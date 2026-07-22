@@ -332,10 +332,10 @@
         "target": "_COPY_CHUNK"
       },
       {
-        "kind": "attribute",
+        "kind": "import",
         "path": "backend/app/services/sqlite_notebook_sharing.py",
         "scope": "<module>._copy_chunk_size",
-        "target": "_COPY_CHUNK"
+        "target": "app.services.sqlite_repository:_COPY_CHUNK"
       },
       {
         "kind": "patch",
@@ -1204,10 +1204,10 @@
         "target": "_new_id"
       },
       {
-        "kind": "attribute",
+        "kind": "import",
         "path": "backend/app/services/sqlite_notebook_sharing.py",
         "scope": "<module>._repository_new_id",
-        "target": "_new_id"
+        "target": "app.services.sqlite_repository:_new_id"
       },
       {
         "kind": "patch",

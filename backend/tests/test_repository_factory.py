@@ -38,351 +38,385 @@ SQLITE_PERSISTENCE_CONSTRUCTORS = {
     "UnifiedKgStore",
 }
 
+SQLITE_CONSTRUCTOR_MODULES = {
+    "AskStateStore": "ask_state_store",
+    "ChunkStore": "chunk_store",
+    "EmbeddingStore": "embedding_store",
+    "GovernanceStore": "governance_store",
+    "IdentityStore": "identity_store",
+    "IndexProjectionStore": "index_projection_store",
+    "KgBuildJobStore": "kg_build_job_store",
+    "KnowhowStore": "knowhow_store",
+    "KnowhowTransferStore": "knowhow_transfer_store",
+    "KnowledgeStore": "knowledge_store",
+    "MemoryStore": "memory_store",
+    "NotebookStore": "notebook_store",
+    "QueryStore": "query_store",
+    "ReportStore": "report_store",
+    "SharingStore": "sharing_store",
+    "SourceStore": "source_store",
+    "SqliteDatabase": "database",
+    "UnifiedKgStore": "unified_kg_store",
+}
+
+SQLITE_CONSTRUCTOR_PATHS = {
+    name: f"app.repositories.sqlite.{module}.{name}"
+    for name, module in SQLITE_CONSTRUCTOR_MODULES.items()
+}
+SQLITE_PATH_CONSTRUCTORS = {
+    path: name for name, path in SQLITE_CONSTRUCTOR_PATHS.items()
+}
+SQLITE_MODULE_CONSTRUCTORS = {
+    f"app.repositories.sqlite.{module}": name
+    for name, module in SQLITE_CONSTRUCTOR_MODULES.items()
+}
+SQLITE_TAINT_ROOTS = {
+    "app",
+    "app.repositories.sqlite",
+    "app.services.sqlite_repository",
+}
+
+# Only existing direct static/class helper calls are exempt. A constructor class
+# reference stored or passed at runtime remains forbidden, even for these methods.
+SQLITE_DIRECT_HELPER_ALLOWLIST = {
+    (
+        "app/repositories/sqlite/governance_store.py",
+        "KnowledgeStore",
+        "replace_object_sources",
+    ),
+    (
+        "app/repositories/sqlite/governance_store.py",
+        "KnowledgeStore",
+        "valid_object_ids",
+    ),
+    (
+        "app/repositories/sqlite/maintenance.py",
+        "KnowledgeStore",
+        "source_ids_from_evidence",
+    ),
+    (
+        "app/repositories/sqlite/notebook_store.py",
+        "NotebookStore",
+        "resolve_participants",
+    ),
+    ("app/services/knowhow/projection.py", "EmbeddingStore", "rows_by_ids"),
+    ("app/services/knowhow/projection.py", "KnowledgeStore", "legacy_typed_table_ids"),
+    ("app/services/sqlite_repository.py", "AskStateStore", "read_trace"),
+    ("app/services/sqlite_repository.py", "GovernanceStore", "merge_evidence"),
+    ("app/services/sqlite_repository.py", "GovernanceStore", "seed_for"),
+    ("app/services/sqlite_repository.py", "KnowledgeStore", "delete_object_sources"),
+    (
+        "app/services/sqlite_repository.py",
+        "KnowledgeStore",
+        "source_ids_from_evidence",
+    ),
+    ("app/services/sqlite_repository.py", "SharingStore", "insert_row_values"),
+}
+
 
 def _sqlite_persistence_construction_sites_from_sources(
     sources: dict[str, str],
 ) -> list[str]:
-    """Interpret constructor aliases in Python evaluation order, per lexical scope."""
+    """Reject concrete SQLite constructor references outside the sole bundle root."""
     offenders: list[str] = []
+    seen: set[tuple[str, ast.AST, str]] = set()
+
     for relative, source in sources.items():
+        if relative == "app/repositories/sqlite/bundle.py":
+            continue
         tree = ast.parse(source, filename=relative)
         module_parts = list(Path(relative).with_suffix("").parts)
-        package_parts = (
-            module_parts if module_parts[-1:] == ["__init__"] else module_parts[:-1]
-        )
-        if package_parts[-1:] == ["__init__"]:
-            package_parts.pop()
+        module_name = ".".join(module_parts)
+        package_parts = module_parts[:-1]
 
-        def dotted_name(node):
+        def record(node: ast.AST, constructor: str) -> None:
+            key = (relative, node, constructor)
+            if key not in seen:
+                seen.add(key)
+                offenders.append(f"{relative}:{node.lineno}:{constructor}")
+
+        def dotted_name(node: ast.AST) -> str:
             if isinstance(node, ast.Name):
                 return node.id
             if isinstance(node, ast.Attribute):
                 parent = dotted_name(node.value)
-                return f"{parent}.{node.attr}" if parent else node.attr
+                return f"{parent}.{node.attr}" if parent else ""
             return ""
 
-        def bound_names(target):
-            if isinstance(target, ast.Name):
-                return {target.id}
-            if isinstance(target, (ast.Tuple, ast.List)):
-                return {
-                    name
-                    for element in target.elts
-                    for name in bound_names(element)
-                }
-            if isinstance(target, ast.Starred):
-                return bound_names(target.value)
-            return set()
+        def canonicalize(value):
+            name = value.rsplit(".", 1)[-1]
+            sqlite_namespace = value.startswith("app.repositories.sqlite.")
+            compat_namespace = value.startswith("app.services.sqlite")
+            if sqlite_namespace or compat_namespace:
+                return SQLITE_CONSTRUCTOR_PATHS.get(name, value)
+            return value
 
-        def argument_names(args):
-            names = {
-                argument.arg
-                for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)
-            }
-            if args.vararg:
-                names.add(args.vararg.arg)
-            if args.kwarg:
-                names.add(args.kwarg.arg)
-            return names
-
-        def resolve_name(node, aliases):
-            if isinstance(node, ast.NamedExpr):
-                return resolve_name(node.value, aliases)
+        def resolve(node: ast.AST, aliases: dict[str, str]) -> str:
             dotted = dotted_name(node)
             head, separator, tail = dotted.partition(".")
-            suffix = f".{tail}" if separator else ""
-            return aliases.get(head, head) + suffix
+            if head not in aliases:
+                return ""
+            value = aliases[head]
+            if separator:
+                value = f"{value}.{tail}"
+            return canonicalize(value)
 
-        def is_sqlite_reference(value):
-            return value == "app" or value.startswith("app.repositories.sqlite")
+        def constructor_name(node, aliases):
+            return SQLITE_PATH_CONSTRUCTORS.get(resolve(node, aliases))
 
-        def bind_name(name, value, aliases):
-            if value and is_sqlite_reference(value):
-                aliases[name] = value
-            else:
-                aliases.pop(name, None)
+        def taint_label(value):
+            value = canonicalize(value)
+            return (
+                SQLITE_PATH_CONSTRUCTORS.get(value)
+                or SQLITE_MODULE_CONSTRUCTORS.get(value)
+                or ("*" if value in SQLITE_TAINT_ROOTS else None)
+            )
 
-        def binding_values(target, value, aliases):
-            if isinstance(target, ast.Name):
-                return [(target.id, resolve_name(value, aliases))]
-            if (
-                isinstance(target, (ast.Tuple, ast.List))
-                and isinstance(value, (ast.Tuple, ast.List))
-                and len(target.elts) == len(value.elts)
-            ):
-                return [
-                    binding
-                    for target_element, value_element in zip(
-                        target.elts, value.elts
-                    )
-                    for binding in binding_values(
-                        target_element, value_element, aliases
-                    )
-                ]
-            return [(name, "") for name in bound_names(target)]
-
-        def bind_target(target, value, aliases):
-            bindings = binding_values(target, value, aliases)
-            for name, resolved in bindings:
-                bind_name(name, resolved, aliases)
-
-        def unbind_target(target, aliases):
-            for name in bound_names(target):
-                aliases.pop(name, None)
-
-        def resolved_import_module(node):
+        def import_module(node: ast.ImportFrom) -> str:
             if not node.level:
                 return node.module or ""
-            keep = len(package_parts) - (node.level - 1)
-            base_parts = package_parts[:max(0, keep)]
+            base = package_parts[: len(package_parts) - node.level + 1]
             if node.module:
-                base_parts.extend(node.module.split("."))
-            return ".".join(base_parts)
+                base.extend(node.module.split("."))
+            return ".".join(base)
 
-        def pattern_captures(pattern):
-            captures: set[str] = set()
-            if isinstance(pattern, ast.MatchAs):
-                if pattern.name:
-                    captures.add(pattern.name)
-                if pattern.pattern:
-                    captures.update(pattern_captures(pattern.pattern))
-            elif isinstance(pattern, ast.MatchStar):
-                if pattern.name:
-                    captures.add(pattern.name)
-            elif isinstance(pattern, ast.MatchMapping):
-                if pattern.rest:
-                    captures.add(pattern.rest)
-                for nested in pattern.patterns:
-                    captures.update(pattern_captures(nested))
-            elif isinstance(pattern, ast.MatchSequence):
-                for nested in pattern.patterns:
-                    captures.update(pattern_captures(nested))
-            elif isinstance(pattern, ast.MatchClass):
-                for nested in (*pattern.patterns, *pattern.kwd_patterns):
-                    captures.update(pattern_captures(nested))
-            elif isinstance(pattern, ast.MatchOr):
-                for nested in pattern.patterns:
-                    captures.update(pattern_captures(nested))
-            return captures
+        def argument_bindings(args):
+            arguments = (
+                *args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg
+            )
+            return [(arg.arg, arg) for arg in arguments if arg]
 
-        def record_call(node, aliases):
-            resolved = resolve_name(node.func, aliases)
-            constructor = resolved.rsplit(".", 1)[-1]
-            if (
-                resolved.startswith("app.repositories.sqlite.")
-                and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
-            ):
-                offenders.append(f"{relative}:{node.lineno}:{constructor}")
+        def pattern_bindings(pattern: ast.pattern) -> list[tuple[str, ast.AST]]:
+            bindings = []
+            if isinstance(pattern, (ast.MatchAs, ast.MatchStar)) and pattern.name:
+                bindings.append((pattern.name, pattern))
+            if isinstance(pattern, ast.MatchMapping) and pattern.rest:
+                bindings.append((pattern.rest, pattern))
+            for nested in ast.iter_child_nodes(pattern):
+                if isinstance(nested, ast.pattern):
+                    bindings.extend(pattern_bindings(nested))
+            return bindings
 
-        def scan_comprehension(node, aliases, method_inherited):
-            # Python evaluates each iterable before binding that generator's
-            # target; its ifs and the final elt/key/value see the bound target.
-            first, *remaining = node.generators
-            scan_expression(first.iter, aliases, method_inherited)
-            local_aliases = dict(aliases)
-            unbind_target(first.target, local_aliases)
-            for condition in first.ifs:
-                scan_expression(condition, local_aliases, method_inherited)
-            for generator in remaining:
-                scan_expression(generator.iter, local_aliases, method_inherited)
-                unbind_target(generator.target, local_aliases)
-                for condition in generator.ifs:
-                    scan_expression(condition, local_aliases, method_inherited)
-            if isinstance(node, ast.DictComp):
-                scan_expression(node.key, local_aliases, method_inherited)
-                scan_expression(node.value, local_aliases, method_inherited)
-            else:
-                scan_expression(node.elt, local_aliases, method_inherited)
+        class ScopeCollector(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.imports: list[tuple[str, str, ast.AST]] = []
+                self.bindings: list[tuple[str, ast.AST]] = []
 
-        def scan_expression(node, aliases, method_inherited=None):
+            def visit_Import(self, node: ast.Import) -> None:
+                for imported in node.names:
+                    local = imported.asname or imported.name.split(".", 1)[0]
+                    value = imported.name if imported.asname else local
+                    self.imports.append((local, value, node))
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                module = import_module(node)
+                for imported in node.names:
+                    if imported.name == "*":
+                        if module.startswith(
+                            "app.repositories.sqlite"
+                        ) or module == "app.services.sqlite_repository":
+                            record(node, "*")
+                        continue
+                    local = imported.asname or imported.name
+                    value = canonicalize(f"{module}.{imported.name}")
+                    self.imports.append((local, value, node))
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self.bindings.append((node.name, node))
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                own_definition = SQLITE_CONSTRUCTOR_PATHS.get(
+                    node.name
+                ) == f"{module_name}.{node.name}"
+                if not own_definition:
+                    self.bindings.append((node.name, node))
+
+            def visit_Lambda(self, node: ast.Lambda) -> None:
+                return
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                return
+
+            visit_SetComp = visit_ListComp
+            visit_DictComp = visit_ListComp
+            visit_GeneratorExp = visit_ListComp
+
+            def visit_Name(self, node: ast.Name) -> None:
+                if isinstance(node.ctx, ast.Store):
+                    self.bindings.append((node.id, node))
+
+            def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+                if node.name:
+                    self.bindings.append((node.name, node))
+                self.generic_visit(node)
+
+            def visit_match_case(self, node: ast.match_case) -> None:
+                self.bindings.extend(pattern_bindings(node.pattern))
+                self.generic_visit(node)
+
+        def scan_annotation(node: ast.AST | None, aliases: dict[str, str]) -> None:
             if node is None:
                 return
-            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-                scan_comprehension(node, aliases, method_inherited)
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call):
+                    scan_expr(child, aliases)
+
+        def scan_comprehension(node: ast.AST, aliases: dict[str, str]) -> None:
+            bindings = [
+                (name.id, name)
+                for gen in node.generators
+                for name in ast.walk(gen.target)
+                if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+            ]
+            local = dict(aliases)
+            for name, binding in bindings:
+                if name in local:
+                    record(binding, local[name].rsplit(".", 1)[-1])
+                    local.pop(name)
+            for gen in node.generators:
+                scan_expr(gen.iter, local)
+                scan_expr(gen.target, local)
+                for condition in gen.ifs:
+                    scan_expr(condition, local)
+            if isinstance(node, ast.DictComp):
+                scan_expr(node.key, local)
+                scan_expr(node.value, local)
+            else:
+                scan_expr(node.elt, local)
+
+        def scan_expr(node: ast.AST | None, aliases: dict[str, str]) -> None:
+            if node is None:
                 return
-            if isinstance(node, ast.NamedExpr):
-                scan_expression(node.value, aliases, method_inherited)
-                bind_target(node.target, node.value, aliases)
+            if isinstance(node, ast.Name):
+                label = taint_label(resolve(node, aliases))
+                if isinstance(node.ctx, ast.Load) and label:
+                    record(node, label)
+                return
+            if isinstance(node, ast.Attribute):
+                if (name := constructor_name(node, aliases)):
+                    record(node, name)
+                else:
+                    resolved = resolve(node, aliases)
+                    head = dotted_name(node).partition(".")[0]
+                    if aliases.get(head) != "app" or resolved.startswith(
+                        ("app.repositories.sqlite", "app.services.sqlite_repository")
+                    ):
+                        scan_expr(node.value, aliases)
+                return
+            if isinstance(node, ast.Call):
+                allowed = False
+                if isinstance(node.func, ast.Attribute):
+                    owner = constructor_name(node.func.value, aliases)
+                    allowed = (
+                        relative, owner, node.func.attr
+                    ) in SQLITE_DIRECT_HELPER_ALLOWLIST
+                if not allowed:
+                    scan_expr(node.func, aliases)
+                for arg in node.args:
+                    scan_expr(arg, aliases)
+                for keyword in node.keywords:
+                    scan_expr(keyword.value, aliases)
+                return
+            if isinstance(
+                node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+            ):
+                scan_comprehension(node, aliases)
                 return
             if isinstance(node, ast.Lambda):
                 for default in (*node.args.defaults, *node.args.kw_defaults):
-                    scan_expression(default, aliases, method_inherited)
-                body_aliases = dict(aliases)
-                for name in argument_names(node.args):
-                    body_aliases.pop(name, None)
-                scan_expression(node.body, body_aliases)
+                    scan_expr(default, aliases)
+                local = dict(aliases)
+                for name, binding in argument_bindings(node.args):
+                    if name in local:
+                        record(binding, local[name].rsplit(".", 1)[-1])
+                        local.pop(name)
+                scan_expr(node.body, local)
                 return
-            if isinstance(node, ast.Call):
-                scan_expression(node.func, aliases, method_inherited)
-                record_call(node, aliases)
-                for argument in node.args:
-                    scan_expression(argument, aliases, method_inherited)
-                for keyword in node.keywords:
-                    scan_expression(keyword.value, aliases, method_inherited)
+            if isinstance(node, ast.NamedExpr):
+                if node.target.id in aliases:
+                    record(node.target, aliases[node.target.id].rsplit(".", 1)[-1])
+                scan_expr(node.value, aliases)
                 return
             for child in ast.iter_child_nodes(node):
-                scan_expression(child, aliases, method_inherited)
+                if isinstance(child, ast.expr):
+                    scan_expr(child, aliases)
 
-        def merge_aliases(target, branches):
-            if not branches:
-                return
-            # A post-branch alias is trusted only when every possible branch
-            # leaves the exact same canonical constructor identity.
-            common = {
-                name: value
-                for name, value in branches[0].items()
-                if all(branch.get(name) == value for branch in branches[1:])
-            }
-            target.clear()
-            target.update(common)
-
-        def scan_function_definition(node, aliases, method_inherited):
+        def scan_definition_expressions(node, aliases: dict[str, str]) -> None:
             for decorator in node.decorator_list:
-                scan_expression(decorator, aliases, method_inherited)
-            for default in (*node.args.defaults, *node.args.kw_defaults):
-                scan_expression(default, aliases, method_inherited)
-            for argument in (
-                *node.args.posonlyargs,
-                *node.args.args,
-                *node.args.kwonlyargs,
-            ):
-                scan_expression(argument.annotation, aliases, method_inherited)
-            if node.args.vararg:
-                scan_expression(node.args.vararg.annotation, aliases, method_inherited)
-            if node.args.kwarg:
-                scan_expression(node.args.kwarg.annotation, aliases, method_inherited)
-            scan_expression(node.returns, aliases, method_inherited)
-            body_aliases = dict(
-                method_inherited if method_inherited is not None else aliases
-            )
-            for name in argument_names(node.args):
-                body_aliases.pop(name, None)
-            scan_block(node.body, body_aliases)
-            aliases.pop(node.name, None)
-
-        def scan_statement(node, aliases, method_inherited=None):
+                scan_expr(decorator, aliases)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                scan_function_definition(node, aliases, method_inherited)
-            elif isinstance(node, ast.ClassDef):
-                for decorator in node.decorator_list:
-                    scan_expression(decorator, aliases, method_inherited)
+                for default in (*node.args.defaults, *node.args.kw_defaults):
+                    scan_expr(default, aliases)
+                for _, argument in argument_bindings(node.args):
+                    scan_annotation(argument.annotation, aliases)
+                scan_annotation(node.returns, aliases)
+            else:
                 for base in node.bases:
-                    scan_expression(base, aliases, method_inherited)
+                    scan_expr(base, aliases)
                 for keyword in node.keywords:
-                    scan_expression(keyword.value, aliases, method_inherited)
-                outer_aliases = dict(
-                    method_inherited if method_inherited is not None else aliases
-                )
-                # Method bodies close over the surrounding lexical scope;
-                # bare names never inherit the class body's local namespace.
-                scan_block(node.body, dict(aliases), outer_aliases)
-                aliases.pop(node.name, None)
-            elif isinstance(node, ast.Import):
-                for imported in node.names:
-                    local = imported.asname or imported.name.split(".", 1)[0]
-                    aliases[local] = imported.name if imported.asname else local
-            elif isinstance(node, ast.ImportFrom):
-                module = resolved_import_module(node)
-                for imported in node.names:
-                    if imported.name == "*":
-                        if (
-                            module == "app.repositories.sqlite"
-                            or module.startswith("app.repositories.sqlite.")
-                        ):
-                            offenders.append(f"{relative}:{node.lineno}:*")
-                        continue
-                    local = imported.asname or imported.name
-                    aliases[local] = ".".join(
-                        part for part in (module, imported.name) if part
-                    )
-            elif isinstance(node, ast.Assign):
-                scan_expression(node.value, aliases, method_inherited)
-                bindings = [
-                    binding_values(target, node.value, aliases)
-                    for target in node.targets
-                ]
-                for target_bindings in bindings:
-                    for name, value in target_bindings:
-                        bind_name(name, value, aliases)
-            elif isinstance(node, ast.AnnAssign):
-                scan_expression(node.annotation, aliases, method_inherited)
-                if node.value is not None:
-                    scan_expression(node.value, aliases, method_inherited)
-                    bind_target(node.target, node.value, aliases)
-                else:
-                    unbind_target(node.target, aliases)
-            elif isinstance(node, ast.AugAssign):
-                scan_expression(node.target, aliases, method_inherited)
-                scan_expression(node.value, aliases, method_inherited)
-                unbind_target(node.target, aliases)
-            elif isinstance(node, ast.Expr):
-                scan_expression(node.value, aliases, method_inherited)
-            elif isinstance(node, ast.If):
-                scan_expression(node.test, aliases, method_inherited)
-                original = dict(aliases)
-                body_aliases = dict(original)
-                scan_block(node.body, body_aliases, method_inherited)
-                else_aliases = dict(original)
-                scan_block(node.orelse, else_aliases, method_inherited)
-                merge_aliases(aliases, [body_aliases, else_aliases])
-            elif isinstance(node, ast.Match):
-                scan_expression(node.subject, aliases, method_inherited)
-                captures: set[str] = set()
-                for case in node.cases:
-                    case_aliases = dict(aliases)
-                    case_captures = pattern_captures(case.pattern)
-                    captures.update(case_captures)
-                    for name in case_captures:
-                        case_aliases.pop(name, None)
-                    scan_expression(case.guard, case_aliases, method_inherited)
-                    scan_block(case.body, case_aliases, method_inherited)
-                for name in captures:
-                    aliases.pop(name, None)
-            elif isinstance(node, (ast.For, ast.AsyncFor)):
-                scan_expression(node.iter, aliases, method_inherited)
-                body_aliases = dict(aliases)
-                unbind_target(node.target, body_aliases)
-                scan_block(node.body, body_aliases, method_inherited)
-                scan_block(node.orelse, dict(aliases), method_inherited)
-                unbind_target(node.target, aliases)
-            elif isinstance(node, ast.While):
-                scan_expression(node.test, aliases, method_inherited)
-                scan_block(node.body, dict(aliases), method_inherited)
-                scan_block(node.orelse, dict(aliases), method_inherited)
-            elif isinstance(node, (ast.With, ast.AsyncWith)):
-                body_aliases = dict(aliases)
-                for item in node.items:
-                    scan_expression(item.context_expr, body_aliases, method_inherited)
-                    if item.optional_vars:
-                        unbind_target(item.optional_vars, body_aliases)
-                scan_block(node.body, body_aliases, method_inherited)
-            elif isinstance(node, ast.Try):
-                scan_block(node.body, dict(aliases), method_inherited)
-                for handler in node.handlers:
-                    handler_aliases = dict(aliases)
-                    scan_expression(handler.type, handler_aliases, method_inherited)
-                    if handler.name:
-                        handler_aliases.pop(handler.name, None)
-                    scan_block(handler.body, handler_aliases, method_inherited)
-                scan_block(node.orelse, dict(aliases), method_inherited)
-                scan_block(node.finalbody, dict(aliases), method_inherited)
-            elif isinstance(node, (ast.Return, ast.Raise, ast.Assert)):
-                for child in ast.iter_child_nodes(node):
-                    if isinstance(child, ast.expr):
-                        scan_expression(child, aliases, method_inherited)
-            elif isinstance(node, ast.Delete):
-                for target in node.targets:
-                    unbind_target(target, aliases)
+                    scan_expr(keyword.value, aliases)
+
+        def scan_statement(node, aliases, kind, class_outer) -> None:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                return
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scan_definition_expressions(node, aliases)
+                inherited = class_outer if kind == "class" else aliases
+                scan_scope(node.body, inherited, "function", None, argument_bindings(node.args))
+                return
+            if isinstance(node, ast.ClassDef):
+                scan_definition_expressions(node, aliases)
+                inherited = class_outer if kind == "class" else aliases
+                scan_scope(node.body, inherited, "class", inherited)
+                return
+            if isinstance(node, ast.AnnAssign):
+                scan_annotation(node.annotation, aliases)
+                scan_expr(node.value, aliases)
+                scan_expr(node.target, aliases)
+                return
+            for child in ast.iter_child_nodes(node):
+                scan_runtime(child, aliases, kind, class_outer)
+
+        def scan_runtime(node, aliases, kind, class_outer) -> None:
+            if isinstance(node, ast.expr):
+                scan_expr(node, aliases)
+            elif isinstance(node, ast.stmt):
+                scan_statement(node, aliases, kind, class_outer)
             else:
                 for child in ast.iter_child_nodes(node):
-                    if isinstance(child, ast.expr):
-                        scan_expression(child, aliases, method_inherited)
+                    scan_runtime(child, aliases, kind, class_outer)
 
-        def scan_block(statements, aliases, method_inherited=None):
+        def scan_scope(statements, inherited, kind, class_outer, parameters=()) -> None:
+            collector = ScopeCollector()
             for statement in statements:
-                scan_statement(statement, aliases, method_inherited)
+                collector.visit(statement)
+            aliases = dict(inherited)
+            names = {name for name, _, _ in collector.imports}
+            for name in names:
+                declarations = [item for item in collector.imports if item[0] == name]
+                tainted = [(value, node) for _, value, node in declarations if taint_label(value)]
+                inherited_value = inherited.get(name)
+                if not tainted and inherited_value is None:
+                    continue
+                chosen = inherited_value or tainted[0][0]
+                label = taint_label(chosen)
+                for _, value, node in declarations:
+                    if value != chosen:
+                        record(node, label)
+                aliases[name] = chosen
+            for name, binding in (*parameters, *collector.bindings):
+                if name in aliases:
+                    record(binding, taint_label(aliases[name]))
+                    aliases.pop(name)
+            for statement in statements:
+                scan_statement(statement, aliases, kind, class_outer)
 
-        scan_block(tree.body, {})
+        own_name = SQLITE_MODULE_CONSTRUCTORS.get(module_name)
+        initial = {own_name: SQLITE_CONSTRUCTOR_PATHS[own_name]} if own_name else {}
+        scan_scope(tree.body, initial, "module", None)
+
     return offenders
 
 
@@ -699,7 +733,7 @@ def test_sqlite_construction_guard_resolves_qualified_and_aliased_calls(
 def test_sqlite_construction_guard_allows_wrapper_static_helper_imports():
     source = (
         "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
-        "helper = KnowledgeStore.source_ids_from_evidence\n"
+        "result = KnowledgeStore.source_ids_from_evidence(evidence)\n"
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/services/sqlite_repository.py": source}
@@ -730,8 +764,7 @@ def test_sqlite_construction_guard_fails_closed_on_sqlite_star_imports(
 def test_sqlite_construction_guard_ignores_non_sqlite_star_imports_and_aliases():
     source = (
         "from app.models.sources import *\n"
-        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
-        "helper = KnowledgeStore.source_ids_from_evidence\n"
+        "from app.models.sources import SourceDetail as helper\n"
         "ordinary = helper\n"
     )
     assert _sqlite_persistence_construction_sites_from_sources(
@@ -756,7 +789,7 @@ def test_sqlite_construction_guard_ignores_non_sqlite_assignment_forms(binding):
     ) == []
 
 
-def test_sqlite_construction_guard_keeps_aliases_in_their_lexical_scope():
+def test_sqlite_construction_guard_fails_closed_on_lexical_shadowing():
     source = (
         "from app.repositories.sqlite.database import SqliteDatabase\n"
         "def violation():\n"
@@ -770,7 +803,11 @@ def test_sqlite_construction_guard_keeps_aliases_in_their_lexical_scope():
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/scoped.py": source}
-    ) == ["app/scoped.py:4:SqliteDatabase"]
+    ) == [
+        "app/scoped.py:3:SqliteDatabase",
+        "app/scoped.py:5:SqliteDatabase",
+        "app/scoped.py:8:SqliteDatabase",
+    ]
 
 
 def test_sqlite_construction_guard_scans_definition_expressions_in_parent_scope():
@@ -784,7 +821,7 @@ def test_sqlite_construction_guard_scans_definition_expressions_in_parent_scope(
     ) == ["app/defaults.py:2:SqliteDatabase"]
 
 
-def test_sqlite_construction_guard_scans_class_methods_once_without_class_aliases():
+def test_sqlite_construction_guard_does_not_close_over_class_aliases():
     source = (
         "from app.repositories.sqlite.database import SqliteDatabase\n"
         "class Example:\n"
@@ -796,87 +833,9 @@ def test_sqlite_construction_guard_scans_class_methods_once_without_class_aliase
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/class_scope.py": source}
-    ) == ["app/class_scope.py:5:SqliteDatabase"]
-
-
-@pytest.mark.parametrize(
-    ("scope", "body", "line"),
-    [
-        (
-            "module",
-            "from app.repositories.sqlite.database import SqliteDatabase as DB\n"
-            "DB(settings, root)\n"
-            "DB = Fake\n",
-            2,
-        ),
-        (
-            "module",
-            "DB = Fake\n"
-            "from app.repositories.sqlite.database import SqliteDatabase as DB\n"
-            "DB(settings, root)\n",
-            3,
-        ),
-        (
-            "function",
-            "def build():\n"
-            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
-            "    DB(settings, root)\n"
-            "    DB = Fake\n",
-            3,
-        ),
-        (
-            "function",
-            "def build():\n"
-            "    DB = Fake\n"
-            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
-            "    DB(settings, root)\n",
-            4,
-        ),
-        (
-            "class",
-            "class Example:\n"
-            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
-            "    DB(settings, root)\n"
-            "    DB = Fake\n",
-            3,
-        ),
-        (
-            "class",
-            "class Example:\n"
-            "    DB = Fake\n"
-            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
-            "    DB(settings, root)\n",
-            4,
-        ),
-    ],
-)
-def test_sqlite_construction_guard_respects_statement_order(scope, body, line):
-    assert _sqlite_persistence_construction_sites_from_sources(
-        {f"app/{scope}_order.py": body}
-    ) == [f"app/{scope}_order.py:{line}:SqliteDatabase"]
-
-
-def test_sqlite_construction_guard_respects_comprehension_execution_order():
-    source = (
-        "from app.repositories.sqlite.database import SqliteDatabase\n"
-        "outer = [item for SqliteDatabase in SqliteDatabase()]\n"
-        "shadowed = [SqliteDatabase() for SqliteDatabase in values]\n"
-        "ordered = [\n"
-        "    SqliteDatabase()\n"
-        "    for item in values\n"
-        "    if SqliteDatabase()\n"
-        "    for SqliteDatabase in SqliteDatabase()\n"
-        "    if SqliteDatabase()\n"
-        "]\n"
-        "after = SqliteDatabase()\n"
-    )
-    assert _sqlite_persistence_construction_sites_from_sources(
-        {"app/comprehension_order.py": source}
     ) == [
-        "app/comprehension_order.py:2:SqliteDatabase",
-        "app/comprehension_order.py:7:SqliteDatabase",
-        "app/comprehension_order.py:8:SqliteDatabase",
-        "app/comprehension_order.py:11:SqliteDatabase",
+        "app/class_scope.py:3:SqliteDatabase",
+        "app/class_scope.py:5:SqliteDatabase",
     ]
 
 
@@ -889,14 +848,14 @@ def test_sqlite_construction_guard_respects_comprehension_execution_order():
         "{SqliteDatabase(): SqliteDatabase() for SqliteDatabase in values}",
     ],
 )
-def test_sqlite_construction_guard_keeps_comprehension_targets_local(expression):
+def test_sqlite_construction_guard_rejects_comprehension_target_shadowing(expression):
     source = (
         "from app.repositories.sqlite.database import SqliteDatabase\n"
         f"result = {expression}\n"
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/comprehension_shadow.py": source}
-    ) == []
+    ) == ["app/comprehension_shadow.py:2:SqliteDatabase"]
 
 
 @pytest.mark.parametrize(
@@ -909,7 +868,7 @@ def test_sqlite_construction_guard_keeps_comprehension_targets_local(expression)
         "Box(value=SqliteDatabase)",
     ],
 )
-def test_sqlite_construction_guard_honors_match_pattern_captures(pattern):
+def test_sqlite_construction_guard_rejects_match_pattern_shadowing(pattern):
     source = (
         "from app.repositories.sqlite.database import SqliteDatabase\n"
         "match value:\n"
@@ -918,7 +877,7 @@ def test_sqlite_construction_guard_honors_match_pattern_captures(pattern):
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/match_capture.py": source}
-    ) == []
+    ) == ["app/match_capture.py:3:SqliteDatabase"]
 
 
 def test_sqlite_construction_guard_does_not_treat_match_class_as_a_capture():
@@ -930,7 +889,288 @@ def test_sqlite_construction_guard_does_not_treat_match_class_as_a_capture():
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/match_class.py": source}
-    ) == ["app/match_class.py:4:SqliteDatabase"]
+    ) == [
+        "app/match_class.py:3:SqliteDatabase",
+        "app/match_class.py:4:SqliteDatabase",
+    ]
+
+
+@pytest.mark.parametrize(
+    "runtime_use",
+    [
+        "wrapped = partial(KnowledgeStore)",
+        "def escaped(default=KnowledgeStore):\n    return default",
+        "@decorate(KnowledgeStore)\ndef escaped():\n    pass",
+        "def escaped():\n    return KnowledgeStore",
+        "def escaped():\n    yield KnowledgeStore",
+        "values = [KnowledgeStore]",
+        "holder.value = KnowledgeStore",
+        "holder[0] = KnowledgeStore",
+        "KnowledgeStore.__new__(KnowledgeStore)",
+        "KnowledgeStore.__call__()",
+        "class Escaped(KnowledgeStore):\n    pass",
+    ],
+)
+def test_sqlite_construction_guard_rejects_tainted_runtime_loads(runtime_use):
+    source = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        f"{runtime_use}\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/runtime_escape.py": source}
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from app.services.sqlite_repository import KnowledgeStore as Store\n"
+        "consume(Store)\n",
+        "import app.services.sqlite_repository as legacy\n"
+        "consume(legacy.KnowledgeStore)\n",
+    ],
+)
+def test_sqlite_construction_guard_taints_compat_reexports(source):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/compat_escape.py": source}
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from app.repositories.sqlite.governance_store import KnowledgeStore\n"
+        "consume(KnowledgeStore)\n",
+        "import app.repositories.sqlite.governance_store as stores\n"
+        "consume(stores.KnowledgeStore)\n",
+        "from app.services.sqlite_compat import KnowledgeStore\n"
+        "consume(KnowledgeStore)\n",
+    ],
+)
+def test_sqlite_construction_guard_taints_same_name_compat_reexports(source):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/reexport_escape.py": source}
+    ) == ["app/reexport_escape.py:2:KnowledgeStore"]
+
+
+def test_sqlite_construction_guard_ignores_postgres_same_name_classes():
+    source = (
+        "from app.repositories.postgres.knowledge_store import KnowledgeStore\n"
+        "consume(KnowledgeStore)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/postgres_control.py": source}
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "label"),
+    [
+        (
+            "from app.repositories.sqlite.knowledge_store import KnowledgeStore as Store\n"
+            "from app.models.sources import SourceDetail as Store\n",
+            "KnowledgeStore",
+        ),
+        (
+            "from app.models.sources import SourceDetail as Store\n"
+            "from app.repositories.sqlite.knowledge_store import KnowledgeStore as Store\n",
+            "KnowledgeStore",
+        ),
+        (
+            "import app.repositories.sqlite.database as store_module\n"
+            "import app.models.sources as store_module\n",
+            "SqliteDatabase",
+        ),
+        (
+            "import app.models.sources as store_module\n"
+            "import app.repositories.sqlite.database as store_module\n",
+            "SqliteDatabase",
+        ),
+    ],
+)
+def test_sqlite_construction_guard_rejects_ambiguous_mixed_imports(source, label):
+    findings = _sqlite_persistence_construction_sites_from_sources(
+        {"app/import_shadow.py": source}
+    )
+    assert len(findings) == 1
+    assert findings[0].endswith(f":{label}")
+
+
+def test_sqlite_construction_guard_rejects_import_shadow_of_inherited_taint():
+    source = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "def escaped():\n"
+        "    from app.models.sources import SourceDetail as KnowledgeStore\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/import_shadow.py": source}
+    ) == ["app/import_shadow.py:3:KnowledgeStore"]
+
+
+@pytest.mark.parametrize(
+    ("source", "label"),
+    [
+        (
+            "import app.repositories.sqlite.database as db\nconsume(db)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "from app.repositories.sqlite import database as db\nholder.mod = db\n",
+            "SqliteDatabase",
+        ),
+        (
+            "import app.services.sqlite_repository as legacy\nconsume(legacy)\n",
+            "*",
+        ),
+    ],
+)
+def test_sqlite_construction_guard_rejects_module_alias_runtime_loads(source, label):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/module_escape.py": source}
+    ) == [f"app/module_escape.py:2:{label}"]
+
+
+def test_sqlite_construction_guard_allows_non_sqlite_module_runtime_loads():
+    source = "import app.models.sources as models\nconsume(models)\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/module_control.py": source}
+    ) == []
+
+
+def test_sqlite_construction_guard_helper_allowlist_is_direct_and_exact():
+    allowed = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "KnowledgeStore.source_ids_from_evidence(payload)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/services/sqlite_repository.py": allowed}
+    ) == []
+
+    wrong_file = _sqlite_persistence_construction_sites_from_sources(
+        {"app/other.py": allowed}
+    )
+    wrong_method = _sqlite_persistence_construction_sites_from_sources(
+        {
+            "app/services/sqlite_repository.py": (
+                "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+                "KnowledgeStore.unlisted_helper(payload)\n"
+            )
+        }
+    )
+    propagated = _sqlite_persistence_construction_sites_from_sources(
+        {
+            "app/services/sqlite_repository.py": (
+                "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+                "helper = KnowledgeStore.source_ids_from_evidence\n"
+            )
+        }
+    )
+    assert wrong_file and wrong_method and propagated
+
+
+def test_sqlite_direct_helper_allowlist_contains_only_live_class_helpers():
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    for relative, class_name, method_name in SQLITE_DIRECT_HELPER_ALLOWLIST:
+        module_name = SQLITE_CONSTRUCTOR_MODULES[class_name]
+        module = importlib.import_module(f"app.repositories.sqlite.{module_name}")
+        descriptor = inspect.getattr_static(getattr(module, class_name), method_name)
+        assert isinstance(descriptor, (staticmethod, classmethod)), (
+            f"{class_name}.{method_name} is not a static/class helper"
+        )
+
+        tree = ast.parse((app_root.parent / relative).read_text(encoding="utf-8"))
+        direct_call_exists = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == method_name
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == class_name
+            for node in ast.walk(tree)
+        )
+        assert direct_call_exists, (
+            f"stale helper allowlist entry: {(relative, class_name, method_name)}"
+        )
+
+
+def test_sqlite_construction_guard_allows_only_pure_type_annotations():
+    pure = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "value: KnowledgeStore\n"
+        "items: list[KnowledgeStore]\n"
+        "def typed(value: KnowledgeStore) -> KnowledgeStore:\n"
+        "    return value\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/annotations.py": pure}
+    ) == []
+
+    runtime_annotation = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "value: KnowledgeStore()\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/annotations.py": runtime_annotation}
+    )
+
+
+def test_sqlite_construction_guard_scans_only_annotation_call_subtrees():
+    prefix = (
+        "from typing import Annotated\n"
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+    )
+    pure_type = prefix + "value: Annotated[KnowledgeStore, metadata_factory()]\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/annotations.py": pure_type}
+    ) == []
+
+    for annotation in (
+        "KnowledgeStore()",
+        "Annotated[KnowledgeStore, metadata_factory(KnowledgeStore)]",
+    ):
+        source = prefix + f"value: {annotation}\n"
+        assert _sqlite_persistence_construction_sites_from_sources(
+            {"app/annotations.py": source}
+        )
+
+
+@pytest.mark.parametrize(
+    "shadow",
+    [
+        "def escaped(KnowledgeStore):\n    pass",
+        "KnowledgeStore = replacement",
+        "for KnowledgeStore in values:\n    pass",
+        "with manager() as KnowledgeStore:\n    pass",
+        "try:\n    run()\nexcept Error as KnowledgeStore:\n    pass",
+        "values = [item for KnowledgeStore in items]",
+        "match value:\n    case KnowledgeStore:\n        pass",
+        "def KnowledgeStore():\n    pass",
+        "class KnowledgeStore:\n    pass",
+    ],
+)
+def test_sqlite_construction_guard_rejects_ambiguous_shadow_bindings(shadow):
+    source = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        f"{shadow}\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/shadow_escape.py": source}
+    )
+
+
+def test_sqlite_construction_guard_does_not_inherit_class_local_aliases():
+    source = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "class Outer:\n"
+        "    Alias = KnowledgeStore\n"
+        "    def method(self):\n"
+        "        consume(Alias)\n"
+        "    class Nested:\n"
+        "        consume(Alias)\n"
+    )
+    findings = _sqlite_persistence_construction_sites_from_sources(
+        {"app/class_alias.py": source}
+    )
+    assert findings == ["app/class_alias.py:3:KnowledgeStore"]
 
 
 def test_create_repository_selects_sqlite_from_only_the_active_url(monkeypatch, tmp_path):

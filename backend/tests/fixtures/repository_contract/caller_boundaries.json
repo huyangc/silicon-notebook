@@ -91,22 +91,6 @@
     {
       "count": 1,
       "kind": "facade_imports",
-      "path": "backend/app/services/sqlite_notebook_sharing.py",
-      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
-      "scope": "<module>._copy_chunk_size",
-      "target": "app.services:sqlite_repository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
-      "path": "backend/app/services/sqlite_notebook_sharing.py",
-      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
-      "scope": "<module>._repository_new_id",
-      "target": "app.services:sqlite_repository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
       "path": "scripts/backfill_kg_embeddings.py",
       "reason": "offline CLI composition root",
       "scope": "<module>",

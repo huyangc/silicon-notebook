@@ -157,7 +157,7 @@ SURFACE_MEMBERS = (
         kind='constant',
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='_COPY_CHUNK'),
-            ConsumerSite(path='backend/app/services/sqlite_notebook_sharing.py', scope='<module>._copy_chunk_size', kind='attribute', target='_COPY_CHUNK'),
+            ConsumerSite(path='backend/app/services/sqlite_notebook_sharing.py', scope='<module>._copy_chunk_size', kind='import', target='app.services.sqlite_repository:_COPY_CHUNK'),
             ConsumerSite(path='backend/tests/test_notebook_copy_service.py', scope='<module>.test_copy_observes_copy_chunk_patched_after_construction', kind='patch', target='_COPY_CHUNK'),
             ConsumerSite(path='backend/tests/test_notebook_copy_service.py', scope='<module>.test_failure_after_first_chunk_compensates_rows_and_files', kind='patch', target='_COPY_CHUNK'),
             ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_copy_notebook_chunked_transactions_release_lock_between_chunks', kind='patch', target='_COPY_CHUNK'),
@@ -470,7 +470,7 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='_new_id'),
-            ConsumerSite(path='backend/app/services/sqlite_notebook_sharing.py', scope='<module>._repository_new_id', kind='attribute', target='_new_id'),
+            ConsumerSite(path='backend/app/services/sqlite_notebook_sharing.py', scope='<module>._repository_new_id', kind='import', target='app.services.sqlite_repository:_new_id'),
             ConsumerSite(path='backend/tests/test_knowhow_copy.py', scope='<module>.test_copy_failure_compensation_removes_assets_dir', kind='patch', target='_new_id'),
             ConsumerSite(path='backend/tests/test_notebook_copy_service.py', scope='<module>.test_copy_observes_new_id_patched_after_construction', kind='patch', target='_new_id'),
             ConsumerSite(path='backend/tests/test_source_chunking_service.py', scope='<module>.test_build_chunks_id_minting_rides_module_seam', kind='patch', target='_new_id'),
