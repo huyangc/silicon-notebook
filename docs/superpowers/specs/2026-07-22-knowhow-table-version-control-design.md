@@ -368,14 +368,19 @@ notebook 整本深拷贝（`notebook_sharing.copy_notebook`）同理不带历史
 
 单格恢复**不需要新端点**——前端拿到历史值后走既有的格子保存端点（§6.4）。但既有格子保存端点需要**新增一个可选 body 字段 `origin`**（缺省 `"user"`，允许值即 §4.1 的 `origin` 枚举），否则时间线上分不清"手动改的"与"从历史恢复的"。这是一处跨栈 wire 变更，落在 §8.3 的契约测试范围内。同理，LLM 优化 / 规整两条既有回填路径也要开始传各自的 `origin`。
 
-错误全部走 `user_error()` 打 header 标记的中文用户文案，不暴露 `str(exc)`：
+错误响应体有两种合法形状，按前端是否需要按 `error_code` 分支来选（不是"错误全部走同一种"——实现落地后 code review 发现前一版说法与已合入代码不符，此处更正）：
+
+- **纯文案通道**：只需要给用户看一句话、不必区分具体原因时，走 `user_error()`（`backend/app/api/deps.py`）——`detail` 是纯字符串，响应打 `X-User-Message` header 标记。前端共享错误层 `errors.ts` 的可展示通道据此原样透传。例：里程碑重名（`create_knowhow_milestone` 接住 `UNIQUE(table_id, name)` 的 `IntegrityError`）就是 `raise user_error(400, "这个里程碑名字已经用过了，换一个试试")`，一句话，不需要前端分支。
+- **结构化通道**：前端需要按错误原因分支处理（不同 code 对应界面截然不同的下一步动作）时，走结构化 `detail={"code","message"}`，**不**打 `X-User-Message` header——前端共享错误层的可展示通道只认字符串/字符串数组形状的 `detail`，对象形状会被判定为"抠不出来"而返回空串，因此这类错误必须配一个前端专用解析器，在共享人话层兜底之前拦截、把 `message` 原样抠出来包成类型化异常，`message` 仍然 100% 由后端写、前端只负责取出来，不重新编造文案。先例是 knowhow 表跨 notebook 传输端点的 409 `{code,new_table_id,message}`：`frontend/app/transfer-model.ts` 的 `parseCleanupFailure`（纯函数，探测 status+已知 code）+ `frontend/app/knowhow-transfer.ts` 的 `KnowhowSourceCleanupError`（类型化异常）。本节的三种 revert 失败镜像同一模式：`frontend/app/knowhow-model.ts` 的 `parseKnowhowRevertFailure` / `KnowhowRevertError`。
+
+本节三种 revert 失败即走结构化通道——三个 code 对应的界面反应截然不同（刷新重试 / 中止且不重试 / 已回滚请核对表内容），压平成一句通用文案会丢失这个区分：
 
 | 场景 | HTTP | error_code | 文案 |
 |---|---|---|---|
 | 前置指纹不一致 | 400 | `knowhow_history_inconsistent` | 表的当前内容与变更历史对不上，回退已中止 |
 | head 已变 | 409 | `knowhow_history_stale` | 这张表刚被改过，请刷新后重试 |
 | 后置校验失败 | 500 | `knowhow_revert_verify_failed` | 回退结果校验失败，已放弃本次回退 |
-| 目标 seq 不存在/不属于本表 | 404 | — | 统一无 oracle |
+| 目标 seq 不存在/不属于本表 | 404 | — | 统一无 oracle（`detail` 是普通字符串 `"Change not found"`，既不打 header 也不是结构化 code，走状态码通用兜底） |
 
 ### 8.2 前端（三个入口，全挂既有结构）
 

@@ -12,7 +12,8 @@
 // 才能联调。
 
 import { API_BASE } from "./api-config.ts";
-import { requestJson, requestVoid } from "./api-client.ts";
+import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
 
@@ -814,7 +815,7 @@ export type KnowhowChange = {
   // 原样透传后端 payload，不做逐 kind 递归 camelCase 转换——14 种 kind 形状差
   // 异很大（design doc §4.4），转换成本和出错面都不小，而 payload 本就没有
   // 统一形状可言。knowhow-history-logic.ts 的纯函数（summarizeChange/
-  // aggregateDiff）直接按后端真实字段名(row_id/column_id/target_seq/rows 等
+  // foldLocalChanges）直接按后端真实字段名(row_id/column_id/target_seq/rows 等
   // snake_case)读取这个字段。
   payload: Record<string, any>;
 };
@@ -843,9 +844,9 @@ export type KnowhowHistoryPage = {
 };
 
 // 两版净变化的格子条目（服务端 aggregate_diff 的 cells 键）。与 knowhow-
-// history-logic.ts 本地折叠函数 aggregateDiff 的 DiffCell 同形状但类型不同——
-// 两者是各自独立的类型（一个来自服务端权威计算，一个来自客户端本地折叠），
-// 只是恰好同形。
+// history-logic.ts 本地折叠函数 foldLocalChanges 的 LocalDiffCell 同形状但
+// 类型不同——两者是各自独立的类型（一个来自服务端权威计算，一个来自客户端
+// 本地折叠），只是恰好同形。
 export type KnowhowHistoryDiffCell = {
   rowId: string;
   columnId: string;
@@ -1114,7 +1115,9 @@ export const fetchKnowhowChange = (
   ).then(mapChange);
 
 // 两版净变化（服务端权威计算，纯只读——不等价于 knowhow-history-logic.ts 的
-// 本地 aggregateDiff，见该文件对应注释）。
+// 本地 foldLocalChanges，见该文件对应注释）。⚠两版对比视图请用这个（服务端
+// 全量 diff，含列结构/表元变化），不要用本地折叠——本地折叠只覆盖 cells + 行
+// 增删，接错不会有类型错误，只会静默漏掉列/表元变化。
 export const fetchKnowhowHistoryDiff = (
   notebookId: string,
   tableId: string,
@@ -1142,35 +1145,119 @@ export const fetchKnowhowCellHistory = (
   ).then((entries) => entries.map(mapCellHistoryEntry));
 };
 
+// --- revert 三种结构化失败（评审问题 1 修复）------------------------------------
+//
+// 后端 revert 端点的三种失败（knowhow_routes.py revert_knowhow_table）返回
+// 结构化 detail={"code","message"}，不是 user_error() 打 X-User-Message 头的
+// 纯字符串——共享错误层 errors.ts 的可展示通道（pickUserDetail）只认字符串/
+// 字符串数组形状的 detail，对象形状会被判定为"抠不出来"而返回空串；这条路径
+// 也没有 X-User-Message 头，闸1（信任）本来就不会放行。两条都不满足，若什么
+// 都不做就会被 throwHumanizedHttpError 兜底成按状态码泛化的通用中文，后端为
+// 这三种场景精心写的具体中文（"这张表刚被其他人改过，请刷新后重试"等）用户
+// 一句都看不到。
+//
+// 解法照抄本仓库解决同类问题的先例——transfer 端点的 409
+// {code,new_table_id,message}：frontend/app/transfer-model.ts 的
+// parseCleanupFailure（纯函数，探测 status+已知 code）+
+// frontend/app/knowhow-transfer.ts 的 KnowhowSourceCleanupError（类型化异常）
+// + transferKnowhowTable（克隆 body 探测，命中转类型化异常，未命中落回
+// throwHumanizedHttpError）。下面的 parseKnowhowRevertFailure/
+// KnowhowRevertError/revertKnowhowTable 是同一模式在 revert 上的镜像——文案仍
+// 100% 来自后端，这里只负责把它从结构化 body 里取出来，不在前端编造/硬编码
+// 这三段话（后端改文案会自动同步，409/400/500 在别的端点还复用于完全不同的
+// 语义，前端不能按状态码猜文案）。
+export type KnowhowRevertFailureCode =
+  | "knowhow_history_stale"
+  | "knowhow_history_inconsistent"
+  | "knowhow_revert_verify_failed";
+
+// 三个 code 与后端三个 except 分支一一对应的 HTTP 状态：knowhow_history_stale
+// =409（head 已变，刷新重试）/ knowhow_history_inconsistent=400（前置指纹不
+// 一致，回退已中止）/ knowhow_revert_verify_failed=500（后置校验失败，已整表
+// 回滚，表未被改动）。解析时要求 status 与 code 成对匹配（不是只看 code 是否
+// 已知），同 parseCleanupFailure 校验 status===409 一样，是防止未来某个无关
+// 端点凑巧返回同形状 body 时被误判命中。
+const KNOWHOW_REVERT_FAILURE_STATUS: Record<KnowhowRevertFailureCode, number> = {
+  knowhow_history_stale: 409,
+  knowhow_history_inconsistent: 400,
+  knowhow_revert_verify_failed: 500,
+};
+
+export type KnowhowRevertFailure = { code: KnowhowRevertFailureCode; message: string };
+
+const FALLBACK_REVERT_FAILURE_MESSAGE = "回退未成功，请刷新后重试";
+
+/**
+ * 判定一个 HTTP 响应是否是 revert 端点结构化的 `{code,message}`（三种 code 之
+ * 一，见 KnowhowRevertFailureCode）。命中 → {code,message}；其余任何情况
+ * （status 与 code 对不上、code 不是这三者之一、detail 是普通字符串、body 根
+ * 本不是对象……）一律 null，调用方落回通用错误路径（含目标 seq 不存在的 404
+ * ——那条走的是普通字符串 detail，本就不该在这里命中）。纯函数，不摸网络——
+ * status/body 由调用方（res.status/已解析的 JSON）转手过来。
+ */
+export const parseKnowhowRevertFailure = (
+  status: number,
+  body: unknown,
+): KnowhowRevertFailure | null => {
+  if (typeof body !== "object" || body === null) return null;
+  const detail = (body as Record<string, unknown>).detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const d = detail as Record<string, unknown>;
+  if (typeof d.code !== "string") return null;
+  if (!(d.code in KNOWHOW_REVERT_FAILURE_STATUS)) return null;
+  const code = d.code as KnowhowRevertFailureCode;
+  if (KNOWHOW_REVERT_FAILURE_STATUS[code] !== status) return null;
+  const message = typeof d.message === "string" && d.message ? d.message : FALLBACK_REVERT_FAILURE_MESSAGE;
+  return { code, message };
+};
+
+// 类型化异常：调用方用 instanceof 分流（如 knowhow_history_stale → 提示刷新
+// 页面重来），.message 是后端原文（不再是 throwHumanizedHttpError 兜底的通用
+// 文案），.code 供需要按三种场景分别处理的调用方精确分流，不必做脆弱的文案
+// 匹配。同 KnowhowSourceCleanupError（knowhow-transfer.ts）的既有取向。
+export class KnowhowRevertError extends Error {
+  readonly code: KnowhowRevertFailureCode;
+
+  constructor(code: KnowhowRevertFailureCode, message: string) {
+    super(message);
+    this.name = "KnowhowRevertError";
+    this.code = code;
+  }
+}
+
 // 整表回退到 targetSeq。expectedHeadSeq 是前端上次拉时间线时看到的 head——
 // 服务端据此判断陈旧（与库内实际 head 不符 -> 409），并发编辑安全网的关键
 // 一环，永远必须传（不是可选参数）。
 //
-// 错误响应体是结构化的 {"code","message"}（三种失败各一个 code：
-// knowhow_history_stale / knowhow_history_inconsistent /
-// knowhow_revert_verify_failed），不是 user_error() 打标记的纯字符串——现有
-// 共享错误层 errors.ts 的可展示通道只认"字符串 detail + X-User-Message 头"，
-// 这三个错误都不满足（detail 是对象，X-User-Message 头也没打），故会被
-// throwHumanizedHttpError 兜底成按状态码泛化的通用中文（409/400/500 各自的
-// 通用文案），后端为这三种场景精心写的具体中文会被丢弃。调用方如需精确到这
-// 三种场景的文案，需要自己 catch 后用 httpErrorStatus(error) 按状态码
-// （409/400/500）分流，而不是依赖 error.message 的具体文案——这是本任务发现
-// 但特意不在这里"顺手"扩大共享错误层职责的地方，留给消费该函数的界面任务
-// 决定要不要为这条 revert 流程单独处理。
-export const revertKnowhowTable = (
+// 走 performApiRequest 而非 requestJson：需要在共享人话层兜底之前先探测上面
+// 的三种结构化失败。res.clone() 手法与 knowhow-transfer.ts
+// transferKnowhowTable 一致——body 只能消费一次（见 errors.ts readHttpError
+// 头注释），探测用克隆读，真正报错仍交给原始 res 走 throwHumanizedHttpError，
+// 不能在这里抢先吃掉。
+export const revertKnowhowTable = async (
   notebookId: string,
   tableId: string,
   targetSeq: number,
   expectedHeadSeq: number,
-): Promise<KnowhowRevertResult> =>
-  requestJson<WireKnowhowRevertResult>(
-    `/notebooks/${notebookId}/knowhow/${tableId}/revert`,
-    {
-      method: "POST",
-      body: JSON.stringify({ target_seq: targetSeq, expected_head_seq: expectedHeadSeq }),
-      tag: "knowhow",
-    },
-  ).then(mapRevertResult);
+): Promise<KnowhowRevertResult> => {
+  const res = await performApiRequest(`/notebooks/${notebookId}/knowhow/${tableId}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ target_seq: targetSeq, expected_head_seq: expectedHeadSeq }),
+    tag: "knowhow",
+  });
+  if (!res.ok) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await res.clone().text());
+    } catch {
+      parsed = undefined;
+    }
+    const failure = parseKnowhowRevertFailure(res.status, parsed);
+    if (failure) throw new KnowhowRevertError(failure.code, failure.message);
+    await throwHumanizedHttpError(res, "knowhow");
+  }
+  return mapRevertResult((await res.json()) as WireKnowhowRevertResult);
+};
 
 // 给某个 seq 命名。seq 必须是这张表真实存在的一条流水，否则 404；重名
 // （UNIQUE(table_id,name)）是 user_error() 打过标记的纯字符串 400，会正常

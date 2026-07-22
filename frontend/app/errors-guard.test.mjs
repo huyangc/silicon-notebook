@@ -32,6 +32,14 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 2,
     reason: "optimizer and reformatter error states are written through the humanization boundary",
   },
+  "knowhow-model.ts|<module>.parseKnowhowRevertFailure|property|message": {
+    count: 3,
+    reason: "revert failure payload is schema-checked (code+status match) before its guidance is returned",
+  },
+  "knowhow-model.ts|<module>.revertKnowhowTable|property|message": {
+    count: 1,
+    reason: "validated revert-failure guidance is copied into its typed error",
+  },
   "knowhow-panel.tsx|<module>.KnowhowPanel|property|message": {
     count: 1,
     reason: "typed source-cleanup error carries server-validated 409 guidance",
