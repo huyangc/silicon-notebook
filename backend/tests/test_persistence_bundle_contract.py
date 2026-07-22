@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import AbstractContextManager
 import inspect
 import json
 import os
@@ -9,7 +10,7 @@ import subprocess
 import sys
 from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import get_type_hints
+from typing import get_origin, get_type_hints
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -163,13 +164,50 @@ def test_mention_alias_scan_is_a_portable_store_operation():
     from app.repositories.ports import UnifiedKgStorePort
     from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
-    assert "mention_alias_candidates" in UnifiedKgStorePort.__dict__
-    assert inspect.signature(UnifiedKgStorePort.mention_alias_candidates) == (
-        inspect.signature(UnifiedKgStore.mention_alias_candidates)
+    assert "mention_alias_candidate_batches" in UnifiedKgStorePort.__dict__
+    port_signature = inspect.signature(UnifiedKgStorePort.mention_alias_candidate_batches)
+    store_signature = inspect.signature(UnifiedKgStore.mention_alias_candidate_batches)
+    assert port_signature.replace(return_annotation=inspect.Signature.empty) == (
+        store_signature.replace(return_annotation=inspect.Signature.empty)
     )
+    assert get_origin(
+        get_type_hints(UnifiedKgStorePort.mention_alias_candidate_batches)["return"]
+    ) is AbstractContextManager
     lifecycle_source = (ROOT / "backend/app/services/knowledge_lifecycle.py").read_text(
         encoding="utf-8"
     )
     assert "_close_local" not in lifecycle_source
     assert ".claim_name_rows(" not in lifecycle_source
     assert ".mention_scan_matches(" not in lifecycle_source
+
+
+def test_newly_neutral_service_type_hints_resolve_without_backend_names():
+    from app.repositories.ports import QueryStorePort
+    from app.services.kg_mutation import KgMutationCoordinator
+    from app.services.knowledge_governance import KnowledgeGovernanceService
+    from app.services.knowledge_lifecycle import KnowledgeLifecycleService
+    from app.services.model_provider import RuntimeModelProvider
+    from app.services.notebook_catalog import NotebookCatalogService
+    from app.services.notebook_sharing import NotebookSharingService
+    from app.services.schema_registry import SchemaRegistryService
+    from app.services.source_chunking import SourceChunkingService
+    from app.services.source_embedding import SourceEmbeddingService
+    from app.services.source_ingestion import SourceIngestionService
+
+    constructors = (
+        NotebookCatalogService,
+        KnowledgeLifecycleService,
+        KnowledgeGovernanceService,
+        NotebookSharingService,
+        SchemaRegistryService,
+        RuntimeModelProvider,
+        SourceIngestionService,
+        SourceChunkingService,
+        SourceEmbeddingService,
+        KgMutationCoordinator,
+    )
+    hints_by_class = {cls: get_type_hints(cls.__init__) for cls in constructors}
+    assert hints_by_class[NotebookCatalogService]["queries"] is QueryStorePort
+    assert get_type_hints(KgMutationCoordinator.bump_cluster_mutation_seq)[
+        "connection"
+    ] is object

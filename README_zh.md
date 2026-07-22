@@ -1047,7 +1047,7 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
 - Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
-- PostgreSQL + pgvector 暂不阻塞本机 beta，当前随附的正式运行时仍是 SQLite。PostgreSQL 配置可以被接受并安全脱敏，但尚不会迁移数据或切换 repository。
+- PostgreSQL + pgvector 暂不阻塞本机 beta，SQLite 是当前可用的默认后端。repository factory 会根据 DATABASE_URL 选择 PostgreSQL；当前因 adapter 尚不可用而显式失败，绝不回落到 SQLite。后端选择与既有数据迁移是两件独立的事。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
 

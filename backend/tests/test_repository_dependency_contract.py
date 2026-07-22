@@ -82,7 +82,7 @@ LIFECYCLE_STORE_CALLS = {
         "finish_rebuild_state",
         "insert_scratch_rows",
         "mention_edges_count",
-        "mention_alias_candidates",
+        "mention_alias_candidate_batches",
         "mention_seed_rows",
         "replace_canonical_relations",
         "replace_cluster_rows_streamed",

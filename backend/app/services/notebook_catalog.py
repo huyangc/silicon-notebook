@@ -303,7 +303,7 @@ class NotebookCatalogService:
         self,
         store: NotebookStorePort,
         summaries: NotebookSummaryQuery,
-        queries: QueryStore,
+        queries: QueryStorePort,
         identity: IdentityStorePort,
         storage_dir: Callable[[], Path],
     ) -> None:

@@ -2132,26 +2132,30 @@ class KnowledgeLifecycleService:
             #    部署规模 ~40万 claims 的插入+扫描绝不能挡住 ingest/其它 rebuild)。
             #    连接关闭即整表蒸发(无需 DELETE/DROP;finally close 兼释放内存)。
             #    trigram=子串语义,故每候选仍须过 boundary_hit 后校验。
-            candidates = self.unified_kg.mention_alias_candidates(
+            with self.unified_kg.mention_alias_candidate_batches(
                 claims, sorted(alias_to_canons)
-            )
-            # 4) 每别名 phrase 候选 → boundary_hit 校验 → DF 双门。
-            for alias in sorted(alias_to_canons):
-                if len(alias) < 3:     # trigram 最短查询=3;别名门已保证,双保险
-                    continue
-                canons = alias_to_canons[alias]
-                hits = [
-                    claim_id
-                    for claim_id, folded in candidates.get(alias, ())
-                    if boundary_hit(alias, folded)
-                ]
-                if len(hits) > df_gate:    # 泛词:整体丢弃 + 计数
-                    dropped += 1
-                    continue
-                for claim_id in hits:
-                    d = claim_hits.setdefault(claim_id, {})
-                    for c in canons:
-                        d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
+            ) as batches:
+                # 4) 每别名 phrase 候选 → boundary_hit 校验 → DF 双门。当前
+                # alias 的 hits 最多保留 df_gate+1；一旦确认泛词就立即前进，
+                # 不累计该 alias 的其余候选，更不累计后续 alias。
+                for alias, candidates in batches:
+                    if len(alias) < 3:  # trigram 最短查询=3;别名门已保证,双保险
+                        continue
+                    canons = alias_to_canons[alias]
+                    hits = []
+                    for claim_id, folded in candidates:
+                        if not boundary_hit(alias, folded):
+                            continue
+                        hits.append(claim_id)
+                        if len(hits) > df_gate:
+                            break
+                    if len(hits) > df_gate:    # 泛词:整体丢弃 + 计数
+                        dropped += 1
+                        continue
+                    for claim_id in hits:
+                        d = claim_hits.setdefault(claim_id, {})
+                        for c in canons:
+                            d.setdefault(c, alias)  # 同 canonical 多别名命中只记首个
         if dropped > 0:
             self.event_log.emit({"kind": "mention_alias_df_dropped",
                                  "notebook_id": notebook_id, "dropped": dropped})

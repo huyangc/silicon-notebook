@@ -88,6 +88,17 @@ def test_repository_backend_selection_documentation_matches_the_interim_runtime(
         assert "SHADOW_DATABASE_URL 仍不生效" in text
         assert "不会执行迁移或切换 repository" not in text
 
+    _assert_phrases(
+        {
+            "README.md": "The repository factory selects PostgreSQL from DATABASE_URL and currently fails closed because its adapter is unavailable; it never falls back to SQLite.",
+            "README_zh.md": "repository factory 会根据 DATABASE_URL 选择 PostgreSQL；当前因 adapter 尚不可用而显式失败，绝不回落到 SQLite。",
+        }
+    )
+    assert "it does not yet migrate data or switch the repository" not in _read(
+        "README.md"
+    )
+    assert "尚不会迁移数据或切换 repository" not in _read("README_zh.md")
+
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
     """Documentation records stable ownership, not source layout or totals."""

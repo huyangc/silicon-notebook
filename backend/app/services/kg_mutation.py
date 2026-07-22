@@ -103,7 +103,7 @@ class KgMutationCoordinator:
         self.notebook_languages.pop(notebook_id, None)
 
     def bump_cluster_mutation_seq(
-        self, connection: sqlite3.Connection, notebook_id: str
+        self, connection: object, notebook_id: str
     ) -> None:
         """concept_clusters 写路径的单调计数器 bump。与 mark_unified_kg_dirty 不同,
         本原语在调用方已持有的写事务 connection 内执行(写簇+bump 同 commit,原子——

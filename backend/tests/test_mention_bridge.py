@@ -216,24 +216,91 @@ def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch)
 
     spy("mention_seed_rows")
     spy("replace_mention_bridge")
-    original_candidates = store.mention_alias_candidates
+    original_batches = store.mention_alias_candidate_batches
 
-    def traced_candidates(claims, aliases):
-        result = original_candidates(claims, aliases)
-        events.append(("mention_alias_candidates", None, (claims, aliases)))
+    def traced_batches(claims, aliases):
+        result = original_batches(claims, aliases)
+        events.append(("mention_alias_candidate_batches", None, (claims, aliases)))
         return result
 
-    monkeypatch.setattr(store, "mention_alias_candidates", traced_candidates)
+    monkeypatch.setattr(store, "mention_alias_candidate_batches", traced_batches)
 
     count = getattr(repo, "rebuild_mention_bridge")(nb.id, force=True)
 
     assert count >= 5
     names = [name for name, _db, _args in events]
     assert names[0] == "mention_seed_rows"
-    assert names.count("mention_alias_candidates") == 1
+    assert names.count("mention_alias_candidate_batches") == 1
     assert close_calls == 1
     replace = next(event for event in events if event[0] == "replace_mention_bridge")
     assert replace[1] in write_ids
+
+
+def test_mention_alias_batches_query_lazily_one_alias_at_a_time(repo, monkeypatch):
+    runtime = object.__getattribute__(repo, "_runtime")
+    store = runtime.unified_kg
+    queries = []
+    close_calls = 0
+    original_close_local = runtime.database.close_local
+
+    monkeypatch.setattr(store, "claim_name_rows", lambda _db, _rows: None)
+
+    def scan(_db, match_expr):
+        queries.append(match_expr)
+        return iter(({"rowid": 1}, {"rowid": 2}))
+
+    monkeypatch.setattr(store, "mention_scan_matches", scan)
+
+    def close_local():
+        nonlocal close_calls
+        close_calls += 1
+        return original_close_local()
+
+    monkeypatch.setattr(runtime.database, "close_local", close_local)
+    claims = (("claim-1", "first claim"), ("claim-2", "second claim"))
+
+    with store.mention_alias_candidate_batches(claims, ("first", "later")) as batches:
+        batches = iter(batches)
+        alias, rows = next(batches)
+        assert alias == "first"
+        assert queries == ['"first"']
+        assert list(rows) == list(claims)
+        assert queries == ['"first"']
+        alias, rows = next(batches)
+        assert alias == "later"
+        assert queries == ['"first"', '"later"']
+        assert list(rows) == list(claims)
+
+    assert close_calls == 1
+
+
+def test_mention_alias_batches_cleanup_on_exceptional_exit(repo, monkeypatch):
+    runtime = object.__getattribute__(repo, "_runtime")
+    store = runtime.unified_kg
+    close_calls = 0
+    original_close_local = runtime.database.close_local
+    monkeypatch.setattr(store, "claim_name_rows", lambda _db, _rows: None)
+    monkeypatch.setattr(
+        store, "mention_scan_matches", lambda _db, _expr: iter(({"rowid": 1},))
+    )
+
+    def close_local():
+        nonlocal close_calls
+        close_calls += 1
+        return original_close_local()
+
+    monkeypatch.setattr(runtime.database, "close_local", close_local)
+
+    with pytest.raises(RuntimeError, match="stop current alias"):
+        with store.mention_alias_candidate_batches(
+            (("claim-1", "claim text"),), ("alias", "later")
+        ) as batches:
+            alias, rows = next(iter(batches))
+            assert alias == "alias"
+            assert next(iter(rows)) == ("claim-1", "claim text")
+            raise RuntimeError("stop current alias")
+
+    assert close_calls == 1
 
 
 def _community_queries(repo):

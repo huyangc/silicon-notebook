@@ -45,6 +45,12 @@ def _sqlite_persistence_construction_sites_from_sources(
     offenders: list[str] = []
     for relative, source in sources.items():
         tree = ast.parse(source, filename=relative)
+        module_parts = list(Path(relative).with_suffix("").parts)
+        package_parts = (
+            module_parts if module_parts[-1:] == ["__init__"] else module_parts[:-1]
+        )
+        if package_parts[-1:] == ["__init__"]:
+            package_parts.pop()
         module_aliases: dict[str, str] = {}
         symbol_aliases: dict[str, str] = {}
         for node in ast.walk(tree):
@@ -52,11 +58,21 @@ def _sqlite_persistence_construction_sites_from_sources(
                 for alias in node.names:
                     local = alias.asname or alias.name.split(".", 1)[0]
                     module_aliases[local] = alias.name if alias.asname else local
-            elif isinstance(node, ast.ImportFrom) and node.module:
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    keep = len(package_parts) - (node.level - 1)
+                    base_parts = package_parts[:max(0, keep)]
+                    if node.module:
+                        base_parts.extend(node.module.split("."))
+                    resolved_module = ".".join(base_parts)
+                else:
+                    resolved_module = node.module or ""
                 for alias in node.names:
                     local = alias.asname or alias.name
-                    target = f"{node.module}.{alias.name}"
-                    if node.module == "app.repositories.sqlite":
+                    target = ".".join(
+                        part for part in (resolved_module, alias.name) if part
+                    )
+                    if resolved_module == "app.repositories.sqlite":
                         module_aliases[local] = target
                     else:
                         symbol_aliases[local] = target
@@ -300,35 +316,54 @@ def test_sqlite_bundle_factory_is_the_only_persistence_construction_root():
 
 
 @pytest.mark.parametrize(
-    ("source", "constructor"),
+    ("relative", "source", "constructor"),
     [
         (
+            "app/escape.py",
             "import app.repositories.sqlite.database as sqlite_db\n"
             "sqlite_db.SqliteDatabase(settings, root)\n",
             "SqliteDatabase",
         ),
         (
+            "app/escape.py",
             "from app.repositories.sqlite.database import SqliteDatabase as DB\n"
             "DB(settings, root)\n",
             "SqliteDatabase",
         ),
         (
+            "app/escape.py",
             "from app.repositories.sqlite.embedding_store import EmbeddingStore as Vectors\n"
             "Vectors(write=write)\n",
             "EmbeddingStore",
         ),
         (
+            "app/escape.py",
             "from app.repositories.sqlite import sharing_store as stores\n"
             "stores.SharingStore(database, settings, now=now, insert_row=insert)\n",
             "SharingStore",
         ),
+        (
+            "app/repositories/sqlite/escape.py",
+            "from .database import SqliteDatabase as DB\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/repositories/sqlite/escape.py",
+            "from . import database as db\ndb.SqliteDatabase(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/repositories/sqlite/nested/escape.py",
+            "from ..database import SqliteDatabase as DB\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
     ],
 )
 def test_sqlite_construction_guard_resolves_qualified_and_aliased_calls(
-    source, constructor
+    relative, source, constructor
 ):
     findings = _sqlite_persistence_construction_sites_from_sources(
-        {"app/escape.py": source}
+        {relative: source}
     )
     assert len(findings) == 1
     assert findings[0].endswith(f":{constructor}")

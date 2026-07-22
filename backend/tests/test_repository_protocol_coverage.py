@@ -398,3 +398,66 @@ def test_bundle_ports_cover_facade_store_calls_and_match_sqlite_signatures():
                 store_method
             ), (runtime_name, name)
     assert missing == {runtime_name: set() for _, runtime_name, _ in BUNDLE_STORE_SEATS}
+
+
+def test_static_store_helpers_remain_static_and_keep_their_first_real_argument():
+    from app.repositories import ports
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+    from app.repositories.sqlite.chunk_store import ChunkStore
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.embedding_store import EmbeddingStore
+    from app.repositories.sqlite.governance_store import GovernanceStore
+    from app.repositories.sqlite.identity_store import IdentityStore
+    from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+    from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_store import KnowhowStore
+    from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+    from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.notebook_store import NotebookStore
+    from app.repositories.sqlite.query_store import QueryStore
+    from app.repositories.sqlite.report_store import ReportStore
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    sqlite_stores = {
+        "database": SqliteDatabase,
+        "identity": IdentityStore,
+        "notebook_store": NotebookStore,
+        "sharing_store": SharingStore,
+        "source_store": SourceStore,
+        "chunk_store": ChunkStore,
+        "embedding_store": EmbeddingStore,
+        "knowledge": KnowledgeStore,
+        "governance": GovernanceStore,
+        "index_projections": IndexProjectionStore,
+        "kg_build_jobs": KgBuildJobStore,
+        "knowhow_store": KnowhowStore,
+        "knowhow_transfer_store": KnowhowTransferStore,
+        "memory_store": MemoryStore,
+        "queries": QueryStore,
+        "report_store": ReportStore,
+        "ask_state": AskStateStore,
+        "unified_kg": UnifiedKgStore,
+    }
+
+    def descriptor(cls, name):
+        return next(base.__dict__[name] for base in cls.__mro__ if name in base.__dict__)
+
+    receiver = object()
+    for _, runtime_name, port_name in BUNDLE_STORE_SEATS:
+        protocol = getattr(ports, port_name)
+        concrete = sqlite_stores[runtime_name]
+        for name in _protocol_methods(protocol):
+            concrete_descriptor = descriptor(concrete, name)
+            if not isinstance(concrete_descriptor, staticmethod):
+                continue
+            protocol_descriptor = descriptor(protocol, name)
+            assert isinstance(protocol_descriptor, staticmethod), (
+                protocol.__name__, name,
+            )
+            bound_protocol = protocol_descriptor.__get__(receiver, protocol)
+            assert _parameter_contract(bound_protocol) == _parameter_contract(
+                getattr(concrete, name)
+            ), (protocol.__name__, name)
