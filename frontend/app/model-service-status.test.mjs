@@ -10,6 +10,15 @@ import {
   testAllSystemModelServices,
   testSystemModelService,
 } from "./model-services.ts";
+import {
+  assignmentsIn,
+  findFunction,
+  jsxElements,
+  parseModule,
+} from "./test/semantic-source.mjs";
+
+
+const supportIdCopyModule = await parseModule("support-id-copy.tsx");
 
 
 function status(serviceId, serviceStatus, overrides = {}) {
@@ -117,4 +126,23 @@ test("the client rejects malformed untrusted response scalars", async () => {
     globalThis.fetch = originalFetch;
     globalThis.window = originalWindow;
   }
+});
+
+
+test("support id copy keys a pure wrapper instead of mutating refs during render", () => {
+  const wrapper = findFunction(supportIdCopyModule, "SupportIdCopy");
+  assert.deepEqual(
+    assignmentsIn(wrapper).filter(({ target }) => target.endsWith(".current")),
+    [],
+  );
+  assert.ok(findFunction(supportIdCopyModule, "SupportIdCopyValue"));
+  assert.deepEqual(jsxElements(supportIdCopyModule, "SupportIdCopyValue"), [{
+    scope: "<module>.SupportIdCopy",
+    attributes: {},
+    bindings: {
+      key: "safeSupportId",
+      supportId: "safeSupportId",
+      className: "className",
+    },
+  }]);
 });
