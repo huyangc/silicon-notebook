@@ -148,3 +148,43 @@ def test_seed_computation_runs_outside_the_write_transaction(repo, monkeypatch):
     repo.rebuild_unified_kg(nb, force=True)
 
     assert calls, "seed_or_unique was never called — this test would pass vacuously"
+
+
+def test_startup_recovery_clears_orphaned_cluster_scratch(tmp_path):
+    """SIGKILL / 掉电后残留的 scratch 行必须在下次启动时被清掉。
+
+    rebuild 的 finally 只兜得住异常和取消——进程被杀时它根本不会执行,而 run_id
+    随进程一起消失,那些行就永久不可达(两张表都没有时间戳列,事后也无从按年龄
+    清理)。几次被打断的大库 rebuild 足以把库撑大。
+    依据与 _recover_interrupted_jobs 其余各行相同:后端单进程,启动这一刻不可能
+    有 rebuild 在飞,所以此时表里的行按定义都是上次崩溃的遗留。
+    """
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path}/recover.db",
+        storage_dir=str(tmp_path / "storage"),
+    )
+    repo = SQLiteRepository(settings)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) "
+            "VALUES ('nb-dead', 'run-dead', 'o1', 's1')"
+        )
+        db.execute(
+            "INSERT INTO kg_canonical_scratch "
+            "(notebook_id, run_id, seed, canonical_id, canonical_name, "
+            " canonical_description, canonical_desc_sig) "
+            "VALUES ('nb-dead', 'run-dead', 's1', 'c1', 'C', '', '')"
+        )
+
+    # 重新构造 = 再跑一次 _recover_interrupted_jobs(模拟进程重启)
+    repo2 = SQLiteRepository(settings)
+    with repo2._connect() as db:
+        left_cluster = db.execute(
+            "SELECT COUNT(*) AS c FROM kg_cluster_scratch").fetchone()["c"]
+        left_canonical = db.execute(
+            "SELECT COUNT(*) AS c FROM kg_canonical_scratch").fetchone()["c"]
+    assert (left_cluster, left_canonical) == (0, 0), (
+        "启动恢复没有清掉孤儿 scratch 行", left_cluster, left_canonical)

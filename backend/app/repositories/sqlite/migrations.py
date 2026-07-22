@@ -1607,6 +1607,15 @@ class SqliteMigrator:
                 "updated_at=?, finished_at=? WHERE status='running'",
                 (now, now),
             )
+            # 重聚类的两张 scratch 表是**纯瞬态**的:只有一次进行中的 rebuild 会读
+            # 自己那个 run_id 的行,进程重启后没有任何代码路径会再回访它们。
+            # rebuild 的 finally 只能兜住异常/取消,兜不住 SIGKILL / 掉电——那种情况
+            # 下 run_id 随进程一起消失,行就永久不可达(每张表都没有时间戳列,事后
+            # 也无从按年龄清理),几次被打断的大库 rebuild 就能把库撑起来。
+            # 与本函数其余各行同一条依据:后端单进程,启动这一刻不可能有 rebuild 在飞,
+            # 所以此时表里的任何行按定义都是上次崩溃的遗留。
+            db.execute("DELETE FROM kg_cluster_scratch")
+            db.execute("DELETE FROM kg_canonical_scratch")
 
     def _seed(self) -> None:
         now = _now()
