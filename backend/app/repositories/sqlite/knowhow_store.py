@@ -901,12 +901,13 @@ class KnowhowStore:
 
         版本管理（spec §5）：collect-skips-and-press-on semantics carry over to
         the flow log — only entries that actually land in ``written`` go into
-        a ``cell_update`` payload, grouped by table (one entry may span several
-        tables), appended after every ``mutation_seq`` bump. A table with zero
-        actual writes (all skipped/rejected/already-applied) gets no entry at
-        all, never one with an empty ``cells`` list. ``before`` reuses the
-        already-verified ``expected_before`` from the phase-1 compare above —
-        no second read."""
+        a ``cell_update`` payload. A call whose ``updates`` span several tables
+        records ONE entry PER DISTINCT written table — never one entry mixing
+        rows from different tables — appended after every ``mutation_seq``
+        bump. A table with zero actual writes (all skipped/rejected/already-
+        applied) gets no entry at all, never one with an empty ``cells`` list.
+        ``before`` reuses the already-verified ``expected_before`` from the
+        phase-1 compare above — no second read."""
         if not updates:
             return {"written": [], "skipped": [], "already_applied": [], "rejected": []}
         now = self.now()
