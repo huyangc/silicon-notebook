@@ -378,4 +378,9 @@ class KnowhowMilestoneCreate(BaseModel):
 
 
 class KnowhowHistoryPruneRequest(BaseModel):
-    before_days: int
+    # 纵深防御（codex P2）：must be a positive, bounded day count. 负数会算出
+    # 一个未来的截止时间 → cutoff_seq 落到 head → 除 head 外整段历史被静默删光；
+    # 0 天会把刚刚发生的编辑也当作"N 天前"清掉。上限 36500（100 年）与前端
+    # parseHistoryPruneDays 对齐，同时挡住超大值。前端本就拦了这些，后端作为
+    # 契约边界必须自己再挡一次（非法值 → 422）。
+    before_days: int = Field(gt=0, le=36500)
