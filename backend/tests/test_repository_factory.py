@@ -183,7 +183,15 @@ def _sqlite_persistence_construction_sites_from_sources(
             return (
                 SQLITE_PATH_CONSTRUCTORS.get(value)
                 or SQLITE_MODULE_CONSTRUCTORS.get(value)
-                or ("*" if value in SQLITE_TAINT_ROOTS else None)
+                or (
+                    "*"
+                    if value in SQLITE_TAINT_ROOTS
+                    or (
+                        compatibility_sqlite_namespace(value)
+                        and value.count(".") == 2
+                    )
+                    else None
+                )
             )
 
         def import_module(node: ast.ImportFrom) -> str:
@@ -334,6 +342,10 @@ def _sqlite_persistence_construction_sites_from_sources(
                 scan_expr(node.value, local)
             else:
                 scan_expr(node.elt, local)
+            generator_targets = {name for name, _ in bindings}
+            for name, value in local.items():
+                if name not in generator_targets and navigation_namespace(value):
+                    aliases[name] = value
 
         def scan_expr(node: ast.AST | None, aliases: dict[str, str]) -> None:
             if node is None:
@@ -349,6 +361,11 @@ def _sqlite_persistence_construction_sites_from_sources(
                     record(node, name)
                 elif label := taint_label(resolved):
                     record(node, label)
+                elif (
+                    compatibility_sqlite_namespace(resolved)
+                    and resolved.count(".") > 2
+                ):
+                    return
                 else:
                     head = dotted_name(node).partition(".")[0]
                     if aliases.get(head) != "app" or sqlite_namespace(resolved):
@@ -389,6 +406,9 @@ def _sqlite_persistence_construction_sites_from_sources(
                     if label := taint_label(aliases[node.target.id]):
                         record(node.target, label)
                 scan_expr(node.value, aliases)
+                resolved = resolve(node.value, aliases)
+                if navigation_namespace(resolved):
+                    aliases[node.target.id] = resolved
                 return
             for child in ast.iter_child_nodes(node):
                 if isinstance(child, ast.expr):
@@ -490,9 +510,14 @@ def _sqlite_persistence_construction_sites_from_sources(
                         changed = True
                     if aliases.get(name) == resolved:
                         navigation_names.add(name)
-            for name, binding in (*parameters, *collector.bindings):
+            for name, binding in parameters:
                 if name in aliases:
-                    if name in navigation_names:
+                    if label := taint_label(aliases[name]):
+                        record(binding, label)
+                    aliases.pop(name)
+            for name, binding in collector.bindings:
+                if name in aliases:
+                    if name in navigation_names or navigation_namespace(aliases[name]):
                         continue
                     if label := taint_label(aliases[name]):
                         record(binding, label)
@@ -910,6 +935,38 @@ def test_sqlite_construction_guard_rejects_qualified_module_values(source, label
 
 
 @pytest.mark.parametrize(
+    "source",
+    [
+        "import app.services.sqlite_compat as compat\nconsume(compat)\n",
+        "import app.services as services\nconsume(services.sqlite_compat)\n",
+        "import app.services as services\n"
+        "compat = services.sqlite_compat\n"
+        "compat.KnowledgeStore(db)\n",
+    ],
+)
+def test_sqlite_construction_guard_rejects_flat_compat_module_values(source):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/compat_module_escape.py": source}
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import app.services.sqlite_repository as compat\nconsume(compat._new_id)\n",
+        "from app.services import sqlite_repository as compat\n"
+        "consume(compat._COPY_CHUNK)\n",
+        "import app.services as services\n"
+        "consume(services.sqlite_repository._new_id)\n",
+    ],
+)
+def test_sqlite_construction_guard_allows_specific_compat_symbols(source):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/compat_symbol_control.py": source}
+    ) == []
+
+
+@pytest.mark.parametrize(
     "binding",
     [
         "other = repos",
@@ -934,6 +991,113 @@ def test_sqlite_construction_guard_propagates_navigation_aliases(binding):
     ) == [f"app/navigation_alias_escape.py:{line}:SqliteDatabase"]
 
 
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "(lambda: ((nav := repos), nav.sqlite.database.SqliteDatabase(settings, root)))()",
+        "[nav.sqlite.database.SqliteDatabase(settings, root) "
+        "for item in items if (nav := repos)]",
+        "{nav.sqlite.database.SqliteDatabase(settings, root) "
+        "for item in items if (nav := repos)}",
+        "{item: nav.sqlite.database.SqliteDatabase(settings, root) "
+        "for item in items if (nav := repos)}",
+        "tuple(nav.sqlite.database.SqliteDatabase(settings, root) "
+        "for item in items if (nav := repos))",
+    ],
+)
+def test_sqlite_construction_guard_propagates_walrus_navigation_inside_expression(
+    expression,
+):
+    source = f"import app.repositories as repos\nresult = {expression}\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/walrus_navigation_escape.py": source}
+    ) == ["app/walrus_navigation_escape.py:2:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[(nav := repos) for item in items]",
+        "{(nav := repos) for item in items}",
+        "{item: (nav := repos) for item in items}",
+        "((nav := repos) for item in items)",
+    ],
+)
+def test_sqlite_construction_guard_exports_comprehension_walrus_navigation(expression):
+    source = (
+        "import app.repositories as repos\n"
+        f"result = {expression}\n"
+        "nav.sqlite.database.SqliteDatabase(settings, root)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/comprehension_walrus_escape.py": source}
+    ) == ["app/comprehension_walrus_escape.py:3:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        (
+            "import app.repositories as repos\n"
+            "repos = replacement\n"
+            "repos.sqlite.database.SqliteDatabase(settings, root)\n",
+            3,
+        ),
+        (
+            "def escaped():\n"
+            "    import app.repositories as repos\n"
+            "    for repos in values:\n"
+            "        pass\n"
+            "    repos.sqlite.database.SqliteDatabase(settings, root)\n",
+            5,
+        ),
+        (
+            "class Escaped:\n"
+            "    import app.repositories as repos\n"
+            "    match value:\n"
+            "        case repos:\n"
+            "            pass\n"
+            "    repos.sqlite.database.SqliteDatabase(settings, root)\n",
+            6,
+        ),
+        (
+            "class Escaped:\n"
+            "    import app.repositories as repos\n"
+            "    class repos:\n"
+            "        pass\n"
+            "    repos.sqlite.database.SqliteDatabase(settings, root)\n",
+            5,
+        ),
+    ],
+)
+def test_sqlite_construction_guard_retains_navigation_across_later_bindings(
+    source, line
+):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/later_navigation_binding_escape.py": source}
+    ) == [f"app/later_navigation_binding_escape.py:{line}:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import app.repositories as repos\n"
+        "def control(repos):\n"
+        "    consume(repos.sqlite.database)\n",
+        "import app.repositories as repos\n"
+        "control = lambda repos: consume(repos.sqlite.database)\n",
+        "import app.repositories as repos\n"
+        "result = [repos.sqlite.database for repos in values]\n",
+    ],
+)
+def test_sqlite_construction_guard_navigation_parameters_and_comp_targets_shadow(
+    source,
+):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_shadow_control.py": source}
+    ) == []
+
+
 def test_sqlite_construction_guard_keeps_navigation_class_locals_out_of_children():
     source = (
         "import app.repositories as repos\n"
@@ -946,6 +1110,21 @@ def test_sqlite_construction_guard_keeps_navigation_class_locals_out_of_children
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/navigation_class_control.py": source}
+    ) == []
+
+
+def test_sqlite_construction_guard_keeps_local_import_navigation_out_of_class_children():
+    source = (
+        "class Outer:\n"
+        "    import app.repositories as repos\n"
+        "    repos = replacement\n"
+        "    def method(self):\n"
+        "        consume(repos.sqlite.database)\n"
+        "    class Nested:\n"
+        "        consume(repos.sqlite.database)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_class_import_control.py": source}
     ) == []
 
 
