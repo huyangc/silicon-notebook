@@ -17,6 +17,7 @@ from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+from app.repositories.sqlite.knowhow_history_store import KnowhowHistoryStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
@@ -321,6 +322,15 @@ class RepositoryRuntime:
         # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
         # 注释），store 自己不需要——不带 new_id/now 构造参数。
         self.knowhow_transfer_store = KnowhowTransferStore(self.database)
+        # knowhow 表版本管理 Task 3：变更流水/里程碑的读侧 store。new_id/now
+        # 与上面 knowhow_store 用同一对 seams 可调用对象，保持三个 store 的
+        # id/时钟来源单一（record_change 本身是模块级函数，不在这里持有——
+        # 由 Task 4-6 的写方法在各自事务内直接调用）。
+        self.knowhow_history_store = KnowhowHistoryStore(
+            self.database,
+            new_id=seams.new_id,
+            now=seams.now,
+        )
 
     @property
     def storage_dir(self) -> Path:
