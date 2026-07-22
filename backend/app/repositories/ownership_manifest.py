@@ -1785,7 +1785,6 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.source_id_in_flight', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._source_evidence', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_pipeline_event_logging', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='get_source'),
@@ -2067,7 +2066,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_index', kind='attribute', target='maintenance'),
-            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_ingest', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_reparse', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.source_id_by_hash', kind='attribute', target='maintenance'),
@@ -2295,7 +2293,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.upload_sources.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all._sched', kind='attribute', target='process_source'),
-            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_ingest._one', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_reparse', kind='attribute', target='process_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='process_source'),
         ),

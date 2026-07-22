@@ -31,7 +31,7 @@
 |---|---|---|---|
 | G1 | 索引全量重建就地覆盖活目录，无 tmp+rename；加载端无任何完整性校验 | `backend/app/services/kg/scale_index.py:263-334`、`:47-58` | **静默错**：旧 manifest + 半截数组被无条件加载 |
 | G2 | 启动清算不覆盖 `queued` / `parsing`；调度队列是纯内存 `ThreadPoolExecutor`、无 job 表 | `migrations.py:1559`、`backend/app/services/kg/scheduler.py:79` | 源永久搁浅，界面只转圈、无提示、无批量入口 |
-| G3 | `ingest` 子命令的 hash 跳过认账过早（`file_hash` 在 INSERT 时即写，早于 parse） | `backend/app/services/source_ingestion.py:378`、`batch_ingest.py:386` | parse 中途中断的源永久变空源；`all` 子命令已用三分流修好，`ingest` 未修 |
+| G3 | `ingest` 子命令的 hash 跳过认账过早（`file_hash` 在 INSERT 时即写，早于 parse） | `backend/app/services/source_ingestion.py:378`、`batch_ingest.py:386` | parse 中途中断的源永久变空源。**当前 schema 下不可判定，见 A4**；存量走 `reparse` |
 | G4 | embedding 无任何进度记账；`extracted` 只 gate 在 KG 抽取上，与向量无关 | `source_ingestion.py:596` | 「已完成」不代表向量齐全 |
 | G5 | element 向量没有 missing/backfill 查询（chunk 侧与 KG 节点侧都有） | 全仓无命中 | 写了一半只能整源重跑 |
 | G6 | 索引水位存「全部 source id」而非「成功索引的 source id」；`rearm_auto_index` 全仓无调用方 | `backend/app/services/scale_index_builder.py:274`、`scale_artifact_runtime.py:677` | delta 恒为 0、fold 空跑；不重启不自愈 |
@@ -43,7 +43,7 @@
 
 把善后能力整理成**三层**，每层职责单一：
 
-1. **加固层** —— 让损坏不发生（G1/G2/G3 的代码修复）。自动，无 UI。
+1. **加固层** —— 让损坏不发生（G1/G2 的代码修复；G3 已确认需 schema 支持，见 A4）。自动，无 UI。
 2. **体检层** —— 让已发生的损坏可被发现（G4/G5/G6/G7 的检测面）。
 3. **修复层** —— 让发现的损坏能一键善后（复用已有重建动作 + 两个新增动作）。
 
@@ -108,14 +108,39 @@ fold 已经做对了，full 没跟上——这是一次**收敛到既有正确�
 抽出空 KG）。正确终态取「失败可重试」语义，判据仍以 `source_elements`
 是否存在为准。具体取值在计划阶段定，需与 `PARSE_STATUS` 标签表同步。
 
-### A4｜`ingest` 子命令对齐 `all` 的三分流（对应 G3）
+### A4｜`ingest` 子命令的完成判据（对应 G3）—— **已撤回，需 schema 支持**
 
-`run_ingest` 当前只有二元判定（`skipped` / `uploaded`），把
-`source_id_by_hash` 命中即视为已摄取。改为复用 `run_all` 已经写好的三分流：
-hash 未命中 → 新文件；命中且有 KG → 跳过；命中且有 elements → 只补抽；
-命中但无 elements → 必须重新 parse。
+原计划把 `run_all` 的分流判据搬到 `ingest`。实现并经六轮评审后确认**该问题在当前
+schema 下不可判定**，A4 已从 P1 撤出（PR #324），此处保留结论以免后人重蹈：
 
-同样是**收敛到既有正确实现**。
+`ingest` 要回答的是「这个源上次跑完了吗」，但可观测的三个信号
+（`source_elements` 有无、`chunks` 有无、`parse_status`）无法区分以下两对：
+
+| | elements | chunks | parse_status | 正确答案 |
+|---|---|---|---|---|
+| 分块失败但仍置 extracted | >0 | 0 | extracted | 要重跑 |
+| 纯标题 md 解析成功 | >0 | 0 | extracted | 不要重跑 |
+
+（`build_chunks` 对纯标题输入返回 0 chunk——已实测；而
+`source_ingestion` 把分块包在 best-effort 的 try 里，失败不阻塞流水线、仍置终态。）
+
+`parsed` 同样二义：既是活跃过渡态（服务端正在处理），也是中断残留态。据此重解析
+会与在跑的服务端抢同一个源，而 `process_source` 没有 source 级单飞守卫、还会
+clear/replace 抽取态。
+
+**正确解需要两样当前没有的东西**：① 持久化的**完成标记**（证明「本代 elements 已
+成功分块」，而非从产物存在与否倒推）；② source 级**活跃租约**（区分「正在跑」与
+「中断残留」）。二者都是 schema 变更。
+
+这与体检层 H1–H3 依赖的是**同一个缺口**——它们同样要回答「这个源卡住了吗」。
+建议合并设计，不要各做一套。
+
+**用户已定的范围约束（2026-07-22）**：`batch_ingest` 的中断**不需要**在 notebook
+的界面按钮里提供 resume 入口。离线批处理的续跑留在 CLI（`reparse` 子命令），
+看板只负责呈现与修复**服务端**管线的损坏。
+
+在此之前，`ingest` 维持内容哈希判据（认账偏早、只会漏修不会误伤），存量补救走
+显式的 `reparse` 子命令。
 
 ### A5｜补 element 向量的缺失查询（对应 G5）
 
@@ -181,7 +206,7 @@ hash 未命中 → 新文件；命中且有 KG → 跳过；命中且有 element
 
 ### 自动 vs 手动的界线
 
-- **加固层全自动**（A1–A4 是纯粹的正确性修复，不涉及成本）。
+- **加固层全自动**（A1–A3、A5–A6 是纯粹的正确性修复，不涉及成本；A4 已撤回）。
 - **修复层一律不自动触发**。凡是会调用 LLM 或 embedding 的动作（重新解析、
   补齐向量、分析新增）都必须由用户点击。这是运行效率约束的直接要求——
   自动补抽会在用户不知情时烧模型额度。
@@ -222,7 +247,7 @@ G8 的跨库残留（`.tmp` / `.old` 目录）作为 admin
 |---|---|---|---|
 | P0 | A1 + A2（索引原子写 + 完整性校验） | 无 | 是 |
 | P0 | A3（启动清算覆盖搁浅源） | 无 | 是 |
-| P1 | A4 + A5 + A6（ingest 三分流、element 向量查询、文档订正） | 无 | 是 |
+| P1 | A5 + A6（element 向量查询、文档订正）| 无 | 是（PR #324；A4 撤回）|
 | P2 | 体检 endpoint（H1–H8 聚合 + memo） | A2、A5 | 是（后端先行不可见） |
 | P3 | 看板改造 + 两个新增修复动作 | P2 | 前后端同一 PR |
 | P4 | admin 残留清理（G8） | 无 | 是 |
@@ -236,7 +261,8 @@ P0 三项互不依赖，是纯粹的止血，建议先行。
   判定为损坏而非静默加载。只加校验不验证等于没加。
 - **A3 需变异验证**：造一个 `queued` 滞留行，确认重启后进入可重试终态，
   且**不会**被误纳入 KG 抽取目标集（抽出空 KG 是这条修复最可能引入的回归）。
-- **A4 需覆盖「parse 中途中断后重跑 `ingest`」这条具体路径**，而不只是测
-  三分流的分支。
+- **A4 已撤回**，其验证要求随之作废。重启这条轨道时，先补完成标记与活跃租约，
+  再按「六情形表」逐格构造用例——判据没有信息维度支撑时，任何用例都只是在
+  两类错误之间挑一个。
 - **体检 endpoint 需在大库上量代价**，确认命中 memo 时为 O(1)、未命中时不
   劣于现有看板打开耗时。

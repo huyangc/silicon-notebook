@@ -343,21 +343,6 @@ def source_id_by_hash(repo: BatchIngestRepository, notebook_id: str, digest: str
     return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
-_IN_FLIGHT_PARSE = ("queued", "parsing", "extracting")
-
-
-def source_id_in_flight(repo: BatchIngestRepository, source_id: str) -> bool:
-    """这一刻该源的 parse 管线是否可能正在别处跑(主键点查,实时值)。
-
-    run_ingest 的 in_flight 快照是进池前取的一次,重解析前用本函数就地复核,把
-    「取快照之后才被服务端接手」的窗口压到最小。取值集合与
-    maintenance.sources_in_flight_parse 必须一致。"""
-    try:
-        summary = repo.get_source(source_id)
-    except KeyError:      # 期间被删了:也不该由本次运行去重解析
-        return True
-    return (summary.parse_status or summary.status) in _IN_FLIGHT_PARSE
-
 
 def _resolve_owner_profile(
     repo: BatchIngestRepository, owner: Optional[str]
@@ -392,61 +377,22 @@ def run_ingest(
 ) -> dict[str, int]:
     """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。
 
-    跳过判据是「这个源的 parse 到底跑完没有」而非「hash 在不在库」。file_hash 是
-    INSERT 时写的(早于 parse),所以一个 parse 中途被中断的源,hash 已经在库、内容却
-    是空的:旧的二元判定(hash 命中即 skipped)会把它永久认账成已摄取,再也补不回来。
-    两分流(ingest 是无 KG 阶段,没有「已有 KG → 跳过」那一档):
-      hash 未命中           → upload_sources → uploaded
-      命中且管线已跑完      → 真的已摄取     → skipped
-      命中且**可能正在跑**  → 不抢,让出      → in_flight
-      命中且管线没跑完      → process_source → reparsed / failed(按真实结果计)
-
-    「已跑完」只认**管线终态**(sources_with_completed_parse),刻意不看「有没有
-    element」。两个方向都会错:
-      · 只看 element「有」→ 漏判。elements 是管线中段的原子写入,其后还有分块、
-        向量、终态置位;崩在中间的源有 element 却没有 chunk,按「有 element 即完成」
-        会被永远跳过,而收尾只嵌入已存在的 chunk、救不回来。
-      · 只看 element「无」→ 误判。一次成功的 parse 完全可以产出零个 element
-        (扫描版/纯图 PDF 没有文本层,'metadata-only' 导入源更是永远没有),按
-        「无 element 即中断」会把它们每次重跑都再解析一遍,永远不收敛。
+    跳过判据是内容哈希:命中即视为已摄取。这条判据**认账偏早**——file_hash 是
+    INSERT 时写的(早于 parse),所以 parse 中途被中断的源 hash 已在库、内容却是空的,
+    再跑 ingest 也不会补。刻意保持现状,不在这里做「有没有跑完」的推断:
+    (elements, chunks, parse_status) 这三个可观测信号无法区分「分块失败但仍置
+    extracted」与「纯标题 md 成功解析出零 chunk」——两者状态完全相同、正确答案相反;
+    `parsed` 同样既是活跃过渡态又是中断残留态。要判准需要持久化的完成标记与活跃租约
+    (schema 变更),见 docs/superpowers/specs/2026-07-22-pipeline-damage-recovery-design.md。
+    存量补救走显式的 `reparse` 子命令(它按「有没有 source_elements」选目标)。
     """
     log = log or (lambda _e: None)
-    counts = {"uploaded": 0, "skipped": 0, "reparsed": 0, "in_flight": 0, "failed": 0}
+    counts = {"uploaded": 0, "skipped": 0, "failed": 0}
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
 
-    # 进池前取一次快照。判据是**管线终态**,不是「有没有 element」:elements 的原子
-    # 写入发生在管线中段(其后还有分块、向量、终态置位),所以「有 element」只证明跑到
-    # 过那一步,不证明跑完了。崩在 elements 已写、chunks 未建之间的源就是这样——按
-    # 「有 element 即完成」会永远跳过它,而收尾的 backfill_chunk_embeddings 只嵌入
-    # **已存在**的 chunk,一个 chunk 都没有的源它救不回来。
-    # 「已完成」= 有 chunks ∪ (管线终态 ∩ 没有 elements)。
-    #
-    # 这个式子是六种情形逼出来的,单看任何一个信号都会漏或误:
-    #   ① elements 已写、未分块就崩   → 无 chunk、非终态       → 要重跑
-    #   ② parse+分块成功、KG 抽取抛错 → 有 chunk               → 不重跑(外层 except 会
-    #      把整源记成 failed,只按状态判就会每次清掉有效产物重来,LLM 一直挂就一直不收敛)
-    #   ③ parse 本身失败              → 无 chunk、非终态       → 要重跑
-    #   ④ 扫描版 PDF 零 element 成功  → 无 chunk,但终态且无 el → 不重跑
-    #   ⑤ metadata-only 导入          → 同 ④                   → 不重跑
-    #   ⑥ 分块失败但仍置 extracted    → 无 chunk、终态、有 el   → 要重跑
-    #      (source_ingestion 把分块包在 best-effort try 里,失败不阻塞流水线,所以
-    #       「终态」并不能证明分块成功——这是 ④ 与 ⑥ 必须靠 elements 才分得开的原因)
-    #
-    # 刻意**不**把「有 element」直接算完成:那是管线中段产物,①⑥ 都有 element 却零 chunk。
-    mnt = repo.maintenance
-    done = (mnt.sources_with_chunks(notebook_id)
-            | (mnt.sources_with_completed_parse(notebook_id)
-               - mnt.sources_with_elements(notebook_id)))
-    # 可能正被别的进程处理的源(服务端在跑、或另一个批处理)。process_source 没有
-    # source 级单飞守卫且会 clear/replace 抽取态,两边同时跑会互相覆盖——离线 CLI
-    # 不该碰服务端进行中的行,与崩溃兜底只在服务端跑是同一条原则。
-    in_flight = repo.maintenance.sources_in_flight_parse(notebook_id)
-    # `parsed` 是快照,看不见本次运行刚产出的 elements:输入目录里若有两个内容相同的
-    # 文件,第二个会 hash 命中(第一个刚建的源)却不在快照里 → 被误判成需要 reparse,
-    # 白跑一遍 parse。用「本次已认领的内容哈希」集合挡掉(线程安全,_one 在池里并发跑)。
-    # 按 digest 而非 sid 认领:认领发生在做任何事之前,不必等 upload 返回 sid,天然没有
-    # 「先插行、后写 elements」的窗口期竞态;digest → source 本就是一一映射。
+    # 同一次运行内的重复文件(输入目录里两个内容相同的文件)按内容哈希认领一次即可,
+    # 省掉第二次的建源/解析。线程安全:_one 在池里并发跑。
     claimed: set[str] = set()
     claim_lock = threading.Lock()
 
@@ -456,40 +402,16 @@ def run_ingest(
             digest = sha256_bytes(content)
             with claim_lock:
                 if digest in claimed:
-                    return ("skipped", path, None)   # 本次运行内的重复文件
+                    return ("skipped", path, None)
                 claimed.add(digest)
-            sid = source_id_by_hash(repo, notebook_id, digest)
-            if sid is None:
-                repo.upload_sources(
-                    notebook_id,
-                    [UploadedSourceFile(file_name=path.name, content_type="", content=content)],
-                    scheduler=None,
-                )
-                return ("uploaded", path, None)
-            if sid in done:
+            if already_ingested(repo, notebook_id, digest):
                 return ("skipped", path, None)
-            if sid in in_flight:
-                return ("in_flight", path, None)   # 别人在处理,不抢
-            # 快照是进池前取的一次:一个源完全可能在取快照之后才被服务端/另一个批
-            # 处理接手。重解析前就地复核一次(主键点查,只对重解析候选发生,不是每文件
-            # 一次全表扫)。窗口从「整轮运行」缩到「这一次点查到 process_source 之间」。
-            # 真正的原子认领需要 source 级租约/锁,当前管线没有——在有之前,复核是能
-            # 做到的最强收敛,且与「不抢别人正在处理的源」这条意图一致。
-            if source_id_in_flight(repo, sid):
-                return ("in_flight", path, None)
-            # 已建源但 parse 没跑完(上次中断/未落地)→ 重新 parse。调的是
-            # upload_sources(scheduler=None) 内部同一个 process_source,不引入新的模型暴露。
-            #
-            # ⚠ process_source 对解析异常是**自己吞掉**的:它在内部 except 里把源置
-            # 'failed' 然后照常 return SourceSummary(source_ingestion.py 的管线 except
-            # 分支不 re-raise)。所以外面这个 try/except 对普通解析失败根本不可达——
-            # 必须查返回值的真实状态,否则失败会被计成 reparsed,汇总数字说谎。
-            summary = repo.process_source(sid)
-            if (summary.parse_status or summary.status) == "failed":
-                # SourceSummary 不暴露 error_message 列,失败详情在 summary 文案里
-                # (管线 except 写的 "Parsing failed; see source error.")。
-                return ("failed", path, summary.summary or "parse failed")
-            return ("reparsed", path, None)
+            repo.upload_sources(
+                notebook_id,
+                [UploadedSourceFile(file_name=path.name, content_type="", content=content)],
+                scheduler=None,
+            )
+            return ("uploaded", path, None)
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
