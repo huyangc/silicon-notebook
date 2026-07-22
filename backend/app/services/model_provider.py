@@ -27,6 +27,7 @@ from app.services.model_work import (
     ModelPriority,
     ModelProviderError,
     ModelSchedulingError,
+    ModelServiceUnavailable,
     ProviderObservation,
     SchedulerSnapshot,
     make_model_work_context,
@@ -268,7 +269,11 @@ class _ScheduledAdapter:
             finally:
                 timing["finished"] = time.perf_counter()
 
-        future = self._runtime.scheduler.submit(context=context, invoke=scheduled)
+        future = self._provider._submit_scheduled(
+            self._runtime,
+            context=context,
+            invoke=scheduled,
+        )
         return _SubmittedCall(
             context=context,
             future=future,
@@ -557,6 +562,22 @@ class RuntimeModelProvider:
             self._runtimes[service.id] = runtime
             return runtime
 
+    def _submit_scheduled(
+        self,
+        runtime: _ServiceRuntime,
+        *,
+        context: Any,
+        invoke: Callable[[], Any],
+    ) -> Future:
+        with self._lock:
+            if self._closed:
+                future: Future = Future()
+                future.set_exception(
+                    ModelServiceUnavailable(support_id=context.support_id)
+                )
+                return future
+            return runtime.scheduler.submit(context=context, invoke=invoke)
+
     def chat(self, workload_id: str):
         workload = self._workload(workload_id, "chat")
         service = self.registry.service_for(workload_id)
@@ -708,8 +729,8 @@ class RuntimeModelProvider:
                 return
             self._closed = True
             runtimes = tuple(self._runtimes.values())
-        for runtime in runtimes:
-            runtime.scheduler.stop_admission()
+            for runtime in runtimes:
+                runtime.scheduler.stop_admission()
         for runtime in runtimes:
             runtime.scheduler.shutdown(wait=True)
         for runtime in runtimes:

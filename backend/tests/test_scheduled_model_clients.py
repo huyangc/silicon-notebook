@@ -536,3 +536,76 @@ def test_close_stops_all_service_admission_before_waiting_for_active_work():
     finally:
         release.set()
         executor.shutdown()
+
+
+def test_close_and_submit_share_one_atomic_provider_admission_boundary():
+    services = {
+        "first": _service("first", "chat", 1),
+        "second": _service("second", "chat", 1),
+    }
+    registry = SystemModelServiceRegistry(
+        services,
+        {"ask_answer": "first", "query_rewrite": "second"},
+    )
+
+    class ClosableChat(_Chat):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+            self.transport_calls = 0
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            self.transport_calls += 1
+            return self.result
+
+        def close(self):
+            self.close_calls += 1
+
+    raws = {"first": ClosableChat(), "second": ClosableChat()}
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
+        _EventLog(),
+        registry=registry,
+        chat_factory=lambda service: raws[service.id],
+    )
+    first = provider.chat("ask_answer")
+    second = provider.chat("query_rewrite")
+    stop_entered = threading.Event()
+    allow_stop = threading.Event()
+    submit_entered = threading.Event()
+    original_stop_admission = first._runtime.scheduler.stop_admission
+
+    def blocked_stop_admission():
+        stop_entered.set()
+        assert allow_stop.wait(2)
+        original_stop_admission()
+
+    first._runtime.scheduler.stop_admission = blocked_stop_admission
+    executor = ThreadPoolExecutor(max_workers=3)
+    try:
+        closing = executor.submit(provider.close)
+        assert stop_entered.wait(1)
+        assert provider._closed is True
+
+        def submit_after_close_started():
+            submit_entered.set()
+            return second.chat_json([], "{}")
+
+        late_call = executor.submit(submit_after_close_started)
+        assert submit_entered.wait(1)
+        time.sleep(0.03)
+        assert not late_call.done()
+        assert raws["second"].transport_calls == 0
+
+        concurrent_close = executor.submit(provider.close)
+        allow_stop.set()
+        closing.result(timeout=2)
+        concurrent_close.result(timeout=2)
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            late_call.result(timeout=2)
+        assert caught.value.code == "model_service_unavailable"
+        assert raws["second"].transport_calls == 0
+        assert [raw.close_calls for raw in raws.values()] == [1, 1]
+    finally:
+        allow_stop.set()
+        executor.shutdown()
