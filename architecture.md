@@ -1,6 +1,6 @@
 # silicon-notebook 架构
 
-更新日期：2026-07-21
+更新日期：2026-07-23
 
 本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署、环境变量全集与产品操作说明以 `README.md`、`README_zh.md` 和 `.env.example` 为准；协作约束以 `AGENTS.md` 为准。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
@@ -110,7 +110,7 @@ source 状态沿 `queued → parsing → parsed → extracting → extracted` �
 
 ### 3.2 Ask 与 detached job
 
-`POST /api/notebooks/{id}/ask` 保留非流式兼容路径。`POST /api/notebooks/{id}/ask/stream` 先让 `ask_jobs` 行持久化 job 元数据与状态、让 `ask_trace_steps` 持久化后续 trace；cancellation event 注册在进程内，然后启动脱离 transport 生命周期的 worker：
+所有 Ask 入口先让 `ask_jobs` 行持久化，并以 job 状态守卫最终 answer 的原子保存。阻塞式 `POST /api/notebooks/{id}/ask` 与 MCP `ask_notebook` 在当前调用内完成该生命周期，job id 只在服务内部使用；它们的公开回答不含 `job_id`，也不承诺 stream 的 progress、重连或显式取消协议。`POST /api/notebooks/{id}/ask/stream` 才会把 `job_id` 交给客户端、把后续 trace 写入 `ask_trace_steps`，让 cancellation event 注册在进程内，并启动脱离 transport 生命周期的 worker：
 
 ```text
 stream start
@@ -131,6 +131,8 @@ transport disconnect / navigation / refresh
 ```
 
 服务重启后仍为 `running` 的 job 会转为 `interrupted`；进程内 cancellation event 不会跨重启恢复。`GET /api/notebooks/{id}/ask/jobs/{job_id}` 返回 `status`、`trace`、`answer_id` 等 job metadata，不直接返回 `AskResponse`；job 完成后，前端重新加载 conversation 取得已持久化的最终回答。前端 logout 仍会终止本地流并重置用户态，但 transport 生命周期本身不拥有后台 job。
+
+会话删除与上述 job 生命周期共用 conversation parent lease。显式删除看到任一 `running` job 时返回 409 且不改任何状态；批量清理在锁内重验 owner、活动时间和 running job，只返回实际删除的 `deleted_ids`（同时保留 `deleted` 计数）。确认可删除后，同一事务按 answer、terminal job trace、terminal job、conversation 清理，已删除的 job id 随即变为 404。锁序刻意不形成环：最终保存是 job→conversation；删除持有 conversation 时只做不加行锁的 running EXISTS，若命中立即拒绝/跳过，在无 running 后才删除不可再变化的 terminal job。
 
 ### 3.3 联合检索与回答合成
 

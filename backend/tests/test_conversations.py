@@ -1,4 +1,4 @@
-import json, pytest
+import json, threading, pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
@@ -86,12 +86,24 @@ def test_delete_and_rename_conversation(repo):
     r = repo.ask(nb.id, AskRequest(question="q1"))
     repo.rename_conversation(r.conversation_id, "新标题")
     assert repo.get_conversation(r.conversation_id).title == "新标题"
+    with repo._connect() as db:
+        job_id = db.execute(
+            "SELECT id FROM ask_jobs WHERE conversation_id=?", (r.conversation_id,)
+        ).fetchone()[0]
+    repo.append_ask_trace(job_id, {"step_type": "answer", "summary": "private"})
     repo.delete_conversation(r.conversation_id)
     with pytest.raises(KeyError):
         repo.get_conversation(r.conversation_id)         # 会话已删
     with repo._connect() as db:
         n = db.execute("SELECT count(*) FROM answers WHERE conversation_id=?", (r.conversation_id,)).fetchone()[0]
+        jobs = db.execute(
+            "SELECT count(*) FROM ask_jobs WHERE conversation_id=?", (r.conversation_id,)
+        ).fetchone()[0]
+        traces = db.execute(
+            "SELECT count(*) FROM ask_trace_steps WHERE job_id=?", (job_id,)
+        ).fetchone()[0]
     assert n == 0                                          # 其下 answers 一并删除
+    assert jobs == 0 and traces == 0                       # 隐藏 job/trace 同步清除
 
 
 def test_conversation_routes(tmp_path, monkeypatch):
@@ -119,15 +131,35 @@ def test_conversation_mutation_routes(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     from app.main import app
+    from app.api.ask_routes import repository
     client = TestClient(app)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
     cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]
+    with repository()._connect() as db:
+        job_id = db.execute(
+            "SELECT id FROM ask_jobs WHERE conversation_id=?", (cid,)
+        ).fetchone()[0]
     assert client.patch(f"/api/conversations/{cid}", json={"title": "T"}).status_code == 200
     assert client.get(f"/api/conversations/{cid}").json()["title"] == "T"
     assert client.delete(f"/api/conversations/{cid}").status_code == 200
     assert client.get(f"/api/conversations/{cid}").status_code == 404
+    assert client.get(f"/api/notebooks/{nb}/ask/jobs/{job_id}").status_code == 404
     assert client.patch("/api/conversations/bogus", json={"title": "x"}).status_code == 404
     assert client.delete("/api/conversations/bogus").status_code == 404
+
+    running_job, running_conversation = repository().begin_ask_job(
+        nb,
+        AskRequest(question="still running", mode="chunk"),
+        "chunk",
+        threading.Event(),
+    )
+    conflict = client.delete(f"/api/conversations/{running_conversation}")
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"] == "conversation has a running Ask job"
+    assert client.get(f"/api/conversations/{running_conversation}").status_code == 200
+    assert client.get(
+        f"/api/notebooks/{nb}/ask/jobs/{running_job}"
+    ).status_code == 200
 
 
 def test_list_conversations_used_reasoning_last_turn(repo):
@@ -236,8 +268,9 @@ def test_bulk_delete_conversations_by_last_activity(repo):
     add_conv("conv-otnb", other.id, "2000-01-01T00:00:00")                      # other notebook -> untouched
     add_conv("conv-other-user", nb.id, "2000-01-01T00:00:00", created_by="someone-else")  # other user -> untouched
 
-    deleted = repo.bulk_delete_conversations(nb.id, older_than_days=3)
-    assert deleted == 1                                                         # only conv-old matched
+    result = repo.bulk_delete_conversations(nb.id, older_than_days=3)
+    assert result.deleted == 1                                                  # only conv-old matched
+    assert result.deleted_ids == ["conv-old"]
 
     survivors = {c.id for c in repo.list_conversations(nb.id)}
     assert survivors == {"conv-new", "conv-revived"}                           # keyed on updated_at, not created_at
@@ -285,7 +318,8 @@ def test_bulk_delete_conversations_route(tmp_path, monkeypatch):
     assert client.delete("/api/notebooks/bogus/conversations", params={"older_than_days": 3}).status_code == 404
     # happy path -> deletes the aged conversation
     resp = client.delete(f"/api/notebooks/{nb}/conversations", params={"older_than_days": 3})
-    assert resp.status_code == 200 and resp.json()["deleted"] == 1
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 1, "deleted_ids": [cid]}
     assert client.get(f"/api/notebooks/{nb}/conversations").json() == []
 
 

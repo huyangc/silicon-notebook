@@ -44,6 +44,7 @@ from app.models.ask import (
     AskRequest,
     AskResponse,
     Citation,
+    ConversationBulkDeleteResult,
     ModelError,
     TraceStep,
 )
@@ -365,7 +366,7 @@ class AskService:
 
     def bulk_delete_conversations_current(
         self, notebook_id: str, older_than_days: int
-    ) -> int:
+    ) -> ConversationBulkDeleteResult:
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
         self.notebooks.get_notebook(notebook_id)

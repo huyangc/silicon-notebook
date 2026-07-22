@@ -58,6 +58,7 @@ from app.models.ask import (
     AskRequest,
     AskResponse,
     Citation,
+    ConversationBulkDeleteResult,
     FeedbackRequest,
     FeedbackResponse,
     ModelError,
@@ -3157,11 +3158,14 @@ class RepositoryFacade:
     def delete_conversation(self, conversation_id: str) -> None:
         return self._runtime.ask_state.delete_conversation(conversation_id)
 
-    def bulk_delete_conversations(self, notebook_id: str, older_than_days: int) -> int:
+    def bulk_delete_conversations(
+        self, notebook_id: str, older_than_days: int
+    ) -> ConversationBulkDeleteResult:
         """Delete the current user's conversations in `notebook_id` whose last
         activity (`updated_at`) is strictly older than `older_than_days` days,
-        cascading to their answers. Returns the number deleted. Raises KeyError
-        if the notebook does not exist."""
+        cascading to their answers and terminal durable Ask state. Returns the
+        authoritative count and ids actually deleted; running conversations
+        are skipped. Raises KeyError if the notebook does not exist."""
         return self._runtime.ask_component.bulk_delete_conversations_current(
             notebook_id, older_than_days
         )

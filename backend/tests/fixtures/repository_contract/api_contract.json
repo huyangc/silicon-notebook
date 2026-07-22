@@ -1036,6 +1036,25 @@
           "title": "ConceptWhitelistEntry",
           "type": "object"
         },
+        "ConversationBulkDeleteResult": {
+          "description": "Authoritative conversations removed by one bulk-cleanup transaction.",
+          "properties": {
+            "deleted": {
+              "default": 0,
+              "title": "Deleted",
+              "type": "integer"
+            },
+            "deleted_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Deleted Ids",
+              "type": "array"
+            }
+          },
+          "title": "ConversationBulkDeleteResult",
+          "type": "object"
+        },
         "ConversationDetail": {
           "properties": {
             "active_job": {
@@ -8962,7 +8981,9 @@
             "200": {
               "content": {
                 "application/json": {
-                  "schema": {}
+                  "schema": {
+                    "$ref": "#/components/schemas/ConversationBulkDeleteResult"
+                  }
                 }
               },
               "description": "Successful Response"

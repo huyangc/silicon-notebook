@@ -442,11 +442,130 @@ def test_bulk_delete_skips_an_old_conversation_with_a_running_job(content_harnes
             ("2000-01-01T00:00:00+00:00", conversation_id),
         )
 
-    assert content_harness.ask.bulk_delete_conversations(
+    result = content_harness.ask.bulk_delete_conversations(
         "nb-content", 1, "user-content"
-    ) == 0
+    )
+    assert result.deleted == 0
+    assert result.deleted_ids == []
     assert content_harness.ask.get_conversation(conversation_id).id == conversation_id
     assert content_harness.ask.ask_job_status(job_id)["status"] == "running"
+
+
+def test_explicit_conversation_delete_refuses_running_and_purges_terminal_job_state(
+    content_harness,
+):
+    running_request = AskRequest(question="still running", mode="reasoning")
+    running_job, running_conversation = content_harness.ask.begin_durable_job(
+        "nb-content", running_request, "reasoning", "user-content"
+    )
+    content_harness.ask.append_trace(
+        "nb-content",
+        running_job,
+        {"step_type": "retrieve", "summary": "private running trace"},
+        "user-content",
+    )
+    with pytest.raises(RuntimeError, match="conversation has a running Ask job"):
+        content_harness.ask.delete_conversation(running_conversation)
+    assert content_harness.ask.get_conversation(running_conversation).active_job is not None
+    assert content_harness.ask.ask_job_status(running_job)["status"] == "running"
+
+    terminal_request = AskRequest(question="terminal private question", mode="reasoning")
+    terminal_job, terminal_conversation = content_harness.ask.begin_durable_job(
+        "nb-content", terminal_request, "reasoning", "user-content"
+    )
+    content_harness.ask.append_trace(
+        "nb-content",
+        terminal_job,
+        {"step_type": "answer", "summary": "private terminal trace"},
+        "user-content",
+    )
+    response = AskResponse(
+        answer="terminal answer",
+        conclusion="terminal answer",
+        conversation_id=terminal_conversation,
+        citations=[],
+        anchors=[],
+    )
+    answer_id = content_harness.ask.save_answer_for_job(
+        terminal_job,
+        "nb-content",
+        terminal_conversation,
+        terminal_request.question,
+        response,
+        "user-content",
+    )
+    assert answer_id
+
+    content_harness.ask.delete_conversation(terminal_conversation)
+    with pytest.raises(KeyError):
+        content_harness.ask.get_conversation(terminal_conversation)
+    with pytest.raises(KeyError):
+        content_harness.ask.ask_job_detail(terminal_job)
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    with content_harness.database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM answers WHERE conversation_id=" + mark,
+            (terminal_conversation,),
+        ).fetchone()["n"] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM ask_trace_steps WHERE job_id=" + mark,
+            (terminal_job,),
+        ).fetchone()["n"] == 0
+
+
+def test_bulk_delete_returns_only_actual_ids_and_purges_their_terminal_jobs(
+    content_harness,
+):
+    def completed(question: str) -> tuple[str, str]:
+        request = AskRequest(question=question, mode="chunk")
+        job_id, conversation_id = content_harness.ask.begin_durable_job(
+            "nb-content", request, "chunk", "user-content"
+        )
+        content_harness.ask.append_trace(
+            "nb-content",
+            job_id,
+            {"step_type": "answer", "summary": question},
+            "user-content",
+        )
+        response = AskResponse(
+            answer=question,
+            conclusion=question,
+            conversation_id=conversation_id,
+            citations=[],
+            anchors=[],
+        )
+        assert content_harness.ask.save_answer_for_job(
+            job_id,
+            "nb-content",
+            conversation_id,
+            question,
+            response,
+            "user-content",
+        )
+        return job_id, conversation_id
+
+    old_job, old_conversation = completed("old terminal")
+    fresh_job, fresh_conversation = completed("fresh terminal")
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    with content_harness.database.write() as connection:
+        if content_harness.backend == "sqlite":
+            content_harness.database.begin_guarded_write(connection)
+        connection.execute(
+            "UPDATE conversations SET updated_at=" + mark + " WHERE id=" + mark,
+            ("2000-01-01T00:00:00+00:00", old_conversation),
+        )
+
+    result = content_harness.ask.bulk_delete_conversations(
+        "nb-content", 1, "user-content"
+    )
+    assert result.deleted == 1
+    assert result.deleted_ids == [old_conversation]
+    with pytest.raises(KeyError):
+        content_harness.ask.ask_job_detail(old_job)
+    assert content_harness.ask.ask_job_detail(fresh_job)["conversation_id"] == (
+        fresh_conversation
+    )
+    assert content_harness.ask.get_conversation(fresh_conversation).turn_count == 1
 
 
 def test_sync_ask_running_job_protects_conversation_until_atomic_final_save(
@@ -720,7 +839,9 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
                 release_continuation.set()
             job_id, continued_id = continuation_future.result(timeout=5)
             assert continued_id == old_turn.conversation_id
-            assert bulk_future.result(timeout=5) == 0
+            bulk_result = bulk_future.result(timeout=5)
+            assert bulk_result.deleted == 0
+            assert bulk_result.deleted_ids == []
     finally:
         release_continuation.set()
         continuation_database.close()
@@ -751,6 +872,135 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
             "SELECT COUNT(*) AS n FROM answers a LEFT JOIN conversations c "
             "ON c.id=a.conversation_id WHERE a.conversation_id IS NOT NULL "
             "AND c.id IS NULL"
+        ).fetchone()["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
+    postgres_database,
+):
+    """Delete holds the conversation while final save holds the job.
+
+    Delete must observe the still-running immutable view without trying to
+    lock the job, reject, and release the parent so job→conversation final save
+    completes. Event barriers plus ``pg_blocking_pids`` make the wait explicit.
+    """
+    from app.repositories.postgres.database import PostgresDatabase
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    store = PostgresAskStateStore(postgres_database, seams)
+    request = AskRequest(question="race final save", mode="chunk")
+    job_id, conversation_id = store.begin_durable_job(
+        "nb-content", request, "chunk", "user-content"
+    )
+    response = AskResponse(
+        answer="saved",
+        conclusion="saved",
+        conversation_id=conversation_id,
+        citations=[],
+        anchors=[],
+    )
+
+    delete_database = PostgresDatabase(
+        postgres_database.settings, postgres_database.root_dir
+    )
+    save_database = PostgresDatabase(
+        postgres_database.settings, postgres_database.root_dir
+    )
+    delete_store = PostgresAskStateStore(delete_database, seams)
+    save_store = PostgresAskStateStore(save_database, seams)
+    delete_locked = threading.Event()
+    release_delete = threading.Event()
+    save_connected = threading.Event()
+    save_pid: list[int] = []
+    original_delete_write = delete_database.write
+    original_save_write = save_database.write
+
+    class _DeleteBarrierConnection:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+        def execute(self, query, params=None):
+            cursor = self.delegate.execute(query, params)
+            if query.startswith(
+                "SELECT id FROM conversations WHERE id=%s FOR UPDATE"
+            ):
+                delete_locked.set()
+                assert release_delete.wait(timeout=5)
+            return cursor
+
+    @contextmanager
+    def observed_delete_write(*args, **kwargs):
+        with original_delete_write(*args, **kwargs) as connection:
+            yield _DeleteBarrierConnection(connection)
+
+    @contextmanager
+    def observed_save_write(*args, **kwargs):
+        with original_save_write(*args, **kwargs) as connection:
+            save_pid.append(
+                int(connection.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"])
+            )
+            save_connected.set()
+            yield connection
+
+    delete_database.write = observed_delete_write
+    save_database.write = observed_save_write
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            delete_future = executor.submit(
+                delete_store.delete_conversation, conversation_id
+            )
+            assert delete_locked.wait(timeout=5)
+            try:
+                save_future = executor.submit(
+                    save_store.save_answer_for_job,
+                    job_id,
+                    "nb-content",
+                    conversation_id,
+                    request.question,
+                    response,
+                    "user-content",
+                )
+                assert save_connected.wait(timeout=5)
+                blocked = False
+                deadline = time.monotonic() + 5
+                with postgres_database.connect() as inspector:
+                    while time.monotonic() < deadline:
+                        blockers = inspector.execute(
+                            "SELECT pg_blocking_pids(%s) AS pids", (save_pid[0],)
+                        ).fetchone()["pids"]
+                        if blockers:
+                            blocked = True
+                            break
+                assert blocked, "final save never waited on the conversation lease"
+            finally:
+                release_delete.set()
+            with pytest.raises(
+                RuntimeError, match="conversation has a running Ask job"
+            ):
+                delete_future.result(timeout=5)
+            answer_id = save_future.result(timeout=5)
+    finally:
+        release_delete.set()
+        delete_database.close()
+        save_database.close()
+
+    assert answer_id
+    assert store.ask_job_status(job_id)["status"] == "done"
+    detail = store.get_conversation(conversation_id)
+    assert detail.turn_count == 1
+    assert detail.turns[0].answer_id == answer_id
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM answers a LEFT JOIN conversations c "
+            "ON c.id=a.conversation_id WHERE a.id=%s AND c.id IS NULL",
+            (answer_id,),
         ).fetchone()["n"] == 0
 
 

@@ -173,6 +173,19 @@ class ConversationRenameRequest(BaseModel):
     title: str
 
 
+class ConversationBulkDeleteResult(BaseModel):
+    """Authoritative conversations removed by one bulk-cleanup transaction."""
+
+    deleted: int = 0
+    deleted_ids: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_authoritative_count(self) -> "ConversationBulkDeleteResult":
+        if self.deleted != len(self.deleted_ids):
+            raise ValueError("deleted must equal len(deleted_ids)")
+        return self
+
+
 class ConversationSummary(BaseModel):
     id: str
     notebook_id: str

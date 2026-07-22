@@ -27,7 +27,7 @@
   "build_notebook_kg": "(self, notebook_id: 'str', *, progress=None) -> 'dict'",
   "build_scale_index": "(self, notebook_id: 'str', on_stage: 'Optional[Callable[[str, int], None]]' = None) -> 'dict'",
   "build_viz_index": "(self, notebook_id: 'str') -> 'Optional[dict]'",
-  "bulk_delete_conversations": "(self, notebook_id: 'str', older_than_days: 'int') -> 'int'",
+  "bulk_delete_conversations": "(self, notebook_id: 'str', older_than_days: 'int') -> 'ConversationBulkDeleteResult'",
   "bulk_delete_memories": "(self, user_id: 'str', memory_ids) -> 'int'",
   "bump_knowhow_mutation_seq": "(self, table_id: 'str') -> 'int'",
   "cancel_ask_job": "(self, job_id: 'str', user_id: 'str') -> 'dict'",

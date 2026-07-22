@@ -4479,7 +4479,7 @@
     "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', older_than_days: 'int') -> 'int'"
+    "signature": "(self, notebook_id: 'str', older_than_days: 'int') -> 'ConversationBulkDeleteResult'"
   },
   "bump_knowhow_mutation_seq": {
     "consumers": [

@@ -59,8 +59,8 @@ from app.models.sources import (
 )
 from app.models.ask import (
     AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
-    ConversationSummary, FeedbackRequest, FeedbackResponse, NotebookSearchResponse,
-    RuleCard,
+    ConversationBulkDeleteResult, ConversationSummary, FeedbackRequest,
+    FeedbackResponse, NotebookSearchResponse, RuleCard,
 )
 from app.models.knowledge import (
     DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
@@ -90,6 +90,13 @@ class PreparedAskTurn:
 
     conversation_id: str
     history: str
+
+
+class ConversationBusyError(RuntimeError):
+    """Explicit deletion cannot remove a conversation used by a running Ask."""
+
+    def __init__(self) -> None:
+        super().__init__("conversation has a running Ask job")
 
 
 @dataclass(frozen=True)
@@ -459,7 +466,9 @@ class AskStateRepository(Protocol):
     def get_conversation(self, conversation_id: str) -> ConversationDetail: ...
     def rename_conversation(self, conversation_id: str, title: str) -> None: ...
     def delete_conversation(self, conversation_id: str) -> None: ...
-    def bulk_delete_conversations(self, notebook_id: str, older_than_days: int) -> int: ...
+    def bulk_delete_conversations(
+        self, notebook_id: str, older_than_days: int
+    ) -> ConversationBulkDeleteResult: ...
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...
 
 
@@ -1128,6 +1137,9 @@ class AskStateStorePort(Protocol):
     def get_conversation(self, conversation_id: str) -> ConversationDetail: ...
     def rename_conversation(self, conversation_id: str, title: str) -> None: ...
     def delete_conversation(self, conversation_id: str) -> None: ...
+    def bulk_delete_conversations(
+        self, notebook_id: str, older_than_days: int, user_id: str
+    ) -> ConversationBulkDeleteResult: ...
     def submit_feedback(self, answer_id: str, payload: FeedbackRequest) -> FeedbackResponse: ...
 
 

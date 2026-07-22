@@ -8,13 +8,14 @@ from app.models.ask import (
     ActiveAskJob,
     AskRequest,
     AskResponse,
+    ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationSummary,
     ConversationTurn,
     FeedbackRequest,
     FeedbackResponse,
 )
-from app.repositories.ports import PreparedAskTurn
+from app.repositories.ports import ConversationBusyError, PreparedAskTurn
 from app.repositories.postgres._store_utils import (
     json_value,
     jsonb,
@@ -544,16 +545,68 @@ class AskStateStore:
             if cur.rowcount == 0:
                 raise KeyError(conversation_id)
 
+    @staticmethod
+    def _conversation_has_running_job_on(db: object, conversation_id: str) -> bool:
+        return db.execute(
+            "SELECT 1 FROM ask_jobs WHERE conversation_id=%s AND status='running'",
+            (conversation_id,),
+        ).fetchone() is not None
+
+    @classmethod
+    def _delete_idle_conversation_on(
+        cls, db: object, conversation_id: str, *, refuse_running: bool
+    ) -> bool:
+        """Delete all private durable state only when no running job is visible.
+
+        The caller already holds the conversation row lease.  This helper
+        deliberately observes running jobs without locking them; final save
+        may therefore retain job→conversation order without a deadlock cycle.
+        Once no running row is visible, all remaining jobs are terminal and
+        immutable, so answers, traces, jobs and parent can be removed atomically.
+        """
+        if cls._conversation_has_running_job_on(db, conversation_id):
+            if refuse_running:
+                raise ConversationBusyError()
+            return False
+        db.execute(
+            "DELETE FROM answers WHERE conversation_id=%s", (conversation_id,)
+        )
+        db.execute(
+            "DELETE FROM ask_trace_steps WHERE job_id IN "
+            "(SELECT id FROM ask_jobs WHERE conversation_id=%s "
+            "AND status<>'running')",
+            (conversation_id,),
+        )
+        db.execute(
+            "DELETE FROM ask_jobs WHERE conversation_id=%s AND status<>'running'",
+            (conversation_id,),
+        )
+        parent = db.execute(
+            "DELETE FROM conversations c WHERE c.id=%s "
+            "AND NOT EXISTS (SELECT 1 FROM answers a "
+            "WHERE a.conversation_id=c.id) "
+            "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
+            "WHERE j.conversation_id=c.id)",
+            (conversation_id,),
+        )
+        return parent.rowcount == 1
+
     def delete_conversation(self, conversation_id: str) -> None:
         with self.database.write() as db:
-            cur = db.execute("DELETE FROM conversations WHERE id=%s", (conversation_id,))
-            if cur.rowcount == 0:
+            parent = db.execute(
+                "SELECT id FROM conversations WHERE id=%s FOR UPDATE",
+                (conversation_id,),
+            ).fetchone()
+            if parent is None:
                 raise KeyError(conversation_id)
-            db.execute("DELETE FROM answers WHERE conversation_id=%s", (conversation_id,))
+            if not self._delete_idle_conversation_on(
+                db, conversation_id, refuse_running=True
+            ):
+                raise KeyError(conversation_id)
 
     def bulk_delete_conversations(
         self, notebook_id: str, older_than_days: int, user_id: str
-    ) -> int:
+    ) -> ConversationBulkDeleteResult:
         """Delete inactive conversations under their parent-row leases.
 
         Candidate parents are locked in stable id order, then ownership,
@@ -579,7 +632,7 @@ class AskStateStore:
                     (notebook_id, user_id, cutoff),
                 ).fetchall()
             ]
-            deleted = 0
+            deleted_ids: list[str] = []
             for conversation_id in candidates:
                 eligible = db.execute(
                     "SELECT 1 FROM conversations c WHERE c.id=%s "
@@ -590,21 +643,13 @@ class AskStateStore:
                 ).fetchone()
                 if eligible is None:
                     continue
-                db.execute(
-                    "DELETE FROM answers WHERE conversation_id=%s",
-                    (conversation_id,),
-                )
-                parent = db.execute(
-                    "DELETE FROM conversations c WHERE c.id=%s "
-                    "AND c.notebook_id=%s AND c.created_by=%s AND c.updated_at<%s "
-                    "AND NOT EXISTS (SELECT 1 FROM answers a "
-                    "WHERE a.conversation_id=c.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
-                    "WHERE j.conversation_id=c.id AND j.status='running')",
-                    (conversation_id, notebook_id, user_id, cutoff),
-                )
-                deleted += parent.rowcount
-        return deleted
+                if self._delete_idle_conversation_on(
+                    db, conversation_id, refuse_running=False
+                ):
+                    deleted_ids.append(conversation_id)
+        return ConversationBulkDeleteResult(
+            deleted=len(deleted_ids), deleted_ids=deleted_ids
+        )
 
     # ------------------------------------------------------------------
     # feedback
