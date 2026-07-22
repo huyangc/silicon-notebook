@@ -17,7 +17,11 @@ from tests.architecture.semantic_source import (
 
 ROOT = Path(__file__).resolve().parents[3]
 PRODUCTION_ROOTS = (ROOT / "backend" / "app", ROOT / "scripts")
-REPOSITORY_SQL_PREFIX = "backend/app/repositories/sqlite/"
+REPOSITORY_SQL_PREFIXES = (
+    "backend/app/repositories/sqlite/",
+    "backend/app/repositories/postgres/",
+)
+SQLITE_REPOSITORY_PREFIX = "backend/app/repositories/sqlite/"
 REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
 
 SQL_REASON_BY_PATH = {
@@ -116,7 +120,7 @@ def _matching_calls(
         if finding.key.target.rsplit(".", 1)[-1] in targets
         and (
             not exclude_repository_sql
-            or not finding.key.path.startswith(REPOSITORY_SQL_PREFIX)
+            or not finding.key.path.startswith(REPOSITORY_SQL_PREFIXES)
         )
     )
 
@@ -132,7 +136,7 @@ def sqlite_connect_sites() -> tuple[SemanticFinding, ...]:
     return tuple(
         finding
         for finding in production_source_index().calls(target="sqlite3.connect")
-        if not finding.key.path.startswith(REPOSITORY_SQL_PREFIX)
+        if not finding.key.path.startswith(SQLITE_REPOSITORY_PREFIX)
     )
 
 

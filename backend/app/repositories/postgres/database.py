@@ -1,0 +1,210 @@
+"""Bounded PostgreSQL connection pool and transaction boundary."""
+from __future__ import annotations
+
+import sys
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from pathlib import Path
+from typing import Iterator
+
+import psycopg
+from psycopg import IsolationLevel
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool, PoolTimeout
+
+from app.core.config import Settings
+from app.core.database_url import database_identity, redact_database_url
+from app.repositories.postgres.rows import PostgresRow
+
+
+class PostgresDatabaseError(RuntimeError):
+    """A safe PostgreSQL pool/lifecycle failure with no connection secrets."""
+
+
+class PostgresDatabaseClosedError(PostgresDatabaseError):
+    """Raised when a closed database pool is used."""
+
+
+class NestedPostgresWriteError(PostgresDatabaseError):
+    """Raised before acquisition when one execution context nests write()."""
+
+
+class PostgresPoolTimeout(PostgresDatabaseError, PoolTimeout):
+    """A credential-safe pool timeout that preserves PoolTimeout semantics."""
+
+
+_WRITE_ACTIVE: ContextVar[bool] = ContextVar("postgres_write_active", default=False)
+_ISOLATION_LEVELS = {
+    "read committed": IsolationLevel.READ_COMMITTED,
+    "repeatable read": IsolationLevel.REPEATABLE_READ,
+    "serializable": IsolationLevel.SERIALIZABLE,
+}
+
+
+class PostgresDatabase:
+    """Own a lazy bounded Psycopg pool; never serialize writes in Python."""
+
+    def __init__(self, settings: Settings, root_dir: Path) -> None:
+        if database_identity(settings.database_url).scheme != "postgresql":
+            raise ValueError("PostgresDatabase requires a PostgreSQL DATABASE_URL")
+        if not (
+            1 <= settings.postgres_pool_min_size <= settings.postgres_pool_max_size
+        ):
+            raise ValueError("PostgreSQL pool sizes must satisfy 1 <= min <= max")
+        if settings.postgres_pool_acquire_timeout_seconds <= 0:
+            raise ValueError("PostgreSQL pool acquisition timeout must be positive")
+        if settings.postgres_statement_timeout_seconds <= 0:
+            raise ValueError("PostgreSQL statement timeout must be positive")
+        if settings.postgres_lock_timeout_seconds <= 0:
+            raise ValueError("PostgreSQL lock timeout must be positive")
+
+        self.settings = settings
+        self.root_dir = Path(root_dir)
+        self._database_url = settings.database_url
+        self._diagnostic_url = redact_database_url(settings.database_url)
+        self._acquire_timeout = float(
+            settings.postgres_pool_acquire_timeout_seconds
+        )
+        self._statement_timeout_ms = int(
+            settings.postgres_statement_timeout_seconds * 1000
+        )
+        self._lock_timeout_ms = int(settings.postgres_lock_timeout_seconds * 1000)
+        self._lifecycle_lock = threading.Lock()
+        self._opened = False
+        self._closed = False
+        self._pool: ConnectionPool[psycopg.Connection[PostgresRow]] = ConnectionPool(
+            conninfo=self._database_url,
+            min_size=settings.postgres_pool_min_size,
+            max_size=settings.postgres_pool_max_size,
+            timeout=self._acquire_timeout,
+            kwargs={
+                "autocommit": False,
+                "application_name": "silicon-notebook",
+                "row_factory": dict_row,
+            },
+            configure=self._configure_connection,
+            check=ConnectionPool.check_connection,
+            reset=self._reset_connection,
+            open=False,
+            name="silicon-notebook-postgres",
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"{type(self).__name__}(database_url={self._diagnostic_url!r}, "
+            f"closed={self._closed})"
+        )
+
+    def resolve_path(self, value: str | Path) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else self.root_dir / path
+
+    def _configure_connection(self, conn: psycopg.Connection[PostgresRow]) -> None:
+        self._restore_session_defaults(conn)
+
+    def _restore_session_defaults(
+        self, conn: psycopg.Connection[PostgresRow]
+    ) -> None:
+        # Pool clients may change session-scoped values. Reassert the adapter's
+        # contract both for new connections and before a returned connection is
+        # reused; the callback must leave the connection idle.
+        conn.isolation_level = IsolationLevel.READ_COMMITTED
+        # RESET ALL is transactional and restores libpq startup options too,
+        # including the fixture/tenant search_path. It also prevents arbitrary
+        # client SET values (work_mem, role-adjacent GUCs, etc.) leaking to the
+        # next borrower.
+        conn.execute("RESET ALL")
+        conn.execute(
+            "SELECT "
+            "set_config('statement_timeout', %s, false), "
+            "set_config('lock_timeout', %s, false), "
+            "set_config('TimeZone', 'UTC', false), "
+            "set_config('application_name', 'silicon-notebook', false)",
+            (f"{self._statement_timeout_ms}ms", f"{self._lock_timeout_ms}ms"),
+        )
+        conn.commit()
+
+    def _reset_connection(self, conn: psycopg.Connection[PostgresRow]) -> None:
+        self._restore_session_defaults(conn)
+
+    def _safe_error(self, operation: str) -> PostgresDatabaseError:
+        return PostgresDatabaseError(
+            f"PostgreSQL {operation} failed for {self._diagnostic_url}"
+        )
+
+    def _ensure_open(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                raise PostgresDatabaseClosedError(
+                    f"PostgreSQL pool is closed for {self._diagnostic_url}"
+                )
+            if self._opened:
+                return
+            try:
+                self._pool.open(wait=True, timeout=self._acquire_timeout)
+            except Exception:
+                # The underlying error may embed a full conninfo. Do not retain
+                # it as __cause__/__context__ in startup diagnostics.
+                raise self._safe_error("pool startup") from None
+            self._opened = True
+
+    @contextmanager
+    def _acquire(self) -> Iterator[psycopg.Connection[PostgresRow]]:
+        self._ensure_open()
+        manager = self._pool.connection(timeout=self._acquire_timeout)
+        try:
+            conn = manager.__enter__()
+        except PoolTimeout:
+            raise PostgresPoolTimeout(
+                f"PostgreSQL pool acquisition timed out for {self._diagnostic_url}"
+            ) from None
+        except Exception:
+            raise self._safe_error("pool acquisition") from None
+
+        try:
+            yield conn
+        except BaseException:
+            manager.__exit__(*sys.exc_info())
+            raise
+        else:
+            manager.__exit__(None, None, None)
+
+    @contextmanager
+    def connect(self) -> Iterator[psycopg.Connection[PostgresRow]]:
+        """Acquire one healthy dict-row connection and return it transactionally."""
+        with self._acquire() as conn:
+            yield conn
+
+    @contextmanager
+    def write(
+        self, *, isolation_level: str = "read committed"
+    ) -> Iterator[psycopg.Connection[PostgresRow]]:
+        """Open one write transaction without a process-wide Python lock."""
+        normalized = " ".join(isolation_level.strip().lower().split())
+        level = _ISOLATION_LEVELS.get(normalized)
+        if level is None:
+            supported = ", ".join(_ISOLATION_LEVELS)
+            raise ValueError(
+                f"unsupported PostgreSQL isolation level; expected one of: {supported}"
+            )
+        if _WRITE_ACTIVE.get():
+            raise NestedPostgresWriteError(
+                "nested PostgreSQL write() transactions are not supported"
+            )
+
+        token = _WRITE_ACTIVE.set(True)
+        try:
+            with self._acquire() as conn:
+                conn.isolation_level = level
+                yield conn
+        finally:
+            _WRITE_ACTIVE.reset(token)
+
+    def close(self) -> None:
+        """Close the pool once. Closing an unopened/already-closed pool is safe."""
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._pool.close()
