@@ -136,20 +136,23 @@ def test_failed_migration_rolls_back_ddl_and_ledger(postgres_database):
     assert ledger["relation"] is None
 
 
-def test_empty_task4_manifest_records_sqlite_pair_without_business_ddl(postgres_database):
+def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 0
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 2
     assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 23
-    assert PostgresMigrator(postgres_database).migrations == ()
-    assert _migrator(postgres_database, []).migrate() == 0
+    assert len(PostgresMigrator(postgres_database).migrations) == 2
+    assert PostgresMigrator(postgres_database).migrate() == 2
     with postgres_database.connect() as conn:
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = current_schema() ORDER BY table_name"
         ).fetchall()
-    assert tables == [{"table_name": "silicon_schema_migrations"}]
+    names = {row["table_name"] for row in tables}
+    assert "silicon_schema_migrations" in names
+    assert "users" in names
+    assert "notebooks" in names
 
 
 def test_migrations_take_the_fixed_transaction_advisory_lock(postgres_database):
