@@ -509,10 +509,7 @@ def check_api_layer() -> None:
     with tempfile.TemporaryDirectory(prefix="sn-api-") as tmp:
         os.environ.update(
             {
-                "OPENAI_COMPAT_BASE_URL": "",
-                "OPENAI_COMPAT_API_KEY": "",
-                "OPENAI_COMPAT_MODEL": "",
-                "EMBED_PROVIDER": "",
+                "MODEL_SERVICES_CONFIG": "",
                 "MINERU_MODE": "off",
                 "DATABASE_URL": f"sqlite:///{tmp}/api.db",
                 "SILICON_NOTEBOOK_STORAGE_DIR": f"{tmp}/storage",

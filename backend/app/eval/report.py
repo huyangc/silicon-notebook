@@ -41,7 +41,7 @@ def render_quality_report(per_book: Dict[str, dict]) -> str:
 def render_speed_report(measured: list, extrapolated: list,
                         recommended_max_chars: int, target_seconds: int) -> str:
     out = ["# KG 抽取速度报告", "",
-           f"目标:单文档抽取 ≤ {target_seconds}s。瓶颈在 deepseek 限流/承载(WORKERS=1000)。", "",
+           f"目标:单文档抽取 ≤ {target_seconds}s。瓶颈由绑定服务的容量与限流决定。", "",
            "## 实测", "",
            "| 字数 | 窗口数 | 墙钟(s) | 单窗口p50(s) | p95(s) | tokens | 重试 | 有效并发 | 状态 |",
            "|---|---|---|---|---|---|---|---|---|"]

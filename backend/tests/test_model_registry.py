@@ -118,10 +118,10 @@ def test_checked_in_example_is_credential_free_and_loads_when_keys_are_supplied(
     registry = SystemModelServiceRegistry.load(
         _settings(template),
         {
-            "GENERAL_LLM_API_KEY": "general-secret",
-            "REASONING_LLM_API_KEY": "reasoning-secret",
-            "EMBEDDING_API_KEY": "embedding-secret",
-            "RERANK_API_KEY": "rerank-secret",
+            "SYSTEM_GENERAL_API_KEY": "general-secret",
+            "SYSTEM_REASONING_API_KEY": "reasoning-secret",
+            "SYSTEM_EMBEDDING_API_KEY": "embedding-secret",
+            "SYSTEM_RERANK_API_KEY": "rerank-secret",
         },
     )
 
@@ -129,6 +129,7 @@ def test_checked_in_example_is_credential_free_and_loads_when_keys_are_supplied(
     assert registry.service_for("ask_answer").id == "general"
     assert registry.service_for("retrieval_query_embedding").id == "embedding"
     assert registry.service_for("retrieval_rerank").id == "rerank"
+    assert all(registry.service_for(workload_id) is not None for workload_id in WORKLOADS)
 
 
 def test_resolves_secret_from_supplied_environment_without_exposing_it(tmp_path):
