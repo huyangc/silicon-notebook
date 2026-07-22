@@ -25,6 +25,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
+from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
 from app.services.vector_index import decode_vector
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
@@ -762,6 +763,62 @@ class SQLiteMaintenanceAdapter:
 
     # -- knowhow-table assets (PR-2+3 Task 14) ---------------------------------
 
+    def _is_asset_referenced(
+        self, db: sqlite3.Connection, notebook_id: str, asset_id: str
+    ) -> bool:
+        """The ONE reference-determination predicate ``sweep_orphan_assets``
+        below calls from BOTH its classification read and its write-phase
+        re-check (knowhow 表版本管理 Task 13 code review). Those two used to
+        be independently hand-duplicated copies of the same SQL string — a
+        prior implementer's own two-sided mutation test (retract EACH copy
+        on its own, confirm both go red) gave false confidence, because the
+        two sites are ANDed together for the purpose of "is this asset still
+        safe to delete": either copy alone staying conservative (matching
+        too much, never too little) is enough to keep an asset that should
+        be kept, so retracting only ONE of them at a time never actually
+        proved the two agree — it only proved each one, independently, errs
+        safe. Calling this SAME method from both places makes "the two
+        disagree" structurally impossible rather than something a future
+        edit to one copy could silently reintroduce.
+
+        True if ``asset_id`` has a surviving reference: a LIVE cell's
+        ``content_md``, or a HISTORY change's content-shaped payload field
+        (see ``content_strings_in_payload`` — never a code attachment's
+        ``code_text``, wherever it rides along; see this class's own
+        ``sweep_orphan_assets`` docstring for the full boundary)."""
+        needle = f"asset://{asset_id}"
+        pattern = f"%{needle}%"
+        live = db.execute(
+            "SELECT 1 FROM knowhow_cells c "
+            "JOIN knowhow_rows r ON r.id = c.row_id "
+            "JOIN knowhow_tables t ON t.id = r.table_id "
+            "WHERE t.notebook_id = ? AND c.content_md LIKE ? LIMIT 1",
+            (notebook_id, pattern),
+        ).fetchone()
+        if live is not None:
+            return True
+        # Coarse SQL pre-filter (mirrors KnowhowHistoryStore.cell_history's
+        # own "LIKE narrows candidates, Python matches exactly" pattern): a
+        # payload_json substring match is a cheap SUPERSET of what actually
+        # counts — it can false-POSITIVE (matching inside an excluded
+        # code_text) but never false-NEGATIVE, so narrowing candidates this
+        # way before parsing JSON is safe and keeps the common case (no
+        # history even mentions this id) just as cheap as before.
+        for row in db.execute(
+            "SELECT ch.kind AS kind, ch.payload_json AS payload_json "
+            "FROM knowhow_changes ch "
+            "JOIN knowhow_tables t2 ON t2.id = ch.table_id "
+            "WHERE t2.notebook_id = ? AND ch.payload_json LIKE ?",
+            (notebook_id, pattern),
+        ).fetchall():
+            payload = json.loads(row["payload_json"])
+            if any(
+                needle in text
+                for text in content_strings_in_payload(row["kind"], payload)
+            ):
+                return True
+        return False
+
     def sweep_orphan_assets(
         self,
         notebook_id: str,
@@ -795,45 +852,75 @@ class SQLiteMaintenanceAdapter:
         版本管理 Task 13, spec §7.1): an asset counts as "kept" if its id
         appears as an ``asset://<id>`` substring either (a) inside a
         ``knowhow_cells.content_md`` belonging to one of THIS notebook's
-        tables, OR (b) inside a ``knowhow_changes.payload_json`` row
-        belonging to one of this notebook's tables. Before version
-        management existed, only (a) was scanned — a cell edit that dropped
-        an image reference made it collectable the very next sweep. Now that
-        every change is remembered forever by default, that same cell edit
-        also leaves the OLD value sitting in a ``knowhow_changes`` row, and
-        reclaiming the asset out from under it would leave a "回退" to that
-        point rendering a permanently broken image — half the point of
-        keeping history at all.
+        tables, OR (b) inside one of the content_md-SHAPED fields of a
+        ``knowhow_changes.payload_json`` row belonging to one of this
+        notebook's tables (see ``_is_asset_referenced`` below). Before
+        version management existed, only (a) was scanned — a cell edit that
+        dropped an image reference made it collectable the very next sweep.
+        Now that every change is remembered forever by default, that same
+        cell edit also leaves the OLD value sitting in a ``knowhow_changes``
+        row, and reclaiming the asset out from under it would leave a "回退"
+        to that point rendering a permanently broken image — half the point
+        of keeping history at all.
 
-        The one carve-out: ``kind IN ('cell_code_put', 'cell_code_delete')``
-        rows are EXCLUDED from the history scan — same "source-code text, not
-        rendered markdown" boundary this method has always drawn for LIVE
-        ``knowhow_cell_code`` (per-cell code attachments, migration 17). An
-        ``asset://`` substring inside a code attachment's ``code_text`` — live
-        or historical — is NOT treated as a keeper reference (see
+        The carve-out is CODE, not any particular ``kind``: a code
+        attachment's ``code_text`` (``knowhow_cell_code``, migration 17) is
+        source-code text, not rendered markdown, and an ``asset://``
+        substring inside one — live or historical — is NOT a keeper
+        reference (see
         ``test_sweep_does_not_treat_code_attachment_text_as_a_reference``).
-        Every OTHER ``kind``'s payload can legitimately carry
-        ``content_md``-shaped text (a deleted cell/row/column's remembered
-        content, a copied table's genesis rows, a revert's own before/after
-        values), so those are scanned without further filtering — a false
-        keeper hit there only ever OVER-protects (mirrors this method's
-        existing LIKE-match asymmetry note above `_ASSET_REF_RE` in
-        ``services/knowhow/api.py``: over-matching here only ever RETAINS an
-        asset, never wrongly deletes one).
+        The history side USED TO implement this as a blanket
+        ``kind NOT IN ('cell_code_put', 'cell_code_delete')`` exclusion —
+        WRONG: ``row_delete``/``column_delete``/``revert`` embed a row's or
+        column's remembered CODE ATTACHMENTS (a ``code`` array,
+        CASCADE-doomed alongside the row/column) in the very SAME payload as
+        its genuine ``content_md``, so excluding by ``kind`` alone let a
+        code-only reference inside one of THOSE payloads keep an asset alive
+        forever once its row/column was deleted (a real, constructed
+        scenario: an image referenced ONLY inside a code attachment, then
+        the row holding it is deleted — the row's ``row_delete`` payload
+        embeds that code attachment's ``code_text`` right next to the row's
+        genuine ``cells``, and a ``kind``-level exclusion cannot tell them
+        apart). The scan is instead field-precise:
+        ``content_strings_in_payload`` (``knowhow_history_store.py``)
+        dispatches on ``kind`` and pulls out ONLY the content_md-shaped
+        strings a change's payload carries (a deleted cell/row/column's
+        remembered content, a revert's own before/after values, ...) and
+        NEVER a ``code``/``code_text`` field, no matter which kind embeds it
+        alongside real content. A false keeper hit here only ever
+        OVER-protects (mirrors this method's existing LIKE-match asymmetry
+        note above `_ASSET_REF_RE` in ``services/knowhow/api.py``:
+        over-matching here only ever RETAINS an asset, never wrongly deletes
+        one) — the risk this field-precision closes runs the OTHER way,
+        under-protecting a still-referenced asset.
 
         KNOWN COST (accepted, spec §7.1): once an image has ever appeared in
         ANY cell, it is for all practical purposes never automatically
         reclaimed again — almost any later edit to that cell leaves a
         ``knowhow_changes`` row remembering the old value, and history is
-        kept forever unless a human explicitly prunes it. The only release
-        path is "清理历史" (``KnowhowHistoryStore.prune``) followed by
-        another sweep: pruning deletes the history rows that were an asset's
-        last remaining reference, at which point a LATER sweep can finally
-        reclaim it (the prune HTTP endpoint triggers exactly this sweep on
-        completion — see ``prune_knowhow_history`` in ``knowhow_routes.py``).
-        This trades unbounded-until-pruned disk growth for the ability to
-        revert to (or simply browse) a past version that still has its
-        images intact.
+        kept forever unless a human explicitly prunes it. The release path
+        is "清理历史" (``KnowhowHistoryStore.prune``) followed by another
+        sweep — but pruning ALONE is not sufficient (verified, not merely
+        theoretical): ``prune`` always keeps HEAD (spec §7.7 — the revert
+        engine's pre-flight fingerprint guard has to compare against
+        something), so if an asset's LAST remaining reference happens to sit
+        in the head change itself — e.g. "paste an image, delete it again,
+        never touch this table again": the delete edit becomes head, and
+        its own ``before`` still embeds the ``asset://`` id — pruning
+        removes every OTHER change and the asset is STILL judged referenced
+        afterward; a sweep run immediately after such a prune reclaims ZERO
+        bytes. Reclaiming it needs one more step first: any edit UNRELATED
+        to this asset moves head to a change that no longer mentions it,
+        and only THEN does the next prune+sweep actually drop it. Deleting
+        the whole table is unaffected by this caveat (no history survives a
+        deleted table, so every asset it ever held is judged orphaned
+        regardless). The prune HTTP endpoint triggers a sweep on completion
+        regardless of this caveat (``prune_knowhow_history`` in
+        ``knowhow_routes.py``) since pruning usually DOES free something —
+        it is just not GUARANTEED to for an asset whose only surviving
+        mention sits on head. This trades unbounded-until-pruned (plus this
+        head caveat) disk growth for the ability to revert to (or simply
+        browse) a past version that still has its images intact.
 
         Table sizes here are small (per-notebook assets/cells), so a plain
         per-asset ``LIKE`` scan is used rather than a single mega-query —
@@ -875,25 +962,7 @@ class SQLiteMaintenanceAdapter:
             unreferenced = [
                 row["id"]
                 for row in assets
-                if db.execute(
-                    "SELECT 1 FROM ("
-                    "  SELECT 1 FROM knowhow_cells c "
-                    "  JOIN knowhow_rows r ON r.id = c.row_id "
-                    "  JOIN knowhow_tables t ON t.id = r.table_id "
-                    "  WHERE t.notebook_id = ? AND c.content_md LIKE ? "
-                    "  UNION ALL "
-                    "  SELECT 1 FROM knowhow_changes ch "
-                    "  JOIN knowhow_tables t2 ON t2.id = ch.table_id "
-                    "  WHERE t2.notebook_id = ? "
-                    "  AND ch.kind NOT IN ('cell_code_put', 'cell_code_delete') "
-                    "  AND ch.payload_json LIKE ?"
-                    ") LIMIT 1",
-                    (
-                        notebook_id, f"%asset://{row['id']}%",
-                        notebook_id, f"%asset://{row['id']}%",
-                    ),
-                ).fetchone()
-                is None
+                if not self._is_asset_referenced(db, notebook_id, row["id"])
             ]
 
             # Marks for notebooks that no longer exist. The adapter is
@@ -996,26 +1065,8 @@ class SQLiteMaintenanceAdapter:
                 is None
             )
             for asset_id in unreferenced if grace_waived else orphan_ids:
-                still_unreferenced = (
-                    db.execute(
-                        "SELECT 1 FROM ("
-                        "  SELECT 1 FROM knowhow_cells c "
-                        "  JOIN knowhow_rows r ON r.id = c.row_id "
-                        "  JOIN knowhow_tables t ON t.id = r.table_id "
-                        "  WHERE t.notebook_id = ? AND c.content_md LIKE ? "
-                        "  UNION ALL "
-                        "  SELECT 1 FROM knowhow_changes ch "
-                        "  JOIN knowhow_tables t2 ON t2.id = ch.table_id "
-                        "  WHERE t2.notebook_id = ? "
-                        "  AND ch.kind NOT IN ('cell_code_put', 'cell_code_delete') "
-                        "  AND ch.payload_json LIKE ?"
-                        ") LIMIT 1",
-                        (
-                            notebook_id, f"%asset://{asset_id}%",
-                            notebook_id, f"%asset://{asset_id}%",
-                        ),
-                    ).fetchone()
-                    is None
+                still_unreferenced = not self._is_asset_referenced(
+                    db, notebook_id, asset_id
                 )
                 if not still_unreferenced:
                     with self._orphan_marks_lock:

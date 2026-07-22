@@ -197,6 +197,102 @@ def _cell_entries_in_change(change: dict, row_id: str, column_id: str) -> list[d
     ]
 
 
+def _rows_content(entries: "list[dict] | None") -> list:
+    """``rows``-shaped entries (``row_add``/``import_append``/``row_delete``/
+    ``table_create``'s own ``rows``, and ``revert``'s ``rows_added``/
+    ``rows_removed``): each entry's ``cells`` dict values are content_md,
+    each entry's ``code`` list is a row's remembered CODE ATTACHMENTS
+    (CASCADE-doomed alongside the row) — deliberately never consulted here,
+    see ``content_strings_in_payload``'s own docstring for why."""
+    texts: list = []
+    for entry in entries or []:
+        texts.extend((entry.get("cells") or {}).values())
+        # entry.get("code") intentionally never read — code_text, not content.
+    return texts
+
+
+def _column_cells_content(cells: "list[dict] | None") -> list:
+    """``column_delete``-shaped ``cells`` entries (also ``revert``'s
+    ``columns_added``/``columns_removed[].cells``): ``{row_id,
+    content_md}`` — the sibling ``code`` list (if present on the same
+    entry) is that column's remembered code attachments and is, again,
+    deliberately never consulted."""
+    texts: list = []
+    for cell in cells or []:
+        content = cell.get("content_md")
+        if content is not None:
+            texts.append(content)
+    return texts
+
+
+def content_strings_in_payload(kind: str, payload: dict) -> list:
+    """Every ``content_md``-shaped string embedded ANYWHERE in one change's
+    payload — the reference corpus ``SQLiteMaintenanceAdapter.
+    sweep_orphan_assets`` (knowhow 表版本管理 Task 13, spec §7.1) searches
+    for a surviving ``asset://<id>`` substring in HISTORY.
+
+    Deliberately narrower than "the whole payload_json blob". Several kinds
+    (``row_delete``/``column_delete``/``revert``) carry a row's or column's
+    remembered CODE ATTACHMENT (``knowhow_cell_code``, CASCADE-doomed
+    alongside the row/column it belonged to) in the SAME payload as its
+    genuine, rendered ``content_md`` — a code attachment's ``code_text`` is
+    source-code text, not rendered markdown, the exact same "not a keeper
+    reference" boundary this module's sibling sweep has always drawn for a
+    LIVE ``knowhow_cell_code`` row (migration 17). A prior implementation
+    tried to draw this line at the ``kind`` level (blanket-excluding only
+    ``cell_code_put``/``cell_code_delete`` and then LIKE-scanning every
+    OTHER kind's ``payload_json`` in full) — that missed exactly this case:
+    ``row_delete``'s own payload embeds BOTH the row's ``cells`` (genuine
+    content) AND its ``code`` array (code attachments) side by side, so a
+    code-only reference inside a DELETED row's payload kept its asset alive
+    forever. This function instead dispatches on ``kind`` and pulls out only
+    the fields that are actually ``content_md``-shaped, mirroring (but not
+    scoped to one row/column, unlike) ``_cell_entries_in_change`` above's
+    per-``kind`` payload-shape knowledge — a ``code``/``code_text`` field is
+    NEVER read by any branch below, whichever kind it rides along in.
+
+    Kinds with no content_md-shaped field at all (``column_add``,
+    ``column_rename``, ``column_kind``, ``anchor_set``, ``table_meta``,
+    ``cell_code_put``, ``cell_code_delete``) fall through every branch below
+    and correctly yield ``[]`` — column/table names and roles are never
+    scanned (asset refs only ever live in rendered cell markdown, never a
+    column name or table title, and the pre-Task-13 implementation never
+    scanned those either). Adding a new ``record_change`` ``kind`` that DOES
+    carry cell content requires adding it here too — there is no generic
+    fallback, by design: guessing "unknown kind, treat the whole payload as
+    content" would silently reintroduce the very code_text-leaks-through-
+    unrelated-payload bug this function exists to close, the moment that new
+    kind ALSO happens to carry a ``code``/``code_text`` field alongside its
+    content."""
+    texts: list = []
+
+    if kind in ("cell_update", "revert"):
+        for cell in payload.get("cells", []) or []:
+            for side in ("before", "after"):
+                value = cell.get(side)
+                if value is not None:
+                    texts.append(value)
+
+    if kind in ("row_add", "import_append", "row_delete", "table_create"):
+        texts.extend(_rows_content(payload.get("rows")))
+
+    if kind == "column_delete":
+        texts.extend(_column_cells_content(payload.get("cells")))
+
+    if kind == "revert":
+        texts.extend(_rows_content(payload.get("rows_added")))
+        texts.extend(_rows_content(payload.get("rows_removed")))
+        for entry in payload.get("columns_added", []) or []:
+            texts.extend(_column_cells_content(entry.get("cells")))
+        for entry in payload.get("columns_removed", []) or []:
+            texts.extend(_column_cells_content(entry.get("cells")))
+        # payload.get("code") — revert's OWN top-level code-attachment
+        # before/after list (mirrors cell_code_put/delete's shape) — is
+        # deliberately never consulted, same reason as every branch above.
+
+    return texts
+
+
 class KnowhowHistoryStore:
     """流水/里程碑的读侧与自带事务的写侧。"""
 

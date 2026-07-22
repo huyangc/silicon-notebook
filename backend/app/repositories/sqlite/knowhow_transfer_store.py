@@ -289,26 +289,21 @@ class KnowhowTransferStore:
                 raise RuntimeError(f"knowhow transfer 校验失败：{checks} != {expected}")
 
             # 版本管理创世流水（spec §7.3）：必须是本事务的最后一步——见本方法
-            # 签名处的文档字符串。cells/cell_code 按 row_id 分组重建成
-            # table_create 的标准 payload 形状（"table"/"columns"/"rows"，
-            # 每行的 "cells"/"code" 内嵌）——与 create_knowhow_table 自己产出的
-            # 创世流水同一形状，只是这次 rows 非空（这张表落库时已经带着全部
-            # 初始内容，不像普通建表要等后续逐行 add_knowhow_row）。
+            # 签名处的文档字符串。payload 形状与 create_knowhow_table 自己产出
+            # 的创世流水完全一致（"table"/"columns"/"rows"，``rows`` 恒为
+            # ``[]``）——这里刻意【不】把 cells/cell_code 铺平重建成一份"非空
+            # rows"的全表副本（Task 13 评审修复：曾经这么做过，但没有任何消费
+            # 者：aggregate_diff 明确排除 table_create、_apply_before 对它直接
+            # raise、cell_history 的 kind 白名单也不含它——唯一实际"读"到过这
+            # 份副本的只有清扫器的历史扫描，而 live cells 本身已经覆盖同样的
+            # 引用，铺平一份没人用的全表快照只是白占一份磁盘）。
+            #
+            # origin（Task 13 评审修复）：不能是 "user"——复制/移动这张表落库
+            # 的不是某个人逐格敲出来的内容，而是一次性把整表内容原样搬过来，
+            # 语义上更接近"导入"而非"手动新建"；VALID_ORIGINS 里没有专门的
+            # "transfer"值，复用既有的 "import" 是最贴切、也不需要改动前端/
+            # 契约的选择（"复制"/"移动"这层语义已经在 ``note`` 里如实区分）。
             if new_id is not None and now is not None:
-                cells_by_row: "dict[str, dict[str, str]]" = {}
-                for cell in payload.get("cells") or []:
-                    cells_by_row.setdefault(cell["row_id"], {})[cell["column_id"]] = (
-                        cell["content_md"]
-                    )
-                code_by_row: "dict[str, list[dict]]" = {}
-                for code in payload.get("cell_code") or []:
-                    code_by_row.setdefault(code["row_id"], []).append({
-                        "column_id": code["column_id"],
-                        "code_text": code["code_text"],
-                        "language": code.get("language", ""),
-                        "cell_content_hash": code["cell_content_hash"],
-                        "updated_by": code.get("updated_by", ""),
-                    })
                 record_change(
                     db, new_id=new_id, now=now, table_id=new_table_id,
                     kind="table_create",
@@ -323,17 +318,9 @@ class KnowhowTransferStore:
                             }
                             for column in payload.get("columns") or []
                         ],
-                        "rows": [
-                            {
-                                "row_id": row["id"], "position": row["position"],
-                                "created_at": row["created_at"],
-                                "cells": cells_by_row.get(row["id"], {}),
-                                "code": code_by_row.get(row["id"], []),
-                            }
-                            for row in payload.get("rows") or []
-                        ],
+                        "rows": [],
                     },
-                    actor=actor, origin="user", note=note,
+                    actor=actor, origin="import", note=note,
                 )
 
     #: 搬到 knowhow_fingerprint 后的同对象别名——既有引用（含测试）不受影响。

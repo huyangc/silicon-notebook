@@ -484,6 +484,39 @@ def test_main_apply_flag_writes_changes(repo, nb_with_dirty_cells, tmp_path):
     assert not _any_dirty_markers(repo, nb_with_dirty_cells)
 
 
+def test_main_apply_records_backfill_origin_and_owner_actor(
+    repo, nb_with_dirty_cells, tmp_path,
+):
+    """knowhow 表版本管理 Task 13 code review: actor/origin threading through
+    the --apply path had ZERO test coverage anywhere (the only actor
+    assertion in the whole suite was a store-level test calling
+    update_knowhow_cell directly with a literal "user-1") — a mutation
+    reverting apply_reviewed_plan's real threaded ``actor``/``origin="backfill"``
+    back to their defaults left the entire 4817-test suite green. Assert the
+    real end-to-end shape: every ``cell_update`` flow entry --apply produces
+    carries ``origin="backfill"`` and ``actor`` == the notebook OWNER's
+    resolved id (``resolve_notebook_owner_profile`` — the same helper
+    ``--use-llm`` already relies on for its own per-user model resolution) —
+    never empty, never the manual editor's ``"user"``."""
+    table_id = repo.list_knowhow_tables(nb_with_dirty_cells)[0]["id"]
+    hist = repo._runtime.knowhow_history_store
+    seq_before = hist.head_seq(table_id)
+
+    rc = _dry_run_then_apply(nb_with_dirty_cells, tmp_path / "plan.json")
+    assert rc == 0
+
+    owner = repo.maintenance.resolve_notebook_owner_profile(nb_with_dirty_cells)
+    assert owner is not None, "test fixture assumption broken: notebook has no resolvable owner"
+
+    new_changes = [c for c in hist.list_changes(table_id, limit=50) if c["seq"] > seq_before]
+    cell_updates = [c for c in new_changes if c["kind"] == "cell_update"]
+    assert cell_updates, "apply must have actually written at least one cell"
+    for change in cell_updates:
+        assert change["origin"] == "backfill"
+        assert change["actor"] == owner.id
+        assert change["actor"] != ""
+
+
 def test_main_use_llm_unconfigured_prints_no_silent_degradation_warning(
     repo, nb_with_dirty_cells, capsys, tmp_path
 ):

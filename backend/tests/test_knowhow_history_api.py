@@ -162,6 +162,54 @@ def test_cell_patch_accepts_and_records_origin(tmp_path, monkeypatch, repo):
     assert changes[0]["origin"] == "revert"
 
 
+# ===========================================================================
+# knowhow 表版本管理 Task 13 code review: actor threading had ZERO test
+# coverage anywhere above the store layer — the only actor assertion in the
+# whole suite was test_knowhow_history_hooks.py's store-level
+# test_update_cell_carries_actor_and_origin (calls the store directly with
+# actor="user-1"). A mutation replacing every real `actor=user.id` in the
+# HTTP routes with `actor=""` left all 4817 existing tests green. The two
+# tests below drive the REAL HTTP path end to end and assert the recorded
+# actor is the actually-logged-in user's own id — not empty, not "user-local"
+# (the ambient ContextVar default a missing `set_request_user` would fall
+# back to), not some other ambient value.
+# ===========================================================================
+
+
+def test_cell_patch_records_the_logged_in_users_id_as_actor(tmp_path, monkeypatch, repo):
+    ctx = _setup(tmp_path, monkeypatch)
+    owner_id = ctx["client"].get("/api/me", headers=ctx["owner"]).json()["id"]
+
+    assert _patch_cell(ctx, "内容").status_code == 200
+
+    changes = ctx["client"].get(
+        f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history",
+        headers=ctx["owner"],
+    ).json()["changes"]
+    cell_update = next(c for c in changes if c["kind"] == "cell_update")
+    assert cell_update["actor"] == owner_id
+    assert cell_update["actor"] != ""
+    assert cell_update["origin"] == "user"
+
+
+def test_create_table_genesis_change_records_the_creating_users_id_as_actor(
+    tmp_path, monkeypatch, repo,
+):
+    """create_knowhow_table's genesis ``table_create`` flow entry (seq==1,
+    written by ``_setup`` itself) must carry the CREATING user's id as
+    actor."""
+    ctx = _setup(tmp_path, monkeypatch)
+    owner_id = ctx["client"].get("/api/me", headers=ctx["owner"]).json()["id"]
+
+    genesis = ctx["client"].get(
+        f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history/1",
+        headers=ctx["owner"],
+    ).json()
+    assert genesis["kind"] == "table_create"
+    assert genesis["actor"] == owner_id
+    assert genesis["actor"] != ""
+
+
 def test_cell_patch_rejects_an_unknown_origin(tmp_path, monkeypatch, repo):
     ctx = _setup(tmp_path, monkeypatch)
 

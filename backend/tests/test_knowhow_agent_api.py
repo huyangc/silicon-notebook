@@ -582,6 +582,64 @@ def test_agent_token_with_code_scope_can_write_and_attribution_reaches_row_detai
     assert code_entry["updated_by"] == "CodeAgent"
 
 
+# ===========================================================================
+# knowhow 表版本管理 Task 13 code review: put/delete_agent_cell_code used to
+# hard-default origin="user" regardless of who actually wrote the code
+# attachment (VALID_ORIGINS has carried "agent" since Task 12, but nothing
+# had ever produced it -- see models/knowhow.py's own "honest badge, never a
+# silent default" contract). Both writers reach the same dual-mode route, so
+# only actor.is_agent tells them apart; the pair below proves the fix
+# branches on it rather than hardcoding either value for everyone.
+# ===========================================================================
+
+
+def test_agent_token_code_write_records_agent_origin(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, col = _seed(client, "a00002050")
+    owner_id = _user_id(client, owner_h)
+    issued = _issue_token(
+        owner_id, ["knowledge:read", "knowhow:code"], nb, name="CodeAgent"
+    )
+    agent_h = _agent_headers(issued.token)
+    url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
+
+    put_resp = client.put(
+        url, headers=agent_h, json={"code_text": "print(1)", "language": "python"}
+    )
+    assert put_resp.status_code == 200, put_resp.text
+
+    history_url = f"/api/notebooks/{nb}/knowhow/{table['id']}/history"
+    changes = client.get(history_url, headers=owner_h).json()["changes"]
+    put_change = next(c for c in changes if c["kind"] == "cell_code_put")
+    assert put_change["origin"] == "agent"
+
+    assert client.delete(url, headers=agent_h).status_code == 204
+    changes = client.get(history_url, headers=owner_h).json()["changes"]
+    delete_change = next(c for c in changes if c["kind"] == "cell_code_delete")
+    assert delete_change["origin"] == "agent"
+
+
+def test_session_code_put_still_records_user_origin(tmp_path, monkeypatch):
+    """Contrast case: a SESSION user writing through the SAME dual-mode
+    route must still be attributed origin="user", not "agent" — this is
+    what proves the fix branches on actor.is_agent rather than simply
+    swapping the hardcoded default from "user" to "agent" for everyone."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h, nb, table, row, col = _seed(client, "a00002051")
+    url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
+
+    resp = client.put(
+        url, headers=owner_h, json={"code_text": "print(1)", "language": "python"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    changes = client.get(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/history", headers=owner_h,
+    ).json()["changes"]
+    put_change = next(c for c in changes if c["kind"] == "cell_code_put")
+    assert put_change["origin"] == "user"
+
+
 def test_agent_token_notebook_not_in_allowlist_returns_404(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, col = _seed(client, "a00002043")

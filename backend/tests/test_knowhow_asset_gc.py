@@ -178,6 +178,88 @@ def test_sweep_does_not_treat_code_attachment_text_as_a_reference(repo):
     assert repo.get_notebook_asset(asset["id"]) is None
 
 
+def test_sweep_reclaims_an_asset_referenced_only_by_a_deleted_rows_code_attachment(repo):
+    """Task 13 code review: a naive ``kind NOT IN ('cell_code_put',
+    'cell_code_delete')`` exclusion only keeps CODE-ONLY kinds out of the
+    history scan — but ``row_delete``'s own payload embeds the deleted row's
+    remembered code attachments (a ``code`` array) in the SAME payload as its
+    genuine ``cells``. An asset:// substring that lives ONLY inside that
+    code array must still not count as a keeper reference once the row
+    holding it is deleted, or it becomes permanently unreclaimable (removed
+    stays 0 forever — this is the exact scenario the review reproduced)."""
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)
+    _table_id, row_id, column_id = _make_cell(repo, nb, "plain note, no image")
+    repo.upsert_knowhow_cell_code(
+        row_id, column_id, f"# see asset://{asset['id']}", "python", "u1", "hash1"
+    )
+
+    repo.delete_knowhow_row(row_id)  # CASCADEs the code row; row_delete's
+    # payload embeds its code_text right alongside the row's genuine cells.
+
+    result = repo.maintenance.sweep_orphan_assets(nb)
+
+    assert result == {"removed": 1}
+    assert repo.get_notebook_asset(asset["id"]) is None
+
+
+def test_sweep_reclaims_an_asset_referenced_only_by_a_deleted_columns_code_attachment(repo):
+    """Same gap as the row_delete case above, but for column_delete's own
+    ``code`` array (a different, top-level payload shape from row_delete's
+    per-row nested one — both must be excluded, not just one)."""
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)
+    _table_id, row_id, column_id = _make_cell(repo, nb, "plain note, no image")
+    repo.upsert_knowhow_cell_code(
+        row_id, column_id, f"# see asset://{asset['id']}", "python", "u1", "hash1"
+    )
+
+    repo.delete_knowhow_column(column_id)
+
+    result = repo.maintenance.sweep_orphan_assets(nb)
+
+    assert result == {"removed": 1}
+    assert repo.get_notebook_asset(asset["id"]) is None
+
+
+def test_classification_and_recheck_share_the_same_reference_predicate(repo, monkeypatch):
+    """Task 13 code review: sweep_orphan_assets has TWO reference-determination
+    call sites (the classification read, and the in-transaction re-check that
+    closes the race against a concurrent cell save) — they must be the exact
+    SAME code, not two independently hand-duplicated SQL strings. A prior
+    implementation's own mutation test retracted each copy ONE AT A TIME and
+    saw both go red, which looks like proof the two agree — it is not: the
+    two sites are ANDed together (an asset is deleted only if BOTH say
+    "unreferenced"), so with either copy still conservative, retracting only
+    the OTHER one can't surface a divergence between them. This test instead
+    asserts STRUCTURAL identity: patch the shared predicate and confirm it is
+    invoked once per phase (classification, then the write-phase re-check)
+    for the SAME asset — impossible if the two sites were separate code."""
+    from app.repositories.sqlite import maintenance as maintenance_mod
+
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)  # unreferenced: one candidate for both phases
+
+    calls: list[str] = []
+    original = maintenance_mod.SQLiteMaintenanceAdapter._is_asset_referenced
+
+    def _spy(self, db, notebook_id, asset_id):
+        calls.append(asset_id)
+        return original(self, db, notebook_id, asset_id)
+
+    monkeypatch.setattr(
+        maintenance_mod.SQLiteMaintenanceAdapter, "_is_asset_referenced", _spy
+    )
+
+    result = repo.maintenance.sweep_orphan_assets(nb)
+
+    assert result == {"removed": 1}
+    assert calls == [asset["id"], asset["id"]], (
+        "expected exactly one classification-phase call and one write-phase "
+        "re-check call, both through the SAME shared predicate"
+    )
+
+
 def test_sweep_is_scoped_to_the_given_notebook(repo):
     nb1 = _mk_notebook(repo, "N1")
     nb2 = _mk_notebook(repo, "N2")
