@@ -122,8 +122,10 @@ def test_legacy_unversioned_db_loads_without_data_loss(tmp_path):
                              "WHERE source='builtin' LIMIT 1").fetchone()["object_type"]
         db.execute("DELETE FROM object_schemas WHERE object_type=?", (deleted,))
 
-    # 3) 用当前代码重新加载同一个库文件（= 生产升级路径）
+    # 3) 用当前代码重新加载同一个库文件（= 生产升级路径 = 构造 + 服务端启动清算；
+    #    清算不再是构造副作用，见 tests/test_startup_recovery_ownership.py）
     repo1 = SQLiteRepository(settings)
+    repo1._recover_interrupted_jobs()
 
     assert repo1._migrate() == []  # 已迁移到位，二次走快路径不再重迁移
     with repo1._connect() as db:

@@ -325,6 +325,14 @@
     {
       "count": 1,
       "kind": "independent_private",
+      "path": "backend/app/services/startup_warmup.py",
+      "reason": "server lifespan is the sole owner of crash recovery; deliberately not a public repository port",
+      "scope": "<module>.run_startup",
+      "target": "_recover_interrupted_jobs"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
       "path": "scripts/bench_sqlite_writes.py",
       "reason": "synthetic temporary write benchmark",
       "scope": "<module>.main",
@@ -377,6 +385,14 @@
       "reason": "disposable contract fixture databases",
       "scope": "<module>.normalized_repository_snapshot",
       "target": "_connect"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "models a server start on a disposable backup, including the startup recovery sweep",
+      "scope": "<module>.verify_snapshot",
+      "target": "_recover_interrupted_jobs"
     }
   ],
   "independent_sql": [

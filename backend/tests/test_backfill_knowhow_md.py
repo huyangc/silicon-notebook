@@ -524,12 +524,15 @@ def test_main_use_llm_configured_prints_no_warning(
 # row's projection_status 'pending' (update_knowhow_cell's existing, UNCHANGED
 # contract) -- unlike the HTTP cell-update route, nothing in this one-shot CLI
 # process ever schedules or RUNS the projector afterwards. Left 'pending', a
-# row is not just stale: the NEXT time ANY process constructs
-# SQLiteRepository, migrations.py::_recover_interrupted_jobs treats a still-
+# row is not just stale: the next SERVER START runs
+# migrations.py::_recover_interrupted_jobs, which treats a still-
 # 'pending'/'syncing' row as an abandoned crash artifact and flips it to
 # 'failed' (this actually happened in production: 10 rows in a real notebook
-# went to 'failed' after running this script). The fix adds a SEPARATE,
-# explicit reprojection step (``reproject_changed_tables``) that main() runs
+# went to 'failed' after running this script). Recovery no longer fires on
+# every SQLiteRepository construction (it moved to startup_warmup.run_startup,
+# so this CLI itself is harmless now), but a row left 'pending' still dies at
+# the next restart -- so the row must be settled here regardless. The fix adds
+# a SEPARATE, explicit reprojection step (``reproject_changed_tables``) that main() runs
 # synchronously, in-process, after the apply write returns and before main()
 # itself returns -- never a background schedule (that would just move the
 # same bug one layer down: a short-lived CLI process exits right past a
@@ -576,7 +579,7 @@ def test_apply_then_reproject_settles_rows_to_synced_with_new_projected_content(
     reproject_changed_tables function level (no CLI argv involved): after
     BOTH steps run, the affected row is 'synced' -- never 'pending' (the
     original bug) or 'failed' (what _recover_interrupted_jobs does to a
-    still-'pending' row on the next process construction) -- and the
+    still-'pending' row at the next server start) -- and the
     PROJECTED artifact (source_elements, read directly via SQL, not just the
     store's own cell) reflects the NEW, cleaned content rather than stale
     pre-backfill text or nothing at all."""
@@ -621,27 +624,31 @@ def test_main_apply_prints_what_was_reprojected(repo, nb_with_dirty_cells, capsy
     assert "重投影" in captured.out or "重投影" in captured.err
 
 
-def test_main_apply_survives_a_second_repository_construction_without_going_failed(
+def test_main_apply_survives_a_later_server_startup_recovery_without_going_failed(
     repo, nb_with_dirty_cells, tmp_path
 ):
     """The exact production incident this fix addresses (task brief: "10
     rows in a real notebook went to failed"): a row left 'pending' after
-    --apply survives only until the NEXT process constructs
-    SQLiteRepository -- migrations.py::_recover_interrupted_jobs
-    unconditionally flips any still-'pending'/'syncing' row to 'failed' on
-    EVERY construction (its crash-recovery heuristic: a background job that
-    outlived its process). Reprojecting synchronously before main() returns
-    must leave the row 'synced', so a SECOND, independent SQLiteRepository
-    construction against the SAME on-disk DB (this test's stand-in for "any
-    later process" -- the server restarting, another CLI run, ...) must NOT
-    reclassify it as 'failed'."""
+    --apply survives only until the next SERVER START --
+    migrations.py::_recover_interrupted_jobs flips any still-'pending'/
+    'syncing' row to 'failed' (its crash-recovery heuristic: a background job
+    that outlived its process). Reprojecting synchronously before main()
+    returns must leave the row 'synced', so a later server startup against the
+    SAME on-disk DB must NOT reclassify it as 'failed'.
+
+    Recovery is driven EXPLICITLY here because that is now the only way it
+    runs: it moved out of ``SQLiteRepository.__init__`` into
+    ``startup_warmup.run_startup`` (so this CLI's own repository construction
+    is no longer the trigger -- see test_startup_recovery_ownership.py). Left
+    as a bare second construction, this test would pass vacuously."""
     dirty_row_id = _find_row_id(repo, nb_with_dirty_cells, DIRTY)
 
     rc = _dry_run_then_apply(nb_with_dirty_cells, tmp_path / "plan.json")
     assert rc == 0
 
-    second_repo = SQLiteRepository(Settings())  # re-runs migrate/recover/seed
-    assert _row_status(second_repo, nb_with_dirty_cells, dirty_row_id) == "synced"
+    server_repo = SQLiteRepository(Settings())  # 服务端重启:构造 + 显式清算
+    server_repo._recover_interrupted_jobs()
+    assert _row_status(server_repo, nb_with_dirty_cells, dirty_row_id) == "synced"
 
 
 # ---------------------------------------------------------------------------
@@ -1158,9 +1165,9 @@ def test_apply_from_plan_skip_report_comes_from_transaction_return_value(
 # ---------------------------------------------------------------------------
 # P2: the DEFAULT (rules-only) dry-run must be FULLY READ-ONLY -- it opens the
 # DB mode=ro and NEVER constructs the write-capable SQLiteRepository (whose
-# __init__ runs migrations/seed/crash-recovery; _recover_interrupted_jobs flips
-# lingering 'pending' rows to 'failed'). --use-llm / --apply still construct the
-# repository and print a one-line DB-open notice.
+# __init__ runs migrations + seed, both of which WRITE; crash recovery is no
+# longer among them -- it moved to startup_warmup.run_startup). --use-llm /
+# --apply still construct the repository and print a one-line DB-open notice.
 # ---------------------------------------------------------------------------
 
 

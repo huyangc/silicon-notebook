@@ -555,6 +555,17 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='_recover_interrupted_jobs',
+        owner='SqliteDatabase',
+        kind='private_wrapper',
+        consumers=(
+            ConsumerSite(path='backend/app/services/startup_warmup.py', scope='<module>.run_startup', kind='attribute', target='_recover_interrupted_jobs'),
+            ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.verify_snapshot', kind='attribute', target='_recover_interrupted_jobs'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='_remap_json_ids',
         owner='NotebookSharingService',
         kind='private_wrapper',

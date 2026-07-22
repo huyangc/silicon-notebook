@@ -71,8 +71,10 @@ PRIVATE_REASON_BY_PATH = {
     "backend/app/api/deps.py": "composition root extracts narrow runtime ports",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",
     "backend/app/services/knowhow/transfer.py": "knowhow transfer orchestration constructs its store and runtime seams",
+    "backend/app/services/startup_warmup.py": "server lifespan is the sole owner of crash recovery; deliberately not a public repository port",
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
+    "scripts/verify_repository_snapshot.py": "models a server start on a disposable backup, including the startup recovery sweep",
 }
 
 SQLITE_CONNECT_REASON_BY_PATH = {

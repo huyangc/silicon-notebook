@@ -3,14 +3,19 @@ from types import SimpleNamespace
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 
 
-def test_initialize_orders_migrate_recover_seed():
+def test_initialize_orders_migrate_then_seed_and_never_recovers():
+    """initialize() = migrate + seed only. Crash recovery is deliberately NOT
+    part of it: every SQLiteRepository construction runs initialize(), and the
+    ~20 offline CLI construction sites must not get to declare the server's
+    in-progress rows dead. The server calls recover_interrupted_jobs()
+    explicitly from startup_warmup.run_startup instead."""
     m = SqliteMigrator(SimpleNamespace(), SimpleNamespace())
     calls = []
     m.migrate = lambda: calls.append("migrate") or []
     m.recover_interrupted_jobs = lambda: calls.append("recover")
     m.seed = lambda: calls.append("seed")
     assert m.initialize() == []
-    assert calls == ["migrate", "recover", "seed"]
+    assert calls == ["migrate", "seed"]
 
 
 def test_schema_version_constant_is_v23():

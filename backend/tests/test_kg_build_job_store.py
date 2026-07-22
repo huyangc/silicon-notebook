@@ -191,7 +191,11 @@ def test_restart_marks_running_kg_job_failed(tmp_path):
             (notebook.id, now, now),
         )
 
+    # 服务端重启 = 构造(migrate + seed) + 显式清算。清算不再是构造的副作用
+    # (离线 CLI 也构造仓储,没资格判定服务端的进行中行);服务端 lifespan 在
+    # mark_ready() 之前调用它——见 tests/test_startup_recovery_ownership.py。
     restarted = SQLiteRepository(settings)
+    restarted._recover_interrupted_jobs()
     restarted_store = KgBuildJobStore(
         restarted._runtime.database,
         new_id=restarted._runtime.seams.new_id,

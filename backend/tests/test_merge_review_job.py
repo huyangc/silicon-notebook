@@ -107,11 +107,14 @@ def test_startup_reconciles_stuck_running(repo, tmp_path):
     with repo._write() as db:
         db.execute("INSERT INTO merge_review_jobs (notebook_id,status,total,done,started_at,updated_at,error) "
                    "VALUES (?, 'running', 5, 2, '', '', '')", (nb,))
-    # a fresh repository over the SAME db file re-runs _migrate on construction
+    # a fresh repository over the SAME db file re-runs _migrate on construction;
+    # 清算则由服务端启动路径显式驱动(不再是构造副作用,见
+    # tests/test_startup_recovery_ownership.py)
     from app.core.config import Settings
     from app.services.sqlite_repository import SQLiteRepository
     from app.services.embedding import FakeEmbedder
     repo2 = SQLiteRepository(Settings())
+    repo2._recover_interrupted_jobs()
     repo2.embedder = FakeEmbedder(dim=16)
     st = repo2.merge_review_job_status(nb)
     assert st["status"] == "failed"

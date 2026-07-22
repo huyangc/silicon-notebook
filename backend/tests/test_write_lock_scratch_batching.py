@@ -179,8 +179,12 @@ def test_startup_recovery_clears_orphaned_cluster_scratch(tmp_path):
             "VALUES ('nb-dead', 'run-dead', 's1', 'c1', 'C', '', '')"
         )
 
-    # 重新构造 = 再跑一次 _recover_interrupted_jobs(模拟进程重启)
+    # 模拟服务端重启:构造仓储 + 显式跑一次清算。清算**不再是构造的副作用**——
+    # 它已移交服务端 lifespan(startup_warmup.run_startup,在 mark_ready() 之前),
+    # 好让离线 CLI 的仓储构造不再把服务端正在处理的行判成残骸。
+    # 见 test_startup_recovery_ownership.py。留成裸构造的话本用例会假绿。
     repo2 = SQLiteRepository(settings)
+    repo2._recover_interrupted_jobs()
     with repo2._connect() as db:
         left_cluster = db.execute(
             "SELECT COUNT(*) AS c FROM kg_cluster_scratch").fetchone()["c"]

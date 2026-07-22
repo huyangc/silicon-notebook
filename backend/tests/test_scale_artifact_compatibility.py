@@ -2,14 +2,20 @@
 
 The frozen v9 storage fixtures (kg_index / kg_viz manifest.json + npy/npz)
 must keep loading byte-compatibly through the filesystem store — an artifact
-written by an earlier deploy is served as-is, no format change. The fold
-temporary/old/live sequence stays atomic: prepare never touches the live
-artifact; only swap replaces it (a fold failure before swap keeps the old
-index intact).
+written by an earlier deploy is served as-is, no format change. The
+temporary/old/live sequence stays atomic for BOTH fold and full rebuild:
+prepare never touches the live artifact; only swap replaces it (a save or fold
+failure before swap keeps the old index intact).
+
+The load side cross-checks manifest counts against the arrays it just read and
+degrades to "no index" (None + a warning) instead of serving a mismatched one —
+while a manifest from an older deploy, which simply lacks those count keys,
+must keep loading (older-index-stays-valid).
 """
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 
@@ -17,6 +23,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
+from app.repositories.filesystem import scale_artifact_store as store_module
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "repository_v9" / "storage"
@@ -45,6 +52,30 @@ def _copy_fixture(store, kind: str, notebook_id: str) -> Path:
 def _write_manifest(directory: Path, payload: dict) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "manifest.json").write_text(json.dumps(payload))
+
+
+def _artifacts(node_ids, manifest, **extra) -> dict:
+    """The smallest complete save_full payload over `node_ids`."""
+    size = len(node_ids)
+    payload = dict(
+        node_ids=list(node_ids),
+        transition=sp.csr_matrix((size, size), dtype=np.float64),
+        idf=[1.0] * size,
+        chunk_index=[],
+        ann_vectors=np.eye(size, 4, dtype=np.float32),
+        ann_labels=list(node_ids),
+        manifest=manifest,
+    )
+    payload.update(extra)
+    return payload
+
+
+def _snapshot(directory: Path) -> dict:
+    return {
+        path.name: path.read_bytes()
+        for path in sorted(Path(directory).iterdir())
+        if path.is_file()
+    }
 
 
 def test_v9_scale_artifact_loads_and_probes(store):
@@ -159,3 +190,167 @@ def test_unswapped_temporary_never_touches_live(store):
     # no swap — a fold failure before the swap leaves the old artifact intact
     assert store.read_manifest_version(live) == ["v", 1]
     assert (live / "manifest.json").stat().st_mtime_ns == before
+
+
+# ── full rebuild is atomic: staging + swap, never an in-place overwrite ──
+
+
+def test_save_full_failure_leaves_previous_artifact_byte_identical(
+    store, monkeypatch
+):
+    """A rebuild that dies mid-save must not touch the live index.
+
+    This is the whole point of staging: writing straight into the live
+    directory used to leave the *previous* manifest.json (written last, so it
+    survived) sitting next to half-overwritten arrays — an index that still
+    loaded but described data that was no longer there.
+    """
+    store.save_full("nb-atomic", _artifacts(
+        ["a", "b"], {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2}))
+    live = store.scale_dir("nb-atomic")
+    before = _snapshot(live)
+    assert before                                      # v1 really is on disk
+
+    def half_write_then_fail(out_dir, **artifacts):
+        target = Path(out_dir)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "graph.npz").write_bytes(b"half-written")
+        (target / "node_ids.npy").write_bytes(b"half-written")
+        raise RuntimeError("injected save failure")
+
+    monkeypatch.setattr(
+        store_module.scale_index_module, "save_scale_index", half_write_then_fail)
+    with pytest.raises(RuntimeError, match="injected save failure"):
+        store.save_full("nb-atomic", _artifacts(
+            ["a", "b", "c"],
+            {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}))
+
+    assert _snapshot(live) == before                   # not one byte moved
+    assert store.read_manifest_version(live) == ["v", 1]
+    # the abandoned staging directory is inert — loading ignores it entirely
+    assert Path(str(live) + ".tmp").is_dir()
+    stale = store.load_scale("nb-atomic")
+    assert stale is not None and list(stale.node_ids) == ["a", "b"]
+    assert stale.manifest["version"] == ["v", 1]
+    # ...and the next successful rebuild clears it and publishes normally
+    monkeypatch.undo()
+    store.save_full("nb-atomic", _artifacts(
+        ["a", "b", "c"],
+        {"version": ["v", 2], "dim": 4, "n_nodes": 3, "n_ann": 3}))
+    assert store.read_manifest_version(live) == ["v", 2]
+    assert list(store.load_scale("nb-atomic").node_ids) == ["a", "b", "c"]
+    assert not Path(str(live) + ".tmp").exists()
+
+
+def test_save_full_first_build_publishes_without_a_live_directory(store):
+    """First-ever full rebuild: there is no live directory to set aside, so the
+    swap's live → .old step has to be skipped rather than raise. Fold never hits
+    this branch (it only runs on an already-indexed notebook)."""
+    live = store.scale_dir("nb-first")
+    assert not live.exists()
+    manifest = store.save_full("nb-first", _artifacts(
+        ["a", "b"], {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2}))
+    assert manifest["n_nodes"] == 2
+    assert live.is_dir()
+    for artifact in ("graph.npz", "node_ids.npy", "idf.npy", "chunk_index.npy",
+                     "ann.bin", "ann_labels.npy", "manifest.json"):
+        assert (live / artifact).exists(), artifact
+    assert not Path(str(live) + ".tmp").exists()
+    assert not Path(str(live) + ".old").exists()
+    idx = store.load_scale("nb-first")
+    assert list(idx.node_ids) == ["a", "b"]
+    assert idx.manifest["version"] == ["v", 1]
+
+
+# ── load-side integrity: mismatched artifacts degrade to "no index" ──
+
+
+def test_load_scale_rejects_manifest_node_count_mismatch(store, caplog):
+    """manifest says 100 nodes, node_ids.npy has 2 → the artifact is not
+    serving anything; degrade to None (a rebuild) and say why in the log."""
+    store.save_full("nb-mismatch", _artifacts(
+        ["a", "b"], {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2}))
+    live = store.scale_dir("nb-mismatch")
+    _write_manifest(live, {"version": ["v", 1], "dim": 4,
+                           "n_nodes": 100, "n_ann": 2})
+    with caplog.at_level(logging.WARNING, logger="app.services.kg.scale_index"):
+        assert store.load_scale("nb-mismatch") is None
+    message = "\n".join(record.getMessage() for record in caplog.records)
+    assert "n_nodes" in message and "100" in message and "2" in message
+    assert str(live) in message
+
+
+def test_load_scale_rejects_cross_array_shape_mismatch(store, caplog):
+    """The counts the manifest never carried are still cross-checkable between
+    arrays: both write paths build the transition as a len(node_ids)-square
+    matrix and idf one entry per node."""
+    manifest = {"version": ["v", 1], "dim": 4}   # deliberately no n_nodes/n_ann
+    store.save_full("nb-idf", _artifacts(["a", "b"], dict(manifest)))
+    np.save(store.scale_dir("nb-idf") / "idf.npy",
+            np.asarray([1.0, 1.0, 1.0], dtype=np.float32))
+    with caplog.at_level(logging.WARNING, logger="app.services.kg.scale_index"):
+        assert store.load_scale("nb-idf") is None
+    assert "idf.npy" in "\n".join(r.getMessage() for r in caplog.records)
+
+    store.save_full("nb-graph", _artifacts(["a", "b"], dict(manifest)))
+    sp.save_npz(store.scale_dir("nb-graph") / "graph.npz",
+                sp.csr_matrix((3, 3), dtype=np.float64))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="app.services.kg.scale_index"):
+        assert store.load_scale("nb-graph") is None
+    assert "graph.npz" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_load_scale_missing_core_artifact_returns_none(store, caplog):
+    """A manifest with no graph.npz next to it must not raise into the
+    retrieval path — None means "no index", which triggers a rebuild."""
+    store.save_full("nb-gone", _artifacts(
+        ["a", "b"], {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2}))
+    (store.scale_dir("nb-gone") / "graph.npz").unlink()
+    with caplog.at_level(logging.WARNING, logger="app.services.kg.scale_index"):
+        assert store.load_scale("nb-gone") is None
+    assert caplog.records                                # and it said so
+
+
+def test_load_scale_older_manifest_without_counts_still_loads(store, caplog):
+    """older-index-stays-valid: a manifest from a deploy that never wrote
+    n_ann / has_viz / n_chunk_ann must load exactly as before. Missing key →
+    that check is skipped, never "corrupt"."""
+    frozen = _copy_fixture(store, "kg_index", "nb-old")
+    manifest = json.loads((frozen / "manifest.json").read_text())
+    assert "n_ann" not in manifest and "has_viz" not in manifest
+    with caplog.at_level(logging.WARNING, logger="app.services.kg.scale_index"):
+        idx = store.load_scale("nb-old")
+    assert idx is not None and list(idx.node_ids)
+    assert idx.manifest == manifest
+
+    # same for a manifest carrying no counts at all
+    store.save_full("nb-bare", _artifacts(["a", "b"], {"version": ["v", 1],
+                                                       "dim": 4}))
+    bare = store.load_scale("nb-bare")
+    assert bare is not None and list(bare.node_ids) == ["a", "b"]
+    assert [r.getMessage() for r in caplog.records] == []
+
+
+def test_load_scale_optional_artifact_counts_are_checked_when_present(store):
+    """The optional ANN counts come from the same write as the main index, so a
+    mismatch proves that write was incomplete → corrupt. A *missing* optional
+    file keeps its long-standing meaning instead ("serve without that ANN"),
+    which is what older/degraded indexes rely on."""
+    store.save_full("nb-chunk", _artifacts(
+        ["a", "b"], {"version": ["v", 1], "dim": 4, "n_nodes": 2, "n_ann": 2},
+        chunk_ann_vectors=np.eye(2, 4, dtype=np.float32),
+        chunk_ann_labels=["c1", "c2"]))
+    live = store.scale_dir("nb-chunk")
+    assert store.read_manifest(live)["n_chunk_ann"] == 2
+    assert store.load_scale("nb-chunk").chunk_ann_labels == ["c1", "c2"]
+
+    manifest = store.read_manifest(live)
+    _write_manifest(live, {**manifest, "n_chunk_ann": 99})
+    assert store.load_scale("nb-chunk") is None
+
+    _write_manifest(live, manifest)
+    (live / "chunk_ann_labels.npy").unlink()
+    degraded = store.load_scale("nb-chunk")
+    assert degraded is not None                  # not escalated to "corrupt"
+    assert degraded.chunk_ann_labels is None
