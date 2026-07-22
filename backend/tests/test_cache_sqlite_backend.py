@@ -105,6 +105,63 @@ def test_overwrite_updates_volume_by_delta(tmp_path):
     assert c.volume() == before - 5000 + 100
 
 
+def test_expiry_sweep_predicate_is_index_backed(tmp_path):
+    """_sweep_expired 的 created_at 条件必须走索引，不能全表扫。
+
+    这条路径长在 put() 里、且在全局锁内：无索引时实测 63 MB 上限下最坏单次 put
+    要 75 ms，线性外推到 2 GiB 默认上限约 2.5 s——一次 put 卡住所有并发读写。
+
+    断言查询计划而不是断言索引名：后者只证明"有个叫这名字的索引"，建错列照样
+    绿。EXPLAIN QUERY PLAN 直接回答"优化器真的用上了吗"。
+    变异验证：删掉 sqlite_backend 建表脚本里的 idx_cache_created 后本测试转红。
+    """
+    c = _mk(tmp_path)
+    c.put("k", "v")
+    conn = sqlite3.connect(c.path)
+    try:
+        plans = [
+            " ".join(str(col) for col in row)
+            for row in conn.execute(
+                "EXPLAIN QUERY PLAN "
+                "SELECT COALESCE(SUM(size),0) FROM cache WHERE created_at < ?", (0,)
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    joined = " | ".join(plans)
+    assert "USING INDEX" in joined and "created_at" in joined, (
+        f"过期清扫在全表扫描 created_at，大库上每次 put 都会被它拖住：{joined}"
+    )
+
+
+def test_startup_recount_repairs_drifted_volume(tmp_path):
+    """构造时校准 total_bytes：增量计量被进程崩溃打漂后，重启必须自愈。
+
+    漂移只累积不自愈，虚高到越过 size_limit 就会触发"为满足幻影字节把健康条目
+    全删光"，且 meta 仍虚高 → 缓存永久停在 0 条。此前 recount() 在 app/ 与
+    scripts/ 下零调用方，文档声称的"漂移兜底"实际不存在。
+
+    这里直接改写 meta 模拟崩溃遗留（公开 API 造不出这个状态），再新建一个指向
+    同一文件的 backend——等价于重启。
+    变异验证：删掉 __init__ 末尾的 self.recount() 后本测试转红。
+    """
+    c = _mk(tmp_path)
+    c.put("k", "z" * 1000)
+    real = c.volume()
+
+    conn = sqlite3.connect(c.path)          # 模拟：写了 cache 行还没写 meta 就被 SIGKILL
+    try:
+        conn.execute("UPDATE meta SET v=? WHERE k='total_bytes'", (real * 50,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    restarted = SqliteCacheBackend(str(tmp_path / "cache.db"))
+    assert restarted.volume() == real, (
+        f"重启没有校准漂移的计量：{restarted.volume()} != {real}"
+    )
+
+
 def test_recount_matches_incremental_volume(tmp_path):
     c = _mk(tmp_path)
     for i in range(10):
