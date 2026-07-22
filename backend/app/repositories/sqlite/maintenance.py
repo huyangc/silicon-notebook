@@ -791,16 +791,49 @@ class SQLiteMaintenanceAdapter:
         It is a mitigation, not a proof: a draft left unsaved for longer than
         the grace window is still reclaimable.
 
-        Reference scope is deliberately narrow: an asset counts as "kept"
-        only if its id appears as an ``asset://<id>`` substring inside a
+        Reference scope covers both LIVE content and HISTORY (knowhow 表
+        版本管理 Task 13, spec §7.1): an asset counts as "kept" if its id
+        appears as an ``asset://<id>`` substring either (a) inside a
         ``knowhow_cells.content_md`` belonging to one of THIS notebook's
-        tables. ``knowhow_cell_code`` (per-cell code attachments, migration
-        17) is source-code text, not rendered markdown — an ``asset://``
-        substring showing up there (e.g. in a comment) is NOT treated as a
-        keeper reference. If that boundary ever proves wrong in practice
-        (some real workflow renders code-attachment text as an image
-        reference), widen the scan to include it then; until observed, cells
-        are the only place an image actually gets embedded/displayed.
+        tables, OR (b) inside a ``knowhow_changes.payload_json`` row
+        belonging to one of this notebook's tables. Before version
+        management existed, only (a) was scanned — a cell edit that dropped
+        an image reference made it collectable the very next sweep. Now that
+        every change is remembered forever by default, that same cell edit
+        also leaves the OLD value sitting in a ``knowhow_changes`` row, and
+        reclaiming the asset out from under it would leave a "回退" to that
+        point rendering a permanently broken image — half the point of
+        keeping history at all.
+
+        The one carve-out: ``kind IN ('cell_code_put', 'cell_code_delete')``
+        rows are EXCLUDED from the history scan — same "source-code text, not
+        rendered markdown" boundary this method has always drawn for LIVE
+        ``knowhow_cell_code`` (per-cell code attachments, migration 17). An
+        ``asset://`` substring inside a code attachment's ``code_text`` — live
+        or historical — is NOT treated as a keeper reference (see
+        ``test_sweep_does_not_treat_code_attachment_text_as_a_reference``).
+        Every OTHER ``kind``'s payload can legitimately carry
+        ``content_md``-shaped text (a deleted cell/row/column's remembered
+        content, a copied table's genesis rows, a revert's own before/after
+        values), so those are scanned without further filtering — a false
+        keeper hit there only ever OVER-protects (mirrors this method's
+        existing LIKE-match asymmetry note above `_ASSET_REF_RE` in
+        ``services/knowhow/api.py``: over-matching here only ever RETAINS an
+        asset, never wrongly deletes one).
+
+        KNOWN COST (accepted, spec §7.1): once an image has ever appeared in
+        ANY cell, it is for all practical purposes never automatically
+        reclaimed again — almost any later edit to that cell leaves a
+        ``knowhow_changes`` row remembering the old value, and history is
+        kept forever unless a human explicitly prunes it. The only release
+        path is "清理历史" (``KnowhowHistoryStore.prune``) followed by
+        another sweep: pruning deletes the history rows that were an asset's
+        last remaining reference, at which point a LATER sweep can finally
+        reclaim it (the prune HTTP endpoint triggers exactly this sweep on
+        completion — see ``prune_knowhow_history`` in ``knowhow_routes.py``).
+        This trades unbounded-until-pruned disk growth for the ability to
+        revert to (or simply browse) a past version that still has its
+        images intact.
 
         Table sizes here are small (per-notebook assets/cells), so a plain
         per-asset ``LIKE`` scan is used rather than a single mega-query —
@@ -843,11 +876,22 @@ class SQLiteMaintenanceAdapter:
                 row["id"]
                 for row in assets
                 if db.execute(
-                    "SELECT 1 FROM knowhow_cells c "
-                    "JOIN knowhow_rows r ON r.id = c.row_id "
-                    "JOIN knowhow_tables t ON t.id = r.table_id "
-                    "WHERE t.notebook_id = ? AND c.content_md LIKE ? LIMIT 1",
-                    (notebook_id, f"%asset://{row['id']}%"),
+                    "SELECT 1 FROM ("
+                    "  SELECT 1 FROM knowhow_cells c "
+                    "  JOIN knowhow_rows r ON r.id = c.row_id "
+                    "  JOIN knowhow_tables t ON t.id = r.table_id "
+                    "  WHERE t.notebook_id = ? AND c.content_md LIKE ? "
+                    "  UNION ALL "
+                    "  SELECT 1 FROM knowhow_changes ch "
+                    "  JOIN knowhow_tables t2 ON t2.id = ch.table_id "
+                    "  WHERE t2.notebook_id = ? "
+                    "  AND ch.kind NOT IN ('cell_code_put', 'cell_code_delete') "
+                    "  AND ch.payload_json LIKE ?"
+                    ") LIMIT 1",
+                    (
+                        notebook_id, f"%asset://{row['id']}%",
+                        notebook_id, f"%asset://{row['id']}%",
+                    ),
                 ).fetchone()
                 is None
             ]
@@ -954,11 +998,22 @@ class SQLiteMaintenanceAdapter:
             for asset_id in unreferenced if grace_waived else orphan_ids:
                 still_unreferenced = (
                     db.execute(
-                        "SELECT 1 FROM knowhow_cells c "
-                        "JOIN knowhow_rows r ON r.id = c.row_id "
-                        "JOIN knowhow_tables t ON t.id = r.table_id "
-                        "WHERE t.notebook_id = ? AND c.content_md LIKE ? LIMIT 1",
-                        (notebook_id, f"%asset://{asset_id}%"),
+                        "SELECT 1 FROM ("
+                        "  SELECT 1 FROM knowhow_cells c "
+                        "  JOIN knowhow_rows r ON r.id = c.row_id "
+                        "  JOIN knowhow_tables t ON t.id = r.table_id "
+                        "  WHERE t.notebook_id = ? AND c.content_md LIKE ? "
+                        "  UNION ALL "
+                        "  SELECT 1 FROM knowhow_changes ch "
+                        "  JOIN knowhow_tables t2 ON t2.id = ch.table_id "
+                        "  WHERE t2.notebook_id = ? "
+                        "  AND ch.kind NOT IN ('cell_code_put', 'cell_code_delete') "
+                        "  AND ch.payload_json LIKE ?"
+                        ") LIMIT 1",
+                        (
+                            notebook_id, f"%asset://{asset_id}%",
+                            notebook_id, f"%asset://{asset_id}%",
+                        ),
                     ).fetchone()
                     is None
                 )

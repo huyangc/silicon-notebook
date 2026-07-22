@@ -295,6 +295,7 @@ def import_table(
     columns_json: str,
     anchor_index: "int | None" = None,
     orientation: str = "columns",
+    actor: str = "",
 ) -> str:
     """Full import orchestration (task brief step 2): parse -> validate ->
     create the table -> insert every row+cell -> bump mutation_seq once for
@@ -309,10 +310,18 @@ def import_table(
     GridParseError (bad file/orientation), column-validation failures
     (parse_import_columns), or the store's own name-uniqueness /
     at-most-one-anchor checks (create_knowhow_table) — routes.py's existing
-    400 idiom catches all of these uniformly."""
+    400 idiom catches all of these uniformly.
+
+    knowhow 表版本管理 Task 13: ``actor`` (the uploading user's id) is
+    threaded to every flow entry this import produces — the genesis
+    ``table_create`` AND every per-row ``row_add`` below — with
+    ``origin="import"`` so the history timeline can tell an imported table
+    apart from one built through the empty-table wizard."""
     grid = parse_grid(filename, data, orientation)
     columns = parse_import_columns(columns_json, grid, anchor_index)
-    table_id = repo.create_knowhow_table(notebook_id, title, "", columns)
+    table_id = repo.create_knowhow_table(
+        notebook_id, title, "", columns, actor=actor, origin="import"
+    )
     column_ids = [c["id"] for c in repo.get_knowhow_table(table_id)["columns"]]
     # 分组型表：anchor 列可能是"只写一次"的分组列（转置/合并型表的
     # 违例概念列），落库前 forward-fill 使同概念分支行共享 anchor 值，
@@ -352,7 +361,7 @@ def import_table(
                 value if col_id in anchor_col_ids
                 else md_normalize.safe_rule_normalize(value)[0]
             )
-        repo.add_knowhow_row(table_id, cells)
+        repo.add_knowhow_row(table_id, cells, actor=actor, origin="import")
     repo.bump_knowhow_mutation_seq(table_id)
     return table_id
 
@@ -363,6 +372,7 @@ def create_table(
     title: str,
     columns: list[dict],
     anchor_index: "int | None",
+    actor: str = "",
 ) -> str:
     """Wizard backend (PR-2+3 Task 3): create an EMPTY table (no grid/rows) —
     mirrors ``import_table``'s create step minus parsing a file. ``columns``
@@ -372,9 +382,15 @@ def create_table(
     emptiness/uniqueness, the at-most-one-anchor rule, and the table title.
     Deliberately does NOT schedule a reprojection — a brand-new table has
     zero rows/cells, so there is nothing to project yet; the first row/cell
-    mutation schedules the table's first real run."""
+    mutation schedules the table's first real run.
+
+    knowhow 表版本管理 Task 13: ``actor`` (the creating user's id) is
+    threaded to the table's genesis ``table_create`` flow entry;
+    ``origin`` stays the store's own default (``"user"``) — an empty table
+    built through the wizard is an ordinary user action, unlike
+    ``import_table``'s ``origin="import"``."""
     merged = _columns_with_anchor(columns, anchor_index)
-    return repo.create_knowhow_table(notebook_id, title, "", merged)
+    return repo.create_knowhow_table(notebook_id, title, "", merged, actor=actor)
 
 
 # --- wire shaping: store `role` <-> wire `kind`, table-level anchor_column_id
@@ -857,14 +873,15 @@ def preview_append(table: dict, filename: str, data: bytes) -> dict:
 
 
 def commit_append(
-    repo: Any, table_id: str, table: dict, filename: str, data: bytes
+    repo: Any, table_id: str, table: dict, filename: str, data: bytes,
+    actor: str = "",
 ) -> int:
     """Append commit (design doc §② 路B "确认后追加导入"): re-parses and
     re-aligns the file (deliberately not trusting a client-supplied preview
     payload — the file itself stays the single source of truth, and this
     keeps commit callable on its own without ever having called preview
-    first), then inserts one row per file data row via the store's existing
-    ``add_knowhow_row`` (position omitted -> always appends, mirroring
+    first), then inserts every file data row via the store's bulk
+    ``add_knowhow_rows`` (position omitted -> always appends, mirroring
     ``import_table``'s own per-row loop), skipping empty cells (mirrors
     ``import_table``'s ``if value`` filter — a blank/missing-column cell is
     simply absent, never an empty-string placeholder, matching
@@ -910,6 +927,15 @@ def commit_append(
     # 与旧行的键失配、组被劈开 (this is the confirmed defect: an appended
     # `A. Component` normalized to `**A. Component**` splits off from the
     # existing `A. Component` group even though the append preview matched them).
+    #
+    # knowhow 表版本管理 Task 13 (spec §5.4): collect every new row's cells
+    # FIRST, then hand the whole batch to ``add_knowhow_rows`` in ONE call —
+    # this is what makes the batch land as a SINGLE ``import_append`` flow
+    # entry instead of one ``row_add`` per row (the old per-row
+    # ``add_knowhow_row`` loop this replaced produced exactly that noise, and
+    # left the revert engine's ``import_append`` branch of ``_apply_before``
+    # permanently unreachable — see ``KnowhowStore.add_knowhow_rows``).
+    new_rows_cells: list[dict[str, str]] = []
     for aligned_row in aligned_rows:
         cells = {}
         for i, value in enumerate(aligned_row):
@@ -919,7 +945,8 @@ def commit_append(
                 value if i == anchor_position
                 else md_normalize.safe_rule_normalize(value)[0]
             )
-        repo.add_knowhow_row(table_id, cells)
+        new_rows_cells.append(cells)
+    repo.add_knowhow_rows(table_id, new_rows_cells, actor=actor, origin="import")
     repo.bump_knowhow_mutation_seq(table_id)
     return len(aligned_rows)
 
@@ -1400,7 +1427,13 @@ def put_cell_code(
     projector's background debounce means the two can transiently differ
     right after an edit). Raises ``ValueError`` for blank ``code_text``
     ("代码内容不能为空") or a cross-table (row, column) pair
-    ("格子定位不合法"), ``KeyError`` for an unknown row."""
+    ("格子定位不合法"), ``KeyError`` for an unknown row.
+
+    knowhow 表版本管理 Task 13: ``updated_by`` (already resolved by both
+    callers — the HTTP agent route's ``RequestActor.actor_label``, the MCP
+    tool's ``principal.profile_name``) doubles as the flow entry's
+    ``actor`` — both express the same "who wrote this" concept, so no new
+    parameter/plumbing is needed on top of what already existed here."""
     if not str(code_text or "").strip():
         raise ValueError("代码内容不能为空")
     location = repo.get_knowhow_row_location(row_id)
@@ -1414,12 +1447,13 @@ def put_cell_code(
     content_hash = cell_content_hash(row["cells"].get(column_id, ""))
     repo.upsert_knowhow_cell_code(
         row_id, column_id, code_text, language or "", updated_by, content_hash,
+        actor=updated_by,
     )
     attachment = repo.get_knowhow_cell_code(row_id, column_id)
     return cell_code_view(row["cells"], column_id, attachment)
 
 
-def delete_cell_code(repo: Any, row_id: str, column_id: str) -> None:
+def delete_cell_code(repo: Any, row_id: str, column_id: str, actor: str = "") -> None:
     """DELETE .../cells/{col}/code service core. Idempotent (the store's own
     delete is a silent no-op when nothing exists to delete) — but an unknown
     ROW or a cross-table (row, column) pair still fails loud (``KeyError``/
@@ -1430,7 +1464,7 @@ def delete_cell_code(repo: Any, row_id: str, column_id: str) -> None:
     if location is None:
         raise KeyError(row_id)
     repo.validate_cell_target(row_id, column_id)
-    repo.delete_knowhow_cell_code(row_id, column_id)
+    repo.delete_knowhow_cell_code(row_id, column_id, actor=actor)
 
 
 __all__ = [

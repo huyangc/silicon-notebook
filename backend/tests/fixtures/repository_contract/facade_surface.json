@@ -2555,6 +2555,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.add_knowhow_rows",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.add_member",
         "target": "_runtime"
       },
@@ -4201,7 +4207,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, table_id: 'str', name: 'str', kind: 'str', position: 'Optional[int]' = None) -> 'str'"
+    "signature": "(self, table_id: 'str', name: 'str', kind: 'str', position: 'Optional[int]' = None, actor: 'str' = '', origin: 'str' = 'user') -> 'str'"
   },
   "add_knowhow_row": {
     "consumers": [
@@ -4209,12 +4215,6 @@
         "kind": "attribute",
         "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.add_knowhow_row",
-        "target": "add_knowhow_row"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.commit_append",
         "target": "add_knowhow_row"
       },
       {
@@ -4228,7 +4228,22 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, table_id: 'str', cells: 'dict', position: 'Optional[int]' = None) -> 'str'"
+    "signature": "(self, table_id: 'str', cells: 'dict', position: 'Optional[int]' = None, actor: 'str' = '', origin: 'str' = 'user') -> 'str'"
+  },
+  "add_knowhow_rows": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.commit_append",
+        "target": "add_knowhow_rows"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', rows: 'list', actor: 'str' = '', origin: 'str' = 'user') -> 'list'"
   },
   "add_url_sources": {
     "consumers": [
@@ -4748,7 +4763,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', title: 'str', description: 'str', columns: 'list', created_by: 'str' = '') -> 'str'"
+    "signature": "(self, notebook_id: 'str', title: 'str', description: 'str', columns: 'list', created_by: 'str' = '', actor: 'str' = '', origin: 'str' = 'user') -> 'str'"
   },
   "create_memory_candidate": {
     "consumers": [
@@ -4997,7 +5012,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_id: 'str', column_id: 'str') -> 'None'"
+    "signature": "(self, row_id: 'str', column_id: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "delete_knowhow_column": {
     "consumers": [
@@ -5012,7 +5027,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, column_id: 'str') -> 'None'"
+    "signature": "(self, column_id: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "delete_knowhow_milestone": {
     "consumers": [
@@ -5042,7 +5057,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_id: 'str') -> 'None'"
+    "signature": "(self, row_id: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "delete_knowhow_table": {
     "consumers": [
@@ -6643,6 +6658,12 @@
       {
         "kind": "attribute",
         "path": "scripts/backfill_knowhow_md.py",
+        "scope": "<module>._run_apply_from_plan",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_knowhow_md.py",
         "scope": "<module>._run_dry_run",
         "target": "maintenance"
       },
@@ -7631,7 +7652,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, column_id: 'str', name: 'str') -> 'None'"
+    "signature": "(self, column_id: 'str', name: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "replace_notebook_bases": {
     "consumers": [
@@ -8285,7 +8306,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, table_id: 'str', column_id: 'Optional[str]') -> 'Optional[str]'"
+    "signature": "(self, table_id: 'str', column_id: 'Optional[str]', actor: 'str' = '', origin: 'str' = 'user') -> 'Optional[str]'"
   },
   "set_knowhow_column_kind": {
     "consumers": [
@@ -8300,7 +8321,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, column_id: 'str', kind: 'str') -> 'None'"
+    "signature": "(self, column_id: 'str', kind: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "set_notebook_personal": {
     "consumers": [
@@ -8734,7 +8755,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', updates: 'list') -> 'dict'"
+    "signature": "(self, notebook_id: 'str', updates: 'list', actor: 'str' = '', origin: 'str' = 'user') -> 'dict'"
   },
   "update_knowhow_cells_guarded_atomic": {
     "consumers": [
@@ -8770,7 +8791,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, table_id: 'str', title: 'Optional[str]' = None, description: 'Optional[str]' = None) -> 'None'"
+    "signature": "(self, table_id: 'str', title: 'Optional[str]' = None, description: 'Optional[str]' = None, actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "update_knowledge": {
     "consumers": [
@@ -8920,7 +8941,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_id: 'str', column_id: 'str', code_text: 'str', language: 'str', updated_by: 'str', cell_content_hash: 'str') -> 'str'"
+    "signature": "(self, row_id: 'str', column_id: 'str', code_text: 'str', language: 'str', updated_by: 'str', cell_content_hash: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'str'"
   },
   "user_can_read_notebook": {
     "consumers": [

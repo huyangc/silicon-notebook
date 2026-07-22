@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Callable
 
 from app.repositories.sqlite import knowhow_fingerprint
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.knowhow_history_store import record_change
 
 # 插入 FK 顺序：表→列/行→资产→格/代码→隐藏源→元素→chunk→向量
 _BUSINESS_ORDER = ("columns", "rows", "assets", "cells", "cell_code")
@@ -192,7 +194,42 @@ class KnowhowTransferStore:
             "chunk_embeddings": chunk_embeddings,
         }
 
-    def insert_transfer(self, payload: dict, expected_counts: dict) -> None:
+    def insert_transfer(
+        self,
+        payload: dict,
+        expected_counts: dict,
+        *,
+        new_id: "Callable[[str], str] | None" = None,
+        now: "Callable[[], str] | None" = None,
+        actor: str = "",
+        note: str = "",
+    ) -> None:
+        """``new_id``/``now`` (knowhow 表版本管理 Task 13, spec §7.3): when
+        BOTH are supplied, records ONE ``table_create`` genesis flow entry
+        for the freshly-inserted target table as the LAST step of this same
+        write transaction — ``record_change`` itself requires this (its
+        fingerprint must reflect the state AFTER the change, and here that
+        means after every business/derived row has landed AND the count
+        check below has actually passed; a failed check raises and rolls
+        back the whole transaction, so a rejected transfer records nothing).
+        ``actor``/``note`` are the caller's (``copy_table``/``move_table``
+        via ``transfer.py``) resolved values — this store has no ``seams``
+        of its own (see ``RepositoryRuntime.__init__``'s own comment on
+        ``knowhow_transfer_store``), so id/clock generation is always
+        supplied at call time, never read from ``self``.
+
+        Both default to ``None`` so existing plain calls (this store's own
+        ``test_insert_transfer_rejects_count_mismatch``, which intentionally
+        never reaches the success path) keep working unchanged — recording
+        is simply skipped when either is omitted, not a silent partial
+        write: with no ``new_id``, ``record_change`` could not even mint the
+        change row's own id.
+
+        History itself does NOT travel with the transfer (spec §7.3 — the
+        source table's own ``knowhow_changes``/``knowhow_milestones`` are
+        deliberately absent from ``_BUSINESS_ORDER``/``_DERIVED_ORDER``
+        above); this is the target's OWN, brand-new first flow entry, not a
+        copy of anything the source ever recorded."""
         table = payload["table"]
         new_table_id = table["id"]
         with self.database.write() as db:
@@ -250,6 +287,54 @@ class KnowhowTransferStore:
             expected = {k: int(expected_counts.get(k, 0)) for k in checks}
             if checks != expected:
                 raise RuntimeError(f"knowhow transfer 校验失败：{checks} != {expected}")
+
+            # 版本管理创世流水（spec §7.3）：必须是本事务的最后一步——见本方法
+            # 签名处的文档字符串。cells/cell_code 按 row_id 分组重建成
+            # table_create 的标准 payload 形状（"table"/"columns"/"rows"，
+            # 每行的 "cells"/"code" 内嵌）——与 create_knowhow_table 自己产出的
+            # 创世流水同一形状，只是这次 rows 非空（这张表落库时已经带着全部
+            # 初始内容，不像普通建表要等后续逐行 add_knowhow_row）。
+            if new_id is not None and now is not None:
+                cells_by_row: "dict[str, dict[str, str]]" = {}
+                for cell in payload.get("cells") or []:
+                    cells_by_row.setdefault(cell["row_id"], {})[cell["column_id"]] = (
+                        cell["content_md"]
+                    )
+                code_by_row: "dict[str, list[dict]]" = {}
+                for code in payload.get("cell_code") or []:
+                    code_by_row.setdefault(code["row_id"], []).append({
+                        "column_id": code["column_id"],
+                        "code_text": code["code_text"],
+                        "language": code.get("language", ""),
+                        "cell_content_hash": code["cell_content_hash"],
+                        "updated_by": code.get("updated_by", ""),
+                    })
+                record_change(
+                    db, new_id=new_id, now=now, table_id=new_table_id,
+                    kind="table_create",
+                    payload={
+                        "table": {
+                            "title": table["title"], "description": table["description"],
+                        },
+                        "columns": [
+                            {
+                                "id": column["id"], "name": column["name"],
+                                "role": column["role"], "position": column["position"],
+                            }
+                            for column in payload.get("columns") or []
+                        ],
+                        "rows": [
+                            {
+                                "row_id": row["id"], "position": row["position"],
+                                "created_at": row["created_at"],
+                                "cells": cells_by_row.get(row["id"], {}),
+                                "code": code_by_row.get(row["id"], []),
+                            }
+                            for row in payload.get("rows") or []
+                        ],
+                    },
+                    actor=actor, origin="user", note=note,
+                )
 
     #: 搬到 knowhow_fingerprint 后的同对象别名——既有引用（含测试）不受影响。
     #: 改 SQL 请去 knowhow_fingerprint.py，那里写明了它现在有两个身份。

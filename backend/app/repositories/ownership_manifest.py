@@ -781,6 +781,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._write_lock', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.add_knowhow_column', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.add_knowhow_row', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.add_knowhow_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.add_member', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.add_relations', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.add_url_sources', kind='attribute', target='_runtime'),
@@ -1115,8 +1116,17 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.add_knowhow_row', kind='attribute', target='add_knowhow_row'),
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.commit_append', kind='attribute', target='add_knowhow_row'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='add_knowhow_row'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='add_knowhow_rows',
+        owner='KnowhowStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.commit_append', kind='attribute', target='add_knowhow_rows'),
         ),
         patches=(
         ),
@@ -2165,6 +2175,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.eval_insert_source_for_test', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>._counts', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
+            ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>._run_apply_from_plan', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>._run_dry_run', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/build_chunks.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>._run_status', kind='attribute', target='maintenance'),

@@ -1155,7 +1155,7 @@ def test_apply_from_plan_skip_report_comes_from_transaction_return_value(
     assert rc == 0
     capsys.readouterr()  # clear buffered dry-run output
 
-    def _fake_guarded(notebook_id, updates):
+    def _fake_guarded(notebook_id, updates, **kwargs):
         skipped = [(row, col) for (_t, row, col, _b, _a) in updates if row == r1]
         written = [(row, col) for (_t, row, col, _b, _a) in updates if row != r1]
         return {"written": written, "skipped": skipped, "rejected": []}

@@ -641,6 +641,15 @@ def _route_repo(monkeypatch, repo):
     return routes_mod
 
 
+def _fake_user():
+    """A bare UserProfile for calling a route function's body directly
+    (bypassing FastAPI's own DI, which is what actually resolves
+    ``Depends(get_current_user)`` in production/HTTP-level tests)."""
+    from app.models.identity import UserProfile
+
+    return UserProfile(id="u-route-test", email="u@test", display_name="U", role="user")
+
+
 def test_single_cell_route_rejects_a_draft_whose_image_was_reclaimed(repo, monkeypatch):
     from fastapi import HTTPException
 
@@ -653,7 +662,9 @@ def test_single_cell_route_rejects_a_draft_whose_image_was_reclaimed(repo, monke
 
     with pytest.raises(HTTPException) as err:
         routes_mod.patch_knowhow_cell(
-            nb, table_id, row_id, column_id, KnowhowCellPatch(content_md="![x](asset://gone)")
+            nb, table_id, row_id, column_id,
+            KnowhowCellPatch(content_md="![x](asset://gone)"),
+            user=_fake_user(),
         )
     assert err.value.status_code == 400
     assert err.value.detail == knowhow_api.CELL_ASSET_MISSING_MESSAGE
@@ -681,6 +692,7 @@ def test_batch_route_rejects_a_draft_whose_image_was_reclaimed(repo, monkeypatch
             KnowhowCellsBatchPatch(
                 column_id=column_id, row_ids=row_ids, content_md="![x](asset://gone)"
             ),
+            user=_fake_user(),
         )
     assert err.value.status_code == 400
     assert err.value.detail == knowhow_api.CELL_ASSET_MISSING_MESSAGE
@@ -707,6 +719,7 @@ def test_batch_route_still_saves_when_the_image_is_alive(repo, monkeypatch):
         KnowhowCellsBatchPatch(
             column_id=column_id, row_ids=row_ids, content_md=f"![x](asset://{live})"
         ),
+        user=_fake_user(),
     )
     for row in repo.get_knowhow_table(table_id)["rows"]:
         assert live in row["cells"][column_id]

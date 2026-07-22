@@ -427,7 +427,7 @@ def load_plan(path: str) -> dict:
 
 
 def apply_reviewed_plan(
-    repo, notebook_id: str, entries: list[dict]
+    repo, notebook_id: str, entries: list[dict], actor: str = "",
 ) -> "tuple[list[dict], list[dict], list[dict]]":
     """Apply a plan's entries VERBATIM (P1-a), with the moved-target check AND
     the membership check done ATOMICALLY inside the write transaction (P1 TOCTOU
@@ -476,7 +476,14 @@ def apply_reviewed_plan(
     pre-filter) and ``rejected`` carries ``reason="membership"`` per cell that
     failed the notebook/table ownership check. Idempotent on re-run: a re-applied
     cell's current content equals ``after`` -> ``already_applied`` (not written,
-    not a moved skip)."""
+    not a moved skip).
+
+    ``actor`` (knowhow 表版本管理 Task 13, spec §7.6) is threaded to
+    ``update_knowhow_cells_bulk_guarded`` with ``origin="backfill"`` so the
+    history timeline can show this write apart from a manual edit --
+    otherwise the one deliverable this whole version-management feature
+    promises for this exact CLI (spec §7.6: "看到 LLM 改了什么") never
+    materializes for it."""
     skipped: list[dict] = []
     candidates: list[dict] = []
     for entry in entries:
@@ -487,10 +494,14 @@ def apply_reviewed_plan(
             continue
         candidates.append(entry)
     by_cell = {(e["row_id"], e["column_id"]): e for e in candidates}
-    result = repo.update_knowhow_cells_bulk_guarded(notebook_id, [
-        (e["table_id"], e["row_id"], e["column_id"], e["before"], e["after"])
-        for e in candidates
-    ])
+    result = repo.update_knowhow_cells_bulk_guarded(
+        notebook_id,
+        [
+            (e["table_id"], e["row_id"], e["column_id"], e["before"], e["after"])
+            for e in candidates
+        ],
+        actor=actor, origin="backfill",
+    )
     applied = [by_cell[key] for key in result["written"]]
     already_applied = [by_cell[key] for key in result.get("already_applied", [])]
     skipped.extend({**by_cell[key], "reason": "moved"} for key in result["skipped"])
@@ -655,8 +666,23 @@ def _run_apply_from_plan(repo, args) -> int:
             file=sys.stderr,
         )
         return 2
+    # knowhow 表版本管理 Task 13（spec §7.6）：actor 按 notebook 所有者解析——
+    # 与 --use-llm 分支解析模型配置用的是同一个 resolve_notebook_owner_profile
+    # helper，但这里的后果轻得多（写库的 actor 字段留空，只是历史时间线上少
+    # 一个"是谁做的"标签），不像 --use-llm 那样是把私有格子文本发去错误模型
+    # 端点的隐私风险——所以这里选择警告后继续写入，而不是像 --use-llm 那样
+    # 硬拒绝：dry-run 阶段本就不做这个解析，一个已经跑通 dry-run、被人工评审
+    # 通过的 plan 不该单单因为所有者解析失败就在 apply 这一步被拦下。
+    owner = repo.maintenance.resolve_notebook_owner_profile(args.notebook)
+    if owner is None:
+        print(
+            f"[apply] 警告：无法解析 notebook（{args.notebook!r}）的所有者，"
+            "本次写入的 actor 将记为空字符串（历史时间线上看不出是谁做的这次回填）。",
+            file=sys.stderr,
+        )
+    actor = owner.id if owner is not None else ""
     applied, already_applied, skipped, rejected = apply_reviewed_plan(
-        repo, args.notebook, document.get("entries", [])
+        repo, args.notebook, document.get("entries", []), actor=actor,
     )
     _print_skipped(skipped + rejected)
     print(
