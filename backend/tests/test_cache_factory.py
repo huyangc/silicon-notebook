@@ -86,6 +86,80 @@ def _unlink_db(path: Path) -> None:
         Path(str(path) + suffix).unlink(missing_ok=True)
 
 
+# --------------------------------------------------- 每个缓存文件只有一个实例
+def test_factory_reuses_one_backend_per_path(tmp_path):
+    """同一个缓存文件在本进程内只能有一个 backend 实例。
+
+    生产形态是「每个 OpenAICompatibleClient（system llm / kg_llm / rewrite /
+    reasoning + per-user）各一个 + embedder 一个」都来这里取。每次 new 一个的话，
+    它们共享同一个文件而锁是实例私有的——put() 里的读改写在实例之间没有互斥。
+    """
+    path = str(tmp_path / "shared.db")
+    a = make_cache_backend(Settings(LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=path))
+    b = make_cache_backend(Settings(LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=path))
+    assert a is b, "同一路径拿到了两个实例：锁不共享，计量会漂移、fd 会翻倍"
+
+
+def test_factory_keeps_distinct_paths_isolated(tmp_path):
+    """记忆化的键是路径，不是全局单例——不同文件必须各自独立。
+
+    没有这条，把记忆化写成"整个进程一个实例"也能让上面那条绿，而测试隔离
+    （每个 tmp_path 一个库）会当场塌掉。
+    """
+    a = make_cache_backend(
+        Settings(LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=str(tmp_path / "a.db")))
+    b = make_cache_backend(
+        Settings(LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=str(tmp_path / "b.db")))
+    assert a is not b, "不同缓存文件被记忆化成了同一个实例"
+    a.put("k", "va")
+    assert b.get("k") is None, "两个库串了"
+
+
+def test_concurrent_consumers_never_drift_volume_accounting(tmp_path):
+    """行为断言：多个消费者各自 make_cache_backend + 并发 put 同一个 key，
+    增量计量不得与真实内容漂移。
+
+    这是记忆化真正要防的事，identity 断言只是它的机制。评审实测未记忆化时
+    4 实例 × 4 线程 × 400 次同 key put → meta=54000 real=50000（8% 虚高），
+    且漂移只累积不自愈；虚高越过 size_limit 后，下一次 put 会为了满足幻影字节
+    把健康条目**全部**淘汰（实测 entries 8 → 0）并永久停在 0 条。
+
+    "相同内容 → 相同 key → 并发重复 put" 对内容寻址缓存是最典型的场景，不是边角。
+    修复后单锁串行化，本测试确定性绿；变异（去掉记忆化）后转红。
+    """
+    path = str(tmp_path / "shared.db")
+    consumers = [
+        make_cache_backend(Settings(LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=path))
+        for _ in range(4)                    # 生产形态：4 个 LLM client + embedder
+    ]
+    key = "shared-key"
+    errors = []
+
+    def worker(consumer, t):
+        try:
+            for i in range(300):
+                consumer.put(key, f"v{t}-{i}-" + "z" * (t * 11 + i), tag="m")
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [
+        threading.Thread(target=worker, args=(consumers[c], c * 4 + t))
+        for c in range(4) for t in range(4)   # 4 消费者 × 4 线程
+    ]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=120)
+
+    assert not any(th.is_alive() for th in threads), "并发 worker 超时未结束"
+    assert not errors, f"并发操作抛异常：{errors[:3]}"
+    volume, real = consumers[0].volume(), consumers[0].recount()
+    assert volume == real, (
+        f"多消费者并发 put 导致计量漂移：volume()={volume} != recount()={real}。"
+        "漂移只累积不自愈，虚高越过 size_limit 会把整个缓存清空并永久停在 0 条。"
+    )
+
+
 def test_llm_key_is_stable_and_content_addressed():
     msgs = [{"role": "user", "content": "hello"}]
     assert llm_key("m", msgs, "{}") == llm_key("m", msgs, "{}")

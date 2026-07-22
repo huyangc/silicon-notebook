@@ -92,12 +92,23 @@ class SqliteCacheBackend:
                 "  created_at REAL NOT NULL, used_at REAL NOT NULL);"
                 "CREATE INDEX IF NOT EXISTS idx_cache_used ON cache(used_at);"
                 "CREATE INDEX IF NOT EXISTS idx_cache_tag ON cache(tag);"
+                # created_at 上的索引服务于 _sweep_expired 的两次条件扫描，而那条
+                # 路径长在 put() 里（热路径，且在全局锁内）。无索引时实测 63 MB
+                # 上限下最坏单次 put 要 75 ms，线性外推到 2 GiB 默认上限约 2.5 s
+                # ——一次 put 卡住所有并发的 get/put。
+                "CREATE INDEX IF NOT EXISTS idx_cache_created ON cache(created_at);"
                 "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);"
                 "INSERT OR IGNORE INTO meta(k, v) VALUES ('total_bytes', 0);"
             )
         # 进程内命中计数（不落盘：重启归零即可，用于观察当前进程的缓存效用）。
         self._hits = 0
         self._misses = 0
+        # 启动即校准 total_bytes。增量计量会被**进程崩溃**（写了 cache 行还没写
+        # meta 就被 SIGKILL）打漂，而漂移只累积不自愈，虚高到越过 size_limit 就会
+        # 触发"为满足幻影字节把健康条目全删光"。代价是一条 SELECT SUM(size)，每个
+        # 进程只付一次；作为对照，此前 recount() 在 app/ 与 scripts/ 下零调用方，
+        # 文档声称的"漂移兜底"实际并不存在。
+        self.recount()
 
     def _new_connection(self) -> _Conn:
         conn = sqlite3.connect(
