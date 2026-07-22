@@ -420,15 +420,24 @@ def run_ingest(
     # 过那一步,不证明跑完了。崩在 elements 已写、chunks 未建之间的源就是这样——按
     # 「有 element 即完成」会永远跳过它,而收尾的 backfill_chunk_embeddings 只嵌入
     # **已存在**的 chunk,一个 chunk 都没有的源它救不回来。
-    # 「已完成」= 管线终态 ∪ 有 chunks。两者都不可少:
-    #   · 终态(extracted/metadata-only)兜住零 element 的成功 parse(扫描版 PDF)。
-    #   · 有 chunks 兜住「parse+分块都成功、下游 KG 抽取抛错」——管线外层 except 会把
-    #     整源记成 parse_status='failed',只按状态判会每次都把有效产物清掉重来,
-    #     LLM 一直不可用就一直不收敛。
-    # 刻意**不**用「有 element」:那是管线中段产物,崩在 elements 已写、chunks 未建
-    # 之间的源有 element 却零 chunk,按它判会被永远跳过、而收尾只嵌入已存在的 chunk。
-    done = (repo.maintenance.sources_with_completed_parse(notebook_id)
-            | repo.maintenance.sources_with_chunks(notebook_id))
+    # 「已完成」= 有 chunks ∪ (管线终态 ∩ 没有 elements)。
+    #
+    # 这个式子是六种情形逼出来的,单看任何一个信号都会漏或误:
+    #   ① elements 已写、未分块就崩   → 无 chunk、非终态       → 要重跑
+    #   ② parse+分块成功、KG 抽取抛错 → 有 chunk               → 不重跑(外层 except 会
+    #      把整源记成 failed,只按状态判就会每次清掉有效产物重来,LLM 一直挂就一直不收敛)
+    #   ③ parse 本身失败              → 无 chunk、非终态       → 要重跑
+    #   ④ 扫描版 PDF 零 element 成功  → 无 chunk,但终态且无 el → 不重跑
+    #   ⑤ metadata-only 导入          → 同 ④                   → 不重跑
+    #   ⑥ 分块失败但仍置 extracted    → 无 chunk、终态、有 el   → 要重跑
+    #      (source_ingestion 把分块包在 best-effort try 里,失败不阻塞流水线,所以
+    #       「终态」并不能证明分块成功——这是 ④ 与 ⑥ 必须靠 elements 才分得开的原因)
+    #
+    # 刻意**不**把「有 element」直接算完成:那是管线中段产物,①⑥ 都有 element 却零 chunk。
+    mnt = repo.maintenance
+    done = (mnt.sources_with_chunks(notebook_id)
+            | (mnt.sources_with_completed_parse(notebook_id)
+               - mnt.sources_with_elements(notebook_id)))
     # 可能正被别的进程处理的源(服务端在跑、或另一个批处理)。process_source 没有
     # source 级单飞守卫且会 clear/replace 抽取态,两边同时跑会互相覆盖——离线 CLI
     # 不该碰服务端进行中的行,与崩溃兜底只在服务端跑是同一条原则。
