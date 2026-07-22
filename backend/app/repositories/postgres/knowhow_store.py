@@ -1,0 +1,1414 @@
+from __future__ import annotations
+
+from typing import Callable, Sequence
+
+from app.repositories.postgres._store_utils import (
+    iso_timestamp,
+    normalized_clock,
+)
+from app.repositories.postgres.database import PostgresDatabase
+
+
+JS_TRIM_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_PG_TRIM_CHARS = " || ".join(
+    f"chr({ord(character)})" for character in JS_TRIM_WHITESPACE
+)
+
+
+def js_trim(value: str | None) -> str:
+    return (value or "").strip(JS_TRIM_WHITESPACE)
+
+
+def postgres_js_trim_expression(value_sql: str) -> str:
+    return f"btrim({value_sql}, {_PG_TRIM_CHARS})"
+
+
+def _compat_row(row, *timestamp_columns: str) -> dict:
+    value = dict(row)
+    for column in timestamp_columns:
+        if column in value:
+            value[column] = iso_timestamp(value[column])
+    return value
+
+
+#: Legal ``knowhow_columns.role`` values post-migration-17 (design doc §①
+#: "角色词表(2026-07-15 修订)": domain-neutral behavior kinds replacing the
+#: PR-1 time-series-fixup-instance vocabulary; the migration remaps stored
+#: legacy values). ``anchor`` marks "this column is the row-title column".
+VALID_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
+#: The content kinds a per-column mutation (``add_knowhow_column`` /
+#: ``set_knowhow_column_kind``) may write. ``anchor`` is deliberately absent:
+#: post-creation it is a TABLE-level designation ("which column is the row
+#: title"), written only by ``set_knowhow_anchor_column`` so the at-most-one
+#: invariant has a single enforcement point. ``create_knowhow_table`` is the
+#: one exception — its initial column list may name the anchor inline (it
+#: validates the at-most-one rule itself).
+_NON_ANCHOR_KINDS = frozenset({"procedure", "entity", "attribute"})
+
+class KnowhowStore:
+    """PostgreSQL row persistence for knowhow tables, assets, and code.
+
+    Row-level only — column-kind-driven KG/chunk projection lives in the
+    projector service; the import/table and editing APIs live in the routes
+    layer. Downstream services depend on these exact names and signatures.
+
+    ``mutation_seq`` is a monotonic per-table counter (NOT a timestamp — see
+    the project's existing ``kg_mutation_seq`` convention) that the projector
+    reads to detect "has this table changed since I last projected it".
+    ``update_knowhow_cell`` bumps it as part of its one write transaction;
+    ``bump_knowhow_mutation_seq`` is also exposed standalone for callers (the
+    projector, bulk-import) that need to bump it at a point of their own
+    choosing without an accompanying cell write. The structural editing
+    methods added in PR-2+3 Task 1 (add/rename/delete column, delete row,
+    set-anchor, table-meta) deliberately do NOT bump it themselves — that
+    stays the projector's job each time it actually re-projects the table
+    (design doc §④: "每次投影 bump 表 mutation_seq"), not every store-level
+    mutation.
+    """
+
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        new_id: Callable[[str], str],
+        now: Callable[[], str],
+    ) -> None:
+        self.database = database
+        self.new_id = new_id
+        self.now = normalized_clock(now)
+
+    @staticmethod
+    def _lock_table(db, table_id: str) -> None:
+        row = db.execute(
+            "SELECT id FROM knowhow_tables WHERE id=%s FOR UPDATE", (table_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(table_id)
+
+    @classmethod
+    def _lock_table_for_row(cls, db, row_id: str) -> str:
+        row = db.execute(
+            "SELECT table_id FROM knowhow_rows WHERE id=%s", (row_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(row_id)
+        table_id = str(row["table_id"])
+        cls._lock_table(db, table_id)
+        return table_id
+
+    # ------------------------------------------------------------- tables
+    def create_knowhow_table(
+        self,
+        notebook_id: str,
+        title: str,
+        description: str,
+        columns: list[dict],
+        created_by: str = "",
+    ) -> str:
+        """Create a table + its column definitions (position = list order).
+
+        Validates: a non-empty (whitespace-stripped) title; every column name
+        is non-empty and unique; every column's ``role`` is one of
+        ``VALID_KINDS``; and AT MOST ONE column carries the ``anchor`` kind
+        (design doc §① "主题列可选(0..1)" — relaxed from PR-1's "exactly one
+        concept column": a table with zero anchor columns is a legitimate
+        "记录型" table that only participates in retrieval, never the KG).
+        Violations raise ``ValueError`` with a Chinese-friendly message —
+        nothing is written on failure. The stored title is the stripped form.
+        """
+        title = str(title or "").strip()
+        if not title:
+            raise ValueError("表标题不能为空")
+        names = [str(column.get("name", "")).strip() for column in columns]
+        if any(not name for name in names):
+            raise ValueError("列名不能为空")
+        if len(names) != len(set(names)):
+            raise ValueError("列名不能重复")
+        kinds = [column.get("role") or "attribute" for column in columns]
+        for kind in kinds:
+            if kind not in VALID_KINDS:
+                raise ValueError(f"非法的列类型：{kind}")
+        anchor_count = sum(1 for kind in kinds if kind == "anchor")
+        if anchor_count > 1:
+            raise ValueError("至多一列可设为行标题列")
+
+        table_id = self.new_id("khtbl")
+        now = self.now()
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO knowhow_tables "
+                "(id, notebook_id, title, description, created_by, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (table_id, notebook_id, title, description or "", created_by or "", now, now),
+            )
+            for position, column in enumerate(columns):
+                db.execute(
+                    "INSERT INTO knowhow_columns (id, table_id, name, role, position) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        self.new_id("khcol"),
+                        table_id,
+                        names[position],
+                        kinds[position],
+                        position,
+                    ),
+                )
+        return table_id
+
+    def update_knowhow_table_meta(
+        self,
+        table_id: str,
+        title: "str | None" = None,
+        description: "str | None" = None,
+    ) -> None:
+        """Patch title and/or description in place (each ``None`` argument
+        leaves that field untouched — the editing API's PATCH semantics for
+        an omitted field). A non-``None`` title is validated the same way
+        ``create_knowhow_table`` validates its own title (non-empty after
+        stripping), raising the same ``ValueError`` message. A ``None``
+        description is left alone (there is no "clear description" case
+        distinct from passing ``""`` explicitly, unlike title which can never
+        legally become empty). Silent no-op if the table is already gone
+        (this codebase's zero-row UPDATE convention)."""
+        sets: list[str] = []
+        params: list[str] = []
+        if title is not None:
+            title = str(title).strip()
+            if not title:
+                raise ValueError("表标题不能为空")
+            sets.append("title = %s")
+            params.append(title)
+        if description is not None:
+            sets.append("description = %s")
+            params.append(description)
+        if not sets:
+            return
+        sets.append("updated_at = %s")
+        params.append(self.now())
+        params.append(table_id)
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT id FROM knowhow_tables WHERE id=%s FOR UPDATE", (table_id,)
+            ).fetchone()
+            if row is None:
+                return
+            db.execute(
+                f"UPDATE knowhow_tables SET {', '.join(sets)} WHERE id = %s", params
+            )
+
+    # ------------------------------------------------------------ columns
+    def set_knowhow_anchor_column(
+        self, table_id: str, column_id: "str | None"
+    ) -> "str | None":
+        """Designate ``column_id`` as the table's row-title (anchor) column,
+        or clear the designation with ``None``. Returns the PREVIOUS anchor
+        column's id (``None`` if the table had no anchor) so callers can tell
+        whether anything actually moved.
+
+        The single enforcement point for the at-most-one-anchor invariant
+        post-creation: the old anchor (if different) is demoted to
+        ``attribute`` in the same write transaction that promotes the new one
+        — an anchor column carries no content-kind of its own, so demotion
+        cannot restore a "previous" kind (there is none to restore).
+
+        A non-``None`` ``column_id`` must belong to this table, else
+        ``ValueError`` (friendly Chinese) and nothing is written. Clearing on
+        a missing/anchorless table is a silent no-op returning ``None``."""
+        with self.database.write() as db:
+            if db.execute(
+                "SELECT id FROM knowhow_tables WHERE id=%s FOR UPDATE", (table_id,)
+            ).fetchone() is None:
+                return None
+            old_row = db.execute(
+                "SELECT id FROM knowhow_columns WHERE table_id = %s AND role = 'anchor'",
+                (table_id,),
+            ).fetchone()
+            old_id = old_row["id"] if old_row is not None else None
+            if column_id is not None:
+                target = db.execute(
+                    "SELECT table_id FROM knowhow_columns WHERE id = %s", (column_id,)
+                ).fetchone()
+                if target is None or target["table_id"] != table_id:
+                    raise ValueError("指定的列不属于本表")
+            if column_id == old_id:
+                return old_id  # no-op move (incl. None -> None)
+            if old_id is not None:
+                db.execute(
+                    "UPDATE knowhow_columns SET role = 'attribute' WHERE id = %s",
+                    (old_id,),
+                )
+            if column_id is not None:
+                db.execute(
+                    "UPDATE knowhow_columns SET role = 'anchor' WHERE id = %s",
+                    (column_id,),
+                )
+            db.execute(
+                "UPDATE knowhow_tables SET updated_at = %s WHERE id = %s",
+                (self.now(), table_id),
+            )
+        return old_id
+
+    def add_knowhow_column(
+        self, table_id: str, name: str, kind: str, position: "int | None" = None
+    ) -> str:
+        """Append a column (default position = MAX(position)+1 — NOT the
+        column count: ``delete_knowhow_column`` leaves position gaps, and a
+        COUNT-based default would collide with a surviving higher position).
+        ``kind`` must be a content kind (``_NON_ANCHOR_KINDS``); the anchor
+        designation only moves via ``set_knowhow_anchor_column``. The name is
+        validated like ``create_knowhow_table``'s (non-empty, unique within
+        the table). Existing rows get NO backfilled cells — cells are sparse
+        by contract (see ``get_knowhow_table``). Raises ``KeyError`` for a
+        missing table."""
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("列名不能为空")
+        if kind == "anchor":
+            raise ValueError("行标题列请通过表设置指定，不能作为列类型添加")
+        if kind not in _NON_ANCHOR_KINDS:
+            raise ValueError(f"非法的列类型：{kind}")
+        column_id = self.new_id("khcol")
+        with self.database.write() as db:
+            self._lock_table(db, table_id)
+            duplicate = db.execute(
+                "SELECT 1 FROM knowhow_columns WHERE table_id = %s AND name = %s",
+                (table_id, name),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("列名不能重复")
+            if position is None:
+                max_row = db.execute(
+                    "SELECT COALESCE(MAX(position) + 1, 0) AS p FROM knowhow_columns "
+                    "WHERE table_id = %s",
+                    (table_id,),
+                ).fetchone()
+                position = max_row["p"]
+            db.execute(
+                "INSERT INTO knowhow_columns (id, table_id, name, role, position) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (column_id, table_id, name, kind, position),
+            )
+        return column_id
+
+    def rename_knowhow_column(self, column_id: str, name: str) -> None:
+        """Rename one column (stored stripped). Raises ``KeyError`` for a
+        missing column; ``ValueError`` for a blank name or a name already
+        used by a SIBLING column (renaming to its own current name is a
+        silent success, not a duplicate)."""
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("列名不能为空")
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT table_id FROM knowhow_columns WHERE id = %s", (column_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(column_id)
+            self._lock_table(db, str(row["table_id"]))
+            duplicate = db.execute(
+                "SELECT 1 FROM knowhow_columns WHERE table_id = %s AND name = %s AND id != %s",
+                (row["table_id"], name, column_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("列名不能重复")
+            db.execute(
+                "UPDATE knowhow_columns SET name = %s WHERE id = %s", (name, column_id)
+            )
+
+    def set_knowhow_column_kind(self, column_id: str, kind: str) -> None:
+        """Change one column's content kind. ``anchor`` is rejected here —
+        the anchor designation is table-level state with its own setter
+        (``set_knowhow_anchor_column``), which is also the only way a column
+        currently marked ``anchor`` legitimately changes kind (clearing or
+        moving the anchor demotes it to ``attribute``). Raises ``KeyError``
+        for a missing column."""
+        if kind == "anchor":
+            raise ValueError("行标题列请通过表设置指定，不能作为列类型修改")
+        if kind not in _NON_ANCHOR_KINDS:
+            raise ValueError(f"非法的列类型：{kind}")
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT table_id FROM knowhow_columns WHERE id = %s", (column_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(column_id)
+            self._lock_table(db, str(row["table_id"]))
+            db.execute(
+                "UPDATE knowhow_columns SET role = %s WHERE id = %s", (kind, column_id)
+            )
+
+    def delete_knowhow_column(self, column_id: str) -> None:
+        """Delete a column; its cells and cell-code attachments go with it
+        (both child foreign keys use ``ON DELETE CASCADE``).
+        Deleting the anchor column simply leaves the table anchorless — a
+        legal state (see ``create_knowhow_table``). Silent no-op when already
+        gone. Remaining positions are NOT renumbered (ordering reads sort by
+        position and tolerate gaps)."""
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT table_id FROM knowhow_columns WHERE id=%s", (column_id,)
+            ).fetchone()
+            if row is not None:
+                self._lock_table(db, str(row["table_id"]))
+            db.execute("DELETE FROM knowhow_columns WHERE id = %s", (column_id,))
+
+    def knowhow_table_health_inputs(self, notebook_id: str) -> list[dict]:
+        with self.database.connect() as db:
+            tables = db.execute(
+                "SELECT id,notebook_id,title,description,created_at,updated_at,"
+                "mutation_seq,hidden_source_id,created_by "
+                "FROM knowhow_tables WHERE notebook_id=%s "
+                "ORDER BY created_at,id COLLATE \"C\"",
+                (notebook_id,),
+            ).fetchall()
+            table_ids = [row["id"] for row in tables]
+            row_stats = {}
+            cell_activity = {}
+            code_inputs = {table_id: [] for table_id in table_ids}
+            if table_ids:
+                placeholders = ",".join("%s" for _ in table_ids)
+                row_stats = {
+                    row["table_id"]: _compat_row(row, "row_activity_at")
+                    for row in db.execute(
+                        "SELECT table_id,COUNT(*) AS row_count,"
+                        "COALESCE(SUM(CASE WHEN projection_status IN ('pending','syncing') "
+                        "THEN 1 ELSE 0 END),0) "
+                        "AS projection_pending,"
+                        "COALESCE(SUM(CASE WHEN projection_status='failed' THEN 1 ELSE 0 END),0) "
+                        "AS projection_failed,MAX(updated_at) AS row_activity_at "
+                        f"FROM knowhow_rows WHERE table_id IN ({placeholders}) GROUP BY table_id",
+                        table_ids,
+                    ).fetchall()
+                }
+                cell_activity = {
+                    row["table_id"]: iso_timestamp(row["cell_activity_at"])
+                    for row in db.execute(
+                        "SELECT r.table_id,MAX(c.updated_at) AS cell_activity_at "
+                        "FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id "
+                        f"WHERE r.table_id IN ({placeholders}) GROUP BY r.table_id",
+                        table_ids,
+                    ).fetchall()
+                }
+                for row in db.execute(
+                    "SELECT r.table_id,cc.cell_content_hash AS saved_hash,"
+                    "COALESCE(c.content_md,'') AS current_content_md,cc.updated_at "
+                    "FROM knowhow_cell_code cc "
+                    "JOIN knowhow_rows r ON r.id=cc.row_id "
+                    "LEFT JOIN knowhow_cells c "
+                    "ON c.row_id=cc.row_id AND c.column_id=cc.column_id "
+                    f"WHERE r.table_id IN ({placeholders})",
+                    table_ids,
+                ).fetchall():
+                    code_inputs[row["table_id"]].append(
+                        _compat_row(row, "updated_at")
+                    )
+        result = []
+        for table in tables:
+            stats = row_stats.get(table["id"], {})
+            result.append({
+                **_compat_row(table, "created_at", "updated_at"),
+                "row_count": int(stats.get("row_count", 0)),
+                "projection_pending": int(stats.get("projection_pending", 0)),
+                "projection_failed": int(stats.get("projection_failed", 0)),
+                "row_activity_at": stats.get("row_activity_at") or "",
+                "cell_activity_at": cell_activity.get(table["id"], ""),
+                "code_inputs": code_inputs[table["id"]],
+            })
+        return result
+
+    def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
+        return self.knowhow_table_health_inputs(notebook_id)
+
+    def get_knowhow_table(self, table_id: str) -> dict:
+        """Full table detail: columns ordered by position, rows ordered by
+        position, each row carrying ``cells: {column_id: content_md}`` (only
+        columns with an actual cell row appear — a never-edited cell is
+        simply absent, not an empty-string placeholder) and
+        ``projection_status``. Raises ``KeyError`` if the table is gone."""
+        with self.database.connect() as db:
+            table_row = db.execute(
+                "SELECT * FROM knowhow_tables WHERE id = %s", (table_id,)
+            ).fetchone()
+            if table_row is None:
+                raise KeyError(table_id)
+            column_rows = db.execute(
+                "SELECT id, name, role, position FROM knowhow_columns "
+                "WHERE table_id = %s ORDER BY position, id COLLATE \"C\"",
+                (table_id,),
+            ).fetchall()
+            row_rows = db.execute(
+                "SELECT id, position, projection_status, created_at, updated_at "
+                "FROM knowhow_rows WHERE table_id = %s "
+                "ORDER BY position, id COLLATE \"C\"",
+                (table_id,),
+            ).fetchall()
+            row_ids = [row["id"] for row in row_rows]
+            cells_by_row: dict[str, dict[str, str]] = {rid: {} for rid in row_ids}
+            if row_ids:
+                placeholders = ",".join("%s" for _ in row_ids)
+                cell_rows = db.execute(
+                    "SELECT row_id, column_id, content_md FROM knowhow_cells "
+                    f"WHERE row_id IN ({placeholders})",
+                    row_ids,
+                ).fetchall()
+                for cell_row in cell_rows:
+                    cells_by_row[cell_row["row_id"]][cell_row["column_id"]] = (
+                        cell_row["content_md"]
+                    )
+        return {
+            "id": table_row["id"],
+            "notebook_id": table_row["notebook_id"],
+            "title": table_row["title"],
+            "description": table_row["description"],
+            "mutation_seq": table_row["mutation_seq"],
+            "hidden_source_id": table_row["hidden_source_id"],
+            "created_by": table_row["created_by"],
+            "created_at": iso_timestamp(table_row["created_at"]),
+            "updated_at": iso_timestamp(table_row["updated_at"]),
+            "columns": [
+                {
+                    "id": column["id"],
+                    "name": column["name"],
+                    "role": column["role"],
+                    "position": column["position"],
+                }
+                for column in column_rows
+            ],
+            "rows": [
+                {
+                    "id": row["id"],
+                    "position": row["position"],
+                    "projection_status": row["projection_status"],
+                    "created_at": iso_timestamp(row["created_at"]),
+                    "updated_at": iso_timestamp(row["updated_at"]),
+                    "cells": cells_by_row[row["id"]],
+                }
+                for row in row_rows
+            ],
+        }
+
+    def table_exists(self, table_id: str) -> bool:
+        """Cheap existence probe (a single ``SELECT 1``, not the full
+        columns/rows/cells hydration ``get_knowhow_table`` does) — for a
+        caller that only needs to know whether the row is still there, e.g.
+        ``KnowhowProjector.project_table``'s pre-terminal-write re-check
+        guarding against a concurrent ``delete_knowhow_table`` (a move or a
+        plain delete) landing mid-pass."""
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM knowhow_tables WHERE id = %s", (table_id,)
+            ).fetchone() is not None
+
+    @staticmethod
+    def table_exists_tx(connection: object, table_id: str) -> bool:
+        """Same probe as ``table_exists``, but against a caller-supplied
+        connection instead of opening its own ``database.connect()`` —
+        mirrors ``KnowledgeStore``'s tx-scoped statics (e.g.
+        ``delete_relations_by_source``). For a caller that must check-then-
+        write atomically inside its OWN ``database.write()`` block, so the
+        check and the write share one lock-held transaction with no gap a
+        concurrent delete could land in.
+
+        PR review round 2 P1-1: ``project_table``'s terminal existence guard
+        used to call ``table_exists``/``source_exists`` BEFORE opening its
+        ``database.write()`` block — a real check-then-act gap (a concurrent
+        move's ``delete_knowhow_table`` could land between the check
+        returning True and the write lock being acquired, letting the
+        terminal write commit an orphan the guard existed to prevent). Moving
+        the check to run on the write block's own connection, as the first
+        thing inside it, closes that gap: the whole block holds
+        ``database.write_lock`` continuously, so a concurrent delete (which
+        needs its own ``write()``) cannot land inside the window at all —
+        it either fully lands before this block starts (check correctly
+        observes "gone") or blocks until this block finishes."""
+        return connection.execute(
+            "SELECT 1 FROM knowhow_tables WHERE id = %s", (table_id,)
+        ).fetchone() is not None
+
+    def delete_knowhow_table(self, table_id: str) -> dict:
+        """Cascade-delete a table through its ``ON DELETE CASCADE`` FKs.
+
+        Returns the table's ``hidden_source_id`` (may be
+        ``None``) so the caller can clean up its projection. Deleting an
+        already-gone table is a silent no-op returning ``{"hidden_source_id":
+        None}`` — mirrors this codebase's zero-row UPDATE/DELETE convention."""
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT hidden_source_id FROM knowhow_tables WHERE id = %s",
+                (table_id,),
+            ).fetchone()
+            hidden_source_id = row["hidden_source_id"] if row is not None else None
+            db.execute("DELETE FROM knowhow_tables WHERE id = %s", (table_id,))
+        return {"hidden_source_id": hidden_source_id}
+
+    def set_knowhow_hidden_source(
+        self,
+        table_id: str,
+        source_id: str,
+        *,
+        connection: "object | None" = None,
+    ) -> None:
+        """Attach ``source_id`` as ``table_id``'s hidden source.
+
+        PR review round 7 P2-A: pass ``connection`` to join a caller-owned
+        write transaction — mirrors ``SourceStore.insert_source``'s/
+        ``update_file_hash``'s own ``connection=`` idiom exactly (build the
+        statement/params once, execute directly on the caller's connection
+        if given, otherwise open this method's own ``write()``). Without a
+        connection, the update commits in its own transaction; ``Knowhow
+        Projector.ensure_hidden_source`` passes the SAME connection it used
+        to insert the ``sources`` row a moment earlier, so creation and
+        attachment land in ONE transaction — see that method's own
+        docstring for why the two used to be separate and what that gap
+        could leak.
+
+        PR review round 8 P1-A: on the ``connection=`` path, raises
+        ``KeyError(table_id)`` if the UPDATE's ``rowcount`` is 0 — i.e.
+        ``table_id`` no longer exists. Round 7 made the sibling
+        ``insert_source`` call and this UPDATE atomic (one transaction),
+        but atomicity alone doesn't stop either statement from succeeding
+        on its own terms: a zero-row UPDATE is not an error, so
+        without this check, a concurrent full delete landing between
+        ``ensure_hidden_source``'s existence check and this transaction
+        actually acquiring the write lock would let ``insert_source``'s
+        INSERT commit anyway — an unreferenced, permanently orphaned
+        ``source_type='knowhow'`` row, born AFTER the move's one-shot
+        orphan sweep already ran (so nothing will ever clean it up; see
+        ``KnowhowProjector.ensure_hidden_source``'s own docstring for the
+        full race). Raising here rolls back the WHOLE caller-owned
+        transaction — the ``with conn:`` both calls share rolls back on any
+        exception — so ``insert_source``'s INSERT is undone too; no source
+        row survives.
+
+        Deliberately scoped to the ``connection=`` path only. The public,
+        no-connection form below keeps its original silently-tolerant
+        zero-row behavior verbatim — this codebase's default zero-row
+        UPDATE/DELETE convention — for its OTHER callers (grepped:
+        ``test_knowhow_store.py``'s three direct calls all target a table
+        that still exists at call time; nothing exercises, or depends on,
+        the old tolerant behavior for an already-gone ``table_id``), so
+        this new invariant applies exactly where it was found missing and
+        nowhere else."""
+        statement = (
+            "UPDATE knowhow_tables SET hidden_source_id = %s, updated_at = %s "
+            "WHERE id = %s"
+        )
+        values = (source_id, self.now(), table_id)
+        if connection is not None:
+            cursor = connection.execute(statement, values)
+            if cursor.rowcount == 0:
+                raise KeyError(table_id)
+            return
+        with self.database.write() as db:
+            db.execute(statement, values)
+
+    def bump_knowhow_mutation_seq(self, table_id: str) -> int:
+        """Increment and return the table's monotonic ``mutation_seq``.
+        Raises ``KeyError`` if the table does not exist."""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = %s",
+                (table_id,),
+            )
+            row = db.execute(
+                "SELECT mutation_seq FROM knowhow_tables WHERE id = %s", (table_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(table_id)
+        return row["mutation_seq"]
+
+    # --------------------------------------------------------------- rows
+    def add_knowhow_row(
+        self, table_id: str, cells: dict[str, str], position: int | None = None
+    ) -> str:
+        """Insert a row (default position = current row count, i.e.
+        append) plus any provided cells, in one write transaction.
+        ``projection_status`` starts at its schema default (``'pending'``).
+        Does not bump the table's ``mutation_seq`` — callers doing bulk
+        inserts (Task 6's import) bump once at the end via
+        ``bump_knowhow_mutation_seq``."""
+        row_id = self.new_id("khrow")
+        now = self.now()
+        with self.database.write() as db:
+            self._lock_table(db, table_id)
+            if position is None:
+                count_row = db.execute(
+                    "SELECT COUNT(*) AS n FROM knowhow_rows WHERE table_id = %s",
+                    (table_id,),
+                ).fetchone()
+                position = count_row["n"]
+            db.execute(
+                "INSERT INTO knowhow_rows (id, table_id, position, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (row_id, table_id, position, now, now),
+            )
+            for column_id, content_md in (cells or {}).items():
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+        return row_id
+
+    def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE knowhow_rows SET projection_status = %s WHERE id = %s",
+                (status, row_id),
+            )
+
+    def set_knowhow_row_projection_if_table_seq(
+        self, row_id: str, status: str, expected_mutation_seq: int
+    ) -> bool:
+        """Publish a projection status only for the table version that ran.
+
+        Cell/row/column mutations bump ``knowhow_tables.mutation_seq`` and mark
+        affected rows pending. A background projection working from an older
+        hydrated table snapshot must not overwrite that newer pending marker
+        while its scheduler rerun is still queued. The version predicate and
+        status update share one write transaction, closing the check/write
+        race; ``False`` means the caller's snapshot is stale or the row/table
+        was deleted.
+        """
+        with self.database.write() as db:
+            locked = db.execute(
+                "SELECT t.id FROM knowhow_rows r JOIN knowhow_tables t "
+                "ON t.id=r.table_id WHERE r.id=%s FOR UPDATE OF t",
+                (row_id,),
+            ).fetchone()
+            if locked is None:
+                return False
+            cursor = db.execute(
+                "UPDATE knowhow_rows SET projection_status = %s "
+                "WHERE id = %s AND EXISTS ("
+                "SELECT 1 FROM knowhow_tables t "
+                "WHERE t.id = knowhow_rows.table_id AND t.mutation_seq = %s)",
+                (status, row_id, expected_mutation_seq),
+            )
+        return cursor.rowcount > 0
+
+    def delete_knowhow_row(self, row_id: str) -> None:
+        """Delete a row; its cells and cell-code attachments go with it
+        (``knowhow_cells.row_id`` and ``knowhow_cell_code.row_id`` are both
+        ``ON DELETE CASCADE`` onto knowhow_rows). Silent no-op when already
+        gone. Surviving rows' positions are NOT renumbered (ordering reads
+        sort by position and tolerate gaps)."""
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT table_id FROM knowhow_rows WHERE id=%s", (row_id,)
+            ).fetchone()
+            if row is not None:
+                self._lock_table(db, str(row["table_id"]))
+            db.execute("DELETE FROM knowhow_rows WHERE id = %s", (row_id,))
+
+    # -------------------------------------------------------------- cells
+    def _require_assets_exist(
+        self, db, row_id: str, require_assets: Sequence[str]
+    ) -> None:
+        """Assert every id in ``require_assets`` is a live ``notebook_assets``
+        row **of the notebook this cell belongs to**, else ``ValueError``. Takes
+        the CALLER's open write connection on purpose — see
+        ``update_knowhow_cell``.
+
+        Scoped to the cell's own notebook, not global: the asset endpoint serves
+        a file only when its ``notebook_id`` matches the requesting notebook, so
+        a reference to some OTHER notebook's asset saves fine and then renders as
+        a permanently broken image — exactly the dead link this check exists to
+        refuse. That is reachable without any malice: copying a cell's markdown
+        from one notebook and pasting it into another carries the ``asset://``
+        ids along. Scoping also keeps the check from answering "does this id
+        exist somewhere in the database" for ids the caller cannot otherwise
+        see."""
+        if not require_assets:
+            return  # keep the common path free of the notebook lookup
+        owner = db.execute(
+            "SELECT t.notebook_id AS notebook_id FROM knowhow_rows r "
+            "JOIN knowhow_tables t ON t.id = r.table_id WHERE r.id = %s",
+            (row_id,),
+        ).fetchone()
+        if owner is None:
+            raise ValueError(f"row {row_id} does not exist")
+        for asset_id in require_assets:
+            row = db.execute(
+                "SELECT 1 FROM notebook_assets WHERE id = %s AND notebook_id = %s LIMIT 1",
+                (asset_id, owner["notebook_id"]),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"asset {asset_id} is not available here")
+
+    def update_knowhow_cell(
+        self,
+        row_id: str,
+        column_id: str,
+        content_md: str,
+        require_assets: Sequence[str] = (),
+    ) -> None:
+        """Upsert one cell's content. One write transaction: the cell
+        (insert or update-in-place via the ``UNIQUE(row_id, column_id)``
+        conflict target), the row's ``updated_at`` + ``projection_status`` ->
+        ``'pending'``, and the owning table's ``mutation_seq`` += 1 (table_id
+        resolved from the row — the public signature has no table_id).
+
+        ``require_assets`` names asset ids the new content references and that
+        must still exist at COMMIT time (``ValueError`` and a full rollback
+        otherwise). The check runs inside this transaction rather than in the
+        caller because the orphan-asset sweeper deletes rows concurrently: a
+        caller that verified existence first would be reading state that the
+        sweeper can invalidate before this write lands, committing a live cell
+        reference to a deleted asset. Both sides now decide under the same
+        write lock, so one of them always loses cleanly — the sweeper's own
+        re-check sees the new reference and spares the asset, or this write
+        sees the deletion and refuses."""
+        now = self.now()
+        with self.database.write() as db:
+            self._lock_table_for_row(db, row_id)
+            self._require_assets_exist(db, row_id, require_assets)
+            db.execute(
+                "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                (self.new_id("khcel"), row_id, column_id, content_md, now),
+            )
+            db.execute(
+                "UPDATE knowhow_rows SET updated_at = %s, projection_status = 'pending' "
+                "WHERE id = %s",
+                (now, row_id),
+            )
+            db.execute(
+                "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 "
+                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = %s)",
+                (row_id,),
+            )
+
+    def update_knowhow_cells(
+        self,
+        row_ids: list[str],
+        column_id: str,
+        content_md: str,
+        require_assets: Sequence[str] = (),
+    ) -> None:
+        """Batch upsert the SAME (column, content) across MULTIPLE rows in
+        ONE write transaction — the merged-cell "write the whole concept
+        group" case (anchor-grouping spec §6, followup A): editing a shared
+        cell must write every branch row or none, never half. Each row gets
+        the identical per-row effect ``update_knowhow_cell`` gives one row
+        (cell upsert via the same ``ON CONFLICT(row_id, column_id)`` target +
+        that row's ``updated_at``/``projection_status`` -> ``'pending'``),
+        but the owning table's ``mutation_seq`` bumps only ONCE for the whole
+        batch (not once per row) since this is a single logical edit —
+        table_id is resolved from row_ids[0] (any row in the batch works;
+        callers guarantee same-table membership, exactly like
+        ``update_knowhow_cell`` takes no table_id argument and trusts its
+        one row). Empty ``row_ids`` is a no-op: no transaction opened, no
+        mutation_seq bump. All-or-nothing by construction — everything runs
+        inside a single ``with self.database.write() as db:`` block, so any
+        failure partway through (e.g. a row_id that doesn't exist, tripping
+        the ``knowhow_cells.row_id`` FK) rolls back every write already made
+        in this call, including earlier rows already looped over.
+
+        ``require_assets`` behaves exactly as in ``update_knowhow_cell`` and
+        is checked once for the whole batch (every row receives the same
+        ``content_md``, so they reference the same assets); a missing asset
+        rolls back the entire batch, preserving all-or-nothing."""
+        if not row_ids:
+            return
+        now = self.now()
+        with self.database.write() as db:
+            self._lock_table_for_row(db, row_ids[0])
+            # row_ids share a table (documented above), so any of them resolves
+            # the same notebook.
+            self._require_assets_exist(db, row_ids[0], require_assets)
+            for row_id in row_ids:
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = %s, projection_status = 'pending' "
+                    "WHERE id = %s",
+                    (now, row_id),
+                )
+            db.execute(
+                "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 "
+                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = %s)",
+                (row_ids[0],),
+            )
+
+    def update_knowhow_cells_bulk_guarded(
+        self, notebook_id: str, updates: list[tuple[str, str, str, str, str]]
+    ) -> "dict[str, list[tuple[str, str]]]":
+        """Compare-and-write bulk cell writer for
+        ``scripts/backfill_knowhow_md.py``'s ``--apply`` paths (TOCTOU +
+        membership fix). Each update is ``(table_id, row_id, column_id,
+        expected_before, content_md)`` and ``notebook_id`` is the notebook the
+        caller claims every entry belongs to. INSIDE ONE write transaction, for
+        every update this:
+
+        1. VALIDATES MEMBERSHIP (F2): joins the row and the column to their
+           owning table and verifies ``row.table_id == column.table_id ==
+           table_id`` (the id the caller claims for this entry) AND that table
+           belongs to ``notebook_id``. An entry that fails -- ids belonging to
+           another notebook/table, a cross-table (row, column) pair, or a
+           nonexistent row/column/table -- is collected as REJECTED and left
+           byte-for-byte untouched. This closes the hole where the method
+           trusted caller-supplied ids: an entry whose (row, column) lived in a
+           DIFFERENT notebook/table passed the ``before`` compare below and
+           silently overwrote a foreign cell while bumping the CALLER's table.
+           The membership read shares this write transaction, so it cannot race
+           a concurrent table move.
+
+        2. RE-READS the target cell's CURRENT ``content_md`` and writes
+           ``content_md`` ONLY when the stored value still equals
+           ``expected_before``; an update whose cell no longer matches (a live
+           backend user edited it after the plan was reviewed, or the row was
+           deleted so the current value is ``None``) is collected as SKIPPED and
+           left untouched. Neither a skip nor a reject ever aborts the
+           transaction.
+
+        Doing the compare INSIDE the same write transaction that performs the
+        write is the whole point. The CLI used to read the current cells, compare
+        against each plan entry's ``before``, THEN call the plain bulk write in a
+        SEPARATE step: a cell edited BETWEEN that read and the write passed the
+        now-stale comparison and got overwritten on top of the live edit,
+        violating the documented "post-review edits are skipped" guarantee.
+        Re-reading under the write lock closes that window -- the compare and the
+        write see the same committed state, so a cell that moved after the read
+        is refused rather than clobbered.
+
+        A written cell gets the exact per-row effect ``update_knowhow_cell``
+        gives (cell upsert via the same
+        ``ON CONFLICT(row_id, column_id)`` target + that row's ``updated_at`` /
+        ``projection_status`` -> ``'pending'``), and every DISTINCT table with at
+        least one actual write bumps its ``mutation_seq`` exactly once -- a table
+        whose updates were ALL skipped/rejected does not bump (nothing in it
+        changed). Empty ``updates`` is a no-op (no transaction opened).
+
+        Returns ``{"written": [...], "skipped": [...], "already_applied": [...],
+        "rejected": [...]}`` (each a list of ``(row_id, column_id)`` in first-seen
+        order), so the CLI reports each outcome from THIS transaction's own result
+        rather than a separate pre-read. F4: a cell whose CURRENT content already
+        equals the update's ``content_md`` (the AFTER) -- a PRIOR apply committed
+        the write but its separate reprojection step never completed (it threw, or
+        the process exited), leaving the row 'pending'/'failed' -- is reported in
+        the DISTINCT ``already_applied`` bucket, NOT lumped with genuine
+        moved-target ``skipped`` (current != before AND != after). The CLI
+        reprojects tables with written OR already_applied rows (reprojection is
+        idempotent), so a rerun of the same plan recovers such stuck rows even
+        though it writes nothing. Both buckets leave the cell untouched and bump
+        no ``mutation_seq``."""
+        if not updates:
+            return {"written": [], "skipped": [], "already_applied": [], "rejected": []}
+        now = self.now()
+        written: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+        already_applied: list[tuple[str, str]] = []
+        rejected: list[tuple[str, str]] = []
+        written_table_ids: list[str] = []
+        with self.database.write() as db:
+            # Lock every aggregate table before the phase-1 compare. This
+            # serializes guarded edits from other processes before any write.
+            for table_id in sorted({update[0] for update in updates}):
+                try:
+                    self._lock_table(db, table_id)
+                except KeyError:
+                    pass
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                # F2: membership -- row and column must both belong to the SAME
+                # table the caller claims, and that table must belong to the
+                # expected notebook. A missing row/column/table yields no join
+                # row and is likewise rejected.
+                membership = db.execute(
+                    "SELECT r.table_id AS row_table, c.table_id AS col_table, "
+                    "t.notebook_id AS tbl_notebook "
+                    "FROM knowhow_rows r, knowhow_columns c, knowhow_tables t "
+                    "WHERE r.id = %s AND c.id = %s AND t.id = %s",
+                    (row_id, column_id, table_id),
+                ).fetchone()
+                if (
+                    membership is None
+                    or membership["row_table"] != table_id
+                    or membership["col_table"] != table_id
+                    or membership["tbl_notebook"] != notebook_id
+                ):
+                    rejected.append((row_id, column_id))
+                    continue
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id = %s AND column_id = %s",
+                    (row_id, column_id),
+                ).fetchone()
+                current = current_row["content_md"] if current_row is not None else None
+                if current != expected_before:
+                    # F4: distinguish an ALREADY-APPLIED cell (current == the AFTER
+                    # this update would write -- a prior committed apply, its
+                    # reprojection never finished) from a GENUINE moved target
+                    # (current != before AND != after -- a live edit after review).
+                    # The CLI reprojects already_applied tables (idempotent) but
+                    # not moved ones; both leave the cell untouched.
+                    if current == content_md:
+                        already_applied.append((row_id, column_id))
+                    else:
+                        skipped.append((row_id, column_id))
+                    continue
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = %s, projection_status = 'pending' "
+                    "WHERE id = %s",
+                    (now, row_id),
+                )
+                written.append((row_id, column_id))
+                if table_id not in written_table_ids:
+                    written_table_ids.append(table_id)
+            for table_id in written_table_ids:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = %s",
+                    (table_id,),
+                )
+        return {
+            "written": written,
+            "skipped": skipped,
+            "already_applied": already_applied,
+            "rejected": rejected,
+        }
+
+    def update_knowhow_cells_guarded_atomic(
+        self,
+        notebook_id: str,
+        updates: "list[tuple[str, str, str, str, str]]",
+        require_assets: Sequence[str] = (),
+        anchor_column_id: "str | None" = None,
+        expected_anchor: "Sequence[str] | None" = None,
+    ) -> "dict[str, object]":
+        """ALL-OR-NOTHING compare-and-write for the interactive editor's
+        batch-reformat save (concurrency P1 fix b, HTTP 409 on a concurrent
+        edit). Each update is ``(table_id, row_id, column_id, expected_before,
+        content_md)`` and ``notebook_id`` is the notebook every entry must
+        belong to. Same membership + compare guarantees as
+        ``update_knowhow_cells_bulk_guarded``, but the FAILURE MODE is the
+        opposite: where the bulk-guarded backfill collects skips/rejects and
+        presses on (idempotent CLI re-run), THIS method refuses the WHOLE batch
+        the moment any entry fails membership or its stored ``content_md`` no
+        longer equals ``expected_before``.
+
+        It does so in TWO PHASES inside ONE ``self.database.write()``
+        transaction: phase 1 validates membership and re-reads+compares EVERY
+        target's current content; only if EVERY entry clears does phase 2 write
+        them all (same per-row effect as ``update_knowhow_cell`` — cell upsert +
+        that row's ``updated_at``/``projection_status`` -> ``'pending'`` — plus
+        one ``mutation_seq`` bump per distinct written table). A conflict in
+        phase 1 returns BEFORE any write happens, so the transaction commits with
+        nothing changed — all-or-nothing by construction, no rollback needed. The
+        compare sharing the write transaction is the whole point: reading the
+        cells in a SEPARATE step, comparing, then writing would reopen the TOCTOU
+        window a live edit between the read and the write slips through.
+
+        ``require_assets`` (F2) behaves exactly as in ``update_knowhow_cell``:
+        asset ids the new content references that must still be live
+        ``notebook_assets`` rows OF THIS notebook at COMMIT time. Checked INSIDE
+        this same write transaction (after membership+stale clear, before any
+        write), so the guarded save path gets the identical dangling-asset guard
+        the legacy last-write-wins path already had — a missing/foreign asset
+        raises ``ValueError`` and the transaction commits nothing (the caller maps
+        it to the legacy 400 + CELL_ASSET_MISSING_MESSAGE, distinct from the 409).
+        Sharing the write lock is the same anti-TOCTOU reasoning as the compare.
+
+        ANCHOR BASELINE GUARD (round-4 P1, OPTIONAL): the editor's batch fan-out
+        writes a merged/shared cell to every branch row of an anchor GROUP using
+        row ids FROZEN when the modal opened. If another client moves a sibling
+        row's ANCHOR out of that group but leaves the EDITED cell untouched,
+        ``expected_before`` still matches and membership still holds — the
+        candidate would silently land on a row that no longer belongs to the
+        group. When the caller supplies BOTH ``anchor_column_id`` and
+        ``expected_anchor`` (positionally parallel to ``updates`` —
+        ``expected_anchor[i]`` is ``updates[i]``'s row's snapshot anchor value,
+        exactly as ``expected_before`` parallels ``row_ids``), phase 1 also
+        re-reads each target row's anchor-column cell UNDER THE SAME
+        locked transaction and treats a mismatch as a conflict identical to a
+        stale ``expected_before``: the whole batch is refused before any write
+        (all-or-nothing). Omitting either argument (both default ``None``) skips
+        the anchor guard entirely — byte-identical to the pre-fix behavior, so
+        the single-cell/manual-editor callers that never pass it are unaffected.
+
+        ANCHOR STRUCTURAL GUARD (round-5 P1): the per-row baseline above catches a
+        frozen target that LEFT the group, but not two drifts that leave EVERY
+        frozen row still matching its snapshot: (a) the table's ANCHOR DESIGNATION
+        moved to a different column (guarded cells all still equal their frozen
+        values, but the grouping is now defined by another column); and (b) a NEW
+        row JOINED the group (its anchor cell set to the group's value), making the
+        fan-out cover only a SUBSET of the current logical group. So when the
+        anchor guard is active, before any write and under the same
+        transaction, this method also (1) verifies ``anchor_column_id`` is
+        STILL the table's anchor column (``knowhow_columns.role == 'anchor'``), and
+        (2) checks EXACT membership: for each distinct frozen anchor VALUE, the
+        current member row-id set (rows whose anchor cell ``js_trim`` value equals
+        it, mirroring the frontend ``groupRowsByAnchor`` and queried through the
+        normalized expression index) must EQUAL the frozen target set. Any
+        designation move, joiner, or vanished row refuses
+        the whole batch (nothing written). The server derives membership itself, so
+        no new wire is needed. (The per-row byte-exact baseline stays the value-edit
+        guard; this pair is the structural guard.)
+
+        Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}``.
+        ``conflict=True`` guarantees ``written == []`` (the caller maps it to a
+        409 with a friendly "内容已被其他人修改，请刷新后重试"). Empty ``updates``
+        is a no-op (``{"written": [], "conflict": False}``, no transaction)."""
+        if not updates:
+            return {"written": [], "conflict": False}
+        now = self.now()
+        written: list[tuple[str, str]] = []
+        written_table_ids: list[str] = []
+        with self.database.write() as db:
+            # Lock every aggregate table before phase 1 so compare-and-write
+            # remains atomic across processes.
+            for table_id in sorted({update[0] for update in updates}):
+                try:
+                    self._lock_table(db, table_id)
+                except KeyError:
+                    return {"written": [], "conflict": True}
+            # Anchor baseline guard active only when BOTH inputs are supplied (the
+            # editor's fan-out); omitted -> byte-identical legacy path. See the
+            # docstring's ANCHOR BASELINE GUARD paragraph.
+            anchor_guard = anchor_column_id is not None and expected_anchor is not None
+            if anchor_guard:
+                if len(expected_anchor) != len(updates):
+                    return {"written": [], "conflict": True}
+                # Round-5 P1: the per-row byte-exact anchor re-read in the phase-1
+                # loop below catches a FROZEN target that LEFT the group, but two
+                # STRUCTURAL drifts leave every per-row baseline still matching while
+                # the fan-out has become a partial/misaimed group write. Both are
+                # caught here, under the same transaction, before any write.
+                #
+                # (a) DESIGNATION: anchor_column_id must STILL be the table's anchor
+                # column. The designation is stored as knowhow_columns.role ==
+                # 'anchor' (moved only by set_knowhow_anchor_column); if another
+                # client repointed it to a different column after the snapshot, the
+                # guarded column's cells may all still equal their frozen values
+                # while the logical grouping is now defined by another column
+                # entirely -> refuse the whole batch (nothing written).
+                anchor_col_row = db.execute(
+                    "SELECT table_id, role FROM knowhow_columns WHERE id = %s",
+                    (anchor_column_id,),
+                ).fetchone()
+                if (
+                    anchor_col_row is None
+                    or anchor_col_row["role"] != "anchor"
+                    or any(
+                        update_table_id != anchor_col_row["table_id"]
+                        for update_table_id, _row, _column, _before, _content in updates
+                    )
+                ):
+                    return {"written": [], "conflict": True}
+                anchor_table_id = anchor_col_row["table_id"]
+                # (b) EXACT MEMBERSHIP: for each DISTINCT frozen anchor VALUE among
+                # the targets, the CURRENT member row-id set must EQUAL the frozen
+                # target set for that value. "Member" MIRRORS the frontend
+                # groupRowsByAnchor (frontend/app/knowhow-grouping-logic.ts): a row
+                # whose anchor cell TRIM-equals the value (see js_trim, which
+                # reproduces JS String.prototype.trim() exactly). A blank-after-trim
+                # value is its OWN group there (never aggregated), so blank keys
+                # carry no multi-row membership and are skipped — the fan-out only
+                # ever targets non-empty groups. A row that JOINED (extra id) or a
+                # frozen row that VANISHED (missing id) makes current != frozen ->
+                # refuse the whole batch. The per-row byte-exact baseline stays the
+                # VALUE-EDIT guard; this set check is the STRUCTURAL guard.
+                frozen_by_key: "dict[str, set[str]]" = {}
+                for (_ut, u_row, _uc, _ub, _um), snapshot in zip(updates, expected_anchor):
+                    key = js_trim(snapshot)
+                    if not key:
+                        continue
+                    frozen_by_key.setdefault(key, set()).add(u_row)
+                if frozen_by_key:
+                    # F2 (round-7 P2): DON'T rescan the table's ENTIRE anchor column
+                    # per guarded call. A unique-anchor table makes every changed cell
+                    # its own singleton coversAnchorGroup unit, so an R×C import fires
+                    # R×C guarded calls, each O(R) -> O(R²C) inside the write lock.
+                    # Instead, for each DISTINCT non-blank frozen key, fetch only
+                    # exact members through the v21 normalized-anchor expression
+                    # index. The SQL expression is shared with that migration and
+                    # exactly matches js_trim, so a whitespace-padded joiner cannot
+                    # hide and no Python post-filter is needed. Same transaction;
+                    # each call now touches O(group) rows, not O(R). (Blank keys were
+                    # already skipped when frozen_by_key was built, so blank-anchor
+                    # rows never aggregate here -- each is its own group, mirroring
+                    # the frontend.)
+                    current_by_key: "dict[str, set[str]]" = {}
+                    normalized_anchor = postgres_js_trim_expression("c.content_md")
+                    for key in frozen_by_key:
+                        for cell in db.execute(
+                            "SELECT c.row_id AS row_id "
+                            "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
+                            "WHERE r.table_id = %s AND c.column_id = %s "
+                            f"AND {normalized_anchor} = %s",
+                            (anchor_table_id, anchor_column_id, key),
+                        ).fetchall():
+                            current_by_key.setdefault(key, set()).add(cell["row_id"])
+                    for key, frozen_ids in frozen_by_key.items():
+                        if current_by_key.get(key, set()) != frozen_ids:
+                            return {"written": [], "conflict": True}
+            # Phase 1: membership + stale compare for ALL entries BEFORE writing.
+            for idx, (table_id, row_id, column_id, expected_before, content_md) in enumerate(updates):
+                membership = db.execute(
+                    "SELECT r.table_id AS row_table, c.table_id AS col_table, "
+                    "t.notebook_id AS tbl_notebook "
+                    "FROM knowhow_rows r, knowhow_columns c, knowhow_tables t "
+                    "WHERE r.id = %s AND c.id = %s AND t.id = %s",
+                    (row_id, column_id, table_id),
+                ).fetchone()
+                if (
+                    membership is None
+                    or membership["row_table"] != table_id
+                    or membership["col_table"] != table_id
+                    or membership["tbl_notebook"] != notebook_id
+                ):
+                    return {"written": [], "conflict": True}
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id = %s AND column_id = %s",
+                    (row_id, column_id),
+                ).fetchone()
+                current = current_row["content_md"] if current_row is not None else None
+                if current != expected_before:
+                    return {"written": [], "conflict": True}
+                if anchor_guard:
+                    # Re-read THIS row's anchor cell under the same lock and compare
+                    # to the frozen snapshot value; a moved/cleared anchor (!=
+                    # expected_anchor[idx]) is a conflict identical to a stale
+                    # expected_before — the row left the logical group this fan-out
+                    # targets. F1 (round-7 P2): an ABSENT anchor cell reads as ""
+                    # (NOT None) to MIRROR get_knowhow_table, which represents a
+                    # never-written cell as "" (the column key is simply missing from
+                    # its `cells` dict) and the frontend's
+                    # (row.cells[anchorColumnId] %s%s "").trim(); the wire therefore
+                    # sends expected_anchor="" for a blank-anchor row. Mapping the
+                    # missing DB row to None instead made "" != None a PERMANENT 409 —
+                    # blank-anchor rows could never be batch-saved even after a reload.
+                    # (content_md is NOT NULL DEFAULT '', so a stored cell is never
+                    # None; absent is the only source of the missing value.)
+                    anchor_cell = db.execute(
+                        "SELECT content_md FROM knowhow_cells "
+                        "WHERE row_id = %s AND column_id = %s",
+                        (row_id, anchor_column_id),
+                    ).fetchone()
+                    current_anchor = (
+                        anchor_cell["content_md"] if anchor_cell is not None else ""
+                    )
+                    if current_anchor != expected_anchor[idx]:
+                        return {"written": [], "conflict": True}
+            # F2: every entry cleared membership+stale → the new content's newly
+            # referenced assets must still exist in THIS notebook. All entries share
+            # notebook_id (membership just proved it), so checking against any target
+            # row resolves the same notebook (mirrors update_knowhow_cells checking
+            # against row_ids[0]). A miss raises ValueError -> whole tx rolls back,
+            # nothing written -> caller returns the legacy 400 (not a 409).
+            self._require_assets_exist(db, updates[0][1], require_assets)
+            # Phase 2: every entry cleared → write them all in this transaction.
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = %s, projection_status = 'pending' "
+                    "WHERE id = %s",
+                    (now, row_id),
+                )
+                written.append((row_id, column_id))
+                if table_id not in written_table_ids:
+                    written_table_ids.append(table_id)
+            for table_id in written_table_ids:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = %s",
+                    (table_id,),
+                )
+        return {"written": written, "conflict": False}
+
+    def validate_cell_target(self, row_id: str, column_id: str) -> None:
+        """Assert (row, column) name a real cell slot: both exist AND belong
+        to the SAME table, else ``ValueError("格子定位不合法")`` uniformly (a
+        missing row, a missing column, and a cross-table pair are all the
+        same "this cell address is not real" to a caller — no oracle for
+        which part was wrong). The editing/code endpoints call this before
+        ``update_knowhow_cell``/``upsert_knowhow_cell_code``, whose own FKs
+        only guarantee existence, not same-table pairing."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT r.table_id AS row_table, c.table_id AS column_table "
+                "FROM knowhow_rows r JOIN knowhow_columns c "
+                "ON r.id = %s AND c.id = %s",
+                (row_id, column_id),
+            ).fetchone()
+        if row is None or row["row_table"] != row["column_table"]:
+            raise ValueError("格子定位不合法")
+
+    # ---------------------------------------------------------- cell code
+    def upsert_knowhow_cell_code(
+        self,
+        row_id: str,
+        column_id: str,
+        code_text: str,
+        language: str,
+        updated_by: str,
+        cell_content_hash: str,
+    ) -> str:
+        """Insert-or-replace the ONE code attachment a cell may carry
+        (``UNIQUE(row_id, column_id)`` conflict target). On update the row
+        keeps its original id and ``created_at``; ``code_text``/``language``/
+        ``updated_by``/``cell_content_hash``/``updated_at`` are replaced.
+        Returns the attachment's stable id. ``cell_content_hash`` is the
+        caller-computed hash of the cell's net text at write time — freshness
+        (implemented/stale) is derived at READ time by comparing it against
+        the cell's current hash, never stored. Same-table pairing of
+        (row, column) is the caller's job via ``validate_cell_target``
+        (mirrors ``update_knowhow_cell``'s contract); the FKs here only
+        guarantee both halves exist."""
+        now = self.now()
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO knowhow_cell_code "
+                "(id, row_id, column_id, code_text, language, updated_by, "
+                " cell_content_hash, created_at, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                "code_text = excluded.code_text, language = excluded.language, "
+                "updated_by = excluded.updated_by, "
+                "cell_content_hash = excluded.cell_content_hash, "
+                "updated_at = excluded.updated_at",
+                (
+                    self.new_id("khcode"), row_id, column_id, code_text,
+                    language or "", updated_by or "", cell_content_hash, now, now,
+                ),
+            )
+            row = db.execute(
+                "SELECT id FROM knowhow_cell_code WHERE row_id = %s AND column_id = %s",
+                (row_id, column_id),
+            ).fetchone()
+        return row["id"]
+
+    def get_knowhow_cell_code(self, row_id: str, column_id: str) -> "dict | None":
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT * FROM knowhow_cell_code WHERE row_id = %s AND column_id = %s",
+                (row_id, column_id),
+            ).fetchone()
+        return _compat_row(row, "created_at", "updated_at") if row is not None else None
+
+    def delete_knowhow_cell_code(self, row_id: str, column_id: str) -> None:
+        """Silent no-op when there is nothing to delete (zero-row DELETE
+        convention)."""
+        with self.database.write() as db:
+            db.execute(
+                "DELETE FROM knowhow_cell_code WHERE row_id = %s AND column_id = %s",
+                (row_id, column_id),
+            )
+
+    def get_knowhow_row_location(self, row_id: str) -> "dict | None":
+        """Resolve a bare ``row_id`` to its owning ``table_id`` + that
+        table's ``notebook_id`` (PR-2+3 Task 10: the agent surface's row/
+        cell-scoped HTTP endpoints — ``GET/PUT/DELETE .../rows/{row}...`` —
+        carry ONLY ``row_id``/``column_id`` in their URL, no ``notebook_id``
+        or ``table_id`` segment at all, unlike every session-facing knowhow
+        route. The request's notebook-access guard must resolve
+        row -> table -> notebook BEFORE it can even check access, since
+        there is no other source of that information in the request).
+        Returns ``None`` when the row does not exist — mirrors
+        ``get_notebook_asset``'s "auxiliary lookup, caller decides" contract
+        rather than ``get_knowhow_table``'s KeyError-on-missing convention
+        (this is a lookup a caller is expected to probe defensively, not one
+        that assumes its target already exists)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT r.table_id AS table_id, t.notebook_id AS notebook_id "
+                "FROM knowhow_rows r JOIN knowhow_tables t ON t.id = r.table_id "
+                "WHERE r.id = %s",
+                (row_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_knowhow_cell_code(self, table_id: str) -> list[dict]:
+        """Every code attachment in one table, in (row position, column
+        position) order — the grid's own reading order, so UI badge
+        aggregation and the agent surface consume it without re-sorting.
+        Joins resolve the table scope through knowhow_rows (cell_code rows
+        carry no table_id of their own)."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT cc.* FROM knowhow_cell_code cc "
+                "JOIN knowhow_rows r ON r.id = cc.row_id "
+                "JOIN knowhow_columns col ON col.id = cc.column_id "
+                "WHERE r.table_id = %s "
+                "ORDER BY r.position, r.id COLLATE \"C\", "
+                "col.position, col.id COLLATE \"C\"",
+                (table_id,),
+            ).fetchall()
+        return [_compat_row(row, "created_at", "updated_at") for row in rows]
+
+    # ------------------------------------------------------------- assets
+    def insert_notebook_asset(
+        self,
+        notebook_id: str,
+        filename: str,
+        mime: str,
+        size: int,
+        created_by: str,
+        source_id: str | None = None,
+    ) -> str:
+        asset_id = self.new_id("asset")
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO notebook_assets "
+                "(id, notebook_id, filename, mime, size, created_by, created_at, source_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (asset_id, notebook_id, filename, mime, size, created_by, self.now(), source_id),
+            )
+        return asset_id
+
+    def get_notebook_asset(self, asset_id: str) -> dict | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT * FROM notebook_assets WHERE id = %s", (asset_id,)
+            ).fetchone()
+        return _compat_row(row, "created_at") if row is not None else None
+
+    def source_asset_ids(self, source_id: str) -> list[str]:
+        """Every ``notebook_assets.id`` linked to ``source_id`` (MinerU
+        embedded-image extraction) — the read half of the source-view
+        rendering + delete/reparse cascade cleanup pair below."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM notebook_assets WHERE source_id = %s", (source_id,)
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def delete_source_asset_rows(self, source_id: str) -> list[str]:
+        """Delete every ``notebook_assets`` row linked to ``source_id`` and
+        return the deleted asset ids so the caller can also remove their
+        on-disk files (this store is rows-only, same division of labor as
+        the notebook-delete/sweep_orphan_assets asset-GC paths in
+        ``AssetService``/``maintenance``)."""
+        ids = self.source_asset_ids(source_id)
+        if ids:
+            with self.database.write() as db:
+                db.execute(
+                    "DELETE FROM notebook_assets WHERE source_id = %s", (source_id,)
+                )
+        return ids
+
+
+__all__ = ["KnowhowStore", "VALID_KINDS"]

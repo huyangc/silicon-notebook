@@ -1,0 +1,144 @@
+"""PostgreSQL reports-table row persistence."""
+from __future__ import annotations
+
+import re
+from typing import Callable, Iterator
+
+from app.repositories.postgres._store_utils import (
+    json_value,
+    jsonb,
+    iso_timestamp,
+    normalize_timestamp,
+)
+from app.repositories.postgres.database import PostgresDatabase
+
+
+class ReportStore:
+    # Bound memory and parameter use for large export selections.
+    IN_CHUNK = 900
+
+    def __init__(self, database: PostgresDatabase, *,
+                 new_id: Callable[[str], str],
+                 now: Callable[[], str],
+                 current_user_id: Callable[[], str]) -> None:
+        self.database = database
+        self.new_id = new_id
+        self.now = now
+        self.current_user_id = current_user_id
+
+    def create_report(self, notebook_id: str, question: str, depth: int = 2) -> str:
+        report_id = self.new_id("rep")
+        now = normalize_timestamp(self.now())
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO reports(id, notebook_id, question, depth, created_by, created_at, updated_at)"
+                " VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (report_id, notebook_id, question, depth,
+                 self.current_user_id(), now, now))
+        return report_id
+
+    def update_report(self, notebook_id: str, report_id: str, *, status=None,
+                      progress=None, error=None, outline=None, sections=None,
+                      gaps=None, references=None, content_md=None,
+                      section_status=None) -> None:
+        sets, args = ["updated_at = %s"], [normalize_timestamp(self.now())]
+        for col, val, dump in (("status", status, False), ("progress", progress, False),
+                               ("error", error, False), ("content_md", content_md, False),
+                               ("outline_json", outline, True),
+                               ("sections_json", sections, True), ("gaps_json", gaps, True),
+                               ("references_json", references, True),
+                               ("section_status_json", section_status, True)):
+            if val is not None:
+                sets.append(f"{col} = %s")
+                args.append(jsonb(val) if dump else val)
+        args.extend([report_id, notebook_id])
+        with self.database.write() as db:
+            db.execute(f"UPDATE reports SET {', '.join(sets)} WHERE id = %s AND notebook_id = %s", args)
+
+    def row_to_dict(self, row, *, full: bool) -> dict:
+        d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
+             "status": row["status"], "progress": row["progress"], "error": row["error"],
+             "created_by": row["created_by"],
+             "created_at": iso_timestamp(row["created_at"]),
+             "updated_at": iso_timestamp(row["updated_at"]), "depth": row["depth"],
+             "section_count": len(json_value(row["outline_json"], []))}
+        if full:
+            d.update(outline=json_value(row["outline_json"], []),
+                     sections=json_value(row["sections_json"], []),
+                     gaps=json_value(row["gaps_json"], []),
+                     references=json_value(row["references_json"], []),
+                     section_status=json_value(row["section_status_json"], []),
+                     content_md=row["content_md"])
+        return d
+
+    def get_report(self, notebook_id: str, report_id: str) -> dict:
+        with self.database.connect() as db:
+            row = db.execute("SELECT * FROM reports WHERE id = %s AND notebook_id = %s",
+                             (report_id, notebook_id)).fetchone()
+        if row is None:
+            raise KeyError(report_id)
+        return self.row_to_dict(row, full=True)
+
+    def list_reports(self, notebook_id: str) -> list:
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM reports WHERE notebook_id = %s "
+                "ORDER BY created_at DESC, id COLLATE \"C\"",
+                (notebook_id,)).fetchall()
+        return [self.row_to_dict(r, full=False) for r in rows]
+
+    def delete_report(self, notebook_id: str, report_id: str) -> None:
+        with self.database.write() as db:
+            db.execute("DELETE FROM reports WHERE id = %s AND notebook_id = %s",
+                       (report_id, notebook_id))
+
+    def _in_batches(self, ids) -> Iterator[list]:
+        """把 id 列表切成 ≤IN_CHUNK 的批(去重保序)——镜像 facade `_in_batches`。"""
+        ids = list(dict.fromkeys(ids))
+        for i in range(0, len(ids), self.IN_CHUNK):
+            yield ids[i:i + self.IN_CHUNK]
+
+    def export_reports(self, notebook_id: str, report_ids: list) -> list:
+        """批量导出:返回 [(filename, content_md)],按传入 report_ids 顺序,只取该
+        notebook 下 status='done' 且 content_md 非空的报告(非 done/空/跨 notebook 的
+        id 静默跳过)。文件名 = f"{_safe(question)[:40]}-{rid}.md"。
+
+        只读走 connect()。report_ids 数量通常极小；仍按 _in_batches 分批以限制
+        单条语句的参数与内存占用，批间用 dict 汇总后按原顺序回放。"""
+        def _safe(name: str) -> str:
+            s = re.sub(r'[/\\:*?"<>|\r\n]', "_", name or "").strip()
+            return s or ""
+
+        ids = [r for r in (report_ids or []) if r]
+        if not ids:
+            return []
+        found: dict = {}                         # rid -> (question, content_md)
+        with self.database.connect() as db:
+            for batch in self._in_batches(ids):
+                placeholders = ",".join("%s" for _ in batch)
+                rows = db.execute(
+                    f"SELECT id, question, content_md FROM reports "
+                    f"WHERE notebook_id = %s AND status = 'done' "
+                    f"AND content_md IS NOT NULL AND content_md != '' "
+                    f"AND id IN ({placeholders})",
+                    (notebook_id, *batch)).fetchall()
+                for row in rows:
+                    found[row["id"]] = (row["question"], row["content_md"])
+        out: list = []
+        seen: dict = {}                          # 文件名去重(极端同名 → 加 -N 后缀)
+        for rid in ids:                          # 保持传入顺序
+            if rid not in found:
+                continue
+            question, content_md = found[rid]
+            stem = _safe(question)[:40] or rid
+            fname = f"{stem}-{rid}.md"
+            if fname in seen:
+                seen[fname] += 1
+                fname = f"{stem}-{rid}-{seen[fname]}.md"
+            else:
+                seen[fname] = 0
+            out.append((fname, content_md))
+        return out
+
+
+__all__ = ["ReportStore"]

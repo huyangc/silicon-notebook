@@ -168,6 +168,51 @@ def chunk_candidate_documents(connection, ids):
     ).fetchall()
 
 
+def memory_candidate_ids(
+    connection,
+    query: str,
+    limit: int,
+    *,
+    notebook_id: str | None = None,
+) -> list[str]:
+    """Return bounded mixed-language Memory candidates using all v6 indexes."""
+    if limit <= 0 or not query.strip():
+        return []
+    pattern = f"%{query}%"
+    scope = "notebook_id=%s AND " if notebook_id is not None else ""
+    params: list[object] = []
+    if notebook_id is not None:
+        params.append(notebook_id)
+    params.extend(
+        [
+            query,
+            pattern,
+            query,
+            pattern,
+            query,
+            pattern,
+            query,
+            query,
+            query,
+            max(12, int(limit)),
+        ]
+    )
+    rows = connection.execute(
+        "SELECT id FROM memory_items WHERE "
+        f"{scope}("
+        "title OPERATOR(public.%%) %s OR title ILIKE %s OR "
+        "content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR "
+        f"{TAGS_JSON_EXPRESSION} OPERATOR(public.%%) %s OR "
+        f"{TAGS_JSON_EXPRESSION} ILIKE %s) "
+        "ORDER BY GREATEST(public.similarity(title,%s),"
+        "public.similarity(content_md,%s),"
+        f"public.similarity({TAGS_JSON_EXPRESSION},%s)) DESC,"
+        "id COLLATE \"C\" LIMIT %s",
+        params,
+    ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
 def notebook_source_rows(connection, notebook_id: str, needle: str, limit: int):
     pattern = f"%{needle}%"
     return connection.execute(
