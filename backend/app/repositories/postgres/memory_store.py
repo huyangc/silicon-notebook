@@ -22,7 +22,12 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.search import MemoryCandidateScope, memory_candidate_ids
+from app.repositories.postgres.search import (
+    MemoryCandidateScope,
+    memory_candidate_ids,
+    memory_match_count,
+    memory_page_candidate_ids,
+)
 from app.services.vector_index import encode_vector
 
 
@@ -1596,22 +1601,28 @@ class MemoryStore:
             params.append(origin)
         where = " AND ".join(clauses)
         with self.database.connect() as db:
+            filtered_total: int | None = None
+            row_offset = offset
             if clean_query:
-                candidate_ids = memory_candidate_ids(
+                scope = MemoryCandidateScope(
+                    owner_id=user_id,
+                    viewer_id=user_id,
+                    notebook_id=notebook_id,
+                    statuses=(status,) if status else (),
+                    origin=origin,
+                )
+                filtered_total = memory_match_count(
                     db,
                     clean_query,
-                    max(200, offset + limit),
-                    scope=MemoryCandidateScope(
-                        owner_id=user_id,
-                        viewer_id=user_id,
-                        notebook_id=notebook_id,
-                        statuses=(status,) if status else (),
-                        origin=origin,
-                    ),
+                    scope=scope,
+                )
+                candidate_ids = memory_page_candidate_ids(
+                    db, clean_query, limit, offset, scope=scope
                 )
                 clauses.append("m.id=ANY(%s)")
                 params.append(candidate_ids)
                 where = " AND ".join(clauses)
+                row_offset = 0
             aggregate = db.execute(
                 "SELECT COUNT(*) AS total_count,"
                 "COALESCE(SUM(CASE WHEN m.status='candidate' THEN 1 ELSE 0 END),0) "
@@ -1630,15 +1641,19 @@ class MemoryStore:
                 "ORDER BY nb.name COLLATE \"C\",m.notebook_id COLLATE \"C\" LIMIT 200",
                 (user_id, user_id, user_id),
             ).fetchall()
-            total = db.execute(
-                f"SELECT COUNT(*) AS c FROM memory_items m {joins} WHERE {where}",
-                params,
-            ).fetchone()["c"]
+            total = (
+                filtered_total
+                if filtered_total is not None
+                else db.execute(
+                    f"SELECT COUNT(*) AS c FROM memory_items m {joins} WHERE {where}",
+                    params,
+                ).fetchone()["c"]
+            )
             rows = db.execute(
                 f"SELECT {self._select_columns()} FROM memory_items m {joins} "
                 f"WHERE {where} ORDER BY m.updated_at DESC,m.id COLLATE \"C\" "
                 "LIMIT %s OFFSET %s",
-                (*params, limit, offset),
+                (*params, limit, row_offset),
             ).fetchall()
         return PaginatedMemories(
             items=[self._record(row) for row in rows],

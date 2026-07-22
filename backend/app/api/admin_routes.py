@@ -68,7 +68,7 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
         return PromotionApproveResult(
             **repository().approve_promotion_as_reviewer(candidate_id, user.id)
         )
-    except KeyError:
+    except (KeyError, PermissionError):
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -87,7 +87,7 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
                 candidate_id, payload.reason, user.id
             )
         )
-    except KeyError:
+    except (KeyError, PermissionError):
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

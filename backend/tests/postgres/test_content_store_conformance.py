@@ -656,6 +656,84 @@ def test_postgres_memory_search_filters_scope_before_candidate_limit(
     assert [item.id for item in result.items] == ["zzz-valid-memory"]
 
 
+@pytest.mark.postgres_integration
+def test_postgres_memory_search_total_is_exact_beyond_candidate_page(
+    postgres_database,
+):
+    """Filtered totals are exact while each result page remains bounded."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from psycopg.types.json import Jsonb
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    store = PostgresMemoryStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    rows = [
+        (
+            f"mem-exact-{index:03d}",
+            "nb-content",
+            "user-content",
+            "external_agent",
+            "confirmed",
+            f"exact-total-token {index:03d}",
+            "exact-total-token",
+            Jsonb([]),
+            NOW,
+            NOW,
+        )
+        for index in range(225)
+    ]
+    with postgres_database.write() as connection:
+        connection.cursor().executemany(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,tags_json,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            rows,
+        )
+        connection.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,tags_json,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                "mem-exact-excluded",
+                "nb-content",
+                "user-content",
+                "ask_answer",
+                "confirmed",
+                "exact-total-token excluded",
+                "exact-total-token",
+                Jsonb([]),
+                NOW,
+                NOW,
+            ),
+        )
+
+    first = store.list_memories(
+        "user-content",
+        notebook_id="nb-content",
+        status="confirmed",
+        origin="external_agent",
+        query="exact-total-token",
+        offset=0,
+        limit=50,
+    )
+    last = store.list_memories(
+        "user-content",
+        notebook_id="nb-content",
+        status="confirmed",
+        origin="external_agent",
+        query="exact-total-token",
+        offset=200,
+        limit=50,
+    )
+    assert first.total_count == last.total_count == 225
+    assert len(first.items) == 50
+    assert len(last.items) == 25
+    assert {item.id for item in first.items}.isdisjoint(item.id for item in last.items)
+
+
 def test_memory_edit_supersedes_pinned_promotion_atomically(content_harness):
     write = MemoryWrite(
         id="mem-promote",
@@ -944,6 +1022,122 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
             assert connection.execute(
                 f"SELECT COUNT(*) AS n FROM {table_name} WHERE {predicate}",
                 (table_id if table_name == "knowhow_tables" else source_id,),
+            ).fetchone()["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
+    postgres_database, monkeypatch
+):
+    """First projection between route snapshot and table DELETE leaves nothing."""
+    from types import SimpleNamespace
+
+    from app.api import knowhow_routes
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.embedding_store import EmbeddingStore
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.source_store import SourceStore
+    from app.services.knowhow.projection import KnowhowProjector
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    knowhow = PostgresKnowhowStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    projector = KnowhowProjector(
+        settings=Settings(database_url="sqlite:///unused.db"),
+        database=postgres_database,
+        knowhow=knowhow,
+        sources=SourceStore(postgres_database, now=seams.now),
+        chunks=ChunkStore(postgres_database),
+        knowledge=KnowledgeStore(postgres_database, seams),
+        embedding=SimpleNamespace(
+            vectors=EmbeddingStore(write=postgres_database.write)
+        ),
+        note_model_error=lambda *_args, **_kwargs: None,
+        invalidate_unified_cache=lambda _notebook_id: None,
+        mark_unified_dirty=lambda _notebook_id: None,
+        new_id=seams.new_id,
+        now=seams.now,
+    )
+    table_id = knowhow.create_knowhow_table(
+        "nb-content",
+        "首次投影删除竞态",
+        "",
+        [
+            {"name": "问题", "role": "anchor"},
+            {"name": "方法", "role": "procedure"},
+        ],
+        "user-content",
+    )
+    columns = knowhow.get_knowhow_table(table_id)["columns"]
+    by_name = {column["name"]: column["id"] for column in columns}
+    knowhow.add_knowhow_row(
+        table_id,
+        {by_name["问题"]: "振荡", by_name["方法"]: "增加阻尼"},
+    )
+
+    deleted: dict[str, str | None] = {}
+
+    class RouteRepository:
+        def get_knowhow_table(self, selected_table_id):
+            return knowhow.get_knowhow_table(selected_table_id)
+
+        def delete_knowhow_table(self, selected_table_id):
+            result = knowhow.delete_knowhow_table(selected_table_id)
+            deleted.update(result)
+            return result
+
+    first_cleanup = True
+
+    class RacingProjector:
+        def delete_table_projection(self, hidden_source_id):
+            nonlocal first_cleanup
+            if first_cleanup and hidden_source_id is None:
+                first_cleanup = False
+                error: list[BaseException] = []
+
+                def run_projection():
+                    try:
+                        projector.project_table(table_id, embed=False)
+                    except BaseException as exc:  # pragma: no cover - asserted below
+                        error.append(exc)
+
+                worker = threading.Thread(target=run_projection)
+                worker.start()
+                worker.join(timeout=10)
+                assert not worker.is_alive(), "projection/delete interleave deadlocked"
+                assert error == []
+                return
+            projector.delete_table_projection(hidden_source_id)
+
+    monkeypatch.setattr(knowhow_routes, "repository", lambda: RouteRepository())
+    monkeypatch.setattr(
+        knowhow_routes.knowhow_api, "build_projector", lambda _repo: RacingProjector()
+    )
+    monkeypatch.setattr(
+        knowhow_routes.knowhow_api,
+        "maybe_sweep_orphan_assets",
+        lambda *_args, **_kwargs: None,
+    )
+
+    knowhow_routes.delete_knowhow_table("nb-content", table_id)
+    source_id = deleted["hidden_source_id"]
+    assert source_id
+    with postgres_database.connect() as connection:
+        for table_name, predicate, value in (
+            ("knowhow_tables", "id=%s", table_id),
+            ("sources", "id=%s", source_id),
+            ("source_elements", "source_id=%s", source_id),
+            ("chunks", "source_id=%s", source_id),
+            ("knowledge_objects", "source_id=%s", source_id),
+            ("knowledge_relations", "source_id=%s", source_id),
+        ):
+            assert connection.execute(
+                f"SELECT COUNT(*) AS n FROM {table_name} WHERE {predicate}",
+                (value,),
             ).fetchone()["n"] == 0
 
 

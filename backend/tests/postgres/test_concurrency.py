@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 
 import pytest
 from psycopg.types.json import Jsonb
 
-from app.models.ask import AskRequest
+from app.models.ask import AskRequest, AskResponse
 from app.models.memory import MemoryWrite
 from app.repositories.postgres.ask_state_store import AskStateStore
 from app.repositories.postgres.governance_store import GovernanceStore
@@ -18,7 +19,16 @@ from app.services.repository_runtime import RepositoryCompatibilitySeams
 
 
 @pytest.mark.postgres_integration
-def test_competing_ask_terminal_writes_keep_explicit_cancel(postgres_database):
+@pytest.mark.parametrize("winner", ["cancel", "save"])
+def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
+    postgres_database, monkeypatch, winner
+):
+    """Two PG connections serialize cancellation and answer insertion.
+
+    The winner holds the real ask_jobs row before the losing store call gets
+    its own pooled connection. This covers both legal terminal outcomes; the
+    cancelled outcome must never leave an answer row behind.
+    """
     assert PostgresMigrator(postgres_database).migrate() == 7
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
@@ -50,21 +60,73 @@ def test_competing_ask_terminal_writes_keep_explicit_cancel(postgres_database):
         in_chunk_size=lambda: 100,
     )
     store = AskStateStore(postgres_database, seams)
-    job_id, _ = store.begin_durable_job(
+    job_id, conversation_id = store.begin_durable_job(
         "nb-race", AskRequest(question="race"), "chunk", "user-race"
     )
-    barrier = threading.Barrier(2)
+    response = AskResponse(
+        answer="race answer", conclusion="race answer", citations=[], anchors=[]
+    )
+    thread_role = threading.local()
+    winner_locked = threading.Event()
+    loser_connected = threading.Event()
+    original_write = postgres_database.write
 
-    def finish(status: str):
-        barrier.wait()
-        return store.finish_job(job_id, status, answer_id="ans-race" if status == "done" else "")
+    @contextmanager
+    def coordinated_write(*args, **kwargs):
+        with original_write(*args, **kwargs) as connection:
+            role = getattr(thread_role, "value", "")
+            if role == winner:
+                connection.execute(
+                    "SELECT id FROM ask_jobs WHERE id=%s FOR UPDATE", (job_id,)
+                ).fetchone()
+                winner_locked.set()
+                assert loser_connected.wait(timeout=5)
+            elif role:
+                loser_connected.set()
+            yield connection
 
+    monkeypatch.setattr(postgres_database, "write", coordinated_write)
+
+    def cancel():
+        thread_role.value = "cancel"
+        return store.cancel_running_job(job_id, "user-race")
+
+    def save():
+        thread_role.value = "save"
+        return store.save_answer_for_job(
+            job_id,
+            "nb-race",
+            conversation_id,
+            "race",
+            response,
+            "user-race",
+        )
+
+    calls = {"cancel": cancel, "save": save}
+    loser = "save" if winner == "cancel" else "cancel"
     with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(finish, "cancelled"), executor.submit(finish, "done")]
-        for future in futures:
-            future.result()
+        winner_future = executor.submit(calls[winner])
+        assert winner_locked.wait(timeout=5)
+        loser_future = executor.submit(calls[loser])
+        winner_result = winner_future.result(timeout=10)
+        loser_result = loser_future.result(timeout=10)
 
-    assert store.ask_job_status(job_id)["status"] == "cancelled"
+    results = {winner: winner_result, loser: loser_result}
+    status = store.ask_job_status(job_id)
+    with postgres_database.connect() as connection:
+        answers = connection.execute(
+            "SELECT id FROM answers WHERE conversation_id=%s", (conversation_id,)
+        ).fetchall()
+    if winner == "cancel":
+        assert results["cancel"]["cancelled"] is True
+        assert results["save"] is None
+        assert status["status"] == "cancelled"
+        assert answers == []
+    else:
+        assert results["save"]
+        assert results["cancel"]["cancelled"] is False
+        assert status["status"] == "done"
+        assert [row["id"] for row in answers] == [results["save"]]
 
 
 def _seed_memory_race(postgres_database, *, member: bool = False) -> None:
