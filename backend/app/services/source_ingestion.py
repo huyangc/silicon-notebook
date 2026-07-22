@@ -50,6 +50,19 @@ from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
 
 
+#: 「改了文档类型 → 只重抽 KG」失败时留给用户的说明。面向用户的文案，不带异常
+#: 类型/堆栈（技术细节进 logger.exception 与事件日志）：它会原样出现在来源卡片
+#: 的错误位上。指路的两条重试入口都是界面上真实存在的。
+RETYPE_REEXTRACT_FAILED_MESSAGE = (
+    "按新的文档类型重新分析时出错；文件已保留，可重新解析或重新上传。"
+)
+
+#: 「抽取跑到一半用户又改了类型」最多连锁补跑几次。正常路径是 1 次（改一次类型
+#: → 补跑一次）；上限只为挡住病态循环——有人不停改类型时，这条源不能永远占着 KG
+#: job 池的一个槽位。
+_DOC_TYPE_RECONCILE_MAX_ROUNDS = 3
+
+
 @dataclass(frozen=True)
 class SourcePipelineHooks:
     """Fresh per-call compatibility hooks into the (still facade-owned) KG /
@@ -428,6 +441,13 @@ class SourceIngestionService:
         永远按错的类型入图。空的 doc_type 绝不覆盖已存的非空值——前端在用户没选
         时就是不传，那是「没意见」而不是「改成自动检测」；比较在两侧都归一化之后
         做，所以 'auto'/未知值与 '' 等价，不会被当成一次改动。
+
+        还在跑的行（'queued'/'parsing'/'extracting'）只记类型、不调度任何东西，
+        由那条正在跑的任务自己收尾：'queued'/'parsing' 的抽取还没开始，
+        run_extraction 到时会读到新类型；'extracting' 的已经读走了旧类型，靠
+        _extract_reconciling_doc_type 跑完比对一次再按新类型补跑。绝不在这里
+        另起一条任务——KG job 池不按 source 串行，两条任务并发抽同一条源会互相
+        清掉对方的 KG 产物（见 _extract_reconciling_doc_type）。
         """
         summary = self.sources.get_source(source_id)
         incoming_doc_type = self.normalize_doc_type(doc_type or "")
@@ -439,6 +459,17 @@ class SourceIngestionService:
             self.sources.set_doc_type(source_id, incoming_doc_type)
         if summary.parse_status == "failed":
             # 失败源整条流水线重跑：解析产物本来就不可信，重跑顺带用上新类型。
+            # 排队前先把状态翻出 'failed'，这一步不是装饰，它同时兑现两件事：
+            # ① 让重试看得见。scheduler 是异步的，返回时 process_source 未必已经
+            #    开始，本次响应里这一行还会是终态 'failed'，而前端只对非终态轮询
+            #    （failed/extracted 之外一律轮询），于是这次重试对用户完全隐形，
+            #    直到他自己刷新页面。
+            # ② 让重试不被重复触发。'queued' 就是「已经入队」的标记：这个窗口里
+            #    用户再传一次同一个文件，会落到下面「在跑的行不重入」的默认分支，
+            #    而不是把同一条源第二次排进队列（同一行两条流水线并发解析+抽取，
+            #    互相清对方的产物，还白烧一份 MinerU/LLM 开销）。
+            # 顺带清掉上一轮的 error_message：它已经不再描述这一行现在的状态。
+            self.set_source_status(source_id, "queued", error_message="")
             if scheduler is not None:
                 scheduler(source_id)
             else:
@@ -478,13 +509,23 @@ class SourceIngestionService:
         网络抖一下就能把一条本来好好的源打成 failed。doc_type 只喂抽取侧，所以
         只重跑抽取就够。
 
-        状态由调用方先翻成 'extracting'；这里落终态：成功 'extracted'，失败退回
-        'parsed'（与 build_notebook_kg 的单源失败口径一致——解析产物还在，能重
-        试），并且绝不把异常抛回上传请求：用户的其它文件已经建好了。"""
+        状态由调用方先翻成 'extracting'；这里必须落**终态**：成功 'extracted'，
+        失败 'failed' 且留下一句用户看得懂的原因。刻意不再退回 'parsed'：
+        'parsed' 在前端是非终态（轮询判据只认 extracted/failed 两个终态），
+        退回去会让界面一直转到超时、报一次假的「处理超时」；而且那之后重传同一个
+        文件也救不回来——doc_type 早已落库，retyped 为 false，整条路径变成静默
+        no-op。落 'failed' 则让前端立刻停轮询并显示失败，用户可以用既有的
+        「重新解析」入口，或者干脆重传（失败源走整条流水线重跑）来重试。
+        （build_notebook_kg 的单源失败确实退 'parsed'，但那是后台批量、没有人在
+        等这一条；这里有一个正在等结果的上传请求，语境不同。）
+
+        绝不把异常抛回上传请求：用户的其它文件已经建好了。"""
         try:
-            hooks.extract_source(source_id)
+            self._extract_reconciling_doc_type(source_id, hooks.extract_source)
         except Exception:  # noqa: BLE001 — 一个源的抽取失败不该炸掉整次上传
-            self.set_source_status(source_id, "parsed", error_message="")
+            self.set_source_status(
+                source_id, "failed", error_message=RETYPE_REEXTRACT_FAILED_MESSAGE
+            )
             self.event_log.logger.exception(
                 "doc-type re-extraction failed for %s", source_id
             )
@@ -497,6 +538,42 @@ class SourceIngestionService:
                 "unified-KG dirty mark failed for source %s", source_id
             )
         hooks.maybe_enqueue_scale_fold(notebook_id)
+
+    def _extract_reconciling_doc_type(
+        self, source_id: str, extract: Callable[[str], None]
+    ) -> None:
+        """跑一次抽取；若抽取期间 doc_type 又被改了，按新类型再跑一次。
+
+        doc_type 是在 run_extraction 的**开头**就读走的（它选抽取 profile、进抽取
+        prompt，因而也进 LLM 缓存键）。所以「抽取正在跑」这段窗口里改类型
+        （reuse_uploaded_source 对 parse_status='extracting' 的行只记类型、不调度
+        任何东西），跑完落库的 doc_type 会与真正用来抽取的 profile 不一致，而且
+        没有任何东西会回来纠正——这条源就永远按错的类型入了图。
+
+        这个窗口只能由正在跑的这一条自己收尾，不能由上传请求另起一条任务：
+        KG job 池（app/services/kg/scheduler.py）是一个普通的 ThreadPoolExecutor，
+        **不**按 source 串行；KG_JOB_CONCURRENCY>1 时两条任务会并发抽同一条源，
+        而 run_extraction 开头的 begin_extraction_run 会先删掉这条源已有的 KG
+        对象——两条任务互相清对方的产物，比丢一次 retype 坏得多。
+
+        异常照旧向外抛（调用方各自决定落什么终态）；比对只多一次主键读，没有
+        任何模型/网络开销。"""
+        used = self.normalize_doc_type(
+            getattr(self.sources.get_source(source_id), "doc_type", "") or ""
+        )
+        for _ in range(_DOC_TYPE_RECONCILE_MAX_ROUNDS):
+            extract(source_id)
+            current = self.normalize_doc_type(
+                getattr(self.sources.get_source(source_id), "doc_type", "") or ""
+            )
+            if current == used:
+                return
+            used = current
+        self.event_log.logger.warning(
+            "doc_type kept changing during extraction of %s; stopped after %s "
+            "rounds with doc_type=%r",
+            source_id, _DOC_TYPE_RECONCILE_MAX_ROUNDS, used,
+        )
 
     def upload_sources(
         self,
@@ -828,7 +905,11 @@ class SourceIngestionService:
                 self.set_source_status(source_id, "extracting")
                 t = time.perf_counter()
                 stage("extract", "start", t)
-                hooks.extract_source(source_id)
+                # 同一条源第一次上传时也存在「抽取跑到一半用户改类型」的窗口
+                # （他嫌慢，用正确的类型把同一个文件又传了一次）：
+                # reuse_uploaded_source 对 'extracting' 的行只记类型不调度，
+                # 由这里跑完自校验一次并按新类型补跑。
+                self._extract_reconciling_doc_type(source_id, hooks.extract_source)
                 stage("extract", "done", t)
                 try:
                     hooks.mark_unified_dirty(source.notebook_id)

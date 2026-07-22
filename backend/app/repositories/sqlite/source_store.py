@@ -403,12 +403,27 @@ class SourceStore:
         matched here. A user re-uploading the same file into a different
         notebook usually means they want it there too, and sharing one
         ``sources`` row across notebooks would tangle ownership/ACLs and
-        delete cascades — see test_upload_dedup.py's cross-notebook case."""
+        delete cascades — see test_upload_dedup.py's cross-notebook case.
+
+        ``source_type NOT IN ('memory', 'knowhow')`` — the same hidden-synthetic
+        exclusion list ``list_sources`` uses — is a correctness guard, not
+        housekeeping. Memory-derived rows carry a NON-empty ``file_hash``
+        (sha256 of ``title + "\\n" + content``), so a file whose bytes happen to
+        equal that exact text would otherwise be "deduped" onto a hidden row:
+        the upload would report success, briefly show a source the visible list
+        then drops, and quietly graft the user's file onto a Memory projection.
+        Excluding the known hidden types rather than allow-listing the importable
+        ones is deliberate: upload's ``source_type`` comes from
+        ``source_type_from_name`` and grows with every new supported format, so
+        an allow-list would silently stop deduping the next format added.
+        ⚠ A NEW hidden/derived source_type must be added here too (grep
+        ``NOT IN ('memory', 'knowhow')`` for the sibling sites)."""
         if not digest:
             return None
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT id FROM sources WHERE notebook_id=? AND file_hash=? "
+                "AND source_type NOT IN ('memory', 'knowhow') "
                 "ORDER BY created_at, id",
                 (notebook_id, digest),
             ).fetchone()
