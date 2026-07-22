@@ -529,6 +529,40 @@ class SourceStore:
                 (doc_type, self.now(), source_id),
             )
 
+    def rename_source_file(
+        self,
+        source_id: str,
+        *,
+        file_name: str,
+        source_type: str,
+        file_path: "str | None" = None,
+    ) -> None:
+        """Repoint an existing source row at a re-uploaded file whose SUFFIX
+        (hence parser) changed.
+
+        Written for the upload path's "same bytes, different suffix" case: content
+        dedup hands the existing row back, but the suffix decides the parser
+        (``parse_source_file`` dispatches on ``file_name``), so a ``.csv`` row
+        re-uploaded as ``.md`` must adopt the new name/type and be re-parsed —
+        otherwise the user can never correct a mis-named file by re-uploading
+        (see SourceIngestionService.reuse_uploaded_source). Sibling of
+        ``set_doc_type``: both persist a user correction onto ONE reused row.
+
+        ``file_path`` is optional: pass the new stored path when the caller
+        rewrote the file under the corrected name (keeps file_path's suffix and
+        file_name in sync — ``read_source_text`` keys the raw-vs-reconstruct
+        read on the path suffix); leave it None to update name/type only."""
+        fields = ["file_name = ?", "source_type = ?", "updated_at = ?"]
+        params: List[object] = [file_name, source_type, self.now()]
+        if file_path is not None:
+            fields.insert(2, "file_path = ?")
+            params.insert(2, file_path)
+        with self.database.write() as db:
+            db.execute(
+                f"UPDATE sources SET {', '.join(fields)} WHERE id = ?",
+                (*params, source_id),
+            )
+
     def replace_elements(
         self,
         connection: sqlite3.Connection,

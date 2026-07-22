@@ -665,3 +665,111 @@ def test_hidden_knowhow_projection_rows_are_excluded_from_dedup_too(
     )
     assert store.source_id_by_hash(notebook_id, digest) is None
     assert hidden not in {s.id for s in repo.list_sources(notebook_id)}
+
+
+# ---------------------------- 后缀（解析器）也是不能撒手的维度：换后缀要重解析
+
+def _upload_named(repo, notebook_id, *, content, name, doc_type="", scheduler=None):
+    return repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(file_name=name, content_type="", content=content,
+                            doc_type=doc_type)],
+        scheduler=scheduler,
+    )
+
+
+def test_reupload_with_a_different_parser_suffix_reparses_the_existing_row(
+    repo, notebook_id
+):
+    """同样字节先传 .csv 再传 .md：parse_source_file 按后缀选解析器（.csv 逐行
+    vs .md 结构块），新名被丢弃、不重解析的话用户无法通过重传纠正一个命名错误
+    的文件。像失败源那样在既有行上重解析 + 更新文件名。"""
+    body = b"col1,col2\n1,2\n3,4"
+    first = _upload_named(repo, notebook_id, content=body, name="data.csv")
+    sid = first[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "extracted")   # 定型
+    repo.process_calls.clear()
+
+    second = _upload_named(repo, notebook_id, content=body, name="data.md")
+
+    assert second[0].id == sid, "仍复用同一行，不新建第二条"
+    assert len(repo.list_sources(notebook_id)) == 1
+    assert repo.get_source(sid).file_name == "data.md", "文件名必须更新为新后缀"
+    assert repo.get_source(sid).type == "markdown", "source_type（模型里叫 type）随后缀更新"
+    assert repo.get_source(sid).file_path.endswith("data.md"), (
+        "落盘文件按新名重写，file_path 与 file_name 同步"
+    )
+    assert repo.process_calls == [sid], "后缀（解析器）变了必须整条流水线重跑"
+    assert second[0].reused is True
+    assert second[0].parse_status == "queued", "响应里就得是非终态，前端才会开始轮询"
+
+
+def test_reupload_with_a_different_suffix_reschedules_when_scheduler_is_given(
+    repo, notebook_id
+):
+    """有 scheduler（真实 API 路径）时，换后缀同样要排进后台队列，而不是同步跑。"""
+    body = b"a,b\n1,2"
+    scheduled = []
+    sid = _upload_named(
+        repo, notebook_id, content=body, name="d.csv", scheduler=scheduled.append
+    )[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "extracted")
+    scheduled.clear()
+
+    again = _upload_named(
+        repo, notebook_id, content=body, name="d.md", scheduler=scheduled.append
+    )
+
+    assert scheduled == [sid], "换后缀要重新排队"
+    assert again[0].id == sid
+    assert again[0].parse_status == "queued"
+    assert repo.process_calls == [], "有 scheduler 时绝不同步跑"
+
+
+def test_reupload_same_suffix_same_content_still_dedups_without_reparsing(
+    repo, notebook_id
+):
+    """相同后缀 + 相同内容：仍然去重、绝不重跑（本特性的核心价值，别改坏）。"""
+    body = b"# heading\n\nbody"
+    sid = _upload_named(repo, notebook_id, content=body, name="doc.md")[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "extracted")
+    repo.process_calls.clear()
+
+    second = _upload_named(repo, notebook_id, content=body, name="doc.md")
+
+    assert second[0].id == sid
+    assert repo.process_calls == [], "同后缀同内容不该重跑"
+    assert repo.get_source(sid).file_name == "doc.md"
+
+
+def test_reupload_with_a_different_suffix_that_maps_to_the_same_parser_is_not_a_reparse(
+    repo, notebook_id
+):
+    """.md 与 .markdown 映射到同一个解析器（parser_class 同为 'markdown'）——
+    不算解析器变化，纯复用不重跑、不改名。判据复用 parse_source_file 的分类，
+    不是「后缀字符串不同就重跑」。"""
+    body = b"# heading\n\nbody"
+    sid = _upload_named(repo, notebook_id, content=body, name="a.md")[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "extracted")
+    repo.process_calls.clear()
+
+    second = _upload_named(repo, notebook_id, content=body, name="a.markdown")
+
+    assert second[0].id == sid
+    assert repo.process_calls == [], "同解析器（.md/.markdown）不触发重解析"
+    assert repo.get_source(sid).file_name == "a.md", "解析器没变就不改名"
+
+
+def test_reupload_with_a_different_suffix_while_in_flight_does_not_reparse(
+    repo, notebook_id
+):
+    """还在飞行中（queued/parsing/extracting）的行不因换后缀而重排——那条正在跑
+    的流水线拥有这个文件，重排会让同一行并发两条流水线（与既有「不重入」一致）。"""
+    body = b"a,b\n1,2"
+    sid = _upload_named(repo, notebook_id, content=body, name="d.csv")[0].id
+    assert repo.get_source(sid).parse_status == "queued"   # 打桩的 process_source 让它停在 queued
+    repo.process_calls.clear()
+
+    _upload_named(repo, notebook_id, content=body, name="d.md")
+
+    assert repo.process_calls == [], "在飞行中的行绝不因换后缀重排"
