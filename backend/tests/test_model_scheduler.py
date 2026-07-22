@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from collections import Counter
-from concurrent.futures import CancelledError, Future
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from queue import Empty, Queue
 import threading
 import time
 
 import pytest
 
+from app.core.config import Settings
 from app.services import model_scheduler as model_scheduler_module
 from app.services import model_work as model_work_module
+from app.services.model_provider import RuntimeModelProvider
+from app.services.model_registry import (
+    ModelServiceDefinition,
+    SystemModelServiceRegistry,
+)
 from app.services.model_scheduler import ServiceScheduler
 from app.services.model_work import (
     ModelPriority,
@@ -842,3 +848,266 @@ def test_shutdown_reaps_dispatcher_and_executor_threads():
         if service_id in thread.name and thread.is_alive()
     ]
     assert leaked == []
+
+
+class _StressEventLog:
+    def emit(self, _event: dict) -> None:
+        pass
+
+
+class _StressPeaks:
+    def __init__(self, expected: dict[str, int]) -> None:
+        self.expected = expected
+        self.release_seeds = threading.Event()
+        self.background_started = threading.Event()
+        self.at_capacity = {
+            service_id: threading.Event() for service_id in expected
+        }
+        self.active: Counter[str] = Counter()
+        self.active_labels: Counter[tuple[str, str]] = Counter()
+        self.peaks: Counter[str] = Counter()
+        self.background_had_interactive_peer = False
+        self._lock = threading.Lock()
+
+    def invoke(self, service_id: str, label: str):
+        with self._lock:
+            self.active[service_id] += 1
+            self.active_labels[(service_id, label)] += 1
+            self.peaks[service_id] = max(
+                self.peaks[service_id], self.active[service_id]
+            )
+            if self.active[service_id] == self.expected[service_id]:
+                self.at_capacity[service_id].set()
+            if label == "background":
+                self.background_had_interactive_peer = any(
+                    active_service == service_id
+                    and active_label.startswith("interactive-")
+                    and count > 0
+                    for (active_service, active_label), count
+                    in self.active_labels.items()
+                )
+                self.background_started.set()
+        try:
+            if label.startswith("seed-"):
+                assert self.release_seeds.wait(5)
+            else:
+                time.sleep(0.01)
+            return label
+        finally:
+            with self._lock:
+                self.active[service_id] -= 1
+                self.active_labels[(service_id, label)] -= 1
+
+
+class _StressChatDelegate:
+    configured = True
+    model = "fake-chat"
+
+    def __init__(self, tracker: _StressPeaks, service_id: str) -> None:
+        self.tracker = tracker
+        self.service_id = service_id
+
+    def chat_json(self, messages, _response_schema_hint, **_kwargs):
+        label = messages[-1]["content"]
+        self.tracker.invoke(self.service_id, label)
+        return '{"ok": true}'
+
+
+class _StressEmbeddingDelegate:
+    configured = True
+    dim = 3
+
+    def __init__(self, tracker: _StressPeaks, service_id: str) -> None:
+        self.tracker = tracker
+        self.service_id = service_id
+
+    def embed_query(self, text):
+        self.tracker.invoke(self.service_id, text)
+        return [1.0, 0.0, 0.0]
+
+    def embed_texts(self, texts):
+        return [self.embed_query(text) for text in texts]
+
+
+class _StressRerankDelegate:
+    configured = True
+    max_docs = 16
+
+    def __init__(self, tracker: _StressPeaks, service_id: str) -> None:
+        self.tracker = tracker
+        self.service_id = service_id
+
+    def _rerank_batch(self, query, documents):
+        self.tracker.invoke(self.service_id, query)
+        return [
+            {"index": index, "relevance_score": float(len(documents) - index)}
+            for index, _document in enumerate(documents)
+        ]
+
+
+def _stress_service(
+    service_id: str, kind: str, maximum: int
+) -> ModelServiceDefinition:
+    return ModelServiceDefinition(
+        id=service_id,
+        display_name=f"fake-{service_id}",
+        kind=kind,
+        protocol="openai",
+        base_url=f"https://{service_id}.invalid/v1",
+        model=f"fake-{service_id}",
+        api_key_env=f"{service_id.upper()}_KEY",
+        api_key="fake-secret",
+        max_concurrency=maximum,
+        fingerprint=f"fp-{service_id}",
+    )
+
+
+def test_stress_shared_peak_and_background_starvation_with_twenty_callers(
+    monkeypatch,
+):
+    """One acceptance run covers shared capacity, independent services, and fairness."""
+    services = {
+        "shared": _stress_service("shared", "chat", 3),
+        "embedding": _stress_service("embedding", "embedding", 2),
+        "rerank": _stress_service("rerank", "rerank", 2),
+    }
+    registry = SystemModelServiceRegistry(
+        services,
+        {
+            "ask_answer": "shared",
+            "query_rewrite": "shared",
+            "retrieval_query_embedding": "embedding",
+            "retrieval_rerank": "rerank",
+        },
+    )
+    tracker = _StressPeaks({"shared": 3, "embedding": 2, "rerank": 2})
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
+        _StressEventLog(),
+        registry=registry,
+        chat_factory=lambda service: _StressChatDelegate(tracker, service.id),
+        embedding_factory=lambda service: _StressEmbeddingDelegate(
+            tracker, service.id
+        ),
+        rerank_factory=lambda service: _StressRerankDelegate(tracker, service.id),
+    )
+    ask = provider.chat("ask_answer")
+    rewrite = provider.chat("query_rewrite")
+    embed = provider.embedding("retrieval_query_embedding")
+    rerank = provider.rerank("retrieval_rerank")
+    caller_threads: set[int] = set()
+    callers_started = threading.Event()
+    caller_lock = threading.Lock()
+
+    monkeypatch.setattr(
+        model_work_module,
+        "request_user_id",
+        lambda: f"stress-{threading.get_ident()}",
+    )
+
+    def caller(invoke):
+        with caller_lock:
+            caller_threads.add(threading.get_ident())
+            if len(caller_threads) == 20:
+                callers_started.set()
+        return invoke()
+
+    def chat_call(client, label):
+        return lambda: client.chat_json(
+            [{"role": "user", "content": label}], '{"ok": true}'
+        )
+
+    def background_call():
+        with model_work_scope(
+            priority=ModelPriority.BACKGROUND,
+            parent_id="stress-background",
+        ):
+            return rewrite.chat_json(
+                [{"role": "user", "content": "background"}], '{"ok": true}'
+            )
+
+    pool = ThreadPoolExecutor(max_workers=20, thread_name_prefix="model-stress-caller")
+    futures = []
+    try:
+        seed_calls = [
+            chat_call(ask, "seed-chat-0"),
+            chat_call(rewrite, "seed-chat-1"),
+            chat_call(ask, "seed-chat-2"),
+            lambda: embed.embed_query("seed-embedding-0"),
+            lambda: embed.embed_query("seed-embedding-1"),
+            lambda: rerank.rerank("seed-rerank-0", ["a", "b"]),
+            lambda: rerank.rerank("seed-rerank-1", ["a", "b"]),
+        ]
+        futures.extend(pool.submit(caller, invoke) for invoke in seed_calls)
+        assert all(event.wait(3) for event in tracker.at_capacity.values())
+
+        interactive_calls = [
+            chat_call(ask if number % 2 == 0 else rewrite, f"interactive-{number}")
+            for number in range(8)
+        ]
+        futures.extend(
+            pool.submit(caller, invoke) for invoke in interactive_calls
+        )
+
+        deadline = time.monotonic() + 3
+        while provider.scheduler_snapshot("shared").queued != 8:
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    f"interactive queue did not fill: "
+                    f"{provider.scheduler_snapshot('shared')}"
+                )
+            time.sleep(0.01)
+
+        trailing_calls = [
+            background_call,
+            lambda: embed.embed_query("embedding-2"),
+            lambda: embed.embed_query("embedding-3"),
+            lambda: rerank.rerank("rerank-2", ["a", "b"]),
+            lambda: rerank.rerank("rerank-3", ["a", "b"]),
+        ]
+        futures.extend(pool.submit(caller, invoke) for invoke in trailing_calls)
+
+        assert callers_started.wait(3)
+        assert len(caller_threads) == 20
+        deadline = time.monotonic() + 3
+        while (
+            provider.scheduler_snapshot("shared").queued != 9
+            or provider.scheduler_snapshot("embedding").queued != 2
+            or provider.scheduler_snapshot("rerank").queued != 2
+        ):
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "stress queues did not fill: "
+                    f"shared={provider.scheduler_snapshot('shared')}, "
+                    f"embedding={provider.scheduler_snapshot('embedding')}, "
+                    f"rerank={provider.scheduler_snapshot('rerank')}"
+                )
+            time.sleep(0.01)
+
+        tracker.release_seeds.set()
+        assert tracker.background_started.wait(3)
+        assert tracker.background_had_interactive_peer is True
+        results = [future.result(timeout=5) for future in futures]
+        assert len(results) == 20
+        assert all(result is not None for result in results)
+
+        deadline = time.monotonic() + 3
+        while any(
+            provider.scheduler_snapshot(service_id).active
+            or provider.scheduler_snapshot(service_id).queued
+            for service_id in services
+        ):
+            if time.monotonic() >= deadline:
+                raise AssertionError("model service queues did not drain")
+            time.sleep(0.01)
+
+        assert tracker.peaks == Counter(
+            {"shared": 3, "embedding": 2, "rerank": 2}
+        )
+        assert tracker.active == Counter(
+            {"shared": 0, "embedding": 0, "rerank": 0}
+        )
+    finally:
+        tracker.release_seeds.set()
+        pool.shutdown(wait=True, cancel_futures=False)
+        provider.close()
