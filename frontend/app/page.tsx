@@ -2509,9 +2509,13 @@ export default function Home() {
     const docTypesBefore = new Map(sources.map((source) => [source.id, source.doc_type ?? ""]));
     const uploaded = await uploadSources(currentNotebookId, formData);
     const outcome = summarizeUpload(uploaded, docTypesBefore);
-    setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
+    // 用折叠去重后的 outcome.sources，不是原始 uploaded：一次上传里两个内容相同的
+    // 文件会让后端对同一个 id 返回两条（新建 + 命中它的 reused），直接铺进 state 会
+    // 渲染出重复卡片，直到重开笔记本才消失。
+    setSources((previous) => [...previous.filter((source) => !outcome.sources.some((item) => item.id === source.id)), ...outcome.sources]);
     // 只加新建的那些：沿用的既有来源本来就已经在总数里了，重复计入会让
-    //「N 个来源」和分页总数一直偏大到重新打开笔记本为止。
+    //「N 个来源」和分页总数一直偏大到重新打开笔记本为止。outcome.added 已按 id 去重，
+    // 批内重复的回声也只计一次。
     setSourcesTotal((t) => t + outcome.added.length);
     setNotebookSourceTotal((t) => t + outcome.added.length);
     await loadNotebookCollection();
