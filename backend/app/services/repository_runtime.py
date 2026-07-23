@@ -392,6 +392,7 @@ class RepositoryRuntime:
                 knowledge=self.knowledge,
                 governance=self.governance,
                 unified_kg=self.unified_kg,
+                queries=self.queries,
                 snapshots=self.retrieval_snapshots,
                 scale_runtime=self.scale_artifacts,
                 model_clients=self.models,
@@ -405,7 +406,8 @@ class RepositoryRuntime:
             from app.services.communities import CommunityQueryService
 
             candidates = CandidateRetrievalService(
-                **common, memory_retriever=self.memory_retriever
+                **common,
+                memory_retriever=self.memory_retriever,
             )
             graph = GraphRetrievalService(**common)
             retrieval = RetrievalService(
@@ -565,6 +567,7 @@ class RepositoryRuntime:
             maybe_enqueue_scale_fold=self.scale_artifacts.maybe_enqueue_fold,
             make_persist_image=make_persist_image,
             delete_source_images=delete_source_images,
+            invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
         )
         # Memory-KG bridge (memory-kg-extract Task 3): MemoryService is wired
         # earlier (wire_memory, before wire_knowledge_lifecycle), but
@@ -799,6 +802,7 @@ class RepositoryRuntime:
             notebook_languages=lambda: self.notebook_languages,
             memory_retriever=self.memory_retriever,
             current_user_id=lambda: self.identity.current_user().id,
+            queries=self.queries,
         )
         self.pending_actions_service = PendingActionsService(
             self.queries,
@@ -923,6 +927,7 @@ class RepositoryRuntime:
             relations_for_notebook=relations_for_notebook,
             notebook_copy_stats=notebook_copy_stats,
             note_model_error=note_model_error,
+            invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
         return self.knowledge_lifecycle

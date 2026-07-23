@@ -261,3 +261,301 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
     finally:
         reset_request_user(owner_token)
         repository.close()
+
+
+def _project_dynamic_knowhow(repository, notebook_id: str, owner_id: str) -> str:
+    from app.services.knowhow.api import build_projector
+
+    table_id = repository.create_knowhow_table(
+        notebook_id,
+        "Dynamic retrieval",
+        "postgres dialect probe",
+        [
+            {"name": "Topic", "role": "anchor"},
+            {"name": "Voltage check", "role": "procedure"},
+        ],
+        created_by=owner_id,
+    )
+    table = repository.get_knowhow_table(table_id)
+    columns = {column["name"]: column["id"] for column in table["columns"]}
+    repository.add_knowhow_row(
+        table_id,
+        {
+            columns["Topic"]: "Power integrity",
+            columns["Voltage check"]: "Measure the rail before signoff",
+        },
+    )
+    build_projector(repository).project_table(table_id, embed=False)
+    return table_id
+
+
+def test_postgres_knowhow_node_retrieval_uses_backend_neutral_type_counts(
+    postgres_settings,
+):
+    """The flag-on production retrieval path must never execute SQLite `?` SQL."""
+    from app.repositories.postgres.repository import PostgresRepository
+
+    postgres_settings.knowhow_kg_node_retrieval_enabled = True
+    repository = PostgresRepository(postgres_settings)
+    owner = repository.create_user("c00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook = repository.create_notebook(NotebookCreate(name="PG dynamic KG"))
+        _project_dynamic_knowhow(repository, notebook.id, owner.id)
+
+        candidates = repository.retrieval.candidates
+        assert set(candidates._knowhow_object_types(notebook.id)) == {
+            "Topic",
+            "Voltage check",
+        }
+        hits = repository._retrieve_scored(notebook.id, "rail before signoff")
+        assert any(hit.object_type == "Voltage check" for hit in hits)
+    finally:
+        reset_request_user(token)
+        repository.close()
+
+
+def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_rows(
+    postgres_settings,
+):
+    from app.repositories.postgres._store_utils import jsonb
+    from app.repositories.postgres.repository import PostgresRepository
+
+    repository = PostgresRepository(postgres_settings)
+    owner = repository.create_user("d00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook = repository.create_notebook(NotebookCreate(name="restart recovery"))
+        sources = repository.import_sources(
+            notebook.id,
+            SourceImportRequest(
+                files=[
+                    SourceImportFile(
+                        file_name="running.md", file_size=1, mime_type="text/markdown"
+                    ),
+                    SourceImportFile(
+                        file_name="terminal.md", file_size=1, mime_type="text/markdown"
+                    ),
+                ]
+            ),
+        )
+        with repository._runtime.database.write() as db:
+            db.execute(
+                "INSERT INTO notebooks "
+                "(id,name,status,created_by,created_at,updated_at) "
+                "VALUES (%s,'terminal','draft',%s,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (f"{notebook.id}-terminal", owner.id),
+            )
+            db.execute(
+                "INSERT INTO merge_review_jobs "
+                "(notebook_id,status,total,done,started_at,updated_at,error) VALUES "
+                "(%s,'running',2,1,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z',''),"
+                "(%s,'done',1,1,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','kept')",
+                (notebook.id, f"{notebook.id}-terminal"),
+            )
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,status,trace_json,error,created_at,updated_at) VALUES "
+                "('ask-running',%s,'running',%s,'','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z'),"
+                "('ask-done',%s,'done',%s,'kept','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (notebook.id, jsonb([{"step": "kept"}]), notebook.id, jsonb([])),
+            )
+            db.execute(
+                "INSERT INTO knowhow_tables "
+                "(id,notebook_id,title,created_by,created_at,updated_at) "
+                "VALUES ('recover-table',%s,'T',%s,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (notebook.id, owner.id),
+            )
+            for row_id, status in (
+                ("row-syncing", "syncing"),
+                ("row-pending", "pending"),
+                ("row-synced", "synced"),
+                ("row-failed", "failed"),
+            ):
+                db.execute(
+                    "INSERT INTO knowhow_rows "
+                    "(id,table_id,position,projection_status,created_at,updated_at) "
+                    "VALUES (%s,'recover-table',0,%s,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                    (row_id, status),
+                )
+            db.execute(
+                "UPDATE sources SET status='parsing',parse_status='extracting',"
+                "error_message='old',updated_at='2020-01-01T00:00:00Z' WHERE id=%s",
+                (sources[0].id,),
+            )
+            db.execute(
+                "UPDATE sources SET status='extracted',parse_status='parsed',"
+                "error_message='kept',updated_at='2020-01-01T00:00:00Z' WHERE id=%s",
+                (sources[1].id,),
+            )
+            db.execute(
+                "INSERT INTO extraction_runs "
+                "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) VALUES "
+                "('extract-running',%s,%s,'kg','running','','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z'),"
+                "('extract-done',%s,%s,'kg','done','kept','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (notebook.id, sources[0].id, notebook.id, sources[1].id),
+            )
+            db.execute(
+                "INSERT INTO kg_build_jobs "
+                "(id,notebook_id,mode,status,stage,error_code,error_message,created_at,updated_at,finished_at) VALUES "
+                "('kg-running',%s,'incremental','running','extracting','','','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z',NULL),"
+                "('kg-done',%s,'incremental','done','finished','kept','kept','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
+                (notebook.id, notebook.id),
+            )
+        repository.close()
+
+        restarted = PostgresRepository(postgres_settings)
+        try:
+            with restarted._runtime.database.connect() as db:
+                merge_rows = {
+                    row["notebook_id"]: row
+                    for row in db.execute("SELECT * FROM merge_review_jobs").fetchall()
+                }
+                ask_rows = {
+                    row["id"]: row
+                    for row in db.execute("SELECT * FROM ask_jobs").fetchall()
+                }
+                row_states = {
+                    row["id"]: row["projection_status"]
+                    for row in db.execute(
+                        "SELECT id,projection_status FROM knowhow_rows"
+                    ).fetchall()
+                }
+                source_rows = {
+                    row["id"]: row
+                    for row in db.execute(
+                        "SELECT id,status,parse_status,error_message,updated_at FROM sources"
+                    ).fetchall()
+                }
+                extraction_rows = {
+                    row["id"]: row
+                    for row in db.execute("SELECT * FROM extraction_runs").fetchall()
+                }
+                kg_rows = {
+                    row["id"]: row
+                    for row in db.execute("SELECT * FROM kg_build_jobs").fetchall()
+                }
+            assert merge_rows[notebook.id]["status"] == "failed"
+            assert merge_rows[notebook.id]["error"] == "中断:服务重启"
+            assert merge_rows[f"{notebook.id}-terminal"]["status"] == "done"
+            assert merge_rows[f"{notebook.id}-terminal"]["error"] == "kept"
+            assert ask_rows["ask-running"]["status"] == "interrupted"
+            assert ask_rows["ask-running"]["error"] == "中断:服务重启"
+            assert ask_rows["ask-running"]["trace_json"] == [{"step": "kept"}]
+            assert ask_rows["ask-done"]["status"] == "done"
+            assert ask_rows["ask-done"]["error"] == "kept"
+            assert row_states == {
+                "row-syncing": "failed",
+                "row-pending": "failed",
+                "row-synced": "synced",
+                "row-failed": "failed",
+            }
+            assert source_rows[sources[0].id]["status"] == "parsed"
+            assert source_rows[sources[0].id]["parse_status"] == "parsed"
+            assert source_rows[sources[0].id]["error_message"] == ""
+            assert source_rows[sources[0].id]["updated_at"].year > 2020
+            assert source_rows[sources[1].id]["status"] == "extracted"
+            assert source_rows[sources[1].id]["error_message"] == "kept"
+            assert source_rows[sources[1].id]["updated_at"].year == 2020
+            assert extraction_rows["extract-running"]["status"] == "failed"
+            assert extraction_rows["extract-running"]["error_message"].startswith(
+                "worker_interrupted:"
+            )
+            assert extraction_rows["extract-running"]["updated_at"].year > 2020
+            assert extraction_rows["extract-done"]["status"] == "done"
+            assert extraction_rows["extract-done"]["error_message"] == "kept"
+            assert extraction_rows["extract-done"]["updated_at"].year == 2020
+            assert kg_rows["kg-running"]["status"] == "failed"
+            assert kg_rows["kg-running"]["stage"] == "finished"
+            assert kg_rows["kg-running"]["error_code"] == "worker_interrupted"
+            assert kg_rows["kg-running"]["updated_at"].year > 2020
+            assert kg_rows["kg-running"]["finished_at"].year > 2020
+            assert kg_rows["kg-done"]["status"] == "done"
+            assert kg_rows["kg-done"]["error_code"] == "kept"
+            assert kg_rows["kg-done"]["updated_at"].year == 2020
+        finally:
+            restarted.close()
+    finally:
+        reset_request_user(token)
+        repository.close()
+
+
+def test_startup_warm_failure_immediately_closes_real_postgres_pool(
+    postgres_settings, monkeypatch
+):
+    from app.api import deps
+    from app.core import config, readiness
+    from app.repositories.postgres.repository import PostgresRepository
+    from app.services import startup_warmup
+
+    repository = PostgresRepository(postgres_settings)
+    cleared = []
+
+    def cached_repository():
+        return repository
+
+    cached_repository.cache_clear = lambda: cleared.append(True)
+    monkeypatch.setattr(deps, "repository", cached_repository)
+    monkeypatch.setattr(config, "get_settings", lambda: postgres_settings)
+    monkeypatch.setattr(
+        repository,
+        "warm_open_path_caches",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("warm failed")),
+    )
+    readiness.reset()
+    try:
+        startup_warmup.run_startup()
+        assert readiness.snapshot()["phase"] == "error"
+        assert repository._runtime.database._closed is True
+        assert cleared == [True]
+        with pytest.raises(Exception):
+            with repository._runtime.database.connect():
+                pass
+    finally:
+        repository.close()
+
+
+def test_postgres_last_knowhow_table_delete_sweeps_asset_row_and_file(
+    postgres_settings, tmp_path, monkeypatch
+):
+    from app.api import knowhow_routes
+    from app.repositories.postgres.repository import PostgresRepository
+    from app.services import background_jobs
+    from app.services.knowhow import api as knowhow_api
+    from app.services.knowhow.assets import AssetService
+
+    postgres_settings.storage_dir = str(tmp_path / "pg-assets")
+    repository = PostgresRepository(postgres_settings)
+    owner = repository.create_user("e00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook = repository.create_notebook(NotebookCreate(name="asset GC"))
+        table_id = _project_dynamic_knowhow(repository, notebook.id, owner.id)
+        asset = AssetService(repository).save(
+            notebook.id, "orphan.png", "image/png", b"png", owner.id
+        )
+        table = repository.get_knowhow_table(table_id)
+        row = table["rows"][0]
+        column = next(c for c in table["columns"] if c["name"] == "Voltage check")
+        repository.update_knowhow_cell(
+            row["id"], column["id"], f"![orphan](asset://{asset['id']})", [asset["id"]]
+        )
+        asset_path = AssetService(repository).path_for(asset)
+        assert asset_path.is_file()
+
+        monkeypatch.setattr(knowhow_routes, "repository", lambda: repository)
+        monkeypatch.setattr(
+            background_jobs,
+            "submit",
+            lambda function, **_kwargs: function(),
+        )
+        knowhow_routes.delete_knowhow_table(notebook.id, table_id)
+
+        assert repository.get_notebook_asset(asset["id"]) is None
+        assert asset_path.exists() is False
+        assert knowhow_api.maybe_sweep_orphan_assets(
+            repository, notebook.id, min_interval=0, background=False
+        )
+    finally:
+        reset_request_user(token)
+        repository.close()

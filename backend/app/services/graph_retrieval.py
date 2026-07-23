@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -67,6 +66,7 @@ class GraphRetrievalService(_RetrievalState):
         knowledge,
         governance,
         unified_kg,
+        queries,
         snapshots,
         scale_runtime,
         model_clients,
@@ -79,6 +79,7 @@ class GraphRetrievalService(_RetrievalState):
     ) -> None:
         super().__init__(
             database=database,
+            queries=queries,
             snapshots=snapshots,
             scale_runtime=scale_runtime,
             model_clients=model_clients,
@@ -355,7 +356,7 @@ class GraphRetrievalService(_RetrievalState):
         node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
             self._gather_kg_graph(notebook_id, source_ids=src)
         return node_ids, edges, chunk_ids
-    def _delta_vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
+    def _delta_vector_matrix(self, db: object, notebook_id: str,
                              table: str, id_col: str, node_ids: List[str]):
         """Like `_vector_matrix` but scoped to exactly `node_ids` — for hot paths
         that only need vectors for a bounded delta node set (e.g. the active KG

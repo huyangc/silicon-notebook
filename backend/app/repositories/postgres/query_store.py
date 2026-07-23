@@ -86,6 +86,10 @@ class QueryStore:
                         progress(index, total)
             return total
 
+    def invalidate_knowledge_counts(self, notebook_id: str) -> None:
+        # PostgreSQL reads counts directly; it has no process-local count memo.
+        del notebook_id
+
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.
     @staticmethod

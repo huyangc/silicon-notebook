@@ -122,7 +122,15 @@ def _initialize(
 
         # Preserve SQLite's restart recovery contract before traffic is ready.
         connection.execute(
-            "UPDATE knowhow_rows SET projection_status='pending' "
+            "UPDATE merge_review_jobs SET status='failed',"
+            "error='中断:服务重启' WHERE status='running'"
+        )
+        connection.execute(
+            "UPDATE ask_jobs SET status='interrupted',"
+            "error='中断:服务重启' WHERE status='running'"
+        )
+        connection.execute(
+            "UPDATE knowhow_rows SET projection_status='failed' "
             "WHERE projection_status IN ('syncing','pending')"
         )
         connection.execute(

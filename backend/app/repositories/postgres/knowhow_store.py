@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Callable, Sequence
 
+from app.repositories.ports import KNOWHOW_COLUMN_KINDS
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
     normalized_clock,
@@ -39,7 +40,7 @@ def _compat_row(row, *timestamp_columns: str) -> dict:
 #: "角色词表(2026-07-15 修订)": domain-neutral behavior kinds replacing the
 #: PR-1 time-series-fixup-instance vocabulary; the migration remaps stored
 #: legacy values). ``anchor`` marks "this column is the row-title column".
-VALID_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
+VALID_KINDS = KNOWHOW_COLUMN_KINDS
 #: The content kinds a per-column mutation (``add_knowhow_column`` /
 #: ``set_knowhow_column_kind``) may write. ``anchor`` is deliberately absent:
 #: post-creation it is a TABLE-level designation ("which column is the row

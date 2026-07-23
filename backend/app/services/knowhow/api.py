@@ -39,7 +39,7 @@ import time
 import weakref
 from typing import Any, Callable
 
-from app.repositories.sqlite.knowhow_store import VALID_KINDS as _STORE_KINDS
+from app.repositories.ports import KNOWHOW_COLUMN_KINDS as _STORE_KINDS
 from app.services import background_jobs
 from app.services.model_config import model_client_fingerprint
 from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column

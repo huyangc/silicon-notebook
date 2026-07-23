@@ -118,3 +118,52 @@ def test_close_repository_closes_and_clears_the_cached_composition(monkeypatch):
     startup_warmup.close_repository()
 
     assert calls == ["close", "clear"]
+
+
+def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_fails(
+    monkeypatch, caplog
+):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.core import config
+    from app.services import startup_warmup
+
+    calls = []
+
+    def close():
+        calls.append("close")
+        raise RuntimeError("close detail must not escape")
+
+    fake = SimpleNamespace(
+        warm_open_path_caches=lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("warm detail must not escape")
+        ),
+        close=close,
+    )
+
+    def repository():
+        calls.append("repository")
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(
+        config,
+        "get_settings",
+        lambda: SimpleNamespace(database_url="sqlite:////tmp/safe.db"),
+    )
+    readiness.reset()
+    startup_warmup.run_startup()
+
+    assert calls == ["repository", "close", "clear"]
+    assert readiness.snapshot()["phase"] == "error"
+    assert "warm detail" not in caplog.text
+    assert "close detail" not in caplog.text
+
+    # Lifespan shutdown after the failed startup must be idempotent and must
+    # not construct a brand-new cached repository merely to close it.
+    startup_warmup.close_repository()
+    assert calls == ["repository", "close", "clear", "clear"]
+    startup_warmup.close_repository()
+    assert calls == ["repository", "close", "clear", "clear", "clear"]

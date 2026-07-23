@@ -37,6 +37,7 @@ class KnowledgeQueryService:
         notebook_languages: Callable[[], dict],
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
+        queries=None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -52,6 +53,7 @@ class KnowledgeQueryService:
         self.notebook_languages = notebook_languages
         self.memory_retriever = memory_retriever
         self.current_user_id = current_user_id
+        self.queries = queries
 
     def backfill_kg_fts(self, notebook_id: str) -> int:
         self.catalog.get_notebook(notebook_id)
@@ -382,8 +384,8 @@ class KnowledgeQueryService:
         # Test-only raw insert bypasses store_kg's kg_mutation_seq bump (which is
         # what invalidates the seq-gated count cache in production). Drop the
         # cache entry so tests that seed via this helper see fresh counts.
-        from app.repositories.sqlite import knowledge_counts_cache
-        knowledge_counts_cache.invalidate(notebook_id)
+        if self.queries is not None:
+            self.queries.invalidate_knowledge_counts(notebook_id)
         return oid
 
     @staticmethod

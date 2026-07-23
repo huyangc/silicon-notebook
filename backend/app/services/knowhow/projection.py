@@ -74,13 +74,13 @@ from typing import Any, Callable, List
 
 from app.core.config import Settings
 from app.repositories.ports import (
+    ChunkWrite,
     ChunkStorePort,
     KnowledgeStorePort,
     KnowhowStorePort,
+    SourceElementWrite,
     SourceStorePort,
 )
-from app.repositories.sqlite.chunk_store import ChunkWrite
-from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services import background_jobs
 from app.services.knowhow import textops
 from app.services.knowhow.ids import (

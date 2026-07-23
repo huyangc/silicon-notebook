@@ -19,3 +19,15 @@ class PostgresRepository(RepositoryFacade):
 
     def close(self) -> None:
         self._runtime.database.close()
+
+    @property
+    def maintenance(self):
+        adapter = self.__dict__.get("_maintenance")
+        if adapter is None:
+            from app.repositories.postgres.maintenance import (
+                PostgresMaintenanceAdapter,
+            )
+
+            adapter = PostgresMaintenanceAdapter(self._runtime)
+            self.__dict__["_maintenance"] = adapter
+        return adapter

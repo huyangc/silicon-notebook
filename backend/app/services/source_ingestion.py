@@ -136,6 +136,7 @@ class SourceIngestionService:
         notebook_meta_sources: Callable[[str, str], List[dict]],
         apply_notebook_meta: Callable[..., None],
         maybe_enqueue_scale_fold: Callable[[str], None],
+        invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
@@ -172,6 +173,7 @@ class SourceIngestionService:
         self.notebook_meta_sources = notebook_meta_sources
         self.apply_notebook_meta = apply_notebook_meta
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
+        self.invalidate_knowledge_counts = invalidate_knowledge_counts
         # 论文元数据 backfill 进程内状态镜像 kg_building（重启即清）
         # nb_id → {"total": N, "done": k, "_gen": G}
         self._paper_meta_backfilling: dict[str, dict] = {}
@@ -593,8 +595,7 @@ class SourceIngestionService:
                 # pending KG) then failed before its kg_mutation_seq bump; with
                 # auto-extract off no later write bumps it. Drop the seq-gated
                 # chunk/pending memos so the next open recomputes, not serves stale.
-                from app.repositories.sqlite import knowledge_counts_cache
-                knowledge_counts_cache.invalidate(notebook_id)
+                self.invalidate_knowledge_counts(notebook_id)
 
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks
@@ -1010,8 +1011,7 @@ class SourceIngestionService:
         # in its own transaction; the kg_mutation_seq bump only lands later in
         # store_kg (success path). Invalidate the count cache here so the no-llm
         # early-return and the exception path can't keep serving pre-delete counts.
-        from app.repositories.sqlite import knowledge_counts_cache
-        knowledge_counts_cache.invalidate(source.notebook_id)
+        self.invalidate_knowledge_counts(source.notebook_id)
         try:
             kg_llm_client = kg_client if kg_client is not None else self.kg_llm()
             if not getattr(kg_llm_client, "configured", False):

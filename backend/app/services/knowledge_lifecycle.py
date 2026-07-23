@@ -132,6 +132,7 @@ class KnowledgeLifecycleService:
         relations_for_notebook: Callable[[str], List[dict]],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
+        invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -172,6 +173,7 @@ class KnowledgeLifecycleService:
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
+        self._invalidate_knowledge_counts = invalidate_knowledge_counts
 
     # Late-bound model clients: resolved per call through the facade's frozen
     # properties, so class-property monkeypatches (type(repo).kg_llm_client)
@@ -202,8 +204,7 @@ class KnowledgeLifecycleService:
         # cache's seq reads 0 afterward — which ALIASES with a genuine seq 0 (e.g.
         # a freshly copy_notebook'd nb whose counts were cached at seq 0). Drop the
         # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
-        from app.repositories.sqlite import knowledge_counts_cache
-        knowledge_counts_cache.invalidate(notebook_id)
+        self._invalidate_knowledge_counts(notebook_id)
         return counts
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],

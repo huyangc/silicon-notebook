@@ -76,6 +76,9 @@ from app.services.retrieval import (
 from app.services.kg.follow_chain import FollowChainResult
 
 
+KNOWHOW_COLUMN_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
+
+
 @dataclass
 class UploadedSourceFile:
     file_name: str
@@ -965,11 +968,22 @@ class ModelErrorSink(Protocol):
     ) -> None: ...
 
 
+class AssetMaintenancePort(Protocol):
+    def sweep_orphan_assets(
+        self,
+        notebook_id: str,
+        *,
+        min_age_seconds: float = 0.0,
+        waive_grace_if_no_tables: bool = False,
+    ) -> dict[str, object]: ...
+
+
 class FacadePropertyContract(ModelClientProvider, Protocol):
     settings: Settings
     storage_dir: Path
     embedder: Any
     retrieval: RetrievalPort
+    maintenance: AssetMaintenancePort
 
 
 class AskStreamPort(Protocol):
@@ -988,7 +1002,7 @@ class NotebookRepository(IdentityRepository, NotebookAccessRepository, NotebookC
     pass
 
 
-class SQLiteMaintenancePort(Protocol):
+class SQLiteMaintenancePort(AssetMaintenancePort, Protocol):
     def delete_notebook_kg(self, notebook_id: str) -> dict[str, object]: ...
     def eval_insert_source_for_test(self, notebook_id: str, name: str, text: str, tmpdir: str) -> str: ...
     def backfill_kg_fts(self, notebook_id: str) -> int: ...
@@ -1043,6 +1057,8 @@ class SQLiteMaintenancePort(Protocol):
     def clear_source_index(self, notebook_id: str) -> int: ...
     def backfill_source_index_batch(self, notebook_id: str, last_id: str, batch_size: int) -> tuple[int, int, str]: ...
     def mark_source_index_backfilled(self, notebook_id: str) -> None: ...
+    # Repeated explicitly because the frozen protocol-coverage contract
+    # enumerates this concrete compatibility port's own dictionary.
     def sweep_orphan_assets(
         self,
         notebook_id: str,
@@ -1415,6 +1431,11 @@ class KnowhowTransferStorePort(Protocol):
 class QueryStorePort(Protocol):
     @staticmethod
     def count_rows(db: object, table: str, column: str, value: str) -> int: ...
+    @staticmethod
+    def knowledge_type_count_rows(
+        db: object, notebook_id: str, statuses: tuple[str, ...]
+    ) -> list[dict]: ...
+    def invalidate_knowledge_counts(self, notebook_id: str) -> None: ...
     def list_user_usage(self) -> list[dict[str, Any]]: ...
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]: ...
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics: ...
