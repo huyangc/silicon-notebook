@@ -203,6 +203,54 @@ export function assignmentsIn(node) {
 }
 
 
+const COMPARISON_OPERATOR_KINDS = new Set([
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+]);
+
+// AST-level comparison finder — deliberately separate from `assignmentsIn`
+// (assignment vs. equality/inequality operators never overlap, see the
+// Kind ranges above). Callers matching on `right` care about the compared
+// *value*, not its source spelling, so a string/no-substitution-template
+// literal's `right` is its unquoted `.text` — this is what makes a caller's
+// match immune to a bypass that only changes quote style or whitespace
+// around the operator (both are already normalized away at the token/AST
+// level and never reach the caller as raw text).
+export function comparisonsIn(node) {
+  const comparisons = [];
+  function rightValue(expression) {
+    if (
+      ts.isStringLiteral(expression)
+      || ts.isNoSubstitutionTemplateLiteral(expression)
+    ) {
+      return expression.text;
+    }
+    return semanticText(expression);
+  }
+  function visit(child) {
+    if (
+      ts.isBinaryExpression(child)
+      && COMPARISON_OPERATOR_KINDS.has(child.operatorToken.kind)
+    ) {
+      comparisons.push({
+        left: semanticText(child.left),
+        operator: child.operatorToken.getText(child.getSourceFile()),
+        right: rightValue(child.right),
+      });
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return comparisons.sort((left, right) => (
+    left.left.localeCompare(right.left)
+    || left.operator.localeCompare(right.operator)
+    || left.right.localeCompare(right.right)
+  ));
+}
+
+
 function assignmentEffect(node) {
   if (
     !ts.isBinaryExpression(node)

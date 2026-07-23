@@ -11,6 +11,8 @@ import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
 import { AnalyticsLoadScope, startAnalyticsLoads } from "./analytics-loaders";
+import { sourceAnomalies } from "./anomaly-severity";
+import { AnomalyBadge } from "./anomaly-badge";
 import {
   answerIdBatches,
   collectSavedAnswerFlags,
@@ -3636,6 +3638,9 @@ export default function Home() {
     modelStatus,
     modelStatusUnavailable,
   });
+  // 来源详情弹窗的异常徽标(anomaly-tiers spec)。算一次给下方两处用(是否渲染
+  // 容器 div + map 渲染),避免重复调用。
+  const sourceDetailAnomalies = sourceDetail ? sourceAnomalies(sourceDetail) : [];
 
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
@@ -4119,8 +4124,12 @@ export default function Home() {
                         <button className="source-row-main" onClick={() => openSourceDetail(source).catch(reportError)}>
                           <FileText className="source-file-icon" size={20} />
                           <span className="source-title-short">{compactSourceTitle(source)}</span>
-                          <span className={`source-status-dot status-${source.parse_status || source.status}`} />
-                          {source.extraction_warning && <span title={source.extraction_warning} style={{cursor:"help",marginLeft:2}}>⚠</span>}
+                          <span className="source-row-status">
+                            <span className={`source-status-dot status-${source.parse_status || source.status}`} />
+                            {sourceAnomalies(source).filter((a) => a.severity !== "info").map((anomaly, i) => (
+                              <AnomalyBadge key={`${anomaly.severity}-${i}`} anomaly={anomaly} />
+                            ))}
+                          </span>
                         </button>
                         <div className="source-row-actions">
                           {currentNotebook?.kg_ready && (
@@ -4130,12 +4139,6 @@ export default function Home() {
                             >
                               {source.kg_extracted ? "已分析" : "待分析"}
                             </span>
-                          )}
-                          {source.paper_meta_status === "missing" && (
-                            <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }} title="论文作者/机构等信息尚未补全">待补全</span>
-                          )}
-                          {source.paper_meta_status === "not_paper" && (
-                            <span className="tag" style={{ opacity: 0.6 }} title="该来源非学术论文，无需补全论文信息">非论文</span>
                           )}
                           {source.source_url ? (
                             <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} aria-label="打开原始链接" onClick={(e) => e.stopPropagation()}>
@@ -5059,16 +5062,12 @@ export default function Home() {
                   )}
                 </div>
               )}
-              {sourceDetail.paper_meta_status === "not_paper" && (
-                <div className="source-detail-paper" style={{ opacity: 0.6 }}>该来源非学术论文</div>
-              )}
-              {sourceDetail.paper_meta_status === "missing" && (
-                <div className="source-detail-paper" style={{ color: "var(--color-warn, #b97a00)" }}>
-                  论文信息未补全（点击上方“补全论文信息”）
+              {sourceDetailAnomalies.length > 0 && (
+                <div className="source-detail-anomalies">
+                  {sourceDetailAnomalies.map((anomaly, i) => (
+                    <AnomalyBadge key={`${anomaly.severity}-${i}`} anomaly={anomaly} block />
+                  ))}
                 </div>
-              )}
-              {sourceDetail.extraction_warning && (
-                <p className="tag" style={{color:"var(--color-warning,#b45309)",background:"var(--color-warning-bg,#fef3c7)",border:"1px solid var(--color-warning-border,#fcd34d)",borderRadius:4,padding:"4px 8px",marginTop:4}}>⚠ {sourceDetail.extraction_warning}</p>
               )}
               <div className="source-element-stack">
                 {sourceElements.length > 0 ? sourceElements.map((element) => (

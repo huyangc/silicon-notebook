@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   BookmarkPlus,
   Check,
   ChevronDown,
@@ -493,7 +494,8 @@ export function AnswerView({
         />
       )}
       {answer.index_required && (
-        <div className="answer-model-error" title="内容较多时检索会走索引；尚未建立索引时结果会受限">
+        <div className="answer-index-degraded" title="内容较多时检索会走索引；尚未建立索引时结果会受限">
+          <AlertTriangle size={14} aria-hidden="true" />
           <span>此笔记本内容较多，尚未建立索引，当前检索能力受限。</span>
           <button
             type="button"
