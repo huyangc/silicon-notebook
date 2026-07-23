@@ -116,8 +116,8 @@ class CheckupService:
         self,
         *,
         database: SqliteDatabase,
-        count_missing_chunk_vectors: Callable[[str], int],
-        count_missing_element_vectors: Callable[[str], int],
+        count_missing_chunk_vectors: Callable[[str, "set[str]"], int],
+        count_missing_element_vectors: Callable[[str, "set[str]"], int],
         scale_index_state: Callable[[str], str],
         index_manifest_identity: Callable[[str], "tuple[bool, Any]"],
         probe_index_integrity: Callable[[str], int],
@@ -158,15 +158,17 @@ class CheckupService:
         checks = [
             CheckupItem("H2", len(h2_hits), _sample(h2_hits), "reparse"),
             CheckupItem("H3", len(h3_hits), _sample(h3_hits), "reparse"),
+            # H4/H5 也减活跃租约(codex):正在嵌入的源 chunk/element 已在、向量还没落,是
+            # 正常在途而非损坏——不排除会每次嵌入都误报缺向量、甚至触发并发 backfill 重复模型调用。
             CheckupItem(
                 "H4",
-                int(self._count_missing_chunk_vectors(notebook_id)),
+                int(self._count_missing_chunk_vectors(notebook_id, active)),
                 [],
                 "backfill_vectors",
             ),
             CheckupItem(
                 "H5",
-                int(self._count_missing_element_vectors(notebook_id)),
+                int(self._count_missing_element_vectors(notebook_id, active)),
                 [],
                 "backfill_vectors",
             ),

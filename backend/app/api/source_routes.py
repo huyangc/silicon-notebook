@@ -236,9 +236,15 @@ def reparse_sources(
     scheduled: List[str] = []
     for source_id in unique_ids:
         try:
-            if repo.get_source(source_id).notebook_id != notebook_id:
-                continue
+            src = repo.get_source(source_id)
         except KeyError:
+            continue
+        if src.notebook_id != notebook_id:
+            continue
+        # ⚠ 只重解析**导入型**用户源(codex):memory/knowhow 隐藏合成源无 file_path、由各自
+        # 投影服务维护;把它们喂给文档解析 process_source 只会标失败/清派生态,不是修复。
+        # 与 H2/H3 判据同口径(那两项本就排除 memory/knowhow),这里挡住 body 里带来的 id。
+        if src.type in ("memory", "knowhow"):
             continue
         kg_scheduler.submit_job(repo.process_source, source_id)
         scheduled.append(source_id)
@@ -270,7 +276,16 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     (只补缺失、幂等,仅 embedding、不动解析/KG)。用户点触发、非自动(承 efficiency-first:
     凡调 embedding 的修复不自动)。补完后 H4/H5 计数下降,前端重拉 checkup 反映。
     用完整 facade(``repository()``)——backfill 需要 maintenance/configured(BatchIngestRepository)。"""
-    kg_scheduler.submit_job(_backfill_vectors_job, repository(), notebook_id)
+    repo = repository()
+    # ⚠ 两个嵌入 workload 都没配 → backfill 会完全 no-op(batch_ingest 各自 configured 门跳过),
+    # 别假受理(codex):否则前端说「已开始」+ 空转轮询 10min,而 H4/H5 永远清不掉。返 accepted=false,
+    # 前端据此提示「未配置嵌入服务」而非「修复中」。
+    if not (
+        repo.configured("chunk_embedding")
+        or repo.configured("source_element_embedding")
+    ):
+        return RepairScheduledResult(accepted=False)
+    kg_scheduler.submit_job(_backfill_vectors_job, repo, notebook_id)
     return RepairScheduledResult(accepted=True)
 
 

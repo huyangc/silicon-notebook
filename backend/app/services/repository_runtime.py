@@ -320,10 +320,14 @@ class RepositoryRuntime:
         self.checkup = CheckupService(
             database=self.database,
             count_missing_chunk_vectors=(
-                lambda nb: self.maintenance_component.count_missing_chunk_vectors(nb)
+                lambda nb, exclude: self.maintenance_component.count_missing_chunk_vectors(
+                    nb, exclude
+                )
             ),
             count_missing_element_vectors=(
-                lambda nb: self.maintenance_component.count_missing_element_vectors(nb)
+                lambda nb, exclude: self.maintenance_component.count_missing_element_vectors(
+                    nb, exclude
+                )
             ),
             scale_index_state=(
                 lambda nb: str(self.scale_artifacts.status(nb).get("state", ""))

@@ -4802,6 +4802,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_vectors",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/eval/speed.py",
         "scope": "<module>.measure_speed",
         "target": "configured"
