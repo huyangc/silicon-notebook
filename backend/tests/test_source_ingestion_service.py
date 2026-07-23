@@ -628,14 +628,17 @@ def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeyp
         assert label in labels, (label, labels)
         return labels.index(label)
 
-    # Frozen order: parsing → parse → parsed → embed start (background) →
-    # extracting → extract → extracted → embed joined → pipeline done last.
+    # Order: parsing → parse → parsed → extracting (parsed→extracting ownership
+    # guard) → embed start (background) → extract → extracted → embed joined →
+    # pipeline done last. Round-7 P2-1: the guard's status:extracting now precedes
+    # embed:start — the background embed thread is spawned only AFTER this pipeline
+    # wins ownership, so a yielded pipeline never races the reparse's clear.
     assert index("status:parsing") < index("pipeline:parse:start")
     assert index("pipeline:parse:start") < index("pipeline:parse:done")
     assert index("pipeline:parse:done") < index("status:parsed")
-    assert index("status:parsed") < index("pipeline:embed:start")
-    assert index("pipeline:embed:start") < index("status:extracting")
-    assert index("status:extracting") < index("pipeline:extract:start")
+    assert index("status:parsed") < index("status:extracting")
+    assert index("status:extracting") < index("pipeline:embed:start")
+    assert index("pipeline:embed:start") < index("pipeline:extract:start")
     assert index("pipeline:extract:start") < index("pipeline:extract:done")
     assert index("pipeline:extract:done") < index("status:extracted")
     assert index("pipeline:embed:done") < index("pipeline:pipeline:done")
