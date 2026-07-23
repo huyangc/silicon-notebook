@@ -251,8 +251,9 @@ JOIN pg_namespace n ON n.oid = e.extnamespace
 WHERE e.extname = 'pg_trgm';
 ```
 
-预期结果是 `pg_trgm | public`；无结果表示首次启动应用前须由 DBA 安装，若位于其他 schema，
-migration 会 fail closed。
+`pg_trgm | public` 表示前置条件已就绪。若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`；
+应用数据库 owner 必须有该权限，否则由 DBA 预装到 `public`。
+既有 `pg_trgm` 位于其他 schema 时会 fail closed。
 
 1. 以 PostgreSQL 管理员创建 UTF8 数据库，owner 是专用登录角色，且该角色是
    `NOSUPERUSER NOCREATEDB NOCREATEROLE`。若复用任何 target，先做 PostgreSQL

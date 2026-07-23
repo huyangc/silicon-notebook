@@ -256,6 +256,34 @@ def test_batch_ingest_backend_boundary_and_postgres_extension_prerequisite_are_d
             "packaging/DEPLOY.md": "`pg_trgm` 必须安装在 `public` schema",
         }
     )
+    _assert_phrases(
+        {
+            "README.md": "`pg_trgm | public` means the prerequisite is ready",
+            "README_zh.md": "`pg_trgm | public` 表示前置条件已就绪",
+            "packaging/DEPLOY.md": "`pg_trgm | public` 表示前置条件已就绪",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": (
+                "If the query returns no row, the first migration automatically attempts "
+                "`CREATE EXTENSION pg_trgm`"
+            ),
+            "README_zh.md": (
+                "若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`"
+            ),
+            "packaging/DEPLOY.md": (
+                "若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`"
+            ),
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "an existing `pg_trgm` in any other schema fails closed",
+            "README_zh.md": "既有 `pg_trgm` 位于其他 schema 时会 fail closed",
+            "packaging/DEPLOY.md": "既有 `pg_trgm` 位于其他 schema 时会 fail closed",
+        }
+    )
     for name in (
         "README.md",
         "README_zh.md",

@@ -92,7 +92,9 @@ JOIN pg_namespace n ON n.oid = e.extnamespace
 WHERE e.extname = 'pg_trgm';
 ```
 
-预期是 `pg_trgm | public`；无行表示尚未安装，其他 schema 会让 migration fail closed。
+`pg_trgm | public` 表示前置条件已就绪。若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`；
+应用数据库 owner 必须有该权限，否则由 DBA 预装到 `public`。
+既有 `pg_trgm` 位于其他 schema 时会 fail closed。
 
 1. DBA 创建专用 UTF8 空库和 login owner；应是
    `NOSUPERUSER NOCREATEDB NOCREATEROLE`，有足够连接/磁盘容量，并且备份策略已演练。

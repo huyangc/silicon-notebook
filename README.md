@@ -283,8 +283,9 @@ JOIN pg_namespace n ON n.oid = e.extnamespace
 WHERE e.extname = 'pg_trgm';
 ```
 
-The expected row is `pg_trgm | public`; no row means the DBA must install it before first
-application startup, and any other schema is rejected by migration.
+`pg_trgm | public` means the prerequisite is ready. If the query returns no row, the first migration automatically attempts `CREATE EXTENSION pg_trgm`;
+the application database owner must have that permission, otherwise a DBA must preinstall it
+in `public`. During migration, an existing `pg_trgm` in any other schema fails closed.
 
 1. As a PostgreSQL administrator, create a UTF8 database owned by a dedicated login with
    `NOSUPERUSER NOCREATEDB NOCREATEROLE`. Take a PostgreSQL backup if reusing any target;
