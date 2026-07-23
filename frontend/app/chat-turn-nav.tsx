@@ -71,6 +71,12 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
     setActive(activeTurnFromTops(tops));
   }, [count, scrollRef]);
 
+  // jump 的解锁定时器 deps 为空，用 ref 持有最新 recompute，避免闭包捕获旧的 count。
+  const recomputeRef = useRef(recompute);
+  useEffect(() => {
+    recomputeRef.current = recompute;
+  }, [recompute]);
+
   useEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
@@ -96,6 +102,13 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
   // 以稳定的会话标识驱动一次重算，避免高亮停留在上一个会话——比拼接问题文本更可靠
   // （规避「问法相同、答案不同」与「问题内含换行」两种签名碰撞）。
   useEffect(() => {
+    // 会话切换 / 轮数变化时，作废上一次点击留下的跳转锁，立即按新布局重算高亮
+    // （否则锁生效期间发生的程序化滚动会被吞掉，高亮停在旧会话、甚至越界无高亮）。
+    lockRef.current = false;
+    if (lockTimer.current) {
+      window.clearTimeout(lockTimer.current);
+      lockTimer.current = null;
+    }
     recompute();
   }, [sessionId, recompute]);
 
@@ -193,6 +206,9 @@ export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurn
     if (lockTimer.current) window.clearTimeout(lockTimer.current);
     lockTimer.current = window.setTimeout(() => {
       lockRef.current = false;
+      // 解锁后补算一次：锁生效期间若发生程序化滚动（答案落定后自动到底等），
+      // 其 scroll 事件已被吞掉，这里按当前布局把高亮校正过来。
+      recomputeRef.current();
     }, 700);
     el.scrollIntoView({ behavior: reduceRef.current ? "auto" : "smooth", block: "start" });
     const bubble = el.querySelector(".chat-user");
