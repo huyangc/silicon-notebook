@@ -17,6 +17,7 @@ from app.repositories.sqlite.identity_store import (
 )
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
+from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_scale import NotebookScaleFacts
 
 
@@ -82,6 +83,36 @@ class QueryStore:
         row = db.execute(
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
             (notebook_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    @staticmethod
+    def notebook_has_usable_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
+        """本库是否有**可用状态**的 knowledge_objects(USABLE_STATUSES,排除 deprecated
+        等)。检索侧就按 USABLE_STATUSES 过滤,故 ask_available 用它,而非 notebook_has_kg
+        (后者含 deprecated)——避免只剩已弃用 KG 的库被误判为可对话(codex PR#334 第4轮
+        P2-1)。注意 notebook_has_kg 仍保留:kg_ready 是"是否建过图"的既有全应用口径。"""
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
+            f"WHERE notebook_id = ? AND status IN ({placeholders}))",
+            (notebook_id, *USABLE_STATUSES),
+        ).fetchone()
+        return bool(row[0])
+
+    @staticmethod
+    def notebook_has_usable_base_kg(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> bool:
+        """本库挂载的参考库中是否有任一含**可用状态** KG。对齐检索口径:base_kg_available
+        (mounted_bases_row 的 has_kg)含 deprecated,ask_available 改用这个 usable 版
+        (codex PR#334 第4轮 P2-1)。"""
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 " + MOUNT_JOIN + MOUNT_VALID
+            + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
+            f"WHERE ko.notebook_id = b.id AND ko.status IN ({placeholders})))",
+            (notebook_id, *USABLE_STATUSES),
         ).fetchone()
         return bool(row[0])
 
