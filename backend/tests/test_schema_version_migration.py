@@ -57,7 +57,10 @@ def test_migration_25_irreversibly_scrubs_user_model_credentials_and_old_status(
         )
         db.execute("PRAGMA user_version = 24")
 
-    assert repo._migrate() == [25]
+    # 从 v24 起 _migrate 依次应用 _migration_25(凭据清除+系统状态表)与
+    # _migration_26(knowhow_changes/knowhow_milestones);本用例只断言 v25 的
+    # 数据副作用,v26 两表的结构由 test_knowhow_history_schema 单独钉。
+    assert repo._migrate() == [25, 26]
 
     with repo._connect() as db:
         settings = db.execute(

@@ -44,7 +44,7 @@
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
 此后 master 先以 v11/v12 增加 SQLite 热路径索引，Agent Memory 在合并后使用 v13
-migration；当前 schema 版本为 25。已提交的 v9 兼容 fixture 会经由 v10–v25 migration
+migration；当前 schema 版本为 26。已提交的 v9 兼容 fixture 会经由 v10–v26 migration
 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
 v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 为交互式规整的

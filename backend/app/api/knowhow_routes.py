@@ -925,18 +925,24 @@ def get_knowhow_history(
     ``milestones_only=true`` 时把本页 ``changes`` 按里程碑 seq 集合过滤——这是
     一次性的单页内过滤，不会为了凑够 ``limit`` 条而多轮翻页：里程碑本来就稀疏，
     这只是前端"只看里程碑"筛选的展示层需求，不值得为它引入内部多轮翻页的
-    复杂度与延迟。"""
+    复杂度与延迟。
+
+    ``head_seq``/``changes``/``milestones`` 三者由 ``knowhow_history_page`` 在
+    **同一读快照**里一次取出（codex 第 4 轮 P1）：早前分三次 store 调用取，
+    一条夹在中间提交的并发编辑会让 ``head_seq`` 领先于 ``changes`` 里最新一条，
+    用户没看见它却能确认回退、陈旧守卫还照放，把这条未见编辑抹掉。
+    ``milestones_only`` 的过滤是纯展示层，落在快照之后、对一致性无影响。"""
     repo = repository()
     _require_table(repo, notebook_id, table_id)
-    changes = repo.list_knowhow_changes(table_id, limit, before_seq)
-    milestones = repo.list_knowhow_milestones(table_id)
+    page = repo.knowhow_history_page(table_id, limit, before_seq)
+    changes = page["changes"]
     if milestones_only:
-        milestone_seqs = {milestone["seq"] for milestone in milestones}
+        milestone_seqs = {milestone["seq"] for milestone in page["milestones"]}
         changes = [change for change in changes if change["seq"] in milestone_seqs]
     return {
-        "head_seq": repo.knowhow_history_head_seq(table_id),
+        "head_seq": page["head_seq"],
         "changes": changes,
-        "milestones": milestones,
+        "milestones": page["milestones"],
     }
 
 

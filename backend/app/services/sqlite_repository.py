@@ -249,7 +249,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 
 @dataclass(frozen=True)
@@ -3451,6 +3451,11 @@ class SQLiteRepository:
         self, table_id: str, limit: int = 50, before_seq: "int | None" = None
     ) -> list:
         return self._runtime.knowhow_history_store.list_changes(table_id, limit, before_seq)
+
+    def knowhow_history_page(
+        self, table_id: str, limit: int = 50, before_seq: "int | None" = None
+    ) -> dict:
+        return self._runtime.knowhow_history_store.history_page(table_id, limit, before_seq)
 
     def get_knowhow_change(self, table_id: str, seq: int) -> "dict | None":
         return self._runtime.knowhow_history_store.get_change(table_id, seq)

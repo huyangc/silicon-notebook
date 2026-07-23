@@ -158,8 +158,8 @@ Confirmed scope:
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state is runtime-owned, and supported post-composition replacements must update every retained consumer. Synchronous Ask/report submission failures must mark the durable job/report failed, unregister its cancellation entry, and re-raise; preserve the successful worker order and existing Ask transaction checkpoints.
 - Schema changes stay version-gated behind `SqliteMigrator` (append `_migration_N` + bump `SCHEMA_VERSION`); startup recovery/seed/admin-upgrade run every boot outside the version gate. Pre-refactor databases must keep loading: the frozen v9 fixture replay (`backend/tests/fixtures/repository_v9/`, `test_legacy_db_compat.py`) and the backup-only real-database verifier `scripts/verify_repository_snapshot.py` are the guards. The verifier uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, never constructs the repository on an original database/storage path, and reports a retained temporary backup on cleanup failure without private row data. Original DB/WAL metadata and SHM existence/size are guarded; on a live WAL attachment only SHM mtime is exempt.
 
-The current schema version is 25. The committed v9 compatibility fixture
-upgrades through migrations v10–v25 and remains readable. Those migrations
+The current schema version is 26. The committed v9 compatibility fixture
+upgrades through migrations v10–v26 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
