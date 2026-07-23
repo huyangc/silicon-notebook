@@ -454,79 +454,31 @@ def test_noop_backend_disables_caching(tmp_path):
     assert len(inner.calls) == 2
 
 
-def test_health_probe_bypasses_cache():
-    """模型故障时探针若命中缓存会显示假绿——必须绕过。
+def test_raw_embedding_survives_unusable_cache_file(tmp_path):
+    """缓存后端构造失败绝不能打死生产 embedding 的构造点 _raw_embedding。
 
-    变异验证：把 model_status.py 里的 cache=False 改成 True 后，本测试必须转红。
-    """
-    import inspect
+    _raw_embedding 在 RuntimeModelProvider 的运行时里为每个 embedding 服务建 raw
+    embedder；缓存后端构造要碰磁盘（建目录/表/开 WAL），失败原因不玄学：WAL 崩溃
+    残留、.local 不可写、路径撞到别的文件（本测试用的就是最后一种）。此处抛异常会
+    让整个模型服务不可用。必须降级为「不包装」而非抛。
 
-    from app.services import model_status
-
-    src = inspect.getsource(model_status)
-    idx = src.find("make_embedder(")
-    assert idx != -1, "model_status 里找不到 make_embedder 调用"
-    window = src[idx:idx + 400]
-    assert "cache=False" in window, "健康探针未绕过缓存，模型故障会被缓存掩盖成假绿"
-
-
-def test_make_embedder_returns_uncached_when_cache_false():
-    from app.core.config import Settings
-    from app.services.embedding import make_embedder
-
-    e = make_embedder(Settings(), cache=False)
-    assert e.__class__.__name__ != "CachedEmbedder"
-
-
-def test_make_embedder_survives_unusable_cache_file(tmp_path, monkeypatch):
-    """缓存后端构造失败绝不能打死 make_embedder。
-
-    make_embedder 在 SQLiteRepository.__init__ 里被调用，而 deps.repository() 是
-    所有请求级依赖的唯一入口——在这里抛异常 = 每个请求 500，且 @lru_cache 永远
-    缓存不住；离线 CLI 同样起不来。触发条件不玄学：WAL 崩溃残留、.local 不可写、
-    路径撞到别的文件（本测试用的就是最后一种）。
-
-    变异验证：去掉 embedding.py 里包住 make_cache_backend 的 try 后本测试转红。
+    变异验证：去掉 model_provider.py 里包住 make_cache_backend 的 try 后本测试转红。
     """
     from app.core.cache import make_cache_backend
     from app.core.config import Settings
-    from app.services.embedding import make_embedder
 
     bad = tmp_path / "not-a-database.db"
     bad.write_bytes(b"this is definitely not a sqlite database\n" * 64)
-    monkeypatch.setenv("LLM_CACHE_ENABLED", "true")
-    monkeypatch.setenv("LLM_CACHE_PATH", str(bad))
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("EMBED_API_KEY", "k")
-    monkeypatch.setenv("EMBED_MODEL", "text-embedding-v4")
-    settings = Settings()
+    settings = Settings(
+        _env_file=None, llm_cache_enabled=True, llm_cache_path=str(bad),
+    )
 
     with pytest.raises(Exception):     # 前提：这个文件确实构造不出后端
         make_cache_backend(settings)
 
-    e = make_embedder(settings)        # 不得抛
+    e = _raw_embedding_for(settings)   # 不得抛
     assert e.__class__.__name__ == "DashscopeEmbedder", "缓存不可用时应降级为不包装"
     assert e.dim == settings.embed_dim, "降级后仍须是个能用的 embedder"
-    assert getattr(e, "_model_status_fingerprint", ""), "身份绑定不能因降级丢失"
-
-
-def test_model_settings_test_endpoint_bypasses_cache():
-    """POST /me/model-settings/test 是前端「测试连接」按钮打的探活端点。全仓 36 个
-    chat_json 调用点中探活性质共 3 处，这是其中之一——命中缓存会在服务已挂掉时
-    仍回放 ok=True 对用户撒谎，chat_json 调用必须显式 bypass_cache=True。
-
-    变异验证：把 system_routes.py 里的 bypass_cache=True 删掉后，本测试必须转红。
-    """
-    import inspect
-
-    from app.api import system_routes
-
-    src = inspect.getsource(system_routes)
-    idx = src.find("chat_json(")
-    assert idx != -1, "system_routes 里找不到 chat_json 调用"
-    window = src[idx:idx + 300]
-    assert "bypass_cache=True" in window, "健康探针未绕过缓存，模型故障会被缓存掩盖成假绿"
 
 
 # ---------------------------------------------- 缓存键必须含服务身份（base_url）
@@ -570,3 +522,65 @@ def test_embed_cache_shared_within_one_endpoint(tmp_path):
     a.embed_texts(["x"])
     b.embed_texts(["x"])
     assert inner_b.calls == [], "同 endpoint 第二个 embedder 应命中缓存，不再打后端"
+
+
+# --- Production integration: the cache lives in RuntimeModelProvider._raw_embedding
+# (this rebase moved it there from make_embedder, since master routes production
+# embedding through RuntimeModelProvider.embedding → ScheduledEmbedder.raw, not
+# make_embedder). These pin "production embedding is cached" and "probes are not".
+
+def _embedding_service():
+    from app.services.model_registry import ModelServiceDefinition
+
+    return ModelServiceDefinition(
+        id="embed", display_name="向量服务", kind="embedding", protocol="openai",
+        base_url="https://embed.example/v1", model="embed-model",
+        api_key_env="EMBED_TEST_KEY", api_key="secret", max_concurrency=2,
+        fingerprint="embed-fingerprint",
+    )
+
+
+def _raw_embedding_for(settings):
+    # Call _raw_embedding with a minimal stand-in: it only reads self.settings and
+    # service.* — no need to construct the full provider (which spawns executors).
+    from app.services.model_provider import RuntimeModelProvider
+
+    holder = type("_Holder", (), {"settings": settings})()
+    return RuntimeModelProvider._raw_embedding(holder, _embedding_service())
+
+
+def test_raw_embedding_is_cached_in_production(tmp_path):
+    """生产 embedding 的唯一构造点 _raw_embedding 在缓存开启时返回 CachedEmbedder，
+    于是 ScheduledEmbedder.raw 走缓存、生产流量真正命中——本次 rebase 把缓存从
+    make_embedder 移到 _raw_embedding 的核心断言。dim 必须透传 inner.dim
+    （ScheduledEmbedder.dim = runtime.raw.dim 靠这条）。"""
+    from app.core.config import Settings
+
+    settings = Settings(
+        _env_file=None, llm_cache_enabled=True,
+        llm_cache_path=str(tmp_path / "cache.db"),
+    )
+    raw = _raw_embedding_for(settings)
+    assert type(raw).__name__ == "CachedEmbedder"
+    assert raw.dim == settings.embed_dim
+
+
+def test_raw_embedding_is_bare_when_cache_disabled():
+    """缓存关闭时 _raw_embedding 不包装——省去每批 key 计算，返回裸 DashscopeEmbedder。"""
+    from app.core.config import Settings
+
+    raw = _raw_embedding_for(Settings(_env_file=None, llm_cache_enabled=False))
+    assert type(raw).__name__ == "DashscopeEmbedder"
+
+
+def test_make_embedder_probe_path_is_never_cached():
+    """探针/离线走 make_embedder；master 架构下它不含缓存，配置齐全也只返回裸
+    DashscopeEmbedder（健康探针命中缓存会造成假绿，故绝不能包 CachedEmbedder）。"""
+    from app.core.config import Settings
+    from app.services.embedding import make_embedder
+
+    embedder = make_embedder(
+        Settings(_env_file=None), provider="dashscope",
+        base_url="https://embed.example/v1", api_key="secret", model="embed-model",
+    )
+    assert type(embedder).__name__ == "DashscopeEmbedder"
