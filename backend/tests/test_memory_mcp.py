@@ -451,6 +451,22 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_experimental_graph(mcp_env
 
 
 @pytest.mark.anyio
+async def test_ask_notebook_rejects_empty_notebook(mcp_env):
+    """PR#334 硬约束覆盖 MCP 这个 user-facing ask 入口:空库(无任何可检索证据)的
+    ask_notebook 与 /ask、/ask/stream 一致被拒绝,不产生凭空回答(codex 第10轮 P2)。
+    mcp_env['notebook'] 由 fixture 建空,未 seed 证据。"""
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook", {"question": "anything", "mode": "chunk"}
+        )
+        assert rejected.isError
+        assert "来源" in rejected.content[0].text
+
+
+@pytest.mark.anyio
 async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(mcp_env):
     notebook_id = mcp_env["notebook"].id
     candidate = mcp_env["service"].create_memory_candidate(
@@ -552,6 +568,9 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
             "name": "Notebook " + (sentinel * 2_000),
             "purpose": "Purpose " + (sentinel * 2_000),
             "counts": huge_counts,
+            # PR#334:ask_notebook 现先经硬约束校验 get_notebook().ask_available;此桩
+            # notebook 要可用,ask 才走到被 monkeypatch 的巨型响应(测预算截断)。
+            "ask_available": True,
         }
     )
     monkeypatch.setattr(service, "get_notebook", lambda _notebook_id: huge_summary)

@@ -907,6 +907,15 @@ def create_memory_mcp(
 
         def run_ask():
             with _owner_request_context(principal):
+                # 硬约束(PR#334):空库(ask_available=False)一律拒绝——与 /ask、/ask/stream
+                # 同一权威闸门,覆盖 MCP 这个 user-facing ask 入口(codex 第10轮 P2)。
+                # get_notebook 在 owner 上下文内,confirmed-memory 判定按调用者作用域。
+                notebook = repo.get_notebook(notebook_id)
+                if not notebook.ask_available:
+                    raise ValueError(
+                        "该笔记本还没有可用于回答的内容，请先添加来源，"
+                        "或在「设置 → 编辑当前笔记本」里挂载一个参考库。"
+                    )
                 return repo.ask(
                     notebook_id, AskRequest(question=question, mode=mode)
                 )
