@@ -11,6 +11,7 @@ source 行会引爆权限、删除级联与归属问题。
 import threading
 import types
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -675,6 +676,77 @@ def test_rename_after_the_reconcile_claim_uses_the_latest_suffix_not_the_stale_o
     )
     assert final.parse_status == "extracted", "补跑完照样落终态"
     assert len(live_repo.list_sources(nb)) == 1, "始终只有一行"
+
+
+def test_reconcile_repoint_cas_keeps_the_latest_suffix_across_the_read_write_sliver(
+    live_repo, monkeypatch
+):
+    """P2-2（Codex 第 7 轮）：_reconcile 认领后重读 file_name，但重读→repoint 落库之间仍有
+    一道 sliver——并发在飞改名可以落在这里。repoint 落库那步必须是**条件 UPDATE（CAS）**守卫
+    在重读到的名字上：被并发改了就重读最新名再试，绝不用陈旧名盖掉更新的纠正。
+
+    时间线：上传 data.csv（P1 跑）→ 抽取中并发重传 data.md（记为待收口意图）→ P1 定型 →
+    收口 reconcile 认领赢（行 'queued'）→ 重读 latest=data.md → **repoint 落库前** 另一条真实
+    线程重传 data.txt（在飞分支只改名，落到 sliver 里）→ CAS 守卫在 data.md 上落空 → 重读
+    data.txt 重试 → 最终按 data.txt 整条重解析、落 data.txt。
+
+    变异：把 _repoint_reused_file 的 expected_file_name 分支换回无条件 rename_source_file
+    （忽略 CAS 守卫）→ 首次 repoint 用陈旧的 data.md 盖掉并发的 data.txt → 最终落 data.md →
+    本测试转红。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    _patch_parse(monkeypatch, [_element("body")])
+
+    body = b"col1,col2\n1,2"
+
+    # 抽取中（in-flight）换后缀重传一次，制造「待收口的后缀纠正」，让流水线跑完触发 reconcile。
+    extract_calls = {"n": 0}
+
+    def fake_extract(source_id, **_kw):
+        extract_calls["n"] += 1
+        if extract_calls["n"] == 1:
+            _upload_named(live_repo, nb, content=body, name="data.md")
+
+    monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
+
+    # 在 reconcile 的「重读 latest → repoint 落库」之间注入并发在飞改名（真实线程）。注入点选
+    # _repoint_reused_file 入口：此刻 reconcile 已重读 latest=data.md、正要落库；另一条线程重传
+    # data.txt（行此刻 'queued' → 在飞分支只改名）恰好落进读→写 sliver。join 保证它先于本次
+    # 落库完成。只在第一次 repoint 注入；CAS 落空后的重试不再注入，让它读到 data.txt 并命中。
+    real_repoint = ingestion._repoint_reused_file
+    injected = {"done": False}
+
+    def repoint_with_sliver_rename(*args, **kwargs):
+        if not injected["done"]:
+            injected["done"] = True
+            t = threading.Thread(
+                target=lambda: _upload_named(live_repo, nb, content=body, name="data.txt")
+            )
+            t.start()
+            t.join(5)
+        return real_repoint(*args, **kwargs)
+
+    monkeypatch.setattr(ingestion, "_repoint_reused_file", repoint_with_sliver_rename)
+
+    sid = _upload_named(live_repo, nb, content=body, name="data.csv")[0].id
+
+    assert injected["done"], "前提：收口 repoint 必须真的执行并触发 sliver 内并发改名注入"
+    final = live_repo.get_source(sid)
+    assert final.file_name == "data.txt", (
+        f"CAS 落空后必须重读最新后缀 data.txt 重试，而非用陈旧的 data.md 盖掉；实际 {final.file_name}"
+    )
+    assert final.file_path.endswith("data.txt"), (
+        "repoint 把盘上文件按最新后缀重写，file_path 与 file_name 同步"
+    )
+    assert final.parse_status == "extracted", "补跑完照样落终态"
+    assert len(live_repo.list_sources(nb)) == 1, "始终只有一行"
+    # CAS-first（先条件 UPDATE 再落盘）：落空的那次尝试（data.md）根本没写盘，绝不留孤儿。
+    nb_dir = Path(ingestion.source_files.storage_dir) / "notebooks" / nb
+    stored = sorted(p.name for p in nb_dir.glob(f"{sid}_*"))
+    assert stored == [f"{sid}_data.txt"], (
+        f"CAS-first 不得留孤儿盘上文件（data.md/data.csv）；实际 {stored}"
+    )
 
 
 def test_an_unchanged_doc_type_costs_exactly_one_extraction(
