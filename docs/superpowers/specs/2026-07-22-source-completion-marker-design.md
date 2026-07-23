@@ -108,9 +108,19 @@ def _migration_25(self) -> None:
 - **为什么是「分块级」不是「解析级」**：A4 二义性两支解析都成功（elements 都落库），
   分歧纯在分块步。`parse_completed_at` 这种解析级标记区分不了。
 - **与 `parse_status` 共存不打架**：`chunked_at` 正交，`parse_status` 一字不改。
-  H3 检测判据仍是纯产物（有 elements、无 chunks），`chunked_at` 只作**假阳性
-  过滤**：`elements>0 AND chunks=0 AND chunked_at IS NULL AND 不在内存租约` 才是真
-  损坏；纯标题 md 的 0-chunk 因 `chunked_at` 有值被排除。
+  H3 检测判据以 **`chunked_at IS NULL` 为准、不带 `chunks=0` 子句**：
+  `elements>0 AND chunked_at IS NULL AND 不在内存租约` 才是真损坏；纯标题 md 的合法
+  0-chunk 因 `chunked_at` 有值被排除。
+  - ⚠ **为什么丢掉 `chunks=0`**（codex 第 2 轮 P2 finding 1）：`chunked_at` 是
+    **世代感知**的（换 elements 即归零、本代成功分块才置位），比 chunks 计数可靠。
+    reparse 换了新代 elements 后、旧代 chunks 尚未被 `replace_source_chunks` 清掉时若
+    分块失败,会留下 `elements>0 AND chunks>0(旧代) AND chunked_at IS NULL`——判据若带
+    `chunks=0` 会**漏检**这种「陈旧 chunks」损坏。只认 `chunked_at IS NULL` 同时覆盖
+    「无 chunks」与「陈旧 chunks」两种。
+  - ⚠ **marker 只信得过的前提**（finding 2）：既然 H3 只认 marker,marker 就不能被
+    错置。同源并发 reparse 由 `source_ingestion.py` 的 **per-source 分块串行锁**保证
+    「换 elements→建 chunks+置 marker」整段原子,不会出现「B 代 elements + A 代 chunks
+    + marker 已置」的假完成(见「写入点」末尾并发一节)。
 
 ## 写入点（`source_ingestion.py` / `source_chunking.py`）
 
@@ -121,15 +131,31 @@ def _migration_25(self) -> None:
 |---|---|---|
 | 进入 process_source | `source_ingestion.py:469` 之前（函数体最顶） | **取内存租约**：锁下 `active[source_id] = now()` |
 | 写 elements（代边界） | `source_ingestion.py:551-572` 的 `with write() as db:` | **同一事务内** `UPDATE sources SET chunked_at=NULL WHERE id=?`（新代 elements 落库即令旧分块完成失效） |
-| **分块成功** | `source_chunking.py:65`（`build_chunks_for_source` 正常返回，**含 0 chunk**）末尾 | `self.sources.mark_chunked(source_id, now())`。放这里而非 process_source：统一覆盖所有分块路径（`chunk_and_embed_source`、`scripts/build_chunks.py`） |
-| **分块失败** | `source_ingestion.py:586-593`（except） | **什么都不写**（留 NULL）——这就是 H3 的损坏信号。现有 invalidate 保留 |
-| 管线出口（成功/失败） | 给 `source_ingestion.py:470` 的 try **加 finally**，早于 `maybe_enqueue_scale_fold`（:687） | **释放内存租约** `active.pop(source_id, None)` |
+| **分块成功** | `build_chunks_for_source` 里 `replace_source_chunks(..., mark_chunked_at=now)`（**含 0 chunk**） | chunked_at 与它认证的 chunk 数据在**同一写事务**里提交（codex 第 1 轮 P2 finding 1:分处两事务会在崩溃窗口留假损坏）。knowhow 投影器按格子复用 `replace_source_chunks` 时**不传**该参数,其隐藏源不打标 |
+| **分块失败** | `build_chunks_for_source` 抛出（except 在 process_source） | **什么都不写**（留 NULL）——这就是 H3 的损坏信号。现有 invalidate 保留 |
+| 管线出口（成功/失败） | process_source 的 try **加 finally**，早于 `maybe_enqueue_scale_fold` | **租约计数减一**（归零才真正撤租，见并发一节） |
 
 **分块 try 成功/失败写不同的东西**（这是全设计的枢纽）：
-- 成功 → `mark_chunked`（纯标题 0-chunk 也算成功、也置值）→ `extracted`+0chunk+**有值** → H3 排除
+- 成功 → `replace_source_chunks(mark_chunked_at=now)`（纯标题 0-chunk 也算成功、也置值）→ `extracted`+0chunk+**有值** → H3 排除
 - 失败 → 什么都不写 → `extracted`+0chunk+**NULL** → H3 命中
 
 两者 `parse_status`/elements/chunks 完全相同、`chunked_at` 相反——正是 A4 缺的那一维。
+
+### 并发:租约计数 + per-source 分块串行锁（codex 第 2 轮 P2）
+
+同一源可被并发处理(上传后台 job 未完时 owner 又点 `POST /sources/{id}/parse`,二者
+都进 `process_source`,无重入守卫)。两处保护:
+
+1. **内存租约用引用计数**(`_active_sources: dict[str,int]`)而非时间戳:每个 invocation
+   进入加一、finally 减一、归零才撤租。否则先完成者会撤掉仍在跑者的租约,令其在途缺
+   elements/chunks 被体检误报(codex 第 1 轮 finding 2)。
+2. **per-source 分块串行锁**(`_source_chunk_locks`)把「换 elements → 建 chunks + 置
+   marker」整段串起来:否则一次 invocation 读到 A 代 elements、另一次换成 B 代、第一次
+   再把 A 代 chunks 连同 marker 写回,留下「B 代 elements + A 代 chunks + marker 已置」
+   的假完成(codex 第 2 轮 finding 2)。**只锁 build_chunks 不够**——replace_elements 若
+   不持同一把锁,仍能插进「读→写」之间;故锁必须连续覆盖 replace_elements 到
+   build_chunks。锁懒创建、与租约同生命周期(refcount 归零即清,有界不泄漏);单写(常见)
+   路径无竞争、零额外开销,只串行罕见的并发同源 reparse。
 
 **memo 说明**：分块成功已 bump `kg_mutation_seq`（`source_chunking.py:58-65`），失败已
 `invalidate`（`source_ingestion.py:592-593`），故 `chunked_at` 的写**无需**自己再 bump。
