@@ -889,3 +889,68 @@ def test_serial_first_upload_still_inserts_and_schedules(repo, notebook_id):
     assert result[0].reused is False
     assert repo.process_calls == [result[0].id]
     assert len(repo.list_sources(notebook_id)) == 1
+
+
+def test_retype_landing_in_the_terminal_mark_window_forces_a_reextract(
+    repo, notebook_id, settled, monkeypatch
+):
+    """P2-doc_type：并发 retype 恰好落在「本轮抽取读到的 doc_type」与「标记 extracted」
+    之间的窄窗口。旧写法这两步不原子——retype 在此改了类型、且因行是 'extracting'
+    而不调度，抽取又无条件落终态 → 存库 doc_type 与实际抽取 profile 永久失配。
+    mark_extracted_if_doc_type 把「比对 + 终态」合成一条 WHERE doc_type=本轮值 的
+    UPDATE：窗口里被改 → rowcount 0 → 按新类型再跑一轮收口。
+
+    窄窗口用真线程复现会 flaky，这里用确定性注入（monkeypatch 落终态的那一步，在它
+    真正写库前塞进一次并发 retype）——与既有 doc_type 用例同一手法，精确命中窗口。"""
+    sid = settled(doc_type="academic_paper")   # 已定型 extracted、has KG
+    store = repo._runtime.source_store
+    real_mark = store.mark_extracted_if_doc_type
+    injected: list[int] = []
+
+    def racing_mark(source_id, expected_doc_type, **kw):
+        if not injected:
+            injected.append(1)
+            # 抽取刚跑完、终态未落的那一刻，行此刻是 'extracting'：模拟用户用又一个
+            # 类型重传（reuse 只记类型、claim 认领落空、不调度）。
+            _upload(repo, notebook_id, doc_type="academic_paper")
+        return real_mark(source_id, expected_doc_type, **kw)
+
+    monkeypatch.setattr(store, "mark_extracted_if_doc_type", racing_mark)
+
+    _upload(repo, notebook_id, doc_type="textbook")   # academic_paper→textbook 触发重抽
+
+    assert repo.extract_calls == [sid, sid], (
+        f"窗口里被 retype 必须按新类型补跑一轮；实际 extract={repo.extract_calls}"
+    )
+    assert repo.get_source(sid).doc_type == "academic_paper", (
+        "存库 doc_type 必须等于最后一轮抽取真正用的类型"
+    )
+    assert repo.get_source(sid).parse_status == "extracted", "补跑完照样落终态"
+
+
+def test_retype_on_an_in_flight_source_never_starts_a_second_reextract(
+    repo, notebook_id, settled, monkeypatch
+):
+    """retype 撞上「行还在 'extracting'」（in-flight）：claim_reextract_if_extracted
+    以 WHERE parse_status='extracted' 认领落空 → 绝不另起第二条重抽（同一行两条抽取
+    互相清 KG 产物），交给正在跑的那条流水线的终态 doc_type 收口。这是 doc_type 竞态
+    retype 侧的原子表决——补上「读 parse_status 再决定」的 TOCTOU。"""
+    from app.services.kg import scheduler as kg_scheduler
+
+    sid = settled(doc_type="academic_paper")
+    repo._runtime.source_ingestion.set_source_status(sid, "extracting")  # 假装正在跑
+    submitted: list = []
+    monkeypatch.setattr(
+        kg_scheduler, "submit_job", lambda fn, *args, **_kw: submitted.append(args)
+    )
+
+    repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
+                            content=b"hello world", doc_type="textbook")],
+        scheduler=lambda _s: None,
+    )
+
+    assert repo.get_source(sid).doc_type == "textbook", "新类型照记（存库）"
+    assert submitted == [], "在跑的行绝不另起第二条重抽"
+    assert repo.get_source(sid).parse_status == "extracting", "仍是在跑，未被认领翻动"
