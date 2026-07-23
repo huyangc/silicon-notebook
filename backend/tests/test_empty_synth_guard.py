@@ -13,6 +13,8 @@ from app.core.config import Settings
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository, _ASK_MODEL_ERRORS, _now
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -21,7 +23,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -106,7 +108,7 @@ def _chunk_only(repo):
 def test_chunk_empty_retries_and_recovers(repo):
     _chunk_only(repo)
     stub = _EmptyThenReal()
-    repo.llm_client = stub
+    bind_chat_client(repo, "ask_answer", stub)
     nb = _seed_chunks(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert stub.calls == 2                                     # 空 content 触发重试
@@ -116,7 +118,7 @@ def test_chunk_empty_retries_and_recovers(repo):
 
 def test_chunk_empty_degrades_honestly(repo):
     _chunk_only(repo)
-    repo.llm_client = _AlwaysEmpty()
+    bind_chat_client(repo, "ask_answer", _AlwaysEmpty())
     nb = _seed_chunks(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert not resp.conclusion.startswith("Retrieved ")       # 不冒充成功占位

@@ -15,6 +15,7 @@ from app.models.knowledge import (
 from app.services.retrieval import RetrievedKnowledge
 from app.services.extraction_profiles import OBJECT_SCHEMAS, OBJECT_TYPE_LABELS, ObjectSchema
 from app.services.knowledge_contracts import KnowledgeGraphTooLargeError
+from app.services.model_work import ModelProviderError
 
 
 class KnowledgeQueryService:
@@ -24,6 +25,7 @@ class KnowledgeQueryService:
         self,
         *,
         settings,
+        model_provider,
         event_log,
         database,
         catalog,
@@ -39,6 +41,7 @@ class KnowledgeQueryService:
         current_user_id: Callable[[], str] = lambda: "",
     ) -> None:
         self.settings = settings
+        self.models = model_provider
         self.event_log = event_log
         self.database = database
         self.catalog = catalog
@@ -65,51 +68,55 @@ class KnowledgeQueryService:
         return count
 
     def semantic_search(self, notebook_id: str, query: str, limit: int) -> list:
-        try:
-            if not self.settings.embedder_configured:
-                return []
-            index = self.scale_runtime.load(notebook_id)
-            if index is None or not index.ann_labels:
-                return []
-            vector = self.retrieval().embed_query(query)
-            if vector is None:
-                return []
-            import numpy as np
-
-            dimension = int(index.manifest.get("dim", len(vector)))
-            if dimension != len(vector):
-                self.event_log.emit({
-                    "kind": "dim_mismatch",
-                    "notebook_id": notebook_id,
-                    "site": "kg_semantic_search",
-                    "manifest_dim": dimension,
-                    "query_dim": len(vector),
-                })
-                return []
-            ann = self.scale_runtime.open_ann(index, "kg")
-            if ann is None:
-                return []
-            ann.set_ef(max(limit + 1, 50))
-            actual = min(limit, len(index.ann_labels))
-            labels, distances = ann.knn_query(
-                np.asarray(vector, dtype=np.float32), k=actual
-            )
-            hits = []
-            for label, distance in zip(labels[0], distances[0]):
-                object_id = index.ann_labels[int(label)]
-                if object_id.startswith("cluster:") or not object_id.startswith("ko-"):
-                    continue
-                score = max(0.0, 1.0 - float(distance))
-                if score > 0:
-                    hits.append({
-                        "object_id": object_id,
-                        "name": "",
-                        "score": score,
-                        "match": "semantic",
-                    })
-            return hits
-        except Exception:  # noqa: BLE001 - semantic overlay is fail-open
+        workload_id = "retrieval_query_embedding"
+        if not self.models.configured(workload_id):
             return []
+        index = self.scale_runtime.load(notebook_id)
+        if index is None or not index.ann_labels:
+            return []
+        try:
+            vector = self.models.embedding(workload_id).embed_query(query)
+        except ModelProviderError as exc:
+            self.models.note_model_error(
+                "kg_semantic_search", exc, workload_id=workload_id
+            )
+            return []
+        if vector is None:
+            return []
+        import numpy as np
+
+        dimension = int(index.manifest.get("dim", len(vector)))
+        if dimension != len(vector):
+            self.event_log.emit({
+                "kind": "dim_mismatch",
+                "notebook_id": notebook_id,
+                "site": "kg_semantic_search",
+                "manifest_dim": dimension,
+                "query_dim": len(vector),
+            })
+            return []
+        ann = self.scale_runtime.open_ann(index, "kg")
+        if ann is None:
+            return []
+        ann.set_ef(max(limit + 1, 50))
+        actual = min(limit, len(index.ann_labels))
+        labels, distances = ann.knn_query(
+            np.asarray(vector, dtype=np.float32), k=actual
+        )
+        hits = []
+        for label, distance in zip(labels[0], distances[0]):
+            object_id = index.ann_labels[int(label)]
+            if object_id.startswith("cluster:") or not object_id.startswith("ko-"):
+                continue
+            score = max(0.0, 1.0 - float(distance))
+            if score > 0:
+                hits.append({
+                    "object_id": object_id,
+                    "name": "",
+                    "score": score,
+                    "match": "semantic",
+                })
+        return hits
 
     def hydrate_search_hits(self, notebook_id: str, hits: list) -> list:
         if not hits:

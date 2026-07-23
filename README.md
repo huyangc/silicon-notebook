@@ -10,7 +10,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 
 - Python FastAPI backend; SQLite persistence at `.local/silicon_notebook.db`
 - Next.js / React / TypeScript frontend under `frontend/`
-- OpenAI-compatible LLM endpoint for KG extraction, grounded answers, and deep reports; embeddings configured independently via `EMBED_*` variables
+- Deployment-owned OpenAI-compatible chat, embedding, and rerank services, with workload bindings and per-service `max_concurrency` declared in one TOML file
 - Deterministic fallbacks when no LLM/embedder is configured — the whole pipeline runs offline
 - Clean start: a fresh database seeds only the local user; no demo notebook or synthetic sources
 - Multipart source upload for PDF, Markdown, DOCX, PPTX, CSV, and XLSX (async through the shared KG job scheduler)
@@ -42,16 +42,18 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 24. The committed v9 compatibility fixture
-upgrades through migrations v10–v24 and remains readable. Those migrations
+The current schema version is 25. The committed v9 compatibility fixture
+upgrades through migrations v10–v25 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
 reference-library mounts plus promotion targets (v20), and the normalized
 interactive-reformat anchor-membership expression index (v21); v22 adds durable
-notebook-scoped KG build jobs; v23 adds per-user latest model-service status;
+notebook-scoped KG build jobs; v23 added per-user latest model-service status;
 v24 adds the kg_canonical_scratch table for the write-lock-slimming cluster-map
-swap.
+swap; v25 irreversibly scrubs stored per-user model credentials and legacy
+status, then adds deployment-wide model-service health persistence keyed by
+service ID.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
@@ -96,16 +98,18 @@ python -m pip install -r backend/requirements.txt
 
 ```bash
 cp .env.example .env
+mkdir -p .local
+cp model-services.example.toml .local/model-services.toml
 ```
 
-The service boots with every value blank — deterministic offline mode (keyword-only
-retrieval, no LLM extraction or answers). To enable full functionality, set at minimum:
+`MODEL_SERVICES_CONFIG` points at the deployment-owned TOML. Edit its `[services]`
+entries and `[bindings]`, choose each physical service's `max_concurrency`, and place only
+the secrets named by `api_key_env` in `.env`. Delete the path or set it to an empty value
+for explicit deterministic offline mode (keyword-only retrieval, no model extraction or
+answers). Users cannot supply or override model credentials, endpoints, models, or capacity.
 
-- **LLM** (KG extraction, answers, deep reports) — `OPENAI_COMPAT_BASE_URL` /
-  `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL`; any OpenAI-compatible endpoint.
-- **Embeddings** (semantic retrieval; otherwise keyword-only) — `EMBED_PROVIDER=dashscope`
-  plus `EMBED_MODEL` / `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM` (must equal the
-  model's output dimension). Optional `EMBED_RUNTIME_DIM` (default `0` = off) truncates
+- **Embedding dimensions** — `EMBED_DIM` must equal the bound embedding model's output
+  dimension. Optional `EMBED_RUNTIME_DIM` (default `0` = off) truncates
   the similarity space to its first N dimensions + re-normalize (MRL) — cuts in-process
   matrix / ANN memory ~`EMBED_DIM/N`× while keeping the native vectors on disk as the
   source of truth. Switching it on/off requires rebuilding scale indexes; see
@@ -114,7 +118,8 @@ retrieval, no LLM extraction or answers). To enable full functionality, set at m
 - **PDF fidelity** (optional) — a MinerU endpoint, see [PDF parsing with MinerU](#pdf-parsing-with-mineru);
   leave `MINERU_MODE=off` for the pypdf text fallback.
 
-`.env.example` is the authoritative, fully-commented list of every variable;
+`.env.example` is the authoritative, fully-commented list of non-service variables and
+secret slots; `model-services.example.toml` is the service/binding/capacity template.
 [Configuration](#configuration) groups the common ones.
 
 **Remote access — note the browser is on a *different* machine** than the server, so it
@@ -256,7 +261,10 @@ tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
 cd    silicon_notebook_<version>_<os>-<arch>
 ./install.sh    # user-local venv; installs deps offline from wheelhouse
                 # (falls back to the pip index for anything missing); writes .env
-vi .env         # fill in model-service URLs (same as step 2 · Configure)
+mkdir -p .local
+cp model-services.example.toml .local/model-services.toml
+vi .local/model-services.toml  # services, workload bindings, per-service max_concurrency
+vi .env         # MODEL_SERVICES_CONFIG + secrets referenced by api_key_env
 ./start.sh      # portable-node standalone frontend + venv uvicorn backend
 ./stop.sh       # stop both
 ```
@@ -275,7 +283,7 @@ The outer page is a notebook collection/library (KG-native pipeline):
 1. Click `＋ 新建` — the app creates an `Untitled notebook` and enters it immediately (no dialog).
 2. Upload PDF, Markdown, DOCX, PPTX, CSV, or XLSX sources (multipart).
 3. Backend (async background job): structured Markdown parse → chunking + embeddings — chunk-native Q&A is ready as soon as the source finishes processing.
-4. **KG extraction is conditional** (see [KG extraction trigger](#kg-extraction-trigger)): on ingest it runs only when the notebook already has a KG, or when `KG_AUTO_EXTRACT=true`. When it runs it uses a shared global extraction pool — window concurrency capped by `KG_EXTRACT_WORKERS` across all documents, document concurrency by `KG_JOB_CONCURRENCY` — and the new source is then incrementally fused into the unified KG.
+4. **KG extraction is conditional** (see [KG extraction trigger](#kg-extraction-trigger)): on ingest it runs only when the notebook already has a KG, or when `KG_AUTO_EXTRACT=true`. `KG_JOB_CONCURRENCY` controls concurrent source jobs; every extraction model call is admitted by the system model scheduler for the service bound to the `kg_extract` workload, so the service's TOML `max_concurrency` remains the only model-capacity limit. The new source is then incrementally fused into the unified KG.
 5. Knowledge objects are stored in `knowledge_objects` + `knowledge_relations` with element-level evidence bindings.
 6. Hybrid retrieval (bi-gram keyword + float32 matrix semantic) feeds KG-native Q&A: answers contain sentence-level `[k_i]` citations, support multi-turn conversations, and expand via 1-hop KG neighbours.
 7. Unified KG aggregates concepts across documents; pending cross-document merges can be confirmed or rejected.
@@ -306,7 +314,7 @@ At most one column can be designated the table's **行标题列 / row-title colu
 
 Projection status is a table-completion contract, not a per-row progress shortcut: rows remain `pending`/`syncing` until the table-wide chunks, embeddings, knowledge objects/relations, mutation sequence, and graph-cache notifications have finished. A row is published as `synced` only after that terminal work succeeds, so callers that observe every row settled can immediately read the completed graph without a scheduling race. Publication is conditional on the table mutation sequence captured by the pass: an older pass can never overwrite the `pending` marker from a newer concurrent edit while its scheduler rerun is queued.
 
-Each column also carries a **content kind** — a deterministic parsing hint, never an LLM call: **方法步骤 / procedure** cells parse as an ordered list of steps, **工具/事物 / entity** cells split on list items/newlines into one deduplicated node per item, and **普通 / attribute** cells stay a single node. Both the cell editor and the row-detail drawer expose an explicit **优化表达 / optimize wording** button (never triggered automatically): it asks the notebook's configured LLM to tidy structure and phrasing while preserving meaning, shows the rewrite side-by-side with the original, and only replaces the cell after you accept it, one cell at a time.
+Each column also carries a **content kind** — a deterministic parsing hint, never an LLM call: **方法步骤 / procedure** cells parse as an ordered list of steps, **工具/事物 / entity** cells split on list items/newlines into one deduplicated node per item, and **普通 / attribute** cells stay a single node. Both the cell editor and the row-detail drawer expose an explicit **优化表达 / optimize wording** button (never triggered automatically): it uses the system service bound to `knowhow_optimize` to tidy structure and phrasing while preserving meaning, shows the rewrite side-by-side with the original, and only replaces the cell after you accept it, one cell at a time.
 
 Ask citations that resolve to a knowhow cell jump straight to that row's detail drawer instead of the generic source view. A notebook's deep copy carries knowhow tables over in full — every table, column, row, cell, and code attachment gets a remapped id in the copy — without re-running embeddings, since cell text that didn't change keeps its existing vectors.
 
@@ -565,159 +573,83 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 
 All model services are reached over URL endpoints — no local model servers are started.
 
-### Model-service status and targeted diagnostics
+### System model services, scheduling, and diagnostics
 
-The collection's service indicator reads the authenticated user's **persisted,
-last-known** model-service snapshot. It never probes a provider while the
-collection is loading, so an unavailable provider cannot block the notebook
-library. Saving settings compares every service's effective identity before
-and after the write, and invalidates only identities that actually changed;
-a no-op save preserves prior results, while inherited LLM variants are
-invalidated only when their resolved fallback changes. A changed configured
-service is then shown as untested until a new explicit check or an observed
-failure records a result. The three-state patch (`null`/omitted = unchanged,
-empty string = clear, non-empty string = set), persisted-settings read, all-six
-fingerprint comparison, settings write, and changed-status deletion run in one
-`BEGIN IMMEDIATE` transaction. Concurrent saves therefore serialize without
-losing disjoint field/role updates. Every effective-settings read queries the
-small persisted JSON directly; the legacy process-local cache object remains a
-compatibility seam only and never serves or fills these reads, so a paused old
-read or another process cannot leave later resolution stale.
+Model endpoints, protocols, models, workload bindings, and service capacity are
+owned by the deployment, not by individual users. Copy
+`model-services.example.toml` to `.local/model-services.toml`, set
+`MODEL_SERVICES_CONFIG=.local/model-services.toml`, and put only the secrets
+referenced by each service's `api_key_env` in `.env`. The checked-in example
+contains no credentials. An empty `MODEL_SERVICES_CONFIG` explicitly selects
+offline/deterministic fallbacks.
 
-Open **模型服务** to inspect the effective saved configuration and test either
-one current service or every current effective service. The effective identity
-is resolved by the backend from the user's saved setting and its configured
-fallbacks, so model names are runtime data — product code in the frontend must
-not carry provider/model-name constants. Ask failure notices identify the
-affected service role and the backend-resolved current model when its safe
-display label is available. The editor tracks Base URL, model, and API key
-dirtiness independently and sends only dirty fields in dirty roles. Untouched
-forms produce `{}` and cannot replay stale values from another browser tab;
-explicit dirty empty strings still clear fields. Loading and successful saves
-reset every dirty flag, and unchanged forms keep Save disabled.
+Each `[services.<id>]` table defines `display_name`, `kind`, `protocol`,
+`base_url`, `model`, `api_key_env`, and `max_concurrency`. The
+`[bindings]` table maps stable workload ids such as `ask_answer`,
+`reasoning_agent`, `kg_extract`, `retrieval_query_embedding`, and
+`retrieval_rerank` to those services. Several workloads may share a service;
+all of them share that service's one scheduler and one concurrency budget.
+`max_concurrency` is the only model-capacity setting. Source-job counts,
+window sizes, batch sizes, and local ANN threads do not create another model
+gate.
 
-Effective identity also includes runtime protocol switches: embedding provider
-selection and rerank API style are normalized into the internal fingerprint.
-Rerank URL, key, and model values are trimmed consistently by resolution,
-runtime construction, probing, and fingerprinting; whitespace-only values are
-unconfigured and never probed.
-An embedding endpoint with `EMBED_PROVIDER` off remains unconfigured and is not
-probed. Changing either switch invalidates the previous result, and an explicit
-test uses the exact resolved endpoint/model/protocol descriptor.
+Scheduling policy is fixed in code:
 
-Embedding is system-managed and read-only in this panel: users can inspect or
-explicitly test its effective service, but cannot edit its endpoint, key, or
-model there. Service-status APIs and UI expose only sanitized status,
-latency, trigger, stable error code, and a safe model label. Raw upstream
-diagnostics (including provider payloads, endpoints, and exception text) stay
-in server logs rather than status responses or tooltips. Endpoint-shaped model
-identifiers, including two-label, Unicode-suffix, and punycode-suffix hostnames,
-are not exposed as model labels.
+- at most `max_concurrency` calls run for one physical service, while different
+  services have independent slots;
+- the total queue is bounded to `10 × max_concurrency`, and one actor may queue
+  at most `2 × max_concurrency` items;
+- dispatch repeats an 8 interactive : 2 report : 1 background pattern and
+  round-robins actors within each lane, so background work progresses under
+  sustained interactive traffic;
+- queue deadlines are 30 seconds for interactive work, 300 seconds for reports,
+  and 1,800 seconds for background work; cancellation is honored before dispatch;
+- a fatal provider failure opens the circuit immediately; three consecutive
+  transient failures also open it. The cooldown is 30 seconds and admits one
+  half-open recovery probe.
 
-Apart from the explicit, actionable "service not configured" guidance, only
-failures from an actual model-provider call can create an Ask model-error
-notice; only those actual call failures can create an observed failed status.
-Local FTS, ANN, keyword, index-open, and vector-persistence failures remain
-server diagnostics and never mark a provider unavailable.
-Each real runtime client carries the exact effective fingerprint used to build
-it. An observed failure is persisted only if that fingerprint is still current;
-an in-flight request from a replaced configuration may still produce its
-sanitized Ask diagnostic, but cannot overwrite the replacement service's
-status. Unstamped test doubles likewise cannot persist provider health.
-Manual and observed results re-read persisted settings and conditionally run
-the monotonic UPSERT inside one `BEGIN IMMEDIATE` transaction. Thus an old
-result committed first is removed by the following settings transaction, an
-old result waiting behind a settings commit is skipped, and a valid result for
-the new identity waiting behind that commit survives.
-Per-service results are occurrence-ordered: a late database write cannot replace
-a newer check, and an observed/error result wins a same-time race with manual
-success.
+The scheduler and breaker are process-local. Production must run exactly one
+backend process (`scripts/prod.sh` pins Uvicorn to `--workers 1`); multiple
+workers would multiply the configured service concurrency and split queue,
+breaker, and health state.
 
-Draft tests are tied to the exact role and form revision they tested. Editing,
-saving, or reopening invalidates stale results; save is locked while a draft
-test is active and editable fields are locked while save is in flight. The
-modal traps keyboard focus and returns it to the exact control that opened it.
-If a save temporarily leaves no enabled control, Tab/Shift+Tab focus the dialog
-container itself. A disabled saved-status test button keeps its normal label;
-only an actively running saved-status test displays `测试中…`.
+The **模型服务** panel is read-only for ordinary users. It shows sanitized
+system service identity, bound workloads, last-known health, active/maximum,
+queued work, oldest wait, and breaker state. Reading
+`GET /api/model-services/status` never probes an upstream service. Only admins
+can explicitly probe one service or all services through
+`POST /api/admin/model-services/{service_id}/test` and
+`POST /api/admin/model-services/test-all`. Provider endpoints, credentials,
+response bodies, and raw exceptions stay in server logs.
 
-Current-status APIs are `GET /api/me/model-services/status`,
-`POST /api/me/model-services/{service}/test`, and
-`POST /api/me/model-services/test-all`. The existing
-`POST /api/me/model-settings/test` remains the separate, draft-value test for
-an unsaved editable LLM/rerank setting.
+Ask/model failures carry the physical service, workload, safe model label, and a
+`support_id` when available. Users should send that support id to maintainers;
+maintainers can correlate it with server logs and the read-only service panel to
+identify the failed model service. Local retrieval/index failures do not mark a
+provider unhealthy.
 
-**LLM (OpenAI-compatible):**
+Personal model configuration routes and their editable UI have been removed.
+Schema migration v24 irreversibly replaces every historical
+`user_profiles.model_settings` value with `{}` and deletes the old per-user
+health rows in the same transaction as the version stamp. Back up the database
+before upgrading if those historical credentials are needed for an external
+record; they are not restored or reused by the application.
+
+Model-call timeout, retry, output-budget, and batching settings remain normal
+workload tuning. `EMBED_DIM` must match the bound embedding model. KG source
+parallelism remains `KG_JOB_CONCURRENCY`, and adaptive extraction windows use
+the `kg_extract` service capacity; neither setting overrides service
+`max_concurrency`.
+
+**Core-aware autotune:** local CPU-bound work may scale with the machine:
 
 ```text
-OPENAI_COMPAT_BASE_URL
-OPENAI_COMPAT_API_KEY
-OPENAI_COMPAT_MODEL
-OPENAI_COMPAT_TIMEOUT_SECONDS   # default 60
-OPENAI_COMPAT_MAX_RETRIES       # default 2
+KG_CLUSTER_ANN_THREADS   # hnswlib concept-clustering threads;
+                         # 0 (default) = min(cpu_count, 32)
 ```
 
-**Embeddings:**
-
-```text
-EMBED_PROVIDER          # ""=off (keyword-only) | dashscope
-EMBED_MODEL             # required with EMBED_PROVIDER=dashscope, e.g. text-embedding-v4
-EMBED_BASE_URL          # required embedding endpoint URL
-EMBED_API_KEY
-EMBED_DIM               # must match model output dimension (default 1024)
-EMBED_TRUNCATE_CHARS    # max chars fed to embedder per text (default 2000)
-EMBED_BATCH_SIZE        # elements per embedding call (default 10)
-EMBED_PERSIST_CHUNK     # rows written to DB per batch (default 200)
-EMBED_CONCURRENCY       # concurrent embedding threads (default 8; mild, avoids 429)
-```
-
-**KG extraction concurrency & windowing:**
-
-```text
-KG_AUTO_EXTRACT             # extract KG on every upload for ALL notebooks (default false);
-                            # when false, a new source is still auto-extracted if its
-                            # notebook already has a KG (opt in once → auto-maintained)
-KG_EXTRACT_WORKERS          # GLOBAL cap on concurrent extraction LLM calls (windows),
-                            # shared across all documents, intra- + inter-doc (default 16)
-KG_JOB_CONCURRENCY          # how many documents extract concurrently; their windows
-                            # share the global KG_EXTRACT_WORKERS budget (default 8)
-KG_ASK_RESERVE              # LLM connections reserved for interactive Ask so it is not
-                            # starved during extraction; pool = WORKERS + RESERVE (default 64)
-KG_WINDOW_TARGET_CHARS      # 0 = adaptive window size (default); >0 forces a fixed size
-KG_WINDOW_MIN_CHARS         # adaptive window lower bound (default 4000)
-KG_WINDOW_MAX_CHARS         # adaptive window upper bound (default 8000)
-KG_WINDOW_OVERLAP_CHARS     # overlap between adjacent windows (default 450)
-KG_WINDOW_WARN_THRESHOLD    # log WARNING when window count exceeds this (default 1200)
-```
-
-**Core-aware autotune:** only knobs that are actually CPU-bound scale with the machine's
-core count automatically — everything else stays fixed regardless of hardware:
-
-```text
-KG_CLUSTER_ANN_THREADS   # hnswlib ANN index-build threads for concept clustering/merge.
-                         # 0 (default) = auto min(cpu_count, 32); the only retrieval/KG
-                         # knob that is core-derived.
-```
-
-`scripts/dev.sh` / `scripts/prod.sh` also source `scripts/autotune.sh`, which sets
-`OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` (and `NUMEXPR_NUM_THREADS`)
-to `min(cpu_count, 8)` when they are not already set in the environment, and the offline
-backfill CLI's process-pool worker default is `min(cpu_count, 32)`. Set `AUTOTUNE=0` to
-disable the shell-level tuning entirely. Any of these values can still be overridden with
-an explicit env var, which always wins over the auto-derived default. The resolved values
-are printed once at backend startup (an `autotune: kg_cluster_ann_threads=... backfill_default_workers=...`
-console line) so you can confirm what a given process actually picked up.
-
-By deliberate contrast, `KG_EXTRACT_WORKERS` / `KG_JOB_CONCURRENCY` / `EMBED_CONCURRENCY`
-are concurrency limits against a remote LLM/embedding endpoint, not the local machine —
-they are **not** scaled by core count, and adding cores will not change them. To raise
-throughput there, scale the model/embedding service instead.
-
-Running multiple backend workers (`--workers N`) is a manual opt-in, not something
-autotune enables for you — the default stays a single worker. Each additional worker
-duplicates in-memory state (a large KG/ANN index can be GB-scale), multiplying memory
-use roughly N×, and background KG jobs may land on any worker, which complicates status
-tracking. Only turn it on if you have understood and accounted for both costs.
+`scripts/dev.sh` and `scripts/prod.sh` source `scripts/autotune.sh` for
+local OMP/BLAS threads. This does not change any model-service capacity.
 
 **Database:**
 
@@ -780,10 +712,7 @@ KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrie
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
 CHUNK_MMR_K                  # MMR-selected chunks when rerank is off (default 16)
-CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: 叠加 KG 局部结构+源 chunk (default true; 需配 qwen3-rerank 才生效)
-RERANK_MODEL                 # qwen3-rerank model name; 空=关 mix 回退 MMR (default empty)
-RERANK_BASE_URL              # DashScope native text-rerank base (default dashscope api/v1; NOT compatible-mode)
-RERANK_API_KEY               # DashScope key for rerank (required to enable mix rerank)
+CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: add local KG structure + source chunks (default true; rerank path requires `retrieval_rerank` bound)
 RERANK_MAX_DOCS              # max docs per rerank request, auto-batched beyond (default 500)
 MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
 MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
@@ -848,17 +777,17 @@ SLOW_REQUEST_MS         # requests slower than this (ms) are flagged SLOW (defau
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` is the authoritative, complete list of every variable with its default
-and an inline comment — the groups above highlight the common ones. Other documented
-knobs include the optional dedicated reasoning LLM (`REASONING_LLM_BASE_URL` /
-`REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`) and its guardrails (`REASONING_MAX_STEPS`,
-`REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, `REASONING_MAX_RETRIES`),
+`.env.example` is the authoritative, complete list of non-service variables and secret
+slots; `model-services.example.toml` is the service/binding/capacity template. The groups
+above highlight the common settings. A dedicated reasoning model is selected by binding
+`reasoning_agent` to a separate service in TOML, while its guardrails remain
+`REASONING_MAX_STEPS`, `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, and `REASONING_MAX_RETRIES`;
 retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
 `EVIDENCE_TAU_HIGH`), the opt-in debug log viewer (`DEBUG_LOGS_ENABLED`), and runtime
 identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
 `SILICON_NOTEBOOK_SINGLE_USER_NAME`).
 
-When LLM settings are not configured, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.
+When the required chat workloads are unbound, summaries and answers fall back to deterministic behavior. Source parsing still completes offline, and KG extraction records a completed `no-llm` run without generating synthetic knowledge.
 
 ## Observability
 
@@ -1093,19 +1022,19 @@ PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_di
 # build the scalable-retrieval index for a base-tier notebook (offline; re-run after rebuilding a static base)
 PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
 
-# backfill any missing chunk + node vectors for a notebook (idempotent; requires EMBED configured)
+# backfill any missing chunk + node vectors (idempotent; requires `chunk_embedding` bound)
 PYTHONPATH=backend python scripts/batch_ingest.py embed --notebook-id nb-xxxx
 
-# one-time storage migration: convert legacy JSON-text vectors to float32 BLOB (idempotent, no EMBED needed)
+# one-time storage migration: convert legacy JSON-text vectors to float32 BLOB (idempotent, no model call)
 PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --all-notebooks --workers 8
 
-# proactively backfill the source-deletion reverse index (idempotent, no EMBED needed)
+# proactively backfill the source-deletion reverse index (idempotent, no model call)
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-notebooks
 
 # backfill missing paper metadata (title/authors/affiliations/venue/year) for a notebook's
-# already-parsed academic-paper sources (idempotent; requires a configured LLM, no EMBED needed)
+# already-parsed academic-paper sources (idempotent; requires `paper_metadata` bound, no embedding call)
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx --force
 
@@ -1114,13 +1043,13 @@ PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 ```
 
-The `embed` subcommand re-fills only the chunk and KG-node vectors that are *missing* (e.g. after a 429-throttled run left gaps). It requires `--notebook-id` and a configured EMBED endpoint — being a vector-backfill command, it ignores `--allow-no-embed` and errors out if EMBED is unconfigured.
+The `embed` subcommand re-fills only the chunk and KG-node vectors that are *missing* (e.g. after a throttled run left gaps). It requires `--notebook-id` and a configured service binding for the `chunk_embedding` workload — being a vector-backfill command, it ignores `--allow-no-embed` and errors out if that workload is unbound.
 
-The `vectors-to-blob` subcommand is a one-time storage migration: embedding vectors used to be stored as JSON text in SQLite, which means loading hundreds of thousands of rows into a matrix (index builds, retrieval cold start) spends most of its time in `json.loads`. New writes are now stored as raw float32 BLOBs (`np.frombuffer` reinterprets them with zero parsing), and every reader already accepts either format — so this command is optional but recommended after upgrading: it re-encodes any pre-existing JSON-text rows across all four embeddings tables (`chunk_embeddings`, `knowledge_embeddings`, `element_embeddings`, `relation_embeddings`) in place, in batched transactions (5,000 rows/commit) with progress printed per table. It does **not** compute new vectors (so it needs no EMBED configuration) and is idempotent/restartable — re-running it converts nothing further, since it only selects rows SQLite still types as `text`. Use `--notebook-id` to scope it to one library or `--all-notebooks` to convert every notebook in the database. The `json.loads`/re-encode step (the single-core bottleneck at millions-of-rows scale) is parallelized across `--workers` processes (default `min(32, cpu_count())`; `--workers 1` uses no process pool at all) — the main process still owns every DB read/write, so SQLite stays single-writer. If the worker pool crashes it falls back to a serial pass automatically rather than losing the run.
+The `vectors-to-blob` subcommand is a one-time storage migration: embedding vectors used to be stored as JSON text in SQLite, which means loading hundreds of thousands of rows into a matrix (index builds, retrieval cold start) spends most of its time in `json.loads`. New writes are now stored as raw float32 BLOBs (`np.frombuffer` reinterprets them with zero parsing), and every reader already accepts either format — so this command is optional but recommended after upgrading: it re-encodes any pre-existing JSON-text rows across all four embeddings tables (`chunk_embeddings`, `knowledge_embeddings`, `element_embeddings`, `relation_embeddings`) in place, in batched transactions (5,000 rows/commit) with progress printed per table. It does **not** compute new vectors (so it needs no model-service binding) and is idempotent/restartable — re-running it converts nothing further, since it only selects rows SQLite still types as `text`. Use `--notebook-id` to scope it to one library or `--all-notebooks` to convert every notebook in the database. The `json.loads`/re-encode step (the single-core bottleneck at millions-of-rows scale) is parallelized across `--workers` processes (default `min(32, cpu_count())`; `--workers 1` uses no process pool at all) — the main process still owns every DB read/write, so SQLite stays single-writer. If the worker pool crashes it falls back to a serial pass automatically rather than losing the run.
 
-The `backfill-source-index` subcommand proactively populates `knowledge_object_sources`, a reverse-lookup table (`object_id, source_id`) used when a source is deleted or reparsed to find which KG objects reference it. Without it, that lookup has to scan every object's evidence JSON in the notebook (`json.loads` over the whole table) just to find matches for one source — expensive at hundreds of thousands of objects. The table is normally populated lazily (the first source delete/reparse on an un-migrated notebook pays the scan once, populates the table while it's already reading every row, and marks the notebook so every subsequent operation is an indexed lookup instead) — this command lets you pay that cost up front, in bounded-memory batches with progress printed, instead of on a user-facing delete. It needs no EMBED configuration and is idempotent/restartable (each run clears and rebuilds the notebook's rows from the current evidence, then re-marks it). Use `--notebook-id` to scope it to one library or `--all-notebooks` to cover every notebook in the database. If you ever suspect a notebook's reverse index has drifted from its actual evidence (e.g. after an abnormal interruption), re-running this command is the remediation — it always rebuilds from the current evidence.
+The `backfill-source-index` subcommand proactively populates `knowledge_object_sources`, a reverse-lookup table (`object_id, source_id`) used when a source is deleted or reparsed to find which KG objects reference it. Without it, that lookup has to scan every object's evidence JSON in the notebook (`json.loads` over the whole table) just to find matches for one source — expensive at hundreds of thousands of objects. The table is normally populated lazily (the first source delete/reparse on an un-migrated notebook pays the scan once, populates the table while it's already reading every row, and marks the notebook so every subsequent operation is an indexed lookup instead) — this command lets you pay that cost up front, in bounded-memory batches with progress printed, instead of on a user-facing delete. It makes no model call and is idempotent/restartable (each run clears and rebuilds the notebook's rows from the current evidence, then re-marks it). Use `--notebook-id` to scope it to one library or `--all-notebooks` to cover every notebook in the database. If you ever suspect a notebook's reverse index has drifted from its actual evidence (e.g. after an abnormal interruption), re-running this command is the remediation — it always rebuilds from the current evidence.
 
-The `metadata` subcommand backfills paper metadata (title, authors, affiliations, venue, year) for a notebook's sources that don't have it yet — useful for a library ingested before paper-metadata extraction existed, or after upgrading the extraction prompt/schema and wanting a refresh. It only targets sources that have already been parsed and look like an academic paper (empty or `academic_paper` doc type); it reads text from the already-stored parsed elements, so the original PDF doesn't need to still be on disk. It requires `--notebook-id` (this subcommand never creates a notebook) and a configured LLM (`KG_LLM_*`, falling back to the global `OPENAI_COMPAT_*`) — it errors out rather than silently skipping if neither is configured, and needs no EMBED configuration. It's idempotent and restartable: sources that already have a metadata row are skipped on a re-run; pass `--force` to re-extract everything in scope regardless (e.g. after a prompt/validation upgrade). Progress prints one line per source (`[meta <done>/<total>] <source-id> <status>`) followed by a final JSON summary of status counts.
+The `metadata` subcommand backfills paper metadata (title, authors, affiliations, venue, year) for a notebook's sources that don't have it yet — useful for a library ingested before paper-metadata extraction existed, or after upgrading the extraction prompt/schema and wanting a refresh. It only targets sources that have already been parsed and look like an academic paper (empty or `academic_paper` doc type); it reads text from the already-stored parsed elements, so the original PDF doesn't need to still be on disk. It requires `--notebook-id` (this subcommand never creates a notebook) and a configured service binding for the `paper_metadata` workload; it errors out rather than silently skipping when that workload is unbound, and needs no embedding workload. It's idempotent and restartable: sources that already have a metadata row are skipped on a re-run; pass `--force` to re-extract everything in scope regardless (e.g. after a prompt/validation upgrade). Progress prints one line per source (`[meta <done>/<total>] <source-id> <status>`) followed by a final JSON summary of status counts.
 
 The `reparse` subcommand fixes a class of historical leftover: sources that were created and whose `parse_status` looks advanced, yet have no `source_elements` (a prior parse that was interrupted or never landed). KG extraction has a zero-LLM grounding check — every node the LLM emits must bind its quoted evidence back to one of the source's elements, or it is dropped; a source with no elements has *all* of its extracted nodes discarded, so `knowledge_objects` never grows (the extraction is wasted) and re-extracting directly never recovers it. Older `all` resume logic used "has KG?" as a proxy for "has been parsed?", routing these element-less sources straight to extraction — exactly this trap (that split is now fixed, so fresh imports no longer hit it). This command re-runs `process_source` (parse → generate elements) for every source in the notebook missing `source_elements`, then does one KG rebuild; sources that already have elements are skipped (idempotent, restartable). `--limit N` processes only the first N; `--no-rebuild` skips the closing clustering (batched runs). Requires `--notebook-id`.
 
@@ -1136,7 +1065,7 @@ The `reparse` subcommand fixes a class of historical leftover: sources that were
 # comparison stays valid (slightly optimistic on sparse subsets; re-run full for borderline calls)
 ( cd backend && python -m app.eval.mrl_truncation --tables relation --sample-rows 50000 )
 
-# gold mode (needs a configured EMBED endpoint; embeds each question once at native dim):
+# gold mode (needs the `chunk_embedding` workload bound; embeds each question once at native dim):
 # recall@12 / MRR relative degradation per truncation tier against the committed gold set
 ( cd backend && python -m app.eval.mrl_truncation --gold app/eval/recall_gold.yaml --notebook nb-b37185f4ae )
 ```
@@ -1154,37 +1083,31 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` bounds only how many sources are *extracted* this run; the final clustering always covers the whole notebook. After a `kg` rebuild on a large notebook (see `SCALE_INDEX_AUTO_ENABLED` above) the scalable-retrieval index is rebuilt automatically (so it never goes stale). `KG_CLUSTER_REP_ANN_MAX` (default 2,000,000) caps the rep-ANN size — above it the index is built in shards with a warning (never silently truncated).
 
-**Concurrency tuning.** Three independent controls set throughput and 429 pressure. An explicit CLI value takes precedence; when omitted, it inherits the corresponding setting/environment value:
+**Batch concurrency.** `--workers` controls source/document jobs only and falls back to `KG_JOB_CONCURRENCY`. It dispatches source jobs in `all` and file parsing in `ingest`; in `vectors-to-blob`, it instead selects the parse/re-encode process-pool size (default `min(32, cpu_count())`; `1` disables that pool).
 
-- `--workers` — source-pipeline concurrency; falls back to `KG_JOB_CONCURRENCY`. It dispatches source jobs in `all` and file parsing in `ingest`. In `vectors-to-blob`, it instead remains the parse/re-encode process-pool size (default `min(32, cpu_count())`; `1` disables that pool).
-- `--llm-conc` — process-wide hard cap for traditional `chat_json` LLM work; falls back to `KG_EXTRACT_WORKERS` (default 16). It is shared across all sources, including intra-source extraction windows.
-- `--embed-conc` — process-wide hard cap for embedding work; falls back to `EMBED_CONCURRENCY`. It is shared across all sources, not a per-document limit.
+Every model call made by `all`, `kg`, `reparse`, `metadata`, `ingest`, or `embed` goes through the same system model-service scheduler as online requests. The service bound to each workload supplies its sole model-capacity setting, `max_concurrency`; there are no batch CLI overrides for model concurrency, and increasing `--workers` never multiplies that service limit. If a throttled run leaves vectors missing, repair them later with the `embed` subcommand.
 
-The model gates are independent of source dispatch: `--workers` never multiplies either model cap. In particular, embedding peak is hard-capped by `--embed-conc` across all sources. The same model-gate contract covers every model-running batch phase, including `all`, `kg`, `reparse`, and `metadata` (as well as embedding work in `ingest` and `embed`). If a throttled run leaves vectors missing, repair them later with the `embed` subcommand.
-
-For a large source pipeline with a conservative embedding endpoint but higher LLM capacity:
+For a larger source pipeline whose model capacity is already declared in the deployment TOML:
 
 ```bash
 PYTHONPATH=backend python scripts/batch_ingest.py reparse \
   --notebook-id nb-xxxx \
   --workers 32 \
-  --llm-conc 24 \
-  --embed-conc 4 \
   --pool-report-interval 5
 ```
 
-- `--pool-report-interval` — in the `all`, `kg`, and `reparse` phases, print a live pool-utilization line every N seconds (default 15; `0` disables it). It reports LLM and embedding gate `active/max/waiting` values beside source jobs — for example, `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40` — so you can see the independent caps and queue pressure.
+- `--pool-report-interval` — in the `all`, `kg`, and `reparse` phases, print producer/source business-pool utilization every N seconds (default 15; `0` disables it). This is not the model-capacity authority; inspect the read-only Model Services status for per-service running/queued counts, health, and breaker state.
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--llm-conc` (process-wide traditional `chat_json` cap = `KG_EXTRACT_WORKERS`), `--embed-conc` (process-wide embedding cap = `EMBED_CONCURRENCY`; throttles 429s across all sources), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between live pool-utilization self-reports in `all`/`kg`/`reparse`, showing LLM and embedding `active/max/waiting`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` and a configured LLM.
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding.
 
-Prereqs: configure EMBED and `KG_LLM` (KG extraction falls back to the global `OPENAI_COMPAT_*`) in `.env`. With EMBED unconfigured the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors (chunk/KG vectors are then skipped), never silently; KG extraction errors if no LLM is reachable. A re-run resumes automatically, but note where that comes from: resumption is derived from **database state**, not from a progress file. Each subcommand asks its own question — `ingest` checks the content hash, `kg` checks whether the source's latest KG extraction run completed, `embed` checks whether each vector row exists. Note `ingest`'s hash check claims a file as ingested at insert time, *before* parsing: a source whose parse was interrupted keeps its hash and will not be picked up again by `ingest`. Repair those with the `reparse` subcommand, which selects by whether the source actually produced elements. That is why an interrupted run picks up where it left off without any flag. `<storage>/batch_ingest/<notebook>.jsonl` is a **write-only run log** for inspection after the fact; nothing reads it back.
+Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, and `paper_metadata`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
 
 ### Retrieval replay diff (`scripts/replay_retrieval.py`)
 
 The acceptance tool for proving "retrieval quality is unchanged" across a performance-optimization change: run a fixed question set through the reasoning retrieval primitives (`federated_retrieve` + `ppr_retrieve`), **without calling any answer LLM**, and record the hit id/score sequences as JSON. Two runs' outputs can then be diffed question-by-question.
 
 ```bash
-# record a run (needs a configured EMBED endpoint for real query vectors; reads retrieval primitives only, no LLM required)
+# record a run (needs the `chunk_embedding` workload bound for real query vectors; reads retrieval primitives only, no chat model required)
 python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
 
 # --full: also runs the complete reasoning-orchestration layer once (plan/reflect are replaced with a
@@ -1201,7 +1124,7 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 `questions.txt` has one question per line; `plan.json` = `{"<question>": ["sub-query 1", "sub-query 2", ...]}`. **Must be run from the main checkout root** (`.env` is loaded relative to the current working directory, same as `batch_ingest.py`). `--owner` reuses the same owner-resolution as `batch_ingest.py` (case-insensitive username, defaults to `"admin"`).
 
-Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (EMBED unconfigured, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
+Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (`retrieval_query_embedding` unbound, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
 
 ### Merging two shared-base deployments (`scripts/merge_dbs.py`)
 
@@ -1271,7 +1194,7 @@ PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --us
 
 - `--notebook` (required) — the notebook to backfill.
 - `--apply` — write the changes; it **requires** `--plan PATH` and applies that reviewed plan file verbatim. A cell whose stored content changed since the dry-run (someone edited it after review) is skipped and reported rather than overwritten on top of a moved target. Each written row is marked pending so the background projector recomputes its KG/steps (reprojection runs synchronously before the command exits). A plan-less `--apply` is a hard error: re-planning from the *current* database at apply time would pick up any cell edited after the reviewed dry-run and write it despite never being reviewed (and for `--use-llm` the stochastic rewrite model would produce different candidates entirely) — so run the dry-run, review its plan file, then apply *that*.
-- `--use-llm` — reformat each cell through the configured rewrite model (with its own zero-LLM content-invariance check and automatic fallback to the deterministic rules) instead of the default, always-available rule-based normalizer. If the rewrite model isn't configured, or its output fails the invariance check and falls back to rules, the tool prints an explicit `WARNING` rather than silently pretending the LLM ran.
+- `--use-llm` — reformat each cell through the system service bound to `knowhow_reformat` (with its own zero-LLM content-invariance check and automatic fallback to the deterministic rules) instead of the default, always-available rule-based normalizer. If that workload is unbound, or its output fails the invariance check and falls back to rules, the tool prints an explicit `WARNING` rather than silently pretending the LLM ran.
 - `--save-plan PATH` — override where the dry-run writes the plan file.
 - `--plan PATH` — the reviewed plan file to apply (see `--apply`).
 
@@ -1305,7 +1228,7 @@ Must be run from the main checkout root (it needs the real `.env`/database confi
 - Ask no longer performs synchronous embedding backfill or a full source-element scan; it uses available keyword/vector indexes and stays responsive while maintenance jobs run. Ask emits per-stage timing (`ask_stage` events).
 - Unified KG rebuild is explicit and observable via `GET /notebooks/{id}/unified-kg/status`; ingesting a source marks the graph dirty instead of rebuilding synchronously, and opening the graph overlay no longer auto-rebuilds (refresh on demand).
 - Cross-document concept merge uses deterministic alias normalization plus bounded top-k vector candidates (scales past thousands of concepts); optional LLM pre-review (`POST /notebooks/{id}/unified-kg/merges/review`) confirms/rejects high-confidence near-synonym merges in small batches.
-- LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
+- LLM-backed KG extraction requires the `kg_extract` workload to be bound in the system model-service TOML; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
 - Notebook sharing is link-based copy/read-only membership, not live collaborative editing; owners retain write authority.
 - PostgreSQL + pgvector are not required for the local beta and are deferred. Until a PostgreSQL repository exists, non-`sqlite:///` `DATABASE_URL` values fail fast instead of silently falling back to a local database.

@@ -8,6 +8,7 @@ Each relation row carries a "notebook_id" key so build_rx_graph can look up tier
 """
 import json
 import pytest
+from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 
 # ── Synthetic fixture ─────────────────────────────────────────────────────────
 
@@ -91,7 +92,15 @@ class TestTask2FederatedRxGraph:
         from app.services.embedding import FakeEmbedder
         from app.models.schemas import NotebookCreate
         r = SQLiteRepository(Settings())
-        r.embedder = FakeEmbedder(dim=16)
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+
+        class _AnswerLLM:
+            configured = True
+
+            def chat_json(self, messages, schema, **kwargs):
+                return json.dumps({"answer": "Oxide evidence [k1].", "grounded": True})
+
+        bind_chat_client(r, "ask_answer", _AnswerLLM())
 
         base_nb = r.create_notebook(NotebookCreate(name="base"))
         r.mark_notebook_base(base_nb.id)
@@ -458,7 +467,15 @@ class TestTask6AskGraphFederated:
         from app.services.embedding import FakeEmbedder
         from app.models.schemas import NotebookCreate
         r = SQLiteRepository(Settings())
-        r.embedder = FakeEmbedder(dim=16)
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+
+        class _AnswerLLM:
+            configured = True
+
+            def chat_json(self, messages, schema, **kwargs):
+                return json.dumps({"answer": "Oxide evidence [k1].", "grounded": True})
+
+        bind_chat_client(r, "ask_answer", _AnswerLLM())
 
         base_nb = r.create_notebook(NotebookCreate(name="base"))
         r.mark_notebook_base(base_nb.id)

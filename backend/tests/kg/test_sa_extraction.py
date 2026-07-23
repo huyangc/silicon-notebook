@@ -130,7 +130,8 @@ def test_extract_graph_forwards_base_filter(monkeypatch):
     captured = {}
 
     def fake_extract_window(client, els, section_path, doc_type, idx,
-                            refine=False, gleaning_rounds=0, base_filter=False):
+                            refine=False, gleaning_rounds=0, base_filter=False,
+                            **_clients):
         captured["base_filter"] = base_filter
         return [], []
 

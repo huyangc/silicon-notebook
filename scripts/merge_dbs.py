@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=23) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=25) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -70,14 +70,20 @@ CHILD_TABLES = [
 # 全局表: 主库优先取并集
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
-    "concept_whitelist", "model_service_status",
+    "concept_whitelist",
 ]
 
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 
 # 副库不导入(临时登录会话, 用户重登即可; primary 的随整库复制保留)
-SKIP_SECONDARY_TABLES = ["auth_sessions"]
+SKIP_SECONDARY_TABLES = [
+    "auth_sessions",
+    # Deployment health and the scrubbed legacy table belong to the primary
+    # deployment. Importing either from a secondary DB would mix runtimes.
+    "model_service_status",
+    "system_model_service_status",
+]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)
 KG_STATE_TABLES = ["kg_rebuild_checkpoint", "unified_kg_state", "kg_cluster_scratch"]

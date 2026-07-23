@@ -29,7 +29,23 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
 elif [[ "${ALLOW_NO_ENV_FILE:-0}" == "1" ]]; then
   echo "ALLOW_NO_ENV_FILE=1 — 无 .env,仅用系统环境变量启动" >&2
 else
-  die "缺 $SCRIPT_DIR/.env —— ./install.sh 会从 .env.example 生成一份;填好模型 URL 再启动(纯环境变量部署可设 ALLOW_NO_ENV_FILE=1)。"
+  die "缺 $SCRIPT_DIR/.env —— ./install.sh 会从 .env.example 生成一份；模型服务由 TOML 管理(纯环境变量部署可设 ALLOW_NO_ENV_FILE=1)。"
+fi
+
+# --- 系统模型服务配置预检 ---
+# 相对路径和后端 Settings 一样锚定到包根。非空配置必须真实存在；留空是明确
+# 选择离线/确定性降级，不会回读任何旧的逐角色 endpoint 环境变量。
+model_config_value="${MODEL_SERVICES_CONFIG:-}"
+if [[ -n "$model_config_value" ]]; then
+  if [[ "$model_config_value" = /* ]]; then
+    model_config_path="$model_config_value"
+  else
+    model_config_path="$SCRIPT_DIR/$model_config_value"
+  fi
+  [[ -f "$model_config_path" ]] || die "MODEL_SERVICES_CONFIG 指向不存在的文件: $model_config_path。运行 ./install.sh 生成默认配置，或从 model-services.example.toml 复制后再启动。"
+  echo "模型服务配置: $model_config_path（services + bindings + max_concurrency；密钥来自 api_key_env）"
+else
+  echo "MODEL_SERVICES_CONFIG 为空：明确以离线/确定性降级模式启动。" >&2
 fi
 
 # --- 按核自调 BLAS/OMP 线程(须早于 python 起) ---

@@ -8,7 +8,6 @@ from typing import Dict, List, Optional, Tuple
 
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
-from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
 
@@ -473,7 +472,7 @@ class GraphRetrievalService(_RetrievalState):
                 except Exception as _exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "scale_ppr_xbridge_query",
-                        self.settings.embed_model,
+                        "",
                         _exc,
                         service="embedding",
                     )
@@ -667,7 +666,7 @@ class GraphRetrievalService(_RetrievalState):
                 except Exception as exc:  # noqa: BLE001 — fail-open per seed source
                     self._note_model_error(
                         "scale_ppr_ann",
-                        self.settings.embed_model,
+                        "",
                         exc,
                         service="embedding",
                     )
@@ -849,8 +848,8 @@ class GraphRetrievalService(_RetrievalState):
     def _ppr_fact_rerank(self, question: str, kg_hits: list) -> list:
         """Recognition memory:LLM 过滤候选 KG 种子,只留与 question 相关的。
         fail-open:LLM 未配/报错/非法返回/过滤后为空 → 原样返回 kg_hits(绝不因
-        rerank 失败而清空种子)。复用 reasoning_llm_client。"""
-        client = self.reasoning_llm_client
+        rerank 失败而清空种子)。"""
+        client = self.model_clients.chat("evidence_refine")
         if not kg_hits or not getattr(client, "configured", False):
             return kg_hits
         lines = []
@@ -879,12 +878,7 @@ class GraphRetrievalService(_RetrievalState):
             return kept or kg_hits   # 过滤后为空 → fail-open(LLM 过度过滤)
         except Exception as exc:
             self._note_model_error(
-                "ppr_fact_rerank",
-                getattr(client, "model", ""),
-                exc,
-                service="reasoning_llm",
-                provider_failure=True,
-                failed_fingerprint=model_client_fingerprint(client),
+                "ppr_fact_rerank", exc, workload_id="evidence_refine"
             )
             return kg_hits
     def _follow_chain(

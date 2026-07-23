@@ -29,7 +29,7 @@ from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
-from app.services.kg.client import safe_json
+from app.services.kg.json_utils import safe_json
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
@@ -113,8 +113,7 @@ class SourceIngestionService:
         delete_source_images: Callable[[str], None],
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
+        model_clients: Any,
         normalize_doc_type: Callable[[str], str],
         default_notebook_names: Iterable[str],
         # --- TEMPORARY KG/catalog callbacks (Task 13/15 targets) ----------
@@ -151,8 +150,7 @@ class SourceIngestionService:
         self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
         self.mineru_cloud_client = mineru_cloud_client
-        self.llm = llm
-        self.kg_llm = kg_llm
+        self.model_clients = model_clients
         self.normalize_doc_type = normalize_doc_type
         self.default_notebook_names = default_notebook_names
         self.clear_source_extraction_state = clear_source_extraction_state
@@ -241,7 +239,7 @@ class SourceIngestionService:
 
     def summarize(self, title: str, elements: List[SourceElement]) -> str:
         text = "\n".join(element.text for element in elements[:12])
-        llm = self.llm()
+        llm = self.model_clients.chat("source_summary")
         if llm.configured and text.strip():
             try:
                 raw = llm.chat_json(
@@ -721,7 +719,7 @@ class SourceIngestionService:
                 labels.append(label)
 
         name_val, desc_val = "", ""
-        llm_client = self.llm()
+        llm_client = self.model_clients.chat("notebook_metadata")
         if llm_client.configured:
             block = "\n".join(
                 f"- {r['title']} "
@@ -1009,15 +1007,24 @@ class SourceIngestionService:
         from app.repositories.sqlite import knowledge_counts_cache
         knowledge_counts_cache.invalidate(source.notebook_id)
         try:
-            kg_llm_client = kg_client if kg_client is not None else self.kg_llm()
-            if not getattr(kg_llm_client, "configured", False):
+            kg_llm_client = kg_client if kg_client is not None else self.model_clients
+            if not (
+                kg_llm_client.configured("kg_extract")
+                if callable(getattr(kg_llm_client, "configured", None))
+                else getattr(kg_llm_client, "configured", False)
+            ):
                 self.finish_extraction_run(run_id, "completed", "no-llm")
                 return
             raw_text = self.source_files.read_source_text(
                 getattr(source, "file_path", "") or "", elements
             )
+            model_parallelism = (
+                kg_llm_client.parallelism("kg_extract")
+                if callable(getattr(kg_llm_client, "parallelism", None))
+                else 1
+            )
             n_chars = kg_ingest.plan_window_size(
-                len(raw_text), self.settings.kg_extract_workers,
+                len(raw_text), model_parallelism,
                 self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
                 override=self.settings.kg_window_target_chars,
             )
@@ -1096,6 +1103,8 @@ class SourceIngestionService:
         source: "SourceSummary | SourceDetail",
         elements: Optional[List[SourceElement]] = None,
         force: bool = False,
+        *,
+        client: Any | None = None,
     ) -> str:
         """单源论文元数据抽取(best-effort,幂等)。返回状态串 stored/not_paper/
         skipped/disabled/no_llm/no_text/failed,仅供调用方统计,不进状态机。
@@ -1127,7 +1136,7 @@ class SourceIngestionService:
         try:
             if not force and self.sources.get_paper_meta(source.id) is not None:
                 return "skipped"
-            client = self.kg_llm()
+            client = client or self.model_clients.chat("paper_metadata")
             if not getattr(client, "configured", False):
                 return "no_llm"
             if elements is None:
@@ -1197,8 +1206,9 @@ class SourceIngestionService:
     ) -> dict:
         """批量补抽缺论文元数据的源(CLI phase=metadata 与应用内端点共用)。
         幂等键=meta 行存在;失败源不落行,重跑自动重试(断点续跑)。有界并发
-        (受 kg_job_concurrency 约束),任务级 copy_context 传播 per-user
-        模型配置。返回 {"total": N, "<status>": n, ...} 计数。成功收尾
+        取自 ``paper_metadata`` 所绑定模型服务的并行度，并在原始 worker
+        启动前解析一次 workload client。返回
+        {"total": N, "<status>": n, ...} 计数。成功收尾
         (stored>0)经 pending_bus 广播 paper_meta_done 铃铛事件,见
         _notify_paper_meta_done。"""
         nb_row = self.notebooks.get_row(notebook_id)  # KeyError if missing
@@ -1208,10 +1218,14 @@ class SourceIngestionService:
         counts: dict = {"total": len(targets)}
         if not targets:
             return counts
+        # Resolve the workload-bound adapter before raw worker threads. The
+        # scheduler remains the authoritative global cap; matching the pool to
+        # this service avoids manufacturing excess blocked worker calls.
+        paper_client = self.model_clients.chat("paper_metadata")
         workers = max(
             1,
             min(
-                int(getattr(self.settings, "kg_job_concurrency", 4)),
+                self.model_clients.parallelism("paper_metadata"),
                 len(targets),
             ),
         )
@@ -1237,7 +1251,9 @@ class SourceIngestionService:
                 nonlocal done
                 try:
                     row = self.sources.get_source(source_id)
-                    status = self.ensure_paper_metadata(row, force=force)
+                    status = self.ensure_paper_metadata(
+                        row, force=force, client=paper_client
+                    )
                 except Exception:
                     status = "failed"
                     self.event_log.logger.exception(

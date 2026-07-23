@@ -47,7 +47,9 @@ class _StubRetrieval:
 class _StubRepo:
     def __init__(self):
         self.retrieval = _StubRetrieval()
-        self.reasoning_llm_client = type("C", (), {"configured": False})()
+
+    def chat(self, workload_id):
+        return type("C", (), {"configured": False})()
 
 
 class _StubCommunities:

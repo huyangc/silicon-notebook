@@ -35,6 +35,7 @@ from app.services.embedding import FakeEmbedder
 from app.services.kg.graph_reason import (
     build_rx_graph, render_subgraph_context)
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
 _FLAG = "knowhow_kg_node_retrieval_enabled"
 
@@ -156,7 +157,7 @@ def kh_store(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     store = _new_repo()
-    store.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(store, FakeEmbedder(dim=16))
     nb = store.create_notebook(NotebookCreate(name="nb"))
     return store, nb
 
@@ -225,7 +226,7 @@ def graph_kh_store(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     store = _new_repo()
-    store.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(store, FakeEmbedder(dim=16))
     nb = store.create_notebook(NotebookCreate(name="nb"))
     store.store_kg(nb.id, None, [
         {"local_id": "K1", "object_type": "formula",
@@ -290,9 +291,13 @@ def _drive_graph_ask(store, nb, monkeypatch):
 
     monkeypatch.setattr(store.retrieval.candidates, "_retrieve_scored",
                         _fake_retrieve_scored)
-    store.llm_client = _CiteLLM(valid_key)
+    bind_chat_client(store, "ask_answer", _CiteLLM(valid_key))
     # Skip the adversarial chain verifier's LLM calls (non-configured stub).
-    store._reasoning_llm_client = type("_NoLLM", (), {"configured": False})()
+    bind_chat_client(
+        store,
+        "graph_chain_verify",
+        type("_NoLLM", (), {"configured": False})(),
+    )
     resp = store.ask(nb.id, AskRequest(question="oxide breakdown failure", mode="graph"))
     return resp, kh_oid
 

@@ -29,6 +29,7 @@ import time
 import zipfile
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator, Mapping, Sequence
 from unittest import mock
 
@@ -245,14 +246,10 @@ def _owner_for(name: str) -> str:
         return AMBIGUOUS_MEMBER_OWNERS[name]
     identity = {
         "current_user", "create_user", "authenticate_user", "create_session",
-        "resolve_session", "delete_session", "get_user_model_settings",
-        "set_user_model_settings", "resolve_model_config", "list_user_usage",
+        "resolve_session", "delete_session", "list_user_usage",
         "list_user_notebooks",
     }
-    provider = {
-        "llm_client", "reasoning_llm_client", "rewrite_llm_client",
-        "kg_llm_client", "rerank_client", "_note_model_error",
-    }
+    provider = {"_note_model_error"}
     sharing_fragments = (
         "share", "member", "copy_notebook", "_sweep_stuck_copies",
         "user_can_", "_owner", "find_notebook_by_share_token",
@@ -318,7 +315,7 @@ def _owner_for(name: str) -> str:
 
 def _patch_compatibility(name: str, kind: str) -> str:
     if kind in {"mutable_property", "constant"} or name in {
-        "_now", "_new_id", "_COPY_CHUNK", "llm_client", "rerank_client",
+        "_now", "_new_id", "_COPY_CHUNK",
     }:
         return "production-compatible"
     return "test-only"
@@ -904,9 +901,6 @@ def _deterministic_runtime() -> Iterator[None]:
         stack.enter_context(mock.patch.object(sqlite_notebook_sharing, "_now", lambda: FIXED_TIME))
         stack.enter_context(mock.patch.object(auth_utils, "hash_password", fixed_hash))
         stack.enter_context(
-            mock.patch.object(sqlite_repository, "OpenAICompatibleClient", _FakeChatAdapter)
-        )
-        stack.enter_context(
             mock.patch.object(model_provider, "OpenAICompatibleClient", _FakeChatAdapter)
         )
         stack.enter_context(
@@ -925,37 +919,60 @@ def _deterministic_runtime() -> Iterator[None]:
         stack.enter_context(mock.patch.object(rerank_client, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(model_provider, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(time, "perf_counter", fixed_perf))
+        stack.enter_context(
+            mock.patch.dict(
+                os.environ,
+                {"FIXTURE_MODEL_API_KEY": "fixture-secret"},
+            )
+        )
         stack.enter_context(mock.patch.object(socket, "create_connection", no_network))
         stack.enter_context(mock.patch.object(socket.socket, "connect", no_network))
         yield
 
 
-def _offline_settings(database: Path, storage: Path, *, required: bool = False):
+def _offline_settings(
+    database: Path,
+    storage: Path,
+    *,
+    configured: bool = False,
+    missing_ask_answer: bool = False,
+):
     from app.core.config import Settings
+    from app.services.model_registry import WORKLOADS
+
+    model_services_config = ""
+    if configured:
+        config_path = database.parent / "fixture-model-services.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        bindings = "\n".join(
+            f'{workload_id} = "fixture_chat"'
+            for workload_id, workload in WORKLOADS.items()
+            if workload.kind == "chat"
+            and (not missing_ask_answer or workload_id != "ask_answer")
+        )
+        config_path.write_text(
+            '''[services.fixture_chat]
+display_name = "FixtureChat"
+kind = "chat"
+protocol = "openai"
+base_url = "https://fixture.invalid/v1"
+model = "fixture-chat"
+api_key_env = "FIXTURE_MODEL_API_KEY"
+max_concurrency = 2
+
+[bindings]
+'''
+            + bindings
+            + "\n",
+            encoding="utf-8",
+        )
+        model_services_config = str(config_path)
 
     return Settings(
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
-        openai_compat_base_url="",
-        openai_compat_api_key="",
-        openai_compat_model="",
-        reasoning_llm_base_url="",
-        reasoning_llm_api_key="",
-        reasoning_llm_model="",
-        rewrite_llm_base_url="",
-        rewrite_llm_api_key="",
-        rewrite_llm_model="",
-        kg_llm_base_url="",
-        kg_llm_api_key="",
-        kg_llm_model="",
-        embed_provider="",
-        embed_model="",
-        embed_base_url="",
-        embed_api_key="",
+        model_services_config=model_services_config,
         embed_dim=4,
-        rerank_model="",
-        rerank_base_url="",
-        rerank_api_key="",
         mineru_mode="off",
         mineru_api_url="",
         mineru_vlm_server_url="",
@@ -965,7 +982,6 @@ def _offline_settings(database: Path, storage: Path, *, required: bool = False):
         llm_log_enabled=False,
         debug_logs_enabled=False,
         auth_optional=True,
-        user_model_config_policy="required" if required else "fallback",
         query_rewrite_enabled=False,
         chunk_kg_overlay_enabled=False,
         graph_ppr_enabled=False,
@@ -976,10 +992,23 @@ def _offline_settings(database: Path, storage: Path, *, required: bool = False):
     )
 
 
-def _new_offline_repo(database: Path, storage: Path, *, required: bool = False):
+def _new_offline_repo(
+    database: Path,
+    storage: Path,
+    *,
+    configured: bool = False,
+    missing_ask_answer: bool = False,
+):
     from app.services.sqlite_repository import SQLiteRepository
 
-    return SQLiteRepository(_offline_settings(database, storage, required=required))
+    return SQLiteRepository(
+        _offline_settings(
+            database,
+            storage,
+            configured=configured,
+            missing_ask_answer=missing_ask_answer,
+        )
+    )
 
 
 def _evidence() -> dict[str, object]:
@@ -1933,18 +1962,21 @@ def collect_ask_goldens() -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="repository-ask-goldens-") as temporary:
         root = Path(temporary)
         with _deterministic_runtime():
-            for case_name, mode, question, include_kg, required in (
-                ("chunk", "chunk", "fixture gain", True, False),
-                ("reasoning", "reasoning", "fixture gain", True, False),
-                ("graph", "graph", "fixture gain", True, False),
-                ("unconfigured_model", "reasoning", "fixture gain", True, True),
-                ("no_kg", "reasoning", "fixture gain", False, False),
-                ("no_hits", "graph", "unrelated-zqxj", True, False),
-                ("large_graph_refusal", "graph", "fixture gain", True, False),
+            for case_name, mode, question, include_kg in (
+                ("chunk", "chunk", "fixture gain", True),
+                ("reasoning", "reasoning", "fixture gain", True),
+                ("graph", "graph", "fixture gain", True),
+                ("unconfigured_model", "reasoning", "fixture gain", True),
+                ("no_kg", "reasoning", "fixture gain", False),
+                ("no_hits", "graph", "unrelated-zqxj", True),
+                ("large_graph_refusal", "graph", "fixture gain", True),
             ):
                 case_root = root / case_name
                 repo = _new_offline_repo(
-                    case_root / "fixture.db", case_root / "storage", required=required
+                    case_root / "fixture.db",
+                    case_root / "storage",
+                    configured=True,
+                    missing_ask_answer=case_name == "unconfigured_model",
                 )
                 notebook_id = _seed_ask_repository(repo, include_kg=include_kg)
                 # Task 24: the graph engine lives in AskService and consumes the
@@ -2046,11 +2078,17 @@ def _serialization_contract() -> dict[str, object]:
         repo = _new_offline_repo(root / "api.db", root / "storage")
         repo.settings.viz_sync_build_max_objects = 1
 
+        def fixture_repository():
+            return repo
+
+        fixture_repository.cache_info = lambda: SimpleNamespace(currsize=1)
+        fixture_repository.cache_clear = lambda: None
+
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(app_main, "get_settings", lambda: repo.settings))
-            stack.enter_context(mock.patch.object(app_main, "repository", lambda: repo))
+            stack.enter_context(mock.patch.object(app_main, "repository", fixture_repository))
             stack.enter_context(mock.patch.object(deps, "get_settings", lambda: repo.settings))
-            stack.enter_context(mock.patch.object(deps, "repository", lambda: repo))
+            stack.enter_context(mock.patch.object(deps, "repository", fixture_repository))
             # `app.api.routes` used to own a module-level `repository`; it is now a
             # pure router aggregator and the factory lives in app/api/deps.py.
             # Patching `deps` alone does NOT reach the routes: every route module
@@ -2062,7 +2100,7 @@ def _serialization_contract() -> dict[str, object]:
             # exactly how the old `routes` line silently rotted into a crash when
             # routes.py was split.
             for module in _api_modules_binding_repository():
-                stack.enter_context(mock.patch.object(module, "repository", lambda: repo))
+                stack.enter_context(mock.patch.object(module, "repository", fixture_repository))
             stack.enter_context(
                 mock.patch.object(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
             )

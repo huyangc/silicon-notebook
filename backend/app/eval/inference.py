@@ -64,9 +64,11 @@ def run_inference(notebook_id: str,
     """对每题:repo.ask -> LLM-judge。返回逐题结果(含 judge)。"""
     from app.core.config import Settings
     from app.models.ask import AskRequest
+    from app.services.kg.client import make_client
     from app.services.sqlite_repository import SQLiteRepository
     repo = SQLiteRepository(Settings())
-    assert repo.llm_client.configured, "LLM 未配置(.env)"
+    judge_client = make_client("EVAL_JUDGE_")
+    assert judge_client.configured, "EVAL_JUDGE_OPENAI_COMPAT_* 未配置"
     questions = load_questions(questions_path)
     rows: List[Dict[str, Any]] = []
     for q in questions:
@@ -74,7 +76,7 @@ def run_inference(notebook_id: str,
         msgs = judge_prompt(q["question"], q["expected_points"], resp.answer or resp.conclusion,
                             resp.evidence_level, q["expected_behavior"])
         try:
-            judged = parse_judge(repo.llm_client.chat_json(msgs, _JUDGE_SCHEMA))
+            judged = parse_judge(judge_client.chat_json(msgs, _JUDGE_SCHEMA))
         except Exception as exc:  # judge 调用失败不应中断整轮
             judged = {"correctness": 0, "inference_quality": 0,
                       "grounding_consistency": False, "fabricated_citation": False,

@@ -8,7 +8,7 @@ Regression for: _answer_mix's `json.loads(raw)` raising JSONDecodeError on
 import json
 
 from app.core.llm import strip_json_fences
-from app.services.kg.client import safe_json
+from app.services.kg.json_utils import safe_json
 
 
 # A faithful shape of the failing MiniMax-M2.7 output: a long think block (with

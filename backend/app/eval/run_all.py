@@ -40,12 +40,16 @@ def main() -> int:
         from app.core.config import Settings
         from app.eval.speed import measure_speed, extrapolate, recommend_max_chars
         from app.eval.report import render_speed_report
+        from app.services.model_registry import SystemModelServiceRegistry
         s = Settings()
+        registry = SystemModelServiceRegistry.load(s)
+        kg_service = registry.service_for("kg_extract")
+        kg_parallelism = kg_service.max_concurrency if kg_service is not None else 1
         source_md = a.source_md or _find_source_md(a.notebook)
         assert source_md, "找不到 speed 源文件,请用 --source-md 指定"
         measured = measure_speed(source_md)
         extra = extrapolate(measured, [100000, 200000, 500000, 1000000],
-                            s.kg_extract_workers, s.kg_window_min_chars, s.kg_window_max_chars)
+                            kg_parallelism, s.kg_window_min_chars, s.kg_window_max_chars)
         rec = recommend_max_chars(measured, a.target_seconds)
         (out / "speed_raw.json").write_text(
             json.dumps({"measured": measured, "extrapolated": extra},

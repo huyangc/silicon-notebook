@@ -14,6 +14,11 @@ from app.services.embedding import FakeEmbedder
 from app.services.kg import scheduler as kg_scheduler
 from app.services.kg.run_control import KgBuildAborted
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import (
+    RecordingModelProvider,
+    bind_chat_client,
+    bind_all_embedding_clients,
+)
 
 
 class _ControlledKgClient:
@@ -121,8 +126,10 @@ def repo(tmp_path, monkeypatch):
     settings.kg_gleaning_enabled = False
     settings.kg_conflict_resolution_enabled = False
     settings.kg_relink_enabled = False
-    result = SQLiteRepository(settings)
-    result.embedder = FakeEmbedder(dim=settings.embed_dim)
+    provider = RecordingModelProvider()
+    result = SQLiteRepository(settings, model_provider=provider)
+    bind_all_embedding_clients(result, FakeEmbedder(dim=settings.embed_dim))
+    result.recording_model_provider = provider
     kg_scheduler.configure(window_workers=1, job_workers=1)
     try:
         yield result
@@ -194,7 +201,7 @@ def _kg_source_ids(repo, notebook_id):
 def test_model_outage_preserves_completed_source_and_stops_remaining(repo):
     notebook, source_ids = _seed_three_parsed_sources(repo)
     client = _ControlledKgClient(fail_after_successful_sources=1)
-    repo._kg_llm_client = client
+    bind_chat_client(repo, "kg_extract", client)
     job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
 
     with pytest.raises(KgBuildAborted):
@@ -230,8 +237,9 @@ def test_failed_rebuild_continues_incrementally_without_second_delete(
         return real_delete(notebook_id)
 
     monkeypatch.setattr(lifecycle, "delete_notebook_kg", tracked_delete)
-    repo._kg_llm_client = _ControlledKgClient(
-        fail_after_successful_sources=1
+    bind_chat_client(
+        repo, "kg_extract",
+        _ControlledKgClient(fail_after_successful_sources=1),
     )
     rebuild = repo.prepare_notebook_kg_job(notebook.id, "rebuild")
     with pytest.raises(KgBuildAborted):
@@ -242,7 +250,7 @@ def test_failed_rebuild_continues_incrementally_without_second_delete(
     assert _kg_source_ids(repo, notebook.id) == {source_ids[0]}
 
     delete_calls.clear()
-    repo._kg_llm_client = _ControlledKgClient()
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
     continuation = repo.prepare_notebook_kg_job(notebook.id, "incremental")
     result = repo.execute_notebook_kg_job(
         notebook.id, continuation["id"], "incremental"
@@ -256,7 +264,7 @@ def test_failed_rebuild_continues_incrementally_without_second_delete(
 
 def test_rebuild_probe_failure_happens_before_delete(repo, monkeypatch):
     notebook, _source_ids = _seed_three_parsed_sources(repo)
-    repo._kg_llm_client = _ControlledKgClient(fail_probe=True)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient(fail_probe=True))
     lifecycle = repo._runtime.knowledge_lifecycle
     delete_calls = []
     monkeypatch.setattr(
@@ -287,7 +295,7 @@ def test_job_enters_stopping_before_running_windows_are_drained(
 
     notebook, _source_ids = _seed_three_parsed_sources(repo)
     client = _DrainVisibilityClient()
-    repo._kg_llm_client = client
+    bind_chat_client(repo, "kg_extract", client)
     elements = [
         SourceElementQ(
             id=f"window-element-{index}",
@@ -343,7 +351,7 @@ def test_job_enters_stopping_before_running_windows_are_drained(
 
 def test_duplicate_preparation_never_enters_executor(repo):
     notebook, _source_ids = _seed_three_parsed_sources(repo)
-    repo._kg_llm_client = _ControlledKgClient()
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
     first = repo.prepare_notebook_kg_job(notebook.id, "incremental")
 
     with pytest.raises(KgBuildAlreadyRunning):
@@ -357,7 +365,7 @@ def test_successful_job_emits_safe_started_progress_and_success_events(
     repo, monkeypatch
 ):
     notebook, source_ids = _seed_three_parsed_sources(repo)
-    repo._kg_llm_client = _ControlledKgClient()
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)
 
@@ -387,7 +395,7 @@ def test_model_failure_emits_circuit_stopping_and_failed_without_diagnostics(
     repo, monkeypatch
 ):
     notebook, _source_ids = _seed_three_parsed_sources(repo)
-    repo._kg_llm_client = _ControlledKgClient(fail_probe=True)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient(fail_probe=True))
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)
     job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
@@ -420,7 +428,7 @@ def test_stopping_publication_failure_does_not_replace_model_failure(
     repo, monkeypatch
 ):
     notebook, _source_ids = _seed_three_parsed_sources(repo)
-    repo._kg_llm_client = _ControlledKgClient(fail_probe=True)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient(fail_probe=True))
     job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
     monkeypatch.setattr(
         repo._runtime.kg_build_jobs,

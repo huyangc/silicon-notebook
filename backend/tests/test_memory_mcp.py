@@ -19,6 +19,7 @@ from app.api.deps import (
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.schemas import MemoryHit, NotebookCreate
+from tests.model_testkit import bind_chat_client
 
 
 PUBLIC_TOOLS = {
@@ -388,6 +389,33 @@ async def test_same_profile_lower_scope_token_cannot_reuse_an_initialized_sessio
 
 @pytest.mark.anyio
 async def test_ask_tool_reuses_formal_ask_and_rejects_experimental_graph(mcp_env):
+    from app.services.sqlite_repository import _now
+
+    repo = repository()
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("mcp-ask-source", mcp_env["notebook"].id, "Evidence", "markdown",
+             "extracted", "parsed", "e.md", "", 0, "", "", "textbook",
+             now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("mcp-ask-chunk", mcp_env["notebook"].id, "mcp-ask-source",
+             "evidence exists in this notebook", "1", "[]", now),
+        )
+
+    class _AnswerClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return '{"answer":"Evidence exists [k1].","grounded":true}'
+
+    bind_chat_client(repo, "ask_answer", _AnswerClient())
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         _payload(await client.call(
             "select_notebook", {"notebook_id": mcp_env["notebook"].id}
@@ -401,6 +429,7 @@ async def test_ask_tool_reuses_formal_ask_and_rejects_experimental_graph(mcp_env
         ))
         assert answer["mode"] == "chunk"
         assert "answer" in answer
+    assert "ask_answer" in repo._runtime.models._test_chat_calls
 
 
 @pytest.mark.anyio

@@ -17,6 +17,8 @@ from app.core.config import Settings
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 class _StubLLM:
@@ -45,13 +47,9 @@ def arepo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -71,7 +69,7 @@ def test_empty_synthesis_retries_and_recovers(arepo):
     # 首次合成空 content("{}") → 重试第二次拿到真答案 → 用真答案,不退化
     nb = _seed(arepo)
     stub = _StubLLM(answers=["{}", {"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True}])
-    arepo.llm_client = stub
+    bind_chat_client(arepo, "ask_answer", stub)
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert stub.answer_calls == 2, f"空 content 应触发一次重试,实际合成 {stub.answer_calls} 次"
     assert not resp.conclusion.startswith(_PLACEHOLDER)
@@ -82,7 +80,7 @@ def test_empty_synthesis_degrades_honestly(arepo):
     # 两次合成皆空 → 不冒充成 "Found N objects";记 model_error;证据仍保留
     nb = _seed(arepo)
     stub = _StubLLM(answers=["{}"])                # 每次都空
-    arepo.llm_client = stub
+    bind_chat_client(arepo, "ask_answer", stub)
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert stub.answer_calls == 2, "应重试一次后仍空"
     assert not resp.conclusion.startswith(_PLACEHOLDER), "不得输出误导占位串"
@@ -90,25 +88,28 @@ def test_empty_synthesis_degrades_honestly(arepo):
     assert resp.related_knowledge, "降级仍应保留已检索证据"
 
 
-def test_reasoning_answer_failure_is_reasoning_service(arepo):
+def test_reasoning_answer_failure_uses_safe_workload_metadata(arepo):
     stub = _StubLLM(answers=["{}"])
     stub.model = "runtime-reasoning-name"
-    arepo._reasoning_llm_client = stub
+    bind_chat_client(arepo, "ask_answer", stub)
     nb = _seed(arepo)
     response = arepo.ask(
         nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning")
     )
     error = next(item for item in response.model_errors if item.stage == "answer")
-    assert (error.service, error.model) == (
-        "reasoning_llm", "runtime-reasoning-name"
-    )
+    assert (
+        error.service_id,
+        error.workload_id,
+        error.model,
+        error.support_id,
+    ) == ("", "ask_answer", "", "")
 
 
 def test_healthy_synthesis_not_retried(arepo):
     # 回归:首次即产出真答案 → 不重试(answer_calls==1),行为不变
     nb = _seed(arepo)
     stub = _StubLLM(answers=[{"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True}])
-    arepo.llm_client = stub
+    bind_chat_client(arepo, "ask_answer", stub)
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert stub.answer_calls == 1, "正常答案不应触发重试"
     assert "RTL到GDSII是标准流程" in resp.conclusion

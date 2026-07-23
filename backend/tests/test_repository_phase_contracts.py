@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "backend" / "tests" / "fixtures" / "repository_contract"
@@ -96,7 +97,7 @@ def repository(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_PROVIDER", "")
     repo = SQLiteRepository(Settings(_env_file=None))
-    repo.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=16))
     return repo
 
 

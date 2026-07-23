@@ -6,7 +6,6 @@ import threading
 import weakref
 from typing import Any, Callable
 
-from app.core import ask_context
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -23,6 +22,7 @@ from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
+from app.repositories.sqlite.model_status_store import ModelStatusStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.report_store import ReportStore
@@ -35,7 +35,12 @@ from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
-from app.services.model_provider import RuntimeModelProvider
+from app.services.model_provider import (
+    RuntimeModelProvider,
+    validate_process_local_scheduler_deployment,
+)
+from app.services.model_registry import SystemModelServiceRegistry
+from app.services.model_status import ModelStatusService
 from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
@@ -76,17 +81,49 @@ class RepositoryCompatibilitySeams:
 
 
 class RepositoryRuntime:
-    def __init__(self, settings: Settings, root_dir: Path, seams: RepositoryCompatibilitySeams) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        root_dir: Path,
+        seams: RepositoryCompatibilitySeams,
+        *,
+        model_provider: Any | None = None,
+    ) -> None:
+        validate_process_local_scheduler_deployment()
         self.settings = settings
         self.root_dir = root_dir
         self.seams = seams
+        self._closed = False
+        self.event_log = EventLogger(settings, channel="events", per_user=True)
+        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
+            self.event_log.logger.warning(
+                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
+                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
+                settings.llm_log_path,
+                settings.event_log_dir,
+            )
+        self.models = model_provider or RuntimeModelProvider(settings, self.event_log)
+        kg_scheduler.initialize(
+            window_workers=self.models.parallelism("kg_extract"),
+            job_workers=settings.kg_job_concurrency,
+        )
         self.database = SqliteDatabase(settings, root_dir)
-        self.model_config_cache: dict[str, dict[str, Any]] = {}
+        # Write-lock observations share the existing per-user event channel.
+        if self.database.stats is not None:
+            self.database.stats.sink = self.event_log.emit
         self.identity = IdentityStore(
             self.database,
             settings,
-            self.model_config_cache,
         )
+        self.model_status_store = ModelStatusStore(self.database)
+        self.model_status = ModelStatusService(
+            getattr(self.models, "registry", SystemModelServiceRegistry({}, {})),
+            self.models,
+            self.model_status_store,
+        )
+        set_observation_sink = getattr(self.models, "set_observation_sink", None)
+        if callable(set_observation_sink):
+            set_observation_sink(self.model_status.record_provider_observation)
         self.queries = QueryStore(self.database)
         self.notebook_store = NotebookStore(
             self.database,
@@ -215,7 +252,7 @@ class RepositoryRuntime:
         # wire_knowledge_lifecycle(): their collaborators (the facade `_write`/
         # `_connect` transaction seats, the facade-owned unified/viz cache
         # objects, the coordinator-backed dirty/invalidate wrappers, the
-        # per-user model-client properties and the Gate-6 scale/viz adapters)
+        # process-owned model provider and the Gate-6 scale/viz adapters)
         # only exist once the facade constructor reaches them.  Construction
         # stays lazy — no seam calls.
         self.knowledge_governance: "KnowledgeGovernanceService | None" = None
@@ -229,32 +266,13 @@ class RepositoryRuntime:
         self.sharing_store: "SharingStore | None" = None
         self.notebook_copies: "NotebookCopyService | None" = None
         self.sharing: "NotebookSharingService | None" = None
-        self.event_log = EventLogger(settings, channel="events", per_user=True)
-        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
-            self.event_log.logger.warning(
-                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
-                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
-                settings.llm_log_path,
-                settings.event_log_dir,
-            )
-        # 写锁观测的出口:走既有 events.jsonl,不新起日志通道。sink 挂在
-        # database 实例上(而非模块级单例),使并发/多实例测试彼此隔离。
-        if self.database.stats is not None:
-            self.database.stats.sink = self.event_log.emit
-        self.models = RuntimeModelProvider(
-            self.identity,
-            settings,
-            self.event_log,
-            ask_context,
-        )
         self.evidence_context: "EvidenceContextService | None" = None
         self.candidate_retrieval: "CandidateRetrievalService | None" = None
         self.graph_retrieval: "GraphRetrievalService | None" = None
         self.retrieval: "RetrievalService | None" = None
         self._retrieval_wire_lock = threading.Lock()
-        # Task 13: schema CRUD + LLM-backed induction. Depends on the model
-        # provider (late-bound per-user llm_client property), so it composes
-        # after `models`.
+        # Task 13: schema CRUD + LLM-backed induction. It requests the
+        # ``schema_induction`` workload from the process-owned provider.
         self.schema_registry = SchemaRegistryService(
             self.notebook_store,
             self.knowledge,
@@ -319,36 +337,31 @@ class RepositoryRuntime:
     def embedder(self) -> Any:
         return self._embedder
 
-    @embedder.setter
-    def embedder(self, value: Any) -> None:
-        self.set_embedder(value)
-
     def set_embedder(self, value: Any) -> None:
         self._embedder = value
         if self.retrieval is not None:
             self.retrieval.replace_embedder(value)
-        if self.memory_service is not None:
-            self.memory_service.embedder = value
         if self.memory_retriever is not None:
             self.memory_retriever.replace_embedder(value)
 
-    def wire_memory(self, *, embedder: Any) -> MemoryService:
+    def wire_memory(
+        self, *, persistence_embedder: Any, query_embedder: Any
+    ) -> MemoryService:
         """Compose owner-private Memory after sharing/access and embedding exist."""
         if self.sharing is None:
             raise RuntimeError("wire_memory requires wire_sharing first")
-        self.set_embedder(embedder)
         self.memory_service = MemoryService(
             self.memory_store,
             self.ask_state,
             self.sharing,
-            self.embedder,
+            persistence_embedder,
             self.event_log,
             self.seams.new_id,
             self.seams.now,
             embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
             kg_ingest_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
         )
-        self.memory_retriever = MemoryRetriever(self.memory_store, self.embedder)
+        self.memory_retriever = MemoryRetriever(self.memory_store, query_embedder)
         self.catalog.memory_retriever = self.memory_retriever
         return self.memory_service
 
@@ -367,10 +380,12 @@ class RepositoryRuntime:
         if self.retrieval is not None:
             self.retrieval.replace_notebook_languages(value)
 
-    def set_model_config_cache(self, value: dict[str, dict[str, Any]]) -> None:
-        self.model_config_cache = value
-        self.identity.model_config_cache = value
-        self.models.model_config_cache = value
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.models.close()
+        self.database.close_local()
 
     def set_unified_cache(self, value: dict) -> None:
         self.retrieval_snapshots.unified_cache = value
@@ -468,7 +483,7 @@ class RepositoryRuntime:
     def wire_source_pipeline(
         self,
         *,
-        embedder: Callable[[], Any],
+        embedder: Callable[[str], Any],
         mark_unified_dirty: Callable[[str], None],
     ) -> tuple[SourceEmbeddingService, SourceChunkingService]:
         """Compose the source embed/chunk pipeline (Task 11) once the
@@ -485,6 +500,7 @@ class RepositoryRuntime:
             chunks=self.chunk_store,
             vectors=self.embedding_store,
             embedder=embedder,
+            parallelism=self.models.parallelism,
             event_log=self.event_log,
             now=self.seams.now,
         )
@@ -509,8 +525,6 @@ class RepositoryRuntime:
         parse_file: Callable[..., list],
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
         normalize_doc_type: Callable[[str], str],
         default_notebook_names: Any,
         clear_source_extraction_state: Callable[..., None],
@@ -530,10 +544,10 @@ class RepositoryRuntime:
         facade-bound seams exist.  ``write`` is the facade's ``_write``
         compatibility seat resolved per call (transaction counting / failure
         injection keep observing every ingestion commit boundary);
-        ``source_elements``/``summarize_source``/``parse_file`` and the model
-        client seams stay facade/module late-bound so frozen patch targets
-        (repo.source_elements, repo._summarize_source, module
-        parse_source_file, per-user llm/kg_llm properties) keep working;
+        ``source_elements``/``summarize_source``/``parse_file`` stay
+        facade/module late-bound so frozen patch targets (repo.source_elements,
+        repo._summarize_source, module parse_source_file) keep working; model
+        calls use explicit workloads on the process-owned provider;
         ``make_persist_image``/``delete_source_images`` are the per-source
         image-persistence factory and the per-source image cascade-delete
         seam (embedded-image retention); the remaining callables are
@@ -568,8 +582,7 @@ class RepositoryRuntime:
             parse_file=parse_file,
             mineru_client=mineru_client,
             mineru_cloud_client=mineru_cloud_client,
-            llm=llm,
-            kg_llm=kg_llm,
+            model_clients=self.models,
             normalize_doc_type=normalize_doc_type,
             default_notebook_names=default_notebook_names,
             clear_source_extraction_state=clear_source_extraction_state,
@@ -809,6 +822,7 @@ class RepositoryRuntime:
             raise RuntimeError("query services require scale runtime")
         self.knowledge_query = KnowledgeQueryService(
             settings=self.settings,
+            model_provider=self.models,
             event_log=self.event_log,
             database=self.database,
             catalog=self.catalog,
@@ -847,8 +861,6 @@ class RepositoryRuntime:
         source_ids_from_evidence: Callable[..., set],
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
         cluster_map: Callable[[str], dict],
         annotate_edge_support: Callable[..., list],
         decided_seed_pairs: Callable[[str], dict],
@@ -899,8 +911,7 @@ class RepositoryRuntime:
             get_notebook=get_notebook,
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,
-            llm=llm,
-            kg_llm=kg_llm,
+            model_clients=self.models,
             relations_for_notebook=relations_for_notebook,
             edge_centrality_map=edge_centrality_map,
             embed_knowledge=embed_knowledge,
@@ -941,8 +952,7 @@ class RepositoryRuntime:
             source_ids_from_evidence=source_ids_from_evidence,
             set_source_status=set_source_status,
             run_extraction=run_extraction,
-            llm=llm,
-            kg_llm=kg_llm,
+            model_clients=self.models,
             cluster_map=cluster_map,
             annotate_edge_support=annotate_edge_support,
             decided_seed_pairs=decided_seed_pairs,

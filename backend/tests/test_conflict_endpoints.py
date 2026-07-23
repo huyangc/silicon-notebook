@@ -15,6 +15,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 # ---------------------------------------------------------------------------
@@ -50,16 +52,12 @@ def _env(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
 
 
 def _make_repo(monkeypatch) -> SQLiteRepository:
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -122,7 +120,7 @@ class TestResolveEndpoint:
     def test_409_when_llm_unconfigured(self, tmp_path, monkeypatch):
         _env(tmp_path, monkeypatch)
         repo = _make_repo(monkeypatch)
-        repo.llm_client = _UnconfiguredLLM()
+        bind_chat_client(repo, "kg_conflict_review", _UnconfiguredLLM())
         tc = _client(repo, monkeypatch)
         nb = repo.create_notebook(NotebookCreate(name="no-llm"))
         r = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
@@ -131,7 +129,7 @@ class TestResolveEndpoint:
     def test_404_unknown_notebook(self, tmp_path, monkeypatch):
         _env(tmp_path, monkeypatch)
         repo = _make_repo(monkeypatch)
-        repo.llm_client = _ConfiguredLLM()
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
         tc = _client(repo, monkeypatch)
         r = tc.post("/api/notebooks/nonexistent-nb/kg/conflicts/resolve")
         assert r.status_code == 404
@@ -139,7 +137,7 @@ class TestResolveEndpoint:
     def test_200_returns_resolving_status(self, tmp_path, monkeypatch):
         _env(tmp_path, monkeypatch)
         repo = _make_repo(monkeypatch)
-        repo.llm_client = _ConfiguredLLM()
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
         tc = _client(repo, monkeypatch)
         nb = repo.create_notebook(NotebookCreate(name="resolve-nb"))
         r = tc.post(f"/api/notebooks/{nb.id}/kg/conflicts/resolve")
@@ -151,7 +149,7 @@ class TestResolveEndpoint:
         import time
         _env(tmp_path, monkeypatch)
         repo = _make_repo(monkeypatch)
-        repo.llm_client = _ConfiguredLLM()
+        bind_chat_client(repo, "kg_conflict_review", _ConfiguredLLM())
         tc = _client(repo, monkeypatch)
         nb = repo.create_notebook(NotebookCreate(name="timing-nb"))
         start = time.monotonic()

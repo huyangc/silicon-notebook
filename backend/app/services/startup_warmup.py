@@ -36,6 +36,11 @@ def run_startup() -> None:
     every notebook, then mark the service ready. Any exception is captured into
     the readiness state — it must never crash the server."""
     try:
+        from app.services.model_provider import (
+            validate_process_local_scheduler_deployment,
+        )
+
+        validate_process_local_scheduler_deployment()
         readiness.set_phase("migrating", "应用数据库迁移")
         logger.info("startup: constructing repository (runs schema migrations)…")
         # Imported lazily so module import stays cheap and side-effect free.

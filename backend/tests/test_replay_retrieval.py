@@ -2,6 +2,8 @@
 import importlib.util
 import pathlib
 
+import pytest
+
 _spec = importlib.util.spec_from_file_location(
     "replay_retrieval",
     pathlib.Path(__file__).resolve().parents[2] / "scripts" / "replay_retrieval.py")
@@ -34,3 +36,23 @@ def test_compare_topk_overlap():
     rep = replay.compare_runs(a, b, mode="topk", k=2)
     # top-2: {x,y} vs {x,z} → overlap 0.5
     assert abs(rep["q1"]["kg"]["overlap"] - 0.5) < 1e-9
+
+
+def test_record_run_requires_retrieval_query_embedding(monkeypatch, capsys):
+    class _Repo:
+        settings = object()
+
+        def configured(self, workload_id):
+            assert workload_id == "retrieval_query_embedding"
+            return False
+
+    import app.services.sqlite_repository as repository_module
+    monkeypatch.setattr(
+        repository_module, "SQLiteRepository", lambda settings: _Repo()
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        replay.record_run("nb-1", ["q"], False, {}, "admin")
+
+    assert exc.value.code == 2
+    assert "retrieval_query_embedding" in capsys.readouterr().err

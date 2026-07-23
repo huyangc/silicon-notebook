@@ -36,10 +36,7 @@ def _offline_settings(root: Path, *, event_log_dir: Path | None = None) -> Setti
         database_url=f"sqlite:///{root / 'silicon_notebook.db'}",
         storage_dir=str(root / "storage"),
         mineru_mode="off",
-        openai_compat_base_url="",
-        openai_compat_api_key="",
-        openai_compat_model="",
-        embed_provider="",
+        model_services_config="",
         event_log_dir=str(_log_dir),
         llm_log_path=str(_log_dir / "llm.jsonl"),
         # P4: 摄取默认不抽 KG;冒烟脚本要端到端验证 KG 抽取/存储/检索全管线,
@@ -512,10 +509,7 @@ def check_api_layer() -> None:
     with tempfile.TemporaryDirectory(prefix="sn-api-") as tmp:
         os.environ.update(
             {
-                "OPENAI_COMPAT_BASE_URL": "",
-                "OPENAI_COMPAT_API_KEY": "",
-                "OPENAI_COMPAT_MODEL": "",
-                "EMBED_PROVIDER": "",
+                "MODEL_SERVICES_CONFIG": "",
                 "MINERU_MODE": "off",
                 "DATABASE_URL": f"sqlite:///{tmp}/api.db",
                 "SILICON_NOTEBOOK_STORAGE_DIR": f"{tmp}/storage",

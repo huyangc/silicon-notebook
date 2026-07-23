@@ -58,7 +58,7 @@ def build_kg(notebook_id: str) -> dict:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    if not getattr(repo.kg_llm_client, "configured", False):
+    if not repo._runtime.models.configured("kg_extract"):
         raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         job = repo.prepare_notebook_kg_job(notebook_id, "incremental")
@@ -93,7 +93,7 @@ def rebuild_kg(notebook_id: str) -> dict:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    if not getattr(repo.kg_llm_client, "configured", False):
+    if not repo._runtime.models.configured("kg_extract"):
         raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         job = repo.prepare_notebook_kg_job(notebook_id, "rebuild")
@@ -280,7 +280,7 @@ def resolve_conflicts(notebook_id: str) -> dict:
     otherwise starts a daemon thread and returns immediately.
     """
     repo = repository()
-    if not getattr(repo.llm_client, "configured", False):
+    if not repo._runtime.models.configured("kg_conflict_review"):
         raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         repo.get_notebook(notebook_id)

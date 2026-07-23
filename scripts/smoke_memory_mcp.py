@@ -80,8 +80,7 @@ async def run() -> None:
                 "SILICON_NOTEBOOK_AUTH_OPTIONAL": "false",
                 "EVENT_LOG_ENABLED": "false",
                 "LLM_LOG_ENABLED": "false",
-                "OPENAI_COMPAT_API_KEY": "",
-                "EMBED_PROVIDER": "",
+                "MODEL_SERVICES_CONFIG": "",
                 "ALLOW_NO_ENV_FILE": "1",
             }
         )

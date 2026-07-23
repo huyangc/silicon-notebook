@@ -53,13 +53,13 @@ def test_fresh_schema_matches_committed_contract(tmp_path):
         "否则说明重构意外改动了表结构，会破坏既有库加载。")
 
 
-def test_v24_schema_version_is_current(tmp_path):
+def test_v25_schema_version_is_current(tmp_path):
     repo = _repo(tmp_path)
     with repo._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 25
 
 
-def test_deployed_v22_db_upgrades_model_service_status_schema(tmp_path):
+def test_deployed_v22_db_upgrades_through_system_model_service_status(tmp_path):
     settings = Settings(
         database_url=f"sqlite:///{tmp_path}/v22.db",
         storage_dir=str(tmp_path / "storage"),
@@ -71,10 +71,14 @@ def test_deployed_v22_db_upgrades_model_service_status_schema(tmp_path):
 
     repo1 = SQLiteRepository(settings)
     with repo1._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 25
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='model_service_status'"
+        ).fetchone() is not None
+        assert db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='system_model_service_status'"
         ).fetchone() is not None
 
 
@@ -94,7 +98,7 @@ def test_deployed_v23_db_upgrades_kg_canonical_scratch_schema(tmp_path):
 
     repo1 = SQLiteRepository(settings)
     with repo1._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 25
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='kg_canonical_scratch'"

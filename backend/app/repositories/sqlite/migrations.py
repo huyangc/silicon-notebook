@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1568,6 +1568,34 @@ class SqliteMigrator:
                 """
             )
 
+    def _migration_25(self) -> None:
+        """Irreversibly retire per-user model credentials and health rows."""
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            db.execute("UPDATE user_profiles SET model_settings = '{}'")
+            db.execute("DELETE FROM model_service_status")
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_model_service_status (
+                  service_id TEXT PRIMARY KEY,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (
+                    trigger IN ('manual_test', 'observed_failure', 'recovery_probe')
+                  ),
+                  support_id TEXT NOT NULL DEFAULT '',
+                  checked_at TEXT NOT NULL
+                )
+                """
+            )
+            # The irreversible scrub and its version stamp are one commit. A
+            # failed stamp must leave the database wholly at v24 so startup can
+            # safely retry instead of reporting v25 over partially scrubbed
+            # state (or committing the scrub while still reporting v24).
+            db.execute("PRAGMA user_version = 25")
+
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -1717,8 +1745,12 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            with self._connect() as db:
-                db.execute(f"PRAGMA user_version = {version}")
+            # v25 stamps itself inside the same BEGIN IMMEDIATE transaction as
+            # its irreversible credential/status scrub. Preserve the existing
+            # migration/stamp behavior byte-for-byte for v1-v24.
+            if version != 25:
+                with self._connect() as db:
+                    db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)
         return applied
 

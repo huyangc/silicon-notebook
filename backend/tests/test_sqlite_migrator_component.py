@@ -18,7 +18,7 @@ def test_initialize_orders_migrate_then_seed_and_never_recovers():
     assert calls == ["migrate", "seed"]
 
 
-def test_schema_version_constant_is_v23():
+def test_schema_version_constant_is_v25():
     # master v11/v12 hot-path indexes、Memory / Agent v13 migration、Task 1 的
     # sources.memory_id v14 migration、Task 5 的 parse_status/source_type 覆盖
     # 索引 v15 migration、knowhow-tables PR-1 Task 1 的五张新表 v16 migration、
@@ -28,8 +28,9 @@ def test_schema_version_constant_is_v23():
     # 与多领域基准库 Task 1 的 notebook_bases 挂载表 + promotion_candidates.
     # target_base_id 列 v20 migration、JS-trim anchor expression index v21、
     # KG 构建任务状态表 v22、每用户模型服务最新状态表 v23 与写锁瘦身改造点 2 的
-    # kg_canonical_scratch 表 v24 均保留；与 facade 模块级 SCHEMA_VERSION 同步。
-    assert SCHEMA_VERSION == 24
+    # kg_canonical_scratch 表 v24 均保留；v25 清除用户模型凭据与旧状态并改为
+    # 系统模型服务状态；与 facade 模块级 SCHEMA_VERSION 同步。
+    assert SCHEMA_VERSION == 25
 
 
 def test_add_column_guard_on_missing_table(tmp_path):

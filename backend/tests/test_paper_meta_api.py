@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -39,7 +40,7 @@ def test_backfill_endpoint_queues_missing(client, monkeypatch):
     def fake_backfill(notebook_id):
         called.append(notebook_id)
 
-    real_repo.llm_client = MagicMock(configured=True)
+    bind_chat_client(real_repo, "paper_metadata", MagicMock(configured=True))
     real_repo.sources_missing_paper_meta = MagicMock(return_value=["src-1", "src-2"])
     real_repo.backfill_paper_metadata = fake_backfill
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
@@ -60,7 +61,7 @@ def test_backfill_endpoint_zero_noop(client, monkeypatch):
     from app.api import deps
     real_repo = deps.repository()
 
-    real_repo.llm_client = MagicMock(configured=True)
+    bind_chat_client(real_repo, "paper_metadata", MagicMock(configured=True))
     real_repo.sources_missing_paper_meta = MagicMock(return_value=[])
     backfill_mock = MagicMock()
     real_repo.backfill_paper_metadata = backfill_mock
@@ -95,7 +96,7 @@ def test_backfill_endpoint_submits_notify_pending(client, monkeypatch):
     from app.api import deps, source_routes as source_routes_mod
 
     real_repo = deps.repository()
-    real_repo.llm_client = MagicMock(configured=True)
+    bind_chat_client(real_repo, "paper_metadata", MagicMock(configured=True))
     real_repo.sources_missing_paper_meta = MagicMock(return_value=["src-1"])
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 

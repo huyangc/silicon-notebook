@@ -103,7 +103,7 @@ def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,
     char_steps = char_steps or [5000, 20000, 50000, 100000, 200000]
     settings = Settings()
     repo = SQLiteRepository(settings)
-    assert repo.llm_client.configured, "LLM 未配置(.env)"
+    assert repo.configured("kg_extract"), "kg_extract workload 未配置"
     full = pathlib.Path(source_md_path).read_text(encoding="utf-8")
     tmpdir = tempfile.mkdtemp()
     results: List[dict] = []
@@ -117,7 +117,7 @@ def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,
                 t0 = time.perf_counter()
                 repo.extract_source(sid)
                 wall = time.perf_counter() - t0
-                size, n = plan_windows(len(text), settings.kg_extract_workers,
+                size, n = plan_windows(len(text), repo.parallelism("kg_extract"),
                                        settings.kg_window_min_chars, settings.kg_window_max_chars)
                 stats = parse_llm_log(llm_log_path, since)
                 eff = max(1, min(n, stats["calls"]) if stats["calls"] else n)

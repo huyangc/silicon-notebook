@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import threading
@@ -15,7 +16,9 @@ from app.api.deps import (
     USER_MESSAGE_HEADER,
     get_current_user,
     mcp_memory_repository,
+    model_provider_if_initialized,
     repository,
+    shutdown_repository_if_initialized,
 )
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
@@ -24,6 +27,7 @@ from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.services.model_provider import validate_process_local_scheduler_deployment
 from app.services.pending_bus import pending_bus
 
 logger = logging.getLogger("silicon_notebook.startup")
@@ -46,28 +50,49 @@ async def _lifespan(app: FastAPI):
     # Tests mark readiness ready up-front (conftest) and drive the app without a
     # real warm-up; skip spawning the thread there so it can't touch a torn-down
     # tmp DB. In production readiness starts not-ready, so the thread runs.
-    if not readiness.is_ready():
-        readiness.set_phase("starting", "后端启动中")
-        threading.Thread(target=run_startup, name="startup-warmup", daemon=True).start()
-    yield
+    startup_worker: threading.Thread | None = None
+    try:
+        if not readiness.is_ready():
+            readiness.set_phase("starting", "后端启动中")
+            startup_worker = threading.Thread(
+                target=run_startup, name="startup-warmup", daemon=True
+            )
+            startup_worker.start()
+        yield
+    finally:
+        if startup_worker is not None:
+            await asyncio.to_thread(startup_worker.join)
+        shutdown_repository_if_initialized()
 
 
-def _diagnostic_concurrency_snapshot() -> dict:
+def _diagnostic_concurrency_snapshot(*, models=None) -> dict:
     from app.services.kg import scheduler
-    from app.services.model_concurrency import current_model_concurrency
 
     result = {"kg": scheduler.stats()}
-    state = current_model_concurrency()
-    if state is not None:
-        for name, snapshot in (
-            ("llm", state.llm.snapshot()),
-            ("embedding", state.embedding.snapshot()),
-        ):
-            result[name] = {
-                "active": snapshot.active,
-                "maximum": snapshot.maximum,
-                "waiting": snapshot.waiting,
-            }
+    if models is None:
+        models = model_provider_if_initialized()
+        if models is None:
+            return result
+    registry = getattr(models, "registry", None)
+    if registry is None:
+        return result
+
+    # runtime.json 保持有界、无凭据的类别级视图；按物理服务的
+    # 调度细节和故障定位由管理员模型服务状态接口提供。
+    groups: dict[str, dict[str, int]] = {}
+    group_for_kind = {"chat": "llm", "embedding": "embedding", "rerank": "rerank"}
+    for service in registry.services():
+        group = group_for_kind.get(service.kind)
+        if group is None:
+            continue
+        snapshot = models.scheduler_snapshot(service.id)
+        aggregate = groups.setdefault(
+            group, {"active": 0, "maximum": 0, "waiting": 0}
+        )
+        aggregate["active"] += snapshot.active
+        aggregate["maximum"] += snapshot.maximum
+        aggregate["waiting"] += snapshot.queued
+    result.update(groups)
     return result
 
 
@@ -94,6 +119,7 @@ def _env_file_preflight() -> None:
 
 
 def create_app() -> FastAPI:
+    validate_process_local_scheduler_deployment()
     _env_file_preflight()
     settings = get_settings()
 
@@ -154,13 +180,12 @@ def create_app() -> FastAPI:
     logger.info("paths: db=%s storage=%s log_dir=%s", db_path, storage_dir, log_dir)
 
     # 启动 autotune 报告：一眼可查本次进程实际解析到的核绑定旋钮值（KG_CLUSTER_ANN_THREADS
-    # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型端并发旋钮
-    # （KG_EXTRACT_WORKERS/KG_JOB_CONCURRENCY/EMBED_CONCURRENCY）不随本机核数缩放，
-    # 升级核数不会改变它们，需要更高吞吐要先扩模型/embed 服务端。
+    # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型服务容量
+    # 由 MODEL_SERVICES_CONFIG 的 max_concurrency 管理，不随本机核数缩放。
     from app.services.batch_ingest import _BACKFILL_DEFAULT_WORKERS
     logger.info(
         "autotune: kg_cluster_ann_threads=%d backfill_default_workers=%d "
-        "(模型端并发旋钮 EXTRACT/JOB/EMBED 与本机核数无关,不自动缩放)",
+        "(模型服务 max_concurrency 与本机核数无关,不自动缩放)",
         settings.kg_cluster_ann_threads, _BACKFILL_DEFAULT_WORKERS,
     )
 

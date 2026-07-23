@@ -460,6 +460,14 @@ sources.created_at|TEXT|1|None|0
 sources.updated_at|TEXT|1|None|0
 sources.doc_type|TEXT|1|''|0
 sources.memory_id|TEXT|0|None|0
+system_model_service_status.service_id|TEXT|0|None|1
+system_model_service_status.config_fingerprint|TEXT|1|None|0
+system_model_service_status.status|TEXT|1|None|0
+system_model_service_status.latency_ms|INTEGER|1|0|0
+system_model_service_status.code|TEXT|1|''|0
+system_model_service_status.trigger|TEXT|1|None|0
+system_model_service_status.support_id|TEXT|1|''|0
+system_model_service_status.checked_at|TEXT|1|None|0
 unified_kg_state.notebook_id|TEXT|0|None|1
 unified_kg_state.dirty|INTEGER|1|0|0
 unified_kg_state.kg_mutation_seq|INTEGER|1|0|0

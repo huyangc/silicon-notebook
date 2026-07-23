@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
-from app.core.llm import OpenAICompatibleClient, cap_kwargs
+from app.core.llm import cap_kwargs
 from app.models.common import Evidence
 from app.models.identity import (
     AgentPrincipal,
@@ -95,7 +95,7 @@ def _normalize_doc_type(doc_type: str) -> str:
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
-from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
+from app.services.model_work import ModelNotConfiguredError
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.sqlite_identity import (
     _REQUEST_USER,
@@ -249,7 +249,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 
 @dataclass(frozen=True)
@@ -276,7 +276,7 @@ class ChunkRetrievalPlan:
 
 
 class SQLiteRepository:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, model_provider: Any | None = None):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
         repository_ref = weakref.ref(self)
@@ -292,6 +292,7 @@ class SQLiteRepository:
                     repository_ref
                 )._IN_CHUNK,
             ),
+            model_provider=model_provider,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the
@@ -322,14 +323,17 @@ class SQLiteRepository:
         # KG-dirty callback late-bound. Object-vector flushes are owned by the
         # source embedding service itself.
         self._runtime.wire_source_pipeline(
-            embedder=lambda: self._runtime.embedder,
+            embedder=self._runtime.models.embedding,
             mark_unified_dirty=lambda notebook_id: self._mark_unified_kg_dirty(
                 notebook_id
             ),
         )
-        from app.services.embedding import make_embedder
-        self.embedder = make_embedder(self.settings)
-        self._runtime.wire_memory(embedder=self.embedder)
+        query_embedder = self._runtime.models.embedding("retrieval_query_embedding")
+        self._runtime.set_embedder(query_embedder)
+        self._runtime.wire_memory(
+            persistence_embedder=self._runtime.models.embedding("memory_embedding"),
+            query_embedder=query_embedder,
+        )
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = self._runtime.event_log
@@ -339,7 +343,6 @@ class SQLiteRepository:
         # are runtime-owned (RetrievalSnapshotCache constructs them eagerly);
         # `_unified_cache` / `_vector_cache` below are write-through property
         # descriptors over those SAME objects — no facade-only copies.
-        self._user_model_cfg_cache = self._runtime.identity.model_config_cache
         # Bilingual-query hints are runtime-owned and shared by every consumer;
         # this compatibility property never retains a facade-only copy.
         # A stale hint affects query expansion only, never storage correctness.
@@ -541,8 +544,6 @@ class SQLiteRepository:
                 source_id, status, **kwargs),
             run_extraction=lambda source_id, **kwargs: _call_extraction_compat(
                 self._run_extraction, self._runtime.source_ingestion.run_extraction, source_id, kwargs),
-            llm=lambda: self.llm_client,
-            kg_llm=lambda: self.kg_llm_client,
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
             annotate_edge_support=lambda notebook_id, edges: (
                 self._annotate_edge_support(notebook_id, edges)
@@ -609,8 +610,6 @@ class SQLiteRepository:
             ),
             mineru_client=lambda: self.mineru_client,
             mineru_cloud_client=lambda: self.mineru_cloud_client,
-            llm=lambda: self.llm_client,
-            kg_llm=lambda: self.kg_llm_client,
             normalize_doc_type=_normalize_doc_type,
             default_notebook_names=_DEFAULT_NOTEBOOK_NAMES,
             clear_source_extraction_state=(
@@ -663,21 +662,18 @@ class SQLiteRepository:
         self._runtime.wire_ask(retrieval=lambda: self.retrieval)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize()
+        # Startup schema work is not application traffic.  In particular, the
+        # v25 credential scrub intentionally uses the instrumented write path;
+        # discard those samples before the fully initialized repository is
+        # published so runtime lock diagnostics start from a clean baseline.
+        if self._runtime.database.stats is not None:
+            self._runtime.database.stats.reset()
 
     def current_user(self) -> UserProfile:
         return self._runtime.identity.current_user()
 
     def _user_profile(self, user, profile) -> UserProfile:
         return self._runtime.identity._user_profile(user, profile)
-
-    def get_user_model_settings(self, user_id: str) -> dict:
-        return self._runtime.identity.get_user_model_settings(user_id)
-
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
-        return self._runtime.identity.set_user_model_settings(user_id, settings)
-
-    def resolve_model_config(self, user, role: str) -> ResolvedModelConfig:
-        return self._runtime.identity.resolve_model_config(user, role)
 
     def create_user(self, username: str, password: str) -> UserProfile:
         return self._runtime.identity.create_user(username, password)
@@ -706,106 +702,14 @@ class SQLiteRepository:
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         return self._runtime.queries.pending_actions_projection_rows(user_id)
 
-    def _system_llm_for(self, role: str):
-        return self._runtime.models._system_llm_for(role)
+    def chat(self, workload_id: str):
+        return self._runtime.models.chat(workload_id)
 
-    def _user_llm_cached(self, cfg: ResolvedModelConfig):
-        return self._runtime.models._user_llm_cached(cfg)
+    def configured(self, workload_id: str) -> bool:
+        return self._runtime.models.configured(workload_id)
 
-    def _llm_for_role(self, role: str):
-        return self._runtime.models._llm_for_role(role)
-
-    @property
-    def llm_client(self):
-        return self._runtime.models.llm_client
-
-    @llm_client.setter
-    def llm_client(self, client):
-        self._runtime.models.llm_client = client
-
-    @property
-    def reasoning_llm_client(self):
-        return self._runtime.models.reasoning_llm_client
-
-    @property
-    def rewrite_llm_client(self):
-        return self._runtime.models.rewrite_llm_client
-
-    @property
-    def kg_llm_client(self):
-        return self._runtime.models.kg_llm_client
-
-    @property
-    def rerank_client(self):
-        return self._runtime.models.rerank_client
-
-    @rerank_client.setter
-    def rerank_client(self, client):
-        self._runtime.models.rerank_client = client
-
-    @property
-    def _system_llm_client(self):
-        return self._runtime.models._system_llm_client
-
-    @_system_llm_client.setter
-    def _system_llm_client(self, client):
-        self._runtime.models._system_llm_client = client
-
-    @property
-    def _reasoning_llm_client(self):
-        return self._runtime.models._reasoning_llm_client
-
-    @_reasoning_llm_client.setter
-    def _reasoning_llm_client(self, client):
-        self._runtime.models._reasoning_llm_client = client
-
-    @property
-    def _rewrite_llm_client(self):
-        return self._runtime.models._rewrite_llm_client
-
-    @_rewrite_llm_client.setter
-    def _rewrite_llm_client(self, client):
-        self._runtime.models._rewrite_llm_client = client
-
-    @property
-    def _kg_llm_client(self):
-        return self._runtime.models._kg_llm_client
-
-    @_kg_llm_client.setter
-    def _kg_llm_client(self, client):
-        self._runtime.models._kg_llm_client = client
-
-    @property
-    def _system_rerank_client(self):
-        return self._runtime.models._system_rerank_client
-
-    @_system_rerank_client.setter
-    def _system_rerank_client(self, client):
-        self._runtime.models._system_rerank_client = client
-
-    @property
-    def _user_model_cfg_cache(self):
-        return self._runtime.identity.model_config_cache
-
-    @_user_model_cfg_cache.setter
-    def _user_model_cfg_cache(self, cache):
-        return self._runtime.set_model_config_cache(cache)
-
-    @property
-    def _user_llm_clients(self):
-        return self._runtime.models._user_llm_clients
-
-    @_user_llm_clients.setter
-    def _user_llm_clients(self, clients):
-        self._runtime.models._user_llm_clients = clients
-
-    @property
-    def _user_rerank_clients(self):
-        return self._runtime.models._user_rerank_clients
-
-    @_user_rerank_clients.setter
-    def _user_rerank_clients(self, clients):
-        self._runtime.models._user_rerank_clients = clients
+    def parallelism(self, workload_id: str) -> int:
+        return self._runtime.models.parallelism(workload_id)
 
     # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
     # (one owner). These handles are write-through descriptors over the SAME
@@ -970,6 +874,10 @@ class SQLiteRepository:
         """关闭并清除当前线程的复用 DB 连接(短命线程/大扫描/临时表清理)。
         委托 runtime-owned SqliteDatabase。见 [[sqlite 连接复用]] INV-6/7。"""
         self._runtime.database.close_local()
+
+    def close(self) -> None:
+        """Drain process-owned model work and release this runtime once."""
+        self._runtime.close()
 
     @contextmanager
     def _write(self):
@@ -3305,14 +3213,6 @@ class SQLiteRepository:
     @storage_dir.setter
     def storage_dir(self, value) -> None:
         self._runtime.storage_dir = value
-
-    @property
-    def embedder(self):
-        return self._runtime.embedder
-
-    @embedder.setter
-    def embedder(self, value) -> None:
-        self._runtime.embedder = value
 
     @property
     def _notebook_langs_cache(self):

@@ -5,6 +5,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services import sqlite_repository as sr
 
 import pytest
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _CountingEmbedder:
@@ -30,10 +31,6 @@ def repo_factory(tmp_path, monkeypatch):
         monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
         monkeypatch.setenv("LLM_LOG_ENABLED", "false")
         monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-        monkeypatch.setenv("EMBED_PROVIDER", "dashscope")  # embedder_configured=True
-        monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-        monkeypatch.setenv("EMBED_API_KEY", "test-key")
-        monkeypatch.setenv("EMBED_MODEL", "test-model")
         r = SQLiteRepository(Settings())
         return r
     return _make
@@ -42,8 +39,8 @@ def repo_factory(tmp_path, monkeypatch):
 def _mk_repo(repo_factory):
     repo = repo_factory()
     emb = _CountingEmbedder()
-    repo.embedder = emb
-    assert repo.settings.embedder_configured  # 确认走真实 embed 路径,非早退
+    bind_all_embedding_clients(repo, emb)
+    assert repo.configured("retrieval_query_embedding")
     return repo, emb
 
 

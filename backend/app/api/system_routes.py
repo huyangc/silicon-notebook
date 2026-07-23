@@ -1,146 +1,54 @@
 import asyncio
 import json
-import logging
-import time
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
     admin_query_repository,
     get_current_user,
-    identity_repository,
+    model_service_binding_summary,
+    model_status_service,
     notebook_catalog_repository,
     repository,
 )
 from app.core.config import get_settings
 from app.models.identity import UserProfile
-from app.models.model_services import (
-    ModelServiceStatusItem,
-    ModelServiceView,
-    ModelServicesStatus,
-    ModelSettingsUpdate,
-    ModelTestRequest,
-    ModelTestResult,
-)
+from app.models.model_services import ModelServicesStatus
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
-from app.services.model_config import STATUS_SERVICE_ROLES
 from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 
 
 router = APIRouter()
-logger = logging.getLogger("silicon_notebook.model_settings")
 
 
 @router.get("/health")
-def health() -> dict:
+def health(
+    bindings: dict[str, bool] = Depends(model_service_binding_summary),
+) -> dict:
     settings = get_settings()
     return {
         "status": "ok",
         "environment": settings.environment,
-        "llm_configured": settings.llm_configured,
-        "reasoning_llm_configured": settings.reasoning_llm_configured,
-        "embedding_configured": settings.embedder_configured,
+        **bindings,
     }
+
+
+@router.get("/model-services/status", response_model=ModelServicesStatus)
+def get_system_model_services_status(
+    _user: UserProfile = Depends(get_current_user),
+    service: ModelStatusService = Depends(model_status_service),
+) -> ModelServicesStatus:
+    """Return local sanitized state only; opening the panel never probes upstream."""
+    return service.snapshot()
 
 
 @router.get("/me", response_model=UserProfile)
 def me(user: UserProfile = Depends(get_current_user)) -> UserProfile:
     return user
-
-
-_MODEL_ROLES = ("llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank")
-
-
-def _mask_key(key: str) -> str:
-    # 只露尾 4 位且必须确有被截断的前缀(len>4)；≤4 位则整体隐去，绝不暴露完整短 key。
-    key = key or ""
-    return f"…{key[-4:]}" if len(key) > 4 else ("…" if key else "")
-
-
-@router.get("/me/model-settings")
-def get_model_settings(user: UserProfile = Depends(get_current_user)):
-    repo = identity_repository()
-    stored = repo.get_user_model_settings(user.id)
-    out = {}
-    for role in _MODEL_ROLES:
-        svc = stored.get(role) or {}
-        out[role] = ModelServiceView(
-            base_url=svc.get("base_url", ""),
-            model=svc.get("model", ""),
-            has_key=bool(svc.get("api_key")),
-            key_hint=_mask_key(svc.get("api_key", "")),
-            source=repo.resolve_model_config(user, role).source,
-        )
-    return out
-
-
-@router.put("/me/model-settings")
-def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
-    repo = identity_repository()
-    repo.patch_user_model_settings_atomic(
-        user.id,
-        payload.model_dump(exclude_unset=True),
-    )
-    return get_model_settings(user)
-
-
-@router.post("/me/model-settings/test", response_model=ModelTestResult)
-def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(get_current_user)):
-    if payload.service not in _MODEL_ROLES:
-        return ModelTestResult(ok=False, code="unknown_service")
-    repo = identity_repository()
-    stored = repo.get_user_model_settings(user.id).get(payload.service) or {}
-    api_key = payload.api_key if payload.api_key else stored.get("api_key", "")
-    base_url, model = payload.base_url.strip(), payload.model.strip()
-    if not (base_url and model and api_key):
-        return ModelTestResult(ok=False, code="missing_config")
-    started = time.perf_counter()
-    settings = get_settings()
-    try:
-        if payload.service == "rerank":
-            from app.services.rerank_client import RerankClient
-            RerankClient(settings, model=model, base_url=base_url, api_key=api_key)._rerank_batch(
-                "ping", ["a", "b"])
-        else:
-            from app.core.llm import OpenAICompatibleClient
-            OpenAICompatibleClient(settings, base_url=base_url, api_key=api_key, model=model).chat_json(
-                [{"role": "user", "content": "ping"}], "{}", timeout=10, max_retries=0)
-        return ModelTestResult(ok=True, latency_ms=round((time.perf_counter() - started) * 1000))
-    except Exception:
-        logger.exception("model settings test failed for %s", payload.service)
-        return ModelTestResult(
-            ok=False,
-            latency_ms=round((time.perf_counter() - started) * 1000),
-            code="upstream_error",
-        )
-
-
-def _model_status_service() -> ModelStatusService:
-    return ModelStatusService(identity_repository(), get_settings())
-
-
-@router.get("/me/model-services/status", response_model=ModelServicesStatus)
-def get_model_services_status(user: UserProfile = Depends(get_current_user)) -> ModelServicesStatus:
-    return _model_status_service().snapshot(user)
-
-
-@router.post("/me/model-services/test-all", response_model=ModelServicesStatus)
-def test_all_model_services(user: UserProfile = Depends(get_current_user)) -> ModelServicesStatus:
-    return _model_status_service().test_all(user)
-
-
-@router.post("/me/model-services/{service}/test", response_model=ModelServiceStatusItem)
-def test_current_model_service(
-    service: str,
-    user: UserProfile = Depends(get_current_user),
-) -> ModelServiceStatusItem:
-    if service not in STATUS_SERVICE_ROLES:
-        raise HTTPException(status_code=404, detail="model service not found")
-    return _model_status_service().test_one(user, service)
 
 
 @router.get("/doc-types")

@@ -5,6 +5,8 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 import app.services.concept_merge_review as cmr
+from tests.model_testkit import RecordingModelProvider
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -12,13 +14,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "k")
-    monkeypatch.setenv("EMBED_MODEL", "m")
-    monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    provider = RecordingModelProvider()
+    r = SQLiteRepository(Settings(), model_provider=provider)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+    r.recording_model_provider = provider
     return r
 
 
@@ -42,6 +41,7 @@ def test_job_drains_all_pending(repo, monkeypatch):
     res = repo.run_merge_review_job(nb, batch=100)
     assert res["status"] == "done"
     assert res["total"] == 250
+    assert ("chat", "kg_merge_review") in repo.recording_model_provider.calls
     assert repo.pending_merges(nb) == []
     st = repo.merge_review_job_status(nb)
     assert st["status"] == "done" and st["done"] == 250
@@ -115,6 +115,6 @@ def test_startup_reconciles_stuck_running(repo, tmp_path):
     from app.services.embedding import FakeEmbedder
     repo2 = SQLiteRepository(Settings())
     repo2._recover_interrupted_jobs()
-    repo2.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(repo2, FakeEmbedder(dim=16))
     st = repo2.merge_review_job_status(nb)
     assert st["status"] == "failed"

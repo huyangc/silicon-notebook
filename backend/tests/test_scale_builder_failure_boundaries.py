@@ -7,6 +7,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -14,23 +15,17 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    for key, value in {
-        "EMBED_PROVIDER": "dashscope",
-        "EMBED_BASE_URL": "https://e.test",
-        "EMBED_API_KEY": "k",
-        "EMBED_MODEL": "m",
-        "EMBED_DIM": "16",
-    }.items():
+    for key, value in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(key, value)
     repository = SQLiteRepository(Settings(_env_file=None))
-    repository.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(repository, FakeEmbedder(dim=16))
     return repository
 
 
 def _add_source(repo, notebook_id, *, source_id, object_id, chunk_id, day):
     now = f"2026-07-{day:02d}T00:00:00"
     text = f"concept {object_id}"
-    vector = json.dumps(repo.embedder.embed_texts([text])[0])
+    vector = json.dumps(repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([text])[0])
     with repo._write() as db:
         db.execute(
             "INSERT INTO sources "

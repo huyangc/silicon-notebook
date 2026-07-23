@@ -11,8 +11,8 @@ Frozen here (the RED items of the move):
    the facade's frozen ``ask_chunk``/``ask_reasoning``/``ask_graph``
    signatures adapt ``current_user().id`` into the service's keyword-only
    ``user_id``;
-3. per-user model changes resolve per call at the service's model-client port
-   — no restart, no rewire (the ``_llm_for_role`` ContextVar chain is intact);
+3. system workload clients resolve through the service's model-client port and
+   remain independent of request-user context;
 4. module boundary: ask_service.py never imports the facade or the runtime,
    never opens private DB seams and never reads the request ContextVar
    directly (persistence identity is explicit ``user_id``; model identity
@@ -29,11 +29,12 @@ from app.core.config import Settings
 from app.models.schemas import AskRequest, AskResponse, NotebookCreate
 from app.services.ask_service import AskService
 from app.services.embedding import FakeEmbedder
-from app.services.sqlite_repository import SQLiteRepository, set_request_user, reset_request_user
+from app.services.sqlite_repository import SQLiteRepository
 import asyncio
 import queue
 from types import SimpleNamespace
 from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -44,7 +45,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_PROVIDER", "")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -78,21 +79,12 @@ def test_runtime_owns_one_ask_service_and_facade_adapts_identity(repo, monkeypat
     assert seen["args"] == (nb.id, repo.current_user().id, None)
 
 
-def test_per_user_model_changes_resolve_without_restart(repo):
+def test_system_model_provider_is_independent_of_request_user_context(repo):
     service = repo._runtime.ask_service()
-    assert service.model_clients is repo._runtime.models    # 同一 provider,一个所有者
-
-    user = repo.current_user()
-    token = set_request_user(user)
-    try:
-        repo.set_user_model_settings(
-            user.id, {"llm": {"base_url": "https://u/v1", "api_key": "k", "model": "m-u1"}})
-        assert service.model_clients.llm_client.model == "m-u1"
-        repo.set_user_model_settings(
-            user.id, {"llm": {"base_url": "https://u/v1", "api_key": "k", "model": "m-u2"}})
-        assert service.model_clients.llm_client.model == "m-u2"   # 无需重启/重接线
-    finally:
-        reset_request_user(token)
+    assert service.model_clients is repo._runtime.models
+    assert service.model_clients.chat("ask_answer") is repo._runtime.models.chat(
+        "ask_answer"
+    )
 
 
 def test_ask_service_module_never_imports_facade_or_private_db():
@@ -123,9 +115,7 @@ class _MinimalAskState:
 
 
 class _MinimalModels:
-    llm_client = SimpleNamespace(configured=False, model="")
-    reasoning_llm_client = SimpleNamespace(configured=False)
-    rewrite_llm_client = SimpleNamespace(configured=False)
+    _chat_client = SimpleNamespace(configured=False, model="")
 
     class _Reranker:
         configured = True
@@ -133,7 +123,17 @@ class _MinimalModels:
         def rerank(self, query, documents, *, on_error=None):
             return list(range(len(documents)))
 
-    rerank_client = _Reranker()
+    _reranker = _Reranker()
+
+    def configured(self, workload_id: str) -> bool:
+        return True
+
+    def chat(self, workload_id: str):
+        return self._chat_client
+
+    def rerank(self, workload_id: str):
+        assert workload_id == "retrieval_rerank"
+        return self._reranker
 
     def primary_unconfigured(self) -> bool:
         return False

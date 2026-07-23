@@ -255,6 +255,38 @@
       "kind": "independent_private",
       "path": "backend/app/api/deps.py",
       "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.memory_preview_client",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.model_provider_if_initialized",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.model_service_binding_summary",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.model_status_service",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
       "scope": "<module>.notebook_access_repository",
       "target": "_runtime"
     },
@@ -272,6 +304,54 @@
       "path": "backend/app/api/deps.py",
       "reason": "composition root extracts narrow runtime ports",
       "scope": "<module>.notebook_sharing_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/kg_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.build_kg",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/kg_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.rebuild_kg",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/kg_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.resolve_conflicts",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/report_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>._report_llm_ready",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/report_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.generate_report",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/source_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>.backfill_paper_metadata",
       "target": "_runtime"
     },
     {
@@ -329,6 +409,14 @@
       "reason": "server lifespan is the sole owner of crash recovery; deliberately not a public repository port",
       "scope": "<module>.run_startup",
       "target": "_recover_interrupted_jobs"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/backfill_kg_embeddings.py",
+      "reason": "offline CLI reads process-owned model scheduling limits",
+      "scope": "<module>.main",
+      "target": "_runtime"
     },
     {
       "count": 1,

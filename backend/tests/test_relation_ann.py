@@ -15,6 +15,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.kg import scale_index as si
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -22,12 +23,11 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
-                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "16"}.items():
+    for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setenv("RELATION_RETRIEVAL_ENABLED", "true")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -151,7 +151,7 @@ def _backfill_relation_vector(repo, nb_id):
                 "SELECT 1 FROM relation_embeddings WHERE relation_id=?", (r["id"],)).fetchone()
             if existing:
                 continue
-            v = repo.embedder.embed_texts([r["edge_type"]])[0]
+            v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([r["edge_type"]])[0]
             db.execute(
                 "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) "
                 "VALUES (?,?,?,?)",
@@ -316,7 +316,7 @@ def test_retrieve_relations_ann_plus_delta_finds_post_watermark_relation(repo, m
             "INSERT INTO knowledge_relations (id,notebook_id,source_object_id,target_object_id,"
             "edge_type,evidence,source_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
             ("rel-delta", nb.id, "c", "d", "bandgap_uses_reference", "[]", "s2", now))
-        v = repo.embedder.embed_texts(["bandgap_uses_reference"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["bandgap_uses_reference"])[0]
         db.execute(
             "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             ("rel-delta", nb.id, json.dumps(v), now))
@@ -418,11 +418,11 @@ def test_fold_scale_index_delta_extends_relation_ann(repo):
                 "edge_type,evidence,source_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (rid, nb.id, o1, o2, et, "[]", sid, now))
             for oid, name in [(o1, n1), (o2, n2)]:
-                v = repo.embedder.embed_texts([name])[0]
+                v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([name])[0]
                 db.execute(
                     "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                     (oid, nb.id, json.dumps(v), now))
-            v = repo.embedder.embed_texts([et])[0]
+            v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([et])[0]
             db.execute(
                 "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                 (rid, nb.id, json.dumps(v), now))

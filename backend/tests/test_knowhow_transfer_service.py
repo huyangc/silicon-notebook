@@ -4,6 +4,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.knowhow import transfer as kh_transfer
+from tests.model_testkit import bind_all_embedding_clients
 
 COLUMNS = [
     {"name": "违例类型", "role": "anchor"},
@@ -24,12 +25,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     r = SQLiteRepository(Settings())
-    r.embedder = _FakeEmbedder()
+    bind_all_embedding_clients(r, _FakeEmbedder())
     return r
 
 def _nb(repo, name="KH"):
@@ -76,13 +73,13 @@ def test_copy_reprojection_reuses_vectors_zero_reembed(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
     _project(repo, src_tid)  # 先把源投影好，产出 chunks + chunk_embeddings
-    repo.embedder.call_count = 0  # 归零，之后只观察 copy 引发的 embed
+    repo._runtime.models.embedding("retrieval_query_embedding").call_count = 0  # 归零，之后只观察 copy 引发的 embed
 
     new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
     _settle(repo, new_tid)  # 等重投影落地（copy_table 自己已调度）
 
     # K-1：chunk_embeddings 已随拷贝以稳定 id 落库 → 重投影零重嵌入
-    assert repo.embedder.call_count == 0
+    assert repo._runtime.models.embedding("retrieval_query_embedding").call_count == 0
 
 
 def test_copy_is_retrievable_in_target_via_lexical_and_vector(repo):

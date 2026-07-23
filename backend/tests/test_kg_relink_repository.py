@@ -17,6 +17,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -184,7 +185,7 @@ def test_build_notebook_kg_skips_relink_when_disabled(repo, monkeypatch):
     # the LLM is configured, and skip per-source extraction (objects already seeded).
     class _Cfg:
         configured = True
-    monkeypatch.setattr(repo, "llm_client", _Cfg())
+    bind_chat_client(repo, "kg_extract", _Cfg())
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda *a, **k: None)
 
     repo.settings.kg_relink_enabled = False

@@ -24,6 +24,14 @@ live code path is covered here via `_federated_rx_graph` (tests 1-2 below).
 import json
 
 import pytest
+from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
+
+
+class _AnswerLLM:
+    configured = True
+
+    def chat_json(self, messages, schema, **kwargs):
+        return json.dumps({"answer": "Alpha evidence [k1].", "grounded": True})
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -37,7 +45,8 @@ def repo(tmp_path, monkeypatch):
     from app.services.sqlite_repository import SQLiteRepository
     from app.services.embedding import FakeEmbedder
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+    bind_chat_client(r, "ask_answer", _AnswerLLM())
     return r
 
 

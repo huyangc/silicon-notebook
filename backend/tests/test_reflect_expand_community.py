@@ -20,7 +20,8 @@ class _StubLLM:
 
 
 def _make_rr(payload, configured=True):
-    repo = type("R", (), {"reasoning_llm_client": _StubLLM(payload, configured)})()
+    client = _StubLLM(payload, configured)
+    repo = type("R", (), {"chat": lambda self, workload_id: client})()
     settings = type("S", (), {"reasoning_timeout_seconds": 1,
                               "reasoning_max_retries": 0})()
     return ReasoningRetriever(

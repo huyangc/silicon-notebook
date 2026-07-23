@@ -7,12 +7,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 # Verification must not inherit a developer's repo-root .env or accidentally
 # call paid/network model services. Tests opt into any provider explicitly.
 export SILICON_NOTEBOOK_ENV_FILE=""
-export OPENAI_COMPAT_BASE_URL="" OPENAI_COMPAT_API_KEY="" OPENAI_COMPAT_MODEL=""
-export REASONING_LLM_BASE_URL="" REASONING_LLM_API_KEY="" REASONING_LLM_MODEL=""
-export REWRITE_LLM_BASE_URL="" REWRITE_LLM_API_KEY="" REWRITE_LLM_MODEL=""
-export KG_LLM_BASE_URL="" KG_LLM_API_KEY="" KG_LLM_MODEL=""
-export EMBED_PROVIDER="" EMBED_BASE_URL="" EMBED_API_KEY="" EMBED_MODEL=""
-export RERANK_MODEL="" RERANK_API_KEY=""
+export MODEL_SERVICES_CONFIG=""
 export MINERU_MODE="off" MINERU_API_TOKEN=""
 
 mkdir -p "$ROOT_DIR/.local/pycache"

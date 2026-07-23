@@ -573,9 +573,11 @@ class SQLiteMaintenanceAdapter:
             )
 
     def backfill_relation_embeddings(self, notebook_id: str) -> None:
-        """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。无 embedder 则 no-op。
+        """给缺向量的关系补 relation_embeddings(幂等,只补缺失)。
+
+        系统未绑定 ``relation_embedding`` 工作负载时 no-op。
         Canonical body (Task 27) — the facade keeps a frozen-signature delegate."""
-        if not self._runtime.settings.embedder_configured:
+        if not self._runtime.models.configured("relation_embedding"):
             return
         relations = self._retrieval().relations_with_names(notebook_id)
         with self._runtime.database.connect() as db:

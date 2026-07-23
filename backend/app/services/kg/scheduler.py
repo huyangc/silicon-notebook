@@ -1,8 +1,9 @@
-"""Process-global concurrency for KG extraction.
+"""Process-global producer pools for KG extraction.
 
 Two SEPARATE singleton thread pools:
-- window pool  (max=KG_EXTRACT_WORKERS): every extract_window LLM call; FIFO,
-  the single global cap shared across all documents (intra- + inter-doc).
+- window pool: sized once from ``provider.parallelism("kg_extract")``.  It is
+  only a producer pool; the model service scheduler owns the actual shared
+  admission cap across all workloads bound to that service.
 - job pool     (max=KG_JOB_CONCURRENCY): one process_source per document.
 
 They MUST be separate: a job thread blocks waiting on window futures; if it
@@ -54,7 +55,14 @@ def _ensure() -> None:
     with _lock:
         if _window_pool is None or _job_pool is None:
             s = Settings()
-            _build(s.kg_extract_workers, s.kg_job_concurrency)
+            _build(1, s.kg_job_concurrency)
+
+
+def initialize(*, window_workers: int, job_workers: int) -> None:
+    """Install provider-derived producer sizes once, before first submission."""
+    with _lock:
+        if _window_pool is None or _job_pool is None:
+            _build(window_workers, job_workers)
 
 
 def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
@@ -184,16 +192,14 @@ def job_concurrency() -> int:
 
 def configure(*, window_workers: int | None = None, job_workers: int | None = None) -> None:
     """Rebuild both pools with explicit sizes (falls back to settings for any
-    omitted value). Used by tests and by the offline CLI's
-    batch_ingest._batch_concurrency_scope, which is the sole batch pool
-    configuration owner. Phase helpers only submit work to the installed
-    pools. The pools otherwise read an independent Settings() at first use, so
-    repo.settings changes do not reach them."""
+    omitted value). This is a test/maintenance reset seam; production installs
+    the model-derived size through ``initialize`` and never overrides it from
+    request or CLI capacity knobs."""
     with _lock:
         s = Settings()
         _shutdown_locked()
         _build(
-            window_workers if window_workers is not None else s.kg_extract_workers,
+            window_workers if window_workers is not None else 1,
             job_workers if job_workers is not None else s.kg_job_concurrency,
         )
 

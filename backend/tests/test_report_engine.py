@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,12 @@ def repo(tmp_path, monkeypatch):
         monkeypatch.setenv(_k, "")
     from app.core.config import Settings
     from app.services.sqlite_repository import SQLiteRepository
-    return SQLiteRepository(Settings(_env_file=None))
+    provider = RecordingModelProvider()
+    repository = SQLiteRepository(
+        Settings(_env_file=None), model_provider=provider
+    )
+    repository.recording_model_provider = provider
+    return repository
 
 
 def _mk_nb(repo):
@@ -107,8 +113,16 @@ def _mk_engine(repo, llm):
     # Task 25:引擎端口化——测试经 from_repository 冻结适配器构造(提取窄端口,
     # 不再持 facade);检索桩改打在 repo.retrieval / repo._runtime.* 的所有者上。
     from app.services.report_engine import ReportEngine
-    repo.llm_client = llm
+    _bind_report_llm(repo, llm)
     return ReportEngine.from_repository(repo, repo.settings)
+
+
+def _bind_report_llm(repo, llm):
+    for workload_id in (
+        "report_outline", "report_sufficiency", "report_section",
+        "report_summary", "query_rewrite", "reasoning_agent", "ask_answer",
+    ):
+        bind_chat_client(repo, workload_id, llm)
 
 
 class _OutlineLLM:
@@ -133,6 +147,48 @@ class _OutlineLLM:
         if "EXECUTIVE SUMMARY" in content:
             return json.dumps({"summary": "总结"})
         return json.dumps({})
+
+
+def test_report_operations_bind_each_exact_workload(repo):
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    engine = _mk_engine(repo, _OutlineLLM())
+    notebook = _mk_nb(repo)
+    report_id = repo.create_report(notebook.id, "q")
+    provider = repo.recording_model_provider
+    provider.calls.clear()
+
+    engine._plan_outline(notebook.id, "q", "")
+    engine._judge_sufficiency(
+        "q", [{"title": "A"}],
+        [{"title": "A", "hits": 0, "base_hits": 0}],
+    )
+    engine._draft_section(
+        notebook.id,
+        {"title": "A", "scope": "s", "sub_queries": ["q"]},
+        "q", ReasoningResult(),
+    )
+    engine._assemble(
+        notebook.id, report_id, "q", [],
+        [{"title": "A", "scope": "s", "markdown": "body", "id_map": {}}],
+    )
+
+    called = {workload for kind, workload in provider.calls if kind == "chat"}
+    assert {
+        "report_outline", "report_sufficiency", "report_section", "report_summary"
+    } <= called
+
+    class _Bad:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return "not json"
+
+    bind_chat_client(repo, "report_outline", _Bad())
+    bind_chat_client(repo, "query_rewrite", _Bad())
+    provider.calls.clear()
+    engine._plan_outline(notebook.id, "fallback", "")
+    assert ("chat", "query_rewrite") in provider.calls
 
 
 def test_engine_outline_fallback_on_bad_json(repo):
@@ -178,7 +234,7 @@ def test_engine_cancel_marks_cancelled(repo, monkeypatch):
     llm = _OutlineLLM()
     cancel = threading.Event()
     from app.services.report_engine import ReportEngine
-    repo.llm_client = llm
+    _bind_report_llm(repo, llm)
     eng = ReportEngine.from_repository(repo, repo.settings, cancel_event=cancel)
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
     monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a, q: [])
@@ -397,12 +453,17 @@ def test_assemble_no_citations_omits_references(repo):
 
 
 # ---------------------------------------------------------------------------
-# Task 2(perf): depth 穿透 + 并发复用 kg_job_concurrency + 节内实时进度
+# Task 2(perf): depth 穿透 + 模型工作负载并行度 + 节内实时进度
 # ---------------------------------------------------------------------------
 
-def test_run_sections_concurrency_uses_kg_job_concurrency(repo, monkeypatch):
-    """并发 = min(节数, kg_job_concurrency);节数≤上限时全并行。"""
-    monkeypatch.setattr(repo.settings, "kg_job_concurrency", 5)
+def test_run_sections_concurrency_uses_report_section_parallelism(repo, monkeypatch):
+    """并发 = min(节数, report_section 所属模型并行度)。"""
+    original_parallelism = repo._runtime.models.parallelism
+    monkeypatch.setattr(
+        repo._runtime.models, "parallelism",
+        lambda workload_id: 5 if workload_id == "report_section"
+        else original_parallelism(workload_id),
+    )
     eng = _mk_engine(repo, _OutlineLLM())
     seen = {"max": 0, "cur": 0}
     import threading as _t
@@ -575,7 +636,7 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
                 return json.dumps({"verdicts":[{"title":"机理","sufficiency":"薄弱",
                                                 "gap_note":"缺实测","action":"supplement"}]})
             return "{}"
-    repo.llm_client = _LLM()          # reasoning/rewrite 都回退到它(测试桩)
+    _bind_report_llm(repo, _LLM())
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q: "MAP")
     monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a,q: [])
     eng = ReportEngine.from_repository(repo, repo.settings)
@@ -593,7 +654,7 @@ def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
     class _Bad:
         configured=True
         def chat_json(self, *a, **k): return "not json"
-    repo.llm_client=_Bad()
+    _bind_report_llm(repo, _Bad())
     monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self,n,q:"MAP")
     monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda a,q: [])
     eng=ReportEngine.from_repository(repo, repo.settings)
@@ -619,7 +680,7 @@ def test_generate_runs_sections_on_stored_outline(repo, monkeypatch):
     class _S:
         configured=True
         def chat_json(self,*a,**k): return json.dumps({"summary":"总"})
-    repo.llm_client=_S()
+    _bind_report_llm(repo, _S())
     eng.generate(nb.id, rid, "q", depth=2)
     d=repo.get_report(nb.id, rid)
     assert d["status"]=="done" and d["content_md"].startswith("#")
@@ -658,13 +719,35 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     notes = []
     # spy 可观测(Task 25:引擎经 ModelErrorSink 端口 = runtime 的模型 provider)
     repo._runtime.models.note_model_error = (
-        lambda stage, model, exc, **kwargs: notes.append(stage)
+        lambda stage, error, *, workload_id: notes.append((stage, workload_id))
     )
     out = eng._draft_section(nb.id, {"title": "T", "scope": "S"}, "q", ReasoningResult())
     assert stub.calls == 2                                   # 空 markdown 触发重试
     assert out["markdown"] == ""
     assert out.get("failed") is True and out.get("error")   # 不再静默:标 failed→渲染 note
-    assert "report_section" in notes                        # report_engine 首次有 model_error 可观测
+    assert ("report_section", "report_section") in notes   # 精确工作负载可观测
+
+
+def test_report_section_queue_failure_stays_a_failed_section(repo):
+    from app.services.model_work import ModelQueueFull
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    class _Busy:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            raise ModelQueueFull(support_id="mdl-report-full")
+
+    engine = _mk_engine(repo, _Busy())
+    notebook = _mk_nb(repo)
+    result = engine._draft_section(
+        notebook.id,
+        {"title": "T", "scope": "S", "sub_queries": ["q"]},
+        "q", ReasoningResult(),
+    )
+
+    assert result["failed"] is True
+    assert result["markdown"] == ""
 
 
 def test_deep_dive_uses_configured_sibling_threshold(repo, monkeypatch):

@@ -11,6 +11,7 @@ import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -527,146 +528,146 @@ def test_snapshot_bounds_identifiers_concurrency_width_and_non_finite_values(tmp
 def test_runtime_file_reports_live_kg_and_model_concurrency_gates(tmp_path):
     from app.main import _diagnostic_concurrency_snapshot
     from app.services.kg import scheduler
-    from app.services.model_concurrency import activate_model_concurrency
+    from app.services.model_scheduler import ServiceScheduler
+    from app.services.model_work import ModelPriority, ModelWorkContext
 
     release = threading.Event()
     kg_window_started = threading.Event()
     kg_job_started = threading.Event()
-    llm_started = threading.Event()
+    chat_started = threading.Event()
     embedding_started = threading.Event()
-    llm_threads: list[threading.Thread] = []
-    embedding_submit_threads: list[threading.Thread] = []
-    embedding_queued = []
-    embedding_errors: list[BaseException] = []
     kg_futures = []
-    embedding_first = None
+    model_futures = []
     runtime = None
+    model_schedulers = {
+        "chat-main": ServiceScheduler("chat-main", maximum=1),
+        "embedding-main": ServiceScheduler("embedding-main", maximum=1),
+    }
+    services = (
+        SimpleNamespace(id="chat-main", kind="chat"),
+        SimpleNamespace(id="embedding-main", kind="embedding"),
+    )
+    models = SimpleNamespace(
+        registry=SimpleNamespace(services=lambda: services),
+        scheduler_snapshot=lambda service_id: model_schedulers[service_id].snapshot(),
+    )
 
     def block(started: threading.Event) -> str:
         started.set()
         release.wait(timeout=5)
         return "done"
 
+    def model_context(actor: str, workload: str) -> ModelWorkContext:
+        return ModelWorkContext(
+            actor_id=actor,
+            workload_id=workload,
+            priority=ModelPriority.INTERACTIVE,
+            parent_id="diagnostics-test",
+            support_id=f"mdl-{actor}",
+            deadline_at=time.monotonic() + 10,
+            cancel_event=None,
+        )
+
     scheduler.configure(window_workers=1, job_workers=1)
     try:
-        with activate_model_concurrency(llm_max=1, embed_max=1) as state:
-            try:
-                kg_futures = [
-                    scheduler.submit_window(block, kg_window_started),
-                    scheduler.submit_job(block, kg_job_started),
-                ]
-                assert kg_window_started.wait(timeout=2)
-                assert kg_job_started.wait(timeout=2)
-                kg_futures.extend(
-                    [
-                        scheduler.submit_window(lambda: "queued-window"),
-                        scheduler.submit_job(lambda: "queued-job"),
-                    ]
-                )
+        kg_futures = [
+            scheduler.submit_window(block, kg_window_started),
+            scheduler.submit_job(block, kg_job_started),
+        ]
+        assert kg_window_started.wait(timeout=2)
+        assert kg_job_started.wait(timeout=2)
+        kg_futures.extend(
+            [
+                scheduler.submit_window(lambda: "queued-window"),
+                scheduler.submit_job(lambda: "queued-job"),
+            ]
+        )
 
-                def hold_llm() -> None:
-                    with state.llm.slot():
-                        llm_started.set()
-                        release.wait(timeout=5)
+        model_futures = [
+            model_schedulers["chat-main"].submit(
+                context=model_context("chat-running", "ask_answer"),
+                invoke=lambda: block(chat_started),
+            ),
+            model_schedulers["embedding-main"].submit(
+                context=model_context(
+                    "embedding-running", "retrieval_query_embedding"
+                ),
+                invoke=lambda: block(embedding_started),
+            ),
+        ]
+        assert chat_started.wait(timeout=2)
+        assert embedding_started.wait(timeout=2)
+        model_futures.extend(
+            [
+                model_schedulers["chat-main"].submit(
+                    context=model_context("chat-waiting", "ask_answer"),
+                    invoke=lambda: "queued-chat",
+                ),
+                model_schedulers["embedding-main"].submit(
+                    context=model_context(
+                        "embedding-waiting", "retrieval_query_embedding"
+                    ),
+                    invoke=lambda: "queued-embedding",
+                ),
+            ]
+        )
 
-                def wait_for_llm() -> None:
-                    with state.llm.slot():
-                        return
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            kg = scheduler.stats()
+            if (
+                kg.get("window_waiting") == 1
+                and kg.get("job_waiting") == 1
+                and model_schedulers["chat-main"].snapshot().queued == 1
+                and model_schedulers["embedding-main"].snapshot().queued == 1
+            ):
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("timed out waiting for concurrency queues")
 
-                llm_threads = [
-                    threading.Thread(target=hold_llm),
-                    threading.Thread(target=wait_for_llm),
-                ]
-                llm_threads[0].start()
-                assert llm_started.wait(timeout=2)
-                llm_threads[1].start()
-
-                embedding_first = state.embedding.submit(
-                    block,
-                    embedding_started,
-                    task_prefix="diagnostic-embedding",
-                )
-                assert embedding_started.wait(timeout=2)
-
-                def submit_waiting_embedding() -> None:
-                    try:
-                        embedding_queued.append(
-                            state.embedding.submit(
-                                lambda: "queued-embedding",
-                                task_prefix="diagnostic-embedding",
-                            )
-                        )
-                    except BaseException as exc:
-                        embedding_errors.append(exc)
-
-                embedding_submit_threads = [
-                    threading.Thread(target=submit_waiting_embedding)
-                ]
-                embedding_submit_threads[0].start()
-
-                deadline = time.monotonic() + 2
-                while time.monotonic() < deadline:
-                    kg = scheduler.stats()
-                    if (
-                        kg.get("window_waiting") == 1
-                        and kg.get("job_waiting") == 1
-                        and state.llm.snapshot().waiting == 1
-                        and state.embedding.snapshot().waiting == 1
-                    ):
-                        break
-                    time.sleep(0.01)
-                else:
-                    raise AssertionError("timed out waiting for concurrency queues")
-
-                runtime = _runtime(
-                    tmp_path,
-                    concurrency_provider=_diagnostic_concurrency_snapshot,
-                )
-                runtime.start()
-                snapshot = _wait_for_json(tmp_path / "runtime.json")
-                assert snapshot["concurrency"] == {
-                    "kg": {
-                        "window_active": 1,
-                        "window_max": 1,
-                        "window_waiting": 1,
-                        "job_active": 1,
-                        "job_max": 1,
-                        "job_waiting": 1,
-                    },
-                    "llm": {"active": 1, "maximum": 1, "waiting": 1},
-                    "embedding": {"active": 1, "maximum": 1, "waiting": 1},
-                }
-                assert all(
-                    type(value) in (int, float)
-                    for group in snapshot["concurrency"].values()
-                    for value in group.values()
-                )
-            finally:
-                if runtime is not None:
-                    runtime.stop()
-                release.set()
-                for future in kg_futures:
-                    if not future.cancelled():
-                        future.result(timeout=2)
-                for thread in llm_threads + embedding_submit_threads:
-                    thread.join(timeout=2)
-                    assert not thread.is_alive()
-                if embedding_first is not None:
-                    embedding_first.result(timeout=2)
-                for future in embedding_queued:
-                    future.result(timeout=2)
-                assert embedding_errors == []
-                assert state.llm.snapshot().active == 0
-                assert state.llm.snapshot().waiting == 0
-                assert state.embedding.snapshot().active == 0
-                assert state.embedding.snapshot().waiting == 0
-        assert scheduler.stats()["window_active"] == 0
-        assert scheduler.stats()["window_waiting"] == 0
-        assert scheduler.stats()["job_active"] == 0
-        assert scheduler.stats()["job_waiting"] == 0
+        runtime = _runtime(
+            tmp_path,
+            concurrency_provider=lambda: _diagnostic_concurrency_snapshot(
+                models=models
+            ),
+        )
+        runtime.start()
+        snapshot = _wait_for_json(tmp_path / "runtime.json")
+        assert snapshot["concurrency"] == {
+            "kg": {
+                "window_active": 1,
+                "window_max": 1,
+                "window_waiting": 1,
+                "job_active": 1,
+                "job_max": 1,
+                "job_waiting": 1,
+            },
+            "llm": {"active": 1, "maximum": 1, "waiting": 1},
+            "embedding": {"active": 1, "maximum": 1, "waiting": 1},
+        }
+        assert all(
+            type(value) in (int, float)
+            for group in snapshot["concurrency"].values()
+            for value in group.values()
+        )
     finally:
-        release.set()
-        scheduler.reset()
+        try:
+            if runtime is not None:
+                runtime.stop()
+            release.set()
+            for future in kg_futures + model_futures:
+                if not future.cancelled():
+                    future.result(timeout=2)
+            for model_scheduler in model_schedulers.values():
+                model_scheduler.shutdown()
+            assert scheduler.stats()["window_active"] == 0
+            assert scheduler.stats()["window_waiting"] == 0
+            assert scheduler.stats()["job_active"] == 0
+            assert scheduler.stats()["job_waiting"] == 0
+        finally:
+            release.set()
+            scheduler.reset()
 
 
 def test_snapshot_bounds_readiness_counts_and_active_sql_names(tmp_path):

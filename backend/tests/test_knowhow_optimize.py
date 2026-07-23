@@ -30,7 +30,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.services.knowhow import api as knowhow_api
-from app.services.model_config import ModelNotConfiguredError
+from app.services.model_work import ModelNotConfiguredError
+from tests.model_testkit import bind_chat_client
+from app.services.model_work import (
+    ModelQueueFull, ModelQueueTimeout, ModelServiceUnavailable,
+)
 
 
 # ===========================================================================
@@ -69,7 +73,7 @@ class _RaisingRewriteClient:
 
 def _fake_repo(client):
     """Minimal repo._runtime.models-shaped stand-in — optimize_cell only ever
-    reaches repo._runtime.models.{rewrite_llm_client,note_model_error}, the
+    reaches repo._runtime.models.{chat,note_model_error}, the
     same narrow-runtime-port pattern build_projector uses (see api.py's own
     docstring). Returns (repo, error_calls) where error_calls records every
     note_model_error(stage, model, exc) invocation as (stage, model,
@@ -77,10 +81,14 @@ def _fake_repo(client):
     test_knowhow_projection.py::test_embedding_failure_emits_through_model_error_channel
     uses for its own projector.note_model_error spy."""
     error_calls: list[tuple[str, str, str]] = []
+    def chat(workload_id):
+        assert workload_id == "knowhow_optimize"
+        return client
+
     models = SimpleNamespace(
-        rewrite_llm_client=client,
-        note_model_error=lambda stage, model, exc, **kwargs: error_calls.append(
-            (stage, model, type(exc).__name__)
+        chat=chat,
+        note_model_error=lambda stage, error, *, workload_id: error_calls.append(
+            (stage, workload_id, type(error).__name__)
         ),
     )
     repo = SimpleNamespace(_runtime=SimpleNamespace(models=models))
@@ -171,9 +179,35 @@ def test_raising_client_wraps_as_unavailable_and_notes_model_error():
         knowhow_api.optimize_cell(repo, "原文", "现象", "attribute")
 
     assert len(calls) == 1
-    stage, _model, exc_type = calls[0]
+    stage, workload_id, exc_type = calls[0]
     assert stage == "knowhow_optimize"
+    assert workload_id == "knowhow_optimize"
     assert exc_type == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelQueueFull(support_id="mdl-kh-full"),
+        ModelQueueTimeout(support_id="mdl-kh-timeout"),
+        ModelServiceUnavailable(support_id="mdl-kh-unavailable"),
+    ],
+)
+def test_scheduler_admission_failure_keeps_optimize_502_semantics(error):
+    class _BusyClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            raise error
+
+    repo, calls = _fake_repo(_BusyClient())
+
+    with pytest.raises(knowhow_api.KnowhowOptimizeUnavailable):
+        knowhow_api.optimize_cell(repo, "原文", "现象", "attribute")
+
+    assert calls == [
+        ("knowhow_optimize", "knowhow_optimize", type(error).__name__)
+    ]
 
 
 def test_llm_empty_reply_also_wraps_as_unavailable_and_notes_model_error():
@@ -287,7 +321,7 @@ def test_optimize_endpoint_success_returns_suggestion_and_writes_nothing(tmp_pat
     owner_h, nb, table, row, column_id = _seed(client, "a00001090")
 
     fake = _FakeRewriteClient(suggestion="1. 先做 A\n2. 再做 B")
-    _app_repo()._rewrite_llm_client = fake
+    bind_chat_client(_app_repo(), "knowhow_optimize", fake)
 
     resp = _optimize(client, owner_h, nb, table["id"], row["id"], column_id)
 
@@ -308,7 +342,7 @@ def test_optimize_endpoint_unconfigured_returns_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, column_id = _seed(client, "a00001091")
 
-    _app_repo()._rewrite_llm_client = SimpleNamespace(configured=False)
+    bind_chat_client(_app_repo(), "knowhow_optimize", SimpleNamespace(configured=False))
 
     resp = _optimize(client, owner_h, nb, table["id"], row["id"], column_id)
 
@@ -320,7 +354,7 @@ def test_optimize_endpoint_raising_client_returns_502(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, column_id = _seed(client, "a00001092")
 
-    _app_repo()._rewrite_llm_client = _RaisingRewriteClient()
+    bind_chat_client(_app_repo(), "knowhow_optimize", _RaisingRewriteClient())
 
     resp = _optimize(client, owner_h, nb, table["id"], row["id"], column_id)
 
@@ -340,7 +374,7 @@ def test_optimize_endpoint_empty_cell_returns_400(tmp_path, monkeypatch):
     row = _add_row(client, owner_h, nb, table["id"], {})  # no cells at all
 
     fake = _FakeRewriteClient()
-    _app_repo()._rewrite_llm_client = fake
+    bind_chat_client(_app_repo(), "knowhow_optimize", fake)
 
     resp = _optimize(client, owner_h, nb, table["id"], row["id"], column_id)
 
@@ -389,7 +423,7 @@ def test_optimize_endpoint_bad_row_or_column_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, column_id = _seed(client, "a00001097")
 
-    _app_repo()._rewrite_llm_client = _FakeRewriteClient()
+    bind_chat_client(_app_repo(), "knowhow_optimize", _FakeRewriteClient())
 
     assert _optimize(client, owner_h, nb, table["id"], "no-such-row", column_id).status_code == 400
     assert _optimize(client, owner_h, nb, table["id"], row["id"], "no-such-col").status_code == 400
@@ -399,7 +433,7 @@ def test_optimize_endpoint_does_not_schedule_reprojection(tmp_path, monkeypatch)
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, column_id = _seed(client, "a00001098")
 
-    _app_repo()._rewrite_llm_client = _FakeRewriteClient()
+    bind_chat_client(_app_repo(), "knowhow_optimize", _FakeRewriteClient())
 
     scheduled: list[str] = []
 

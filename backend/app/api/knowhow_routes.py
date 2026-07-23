@@ -40,7 +40,7 @@ from app.models.knowhow import (
 )
 from app.services.knowhow import api as knowhow_api
 from app.services.knowhow import transfer as _kh_transfer
-from app.services.model_config import ModelNotConfiguredError
+from app.services.model_work import ModelNotConfiguredError
 
 
 router = APIRouter()

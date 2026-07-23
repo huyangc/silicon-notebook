@@ -11,6 +11,8 @@ from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.vector_index import encode_vector
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -19,12 +21,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")   # embedder_configured == True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -106,7 +104,7 @@ def test_vector_matrix_mixed_json_and_blob_rows_matches_all_json_oracle(repo):
 
 def test_ask_matrix_path_returns_matching_object(repo):
     # P4-5: ask_fast retired; verify vector-matrix path via _retrieve_scored directly.
-    repo.llm_client = _FakeLLM()
+    bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Engram improves perplexity"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Engram improves perplexity"}}])
@@ -115,7 +113,7 @@ def test_ask_matrix_path_returns_matching_object(repo):
 
 
 def test_ask_does_not_backfill_missing_knowledge_embeddings(repo, monkeypatch):
-    repo.llm_client = _FakeLLM()
+    bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo._test_insert_object(nb.id, "claim", {"name": "Channel loss depends on equalization"})
 
@@ -132,7 +130,7 @@ def test_ask_does_not_load_all_source_elements_for_citation_validation(repo, mon
     # P4-5: ask_fast retired. This test was specific to ask_fast's element-gather
     # optimization. Replaced: verify _retrieve_scored surfaces the bandwidth claim
     # without loading all elements (the optimization now lives in ask_chunk/ask_graph).
-    repo.llm_client = _FakeLLM()
+    bind_chat_client(repo, "ask_answer", _FakeLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     oid = repo._test_insert_object(nb.id, "claim", {"name": "Finite cable bandwidth attenuates high frequencies"})
     repo._embed_objects_batch(nb.id, [{"_oid": oid, "payload": {"name": "Finite cable bandwidth attenuates high frequencies"}}])

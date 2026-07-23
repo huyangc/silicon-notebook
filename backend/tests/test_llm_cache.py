@@ -46,13 +46,17 @@ class _FakeOpenAI:
 
 
 def _configured_client(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://llm.example.test")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "m")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("LLM_CACHE_ENABLED", "true")
-    monkeypatch.setenv("LLM_CACHE_PATH", str(tmp_path / "cache.db"))
-    client = OpenAICompatibleClient(Settings())
+    settings = Settings(
+        llm_cache_enabled=True,
+        llm_cache_path=str(tmp_path / "cache.db"),
+    )
+    client = OpenAICompatibleClient(
+        settings,
+        base_url="https://llm.example.test",
+        api_key="k",
+        model="m",
+    )
     fake = _FakeOpenAI()
     monkeypatch.setattr(client, "client", lambda: fake)
     return client, fake

@@ -12,6 +12,7 @@ import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.vector_cache import VectorCache
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -33,8 +34,6 @@ def test_settings_storage_and_database_identities(repo):
     assert repo.event_log is runtime.event_log
     assert repo.db_path is runtime.database.db_path
     assert repo._write_lock is runtime.database.write_lock
-    assert repo._user_model_cfg_cache is runtime.identity.model_config_cache
-    assert repo._user_model_cfg_cache is runtime.models.model_config_cache
 
 
 def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_path):
@@ -44,7 +43,7 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     replacement_languages = {"nb-1": ["zh", "en"]}
 
     repo.storage_dir = replacement_dir
-    repo.embedder = replacement_embedder
+    bind_all_embedding_clients(repo, replacement_embedder)
     repo._notebook_langs_cache = replacement_languages
 
     runtime = repo._runtime
@@ -55,8 +54,11 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     assert runtime.source_files.storage_dir is replacement_dir
     assert runtime.notebook_copies._storage_dir() is replacement_dir
     assert runtime.source_ingestion.source_files.storage_dir is replacement_dir
-    assert runtime.source_embedding.embedder() is replacement_embedder
-    assert runtime.source_ingestion.embedding.embedder() is replacement_embedder
+    assert (
+        runtime.source_embedding.embedder("source_element_embedding")
+        is runtime.models.embedding("source_element_embedding")
+    )
+    assert runtime.source_ingestion.embedding is runtime.source_embedding
     assert repo.retrieval.candidates.embedder is replacement_embedder
     assert repo.retrieval.graph.embedder is replacement_embedder
     assert runtime.notebook_languages is replacement_languages
@@ -65,14 +67,33 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     assert repo.retrieval.graph._notebook_langs_cache is replacement_languages
 
 
-def test_model_client_setters_write_through_to_the_provider(repo):
-    llm = object()
-    repo.llm_client = llm
-    assert repo._runtime.models._system_llm_client is llm
-    assert repo.llm_client is llm
-    rerank = object()
-    repo.rerank_client = rerank
-    assert repo._runtime.models._system_rerank_client is rerank
+def test_retired_model_client_facade_attributes_do_not_exist(repo):
+    assert repo.chat("ask_answer") is repo._runtime.models.chat("ask_answer")
+    assert repo._runtime.models.rerank("retrieval_rerank") is not None
+    for attribute in (
+        "llm_client",
+        "reasoning_llm_client",
+        "rewrite_llm_client",
+        "kg_llm_client",
+        "rerank_client",
+        "embedder",
+    ):
+        with pytest.raises(AttributeError):
+            getattr(repo, attribute)
+    for attribute in (
+        "llm_client",
+        "reasoning_llm_client",
+        "rewrite_llm_client",
+        "kg_llm_client",
+        "rerank_client",
+    ):
+        with pytest.raises(AttributeError):
+            getattr(repo._runtime.models, attribute)
+
+
+def test_runtime_query_embedder_is_read_only(repo):
+    with pytest.raises(AttributeError):
+        repo._runtime.embedder = object()
 
 
 def test_retrieval_and_evidence_services_have_one_owner(repo):

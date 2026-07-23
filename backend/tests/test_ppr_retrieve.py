@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 def test_ppr_settings_defaults_off():
@@ -21,7 +23,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings(_env_file=None))
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -195,8 +197,7 @@ class _StubAnswerLLM:
 def test_ask_graph_ppr_cites_multiple_documents(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    repo.llm_client = _StubAnswerLLM()
-    repo._reasoning_llm_client = _StubAnswerLLM()
+    bind_chat_client(repo, "ask_answer", _StubAnswerLLM())
     from app.models.schemas import AskRequest
     resp = repo.ask_graph(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="graph"))
     assert resp.mode == "graph"
@@ -308,7 +309,7 @@ def test_fact_rerank_filters_irrelevant_seed(repo, monkeypatch):
     nb = _seed_relevant_irrelevant(repo)
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     monkeypatch.setattr(repo.settings, "ppr_fact_rerank_enabled", True)
-    repo._reasoning_llm_client = _FilterLLM()
+    bind_chat_client(repo, "evidence_refine", _FilterLLM())
     reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
     assert key_to_idx["ekeep"] in reset
     assert key_to_idx["edrop"] not in reset
@@ -319,7 +320,7 @@ def test_fact_rerank_fail_open_when_no_llm(repo, monkeypatch):
     G, key_to_idx, _ = repo._ppr_graph(nb.id)
     monkeypatch.setattr(repo.settings, "ppr_fact_rerank_enabled", True)
     class _Down: configured = False
-    repo._reasoning_llm_client = _Down()
+    bind_chat_client(repo, "evidence_refine", _Down())
     reset = repo._ppr_reset_vector(nb.id, "topic", key_to_idx)
     assert key_to_idx["ekeep"] in reset
     assert key_to_idx["edrop"] in reset
@@ -410,8 +411,7 @@ def test_ask_graph_ppr_community_context(repo, monkeypatch):
                    ("cm1", nb.id, 0, json.dumps(["e1", "e2"]), 2, "MoE models",
                     "DeepSeek and GLM both use Mixture-of-Experts.", "[]", "2026-06-24T00:00:00"))
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    repo.llm_client = _StubAnswerLLM()
-    repo._reasoning_llm_client = _StubAnswerLLM()
+    bind_chat_client(repo, "ask_answer", _StubAnswerLLM())
     from app.models.schemas import AskRequest
     resp = repo.ask_graph(nb.id, AskRequest(question="MoE comparison across models", mode="graph"))
     assert resp.mode == "graph"
@@ -421,8 +421,7 @@ def test_ask_graph_ppr_community_context(repo, monkeypatch):
 def test_ask_graph_ppr_no_community_when_none(repo, monkeypatch):
     nb = _seed_two_doc_moe(repo)   # no communities seeded
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", True)
-    repo.llm_client = _StubAnswerLLM()
-    repo._reasoning_llm_client = _StubAnswerLLM()
+    bind_chat_client(repo, "ask_answer", _StubAnswerLLM())
     from app.models.schemas import AskRequest
     resp = repo.ask_graph(nb.id, AskRequest(question="MoE", mode="graph"))
     assert not any("Knowledge base theme" in c.label for c in resp.citations)

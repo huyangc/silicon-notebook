@@ -3523,13 +3523,33 @@
               "title": "Model",
               "type": "string"
             },
-            "service": {
-              "default": "llm",
-              "title": "Service",
+            "service_id": {
+              "default": "",
+              "title": "Service Id",
+              "type": "string"
+            },
+            "service_name": {
+              "default": "",
+              "title": "Service Name",
               "type": "string"
             },
             "stage": {
               "title": "Stage",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
+              "type": "string"
+            },
+            "workload_id": {
+              "default": "",
+              "title": "Workload Id",
+              "type": "string"
+            },
+            "workload_label": {
+              "default": "",
+              "title": "Workload Label",
               "type": "string"
             }
           },
@@ -3542,6 +3562,11 @@
         },
         "ModelServiceStatusItem": {
           "properties": {
+            "active": {
+              "default": 0,
+              "title": "Active",
+              "type": "integer"
+            },
             "checked_at": {
               "default": "",
               "title": "Checked At",
@@ -3552,13 +3577,16 @@
               "title": "Code",
               "type": "string"
             },
-            "configured": {
-              "default": false,
-              "title": "Configured",
-              "type": "boolean"
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
             },
             "kind": {
-              "default": "llm",
+              "enum": [
+                "chat",
+                "embedding",
+                "rerank"
+              ],
               "title": "Kind",
               "type": "string"
             },
@@ -3567,79 +3595,67 @@
               "title": "Latency Ms",
               "type": "integer"
             },
+            "maximum": {
+              "default": 0,
+              "title": "Maximum",
+              "type": "integer"
+            },
             "model": {
               "default": "",
               "title": "Model",
               "type": "string"
             },
-            "required": {
-              "default": false,
-              "title": "Required",
-              "type": "boolean"
+            "oldest_wait_ms": {
+              "default": 0,
+              "title": "Oldest Wait Ms",
+              "type": "integer"
             },
-            "service": {
-              "title": "Service",
-              "type": "string"
+            "queued": {
+              "default": 0,
+              "title": "Queued",
+              "type": "integer"
             },
-            "source": {
-              "default": "none",
-              "title": "Source",
+            "service_id": {
+              "title": "Service Id",
               "type": "string"
             },
             "status": {
-              "default": "unconfigured",
+              "default": "untested",
+              "enum": [
+                "untested",
+                "ok",
+                "busy",
+                "error",
+                "circuit_open",
+                "half_open"
+              ],
               "title": "Status",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
               "type": "string"
             },
             "trigger": {
               "default": "",
               "title": "Trigger",
               "type": "string"
+            },
+            "workloads": {
+              "items": {
+                "$ref": "#/components/schemas/ModelWorkloadView"
+              },
+              "title": "Workloads",
+              "type": "array"
             }
           },
           "required": [
-            "service"
+            "service_id",
+            "display_name",
+            "kind"
           ],
           "title": "ModelServiceStatusItem",
-          "type": "object"
-        },
-        "ModelServiceUpdate": {
-          "properties": {
-            "api_key": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Api Key"
-            },
-            "base_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Base Url"
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Model"
-            }
-          },
-          "title": "ModelServiceUpdate",
           "type": "object"
         },
         "ModelServicesStatus": {
@@ -3655,122 +3671,22 @@
           "title": "ModelServicesStatus",
           "type": "object"
         },
-        "ModelSettingsUpdate": {
+        "ModelWorkloadView": {
           "properties": {
-            "kg_llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "reasoning_llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "rerank": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "rewrite_llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "title": "ModelSettingsUpdate",
-          "type": "object"
-        },
-        "ModelTestRequest": {
-          "properties": {
-            "api_key": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Api Key"
-            },
-            "base_url": {
-              "default": "",
-              "title": "Base Url",
+            "id": {
+              "title": "Id",
               "type": "string"
             },
-            "model": {
-              "default": "",
-              "title": "Model",
-              "type": "string"
-            },
-            "service": {
-              "title": "Service",
+            "label": {
+              "title": "Label",
               "type": "string"
             }
           },
           "required": [
-            "service"
+            "id",
+            "label"
           ],
-          "title": "ModelTestRequest",
-          "type": "object"
-        },
-        "ModelTestResult": {
-          "properties": {
-            "code": {
-              "default": "",
-              "title": "Code",
-              "type": "string"
-            },
-            "error": {
-              "default": "",
-              "title": "Error",
-              "type": "string"
-            },
-            "latency_ms": {
-              "default": 0,
-              "title": "Latency Ms",
-              "type": "integer"
-            },
-            "ok": {
-              "title": "Ok",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "ok"
-          ],
-          "title": "ModelTestResult",
+          "title": "ModelWorkloadView",
           "type": "object"
         },
         "MountedBase": {
@@ -5959,6 +5875,63 @@
           "summary": "Root"
         }
       },
+      "/api/admin/model-services/test-all": {
+        "post": {
+          "operationId": "test_all_system_model_services_api_admin_model_services_test_all_post",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServicesStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Test All System Model Services"
+        }
+      },
+      "/api/admin/model-services/{service_id}/test": {
+        "post": {
+          "operationId": "test_system_model_service_api_admin_model_services__service_id__test_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "service_id",
+              "required": true,
+              "schema": {
+                "title": "Service Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServiceStatusItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Test System Model Service"
+        }
+      },
       "/api/admin/online": {
         "get": {
           "description": "当前在线用户 id 集合(持有实时流连接)。仅 admin,纯读内存零 DB。",
@@ -7545,169 +7518,6 @@
           "summary": "Me"
         }
       },
-      "/api/me/model-services/status": {
-        "get": {
-          "operationId": "get_model_services_status_api_me_model_services_status_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelServicesStatus"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Get Model Services Status"
-        }
-      },
-      "/api/me/model-services/test-all": {
-        "post": {
-          "operationId": "test_all_model_services_api_me_model_services_test_all_post",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelServicesStatus"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Test All Model Services"
-        }
-      },
-      "/api/me/model-services/{service}/test": {
-        "post": {
-          "operationId": "test_current_model_service_api_me_model_services__service__test_post",
-          "parameters": [
-            {
-              "in": "path",
-              "name": "service",
-              "required": true,
-              "schema": {
-                "title": "Service",
-                "type": "string"
-              }
-            }
-          ],
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelServiceStatusItem"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Test Current Model Service"
-        }
-      },
-      "/api/me/model-settings": {
-        "get": {
-          "operationId": "get_model_settings_api_me_model_settings_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Get Model Settings"
-        },
-        "put": {
-          "operationId": "put_model_settings_api_me_model_settings_put",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelSettingsUpdate"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Put Model Settings"
-        }
-      },
-      "/api/me/model-settings/test": {
-        "post": {
-          "operationId": "test_model_service_api_me_model_settings_test_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelTestRequest"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelTestResult"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Test Model Service"
-        }
-      },
       "/api/me/pending-actions": {
         "get": {
           "description": "当前用户的待办快照：深度报告待确认 + 治理三队列 + 索引状态，供铃铛使用。\n只读转调 repository().pending_actions；聚合逻辑与三源覆盖见该方法本身\n（Task 1 已有专门单测），此处只做 HTTP 薄包装。",
@@ -8248,6 +8058,25 @@
             }
           },
           "summary": "Reject Memory"
+        }
+      },
+      "/api/model-services/status": {
+        "get": {
+          "description": "Return local sanitized state only; opening the panel never probes upstream.",
+          "operationId": "get_system_model_services_status_api_model_services_status_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServicesStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Get System Model Services Status"
         }
       },
       "/api/notebook-templates": {

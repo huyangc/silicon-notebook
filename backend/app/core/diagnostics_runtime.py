@@ -154,7 +154,7 @@ _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("openapi.json",),
     ("mcp",),
 )
-_CONCURRENCY_GROUPS = frozenset({"kg", "llm", "embedding"})
+_CONCURRENCY_GROUPS = frozenset({"kg", "llm", "embedding", "rerank"})
 _CONCURRENCY_FIELDS = frozenset(
     {
         "active",

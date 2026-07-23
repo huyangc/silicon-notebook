@@ -21,6 +21,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 # ---------------------------------------------------------------------------
@@ -69,13 +71,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -138,7 +136,7 @@ def _seed_notebook_with_contradicting_claims(repo: SQLiteRepository):
 # ---------------------------------------------------------------------------
 
 def test_llm_not_configured_returns_skipped_summary(repo):
-    repo.llm_client = UnconfiguredLLM()
+    bind_chat_client(repo, "kg_conflict_review", UnconfiguredLLM())
     nb = repo.create_notebook(NotebookCreate(name="nb-no-llm"))
 
     result = repo.resolve_notebook_conflicts(nb.id)
@@ -158,7 +156,7 @@ def test_candidates_detected_and_queued(repo):
     nb_id, oid_a, oid_b, rel_a, rel_b = _seed_notebook_with_contradicting_claims(repo)
 
     # FakeLLM with no-conflict verdict so nothing is auto-applied
-    repo.llm_client = FakeLLM([])  # defaults to "none/keep/0.0" for every call
+    bind_chat_client(repo, "kg_conflict_review", FakeLLM([]))  # defaults to "none/keep/0.0" for every call
 
     result = repo.resolve_notebook_conflicts(nb_id)
 
@@ -194,7 +192,7 @@ def test_high_confidence_discard_applies_and_marks_applied(repo):
         "rationale": "These edges genuinely contradict each other.",
     }
 
-    repo.llm_client = FakeLLM([high_conf_verdict])
+    bind_chat_client(repo, "kg_conflict_review", FakeLLM([high_conf_verdict]))
     # Set threshold below 0.98 so it auto-applies
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
@@ -245,7 +243,7 @@ def test_low_confidence_leaves_db_unchanged_and_pending(repo):
         "rationale": "Possibly conflicting but uncertain.",
     }
 
-    repo.llm_client = FakeLLM([low_conf_verdict])
+    bind_chat_client(repo, "kg_conflict_review", FakeLLM([low_conf_verdict]))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
     # Snapshot edge statuses before
@@ -301,7 +299,9 @@ def test_build_notebook_kg_calls_resolve_when_enabled(repo, monkeypatch):
         return original(notebook_id)
 
     monkeypatch.setattr(repo._runtime.knowledge_governance, "resolve_notebook_conflicts", spy)
-    repo.llm_client = FakeLLM([])  # no-op verdicts
+    llm = FakeLLM([])
+    bind_chat_client(repo, "kg_conflict_review", llm)  # no-op verdicts
+    bind_chat_client(repo, "kg_extract", llm)
     repo.settings.kg_conflict_resolution_enabled = True
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
@@ -311,9 +311,6 @@ def test_build_notebook_kg_calls_resolve_when_enabled(repo, monkeypatch):
         "run_extraction",
         lambda sid, **kwargs: None,
     )
-    # Also ensure llm_client.configured is True (needed by build_notebook_kg guard)
-    repo.llm_client.configured = True
-
     repo.build_notebook_kg(nb_id)
 
     assert nb_id in calls, "resolve_notebook_conflicts was not called"
@@ -328,8 +325,9 @@ def test_build_notebook_kg_skips_resolve_when_disabled(repo, monkeypatch):
         calls.append(notebook_id)
 
     monkeypatch.setattr(repo._runtime.knowledge_governance, "resolve_notebook_conflicts", spy)
-    repo.llm_client = FakeLLM([])
-    repo.llm_client.configured = True
+    llm = FakeLLM([])
+    bind_chat_client(repo, "kg_conflict_review", llm)
+    bind_chat_client(repo, "kg_extract", llm)
     repo.settings.kg_conflict_resolution_enabled = False
 
     monkeypatch.setattr(
@@ -359,7 +357,7 @@ def test_conflict_type_none_stays_pending(repo):
         "rationale": "These are corroborating, not conflicting.",
     }
 
-    repo.llm_client = FakeLLM([none_verdict])
+    bind_chat_client(repo, "kg_conflict_review", FakeLLM([none_verdict]))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
     result = repo.resolve_notebook_conflicts(nb_id)
@@ -374,7 +372,7 @@ def test_conflict_type_none_stays_pending(repo):
 
 def test_summary_dict_has_expected_keys(repo):
     nb = repo.create_notebook(NotebookCreate(name="summary-keys"))
-    repo.llm_client = FakeLLM([])
+    bind_chat_client(repo, "kg_conflict_review", FakeLLM([]))
 
     result = repo.resolve_notebook_conflicts(nb.id)
 
@@ -513,12 +511,12 @@ def test_node_discriminative_discard_applies(repo):
     )
 
     # Now run full orchestration: FakeLLM picks left as winner (discard right)
-    repo.llm_client = RefAwareFakeLLM(
+    bind_chat_client(repo, "kg_conflict_review", RefAwareFakeLLM(
         conflict_type="mutual",
         resolution="discard",
         pick="left",
         confidence=0.98,
-    )
+    ))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
     result = repo.resolve_notebook_conflicts(nb_id)
@@ -564,13 +562,13 @@ def test_node_discriminative_modify_applies(repo):
 
     new_payload = {"name": "positive feedback dominates", "statement": "Reconciled claim [modified]"}
 
-    repo.llm_client = RefAwareFakeLLM(
+    bind_chat_client(repo, "kg_conflict_review", RefAwareFakeLLM(
         conflict_type="granularity",
         resolution="modify",
         pick="left",
         resolved_payload=new_payload,
         confidence=0.97,
-    )
+    ))
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
     result = repo.resolve_notebook_conflicts(nb_id)
@@ -677,7 +675,7 @@ def test_edge_evidence_quote_reaches_llm_prompt(repo):
     ])
 
     llm = PromptRecordingLLM()
-    repo.llm_client = llm
+    bind_chat_client(repo, "kg_conflict_review", llm)
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
     repo.resolve_notebook_conflicts(nb.id)

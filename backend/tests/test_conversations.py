@@ -3,6 +3,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 class FakeLLM:
     configured = True
@@ -14,12 +16,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings()); r.embedder = FakeEmbedder(dim=16); r.llm_client = FakeLLM()
+    r = SQLiteRepository(Settings()); bind_all_embedding_clients(r, FakeEmbedder(dim=16)); bind_chat_client(r, "ask_answer", FakeLLM())
     return r
 
 def test_schema_has_conversations_and_fk(repo):
@@ -51,9 +49,18 @@ def test_ask_feeds_prior_turns_into_prompt(repo, monkeypatch):
     def cap(messages, schema_hint, **kwargs):
         captured["p"] = messages[0]["content"]
         return json.dumps({"answer": "ok.", "grounded": False})
-    repo.llm_client.chat_json = cap
-    r1 = repo.ask(nb.id, AskRequest(question="ZZTOPIC question"))
-    repo.ask(nb.id, AskRequest(question="follow up", conversation_id=r1.conversation_id))
+    capture_client = FakeLLM()
+    capture_client.chat_json = cap
+    bind_chat_client(repo, "ask_answer", capture_client)
+    r1 = repo.ask(nb.id, AskRequest(question="ZZTOPIC question", mode="reasoning"))
+    repo.ask(
+        nb.id,
+        AskRequest(
+            question="follow up",
+            conversation_id=r1.conversation_id,
+            mode="reasoning",
+        ),
+    )
     assert "ZZTOPIC question" in captured["p"]      # prior turn present in 2nd prompt
 
 

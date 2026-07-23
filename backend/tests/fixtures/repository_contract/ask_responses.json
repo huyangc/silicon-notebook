@@ -359,7 +359,7 @@
                 }
               ]
             },
-            "duration_ms": 1,
+            "duration_ms": 5,
             "step_type": "plan",
             "summary": "规划了 1 个子查询"
           },
@@ -378,7 +378,7 @@
               "stale": 0,
               "sufficient": true
             },
-            "duration_ms": 1,
+            "duration_ms": 5,
             "step_type": "reflect",
             "summary": "answer"
           },
@@ -474,7 +474,7 @@
                 }
               ]
             },
-            "duration_ms": 1,
+            "duration_ms": 5,
             "step_type": "plan",
             "summary": "规划了 1 个子查询"
           },
@@ -493,7 +493,7 @@
               "stale": 0,
               "sufficient": true
             },
-            "duration_ms": 1,
+            "duration_ms": 5,
             "step_type": "reflect",
             "summary": "answer"
           },
@@ -546,7 +546,7 @@
         "answer": "",
         "answer_id": "<ans-id-1>",
         "citations": [],
-        "conclusion": "请先在设置中配置你的模型服务",
+        "conclusion": "系统未配置当前问答所需的模型服务，请联系维护人员",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "inferred",
         "grounded": false,
@@ -558,8 +558,12 @@
           {
             "message": "missing_config",
             "model": "",
-            "service": "llm",
-            "stage": "answer"
+            "service_id": "",
+            "service_name": "",
+            "stage": "answer",
+            "support_id": "",
+            "workload_id": "",
+            "workload_label": ""
           }
         ],
         "reasoning_trace": null,
@@ -572,7 +576,7 @@
         "answer": "",
         "answer_id": "<ans-id-1>",
         "citations": [],
-        "conclusion": "请先在设置中配置你的模型服务",
+        "conclusion": "系统未配置当前问答所需的模型服务，请联系维护人员",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "inferred",
         "grounded": false,
@@ -584,8 +588,12 @@
           {
             "message": "missing_config",
             "model": "",
-            "service": "llm",
-            "stage": "answer"
+            "service_id": "",
+            "service_name": "",
+            "stage": "answer",
+            "support_id": "",
+            "workload_id": "",
+            "workload_label": ""
           }
         ],
         "reasoning_trace": null,

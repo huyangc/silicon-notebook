@@ -23,7 +23,7 @@ router = APIRouter()
 
 
 def _report_llm_ready(repo) -> bool:
-    return bool(getattr(repo.reasoning_llm_client, "configured", False))
+    return repo._runtime.models.configured("report_outline")
 
 
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
@@ -122,6 +122,8 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
              dependencies=[Depends(require_notebook_write)])
 def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateRequest) -> dict:
     repo = repository()
+    if not repo._runtime.models.configured("report_section"):
+        raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         cur = repo.get_report(notebook_id, report_id)
     except KeyError:

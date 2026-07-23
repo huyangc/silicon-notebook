@@ -18,7 +18,6 @@ from app.core.ask_context import _ASK_EMBED_CACHE
 from app.models.common import Evidence
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
-from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     W_KEYWORD,
@@ -87,22 +86,6 @@ class _RetrievalState:
         return self._retrieval
 
     @property
-    def llm_client(self):
-        return self.model_clients.llm_client
-
-    @property
-    def reasoning_llm_client(self):
-        return self.model_clients.reasoning_llm_client
-
-    @property
-    def rewrite_llm_client(self):
-        return self.model_clients.rewrite_llm_client
-
-    @property
-    def rerank_client(self):
-        return self.model_clients.rerank_client
-
-    @property
     def _vector_cache(self):
         return self.snapshots.vector_cache
 
@@ -120,16 +103,23 @@ class _RetrievalState:
     def _note_model_error(
         self,
         stage: str,
-        model: str,
-        exc: Exception,
+        model_or_error,
+        exc: Exception | None = None,
         service: str = "",
         *,
         provider_failure: bool = False,
         failed_fingerprint: str = "",
+        workload_id: str = "",
     ) -> None:
+        if workload_id:
+            error = exc or model_or_error
+            self.model_error_sink.note_model_error(
+                stage, error, workload_id=workload_id
+            )
+            return
         self.model_error_sink.note_model_error(
             stage,
-            model,
+            model_or_error,
             exc,
             service=service,
             provider_failure=provider_failure,
@@ -330,7 +320,7 @@ class CandidateRetrievalService(_RetrievalState):
         P1-A:ask 作用域内(_ASK_EMBED_CACHE 非 None)按 query[:2000] 复用同文本
         的截断后向量,砍 federated 双 tier/seed/quota 对同一问题的重复 RTT;
         失败不缓存(保留每次重试语义)。default None(非 ask 路径)行为不变。"""
-        if not self.settings.embedder_configured:
+        if not getattr(self.embedder, "configured", False):
             return None
         cache = _ASK_EMBED_CACHE.get()
         key = query[:2000]
@@ -343,11 +333,8 @@ class CandidateRetrievalService(_RetrievalState):
         except Exception as exc:
             self._note_model_error(
                 "embed",
-                self.settings.embed_model,
                 exc,
-                service="embedding",
-                provider_failure=True,
-                failed_fingerprint=model_client_fingerprint(self.embedder),
+                workload_id="retrieval_query_embedding",
             )
             return None
         from app.services.vector_index import resolve_runtime_dim, truncate_vec
@@ -527,7 +514,7 @@ class CandidateRetrievalService(_RetrievalState):
                 except Exception as exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "relation_ann_query",
-                        self.settings.embed_model,
+                        "",
                         exc,
                         service="embedding",
                     )
@@ -553,7 +540,7 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
                 self._note_model_error(
                     "relation_ann_delta",
-                    self.settings.embed_model,
+                    "",
                     exc,
                     service="embedding",
                 )
@@ -701,7 +688,7 @@ class CandidateRetrievalService(_RetrievalState):
                 except Exception as exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "kg_obj_ann",
-                        self.settings.embed_model,
+                        "",
                         exc,
                         service="embedding",
                     )
@@ -726,7 +713,7 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
                 self._note_model_error(
                     "kg_obj_delta",
-                    self.settings.embed_model,
+                    "",
                     exc,
                     service="embedding",
                 )
@@ -1173,7 +1160,7 @@ class CandidateRetrievalService(_RetrievalState):
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
             self._note_model_error(
                 "chunk_ann_query",
-                self.settings.embed_model,
+                "",
                 exc,
                 service="embedding",
             )
@@ -1204,7 +1191,7 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
                 self._note_model_error(
                     "chunk_ann_delta",
-                    self.settings.embed_model,
+                    "",
                     exc,
                     service="embedding",
                 )
@@ -1220,7 +1207,7 @@ class CandidateRetrievalService(_RetrievalState):
                     cand_ids.append(cid)
                     chunk_sims[cid] = 0.0   # 词法命中无语义分;score_chunks 的 keyword 分兜底
         except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-            self._note_model_error("chunk_fts", self.settings.embed_model, exc)
+            self._note_model_error("chunk_fts", "", exc)
 
         if not cand_ids:
             return [], [], None
@@ -1302,7 +1289,7 @@ class CandidateRetrievalService(_RetrievalState):
             # union where lexical hits get keyword score and semantic 0.
             return score_chunks(needle, chunks, None, None, limit=recall)
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
-            self._note_model_error("chunk_keyword_union", self.settings.embed_model, exc)
+            self._note_model_error("chunk_keyword_union", "", exc)
             return []
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
@@ -1440,7 +1427,7 @@ class CandidateRetrievalService(_RetrievalState):
             return base_seeds
         from app.services.query_rewrite import expand_query
         raise_if_cancelled(cancel_event)
-        exp = expand_query(self.rewrite_llm_client, question,
+        exp = expand_query(self.model_clients.chat("query_rewrite"), question,
                            corpus_langs=self._notebook_langs(notebook_id),
                            cancel_event=cancel_event)
         hl = " ".join(exp.high_level_keywords) or exp.query or question
@@ -1543,7 +1530,7 @@ class CandidateRetrievalService(_RetrievalState):
         fuse_k 复刻 multi 分支 quota_fuse 复用 chunk_mmr_k 的隐式契约。"""
         s = self.settings
         overlay_on = (s.chunk_kg_overlay_enabled
-                      and self.rerank_client.configured
+                      and self.model_clients.rerank("retrieval_rerank").configured
                       and (self._notebook_has_kg(notebook_id)
                            or self._any_base_notebook_has_kg(notebook_id)))
         if overlay_on:

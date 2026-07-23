@@ -1,7 +1,9 @@
 """Cross-cutting architecture invariants introduced by the hardening pass."""
 from __future__ import annotations
 
+import ast
 import contextvars
+from pathlib import Path
 import threading
 import time
 
@@ -13,6 +15,83 @@ from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 
 
+ROOT = Path(__file__).resolve().parents[2]
+RAW_TRANSPORT_FILES = {
+    "backend/app/core/llm.py",
+    "backend/app/services/embedding_dashscope.py",
+    "backend/app/services/rerank_client.py",
+    "backend/app/services/model_provider.py",
+}
+OFFLINE_KG_TRANSPORT = "backend/app/services/kg/client.py"
+OFFLINE_KG_CALLERS = {
+    "backend/app/eval/inference.py",
+    "backend/app/scripts/gen_recall_gold.py",
+    "scripts/kg_goldgen.py",
+    "scripts/kg_goldgen_all.py",
+}
+RETIRED_MODEL_SYMBOLS = {
+    "USER_MODEL_CONFIG_POLICY",
+    "user_model_config_policy",
+    "LimitedJsonChatClient",
+    "activate_model_concurrency",
+    "KG_EXTRACT_WORKERS",
+    "EMBED_CONCURRENCY",
+    "KG_ASK_RESERVE",
+}
+RETIRED_REPOSITORY_CLIENT_ATTRS = {
+    "llm_client",
+    "reasoning_llm_client",
+    "rewrite_llm_client",
+    "kg_llm_client",
+    "rerank_client",
+    "embedder",
+}
+
+
+def _python_sources(*roots: str):
+    for root in roots:
+        for path in sorted((ROOT / root).rglob("*.py")):
+            if "__pycache__" not in path.parts:
+                yield path, path.relative_to(ROOT).as_posix()
+
+
+def _dotted(node: ast.AST) -> str:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _imports_kg_client(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "app.services.kg.client":
+            return True
+        if isinstance(node, ast.Import):
+            if any(alias.name == "app.services.kg.client" for alias in node.names):
+                return True
+    return False
+
+
+def _inside_attribute_error_assertion(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, ast.With):
+            for item in current.items:
+                expr = item.context_expr
+                if (
+                    isinstance(expr, ast.Call)
+                    and _dotted(expr.func) == "pytest.raises"
+                    and expr.args
+                    and _dotted(expr.args[0]) == "AttributeError"
+                ):
+                    return True
+        current = parents.get(current)
+    return False
+
+
 def _settings(tmp_path) -> Settings:
     return Settings(
         database_url=f"sqlite:///{tmp_path / 't.db'}",
@@ -21,6 +100,186 @@ def _settings(tmp_path) -> Settings:
         llm_log_enabled=False,
         auth_optional=True,
     )
+
+
+def test_raw_model_transports_are_confined_to_reviewed_boundaries():
+    """Raw SDK construction/calls must never bypass the runtime scheduler."""
+    offenders: list[str] = []
+    raw_constructors = {
+        "OpenAICompatibleClient",
+        "DashscopeEmbedder",
+        "RerankClient",
+    }
+    for path, relative in _python_sources("backend/app", "scripts"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = _dotted(node.func)
+            short = callee.rsplit(".", 1)[-1]
+            is_raw = (
+                short in raw_constructors
+                or callee.endswith(".embeddings.create")
+                or short == "_rerank_batch"
+            )
+            if is_raw and relative not in RAW_TRANSPORT_FILES:
+                offenders.append(f"{relative}:{node.lineno}:{callee}")
+
+            if (
+                short == "chat_json"
+                and isinstance(node.func, ast.Attribute)
+                and node.func.value.__class__ is ast.Attribute
+                and node.func.value.attr in RETIRED_REPOSITORY_CLIENT_ATTRS
+            ):
+                offenders.append(f"{relative}:{node.lineno}:unbound-{callee}")
+
+    assert offenders == []
+
+
+def test_offline_kg_transport_has_no_product_runtime_importers():
+    importers: set[str] = set()
+    prefixes: dict[str, set[str]] = {}
+    for path, relative in _python_sources("backend/app", "scripts"):
+        if relative == OFFLINE_KG_TRANSPORT:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        if _imports_kg_client(tree):
+            importers.add(relative)
+            prefixes[relative] = {
+                str(node.args[0].value)
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and _dotted(node.func).rsplit(".", 1)[-1] == "make_client"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            }
+
+    assert importers == OFFLINE_KG_CALLERS
+    assert prefixes == {
+        "backend/app/eval/inference.py": {"EVAL_JUDGE_"},
+        "backend/app/scripts/gen_recall_gold.py": {"GOLDGEN_"},
+        "scripts/kg_goldgen.py": {"GOLDGEN_"},
+        "scripts/kg_goldgen_all.py": {"GOLDGEN_"},
+    }
+
+
+def test_retired_model_configuration_and_gate_symbols_are_absent():
+    offenders: list[str] = []
+    retired_routes = {"/me/model-settings", "/me/model-services"}
+    for path, relative in _python_sources("backend/app", "frontend/app", "scripts"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        except SyntaxError:
+            # TypeScript/TSX is covered by the front-end architecture contract.
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id in RETIRED_MODEL_SYMBOLS:
+                offenders.append(f"{relative}:{node.lineno}:{node.id}")
+            elif isinstance(node, ast.Attribute) and node.attr in RETIRED_MODEL_SYMBOLS:
+                offenders.append(f"{relative}:{node.lineno}:{node.attr}")
+            elif isinstance(node, ast.keyword) and node.arg in RETIRED_MODEL_SYMBOLS:
+                offenders.append(f"{relative}:{node.lineno}:{node.arg}")
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                for symbol in RETIRED_MODEL_SYMBOLS | retired_routes:
+                    if symbol in node.value:
+                        offenders.append(f"{relative}:{node.lineno}:{symbol}")
+    assert offenders == []
+
+
+def _retired_model_attribute_offenders(tree: ast.AST, relative: str) -> list[str]:
+    offenders: list[str] = []
+    retired_clients = RETIRED_REPOSITORY_CLIENT_ATTRS - {"embedder"}
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in retired_clients
+        ):
+            offenders.append(f"{relative}:{node.lineno}:def-{node.name}")
+            continue
+
+        if isinstance(node, ast.Attribute):
+            receiver = _dotted(node.value)
+            direct_repository_receiver = (
+                "." not in receiver
+                and (
+                    receiver in {"r", "repo", "repository", "_repo"}
+                    or receiver.endswith("repo")
+                    or receiver.endswith("repository")
+                )
+            )
+            if (
+                (
+                    node.attr in retired_clients
+                    or (node.attr == "embedder" and direct_repository_receiver)
+                )
+                and not _inside_attribute_error_assertion(node, parents)
+            ):
+                offenders.append(
+                    f"{relative}:{node.lineno}:attribute-{receiver}.{node.attr}"
+                )
+            continue
+
+        if (
+            isinstance(node, ast.Call)
+            and _dotted(node.func) == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in RETIRED_REPOSITORY_CLIENT_ATTRS
+        ):
+            receiver = _dotted(node.args[0])
+            repository_receiver = any(
+                part in {"r", "repo", "repository", "_repo"}
+                or part.endswith("repo")
+                or part.endswith("repository")
+                or part in {"models", "model_clients", "provider"}
+                for part in receiver.split(".")
+            )
+            if (
+                repository_receiver
+                and not _inside_attribute_error_assertion(node, parents)
+            ):
+                offenders.append(
+                    f"{relative}:{node.lineno}:getattr-{receiver}.{node.args[1].value}"
+                )
+    return offenders
+
+
+def test_retired_repository_model_attributes_cannot_be_read_or_rebound():
+    offenders: list[str] = []
+    for path, relative in _python_sources("backend/app", "backend/tests", "scripts"):
+        if relative == "backend/tests/model_testkit.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
+        offenders.extend(_retired_model_attribute_offenders(tree, relative))
+
+    assert offenders == []
+
+
+def test_retired_model_attribute_guard_detects_direct_and_two_step_bypasses():
+    tree = ast.parse(
+        """
+answer = repo.llm_client.chat_json([])
+provider = repo._runtime.models
+reranker = provider.rerank_client
+hidden = getattr(provider, "kg_llm_client")
+vector = repository.embedder.embed_query("q")
+"""
+    )
+
+    offenders = _retired_model_attribute_offenders(tree, "negative.py")
+
+    assert len(offenders) == 4
+    assert any("repo.llm_client" in offender for offender in offenders)
+    assert any("provider.rerank_client" in offender for offender in offenders)
+    assert any("getattr-provider.kg_llm_client" in offender for offender in offenders)
+    assert any("repository.embedder" in offender for offender in offenders)
 
 
 def test_settings_accept_field_names_even_when_fields_have_validation_aliases(tmp_path):

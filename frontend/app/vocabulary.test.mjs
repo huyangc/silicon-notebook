@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS, SEVERITY, MODEL_SERVICE_STATUS_ERROR, MODEL_TEST_ERROR } from "./vocabulary.ts";
+import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS, SEVERITY, MODEL_SERVICE_STATUS_ERROR } from "./vocabulary.ts";
 import { KNOWLEDGE_STATUS_OPTIONS } from "./workspace-model.ts";
 
 test("label 命中时返回映射值", () => {
@@ -84,26 +84,13 @@ test("SEVERITY 三个取值都有中文(真源 extraction_profiles.py:28)", () =
 });
 
 
-// --- 模型「测试连接」的 code → 文案 ---------------------------------------------
-// 后端只回 code,文案在这边。跨栈契约:后端加了 code 而这边没跟,用户就会静默退回
-// 「连接未通过」——不崩,但正是这条轨道要消灭的「文案悄悄消失」。
-
-test("MODEL_TEST_ERROR 三个 code 都有人话,且不泄漏后端字段名", () => {
-  assert.equal(label(MODEL_TEST_ERROR, "unknown_service", "连接未通过"), "不认识这个模型用途");
-  assert.equal(label(MODEL_TEST_ERROR, "missing_config", "连接未通过"), "还没填完，需要接口地址、模型名和密钥");
-  assert.equal(label(MODEL_TEST_ERROR, "upstream_error", "连接未通过"), "连不上这个模型服务");
-  // 曾经的写法把 "缺少 base_url / model / api_key" 直接甩给用户。
-  for (const v of Object.values(MODEL_TEST_ERROR)) {
-    assert.ok(!/base_url|api_key|model\b/.test(v), `文案泄漏后端字段名：${v}`);
-  }
-});
-
-test("未知 code 退到兜底词,绝不回显 code 本身", () => {
-  assert.equal(label(MODEL_TEST_ERROR, "rate_limited", "连接未通过"), "连接未通过");
-  assert.notEqual(label(MODEL_TEST_ERROR, "rate_limited", "连接未通过"), "rate_limited");
-});
-
 test("模型服务状态 code 使用稳定中文，不展示原始诊断", () => {
   assert.equal(label(MODEL_SERVICE_STATUS_ERROR, "upstream_error", "连接未通过"), "连接未通过");
+  assert.equal(label(MODEL_SERVICE_STATUS_ERROR, "model_queue_timeout", "连接未通过"), "排队等待超时");
+  assert.equal(label(MODEL_SERVICE_STATUS_ERROR, "provider_rate_limited", "连接未通过"), "上游服务限流");
+  for (const value of Object.values(MODEL_SERVICE_STATUS_ERROR)) {
+    assert.ok(!/base_url|api_key|provider_|model_/i.test(value), `文案泄漏协议字段名：${value}`);
+  }
   assert.equal(label(MODEL_SERVICE_STATUS_ERROR, "future_code", "连接未通过"), "连接未通过");
+  assert.notEqual(label(MODEL_SERVICE_STATUS_ERROR, "future_code", "连接未通过"), "future_code");
 });

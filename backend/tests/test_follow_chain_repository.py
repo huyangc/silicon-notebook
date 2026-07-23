@@ -6,6 +6,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -13,17 +14,13 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'follow.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     for key in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
                 "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL",
                 "REASONING_LLM_MODEL"):
         monkeypatch.setenv(key, "")
     result = SQLiteRepository(Settings(_env_file=None))
-    result.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(result, FakeEmbedder(dim=16))
     return result
 
 

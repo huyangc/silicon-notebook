@@ -130,12 +130,8 @@ from app.models.memory import (
 )
 from app.models.model_services import (
     ModelServiceStatusItem,
-    ModelServiceUpdate,
-    ModelServiceView,
     ModelServicesStatus,
-    ModelSettingsUpdate,
-    ModelTestRequest,
-    ModelTestResult,
+    ModelWorkloadView,
 )
 from app.models.notebooks import (
     MountedBase,
@@ -203,8 +199,7 @@ __all__ = [
     "MemoryOverviewItem", "MemoryOverviewSummary", "MemoryPreview", "MemoryPromotionState",
     "MemoryRecord", "MemoryReviewRequest", "MemoryStatus", "MemoryTransferRequest", "MemoryUpdate",
     "MergeRequest", "MergeReviewJob", "MergeReviewRequest", "MergeReviewSummary", "ModelError",
-    "ModelServiceStatusItem", "ModelServiceUpdate", "ModelServiceView", "ModelServicesStatus",
-    "ModelSettingsUpdate", "ModelTestRequest", "ModelTestResult", "MountedBase", "MountedByCount", "NotebookAnalytics",
+    "ModelServiceStatusItem", "ModelServicesStatus", "ModelWorkloadView", "MountedBase", "MountedByCount", "NotebookAnalytics",
     "NotebookContentOverview", "NotebookCreate", "NotebookRef", "NotebookSearchResponse",
     "NotebookSummary", "NotebookTemplate", "NotebookUpdate", "ObjectSchemaCreate",
     "ObjectSchemaModel", "ObjectSchemaUpdate", "PaginatedKnowledge", "PaginatedMemories",

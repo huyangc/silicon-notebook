@@ -36,6 +36,7 @@ from app.models.schemas import NotebookCreate
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.knowhow.projection import KnowhowProjector
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _FakeEmbedder:
@@ -66,10 +67,6 @@ def repo_factory(tmp_path, monkeypatch):
         monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
         monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
         monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-        monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-        monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-        monkeypatch.setenv("EMBED_API_KEY", "test-key")
-        monkeypatch.setenv("EMBED_MODEL", "test-model")
         return SQLiteRepository(Settings())
 
     return _make
@@ -83,8 +80,8 @@ def repo(repo_factory):
 @pytest.fixture
 def embedder(repo) -> _FakeEmbedder:
     emb = _FakeEmbedder()
-    repo.embedder = emb
-    assert repo.settings.embedder_configured
+    bind_all_embedding_clients(repo, emb)
+    assert repo.configured("knowhow_embedding")
     return emb
 
 

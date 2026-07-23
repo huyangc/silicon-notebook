@@ -3,6 +3,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -99,10 +100,6 @@ def embed_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")     # embedder_configured == True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "10")
     r = SQLiteRepository(Settings())
 
@@ -110,7 +107,7 @@ def embed_repo(tmp_path, monkeypatch):
         def embed_texts(self, texts):
             return [[0.1, 0.2, 0.3] for _ in texts]
 
-    r.embedder = _FakeEmbedder()
+    bind_all_embedding_clients(r, _FakeEmbedder())
     return r
 
 

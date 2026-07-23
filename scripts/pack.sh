@@ -129,6 +129,7 @@ cp "$ROOT_DIR/packaging/start.sh"   "$STAGE/start.sh"
 cp "$ROOT_DIR/packaging/stop.sh"    "$STAGE/stop.sh"
 cp "$ROOT_DIR/packaging/DEPLOY.md"  "$STAGE/DEPLOY.md"
 cp "$ROOT_DIR/.env.example"         "$STAGE/.env.example"
+cp "$ROOT_DIR/model-services.example.toml" "$STAGE/model-services.example.toml"
 chmod +x "$STAGE/install.sh" "$STAGE/start.sh" "$STAGE/stop.sh"
 cat > "$STAGE/VERSION" <<EOF
 version=$VERSION

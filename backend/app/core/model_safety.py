@@ -10,6 +10,15 @@ MODEL_ERROR_MISSING_CONFIG = "missing_config"
 _MODEL_ERROR_CODES = frozenset({
     MODEL_ERROR_UPSTREAM,
     MODEL_ERROR_MISSING_CONFIG,
+    "model_queue_full",
+    "model_queue_timeout",
+    "model_service_unavailable",
+    "provider_auth",
+    "provider_rate_limited",
+    "provider_unavailable",
+    "provider_error",
+    "malformed_response",
+    "model_not_configured",
 })
 _MODEL_SERVICES = frozenset({
     "llm",
@@ -133,6 +142,48 @@ def safe_model_error_code(value: object) -> str:
         if isinstance(value, str) and value in _MODEL_ERROR_CODES
         else MODEL_ERROR_UPSTREAM
     )
+
+
+_SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
+_SAFE_SUPPORT_ID_RE = re.compile(r"mdl-[A-Za-z0-9_-]{1,80}\Z")
+
+
+def safe_model_metadata_id(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    return candidate if _SAFE_ID_RE.fullmatch(candidate) else ""
+
+
+def safe_model_support_id(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    return candidate if _SAFE_SUPPORT_ID_RE.fullmatch(candidate) else ""
+
+
+def safe_model_display_name(value: object) -> str:
+    """Allow bounded operator labels while rejecting endpoint/secret shapes."""
+    if not isinstance(value, str):
+        return ""
+    candidate = " ".join(value.strip().split())
+    if not candidate or len(candidate) > 80:
+        return ""
+    lowered = candidate.lower()
+    compact = "".join(char for char in lowered if char.isalnum())
+    if (
+        _URL_SCHEME_RE.search(candidate)
+        or _IPV4_RE.search(candidate)
+        or _CREDENTIAL_TOKEN_RE.search(candidate)
+        or _VENDOR_KEY_TOKEN_RE.search(candidate)
+        or _AWS_ACCESS_ID_RE.search(candidate)
+        or _STRIPE_KEY_RE.search(candidate)
+        or "localhost" in lowered
+        or any(marker in compact for marker in _UNSAFE_MODEL_MARKERS)
+        or any(char in candidate for char in "{}[]<>\\\n\r\t")
+    ):
+        return ""
+    return candidate
 
 
 def _has_endpoint_port(model: str) -> bool:

@@ -22,6 +22,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 # ---------------------------------------------------------------------------
@@ -33,13 +35,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -159,7 +157,8 @@ def test_e2e_conflict_resolved_via_build_hook(repo):
 
     # Wire up a RefAware fake LLM that always issues a high-confidence discard
     fake_llm = RefAwareFakeLLM(confidence=0.98)
-    repo.llm_client = fake_llm
+    bind_chat_client(repo, "kg_extract", fake_llm)
+    bind_chat_client(repo, "kg_conflict_review", fake_llm)
     repo.settings.kg_conflict_resolution_enabled = True
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 
@@ -213,7 +212,8 @@ def test_e2e_conflict_skipped_when_flag_disabled(repo):
     oid_a, oid_b, rel_a, rel_b = _seed_conflict(repo, nb.id, sid)
 
     fake_llm = RefAwareFakeLLM(confidence=0.98)
-    repo.llm_client = fake_llm
+    bind_chat_client(repo, "kg_extract", fake_llm)
+    bind_chat_client(repo, "kg_conflict_review", fake_llm)
     repo.settings.kg_conflict_resolution_enabled = False
     repo.settings.kg_conflict_auto_apply_threshold = 0.95
 

@@ -339,7 +339,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_24(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_25(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -370,7 +370,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_24(tmp_path):
     build-job table, _migration_23's per-user model-service status, and
     _migration_24's kg_canonical_scratch table (write-lock slimming
     improvement point 2's cluster-map-swap preparation scratch table — no
-    separate index rollback needed, DROP TABLE takes its index with it), or
+    separate index rollback needed, DROP TABLE takes its index with it), and
+    _migration_25's system model-service status table, or
     the constructed 'v13' would retain them and the hop would under-report
     its additions."""
     from app.core.config import Settings
@@ -391,6 +392,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_24(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")        # _migration_25
         rollback.execute("DROP TABLE kg_canonical_scratch")              # _migration_24
         rollback.execute("DROP TABLE model_service_status")               # _migration_23
         rollback.execute("DROP TABLE kg_build_jobs")                     # _migration_22
@@ -426,7 +428,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_24(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_to_24(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -436,6 +438,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_24(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
@@ -452,7 +455,23 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_24(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v21_database_verifies_through_migrations_22_to_24(tmp_path):
+def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypatch):
+    module = _load_verifier()
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "must-not-leak")
+    database, storage = _copy_fixture(tmp_path)
+
+    settings = module.offline_settings(
+        tmp_path / "snapshot.db", tmp_path / "storage"
+    )
+    registry = module.SystemModelServiceRegistry.load(settings, environ={})
+
+    assert settings.model_services_config == ""
+    assert registry.service_for("ask_answer") is None
+    assert registry.service_for("retrieval_query_embedding") is None
+    assert module.verify_snapshot(database, storage).ok
+
+
+def test_deployed_v21_database_verifies_through_migrations_22_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -462,6 +481,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_24(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
@@ -477,7 +497,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_24(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v22_database_verifies_through_migrations_23_and_24(tmp_path):
+def test_deployed_v22_database_verifies_through_migrations_23_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -487,6 +507,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_and_24(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("PRAGMA user_version = 22")
@@ -501,12 +522,8 @@ def test_deployed_v22_database_verifies_through_migrations_23_and_24(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_through_kg_canonical_scratch(tmp_path):
-    """Single-hop sibling of the v22 test above, one migration newer: a v23
-    database (has model_service_status, missing only _migration_24's
-    kg_canonical_scratch table — the write-lock slimming improvement point 2
-    preparation-segment scratch table) must verify clean through just that
-    one hop."""
+def test_deployed_v23_database_verifies_kg_scratch_and_model_status_scrub(tmp_path):
+    """A v23 database must verify cleanly through both v24 and v25."""
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -514,19 +531,30 @@ def test_deployed_v23_database_verifies_through_kg_canonical_scratch(tmp_path):
         module.offline_settings(database, tmp_path / "upgrade-storage")
     )
     upgraded.close_local()
-    rollback = sqlite3.connect(database)
-    try:
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
+        rollback.execute(
+            "UPDATE user_profiles SET model_settings=? WHERE user_id='user-local'",
+            ('{"llm":{"api_key":"credential-must-be-scrubbed"}}',),
+        )
+        rollback.execute(
+            "INSERT INTO model_service_status VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "user-local", "llm", "old-fingerprint", "error", 0,
+                "upstream_error", "observed_failure",
+                "2030-01-01T00:00:00+00:00",
+            ),
+        )
         rollback.execute("PRAGMA user_version = 23")
-        rollback.commit()
-    finally:
-        rollback.close()
 
     result = module.verify_snapshot(database, storage)
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 23
     assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.normalized["scrubbed_model_profiles"] == 1
+    assert result.normalized["scrubbed_model_statuses"] == 1
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_chat_client
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
@@ -267,8 +268,10 @@ def test_t4deleg_conflict_resolution_rows_delegate(repo, monkeypatch):
     governance = repo._runtime.knowledge_governance
     # Get past the "LLM not configured -> skip" guard so the compound
     # conflict-resolution read is actually reached.
-    monkeypatch.setattr(
-        governance, "_llm", lambda: types.SimpleNamespace(configured=True)
+    bind_chat_client(
+        repo,
+        "kg_conflict_review",
+        types.SimpleNamespace(configured=True),
     )
     calls = []
 

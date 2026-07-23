@@ -54,6 +54,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from unittest import mock
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.config import Settings
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
+from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
 from app.services.sqlite_repository import (
     SCHEMA_VERSION,
     SQLiteRepository,
@@ -88,6 +90,7 @@ SPECIAL_TABLES = (
     "sources",
     "extraction_runs",
     "kg_build_jobs",
+    "model_service_status",
 )
 
 # The admin in-place upgrade (`_seed`) rewrites exactly these user-local
@@ -837,25 +840,7 @@ def offline_settings(database: Path, storage: Path) -> Settings:
     settings = Settings(
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
-        openai_compat_base_url="",
-        openai_compat_api_key="",
-        openai_compat_model="",
-        reasoning_llm_base_url="",
-        reasoning_llm_api_key="",
-        reasoning_llm_model="",
-        rewrite_llm_base_url="",
-        rewrite_llm_api_key="",
-        rewrite_llm_model="",
-        kg_llm_base_url="",
-        kg_llm_api_key="",
-        kg_llm_model="",
-        embed_provider="",
-        embed_model="",
-        embed_base_url="",
-        embed_api_key="",
-        rerank_model="",
-        rerank_base_url="",
-        rerank_api_key="",
+        model_services_config="",
         mineru_mode="off",
         mineru_api_url="",
         mineru_vlm_server_url="",
@@ -871,14 +856,12 @@ def offline_settings(database: Path, storage: Path) -> Settings:
 
 
 def _assert_offline(settings: Settings) -> None:
+    registry = SystemModelServiceRegistry.load(settings, environ={})
     offline_checks = {
-        "llm_configured": settings.llm_configured,
-        "reasoning_llm_configured": settings.reasoning_llm_configured,
-        "rewrite_llm_configured": settings.rewrite_llm_configured,
-        "kg_llm_configured": settings.kg_llm_configured,
-        "embedder_configured": settings.embedder_configured,
-        "rerank_model": bool(settings.rerank_model),
-        "rerank_base_url": bool(settings.rerank_base_url),
+        "model_services": any(
+            registry.service_for(workload_id) is not None
+            for workload_id in WORKLOADS
+        ),
         "mineru_enabled": settings.mineru_enabled,
         "mineru_cloud_enabled": settings.mineru_cloud_enabled,
         "scale_index_auto_enabled": settings.scale_index_auto_enabled,
@@ -1121,6 +1104,8 @@ def _empty_normalized() -> Dict[str, int]:
         "seeded_concept_whitelist": 0,
         "seeded_object_schemas": 0,
         "admin_upgraded": 0,
+        "scrubbed_model_profiles": 0,
+        "scrubbed_model_statuses": 0,
     }
 
 
@@ -1130,6 +1115,8 @@ def _compare_special_rows(
     post_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
     normalized: Dict[str, int],
     problems: List[str],
+    *,
+    allow_model_scrub: bool = False,
 ) -> None:
     def rows_equal(pre: Dict[str, Any], post: Dict[str, Any], skip: frozenset) -> bool:
         keys = set(pre) | set(post)
@@ -1151,8 +1138,21 @@ def _compare_special_rows(
     for key, pre_row in pre_rows.items():
         post_row = post_rows.get(key)
         if post_row is None:
+            if allow_model_scrub and table == "model_service_status":
+                normalized["scrubbed_model_statuses"] += 1
+                continue
             problems.append(f"table={table} reason=row-deleted")
             continue
+        if allow_model_scrub and table == "user_profiles":
+            if (
+                post_row.get("model_settings") == "{}"
+                and rows_equal(
+                    pre_row, post_row, frozenset({"model_settings"})
+                )
+            ):
+                if pre_row.get("model_settings") != "{}":
+                    normalized["scrubbed_model_profiles"] += 1
+                continue
         if table == "users" and pre_row.get("id") == "user-local":
             if not rows_equal(pre_row, post_row, ADMIN_UPGRADE_COLUMNS):
                 problems.append(f"table={table} reason=admin-row-changed-beyond-upgrade")
@@ -1391,6 +1391,9 @@ def compare_snapshots(
                 post.special_rows.get(name, {}),
                 normalized,
                 problems,
+                allow_model_scrub=(
+                    pre.user_version < 24 <= post.user_version
+                ),
             )
             if problems:
                 for problem in problems:
@@ -1627,7 +1630,15 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
         ):
             raise _fail("repository would be constructed with the original storage")
 
-        with _no_network():
+        # Pin registry resolution to an explicit empty registry for the whole
+        # repository lifetime.  This preserves the repository's public
+        # constructor seam used by the verifier's mutation probes and prevents
+        # hostile process/.env model variables from activating any provider.
+        with _no_network(), mock.patch.object(
+            SystemModelServiceRegistry,
+            "load",
+            return_value=SystemModelServiceRegistry({}, {}),
+        ):
             repo = SQLiteRepository(settings)
             # Startup crash recovery is no longer a construction side effect
             # (it moved to app/services/startup_warmup.py::run_startup so
@@ -1867,6 +1878,39 @@ MIGRATION_MANIFEST[(23, 24)] = {
     "tables": KG_CANONICAL_SCRATCH_TABLE,
     "columns": {},
     "indexes": KG_CANONICAL_SCRATCH_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
+# v25: deployment-wide model-service health plus an irreversible data-only
+# scrub of per-user settings and legacy status rows. The retained v23 table and
+# user_profiles column are unchanged structurally; compare_snapshots validates
+# the only permitted row changes separately.
+SYSTEM_MODEL_SERVICE_STATUS_TABLE = {
+    "system_model_service_status": """CREATE TABLE system_model_service_status (
+                  service_id TEXT PRIMARY KEY,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (
+                    trigger IN ('manual_test', 'observed_failure', 'recovery_probe')
+                  ),
+                  support_id TEXT NOT NULL DEFAULT '',
+                  checked_at TEXT NOT NULL
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 25, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SYSTEM_MODEL_SERVICE_STATUS_TABLE},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(24, 25)] = {
+    "tables": SYSTEM_MODEL_SERVICE_STATUS_TABLE,
+    "columns": {},
+    "indexes": {},
     "triggers": {},
     "views": {},
 }

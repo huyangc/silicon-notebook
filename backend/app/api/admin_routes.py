@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import (
     admin_query_repository,
     get_current_user,
+    model_status_service,
     identity_repository,
     repository,
     require_notebook_access,
@@ -22,6 +23,8 @@ from app.models.admin import (
     PromotionRejectRequest,
 )
 from app.models.identity import UserProfile
+from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
+from app.services.model_status import ModelStatusService
 from app.repositories.sqlite.identity_store import (
     BuiltinAdminDemotionError,
     SelfDemotionError,
@@ -30,6 +33,36 @@ from app.services.pending_bus import pending_bus
 
 
 router = APIRouter()
+
+
+@router.post(
+    "/admin/model-services/{service_id}/test",
+    response_model=ModelServiceStatusItem,
+)
+def test_system_model_service(
+    service_id: str,
+    user: UserProfile = Depends(get_current_user),
+    status_service: ModelStatusService = Depends(model_status_service),
+) -> ModelServiceStatusItem:
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可测试模型服务")
+    try:
+        return status_service.test_one(service_id, actor_id=user.id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Model service not found")
+
+
+@router.post(
+    "/admin/model-services/test-all",
+    response_model=ModelServicesStatus,
+)
+def test_all_system_model_services(
+    user: UserProfile = Depends(get_current_user),
+    status_service: ModelStatusService = Depends(model_status_service),
+) -> ModelServicesStatus:
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可测试模型服务")
+    return status_service.test_all(actor_id=user.id)
 
 
 # --- Governance: promotion queue (Track F) ------------------------------

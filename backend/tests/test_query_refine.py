@@ -5,6 +5,8 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.retrieval import RetrievedKnowledge
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _RefineAnswerLLM:
@@ -29,8 +31,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    r = SQLiteRepository(Settings(), model_provider=RecordingModelProvider())
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -67,27 +69,37 @@ def _seed_hit(repo):
 
 
 def test_answer_reasoning_refines_when_enabled(repo):
-    """_answer_reasoning 应在 enabled 时通过 reasoning_llm_client 触发 refine。"""
-    repo.llm_client = _RefineAnswerLLM()
+    """Reasoning answer refinement uses the dedicated evidence workload."""
+    refine_client = _RefineAnswerLLM()
+    answer_client = _RefineAnswerLLM()
+    bind_chat_client(repo, "evidence_refine", refine_client)
+    bind_chat_client(repo, "ask_answer", answer_client)
     repo.settings.kg_query_refine_enabled = True
     nb, hits = _seed_hit(repo)
-    # reasoning_llm_client 回退到 llm_client（未配 REASONING_LLM_*）
     answer, grounded, anchors = repo._answer_reasoning(
         nb.id, "how does cascode affect output resistance?", hits, [], ""
     )
-    assert repo.llm_client.refine_calls == 1  # refinement happened before answering
-    assert repo.llm_client.answer_calls == 1
+    assert refine_client.refine_calls == 1
+    assert refine_client.answer_calls == 0
+    assert answer_client.refine_calls == 0
+    assert answer_client.answer_calls == 1
+    assert ("chat", "evidence_refine") in repo._runtime.models.calls
+    assert ("chat", "ask_answer") in repo._runtime.models.calls
     assert answer  # answer produced
 
 
 def test_answer_reasoning_no_refine_when_disabled(repo):
     """_answer_reasoning 在 refine disabled 时不触发 refine。"""
-    repo.llm_client = _RefineAnswerLLM()
+    refine_client = _RefineAnswerLLM()
+    answer_client = _RefineAnswerLLM()
+    bind_chat_client(repo, "evidence_refine", refine_client)
+    bind_chat_client(repo, "ask_answer", answer_client)
     repo.settings.kg_query_refine_enabled = False  # default is now True; disable explicitly
     nb, hits = _seed_hit(repo)
     answer, grounded, anchors = repo._answer_reasoning(nb.id, "q?", hits, [], "")
-    assert repo.llm_client.refine_calls == 0  # no refinement
-    assert repo.llm_client.answer_calls == 1
+    assert refine_client.refine_calls == 0
+    assert answer_client.refine_calls == 0
+    assert answer_client.answer_calls == 1
 
 
 def test_refine_context_prepends_focused_evidence(repo):

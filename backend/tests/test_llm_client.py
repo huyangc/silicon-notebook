@@ -61,13 +61,45 @@ def _api_status_error(status, message):
 
 
 def _make(monkeypatch, create):
-    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://x")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "m")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    c = OpenAICompatibleClient(Settings())
+    c = OpenAICompatibleClient(
+        Settings(_env_file=None),
+        base_url="https://x",
+        api_key="k",
+        model="m",
+    )
     monkeypatch.setattr(c, "client", lambda: _FakeOpenAI(create))
     return c
+
+
+def test_client_connection_pool_matches_explicit_service_capacity(monkeypatch):
+    captured = {}
+
+    class _HttpClient:
+        def __init__(self, *, timeout, limits):
+            captured.update(timeout=timeout, limits=limits)
+
+    monkeypatch.setattr(llm_mod.httpx, "Client", _HttpClient)
+    monkeypatch.setattr(llm_mod, "OpenAI", lambda **kwargs: captured.update(openai=kwargs) or object())
+    settings = Settings(_env_file=None)
+    client = OpenAICompatibleClient(
+        settings,
+        base_url="https://safe.example/v1",
+        api_key="key",
+        model="model",
+        max_connections=7,
+    )
+
+    client.client()
+
+    assert captured["limits"].max_connections == 7
+    assert captured["limits"].max_keepalive_connections == 7
+
+
+def test_raw_client_preserves_empty_success_for_scheduled_classification(monkeypatch):
+    create = _FakeCreate([_Resp("")])
+    client = _make(monkeypatch, create)
+    assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == ""
 
 
 def test_kg_llm_limits_have_bounded_defaults(monkeypatch):
@@ -262,16 +294,18 @@ def test_client_built_with_no_sdk_retries(monkeypatch):
         return object()
 
     monkeypatch.setattr(llm_mod, "OpenAI", fake_openai)
-    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://x")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "m")
-    c = OpenAICompatibleClient(Settings())
+    c = OpenAICompatibleClient(
+        Settings(_env_file=None),
+        base_url="https://x",
+        api_key="k",
+        model="m",
+    )
     c.client()
     assert captured.get("max_retries") == 0
 
 
 def test_override_params_win_over_global(monkeypatch):
-    """显式覆盖参数应优先于全局 OPENAI_COMPAT_*，并驱动 configured/base_url/model。"""
+    """Registry-supplied transport identity drives configured/base_url/model."""
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://global")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gk")
     monkeypatch.setenv("OPENAI_COMPAT_MODEL", "global-model")
@@ -287,13 +321,13 @@ def test_override_params_win_over_global(monkeypatch):
     assert create.calls[0]["model"] == "reason-model"  # 发出的是覆盖后的 model
 
 
-def test_default_params_fall_back_to_global(monkeypatch):
-    """不传覆盖参数 → 三项取全局 OPENAI_COMPAT_*（向后兼容）。"""
+def test_default_params_do_not_fall_back_to_retired_settings(monkeypatch):
+    """Raw protocol clients never resolve retired Settings/env endpoints."""
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://global")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "gk")
     monkeypatch.setenv("OPENAI_COMPAT_MODEL", "global-model")
     c = OpenAICompatibleClient(Settings())
-    assert c.base_url == "https://global"
-    assert c.api_key == "gk"
-    assert c.model == "global-model"
-    assert c.configured is True
+    assert c.base_url == ""
+    assert c.api_key == ""
+    assert c.model == ""
+    assert c.configured is False

@@ -19,6 +19,7 @@ from typing import (
     Iterable,
     List,
     Mapping,
+    Literal,
     Optional,
     Protocol,
     Sequence,
@@ -66,7 +67,6 @@ from app.models.knowledge import (
     ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate, PaginatedKnowledge,
 )
 from app.services.cancellation import CancelEvent
-from app.services.model_config import ResolvedModelConfig
 from app.services.notebook_scale import NotebookScaleFacts
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, RetrievedRelation,
@@ -144,30 +144,29 @@ class DirectedGraphPort(Protocol):
 
 class IdentityRepository(Protocol):
     def current_user(self) -> UserProfile: ...
-    def get_user_model_settings(self, user_id: str) -> dict: ...
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None: ...
-    def patch_user_model_settings_atomic(
-        self, user_id: str, patch: Mapping[str, Mapping[str, str | None] | None],
-    ) -> dict: ...
-    def get_model_service_statuses(self, user_id: str) -> dict[str, dict[str, Any]]: ...
-    def record_model_service_status(
-        self, user_id: str, service: str, config_fingerprint: str, status: str,
-        latency_ms: int, code: str, trigger: str, checked_at: str,
-    ) -> None: ...
-    def record_model_service_status_if_current(
-        self, user_id: str, service: str, expected_fingerprint: str, status: str,
-        latency_ms: int, code: str, trigger: str, checked_at: str,
-    ) -> bool: ...
-    def clear_model_service_statuses(
-        self, user_id: str, services: Sequence[str] | None = None,
-    ) -> None: ...
-    def resolve_model_config(self, user: UserProfile, role: str) -> ResolvedModelConfig: ...
     def create_user(self, username: str, password: str) -> UserProfile: ...
     def authenticate_user(self, username: str, password: str) -> UserProfile | None: ...
     def create_session(self, user_id: str) -> str: ...
     def resolve_session(self, token: str) -> UserProfile | None: ...
     def delete_session(self, token: str) -> None: ...
     def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]: ...
+
+
+class ModelStatusStorePort(Protocol):
+    def get_all(self) -> dict[str, dict[str, object]]: ...
+
+    def record(
+        self,
+        *,
+        service_id: str,
+        config_fingerprint: str,
+        status: Literal["ok", "error"],
+        latency_ms: int,
+        code: str,
+        trigger: Literal["manual_test", "observed_failure", "recovery_probe"],
+        support_id: str,
+        checked_at: str,
+    ) -> None: ...
 
 
 class NotebookAccessRepository(Protocol):
@@ -667,23 +666,13 @@ class AskGraphPort(Protocol):
 
 @runtime_checkable
 class ReasoningModelProvider(Protocol):
-    @property
-    def reasoning_llm_client(self) -> JsonChatClientPort: ...
+    def chat(self, workload_id: str) -> JsonChatClientPort: ...
+    def configured(self, workload_id: str) -> bool: ...
+    def parallelism(self, workload_id: str) -> int: ...
 
 
 class ModelClientProvider(ReasoningModelProvider, Protocol):
-    @property
-    def llm_client(self) -> JsonChatClientPort: ...
-    @llm_client.setter
-    def llm_client(self, value: JsonChatClientPort) -> None: ...
-    @property
-    def rewrite_llm_client(self) -> JsonChatClientPort: ...
-    @property
-    def kg_llm_client(self) -> JsonChatClientPort: ...
-    @property
-    def rerank_client(self) -> RerankClientPort: ...
-    @rerank_client.setter
-    def rerank_client(self, value: RerankClientPort) -> None: ...
+    def rerank(self, workload_id: str) -> RerankClientPort: ...
 
 
 class AskModelClientProvider(ModelClientProvider, Protocol):
@@ -694,19 +683,15 @@ class ModelErrorSink(Protocol):
     def note_model_error(
         self,
         stage: str,
-        model: str,
         error: Exception,
-        service: str = "",
         *,
-        provider_failure: bool = False,
-        failed_fingerprint: str = "",
+        workload_id: str,
     ) -> None: ...
 
 
 class FacadePropertyContract(ModelClientProvider, Protocol):
     settings: Settings
     storage_dir: Path
-    embedder: Any
     retrieval: RetrievalPort
 
 

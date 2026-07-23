@@ -96,6 +96,20 @@ def test_llm_logger_per_user(tmp_path):
     assert not (tmp_path / "logs" / "llm.jsonl").exists()
 
 
+def test_llm_interaction_support_scope_adds_the_opaque_support_id(tmp_path):
+    from app.core.llm_logging import LLMInteractionLogger, interaction_support_scope
+
+    logger = LLMInteractionLogger(Settings(
+        llm_log_path=str(tmp_path / "logs" / "llm.jsonl"),
+        llm_log_enabled=True,
+    ))
+    with interaction_support_scope("mdl-safe-correlation"):
+        logger.log({"kind": "chat", "model": "m", "status": "ok", "latency_ms": 1})
+
+    path = tmp_path / "logs" / "user-local" / f"llm-{_TODAY}.jsonl"
+    assert _read(path)[0]["support_id"] == "mdl-safe-correlation"
+
+
 def test_repo_event_log_is_per_user(tmp_path):
     from app.core.config import Settings
     from app.services.sqlite_repository import (
