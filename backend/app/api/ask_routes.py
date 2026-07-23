@@ -12,7 +12,9 @@ from app.api.deps import (
     notebook_catalog_repository,
     repository,
     require_notebook_read,
+    user_error,
 )
+from app.models.notebooks import NotebookSummary
 from app.models.ask import (
     AskRequest,
     AskResponse,
@@ -33,6 +35,19 @@ from app.services.cancellation import AskCancelled
 router = APIRouter()
 
 
+def _require_ask_available(notebook: NotebookSummary) -> None:
+    """硬约束(PR#334):笔记本在任一模式下都取不到可检索证据(NotebookSummary
+    .ask_available=False——无可见来源/knowhow chunk/可用 KG/带图参考库/confirmed memory)
+    时,回答只会是凭空生成,拒绝提问。前端会据同一信号禁用对话框,但那只是 UX;这里是
+    **权威闸门**——挡住前端快照陈旧(跨标签/并发删证据)、直连 HTTP 等一切旁路。"""
+    if not notebook.ask_available:
+        raise user_error(
+            409,
+            "该笔记本还没有可用于回答的内容，请先添加来源，"
+            "或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
+        )
+
+
 @router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
 def search_notebook(
     notebook_id: str,
@@ -46,8 +61,20 @@ def search_notebook(
 
 @router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
+    repo = repository()
     try:
-        return repository().ask(notebook_id, payload)
+        notebook = repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    # 先校验模式(422 malformed 请求),再查可用性(409 前置条件不满足),口径与 stream 一致。
+    try:
+        resolve_mode(payload.mode)
+    except UnknownAskMode as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+    _require_ask_available(notebook)
+    try:
+        return repo.ask(notebook_id, payload)
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
@@ -109,7 +136,7 @@ async def _stream_ask_events(
 async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
     repo = repository()
     try:
-        repo.get_notebook(notebook_id)
+        notebook = repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     try:
@@ -117,6 +144,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+    _require_ask_available(notebook)  # 硬约束:空库 ask 权威拒绝(复用上面已拉的快照,零额外查询)
     return StreamingResponse(
         _stream_ask_events(repo, notebook_id, payload, spec, request),
         media_type="application/x-ndjson",

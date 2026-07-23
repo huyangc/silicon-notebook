@@ -1,5 +1,7 @@
 from fastapi.testclient import TestClient
 
+from tests.ask_testkit import seed_ask_evidence
+
 
 def _client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
@@ -35,10 +37,37 @@ def test_unknown_mode_returns_422_not_silent_fast(tmp_path, monkeypatch):
     assert rs.status_code == 422
 
 
+def test_ask_on_empty_notebook_is_rejected_409(tmp_path, monkeypatch):
+    """PR#334 硬约束权威闸门:无任何可检索证据的空库,/ask 与 /ask/stream 都以 409
+    拒绝(带 X-User-Message 用户文案),不产生凭空回答;塞一条证据后放行。"""
+    from app.api.ask_routes import repository
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    r = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q", "mode": "chunk"})
+    assert r.status_code == 409
+    assert r.headers.get("X-User-Message") == "1"
+    assert "来源" in r.json()["detail"]
+
+    rs = client.post(f"/api/notebooks/{nb}/ask/stream", json={"question": "q", "mode": "chunk"})
+    assert rs.status_code == 409
+    assert rs.headers.get("X-User-Message") == "1"
+
+    # 未知模式(422)先于可用性(409)判定,即便空库也应报模式错。
+    bad = client.post(f"/api/notebooks/{nb}/ask/stream", json={"question": "q", "mode": "bogus"})
+    assert bad.status_code == 422
+
+    seed_ask_evidence(repository(), nb)
+    ok = client.post(f"/api/notebooks/{nb}/ask/stream", json={"question": "q", "mode": "chunk"})
+    assert ok.status_code == 200
+
+
 def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
     import json
     client = _client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repository(), nb)  # PR#334:空库 ask 会 409,先塞一条证据
     r = client.post(f"/api/notebooks/{nb}/ask/stream",
                     json={"question": "q", "mode": "chunk"})
     assert r.status_code == 200
@@ -64,6 +93,7 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
     repo = repository()
+    seed_ask_evidence(repo, nb)  # PR#334:空库 ask 会 409,先塞一条证据
     service = repo._runtime.ask_service()
     seen = {}
 

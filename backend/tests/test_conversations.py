@@ -5,6 +5,7 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
 from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
+from tests.ask_testkit import seed_ask_evidence
 
 class FakeLLM:
     configured = True
@@ -121,6 +122,8 @@ def test_conversation_routes(tmp_path, monkeypatch):
     from app.main import app
     client = TestClient(app)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    from app.api.ask_routes import repository
+    seed_ask_evidence(repository(), nb)  # PR#334:空库 ask 会 409,先塞一条证据
     r = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q1"})
     assert r.status_code == 200
     cid = r.json()["conversation_id"]
@@ -141,6 +144,8 @@ def test_conversation_mutation_routes(tmp_path, monkeypatch):
     from app.api.ask_routes import repository
     client = TestClient(app)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    from app.api.ask_routes import repository
+    seed_ask_evidence(repository(), nb)  # PR#334:空库 ask 会 409,先塞一条证据
     cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]
     with repository()._connect() as db:
         job_id = db.execute(
@@ -311,6 +316,7 @@ def test_bulk_delete_conversations_route(tmp_path, monkeypatch):
     from app.api.ask_routes import repository
     client = TestClient(app)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repository(), nb)  # PR#334:空库 ask 会 409,先塞一条证据
     cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]
 
     # age the conversation's last activity to long ago (external connection, no concurrent write)

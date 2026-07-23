@@ -5736,6 +5736,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.ask_stream",
         "target": "get_notebook"
       },

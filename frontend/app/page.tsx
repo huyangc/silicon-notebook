@@ -2506,6 +2506,10 @@ export default function Home() {
     setSourcesTotal((t) => t + uploaded.length);
     setNotebookSourceTotal((t) => t + uploaded.length);
     await loadNotebookCollection();
+    // P1(codex PR#334 第9轮):快传小文件可能后台已解析完(返回即 extracted),hasPending 保持
+    // false → 处理轮询的 reachedExtracted 分支不触发 → ask_available 陈旧为假、对话框空锁。显式
+    // 重拉解禁;仍在解析中的慢路径由处理轮询覆盖。
+    revalidateAskAvailability();
     setStagedFiles([]);
     setStagedDocTypes([]);
     setSourceModalOpen(false);
@@ -2539,6 +2543,7 @@ export default function Home() {
         // 故链接导入 +N 后满额判定同步跟进。
         setNotebookSourceTotal((t) => t + result.created.length);
         await loadNotebookCollection();
+        revalidateAskAvailability(); // P1:导入即产出可检索证据时解禁对话框(同 confirmUpload)
       }
       setUrlRejected(result.rejected);
       setToast(`已添加 ${result.created.length} 个，被拒 ${result.rejected.length} 个`);
