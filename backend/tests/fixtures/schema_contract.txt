@@ -22,6 +22,9 @@ answers.question|TEXT|1|''|0
 answers.payload|TEXT|1|'{}'|0
 answers.created_at|TEXT|1|None|0
 answers.conversation_id|TEXT|0|None|0
+app_settings.key|TEXT|0|None|1
+app_settings.value|TEXT|1|None|0
+app_settings.updated_at|TEXT|1|None|0
 ask_jobs.id|TEXT|0|None|1
 ask_jobs.notebook_id|TEXT|1|None|0
 ask_jobs.conversation_id|TEXT|1|''|0
@@ -507,6 +510,7 @@ user_profiles.domain_focus|TEXT|1|'[]'|0
 user_profiles.created_at|TEXT|1|None|0
 user_profiles.updated_at|TEXT|1|None|0
 user_profiles.model_settings|TEXT|1|'{}'|0
+user_profiles.upload_document_limit|INTEGER|0|None|0
 users.id|TEXT|0|None|1
 users.email|TEXT|1|None|0
 users.display_name|TEXT|1|None|0

@@ -25,6 +25,14 @@ from app.repositories.sqlite.database import SqliteDatabase
 _UNSET = object()
 
 
+# 「用户可见文档」的判定谓词 —— 排除 Memory 派生源与 knowhow 表隐藏投影源
+# (source_type IN ('memory', 'knowhow')):两者都是无独立用户可见内容的内部派生链接。
+# 这是 list_sources_page 的 total_count 与文档数量上限强制(visible_document_count)
+# 的**单一真源**:两处口径逐字一致才不会出现「面板显示 19 篇但配额算到 18」。
+# 内部真集路径(get_source/pending_kg/copy/scale-index)刻意不用它,保留完整集合。
+VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory', 'knowhow')"
+
+
 def _created_label(value: str) -> str:
     try:
         dt = datetime.fromisoformat(value)
@@ -72,7 +80,7 @@ class SourceStore:
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM sources WHERE notebook_id = ? "
-                "AND source_type NOT IN ('memory', 'knowhow') "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
                 "ORDER BY created_at ASC",
                 (notebook_id,),
             ).fetchall()
@@ -87,7 +95,7 @@ class SourceStore:
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         needle = (q or "").strip().lower()
-        where = "WHERE notebook_id = ? AND source_type NOT IN ('memory', 'knowhow')"
+        where = f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
         params: List[object] = [notebook_id]
         if needle:
             where += (
@@ -108,6 +116,18 @@ class SourceStore:
             ).fetchall()
             items = self.sources_from_rows(db, rows)
         return PaginatedSources(items=items, total_count=total, offset=offset, limit=limit)
+
+    def visible_document_count(self, notebook_id: str) -> int:
+        """本笔记本「用户可见文档」数量 —— 与 list_sources_page 的 total_count 逐字
+        同口径(共用 VISIBLE_SOURCE_TYPES_PREDICATE),是文档数量上限强制的当前计数。
+        排除 Memory 派生源与 knowhow 隐藏投影源;内部真集路径不走此方法。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS c FROM sources "
+                f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
+                (notebook_id,),
+            ).fetchone()
+        return int(row["c"])
 
     def get_source(self, source_id: str) -> SourceDetail:
         with self.database.connect() as db:

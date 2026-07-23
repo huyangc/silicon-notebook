@@ -30,9 +30,10 @@ def test_schema_version_constant_is_v27():
     # KG 构建任务状态表 v22、每用户模型服务最新状态表 v23、写锁瘦身改造点 2 的
     # kg_canonical_scratch 表 v24、v25 清除用户模型凭据与旧状态并改为系统模型
     # 服务状态、knowhow 表版本管理的 knowhow_changes/knowhow_milestones 两表 v26、
-    # v27 加源完成标记 sources.chunked_at 列，均保留；与 facade 模块级
+    # v27 加源完成标记 sources.chunked_at 列、v28 每笔记本文档数量上限的 app_settings
+    # 表 + user_profiles.upload_document_limit 列，均保留；与 facade 模块级
     # SCHEMA_VERSION 同步。
-    assert SCHEMA_VERSION == 27
+    assert SCHEMA_VERSION == 28
 
 
 def test_add_column_guard_on_missing_table(tmp_path):

@@ -249,7 +249,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 
 @dataclass(frozen=True)
@@ -689,6 +689,22 @@ class SQLiteRepository:
 
     def delete_session(self, token: str) -> None:
         return self._runtime.identity.delete_session(token)
+
+    # ---- 每笔记本文档数量上限:只读配额投影(强制在 source_routes 内做) ----
+    def visible_document_count(self, notebook_id: str) -> int:
+        return self._runtime.source_store.visible_document_count(notebook_id)
+
+    def global_document_limit_default(self) -> int:
+        return self._runtime.identity.global_document_limit_default()
+
+    def user_document_limit_override(self, user_id: str) -> "int | None":
+        return self._runtime.identity.user_document_limit_override(user_id)
+
+    def effective_document_limit(self, user_id: "str | None") -> int:
+        return self._runtime.identity.effective_document_limit(user_id)
+
+    def notebook_owner(self, notebook_id: str) -> "tuple[str | None, str | None]":
+        return self._runtime.identity.notebook_owner(notebook_id)
 
     def list_user_usage(self) -> List[Dict[str, Any]]:
         return self._runtime.queries.list_user_usage()
@@ -1434,9 +1450,10 @@ class SQLiteRepository:
         notebook_id: str,
         urls: Iterable[str],
         scheduler: Optional[Callable[[str], None]] = None,
+        capacity: "int | None" = None,
     ) -> AddUrlSourcesResult:
         return self._runtime.source_ingestion.add_url_sources_compat(
-            notebook_id, urls, scheduler
+            notebook_id, urls, scheduler, capacity=capacity
         )
 
     def upload_sources(

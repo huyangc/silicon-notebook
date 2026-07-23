@@ -224,10 +224,10 @@ class SourceIngestionService:
         return self.import_sources(notebook_id, payload, self.pipeline_hooks())
 
     def add_url_sources_compat(
-        self, notebook_id: str, urls: Iterable[str], scheduler=None
+        self, notebook_id: str, urls: Iterable[str], scheduler=None, capacity=None
     ) -> AddUrlSourcesResult:
         return self.add_url_sources(
-            notebook_id, urls, scheduler, self.pipeline_hooks()
+            notebook_id, urls, scheduler, self.pipeline_hooks(), capacity=capacity
         )
 
     def upload_sources_compat(
@@ -330,9 +330,14 @@ class SourceIngestionService:
         urls: Iterable[str],
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
+        capacity: "int | None" = None,
     ) -> AddUrlSourcesResult:
-        """逐 URL 初筛(非 PDF/不可达/超限→rejected,不建来源);通过的建 source_url
-        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。"""
+        """逐 URL 初筛(空白跳过;非 PDF/不可达→rejected,不建来源);通过的建 source_url
+        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。
+
+        capacity 是「每笔记本文档数量上限」的剩余额度(None=不限,如 admin 笔记本):容量
+        按**成功探测逐条**扣减——探测通过但额度已用尽的 URL 进 rejected(超限原因),不消耗
+        配额。故一个无效链接不会拖累整批,接近上限时仍能建成额度内的有效来源。"""
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
         if not (
@@ -343,6 +348,7 @@ class SourceIngestionService:
             )
         created: List[SourceSummary] = []
         rejected: List[RejectedUrl] = []
+        budget = capacity  # None=不限;int=剩余可建数,每建成一个 -1
         for raw in urls:
             url = (raw or "").strip()
             if not url:
@@ -350,6 +356,11 @@ class SourceIngestionService:
             probe = remote_sources.probe_pdf(url)
             if not probe.ok:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
+                continue
+            if budget is not None and budget <= 0:
+                rejected.append(
+                    RejectedUrl(url=url, reason="已达该笔记本的文档数量上限，未添加")
+                )
                 continue
             source_id = self.new_id("src")
             self.sources.insert_source(
@@ -372,6 +383,8 @@ class SourceIngestionService:
             else:
                 self.process_source(source_id, hooks)
             created.append(self.sources.get_source(source_id))
+            if budget is not None:
+                budget -= 1
         return AddUrlSourcesResult(created=created, rejected=rejected)
 
     def upload_sources(

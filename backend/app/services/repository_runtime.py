@@ -125,7 +125,7 @@ class RepositoryRuntime:
         set_observation_sink = getattr(self.models, "set_observation_sink", None)
         if callable(set_observation_sink):
             set_observation_sink(self.model_status.record_provider_observation)
-        self.queries = QueryStore(self.database)
+        self.queries = QueryStore(self.database, self.settings)
         self.notebook_store = NotebookStore(
             self.database,
             new_id=seams.new_id,

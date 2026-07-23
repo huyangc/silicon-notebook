@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1654,6 +1654,30 @@ class SqliteMigrator:
                 "UPDATE sources SET chunked_at = updated_at "
                 "WHERE chunked_at IS NULL AND parse_status IN "
                 "('parsed','extracting','extracted')"
+            )
+
+    def _migration_28(self) -> None:
+        """每笔记本文档数量上限(per-user 可配)：app_settings KV 表 + user_profiles
+        新增可空列 upload_document_limit。
+
+        与近期迁移(v22/23/26/27)同款单层写法:新表/新列**只**在本步定义,不再回写
+        _migration_1 baseline。migrate() 对全新库全量 sweep 1..28,本步随之执行建表/
+        补列;已部署库(user_version>=1)也靠本步补齐。CREATE TABLE IF NOT EXISTS +
+        add_column_if_missing 均幂等。upload_document_limit 经 add_column_if_missing
+        追加,落在 user_profiles 末尾(model_settings 之后);全新库与升级库列序一致
+        (同 memory_id / doc_type 的列序约束)。"""
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self.add_column_if_missing(
+                db, "user_profiles", "upload_document_limit", "INTEGER"
             )
 
     def _recover_interrupted_jobs(self) -> None:

@@ -1986,6 +1986,26 @@ MIGRATION_MANIFEST[(25, 26)] = {
 SOURCES_CHUNKED_AT_COLUMN = {
     "chunked_at": ("chunked_at", "TEXT", 0, None, 0),
 }
+# v28 层级联在 v27 之上：每笔记本文档数量上限 —— app_settings 全局设置 KV 表 +
+# user_profiles.upload_document_limit 可空列。字典推导把上面每条 (X, 27) 条目重基到
+# (X, 28) 并叠加 app_settings 表与该列，随后显式登记 (27, 28) hop —— 与前面各层同款。
+# app_settings 是全新表（每条 hop 的 tables allowlist 都含它）；user_profiles 自 v1
+# baseline 就存在（其 model_settings 列在 v9 fixture 里已具备，故不是迁移新增），所以
+# upload_document_limit 是每条 hop 唯一新增的 user_profiles 列，属于 columns allowlist
+# （镜像 v20 对 promotion_candidates.target_base_id 的处理）。SQL 文本与已部署库
+# sqlite_master 存储逐字一致（"IF NOT EXISTS" 被 SQLite 剥除）。
+APP_SETTINGS_TABLE = {
+    "app_settings": (
+        "CREATE TABLE app_settings (\n"
+        "                  key TEXT PRIMARY KEY,\n"
+        "                  value TEXT NOT NULL,\n"
+        "                  updated_at TEXT NOT NULL\n"
+        "                )"
+    ),
+}
+USER_PROFILES_UPLOAD_LIMIT_COLUMN = {
+    "upload_document_limit": ("upload_document_limit", "INTEGER", 0, None, 0),
+}
 MIGRATION_MANIFEST = {
     (key[0], 27, *key[2:]): {
         **manifest,
@@ -1994,6 +2014,20 @@ MIGRATION_MANIFEST = {
             "sources": {
                 **manifest["columns"].get("sources", {}),
                 **SOURCES_CHUNKED_AT_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST = {
+    (key[0], 28, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **APP_SETTINGS_TABLE},
+        "columns": {
+            **manifest["columns"],
+            "user_profiles": {
+                **manifest["columns"].get("user_profiles", {}),
+                **USER_PROFILES_UPLOAD_LIMIT_COLUMN,
             },
         },
     }
@@ -2008,6 +2042,16 @@ MIGRATION_MANIFEST = {
 MIGRATION_MANIFEST[(26, 27)] = {
     "tables": {},
     "columns": {"sources": SOURCES_CHUNKED_AT_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+# The single-hop (27, 28) entry — 每笔记本文档数量上限层。同上，无 fixture 走纯
+# v27→v28 replay，靠上面的 (X,28) 广播段实际生效；保留此条以镜像 append 约定、
+# 并供未来 v27 回滚 fixture 直接命中。
+MIGRATION_MANIFEST[(27, 28)] = {
+    "tables": APP_SETTINGS_TABLE,
+    "columns": {"user_profiles": USER_PROFILES_UPLOAD_LIMIT_COLUMN},
     "indexes": {},
     "triggers": {},
     "views": {},
