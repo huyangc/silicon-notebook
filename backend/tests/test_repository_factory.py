@@ -120,7 +120,16 @@ def _sqlite_persistence_construction_sites_from_sources(
     seen: set[tuple[str, ast.AST, str]] = set()
 
     for relative, source in sources.items():
-        if relative == "app/repositories/sqlite/bundle.py":
+        # bundle.py is the sole construction ROOT; database.py is the DEFINITION
+        # module of SqliteDatabase — its own module-level introspection of the
+        # class (e.g. ``SqliteDatabase.write.__wrapped__.__code__`` for the
+        # write-lock guard, predating the bundle factory) references the name but
+        # never CONSTRUCTS it, so it is a definition-site self-reference, not an
+        # off-root construction.
+        if relative in {
+            "app/repositories/sqlite/bundle.py",
+            "app/repositories/sqlite/database.py",
+        }:
             continue
         tree = ast.parse(source, filename=relative)
         module_parts = list(Path(relative).with_suffix("").parts)
@@ -649,8 +658,9 @@ def test_runtime_late_wiring_uses_declared_methods_on_slot_only_store_ports(tmp_
         __slots__ = (
             "database", "identity", "notebooks", "sharing", "sources", "chunks",
             "embeddings", "knowledge", "governance", "index_projection",
-            "kg_build_jobs", "knowhow", "knowhow_transfer", "memory", "queries",
-            "reports", "ask_state", "unified_kg",
+            "kg_build_jobs", "knowhow", "knowhow_history", "knowhow_transfer",
+            "memory", "queries", "reports", "ask_state", "unified_kg",
+            "model_status",
         )
 
         def __init__(self, delegate):
