@@ -49,11 +49,31 @@ class CachedEmbedder:
         # base_url 一并入键：见 __init__，隔离不同 endpoint 的同名模型。
         return embed_key(self._model, text[:self._truncate_chars], self._base_url)
 
+    def _expected_dim(self) -> int:
+        """本 embedder 声明的**原生输出维度**——缓存里存的就是这个维度的原始 API 向量
+        （4096→1024 的运行时截断在消费侧、绝不在本层，见模块 docstring；inner 直接
+        返回后端原维向量，未截断）。取 inner.dim：DashscopeEmbedder 构造时置
+        `self.dim = settings.embed_dim`，语义即「存储/模型原生维」，是这条服务向量该
+        有的维度的权威来源（比在本层另读 settings 更贴近「这个 inner 会产出多少维」）。
+
+        期望值只用于「命中/写入维度必须等于原生维」这道门（round-8 P2-1）：
+        embedding_batch_dim 只查**批内一致**，provider 偶发返回一批内部一致却错维
+        （如全 2 维）的向量能过它，写进去就静默零召回、且服务恢复也修不好（命中即不
+        再打后端）。要求维度 == 原生维即挡住这类「批内一致但整体错维」。
+
+        拿不到或非正整数（unpickle 空壳、无 dim 的测试双桩、误配）→ 返回 0：下面两处
+        用 `if native and ...` 守卫，native==0 时这道门整体让开，退化为「只有既有的批内
+        一致门」的旧行为——绝不因取不到维度而拒绝所有命中拖垮主流程。getattr 带默认、
+        不抛异常，与「缓存故障永不影响主流程」一致。"""
+        dim = getattr(self._inner, "dim", 0)
+        return dim if isinstance(dim, int) and dim > 0 else 0
+
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         texts = list(texts)
         if not texts:
             return []
         keys = [self._key(t) for t in texts]
+        expected_dim = self._expected_dim()  # 原生维；0=取不到，下面的门整体让开
         cached: Dict[str, List[float]] = {}
         for key in set(keys):
             try:
@@ -61,6 +81,12 @@ class CachedEmbedder:
                 # 解码也在 try 之内：坏条目（非 JSON、不是数组）同样只能退化成
                 # miss。放在 try 之外的话，一条损坏的缓存行会把异常抛进主流程。
                 vec = _decode(raw) if raw is not None else None
+                # 命中侧维度门（round-8 P2-1）：存的是原始 API 维向量，命中一条维度
+                # 不等于原生维的（provider 曾抖动写入的错维毒、或跨配置残留）→ 当 miss
+                # 重取，绝不把错维向量喂给下游（截断/相似度会静默零召回）。native==0
+                # 时让开这道门（保持旧行为）。
+                if vec is not None and expected_dim and len(vec) != expected_dim:
+                    vec = None
             except Exception:      # 缓存故障退化为 miss，绝不影响主流程
                 vec = None
             if vec is not None:
@@ -100,6 +126,12 @@ class CachedEmbedder:
                 # 处置由上游各调用点的既有降级逻辑负责）——只是不落缓存。
                 cached[key] = list(vec)
                 if not is_cacheable_embedding(vec, batch_dim):
+                    continue
+                # 写入侧维度门（round-8 P2-1）：批内一致（batch_dim）挡不住「整批内部
+                # 一致却错维」（provider 偶发全返 2 维）。要求维度 == 原生维，才不会把
+                # 这种错维向量固化 90 天（命中即不再打后端，服务恢复也修不好）。
+                # native==0（取不到维度）时让开，退化为只剩批内一致门（旧行为）。
+                if expected_dim and len(vec) != expected_dim:
                     continue
                 try:
                     self._backend.put(key, _encode(vec), tag=self._model)

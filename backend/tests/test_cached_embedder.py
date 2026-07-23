@@ -171,6 +171,62 @@ def test_inconsistent_vector_dims_in_one_response_are_not_cached(tmp_path):
     assert backend.get(cached._key("b")) is None, "维度存疑的响应被写进了缓存(b)"
 
 
+def test_consistent_but_off_native_dim_response_is_not_cached(tmp_path):
+    """provider 偶发返回一批**内部一致却错维**（全 2 维，原生维应为 4）的向量。
+
+    embedding_batch_dim 只查批内一致（都 2 维 → batch_dim=2），is_cacheable_embedding
+    据它判过；写进去就是静默零召回，且服务恢复也修不好（命中即不再打后端）。要求
+    维度 == inner 声明的原生维（dim=4）才挡得住这种「批内一致但整体错维」。
+    变异验证：去掉写入侧 `len(vec) == expected_dim` 门后本测试转红（上面那条批内
+    一致门放它过，挡不住这个变异）。
+    """
+
+    class OffDimEmbedder(RecordingEmbedder):
+        dim = 4
+
+        def embed_texts(self, texts):
+            self.calls.append(list(texts))
+            return [[1.0, 2.0] for _ in texts]  # 内部一致但只有 2 维（原生维=4）
+
+    inner = OffDimEmbedder()
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000,
+                            base_url="https://embed.test")
+
+    out = cached.embed_texts(["a", "b"])
+    assert out == [[1.0, 2.0], [1.0, 2.0]], "本次调用照常返回后端给的东西"
+    assert backend.get(cached._key("a")) is None, "错维向量（2≠原生 4）绝不入缓存(a)"
+    assert backend.get(cached._key("b")) is None, "错维向量（2≠原生 4）绝不入缓存(b)"
+
+
+def test_off_native_dim_cache_hit_is_treated_as_miss_and_refetched(tmp_path):
+    """已在缓存里的错维毒（早于本修复由抖动写入，或跨配置残留）命中时必须当 miss、
+    重取正确维度，绝不把 2 维向量喂给下游（截断/相似度会静默零召回）。
+    变异验证：去掉命中侧 `len(vec) == expected_dim` 门后，预置的 2 维毒被 serve、
+    根本不打后端 → inner.calls == [] → 本测试转红。
+    """
+    import json
+
+    inner = RecordingEmbedder()  # dim=4, returns 4-dim
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000,
+                            base_url="https://embed.test")
+    # 预置一条 2 维毒在 "a" 的键上（模拟历史抖动写入的错维缓存行）。
+    backend.put(cached._key("a"), json.dumps([1.0, 2.0]), tag="m1")
+
+    out = cached.embed_texts(["a"])
+    assert inner.calls == [["a"]], "命中错维毒必须真的打后端重取，而不是 serve 毒"
+    assert out == [inner._vec("a")], "返回后端重取的正确维向量"
+    assert len(out[0]) == 4
+    # 重取后写回的是正确维（4）的向量，后续命中正常。
+    assert _decode_len(backend.get(cached._key("a"))) == 4, "错维毒被正确维向量覆盖"
+
+
+def _decode_len(raw):
+    import json
+    return len(json.loads(raw))
+
+
 def test_healthy_response_is_still_cached(tmp_path):
     """准入规则不能靠"一律不写"蒙混过关——正常响应必须照旧入缓存。"""
     inner, cached = _mk(tmp_path)
