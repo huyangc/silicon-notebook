@@ -301,11 +301,18 @@ def user_error(status_code: int, message: str) -> HTTPException:
 
 
 from app.services.content_overview import ContentOverviewService  # noqa: E402
+from app.services.checkup import CheckupService  # noqa: E402
 
 
 def content_overview_service() -> ContentOverviewService:
     runtime = repository()._runtime  # type: ignore[attr-defined]
     return ContentOverviewService(runtime.memory_store, runtime.knowhow_store)
+
+
+def checkup_service() -> CheckupService:
+    """体检聚合 service(P2)。已由 RepositoryRuntime 组合(collaborator 全 wire 好),
+    直接取 runtime 上的单例——与 content_overview_service 同款、不经 facade surface。"""
+    return repository()._runtime.checkup  # type: ignore[attr-defined]
 
 
 def shutdown_repository_if_initialized() -> None:

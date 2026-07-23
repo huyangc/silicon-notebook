@@ -223,6 +223,14 @@
       "kind": "independent_private",
       "path": "backend/app/api/deps.py",
       "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.checkup_service",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
       "scope": "<module>.content_overview_service",
       "target": "_runtime"
     },
