@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   summarizeChange, originLabel, groupChangesByDay, foldLocalChanges, isStaleHead,
   describeColumnChange, summarizeRevertImpact, isCellHistoryEntryRestorable,
+  mergeMilestoneTimeline, earliestComparePoint,
 } from "./knowhow-history-logic.ts";
 
 // payload 字段名按后端真实形状（design doc
@@ -416,4 +417,50 @@ test("isCellHistoryEntryRestorable: after 是与当前不同的非空字符串�
 
 test("isCellHistoryEntryRestorable: after 是空字符串且当前非空——可恢复（清空是合法的可恢复状态，不同于 null）", () => {
   assert.equal(isCellHistoryEntryRestorable("", "当前非空内容"), true);
+});
+
+
+// --- codex 第 2 轮 P2：里程碑在旧页 / 两版对比最早起点 -----------------------
+// 复用文件顶部既有的 chg({ ...override }) helper（别重定义，const 重声明会崩）。
+
+test("mergeMilestoneTimeline: 里程碑对应流水在旧页（不在已加载 changes）也能显示", () => {
+  const loaded = [chg({ seq: 50 }), chg({ seq: 49 })];        // 当前页
+  const milestoneSeqs = new Set([50, 12]);                    // 12 在更旧的一页
+  const extra = [chg({ seq: 12, kind: "table_meta" })];       // 被单独抓回来的那条
+  const merged = mergeMilestoneTimeline(loaded, milestoneSeqs, extra);
+  assert.deepEqual(merged.map((c) => c.seq), [50, 12], "seq 倒序，含补抓回来的 12");
+});
+
+test("mergeMilestoneTimeline: 已加载的优先于补抓的（同 seq 不重复）", () => {
+  const loaded = [chg({ seq: 50, kind: "cell_update" })];
+  const merged = mergeMilestoneTimeline(loaded, new Set([50]), [chg({ seq: 50, kind: "revert" })]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].kind, "cell_update", "同 seq 保留已加载的权威副本");
+});
+
+test("mergeMilestoneTimeline: 非里程碑 seq 不进结果", () => {
+  const merged = mergeMilestoneTimeline([chg({ seq: 50 }), chg({ seq: 49 })], new Set([50]), []);
+  assert.deepEqual(merged.map((c) => c.seq), [50]);
+});
+
+test("earliestComparePoint: 链条到达建表 → seq 0「表创建之初」", () => {
+  const changes = [chg({ seq: 3 }), chg({ seq: 2 }), chg({ seq: 1, kind: "table_create" })];
+  assert.deepEqual(earliestComparePoint(changes, false), {
+    value: 0, label: "最早（表创建之初）",
+  });
+});
+
+test("earliestComparePoint: 存量表/prune 后（最老不是建表）→ 最早保留 seq−1、不谎称建表", () => {
+  const changes = [chg({ seq: 9 }), chg({ seq: 8 }), chg({ seq: 7 })];  // 最老 seq=7，非建表
+  assert.deepEqual(earliestComparePoint(changes, false), {
+    value: 6, label: "最早（保留的记录起点）",
+  });
+});
+
+test("earliestComparePoint: 还有更早未加载（hasMoreOlder）→ 不给「最早」选项", () => {
+  assert.equal(earliestComparePoint([chg({ seq: 9 }), chg({ seq: 8 })], true), null);
+});
+
+test("earliestComparePoint: 空 changes → null", () => {
+  assert.equal(earliestComparePoint([], false), null);
 });

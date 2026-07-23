@@ -289,6 +289,17 @@ class NotebookCopyService:
             self._store.insert_copy_rows(
                 "knowhow_cell_code", cell_code_out, chunk_size=chunk_size
             )
+            # 版本管理创世流水（codex 第 2 轮 P2）：knowhow 表内容已全部插完，
+            # 为每个拷贝表补一条 table_create，让它有可回退到的拷贝态起点——
+            # 单表 copy_table 早就这么做了，整本深拷贝这条路径此前漏了。指纹在
+            # 此刻算才反映完整表状态，故必须放在 cell/cell_code 插入之后。
+            self._store.seed_copied_knowhow_genesis(
+                list(khtbl_map.values()),
+                new_id=self._seams.new_id,
+                now=self._seams.now,
+                actor=new_owner_id,
+                note=f"随笔记本《{source_notebook.name}》复制而来",
+            )
             # --- end knowhow business tables -------------------------------
 
             elements_out = []

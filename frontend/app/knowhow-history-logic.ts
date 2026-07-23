@@ -370,3 +370,46 @@ export function isCellHistoryEntryRestorable(after: string | null, currentConten
   // 见该文件 isHead 用法）。
   return after !== currentContentMd;
 }
+
+// codex 第 2 轮 P2：「只看里程碑」模式下，里程碑指向的流水可能落在还没加载进来
+// 的更旧一页里——单纯 `changes.filter(命中里程碑 seq)` 会把它漏掉，界面误报
+// 「还没有里程碑」。组件负责把缺失的那几条流水按 seq 单独抓回来（extra），这个
+// 纯函数把「已加载命中的」与「补抓回来的」按 seq 去重合并、seq 倒序，供列表渲染。
+export function mergeMilestoneTimeline(
+  loaded: KnowhowChange[],
+  milestoneSeqs: Set<number>,
+  extra: KnowhowChange[],
+): KnowhowChange[] {
+  const bySeq = new Map<number, KnowhowChange>();
+  for (const change of loaded) {
+    if (milestoneSeqs.has(change.seq)) bySeq.set(change.seq, change);
+  }
+  for (const change of extra) {
+    // 已加载的优先（是同一条流水的更权威副本）；只补 loaded 里没有的。
+    if (milestoneSeqs.has(change.seq) && !bySeq.has(change.seq)) {
+      bySeq.set(change.seq, change);
+    }
+  }
+  return [...bySeq.values()].sort((a, b) => b.seq - a.seq);
+}
+
+// codex 第 2 轮 P2：两版对比的「最早」起点选项此前无条件是 seq 0（表创建之初）。
+// 但存量表（版本管理上线前建的）与「清理历史」之后，保留的链条并不从 table_create
+// 开始——选 seq 0 会得到一个标着「从建表」却实际不完整的结果。此函数按保留链条的
+// 真实起点给出正确的「最早」选项（changes 为 seq 倒序，最后一个是最老的）：
+//   · 链条确实到达建表（最老一条是 table_create 且没有更早未加载）→ seq 0，标「表创建之初」
+//   · 到底了但不是建表（存量表 / prune 后）→ 最早保留 seq − 1（(from,to] 才含最早那条），
+//     标「保留的记录起点」，不谎称从建表
+//   · 还有更早未加载（hasMoreOlder）→ 当前页不是最早，不给「最早」选项，避免以偏概全
+export function earliestComparePoint(
+  changes: KnowhowChange[],
+  hasMoreOlder: boolean,
+): { value: number; label: string } | null {
+  if (changes.length === 0) return null;
+  const earliest = changes[changes.length - 1];
+  if (hasMoreOlder) return null;
+  if (earliest.kind === "table_create") {
+    return { value: 0, label: "最早（表创建之初）" };
+  }
+  return { value: earliest.seq - 1, label: "最早（保留的记录起点）" };
+}

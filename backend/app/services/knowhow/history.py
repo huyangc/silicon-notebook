@@ -51,6 +51,13 @@ def aggregate_diff(changes: list[dict]) -> dict:
     """
     cell_acc: dict[tuple[str, str], list] = {}
     row_state: dict[str, dict] = {}
+    # 行的双端点存在性（对称于下面列的 column_existed_before/exists_after）：
+    # 专用于过滤幽灵格子（codex 第 2 轮 P2）。row_state 的抵消（add↔delete 都
+    # 删）分不清「先增后删（两端点都不存在）」与「先删后增（两端点都存在）」，
+    # 而格子该不该出现在净 diff 里恰恰取决于此——只有其行/列两端点都不存在时
+    # 才是应剔除的幽灵格子。
+    row_existed_before: dict[str, bool] = {}
+    row_exists_after: dict[str, bool] = {}
     column_existed_before: dict[str, bool] = {}
     column_exists_after: dict[str, bool] = {}
     column_before_fields: dict[str, dict] = {}
@@ -67,6 +74,13 @@ def aggregate_diff(changes: list[dict]) -> dict:
             cell_acc[key][1] = after
 
     def apply_row(row_id: str, row: dict, status: str) -> None:
+        # 双端点存在性追踪（不影响下面 row_state 的抵消逻辑，只供格子过滤用）。
+        if status == "added":
+            row_existed_before.setdefault(row_id, False)
+            row_exists_after[row_id] = True
+        else:  # removed
+            row_existed_before.setdefault(row_id, True)
+            row_exists_after[row_id] = False
         existing = row_state.get(row_id)
         if existing is not None and existing["status"] != status:
             del row_state[row_id]  # 先增后删/先删后增，两边都清掉（无条件抵消）
@@ -168,10 +182,22 @@ def aggregate_diff(changes: list[dict]) -> dict:
         # 其余 kind（table_create/cell_code_put/cell_code_delete）不在本函数
         # 的输出范围内，见函数 docstring 末段。
 
+    def _net_cancelled(existed_before: dict, exists_after: dict, key: str) -> bool:
+        """key（行 id 或列 id）在区间内被增删过、且两端点都不存在 → 它承载的
+        格子是幽灵格子（净 diff 里不该出现其行/列都不在的格子）。只有被追踪过
+        （出现在 existed_before）才判定；从没动过增删的行/列两端点都在，不剔。"""
+        return (
+            key in existed_before
+            and not existed_before[key]
+            and not exists_after.get(key, True)
+        )
+
     cells_out = [
         {"row_id": row_id, "column_id": column_id, "before": before, "after": after}
         for (row_id, column_id), (before, after) in sorted(cell_acc.items())
         if before != after
+        and not _net_cancelled(row_existed_before, row_exists_after, row_id)
+        and not _net_cancelled(column_existed_before, column_exists_after, column_id)
     ]
     rows_added_out = [
         state["row"] for row_id, state in sorted(row_state.items())

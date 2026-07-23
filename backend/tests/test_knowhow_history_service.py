@@ -271,3 +271,54 @@ def test_revert_table_does_not_schedule_when_the_store_call_raises(repo, noteboo
             )
 
     fake_scheduler.schedule.assert_not_called()
+
+
+# --- codex 第 2 轮 P2：行/列在区间内净抵消后，其格子是幽灵格子须剔除 -----------
+
+def test_cell_on_a_row_added_then_deleted_is_dropped_from_diff():
+    """行 add → 编辑其格子 → 行 delete：行两端点都不存在，那个格子若还出现在
+    净 diff 里，就是一个「所在行两端都不存在」的幽灵格子。"""
+    changes = [
+        {"kind": "row_add", "payload": {"rows": [{"row_id": "r9", "position": 0,
+                                                  "cells": {}, "code": []}]}},
+        {"kind": "cell_update", "payload": {"cells": [
+            {"row_id": "r9", "column_id": "c1", "before": None, "after": "临时内容"}]}},
+        {"kind": "row_delete", "payload": {"rows": [{"row_id": "r9", "position": 0,
+                                                     "cells": {"c1": "临时内容"}, "code": []}]}},
+    ]
+    result = aggregate_diff(changes)
+    assert result["cells"] == [], "行两端点都不存在，其格子不该出现在净 diff"
+    assert result["rows_added"] == [] and result["rows_removed"] == []
+
+
+def test_cell_on_a_column_added_then_deleted_is_dropped_from_diff():
+    """列 add → 编辑该列某格 → 列 delete：列两端点都不存在，格子同样是幽灵。"""
+    changes = [
+        {"kind": "column_add", "payload": {"column": {
+            "id": "c9", "name": "临时列", "role": "attribute", "position": 3}}},
+        {"kind": "cell_update", "payload": {"cells": [
+            {"row_id": "r1", "column_id": "c9", "before": None, "after": "值"}]}},
+        {"kind": "column_delete", "payload": {"column": {
+            "id": "c9", "name": "临时列", "role": "attribute", "position": 3},
+            "cells": [{"row_id": "r1", "content_md": "值"}], "code": []}},
+    ]
+    result = aggregate_diff(changes)
+    assert result["cells"] == [], "列两端点都不存在，其格子不该出现在净 diff"
+    assert result["columns"] == []
+
+
+def test_cell_on_a_row_deleted_then_restored_is_kept():
+    """对照（防过度剔除）：行 delete 又 add 回来（同 id），两端点都存在，其格子
+    的净变化必须保留——只有「两端点都不存在」才剔，「两端点都存在」不剔。"""
+    changes = [
+        {"kind": "cell_update", "payload": {"cells": [
+            {"row_id": "r1", "column_id": "c1", "before": "A", "after": "B"}]}},
+        {"kind": "row_delete", "payload": {"rows": [{"row_id": "r1", "position": 0,
+                                                     "cells": {"c1": "B"}, "code": []}]}},
+        {"kind": "row_add", "payload": {"rows": [{"row_id": "r1", "position": 0,
+                                                  "cells": {"c1": "B"}, "code": []}]}},
+    ]
+    result = aggregate_diff(changes)
+    assert result["cells"] == [
+        {"row_id": "r1", "column_id": "c1", "before": "A", "after": "B"}
+    ], "行两端点都存在，格子净变化须保留"

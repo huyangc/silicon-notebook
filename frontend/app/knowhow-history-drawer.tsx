@@ -62,6 +62,7 @@ import {
   composeRowTitle,
   createKnowhowMilestone,
   deleteKnowhowMilestone,
+  fetchKnowhowChange,
   fetchKnowhowHistory,
   fetchKnowhowHistoryDiff,
   revertKnowhowTable,
@@ -73,8 +74,10 @@ import {
 } from "./knowhow-model.ts";
 import {
   describeColumnChange,
+  earliestComparePoint,
   foldLocalChanges,
   groupChangesByDay,
+  mergeMilestoneTimeline,
   originLabel,
   roleLabel,
   summarizeChange,
@@ -544,9 +547,40 @@ export function KnowhowHistoryDrawer({
   }, [milestones]);
   const staleMilestones = useMemo(() => milestones.filter((m) => m.stale), [milestones]);
 
+  // codex 第 2 轮 P2：里程碑可能落在还没加载进来的更旧一页里。「只看里程碑」
+  // 开启时，把 milestoneBySeq 里当前 changes 尚未覆盖的 seq 单独抓回来，避免
+  // 界面误报「还没有里程碑」（>100 变更且里程碑在旧页时曾会漏）。
+  const milestoneSeqs = useMemo(() => new Set(milestoneBySeq.keys()), [milestoneBySeq]);
+  const [extraMilestoneChanges, setExtraMilestoneChanges] = useState<KnowhowChange[]>([]);
+  useEffect(() => {
+    if (!milestonesOnly) {
+      setExtraMilestoneChanges([]);
+      return;
+    }
+    const loadedSeqs = new Set(changes.map((c) => c.seq));
+    const missing = [...milestoneSeqs].filter((seq) => !loadedSeqs.has(seq));
+    if (missing.length === 0) {
+      setExtraMilestoneChanges([]);
+      return;
+    }
+    let cancelled = false;
+    Promise.all(
+      missing.map((seq) => fetchKnowhowChange(notebookId, tableId, seq).catch(() => null)),
+    ).then((results) => {
+      if (cancelled) return;
+      setExtraMilestoneChanges(results.filter((c): c is KnowhowChange => c !== null));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [milestonesOnly, changes, milestoneSeqs, notebookId, tableId]);
+
   const displayedChanges = useMemo(
-    () => (milestonesOnly ? changes.filter((c) => milestoneBySeq.has(c.seq)) : changes),
-    [changes, milestonesOnly, milestoneBySeq],
+    () =>
+      milestonesOnly
+        ? mergeMilestoneTimeline(changes, milestoneSeqs, extraMilestoneChanges)
+        : changes,
+    [changes, milestonesOnly, milestoneSeqs, extraMilestoneChanges],
   );
   const days = useMemo(() => groupChangesByDay(displayedChanges), [displayedChanges]);
   const showLegacyNote = !hasMoreOlder && (changes.length === 0 || changes[changes.length - 1].kind !== "table_create");
@@ -557,6 +591,11 @@ export function KnowhowHistoryDrawer({
       label: `#${c.seq} · ${formatClock(c.createdAt)} · ${summarizeChange(c)}`,
     })),
     [changes],
+  );
+  // codex 第 2 轮 P2：「最早」起点选项按保留链条真实起点给（不再无条件 seq 0）。
+  const earliestOption = useMemo(
+    () => earliestComparePoint(changes, hasMoreOlder),
+    [changes, hasMoreOlder],
   );
 
   function revertImpactText(targetSeq: number): string {
@@ -980,7 +1019,9 @@ export function KnowhowHistoryDrawer({
                     onChange={(event) => setCompareFrom(event.target.value === "" ? null : Number(event.target.value))}
                   >
                     <option value="">请选择</option>
-                    <option value={0}>最早（表创建之初）</option>
+                    {earliestOption && (
+                      <option value={earliestOption.value}>{earliestOption.label}</option>
+                    )}
                     {compareOptions.map((opt) => <option key={opt.seq} value={opt.seq}>{opt.label}</option>)}
                   </select>
                 </label>
