@@ -582,6 +582,16 @@ class RepositoryFacade:
                 source_id, status, **kwargs),
             run_extraction=lambda source_id, **kwargs: _call_extraction_compat(
                 self._run_extraction, self._runtime.source_ingestion.run_extraction, source_id, kwargs),
+            # notebook KG 构建路径的 doc_type 终态收口：复用上传流水线同一套
+            # _extract_reconciling_doc_type（守卫落 'extracted' + 不一致重跑），并让它
+            # 原子补发 'extracted' 事件（构建路径无 stage 前置事件、无顺序约束）。晚绑定
+            # 到 source_ingestion（call-time 解析，与 run_extraction 同——它在
+            # wire_source_ingestion 才建，晚于 wire_knowledge_lifecycle）。
+            reconcile_extracted_terminal=lambda source_id, extract: (
+                self._runtime.source_ingestion._extract_reconciling_doc_type(
+                    source_id, extract, emit_terminal_status=True
+                )
+            ),
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
             annotate_edge_support=lambda notebook_id, edges: (
                 self._annotate_edge_support(notebook_id, edges)

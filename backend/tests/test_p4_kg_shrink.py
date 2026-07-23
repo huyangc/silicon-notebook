@@ -156,6 +156,46 @@ def test_build_notebook_kg_requires_llm(repo):
         repo.build_notebook_kg(nb.id)
 
 
+def test_build_notebook_kg_reconciles_doc_type_changed_mid_extraction(repo, monkeypatch):
+    """notebook KG 构建路径（_extract_one）也要有 doc_type 终态收口，和上传流水线
+    process_source 共用同一套 _extract_reconciling_doc_type。
+
+    run_extraction 开头就读走 doc_type 快照（它选抽取 profile、进抽取 prompt，因而进
+    LLM 缓存键）。抽取跑到一半并发重传改了 doc_type，若无条件落 'extracted'，存库的
+    新类型会配着**旧 profile 抽出的 KG**，而且没有任何东西回来纠正。收口改为：守卫落
+    终态（WHERE doc_type=本轮值）→ rowcount 0（窗口里被改了）就带新类型再抽一轮。
+
+    确定性注入：run_extraction 桩在第一次抽取（此刻这一行就是 'extracting'）里模拟并发
+    retype——直接改 doc_type 列。跑完守卫比对发现列已变，带新类型补跑一轮，最终落库的
+    doc_type 与真正用来抽取的那一轮一致。
+
+    变异验证：把 _extract_one 的收口换回无条件
+    ``self._set_source_status(source_id, "extracted")`` → 只抽一次、不补跑 →
+    seen == ["academic_paper"] → 本测试转红。"""
+    _configure_llm(repo)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    sid = _make_source(repo, nb.id, "s1", status="parsed")   # doc_type='academic_paper'
+    store = repo._runtime.source_store
+    seen = []
+
+    def fake_extract(source_id, **_kw):
+        seen.append(repo.get_source(source_id).doc_type)
+        if len(seen) == 1:
+            # 抽取正在跑（此刻这一行就是 'extracting'）——模拟并发重传把类型改成 textbook。
+            assert repo.get_source(source_id).parse_status == "extracting"
+            store.set_doc_type(source_id, "textbook")
+
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", fake_extract)
+
+    repo.build_notebook_kg(nb.id)
+
+    assert seen == ["academic_paper", "textbook"], (
+        "抽取期间改的类型必须被补跑一次；只有一次说明构建路径缺 doc_type 终态收口"
+    )
+    assert repo.get_source(sid).doc_type == "textbook"
+    assert repo.get_source(sid).parse_status == "extracted", "补跑完照样落终态"
+
+
 # ---------------------------------------------------------------------------
 # P4-4: base_kg_available signal
 # ---------------------------------------------------------------------------
