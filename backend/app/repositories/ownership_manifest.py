@@ -633,6 +633,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.complete_row', kind='attribute', target='_runtime'),

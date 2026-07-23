@@ -299,6 +299,40 @@ def test_count_missing_element_vectors_excludes_given_sources(repo):
     assert mnt.count_missing_element_vectors(nb.id, {a, b}) == 0   # 全排除
 
 
+def test_missing_element_rows_excludes_given_sources(repo):
+    """missing_element_embedding_rows 的 exclude_source_ids 排除指定源(backfill 排除活跃源的
+    底座,codex P1:避免给正在 reparse 的源——element id 复用——算旧代文本向量)。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)
+    b = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
+    mnt = repo._runtime.maintenance_component
+    assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id)} == {a, b}
+    assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, {a})} == {b}
+
+
+def test_backfill_job_excludes_active_lease_sources(repo, monkeypatch):
+    """_backfill_vectors_job 先快照活跃租约、并把这些源传给两个 backfill 作 exclude
+    (codex P1:正在 reparse 的源不补,免得挂上永久陈旧向量)。"""
+    monkeypatch.setattr(
+        repo._runtime, "_active_source_ids_snapshot", lambda: {"src-reparsing"}
+    )
+    seen: dict[str, set] = {}
+    from app.services import batch_ingest
+    from app.api import source_routes
+
+    monkeypatch.setattr(
+        batch_ingest, "backfill_chunk_embeddings",
+        lambda r, n, missing_only, exclude_source_ids: seen.__setitem__("chunk", set(exclude_source_ids)),
+    )
+    monkeypatch.setattr(
+        batch_ingest, "backfill_element_embeddings",
+        lambda r, n, exclude_source_ids: seen.__setitem__("elem", set(exclude_source_ids)),
+    )
+    source_routes._backfill_vectors_job(repo, "nb-x")
+    assert seen["chunk"] == {"src-reparsing"}
+    assert seen["elem"] == {"src-reparsing"}
+
+
 def test_h4_h5_pass_active_lease_snapshot_to_counts(repo):
     """H4/H5 把活跃租约快照传给计数 seam(codex:正在嵌入的源 chunk/element 已在、向量还没落,
     是正常在途,不该算缺向量——由 count 的 exclude_source_ids 排除)。"""

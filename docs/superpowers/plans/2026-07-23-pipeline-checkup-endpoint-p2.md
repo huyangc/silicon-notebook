@@ -148,6 +148,25 @@ def h8_index_integrity(nb_id):
 
 ## 九、开放实现细节(实现时定,非阻塞)
 
-- H8 缓存的有界化策略(LRU N 个 nb vs 与 notebook 生命周期对齐)。
-- `sample` 的上界 N(给前端展示够用即可,如 20)。
+- H8 缓存的有界化策略(LRU N 个 nb vs 与 notebook 生命周期对齐)。已实现:LRU 256 + 300s TTL。
+- `sample` 的上界 N(给前端展示够用即可,如 20)。已实现:20。
 - checkup 是否要一个「上次体检时刻」的轻记录(纯前端展示,不持久化亦可)。
+
+## 十、已知非阻塞项(codex 评审记录,待后续加固)
+
+codex 多轮评审后仍有几处**非阻塞**的边角,经与用户权衡后本 PR 不修、留作独立加固:
+
+- **backfill accepted 只到 workload 「或」粒度**(codex 第 4 轮 P2):`configured(chunk) or
+  configured(element)` 只要有一种嵌入配了就返 accepted=true。若只配了 element、而损坏的是 H4
+  chunk 向量,chunk backfill 是 no-op 但仍报受理、前端空转轮询。要治须按「本次损坏属哪个
+  workload」返 per-workload 结果——需要端点知道用户点的是 H4 还是 H5(当前前端把 H4/H5 合并成
+  一个「补齐向量」CTA),改动面较大。
+- **H8 的 ANN 校验只到「文件存在」**(codex 第 4 轮 P2):主 ann.bin 存在但**内容**截断/非法
+  HNSW 时,探针判健康。要治须真 hnswlib 打开校验——但那正是懒加载想避开的开销,且高频探针里
+  每次真 load ANN 代价不小。当前已校验:manifest 计数/数组长度失配 + 主 ANN 文件存在性 + 健康
+  缓存 300s TTL(post-probe 损坏最终可见)。内容级 ANN 校验留作独立改动。
+- **backfill 排除活跃源有极窄残留**(codex 第 4 轮 P1 的残留):已快照活跃租约并排除(覆盖
+  「backfill 启动时源已在 reparse」主场景),但**快照后、读取前才开始 reparse**的源覆盖不到。
+  要全覆盖须把 backfill 与源替换串行化(如复用 P1.5 的 per-source 分块锁扩展到 backfill)。
+- **铃铛签名只含 H 码集合**(codex 第 4 轮 P3):同一类型(如 H2)已有告警时,新增的同类型损坏
+  源不会让已读/已关的铃铛复活。要治须把计数/有界样本身份纳入签名。

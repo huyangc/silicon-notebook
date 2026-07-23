@@ -423,24 +423,42 @@ class SQLiteMaintenanceAdapter:
 
     # -- embeddings -----------------------------------------------------------
 
-    def missing_chunk_embedding_rows(self, notebook_id: str) -> list[dict]:
+    def missing_chunk_embedding_rows(
+        self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
+    ) -> list[dict]:
+        """``exclude_source_ids`` 排除指定源的 chunk——体检 backfill 传活跃租约快照,免得给
+        **正在 reparse**的源(element/chunk id 复用)算旧代向量、在替换后才提交,挂上永久陈旧的
+        向量(codex P1)。CLI 盘点/补齐不传、口径不变。"""
+        exclude = tuple(exclude_source_ids or ())
+        clause = (
+            f" AND c.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+        )
         with self._runtime.database.connect() as db:
             return [
                 dict(r)
                 for r in db.execute(
                     "SELECT c.id, c.text FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)",
-                    (notebook_id,),
+                    "WHERE e.chunk_id=c.id)" + clause,
+                    (notebook_id, *exclude),
                 ).fetchall()
             ]
 
-    def missing_element_embedding_rows(self, notebook_id: str) -> list[dict]:
+    def missing_element_embedding_rows(
+        self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
+    ) -> list[dict]:
         """该 notebook 下缺 element 向量、且文本非空白的 source_elements 行
         ([{"id","source_id","text"}, ...])。空白文本必须排除:embed_source 会跳过
         它们(text.strip() 为空),永远不会有向量——不排除的话补齐命令每次都报「还有
         N 个缺失」、每次都试着嵌入空串,成为永不收敛的脏状态。TRIM 的字符集用
-        PY_WHITESPACE(= Python str.strip() 的全集),与 embed_source 的过滤逐字符一致。"""
+        PY_WHITESPACE(= Python str.strip() 的全集),与 embed_source 的过滤逐字符一致。
+        ``exclude_source_ids`` 排除指定源——体检 backfill 传活跃租约快照,免得给**正在
+        reparse**的源(element id 复用)算旧代文本的向量、在替换后才提交而挂上永久陈旧向量
+        (codex P1)。CLI 盘点/补齐不传、口径不变。"""
+        exclude = tuple(exclude_source_ids or ())
+        clause = (
+            f" AND e.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+        )
         with self._runtime.database.connect() as db:
             return [
                 dict(r)
@@ -449,8 +467,8 @@ class SQLiteMaintenanceAdapter:
                     "JOIN sources s ON s.id = e.source_id "
                     "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
-                    "WHERE v.element_id = e.id)",
-                    (notebook_id, PY_WHITESPACE),
+                    "WHERE v.element_id = e.id)" + clause,
+                    (notebook_id, PY_WHITESPACE, *exclude),
                 ).fetchall()
             ]
 
