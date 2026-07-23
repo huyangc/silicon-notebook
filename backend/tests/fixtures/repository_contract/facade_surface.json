@@ -2604,6 +2604,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.append_knowhow_rows",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.apply_conflict_resolution",
         "target": "_runtime"
       },
@@ -2803,6 +2809,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.create_knowhow_table",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.create_knowhow_table_with_rows",
         "target": "_runtime"
       },
       {
@@ -4163,18 +4175,6 @@
         "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.add_knowhow_row",
         "target": "add_knowhow_row"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.commit_append",
-        "target": "add_knowhow_row"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.import_table",
-        "target": "add_knowhow_row"
       }
     ],
     "kind": "method",
@@ -4212,6 +4212,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, user_id: 'str', notebook_id: 'str', query: 'str', include_candidates: 'bool', limit: 'int' = 8) -> 'list'"
+  },
+  "append_knowhow_rows": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.commit_append",
+        "target": "append_knowhow_rows"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', rows) -> 'list[str]'"
   },
   "approve_promotion_as_reviewer": {
     "consumers": [
@@ -4475,27 +4490,6 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', older_than_days: 'int') -> 'ConversationBulkDeleteResult'"
   },
-  "bump_knowhow_mutation_seq": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.commit_append",
-        "target": "bump_knowhow_mutation_seq"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.import_table",
-        "target": "bump_knowhow_mutation_seq"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowhowStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, table_id: 'str') -> 'int'"
-  },
   "cancel_ask_job": {
     "consumers": [
       {
@@ -4659,12 +4653,6 @@
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.create_table",
         "target": "create_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.import_table",
-        "target": "create_knowhow_table"
       }
     ],
     "kind": "method",
@@ -4672,6 +4660,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', title: 'str', description: 'str', columns: 'list', created_by: 'str' = '') -> 'str'"
+  },
+  "create_knowhow_table_with_rows": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.import_table",
+        "target": "create_knowhow_table_with_rows"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', title: 'str', description: 'str', columns: 'list', rows, created_by: 'str' = '') -> 'str'"
   },
   "create_memory_candidate": {
     "consumers": [
@@ -5393,12 +5396,6 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.get_table_in_notebook",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/knowhow/api.py",
-        "scope": "<module>.import_table",
         "target": "get_knowhow_table"
       },
       {

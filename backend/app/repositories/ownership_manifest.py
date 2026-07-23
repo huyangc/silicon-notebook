@@ -782,6 +782,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.answer_owner', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.append_ask_trace', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.append_clusters', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.append_knowhow_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.apply_conflict_resolution', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.approve_promotion', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.approve_promotion_as_reviewer', kind='attribute', target='_runtime'),
@@ -816,6 +817,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.copy_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.create_agent_profile', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.create_knowhow_table', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.create_knowhow_table_with_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.create_memory_candidate', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.create_memory_from_answer', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.create_notebook', kind='attribute', target='_runtime'),
@@ -1100,8 +1102,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.add_knowhow_row', kind='attribute', target='add_knowhow_row'),
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.commit_append', kind='attribute', target='add_knowhow_row'),
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='add_knowhow_row'),
         ),
         patches=(
         ),
@@ -1122,6 +1122,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.search_agent_memory.load', kind='attribute', target='agent_memory_hits'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='append_knowhow_rows',
+        owner='KnowhowStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.commit_append', kind='attribute', target='append_knowhow_rows'),
         ),
         patches=(
         ),
@@ -1244,17 +1254,6 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
-        name='bump_knowhow_mutation_seq',
-        owner='KnowhowStore',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.commit_append', kind='attribute', target='bump_knowhow_mutation_seq'),
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='bump_knowhow_mutation_seq'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
         name='cancel_ask_job',
         owner='AskService',
         kind='method',
@@ -1361,7 +1360,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.create_table', kind='attribute', target='create_knowhow_table'),
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='create_knowhow_table'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='create_knowhow_table_with_rows',
+        owner='KnowhowStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='create_knowhow_table_with_rows'),
         ),
         patches=(
         ),
@@ -1708,7 +1716,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_knowhow_row.load', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_cell_code', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_table_in_notebook', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.list_tables_for_agent', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.put_cell_code', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>.move_table', kind='attribute', target='get_knowhow_table'),

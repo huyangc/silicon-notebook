@@ -73,6 +73,260 @@ def test_postgres_content_store_surfaces_cover_sqlite(sqlite_cls, postgres_cls):
         )
 
 
+def _knowhow_columns():
+    return [
+        {"name": "Topic", "role": "anchor"},
+        {"name": "Procedure", "role": "procedure"},
+    ]
+
+
+def _cell_values(table: dict) -> list[list[str]]:
+    column_ids = [column["id"] for column in table["columns"]]
+    return [
+        [row["cells"].get(column_id, "") for column_id in column_ids]
+        for row in table["rows"]
+    ]
+
+
+def test_knowhow_atomic_create_rolls_back_table_for_missing_asset_and_row2_error(
+    content_harness, monkeypatch
+):
+    store = content_harness.knowhow
+    before = store.list_knowhow_tables("nb-content")
+    missing = "asset-missing-import"
+    with pytest.raises(ValueError, match=missing):
+        store.create_knowhow_table_with_rows(
+            "nb-content",
+            "Atomic import",
+            "",
+            _knowhow_columns(),
+            [["A", "ok"], ["B", f"![missing](asset://{missing})"]],
+            "user-content",
+        )
+    assert store.list_knowhow_tables("nb-content") == before
+
+    original_new_id = store.new_id
+    cell_calls = 0
+
+    def duplicate_cell_id(prefix: str) -> str:
+        nonlocal cell_calls
+        if prefix == "khcel":
+            cell_calls += 1
+            # Row 1's two cells succeed; row 2's first cell collides with row 1.
+            return f"khcel-forced-{1 if cell_calls >= 3 else cell_calls}"
+        return original_new_id(prefix)
+
+    monkeypatch.setattr(store, "new_id", duplicate_cell_id)
+    with pytest.raises(Exception):
+        store.create_knowhow_table_with_rows(
+            "nb-content",
+            "Constraint rollback",
+            "",
+            _knowhow_columns(),
+            [["A", "first"], ["B", "second"]],
+            "user-content",
+        )
+    assert store.list_knowhow_tables("nb-content") == before
+
+
+def test_knowhow_atomic_append_rolls_back_exact_state_for_missing_asset_and_row2_error(
+    content_harness, monkeypatch
+):
+    store = content_harness.knowhow
+    table_id = store.create_knowhow_table_with_rows(
+        "nb-content",
+        "Atomic append",
+        "",
+        _knowhow_columns(),
+        [["seed", "old"]],
+        "user-content",
+    )
+    table = store.get_knowhow_table(table_id)
+    topic_id, procedure_id = [column["id"] for column in table["columns"]]
+    before = store.get_knowhow_table(table_id)
+    missing = "asset-missing-append"
+    with pytest.raises(ValueError, match=missing):
+        store.append_knowhow_rows(
+            table_id,
+            [
+                {topic_id: "A", procedure_id: "first"},
+                {topic_id: "B", procedure_id: f"![missing](asset://{missing})"},
+            ],
+        )
+    assert store.get_knowhow_table(table_id) == before
+
+    original_new_id = store.new_id
+    cell_calls = 0
+
+    def duplicate_cell_id(prefix: str) -> str:
+        nonlocal cell_calls
+        if prefix == "khcel":
+            cell_calls += 1
+            # Row 1's two cells succeed; row 2's first cell collides with row 1.
+            return f"khcel-forced-append-{1 if cell_calls >= 3 else cell_calls}"
+        return original_new_id(prefix)
+
+    monkeypatch.setattr(store, "new_id", duplicate_cell_id)
+    with pytest.raises(Exception):
+        store.append_knowhow_rows(
+            table_id,
+            [
+                {topic_id: "C", procedure_id: "third"},
+                {topic_id: "D", procedure_id: "fourth"},
+            ],
+        )
+    assert store.get_knowhow_table(table_id) == before
+
+
+def test_knowhow_atomic_create_and_append_preserve_order_content_and_one_seq_bump(
+    content_harness,
+):
+    store = content_harness.knowhow
+    table_id = store.create_knowhow_table_with_rows(
+        "nb-content",
+        "Ordered batch",
+        "",
+        _knowhow_columns(),
+        [["A", "first"], ["B", "second"]],
+        "user-content",
+    )
+    imported = store.get_knowhow_table(table_id)
+    assert [row["position"] for row in imported["rows"]] == [0, 1]
+    assert _cell_values(imported) == [["A", "first"], ["B", "second"]]
+    assert imported["mutation_seq"] == 1
+    topic_id, procedure_id = [column["id"] for column in imported["columns"]]
+
+    row_ids = store.append_knowhow_rows(
+        table_id,
+        [
+            {topic_id: "C", procedure_id: "third"},
+            {topic_id: "D", procedure_id: "fourth"},
+        ],
+    )
+    final = store.get_knowhow_table(table_id)
+    assert row_ids == [row["id"] for row in final["rows"][2:]]
+    assert [row["position"] for row in final["rows"]] == [0, 1, 2, 3]
+    assert _cell_values(final) == [
+        ["A", "first"],
+        ["B", "second"],
+        ["C", "third"],
+        ["D", "fourth"],
+    ]
+    assert final["mutation_seq"] == 2
+
+
+def test_knowhow_asset_delta_allows_preserved_legacy_dead_ref_and_checks_each_target(
+    content_harness,
+):
+    store = content_harness.knowhow
+    table_id = store.create_knowhow_table_with_rows(
+        "nb-content",
+        "Legacy refs",
+        "",
+        _knowhow_columns(),
+        [["A", "one"], ["B", "two"]],
+        "user-content",
+    )
+    table = store.get_knowhow_table(table_id)
+    procedure_id = table["columns"][1]["id"]
+    row_a, row_b = [row["id"] for row in table["rows"]]
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    legacy = "asset-legacy-dead"
+    missing = "asset-new-dead"
+    old_ref = f"![legacy](asset://{legacy})"
+    with content_harness.database.write() as connection:
+        connection.execute(
+            f"UPDATE knowhow_cells SET content_md={mark} "
+            f"WHERE row_id={mark} AND column_id={mark}",
+            (old_ref, row_a, procedure_id),
+        )
+
+    preserved = f"{old_ref} edited text"
+    store.update_knowhow_cell(row_a, procedure_id, preserved)
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cell(
+            row_a,
+            procedure_id,
+            f"{preserved} ![new](asset://{missing})",
+        )
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cell(
+            row_a, procedure_id, f"![replacement](asset://{missing})"
+        )
+    assert store.get_knowhow_table(table_id)["rows"][0]["cells"][procedure_id] == preserved
+
+    # The shared write would preserve the ref on row A but add it to row B;
+    # per-target delta union must therefore validate and reject it.
+    with pytest.raises(ValueError, match=legacy):
+        store.update_knowhow_cells(
+            [row_a, row_b], procedure_id, f"{old_ref} merged"
+        )
+    with content_harness.database.write() as connection:
+        connection.execute(
+            f"UPDATE knowhow_cells SET content_md={mark} "
+            f"WHERE row_id={mark} AND column_id={mark}",
+            (old_ref, row_b, procedure_id),
+        )
+    store.update_knowhow_cells(
+        [row_a, row_b], procedure_id, f"{old_ref} merged"
+    )
+    assert [
+        row["cells"][procedure_id]
+        for row in store.get_knowhow_table(table_id)["rows"]
+    ] == [f"{old_ref} merged", f"{old_ref} merged"]
+
+    bulk_before = f"{old_ref} merged"
+    bulk_after = f"{old_ref} bulk"
+    bulk_result = store.update_knowhow_cells_bulk_guarded(
+        "nb-content",
+        [
+            (table_id, row_a, procedure_id, bulk_before, bulk_after),
+            (table_id, row_b, procedure_id, bulk_before, bulk_after),
+        ],
+    )
+    assert bulk_result["written"] == [(row_a, procedure_id), (row_b, procedure_id)]
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cells_bulk_guarded(
+            "nb-content",
+            [
+                (
+                    table_id,
+                    row_a,
+                    procedure_id,
+                    bulk_after,
+                    f"{bulk_after} ![new](asset://{missing})",
+                )
+            ],
+        )
+
+    atomic_after = f"{old_ref} atomic"
+    atomic_result = store.update_knowhow_cells_guarded_atomic(
+        "nb-content",
+        [
+            (table_id, row_a, procedure_id, bulk_after, atomic_after),
+            (table_id, row_b, procedure_id, bulk_after, atomic_after),
+        ],
+    )
+    assert atomic_result["conflict"] is False
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cells_guarded_atomic(
+            "nb-content",
+            [
+                (
+                    table_id,
+                    row_a,
+                    procedure_id,
+                    atomic_after,
+                    f"![replacement](asset://{missing})",
+                )
+            ],
+        )
+    assert [
+        row["cells"][procedure_id]
+        for row in store.get_knowhow_table(table_id)["rows"]
+    ] == [atomic_after, atomic_after]
+
+
 def _seams() -> RepositoryCompatibilitySeams:
     lock = threading.Lock()
     counter: dict[str, int] = {}

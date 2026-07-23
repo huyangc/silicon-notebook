@@ -684,6 +684,72 @@ def test_asset_writer_first_blocks_gc_then_gc_rechecks_and_retains_reference(
 
 
 @pytest.mark.postgres_integration
+def test_atomic_append_holds_asset_lock_until_every_row_and_sequence_commit(
+    postgres_database, tmp_path, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store, table_id, anchor_id, procedure_id, _row_ids = _knowhow_race_store(
+        postgres_database
+    )
+    before_seq = store.get_knowhow_table(table_id)["mutation_seq"]
+    asset_id, asset_path = _insert_gc_asset(store, tmp_path, "append-writer-first")
+    maintenance = PostgresMaintenanceAdapter(
+        SimpleNamespace(database=postgres_database, storage_dir=tmp_path)
+    )
+    writer_locked = threading.Event()
+    allow_writer_commit = threading.Event()
+    gc_lock_attempted = threading.Event()
+    gc_lock_acquired = threading.Event()
+    original_require = store._lock_required_assets
+    original_gc_lock = maintenance._lock_candidate_assets
+
+    def hold_writer_lock(db, notebook_id, asset_ids):
+        result = original_require(db, notebook_id, asset_ids)
+        writer_locked.set()
+        assert allow_writer_commit.wait(timeout=5)
+        return result
+
+    def observe_gc_lock(db, notebook_id, asset_ids):
+        gc_lock_attempted.set()
+        result = original_gc_lock(db, notebook_id, asset_ids)
+        gc_lock_acquired.set()
+        return result
+
+    monkeypatch.setattr(store, "_lock_required_assets", hold_writer_lock)
+    monkeypatch.setattr(maintenance, "_lock_candidate_assets", observe_gc_lock)
+    content = f"![kept](asset://{asset_id})"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writer = executor.submit(
+            store.append_knowhow_rows,
+            table_id,
+            [
+                {anchor_id: "B", procedure_id: content},
+                {anchor_id: "C", procedure_id: content},
+            ],
+        )
+        assert writer_locked.wait(timeout=5)
+        sweep = executor.submit(
+            maintenance.sweep_orphan_assets, "nb-memory-race"
+        )
+        assert gc_lock_attempted.wait(timeout=5)
+        assert not gc_lock_acquired.wait(timeout=0.1)
+        allow_writer_commit.set()
+        appended_ids = writer.result(timeout=10)
+        assert sweep.result(timeout=10) == {"removed": 0}
+
+    final = store.get_knowhow_table(table_id)
+    assert appended_ids == [row["id"] for row in final["rows"][-2:]]
+    assert [row["cells"][procedure_id] for row in final["rows"][-2:]] == [
+        content,
+        content,
+    ]
+    assert final["mutation_seq"] == before_seq + 1
+    assert store.get_notebook_asset(asset_id) is not None
+    assert asset_path.is_file()
+
+
+@pytest.mark.postgres_integration
 def test_asset_gc_first_blocks_writer_then_writer_rolls_back_missing_reference(
     postgres_database, tmp_path, monkeypatch
 ):

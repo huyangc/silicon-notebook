@@ -33,12 +33,12 @@ PR-2+3 Task 3 adds three things to this module:
 from __future__ import annotations
 
 import json
-import re
 import threading
 import time
 import weakref
 from typing import Any, Callable
 
+from app.repositories.knowhow_asset_refs import rendered_asset_ids
 from app.repositories.ports import KNOWHOW_COLUMN_KINDS as _STORE_KINDS
 from app.services import background_jobs
 from app.services.model_config import model_client_fingerprint
@@ -224,15 +224,13 @@ def parse_import_columns(
 # sweeper's own `LIKE '%asset://<id>%'`: over-matching there only ever RETAINS
 # an asset (safe), while over-matching here REFUSES a save (not safe), so the
 # two are allowed to differ and this side is the strict one.
-_ASSET_REF_RE = re.compile(r"!\[[^\]]*\]\(asset://([A-Za-z0-9_-]+)\)")
-
 CELL_ASSET_MISSING_MESSAGE = (
     "这一格引用的图片已不存在（可能已被自动清理），请重新插入图片后再保存。"
 )
 
 
 def asset_refs(markdown: str) -> "set[str]":
-    return set(_ASSET_REF_RE.findall(markdown or ""))
+    return set(rendered_asset_ids(markdown))
 
 
 def newly_added_asset_refs(previous_md: str, next_md: str) -> "list[str]":
@@ -298,8 +296,8 @@ def import_table(
     orientation: str = "columns",
 ) -> str:
     """Full import orchestration (task brief step 2): parse -> validate ->
-    create the table -> insert every row+cell -> bump mutation_seq once for
-    the whole batch. Returns the new table_id; the caller (routes.py) is
+    atomically create the table and insert every row+cell, with one
+    mutation_seq bump for the whole batch. Returns the new table_id; the caller (routes.py) is
     responsible for scheduling the background projection job and re-fetching
     the full detail for the response — this function does no HTTP/job
     concerns, only data orchestration, so it stays trivially testable and
@@ -313,8 +311,6 @@ def import_table(
     400 idiom catches all of these uniformly."""
     grid = parse_grid(filename, data, orientation)
     columns = parse_import_columns(columns_json, grid, anchor_index)
-    table_id = repo.create_knowhow_table(notebook_id, title, "", columns)
-    column_ids = [c["id"] for c in repo.get_knowhow_table(table_id)["columns"]]
     # 分组型表：anchor 列可能是"只写一次"的分组列（转置/合并型表的
     # 违例概念列），落库前 forward-fill 使同概念分支行共享 anchor 值，
     # 下游 cell-level 投影据此归并成一个概念 KO（见 projection.py）。
@@ -340,22 +336,22 @@ def import_table(
     # `A. 概念` normalized to `**A. 概念**` would split off from an existing
     # `A. 概念` group). ``columns`` carries the store roles here, so the anchor
     # column is whichever one ``parse_import_columns`` marked ``role=='anchor'``.
-    anchor_col_ids = {
-        column_ids[i] for i, column in enumerate(columns) if column.get("role") == "anchor"
+    anchor_positions = {
+        i for i, column in enumerate(columns) if column.get("role") == "anchor"
     }
+    normalized_rows: list[list[str]] = []
     for row in rows:
-        cells = {}
+        normalized_row: list[str] = []
         for i, value in enumerate(row):
-            if not value:
-                continue
-            col_id = column_ids[i]
-            cells[col_id] = (
-                value if col_id in anchor_col_ids
+            normalized_row.append(
+                value
+                if not value or i in anchor_positions
                 else md_normalize.safe_rule_normalize(value)[0]
             )
-        repo.add_knowhow_row(table_id, cells)
-    repo.bump_knowhow_mutation_seq(table_id)
-    return table_id
+        normalized_rows.append(normalized_row)
+    return repo.create_knowhow_table_with_rows(
+        notebook_id, title, "", columns, normalized_rows
+    )
 
 
 def create_table(
@@ -864,9 +860,8 @@ def commit_append(
     re-aligns the file (deliberately not trusting a client-supplied preview
     payload — the file itself stays the single source of truth, and this
     keeps commit callable on its own without ever having called preview
-    first), then inserts one row per file data row via the store's existing
-    ``add_knowhow_row`` (position omitted -> always appends, mirroring
-    ``import_table``'s own per-row loop), skipping empty cells (mirrors
+    first), then atomically appends every file data row through the store's
+    batch port, skipping empty cells (mirrors
     ``import_table``'s ``if value`` filter — a blank/missing-column cell is
     simply absent, never an empty-string placeholder, matching
     ``get_knowhow_table``'s "no cell row = never edited" contract) — then
@@ -911,6 +906,7 @@ def commit_append(
     # 与旧行的键失配、组被劈开 (this is the confirmed defect: an appended
     # `A. Component` normalized to `**A. Component**` splits off from the
     # existing `A. Component` group even though the append preview matched them).
+    batch_rows: list[dict[str, str]] = []
     for aligned_row in aligned_rows:
         cells = {}
         for i, value in enumerate(aligned_row):
@@ -920,8 +916,8 @@ def commit_append(
                 value if i == anchor_position
                 else md_normalize.safe_rule_normalize(value)[0]
             )
-        repo.add_knowhow_row(table_id, cells)
-    repo.bump_knowhow_mutation_seq(table_id)
+        batch_rows.append(cells)
+    repo.append_knowhow_rows(table_id, batch_rows)
     return len(aligned_rows)
 
 

@@ -3309,6 +3309,19 @@ class RepositoryFacade:
             notebook_id, title, description, columns, created_by
         )
 
+    def create_knowhow_table_with_rows(
+        self,
+        notebook_id: str,
+        title: str,
+        description: str,
+        columns: list,
+        rows,
+        created_by: str = "",
+    ) -> str:
+        return self._runtime.knowhow_store.create_knowhow_table_with_rows(
+            notebook_id, title, description, columns, rows, created_by
+        )
+
     def list_knowhow_tables(self, notebook_id: str) -> list:
         return self._runtime.knowhow_store.list_knowhow_tables(notebook_id)
 
@@ -3321,6 +3334,9 @@ class RepositoryFacade:
         return self._runtime.knowhow_store.add_knowhow_row(
             table_id, cells, position
         )
+
+    def append_knowhow_rows(self, table_id: str, rows) -> list[str]:
+        return self._runtime.knowhow_store.append_knowhow_rows(table_id, rows)
 
     def update_knowhow_cell(
         self, row_id: str, column_id: str, content_md: str, require_assets=()

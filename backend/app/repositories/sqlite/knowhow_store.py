@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Sequence
 
+from app.repositories.knowhow_asset_refs import required_asset_ids
 from app.repositories.ports import KNOWHOW_COLUMN_KINDS
 from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
@@ -42,8 +43,8 @@ class KnowhowStore:
     the project's existing ``kg_mutation_seq`` convention) that the projector
     reads to detect "has this table changed since I last projected it".
     ``update_knowhow_cell`` bumps it as part of its one write transaction;
-    ``bump_knowhow_mutation_seq`` is also exposed standalone for callers (the
-    projector, bulk-import) that need to bump it at a point of their own
+    ``bump_knowhow_mutation_seq`` is also exposed standalone for callers such
+    as the projector that need to bump it at a point of their own
     choosing without an accompanying cell write. The structural editing
     methods added in PR-2+3 Task 1 (add/rename/delete column, delete row,
     set-anchor, table-meta) deliberately do NOT bump it themselves — that
@@ -62,6 +63,77 @@ class KnowhowStore:
         self.database = database
         self.new_id = new_id
         self.now = now
+
+    @staticmethod
+    def _validated_table_definition(
+        title: str, columns: list[dict]
+    ) -> tuple[str, list[str], list[str]]:
+        title = str(title or "").strip()
+        if not title:
+            raise ValueError("表标题不能为空")
+        names = [str(column.get("name", "")).strip() for column in columns]
+        if any(not name for name in names):
+            raise ValueError("列名不能为空")
+        if len(names) != len(set(names)):
+            raise ValueError("列名不能重复")
+        kinds = [column.get("role") or "attribute" for column in columns]
+        for kind in kinds:
+            if kind not in VALID_KINDS:
+                raise ValueError(f"非法的列类型：{kind}")
+        if sum(1 for kind in kinds if kind == "anchor") > 1:
+            raise ValueError("至多一列可设为行标题列")
+        return title, names, kinds
+
+    def _insert_table_on(
+        self,
+        db,
+        notebook_id: str,
+        title: str,
+        description: str,
+        names: list[str],
+        kinds: list[str],
+        created_by: str,
+        now: str,
+    ) -> tuple[str, list[str]]:
+        table_id = self.new_id("khtbl")
+        db.execute(
+            "INSERT INTO knowhow_tables "
+            "(id, notebook_id, title, description, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (table_id, notebook_id, title, description or "", created_by or "", now, now),
+        )
+        column_ids: list[str] = []
+        for position, name in enumerate(names):
+            column_id = self.new_id("khcol")
+            column_ids.append(column_id)
+            db.execute(
+                "INSERT INTO knowhow_columns (id, table_id, name, role, position) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (column_id, table_id, name, kinds[position], position),
+            )
+        return table_id, column_ids
+
+    def _insert_knowhow_row_on(
+        self,
+        db,
+        table_id: str,
+        cells: dict[str, str],
+        position: int,
+        now: str,
+    ) -> str:
+        row_id = self.new_id("khrow")
+        db.execute(
+            "INSERT INTO knowhow_rows (id, table_id, position, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (row_id, table_id, position, now, now),
+        )
+        for column_id, content_md in cells.items():
+            db.execute(
+                "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (self.new_id("khcel"), row_id, column_id, content_md, now),
+            )
+        return row_id
 
     # ------------------------------------------------------------- tables
     def create_knowhow_table(
@@ -83,43 +155,73 @@ class KnowhowStore:
         Violations raise ``ValueError`` with a Chinese-friendly message —
         nothing is written on failure. The stored title is the stripped form.
         """
-        title = str(title or "").strip()
-        if not title:
-            raise ValueError("表标题不能为空")
-        names = [str(column.get("name", "")).strip() for column in columns]
-        if any(not name for name in names):
-            raise ValueError("列名不能为空")
-        if len(names) != len(set(names)):
-            raise ValueError("列名不能重复")
-        kinds = [column.get("role") or "attribute" for column in columns]
-        for kind in kinds:
-            if kind not in VALID_KINDS:
-                raise ValueError(f"非法的列类型：{kind}")
-        anchor_count = sum(1 for kind in kinds if kind == "anchor")
-        if anchor_count > 1:
-            raise ValueError("至多一列可设为行标题列")
-
-        table_id = self.new_id("khtbl")
+        title, names, kinds = self._validated_table_definition(title, columns)
         now = self.now()
         with self.database.write() as db:
-            db.execute(
-                "INSERT INTO knowhow_tables "
-                "(id, notebook_id, title, description, created_by, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (table_id, notebook_id, title, description or "", created_by or "", now, now),
+            table_id, _column_ids = self._insert_table_on(
+                db,
+                notebook_id,
+                title,
+                description,
+                names,
+                kinds,
+                created_by,
+                now,
             )
-            for position, column in enumerate(columns):
-                db.execute(
-                    "INSERT INTO knowhow_columns (id, table_id, name, role, position) "
-                    "VALUES (?, ?, ?, ?, ?)",
+        return table_id
+
+    def create_knowhow_table_with_rows(
+        self,
+        notebook_id: str,
+        title: str,
+        description: str,
+        columns: list[dict],
+        rows: Sequence[Sequence[str]],
+        created_by: str = "",
+    ) -> str:
+        """Atomically create an imported table and every normalized row."""
+        title, names, kinds = self._validated_table_definition(title, columns)
+        normalized_rows = [list(row) for row in rows]
+        if any(len(row) != len(names) for row in normalized_rows):
+            raise ValueError("导入行列数与表结构不一致")
+        now = self.now()
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            table_id, column_ids = self._insert_table_on(
+                db,
+                notebook_id,
+                title,
+                description,
+                names,
+                kinds,
+                created_by,
+                now,
+            )
+            self._require_assets_for_notebook(
+                db,
+                notebook_id,
+                required_asset_ids(
+                    (),
                     (
-                        self.new_id("khcol"),
-                        table_id,
-                        names[position],
-                        kinds[position],
-                        position,
+                        ("", content)
+                        for row in normalized_rows
+                        for content in row
                     ),
+                ),
+            )
+            for position, row in enumerate(normalized_rows):
+                cells = {
+                    column_ids[index]: content
+                    for index, content in enumerate(row)
+                    if content
+                }
+                self._insert_knowhow_row_on(
+                    db, table_id, cells, position, now
                 )
+            db.execute(
+                "UPDATE knowhow_tables SET mutation_seq=mutation_seq+1 WHERE id=?",
+                (table_id,),
+            )
         return table_id
 
     def update_knowhow_table_meta(
@@ -577,30 +679,93 @@ class KnowhowStore:
         """Insert a row (default position = current row count, i.e.
         append) plus any provided cells, in one write transaction.
         ``projection_status`` starts at its schema default (``'pending'``).
-        Does not bump the table's ``mutation_seq`` — callers doing bulk
-        inserts (Task 6's import) bump once at the end via
-        ``bump_knowhow_mutation_seq``."""
-        row_id = self.new_id("khrow")
+        Does not bump the table's ``mutation_seq``; aggregate callers use the
+        atomic batch ports when they need one bump for multiple rows."""
         now = self.now()
         with self.database.write() as db:
+            self.database.begin_immediate(db)
+            table = db.execute(
+                "SELECT notebook_id FROM knowhow_tables WHERE id=?", (table_id,)
+            ).fetchone()
+            if table is None:
+                raise KeyError(table_id)
+            valid_columns = {
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM knowhow_columns WHERE table_id=?", (table_id,)
+                ).fetchall()
+            }
+            if any(column_id not in valid_columns for column_id in (cells or {})):
+                raise ValueError("单元格列不属于本表")
+            self._require_assets_for_notebook(
+                db,
+                str(table["notebook_id"]),
+                required_asset_ids(
+                    (), (("", content) for content in (cells or {}).values())
+                ),
+            )
             if position is None:
                 count_row = db.execute(
                     "SELECT COUNT(*) AS n FROM knowhow_rows WHERE table_id = ?",
                     (table_id,),
                 ).fetchone()
                 position = count_row["n"]
-            db.execute(
-                "INSERT INTO knowhow_rows (id, table_id, position, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (row_id, table_id, position, now, now),
+            return self._insert_knowhow_row_on(
+                db, table_id, dict(cells or {}), position, now
             )
-            for column_id, content_md in (cells or {}).items():
-                db.execute(
-                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+
+    def append_knowhow_rows(
+        self, table_id: str, rows: Sequence[dict[str, str]]
+    ) -> list[str]:
+        """Append every row atomically and bump the table sequence once."""
+        batch_rows = [dict(row) for row in rows]
+        now = self.now()
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            table = db.execute(
+                "SELECT notebook_id FROM knowhow_tables WHERE id=?", (table_id,)
+            ).fetchone()
+            if table is None:
+                raise KeyError(table_id)
+            valid_columns = {
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM knowhow_columns WHERE table_id=?", (table_id,)
+                ).fetchall()
+            }
+            if any(
+                column_id not in valid_columns
+                for cells in batch_rows
+                for column_id in cells
+            ):
+                raise ValueError("单元格列不属于本表")
+            self._require_assets_for_notebook(
+                db,
+                str(table["notebook_id"]),
+                required_asset_ids(
+                    (),
+                    (
+                        ("", content)
+                        for cells in batch_rows
+                        for content in cells.values()
+                    ),
+                ),
+            )
+            count_row = db.execute(
+                "SELECT COUNT(*) AS n FROM knowhow_rows WHERE table_id=?", (table_id,)
+            ).fetchone()
+            start_position = int(count_row["n"])
+            row_ids = [
+                self._insert_knowhow_row_on(
+                    db, table_id, cells, start_position + offset, now
                 )
-        return row_id
+                for offset, cells in enumerate(batch_rows)
+            ]
+            db.execute(
+                "UPDATE knowhow_tables SET mutation_seq=mutation_seq+1 WHERE id=?",
+                (table_id,),
+            )
+        return row_ids
 
     def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
         with self.database.write() as db:
@@ -642,6 +807,24 @@ class KnowhowStore:
             db.execute("DELETE FROM knowhow_rows WHERE id = ?", (row_id,))
 
     # -------------------------------------------------------------- cells
+    @staticmethod
+    def _require_assets_for_notebook(
+        db, notebook_id: str, require_assets: Sequence[str]
+    ) -> tuple[str, ...]:
+        ordered = tuple(sorted({str(asset_id) for asset_id in require_assets}))
+        missing: list[str] = []
+        for asset_id in ordered:
+            row = db.execute(
+                "SELECT 1 FROM notebook_assets "
+                "WHERE id=? AND notebook_id=? LIMIT 1",
+                (asset_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                missing.append(asset_id)
+        if missing:
+            raise ValueError(f"asset {missing[0]} is not available here")
+        return ordered
+
     def _require_assets_exist(
         self, db, row_id: str, require_assets: Sequence[str]
     ) -> None:
@@ -668,13 +851,9 @@ class KnowhowStore:
         ).fetchone()
         if owner is None:
             raise ValueError(f"row {row_id} does not exist")
-        for asset_id in require_assets:
-            row = db.execute(
-                "SELECT 1 FROM notebook_assets WHERE id = ? AND notebook_id = ? LIMIT 1",
-                (asset_id, owner["notebook_id"]),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"asset {asset_id} is not available here")
+        self._require_assets_for_notebook(
+            db, str(owner["notebook_id"]), require_assets
+        )
 
     def update_knowhow_cell(
         self,
@@ -701,7 +880,18 @@ class KnowhowStore:
         sees the deletion and refuses."""
         now = self.now()
         with self.database.write() as db:
-            self._require_assets_exist(db, row_id, require_assets)
+            self.database.begin_immediate(db)
+            current_row = db.execute(
+                "SELECT content_md FROM knowhow_cells "
+                "WHERE row_id=? AND column_id=?",
+                (row_id, column_id),
+            ).fetchone()
+            current = current_row["content_md"] if current_row is not None else ""
+            self._require_assets_exist(
+                db,
+                row_id,
+                required_asset_ids(require_assets, ((current, content_md),)),
+            )
             db.execute(
                 "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
@@ -754,9 +944,29 @@ class KnowhowStore:
             return
         now = self.now()
         with self.database.write() as db:
+            self.database.begin_immediate(db)
             # row_ids share a table (documented above), so any of them resolves
             # the same notebook.
-            self._require_assets_exist(db, row_ids[0], require_assets)
+            current_by_row: dict[str, str] = {}
+            for row_id in row_ids:
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id=? AND column_id=?",
+                    (row_id, column_id),
+                ).fetchone()
+                if current_row is not None:
+                    current_by_row[row_id] = current_row["content_md"]
+            self._require_assets_exist(
+                db,
+                row_ids[0],
+                required_asset_ids(
+                    require_assets,
+                    (
+                        (current_by_row.get(row_id, ""), content_md)
+                        for row_id in row_ids
+                    ),
+                ),
+            )
             for row_id in row_ids:
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
@@ -845,6 +1055,7 @@ class KnowhowStore:
         skipped: list[tuple[str, str]] = []
         already_applied: list[tuple[str, str]] = []
         rejected: list[tuple[str, str]] = []
+        to_write: list[tuple[str, str, str, str, str]] = []
         written_table_ids: list[str] = []
         with self.database.write() as db:
             # F1 (cross-process atomicity): take a RESERVED lock BEFORE the
@@ -900,6 +1111,22 @@ class KnowhowStore:
                     else:
                         skipped.append((row_id, column_id))
                     continue
+                to_write.append(
+                    (table_id, row_id, column_id, current or "", content_md)
+                )
+
+            self._require_assets_for_notebook(
+                db,
+                notebook_id,
+                required_asset_ids(
+                    (),
+                    (
+                        (old_content, content)
+                        for _table, _row, _column, old_content, content in to_write
+                    ),
+                ),
+            )
+            for table_id, row_id, column_id, _old_content, content_md in to_write:
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                     "VALUES (?, ?, ?, ?, ?) "
@@ -1160,7 +1387,17 @@ class KnowhowStore:
             # row resolves the same notebook (mirrors update_knowhow_cells checking
             # against row_ids[0]). A miss raises ValueError -> whole tx rolls back,
             # nothing written -> caller returns the legacy 400 (not a 409).
-            self._require_assets_exist(db, updates[0][1], require_assets)
+            self._require_assets_exist(
+                db,
+                updates[0][1],
+                required_asset_ids(
+                    require_assets,
+                    (
+                        (expected_before or "", content)
+                        for _table, _row, _column, expected_before, content in updates
+                    ),
+                ),
+            )
             # Phase 2: every entry cleared → write them all in this transaction.
             for table_id, row_id, column_id, expected_before, content_md in updates:
                 db.execute(
