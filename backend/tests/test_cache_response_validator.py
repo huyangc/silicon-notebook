@@ -149,8 +149,12 @@ def test_no_validator_does_not_read_a_prepopulated_hit(tmp_path, monkeypatch):
 
 def test_validator_bearing_call_is_served_a_good_hit(tmp_path, monkeypatch):
     """The hit gate must not block GOOD cached values: a well-shaped reply written
-    with a validator is served on the next validator-bearing call (no re-hit)."""
-    good = '{"nodes": [{"type": "Concept"}], "edges": []}'
+    with a validator is served on the next validator-bearing call (no re-hit).
+
+    The value is a groundable node (name + integer ev): the window-less
+    _kg_fragment_cacheable now judges grounding by the minimal field set, so a bare
+    ``{"type":"Concept"}`` (no name/ev) is no longer a cacheable 'good' reply."""
+    good = '{"nodes": [{"type": "Concept", "name": "x", "ev": 0}], "edges": []}'
     client, fake = _client(tmp_path, monkeypatch, good)
     client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
     client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
@@ -184,23 +188,28 @@ def test_kg_fragment_validator_rejects_wrong_typed_containers():
 
 
 def test_kg_fragment_validator_rejects_error_envelopes_and_junk_entries():
-    # Round-7 tightening: a real extraction ALWAYS emits nodes as a list. Replies
-    # that ground to 0 objects but would DIFFER on retry (error envelopes) or are
-    # simply malformed (junk node entries) must not be frozen for the whole TTL.
+    # Round-8 structural tightening: cache only a reply that GROUNDS >=1 object (the
+    # real downstream gate), or is a legit empty window. Replies that ground to 0
+    # objects but would DIFFER on retry (error envelopes), are malformed (junk node
+    # entries), or are present-but-ungroundable must not be frozen for the whole TTL.
     assert _kg_fragment_cacheable('{"error": "quota"}') is False  # no nodes + error
     assert _kg_fragment_cacheable('{"nodes": [], "error": "partial"}') is False  # error env
     assert _kg_fragment_cacheable('{"nodes": [{"garbage": 1}]}') is False  # typeless junk
     assert _kg_fragment_cacheable('{"nodes": [{"type": "Widget"}]}') is False  # off-vocab type
     assert _kg_fragment_cacheable('{"nodes": [{"type": "Concept"}, 5]}') is False  # non-dict entry
+    # The round-4..8 whack-a-mole shape: a typed node with NO name/ev. It parses,
+    # passes every earlier shape check, yet extract_window drops it (ungroundable)
+    # so the window yields 0 objects. The window-less gate rejects it on the minimal
+    # field set (name empty), and the elements-aware gate rejects it on real resolve.
+    assert _kg_fragment_cacheable('{"nodes": [{"type": "Concept"}]}') is False
 
 
 def test_kg_fragment_validator_accepts_usable_shapes():
     assert _kg_fragment_cacheable('{"nodes": [], "edges": []}') is True  # legit empty window
-    assert _kg_fragment_cacheable('{"nodes": [{"type": "Concept"}]}') is True
     assert _kg_fragment_cacheable(
         '{"nodes": [{"local_id": "a", "type": "Concept", "name": "x", "ev": 0}],'
         ' "edges": []}'
-    ) is True  # a normal, fully-formed extraction
+    ) is True  # a normal, fully-formed extraction (name + integer ev -> grounds)
     # No `nodes` key is error/malformed, NOT a legit empty window (that is
     # {"nodes":[],...}); is_cacheable_llm_response already rejects a bare "{}".
     assert _kg_fragment_cacheable('{}') is False

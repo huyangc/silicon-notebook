@@ -28,43 +28,63 @@ _KG_SCHEMA_HINT = (
 )
 
 
-def _kg_fragment_cacheable(content: str) -> bool:
-    """Cache-admission shape gate for the KG-fragment schema (_KG_SCHEMA_HINT).
+def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
+    """Does this one LLM node dict clear the SAME gate extract_window / _glean_nodes
+    apply before the entry becomes an object? Downstream keeps a node only when it
+    is a typed dict (``isinstance(it, dict) and it.get("type") in NODE_TYPES``) with
+    a non-empty ``name`` that ``_resolve`` can bind to some window element — by the
+    integer ``ev`` label, or (fallback) because the name is a substring of an
+    element's text. This calls the very same ``_resolve``, so the cache decision can
+    never drift from what actually gets consumed (that drift is exactly what the
+    per-shape tightening kept missing round after round).
+
+    Degraded path — ``elements`` empty (a caller/test with no window to resolve
+    against): fall back to the minimal field set the real gate needs, a non-empty
+    ``name`` AND an integer ``ev``. Conservative by construction (it cannot use the
+    name-substring fallback), which only ever means "re-fetch", never "cache junk"."""
+    if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
+        return False
+    name = str(it.get("name", "")).strip()
+    if not name:
+        return False
+    if elements:
+        return _resolve(elements, it.get("ev"), name) is not None
+    return isinstance(it.get("ev"), int)
+
+
+def _fragment_grounds_something(content: str, elements: List[SourceElementQ]) -> bool:
+    """Cache-admission gate for the KG-fragment schema (_KG_SCHEMA_HINT), judged by
+    running the DOWNSTREAM grounding logic itself instead of a shape approximation.
 
     is_cacheable_llm_response already rejects the empty "{}" fallback, unparseable
-    JSON and budget-truncated replies, but a syntactically valid reply can still
-    be a NON-extraction that must never be frozen for the 90-day TTL. The prior
-    gate was deliberately lax (list-when-present, absent-is-fine) and therefore
-    admitted two poison shapes: an error envelope like ``{"error":"quota"}`` (no
-    ``nodes`` key at all → treated as a "legit empty window") and a ``nodes`` list
-    full of junk entries (``{"nodes":[{"garbage":1}]}``) — both ground to 0 objects
-    and, once cached, make every re-parse replay the 0. Skipping a doubtful reply
-    costs only one cache miss (the reply is still USED this call, just re-fetched
-    next time), so tighten to "cache only when we are sure it is a real extraction"
-    and mirror what extract_window ACTUALLY consumes:
+    JSON and budget-truncated replies, but a syntactically valid reply can still be
+    a NON-extraction that must never be frozen for the 90-day TTL. Earlier rounds
+    tightened the shape check case-by-case and never converged: every round found a
+    new reply that parsed yet grounded to 0 objects downstream (an ``{"error":..}``
+    envelope; a ``nodes`` list of typeless junk; and — the one this closes — a
+    PRESENT-but-ungroundable node like ``{"nodes":[{"type":"Concept"}]}`` that has a
+    type but no name/ev, so extract_window drops it and the window yields nothing).
+    The root cause is that "is this reply usable" IS the downstream consumption
+    logic; any approximation of it leaks. So cache iff the fragment produces the
+    same thing the pipeline would keep:
 
-    - A real extraction ALWAYS emits ``nodes`` as a LIST — even an empty window is
-      ``{"nodes":[],"edges":[]}``. A reply with no ``nodes`` key, or a non-list one,
-      is error/malformed, NOT a legit empty window → reject.
-    - An ``error`` key (or any error-envelope shape) is a transient failure that
-      would differ on retry → never cache.
-    - ``edges`` when present must be a list.
-    - Each PRESENT node must clear extract_window's own first-line consumption gate
-      (``isinstance(it, dict) and it.get("type") in NODE_TYPES``) — the field that
-      decides whether the entry becomes an object. A list where any entry fails
-      that gate is (at least partly) junk; do not cache it. Groundability (ev/name
-      vs the window's elements) is NOT re-checked here: it depends on ``elements``
-      the validator does not have, and it is deterministic for this cache key
-      anyway (the elements' text is IN the key), so a typed node is a real reply.
+    - dict, no ``error`` key, ``nodes`` is a list, ``edges`` (if present) a list —
+      structural validity; anything else is error/malformed → reject.
+    - ``nodes == []`` — a LEGIT empty window (the model genuinely found nothing to
+      extract; ``{"nodes":[],"edges":[]}``). No ungroundable junk → cache it.
+    - otherwise cache iff AT LEAST ONE present node grounds via ``_grounds_a_node``
+      (the real ``_resolve`` gate). A list whose nodes ALL fail to ground drops to 0
+      objects downstream — freezing that 0 for the TTL is the poison → reject.
 
-    Passed to chat_json as response_validator; a fault there conservatively skips
-    the write (see OpenAICompatibleClient._response_validator_allows). On a cache
-    HIT this same gate re-judges the stored value, so any laxer-era poison already
-    in the cache is treated as a miss and re-fetched."""
+    The window's ``elements`` are closed in by the caller (extract_window /
+    _glean_nodes build ``lambda content: _fragment_grounds_something(content,
+    elements)``) so grounding is the ACTUAL resolve, not a proxy. Passed to
+    chat_json as response_validator; a fault there conservatively skips the write
+    (OpenAICompatibleClient._response_validator_allows). On a cache HIT this same
+    gate re-judges the stored value against this window's elements, so any
+    laxer-era poison already in the cache is treated as a miss and re-fetched."""
     data = safe_json(content)
-    if not isinstance(data, dict):
-        return False
-    if "error" in data:
+    if not isinstance(data, dict) or "error" in data:
         return False
     nodes = data.get("nodes")
     if not isinstance(nodes, list):
@@ -72,10 +92,17 @@ def _kg_fragment_cacheable(content: str) -> bool:
     edges = data.get("edges")
     if edges is not None and not isinstance(edges, list):
         return False
-    for it in nodes:
-        if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
-            return False
-    return True
+    if not nodes:
+        return True  # legit empty window — a real "found nothing" extraction
+    return any(_grounds_a_node(it, elements) for it in nodes)
+
+
+def _kg_fragment_cacheable(content: str) -> bool:
+    """Degraded (window-less) entry to _fragment_grounds_something for callers/tests
+    that have no ``elements`` to resolve against — approximates grounding with the
+    minimal field set (see _grounds_a_node). Real extraction callers pass an
+    elements-closed validator instead, so grounding is checked for real."""
+    return _fragment_grounds_something(content, [])
 
 
 def _refine_response_cacheable(content: str) -> bool:
@@ -322,8 +349,13 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
     ]
     for _ in range(max_rounds):
         try:
-            raw = client.chat_json(messages, _KG_SCHEMA_HINT,
-                                   **_extract_call_kwargs(client, _kg_fragment_cacheable))
+            raw = client.chat_json(
+                messages, _KG_SCHEMA_HINT,
+                **_extract_call_kwargs(
+                    client,
+                    lambda content: _fragment_grounds_something(content, elements),
+                ),
+            )
             data = safe_json(raw)
         except KgBuildAborted:
             raise
@@ -373,7 +405,10 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             [{"role": "user",
               "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
             _KG_SCHEMA_HINT,
-            **_extract_call_kwargs(client, _kg_fragment_cacheable),
+            **_extract_call_kwargs(
+                client,
+                lambda content: _fragment_grounds_something(content, elements),
+            ),
         )
         data = safe_json(raw)
     except KgBuildAborted:
