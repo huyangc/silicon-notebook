@@ -191,8 +191,8 @@ LLM 侧无需任何装饰器——`extract_graph` / `extract_window` / refine / 
 
 | | key | 依据 |
 |---|---|---|
-| KG | `sha256(base_url + model + messages全文 + schema_hint)` | prompt 已核对为内容的纯函数；base_url 见下"服务身份" |
-| embed | `sha256(base_url + model + 单条 text[:embed_truncate_chars])`，**per-text 而非 per-batch** | 见下三条 |
+| KG | `sha256(base_url + model + messages全文 + schema_hint + 有效 temperature/top_p/max_tokens)` | prompt 已核对为内容的纯函数；base_url 见下"服务身份"；生成参数见下"生成参数" |
+| embed | `sha256(base_url + model + 单条 text[:embed_truncate_chars])`，**per-text 而非 per-batch** | 见下三条（embedding 无采样/token 参数，不受生成参数影响） |
 
 **服务身份（base_url）必须进 key（已解决）**：本仓库有 per-user 模型配置，不同
 用户/角色可配不同 `base_url` 指向不同 endpoint，而缓存是**跨用户全局共享**的。若
@@ -211,6 +211,22 @@ endpoint（正是上面的场景），且它本就不是秘密（出现在日志
 
 （此改动让此前**全部**缓存条目 key 变化 = 一次性全冷。缓存尚未上线，冷启动重建
 即可，无迁移成本。）
+
+**生成参数（temperature / top_p / max_tokens）必须进 key（已并入）**：`chat_json` 的
+这三个参数是 per-call 的（KG 抽取用高 token 预算、答案合成用另一档）。相同 messages
++ schema 但不同采样设置、或不同 token 预算是**语义不同的 upstream 请求**，绝不能共用
+一条缓存。`max_tokens` 尤其关键——本仓库文档化的截断补救手段就是调大
+`KG_EXTRACT_MAX_TOKENS` 重跑，若它不在 key 里，调大后仍会命中被截断的旧响应。这与
+「截断响应不入缓存」（`is_cacheable_llm_response`）互为**两半**：那条防坏响应被写入，
+这条防参数变了还命中旧响应。
+
+⚠ **key 用解析后的有效值，而非原始入参**：`max_tokens=None` 在 `chat_json` 里回落到
+`settings.openai_compat_max_tokens`，因此 `llm_key` 收到的必须是**解析后**的有效预算
+（`chat_json` 在缓存查询前先算出 `effective_max_tokens` 再传入）。否则 `max_tokens=None`
+与显式传入等价默认值会算出两条不同 key = 虚假 miss，白白多打一次模型。`temperature`
+/ `top_p` 无 None 回落，直接用入参即可。（此前设计与 `llm_key` 文档串曾把 temperature
+记作「固定常量，刻意排除；若将来加了 per-call temperature 必须并入 key」——现在正是
+那个"将来"，已并入，并一并补上 top_p 与 max_tokens。）
 
 embed key 的另两个必须点：
 
