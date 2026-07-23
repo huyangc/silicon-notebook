@@ -32,6 +32,7 @@ from tests.postgres.lane import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+_INVALID_HOST_PROBE_DUMMY_PASSWORD = "invalid-host-probe-dummy"
 
 
 def _pgpass_fields(line: str) -> list[str]:
@@ -57,7 +58,7 @@ def _pgpass_fields(line: str) -> list[str]:
     return fields
 
 
-def _current_target_password(url: str) -> str:
+def _current_target_password(url: str) -> str | None:
     parsed = urlsplit(url)
     expected = (
         parsed.hostname,
@@ -67,14 +68,25 @@ def _current_target_password(url: str) -> str:
     )
     pgpass_path = os.environ.get("PGPASSFILE")
     if not pgpass_path:
-        raise RuntimeError("isolated PostgreSQL lane did not provide PGPASSFILE")
-    for raw_line in Path(pgpass_path).read_text(encoding="utf-8").splitlines():
+        return None
+    try:
+        lines = Path(pgpass_path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    for raw_line in lines:
         if not raw_line or raw_line.startswith("#"):
             continue
         fields = _pgpass_fields(raw_line)
         if all(actual == "*" or actual == wanted for actual, wanted in zip(fields, expected)):
             return fields[4]
-    raise RuntimeError("isolated PostgreSQL credential was not found")
+    return None
+
+
+def _invalid_host_probe_password(url: str) -> str:
+    password = _current_target_password(url)
+    if password is not None:
+        return password
+    return _INVALID_HOST_PROBE_DUMMY_PASSWORD
 
 
 def _run_postgres_gate(url: str) -> subprocess.CompletedProcess[str]:
@@ -109,6 +121,22 @@ def _process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def test_invalid_host_probe_uses_dummy_when_lane_pgpass_is_empty(
+    monkeypatch,
+    tmp_path,
+):
+    empty_pgpass = tmp_path / "empty.pgpass"
+    empty_pgpass.write_text("", encoding="utf-8")
+    empty_pgpass.chmod(0o600)
+    monkeypatch.setenv("PGPASSFILE", str(empty_pgpass))
+    password = _invalid_host_probe_password(
+        "postgresql://postgres@127.0.0.1:55432/"
+        "silicon_notebook_task4_test"
+    )
+    assert password == _INVALID_HOST_PROBE_DUMMY_PASSWORD
+    assert "sentinel" not in password
 
 
 def test_psycopg_binary_and_pool_have_explicit_compatible_major_ranges():
@@ -887,7 +915,7 @@ def test_invalid_url_cannot_be_redirected_by_parent_pghostaddr(
 ):
     current_url = os.environ["TEST_POSTGRES_URL"]
     parsed = urlsplit(current_url)
-    password = _current_target_password(current_url)
+    password = _invalid_host_probe_password(current_url)
     invalid_url = (
         f"postgresql://{parsed.username}@definitely.invalid:{parsed.port or 5432}"
         f"{parsed.path}"
