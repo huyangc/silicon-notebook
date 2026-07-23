@@ -19,6 +19,9 @@ from app.migration.sqlite_to_postgres import (  # noqa: E402
     preflight,
     target_url_from_environment,
 )
+from app.migration.database_activation import (  # noqa: E402
+    activate_postgres_from_receipt,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -64,6 +67,27 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="create the snapshot and write the empty PostgreSQL target",
     )
+    parser.add_argument(
+        "--activate-env",
+        type=Path,
+        help=(
+            "after full receipt verification, atomically switch DATABASE_URL in "
+            "this stopped local deployment env file and preserve SQLite as shadow"
+        ),
+    )
+    parser.add_argument(
+        "--activation-receipt",
+        type=Path,
+        help=(
+            "activate an already completed migration from this receipt instead of "
+            "writing a new empty target"
+        ),
+    )
+    parser.add_argument(
+        "--confirm-service-stopped",
+        action="store_true",
+        help="required for activation: confirm all API/background writers are stopped",
+    )
     return parser
 
 
@@ -71,6 +95,41 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         target_url = target_url_from_environment(args.target_env)
+        if args.activation_receipt is not None:
+            if args.apply or args.snapshot is not None:
+                raise SqliteToPostgresMigrationError(
+                    "--activation-receipt cannot be combined with --apply or --snapshot"
+                )
+            if args.activate_env is None or not args.confirm_service_stopped:
+                raise SqliteToPostgresMigrationError(
+                    "receipt activation requires --activate-env and "
+                    "--confirm-service-stopped"
+                )
+            activation = activate_postgres_from_receipt(
+                source_path=args.source,
+                target_url=target_url,
+                receipt_path=args.activation_receipt,
+                work_dir=args.work_dir,
+                env_path=args.activate_env,
+                root_dir=REPO_ROOT,
+                batch_rows=args.batch_rows,
+            )
+            action = "already active" if not activation.changed else "activated"
+            print(
+                "ACTIVATION OK: "
+                f"PostgreSQL {action}; {activation.verification.total_rows} verified "
+                f"rows across {len(activation.verification.tables)} tables; "
+                f"env={activation.env_path}; backup={activation.backup_path or 'unchanged'}"
+            )
+            print("Restart the backend and require /api/ready before resuming writes.")
+            return 0
+
+        if args.activate_env is not None and (
+            not args.apply or not args.confirm_service_stopped
+        ):
+            raise SqliteToPostgresMigrationError(
+                "--activate-env requires --apply and --confirm-service-stopped"
+            )
         if not args.apply:
             source, target = preflight(
                 source_path=args.source,
@@ -100,10 +159,27 @@ def main(argv: list[str] | None = None) -> int:
             f"SQLite v{result.upgraded_from}->v{result.upgraded_to}; "
             f"snapshot={result.snapshot_path}; receipt={result.receipt_path}"
         )
-        print(
-            "DATABASE_URL was not changed. Keep SQLite authoritative until the "
-            "documented stop/write-freeze/final-migration cutover."
+        if args.activate_env is None:
+            print(
+                "DATABASE_URL was not changed. Keep SQLite authoritative until the "
+                "documented stop/write-freeze/final-migration cutover."
+            )
+            return 0
+
+        activation = activate_postgres_from_receipt(
+            source_path=args.source,
+            target_url=target_url,
+            receipt_path=Path(result.receipt_path),
+            work_dir=args.work_dir,
+            env_path=args.activate_env,
+            root_dir=REPO_ROOT,
+            batch_rows=args.batch_rows,
         )
+        print(
+            "ACTIVATION OK: PostgreSQL activated after final checksum verification; "
+            f"env={activation.env_path}; backup={activation.backup_path}"
+        )
+        print("Restart the backend and require /api/ready before resuming writes.")
         return 0
     except SqliteToPostgresMigrationError as exc:
         print(f"MIGRATION FAILED: {exc}", file=sys.stderr)

@@ -196,24 +196,29 @@ succeeded: SQLite commits after that snapshot are absent.
 2. Create a **new empty final PostgreSQL database**. A rehearsal target contains an older
    snapshot and is intentionally rejected. Take/restore-test the normal SQLite and PostgreSQL
    backups required by your deployment policy.
-3. Run preview and `--apply` again against the stopped SQLite source without `--snapshot`.
-   Retain the final sealed snapshot and receipt. Verify that
+3. Run preview again against the stopped SQLite source. Then perform the final import and
+   atomic local activation in one command (all paths must be absolute):
+
+   ```bash
+   python scripts/migrate_sqlite_to_postgres.py \
+     --source /absolute/path/to/.local/silicon_notebook.db \
+     --work-dir /protected/path/postgres-migration \
+     --apply \
+     --activate-env /absolute/path/to/.env \
+     --confirm-service-stopped
+   ```
+
+   The activation pass repeats the SQLite snapshot and every PostgreSQL table checksum before
+   it atomically replaces `.env`; a mismatch leaves `.env` unchanged. Retain the final sealed
+   snapshot, receipt, and restricted `.env.pre-postgres-*.bak` file. Verify that
    `SILICON_NOTEBOOK_STORAGE_DIR` points to the same files on the new deployment host, or copy
    that directory separately and verify it; database migration never copies those files.
-4. Back up `.env`, then change exactly one selector. SQLite uses:
-
-   ```text
-   DATABASE_URL=sqlite:///.local/silicon_notebook.db
-   ```
-
-   PostgreSQL uses:
-
-   ```text
-   DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/FINAL_DB
-   ```
-
-   Do not use `SHADOW_DATABASE_URL` as a selector and do not leave two uncommented
-   `DATABASE_URL` assignments. Restart the backend; deployment remains `--workers 1`.
+   To activate a migration that already completed while the source has remained stopped, use
+   `--activation-receipt /absolute/path/migration-*.receipt.json` instead of `--apply`; the same
+   full verification still runs. The CLI sets PostgreSQL as the only `DATABASE_URL` and stores
+   the prior SQLite URL as inert `SHADOW_DATABASE_URL`; it does not stop or start processes.
+4. Restart the backend; deployment remains `--workers 1`. Do not manually edit the selector
+   between receipt verification and startup.
 5. Before traffic, require `curl -fsS http://127.0.0.1:8000/api/ready` to report
    `"ready": true`; log in as admin and a normal user; compare notebook/source counts with
    the receipt; exercise search and representative Ask/Knowledge/Memory/Knowhow/report reads;

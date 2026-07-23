@@ -70,6 +70,21 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 失败发生在目标数据提交前时，目标业务表保持空；可显式用 `--snapshot` 复用本工具生成的 sealed snapshot。脚本会重新检查目录、文件名/hash、`quick_check`、schema 版本和 WAL/SHM sidecar，不接受任意 SQLite 文件。在线运行只得到某一时刻的一致演练快照，不会同步后续写入；正式切换的停写、URL 修改和回滚步骤见 `docs/operations_zh.md`。脚本只迁 DB 行，不复制 `.local/storage`，也不支持 MySQL。
 
+停掉全部 writer 和后端后，可让同一个 CLI 在重新核对 SQLite 快照和 PostgreSQL 全表 checksum
+后原子激活本地 `.env`：
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/.local/silicon_notebook.db \
+  --work-dir /absolute/path/postgres-migration \
+  --activation-receipt /absolute/path/postgres-migration/migration-TIMESTAMP.receipt.json \
+  --activate-env /absolute/path/.env \
+  --confirm-service-stopped
+```
+
+未来的最终迁移也可把 `--apply`、`--activate-env`、`--confirm-service-stopped` 放在同一条命令。
+CLI 原子替换配置并保存权限受限的回退副本，但不会自行停止或重启服务。
+
 ---
 
 ## 二、检索 / chunk 运维

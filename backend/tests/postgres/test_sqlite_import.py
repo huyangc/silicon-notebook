@@ -7,9 +7,11 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from dotenv import dotenv_values
 from psycopg.rows import dict_row
 
 from app.core.config import Settings
+from app.migration.database_activation import activate_postgres_from_receipt
 from app.migration.sqlite_to_postgres import (
     SqliteToPostgresMigrationError,
     migrate,
@@ -193,10 +195,29 @@ def test_migrate_sqlite_snapshot_to_empty_postgres(
         ).fetchone()["ordinal"]
         assert int(ordinal) == int(source_rowid)
 
+    env_path = tmp_path / ".env"
+    env_path.write_text(f"DATABASE_URL=sqlite:///{source}\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    activation = activate_postgres_from_receipt(
+        source_path=source,
+        target_url=postgres_scope.url,
+        receipt_path=Path(result.receipt_path),
+        work_dir=tmp_path / "migration",
+        env_path=env_path,
+        root_dir=REPO_ROOT,
+        batch_rows=2,
+        progress=lambda _message: None,
+    )
+    assert activation.changed is True
+    assert activation.verification.total_rows == result.total_rows
+    assert "password" not in activation.active_database
+    activated_env = dotenv_values(env_path, interpolate=False)
+    assert activated_env["DATABASE_URL"] == postgres_scope.url
+    assert activated_env["SHADOW_DATABASE_URL"] == f"sqlite:///{source}"
+
     with pytest.raises(SqliteToPostgresMigrationError, match="not empty"):
         preflight(
             source_path=source,
             target_url=postgres_scope.url,
             root_dir=REPO_ROOT,
         )
-
