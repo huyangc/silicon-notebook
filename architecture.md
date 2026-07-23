@@ -131,8 +131,8 @@ degradation，并排除不完整信号，剩余采集继续。`scripts/diag_rule
 确定性排序最多三个假设，输出 `high`/`medium`/`low` 证据强度和安全下一步；默认 stdout 是一段最多
 32 KiB 的 UTF-8 文本。空闲服务可以没有有效多信号结论，不能据此编造根因。
 
-统一入口精确包含 `incident`、`slow`、`latency`、`open`、`db`、`base-recall` 六命令；裸调用仍为
-`slow`。六个命令及其 reporter 都是纯标准库、app-import-free。`base-recall` 复用 `db` 的
+统一入口精确包含 `incident`、`slow`、`latency`、`locks`、`open`、`db`、`base-recall` 七命令；裸调用仍为
+`slow`。七个命令及其 reporter 都是纯标准库、app-import-free。`base-recall` 复用 `db` 的
 `O_NOATIME` pin、非阻塞锁、身份复核和有界 DB/WAL 拷贝，只在诊断自己拥有的快照上运行固定聚合
 投影；它不构造 repository、不跑 application retrieval/migration、也不用 SQLite 打开源库。
 legacy `<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip

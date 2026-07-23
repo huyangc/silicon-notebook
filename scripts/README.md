@@ -117,13 +117,14 @@ checkpoint/vacuum/analyze/reindex/migration；只允许维护上述有界 `.loca
 来源/Ask/prompt/模型消息/Memory/Knowhow 正文、SQL 文本或参数、authorization/cookie/token/secret、
 原始命令行或局部变量。脱敏输出发给可信团队之外的人之前仍须人工复核。
 
-### `diag.py` 六命令矩阵
+### `diag.py` 七命令矩阵
 
 | 命令 | 用途 | 边界 / 委托 |
 |---|---|---|
 | `python3 scripts/diag.py incident` | 卡顿现场的首选有界采集；必要时加 `--pid <backend-pid>`，删除分析也可显式加 `--notebook <id>`。 | Ubuntu/Linux 活体证据；纯 stdlib、app-free → `diag_incident.py`。 |
 | `python3 scripts/diag.py slow --since 24 --deep` | 历史慢因：请求/事件/LLM 延迟、规模画像、reasoning/PPR 与 scale-index 审计；`--deep` 增加可能耗时数分钟的只读 DB 检查。裸 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib、app-free → `diag_slow.py`。 |
 | `python3 scripts/diag.py latency --last 500` | `ask_stage` 的逐阶段 P50/P95/max。 | 离线、纯 stdlib、app-free；口径与 `app/eval/ask_latency.py` 一致。 |
+| `python3 scripts/diag.py locks --top 20` | 按调用点汇总 SQLite 写锁的 wait/hold 分布。 | 离线、纯 stdlib、app-free；读取 `db_write_lock_slow` / `db_write_lock_stats` 事件。 |
 | `python3 scripts/diag.py open --local .local` | 打开笔记本的查询/端点延迟、计数缓存冷成本、pending 子查询与 mutation-sequence churn。 | 离线、纯 stdlib、app-free → `diag_open_latency.py`。 |
 | `python3 scripts/diag.py db --db .local/silicon_notebook.db` | SQLite/WAL/表/FK 索引/query plan 的有界源端无副作用证据。 | 离线、纯 stdlib、app-free → `diag_db.py`。 |
 | `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、app-free → `diag_base_report.py`；不执行检索或回显查询/正文。 |
@@ -138,7 +139,7 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 `<channel>-YYYY-MM-DD.jsonl`、daily gzip `<channel>-YYYY-MM-DD.jsonl.gz` 与下一层 per-user
 目录；读取受时间窗、记录数、输入字节和总 deadline 约束，malformed/截断会进入降级信息。
 
-既有独立引擎脚本仍可直接运行，旧运维笔记与 cron 不受影响；新操作优先使用上表六命令。
+既有独立引擎脚本仍可直接运行，旧运维笔记与 cron 不受影响；新操作优先使用上表七命令。
 `bench_sqlite_writes.py`（合成写吞吐基准）与 `replay_retrieval.py`（检索回归对照）不属于
 生产 DFX 命令，见下表。
 

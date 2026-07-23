@@ -13,6 +13,8 @@ When making changes that affect setup, product behavior, architecture, or develo
 
 Do not update only one language README when the same information should be available in both. `CLAUDE.md` belongs in this set because Claude Code loads it and not this file: leave it out of a constraint change and the standard that actually reaches the agent goes stale while these three look current.
 
+Keep the root READMEs as concise project entry points. Detailed behavior belongs in the paired canonical references under `docs/`: `product-and-api`, `deployment-and-configuration`, `operations`, and `development`. A change must also update the owning English/Chinese detail pair; do not copy the full detail back into the root READMEs.
+
 ## Tracking Completed Spec Features
 
 `silicon_notebook_fangan.md` is the product spec; `fangan_done.md` records what has actually been implemented against it.
@@ -349,7 +351,7 @@ Structured logs go to `.local/logs/*.jsonl` (gitignored) plus brief console line
 
 Rules: reuse `EventLogger` for any new structured log (it handles JSONL append + console + never raising); never log raw embedding vectors; chat prompt/response are truncated to `LLM_LOG_MAX_CHARS`. The browser/API debug log viewer (`/dev/logs`, `/api/debug/logs/...`) is opt-in because full LLM records may contain prompt/response text from private sources; enable only with `DEBUG_LOGS_ENABLED=true`. Config env vars: `LLM_LOG_ENABLED`, `LLM_LOG_PATH`, `LLM_LOG_MAX_CHARS`, `EVENT_LOG_ENABLED`, `EVENT_LOG_DIR`, `SLOW_REQUEST_MS`, `DEBUG_LOGS_ENABLED` — keep `.env.example` aligned.
 
-Production DFX is a binding internal-infrastructure contract. The supported production shape is Ubuntu 24.04 started from the repository with `npm run start` and one Uvicorn worker; operators run `python3 scripts/diag.py incident` **during** a visible hang, retrying with `--pid <backend-pid>` only when automatic discovery cannot select the already-running worker. The unified dispatcher has exactly six commands: `incident`, `slow`, `latency`, `open`, `db`, and `base-recall`; bare invocation remains `slow`. Existing standalone engine scripts and their old operator/cron paths must keep working, but do not reintroduce retired commands.
+Production DFX is a binding internal-infrastructure contract. The supported production shape is Ubuntu 24.04 started from the repository with `npm run start` and one Uvicorn worker; operators run `python3 scripts/diag.py incident` **during** a visible hang, retrying with `--pid <backend-pid>` only when automatic discovery cannot select the already-running worker. The unified dispatcher has exactly seven commands: `incident`, `slow`, `latency`, `locks`, `open`, `db`, and `base-recall`; bare invocation remains `slow`. Existing standalone engine scripts and their old operator/cron paths must keep working, but do not reintroduce retired commands.
 
 The default `incident` result must remain one copyable UTF-8 block no larger than 32 KiB, use one deadline capped at 10 seconds, and rank no more than three evidence-backed hypotheses while preserving explicit missing/degraded evidence instead of inventing a cause. The runtime atomically refreshes `.local/diagnostics/runtime.json` every two seconds; a heartbeat older than six seconds is stale. `SIGUSR1` is a non-terminating all-Python-thread faulthandler dump with no local-variable capture. `.local/diagnostics/thread-dumps.log` retention remains bounded to 8 MiB after successful capture, and temporary DB snapshots remain bounded beneath `.local/diagnostics/db-snapshots/`.
 
