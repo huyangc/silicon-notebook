@@ -86,6 +86,10 @@ class UploadedSourceFile:
     content_type: str
     content: bytes
     doc_type: str = ""
+    # 用户是否在 UI 里**显式**设过这一项的文档类型下拉框（改成某类型、或选回「自动检测」）。
+    # 只有显式时，reuse 路径才允许改/重置既有源的类型；auto-detect 的建议值、以及不发此
+    # 信号的调用方（老前端、batch_ingest）都视为「没表态」、绝不动既有源的类型。缺省 False。
+    doc_type_explicit: bool = False
 
 
 @dataclass(frozen=True)

@@ -98,7 +98,7 @@ import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
-import { summarizeUpload, docTypeForUpload } from "./source-upload.ts";
+import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched } from "./source-upload.ts";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -730,6 +730,10 @@ export default function Home() {
   const [docTypeOptions, setDocTypeOptions] = useState<Array<{ id: string; label: string }>>([]);
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   const [stagedDocTypes, setStagedDocTypes] = useState<string[]>([]);
+  // 与 stagedDocTypes 同序等长：用户是否**手动**动过这一项的类型下拉框。auto-detect
+  // 自动回填不置位（那是系统建议、非用户表态）；上传时据此发 doc_type_explicit，让后端
+  // 只在用户显式表态时才改/重置复用来源的类型（见 uploadDocTypeFields / 后端 reuse 路径）。
+  const [stagedDocTypeTouched, setStagedDocTypeTouched] = useState<boolean[]>([]);
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
@@ -2149,6 +2153,7 @@ export default function Home() {
     await openNotebook(notebook.id);
     setStagedFiles([]);
     setStagedDocTypes([]);
+    setStagedDocTypeTouched([]);
     setSourceModalOpen(true);
   }
 
@@ -2159,6 +2164,7 @@ export default function Home() {
     await openNotebook(notebook.id);
     setStagedFiles([]);
     setStagedDocTypes([]);
+    setStagedDocTypeTouched([]);
     setSourceModalOpen(true);
   }
 
@@ -2452,16 +2458,19 @@ export default function Home() {
     // 追加而非覆盖（"继续添加文件"语义）；按 name+size 去重，避免重复入列。
     const merged = [...stagedFiles];
     const mergedTypes = [...stagedDocTypes];
+    const mergedTouched = [...stagedDocTypeTouched];
     const added: File[] = [];
     for (const file of picked) {
       if (!merged.some((existing) => existing.name === file.name && existing.size === file.size)) {
         merged.push(file);
-        mergedTypes.push("");
+        mergedTypes.push("");        // 新文件默认「自动检测」
+        mergedTouched.push(false);   // 且尚未被用户手动设置（与 mergedTypes 同步增长）
         added.push(file);
       }
     }
     setStagedFiles(merged);
     setStagedDocTypes(mergedTypes);
+    setStagedDocTypeTouched(mergedTouched);
     setSourceModalOpen(true);
     // 对新增的文本类文件做内容检测，预填类型下拉（异步，不阻塞 UI；用户仍可改）。
     void detectStagedTypes(added, merged);
@@ -2479,8 +2488,10 @@ export default function Home() {
       const byName: Record<string, string> = {};
       results.forEach((r) => { if (r.doc_type_id) byName[r.name] = r.doc_type_id; });
       if (Object.keys(byName).length === 0) return;
-      // 按 fullList 的位置回填；只填仍为空的项，不覆盖用户已手动选择的。
-      setStagedDocTypes((prev) => prev.map((dt, i) => (dt ? dt : (byName[fullList[i]?.name] ?? dt))));
+      // 按 fullList 的位置回填；只填仍为空的项，不覆盖用户已手动选择的。**绝不动
+      // stagedDocTypeTouched**——这是系统建议、不是用户表态，重传时才会发 explicit=0。
+      const detected = fullList.map((file) => byName[file.name]);
+      setStagedDocTypes((prev) => fillAutoDetectedTypes(prev, detected));
     } catch {
       // 检测失败不影响上传：保持"自动检测"，用户可手动选。
     }
@@ -2488,24 +2499,32 @@ export default function Home() {
 
   function setStagedDocType(index: number, value: string) {
     setStagedDocTypes((prev) => prev.map((dt, i) => (i === index ? value : dt)));
+    // 用户手动改了这一项 → 标记为显式设置（哪怕选回「自动检测」也是一次显式表态）。
+    setStagedDocTypeTouched((prev) => markTouched(prev, index));
   }
 
   function setAllStagedDocTypes(value: string) {
     setStagedDocTypes((prev) => prev.map(() => value));
+    setStagedDocTypeTouched((prev) => markAllTouched(prev));
   }
 
   function removeStagedFile(index: number) {
     setStagedFiles((prev) => prev.filter((_, i) => i !== index));
     setStagedDocTypes((prev) => prev.filter((_, i) => i !== index));
+    setStagedDocTypeTouched((prev) => prev.filter((_, i) => i !== index));
   }
 
   async function confirmUpload() {
     if (!currentNotebookId || stagedFiles.length === 0) return;
     const formData = new FormData();
     stagedFiles.forEach((file) => formData.append("files", file));
-    // 空串（界面上的「自动检测」）转成哨兵 "auto"，让后端能把「显式选自动检测」与
-    // 「没表态」区分开——前者对已定型来源要重置回自动，后者保留旧类型（docTypeForUpload）。
-    stagedDocTypes.forEach((dt) => formData.append("doc_types", docTypeForUpload(dt)));
+    // 每个文件发两个并列字段：doc_types（原值，"" = 自动检测）+ doc_type_explicit
+    // （"1"/"0"，用户是否手动动过下拉框）。后端 reuse 路径只在显式时才改/重置既有来源的
+    // 类型——auto-detect 自动填的建议值发 "0"，重传不会静默把既有类型抹掉（uploadDocTypeFields）。
+    uploadDocTypeFields(stagedDocTypes, stagedDocTypeTouched).forEach(({ docType, explicit }) => {
+      formData.append("doc_types", docType);
+      formData.append("doc_type_explicit", explicit);
+    });
     // 上传前各来源的文档类型：内容判重会沿用既有来源，但用户新选的类型仍会写进
     // 去并触发按新类型重抽——只有对着上传前的值才看得出这次到底改没改。
     const docTypesBefore = new Map(sources.map((source) => [source.id, source.doc_type ?? ""]));
@@ -2527,6 +2546,7 @@ export default function Home() {
     revalidateAskAvailability();
     setStagedFiles([]);
     setStagedDocTypes([]);
+    setStagedDocTypeTouched([]);
     setSourceModalOpen(false);
     setToast(outcome.toast);
   }
@@ -4718,7 +4738,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
+              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedDocTypeTouched([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -4816,7 +4836,7 @@ export default function Home() {
                 </div>
                 <div className="tag-row">
                   <button className="new-pill" disabled={docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
-                  <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); }}>清空</button>
+                  <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedDocTypeTouched([]); }}>清空</button>
                 </div>
               </div>
             )}

@@ -1,20 +1,59 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { summarizeUpload, docTypeForUpload } from "./source-upload.ts";
+import {
+  summarizeUpload,
+  uploadDocTypeFields,
+  fillAutoDetectedTypes,
+  markTouched,
+  markAllTouched,
+} from "./source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
 
-// ------------------------------------ 显式「自动检测」→ 哨兵 "auto"（能重置已定型类型）
+// ---------------- 追踪「用户是否动过类型下拉框」→ 上传发 per-file doc_type_explicit
 
-test("docTypeForUpload: 空串（界面上的自动检测）→ 哨兵 'auto'（让后端区分显式自动 vs 没表态）", () => {
-  assert.equal(docTypeForUpload(""), "auto");
-  assert.equal(docTypeForUpload("   "), "auto");
+test("uploadDocTypeFields: touched 的文件发 explicit=1，未 touched 发 0（据交互不据值）", () => {
+  // file0：用户手动选回「自动检测」（值空但 touched）→ explicit=1（显式重置回自动）。
+  // file1：auto-detect 自动填了 textbook、用户没动（有值但未 touched）→ explicit=0。
+  const fields = uploadDocTypeFields(["", "textbook"], [true, false]);
+  assert.deepEqual(fields, [
+    { docType: "", explicit: "1" },
+    { docType: "textbook", explicit: "0" },
+  ]);
 });
 
-test("docTypeForUpload: 具体 profile id 原样透传", () => {
-  assert.equal(docTypeForUpload("textbook"), "textbook");
-  assert.equal(docTypeForUpload("academic_paper"), "academic_paper");
+test("uploadDocTypeFields: 显式选具体类型发 explicit=1，doc_types 原样透传（空串表自动检测）", () => {
+  const fields = uploadDocTypeFields(["academic_paper", ""], [true, false]);
+  assert.deepEqual(fields.map((f) => f.docType), ["academic_paper", ""]);
+  assert.deepEqual(fields.map((f) => f.explicit), ["1", "0"]);
+});
+
+test("fillAutoDetectedTypes: 自动检测回填只填空项、不覆盖已选值，且**不置 touched**", () => {
+  // 模拟 page.tsx 的状态机：两个文件入列（types 全空、touched 全 false）。
+  let types = ["", ""];
+  const touched = [false, false];
+  // auto-detect 把 file0 填成 textbook（file1 没检测出）。
+  types = fillAutoDetectedTypes(types, ["textbook", undefined]);
+  assert.deepEqual(types, ["textbook", ""], "只填空项、无建议的保持空");
+  assert.deepEqual(touched, [false, false], "auto-detect 是系统建议、不算用户表态");
+  // 于是重传没动下拉框时，两个文件都发 explicit=0 → 后端保留既有类型（消除静默重置回退）。
+  assert.deepEqual(
+    uploadDocTypeFields(types, touched).map((f) => f.explicit),
+    ["0", "0"],
+  );
+});
+
+test("fillAutoDetectedTypes: 已被用户选过的值绝不被自动检测覆盖", () => {
+  assert.deepEqual(fillAutoDetectedTypes(["academic_paper", ""], ["textbook", "textbook"]), [
+    "academic_paper", // 用户已选，检测结果不得覆盖
+    "textbook",       // 仍为空，用检测结果回填
+  ]);
+});
+
+test("markTouched: 用户改某一项下拉框只置该项 touched；markAllTouched 置全部", () => {
+  assert.deepEqual(markTouched([false, false, false], 1), [false, true, false]);
+  assert.deepEqual(markAllTouched([false, false]), [true, true]);
 });
 
 test("summarizeUpload: 全是新建 → 全部计入新增，文案就是老的那句", () => {
