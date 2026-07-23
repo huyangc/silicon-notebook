@@ -40,10 +40,9 @@ Red lines:
 """
 from __future__ import annotations
 
-import sqlite3
-from typing import Callable, ContextManager, List, MutableMapping, Set
+from typing import Any, Callable, ContextManager, List, MutableMapping, Set
 
-from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.repositories.ports import UnifiedKgStorePort
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.vector_cache import VectorCache
 
@@ -51,12 +50,12 @@ from app.services.vector_cache import VectorCache
 class KgMutationCoordinator:
     def __init__(
         self,
-        unified_store: UnifiedKgStore,
+        unified_store: UnifiedKgStorePort,
         snapshots: RetrievalSnapshotCache,
         auto_index_checked: Set[str],
         notebook_languages: MutableMapping[str, List[str]],
         *,
-        write: Callable[[], ContextManager[sqlite3.Connection]],
+        write: Callable[[], ContextManager[Any]],
         now: Callable[[], str],
     ) -> None:
         self.unified_store = unified_store
@@ -104,7 +103,7 @@ class KgMutationCoordinator:
         self.notebook_languages.pop(notebook_id, None)
 
     def bump_cluster_mutation_seq(
-        self, connection: sqlite3.Connection, notebook_id: str
+        self, connection: object, notebook_id: str
     ) -> None:
         """concept_clusters 写路径的单调计数器 bump。与 mark_unified_kg_dirty 不同,
         本原语在调用方已持有的写事务 connection 内执行(写簇+bump 同 commit,原子——

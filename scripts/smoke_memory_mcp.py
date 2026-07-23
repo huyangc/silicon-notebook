@@ -37,6 +37,22 @@ def payload(result):
     return json.loads(result.content[0].text)
 
 
+async def wait_for_ready(app) -> None:
+    """Wait for the lifespan-owned repository warm-up before MCP traffic."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        deadline = asyncio.get_running_loop().time() + 5
+        snapshot = None
+        while asyncio.get_running_loop().time() < deadline:
+            snapshot = (await client.get("/api/ready")).json()
+            if snapshot["ready"]:
+                return
+            await asyncio.sleep(0.01)
+    raise AssertionError(f"service did not become ready: {snapshot}")
+
+
 class Client:
     def __init__(self, app, raw_token: str):
         self.app = app
@@ -90,7 +106,6 @@ async def run() -> None:
             notebook_catalog_repository,
             repository,
         )
-        from app.core import readiness
         from app.core.config import get_settings
         from app.core.request_context import reset_request_user, set_request_user
         from app.main import create_app
@@ -98,10 +113,6 @@ async def run() -> None:
 
         get_settings.cache_clear()
         repository.cache_clear()
-        # MCP transport behavior is the subject of this smoke. Startup warm-up
-        # and its 503 readiness gate have dedicated tests, so keep this isolated
-        # official-client check deterministic like the pytest MCP suite.
-        readiness.mark_ready()
         app = create_app()
         identity = identity_repository()
         catalog = notebook_catalog_repository()
@@ -131,6 +142,7 @@ async def run() -> None:
         )
 
         async with app.router.lifespan_context(app):
+            await wait_for_ready(app)
             async with Client(app, first.token) as creator:
                 listed = await creator.session.list_tools()
                 assert {item.name for item in listed.tools} == TOOLS

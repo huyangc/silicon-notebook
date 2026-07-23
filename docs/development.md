@@ -7,12 +7,12 @@ This document preserves the contributor-facing architecture summary, verificatio
 ## Architecture Boundaries
 
 - Backend endpoint bodies live in domain FastAPI routers composed by `backend/app/api/routes.py`; the aggregate is composition-only and owns router order, not product handlers or compatibility exports. Boundary tests inspect endpoint ownership on the domain routers and verify the aggregate's composition declaration semantically; they do not assume `include_router()` flattens child routes, because newer FastAPI versions retain lazy included-router nodes. Domain Pydantic models live under `backend/app/models/`; `backend/app/models/schemas.py` is a legacy compatibility facade that re-exports the same model objects for old imports.
-- `SQLiteRepository` is the compatibility facade over a composed `RepositoryRuntime`. Application services do not assemble product SQL. Stores own product SQL and raw row selection; established application/query components may assemble domain/application projections such as `NotebookSummaryQuery.from_row`. Stores share one `SqliteDatabase` connection factory/write lock and one version-gated `SqliteMigrator`, while services retain sequencing and policy. Every facade operation is an explicit compatibility adapter or one of the source-checked one-hop delegates whose real target must match the ownership manifest. Consumers use executable, consumer-specific Protocols from `backend/app/repositories/ports.py`; dependencies point one way — facade → runtime → services → stores → SQLite — so a future PostgreSQL adapter replaces the store layer behind the same ports without touching callers. `sqlite_identity.py` and `sqlite_notebook_sharing.py` remain compatibility re-export shims, and the legacy request-context, `_COPY_CHUNK`, and `_remap_json_ids` exports stay importable.
+- One repository factory selects `SQLiteRepository` or `PostgresRepository` from `DATABASE_URL`; both compose the same runtime boundary. `RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle. Application services do not assemble product SQL, inspect dialects, or import the opposite adapter. Stores own product SQL and raw row selection; established application/query components may assemble domain/application projections such as `NotebookSummaryQuery.from_row`. SQLite retains its compatibility migration/maintenance wrapper and PostgreSQL owns a bounded Psycopg pool plus checksummed migrations. Every facade operation is an explicit compatibility adapter or belongs to the source-checked one-hop delegates whose real targets match the ownership manifest. The dependency direction is factory/wrapper → facade → runtime → services → stores. `sqlite_identity.py` and `sqlite_notebook_sharing.py` remain compatibility re-export shims, and the legacy request-context, `_COPY_CHUNK`, and `_remap_json_ids` exports stay importable.
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 28. The committed v9 compatibility fixture
-upgrades through migrations v10–v28 and remains readable. Those migrations
+The current schema version is 29. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v29 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -27,7 +27,9 @@ the sources.chunked_at completion marker so an extracted-but-chunkless source's
 history is decidable (a legitimate zero-chunk parse versus an interrupted chunk
 build); v28 adds the app_settings key/value table and the nullable
 user_profiles.upload_document_limit column backing the per-notebook document
-limit.
+limit; v29 deterministically deduplicates cluster memberships and installs the
+unique membership index. PostgreSQL's checksummed schema manifest currently
+targets migration v8 and declares compatibility with SQLite v29.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
@@ -76,6 +78,13 @@ separate from the under-60-second local Apple Silicon warm-gate target.
 `CI / full-gate` is initially observational; make it a required `master` check
 only after stable green pull-request and post-merge runs have been observed
 and the user explicitly approves the branch-protection change.
+
+PostgreSQL coverage is deliberately separate from the offline full gate. The
+`postgres-integration` job starts PostgreSQL 16, provisions least-privilege and
+auxiliary encoding/locale targets, and runs `bash scripts/check_postgres.sh` with
+only the `postgres_integration` marker. Local verification uses an installed
+PostgreSQL 16 service and an explicit `TEST_POSTGRES_URL`; `scripts/check.sh`
+must never start or contact PostgreSQL.
 
 CI portability is part of the gate contract: every filesystem, data, and
 dependency path used by a CI-executed test is repository-relative and

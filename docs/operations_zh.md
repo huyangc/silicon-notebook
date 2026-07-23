@@ -106,6 +106,27 @@ SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 
+## SQLite / PostgreSQL 切换与回滚
+
+运行时只有一个 active database，应用不做 dual-write。只有外部迁移工具/流程已经复制并验证
+存量数据后，才能按此 runbook 切换；只改 `DATABASE_URL` 只会打开另一份数据存储。
+
+1. 宣布停写，并停止所有 API、后台任务、MCP、batch 与 maintenance writer；等待进行中事务
+   结束后停止后端。
+2. SQLite 使用 backup API（或完全停机并正确处理 WAL）备份；PostgreSQL 使用已演练的
+   `pg_dump --format=custom`/`pg_restore` 或组织标准物理备份。记录 checksum 与恢复演练回执。
+3. 外部复制必须保留主键、ordinal 顺序值、JSON null、UTF-8、时间戳和 float32 向量字节。
+   切换前比较 schema 版本、表数量、稳定键集合、内容哈希、存储引用，以及认证/问答/知识/
+   Memory/Knowhow/报告的代表性读取。
+4. 只修改 `DATABASE_URL`，以单 worker 启动；放流量前必须通过脱敏 database status、
+   `/api/ready`、管理员与普通用户登录、notebook/source 数量、搜索、一次写事务和后台任务恢复。
+5. 观察期内保持源备份不可变。PostgreSQL 尚无业务写入时，可停机改回 URL 并重复 smoke；一旦
+   已有 PG 写入，直接改回会丢数据，必须再次停写，外部对账 PostgreSQL→SQLite，验证两端后
+   才能恢复 SQLite。
+
+若故障发生在放流量前或 PostgreSQL 尚无业务写入，可保持目标停止并恢复原 SQLite URL。
+不得把 SQLite maintenance 命令指向 PostgreSQL；`scripts/batch_ingest.py` 的变更阶段仍只支持 SQLite。
+
 ## 用 MinerU 解析 PDF
 
 PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 时才调用它，否则回退到 pypdf 纯文本。

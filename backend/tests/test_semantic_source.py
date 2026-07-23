@@ -94,7 +94,7 @@ def test_session_index_contains_known_repository_import(python_source_index):
         path="backend/app/api/deps.py",
         scope="<module>",
         kind="import",
-        target="app.services.sqlite_repository:SQLiteRepository",
+        target="app.repositories.factory:create_repository",
     ) in imports
 
 

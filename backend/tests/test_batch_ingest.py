@@ -6,6 +6,7 @@ import time
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user, set_request_user, reset_request_user
@@ -268,6 +269,64 @@ def test_main_dry_run_lists_files(repo, tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "dry-run" in out and "3 files" in out
+
+
+def test_main_postgres_mutation_fails_before_sqlite_repository(monkeypatch, capsys):
+    secret_url = (
+        "postgresql://batch-user:do-not-leak@db.example.test:5432/"
+        "silicon_notebook?sslmode=require"
+    )
+    monkeypatch.setenv("DATABASE_URL", secret_url)
+    constructed = False
+
+    def _unexpected_sqlite_repository(_settings):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("PostgreSQL batch mutation must not construct SQLiteRepository")
+
+    monkeypatch.setattr(bi, "SQLiteRepository", _unexpected_sqlite_repository)
+
+    rc = bi.main(["index", "--notebook-id", "nb-existing"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert constructed is False
+    assert "SQLite-only" in captured.err
+    assert "app/API" in captured.err
+    assert "KG/reindex" in captured.err
+    combined_output = captured.out + captured.err
+    assert secret_url not in combined_output
+    assert "do-not-leak" not in combined_output
+
+
+def test_arg_parser_help_classifies_batch_ingest_as_sqlite_only(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        bi.main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "SQLite-only" in capsys.readouterr().out
+
+
+def test_main_postgres_dry_run_remains_filesystem_only(
+    monkeypatch, tmp_path, capsys
+):
+    d = _make_md_dir(tmp_path, n=2)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://batch-user:do-not-leak@db.example.test:5432/silicon_notebook",
+    )
+
+    def _unexpected_sqlite_repository(_settings):
+        raise AssertionError("dry-run must not construct SQLiteRepository")
+
+    monkeypatch.setattr(bi, "SQLiteRepository", _unexpected_sqlite_repository)
+
+    rc = bi.main(["ingest", "--input-dir", str(d), "--dry-run"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "dry-run" in captured.out and "3 files" in captured.out
+    assert "do-not-leak" not in captured.out + captured.err
 
 
 def test_main_requires_input_dir_for_ingest(repo, capsys):
@@ -1358,6 +1417,41 @@ def test_run_vectors_to_blob_covers_all_embeddings_tables(repo, tmp_path, capsys
     out_str = capsys.readouterr().out
     assert "[blob] chunk_embeddings:" in out_str
     assert "[blob] knowledge_embeddings:" in out_str
+
+
+def test_vector_blob_encoder_receives_neutral_mapping_rows_and_returns_updates(repo):
+    notebook_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node(repo, notebook_id, "ko-vector-contract")
+    _seed_json_vector(
+        repo,
+        "knowledge_embeddings",
+        "object_id",
+        "ko-vector-contract",
+        notebook_id,
+    )
+    observed = []
+
+    def encode(rows):
+        observed.append(rows)
+        assert len(rows) == 1
+        assert isinstance(rows[0], Mapping)
+        row = rows[0]
+        return [(b"", row["notebook_id"], row["vid"])]
+
+    processed, bad = repo.maintenance.convert_text_vector_batch(
+        "knowledge_embeddings", "object_id", notebook_id, 10, encode
+    )
+
+    assert processed == 1
+    assert bad == 1
+    assert len(observed) == 1
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT typeof(vector) AS kind FROM knowledge_embeddings "
+            "WHERE object_id=?",
+            ("ko-vector-contract",),
+        ).fetchone()
+    assert row["kind"] == "blob"
 
 
 def test_run_vectors_to_blob_requires_notebook_id_or_all(repo):

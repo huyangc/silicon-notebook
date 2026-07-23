@@ -3,8 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from app.core.config import Settings
-from app.repositories.sqlite.chunk_store import ChunkStore, ChunkWrite
-from app.repositories.sqlite.source_store import SourceStore
+from app.repositories.ports import ChunkStorePort, ChunkWrite, SourceStorePort
 from app.services.chunking import build_chunks
 from app.services.source_embedding import SourceEmbeddingService
 
@@ -25,8 +24,8 @@ class SourceChunkingService:
         self,
         *,
         settings: Settings,
-        sources: SourceStore,
-        chunks: ChunkStore,
+        sources: SourceStorePort,
+        chunks: ChunkStorePort,
         embedding: SourceEmbeddingService,
         new_id: Callable[[str], str],
         now: Callable[[], str],

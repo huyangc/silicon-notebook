@@ -1469,6 +1469,11 @@
         "type": "index"
       },
       {
+        "name": "uq_clusters_notebook_type_member",
+        "sql_sha256": "8ac332952599b7949d12d9591820d427879fda5ccf6b4083857a0db9ace288b0",
+        "type": "index"
+      },
+      {
         "name": "agent_access_tokens",
         "sql_sha256": "422fbf0a05c41604a7849112c8f3a3d78c21b211a5b5ac2de2e4522ad4533a23",
         "type": "table"
@@ -1869,6 +1874,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 28
+    "user_version": 29
   }
 }

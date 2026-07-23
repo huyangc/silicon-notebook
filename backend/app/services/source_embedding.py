@@ -5,9 +5,7 @@ from typing import Any, Callable, List, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
-from app.repositories.sqlite.chunk_store import ChunkStore
-from app.repositories.sqlite.embedding_store import EmbeddingStore
-from app.repositories.sqlite.source_store import SourceStore
+from app.repositories.ports import ChunkStorePort, EmbeddingStorePort, SourceStorePort
 from app.services.retrieval import _payload_text
 
 
@@ -28,9 +26,9 @@ class SourceEmbeddingService:
         self,
         *,
         settings: Settings,
-        sources: SourceStore,
-        chunks: ChunkStore,
-        vectors: EmbeddingStore,
+        sources: SourceStorePort,
+        chunks: ChunkStorePort,
+        vectors: EmbeddingStorePort,
         embedder: Callable[[str], Any],
         parallelism: Callable[[str], int],
         event_log: EventLogger,
@@ -416,7 +414,7 @@ class SourceEmbeddingService:
             self.embedder("knowledge_object_embedding"), "configured", True
         ):
             return
-        have = EmbeddingStore.embedded_object_ids(db, notebook_id)
+        have = self.vectors.embedded_object_ids(db, notebook_id)
         missing = [
             {"_oid": obj["id"], "payload": obj.get("payload", {})}
             for obj in objects

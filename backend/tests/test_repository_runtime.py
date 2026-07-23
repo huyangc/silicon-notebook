@@ -22,6 +22,7 @@ def test_runtime_seams_are_late_bound(repo, monkeypatch):
 
 def test_runtime_construction_does_not_evaluate_seams():
     from app.core.config import Settings
+    from app.repositories.sqlite.bundle import SqlitePersistenceBundleFactory
     from app.services.repository_runtime import RepositoryCompatibilitySeams, RepositoryRuntime
 
     calls = []
@@ -35,7 +36,12 @@ def test_runtime_construction_does_not_evaluate_seams():
         event_log_enabled=False,
         llm_log_enabled=False,
     )
-    RepositoryRuntime(settings=settings, root_dir=Path("."), seams=seams)
+    RepositoryRuntime(
+        settings=settings,
+        root_dir=Path("."),
+        seams=seams,
+        persistence_factory=SqlitePersistenceBundleFactory(),
+    )
     assert calls == []
 
 

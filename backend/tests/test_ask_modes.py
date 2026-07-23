@@ -23,15 +23,17 @@ def test_ask_dispatches_by_registry(monkeypatch, tmp_path):
             return lambda notebook_id, payload, **kwargs: calls.__setitem__("hit", mid) or AskResponse(conclusion=mid)
         monkeypatch.setattr(ask_service, mid, make(mid))
 
-    assert repo.ask(nb.id, AskRequest(question="q")).conclusion == "ask_chunk"       # 缺省
-    assert repo.ask(nb.id, AskRequest(question="q", mode="graph")).conclusion == "ask_graph"
+    service = repo.__dict__["_runtime"].ask_component
+    user_id = repo.current_user().id
+    assert service.ask(nb.id, AskRequest(question="q"), user_id=user_id).conclusion == "ask_chunk"
+    assert service.ask(nb.id, AskRequest(question="q", mode="graph"), user_id=user_id).conclusion == "ask_graph"
     # P4-5: retired ids "fast"/"global" alias to chunk (保旧会话/书签不 422)
-    assert repo.ask(nb.id, AskRequest(question="q", mode="fast")).conclusion == "ask_chunk"
-    assert repo.ask(nb.id, AskRequest(question="q", mode="global")).conclusion == "ask_chunk"
+    assert service.ask(nb.id, AskRequest(question="q", mode="fast"), user_id=user_id).conclusion == "ask_chunk"
+    assert service.ask(nb.id, AskRequest(question="q", mode="global"), user_id=user_id).conclusion == "ask_chunk"
 
     from app.services.ask_modes import UnknownAskMode
     with pytest.raises(UnknownAskMode):
-        repo.ask(nb.id, AskRequest(question="q", mode="bogus"))
+        service.ask(nb.id, AskRequest(question="q", mode="bogus"), user_id=user_id)
 
 
 def test_registry_has_expected_modes_and_flags():
@@ -70,7 +72,8 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
 
     def make(mid):
         def handler(notebook_id, payload, *, user_id,
-                    on_trace=None, cancel_event=None, seed_ids=None):
+                    on_trace=None, cancel_event=None, seed_ids=None,
+                    job_id=None):
             calls["hit"] = (mid, user_id)
             return AskResponse(conclusion=mid)
         return handler

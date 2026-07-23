@@ -186,6 +186,9 @@ class SharingStore:
         self.now = now
         self.insert_row = insert_row
 
+    def bind_insert_row(self, insert_row: Callable) -> None:
+        self.insert_row = insert_row
+
     # ------------------------------------------------------------ share rows
     def set_share_token(self, notebook_id: str, token: str) -> str:
         """Mark shared.  ``token`` is the candidate for a first-time share; an

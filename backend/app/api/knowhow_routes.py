@@ -185,8 +185,15 @@ def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
         detail = knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Table not found")
-    knowhow_api.build_projector(repo).delete_table_projection(detail.get("hidden_source_id"))
-    repo.delete_knowhow_table(table_id)
+    projector = knowhow_api.build_projector(repo)
+    snapshot_hidden_source_id = detail.get("hidden_source_id")
+    projector.delete_table_projection(snapshot_hidden_source_id)
+    deleted = repo.delete_knowhow_table(table_id)
+    # A first projection can attach its hidden source after the detail snapshot
+    # above but before the table DELETE obtains its row lock. The store returns
+    # the id observed by that atomic DELETE; clean that authoritative id too.
+    # This second call is deliberately idempotent when both ids are equal.
+    projector.delete_table_projection(deleted.get("hidden_source_id"))
     # Deleting a table bulk-orphans every asset its cells referenced, and it is
     # the one mutation that deliberately never schedules a projection (the table
     # is gone), so the projection-completion trigger would never see it — if this

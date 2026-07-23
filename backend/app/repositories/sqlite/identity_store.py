@@ -8,6 +8,10 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
+from app.repositories.identity_errors import (
+    BuiltinAdminDemotionError,
+    SelfDemotionError,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -46,14 +50,6 @@ def _resolve_global_default(raw_value: "str | None", settings) -> int:
         except (TypeError, ValueError):
             pass
     return int(settings.user_upload_document_limit)
-
-
-class BuiltinAdminDemotionError(ValueError):
-    """The seeded recovery administrator must always retain admin access."""
-
-
-class SelfDemotionError(ValueError):
-    """An administrator cannot remove the authority of the active request."""
 
 
 class IdentityStore:

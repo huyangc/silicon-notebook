@@ -67,7 +67,15 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
     service = repo._runtime.ask_service()
     seen = {}
 
-    def fake_ask(notebook_id, payload, *, user_id, on_trace=None, cancel_event=None):
+    def fake_ask(
+        notebook_id,
+        payload,
+        *,
+        user_id,
+        on_trace=None,
+        cancel_event=None,
+        job_id=None,
+    ):
         seen["user_id"] = user_id
         return AskResponse(conclusion="service-stub", conversation_id=payload.conversation_id or "")
 

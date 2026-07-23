@@ -4,7 +4,7 @@
 #   scripts/backend.sh start     启动后端到 :8000(后台,日志落文件)
 #   scripts/backend.sh stop      停掉 :8000 上的服务(无论是不是本后端)
 #   scripts/backend.sh restart   停当前 + 启 silicon-notebook(":8000 起错服务" 最常用)
-#   scripts/backend.sh status    看 :8000 现在跑的是什么 + notebook 数
+#   scripts/backend.sh status    看 :8000 现在跑的是什么 + readiness
 #
 # 为什么需要它:路径(DB/storage/.env)在代码里(Settings)已锚定到仓库根,与启动
 # 目录无关——DB 解析到 仓库根/.local/silicon_notebook.db(你的真实库)。若 :8000 被
@@ -23,24 +23,66 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 LOG_FILE="${LOG_FILE:-$ROOT_DIR/.local/logs/backend.log}"
+START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-40}"
 APP="app.main:app"
 
-port_pid() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1; }
+if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "✗ START_TIMEOUT_SECONDS 必须是正整数。" >&2
+  exit 2
+fi
 
-# silicon-notebook 后端独有 /api/notebooks;EDA Agent 等其它服务没有→返回非 200。
-http_code() { curl -s -o /dev/null -w "%{http_code}" -m 3 "http://$HOST:$PORT/api/notebooks" 2>/dev/null || echo 000; }
-is_sn()     { [[ "$(http_code)" == "200" ]]; }
-# :PORT 服务的 openapi 标题(用来说明"占用的到底是谁")
+port_pid() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true; }
+
+# Shipped auth makes /api/notebooks anonymous requests return 401. Service
+# identity therefore uses only the anonymous readiness document + exact
+# OpenAPI title; readiness=true is a separate start-success condition.
 svc_title() { curl -s -m 3 "http://$HOST:$PORT/openapi.json" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json;print(json.load(sys.stdin).get('info',{}).get('title','?'))" 2>/dev/null || echo "?"; }
-nb_count()  { curl -s -m 3 "http://$HOST:$PORT/api/notebooks" 2>/dev/null \
-                | "$PYTHON_BIN" -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?"; }
+ready_state() { curl -s -m 3 "http://$HOST:$PORT/api/ready" 2>/dev/null \
+                | "$PYTHON_BIN" -c "import sys,json; v=json.load(sys.stdin); print('true' if v.get('ready') is True else 'false')" 2>/dev/null || echo "missing"; }
+is_sn()       { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" != "missing" ]]; }
+is_sn_ready() { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" == "true" ]]; }
+database_status() {
+  ( cd "$ROOT_DIR/backend" && PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \
+      "from app.core.config import Settings; from app.core.database_url import database_status; print(database_status(Settings().database_url))" )
+}
+DATABASE_STATUS=""
+load_database_status() {
+  local resolved
+  if ! resolved="$(database_status 2>/dev/null)" || [[ -z "$resolved" ]]; then
+    echo "✗ 数据库配置无效；请检查 DATABASE_URL（详细错误已隐藏）。" >&2
+    return 1
+  fi
+  DATABASE_STATUS="$resolved"
+}
+
+terminate_launched_pid() {
+  local pid="$1"
+  kill "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  kill -9 "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
 
 cmd_status() {
+  load_database_status
+  echo "● $DATABASE_STATUS"
   local pid; pid="$(port_pid)"
   if [[ -z "$pid" ]]; then echo "● :$PORT 空闲 —— 没有服务在跑。"; return 0; fi
   if is_sn; then
-    echo "● :$PORT = silicon-notebook 后端(PID $pid),notebooks=$(nb_count) ✅"
+    local state; state="$(ready_state)"
+    if [[ "$state" == "true" ]]; then
+      echo "● :$PORT = silicon-notebook 后端(PID $pid),ready=true ✅"
+    else
+      echo "● :$PORT = silicon-notebook 后端(PID $pid),ready=false ⚠"
+    fi
   else
     echo "● :$PORT 被占用(PID $pid),但不是 silicon-notebook —— 是 \"$(svc_title)\"。"
     echo "  ⚠ 前端调 /api/notebooks 会 404(notebook 看似'消失')。用 '$0 restart' 换回 silicon-notebook。"
@@ -48,6 +90,7 @@ cmd_status() {
 }
 
 cmd_stop() {
+  load_database_status
   local pid; pid="$(port_pid)"
   if [[ -z "$pid" ]]; then echo "✓ :$PORT 本来就没服务,无需停止。"; return 0; fi
   local title; title="$(is_sn && echo silicon-notebook || svc_title)"
@@ -59,24 +102,37 @@ cmd_stop() {
 }
 
 cmd_start() {
+  load_database_status
   local pid; pid="$(port_pid)"
   if [[ -n "$pid" ]]; then
-    if is_sn; then echo "✓ silicon-notebook 已在 :$PORT 运行(PID $pid),notebooks=$(nb_count)。无需重复启动。"; return 0; fi
+    if is_sn_ready; then echo "✓ silicon-notebook 已在 :$PORT 运行(PID $pid),ready=true。无需重复启动。"; return 0; fi
+    if is_sn; then echo "✗ silicon-notebook 已占用 :$PORT(PID $pid),但尚未就绪；请看日志。"; return 1; fi
     echo "✗ :$PORT 已被别的服务占用(\"$(svc_title)\", PID $pid)。"
     echo "  先跑 '$0 stop'(会停掉它)再 start,或换端口:PORT=8001 $0 start"; return 1
   fi
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "启动 silicon-notebook 后端…"
   echo "  python = $PYTHON_BIN"
-  echo "  cwd    = $ROOT_DIR/backend  (路径已锚定仓库根,与 cwd 无关;.env/DB=$ROOT_DIR/.local/silicon_notebook.db)"
+  echo "  cwd    = $ROOT_DIR/backend  (路径已锚定仓库根,与 cwd 无关)"
+  echo "  $DATABASE_STATUS"
   echo "  listen = http://$HOST:$PORT   日志 = $LOG_FILE"
-  ( cd "$ROOT_DIR/backend" && nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 & )
+  local launched_pid
+  ( cd "$ROOT_DIR/backend" && exec nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" ) >>"$LOG_FILE" 2>&1 &
+  launched_pid="$!"
   echo -n "  等待就绪"
-  for _ in $(seq 1 40); do
-    if is_sn; then echo " ok"; echo "✅ 启动成功(PID $(port_pid)):/api/notebooks 可用,notebooks=$(nb_count)。"; return 0; fi
+  for _ in $(seq 1 "$START_TIMEOUT_SECONDS"); do
+    if is_sn_ready; then echo " ok"; echo "✅ 启动成功(PID $(port_pid)):ready=true。"; return 0; fi
+    if ! kill -0 "$launched_pid" 2>/dev/null; then
+      echo " 失败"; echo "✗ 后端进程提前退出,看日志排错:tail -50 $LOG_FILE"
+      terminate_launched_pid "$launched_pid" || true
+      return 1
+    fi
     echo -n "."; sleep 1
   done
-  echo " 超时"; echo "✗ 40s 内 /api/notebooks 仍不可用,看日志排错:tail -50 $LOG_FILE"; return 1
+  echo " 超时"
+  terminate_launched_pid "$launched_pid" || true
+  echo "✗ ${START_TIMEOUT_SECONDS}s 内 /api/ready 未就绪；已清理本次启动进程。看日志:tail -50 $LOG_FILE"
+  return 1
 }
 
 case "${1:-}" in

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 import weakref
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 from app.models.kg import KgBuildJobStatus
 from app.models.notebooks import (
@@ -19,15 +18,18 @@ from app.models.notebooks import (
 )
 from app.models.ask import NotebookSearchResponse, SearchHit
 from app.core import diagnostics_runtime as diagnostics
-from app.repositories.ports import KgBuildJobStorePort
+from app.repositories.ports import (
+    IdentityStorePort,
+    KgBuildJobStorePort,
+    NotebookStorePort,
+    QueryStorePort,
+    RepositoryDatabasePort,
+)
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and
 # historical importers unchanged.
 from app.repositories.source_files import delete_source_file as _delete_source_file
-from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.identity_store import IdentityStore
-from app.repositories.sqlite.notebook_store import NotebookStore, USABLE_STATUSES
-from app.repositories.sqlite.query_store import QueryStore
+from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 
 
@@ -95,21 +97,21 @@ class NotebookSummaryQuery:
 
     def __init__(
         self,
-        database: SqliteDatabase,
-        queries: "QueryStore | None" = None,
+        database: RepositoryDatabasePort,
+        queries: QueryStorePort,
         kg_build_jobs: "KgBuildJobStorePort | None" = None,
     ) -> None:
         self.database = database
-        self.queries = queries or QueryStore(database)
+        self.queries = queries
         self.kg_build_jobs = kg_build_jobs
 
     def count(
-        self, db: sqlite3.Connection, table: str, column: str, value: str
+        self, db: object, table: str, column: str, value: str
     ) -> int:
         return self.queries.count_rows(db, table, column, value)
 
     def knowledge_type_counts(
-        self, db: sqlite3.Connection, notebook_id: str
+        self, db: object, notebook_id: str
     ) -> Dict[str, int]:
         """{counts-dict key: count} for the 6 knowledge object_types
         from_row surfaces, via ONE GROUP BY query instead of 6 separate
@@ -124,11 +126,11 @@ class NotebookSummaryQuery:
             for otype, key in self._NOTEBOOK_COUNT_TYPES.items()
         }
 
-    def has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
+    def has_kg(self, db: object, notebook_id: str) -> bool:
         return self.queries.notebook_has_kg(db, notebook_id)
 
     def visible_source_count(
-        self, db: sqlite3.Connection, notebook_id: str
+        self, db: object, notebook_id: str
     ) -> int:
         """NotebookSummary's counts["sources"] — excludes Memory-derived and
         Knowhow-table synthetic sources (source_type IN ('memory', 'knowhow')); see
@@ -138,13 +140,13 @@ class NotebookSummaryQuery:
         return self.queries.visible_source_count(db, notebook_id)
 
     def count_pending_kg_sources(
-        self, db: sqlite3.Connection, notebook_id: str
+        self, db: object, notebook_id: str
     ) -> int:
         """Count every physical parsed source without a complete KG extraction."""
         return self.queries.pending_kg_source_count(db, notebook_id)
 
     def visible_pending_kg_sources(
-        self, db: sqlite3.Connection, notebook_id: str
+        self, db: object, notebook_id: str
     ) -> int:
         """Count user-visible parsed sources without a complete KG extraction.
 
@@ -153,7 +155,7 @@ class NotebookSummaryQuery:
         return self.queries.visible_pending_kg_source_count(db, notebook_id)
 
     def mounted_bases(
-        self, notebook_id: str, db: "sqlite3.Connection | None" = None
+        self, notebook_id: str, db: "object | None" = None
     ) -> "tuple[list[NotebookRef], bool]":
         """(参考库列表, 是否任一有 KG) —— 一次查询同时供 NotebookSummary 的
         base_notebooks 与 base_kg_available,避免每条 summary 各查一次。
@@ -171,8 +173,8 @@ class NotebookSummaryQuery:
 
     def from_row(
         self,
-        connection: sqlite3.Connection,
-        row: sqlite3.Row,
+        connection: object,
+        row: Any,
         *,
         memory_count: int = 0,
     ) -> NotebookSummary:
@@ -300,10 +302,10 @@ class NotebookCatalogService:
 
     def __init__(
         self,
-        store: NotebookStore,
+        store: NotebookStorePort,
         summaries: NotebookSummaryQuery,
-        queries: QueryStore,
-        identity: IdentityStore,
+        queries: QueryStorePort,
+        identity: IdentityStorePort,
         storage_dir: Callable[[], Path],
     ) -> None:
         """``storage_dir`` is a zero-arg callable resolving the LIVE storage
@@ -353,9 +355,7 @@ class NotebookCatalogService:
         count) for every notebook so the first login after a restart is served
         warm instead of paying the cold recompute. Called by the startup-readiness
         warm-up; best-effort per notebook inside ``warm_all``. Returns the count."""
-        from app.repositories.sqlite import knowledge_counts_cache
-        with self._summaries.database.connect() as db:
-            return knowledge_counts_cache.warm_all(db, progress)
+        return self._queries.warm_open_path_caches(progress)
 
     def _fill_document_limit(
         self, summary: NotebookSummary, notebook_id: str

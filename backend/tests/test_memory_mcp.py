@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
@@ -79,6 +80,22 @@ def _omitted_total(payload: dict) -> int:
     )
 
 
+async def _wait_for_ready(app) -> None:
+    """Wait for the real background lifespan warm-up before MCP traffic."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://127.0.0.1",
+    ) as client:
+        deadline = asyncio.get_running_loop().time() + 5
+        snapshot = None
+        while asyncio.get_running_loop().time() < deadline:
+            snapshot = (await client.get("/api/ready")).json()
+            if snapshot["ready"]:
+                return
+            await asyncio.sleep(0.01)
+    raise AssertionError(f"service did not become ready: {snapshot}")
+
+
 class OfficialMcpClient:
     def __init__(self, app, token: str, *, manage_lifespan: bool = True):
         self.app = app
@@ -94,6 +111,7 @@ class OfficialMcpClient:
             await self.stack.enter_async_context(
                 self.app.router.lifespan_context(self.app)
             )
+        await _wait_for_ready(self.app)
         async def capture_session_id(response: httpx.Response):
             if value := response.headers.get("mcp-session-id"):
                 self.mcp_session_id = value
@@ -1017,6 +1035,7 @@ async def test_transport_rejects_missing_token_and_untrusted_origin(mcp_env):
         },
     }
     async with app.router.lifespan_context(app):
+        await _wait_for_ready(app)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app),
             base_url="http://127.0.0.1",
@@ -1058,6 +1077,7 @@ async def test_runtime_transport_requires_https_only_for_remote_clients(mcp_env)
         "accept": "application/json, text/event-stream",
     }
     async with app.router.lifespan_context(app):
+        await _wait_for_ready(app)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(
                 app=app, client=("198.51.100.23", 43123)

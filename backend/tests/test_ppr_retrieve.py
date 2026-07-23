@@ -89,6 +89,71 @@ def test_ppr_graph_has_cross_doc_bridge(repo):
     assert set(G.successor_indices(router)) == {key_to_idx["e1"], key_to_idx["e2"]}
 
 
+class _OrderedMembershipSet(set):
+    def __init__(self, values):
+        super().__init__(values)
+        self._iteration_order = tuple(values)
+
+    def __iter__(self):
+        return iter(self._iteration_order)
+
+
+def test_runtime_ppr_memberships_and_complete_graph_ignore_set_iteration(
+    repo, monkeypatch
+):
+    import app.services.kg.ppr as ppr_module
+
+    notebook = _seed_two_doc_moe(repo)
+    memberships_seen = []
+    real_build = ppr_module.build_ppr_graph
+
+    def recording_build(nodes, chunks, relations, memberships, clusters, **kwargs):
+        memberships_seen.append(list(memberships))
+        return real_build(
+            nodes, chunks, relations, memberships, clusters, **kwargs
+        )
+
+    monkeypatch.setattr(ppr_module, "build_ppr_graph", recording_build)
+    current = {
+        "value": {
+            "e2": _OrderedMembershipSet(("cB", "cA")),
+            "e1": _OrderedMembershipSet(("cB", "cA")),
+        }
+    }
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "_ent_chunk_map",
+        lambda _notebook_id: current["value"],
+    )
+
+    first = repo._ppr_graph(notebook.id)
+    repo._vector_cache.invalidate(f"{notebook.id}:ppr_graph")
+    current["value"] = {
+        "e1": _OrderedMembershipSet(("cA", "cB")),
+        "e2": _OrderedMembershipSet(("cA", "cB")),
+    }
+    second = repo._ppr_graph(notebook.id)
+
+    expected_memberships = [
+        ("e1", "cA"),
+        ("e1", "cB"),
+        ("e2", "cA"),
+        ("e2", "cB"),
+    ]
+    assert memberships_seen == [expected_memberships, expected_memberships]
+
+    def complete_snapshot(result):
+        graph, key_to_idx, chunk_idx_to_id = result
+        return (
+            list(graph.nodes()),
+            graph.weighted_edge_list(),
+            list(key_to_idx.items()),
+            list(chunk_idx_to_id.items()),
+        )
+
+    assert complete_snapshot(first) == complete_snapshot(second)
+
+
 def test_ppr_graph_cache_evicted_on_invalidate(repo):
     """_invalidate_unified_cache must remove the ppr_graph cache entry so that a
     same-second KG edit (unchanged version-tuple counts/timestamps) cannot serve

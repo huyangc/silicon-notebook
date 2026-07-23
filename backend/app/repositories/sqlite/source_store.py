@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -15,6 +14,7 @@ from app.models.sources import (
     SourceElement,
     SourceSummary,
 )
+from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -22,7 +22,7 @@ from app.repositories.sqlite.database import SqliteDatabase
 # fetch it itself) from an explicit `paper_meta=None` ("caller already
 # fetched — there is no meta row"). A plain `None` default couldn't tell
 # those two cases apart.
-_UNSET = object()
+_UNSET = SOURCE_PAPER_META_UNSET
 
 
 # 「用户可见文档」的判定谓词 —— 排除 Memory 派生源与 knowhow 表隐藏投影源
@@ -39,15 +39,6 @@ def _created_label(value: str) -> str:
     except ValueError:
         dt = datetime.now()
     return f"{dt.year}年{dt.month}月{dt.day}日"
-
-
-@dataclass(frozen=True)
-class SourceElementWrite:
-    id: str
-    element_type: str
-    location_label: str
-    text: str
-    metadata: Mapping[str, Any]
 
 
 class SourceStore:
@@ -167,6 +158,19 @@ class SourceStore:
         2 P1-1: the caller must run this on the SAME connection/transaction
         as the write it gates, not on a separately-opened one, or the
         check-then-write pair is still a TOCTOU gap)."""
+        return connection.execute(
+            "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+        ).fetchone() is not None
+
+    @staticmethod
+    def source_exists_for_update_tx(
+        connection: sqlite3.Connection, source_id: str
+    ) -> bool:
+        """Lock-order seam shared with PostgreSQL projection teardown.
+
+        SQLite's caller has already acquired ``BEGIN IMMEDIATE``, so a plain
+        existence probe runs under the database-wide write reservation.
+        """
         return connection.execute(
             "SELECT 1 FROM sources WHERE id = ?", (source_id,)
         ).fetchone() is not None

@@ -698,6 +698,71 @@ def test_commit_append_forward_fills_anchor_column(tmp_path, monkeypatch, repo):
     assert anchor_values == ["hold&setup", "hold&setup", "hold&setup"]
 
 
+def test_import_and_append_missing_asset_are_atomic_and_never_schedule(
+    tmp_path, monkeypatch, repo
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000539")
+    nb = _mk_notebook(client, owner_h)
+    from app.services.knowhow import api as knowhow_api
+
+    scheduled: list[str] = []
+    scheduler = type(
+        "SchedulerSpy", (), {"schedule": lambda self, table_id: scheduled.append(table_id)}
+    )()
+    monkeypatch.setattr(knowhow_api, "get_scheduler", lambda _repo: scheduler)
+    missing = "asset-missing-api-batch"
+    rows = [
+        ["A", "first"],
+        ["B", f"![missing](asset://{missing})"],
+    ]
+    before_tables = repo.list_knowhow_tables(nb)
+    imported = _import_xlsx(
+        client,
+        owner_h,
+        nb,
+        header=["Topic", "Procedure"],
+        rows=rows,
+        columns_json=json.dumps(
+            [
+                {"name": "Topic", "kind": "attribute"},
+                {"name": "Procedure", "kind": "procedure"},
+            ]
+        ),
+        anchor_index=0,
+    )
+    assert imported.status_code == 400, imported.text
+    assert repo.list_knowhow_tables(nb) == before_tables
+    assert scheduled == []
+
+    table_id = knowhow_api.create_table(
+        repo,
+        nb,
+        "Append target",
+        [
+            {"name": "Topic", "kind": "attribute"},
+            {"name": "Procedure", "kind": "procedure"},
+        ],
+        anchor_index=0,
+    )
+    before = repo.get_knowhow_table(table_id)
+    appended = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/append",
+        headers=owner_h,
+        files={
+            "file": (
+                "append.xlsx",
+                _xlsx_bytes(["Topic", "Procedure"], rows),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"mode": "commit"},
+    )
+    assert appended.status_code == 400, appended.text
+    assert repo.get_knowhow_table(table_id) == before
+    assert scheduled == []
+
+
 # ---------------------------------------------------------------------------
 # knowhow-md-normalize Task 5: import/append must normalize Excel-idiom cell
 # formatting (Tab-indented `•` bullets, `A.`/`B.` section markers) into clean

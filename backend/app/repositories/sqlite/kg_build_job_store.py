@@ -4,10 +4,7 @@ import sqlite3
 from typing import Callable
 
 from app.repositories.sqlite.database import SqliteDatabase
-
-
-class KgBuildAlreadyRunning(RuntimeError):
-    pass
+from app.repositories.ports import KgBuildAlreadyRunning
 
 
 class KgBuildJobStore:

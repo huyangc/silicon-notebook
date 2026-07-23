@@ -404,6 +404,10 @@ class SqliteDatabase:
             except sqlite3.Error:
                 pass
 
+    def close(self) -> None:
+        """Backend-neutral lifecycle close for the current process thread."""
+        self.close_local()
+
     @contextmanager
     def write(
         self, *, operation: str = "sqlite.write"
@@ -660,6 +664,20 @@ class SqliteDatabase:
         （repositories/sqlite），服务层不出现裸 SQL（callers_static 约束）。"""
         conn.execute("BEGIN IMMEDIATE")
 
+    @staticmethod
+    def begin_guarded_write(conn: sqlite3.Connection) -> None:
+        """Backend-neutral guarded-write seam used by domain services."""
+        conn.execute("BEGIN IMMEDIATE")
+
+    @contextmanager
+    def table_projection_lock(self, table_id: str) -> Iterator[None]:
+        """Backend-neutral projection seam.
+
+        SQLite keeps its existing process-local scheduler and serialized write
+        transactions. PostgreSQL overrides this with a cross-process lock.
+        """
+        del table_id
+        yield
 
 # _caller_site() 里 _is_write_frame() 用来识别 write() 自己那一帧的 code 对象。
 # 放在类体之后取(而非放进类体内部或 _caller_site 旁):必须等 @contextmanager

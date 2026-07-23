@@ -3,7 +3,8 @@
 的唯一所有者。SQLiteRepository 只保留冻结签名 delegate。
 
 组合规则 (Gate 8):
-* 引擎只持窄端口 —— ask_state(prepare_turn/save_answer,Task 22)、
+* 引擎只持窄端口 —— ask_state(prepare_turn_for_job/begin_durable_job/
+  save_answer_for_job/finish_job,Task 22)、
   retrieval(candidates+graph,Task 21)、evidence_context(上下文/锚点/引用/
   tier,Task 21)、model_clients/model_errors(RuntimeModelProvider,一个所有
   者，测试仅通过显式 workload 绑定模型替身)、communities 工厂(逐次新建,
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
         AskCandidatePort,
         AskGraphPort,
         AskModelClientProvider,
+        PreparedAskTurn,
         RetrievalPort,
     )
 
@@ -41,6 +44,7 @@ from app.models.ask import (
     AskRequest,
     AskResponse,
     Citation,
+    ConversationBulkDeleteResult,
     ModelError,
     TraceStep,
 )
@@ -209,6 +213,7 @@ class AskService:
         payload: AskRequest,
         *,
         user_id: str,
+        job_id: str = "",
         cancel_event: CancelEvent = None,
         on_trace: "Callable[[Any], None] | None" = None,
     ) -> AskResponse:
@@ -222,12 +227,51 @@ class AskService:
         handler = getattr(self, spec.handler)
         if spec.streaming:
             return handler(notebook_id, payload, user_id=user_id,
-                           on_trace=on_trace, cancel_event=cancel_event)
+                           job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
         return handler(notebook_id, payload, user_id=user_id,
-                       cancel_event=cancel_event)
+                       job_id=job_id, cancel_event=cancel_event)
 
     def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
-        return self.ask(notebook_id, payload, user_id=self.current_user_id())
+        """Run the synchronous Ask surface through the durable job lifecycle.
+
+        Streaming and synchronous callers now share the same state-store
+        primitives: create/touch conversation plus running job atomically,
+        pass the job into the engine's atomic final save, then finalize and
+        unregister. The job id remains internal to this blocking protocol.
+        """
+        from app.services.ask_modes import resolve_mode
+
+        user_id = self.current_user_id()
+        mode = resolve_mode(getattr(payload, "mode", None))
+        cancel_event = threading.Event()
+        job_id, _conversation_id = self.begin_job_current(
+            notebook_id, payload, mode.id, cancel_event
+        )
+        try:
+            response = self.ask(
+                notebook_id,
+                payload,
+                user_id=user_id,
+                job_id=job_id,
+                cancel_event=cancel_event,
+            )
+        except AskCancelled:
+            self.finish_job(job_id, "cancelled")
+            raise
+        except BaseException as exc:
+            self.finish_job(
+                job_id, "failed", error=f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        answer_id = str(getattr(response, "answer_id", "") or "")
+        if not answer_id:
+            error = RuntimeError("synchronous Ask completed without a durable answer")
+            self.finish_job(
+                job_id, "failed", error=f"{type(error).__name__}: {error}"
+            )
+            raise error
+        self.finish_job(job_id, "done", answer_id=answer_id)
+        return response
 
     def ask_chunk_current(
         self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None
@@ -292,6 +336,7 @@ class AskService:
     def finish_job(
         self, job_id: str, status: str, *, answer_id: str = "", error: str = ""
     ) -> None:
+        """Finalize one durable Ask and remove its in-process cancel handle."""
         conversation_id = self.ask_state.finish_job(
             job_id, status, answer_id=answer_id, error=error
         )
@@ -300,14 +345,12 @@ class AskService:
             self.ask_state.cleanup_empty_conversation(conversation_id)
 
     def cancel_job(self, job_id: str, user_id: str) -> dict:
-        state = self.ask_state.ask_job_status(job_id)
-        if state["created_by"] != user_id:
-            raise KeyError(job_id)
-        cancelled = self.cancellations.cancel(job_id)
-        return {
-            "status": "cancelling" if cancelled else state["status"],
-            "job_id": job_id,
-        }
+        state = self.ask_state.cancel_running_job(job_id, user_id)
+        if state["cancelled"]:
+            self.cancellations.cancel(job_id)
+            if state["conversation_id"]:
+                self.ask_state.cleanup_empty_conversation(state["conversation_id"])
+        return {"status": state["status"], "job_id": job_id}
 
     def append_trace_fail_open(self, job_id: str, step: dict) -> None:
         try:
@@ -323,7 +366,7 @@ class AskService:
 
     def bulk_delete_conversations_current(
         self, notebook_id: str, older_than_days: int
-    ) -> int:
+    ) -> ConversationBulkDeleteResult:
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
         self.notebooks.get_notebook(notebook_id)
@@ -404,6 +447,33 @@ class AskService:
         except Exception:  # noqa: BLE001 — 判定失败不拖垮 ask,退化为不提示
             return False
 
+    def _prepare_turn(
+        self,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        question: str,
+        *,
+        user_id: str,
+        job_id: str,
+    ) -> "PreparedAskTurn":
+        """Prepare through the durable lease when this is a public Ask job.
+
+        Legacy engine-level compatibility calls without a job keep the old
+        create-or-continue behavior.  Once a durable job exists, however, its
+        exact parent and running status are authoritative: cancellation or
+        deletion raises before any fallback conversation can be created.
+        """
+        if not job_id:
+            return self.ask_state.prepare_turn(
+                notebook_id, conversation_id, question, user_id
+            )
+        turn = self.ask_state.prepare_turn_for_job(
+            job_id, notebook_id, conversation_id, user_id
+        )
+        if turn is None:
+            raise AskCancelled()
+        return turn
+
     def _save_answer(
         self,
         notebook_id: str,
@@ -412,13 +482,27 @@ class AskService:
         conversation_id: Optional[str] = None,
         *,
         user_id: str,
+        job_id: str = "",
     ) -> str:
         # 所有 ask handler 的唯一收口:在持久化/返回前给 response 打大库无索引提示位。
         # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
         # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
         response.index_required = self._needs_index(notebook_id)
-        return self.ask_state.save_answer(
-            notebook_id, conversation_id, question, response, user_id)
+        if not job_id:
+            return self.ask_state.save_answer(
+                notebook_id, conversation_id, question, response, user_id
+            )
+        answer_id = self.ask_state.save_answer_for_job(
+            job_id,
+            notebook_id,
+            conversation_id,
+            question,
+            response,
+            user_id,
+        )
+        if answer_id is None:
+            raise AskCancelled()
+        return answer_id
 
     # ------------------------------------------------------------------
     # synthesis helpers
@@ -691,7 +775,7 @@ class AskService:
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
-                                     *, user_id: str) -> AskResponse:
+                                     *, user_id: str, job_id: str = "") -> AskResponse:
         """系统模型已启用但漏绑问答工作负载时的统一短路响应。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         response = AskResponse(
@@ -702,7 +786,8 @@ class AskService:
             ModelError(stage="answer", model="", message="missing_config")
         ]
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         return response
 
     # ------------------------------------------------------------------
@@ -715,6 +800,7 @@ class AskService:
         payload: AskRequest,
         *,
         user_id: str,
+        job_id: str = "",
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
@@ -731,8 +817,13 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
-        turn = self.ask_state.prepare_turn(
-            notebook_id, payload.conversation_id, question, user_id)
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            question,
+            user_id=user_id,
+            job_id=job_id,
+        )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
@@ -961,7 +1052,8 @@ class AskService:
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         ask_stage("total", ask_started)
         return response
 
@@ -975,6 +1067,7 @@ class AskService:
         payload: AskRequest,
         *,
         user_id: str,
+        job_id: str = "",
         on_trace=None,
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
@@ -985,15 +1078,21 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
-        turn = self.ask_state.prepare_turn(
-            notebook_id, payload.conversation_id, question, user_id)
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            question,
+            user_id=user_id,
+            job_id=job_id,
+        )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
-                notebook_id, question, conversation_id, "reasoning", user_id=user_id)
+                notebook_id, question, conversation_id, "reasoning",
+                user_id=user_id, job_id=job_id)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1008,7 +1107,8 @@ class AskService:
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id, user_id=user_id)
+                notebook_id, question, response, conversation_id,
+                user_id=user_id, job_id=job_id)
             return response
 
         _err_sink: list = []
@@ -1133,7 +1233,8 @@ class AskService:
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         return response
 
     # ------------------------------------------------------------------
@@ -1146,6 +1247,7 @@ class AskService:
         payload: "AskRequest",
         *,
         user_id: str,
+        job_id: str = "",
         seed_ids: Optional[List[str]] = None,
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
@@ -1169,15 +1271,21 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
-        turn = self.ask_state.prepare_turn(
-            notebook_id, payload.conversation_id, question, user_id)
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            question,
+            user_id=user_id,
+            job_id=job_id,
+        )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
-                notebook_id, question, conversation_id, "graph", user_id=user_id)
+                notebook_id, question, conversation_id, "graph",
+                user_id=user_id, job_id=job_id)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1192,7 +1300,8 @@ class AskService:
             response.mode = "graph"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id, user_id=user_id)
+                notebook_id, question, response, conversation_id,
+                user_id=user_id, job_id=job_id)
             return response
 
         _err_sink: list = []
@@ -1252,7 +1361,8 @@ class AskService:
                 response.model_errors = [ModelError(**e) for e in _err_sink]
                 raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id, user_id=user_id)
+                    notebook_id, question, response, conversation_id,
+                    user_id=user_id, job_id=job_id)
                 return response
 
             # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
@@ -1345,7 +1455,8 @@ class AskService:
                     resp.model_errors = [ModelError(**e) for e in _err_sink]
                     raise_if_cancelled(cancel_event)
                     resp.answer_id = self._save_answer(
-                        notebook_id, question, resp, conversation_id, user_id=user_id)
+                        notebook_id, question, resp, conversation_id,
+                        user_id=user_id, job_id=job_id)
                     return resp
 
             # 大库守卫(与 PPR 检索的 Fix 1 同一「大」定义):下方
@@ -1378,7 +1489,8 @@ class AskService:
                 response.model_errors = [ModelError(**e) for e in _err_sink]
                 raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id, user_id=user_id)
+                    notebook_id, question, response, conversation_id,
+                    user_id=user_id, job_id=job_id)
                 return response
 
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
@@ -1519,7 +1631,8 @@ class AskService:
                 resp.mode = "graph"
                 resp.model_errors = [ModelError(**e) for e in _err_sink]
                 resp.answer_id = self._save_answer(
-                    notebook_id, question, resp, conversation_id, user_id=user_id)
+                    notebook_id, question, resp, conversation_id,
+                    user_id=user_id, job_id=job_id)
                 return resp
 
             # Synthesise the answer through the existing LLM + grounding path.
@@ -1629,5 +1742,6 @@ class AskService:
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         return response

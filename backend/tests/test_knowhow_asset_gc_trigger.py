@@ -498,8 +498,15 @@ def test_batch_guard_covers_a_ref_new_to_only_one_row(repo):
     is the UNION over target rows — a ref already present in row 0 is still new
     to row 1, and checking only the first row would have missed it."""
     nb = repo.create_notebook(NotebookCreate(name="N")).id
-    table_id = _seed_table(repo, nb, "![x](asset://gone) 旧")
-    _, column_id = _cell(repo, table_id)
+    table_id = _seed_table(repo, nb, "旧")
+    row_id, column_id = _cell(repo, table_id)
+    # New rows now validate every rendered ref. Model a pre-existing legacy
+    # dead link directly so this test remains about per-target edit deltas.
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_cells SET content_md=? WHERE row_id=? AND column_id=?",
+            ("![x](asset://gone) 旧", row_id, column_id),
+        )
     repo.add_knowhow_row(table_id, {})
 
     added = sorted(

@@ -39,7 +39,7 @@ import json
 from typing import Dict, Mapping, Sequence
 
 from app.services.knowhow import textops
-from app.services.knowhow.projection import _cell_ko_id
+from app.services.knowhow.ids import _cell_ko_id
 from app.services.vector_index import build_matrix, query_sims
 
 

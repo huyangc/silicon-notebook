@@ -67,7 +67,6 @@ LIFECYCLE_STORE_CALLS = {
         "checkpoint_gc",
         "checkpoint_load",
         "checkpoint_put",
-        "claim_name_rows",
         "clear_canonical_scratch_run",
         "clear_mention_bridge",
         "clear_scratch_run",
@@ -85,7 +84,7 @@ LIFECYCLE_STORE_CALLS = {
         "insert_canonical_scratch_rows",
         "insert_scratch_rows",
         "mention_edges_count",
-        "mention_scan_matches",
+        "mention_alias_candidate_batches",
         "mention_seed_rows",
         "replace_canonical_relations",
         "replace_communities",
@@ -139,6 +138,17 @@ def test_facade_import_targets_cover_module_and_symbol_import_forms():
     }
 
 
+def test_api_repository_dependency_uses_the_cached_backend_factory():
+    import inspect
+
+    from app.api import deps
+
+    source = inspect.getsource(deps.repository)
+    assert hasattr(deps.repository, "cache_clear")
+    assert "create_repository(get_settings())" in source
+    assert "SQLiteRepository" not in source
+
+
 def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():
     path = ROOT / "backend" / "app" / "services" / "knowledge_lifecycle.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -163,6 +173,26 @@ def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in {"execute", "executemany", "executescript"}
     ]
+
+    from app.repositories import ports
+
+    protocol_by_owner = {
+        "knowledge": ports.KnowledgeStorePort,
+        "governance_store": ports.GovernanceStorePort,
+        "unified_kg": ports.UnifiedKgStorePort,
+    }
+    missing = {}
+    for owner, calls in actual.items():
+        protocol = protocol_by_owner[owner]
+        declared = {
+            name
+            for base in protocol.__mro__
+            for name, value in base.__dict__.items()
+            if callable(value)
+        }
+        if calls - declared:
+            missing[owner] = sorted(calls - declared)
+    assert missing == {}
 
 
 def test_retired_retrieval_privates_have_no_production_callers():

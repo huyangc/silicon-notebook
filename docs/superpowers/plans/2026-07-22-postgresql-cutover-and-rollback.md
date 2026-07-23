@@ -134,7 +134,8 @@ The formal repository/database receives `WriteAdmission` by injection. Every bus
 Shadow control/replication uses separately constructed maintenance connections; it cannot obtain a bypass from the formal repository.
 
 Installing SQLite v25 updates the accepted compatibility pair to `(sqlite=25,
-postgres=2, epoch=1)`; the business schema epoch remains unchanged. Startup and every
+postgres=6, epoch=1)`; the business schema epoch remains unchanged. PostgreSQL v2 is
+only the prior plan's COPY-ready staging version, never a runnable cutover target. Startup and every
 shadow command reject the earlier v24 pair once this release is deployed.
 
 - [ ] **Step 4: Add v25 durable operation state and actor heartbeats**
@@ -258,11 +259,11 @@ smoke --run-id RUN --mode read-only|post-open-canary
 
 - [ ] **Step 1: Write freeze race tests**
 
-Use deterministic barriers for a write transaction already open, a mutation admitted but not yet in SQL, an upload/file deletion, an Ask/report worker, a separately heartbeating job process, a stale actor, an unregistered direct SQLite writer, and a newly arriving request during drain. Assert already admitted work finishes or rolls back before the final waterline; no new mutation commits after `Hfinal`.
+Use deterministic barriers for a write transaction already open, a mutation admitted but not yet in SQL, an upload/file deletion, an Ask/report worker, a separately heartbeating job process, a stale actor, an unregistered direct SQLite writer, and a newly arriving request during drain. Assert already admitted work finishes or rolls back before the final waterline; no new mutation commits after `Hfinal`. Simulate forward events with explicit ordinals after the baseline reseed, then prove the final freeze reseeds all seven PostgreSQL identities again: non-empty next value is `MAX(ordinal)+1`, empty next value is 1, and any reseed/catalog mismatch keeps the cutover gate closed.
 
 - [ ] **Step 2: Implement draining and durable freeze**
 
-`freeze` transitions admission `open→draining`, waits every registered actor `accepting_writes=false,inflight=0`, rejects stale/unknown live actors, then sets SQLite `write_frozen=1`. Because setting the SQLite control row obtains the SQLite writer lock, all earlier SQLite transactions finish before it commits. Capture `Hfinal` afterward, wait forward checkpoint exactly through it for ≥60 seconds, run `CUTOVER` verification, and transition phase to `cutover_readonly`.
+`freeze` transitions admission `open→draining`, waits every registered actor `accepting_writes=false,inflight=0`, rejects stale/unknown live actors, then sets SQLite `write_frozen=1`. Because setting the SQLite control row obtains the SQLite writer lock, all earlier SQLite transactions finish before it commits. Capture `Hfinal` afterward and wait forward checkpoint exactly through it for ≥60 seconds. Since forward apply writes historical ordinals explicitly without advancing identity sequences, resolve/reseed all seven owned sequences through bound manifest/catalog metadata and verify each next value is strictly above `MAX(ordinal)` (empty tables next=1). Only then run `CUTOVER` verification and transition phase to `cutover_readonly`; reseed failure cannot be bypassed or followed by `resume-writes`.
 
 - [ ] **Step 3: Add backup receipts**
 
@@ -318,7 +319,7 @@ silicon_shadow.reverse_change_log(
   run_id text,
   source_txid bigint,
   table_name text,
-  pk_json jsonb,
+  key_json jsonb,
   operation text,
   schema_epoch integer,
   captured_at timestamptz,
@@ -339,7 +340,7 @@ not executable by the application role. A custom GUC alone is not an authorizati
 
 - [ ] **Step 1: Parameterize capture tests over all manifest tables**
 
-Exercise INSERT/UPDATE/PK UPDATE/DELETE/cascade, transaction rollback, capture disabled, business freeze, wrong run/epoch, and change-log payload absence. Assert one monotonic total seq and canonical PK JSON.
+Exercise INSERT/UPDATE/stable-replication-key UPDATE/DELETE/cascade, transaction rollback, capture disabled, business freeze, wrong run/epoch, and change-log payload absence. Assert one monotonic total seq and canonical key JSON. The inherited manifest must use the declared PK or the reviewed `shadow_unique` logical key in exact field order, including `kg_cluster_scratch=(object_id, notebook_id, run_id)`; trigger SQL, hydration, hashes, fixtures, and both unique guards must lock that same order.
 
 - [ ] **Step 2: Add least-privilege tests**
 
@@ -394,7 +395,7 @@ CREATE TABLE shadow_reverse_applied_events (
 
 - [ ] **Step 1: Write reverse and no-loop tests first**
 
-Cover all operation types, current PostgreSQL row hydration, PostgreSQL row deleted after earlier upsert, JSONB/timestamp/boolean/bytea reverse transforms, shared-file references, replay, sequence gaps, transaction rollback, a lower sequence committing after a higher sequence, wrong phase, and explicit proof that applying to SQLite creates no forward event.
+Cover all operation types, current PostgreSQL row hydration, PostgreSQL row deleted after earlier upsert, JSONB/timestamp/boolean/bytea reverse transforms, shared-file references, replay, sequence gaps, transaction rollback, a lower sequence committing after a higher sequence, wrong phase, and explicit proof that applying to SQLite creates no forward event. For all seven ordinal tables, reverse-apply explicit PostgreSQL ordinals as SQLite rowids, then prove a rolled-back implicit-insert probe chooses a non-colliding next rowid and preserves every documented row-order behavior.
 
 - [ ] **Step 2: Write SQLite lease/crash tests**
 
@@ -453,7 +454,7 @@ requires an empty/unacknowledged-free reverse outbox and no SQLite event receipt
 new direction, enables reverse capture, and moves to `postgres_to_sqlite` while keeping PG
 frozen.
 
-`resume-writes` additionally requires a live unique reverse worker heartbeat, zero
+`resume-writes` additionally requires the successful `Hfinal` seven-table identity-reseed receipt and catalog proof that every next PostgreSQL value is greater than `MAX(ordinal)` (empty next=1), a live unique reverse worker heartbeat, zero
 `applied_at IS NULL` reverse events for ≥60 seconds, zero poison/difference, SQLite
 `write_frozen=1/apply_active=0`, and a passed read-only smoke. A max-seq equality is not a
 substitute. Any missing fact rejects the transition.
@@ -501,7 +502,7 @@ Test rollback with writes at each stage, PG transaction in flight, reverse lag, 
 Transition PostgreSQL admission open→draining; wait registered work; set PG durable write
 gate frozen; wait for all application-role transactions to end; capture the final visible
 reverse event set; process until `applied_at IS NULL` is zero for ≥60 seconds; run
-cutover-level PG→SQLite verification including storage references; save PG and SQLite backup
+cutover-level PG→SQLite verification including storage references; verify all seven explicit ordinal→SQLite-rowid projections and a rolled-back next-rowid probe before SQLite can become writable; save PG and SQLite backup
 receipts; stop reverse worker/capture; transition to rollback `cutover_readonly`.
 
 - [ ] **Step 3: Reuse atomic activation in reverse**

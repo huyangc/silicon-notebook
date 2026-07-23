@@ -27,6 +27,11 @@ from app.services.knowledge_contracts import USABLE_STATUSES
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy
 
+
+def _binary_text_key(value: str) -> bytes:
+    """Match SQLite BINARY collation for identifier ordering."""
+    return value.encode("utf-8", "surrogatepass")
+
 # The two frozen edge encodings the gathered graph produces: the default
 # string path and the build-only int-indexed array fast path.
 ScaleGraphEdges = (
@@ -56,6 +61,21 @@ class IndexProjectionStore:
         vector_matrix: Callable,
     ) -> None:
         self.settings = settings
+        self.connect = connect
+        self.in_batches = in_batches
+        self.ent_chunk_map = ent_chunk_map
+        self.mention_extra_edges = mention_extra_edges
+        self.vector_matrix = vector_matrix
+
+    def bind_runtime_callbacks(
+        self,
+        *,
+        connect: Callable,
+        in_batches: Callable,
+        ent_chunk_map: Callable,
+        mention_extra_edges: Callable,
+        vector_matrix: Callable,
+    ) -> None:
         self.connect = connect
         self.in_batches = in_batches
         self.ent_chunk_map = ent_chunk_map
@@ -318,7 +338,8 @@ class IndexProjectionStore:
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT id, object_type, payload FROM knowledge_objects "
-                        f"WHERE notebook_id=? AND status IN ({ph}){src_clause}",
+                        f"WHERE notebook_id=? AND status IN ({ph}){src_clause} "
+                        f"ORDER BY rowid, id",
                         (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
                     kg_nodes[r["id"]] = {
                         "type": r["object_type"],
@@ -327,28 +348,41 @@ class IndexProjectionStore:
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=? AND review_status!='rejected'{src_clause}",
+                        f"WHERE notebook_id=? AND review_status!='rejected'{src_clause} "
+                        f"ORDER BY id",
                         (notebook_id, *src_params)).fetchall():
                     relations.append(dict(r))
             for src_clause, src_params in clauses:
                 for r in db.execute(
-                        f"SELECT id FROM chunks WHERE notebook_id=?{src_clause}",
+                        f"SELECT id FROM chunks WHERE notebook_id=?{src_clause} ORDER BY rowid, id",
                         (notebook_id, *src_params)).fetchall():
                     chunk_ids.append(r["id"])
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=?", (notebook_id,)).fetchall():
+                    "WHERE notebook_id=? ORDER BY canonical_id, member_object_id",
+                    (notebook_id,)).fetchall():
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
 
         # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
         ent_chunk_map = self.ent_chunk_map(notebook_id)
         _kg_keys = set(kg_nodes.keys())
-        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items()
-                       if (not scoped or oid in _kg_keys) for cid in cids]
+        membership_object_ids = sorted(
+            (
+                oid
+                for oid in ent_chunk_map
+                if not scoped or oid in _kg_keys
+            ),
+            key=_binary_text_key,
+        )
+        memberships = [
+            (oid, cid)
+            for oid in membership_object_ids
+            for cid in sorted(ent_chunk_map[oid], key=_binary_text_key)
+        ]
         membership_counts: Dict[str, int] = {
-            oid: len(cids) for oid, cids in ent_chunk_map.items()
-            if (not scoped or oid in _kg_keys)}
-        del ent_chunk_map, _kg_keys
+            oid: len(ent_chunk_map[oid]) for oid in membership_object_ids
+        }
+        del ent_chunk_map, _kg_keys, membership_object_ids
 
         # Extra edges: variant pairs + optional synonym pairs (whole-notebook only)
         extra_edges = []

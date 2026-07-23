@@ -1,0 +1,28 @@
+-- Knowledge graph, governance relation, embedding, and community indexes.
+CREATE INDEX idx_candidates_nb_status ON concept_merge_candidates(notebook_id, status);
+CREATE INDEX idx_chunk_embeddings_nb ON chunk_embeddings(notebook_id);
+CREATE INDEX idx_clusters_member ON concept_clusters(member_object_id);
+CREATE INDEX idx_clusters_nb ON concept_clusters(notebook_id);
+CREATE INDEX idx_clusters_nb_created ON concept_clusters(notebook_id, created_at);
+CREATE INDEX idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b);
+CREATE INDEX idx_commmem_nb_can ON community_members(notebook_id, canonical_id);
+CREATE INDEX idx_commmem_nb_comm ON community_members(notebook_id, community_id);
+CREATE INDEX idx_communities_nb_level ON communities(notebook_id, level);
+CREATE INDEX idx_conflict_candidates_nb_status ON kg_conflict_candidates(notebook_id, status);
+CREATE INDEX idx_kg_cluster_scratch_nb_run ON kg_cluster_scratch(notebook_id, run_id);
+CREATE INDEX idx_knowledge_embeddings_nb ON knowledge_embeddings(notebook_id);
+CREATE INDEX idx_knowledge_embeddings_nb_created ON knowledge_embeddings(notebook_id, created_at);
+CREATE INDEX idx_knowledge_objects_nb_status ON knowledge_objects(notebook_id, status);
+CREATE INDEX idx_knowledge_objects_nb_type_created ON knowledge_objects(notebook_id, object_type, created_at, id);
+CREATE INDEX idx_knowledge_objects_nb_type_status ON knowledge_objects(notebook_id, object_type, status);
+CREATE INDEX idx_knowledge_objects_nb_updated ON knowledge_objects(notebook_id, updated_at);
+CREATE INDEX idx_knowledge_objects_source ON knowledge_objects(source_id);
+CREATE INDEX idx_knowledge_relations_nb_created ON knowledge_relations(notebook_id, created_at);
+CREATE INDEX idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status);
+CREATE INDEX idx_knowledge_relations_nb_source ON knowledge_relations(notebook_id, source_object_id);
+CREATE INDEX idx_knowledge_relations_nb_target ON knowledge_relations(notebook_id, target_object_id);
+CREATE INDEX idx_knowledge_relations_source ON knowledge_relations(source_id);
+CREATE INDEX idx_kos_notebook ON knowledge_object_sources(notebook_id);
+CREATE INDEX idx_kos_object ON knowledge_object_sources(object_id);
+CREATE INDEX idx_kos_source ON knowledge_object_sources(source_id);
+CREATE INDEX idx_relation_embeddings_nb ON relation_embeddings(notebook_id);

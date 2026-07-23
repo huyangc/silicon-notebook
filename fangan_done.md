@@ -42,10 +42,10 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - 后端使用 Python FastAPI。
 - 前端为唯一主线：Next.js / React / TypeScript，目录 `frontend/`。**原静态 `web/` fallback 目录已删除**，`scripts/dev.sh` 与 `scripts/check.sh` 已移除相关引用。
-- 本机默认持久化为 SQLite：`sqlite:///.local/silicon_notebook.db`（标准库 `sqlite3`）。
+- 发行默认持久化为 SQLite：`sqlite:///.local/silicon_notebook.db`（标准库 `sqlite3`）；也可通过同一个 `DATABASE_URL` 直接选择 PostgreSQL 16。
 - 原始上传文件保存到 `.local/storage`。
-- repository 边界：`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade——主业务库 SQL 只在 `backend/app/repositories/sqlite/` 领域 store，编排在 application services，消费者依赖 `backend/app/repositories/ports.py` 小型 Protocol；PostgreSQL adapter 留待将来在同一 ports 后实现。旧库兼容由冻结 v9 fixture、schema golden 与 `scripts/verify_repository_snapshot.py` backup-only 真库验证共同守护。
-- 向量检索本机实现：embedding 本地持久化，查询时使用有界 float32 矩阵或 scale index；PostgreSQL + pgvector 留作后续放量方向。
+- repository 边界：唯一 factory 在 `SQLiteRepository` / `PostgresRepository` 间原子选择，两者仍保留“组合式 `RepositoryRuntime` 之上的兼容 facade”边界与小型 Protocol；application service 不判断 dialect。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection。SQLite 旧库兼容由冻结 `repository_v9` fixture、schema golden 与 backup-only `scripts/verify_repository_snapshot.py` 守护；PostgreSQL 使用 checksummed migration、有界 Psycopg pool 与独立 PG16 integration/CI lane。
+- 向量检索在 SQLite 使用有界 float32 矩阵/scale index，在 PostgreSQL 以 float32 `bytea` 持久化并通过 `pg_trgm`/`ILIKE` 搜索；不要求 pgvector。切换只改变 active backend，不会复制存量数据，运维 runbook 明确了停写、备份、外部迁移、一致性检查与回滚边界。
 - 模型服务由部署者在 `MODEL_SERVICES_CONFIG` 指向的 TOML 中统一声明：物理 chat / embedding / rerank 服务包含协议、endpoint、模型、`api_key_env` 与唯一容量 `max_concurrency`，`.env` 只保存被引用的密钥。
 - 所有模型调用按稳定 workload id 取得绑定服务并进入该物理服务的共享调度器；可用性通过 `RuntimeModelProvider.configured(workload_id)` 判定。用户不能保存或覆盖模型配置，配置路径留空时明确进入离线/确定性降级。
 - **历史架构债偿还（2026-07-21，非产品功能）**：领域 FastAPI router 由 `app/api/routes.py` 组合，领域 Pydantic model 以 `app/models/schemas.py` compatibility facade 保持旧 import，七个前端 domain API module 共用 `frontend/app/api-client.ts` transport；等价性与 public/domain seam 测试取代 aggregate-private coupling。rebase 到 #315 后，exact PR head 已通过连续两次完整 warm gate，所有 lane 均不超过 60 秒；具体权威秒数记录在 PR 验证区，避免 tracked 文档改动把它们变成上一 SHA 的数据。该门槛是本机测量，CI 时长仍只作观察。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle 仍未完成，保留为独立债务。

@@ -4,7 +4,7 @@
 
 **Goal:** While SQLite remains the only formal read/write authority, build a resumable PostgreSQL baseline, capture every committed SQLite business mutation, continuously apply it to PostgreSQL, and produce barrier-aware consistency evidence without adding dual-write code to business services.
 
-**Architecture:** A temporary, self-contained `migration/shadow` module owns a total table manifest, SQLite trigger capture, snapshot/COPY pipeline, forward worker, checkpoints, and verifier. SQLite business transactions append only dirty primary keys in the same transaction. A single forward worker hydrates current rows, applies idempotent PostgreSQL upserts/deletes, and commits each batch with its checkpoint. PostgreSQL shadow metadata lives in a removable `silicon_shadow` schema. The formal API still uses SQLite through `DATABASE_URL`; PostgreSQL is addressed only by `SHADOW_DATABASE_URL`.
+**Architecture:** A temporary, self-contained `migration/shadow` module owns a total table manifest, SQLite trigger capture, snapshot/COPY pipeline, forward worker, checkpoints, and verifier. SQLite business transactions append only dirty stable replication keys in the same transaction. A single forward worker hydrates current rows, applies idempotent PostgreSQL upserts/deletes, and commits each batch with its checkpoint. PostgreSQL shadow metadata lives in a removable `silicon_shadow` schema. The formal API still uses SQLite through `DATABASE_URL`; PostgreSQL is addressed only by `SHADOW_DATABASE_URL`.
 
 **Tech Stack:** Python 3.13, sqlite3 backup API/FTS5, psycopg 3/COPY, PostgreSQL 17, SHA-256/BLAKE2b streaming hashes, pytest, shell process wrapper, existing repository conformance fixtures.
 
@@ -16,7 +16,7 @@
 - SQLite is the sole business authority for this entire phase. `DATABASE_URL` remains SQLite; PostgreSQL must not serve production API requests.
 - No service, API route, background job, MCP tool, or ordinary store writes two databases. Only `backend/app/migration/shadow/` may import both adapters.
 - Replication is one-way (`sqlite_to_postgres`) and single-consumer. Reverse capture, formal cutover, rollback, pgvector, and multi-worker are out of scope.
-- Change logs contain table, primary key, operation, schema epoch, run id, and time only. They never duplicate row payloads or embedding BLOBs.
+- Change logs contain table, stable replication key, operation, schema epoch, run id, and time only. They never duplicate row payloads or embedding BLOBs.
 - Target row apply and forward checkpoint commit in one PostgreSQL transaction. Poison events stop progress; there is no skip flag.
 - Full copy and verification stream data in bounded batches; the 4.8 GB current database must not be materialized in memory.
 - Shared files are referenced and verified, never copied into PostgreSQL.
@@ -54,11 +54,16 @@ class TableClass(StrEnum):
     SHARED_FILESYSTEM = "shared-filesystem"
     SHADOW_INTERNAL = "shadow-internal"
 
+class ReplicationKeyKind(StrEnum):
+    DECLARED_PK = "declared_pk"
+    SHADOW_UNIQUE = "shadow_unique"
+
 @dataclass(frozen=True)
 class TableSpec:
     name: str
     table_class: TableClass
-    primary_key: tuple[str, ...]
+    replication_key: tuple[str, ...]
+    key_kind: ReplicationKeyKind
     copy_rank: int
     blob_columns: tuple[str, ...] = ()
     path_columns: tuple[str, ...] = ()
@@ -72,15 +77,15 @@ class SchemaPair:
     epoch: int
 ```
 
-The replicated set at epoch 1 is exactly:
+The replicated set at epoch 1 is exactly these 55 tables:
 
 ```text
-agent_access_tokens, agent_profiles, agent_token_notebooks, answers, article_claims,
-articles, ask_jobs, ask_trace_steps, auth_sessions, canonical_relations,
+agent_access_tokens, agent_profiles, agent_token_notebooks, answers,
+ask_jobs, ask_trace_steps, auth_sessions, canonical_relations,
 chunk_embeddings, chunks, communities, community_members, concept_clusters,
 concept_comentions, concept_merge_candidates, concept_whitelist, conversations,
-derived_rule_candidates, element_embeddings, extraction_candidates, extraction_runs,
-feedback, kg_build_jobs, kg_cluster_scratch, kg_conflict_candidates,
+element_embeddings, extraction_runs, feedback, kg_build_jobs, kg_cluster_scratch,
+kg_conflict_candidates,
 kg_rebuild_checkpoint, knowhow_cell_code, knowhow_cells, knowhow_columns,
 knowhow_rows, knowhow_tables, knowledge_embeddings, knowledge_object_sources,
 knowledge_objects, knowledge_relations, memory_embeddings, memory_items,
@@ -92,13 +97,46 @@ source_elements, source_paper_meta, sources, unified_kg_state, user_profiles, us
 
 FTS5 families `chunks_fts*`, `kg_objects_fts*`, and `memory_items_fts*` are `rebuilt`. Source/upload/asset/scale/viz paths are `shared-filesystem`; the rows that reference them remain replicated. SQLite `sqlite_*`, PostgreSQL catalogs, and all shadow tables are excluded/internal.
 
-After SQLite v24 is installed, the accepted compatibility pair is `(sqlite=24,
-postgres=2, epoch=1)`. The PostgreSQL business schema version does not change merely
-because the removable `silicon_shadow` schema is installed.
+Most entries use their declared database primary key as the stable replication key
+(`key_kind=declared_pk`). The three reviewed exceptions remain replicated and use
+logical composite keys guarded for the life of shadow sync
+(`key_kind=shadow_unique`):
+
+- `community_members=(notebook_id, level, canonical_id)`;
+- `kg_cluster_scratch=(object_id, notebook_id, run_id)` (the same unique tuple, ordered so its guard cannot replace the existing `(notebook_id, run_id)` access path);
+- `knowledge_object_sources=(object_id, source_id)`.
+
+The initial UTF8/identity/emptiness preflight is strictly read-only. After it succeeds,
+the formal checksummed migrator first prepares PostgreSQL at COPY-ready v2 so every
+target business table exists. Only then may the two guard/install interfaces scan all
+rows in each exception and fail closed if any key is null or duplicated; neither may
+silently deduplicate. The SQLite installation interface performs that scan, creates
+the three guards, and installs its capture/freeze triggers inside one
+`BEGIN IMMEDIATE`, leaving capture disabled. A separate PostgreSQL guard transaction
+scans the now-existing v2 tables and creates and verifies the corresponding indexes.
+Only after both independent transactions commit and their reports verify successfully
+may control perform the two-report CAS that enables SQLite capture. There is no
+cross-database atomic installation: failure on either side leaves capture disabled
+and both interfaces must be idempotently retryable. Snapshot creation and baseline
+COPY begin only after that CAS. The explicitly named, shadow-owned unique indexes are
+`shadow_uq_community_members_replication_key`,
+`shadow_uq_kg_cluster_scratch_replication_key`, and
+`shadow_uq_knowledge_object_sources_replication_key` on both SQLite and PostgreSQL.
+These observation-period guards prevent new duplicates without changing the reviewed
+business schema pair. They are excluded from business-index parity and are removed
+explicitly by shadow retirement. Updating any declared or logical replication-key
+column emits delete-old followed by upsert-new.
+
+After SQLite v24 is installed, `(sqlite=24, postgres=2, epoch=1)` is the narrowly
+scoped COPY-ready staging pair: PostgreSQL has tables/constraints and six partial
+unique integrity indexes, but no deferred operational/search indexes. After COPY,
+reseed, and normal ledger migration, the accepted running pair is
+`(sqlite=24, postgres=6, epoch=1)`. Installing the removable `silicon_shadow` schema
+does not itself change either business schema version.
 
 - [ ] **Step 1: Add a failing totality test**
 
-Create a fresh SQLite v24 database, enumerate every ordinary user table and FTS family, and compare with the manifest. Query PostgreSQL business tables and enforce the same reverse totality. Fail on a new table, missing PK, duplicate copy rank, FK rank inversion, unknown transform, or unclassified path/BLOB column.
+Create a fresh SQLite v24 database, enumerate every ordinary user table and FTS family, and compare with the manifest. Query PostgreSQL business tables and enforce the same reverse totality. Fail on a new table, a missing/nullable/duplicate stable replication key, duplicate copy rank, FK rank inversion, unknown transform, or unclassified path/BLOB column. The three `shadow_unique` entries require full-table duplicate preflight on both databases before capture can be enabled. The manifest recognizes PG v2 only as COPY-ready staging and requires PG v6 for normal running verification.
 
 - [ ] **Step 2: Run the unit test and observe failure**
 
@@ -109,11 +147,11 @@ PYTHONPATH=backend ${PYTHON_BIN:-python3} -m pytest -q -n0 \
 
 - [ ] **Step 3: Implement immutable manifest entries**
 
-Declare each table once. Resolve the exact PK tuple from schema facts, including composite keys; order composite PK fields exactly as capture/hash/apply will use them. Add transform names for timestamptz, JSONB, boolean, and bytea fields; no callable lambdas in the data declaration.
+Declare each table once. Resolve each exact replication-key tuple: the declared PK for ordinary entries and the reviewed logical composite key for the three `shadow_unique` entries. Order composite fields exactly as capture/hash/apply will use them. Add transform names for timestamptz, JSONB, boolean, and bytea fields; no callable lambdas in the data declaration.
 
 - [ ] **Step 4: Generate and review the manifest fixture**
 
-The fixture contains table/class/PK/copy rank/transform names only, no data. Review the diff and commit it as a schema-change tripwire.
+The fixture contains table/class/replication key/key kind/copy rank/transform names only, no data. Review the diff and commit it as a schema-change tripwire.
 
 - [ ] **Step 5: Run SQLite unit and PostgreSQL parity cases**
 
@@ -148,7 +186,7 @@ CREATE TABLE shadow_change_log (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL,
   table_name TEXT NOT NULL,
-  pk_json TEXT NOT NULL,
+  key_json TEXT NOT NULL,
   operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
   schema_epoch INTEGER NOT NULL,
   captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -174,15 +212,32 @@ def disable_sqlite_capture(conn: sqlite3.Connection, *, run_id: str) -> None: ..
 
 - [ ] **Step 1: Write trigger behavior tests first**
 
-For every replicated table create a minimally valid row via existing repository fixtures, then exercise INSERT, non-PK UPDATE, PK UPDATE where legal, DELETE, and applicable FK cascade. Assert canonical `pk_json`, exact event order, run/epoch, no events for rebuilt/internal tables, and no BLOB payload in the log.
+For every replicated table create a minimally valid row via existing repository fixtures, then exercise INSERT, non-key UPDATE, replication-key UPDATE where legal, DELETE, and applicable FK cascade. Assert canonical `key_json`, exact event order, run/epoch, no events for rebuilt/internal tables, and no BLOB payload in the log.
 
 Test a rolled-back business transaction leaves neither row nor visible log. Test `enabled=0` creates no log. Test `write_frozen=1, apply_active=0` aborts a direct SQL mutation, while the later controlled lease (`apply_active=1` in the same write transaction) permits it.
+
+For each `shadow_unique` table, seed a duplicate and prove installation fails without
+leaving an index, trigger, or enabled control row; then remove it and prove the full
+duplicate scan, three named SQLite guards, and all triggers commit in one
+`BEGIN IMMEDIATE`. Inject a failure after guard creation and assert the whole SQLite
+transaction rolls back and an idempotent retry succeeds.
 
 - [ ] **Step 2: Confirm the tests fail before v24/capture exists**
 
 - [ ] **Step 3: Add v24 and generated triggers**
 
-Generate a `BEFORE INSERT/UPDATE/DELETE` freeze trigger and `AFTER` capture triggers per manifest entry. Quote only manifest-owned identifiers; values remain bound. PK UPDATE emits OLD delete then NEW upsert. Installation is idempotent only for the same run/epoch and refuses an active different run.
+Generate a `BEFORE INSERT/UPDATE/DELETE` freeze trigger and `AFTER` capture triggers per manifest entry. Quote only manifest-owned identifiers; values remain bound. A replication-key UPDATE emits OLD delete then NEW upsert. Runtime orchestration invokes these interfaces only after the strictly read-only preflight and formal migration to COPY-ready PostgreSQL v2. The SQLite-side install transaction uses one `BEGIN IMMEDIATE` for duplicate scan + named guards + triggers and commits with capture disabled. PostgreSQL duplicate scan + guards then use a separate target transaction against the existing v2 business tables. Only after both committed reports are verified does a run/epoch/revision CAS enable capture; any preparation or guard failure remains disabled and can be retried idempotently. Installation refuses an active different run and never claims cross-database atomicity.
+
+Before fixing any guard column order, audit every unordered read of the three tables and
+lock the result with behavior plus `EXPLAIN QUERY PLAN` tests. In particular,
+`stream_scratch_rows WHERE notebook_id=? AND run_id=?` must keep using
+`idx_kg_cluster_scratch_nb_run` (or return the identical pre-guard stream); therefore
+the scratch logical key/unique guard is ordered
+`(object_id, notebook_id, run_id)`, whose left prefix cannot steal that access path.
+Audit `community_members` and `knowledge_object_sources` likewise and prove their
+selected guard orders either preserve result order where it matters or that every
+consumer is order-insensitive. Do not add another ordinal without evidence that an
+observable cross-backend ordering contract exists.
 
 - [ ] **Step 4: Validate trigger SQL structurally**
 
@@ -229,9 +284,24 @@ silicon_shadow.retention_checkpoints
 
 `runs` stores run id, source/target redacted identities and identity hashes, schema epoch/pair, phase, active backend, created/updated times, and terminal reason. It never stores a URL or credential.
 
+**Target-guard interface:**
+
+```python
+def prepare_postgres_replication_key_guards(
+    target: PostgresDatabase, *, manifest: Manifest, run_id: str
+) -> GuardReport: ...
+```
+
+This independently scans all three logical-key tables, fails on NULL/duplicates, and
+creates/verifies the three named shadow-owned PostgreSQL unique indexes in one target
+transaction. It does not enable SQLite capture and is idempotent only for the same
+reviewed definitions. Runtime orchestration may call it only after the strictly
+read-only preflight has succeeded and the formal checksummed migrator has committed
+COPY-ready PostgreSQL v2, so all three target business tables already exist.
+
 - [ ] **Step 1: Write failing state/identity tests**
 
-Cover database identity fingerprints, same-database rejection, non-empty/unowned target rejection, source path/storage root validation, PostgreSQL extension/privilege checks, schema pair mismatch, run reuse, illegal phase transition, and concurrent control updates.
+Cover database identity fingerprints, same-database rejection, non-empty/unowned target rejection, source path/storage root validation, PostgreSQL UTF8 server-encoding/extension/privilege checks, schema pair mismatch, run reuse, illegal phase transition, and concurrent control updates. A SQL_ASCII/LATIN1 target must fail before formal migration, shadow-schema or capture/guard installation, snapshot creation, or any other write. Cover PostgreSQL logical-key duplicate guard rollback and retry separately from SQLite installation, then prove capture-enable CAS remains disabled until both side-specific reports are committed and verified.
 
 - [ ] **Step 2: Implement shadow schema installation**
 
@@ -243,7 +313,7 @@ Every transition is a conditional update on run id + expected phase + revision. 
 
 - [ ] **Step 4: Implement `preflight`**
 
-It performs read-only checks except installing the owned shadow schema when explicitly passed `--prepare-target`. It reports disk estimates, connection/pool settings, schema identities, target ownership/emptiness, storage references, and backup prerequisites using redacted identities.
+Its first target compatibility check requires `current_setting('server_encoding')='UTF8'`; collation does not substitute for encoding. The entire preflight is strictly read-only: it neither installs the owned shadow schema nor runs formal migrations, guards, triggers, snapshot, or COPY. It reports disk estimates, connection/pool settings, schema identities, target ownership/emptiness, storage references, and backup prerequisites using redacted identities. The resulting identity-bound confirmation token authorizes `start-forward` to perform the later writes in the documented order.
 
 - [ ] **Step 5: Run tests**
 
@@ -294,7 +364,7 @@ Use sqlite backup progress hooks and a writer thread. Assert the snapshot is int
 
 - [ ] **Step 2: Test type conversions and bounded COPY**
 
-Cover JSONB canonical values/null, boolean integers, timestamptz, empty/nonempty bytea, non-ASCII text, large Markdown, and paths. Instrument reads so no fetch exceeds `batch_rows`; assert embedding BLOBs are streamed and never converted to Python float arrays.
+Cover JSONB canonical values/null, boolean integers, timestamptz, empty/nonempty bytea, non-ASCII text, large Markdown, and paths. Instrument reads so no fetch exceeds `batch_rows`; assert embedding BLOBs are streamed and never converted to Python float arrays. For all seven manifest-declared ordinal tables, COPY explicit historical ordinals, reseed, and assert the next insert receives `MAX(ordinal)+1`; for an empty table assert the first generated ordinal is `1`. Inject reseed failure and assert the table/COPY run cannot be marked complete or advance a checkpoint.
 
 - [ ] **Step 3: Implement temp-file snapshot publication**
 
@@ -302,11 +372,27 @@ Write under the configured migration work directory, fsync, validate SQLite inte
 
 - [ ] **Step 4: Implement resumable COPY**
 
-Copy by manifest rank and stable PK order into the prepared target. Save last PK, rows, bytes, and rolling hash per table. Resume only when run/snapshot hash/schema/checkpoint match. For a failed partial table, delete only rows tagged/owned by the current pre-cutover run or restart that table inside a transaction; never truncate an unrelated target.
+Require and reverify an already committed COPY-ready PostgreSQL v2 target, with the PostgreSQL replication-key guard report committed and the two-report capture-enable CAS complete. Copy by manifest rank and stable replication-key order into that target. Save the last replication key, rows, bytes, and rolling hash per table. Resume only when run/snapshot hash/schema/checkpoint match. For a failed partial table, delete only rows tagged/owned by the current pre-cutover run or restart that table inside a transaction; never truncate an unrelated target. Target preparation belongs to `start-forward` before guard installation, never inside snapshot/COPY.
 
-- [ ] **Step 5: Create secondary/search indexes after data load and analyze**
+- [ ] **Step 5: Reseed identities, migrate through v3-v6, and analyze**
 
-Keep PK/FK/unique constraints active according to the reviewed migration; defer only secondary index build. Validate all FKs before setting the forward checkpoint atomically to H0.
+After all rows for a table are copied, reseed every one of the seven
+`POSTGRES_ROWID_ORDINAL_TABLES`. Resolve each owned identity sequence through bound
+manifest table/column values and `pg_catalog` dependency metadata to a sequence
+OID/`regclass`; never interpolate an untrusted identifier. For a non-empty table set
+the sequence state so the first new value is `MAX(ordinal)+1`; for an empty table set
+it so the first new value is `1`. Reseed success is part of table completion and a
+precondition for any copy/checkpoint promotion.
+
+Then invoke the normal checksummed migrator from v2 through individually checkpointed
+v3-v6 using a shadow-owned, long but finite migration statement-timeout setting; do
+not manually run, drop/recreate, or bypass the ledger for an index group. Keep the
+pool's `lock_timeout`, allow external cancellation, and record each migration
+version's start/failure/success in later CLI status. The transaction-local override
+must reset before the connection returns to ordinary borrowers. Keep PK/FK/unique
+constraints and the six v2 integrity indexes active throughout COPY; v3-v5 create
+the 73 deferred non-unique operational indexes and v6 creates five GIN indexes.
+Validate all FKs and analyze before setting the forward checkpoint atomically to H0.
 
 - [ ] **Step 6: Run E2E copy tests including a frozen historical SQLite fixture**
 
@@ -345,7 +431,7 @@ class ShadowReplicator:
 
 - [ ] **Step 1: Write operation/order/idempotency tests**
 
-Cover insert/update/delete, PK update, repeated key coalescence without reordering delete→upsert semantics, cascade events, current-row hydration, a row already deleted by a later event, exact checkpoint continuity, duplicate replay, and no source mutation.
+Cover insert/update/delete, replication-key update, repeated key coalescence without reordering delete→upsert semantics, cascade events, current-row hydration, a row already deleted by a later event, exact checkpoint continuity, duplicate replay, and no source mutation.
 
 - [ ] **Step 2: Add crash injection at every transaction boundary**
 
@@ -353,7 +439,7 @@ Inject before first target statement, mid-batch, before checkpoint update, after
 
 - [ ] **Step 3: Implement bounded sequential apply**
 
-Read contiguous events after checkpoint; reject a gap, wrong run/epoch/table/op/PK shape. Hydrate source rows using manifest-bound SQL. In one target transaction apply statements in seq order and advance checkpoint to the last contiguous seq. Size batches by event count and hydrated bytes.
+Read contiguous events after checkpoint; reject a gap, wrong run/epoch/table/op/replication-key shape. Hydrate source rows using manifest-bound SQL. In one target transaction apply statements in seq order and advance checkpoint to the last contiguous seq. Size batches by event count and hydrated bytes.
 
 - [ ] **Step 4: Implement error taxonomy**
 
@@ -361,7 +447,7 @@ Retry connection loss, pool timeout, deadlock, serialization failure, lock timeo
 
 - [ ] **Step 5: Export structured metrics**
 
-Emit run/direction/checkpoints/lag/batch rows/bytes/duration/retries/poison count with redacted identities. Do not label metrics with table PK or user data.
+Emit run/direction/checkpoints/lag/batch rows/bytes/duration/retries/poison count with redacted identities. Do not label metrics with table replication keys or user data.
 
 - [ ] **Step 6: Run tests**
 
@@ -405,13 +491,13 @@ def verify(run_id: str, level: VerificationLevel) -> VerificationReport: ...
 1. Open a SQLite read snapshot, record `Hv`, and stream source facts/hashes.
 2. Wait for PG checkpoint ≥ `Hv`.
 3. Open a PostgreSQL `REPEATABLE READ, READ ONLY` transaction; read its applied checkpoint `Ht` and pin target state.
-4. In a new SQLite read transaction collect every dirty PK with `seq > Hv` through its current `Hseen`. A change committed after this collection cannot have influenced the already pinned PG snapshot; a future state hydrated into PG before the snapshot necessarily has a visible dirty event by `Hseen`.
+4. In a new SQLite read transaction collect every dirty replication key with `seq > Hv` through its current `Hseen`. A change committed after this collection cannot have influenced the already pinned PG snapshot; a future state hydrated into PG before the snapshot necessarily has a visible dirty event by `Hseen`.
 5. Exclude those concurrent keys from strict drift; compare all stable keys. Save the barrier until report commit so retention cannot cross it.
 6. `CUTOVER` additionally requires the source frozen, `Hv=Ht=source MAX(seq)`, zero concurrent keys, and 100% coverage.
 
 - [ ] **Step 1: Test canonical normalization**
 
-Cover ordered composite PK JSON, JSON key ordering/null/NaN/Infinity, timezone instants, booleans, text bytes, bytea length/hash, float32 dimension/norm/cosine tolerance, and paths relative to storage root.
+Cover ordered composite replication-key JSON, JSON key ordering/null/NaN/Infinity, timezone instants, booleans, text bytes, bytea length/hash, float32 dimension/norm/cosine tolerance, and paths relative to storage root.
 
 - [ ] **Step 2: Test active-write barriers deterministically**
 
@@ -419,7 +505,7 @@ Use explicit barriers to commit changes before/after each verifier step. Assert 
 
 - [ ] **Step 3: Implement verification layers**
 
-Structural: schema pair, row counts, PK sets, chunked normalized hashes, FKs/uniques/cascades, file references.
+Structural: schema pair, row counts, stable replication-key sets, chunked normalized hashes, FKs/uniques/cascades, file references. For ordinary tables this is the declared-PK set check; for the three reviewed exceptions it is the guarded logical-key set check.
 
 Full: selected repository contract reads against both adapters, embedding invariants, mixed Chinese/English retrieval golden set.
 
@@ -427,7 +513,7 @@ Cutover: all full checks plus frozen/caught-up/zero-concurrent/100% and two cons
 
 - [ ] **Step 4: Store safe reports**
 
-Persist run/table/PK hash or chunk bounds/category/redacted summary. Never store raw source/Memory/token/password text. Differences stay red until a later verified run supersedes them; there is no manual green flag.
+Persist run/table/replication-key hash or chunk bounds/category/redacted summary. Never store raw source/Memory/token/password text. Differences stay red until a later verified run supersedes them; there is no manual green flag.
 
 - [ ] **Step 5: Enforce quality gates**
 
@@ -467,7 +553,7 @@ git commit -m "feat: verify PostgreSQL shadow consistency"
 
 ```text
 status --run-id RUN
-preflight --run-id RUN [--prepare-target]
+preflight --run-id RUN
 start-forward --run-id RUN --work-dir PATH
 verify --run-id RUN --level structural|full
 worker --run-id RUN --direction forward
@@ -483,7 +569,7 @@ Only one live forward worker may hold the direction lease. Heartbeats use databa
 
 - [ ] **Step 3: Implement `start-forward` orchestration**
 
-It validates preflight, installs capture, creates the snapshot, copies/resumes the baseline, sets H0, transitions to `sqlite_to_postgres`, and prints the exact foreground worker command. It does not daemonize invisibly.
+It validates the identity-bound result of a strictly read-only UTF8/identity/emptiness preflight, prepares PostgreSQL at COPY-ready v2 through the formal checksummed migrator so the target business tables exist, installs the owned shadow control schema, and commits the SQLite and PostgreSQL guard/install interfaces in independent transactions while capture remains disabled. After verifying both committed reports, it enables capture only through the two-report CAS, creates the snapshot, copies/resumes the baseline, reseeds all seven ordinal identities, migrates through resumable v3-v6 index groups with the configured bounded timeout, sets H0, transitions to `sqlite_to_postgres`, and prints the exact foreground worker command. Any preparation or guard failure remains visible and leaves capture disabled; reseed or index-group failure cannot mark COPY complete or advance H0. Each step is identity-bound and idempotently retryable; the sequence does not claim cross-database atomicity. It does not daemonize invisibly.
 
 - [ ] **Step 4: Implement `scripts/shadow.sh` as an optional local supervisor**
 

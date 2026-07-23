@@ -33,7 +33,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Notebook collection (grid/compact/list, edit/delete); clicking `＋ 新建` creates an `Untitled notebook` and enters it immediately — no dialog
 - No Docker in the first version
 
-PostgreSQL + pgvector remain the future production/team-beta direction; local development does not require them.
+SQLite remains the shipped default, while PostgreSQL 16 is also a supported direct repository backend. The application selects exactly one through `DATABASE_URL`; it does not dual-write or move existing data. PostgreSQL stores vectors in `bytea`, so pgvector is not required.
 
 ## Product Flow
 
@@ -332,7 +332,7 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 
 ## Current Limitations
 
-- Retrieval uses SQLite keyword (CJK bi-gram) + float32 matrix semantic search with per-notebook cache. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach). BM25/FTS5 and pgvector are deferred for larger scale.
+- Retrieval on SQLite uses keyword/FTS-compatible CJK handling plus a bounded float32 matrix/scale index. PostgreSQL uses `pg_trgm`/`ILIKE` and the same byte-oriented float32 vectors behind repository ports; pgvector remains a future scale option, not a runtime prerequisite.
 - Large-document ingestion is hardened: greedy-window KG extraction (cost scales linearly with document size), concurrent embedding with per-batch DB writes, and extraction-first pipeline. For very large corpora, adding `sqlite-vec` is a natural next step.
 - Ask no longer performs synchronous embedding backfill or a full source-element scan; it uses available keyword/vector indexes and stays responsive while maintenance jobs run. Ask emits per-stage timing (`ask_stage` events).
 - Unified KG rebuild is explicit and observable via `GET /notebooks/{id}/unified-kg/status`; ingesting a source marks the graph dirty instead of rebuilding synchronously, and opening the graph overlay no longer auto-rebuilds (refresh on demand).
@@ -340,6 +340,6 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 - LLM-backed KG extraction requires the `kg_extract` workload to be bound in the system model-service TOML; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
 - Notebook sharing is link-based copy/read-only membership, not live collaborative editing; owners retain write authority.
-- PostgreSQL + pgvector are not required for the local beta and are deferred. Until a PostgreSQL repository exists, non-`sqlite:///` `DATABASE_URL` values fail fast instead of silently falling back to a local database.
+- SQLite/PostgreSQL selection is direct and atomic through the repository factory. Changing `DATABASE_URL` does not synchronize existing rows; cutover and rollback therefore require stopped writers, verified backups, an external data migration when data already exists, and post-start consistency checks.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see [PDF parsing with MinerU](./operations.md#pdf-parsing-with-mineru).
 - User memory remains manual opt-in only; no automatic memory behavior has been added.

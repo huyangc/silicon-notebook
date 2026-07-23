@@ -44,6 +44,17 @@ class QueryStore:
         # 那条路径下再兜底到 get_settings()。
         self.settings = settings
 
+    def warm_open_path_caches(self, progress=None) -> int:
+        from app.repositories.sqlite import knowledge_counts_cache
+
+        with self.database.connect() as db:
+            return knowledge_counts_cache.warm_all(db, progress)
+
+    def invalidate_knowledge_counts(self, notebook_id: str) -> None:
+        from app.repositories.sqlite import knowledge_counts_cache
+
+        knowledge_counts_cache.invalidate(notebook_id)
+
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.
     @staticmethod

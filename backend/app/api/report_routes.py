@@ -139,14 +139,17 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
              dependencies=[Depends(require_notebook_write)])
 def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
     from app.services.report_engine import cancel_report as _cancel
-    live = _cancel(report_id)
-    if not live:                               # 线程已结束/不存在:直接落库标记
-        try:
-            repository().update_report(notebook_id, report_id, status="cancelled",
-                                       progress="已取消")
-        except Exception:
-            raise HTTPException(status_code=404, detail="Report not found")
-    return {"status": "cancelling" if live else "cancelled"}
+    repo = repository()
+    try:
+        repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Report not found")
+    repo.update_report(
+        notebook_id, report_id, status="cancelled", progress="已取消"
+    )
+    # Durable state wins first; the event only stops an active worker promptly.
+    _cancel(report_id)
+    return {"status": "cancelled"}
 
 
 @router.delete("/notebooks/{notebook_id}/reports/{report_id}",

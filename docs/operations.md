@@ -131,6 +131,34 @@ in the second table. Tune the capture threshold with `DB_WRITE_LOCK_WARN_MS` (de
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 
+## SQLite / PostgreSQL cutover and rollback
+
+There is one active database and no application dual-write. Use this runbook only after an
+external migration tool/process has copied and verified existing data; changing
+`DATABASE_URL` alone creates or opens a different datastore.
+
+1. Announce a write freeze and stop every API, background job, MCP, batch, and maintenance
+   writer. Stop the backend after in-flight transactions finish.
+2. Back up SQLite with the SQLite backup API (or while fully stopped, preserving WAL
+   semantics) and PostgreSQL with a tested `pg_dump --format=custom`/`pg_restore` or the
+   organization's physical-backup procedure. Record checksums and restore-test receipts.
+3. Copy externally, preserving primary keys, ordered/ordinal values, JSON nulls, UTF-8,
+   timestamps, and float32 vector bytes. Compare schema versions, table counts, stable-key
+   sets, content hashes, storage references, and representative auth/Ask/Knowledge/Memory/
+   Knowhow/report reads before declaring the target ready.
+4. Change only `DATABASE_URL`, start one worker, and require redacted database status,
+   `/api/ready`, admin and ordinary-user login, notebook/source counts, searches, one write
+   transaction, and background-job recovery before reopening traffic.
+5. Keep the source backup immutable through the observation window. If PostgreSQL has
+   accepted no business writes, rollback is stop/change/start plus the same smoke. Once it
+   has accepted writes, switching the URL back would discard those writes; freeze again,
+   reconcile PostgreSQL→SQLite externally, verify both sides, and only then reopen SQLite.
+
+For an emergency failure before traffic or before any PostgreSQL business write, leave the
+target stopped and restore the original SQLite URL. Never try to recover by running SQLite
+maintenance commands against PostgreSQL. `scripts/batch_ingest.py` mutation phases remain
+SQLite-only.
+
 ## PDF parsing with MinerU
 
 PDF parsing is decoupled from the GPU. The backend never imports torch; it talks to MinerU only when configured, and otherwise uses the pypdf text fallback.

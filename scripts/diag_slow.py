@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import sqlite3
@@ -102,6 +103,27 @@ class _BoundedOutput:
 
     def isatty(self):
         return self._stream.isatty()
+
+
+def _redact_database_url(raw):
+    """Load the isolated core URL redactor without importing the app package."""
+    module_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "backend",
+        "app",
+        "core",
+        "database_url.py",
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("silicon_notebook_database_url", module_path)
+        if spec is None or spec.loader is None:
+            return "<invalid/redacted database URL>"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.redact_database_url(raw)
+    except Exception:  # diagnostics must fail closed rather than print the raw URL
+        return "<invalid/redacted database URL>"
 
 
 def _pct(sorted_vals, p):

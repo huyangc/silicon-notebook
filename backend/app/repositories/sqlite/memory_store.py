@@ -595,6 +595,7 @@ class MemoryStore:
             ).fetchone()
             if row is None:
                 raise KeyError(write.source_answer_id)
+            row = self._answer_save_scope_locked_on(db, write, row)
             payload = _json_object(row["payload"])
             provenance = {
                 "answer_id": write.source_answer_id,
@@ -612,6 +613,14 @@ class MemoryStore:
             )
             self._ensure_initial_revision_on(db, item, created, changed_by, reason)
         return item
+
+    @staticmethod
+    def _answer_save_scope_locked_on(
+        db: sqlite3.Connection, write: MemoryWrite, row: object
+    ):
+        """Parity seam reached after SQLite's guarded access snapshot."""
+        del db, write
+        return row
 
     def memory_for_user(self, memory_id: str, user_id: str) -> MemoryRecord:
         with self.database.connect() as db:
@@ -736,16 +745,10 @@ class MemoryStore:
         allowed = {"title", "content_md", "tags"}
         values = {key: value for key, value in fields.items() if key in allowed}
         with self.database.write() as db:
-            row = db.execute(
-                "SELECT m.title,m.content_md,m.tags_json,m.status,m.promotion_state,"
-                "p.payload_json FROM memory_items m "
-                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                "WHERE m.id=? AND m.created_by=? AND "
-                f"{self._read_access_clause()}",
-                (memory_id, user_id, user_id, user_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(memory_id)
+            self.database.begin_guarded_write(db)
+            row = self._lock_memory_aggregate_on(
+                db, memory_id, expected_creator=user_id
+            )
             if row["status"] not in expected:
                 destination = target or row["status"]
                 raise ValueError(
@@ -827,6 +830,93 @@ class MemoryStore:
                 reason,
             )
         return self.memory_for_user(memory_id, user_id)
+
+    def _lock_memory_aggregate_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        *,
+        expected_creator: str | None = None,
+        expected_notebook: str | None = None,
+        permission_error: bool = False,
+    ):
+        """SQLite parity for the canonical promotion aggregate guard.
+
+        The caller owns ``BEGIN IMMEDIATE``, which serializes the same
+        notebook/member/Memory/candidate decision across processes.
+        """
+        routing = db.execute(
+            "SELECT notebook_id,created_by FROM memory_items WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        if routing is None or (
+            expected_creator is not None
+            and routing["created_by"] != expected_creator
+        ):
+            raise KeyError(memory_id)
+        notebook_id = str(routing["notebook_id"])
+        creator_id = str(routing["created_by"])
+        if expected_notebook is not None and notebook_id != expected_notebook:
+            raise ValueError("promotion candidate notebook does not match Memory notebook")
+        notebook = db.execute(
+            "SELECT created_by FROM notebooks WHERE id=?", (notebook_id,)
+        ).fetchone()
+        if notebook is None:
+            raise KeyError(memory_id)
+        if notebook["created_by"] != creator_id:
+            member = db.execute(
+                "SELECT 1 FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                (notebook_id, creator_id),
+            ).fetchone()
+            if member is None:
+                if permission_error:
+                    raise PermissionError(memory_id)
+                raise KeyError(memory_id)
+        row = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            "WHERE m.id=? AND m.notebook_id=? AND m.created_by=?",
+            (memory_id, notebook_id, creator_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        if row["promotion_state"] == "proposed":
+            provenance = _json_object(row["payload_json"])
+            promotion = provenance.get("kg_promotion")
+            proposal_id = (
+                str(promotion.get("proposal_id") or "")
+                if isinstance(promotion, dict)
+                else ""
+            )
+            if proposal_id:
+                self._lock_active_promotion_candidate_on(
+                    db, proposal_id, memory_id
+                )
+        return row
+
+    @staticmethod
+    def _lock_active_promotion_candidate_on(
+        db: sqlite3.Connection, proposal_id: str, memory_id: str
+    ):
+        return db.execute(
+            "SELECT id FROM promotion_candidates WHERE id=? AND object_id=?",
+            (proposal_id, memory_id),
+        ).fetchone()
+
+    def lock_promotion_memory_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        candidate_notebook_id: str,
+    ) -> MemoryRecord:
+        self.database.begin_guarded_write(db)
+        row = self._lock_memory_aggregate_on(
+            db,
+            memory_id,
+            expected_notebook=candidate_notebook_id,
+            permission_error=True,
+        )
+        return self._record(row)
 
     @staticmethod
     def _supersede_active_promotion_on(
@@ -1274,13 +1364,11 @@ class MemoryStore:
     def delete_memory_if_unchanged(
         self, memory_id: str, user_id: str, expected_revision: "int | None"
     ) -> bool:
-        """Atomic conditional delete for ``MemoryService.transfer``'s move
-        cleanup (PR review round 3 P1-2): folds the concurrent-edit check
-        directly into the ``DELETE``'s ``WHERE`` clause, so "is it still the
-        row we copied" and "delete it" are ONE statement instead of a
-        separate read-then-write — no other writer can commit an edit
-        between them the way it could across two independent calls (a
-        revision compare, then a later unconditional ``delete_memory``).
+        """Atomic conditional delete for ``MemoryService.transfer``'s move.
+
+        ``BEGIN IMMEDIATE`` is acquired before revision, status, promotion,
+        ownership, and deletion are evaluated in one write transaction. This
+        serializes the decision with writers in other SQLite processes.
 
         Keyed on the ``memory_revisions`` MAX(revision) for this memory, NOT
         ``updated_at``: ``updated_at`` was the first design tried here, but
@@ -1297,16 +1385,14 @@ class MemoryStore:
         content edits and status transitions — ``deprecate`` goes through
         ``transition_with_revision`` too), so any mutation since
         ``expected_revision`` was captured makes MAX(revision) strictly
-        greater, unconditionally. Mirrors ``mark_embedding_failed``'s
-        existing ``(SELECT COALESCE(MAX(revision),0) FROM memory_revisions
-        WHERE memory_id=?)=?`` shape (same file) rather than inventing a new
-        one. ``status='confirmed'`` is redundant with that (any transition
+        greater, unconditionally. ``status='confirmed'`` is redundant with
+        that (any transition
         away from 'confirmed' also advances revision) but kept as an
         explicit, cheap belt-and-suspenders check — a move should never
         delete a row that isn't (still) confirmed, regardless of how that
         came to be true. ``expected_revision=None`` (the source's revision
         couldn't be captured — see caller) can never equal a real revision
-        number, so the DELETE safely matches zero rows. Returns whether the
+        number, so the method safely returns ``False``. Returns whether the
         row was actually deleted (``False`` means the memory was edited or
         transitioned away from 'confirmed', or (round 8, see below) had a
         promotion proposed, since ``expected_revision`` was captured — the
@@ -1331,26 +1417,31 @@ class MemoryStore:
         check a moment later compares against that same, unmoved-since
         number: both sides agree, precisely because the very mutation this
         method needed to catch is what moved the number they now agree on.
-        A revision-only WHERE clause cannot distinguish "unchanged since
+        A revision-only check cannot distinguish "unchanged since
         expected_revision was captured" from "changed, but AFTER capture
-        and by exactly the mutation this delete needs to reject" — folding
-        the ``promotion_state`` check directly into this same atomic
-        statement closes that gap regardless of exactly when, relative to
-        the revision capture, the proposal lands: whatever the DELETE
-        would have matched on revision/status alone, this additional
-        clause still independently vetoes it while ``promotion_state`` is
-        ``'proposed'`` at the instant the DELETE actually runs. A rowcount
-        of 0 caused by this new clause flows through the exact same
+        and by exactly the mutation this delete needs to reject". Rechecking
+        ``promotion_state`` in the same guarded transaction closes that gap
+        regardless of exactly when, relative to the revision capture, the
+        proposal lands. A failed promotion-state check flows through the same
         ``False`` return / retain-and-report-``copied_source_not_removed``
         path as every other "changed since expected_revision" cause above
         — not a new result shape."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            locked = self._lock_memory_revision_on(db, memory_id)
+            if locked is None or expected_revision is None:
+                return False
+            item, revision = locked
+            if (
+                item["created_by"] != user_id
+                or item["status"] != "confirmed"
+                or item["promotion_state"] == "proposed"
+                or revision != int(expected_revision)
+            ):
+                return False
             cursor = db.execute(
-                "DELETE FROM memory_items WHERE id=? AND created_by=? "
-                "AND status='confirmed' AND promotion_state NOT IN ('proposed') AND "
-                "(SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
-                " WHERE memory_id=?)=?",
-                (memory_id, user_id, memory_id, expected_revision),
+                "DELETE FROM memory_items WHERE id=? AND created_by=?",
+                (memory_id, user_id),
             )
         return cursor.rowcount == 1
 
@@ -1473,12 +1564,12 @@ class MemoryStore:
         vector: Sequence[float],
     ) -> bool:
         with self.database.write() as db:
-            current = db.execute(
-                "SELECT COALESCE(MAX(revision),0) AS revision "
-                "FROM memory_revisions WHERE memory_id=?",
-                (memory_id,),
-            ).fetchone()
-            if int(current["revision"]) != int(expected_revision):
+            self.database.begin_guarded_write(db)
+            locked = self._lock_memory_revision_on(db, memory_id)
+            if locked is None:
+                return False
+            _, revision = locked
+            if revision != int(expected_revision):
                 return False
             db.execute(
                 "INSERT OR REPLACE INTO memory_embeddings "
@@ -1492,15 +1583,36 @@ class MemoryStore:
             )
         return True
 
+    @staticmethod
+    def _lock_memory_revision_on(db: sqlite3.Connection, memory_id: str):
+        item = db.execute(
+            "SELECT id,created_by,status,promotion_state FROM memory_items WHERE id=?",
+            (memory_id,),
+        ).fetchone()
+        if item is None:
+            return None
+        current = db.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision "
+            "FROM memory_revisions WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        return item, int(current["revision"])
+
     def mark_embedding_failed(
         self, memory_id: str, expected_revision: int, error: str
     ) -> bool:
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            locked = self._lock_memory_revision_on(db, memory_id)
+            if locked is None:
+                return False
+            _, revision = locked
+            if revision != int(expected_revision):
+                return False
             cursor = db.execute(
                 "UPDATE memory_items SET embedding_status='failed',embedding_error=? "
-                "WHERE id=? AND (SELECT COALESCE(MAX(revision),0) "
-                "FROM memory_revisions WHERE memory_id=?)=?",
-                (error[:500], memory_id, memory_id, int(expected_revision)),
+                "WHERE id=?",
+                (error[:500], memory_id),
             )
         return cursor.rowcount == 1
 
@@ -1607,7 +1719,8 @@ class MemoryStore:
         退化成完全相同的形状，服务侧的 ``_schedule_embed`` 兜底照常接管。
         """
         with self.database.write() as db:
-            db.execute("BEGIN IMMEDIATE")
+            self.database.begin_guarded_write(db)
+            source_guard = self._lock_copy_source_on(db, source_memory_id)
             item, created = self._insert_memory_on(db, write)
             if item.id != write.id:
                 return item  # 幂等命中已有行（正常不会发生：copy 用全新 id）
@@ -1619,7 +1732,8 @@ class MemoryStore:
                 (source_memory_id, source_memory_id),
             ).fetchone()
             source_is_current = (
-                source_state is not None
+                source_guard is not None
+                and source_state is not None
                 and source_state["embedding_status"] == "ready"
                 and expected_source_revision is not None
                 and int(source_state["revision"]) == int(expected_source_revision)
@@ -1649,3 +1763,10 @@ class MemoryStore:
                         ).fetchone()
                     )
         return item
+
+    @staticmethod
+    def _lock_copy_source_on(db: sqlite3.Connection, source_memory_id: str):
+        return db.execute(
+            "SELECT embedding_status FROM memory_items WHERE id=?",
+            (source_memory_id,),
+        ).fetchone()

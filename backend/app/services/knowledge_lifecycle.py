@@ -38,17 +38,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
-from app.repositories.sqlite.governance_store import GovernanceStore
-from app.repositories.sqlite.knowledge_store import KnowledgeStore
-from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
-from app.repositories.ports import KgBuildJobStorePort
+from app.repositories.ports import (
+    GovernanceStorePort,
+    KgBuildJobStorePort,
+    KnowledgeStorePort,
+    UnifiedKgStorePort,
+)
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
@@ -120,9 +121,9 @@ class KnowledgeLifecycleService:
         *,
         settings: Settings,
         event_log: EventLogger,
-        knowledge: KnowledgeStore,
-        governance_store: GovernanceStore,
-        unified_kg: UnifiedKgStore,
+        knowledge: KnowledgeStorePort,
+        governance_store: GovernanceStorePort,
+        unified_kg: UnifiedKgStorePort,
         governance: KnowledgeGovernanceService,
         kg_build_jobs: KgBuildJobStorePort,
         kg_building: set,
@@ -130,15 +131,14 @@ class KnowledgeLifecycleService:
         scale_artifacts: Any,
         new_id: Callable[[str], str],
         now: Callable[[], str],
-        connect: Callable[[], sqlite3.Connection],
-        close_local: Callable[[], None],
+        connect: Callable[[], object],
         write: Callable[[], Any],
         bulk_write: Callable[..., int],
         get_notebook: Callable[[str], Any],
         current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
-        bump_cluster_mutation_seq: Callable[[sqlite3.Connection, str], None],
+        bump_cluster_mutation_seq: Callable[[object, str], None],
         embed_objects_batch: Callable[..., None],
         embed_relations_batch: Callable[[str, List[dict]], None],
         source_ids_from_evidence: Callable[[Optional[str]], set],
@@ -151,6 +151,7 @@ class KnowledgeLifecycleService:
         relations_for_notebook: Callable[[str], List[dict]],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
+        invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -172,7 +173,6 @@ class KnowledgeLifecycleService:
         self._new_id = new_id
         self._now = now
         self._connect = connect
-        self._close_local = close_local
         self._write = write
         self._bulk_write = bulk_write
         self.get_notebook = get_notebook
@@ -192,6 +192,7 @@ class KnowledgeLifecycleService:
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
+        self._invalidate_knowledge_counts = invalidate_knowledge_counts
 
     # ------------------------------------------------------------------
     # KG deletion / store / relink / cluster writes / incremental fusion
@@ -210,8 +211,7 @@ class KnowledgeLifecycleService:
         # cache's seq reads 0 afterward — which ALIASES with a genuine seq 0 (e.g.
         # a freshly copy_notebook'd nb whose counts were cached at seq 0). Drop the
         # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
-        from app.repositories.sqlite import knowledge_counts_cache
-        knowledge_counts_cache.invalidate(notebook_id)
+        self._invalidate_knowledge_counts(notebook_id)
         return counts
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
@@ -2255,42 +2255,36 @@ class KnowledgeLifecycleService:
         if cross and claims and alias_to_canons:
             df_gate = max(self.settings.mention_alias_df_floor,
                           self.settings.mention_alias_df_cap * n_claims)
-            rowid_map = {i: claims[i - 1] for i in range(1, n_claims + 1)}
             # 3) 连接私有 TEMP trigram FTS(建+填+查同一 _connect 连接):temp schema
             #    按连接隔离——并发 rebuild 同名不相撞,无需串行化;temp_store=MEMORY
             #    (见 _connect)→ 全程纯内存,零 WAL 写入、不占 _write_lock(效率约束:
             #    部署规模 ~40万 claims 的插入+扫描绝不能挡住 ingest/其它 rebuild)。
             #    连接关闭即整表蒸发(无需 DELETE/DROP;finally close 兼释放内存)。
             #    trigram=子串语义,故每候选仍须过 boundary_hit 后校验。
-            scan_db = self._connect()
-            try:
-                self.unified_kg.claim_name_rows(
-                    scan_db,
-                    [(i, folded) for i, (_cid, folded) in enumerate(claims, 1)],
-                )
-                # 4) 每别名 phrase MATCH 召回 → boundary_hit 校验 → DF 双门。
-                for alias in sorted(alias_to_canons):
-                    if len(alias) < 3:     # trigram 最短查询=3;别名门已保证,双保险
+            with self.unified_kg.mention_alias_candidate_batches(
+                claims, sorted(alias_to_canons)
+            ) as batches:
+                # 4) 每别名 phrase 候选 → boundary_hit 校验 → DF 双门。当前
+                # alias 的 hits 最多保留 df_gate+1；一旦确认泛词就立即前进，
+                # 不累计该 alias 的其余候选，更不累计后续 alias。
+                for alias, candidates in batches:
+                    if len(alias) < 3:  # trigram 最短查询=3;别名门已保证,双保险
                         continue
                     canons = alias_to_canons[alias]
-                    match_expr = '"' + alias.replace('"', '""') + '"'
                     hits = []
-                    for row in self.unified_kg.mention_scan_matches(scan_db, match_expr):
-                        claim_id, folded = rowid_map[row["rowid"]]
-                        if boundary_hit(alias, folded):
-                            hits.append(claim_id)
+                    for claim_id, folded in candidates:
+                        if not boundary_hit(alias, folded):
+                            continue
+                        hits.append(claim_id)
+                        if len(hits) > df_gate:
+                            break
                     if len(hits) > df_gate:    # 泛词:整体丢弃 + 计数
                         dropped += 1
                         continue
                     for claim_id in hits:
                         d = claim_hits.setdefault(claim_id, {})
                         for c in canons:
-                            d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
-                # ⚠ precondition: _close_local() 关闭整个线程的复用连接,故本扫描不得在任何
-                # open `with self._connect() as db:` 块内调用(会使该 db 中途失效→ProgrammingError)。
-                # 当前两处调用点均在 depth 0(无外层 open connect)。
-            finally:
-                self._close_local()   # 关连接(临时表蒸发)+清 thread-local(下次 connect 重建)
+                            d.setdefault(c, alias)  # 同 canonical 多别名命中只记首个
         if dropped > 0:
             self.event_log.emit({"kind": "mention_alias_df_dropped",
                                  "notebook_id": notebook_id, "dropped": dropped})

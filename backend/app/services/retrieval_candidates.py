@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import sqlite3
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
@@ -57,6 +56,7 @@ class _RetrievalState:
         *,
         database,
         snapshots,
+        queries,
         scale_runtime,
         model_clients,
         model_error_sink,
@@ -67,6 +67,7 @@ class _RetrievalState:
     ) -> None:
         self.database = database
         self.snapshots = snapshots
+        self.queries = queries
         self.scale_runtime = scale_runtime
         self.model_clients = model_clients
         self.model_error_sink = model_error_sink
@@ -218,6 +219,7 @@ class CandidateRetrievalService(_RetrievalState):
         knowledge,
         governance,
         unified_kg,
+        queries,
         snapshots,
         scale_runtime,
         model_clients,
@@ -231,6 +233,7 @@ class CandidateRetrievalService(_RetrievalState):
     ) -> None:
         super().__init__(
             database=database,
+            queries=queries,
             snapshots=snapshots,
             scale_runtime=scale_runtime,
             model_clients=model_clients,
@@ -247,6 +250,7 @@ class CandidateRetrievalService(_RetrievalState):
         self.knowledge = knowledge
         self.governance = governance
         self.unified_kg = unified_kg
+        self.queries = queries
         self.snapshots = snapshots
         self.scale_runtime = scale_runtime
         self.model_clients = model_clients
@@ -345,7 +349,7 @@ class CandidateRetrievalService(_RetrievalState):
         if cache is not None and vec is not None:
             cache[key] = vec
         return vec
-    def _gather_elements(self, db: sqlite3.Connection, notebook_id: str,
+    def _gather_elements(self, db: object, notebook_id: str,
                          with_vectors: bool = True) -> List[dict]:
         # 运行时截断旁路(计划 §1.2 旁路 1):element 兜底不走 build_matrix,逐向量
         # 进 retrieval.cosine 与 _embed_query(已截断,T2)比较 —— cosine 对 len 不等
@@ -382,14 +386,14 @@ class CandidateRetrievalService(_RetrievalState):
             for element in elements
             if element.get("vector")
         }
-    def _gather_chunks(self, db: sqlite3.Connection, notebook_id: str) -> List[dict]:
+    def _gather_chunks(self, db: object, notebook_id: str) -> List[dict]:
         rows = self.chunks.retrieval_rows(db, notebook_id)
         return [{
             "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
             "section_path": r["section_path"], "source_title": r["source_title"],
             "element_ids": json.loads(r["element_ids"] or "[]"),
         } for r in rows]
-    def _vector_matrix_version(self, db: sqlite3.Connection, notebook_id: str, table: str):
+    def _vector_matrix_version(self, db: object, notebook_id: str, table: str):
         """(table, count, max created_at) version tuple for a notebook's `table`
         embeddings — the same cheap aggregate query _vector_matrix uses to key
         its cache. Factored out so callers can `peek()` cache warmth (e.g. the
@@ -405,7 +409,7 @@ class CandidateRetrievalService(_RetrievalState):
         from app.services.vector_index import resolve_runtime_dim
         ver = self.embeddings.version_row(db, notebook_id, table)
         return (table, ver["c"], ver["ts"], resolve_runtime_dim(self.settings))
-    def _vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
+    def _vector_matrix(self, db: object, notebook_id: str,
                        table: str, id_col: str):
         """Cached (ids, normalized float32 matrix) for a notebook's embeddings.
 
@@ -427,7 +431,7 @@ class CandidateRetrievalService(_RetrievalState):
                                 runtime_dim=runtime_dim)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
-    def _vector_matrix_warm(self, db: sqlite3.Connection, notebook_id: str, table: str) -> bool:
+    def _vector_matrix_warm(self, db: object, notebook_id: str, table: str) -> bool:
         """True 当且仅当 `table` 的向量矩阵已经暖在 _vector_cache 里(版本匹配当前
         数据)—— 不触发 loader,只是 peek。供大库场景「加载前先问值不值得」的
         守卫使用(见 _retrieve_relations_scored)。"""
@@ -461,7 +465,7 @@ class CandidateRetrievalService(_RetrievalState):
         ver = self.knowledge.object_version_row(db, notebook_id)
         version = ("kwtok", ver["c"], ver["ts"])
         return self._vector_cache.get(f"{notebook_id}:kwtok", version, lambda: _build(objects))
-    def _relations_with_names(self, db: sqlite3.Connection, notebook_id: str,
+    def _relations_with_names(self, db: object, notebook_id: str,
                               relation_ids: Optional[List[str]] = None) -> List[dict]:
         """关系 + 两端实体名 + evidence,预构建 keyword/embed 文本。JOIN 丢弃悬空边
         (端点不在 knowledge_objects),与图节点过滤一致。
@@ -487,6 +491,7 @@ class CandidateRetrievalService(_RetrievalState):
             out.append({
                 "id": r["id"], "source_object_id": r["s"], "target_object_id": r["t"],
                 "edge_type": r["et"],
+                "review_status": r["review_status"],
                 "text": relation_embed_text(src_name, r["et"], tgt_name, spans),
             })
         return out
@@ -608,6 +613,10 @@ class CandidateRetrievalService(_RetrievalState):
         在 O(bounded)。已暖(_vector_cache 命中)或小库:字节不变,走原路径。"""
         from app.services.retrieval import score_relations
         from app.services.vector_index import top_k_sims
+
+        def live_relations(rows: List[dict]) -> List[dict]:
+            return [row for row in rows if row["review_status"] != "rejected"]
+
         with self._connect() as db:
             if not self.knowledge.relation_exists(db, notebook_id):
                 return []
@@ -624,7 +633,11 @@ class CandidateRetrievalService(_RetrievalState):
                         notebook_id, query_vector, idx, self.settings.relation_recall)
                     if cand_sims:
                         top_ids = list(cand_sims.keys())
-                        relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
+                        relations = live_relations(
+                            self._relations_with_names(
+                                db, notebook_id, relation_ids=top_ids
+                            )
+                        )
                         return score_relations(query, relations, query_vector=query_vector,
                                                relation_sims=cand_sims,
                                                downweight_edges=self.settings.kg_about_downweight_enabled)
@@ -644,7 +657,9 @@ class CandidateRetrievalService(_RetrievalState):
                 db, notebook_id, "relation_embeddings", "relation_id")
             if not rel_ids:
                 # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
-                relations = self._relations_with_names(db, notebook_id)
+                relations = live_relations(
+                    self._relations_with_names(db, notebook_id)
+                )
                 relation_sims = None
             else:
                 top_pairs = top_k_sims(query_vector, rel_ids, rel_mat,
@@ -661,7 +676,11 @@ class CandidateRetrievalService(_RetrievalState):
                     # 有界不炸内存,排序质量让位于可用性。
                     top_ids = rel_ids[: self.settings.relation_recall]
                     relation_sims = {}
-                relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
+                relations = live_relations(
+                    self._relations_with_names(
+                        db, notebook_id, relation_ids=top_ids
+                    )
+                )
         return score_relations(query, relations, query_vector=query_vector,
                                relation_sims=relation_sims,
                                downweight_edges=self.settings.kg_about_downweight_enabled)
@@ -726,11 +745,15 @@ class CandidateRetrievalService(_RetrievalState):
         invalidates) minus the four fixed ``_KG_TYPES``. Empty tuple ⇒ the
         notebook has no knowhow graph content ⇒ every caller no-ops. Only ever
         reached on the flag-on branch (see ``_scored_types``)."""
-        from app.repositories.sqlite import knowledge_counts_cache
         with self._connect() as db:
-            counts = knowledge_counts_cache.type_counts(
-                db, notebook_id, statuses=USABLE_STATUSES)
-        return tuple(t for t in counts if t not in _KG_TYPES)
+            rows = self.queries.knowledge_type_count_rows(
+                db, notebook_id, USABLE_STATUSES
+            )
+        return tuple(
+            row["object_type"]
+            for row in rows
+            if row["object_type"] not in _KG_TYPES
+        )
 
     def _scored_types(self, notebook_id: str, types) -> List[str]:
         """The object_types ``_retrieve_scored`` will fetch+score. FLAG OFF (or a

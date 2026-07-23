@@ -50,7 +50,7 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_27():
+def test_schema_version_is_29():
     # paper-metadata Task 1's _migration_17 (source_paper_meta/source_authors
     # tables) bumped v16 → v17; knowhow-tables PR-2+3 Task 1's _migration_18
     # (knowhow_cell_code table + role vocabulary remap) bumped v17 → v18;
@@ -67,8 +67,9 @@ def test_schema_version_is_27():
     # source-completion-marker P1.5's _migration_27 (sources.chunked_at column)
     # bumped v26 → v27; the per-notebook document limit's _migration_28
     # (app_settings table + user_profiles.upload_document_limit column) bumped
-    # v27 → v28.
-    assert sr.SCHEMA_VERSION == 28
+    # v27 → v28; v29 reconciles the two independently allocated v24
+    # lineages (canonical scratch + cluster membership uniqueness).
+    assert sr.SCHEMA_VERSION == 29
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

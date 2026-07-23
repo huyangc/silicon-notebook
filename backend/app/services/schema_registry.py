@@ -17,9 +17,12 @@ from app.models.knowledge import (
     ObjectSchemaModel,
     ObjectSchemaUpdate,
 )
-from app.repositories.sqlite.knowledge_store import KnowledgeStore
-from app.repositories.sqlite.notebook_store import NotebookStore
-from app.repositories.sqlite.source_store import SourceStore
+from app.repositories.ports import (
+    KnowledgeStorePort,
+    NotebookStorePort,
+    RepositoryDatabasePort,
+    SourceStorePort,
+)
 from app.services.extraction_profiles import OBJECT_SCHEMAS, ObjectSchema
 from app.services.prompts import SCHEMA_INDUCTION_HINT, schema_induction_prompt
 
@@ -43,18 +46,19 @@ def object_schema_from_row(row) -> ObjectSchemaModel:
 class SchemaRegistryService:
     def __init__(
         self,
-        notebooks: NotebookStore,
-        knowledge_store: KnowledgeStore,
-        source_store: SourceStore,
+        database: RepositoryDatabasePort,
+        notebooks: NotebookStorePort,
+        knowledge_store: KnowledgeStorePort,
+        source_store: SourceStorePort,
         model_clients,
         settings: Settings,
     ) -> None:
+        self.database = database
         self.notebooks = notebooks
         self.knowledge = knowledge_store
         self.sources = source_store
         self.models = model_clients
         self.settings = settings
-        self.database = knowledge_store.database
 
     @staticmethod
     def from_row(row) -> ObjectSchemaModel:

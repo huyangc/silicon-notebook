@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +9,11 @@ from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
+
+
+def _binary_text_key(value: str) -> bytes:
+    """Locale-free identifier order shared with persisted graph artifacts."""
+    return value.encode("utf-8", "surrogatepass")
 
 
 class GraphRetrievalService(_RetrievalState):
@@ -61,6 +65,7 @@ class GraphRetrievalService(_RetrievalState):
         knowledge,
         governance,
         unified_kg,
+        queries,
         snapshots,
         scale_runtime,
         model_clients,
@@ -73,6 +78,7 @@ class GraphRetrievalService(_RetrievalState):
     ) -> None:
         super().__init__(
             database=database,
+            queries=queries,
             snapshots=snapshots,
             scale_runtime=scale_runtime,
             model_clients=model_clients,
@@ -264,10 +270,18 @@ class GraphRetrievalService(_RetrievalState):
                         chunk_ids.append(r["id"])
                     for r in self.unified_kg.cluster_member_rows(db, nb):
                         cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-            memberships = [(oid, cid)
-                           for nb in participants
-                           for oid, cids in self._ent_chunk_map(nb).items()
-                           for cid in cids]
+            memberships = sorted(
+                (
+                    (oid, cid)
+                    for nb in participants
+                    for oid, cids in self._ent_chunk_map(nb).items()
+                    for cid in cids
+                ),
+                key=lambda pair: (
+                    _binary_text_key(pair[0]),
+                    _binary_text_key(pair[1]),
+                ),
+            )
             from app.services.kg.ppr import variant_edge_pairs
             extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
             if self.settings.ppr_emb_synonym_enabled:
@@ -341,7 +355,7 @@ class GraphRetrievalService(_RetrievalState):
         node_ids, edges, chunk_ids, _kg_node_ids, _membership_counts = \
             self._gather_kg_graph(notebook_id, source_ids=src)
         return node_ids, edges, chunk_ids
-    def _delta_vector_matrix(self, db: sqlite3.Connection, notebook_id: str,
+    def _delta_vector_matrix(self, db: object, notebook_id: str,
                              table: str, id_col: str, node_ids: List[str]):
         """Like `_vector_matrix` but scoped to exactly `node_ids` — for hot paths
         that only need vectors for a bounded delta node set (e.g. the active KG

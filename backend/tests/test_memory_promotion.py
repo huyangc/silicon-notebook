@@ -829,3 +829,74 @@ def test_promotion_routes_record_the_authenticated_admin_reviewer(tmp_path, monk
         reject_proposal["id"]: reviewer_b["user"]["id"],
         knowledge_proposal["id"]: reviewer_b["user"]["id"],
     }
+
+
+def test_memory_promotion_routes_hide_revoked_member_candidates(tmp_path, monkeypatch):
+    """Approve and reject use the same 404 boundary after creator access loss."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'revoked-routes.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.api.deps import repository
+    from app.main import create_app
+
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    owner_session = client.post(
+        "/api/auth/register", json={"username": "x00108104", "password": "pw"}
+    ).json()
+    member_session = client.post(
+        "/api/auth/register", json={"username": "y00108105", "password": "pw"}
+    ).json()
+    reviewer_session = client.post(
+        "/api/auth/register", json={"username": "z00108106", "password": "pw"}
+    ).json()
+    owner_headers = {"Authorization": f"Bearer {owner_session['token']}"}
+    reviewer_headers = {"Authorization": f"Bearer {reviewer_session['token']}"}
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Revoked member"}
+    ).json()["id"]
+    owner_id = owner_session["user"]["id"]
+    member_id = member_session["user"]["id"]
+    repo_api = repository()
+    base = repo_api.create_notebook(NotebookCreate(name="Revoked member base"))
+    repo_api.mark_notebook_base(base.id)
+    repo_api.replace_notebook_bases(notebook_id, [base.id], owner_id)
+    repo_api.add_member(notebook_id, member_id)
+    with repo_api._write() as db:
+        db.execute(
+            "UPDATE users SET role='admin' WHERE id=?",
+            (reviewer_session["user"]["id"],),
+        )
+
+    proposals = []
+    for suffix in ("approve", "reject"):
+        memory = repo_api.create_memory_candidate(
+            notebook_id, member_id, None, f"revoked-{suffix}", suffix,
+            f"Member content for {suffix}.", [], "", {}, [],
+        )
+        memory = repo_api.confirm_memory(memory.id, member_id)
+        proposals.append(repo_api.propose_memory_promotion(memory.id, member_id))
+    repo_api.remove_member(notebook_id, member_id)
+
+    approve = client.post(
+        f"/api/promotion-queue/{proposals[0]['id']}/approve",
+        headers=reviewer_headers,
+    )
+    reject = client.post(
+        f"/api/promotion-queue/{proposals[1]['id']}/reject",
+        headers=reviewer_headers,
+        json={"reason": "access revoked"},
+    )
+    assert approve.status_code == 404
+    assert reject.status_code == 404
+    assert approve.json() == reject.json() == {"detail": "Promotion candidate not found"}
+    with repo_api._connect() as db:
+        statuses = {
+            row["id"]: row["status"]
+            for row in db.execute(
+                "SELECT id,status FROM promotion_candidates WHERE id IN (?,?)",
+                (proposals[0]["id"], proposals[1]["id"]),
+            ).fetchall()
+        }
+    assert statuses == {proposal["id"]: "proposed" for proposal in proposals}

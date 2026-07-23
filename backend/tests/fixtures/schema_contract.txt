@@ -605,3 +605,4 @@ idx_sources_nb_parse_status_type
 idx_sources_notebook_created
 idx_sources_notebook_status
 idx_users_username
+uq_clusters_notebook_type_member

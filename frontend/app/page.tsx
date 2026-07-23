@@ -82,7 +82,13 @@ import {
   normalizedNotebookName,
 } from "./notebook-creation";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
-import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
+import {
+  conversationCleanupToast,
+  conversationsOlderThan,
+  CLEANUP_PRESETS,
+  reconcileConversationCleanup,
+  runOwnedConversationCleanup,
+} from "./conversation-cleanup";
 import { fetchMe, logoutUser, type AuthUser } from "./auth";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
@@ -2711,22 +2717,52 @@ export default function Home() {
       message: `将删除 ${victims.length} 条最近 ${days} 天内无活动的会话，对应的历史问答会一起移除。`,
       actions: [
         { label: "取消", action: () => undefined },
-        { label: "删除", danger: true, action: () => { bulkCleanup(days, victims).catch(reportError); } },
+        { label: "删除", danger: true, action: () => { bulkCleanup(days).catch(reportError); } },
       ],
     });
   }
 
-  async function bulkCleanup(days: number, victims: ConversationSummary[]) {
-    const { deleted } = await bulkDeleteConversations(currentNotebookId ?? "", days);
-    if (conversationId && victims.some((s) => s.id === conversationId)) {
-      setTurns([]);
-      setConversationId(null);
-      setPendingQuestion("");
-      setPendingMode(DEFAULT_ASK_MODE);
-      setPendingTrace([]);
-    }
-    await loadSessions(currentNotebookId);
-    setToast(`已删除 ${deleted} 条会话`);
+  async function bulkCleanup(days: number) {
+    const notebookId = currentNotebookId;
+    if (!notebookId) return;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const conversationIdAtStart = conversationId;
+    const isCurrent = () => workspaceRequestIsCurrent(
+      false,
+      workspaceEpoch,
+      workspaceEpochRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
+    );
+    await runOwnedConversationCleanup(
+      bulkDeleteConversations(notebookId, days),
+      isCurrent,
+      ({ deleted_ids: deletedIds }) => {
+        setSessions((currentSessions) => reconcileConversationCleanup(
+          currentSessions,
+          conversationIdAtStart,
+          deletedIds,
+        ).sessions);
+        const { currentDeleted } = reconcileConversationCleanup(
+          [],
+          conversationIdAtStart,
+          deletedIds,
+        );
+        if (currentDeleted) {
+          setTurns([]);
+          setConversationId(null);
+          setPendingQuestion("");
+          setPendingMode(DEFAULT_ASK_MODE);
+          setPendingTrace([]);
+        }
+      },
+      async () => {
+        await loadSessions(notebookId, workspaceEpoch);
+      },
+      ({ deleted }) => {
+        setToast(conversationCleanupToast(deleted));
+      },
+    );
   }
 
   function beginRenameSession(session: ConversationSummary) {

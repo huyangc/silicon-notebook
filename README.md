@@ -4,7 +4,7 @@
 
 `silicon-notebook` is a source-grounded knowhow notebook for semiconductor engineering teams. It turns PDF, Markdown, DOCX, PPTX, CSV, and XLSX material into searchable source elements, structured knowledge, cited answers, private Memory, knowhow tables, and deep reports.
 
-The current target is a local real-team beta: FastAPI + SQLite on the backend and Next.js on the frontend. It requires no Docker, GPU, database server, or local model server. OpenAI-compatible chat, embedding, rerank, and MinerU services are optional URL-based integrations; deterministic fallbacks keep the core pipeline usable when they are not configured.
+The current target is a local real-team beta: FastAPI with a selectable SQLite or PostgreSQL repository backend, plus Next.js on the frontend. The shipped-default SQLite quick start requires no Docker, GPU, database server, or local model server; selecting PostgreSQL requires an accessible PostgreSQL server. OpenAI-compatible chat, embedding, rerank, and MinerU services are optional URL-based integrations; deterministic fallbacks keep the core pipeline usable when they are not configured.
 
 ## Highlights
 
@@ -69,6 +69,8 @@ npm run dev
 
 Open <http://127.0.0.1:3000>. A fresh database creates the built-in `admin` account; the local default password is `admin`. Binding to a non-loopback address requires a non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD`.
 
+Startup migrates the selected datastore. The default is `DATABASE_URL=sqlite:///.local/silicon_notebook.db`; a provisioned PostgreSQL 16 database may instead use `DATABASE_URL=postgresql://user:password@host:5432/database`.
+
 Production uses one backend worker so the in-process model scheduler remains the deployment-wide capacity boundary:
 
 ```bash
@@ -107,18 +109,39 @@ Browser
   → Next.js frontend
   → FastAPI /api and Streamable HTTP /mcp
   → application services and repository ports
-  → SQLite + local source/index/log storage
+  → SQLite or PostgreSQL + local source/index/log storage
 
 Optional external services
   → OpenAI-compatible chat / embedding / rerank
   → MinerU HTTP, isolated CLI, or cloud fallback
 ```
 
-- SQLite defaults to `.local/silicon_notebook.db`; uploaded files and generated artifacts stay under `.local/`.
+- SQLite defaults to `.local/silicon_notebook.db`; PostgreSQL is a direct alternative. Uploaded files and generated artifacts stay under `.local/` for either database.
 - The production backend is deliberately single-worker because model queues, breakers, health, and cancellation state are process-local.
 - Baseline `chunk` retrieval is active-notebook-only. KG-assisted and reasoning paths may federate through explicitly mounted base notebooks.
 - The candidate review queue has been retired; current knowledge governance operates on stored knowledge objects.
-- PostgreSQL/pgvector remain a future direction. Non-SQLite `DATABASE_URL` values currently fail fast.
+- DATABASE_URL selects the formal repository backend through one repository factory. Exactly one active repository backend is selected centrally from `DATABASE_URL`. SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.
+
+### SQLite / PostgreSQL switching
+
+The application never dual-writes. `SHADOW_DATABASE_URL` is reserved for future migration tooling and cannot select or synchronize the active backend. Changing `DATABASE_URL` does not copy, migrate, or synchronize existing data.
+
+- On the shipped SQLite default, search uses SQLite FTS/vector storage. The PostgreSQL backend uses `pg_trgm`/`ILIKE`; float32 vectors remain `bytea`, so pgvector is not installed or required.
+- `pg_trgm` must be installed in the `public` schema. Check it without exposing credentials:
+
+  ```sql
+  SELECT e.extname, n.nspname
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_trgm';
+  ```
+
+  `pg_trgm | public` means the prerequisite is ready. If the query returns no row, the first migration automatically attempts `CREATE EXTENSION pg_trgm`; an existing `pg_trgm` in any other schema fails closed.
+- Switch with a stop/change/start boundary: quiesce writes, stop the backend, take and verify a consistent backup, change the single `DATABASE_URL`, start with `--workers 1`, then verify status, `/api/ready`, login, counts, and representative reads before sending traffic.
+- Returning to SQLite cannot replay PostgreSQL-only writes. Lossless rollback therefore requires no post-cutover writes or an externally reconciled and verified migration in both directions.
+- `scripts/batch_ingest.py` mutation phases are SQLite-only; on PostgreSQL use the normal application/API ingestion and KG/index flows.
+
+The complete decision table, backup rules, and rollback procedure are in [Deployment and configuration](./docs/deployment-and-configuration.md) and [Operations](./docs/operations.md).
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
 
@@ -140,7 +163,7 @@ Chinese counterparts are linked from the top of each split document.
 
 ## Current boundaries
 
-- Local persistence is SQLite; PostgreSQL/pgvector are not yet the production store.
+- SQLite is the shipped default; PostgreSQL 16 is a supported direct backend. Existing data still requires an externally controlled, verified migration between them.
 - No Docker is required or provided as the default first-version workflow.
 - High-fidelity formulas, tables, layout, and scanned PDFs require MinerU; `MINERU_MODE=off` uses pypdf text fallback.
 - Knowledge extraction and model-backed answers require the relevant workload bindings; offline mode does not synthesize knowledge.

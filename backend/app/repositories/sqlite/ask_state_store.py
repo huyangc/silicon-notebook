@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -41,22 +40,15 @@ from app.models.ask import (
     ActiveAskJob,
     AskRequest,
     AskResponse,
+    ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationSummary,
     ConversationTurn,
     FeedbackRequest,
     FeedbackResponse,
 )
+from app.repositories.ports import ConversationBusyError, PreparedAskTurn
 from app.repositories.sqlite.database import SqliteDatabase
-
-
-@dataclass(frozen=True)
-class PreparedAskTurn:
-    """One prepared conversation turn: the (created-or-continued) conversation
-    id plus the prior-turns history block the answer prompt consumes."""
-
-    conversation_id: str
-    history: str
 
 
 class AskStateStore:
@@ -134,9 +126,44 @@ class AskStateStore:
         write transaction — the exact read-modify block every ask mode engine
         opens today (Task 24 moves the engines onto this port)."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             conversation_id = self.ensure_conversation(
                 db, notebook_id, requested_conversation_id, question, user_id
             )
+            history = self.conversation_history(db, conversation_id)
+        return PreparedAskTurn(conversation_id=conversation_id, history=history)
+
+    def prepare_turn_for_job(
+        self,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: "str | None",
+        user_id: str,
+    ) -> "PreparedAskTurn | None":
+        """Prepare only the exact still-running durable job and its parent.
+
+        ``BEGIN IMMEDIATE`` makes the parent/status validation one guarded
+        state transition.  Missing or terminal state returns ``None`` and can
+        never fall through to ``ensure_conversation``'s compatibility create.
+        """
+        if not conversation_id:
+            return None
+        with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            parent = db.execute(
+                "SELECT id FROM conversations WHERE id=? AND notebook_id=? "
+                "AND created_by=?",
+                (conversation_id, notebook_id, user_id),
+            ).fetchone()
+            if parent is None:
+                return None
+            running = db.execute(
+                "SELECT 1 FROM ask_jobs WHERE id=? AND notebook_id=? "
+                "AND conversation_id=? AND created_by=? AND status='running'",
+                (job_id, notebook_id, conversation_id, user_id),
+            ).fetchone()
+            if running is None:
+                return None
             history = self.conversation_history(db, conversation_id)
         return PreparedAskTurn(conversation_id=conversation_id, history=history)
 
@@ -160,6 +187,7 @@ class AskStateStore:
         now = self.seams.now()
         job_id = self.seams.new_id("askjob")
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             conversation_id = self.ensure_conversation(
                 db, notebook_id, payload.conversation_id, question, user_id)
             payload.conversation_id = conversation_id
@@ -179,23 +207,66 @@ class AskStateStore:
         answer_id: str = "",
         error: str = "",
     ) -> "str | None":
-        """终态化 ask_job(仅这一个终态 job 行事务)。返回该 job 的
+        """终态化仍在运行的 ask_job。已写入的终态不可被后来覆盖。返回该 job 的
         conversation_id(job 行不存在 → None);cancelled/failed 的空会话清理
         保持为**之后的另一个**事务(cleanup_empty_conversation),由 facade 编排。"""
         with self.database.write() as db:
-            row = db.execute("SELECT conversation_id FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-            db.execute(
-                "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? WHERE id=?",
-                (status, answer_id, error, self.seams.now(), job_id))
+            row = db.execute(
+                "SELECT conversation_id,status FROM ask_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is not None and row["status"] == "running":
+                db.execute(
+                    "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? "
+                    "WHERE id=? AND status='running'",
+                    (status, answer_id, error, self.seams.now(), job_id),
+                )
         return row["conversation_id"] if row is not None else None
 
-    def cleanup_empty_conversation(self, conversation_id: str) -> None:
-        """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
+    def cancel_running_job(self, job_id: str, user_id: str) -> dict:
+        """Durably cancel a running owned job in one write transaction."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            row = db.execute(
+                "SELECT conversation_id,status FROM ask_jobs "
+                "WHERE id=? AND created_by=?",
+                (job_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            cancelled = row["status"] == "running"
+            if cancelled:
+                db.execute(
+                    "UPDATE ask_jobs SET status='cancelled',answer_id='',error='',updated_at=? "
+                    "WHERE id=? AND status='running'",
+                    (self.seams.now(), job_id),
+                )
+        return {
+            "job_id": job_id,
+            "status": "cancelled" if cancelled else row["status"],
+            "conversation_id": row["conversation_id"],
+            "cancelled": cancelled,
+        }
+
+    def cleanup_empty_conversation(self, conversation_id: str) -> None:
+        """Delete an answer-less conversation once no Ask worker can use it."""
+        with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            conversation = db.execute(
+                "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+            ).fetchone()
+            if conversation is None:
+                return
+            in_use = db.execute(
+                "SELECT 1 WHERE EXISTS "
+                "(SELECT 1 FROM answers WHERE conversation_id=?) OR EXISTS "
+                "(SELECT 1 FROM ask_jobs WHERE conversation_id=? AND status='running')",
+                (conversation_id, conversation_id),
+            ).fetchone()
+            if in_use is not None:
+                return
             db.execute(
-                "DELETE FROM conversations WHERE id=? AND NOT EXISTS "
-                "(SELECT 1 FROM answers WHERE conversation_id=?)",
-                (conversation_id, conversation_id))
+                "DELETE FROM conversations WHERE id=?", (conversation_id,)
+            )
 
     def ask_job_status(self, job_id: str) -> dict:
         with self.database.connect() as db:
@@ -318,25 +389,105 @@ class AskStateStore:
         user_id: str,
     ) -> str:
         """Mint the answer id, stamp it into the payload JSON and commit the
-        answers row in its own write transaction.  The large-library
-        ``index_required`` decoration stays a facade concern (scale-index
-        domain) and must already be applied to ``response``."""
+        answers row in its own guarded write transaction. A non-null
+        conversation is owner/notebook checked before insert because the
+        legacy schema has no answers→conversations FK; ``None`` remains valid
+        for server-owned answer snapshots used outside conversation history.
+        The large-library ``index_required`` decoration stays a facade concern
+        and must already be applied to ``response``."""
         answer_id = self.seams.new_id("ans")
         now = self.seams.now()
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            self._lock_answer_conversation_on(
+                db, notebook_id, conversation_id, user_id
+            )
+            self._insert_answer_on(
+                db, answer_id, notebook_id, conversation_id, question, payload, now
+            )
+        return answer_id
+
+    @staticmethod
+    def _lock_answer_conversation_on(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        user_id: str,
+    ) -> None:
+        if conversation_id is None:
+            return
+        row = db.execute(
+            "SELECT id FROM conversations WHERE id=? AND notebook_id=? "
+            "AND created_by=?",
+            (conversation_id, notebook_id, user_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(conversation_id)
+
+    @staticmethod
+    def _insert_answer_on(
+        db: sqlite3.Connection,
+        answer_id: str,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        question: str,
+        payload: dict,
+        now: str,
+    ) -> None:
+        db.execute(
+            "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                answer_id,
+                notebook_id,
+                question,
+                json.dumps(payload, ensure_ascii=False),
+                now,
+                conversation_id,
+            ),
+        )
+
+    def save_answer_for_job(
+        self,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        question: str,
+        response: AskResponse,
+        user_id: str,
+    ) -> "str | None":
+        """Atomically save the final answer and move a running job to done.
+
+        A durable cancel that wins the transaction ordering returns ``None``
+        and leaves no answer row.
+        """
+        answer_id = self.seams.new_id("ans")
+        now = self.seams.now()
+        payload = response.model_dump()
+        payload["answer_id"] = answer_id
+        with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            row = db.execute(
+                "SELECT status FROM ask_jobs WHERE id=? AND notebook_id=? "
+                "AND conversation_id=? AND created_by=?",
+                (job_id, notebook_id, conversation_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["status"] != "running":
+                return None
+            self._lock_answer_conversation_on(
+                db, notebook_id, conversation_id, user_id
+            )
+            self._insert_answer_on(
+                db, answer_id, notebook_id, conversation_id, question, payload, now
+            )
             db.execute(
-                "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    answer_id,
-                    notebook_id,
-                    question,
-                    json.dumps(payload, ensure_ascii=False),
-                    now,
-                    conversation_id,
-                ),
+                "UPDATE ask_jobs SET status='done',answer_id=?,error='',updated_at=? "
+                "WHERE id=? AND status='running'",
+                (answer_id, now, job_id),
             )
         return answer_id
 
@@ -432,35 +583,105 @@ class AskStateStore:
             if cur.rowcount == 0:
                 raise KeyError(conversation_id)
 
+    @staticmethod
+    def _conversation_has_running_job_on(
+        db: sqlite3.Connection, conversation_id: str
+    ) -> bool:
+        return db.execute(
+            "SELECT 1 FROM ask_jobs WHERE conversation_id=? AND status='running'",
+            (conversation_id,),
+        ).fetchone() is not None
+
+    @classmethod
+    def _delete_idle_conversation_on(
+        cls,
+        db: sqlite3.Connection,
+        conversation_id: str,
+        *,
+        refuse_running: bool,
+    ) -> bool:
+        """Guard and purge one conversation under SQLite's writer lease."""
+        if cls._conversation_has_running_job_on(db, conversation_id):
+            if refuse_running:
+                raise ConversationBusyError()
+            return False
+        db.execute(
+            "DELETE FROM answers WHERE conversation_id=?", (conversation_id,)
+        )
+        db.execute(
+            "DELETE FROM ask_trace_steps WHERE job_id IN "
+            "(SELECT id FROM ask_jobs WHERE conversation_id=? "
+            "AND status<>'running')",
+            (conversation_id,),
+        )
+        db.execute(
+            "DELETE FROM ask_jobs WHERE conversation_id=? AND status<>'running'",
+            (conversation_id,),
+        )
+        parent = db.execute(
+            "DELETE FROM conversations WHERE id=? "
+            "AND NOT EXISTS (SELECT 1 FROM answers a "
+            "WHERE a.conversation_id=conversations.id) "
+            "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
+            "WHERE j.conversation_id=conversations.id)",
+            (conversation_id,),
+        )
+        return parent.rowcount == 1
+
     def delete_conversation(self, conversation_id: str) -> None:
         with self.database.write() as db:
-            cur = db.execute("DELETE FROM conversations WHERE id=?", (conversation_id,))
-            if cur.rowcount == 0:
+            self.database.begin_guarded_write(db)
+            parent = db.execute(
+                "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+            ).fetchone()
+            if parent is None:
                 raise KeyError(conversation_id)
-            db.execute("DELETE FROM answers WHERE conversation_id=?", (conversation_id,))
+            if not self._delete_idle_conversation_on(
+                db, conversation_id, refuse_running=True
+            ):
+                raise KeyError(conversation_id)
 
     def bulk_delete_conversations(
         self, notebook_id: str, older_than_days: int, user_id: str
-    ) -> int:
-        """Delete the given user's conversations in `notebook_id` whose last
-        activity (`updated_at`) is strictly older than `older_than_days` days,
-        cascading to their answers. Returns the number deleted.  The notebook-
-        existence KeyError guard stays with the facade adapter."""
+    ) -> ConversationBulkDeleteResult:
+        """Delete inactive conversations in one guarded write transaction.
+
+        SQLite's writer lease gives parity with PostgreSQL parent-row leases;
+        cutoff/ownership, answers and running jobs are still revalidated at
+        deletion so both adapters expose the same durable lifecycle contract.
+        """
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
         cutoff = (datetime.now() - timedelta(days=older_than_days)).replace(microsecond=0).isoformat()
         with self.database.write() as db:
-            ids = [
+            self.database.begin_guarded_write(db)
+            candidates = [
                 row["id"]
                 for row in db.execute(
                     "SELECT id FROM conversations "
-                    "WHERE notebook_id = ? AND created_by = ? AND updated_at < ?",
+                    "WHERE notebook_id=? AND created_by=? AND updated_at<? "
+                    "ORDER BY id",
                     (notebook_id, user_id, cutoff),
                 ).fetchall()
             ]
-            db.executemany("DELETE FROM answers WHERE conversation_id = ?", [(cid,) for cid in ids])
-            db.executemany("DELETE FROM conversations WHERE id = ?", [(cid,) for cid in ids])
-        return len(ids)
+            deleted_ids: list[str] = []
+            for conversation_id in candidates:
+                eligible = db.execute(
+                    "SELECT 1 FROM conversations c WHERE c.id=? "
+                    "AND c.notebook_id=? AND c.created_by=? AND c.updated_at<? "
+                    "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
+                    "WHERE j.conversation_id=c.id AND j.status='running')",
+                    (conversation_id, notebook_id, user_id, cutoff),
+                ).fetchone()
+                if eligible is None:
+                    continue
+                if self._delete_idle_conversation_on(
+                    db, conversation_id, refuse_running=False
+                ):
+                    deleted_ids.append(conversation_id)
+        return ConversationBulkDeleteResult(
+            deleted=len(deleted_ids), deleted_ids=deleted_ids
+        )
 
     # ------------------------------------------------------------------
     # feedback

@@ -905,12 +905,20 @@ class TableSnapshot:
     digest: str
 
 
+@dataclass(frozen=True)
+class ClusterDedupeProjection:
+    row_count: int
+    digest: str
+    removed_count: int
+
+
 @dataclass
 class DatabaseSnapshot:
     user_version: int
     tables: Dict[str, TableSnapshot]
     schema_objects: Dict[str, Dict[str, str]]
     special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]]
+    cluster_v24_projection: "ClusterDedupeProjection | None"
 
 
 def _digest_update(h: "hashlib._Hash", value: Any) -> None:
@@ -968,6 +976,46 @@ def _table_digest(
     return h.hexdigest()
 
 
+def _cluster_v24_projection(
+    digest_conn: sqlite3.Connection,
+    column_names: Sequence[str],
+    total_count: int,
+) -> ClusterDedupeProjection:
+    """Stream the exact row image migration 24 is allowed to publish.
+
+    The SQL window duplicates migration 24's partition and BINARY winner rule.
+    Only survivor rows are streamed through the same rowid + column digest used
+    by the ordinary post-migration table snapshot, so validation stays bounded
+    and never materializes the cluster table in Python.
+    """
+    quoted = ", ".join(f'"{name}"' for name in column_names)
+    cursor = digest_conn.execute(
+        f"SELECT __rowid__, {quoted} FROM ("
+        f"SELECT rowid AS __rowid__, {quoted}, "
+        "ROW_NUMBER() OVER ("
+        "PARTITION BY notebook_id, object_type, member_object_id "
+        "ORDER BY created_at DESC, id COLLATE BINARY DESC"
+        ") AS __duplicate_rank__ "
+        "FROM concept_clusters"
+        ") WHERE __duplicate_rank__=1 ORDER BY __rowid__"
+    )
+    digest = hashlib.sha256()
+    survivor_count = 0
+    while True:
+        rows = cursor.fetchmany(2000)
+        if not rows:
+            break
+        survivor_count += len(rows)
+        for row in rows:
+            for value in row:
+                _digest_update(digest, value)
+    return ClusterDedupeProjection(
+        row_count=survivor_count,
+        digest=digest.hexdigest(),
+        removed_count=total_count - survivor_count,
+    )
+
+
 def _special_table_rows(
     meta_conn: sqlite3.Connection,
     table: str,
@@ -1021,6 +1069,7 @@ def snapshot_database(
         }
         tables: Dict[str, TableSnapshot] = {}
         special_rows: Dict[str, Dict[Tuple[Any, ...], Dict[str, Any]]] = {}
+        cluster_v24_projection: "ClusterDedupeProjection | None" = None
         for kind, name, sql in master:
             if kind != "table":
                 continue
@@ -1054,6 +1103,12 @@ def snapshot_database(
                 row_count=row_count,
                 digest=digest,
             )
+            if name == "concept_clusters" and user_version < 29:
+                cluster_v24_projection = _cluster_v24_projection(
+                    digest_conn,
+                    digest_columns,
+                    row_count,
+                )
             if name in SPECIAL_TABLES:
                 special_rows[name] = _special_table_rows(
                     meta_conn, name, digest_columns, pk_columns
@@ -1063,6 +1118,7 @@ def snapshot_database(
             tables=tables,
             schema_objects=schema_objects,
             special_rows=special_rows,
+            cluster_v24_projection=cluster_v24_projection,
         )
     finally:
         meta_conn.close()
@@ -1104,6 +1160,7 @@ def _empty_normalized() -> Dict[str, int]:
         "seeded_concept_whitelist": 0,
         "seeded_object_schemas": 0,
         "admin_upgraded": 0,
+        "concept_clusters": 0,
         "scrubbed_model_profiles": 0,
         "scrubbed_model_statuses": 0,
     }
@@ -1383,6 +1440,20 @@ def compare_snapshots(
         if pre_table.pk_columns != post_table.pk_columns:
             note(name, "primary-key-changed")
             continue
+        if (
+            name == "concept_clusters"
+            and pre.user_version < 29 <= post.user_version
+        ):
+            projection = pre.cluster_v24_projection
+            if projection is None:
+                note(name, "migration-v24-projection-missing")
+            elif post_table.row_count != projection.row_count:
+                note(name, "migration-v24-row-count-mismatch")
+            elif post_table.digest != projection.digest:
+                note(name, "migration-v24-survivor-digest-mismatch")
+            else:
+                normalized["concept_clusters"] = projection.removed_count
+            continue
         if name in SPECIAL_TABLES:
             problems: List[str] = []
             _compare_special_rows(
@@ -1392,7 +1463,7 @@ def compare_snapshots(
                 normalized,
                 problems,
                 allow_model_scrub=(
-                    pre.user_version < 24 <= post.user_version
+                    pre.user_version < 25 <= post.user_version
                 ),
             )
             if problems:
@@ -2053,6 +2124,33 @@ MIGRATION_MANIFEST[(27, 28)] = {
     "tables": APP_SETTINGS_TABLE,
     "columns": {"user_profiles": USER_PROFILES_UPLOAD_LIMIT_COLUMN},
     "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v29: serialize cluster membership at the repository boundary and retain a
+# database-level uniqueness guard.  This number deliberately follows master's
+# v24-v28 migrations; migration 29 also performs deterministic legacy duplicate
+# cleanup before creating the index.
+CLUSTER_MEMBERSHIP_UNIQUE_INDEX = {
+    "uq_clusters_notebook_type_member":
+        """CREATE UNIQUE INDEX uq_clusters_notebook_type_member
+                  ON concept_clusters(notebook_id, object_type, member_object_id)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 29, *key[2:]): {
+        **manifest,
+        "indexes": {
+            **manifest["indexes"],
+            **CLUSTER_MEMBERSHIP_UNIQUE_INDEX,
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(28, 29)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": CLUSTER_MEMBERSHIP_UNIQUE_INDEX,
     "triggers": {},
     "views": {},
 }

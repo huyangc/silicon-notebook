@@ -6,6 +6,13 @@ from typing import Annotated, List, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.database_url import (
+    database_identity,
+    normalize_database_url,
+    redact_database_url,
+    sanitize_database_url_for_error,
+)
+
 # 仓库根锚点：backend/app/core/config.py -> parents[3] = 仓库根。与
 # event_logging.py 的 _ROOT_DIR 同口径。相对路径类的设置项（storage_dir、
 # database_url 的 sqlite 路径部分）统一在下面的 model_validator 里锚定到此处，
@@ -36,6 +43,15 @@ def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[st
         if p.is_file() and p.name != ".env.example"
     )
     return env_path, False, lookalikes
+
+
+class _InvalidDatabaseUrl(str):
+    """Safe replacement input that preserves a URL-validation reason."""
+
+    def __new__(cls, sanitized: str, reason: str):
+        value = super().__new__(cls, sanitized)
+        value.reason = reason
+        return value
 
 
 class Settings(BaseSettings):
@@ -450,6 +466,22 @@ class Settings(BaseSettings):
         "sqlite:///.local/silicon_notebook.db",
         validation_alias="DATABASE_URL",
     )
+    # Reserved for the later shadow-sync phase. It never changes the active backend.
+    shadow_database_url: str | None = Field(None, validation_alias="SHADOW_DATABASE_URL")
+    postgres_pool_min_size: int = Field(1, validation_alias="POSTGRES_POOL_MIN_SIZE")
+    postgres_pool_max_size: int = Field(10, validation_alias="POSTGRES_POOL_MAX_SIZE")
+    postgres_pool_acquire_timeout_seconds: int = Field(
+        10,
+        validation_alias="POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS",
+    )
+    postgres_statement_timeout_seconds: int = Field(
+        30,
+        validation_alias="POSTGRES_STATEMENT_TIMEOUT_SECONDS",
+    )
+    postgres_lock_timeout_seconds: int = Field(
+        5,
+        validation_alias="POSTGRES_LOCK_TIMEOUT_SECONDS",
+    )
     storage_dir: str = Field(".local/storage", validation_alias="SILICON_NOTEBOOK_STORAGE_DIR")
     # Notebook 分享拷贝阈值:超过任一阈值的库仅可只读共享(Phase 2),不可深拷贝。
     notebook_copy_max_bytes: int = Field(50 * 1024 * 1024, validation_alias="NOTEBOOK_COPY_MAX_BYTES")
@@ -474,6 +506,46 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def validate_database_url(cls, value):
+        if isinstance(value, _InvalidDatabaseUrl):
+            raise ValueError(value.reason)
+        return normalize_database_url(value)
+
+    @field_validator("shadow_database_url", mode="before")
+    @classmethod
+    def validate_shadow_database_url(cls, value):
+        if isinstance(value, _InvalidDatabaseUrl):
+            raise ValueError(value.reason)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return normalize_database_url(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_invalid_database_url_inputs(cls, values):
+        if not isinstance(values, dict):
+            return values
+        prepared = dict(values)
+        for key in (
+            "DATABASE_URL",
+            "database_url",
+            "SHADOW_DATABASE_URL",
+            "shadow_database_url",
+        ):
+            raw = prepared.get(key)
+            if raw is None or ("SHADOW" in key.upper() and isinstance(raw, str) and not raw.strip()):
+                continue
+            try:
+                prepared[key] = normalize_database_url(raw)
+            except ValueError as exc:
+                prepared[key] = _InvalidDatabaseUrl(
+                    sanitize_database_url_for_error(raw),
+                    str(exc),
+                )
+        return prepared
 
     @model_validator(mode="after")
     def _validate_runtime_dim(self) -> "Settings":
@@ -509,12 +581,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _anchor_relative_paths_to_repo_root(self) -> "Settings":
-        """storage_dir 与 database_url（仅 sqlite:/// 且路径部分相对时）统一
-        锚定到仓库根，与默认值/env 覆盖是否相对无关，与进程 CWD 无关。
+        """storage_dir 与 SQLite database_url 的相对路径统一锚定到仓库根。
 
         - 绝对路径（默认或 env 覆盖）原样保留，不重锚。
-        - 当前 repository 只实现 SQLite；其它 URL 直接报错，避免部署时
-          看似连上 PostgreSQL、实际静默写进本地 SQLite 的数据分叉。
+        - PostgreSQL URL 在这里仅接受、规范化和保留；正式 backend 仍由后续
+          repository factory 选择，不能静默回落到 SQLite。
         - sqlite:/// 的拼写规则：`sqlite:///relative/path`（三斜杠+相对路径）
           与 `sqlite:////abs/path`（三斜杠分隔符 + 绝对路径本身以 / 开头，
           视觉上四个斜杠）；判断标准是把 `sqlite:///` 前缀去掉后剩余部分是否
@@ -526,12 +597,10 @@ class Settings(BaseSettings):
         if self.model_services_config and not Path(self.model_services_config).is_absolute():
             self.model_services_config = str(_ROOT_DIR / self.model_services_config)
 
+        if database_identity(self.database_url).scheme != "sqlite":
+            return self
+
         prefix = "sqlite:///"
-        if not self.database_url.startswith(prefix):
-            raise ValueError(
-                "DATABASE_URL currently supports only sqlite:/// URLs; "
-                "configure SQLite until a PostgreSQL repository is implemented"
-            )
         raw_path = self.database_url[len(prefix):]
         if raw_path and not Path(raw_path).is_absolute():
             self.database_url = f"{prefix}{_ROOT_DIR / raw_path}"
@@ -552,10 +621,15 @@ class Settings(BaseSettings):
 
     @property
     def sqlite_path(self) -> str:
-        prefix = "sqlite:///"
-        if self.database_url.startswith(prefix):
-            return self.database_url[len(prefix) :]
-        raise ValueError("DATABASE_URL is not a supported sqlite:/// URL")
+        if database_identity(self.database_url).scheme == "sqlite":
+            return database_identity(self.database_url).database
+        raise ValueError("DATABASE_URL is not a SQLite URL")
+
+    def __repr_args__(self):
+        for name, value in super().__repr_args__():
+            if name in {"database_url", "shadow_database_url"} and value:
+                value = redact_database_url(value)
+            yield name, value
 
 
 @lru_cache

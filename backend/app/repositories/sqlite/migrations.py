@@ -12,7 +12,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 28
+# Both sides originally allocated migration 24 independently.  Version 29 is
+# the merge migration that makes either already-deployed lineage converge.
+SCHEMA_VERSION = 29
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1678,6 +1680,46 @@ class SqliteMigrator:
             )
             self.add_column_if_missing(
                 db, "user_profiles", "upload_document_limit", "INTEGER"
+            )
+
+    def _migration_29(self) -> None:
+        """Reconcile the two migration-24 lineages after the PostgreSQL merge.
+
+        PostgreSQL-adapter builds used v24 for the cluster-membership unique
+        index, while master used it for ``kg_canonical_scratch``.  Repeating
+        both idempotent changes here makes upgrades from either lineage safe.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                DELETE FROM concept_clusters
+                WHERE id IN (
+                  SELECT id FROM (
+                    SELECT
+                      id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY notebook_id, object_type, member_object_id
+                        ORDER BY created_at DESC, id COLLATE BINARY DESC
+                      ) AS duplicate_rank
+                    FROM concept_clusters
+                  ) AS ranked
+                  WHERE duplicate_rank > 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_clusters_notebook_type_member
+                  ON concept_clusters(notebook_id, object_type, member_object_id);
+
+                CREATE TABLE IF NOT EXISTS kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed);
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

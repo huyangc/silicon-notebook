@@ -3,14 +3,6 @@
     {
       "count": 1,
       "kind": "facade_imports",
-      "path": "backend/app/api/deps.py",
-      "reason": "API composition root",
-      "scope": "<module>",
-      "target": "app.services.sqlite_repository:SQLiteRepository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
       "path": "backend/app/eval/inference.py",
       "reason": "evaluation composition root",
       "scope": "<module>.run_inference",
@@ -38,6 +30,14 @@
       "path": "backend/app/eval/speed.py",
       "reason": "evaluation composition root",
       "scope": "<module>.measure_speed",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/repositories/factory.py",
+      "reason": "formal backend-selection composition root",
+      "scope": "<module>",
       "target": "app.services.sqlite_repository:SQLiteRepository"
     },
     {
@@ -87,22 +87,6 @@
       "reason": "batch-ingest CLI composition root",
       "scope": "<module>",
       "target": "app.services.sqlite_repository:SQLiteRepository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
-      "path": "backend/app/services/sqlite_notebook_sharing.py",
-      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
-      "scope": "<module>._copy_chunk_size",
-      "target": "app.services:sqlite_repository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
-      "path": "backend/app/services/sqlite_notebook_sharing.py",
-      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
-      "scope": "<module>._repository_new_id",
-      "target": "app.services:sqlite_repository"
     },
     {
       "count": 1,
@@ -907,6 +891,14 @@
       "reason": "temporary copies used by the offline two-database merge tool",
       "scope": "<module>.table_columns",
       "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>._cluster_v24_projection",
+      "target": "digest_conn.execute"
     },
     {
       "count": 2,

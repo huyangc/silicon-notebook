@@ -16,6 +16,7 @@ from app.api.deps import (
 from app.models.ask import (
     AskRequest,
     AskResponse,
+    ConversationBulkDeleteResult,
     ConversationDetail,
     ConversationRenameRequest,
     ConversationSummary,
@@ -24,8 +25,9 @@ from app.models.ask import (
     NotebookSearchResponse,
 )
 from app.models.identity import UserProfile
-from app.repositories.ports import AskStreamPort
+from app.repositories.ports import AskStreamPort, ConversationBusyError
 from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
+from app.services.cancellation import AskCancelled
 
 
 router = APIRouter()
@@ -49,6 +51,8 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+    except AskCancelled:
+        raise HTTPException(status_code=409, detail="Ask cancelled")
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -178,15 +182,22 @@ def delete_conversation(conversation_id: str, user: UserProfile = Depends(get_cu
     try:
         repository().delete_conversation(conversation_id)
         return {"ok": True}
+    except ConversationBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except KeyError:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
 
-@router.delete("/notebooks/{notebook_id}/conversations", dependencies=[Depends(require_notebook_read)])  # 仓库层按 created_by scope,成员删自己的旧会话
-def bulk_delete_conversations(notebook_id: str, older_than_days: int = Query(..., ge=1)):
+@router.delete(
+    "/notebooks/{notebook_id}/conversations",
+    response_model=ConversationBulkDeleteResult,
+    dependencies=[Depends(require_notebook_read)],
+)  # 仓库层按 created_by scope,成员删自己的旧会话
+def bulk_delete_conversations(
+    notebook_id: str, older_than_days: int = Query(..., ge=1)
+) -> ConversationBulkDeleteResult:
     try:
-        deleted = repository().bulk_delete_conversations(notebook_id, older_than_days)
-        return {"deleted": deleted}
+        return repository().bulk_delete_conversations(notebook_id, older_than_days)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

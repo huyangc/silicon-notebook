@@ -4,7 +4,7 @@
 
 `silicon-notebook` 是面向半导体工程团队的来源可追溯 knowhow 笔记本。它把 PDF、Markdown、DOCX、PPTX、CSV、XLSX 材料转成可搜索的来源元素、结构化知识、带引用回答、私有 Memory、knowhow 表和深度报告。
 
-当前目标是可供真实团队使用的本地 beta：后端采用 FastAPI + SQLite，前端采用 Next.js。不要求 Docker、GPU、数据库服务或本地模型服务。OpenAI 兼容的聊天、嵌入、重排和 MinerU 服务都是可选的 URL 集成；未配置时，确定性降级仍可维持核心流程。
+当前目标是可供真实团队使用的本地 beta：后端采用 FastAPI，并可选择 SQLite 或 PostgreSQL repository；前端采用 Next.js。发行默认的 SQLite 快速启动不要求 Docker、GPU、数据库服务或本地模型服务；选择 PostgreSQL 时需要可访问的 PostgreSQL 服务。OpenAI 兼容的聊天、嵌入、重排和 MinerU 服务都是可选的 URL 集成；未配置时，确定性降级仍可维持核心流程。
 
 ## 核心能力
 
@@ -69,6 +69,8 @@ npm run dev
 
 浏览器打开 <http://127.0.0.1:3000>。全新数据库会创建内置 `admin` 账号，本地默认密码为 `admin`；绑定到非回环地址时必须配置非默认的 `SILICON_NOTEBOOK_ADMIN_PASSWORD`。
 
+启动会迁移当前选中的数据存储。默认值是 `DATABASE_URL=sqlite:///.local/silicon_notebook.db`；已准备好的 PostgreSQL 16 数据库可改用 `DATABASE_URL=postgresql://user:password@host:5432/database`。
+
 生产模式固定一个后端 worker，使进程内模型调度器成为整个部署的容量边界：
 
 ```bash
@@ -107,18 +109,39 @@ bash scripts/check.sh
   → Next.js 前端
   → FastAPI /api 与 Streamable HTTP /mcp
   → 应用服务与 repository ports
-  → SQLite + 本地来源/索引/日志存储
+  → SQLite 或 PostgreSQL + 本地来源/索引/日志存储
 
 可选外部服务
   → OpenAI 兼容 chat / embedding / rerank
   → MinerU HTTP、隔离 CLI 或云端降级
 ```
 
-- SQLite 默认位于 `.local/silicon_notebook.db`；上传文件和生成工件位于 `.local/`。
+- SQLite 默认位于 `.local/silicon_notebook.db`；PostgreSQL 是可直接选择的替代后端。两者的上传文件和生成工件仍位于 `.local/`。
 - 生产后端刻意保持单 worker，因为模型队列、熔断、健康和取消状态都在进程内。
 - 默认 `chunk` 检索只读取当前笔记本；图谱增强和推理路径可通过显式挂载的公共库联合检索。
 - 候选 Review Queue 已退出当前流程；知识治理直接作用于已存知识对象。
-- PostgreSQL/pgvector 仍是后续方向；当前非 SQLite 的 `DATABASE_URL` 会直接失败。
+- DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。
+
+### SQLite / PostgreSQL 切换
+
+应用不会双写。`SHADOW_DATABASE_URL` 只为未来迁移工具保留，不能选择 active backend，也不会同步数据。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。
+
+- 在发行默认的 SQLite 后端上，搜索使用 SQLite FTS/向量存储；PostgreSQL 后端改用 `pg_trgm`/`ILIKE`。float32 向量仍存为 `bytea`，不安装也不需要 pgvector。
+- PostgreSQL 要求 `pg_trgm` 必须安装在 `public` schema。可用不回显凭据的查询检查：
+
+  ```sql
+  SELECT e.extname, n.nspname
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_trgm';
+  ```
+
+  `pg_trgm | public` 表示前置条件已就绪。若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`；既有 `pg_trgm` 位于其他 schema 时会 fail closed。
+- 切换必须走“停写 → 停后端 → 制作并验证一致备份 → 只改一个 `DATABASE_URL` → 以 `--workers 1` 启动 → 校验 status、`/api/ready`、登录、数量和代表性读取 → 放流量”。
+- 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
+- `scripts/batch_ingest.py` 的变更阶段仅支持 SQLite；PostgreSQL 请使用正常应用/API 摄取和 KG/索引流程。
+
+完整决策表、备份规则和回滚步骤见[部署与配置](./docs/deployment-and-configuration_zh.md)与[运维文档](./docs/operations_zh.md)。
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
@@ -140,7 +163,7 @@ bash scripts/check.sh
 
 ## 当前边界
 
-- 本地持久化仍是 SQLite；PostgreSQL/pgvector 尚未成为生产存储。
+- SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。两者之间的存量数据仍需外部受控迁移并验证。
 - Docker 不是一期默认工作流，也不是运行前提。
 - 公式、表格、版面和扫描 PDF 的高保真解析需要 MinerU；`MINERU_MODE=off` 使用 pypdf 文本降级。
 - 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。

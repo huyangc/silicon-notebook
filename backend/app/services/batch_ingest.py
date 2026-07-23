@@ -1,5 +1,5 @@
 # backend/app/services/batch_ingest.py
-"""离线批量摄取(目录 → notebook → source/chunk(+embed) → KG → 概念簇)。
+"""SQLite-only 离线批量摄取(目录 → notebook → source/chunk(+embed) → KG → 概念簇)。
 
 复用现有管线,不重写解析/分块/抽取。两阶段:
   ingest  upload_sources(同步 parse+chunk+系统调度 embedding) → 收尾补缺失向量
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.core.config import Settings
+from app.core.database_url import database_identity
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.notebooks import NotebookCreate, NotebookSummary
 from app.models.sources import SourceSummary
@@ -29,12 +30,12 @@ from app.models.identity import UserProfile
 from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
-import sqlite3
 from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,
     KGBuildResult,
     RebuildProgress,
+    RepositoryRow,
     ScaleBuildManifest,
     SQLiteMaintenancePort,
     SourceScheduler,
@@ -828,7 +829,7 @@ def _parse_encode(pair: Tuple[str, str]) -> Tuple[str, bytes]:
 
 
 def _parse_encode_batch_serial(
-    rows: Sequence[sqlite3.Row],
+    rows: Sequence[RepositoryRow],
 ) -> List[Tuple[bytes, str, str]]:
     """Serial parse+encode of a batch of rows — the exact pre-parallel code
     path. Returns [(blob, notebook_id, vid), ...] ready for executemany."""
@@ -903,7 +904,7 @@ def _backfill_table_to_blob(repo: BatchIngestRepository, notebook_id: Optional[s
             use_pool = False
 
     def _encode(
-        rows: Sequence[sqlite3.Row],
+        rows: Sequence[RepositoryRow],
     ) -> list[tuple[bytes, str, str]]:
         """Parse+encode one selected batch — runs inside the adapter's write
         transaction (same boundary as the old inline block)."""
@@ -1073,7 +1074,9 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
+        prog="batch_ingest",
+        description="SQLite-only 离线批量摄取目录 → 项目 KG/向量库",
+    )
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
                                       "backfill-source-index", "metadata", "reparse"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
@@ -1331,6 +1334,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.phase in {"ingest", "all"} and not args.notebook_id and not args.notebook_name:
         print("error: 新建 notebook 需用 --notebook-name 指定名字(不再默认用目录名)",
               file=sys.stderr)
+        return 2
+
+    if database_identity(settings.database_url).scheme != "sqlite":
+        print(
+            "error: batch_ingest mutation phases are SQLite-only. "
+            "For PostgreSQL, use the normal app/API upload and KG/reindex flows.",
+            file=sys.stderr,
+        )
         return 2
 
     repo = SQLiteRepository(settings)

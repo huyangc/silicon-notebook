@@ -45,24 +45,48 @@ async def _lifespan(app: FastAPI):
     # Run migration + cache warm-up OFF the event loop (daemon thread) so uvicorn
     # binds and serves /api/ready immediately; the readiness gate keeps app routes
     # at 503 until run_startup() flips readiness. See app/services/startup_warmup.
-    from app.services.startup_warmup import run_startup
+    from app.services.startup_warmup import (
+        LifecycleAlreadyActiveError,
+        begin_lifecycle,
+        close_repository,
+        run_startup,
+    )
 
-    # Tests mark readiness ready up-front (conftest) and drive the app without a
-    # real warm-up; skip spawning the thread there so it can't touch a torn-down
-    # tmp DB. In production readiness starts not-ready, so the thread runs.
-    startup_worker: threading.Thread | None = None
+    # Reserve ownership before resetting readiness or touching the composition
+    # factory. An overlapping lifespan fails before yield: it cannot become an
+    # unowned server context that outlives the actual repository owner.
+    # Tests may mark readiness ready up-front and drive a preconstructed
+    # repository; do not reset or replace that fixture-owned lifecycle.
+    if readiness.is_ready():
+        try:
+            yield
+        finally:
+            shutdown_repository_if_initialized()
+        return
+
+    lease = begin_lifecycle()
+    if lease is None:
+        raise LifecycleAlreadyActiveError(
+            "cannot enter ASGI lifespan while the repository lifecycle is active"
+        )
+
+    started = {"repository": None}
+
+    def _start() -> None:
+        started["repository"] = run_startup(lease)
+
+    startup_thread = threading.Thread(
+        target=_start, name="startup-warmup", daemon=True
+    )
+    startup_thread.start()
     try:
-        if not readiness.is_ready():
-            readiness.set_phase("starting", "后端启动中")
-            startup_worker = threading.Thread(
-                target=run_startup, name="startup-warmup", daemon=True
-            )
-            startup_worker.start()
         yield
     finally:
-        if startup_worker is not None:
-            await asyncio.to_thread(startup_worker.join)
-        shutdown_repository_if_initialized()
+        # Do not close a PostgreSQL pool while the migration/warmup thread may
+        # still be borrowing it. Production shutdown is rare and correctness
+        # is more important than a short shutdown timeout.
+        await asyncio.to_thread(startup_thread.join)
+        close_repository(lease, started["repository"])
 
 
 def _diagnostic_concurrency_snapshot(*, models=None) -> dict:
@@ -171,13 +195,15 @@ def create_app() -> FastAPI:
     # 可见），根治「CLI 建索引 vs 服务启动」CWD 不一致导致数据分裂却无从察觉
     # 的问题。storage_dir/database_url 经 config.py 的 model_validator 锚定到
     # 仓库根后此处一定是绝对路径；event_log_dir 独立锚定（event_logging._ROOT_DIR）。
-    db_path = settings.sqlite_path
+    from app.core.database_url import database_status
+
+    database = database_status(settings.database_url)
     storage_dir = settings.storage_dir
     log_dir = settings.event_log_dir
     if not Path(log_dir).is_absolute():
         from app.core.event_logging import _ROOT_DIR as _LOG_ROOT_DIR
         log_dir = str(_LOG_ROOT_DIR / log_dir)
-    logger.info("paths: db=%s storage=%s log_dir=%s", db_path, storage_dir, log_dir)
+    logger.info("paths: %s storage=%s log_dir=%s", database, storage_dir, log_dir)
 
     # 启动 autotune 报告：一眼可查本次进程实际解析到的核绑定旋钮值（KG_CLUSTER_ANN_THREADS
     # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型服务容量

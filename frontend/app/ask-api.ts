@@ -116,7 +116,7 @@ export const deleteConversation = (id: string) =>
   requestVoid(`/conversations/${id}`, { ...options, method: "DELETE" });
 
 export const bulkDeleteConversations = (nb: string, days: number) =>
-  requestJson<{ deleted: number }>(
+  requestJson<{ deleted: number; deleted_ids: string[] }>(
     `/notebooks/${nb}/conversations?older_than_days=${days}`,
     { ...options, method: "DELETE" },
   );

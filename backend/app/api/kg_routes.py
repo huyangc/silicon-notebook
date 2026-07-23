@@ -21,7 +21,7 @@ from app.models.kg import (
     ScaleIndexStatus,
     UnifiedKgStatus,
 )
-from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
+from app.repositories.ports import KgBuildAlreadyRunning
 from app.services import background_jobs
 
 

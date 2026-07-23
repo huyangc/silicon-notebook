@@ -50,3 +50,92 @@ jobs:
           PYTHON_BIN: python
           BACKEND_PYTEST_WORKERS: "4"
         run: bash scripts/check.sh
+
+  postgres-integration:
+    name: postgres-integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-admin-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install backend dependencies
+        env:
+          HNSWLIB_NO_NATIVE: "1"
+        run: python -m pip install --no-cache-dir -r backend/requirements.txt
+
+      - name: Provision least-privilege PostgreSQL test targets
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: postgres
+          PGPASSWORD: ci-only-admin-password
+          POSTGRES_APP_PASSWORD: ci-only-app-password
+        run: |
+          python - <<'PY'
+          import os
+
+          import psycopg
+          from psycopg import sql
+
+          role = "silicon_notebook_app"
+          password = os.environ["POSTGRES_APP_PASSWORD"]
+          with psycopg.connect(
+              host=os.environ["PGHOST"],
+              port=os.environ["PGPORT"],
+              user=os.environ["PGUSER"],
+              password=os.environ["PGPASSWORD"],
+              dbname="postgres",
+              autocommit=True,
+          ) as connection:
+              connection.execute(
+                  sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION").format(
+                      sql.Identifier(role), sql.Literal(password)
+                  )
+              )
+              connection.execute(
+                  sql.SQL("CREATE DATABASE {} WITH OWNER {} ENCODING 'UTF8' TEMPLATE template0").format(
+                      sql.Identifier("silicon_notebook_ci_test"), sql.Identifier(role)
+                  )
+              )
+              connection.execute(
+                  sql.SQL("CREATE DATABASE {} WITH OWNER {} ENCODING 'UTF8' LOCALE_PROVIDER icu ICU_LOCALE 'en-US' TEMPLATE template0").format(
+                      sql.Identifier("silicon_notebook_non_c_test"), sql.Identifier(role)
+                  )
+              )
+              connection.execute(
+                  sql.SQL("CREATE DATABASE {} WITH OWNER {} ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0").format(
+                      sql.Identifier("silicon_notebook_non_utf_test"), sql.Identifier(role)
+                  )
+              )
+          PY
+
+      - name: Run isolated PostgreSQL integration gate
+        env:
+          PYTHON_BIN: python
+          POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"
+          TEST_POSTGRES_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_ci_test
+          TEST_POSTGRES_NON_C_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_non_c_test
+          TEST_POSTGRES_NON_UTF_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_non_utf_test
+        run: bash scripts/check_postgres.sh

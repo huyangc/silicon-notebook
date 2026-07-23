@@ -24,46 +24,268 @@ exception-safe, so it can never flip a successful startup back to "error".
 from __future__ import annotations
 
 import logging
+import threading
+from dataclasses import dataclass
 
 from app.core import readiness
 
 logger = logging.getLogger("silicon_notebook.startup")
+_cleanup_lock = threading.Lock()
 
 
-def run_startup() -> None:
-    """Construct the repository (runs migrations + seed), settle the rows left
-    in-progress by the previous process, warm the open-path count caches for
-    every notebook, then mark the service ready. Any exception is captured into
-    the readiness state — it must never crash the server."""
+@dataclass
+class _LifecycleState:
+    lease: object
+    status: str = "reserved"
+    repository: object | None = None
+    repository_factory: object | None = None
+
+
+_active_lifecycle: _LifecycleState | None = None
+
+
+class LifecycleAlreadyActiveError(RuntimeError):
+    """Raised when an ASGI lifespan cannot own the process repository."""
+
+
+def begin_lifecycle() -> object | None:
+    """Reserve the one process-wide repository lifecycle before construction.
+
+    An overlapping ASGI lifespan receives no lease and therefore cannot invoke
+    the composition factory, reset the winner's readiness, or close its pool.
+    The lock protects only ownership transitions; migration and warm-up happen
+    after it is released.
+    """
+    global _active_lifecycle
+    with _cleanup_lock:
+        if _active_lifecycle is not None:
+            return None
+        lease = object()
+        _active_lifecycle = _LifecycleState(lease=lease)
+        # Ownership is established before process-global readiness changes.
+        readiness.reset()
+        readiness.set_phase("starting", "后端启动中")
+        return lease
+
+
+def _start_lifecycle(lease: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease or state.status != "reserved":
+            return False
+        state.status = "constructing"
+        readiness.set_phase("migrating", "应用数据库迁移")
+        return True
+
+def _record_repository_factory(lease: object, repository_factory: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease or state.status != "constructing":
+            return False
+        state.repository_factory = repository_factory
+        return True
+
+
+def _bind_repository_and_begin_warmup(lease: object, repo: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease or state.status != "constructing":
+            return False
+        state.repository = repo
+        state.status = "warming"
+        readiness.set_phase("warming", "预热笔记本计数缓存")
+        return True
+
+
+def _set_warmup_progress(lease: object, done: int, total: int) -> None:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is not None and state.lease is lease and state.status == "warming":
+            readiness.set_detail(f"{done}/{total} 笔记本", warmed=done, total=total)
+
+
+def _mark_lifecycle_ready(lease: object, repo: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if (
+            state is None
+            or state.lease is not lease
+            or state.repository is not repo
+            or state.status != "warming"
+        ):
+            return False
+        state.status = "ready"
+        readiness.mark_ready()
+        return True
+
+
+def _clear_repository_cache(repository: object) -> None:
+    cache_clear = getattr(repository, "cache_clear", None)
+    if cache_clear is None:
+        return
+    try:
+        cache_clear()
+    except Exception:  # cleanup must never replace the startup diagnostic
+        logger.error("repository cache cleanup failed")
+
+
+def _close_repository_instance(repo: object) -> None:
+    try:
+        close = getattr(repo, "close", None)
+        if close is not None:
+            close()
+            return
+        database = getattr(getattr(repo, "_runtime", None), "database", None)
+        database_close = getattr(database, "close", None)
+        if database_close is not None:
+            database_close()
+    except Exception:  # never attach third-party connection diagnostics
+        logger.error("repository close failed")
+
+
+def _fail_lifecycle(lease: object, exc: BaseException) -> None:
+    """Clean up and release a failed lifecycle without touching another one."""
+    global _active_lifecycle
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease:
+            return
+        state.status = "failing"
+        repo = state.repository
+        repository_factory = state.repository_factory
+
+    # Keep the reservation while external driver cleanup runs. A retry cannot
+    # start and reset readiness until the failed pool/cache are fully gone.
+    try:
+        if repo is not None:
+            _close_repository_instance(repo)
+    finally:
+        if repository_factory is not None:
+            _clear_repository_cache(repository_factory)
+
+    try:
+        from app.core.config import get_settings
+
+        safe_error = readiness.startup_error(exc, get_settings().database_url)
+    except Exception:  # diagnostics must not strand the failing reservation
+        safe_error = f"{type(exc).__name__}: database initialization failed"
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease or state.status != "failing":
+            return
+        readiness.mark_error(safe_error)
+        # Cleanup is complete, but the failed ASGI context still owns this
+        # lifecycle until its finally block releases the exact lease. Keeping
+        # the tombstone prevents another context from becoming ready while the
+        # failed one is still alive and serving the process-global gate.
+        state.repository = None
+        state.repository_factory = None
+        state.status = "failed"
+    # Never attach the original exception: a third-party driver may carry raw
+    # conninfo in its traceback even though our adapter errors do not.
+    logger.error("startup FAILED — service stays not-ready: %s", safe_error)
+
+
+def run_startup(lease: object | None) -> object | None:
+    """Construct the repository, recover interrupted work, warm caches, and
+    then mark the service ready. Any exception is captured into readiness and
+    must never crash the server.
+
+    ``lease`` must have been obtained from :func:`begin_lifecycle` before this
+    function is called. Returns the exact warmed repository instance. Lifespan
+    shutdown must pass both that lease and instance to ``close_repository``.
+    """
+    if lease is None or not _start_lifecycle(lease):
+        return None
     try:
         from app.services.model_provider import (
             validate_process_local_scheduler_deployment,
         )
 
         validate_process_local_scheduler_deployment()
-        readiness.set_phase("migrating", "应用数据库迁移")
         logger.info("startup: constructing repository (runs schema migrations)…")
         # Imported lazily so module import stays cheap and side-effect free.
-        from app.api.deps import repository
+        from app.api.deps import repository as repository_factory
 
-        repo = repository()  # construct + migrate + seed (the heavy one-time cost)
-        # 崩溃兜底：把上次进程遗留的「进行中」行结算掉。必须在 mark_ready() 之前——
-        # 就绪门之后业务路由才会放行，用户不可能在残骸还没翻正时发起新任务。
+        if not _record_repository_factory(lease, repository_factory):
+            return None
+        repo = repository_factory()  # construct + migrate + seed
+        # Server startup is the only owner allowed to settle rows left in an
+        # in-progress state by the previous process. Offline CLIs must not make
+        # this claim while a live backend may still own those jobs.
         repo._recover_interrupted_jobs()
+        if not _bind_repository_and_begin_warmup(lease, repo):
+            # Defensive only: a valid lease cannot be detached during startup.
+            # If that invariant is ever broken, do not leak the just-created
+            # composition root.
+            _close_repository_instance(repo)
+            _clear_repository_cache(repository_factory)
+            return None
         logger.info("startup: migrations + recovery done; warming open-path caches…")
 
-        readiness.set_phase("warming", "预热笔记本计数缓存")
-
         def _progress(done: int, total: int) -> None:
-            readiness.set_detail(f"{done}/{total} 笔记本", warmed=done, total=total)
+            _set_warmup_progress(lease, done, total)
 
         total = repo.warm_open_path_caches(progress=_progress)
-        readiness.mark_ready()
+        if not _mark_lifecycle_ready(lease, repo):
+            return None
         logger.info("startup: READY — %d notebook(s) warmed", total)
         _reproject_legacy_knowhow_tables(repo)
+        return repo
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
-        readiness.mark_error(f"{type(exc).__name__}: {exc}")
-        logger.exception("startup FAILED — service stays not-ready")
+        _fail_lifecycle(lease, exc)
+        return None
+
+
+def close_repository(
+    lease: object | None,
+    repository_instance: object | None,
+) -> None:
+    """Close only the exact repository owned by the active lifespan cycle.
+
+    Missing, stale, mismatched, and already-closed lease/instance pairs are
+    strict no-ops. The sole no-repository form is the exact lease of a failed
+    startup whose pool/cache were already cleaned; its owning lifespan uses
+    ``(lease, None)`` to release the retained failure tombstone. There is no
+    wildcard form that could close another lifespan's repository.
+    """
+    global _active_lifecycle
+    if lease is None:
+        return
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease:
+            return
+        failed = state.status == "failed" and repository_instance is None
+        ready = (
+            state.status == "ready"
+            and repository_instance is not None
+            and state.repository is repository_instance
+        )
+        if not failed and not ready:
+            return
+        state.status = "closing_failed" if failed else "closing"
+        repository_factory = None if failed else state.repository_factory
+
+    # The reservation remains active while the exact pool is closed and its
+    # cache entry cleared, so a fresh cycle cannot race cleanup.
+    try:
+        if not failed:
+            _close_repository_instance(repository_instance)
+    finally:
+        if repository_factory is not None:
+            _clear_repository_cache(repository_factory)
+        with _cleanup_lock:
+            state = _active_lifecycle
+            if (
+                state is not None
+                and state.lease is lease
+                and state.repository is repository_instance
+                and state.status == ("closing_failed" if failed else "closing")
+            ):
+                # State/cache cleanup must survive driver close failures.
+                readiness.mark_stopped()
+                _active_lifecycle = None
 
 
 def _reproject_legacy_knowhow_tables(repo) -> None:

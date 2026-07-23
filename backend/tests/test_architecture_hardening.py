@@ -299,13 +299,32 @@ def test_settings_accept_field_names_even_when_fields_have_validation_aliases(tm
     assert settings.storage_dir == str(tmp_path / "storage")
 
 
-@pytest.mark.parametrize("url", [
-    "postgres://user:pass@db.example/db",
-    "mysql://user:pass@db.example/db",
-])
-def test_non_sqlite_database_url_fails_fast(url):
-    with pytest.raises(ValidationError, match="only sqlite"):
-        Settings(database_url=url)
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("postgres://user:pass@db.example/db", "postgresql://user:pass@db.example/db"),
+        ("postgresql://user:pass@db.example/db?sslmode=require", "postgresql://user:pass@db.example/db?sslmode=require"),
+    ],
+)
+def test_postgresql_database_urls_are_accepted_and_legacy_scheme_is_normalized(url, expected):
+    assert Settings(database_url=url).database_url == expected
+
+
+def test_mysql_database_url_fails_closed_without_leaking_credentials():
+    raw = "mysql://redacted-user:redacted-password@db.example/db?access_token=redacted-token#fragment"
+
+    with pytest.raises(ValidationError) as captured:
+        Settings(database_url=raw)
+
+    diagnostics = (str(captured.value), repr(captured.value.errors()), captured.value.json())
+    assert "unsupported database URL scheme: mysql" in diagnostics[0]
+    assert "mysql://db.example" in diagnostics[0]
+    for diagnostic in diagnostics:
+        assert raw not in diagnostic
+        assert "redacted-user" not in diagnostic
+        assert "redacted-password" not in diagnostic
+        assert "access_token=redacted-token" not in diagnostic
+        assert "#fragment" not in diagnostic
 
 
 def test_multi_query_retrieval_copies_context_per_worker(tmp_path, monkeypatch):
@@ -397,9 +416,14 @@ def test_session_resolution_does_not_write_on_every_request(tmp_path):
 
 
 def test_facade_composition_is_flat_and_static(tmp_path):
-    """Task 26: the consolidated facade is a flat class (no mixin MRO) whose
-    members are all statically visible delegates — no dynamic dispatch."""
-    assert SQLiteRepository.__mro__ == (SQLiteRepository, object)
+    """The compatibility wrapper has one neutral facade base and no mixins."""
+    from app.services.repository_facade import RepositoryFacade
+
+    assert SQLiteRepository.__mro__ == (
+        SQLiteRepository,
+        RepositoryFacade,
+        object,
+    )
     assert "__getattr__" not in SQLiteRepository.__dict__
     assert "__getattribute__" not in SQLiteRepository.__dict__
 

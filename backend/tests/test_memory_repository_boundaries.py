@@ -7,6 +7,7 @@ from pathlib import Path
 from app.repositories import ports
 from app.repositories.ownership_manifest import DELEGATE_OWNER_OVERRIDES
 from app.services.sqlite_repository import SQLiteRepository
+from app.services.repository_facade import RepositoryFacade
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,5 +126,5 @@ def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_pa
         "memory_revisions",
         "transfer_memories",
     ):
-        assert name in SQLiteRepository.__dict__
+        assert name in RepositoryFacade.__dict__
         assert DELEGATE_OWNER_OVERRIDES[name] == "MemoryService"

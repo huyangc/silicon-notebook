@@ -33,8 +33,7 @@ mutation-commits-before-candidate-status boundary.
 from __future__ import annotations
 
 import json
-import sqlite3
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
@@ -46,9 +45,12 @@ from app.models.knowledge import (
     KnowledgeUpdate,
     MergeRequest,
 )
-from app.repositories.sqlite.governance_store import GovernanceStore
-from app.repositories.sqlite.knowledge_store import KnowledgeStore
-from app.repositories.sqlite.memory_store import MemoryStore
+from app.repositories.ports import (
+    GovernanceStorePort,
+    KnowledgeStorePort,
+    MemoryStorePort,
+    RepositoryRow,
+)
 from app.services.retrieval import cosine, keyword_score
 
 
@@ -70,7 +72,7 @@ class PromotionTargetError(ValueError):
 
 
 def promotion_row_to_dict(
-    row: sqlite3.Row, *, payload=None, evidence=None, source_revision: int = 0,
+    row: Mapping[str, Any], *, payload=None, evidence=None, source_revision: int = 0,
     target_base_name: str = "",
 ) -> dict:
     """Map a promotion_candidates row to the PromotionCandidate-shaped dict.
@@ -145,11 +147,11 @@ class KnowledgeGovernanceService:
         *,
         settings: Settings,
         event_log: EventLogger,
-        governance_store: GovernanceStore,
-        knowledge: KnowledgeStore,
+        governance_store: GovernanceStorePort,
+        knowledge: KnowledgeStorePort,
         new_id: Callable[[str], str],
         now: Callable[[], str],
-        connect: Callable[[], sqlite3.Connection],
+        connect: Callable[[], object],
         write: Callable[[], Any],
         get_notebook: Callable[[str], Any],
         invalidate_unified_cache: Callable[[str], None],
@@ -162,7 +164,7 @@ class KnowledgeGovernanceService:
         as_retrieved: Callable[[dict, str], Any],
         rule_card: Callable[[Any], RuleCard],
         set_conflict_status: Callable[[str, str, str], None],
-        memory_store: MemoryStore,
+        memory_store: MemoryStorePort,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -1003,7 +1005,7 @@ class KnowledgeGovernanceService:
     # ------------------------------------------------------------------
 
     def _resolve_promotion_target(
-        self, db: sqlite3.Connection, notebook_id: str, target_base_id: str = ""
+        self, db: object, notebook_id: str, target_base_id: str = ""
     ) -> str:
         """挂 0 个公共库 → 拒绝；挂 1 个 → 默认它；挂 >1 个 → 必须显式指定且必须
         在挂载集合内(设计 §6 晋升目标)。Shared by propose_promotion and
@@ -1146,7 +1148,7 @@ class KnowledgeGovernanceService:
             memory_ids = list(dict.fromkeys(
                 r["object_id"] for r in rows if r["object_type"] == "memory"
             ))
-            obj_by_id: Dict[str, sqlite3.Row] = {}
+            obj_by_id: Dict[str, RepositoryRow] = {}
             for i in range(0, len(object_ids), _IN_CHUNK):
                 batch = object_ids[i:i + _IN_CHUNK]
                 for r in self.governance_store.promotion_object_rows(db, batch):
@@ -1214,15 +1216,33 @@ class KnowledgeGovernanceService:
         """
         now = self._now()
         with self._write() as db:
+            identity = self.governance_store.promotion_candidate_identity(
+                db, candidate_id
+            )
+            if identity is None:
+                raise KeyError(candidate_id)
+            locked_memory = None
+            if identity["object_type"] == "memory":
+                locked_memory = self.memory_store.lock_promotion_memory_on(
+                    db, identity["object_id"], identity["notebook_id"]
+                )
             cand = self.governance_store.promotion_candidate_row(db, candidate_id)
             if cand is None:
                 raise KeyError(candidate_id)
+            if (
+                cand["object_id"] != identity["object_id"]
+                or cand["notebook_id"] != identity["notebook_id"]
+                or cand["object_type"] != identity["object_type"]
+            ):
+                raise ValueError("promotion candidate routing changed")
             if cand["status"] == "rejected":
                 raise ValueError("cannot approve a rejected promotion candidate")
             if cand["object_type"] == "memory":
                 memory, _legacy_candidates, existing_ids = (
                     self.memory_store.promotion_data_on(db, cand["object_id"])
                 )
+                if locked_memory is None or memory.id != locked_memory.id:
+                    raise KeyError(cand["object_id"])
                 if cand["status"] == "approved" and existing_ids:
                     return {
                         "candidate_id": candidate_id,
@@ -1230,9 +1250,6 @@ class KnowledgeGovernanceService:
                         "base_object_ids": existing_ids,
                         "merged_into": cand["base_match_id"] or "",
                     }
-                self.memory_store.validate_promotion_approval_access_on(
-                    db, memory.id, cand["notebook_id"]
-                )
                 snapshot = self.memory_store.pinned_promotion_snapshot(
                     memory, candidate_id
                 )
@@ -1346,9 +1363,25 @@ class KnowledgeGovernanceService:
         Raises KeyError if missing; ValueError if already approved."""
         now = self._now()
         with self._write() as db:
+            identity = self.governance_store.promotion_candidate_identity(
+                db, candidate_id
+            )
+            if identity is None:
+                raise KeyError(candidate_id)
+            locked_memory = None
+            if identity["object_type"] == "memory":
+                locked_memory = self.memory_store.lock_promotion_memory_on(
+                    db, identity["object_id"], identity["notebook_id"]
+                )
             cand = self.governance_store.promotion_candidate_row(db, candidate_id)
             if cand is None:
                 raise KeyError(candidate_id)
+            if (
+                cand["object_id"] != identity["object_id"]
+                or cand["notebook_id"] != identity["notebook_id"]
+                or cand["object_type"] != identity["object_type"]
+            ):
+                raise ValueError("promotion candidate routing changed")
             if cand["status"] == "approved":
                 raise ValueError("cannot reject an approved promotion candidate")
             if cand["status"] == "rejected":
@@ -1365,6 +1398,8 @@ class KnowledgeGovernanceService:
                 db, candidate_id, reason, now, reviewer
             )
             if cand["object_type"] == "memory":
+                if locked_memory is None:
+                    raise KeyError(cand["object_id"])
                 self.memory_store.record_promotion_decision_on(
                     db,
                     cand["object_id"],

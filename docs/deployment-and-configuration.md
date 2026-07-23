@@ -7,8 +7,9 @@ This is the detailed source-checkout deployment and configuration reference. For
 ## Deployment
 
 silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend — over
-a local SQLite database. It requires **no GPU, no database server, and no local model
-server**. LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
+one repository selected by `DATABASE_URL`. The shipped SQLite default requires **no GPU,
+no database server, and no local model server**. PostgreSQL 16 is also a supported direct
+backend when an accessible server is provisioned. LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
 HTTP (`MINERU_MODE=http`), an isolated same-host subprocess (`MINERU_MODE=cli`), or the
 pypdf fallback (`MINERU_MODE=off`). The pipeline runs offline with deterministic fallbacks
 when no model service or MinerU parser is configured.
@@ -125,9 +126,9 @@ reachable from other machines.
 
 ### 3 · Run
 
-There is **no migration or seed step** — on first boot the backend creates the SQLite
-schema and the `.local/storage` and `.local/logs` directories, and seeds only the local
-user. Always run the backend **without `--reload`**: a reload restart kills in-flight
+There is no manual schema step — on first boot the backend migrates the selected SQLite
+or PostgreSQL datastore, creates the `.local/storage` and `.local/logs` directories, and
+seeds only the local user. Always run the backend **without `--reload`**: a reload restart kills in-flight
 ingestion background tasks and leaves uploads stuck at `extracting`.
 
 All relative paths (database, storage, logs, `.env`) are **anchored to the repo root in
@@ -190,6 +191,34 @@ and then `fuser` — at least one must be available.
 > `DATABASE_URL=sqlite:////abs/path/silicon_notebook.db` — note the four slashes for an
 > absolute sqlite path) — absolute env values are always respected as-is and never
 > re-anchored.
+
+### 3.1 · Select SQLite or PostgreSQL
+
+`DATABASE_URL` is the only active-backend selector. It accepts `sqlite:///...`,
+`postgresql://...`, and the normalized legacy alias `postgres://...`; unsupported schemes,
+connection failures, migration failures, and warmup failures fail closed without falling
+back to another database. `SHADOW_DATABASE_URL` is reserved and cannot enable dual-write.
+
+```dotenv
+# Shipped default
+DATABASE_URL=sqlite:///.local/silicon_notebook.db
+
+# Direct PostgreSQL 16 backend
+DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+```
+
+PostgreSQL must use UTF-8 and have `pg_trgm` installed in `public`. The database owner may
+let migration 0001 create it, or a DBA may preinstall it. An extension of that name in
+another schema is rejected. PostgreSQL stores vectors as float32 `bytea`; pgvector is not
+required. Keep production at one backend worker (`--workers 1`).
+
+Changing the URL never moves existing rows. For a fresh target, stop the service, change
+the URL, start, and verify the empty/bootstrap state. For an existing SQLite→PostgreSQL
+move, first quiesce all writers, stop the service, make verified backups of both sides,
+perform an externally controlled full migration, compare table counts and representative
+domain reads, then change the one URL. Detailed cutover and rollback steps are in
+[Operations](./operations.md); the packaged decision table is also in
+[packaging/DEPLOY.md](../packaging/DEPLOY.md).
 
 ### 4 · Verify
 

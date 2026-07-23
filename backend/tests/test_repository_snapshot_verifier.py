@@ -7,8 +7,8 @@ ever touching the original files: the original is only read via a
 constructed exclusively on the temporary backup + a temporary storage
 directory, and the only rows allowed to change on open are the documented
 startup normalizations (interrupted-job recovery, seed inserts, the admin
-in-place upgrade).  Its stdout may carry table names / counts / digests —
-never row content.
+in-place upgrade) and deterministic versioned migration cleanup.  Its stdout
+may carry table names / counts / digests — never row content.
 """
 from __future__ import annotations
 
@@ -339,7 +339,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_27(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_29(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -374,8 +374,10 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_27(tmp_path):
     _migration_25's system model-service status table, and
     _migration_26's two knowhow-history tables (knowhow_changes +
     knowhow_milestones — leaf tables nothing else absorbs, so each gets its
-    own explicit rollback statement below), or the constructed 'v13' would
-    retain them and the hop would under-report its additions."""
+    own explicit rollback statement below), _migration_27's source completion
+    marker, _migration_28's document-limit schema, and _migration_29's cluster
+    membership uniqueness guard, or the constructed 'v13' would retain them
+    and the hop would under-report its additions."""
     from app.core.config import Settings
 
     module = _load_verifier()
@@ -394,6 +396,12 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_27(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
+        rollback.execute("DROP TABLE app_settings")                      # _migration_28
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_28
+        rollback.execute("ALTER TABLE sources DROP COLUMN chunked_at")   # _migration_27
         rollback.execute("DROP TABLE system_model_service_status")        # _migration_25
         rollback.execute("DROP TABLE kg_canonical_scratch")              # _migration_24
         rollback.execute("DROP TABLE model_service_status")               # _migration_23
@@ -408,26 +416,21 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_27(tmp_path):
         # knowhow_cell_code FKs onto BOTH knowhow_rows and knowhow_columns,
         # so it must drop before either parent (same child-before-parent
         # rule as knowhow_cells on the next line).
-        rollback.execute("ALTER TABLE sources DROP COLUMN chunked_at")   # _migration_27
         rollback.execute("DROP TABLE knowhow_cell_code")                  # _migration_18
         rollback.execute("DROP TABLE knowhow_cells")                      # _migration_16
         rollback.execute("DROP TABLE knowhow_rows")                       # _migration_16
         rollback.execute("DROP TABLE knowhow_columns")                    # _migration_16
         # knowhow_changes / knowhow_milestones FK onto knowhow_tables, so
         # both must drop before it (same child-before-parent rule as above).
-        rollback.execute("DROP INDEX idx_knowhow_milestones_table")       # _migration_24
-        rollback.execute("DROP INDEX idx_knowhow_changes_table")          # _migration_24
-        rollback.execute("DROP TABLE knowhow_milestones")                 # _migration_24
-        rollback.execute("DROP TABLE knowhow_changes")                    # _migration_24
+        rollback.execute("DROP INDEX idx_knowhow_milestones_table")       # _migration_26
+        rollback.execute("DROP INDEX idx_knowhow_changes_table")          # _migration_26
+        rollback.execute("DROP TABLE knowhow_milestones")                 # _migration_26
+        rollback.execute("DROP TABLE knowhow_changes")                    # _migration_26
         rollback.execute("DROP TABLE knowhow_tables")                     # _migration_16
         rollback.execute("DROP TABLE notebook_assets")                   # _migration_16
         rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
         rollback.execute("DROP INDEX idx_sources_memory_id")             # _migration_14
         rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")    # _migration_14
-        rollback.execute("DROP TABLE app_settings")                      # _migration_27
-        rollback.execute(
-            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
-        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 13")
         rollback.commit()
     finally:
@@ -441,7 +444,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_27(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_to_27(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_29(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -451,6 +454,11 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_27(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
+        rollback.execute("DROP TABLE app_settings")                      # _migration_28
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_28
         rollback.execute("ALTER TABLE sources DROP COLUMN chunked_at")   # _migration_27
         rollback.execute("DROP TABLE system_model_service_status")       # _migration_25
         rollback.execute("DROP TABLE kg_canonical_scratch")
@@ -461,10 +469,6 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_27(tmp_path):
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
-        rollback.execute("DROP TABLE app_settings")                      # _migration_27
-        rollback.execute(
-            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
-        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 20")
         rollback.commit()
     finally:
@@ -493,7 +497,7 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
-def test_deployed_v21_database_verifies_through_migrations_22_to_27(tmp_path):
+def test_deployed_v21_database_verifies_through_migrations_22_to_29(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -503,6 +507,11 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_27(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
+        rollback.execute("DROP TABLE app_settings")                      # _migration_28
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_28
         rollback.execute("ALTER TABLE sources DROP COLUMN chunked_at")   # _migration_27
         rollback.execute("DROP TABLE system_model_service_status")       # _migration_25
         rollback.execute("DROP TABLE kg_canonical_scratch")
@@ -512,10 +521,6 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_27(tmp_path):
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
-        rollback.execute("DROP TABLE app_settings")                      # _migration_27
-        rollback.execute(
-            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
-        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 21")
         rollback.commit()
     finally:
@@ -528,7 +533,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_27(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v22_database_verifies_through_migrations_23_to_27(tmp_path):
+def test_deployed_v22_database_verifies_through_migrations_23_to_29(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -538,9 +543,15 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_27(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
-        # current is now five hops past v22 (v23 model_service_status, v24
+        rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
+        rollback.execute("DROP TABLE app_settings")                      # _migration_28
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_28
+        # current is now seven hops past v22 (v23 model_service_status, v24
         # kg_canonical_scratch, v25 system_model_service_status + credential
-        # scrub, v26 knowhow_changes/knowhow_milestones, v27 sources.chunked_at);
+        # scrub, v26 knowhow_changes/knowhow_milestones, v27 sources.chunked_at,
+        # v28 document limits, v29 cluster membership uniqueness);
         # all must roll back so this forged source truly has nothing beyond v22,
         # or those additions would already be present pre-migration and
         # manifest-addition-missing would fire (they'd never appear in the
@@ -553,10 +564,6 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_27(tmp_path):
         rollback.execute("DROP TABLE knowhow_milestones")
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
-        rollback.execute("DROP TABLE app_settings")                      # _migration_27
-        rollback.execute(
-            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
-        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
     finally:
@@ -569,7 +576,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_27(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_through_migrations_24_to_27(tmp_path):
+def test_deployed_v23_database_verifies_through_migrations_24_to_29(tmp_path):
     """A v23 database (has model_service_status + populated model_settings,
     missing _migration_24's kg_canonical_scratch, _migration_25's system
     model-service scrub, and _migration_26's knowhow-history tables) must
@@ -583,6 +590,11 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_27(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
+        rollback.execute("DROP TABLE app_settings")                      # _migration_28
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_28
         rollback.execute("ALTER TABLE sources DROP COLUMN chunked_at")   # _migration_27
         rollback.execute("DROP TABLE system_model_service_status")       # _migration_25
         rollback.execute("DROP TABLE kg_canonical_scratch")
@@ -602,10 +614,6 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_27(tmp_path):
                 "2030-01-01T00:00:00+00:00",
             ),
         )
-        rollback.execute("DROP TABLE app_settings")                      # _migration_27
-        rollback.execute(
-            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
-        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 23")
 
     result = module.verify_snapshot(database, storage)
@@ -615,6 +623,136 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_27(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.normalized["scrubbed_model_profiles"] == 1
     assert result.normalized["scrubbed_model_statuses"] == 1
+
+
+_V23_CLUSTER_ROWS = (
+    (
+        "cluster-old",
+        "nb-fixture",
+        "canonical-old",
+        "member-duplicate",
+        "old",
+        "concept",
+        "old-description",
+        "old-signature",
+        "2026-07-20T00:00:00+00:00",
+    ),
+    (
+        "cluster-tie-a",
+        "nb-fixture",
+        "canonical-a",
+        "member-duplicate",
+        "a",
+        "concept",
+        "a-description",
+        "a-signature",
+        "2026-07-21T00:00:00+00:00",
+    ),
+    (
+        "cluster-tie-z",
+        "nb-fixture",
+        "canonical-z",
+        "member-duplicate",
+        "z",
+        "concept",
+        "z-description",
+        "z-signature",
+        "2026-07-21T00:00:00+00:00",
+    ),
+    (
+        "cluster-singleton",
+        "nb-fixture",
+        "canonical-singleton",
+        "member-singleton",
+        "singleton",
+        "concept",
+        "singleton-description",
+        "singleton-signature",
+        "2026-07-19T00:00:00+00:00",
+    ),
+)
+
+
+def _prepare_v28_cluster_duplicates(module, database, tmp_path):
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    db = sqlite3.connect(database)
+    try:
+        db.execute("DROP INDEX uq_clusters_notebook_type_member")
+        db.executemany(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+            "object_type,canonical_description,canonical_desc_sig,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            _V23_CLUSTER_ROWS,
+        )
+        db.execute("PRAGMA user_version = 28")
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_v29_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_path):
+    module = _load_verifier()
+    assert "concept_clusters" not in module.SPECIAL_TABLES
+    database, storage = _copy_fixture(tmp_path)
+    _prepare_v28_cluster_duplicates(module, database, tmp_path)
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.normalized["concept_clusters"] == 2
+    assert result.changed_tables == []
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("wrong-survivor", "changed-singleton", "deleted-singleton"),
+)
+def test_v29_verifier_rejects_cluster_cleanup_corruption(
+    tmp_path, monkeypatch, corruption
+):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    _prepare_v28_cluster_duplicates(module, database, tmp_path)
+    real_repository = module.SQLiteRepository
+
+    class CorruptingRepository(real_repository):
+        def __init__(self, settings):
+            super().__init__(settings)
+            with sqlite3.connect(settings.sqlite_path) as db:
+                if corruption == "wrong-survivor":
+                    db.execute(
+                        "DELETE FROM concept_clusters WHERE id='cluster-tie-z'"
+                    )
+                    db.execute(
+                        "INSERT INTO concept_clusters "
+                        "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                        "object_type,canonical_description,canonical_desc_sig,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        _V23_CLUSTER_ROWS[1],
+                    )
+                elif corruption == "changed-singleton":
+                    db.execute(
+                        "UPDATE concept_clusters SET canonical_description='corrupt' "
+                        "WHERE id='cluster-singleton'"
+                    )
+                else:
+                    db.execute(
+                        "DELETE FROM concept_clusters WHERE id='cluster-singleton'"
+                    )
+
+    monkeypatch.setattr(module, "SQLiteRepository", CorruptingRepository)
+    result = module.verify_snapshot(database, storage)
+
+    assert not result.ok
+    assert "concept_clusters" in result.changed_tables
+    assert any(
+        item.startswith("table=concept_clusters reason=")
+        for item in result.discrepancies
+    )
 
 
 @pytest.mark.parametrize(

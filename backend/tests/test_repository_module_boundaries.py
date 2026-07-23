@@ -96,6 +96,7 @@ def test_stores_own_the_plan_frozen_primitives():
 
 
 def test_facade_keeps_frozen_signature_delegates():
+    from app.services.repository_facade import RepositoryFacade
     from app.services.sqlite_repository import SQLiteRepository
 
     for name in (
@@ -112,7 +113,12 @@ def test_facade_keeps_frozen_signature_delegates():
         "_mark_unified_kg_dirty", "_bump_cluster_mutation_seq",
         "_clear_source_extraction_state", "_source_ids_from_evidence",
     ):
-        assert name in SQLiteRepository.__dict__, name
+        owner = (
+            SQLiteRepository
+            if name in {"_clear_source_extraction_state", "_source_ids_from_evidence"}
+            else RepositoryFacade
+        )
+        assert name in owner.__dict__, name
 
 
 def test_knowledge_contracts_is_leaf_of_the_dependency_graph():

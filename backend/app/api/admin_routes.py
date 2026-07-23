@@ -29,7 +29,7 @@ from app.models.admin import (
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.services.model_status import ModelStatusService
-from app.repositories.sqlite.identity_store import (
+from app.repositories.identity_errors import (
     BuiltinAdminDemotionError,
     SelfDemotionError,
 )
@@ -112,7 +112,7 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
         return PromotionApproveResult(
             **repository().approve_promotion_as_reviewer(candidate_id, user.id)
         )
-    except KeyError:
+    except (KeyError, PermissionError):
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -131,7 +131,7 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
                 candidate_id, payload.reason, user.id
             )
         )
-    except KeyError:
+    except (KeyError, PermissionError):
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -1,0 +1,6741 @@
+{
+  "business_check_constraints": {
+    "agent_profiles": {
+      "ck_agent_profiles_status": "STATUS IN ('ACTIVE', 'REVOKED')"
+    },
+    "memory_embeddings": {
+      "ck_memory_embeddings_dimension": "DIMENSION > 0"
+    },
+    "memory_items": {
+      "ck_memory_items_origin": "ORIGIN IN ('ASK_ANSWER', 'EXTERNAL_AGENT')",
+      "ck_memory_items_promotion_state": "PROMOTION_STATE IN ('NONE', 'PROPOSED', 'APPROVED', 'REJECTED')",
+      "ck_memory_items_status": "STATUS IN ('CANDIDATE', 'CONFIRMED', 'REJECTED', 'DEPRECATED')"
+    },
+    "memory_provenance": {
+      "ck_memory_provenance_origin": "ORIGIN IN ('ASK_ANSWER', 'EXTERNAL_AGENT')"
+    },
+    "memory_revisions": {
+      "ck_memory_revisions_promotion_state": "PROMOTION_STATE IN ('NONE', 'PROPOSED', 'APPROVED', 'REJECTED')",
+      "ck_memory_revisions_revision": "REVISION > 0",
+      "ck_memory_revisions_status": "STATUS IN ('CANDIDATE', 'CONFIRMED', 'REJECTED', 'DEPRECATED')"
+    },
+    "model_service_status": {
+      "ck_model_service_status_status": "STATUS IN ('OK', 'ERROR')",
+      "ck_model_service_status_trigger": "TRIGGER IN ('MANUAL_TEST', 'OBSERVED_FAILURE')"
+    },
+    "notebook_bases": {
+      "ck_notebook_bases_distinct": "NOTEBOOK_ID < > BASE_NOTEBOOK_ID"
+    },
+    "system_model_service_status": {
+      "ck_system_model_service_status_status": "STATUS IN ('OK', 'ERROR')",
+      "ck_system_model_service_status_trigger": "TRIGGER IN ('MANUAL_TEST', 'OBSERVED_FAILURE', 'RECOVERY_PROBE')"
+    }
+  },
+  "normalizations": {
+    "postgres_null_time_to_domain_empty": [
+      "ask_jobs.created_at",
+      "ask_jobs.updated_at",
+      "ask_trace_steps.created_at",
+      "kg_build_jobs.finished_at",
+      "knowledge_objects.last_reviewed",
+      "merge_review_jobs.started_at",
+      "merge_review_jobs.updated_at",
+      "unified_kg_state.last_rebuild_at"
+    ],
+    "postgres_ordinal_sequence_reseed_after_copy": [
+      "answers",
+      "chunks",
+      "concept_merge_candidates",
+      "extraction_runs",
+      "kg_build_jobs",
+      "knowledge_objects",
+      "source_elements"
+    ],
+    "sqlite_empty_json_array_to_postgres_array": [
+      "ask_jobs.trace_json",
+      "notebooks.expected_questions",
+      "notebooks.source_types",
+      "notebooks.taxonomy"
+    ],
+    "sqlite_empty_time_to_postgres_null": [
+      "ask_jobs.created_at",
+      "ask_jobs.updated_at",
+      "ask_trace_steps.created_at",
+      "kg_build_jobs.finished_at",
+      "knowledge_objects.last_reviewed",
+      "merge_review_jobs.started_at",
+      "merge_review_jobs.updated_at",
+      "unified_kg_state.last_rebuild_at"
+    ],
+    "sqlite_rowid_to_postgres_ordinal": [
+      "answers",
+      "chunks",
+      "concept_merge_candidates",
+      "extraction_runs",
+      "kg_build_jobs",
+      "knowledge_objects",
+      "source_elements"
+    ]
+  },
+  "ordinal_evidence": {
+    "answers": [
+      "app.repositories.sqlite.ask_state_store:AskStateStore.get_conversation",
+      "app.repositories.sqlite.ask_state_store:AskStateStore.list_conversations"
+    ],
+    "chunks": [
+      "app.repositories.sqlite.chunk_store:ChunkStore.language_probe_rows"
+    ],
+    "concept_merge_candidates": [
+      "app.repositories.sqlite.governance_store:GovernanceStore.pending_merges_batch"
+    ],
+    "extraction_runs": [
+      "app.repositories.sqlite.maintenance:SQLiteMaintenanceAdapter.count_sources_missing_kg",
+      "app.repositories.sqlite.source_store:SourceStore.source_from_row",
+      "app.repositories.sqlite.source_store:SourceStore.sources_from_rows"
+    ],
+    "kg_build_jobs": [
+      "app.repositories.sqlite.kg_build_job_store:KgBuildJobStore.latest_on"
+    ],
+    "knowledge_objects": [
+      "app.repositories.sqlite.unified_kg_store:UnifiedKgStore.seed_payload_rows",
+      "app.repositories.sqlite.unified_kg_store:UnifiedKgStore.stream_seed_rows"
+    ],
+    "source_elements": [
+      "app.repositories.sqlite.source_store:SourceStore.notebook_element_sample"
+    ]
+  },
+  "ordinal_tables": [
+    "answers",
+    "chunks",
+    "concept_merge_candidates",
+    "extraction_runs",
+    "kg_build_jobs",
+    "knowledge_objects",
+    "source_elements"
+  ],
+  "ordinary_table_count": 60,
+  "postgres_extension_schemas": {
+    "pg_trgm": "public"
+  },
+  "postgres_extensions": [
+    "pg_trgm"
+  ],
+  "postgres_internal_tables": [
+    "silicon_schema_migrations"
+  ],
+  "postgres_version": 8,
+  "rebuilt": {
+    "fts_internal_tables": [
+      "chunks_fts_config",
+      "chunks_fts_content",
+      "chunks_fts_data",
+      "chunks_fts_docsize",
+      "chunks_fts_idx",
+      "kg_objects_fts_config",
+      "kg_objects_fts_content",
+      "kg_objects_fts_data",
+      "kg_objects_fts_docsize",
+      "kg_objects_fts_idx",
+      "memory_items_fts_config",
+      "memory_items_fts_data",
+      "memory_items_fts_docsize",
+      "memory_items_fts_idx"
+    ],
+    "fts_virtual_roots": [
+      "chunks_fts",
+      "kg_objects_fts",
+      "memory_items_fts"
+    ]
+  },
+  "rebuilt_table_count": 17,
+  "sqlite_check_expressions": {
+    "agent_profiles": [
+      "STATUS IN ('ACTIVE', 'REVOKED')"
+    ],
+    "memory_embeddings": [
+      "DIMENSION > 0"
+    ],
+    "memory_items": [
+      "ORIGIN IN ('ASK_ANSWER', 'EXTERNAL_AGENT')",
+      "PROMOTION_STATE IN ('NONE', 'PROPOSED', 'APPROVED', 'REJECTED')",
+      "STATUS IN ('CANDIDATE', 'CONFIRMED', 'REJECTED', 'DEPRECATED')"
+    ],
+    "memory_provenance": [
+      "ORIGIN IN ('ASK_ANSWER', 'EXTERNAL_AGENT')"
+    ],
+    "memory_revisions": [
+      "PROMOTION_STATE IN ('NONE', 'PROPOSED', 'APPROVED', 'REJECTED')",
+      "REVISION > 0",
+      "STATUS IN ('CANDIDATE', 'CONFIRMED', 'REJECTED', 'DEPRECATED')"
+    ],
+    "model_service_status": [
+      "STATUS IN ('OK', 'ERROR')",
+      "TRIGGER IN ('MANUAL_TEST', 'OBSERVED_FAILURE')"
+    ],
+    "notebook_bases": [
+      "NOTEBOOK_ID < > BASE_NOTEBOOK_ID"
+    ],
+    "system_model_service_status": [
+      "STATUS IN ('OK', 'ERROR')",
+      "TRIGGER IN ('MANUAL_TEST', 'OBSERVED_FAILURE', 'RECOVERY_PROBE')"
+    ]
+  },
+  "sqlite_explicit_indexes": [
+    {
+      "keys": [
+        {
+          "column": "owner_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        },
+        {
+          "column": "updated_at",
+          "descending": true
+        }
+      ],
+      "name": "idx_agent_profiles_owner_status",
+      "predicate": null,
+      "table": "agent_profiles",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "token_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_agent_token_notebooks_notebook",
+      "predicate": null,
+      "table": "agent_token_notebooks",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "agent_profile_id",
+          "descending": false
+        },
+        {
+          "column": "revoked_at",
+          "descending": false
+        },
+        {
+          "column": "expires_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_agent_tokens_profile",
+      "predicate": null,
+      "table": "agent_access_tokens",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "conversation_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_answers_conversation",
+      "predicate": null,
+      "table": "answers",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_answers_nb",
+      "predicate": null,
+      "table": "answers",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "conversation_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_ask_jobs_conv",
+      "predicate": null,
+      "table": "ask_jobs",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_ask_jobs_nb_status",
+      "predicate": null,
+      "table": "ask_jobs",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "user_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_auth_sessions_user",
+      "predicate": null,
+      "table": "auth_sessions",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_candidates_nb_status",
+      "predicate": null,
+      "table": "concept_merge_candidates",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_chunk_embeddings_nb",
+      "predicate": null,
+      "table": "chunk_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_chunks_nb",
+      "predicate": null,
+      "table": "chunks",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_chunks_nb_created",
+      "predicate": null,
+      "table": "chunks",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_chunks_source",
+      "predicate": null,
+      "table": "chunks",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "member_object_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_clusters_member",
+      "predicate": null,
+      "table": "concept_clusters",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_clusters_nb",
+      "predicate": null,
+      "table": "concept_clusters",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_clusters_nb_created",
+      "predicate": null,
+      "table": "concept_clusters",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "canonical_b",
+          "descending": false
+        }
+      ],
+      "name": "idx_comentions_nb_b",
+      "predicate": null,
+      "table": "concept_comentions",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "canonical_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_commmem_nb_can",
+      "predicate": null,
+      "table": "community_members",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "community_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_commmem_nb_comm",
+      "predicate": null,
+      "table": "community_members",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "level",
+          "descending": false
+        }
+      ],
+      "name": "idx_communities_nb_level",
+      "predicate": null,
+      "table": "communities",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_conflict_candidates_nb_status",
+      "predicate": null,
+      "table": "kg_conflict_candidates",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "created_by",
+          "descending": false
+        }
+      ],
+      "name": "idx_conversations_created_by",
+      "predicate": null,
+      "table": "conversations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_element_embeddings_nb",
+      "predicate": null,
+      "table": "element_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_element_embeddings_source",
+      "predicate": null,
+      "table": "element_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_extraction_runs_source_created",
+      "predicate": null,
+      "table": "extraction_runs",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "answer_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_feedback_answer",
+      "predicate": null,
+      "table": "feedback",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "rating",
+          "descending": false
+        }
+      ],
+      "name": "idx_feedback_nb_rating",
+      "predicate": null,
+      "table": "feedback",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": true
+        },
+        {
+          "column": "id",
+          "descending": true
+        }
+      ],
+      "name": "idx_kg_build_jobs_nb_created",
+      "predicate": null,
+      "table": "kg_build_jobs",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_kg_build_jobs_one_running",
+      "predicate": "status = 'running'",
+      "table": "kg_build_jobs",
+      "unique": true
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "run_id",
+          "descending": false
+        },
+        {
+          "column": "seed",
+          "descending": false
+        }
+      ],
+      "name": "idx_kg_canonical_scratch_nb_run_seed",
+      "predicate": null,
+      "table": "kg_canonical_scratch",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "run_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_kg_cluster_scratch_nb_run",
+      "predicate": null,
+      "table": "kg_cluster_scratch",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "row_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowhow_cell_code_row",
+      "predicate": null,
+      "table": "knowhow_cell_code",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "column_id",
+          "descending": false
+        },
+        {
+          "column": "__js_trim_content_md__",
+          "descending": false
+        },
+        {
+          "column": "row_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowhow_cells_column_normalized_anchor_row",
+      "predicate": null,
+      "table": "knowhow_cells",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "row_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowhow_cells_row",
+      "predicate": null,
+      "table": "knowhow_cells",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "table_id",
+          "descending": false
+        },
+        {
+          "column": "seq",
+          "descending": true
+        }
+      ],
+      "name": "idx_knowhow_changes_table",
+      "predicate": null,
+      "table": "knowhow_changes",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "table_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowhow_columns_table",
+      "predicate": null,
+      "table": "knowhow_columns",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "table_id",
+          "descending": false
+        },
+        {
+          "column": "seq",
+          "descending": true
+        }
+      ],
+      "name": "idx_knowhow_milestones_table",
+      "predicate": null,
+      "table": "knowhow_milestones",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "table_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowhow_rows_table",
+      "predicate": null,
+      "table": "knowhow_rows",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowhow_tables_nb",
+      "predicate": null,
+      "table": "knowhow_tables",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_embeddings_nb",
+      "predicate": null,
+      "table": "knowledge_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_embeddings_nb_created",
+      "predicate": null,
+      "table": "knowledge_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_objects_nb_status",
+      "predicate": null,
+      "table": "knowledge_objects",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "object_type",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        },
+        {
+          "column": "id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_objects_nb_type_created",
+      "predicate": null,
+      "table": "knowledge_objects",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "object_type",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_objects_nb_type_status",
+      "predicate": null,
+      "table": "knowledge_objects",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "updated_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_objects_nb_updated",
+      "predicate": null,
+      "table": "knowledge_objects",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_objects_source",
+      "predicate": null,
+      "table": "knowledge_objects",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_nb_created",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "review_status",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_nb_review",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "source_object_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_nb_source",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "target_object_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_nb_target",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_source",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_kos_notebook",
+      "predicate": null,
+      "table": "knowledge_object_sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "object_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_kos_object",
+      "predicate": null,
+      "table": "knowledge_object_sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_kos_source",
+      "predicate": null,
+      "table": "knowledge_object_sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "created_by",
+          "descending": false
+        },
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        },
+        {
+          "column": "agent_profile_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_memory_agent_candidate",
+      "predicate": null,
+      "table": "memory_items",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "created_by",
+          "descending": false
+        },
+        {
+          "column": "source_answer_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_memory_answer_once",
+      "predicate": "source_answer_id IS NOT NULL",
+      "table": "memory_items",
+      "unique": true
+    },
+    {
+      "keys": [
+        {
+          "column": "model",
+          "descending": false
+        },
+        {
+          "column": "dimension",
+          "descending": false
+        }
+      ],
+      "name": "idx_memory_embeddings_model",
+      "predicate": null,
+      "table": "memory_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "created_by",
+          "descending": false
+        },
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        },
+        {
+          "column": "updated_at",
+          "descending": true
+        }
+      ],
+      "name": "idx_memory_owner_notebook_status",
+      "predicate": null,
+      "table": "memory_items",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "memory_id",
+          "descending": false
+        },
+        {
+          "column": "revision",
+          "descending": true
+        }
+      ],
+      "name": "idx_memory_revisions_memory",
+      "predicate": null,
+      "table": "memory_revisions",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "user_id",
+          "descending": false
+        },
+        {
+          "column": "checked_at",
+          "descending": true
+        }
+      ],
+      "name": "idx_model_service_status_user_checked",
+      "predicate": null,
+      "table": "model_service_status",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_notebook_assets_nb",
+      "predicate": null,
+      "table": "notebook_assets",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_notebook_assets_source",
+      "predicate": null,
+      "table": "notebook_assets",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "base_notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_notebook_bases_base",
+      "predicate": null,
+      "table": "notebook_bases",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "user_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_notebook_members_user",
+      "predicate": null,
+      "table": "notebook_members",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "created_by",
+          "descending": false
+        }
+      ],
+      "name": "idx_notebooks_created_by",
+      "predicate": null,
+      "table": "notebooks",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "share_token",
+          "descending": false
+        }
+      ],
+      "name": "idx_notebooks_share_token",
+      "predicate": "share_token IS NOT NULL",
+      "table": "notebooks",
+      "unique": true
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_promotion_nb",
+      "predicate": null,
+      "table": "promotion_candidates",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "object_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_promotion_object",
+      "predicate": "status NOT IN ('approved', 'rejected')",
+      "table": "promotion_candidates",
+      "unique": true
+    },
+    {
+      "keys": [
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_promotion_status",
+      "predicate": null,
+      "table": "promotion_candidates",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_relation_embeddings_nb",
+      "predicate": null,
+      "table": "relation_embeddings",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": true
+        }
+      ],
+      "name": "idx_reports_nb_created",
+      "predicate": null,
+      "table": "reports",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_source_authors_nb",
+      "predicate": null,
+      "table": "source_authors",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_source_authors_source",
+      "predicate": null,
+      "table": "source_authors",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_source_elements_source",
+      "predicate": null,
+      "table": "source_elements",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "source_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        },
+        {
+          "column": "id",
+          "descending": false
+        }
+      ],
+      "name": "idx_source_elements_source_created",
+      "predicate": null,
+      "table": "source_elements",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_source_paper_meta_nb",
+      "predicate": null,
+      "table": "source_paper_meta",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "memory_id",
+          "descending": false
+        }
+      ],
+      "name": "idx_sources_memory_id",
+      "predicate": "memory_id IS NOT NULL AND memory_id != ''",
+      "table": "sources",
+      "unique": true
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "parse_status",
+          "descending": false
+        }
+      ],
+      "name": "idx_sources_nb_parse_status",
+      "predicate": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "parse_status",
+          "descending": false
+        },
+        {
+          "column": "source_type",
+          "descending": false
+        }
+      ],
+      "name": "idx_sources_nb_parse_status_type",
+      "predicate": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "created_at",
+          "descending": false
+        }
+      ],
+      "name": "idx_sources_notebook_created",
+      "predicate": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "status",
+          "descending": false
+        }
+      ],
+      "name": "idx_sources_notebook_status",
+      "predicate": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "username",
+          "descending": false
+        }
+      ],
+      "name": "idx_users_username",
+      "predicate": "username != ''",
+      "table": "users",
+      "unique": true
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "object_type",
+          "descending": false
+        },
+        {
+          "column": "member_object_id",
+          "descending": false
+        }
+      ],
+      "name": "uq_clusters_notebook_type_member",
+      "predicate": null,
+      "table": "concept_clusters",
+      "unique": true
+    }
+  ],
+  "sqlite_internal_tables": [],
+  "sqlite_table_count": 77,
+  "sqlite_version": 29,
+  "tables": {
+    "agent_access_tokens": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "agent_profile_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "token_hash",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "scopes_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "default_notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "expires_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "revoked_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "last_used_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "agent_profile_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "agent_profiles"
+        },
+        {
+          "columns": [
+            "default_notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "token_hash"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "agent_profiles": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "owner_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "description",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "active",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "owner_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "agent_token_notebooks": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "token_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "token_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "agent_access_tokens"
+        }
+      ],
+      "primary_key": [
+        "token_id",
+        "notebook_id"
+      ],
+      "unique_keys": []
+    },
+    "answers": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "question",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "payload",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "conversation_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "app_settings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "key",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "value",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "key"
+      ],
+      "unique_keys": []
+    },
+    "ask_jobs": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "conversation_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "mode",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "question",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "running",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "trace_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "answer_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "error",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "ask_trace_steps": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "job_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "step_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "job_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "ask_jobs"
+        }
+      ],
+      "primary_key": [
+        "job_id",
+        "seq"
+      ],
+      "unique_keys": []
+    },
+    "auth_sessions": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "token",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "expires_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "last_seen_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        }
+      ],
+      "primary_key": [
+        "token"
+      ],
+      "unique_keys": []
+    },
+    "canonical_relations": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_src",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "edge_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_tgt",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 1,
+          "name": "support_count",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 1,
+          "name": "source_count",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": [],
+          "name": "sample_relation_ids",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id",
+        "canonical_src",
+        "edge_type",
+        "canonical_tgt"
+      ],
+      "unique_keys": []
+    },
+    "chunk_embeddings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "chunk_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "vector",
+          "nullable": false,
+          "postgres_type": "bytea",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "chunk_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "chunks"
+        }
+      ],
+      "primary_key": [
+        "chunk_id"
+      ],
+      "unique_keys": []
+    },
+    "chunks": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "text",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "section_path",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "element_ids",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "source_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "sources"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "communities": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "level",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "member_ids",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "size",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "title",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "summary",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "findings",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "community_members": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "canonical_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "level",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "community_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "centrality",
+          "nullable": false,
+          "postgres_type": "double precision",
+          "sqlite_not_null": true,
+          "sqlite_type": "REAL"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [],
+      "unique_keys": []
+    },
+    "concept_clusters": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "member_object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "concept",
+          "name": "object_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_description",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_desc_sig",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "notebook_id",
+            "object_type",
+            "member_object_id"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "concept_comentions": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_a",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_b",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 1,
+          "name": "bridge_claims",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id",
+        "canonical_a",
+        "canonical_b"
+      ],
+      "unique_keys": []
+    },
+    "concept_merge_candidates": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_a",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_b",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "score",
+          "nullable": false,
+          "postgres_type": "double precision",
+          "sqlite_not_null": true,
+          "sqlite_type": "REAL"
+        },
+        {
+          "default": "pending",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "confidence",
+          "nullable": false,
+          "postgres_type": "double precision",
+          "sqlite_not_null": true,
+          "sqlite_type": "REAL"
+        },
+        {
+          "default": "",
+          "name": "rationale",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "reviewed_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "seed_a",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "seed_b",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "concept_whitelist": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "term",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "note",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "term"
+      ],
+      "unique_keys": []
+    },
+    "conversations": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "title",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "element_embeddings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "element_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "vector",
+          "nullable": false,
+          "postgres_type": "bytea",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "element_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "source_elements"
+        }
+      ],
+      "primary_key": [
+        "element_id"
+      ],
+      "unique_keys": []
+    },
+    "extraction_runs": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "run_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "error_message",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "source_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "sources"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "feedback": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "answer_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "rating",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "comment",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "answer_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "answers"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "kg_build_jobs": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "mode",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "running",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "probing",
+          "name": "stage",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "total_sources",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "completed_sources",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "failed_sources",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "error_code",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "error_message",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "finished_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "predicate": "status = 'running'"
+        }
+      ]
+    },
+    "kg_canonical_scratch": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seed",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_description",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_desc_sig",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [],
+      "unique_keys": []
+    },
+    "kg_cluster_scratch": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seed",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [],
+      "unique_keys": []
+    },
+    "kg_conflict_candidates": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "kind",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "left_ref",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "right_ref",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "conflict_type",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "resolution",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "winner_ref",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "resolved_payload",
+          "nullable": true,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "confidence",
+          "nullable": true,
+          "postgres_type": "double precision",
+          "sqlite_not_null": false,
+          "sqlite_type": "REAL"
+        },
+        {
+          "default": null,
+          "name": "rationale",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "pending",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "kg_rebuild_checkpoint": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "input_version",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "stage",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "item_key",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "payload",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id",
+        "input_version",
+        "stage",
+        "item_key"
+      ],
+      "unique_keys": []
+    },
+    "knowhow_cell_code": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "row_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "column_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "code_text",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "language",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "updated_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "cell_content_hash",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "column_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_columns"
+        },
+        {
+          "columns": [
+            "row_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_rows"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "row_id",
+            "column_id"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "knowhow_cells": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "row_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "column_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "content_md",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "column_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_columns"
+        },
+        {
+          "columns": [
+            "row_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_rows"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "row_id",
+            "column_id"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "knowhow_changes": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "table_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "kind",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "actor",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "user",
+          "name": "origin",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "payload_json",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "fingerprint",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "note",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "table_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_tables"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "table_id",
+            "seq"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "knowhow_columns": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "table_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "plain",
+          "name": "role",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "position",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "table_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_tables"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "knowhow_milestones": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "table_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "note",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "table_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_tables"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "table_id",
+            "name"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "knowhow_rows": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "table_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "position",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "pending",
+          "name": "projection_status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "table_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_tables"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "knowhow_tables": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "description",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "mutation_seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "hidden_source_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "knowledge_embeddings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "vector",
+          "nullable": false,
+          "postgres_type": "bytea",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "object_id"
+      ],
+      "unique_keys": []
+    },
+    "knowledge_object_sources": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [],
+      "unique_keys": []
+    },
+    "knowledge_objects": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "object_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "approved",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "owner",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "payload",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "evidence",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_candidate_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "last_reviewed",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "knowledge_relations": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "target_object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "edge_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "evidence",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "pending",
+          "name": "review_status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "source_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "sources"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "memory_embeddings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "memory_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "model",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "dimension",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "vector",
+          "nullable": false,
+          "postgres_type": "bytea",
+          "sqlite_not_null": true,
+          "sqlite_type": "BLOB"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "memory_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "memory_items"
+        }
+      ],
+      "primary_key": [
+        "memory_id"
+      ],
+      "unique_keys": []
+    },
+    "memory_items": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "agent_profile_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_answer_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "origin",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "none",
+          "name": "promotion_state",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "content_md",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "tags_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "confirmed_by",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "confirmed_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "pending",
+          "name": "embedding_status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "embedding_error",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "agent_profile_id"
+          ],
+          "on_delete": "SET NULL",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "agent_profiles"
+        },
+        {
+          "columns": [
+            "confirmed_by"
+          ],
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        },
+        {
+          "columns": [
+            "created_by"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        },
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "created_by",
+            "source_answer_id"
+          ],
+          "predicate": "source_answer_id IS NOT NULL"
+        }
+      ]
+    },
+    "memory_provenance": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "memory_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "origin",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "payload_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "memory_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "memory_items"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "memory_id"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "memory_revisions": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "memory_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "revision",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "content_md",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "tags_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "promotion_state",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "changed_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "change_reason",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "changed_by"
+          ],
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        },
+        {
+          "columns": [
+            "memory_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "memory_items"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "memory_id",
+            "revision"
+          ],
+          "predicate": null
+        }
+      ]
+    },
+    "mention_edges": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "claim_object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "concept_canonical_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "matched_alias",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id",
+        "claim_object_id",
+        "concept_canonical_id"
+      ],
+      "unique_keys": []
+    },
+    "merge_review_jobs": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "idle",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "total",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "done",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "started_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "error",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id"
+      ],
+      "unique_keys": []
+    },
+    "model_service_status": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "user_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "service",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "config_fingerprint",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "latency_ms",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "code",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "trigger",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "checked_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        }
+      ],
+      "primary_key": [
+        "user_id",
+        "service"
+      ],
+      "unique_keys": []
+    },
+    "notebook_assets": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "filename",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "mime",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "size",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "notebook_bases": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "base_notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "base_notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "created_by"
+          ],
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        },
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id",
+        "base_notebook_id"
+      ],
+      "unique_keys": []
+    },
+    "notebook_members": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "reader",
+          "name": "role",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "added_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "user_id"
+          ],
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        }
+      ],
+      "primary_key": [
+        "notebook_id",
+        "user_id"
+      ],
+      "unique_keys": []
+    },
+    "notebooks": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "purpose",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "primary_domain",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "draft",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_by",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "target_users",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "expected_questions",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "source_types",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "taxonomy",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "access_scope",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "template",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "purpose_auto",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "personal",
+          "name": "tier",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "is_shared",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "share_token",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "created_by"
+          ],
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "share_token"
+          ],
+          "predicate": "share_token IS NOT NULL"
+        }
+      ]
+    },
+    "object_schemas": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "object_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "plural",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "fields",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "primary_field",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "description",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "label",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "list_fields",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "builtin",
+          "name": "source",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "active",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "rationale",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "object_type"
+      ],
+      "unique_keys": []
+    },
+    "promotion_candidates": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "object_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "object_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "proposed",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "reason",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "reviewed_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "base_match_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "target_base_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "object_id"
+          ],
+          "predicate": "status NOT IN ('approved', 'rejected')"
+        }
+      ]
+    },
+    "relation_embeddings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "relation_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "vector",
+          "nullable": false,
+          "postgres_type": "bytea",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "relation_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowledge_relations"
+        }
+      ],
+      "primary_key": [
+        "relation_id"
+      ],
+      "unique_keys": []
+    },
+    "reports": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "question",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "outline_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "sections_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "gaps_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "references_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 2,
+          "name": "depth",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": [],
+          "name": "section_status_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "content_md",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "pending",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "progress",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "error",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "source_authors": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "position",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "affiliation",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "source_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "sources"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "source_elements": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "element_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "location_label",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "text",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "metadata",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "source_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "sources"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "source_paper_meta": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "source_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "is_paper",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "paper_title",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "venue",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "pub_year",
+          "nullable": true,
+          "postgres_type": "bigint",
+          "sqlite_not_null": false,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "doi",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "keywords",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "raw_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "model",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        },
+        {
+          "columns": [
+            "source_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "sources"
+        }
+      ],
+      "primary_key": [
+        "source_id"
+      ],
+      "unique_keys": []
+    },
+    "sources": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "title",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "source_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "uploaded",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "uploaded",
+          "name": "parse_status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "file_name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "file_path",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "source_url",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "file_size",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "file_hash",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "summary",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "error_message",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "doc_type",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "memory_id",
+          "nullable": true,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "chunked_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "memory_id"
+          ],
+          "predicate": "memory_id IS NOT NULL AND memory_id != ''"
+        }
+      ]
+    },
+    "system_model_service_status": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "service_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "config_fingerprint",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "latency_ms",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "code",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "trigger",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "support_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "checked_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "service_id"
+      ],
+      "unique_keys": []
+    },
+    "unified_kg_state": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "dirty",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "kg_mutation_seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "cluster_mutation_seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "cluster_input_version",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "last_rebuild_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "object_count",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "relation_count",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "cluster_count",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": -1,
+          "name": "community_seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": -1,
+          "name": "canonical_rel_seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": -1,
+          "name": "mention_seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": 0,
+          "name": "source_index_backfilled",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "notebook_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "notebooks"
+        }
+      ],
+      "primary_key": [
+        "notebook_id"
+      ],
+      "unique_keys": []
+    },
+    "user_profiles": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "user_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "manual",
+          "name": "memory_mode",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": [],
+          "name": "domain_focus",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "model_settings",
+          "nullable": false,
+          "postgres_type": "jsonb",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "upload_document_limit",
+          "nullable": true,
+          "postgres_type": "bigint",
+          "sqlite_not_null": false,
+          "sqlite_type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "user_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "users"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": []
+    },
+    "users": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "email",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "display_name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "role",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "active",
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "username",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "password_hash",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "password_salt",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "password_iterations",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "email"
+          ],
+          "predicate": null
+        },
+        {
+          "columns": [
+            "username"
+          ],
+          "predicate": "username != ''"
+        }
+      ]
+    }
+  }
+}

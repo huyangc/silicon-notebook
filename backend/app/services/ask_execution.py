@@ -71,6 +71,7 @@ class AskServicePort(Protocol):
         payload: "AskRequest",
         *,
         user_id: str,
+        job_id: str = "",
         cancel_event: "threading.Event | None" = None,
         on_trace: "Callable[[Any], None] | None" = None,
     ) -> "AskResponse": ...
@@ -172,7 +173,7 @@ class AskExecutionCoordinator:
             try:
                 response = self.ask().ask(
                     notebook_id, payload, user_id=user_id,
-                    on_trace=on_trace, cancel_event=cancel_event,
+                    job_id=job_id, on_trace=on_trace, cancel_event=cancel_event,
                 )
                 self._finish(job_id, "done", answer_id=response.answer_id)
                 events.put({"event": "final", "response": response.model_dump()})

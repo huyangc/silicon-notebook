@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import runpy
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ import pytest
 from app.core.config import Settings
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
 from app.services import repository, sqlite_repository
+from app.services.repository_facade import RepositoryFacade
 from app.services.sqlite_repository import SQLiteRepository
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +32,8 @@ FIXTURE = (
     / "repository_contract"
     / "facade_surface.json"
 )
-FACADE_FILE = "backend/app/services/sqlite_repository.py"
+FACADE_FILE = "backend/app/services/repository_facade.py"
+SQLITE_WRAPPER_FILE = "backend/app/services/sqlite_repository.py"
 
 RUNTIME_COMPONENT_OWNERS = {
     "ask": "AskService",
@@ -650,27 +653,89 @@ def test_facade_matches_frozen_surface_manifest(repo):
 
 
 def test_facade_has_no_getattr_or_sql():
-    source = inspect.getsource(SQLiteRepository)
+    source = inspect.getsource(RepositoryFacade)
     assert "def __getattr__" not in source
     assert ".execute(" not in source
     assert ".executemany(" not in source
     assert ".executescript(" not in source
 
 
+def test_sqlite_wrapper_has_only_explicit_migration_maintenance_compatibility_members():
+    tree = ast.parse((ROOT / SQLITE_WRAPPER_FILE).read_text(encoding="utf-8"))
+    wrapper = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SQLiteRepository"
+    )
+    allowed = {
+        "__init__", "db_path", "_write_lock", "_connect", "close_local",
+        "_clear_source_extraction_state", "_knowledge_objects", "_migrate",
+        "_migrate_legacy", "_add_column_if_missing", "_migration_1",
+        "_migration_2", "_migration_3", "_migration_4", "_migration_5",
+        "_migration_6", "_migration_7", "_migration_8", "_migration_9",
+        "_migration_10", "_migration_19", "_migration_27", "_run_migration",
+        "_recover_interrupted_jobs",
+        "_recover_interrupted_jobs_legacy", "_seed", "_seed_legacy",
+        "maintenance", "eval_insert_source_for_test",
+        "_backfill_relation_embeddings", "_source_ids_from_evidence",
+        "_delete_knowledge_object_sources", "_insert_row", "_seed_fn_for",
+        "_merge_evidence_lists", "_read_ask_trace",
+    }
+    actual = {
+        node.name
+        for node in wrapper.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert actual == allowed
+    wrapper_source = ast.get_source_segment(
+        (ROOT / SQLITE_WRAPPER_FILE).read_text(encoding="utf-8"), wrapper
+    )
+    assert ".execute(" not in wrapper_source
+    assert ".executemany(" not in wrapper_source
+    assert ".executescript(" not in wrapper_source
+
+    backend_imports = {
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module
+        and node.module.startswith("app.repositories.sqlite")
+    }
+    assert backend_imports == {
+        "app.repositories.sqlite.ask_state_store",
+        "app.repositories.sqlite.bundle",
+        "app.repositories.sqlite.governance_store",
+        "app.repositories.sqlite.knowledge_store",
+        "app.repositories.sqlite.maintenance",
+        "app.repositories.sqlite.migrations",
+        "app.repositories.sqlite.sharing_store",
+    }
+
+
+def test_surface_owner_generator_requires_explicit_wrapper_ownership():
+    generator = runpy.run_path(
+        str(ROOT / "scripts" / "generate_repository_contract_fixtures.py")
+    )
+    owner_for = generator["_owner_for"]
+
+    assert owner_for("maintenance") == "SQLiteMaintenanceAdapter"
+    with pytest.raises(KeyError, match="unmapped repository surface owner"):
+        owner_for("_zzz_unmapped_zzz")
+
+
 def test_task6_facade_has_no_remaining_multi_body_or_ownership_debt():
     """Task 6 closes the exact remediation ledger instead of refreshing it."""
-    assert facade_body_violations(SQLiteRepository) == []
-    assert manifest_delegate_mismatches(SQLiteRepository, OWNER_BY_MEMBER) == []
+    assert facade_body_violations(RepositoryFacade) == []
+    assert manifest_delegate_mismatches(RepositoryFacade, OWNER_BY_MEMBER) == []
 
 
 def test_manifest_owner_matches_facade_delegate_target():
-    assert set(manifest_delegate_mismatches(SQLiteRepository, OWNER_BY_MEMBER)) == (
+    assert set(manifest_delegate_mismatches(RepositoryFacade, OWNER_BY_MEMBER)) == (
         EXPECTED_REMEDIATION_SITES["ownership"]
     )
 
 
 def test_facade_methods_are_properties_adapters_or_one_hop_delegates():
-    assert set(facade_body_violations(SQLiteRepository)) == (
+    assert set(facade_body_violations(RepositoryFacade)) == (
         EXPECTED_REMEDIATION_SITES["facade_body"]
     )
 

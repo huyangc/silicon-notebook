@@ -6,8 +6,9 @@
 
 ## 部署
 
-silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
-**无需 GPU、无需数据库服务、无需本地模型服务**。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
+silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——并由 `DATABASE_URL`
+选择唯一 repository。发行默认 SQLite **无需 GPU、无需数据库服务、无需本地模型服务**；
+准备好可访问的服务后，也可直接使用 PostgreSQL 16。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
 远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf 回退
 （`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
 
@@ -112,8 +113,8 @@ SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 
 ### 3 · 运行
 
-**没有迁移 / seed 步骤**——首次启动时后端会自建 SQLite 表结构,并创建 `.local/storage`
-与 `.local/logs` 目录,只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
+不需要手工 schema 步骤——首次启动时后端会迁移当前选中的 SQLite 或 PostgreSQL 数据存储，
+并创建 `.local/storage` 与 `.local/logs` 目录，只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
 进行中的抽取后台任务,让上传卡在 `extracting`。
 
 所有相对路径(数据库、存储、日志、`.env`)都在**代码里锚定到仓库根**,与启动脚本
@@ -166,6 +167,30 @@ Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行�
 > (`SILICON_NOTEBOOK_STORAGE_DIR=/abs/path/storage`、
 > `DATABASE_URL=sqlite:////abs/path/silicon_notebook.db`——绝对 sqlite 路径注意四条
 > 斜杠)——绝对路径的 env 值永远原样尊重,不会被重新锚定。
+
+### 3.1 · 选择 SQLite 或 PostgreSQL
+
+`DATABASE_URL` 是唯一 active backend 选择器，接受 `sqlite:///...`、
+`postgresql://...` 和会被规范化的旧别名 `postgres://...`。不支持的 scheme、建连、
+migration 或 warmup 失败都 fail closed，不会回落到另一数据库。`SHADOW_DATABASE_URL`
+只保留，不能启用 dual-write。
+
+```dotenv
+# 发行默认
+DATABASE_URL=sqlite:///.local/silicon_notebook.db
+
+# 直接使用 PostgreSQL 16
+DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+```
+
+PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 owner 可让 migration
+0001 创建，也可由 DBA 预装；同名扩展位于其他 schema 时会被拒绝。向量存为 float32
+`bytea`，不需要 pgvector。生产仍保持单 backend worker（`--workers 1`）。
+
+改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
+存量 SQLite→PostgreSQL 必须先停写、停服务、验证两端备份，执行外部受控全量迁移，
+核对表数量和代表性领域读取，再修改唯一 URL。完整切换/回滚步骤见[运维文档](./operations_zh.md)，
+离线包决策表也见 [packaging/DEPLOY.md](../packaging/DEPLOY.md)。
 
 ### 4 · 验证
 

@@ -7,11 +7,11 @@
 ## 架构边界
 
 - 后端 endpoint body 位于由 `backend/app/api/routes.py` 组合的领域 FastAPI router；聚合层只负责 composition/order，不承载产品 handler，也不提供兼容导出。边界测试直接检查领域 router 的 endpoint 所有权，并以语义 AST 检查聚合组合声明；不要假设 `include_router()` 一定把子路由平铺，因为新版 FastAPI 会保留惰性的 included-router 节点。领域 Pydantic model 位于 `backend/app/models/`；`backend/app/models/schemas.py` 是旧导入的兼容 facade，re-export 同一批 model object。
-- `SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade。application service 不拼装主业务库 SQL。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。store 共享一个 `SqliteDatabase` 连接工厂、写锁与版本闸 `SqliteMigrator`；service 保留顺序与策略。facade 每个操作要么是显式兼容 adapter，要么是源码守卫验证的单跳委托，真实目标必须与 ownership manifest 一致。消费者依赖 `backend/app/repositories/ports.py` 中可执行、按消费者划分的小型 Protocol；依赖方向单向——facade → runtime → services → stores → SQLite——未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层，调用方不动。`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim，请求 Context、`_COPY_CHUNK`、`_remap_json_ids` 等旧导出继续可 import。
+- 唯一 repository factory 按 `DATABASE_URL` 选择 `SQLiteRepository` 或 `PostgresRepository`；两者组合相同运行时边界。`RepositoryFacade` 是注入 `RepositoryRuntime` bundle 之上的后端中立 facade。application service 不拼装主业务库 SQL、不判断 dialect，也不 import 对侧 adapter。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。SQLite 保留 migration/maintenance 兼容 wrapper，PostgreSQL 拥有有界 Psycopg pool 和 checksummed migration。facade 操作仍是显式兼容 adapter 或源码守卫验证的单跳委托，真实目标必须与 ownership manifest 一致；这些单跳委托由 ownership manifest 固定。依赖方向固定为 factory/wrapper → facade → runtime → services → stores。`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim，请求 Context、`_COPY_CHUNK`、`_remap_json_ids` 等旧导出继续可 import。
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 28。已提交的 v9 兼容 fixture 会经由 v10–v28 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁瘦身的簇映射切换段增加 kg_canonical_scratch 表，v25 不可逆地清除已存的用户模型凭据与旧状态并新增按服务 ID 存储的部署级模型服务健康状态，v26 增加 knowhow 表变更流水与命名里程碑，v27 增加 sources.chunked_at 完成标记，使「已就绪但无分块」的来源历史可判定（合法的零分块解析 vs 中途失败的分块），v28 新增 app_settings 全局设置表与可空的 user_profiles.upload_document_limit 列，用于每笔记本文档数量上限。
+当前 schema 版本为 29。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v29 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 增加 kg_canonical_scratch，v25 清除旧用户模型凭据并新增部署级模型服务状态，v26 增加 knowhow 变更流水/里程碑，v27 增加 sources.chunked_at，v28 增加文档数量上限 schema，v29 确定性清理重复 cluster membership 并安装唯一索引。PostgreSQL checksummed schema manifest 当前为 v8，并声明与 SQLite v29 兼容。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
 - workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
 - 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
@@ -56,6 +56,11 @@ runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN �
 与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
 `CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
+
+PostgreSQL 覆盖与离线 full gate 明确分离。`postgres-integration` job 启动 PostgreSQL 16，
+创建最小权限与辅助 encoding/locale 目标，并通过 `bash scripts/check_postgres.sh` 只运行
+`postgres_integration` marker。本地使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL`；
+`scripts/check.sh` 不得启动或连接 PostgreSQL。
 
 CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
 路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置

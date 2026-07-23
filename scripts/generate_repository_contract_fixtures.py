@@ -73,9 +73,9 @@ COMPATIBILITY_EXPORTS = {
     "_COPY_CHUNK": ("app.services.sqlite_repository", "NotebookSharingService"),
     "_REQUEST_USER": ("app.services.sqlite_repository", "RequestContext"),
     "_concept_desc_sig": ("app.services.sqlite_repository", "KnowledgeLifecycleService"),
-    "_fast_loads": ("app.services.sqlite_repository", "QueryStore"),
-    "_new_id": ("app.services.sqlite_repository", "QueryStore"),
-    "_now": ("app.services.sqlite_repository", "QueryStore"),
+    "_fast_loads": ("app.services.sqlite_repository", "KnowledgeLifecycleService"),
+    "_new_id": ("app.services.sqlite_repository", "RepositoryCompatibilitySeams"),
+    "_now": ("app.services.sqlite_repository", "RepositoryCompatibilitySeams"),
     "_remap_json_ids": ("app.services.sqlite_repository", "NotebookSharingService"),
     "KNOWLEDGE_STATUSES": ("app.services.sqlite_repository", "KnowledgeGovernanceService"),
     "parse_source_file": ("app.services.sqlite_repository", "SourceIngestionService"),
@@ -88,6 +88,45 @@ AMBIGUOUS_MEMBER_OWNERS = {
     "list_promotion_queue": "KnowledgeGovernanceService",
     "propose_promotion": "KnowledgeGovernanceService",
     "reject_promotion": "KnowledgeGovernanceService",
+}
+
+ATTRIBUTE_MEMBER_OWNERS = {
+    "_IN_CHUNK": "RepositoryCompatibilitySeams",
+    "_kg_building": "KnowledgeLifecycleService",
+    "_kg_building_lock": "KnowledgeLifecycleService",
+    "_migrator": "SqliteDatabase",
+    "_runtime": "RepositoryRuntime",
+    "event_log": "EventLogger",
+    "maintenance": "SQLiteMaintenanceAdapter",
+    "mineru_client": "SourceIngestionService",
+    "mineru_cloud_client": "SourceIngestionService",
+    "root_dir": "RepositoryFacade",
+    "settings": "RepositoryFacade",
+}
+
+SQLITE_WRAPPER_ALLOWED_MEMBERS = {
+    "__init__", "db_path", "_write_lock", "_connect", "close_local",
+    "_clear_source_extraction_state", "_knowledge_objects", "_migrate",
+    "_migrate_legacy", "_add_column_if_missing", "_migration_1",
+    "_migration_2", "_migration_3", "_migration_4", "_migration_5",
+    "_migration_6", "_migration_7", "_migration_8", "_migration_9",
+    "_migration_10", "_migration_19", "_migration_27", "_run_migration",
+    "_recover_interrupted_jobs",
+    "_recover_interrupted_jobs_legacy", "_seed", "_seed_legacy",
+    "maintenance", "eval_insert_source_for_test",
+    "_backfill_relation_embeddings", "_source_ids_from_evidence",
+    "_delete_knowledge_object_sources", "_insert_row", "_seed_fn_for",
+    "_merge_evidence_lists", "_read_ask_trace",
+}
+
+SQLITE_WRAPPER_ALLOWED_BACKEND_IMPORTS = {
+    "app.repositories.sqlite.ask_state_store",
+    "app.repositories.sqlite.bundle",
+    "app.repositories.sqlite.governance_store",
+    "app.repositories.sqlite.knowledge_store",
+    "app.repositories.sqlite.maintenance",
+    "app.repositories.sqlite.migrations",
+    "app.repositories.sqlite.sharing_store",
 }
 
 
@@ -140,6 +179,23 @@ def _artifact_manifest(root: Path, path: Path) -> dict[str, object]:
         "size": path.stat().st_size,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
+
+
+def collect_sqlite_repository_public_callables() -> dict[str, str]:
+    """Freeze the consumer-visible callable signatures on the compatibility wrapper."""
+    surface: dict[str, str] = {}
+    for name in sorted(dir(SQLiteRepository)):
+        if name.startswith("_"):
+            continue
+        member = inspect.getattr_static(SQLiteRepository, name)
+        target = member.fget if isinstance(member, property) else member
+        if not callable(target):
+            continue
+        try:
+            surface[name] = str(inspect.signature(target))
+        except (TypeError, ValueError):
+            continue
+    return surface
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -244,6 +300,8 @@ def _owner_for(name: str) -> str:
         return explicit_export[1]
     if name in AMBIGUOUS_MEMBER_OWNERS:
         return AMBIGUOUS_MEMBER_OWNERS[name]
+    if name in ATTRIBUTE_MEMBER_OWNERS:
+        return ATTRIBUTE_MEMBER_OWNERS[name]
     identity = {
         "current_user", "create_user", "authenticate_user", "create_session",
         "resolve_session", "delete_session", "list_user_usage",
@@ -308,9 +366,9 @@ def _owner_for(name: str) -> str:
         return "SchemaRegistryService"
     if any(part in name for part in notebook_fragments):
         return "NotebookCatalogService"
-    if name in {"_connect", "_write", "_migrate", "_seed", "SCHEMA_VERSION"}:
+    if name in {"_connect", "_write", "_migrate", "_run_migration", "_seed", "SCHEMA_VERSION"} or name.startswith("_migration_"):
         return "SqliteDatabase"
-    return "QueryStore"
+    raise KeyError(f"unmapped repository surface owner: {name}")
 
 
 def _patch_compatibility(name: str, kind: str) -> str:
@@ -333,11 +391,57 @@ def _owners_at_commit(commit: str) -> dict[str, str]:
     return dict(namespace["OWNER_BY_MEMBER"])
 
 
+def _validate_sqlite_wrapper_contract() -> None:
+    """Fail fixture generation if SQLite compatibility grows backend behavior."""
+    path = REPO_ROOT / "backend/app/services/sqlite_repository.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    wrapper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SQLiteRepository"
+    )
+    actual_members = {
+        node.name
+        for node in wrapper.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    if actual_members != SQLITE_WRAPPER_ALLOWED_MEMBERS:
+        raise AssertionError(
+            "SQLiteRepository wrapper member drift: "
+            f"expected={sorted(SQLITE_WRAPPER_ALLOWED_MEMBERS)!r}, "
+            f"actual={sorted(actual_members)!r}"
+        )
+    wrapper_source = ast.get_source_segment(source, wrapper) or ""
+    forbidden_sql = {
+        token for token in (".execute(", ".executemany(", ".executescript(")
+        if token in wrapper_source
+    }
+    if forbidden_sql:
+        raise AssertionError(
+            f"SQLiteRepository wrapper contains SQL execution: {sorted(forbidden_sql)!r}"
+        )
+    backend_imports = {
+        node.module
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module
+        and node.module.startswith("app.repositories.sqlite")
+    }
+    if backend_imports != SQLITE_WRAPPER_ALLOWED_BACKEND_IMPORTS:
+        raise AssertionError(
+            "SQLiteRepository wrapper backend import drift: "
+            f"expected={sorted(SQLITE_WRAPPER_ALLOWED_BACKEND_IMPORTS)!r}, "
+            f"actual={sorted(backend_imports)!r}"
+        )
+
+
 def collect_facade_surface(
     *,
     owner_by_member: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, object]]:
     """Collect the consumer-visible facade and compatibility patch surface."""
+    _validate_sqlite_wrapper_contract()
     if owner_by_member is None:
         from app.repositories.ownership_manifest import OWNER_BY_MEMBER
 
@@ -345,6 +449,7 @@ def collect_facade_surface(
     from app.services import repository as repository_module
     from app.services import sqlite_repository as module
     from app.services.ask_modes import ASK_MODES
+    from app.services.repository_facade import RepositoryFacade
     from app.services.sqlite_repository import SQLiteRepository
     from tests.test_repository_facade_contract import facade_delegate_evidence
 
@@ -358,13 +463,16 @@ def collect_facade_surface(
             ):
                 class_members[name] = value
 
-    source_tree = ast.parse(
-        (REPO_ROOT / "backend/app/services/sqlite_repository.py").read_text(
-            encoding="utf-8"
+    source_trees = tuple(
+        ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+        for relative in (
+            "backend/app/services/repository_facade.py",
+            "backend/app/services/sqlite_repository.py",
         )
     )
     instance_attributes = {
         node.targets[0].attr
+        for source_tree in source_trees
         for node in ast.walk(source_tree)
         if isinstance(node, ast.Assign)
         and len(node.targets) == 1
@@ -374,6 +482,7 @@ def collect_facade_surface(
     }
     instance_attributes |= {
         node.target.attr
+        for source_tree in source_trees
         for node in ast.walk(source_tree)
         if isinstance(node, ast.AnnAssign)
         and isinstance(node.target, ast.Attribute)
@@ -390,7 +499,7 @@ def collect_facade_surface(
     delegate_owners = {
         name: owner
         for name, owner in facade_delegate_evidence(
-            SQLiteRepository,
+            RepositoryFacade,
             {name: "" for name in candidate_names},
         ).items()
         if owner
@@ -429,7 +538,7 @@ def collect_facade_surface(
             continue
         scopes = _semantic_scopes(tree)
         module_aliases = {"sqlite_repository"}
-        class_aliases = {"SQLiteRepository"}
+        class_aliases = {"SQLiteRepository", "RepositoryFacade"}
         for import_node in ast.walk(tree):
             if isinstance(import_node, ast.Import):
                 for alias in import_node.names:
@@ -444,10 +553,13 @@ def collect_facade_surface(
                         module_aliases.add(alias.asname or alias.name)
             elif (
                 isinstance(import_node, ast.ImportFrom)
-                and import_node.module == "app.services.sqlite_repository"
+                and import_node.module in {
+                    "app.services.repository_facade",
+                    "app.services.sqlite_repository",
+                }
             ):
                 for alias in import_node.names:
-                    if alias.name == "SQLiteRepository":
+                    if alias.name in {"RepositoryFacade", "SQLiteRepository"}:
                         class_aliases.add(alias.asname or alias.name)
 
         for node in ast.walk(tree):
@@ -490,6 +602,7 @@ def collect_facade_surface(
             )
         }
         facade_classes = {
+            "RepositoryFacade",
             "SQLiteRepository",
             "SQLiteIdentityMixin",
             "SQLiteNotebookSharingMixin",
@@ -736,6 +849,13 @@ def collect_facade_surface(
                 signature = type(value).__name__
         else:
             continue
+        owner = delegate_owners.get(name)
+        if owner is None:
+            owner = (
+                owner_by_member[name]
+                if name in owner_by_member
+                else _owner_for(name)
+            )
         surface[name] = {
             "kind": kind,
             "scope": scope,
@@ -744,10 +864,7 @@ def collect_facade_surface(
                 consumers[name][key]
                 for key in sorted(consumers[name])
             ],
-            "owner": delegate_owners.get(
-                name,
-                owner_by_member.get(name, _owner_for(name)),
-            ),
+            "owner": owner,
             "patch_targets": [
                 patches[name][key]
                 for key in sorted(patches[name])
@@ -866,6 +983,7 @@ def _deterministic_runtime() -> Iterator[None]:
     from app.services import embedding
     from app.services import model_provider
     from app.services import rerank_client
+    from app.services import repository_facade
     from app.services import sqlite_identity
     from app.services import sqlite_notebook_sharing
     from app.services import sqlite_repository
@@ -2669,6 +2787,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Living characterization contracts: re-blessed against the current runtime.
     _write_phase_contracts(contract_dir)
+    _write_json(
+        contract_dir / "sqlite_repository_public_callables.json",
+        collect_sqlite_repository_public_callables(),
+    )
     generate_ask_goldens(contract_dir / "ask_responses.json")
     generate_api_contract(contract_dir / "api_contract.json")
 

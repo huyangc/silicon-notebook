@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_type_hints
 
 from app.repositories.ports import (
@@ -21,6 +22,27 @@ from tests.architecture.semantic_source import qualified_scopes
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = (ROOT / "backend" / "app", ROOT / "scripts")
 EXPECTED_REMEDIATION_SITES = set()
+BUNDLE_STORE_SEATS = (
+    ("database", "database", "RepositoryDatabasePort"),
+    ("identity", "identity", "IdentityStorePort"),
+    ("notebooks", "notebook_store", "NotebookStorePort"),
+    ("sharing", "sharing_store", "SharingStorePort"),
+    ("sources", "source_store", "SourceStorePort"),
+    ("chunks", "chunk_store", "ChunkStorePort"),
+    ("embeddings", "embedding_store", "EmbeddingStorePort"),
+    ("knowledge", "knowledge", "KnowledgeStorePort"),
+    ("governance", "governance", "GovernanceStorePort"),
+    ("index_projection", "index_projections", "IndexProjectionStorePort"),
+    ("kg_build_jobs", "kg_build_jobs", "KgBuildJobStorePort"),
+    ("knowhow", "knowhow_store", "KnowhowStorePort"),
+    ("knowhow_transfer", "knowhow_transfer_store", "KnowhowTransferStorePort"),
+    ("memory", "memory_store", "MemoryStorePort"),
+    ("queries", "queries", "QueryStorePort"),
+    ("reports", "report_store", "ReportStorePort"),
+    ("ask_state", "ask_state", "AskStateStorePort"),
+    ("unified_kg", "unified_kg", "UnifiedKgStorePort"),
+)
+FACADE_PATH = ROOT / "backend" / "app" / "services" / "repository_facade.py"
 
 
 @dataclass(frozen=True, order=True)
@@ -204,6 +226,38 @@ def _parameter_contract(callable_):
     ]
 
 
+def _bundle_facade_calls() -> dict[str, set[str]]:
+    """Methods that Task 3 must preserve when it injects the bundle."""
+    tree = ast.parse(FACADE_PATH.read_text(encoding="utf-8"), filename=str(FACADE_PATH))
+    calls = {runtime_name: set() for _, runtime_name, _ in BUNDLE_STORE_SEATS}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        receiver = node.func.value
+        if not (
+            isinstance(receiver, ast.Attribute)
+            and isinstance(receiver.value, ast.Attribute)
+            and isinstance(receiver.value.value, ast.Name)
+            and receiver.value.value.id == "self"
+            and receiver.value.attr == "_runtime"
+            and receiver.attr in calls
+        ):
+            continue
+        calls[receiver.attr].add(node.func.attr)
+    return calls
+
+
+def _protocol_methods(protocol) -> dict[str, object]:
+    methods: dict[str, object] = {}
+    for base in reversed(protocol.__mro__):
+        for name, value in base.__dict__.items():
+            if (
+                callable(value) or isinstance(value, (staticmethod, classmethod))
+            ) and not name.startswith("__"):
+                methods[name] = getattr(protocol, name)
+    return methods
+
+
 def test_model_client_ports_match_concrete_call_signatures():
     from app.core.llm import OpenAICompatibleClient
     from app.repositories.ports import JsonChatClientPort, RerankClientPort
@@ -233,3 +287,192 @@ def test_batch_repository_returns_typed_consumer_projections():
     assert hints["return"] is ScaleBuildManifest
     assert KGBuildResult.__required_keys__ >= {"built", "failed"}
     assert ScaleBuildManifest.__optional_keys__ == {"n_nodes"}
+
+
+def test_sqlite_stores_structurally_satisfy_every_persistence_bundle_port():
+    from app.repositories import ports
+    from app.repositories.bundle import PersistenceBundle
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+    from app.repositories.sqlite.chunk_store import ChunkStore
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.embedding_store import EmbeddingStore
+    from app.repositories.sqlite.governance_store import GovernanceStore
+    from app.repositories.sqlite.identity_store import IdentityStore
+    from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+    from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_store import KnowhowStore
+    from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+    from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.notebook_store import NotebookStore
+    from app.repositories.sqlite.query_store import QueryStore
+    from app.repositories.sqlite.report_store import ReportStore
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    sqlite_stores = {
+        "database": SqliteDatabase,
+        "identity": IdentityStore,
+        "notebooks": NotebookStore,
+        "sharing": SharingStore,
+        "sources": SourceStore,
+        "chunks": ChunkStore,
+        "embeddings": EmbeddingStore,
+        "knowledge": KnowledgeStore,
+        "governance": GovernanceStore,
+        "index_projection": IndexProjectionStore,
+        "kg_build_jobs": KgBuildJobStore,
+        "knowhow": KnowhowStore,
+        "knowhow_transfer": KnowhowTransferStore,
+        "memory": MemoryStore,
+        "queries": QueryStore,
+        "reports": ReportStore,
+        "ask_state": AskStateStore,
+        "unified_kg": UnifiedKgStore,
+    }
+    stores = {name: object.__new__(store) for name, store in sqlite_stores.items()}
+    bundle = SimpleNamespace(
+        **{
+            bundle_name: stores[bundle_name]
+            for bundle_name, _, _ in BUNDLE_STORE_SEATS
+        }
+    )
+
+    assert set(get_type_hints(PersistenceBundle)) == {
+        bundle_name for bundle_name, _, _ in BUNDLE_STORE_SEATS
+    }
+    assert isinstance(bundle, PersistenceBundle)
+    for bundle_name, _, port_name in BUNDLE_STORE_SEATS:
+        assert isinstance(getattr(bundle, bundle_name), getattr(ports, port_name))
+
+
+def test_bundle_ports_cover_facade_store_calls_and_match_sqlite_signatures():
+    from app.repositories import ports
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+    from app.repositories.sqlite.chunk_store import ChunkStore
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.embedding_store import EmbeddingStore
+    from app.repositories.sqlite.governance_store import GovernanceStore
+    from app.repositories.sqlite.identity_store import IdentityStore
+    from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+    from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_store import KnowhowStore
+    from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+    from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.notebook_store import NotebookStore
+    from app.repositories.sqlite.query_store import QueryStore
+    from app.repositories.sqlite.report_store import ReportStore
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    sqlite_stores = {
+        "database": SqliteDatabase,
+        "identity": IdentityStore,
+        "notebook_store": NotebookStore,
+        "sharing_store": SharingStore,
+        "source_store": SourceStore,
+        "chunk_store": ChunkStore,
+        "embedding_store": EmbeddingStore,
+        "knowledge": KnowledgeStore,
+        "governance": GovernanceStore,
+        "index_projections": IndexProjectionStore,
+        "kg_build_jobs": KgBuildJobStore,
+        "knowhow_store": KnowhowStore,
+        "knowhow_transfer_store": KnowhowTransferStore,
+        "memory_store": MemoryStore,
+        "queries": QueryStore,
+        "report_store": ReportStore,
+        "ask_state": AskStateStore,
+        "unified_kg": UnifiedKgStore,
+    }
+    calls = _bundle_facade_calls()
+    missing: dict[str, set[str]] = {}
+    for _, runtime_name, port_name in BUNDLE_STORE_SEATS:
+        protocol_methods = _protocol_methods(getattr(ports, port_name))
+        missing[runtime_name] = calls[runtime_name] - set(protocol_methods)
+        for name, protocol_method in protocol_methods.items():
+            store_method = getattr(sqlite_stores[runtime_name], name)
+            assert _parameter_contract(protocol_method) == _parameter_contract(
+                store_method
+            ), (runtime_name, name)
+    assert missing == {runtime_name: set() for _, runtime_name, _ in BUNDLE_STORE_SEATS}
+
+
+def test_static_store_helpers_remain_static_and_keep_their_first_real_argument():
+    from app.repositories import ports
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+    from app.repositories.sqlite.chunk_store import ChunkStore
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.embedding_store import EmbeddingStore
+    from app.repositories.sqlite.governance_store import GovernanceStore
+    from app.repositories.sqlite.identity_store import IdentityStore
+    from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+    from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_store import KnowhowStore
+    from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+    from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.notebook_store import NotebookStore
+    from app.repositories.sqlite.query_store import QueryStore
+    from app.repositories.sqlite.report_store import ReportStore
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    sqlite_stores = {
+        "database": SqliteDatabase,
+        "identity": IdentityStore,
+        "notebook_store": NotebookStore,
+        "sharing_store": SharingStore,
+        "source_store": SourceStore,
+        "chunk_store": ChunkStore,
+        "embedding_store": EmbeddingStore,
+        "knowledge": KnowledgeStore,
+        "governance": GovernanceStore,
+        "index_projections": IndexProjectionStore,
+        "kg_build_jobs": KgBuildJobStore,
+        "knowhow_store": KnowhowStore,
+        "knowhow_transfer_store": KnowhowTransferStore,
+        "memory_store": MemoryStore,
+        "queries": QueryStore,
+        "report_store": ReportStore,
+        "ask_state": AskStateStore,
+        "unified_kg": UnifiedKgStore,
+    }
+
+    def descriptor(cls, name):
+        return next(base.__dict__[name] for base in cls.__mro__ if name in base.__dict__)
+
+    def descriptor_kind(value):
+        if isinstance(value, staticmethod):
+            return "static"
+        if isinstance(value, classmethod):
+            return "class"
+        return "instance"
+
+    receiver = object()
+    for _, runtime_name, port_name in BUNDLE_STORE_SEATS:
+        protocol = getattr(ports, port_name)
+        concrete = sqlite_stores[runtime_name]
+        for name in _protocol_methods(protocol):
+            concrete_descriptor = descriptor(concrete, name)
+            protocol_descriptor = descriptor(protocol, name)
+            kind = descriptor_kind(concrete_descriptor)
+            assert descriptor_kind(protocol_descriptor) == kind, (
+                protocol.__name__, name,
+            )
+            if kind in {"static", "class"}:
+                bound_protocol = protocol_descriptor.__get__(receiver, protocol)
+                bound_concrete = concrete_descriptor.__get__(receiver, concrete)
+                assert _parameter_contract(bound_protocol) == _parameter_contract(
+                    bound_concrete
+                ), (protocol.__name__, name)
+            else:
+                assert _parameter_contract(
+                    getattr(protocol, name)
+                ) == _parameter_contract(getattr(concrete, name)), (
+                    protocol.__name__, name,
+                )

@@ -4,7 +4,7 @@ from datetime import datetime
 
 
 def _now() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
 def _repository_new_id(prefix: str) -> str:
@@ -12,9 +12,9 @@ def _repository_new_id(prefix: str) -> str:
     # Task 9: production code now reaches this policy through
     # RepositoryCompatibilitySeams.new_id; kept as a documented compatibility
     # helper for external callers of this module.
-    from app.services import sqlite_repository
+    from app.services.sqlite_repository import _new_id
 
-    return sqlite_repository._new_id(prefix)
+    return _new_id(prefix)
 
 
 def _copy_chunk_size() -> int:
@@ -22,9 +22,9 @@ def _copy_chunk_size() -> int:
     # Task 9: production code now reads it through
     # RepositoryCompatibilitySeams.copy_chunk_size (same late binding); kept
     # as a documented compatibility helper for external callers.
-    from app.services import sqlite_repository
+    from app.services.sqlite_repository import _COPY_CHUNK
 
-    return int(sqlite_repository._COPY_CHUNK)
+    return int(_COPY_CHUNK)
 
 
 def _remap_json_ids(value, maps: dict):
