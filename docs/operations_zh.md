@@ -108,24 +108,93 @@ SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「
 
 ## SQLite / PostgreSQL 切换与回滚
 
-运行时只有一个 active database，应用不做 dual-write。只有外部迁移工具/流程已经复制并验证
-存量数据后，才能按此 runbook 切换；只改 `DATABASE_URL` 只会打开另一份数据存储。
+运行时只有一个 active database，应用不做 dual-write。仓库内 importer 只提供单向
+SQLite→PostgreSQL 快照迁移；只改 `DATABASE_URL` 只会打开另一份数据存储。它不迁 MySQL、
+不持续捕获后续写入、不回放 PostgreSQL→SQLite，也不复制 source/upload/asset 文件。
 
-1. 宣布停写，并停止所有 API、后台任务、MCP、batch 与 maintenance writer；等待进行中事务
-   结束后停止后端。
-2. SQLite 使用 backup API（或完全停机并正确处理 WAL）备份；PostgreSQL 使用已演练的
-   `pg_dump --format=custom`/`pg_restore` 或组织标准物理备份。记录 checksum 与恢复演练回执。
-3. 外部复制必须保留主键、ordinal 顺序值、JSON null、UTF-8、时间戳和 float32 向量字节。
-   切换前比较 schema 版本、表数量、稳定键集合、内容哈希、存储引用，以及认证/问答/知识/
-   Memory/Knowhow/报告的代表性读取。
-4. 只修改 `DATABASE_URL`，以单 worker 启动；放流量前必须通过脱敏 database status、
-   `/api/ready`、管理员与普通用户登录、notebook/source 数量、搜索、一次写事务和后台任务恢复。
-5. 观察期内保持源备份不可变。PostgreSQL 尚无业务写入时，可停机改回 URL 并重复 smoke；一旦
-   已有 PG 写入，直接改回会丢数据，必须再次停写，外部对账 PostgreSQL→SQLite，验证两端后
-   才能恢复 SQLite。
+### 1. 准备空目标并预检
 
-若故障发生在放流量前或 PostgreSQL 尚无业务写入，可保持目标停止并恢复原 SQLite URL。
-不得把 SQLite maintenance 命令指向 PostgreSQL；`scripts/batch_ingest.py` 的变更阶段仍只支持 SQLite。
+创建专用的 UTF-8 PostgreSQL 数据库。不要指向已有应用库：任一业务表有行都会 fail closed。
+URL 通过环境变量传入，不放进命令参数：
+
+```bash
+export POSTGRES_MIGRATION_URL='postgresql://USER:PASSWORD@HOST:5432/EMPTY_DB'
+
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db
+```
+
+默认只做只读 preflight：检查 SQLite 身份/schema 与 PostgreSQL UTF-8、current schema、空库和
+migration ledger，然后退出；不会创建快照或写目标。磁盘要同时容纳 SQLite 快照、升级工作副本、
+PostgreSQL 数据与索引；目标用户还必须能在 `public` 安装/使用 `pg_trgm`。
+
+### 2. SQLite 在线时先做演练
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --apply
+```
+
+工具使用 SQLite backup API，能包含已提交 WAL，不会错误地裸复制 live `.db`。它只升级私有
+快照副本，按 FK 顺序和有界 batch 流式 COPY，保留历史 ordinal，把旧 JSON 向量转换为
+float32 `bytea`；PostgreSQL 无法表示的 NUL codepoint 会以可逆字面量 `\\u0000` 保存。随后
+逐表做内容 checksum、重建索引、执行 `ANALYZE`，并在一个目标事务中提交全部数据。无凭据
+receipt 记录每表数量/checksum 与全部 NUL normalization。退役 SQLite 表为空时只记录不复制；
+只要其中一张非空就拒绝迁移，绝不静默丢历史数据。
+
+若目标在提交前失败，业务表仍为空。要重试同一个时间点而不再复制数 GB 源库，只能显式传入
+本工具生成的 sealed snapshot：
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --snapshot /protected/path/postgres-migration/sqlite-vNN-HASH.snapshot.db \
+  --apply
+```
+
+工具会重新验证目录、文件名、SHA-256 前缀、`quick_check`、schema 版本以及不存在 WAL/SHM。
+不要因为旧演练成功就拿其 `--snapshot` 做正式切换：快照之后的 SQLite commit 不在里面。
+
+### 3. 正式从 SQLite 切到 PostgreSQL
+
+1. 公告维护窗口。停止所有 API、后台 worker、会写数据的 MCP 客户端、batch/maintenance 和
+   scheduler；等进行中写入结束后停止后端。
+2. 创建一个**新的空最终 PostgreSQL 数据库**。演练目标保存的是旧时间点，会被工具主动拒绝。
+   同时按部署策略完成 SQLite、PostgreSQL 常规备份与恢复演练。
+3. 对已停止的 SQLite 源重新执行 preview 与 `--apply`，不要用旧 `--snapshot`。保留最终 sealed
+   snapshot 和 receipt。确认新部署仍能访问同一个 `SILICON_NOTEBOOK_STORAGE_DIR`；若换主机，
+   单独复制并校验这个目录，因为 DB importer 不复制文件。
+4. 先备份 `.env`，再只改唯一 selector。SQLite 写法：
+
+   ```text
+   DATABASE_URL=sqlite:///.local/silicon_notebook.db
+   ```
+
+   PostgreSQL 写法：
+
+   ```text
+   DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/FINAL_DB
+   ```
+
+   不要拿 `SHADOW_DATABASE_URL` 当 selector，也不要留下两行未注释的 `DATABASE_URL`。重启后端；
+   部署仍固定 `--workers 1`。
+5. 放流量前要求 `curl -fsS http://127.0.0.1:8000/api/ready` 返回 `"ready": true`；分别用 admin
+   和普通用户登录；按 receipt 核对 notebook/source 数量；检查搜索和 Ask/Knowledge/Memory/
+   Knowhow/report 代表性读取与引用文件；最后做一次明确批准的 canary 写入并等其后台任务结束。
+   全部通过后才恢复流量。
+
+### 4. 安全切回 SQLite
+
+- PostgreSQL 尚未接受任何业务写入时，可以停后端、把 `DATABASE_URL` 恢复成 SQLite、以单 worker
+  启动并重复 readiness/认证/数量/读取 smoke。
+- 第一次 PG 业务写入之后，直接改 URL 会丢这次及后续写入。仓库没有 reverse importer 或
+  dual-write log；必须再次停写，在外部完成 PostgreSQL→SQLite 对账（包括 storage 副作用），
+  验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。
+- 开发时反复切 URL 只是选择两条彼此独立的历史，任何一边都不会自动同步。选择 PostgreSQL 时
+  不得运行 SQLite-only maintenance 或 `scripts/batch_ingest.py` 的变更阶段。
 
 ## 用 MinerU 解析 PDF
 

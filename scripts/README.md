@@ -56,6 +56,20 @@ PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 contracts + 后端测试/离线 smoke + 前端测试/tsc/build 三条 lane 并行执行。脚本会强制 `MODEL_SERVICES_CONFIG=""`，不读取开发者真实密钥，也不会访问付费/网络模型服务；EXIT=0 即过。
 
+### `migrate_sqlite_to_postgres.py` —— SQLite 存量迁移到 PostgreSQL
+
+默认只预检；目标必须是空的 PostgreSQL 16 UTF-8 数据库，URL 从环境变量读取而不出现在 CLI 参数：
+
+```bash
+export POSTGRES_MIGRATION_URL='postgresql://USER:PASSWORD@HOST:5432/EMPTY_DB'
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/.local/silicon_notebook.db
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/.local/silicon_notebook.db --apply
+```
+
+失败发生在目标数据提交前时，目标业务表保持空；可显式用 `--snapshot` 复用本工具生成的 sealed snapshot。脚本会重新检查目录、文件名/hash、`quick_check`、schema 版本和 WAL/SHM sidecar，不接受任意 SQLite 文件。在线运行只得到某一时刻的一致演练快照，不会同步后续写入；正式切换的停写、URL 修改和回滚步骤见 `docs/operations_zh.md`。脚本只迁 DB 行，不复制 `.local/storage`，也不支持 MySQL。
+
 ---
 
 ## 二、检索 / chunk 运维

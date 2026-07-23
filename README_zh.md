@@ -124,7 +124,7 @@ bash scripts/check.sh
 
 ### SQLite / PostgreSQL 切换
 
-应用不会双写。`SHADOW_DATABASE_URL` 只为未来迁移工具保留，不能选择 active backend，也不会同步数据。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。
+应用不会双写。`SHADOW_DATABASE_URL` 是保留配置，不能选择 active backend，也不会同步数据。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。silicon-notebook 的既有 SQLite 数据使用默认 dry-run 的离线工具 `scripts/migrate_sqlite_to_postgres.py` 迁移；它不是 MySQL importer。
 
 - 在发行默认的 SQLite 后端上，搜索使用 SQLite FTS/向量存储；PostgreSQL 后端改用 `pg_trgm`/`ILIKE`。float32 向量仍存为 `bytea`，不安装也不需要 pgvector。
 - PostgreSQL 要求 `pg_trgm` 必须安装在 `public` schema。可用不回显凭据的查询检查：
@@ -137,11 +137,12 @@ bash scripts/check.sh
   ```
 
   `pg_trgm | public` 表示前置条件已就绪。若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`；既有 `pg_trgm` 位于其他 schema 时会 fail closed。
-- 切换必须走“停写 → 停后端 → 制作并验证一致备份 → 只改一个 `DATABASE_URL` → 以 `--workers 1` 启动 → 校验 status、`/api/ready`、登录、数量和代表性读取 → 放流量”。
+- importer 要求目标 PostgreSQL 是空的且使用 UTF-8；目标 URL 只从 `POSTGRES_MIGRATION_URL` 读取，不放在 CLI 参数中。它用 SQLite backup API 获取包含已提交 WAL 的在线一致快照，只在工作副本上升级到配对 schema，按有界 batch 流式 `COPY`，保留 ordinal，把旧 JSON 向量转换成 float32 `bytea`，逐表做内容 checksum，重建索引并 `ANALYZE`，最后在一个目标事务中提交。它不会修改 `DATABASE_URL`，也不会复制 `.local/storage`。
+- 在线迁移只能算演练快照：快照之后继续写入 SQLite 的数据不会被同步。正式切换必须先停止所有 writer 和后端，再迁到一个新的空目标；随后只改 `DATABASE_URL`、用 `--workers 1` 启动，并在放流量前检查 `/api/ready`、登录、数量、搜索、代表性读取和一次 canary 写入。
 - 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
 - `scripts/batch_ingest.py` 的变更阶段仅支持 SQLite；PostgreSQL 请使用正常应用/API 摄取和 KG/索引流程。
 
-完整决策表、备份规则和回滚步骤见[部署与配置](./docs/deployment-and-configuration_zh.md)与[运维文档](./docs/operations_zh.md)。
+preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
@@ -163,7 +164,7 @@ bash scripts/check.sh
 
 ## 当前边界
 
-- SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。两者之间的存量数据仍需外部受控迁移并验证。
+- SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。仓库提供经过校验的单向 SQLite→PostgreSQL 快照 importer；它不提供实时同步、PostgreSQL→SQLite 回放或 MySQL 迁移。
 - Docker 不是一期默认工作流，也不是运行前提。
 - 公式、表格、版面和扫描 PDF 的高保真解析需要 MinerU；`MINERU_MODE=off` 使用 pypdf 文本降级。
 - 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。

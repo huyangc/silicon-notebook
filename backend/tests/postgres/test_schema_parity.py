@@ -15,6 +15,14 @@ import pytest
 from app.core.config import Settings
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
+from app.repositories.postgres.schema_manifest import (
+    POSTGRES_BUSINESS_TABLES,
+    POSTGRES_BYTEA_COLUMNS,
+    POSTGRES_EMPTY_JSON_LIST_SENTINELS,
+    POSTGRES_EMPTY_TIME_SENTINELS,
+    POSTGRES_JSON_COLUMNS,
+    SQLITE_RETIRED_TABLES,
+)
 from tests.postgres.conftest import (
     _database_catalog,
     _url_with_search_path,
@@ -31,68 +39,10 @@ MIGRATIONS_PATH = (
 # These are reviewed application-owned JSON values. Keeping the classification
 # explicit prevents a new TEXT column from silently becoming jsonb merely
 # because its name happens to contain "json".
-JSON_COLUMNS = {
-    "agent_access_tokens.scopes_json",
-    "answers.payload",
-    "ask_jobs.trace_json",
-    "ask_trace_steps.step_json",
-    "canonical_relations.sample_relation_ids",
-    "chunks.element_ids",
-    "communities.findings",
-    "communities.member_ids",
-    "kg_conflict_candidates.resolved_payload",
-    "kg_rebuild_checkpoint.payload",
-    "knowledge_objects.evidence",
-    "knowledge_objects.payload",
-    "knowledge_relations.evidence",
-    "memory_items.tags_json",
-    "memory_provenance.payload_json",
-    "memory_revisions.tags_json",
-    "notebooks.expected_questions",
-    "notebooks.source_types",
-    "notebooks.taxonomy",
-    "object_schemas.fields",
-    "object_schemas.list_fields",
-    "reports.gaps_json",
-    "reports.outline_json",
-    "reports.references_json",
-    "reports.section_status_json",
-    "reports.sections_json",
-    "source_elements.metadata",
-    "source_paper_meta.keywords",
-    "source_paper_meta.raw_json",
-    "user_profiles.domain_focus",
-    "user_profiles.model_settings",
-}
-
-BYTEA_COLUMNS = {
-    "chunk_embeddings.vector",
-    "element_embeddings.vector",
-    "knowledge_embeddings.vector",
-    "memory_embeddings.vector",
-    "relation_embeddings.vector",
-}
-
-EMPTY_JSON_LIST_SENTINELS = {
-    "ask_jobs.trace_json",
-    "notebooks.expected_questions",
-    "notebooks.source_types",
-    "notebooks.taxonomy",
-}
-
-# SQLite used a non-null empty string as an optional-time sentinel in these
-# legacy columns. PostgreSQL normalizes it to NULL so the column can remain a
-# real timestamptz; row mappers preserve the existing domain-facing empty value.
-EMPTY_TIME_SENTINELS = {
-    "ask_jobs.created_at",
-    "ask_jobs.updated_at",
-    "ask_trace_steps.created_at",
-    "kg_build_jobs.finished_at",
-    "knowledge_objects.last_reviewed",
-    "merge_review_jobs.started_at",
-    "merge_review_jobs.updated_at",
-    "unified_kg_state.last_rebuild_at",
-}
+JSON_COLUMNS = POSTGRES_JSON_COLUMNS
+BYTEA_COLUMNS = POSTGRES_BYTEA_COLUMNS
+EMPTY_JSON_LIST_SENTINELS = POSTGRES_EMPTY_JSON_LIST_SENTINELS
+EMPTY_TIME_SENTINELS = POSTGRES_EMPTY_TIME_SENTINELS
 
 EXPECTED_FTS_ROOTS = {"chunks_fts", "kg_objects_fts", "memory_items_fts"}
 EXPECTED_ORDINARY_TABLE_COUNT = 60
@@ -1006,6 +956,8 @@ def test_reviewed_json_and_binary_mappings_cover_only_real_columns(tmp_path):
     assert EMPTY_JSON_LIST_SENTINELS <= qualified
     assert EMPTY_TIME_SENTINELS <= qualified
     assert set(POSTGRES_ROWID_ORDINAL_TABLES) == set(ROWID_ORDER_EVIDENCE)
+    assert set(POSTGRES_BUSINESS_TABLES) == set(contract["tables"])
+    assert set(SQLITE_RETIRED_TABLES).isdisjoint(POSTGRES_BUSINESS_TABLES)
     assert contract["ordinal_evidence"] == ROWID_ORDER_EVIDENCE
     fingerprint = hashlib.sha256(
         "\n".join(sorted(contract["tables"])).encode("utf-8")
@@ -1059,7 +1011,7 @@ def test_packaged_index_migration_phases_are_exact():
     ]
     operational = [
         declaration
-        for version in (3, 4, 5)
+        for version in (3, 4, 5, 8)
         for declaration in index_declarations(version)
     ]
     assert len(operational) == 73

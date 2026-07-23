@@ -124,7 +124,7 @@ Optional external services
 
 ### SQLite / PostgreSQL switching
 
-The application never dual-writes. `SHADOW_DATABASE_URL` is reserved for future migration tooling and cannot select or synchronize the active backend. Changing `DATABASE_URL` does not copy, migrate, or synchronize existing data.
+The application never dual-writes. `SHADOW_DATABASE_URL` is reserved and cannot select or synchronize the active backend. Changing `DATABASE_URL` alone does not copy, migrate, or synchronize existing data. Existing silicon-notebook SQLite data is migrated with the offline, dry-run-first `scripts/migrate_sqlite_to_postgres.py` tool; it is not a MySQL importer.
 
 - On the shipped SQLite default, search uses SQLite FTS/vector storage. The PostgreSQL backend uses `pg_trgm`/`ILIKE`; float32 vectors remain `bytea`, so pgvector is not installed or required.
 - `pg_trgm` must be installed in the `public` schema. Check it without exposing credentials:
@@ -137,11 +137,12 @@ The application never dual-writes. `SHADOW_DATABASE_URL` is reserved for future 
   ```
 
   `pg_trgm | public` means the prerequisite is ready. If the query returns no row, the first migration automatically attempts `CREATE EXTENSION pg_trgm`; an existing `pg_trgm` in any other schema fails closed.
-- Switch with a stop/change/start boundary: quiesce writes, stop the backend, take and verify a consistent backup, change the single `DATABASE_URL`, start with `--workers 1`, then verify status, `/api/ready`, login, counts, and representative reads before sending traffic.
+- The importer requires an empty UTF-8 PostgreSQL target, reads its URL from `POSTGRES_MIGRATION_URL` (never a URL CLI argument), takes an online SQLite backup-API snapshot including committed WAL state, upgrades only a working copy to the paired schema, streams bounded `COPY`, preserves ordinal values, converts legacy JSON vectors to float32 `bytea`, verifies every table with content checksums, rebuilds indexes/`ANALYZE`, and commits target data in one transaction. It never changes `DATABASE_URL` or copies `.local/storage`.
+- An online import is a rehearsal snapshot only: SQLite writes committed after its snapshot are not synchronized. The final switch must quiesce every writer, stop the backend, migrate again into a new empty target, then change the single `DATABASE_URL`, start with `--workers 1`, and verify `/api/ready`, login, counts, search, representative reads, and one canary write before sending traffic.
 - Returning to SQLite cannot replay PostgreSQL-only writes. Lossless rollback therefore requires no post-cutover writes or an externally reconciled and verified migration in both directions.
 - `scripts/batch_ingest.py` mutation phases are SQLite-only; on PostgreSQL use the normal application/API ingestion and KG/index flows.
 
-The complete decision table, backup rules, and rollback procedure are in [Deployment and configuration](./docs/deployment-and-configuration.md) and [Operations](./docs/operations.md).
+Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
 
@@ -163,7 +164,7 @@ Chinese counterparts are linked from the top of each split document.
 
 ## Current boundaries
 
-- SQLite is the shipped default; PostgreSQL 16 is a supported direct backend. Existing data still requires an externally controlled, verified migration between them.
+- SQLite is the shipped default; PostgreSQL 16 is a supported direct backend. The repository includes a verified one-way SQLite→PostgreSQL snapshot importer; it does not provide live synchronization, PostgreSQL→SQLite replay, or MySQL migration.
 - No Docker is required or provided as the default first-version workflow.
 - High-fidelity formulas, tables, layout, and scanned PDFs require MinerU; `MINERU_MODE=off` uses pypdf text fallback.
 - Knowledge extraction and model-backed answers require the relevant workload bindings; offline mode does not synthesize knowledge.

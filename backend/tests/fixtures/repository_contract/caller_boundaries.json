@@ -533,6 +533,166 @@
       "target": "db.execute"
     },
     {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._assert_target_empty",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._copy_order",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._copy_table",
+      "target": "sqlite_connection.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._drop_rebuildable_indexes",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._lock_business_tables",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._postgres_columns",
+      "target": "connection.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._reseed_ordinal",
+      "target": "connection.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._sqlite_business_tables",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._sqlite_columns",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._sqlite_read_only",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._target_digest",
+      "target": "cursor.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._target_tables",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.copy_snapshot_to_postgres",
+      "target": "source.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.copy_snapshot_to_postgres",
+      "target": "target.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.create_consistent_snapshot",
+      "target": "check.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.create_consistent_snapshot",
+      "target": "target_connection.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.inspect_source",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.inspect_target",
+      "target": "connection.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.prepare_upgraded_snapshot",
+      "target": "connection.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.validate_existing_snapshot",
+      "target": "connection.execute"
+    },
+    {
       "count": 4,
       "kind": "independent_sql",
       "path": "scripts/backfill_knowhow_md.py",
@@ -948,6 +1108,30 @@
       "path": "backend/app/eval/db.py",
       "reason": "independent evaluation-results database",
       "scope": "<module>.EvalDB._connect",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>._sqlite_read_only",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 2,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.create_consistent_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/sqlite_to_postgres.py",
+      "reason": "owned offline cross-backend snapshot-import boundary",
+      "scope": "<module>.prepare_upgraded_snapshot",
       "target": "sqlite3.connect"
     },
     {

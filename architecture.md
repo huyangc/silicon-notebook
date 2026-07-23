@@ -63,7 +63,8 @@ cluster membership 并增加唯一索引；SQLite store
 
 - `backend/app/repositories/factory.py` 是唯一 backend choice；PostgreSQL bundle 组合与 SQLite 对等的领域 store，共享一个有界 `PostgresDatabase` pool。启动 lease 覆盖 checksummed migration、恢复、warmup 与 readiness 发布，失败或被替换的实例只关闭自己的 pool。
 - 跨进程访问由 PostgreSQL 自身的 MVCC、row/advisory lock 与 transaction isolation 处理，可消除 SQLite 的单 writer 文件锁争用；它不能消除业务层锁序错误或长事务，因此 pool acquire、statement、lock timeout 仍保持有界。
-- 切换只允许“停写 → 停服务 → 一致备份 → 修改唯一 `DATABASE_URL` → 启动并自动 migration → status/`/api/ready`/认证/数量/代表性读取验证 → 放流量”。只改 URL 不复制数据。`SHADOW_DATABASE_URL` 不启用 dual-write；切回 SQLite 也不会回放 PG-only 写入。
+- `scripts/migrate_sqlite_to_postgres.py` 是唯一 SQLite→PostgreSQL 存量导入边界：默认 dry-run，SQLite 只读 backup-API 快照与工作副本升级，目标空库/manifest 守卫，按 FK 排序的有界 COPY，JSON/时间/旧 JSON 向量/NUL 的显式兼容转换，rowid→ordinal 保留与 reseed，全表内容 checksum，索引重建/ANALYZE/数据单事务提交和无凭据 receipt。它不进入应用 runtime、不修改 `DATABASE_URL`、不复制 storage、不读取 MySQL，也不提供持续同步或反向回放。
+- 在线导入仅用于演练，因为快照后的 SQLite 写入不会被捕获。正式切换只允许“停全部 writer → 停服务 → 向新空目标做最终迁移 → 验证共享/已复制 storage → 修改唯一 `DATABASE_URL` → 启动并自动 migration → `/api/ready`/认证/数量/搜索/代表性读取/canary 写验证 → 放流量”。`SHADOW_DATABASE_URL` 不启用 dual-write；PG 接受业务写后，未经外部 PG→SQLite 对账不得切回。
 - PostgreSQL 依赖 `public.pg_trgm`，向量为 float32 `bytea`，不依赖 pgvector。生产仍用 `--workers 1`，因为模型 scheduler、breaker 与 cancellation registry 是进程内状态。
 - `batch_ingest` 的 mutation phase 仅支持 SQLite；PostgreSQL 使用正常 application/API 摄取与 KG/index 流程。离线 `scripts/check.sh` 不连接 PostgreSQL；`scripts/check_postgres.sh` 和 CI 的独立 PostgreSQL 16 lane 验证 adapter、migration 与跨进程语义。
 

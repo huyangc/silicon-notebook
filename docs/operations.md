@@ -133,31 +133,105 @@ in the second table. Tune the capture threshold with `DB_WRITE_LOCK_WARN_MS` (de
 
 ## SQLite / PostgreSQL cutover and rollback
 
-There is one active database and no application dual-write. Use this runbook only after an
-external migration tool/process has copied and verified existing data; changing
-`DATABASE_URL` alone creates or opens a different datastore.
+There is exactly one active database and no application dual-write. The included importer is
+one-way SQLite→PostgreSQL snapshot migration; changing `DATABASE_URL` alone only opens a
+different datastore. It does not import MySQL, continuously capture later writes, replay
+PostgreSQL→SQLite, or copy source/upload/asset files.
 
-1. Announce a write freeze and stop every API, background job, MCP, batch, and maintenance
-   writer. Stop the backend after in-flight transactions finish.
-2. Back up SQLite with the SQLite backup API (or while fully stopped, preserving WAL
-   semantics) and PostgreSQL with a tested `pg_dump --format=custom`/`pg_restore` or the
-   organization's physical-backup procedure. Record checksums and restore-test receipts.
-3. Copy externally, preserving primary keys, ordered/ordinal values, JSON nulls, UTF-8,
-   timestamps, and float32 vector bytes. Compare schema versions, table counts, stable-key
-   sets, content hashes, storage references, and representative auth/Ask/Knowledge/Memory/
-   Knowhow/report reads before declaring the target ready.
-4. Change only `DATABASE_URL`, start one worker, and require redacted database status,
-   `/api/ready`, admin and ordinary-user login, notebook/source counts, searches, one write
-   transaction, and background-job recovery before reopening traffic.
-5. Keep the source backup immutable through the observation window. If PostgreSQL has
-   accepted no business writes, rollback is stop/change/start plus the same smoke. Once it
-   has accepted writes, switching the URL back would discard those writes; freeze again,
-   reconcile PostgreSQL→SQLite externally, verify both sides, and only then reopen SQLite.
+### 1. Prepare an empty target and preview
 
-For an emergency failure before traffic or before any PostgreSQL business write, leave the
-target stopped and restore the original SQLite URL. Never try to recover by running SQLite
-maintenance commands against PostgreSQL. `scripts/batch_ingest.py` mutation phases remain
-SQLite-only.
+Create a dedicated UTF-8 PostgreSQL database. Do not point the importer at an existing app
+database: any business row fails preflight. Keep the URL out of command arguments:
+
+```bash
+export POSTGRES_MIGRATION_URL='postgresql://USER:PASSWORD@HOST:5432/EMPTY_DB'
+
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db
+```
+
+The default is a read-only preflight. It validates the SQLite identity/schema and PostgreSQL
+UTF-8/current-schema/emptiness/migration-ledger state, then exits without creating a snapshot
+or writing the target. Ensure free space for a SQLite snapshot and upgrade working copy plus
+the PostgreSQL database and indexes. `pg_trgm` must be creatable in `public`.
+
+### 2. Rehearse while SQLite remains online
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --apply
+```
+
+The tool uses SQLite's backup API, so committed WAL state is included without copying a live
+`.db` file incorrectly. It upgrades only a private snapshot copy, streams bounded COPY in FK
+order, preserves historical ordinals, converts legacy JSON vectors to float32 `bytea`, escapes
+PostgreSQL-unrepresentable NUL codepoints as the reversible literal `\\u0000`, verifies every
+table with a content checksum, rebuilds indexes, runs `ANALYZE`, and commits all target data in
+one transaction. Its credential-free receipt records table counts/checksums and every NUL
+normalization. Empty retired SQLite tables are recorded but not copied; a non-empty retired
+table fails closed.
+
+If a target attempt fails before commit, its business tables remain empty. Retry the exact
+same point-in-time snapshot without another multi-gigabyte backup only by explicitly naming
+the importer-owned file:
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --snapshot /protected/path/postgres-migration/sqlite-vNN-HASH.snapshot.db \
+  --apply
+```
+
+Name, directory, SHA-256 prefix, `quick_check`, schema version, and WAL/SHM absence are all
+revalidated. Never use `--snapshot` for the final cutover merely because an older rehearsal
+succeeded: SQLite commits after that snapshot are absent.
+
+### 3. Perform the final SQLite→PostgreSQL cutover
+
+1. Announce the maintenance window. Stop every API, background worker, MCP client writer,
+   batch/maintenance process, and scheduler; then stop the backend after in-flight writes end.
+2. Create a **new empty final PostgreSQL database**. A rehearsal target contains an older
+   snapshot and is intentionally rejected. Take/restore-test the normal SQLite and PostgreSQL
+   backups required by your deployment policy.
+3. Run preview and `--apply` again against the stopped SQLite source without `--snapshot`.
+   Retain the final sealed snapshot and receipt. Verify that
+   `SILICON_NOTEBOOK_STORAGE_DIR` points to the same files on the new deployment host, or copy
+   that directory separately and verify it; database migration never copies those files.
+4. Back up `.env`, then change exactly one selector. SQLite uses:
+
+   ```text
+   DATABASE_URL=sqlite:///.local/silicon_notebook.db
+   ```
+
+   PostgreSQL uses:
+
+   ```text
+   DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/FINAL_DB
+   ```
+
+   Do not use `SHADOW_DATABASE_URL` as a selector and do not leave two uncommented
+   `DATABASE_URL` assignments. Restart the backend; deployment remains `--workers 1`.
+5. Before traffic, require `curl -fsS http://127.0.0.1:8000/api/ready` to report
+   `"ready": true`; log in as admin and a normal user; compare notebook/source counts with
+   the receipt; exercise search and representative Ask/Knowledge/Memory/Knowhow/report reads;
+   verify referenced files; then perform one explicitly approved canary write and its
+   background-job completion. Only then reopen traffic.
+
+### 4. Switch back safely
+
+- Before PostgreSQL accepts any business write, rollback is safe: stop the backend, restore
+  the SQLite `DATABASE_URL`, start one worker, and repeat the readiness/auth/count/read smoke.
+- After the first PostgreSQL business write, editing the URL back loses that write. This
+  repository has no reverse importer or dual-write log. Freeze again, externally reconcile
+  PostgreSQL→SQLite (including storage effects), verify both sides, and only then reopen
+  SQLite. If that process has not been designed and rehearsed, PostgreSQL is the rollback
+  boundary.
+- Merely toggling the URL during development selects two independent histories. Neither side
+  is kept synchronized. Never run SQLite-only maintenance or `scripts/batch_ingest.py`
+  mutation phases while PostgreSQL is selected.
 
 ## PDF parsing with MinerU
 
