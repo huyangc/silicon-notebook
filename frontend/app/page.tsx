@@ -659,6 +659,11 @@ export default function Home() {
   const [outerView, setOuterView] = useState<"notebooks" | "memory">("notebooks");
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourcesTotal, setSourcesTotal] = useState(0);
+  // sourcesTotal follows the source-list filter (it holds the search-matched count
+  // while a source search is active, which pagination needs). The Ask composer / welcome
+  // copy instead want the notebook's imported-source total regardless of that filter, so
+  // track it separately: updated only on unfiltered loads and on source mutations.
+  const [notebookSourceTotal, setNotebookSourceTotal] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
   const [sourceQuery, setSourceQuery] = useState("");
@@ -1747,7 +1752,7 @@ export default function Home() {
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
-  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources, sourcesTotal), [currentNotebook, sources, sourcesTotal]);
+  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources, notebookSourceTotal), [currentNotebook, sources, notebookSourceTotal]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentKgBuildView = kgBuildPresentation(
@@ -2047,6 +2052,9 @@ export default function Home() {
     // 不传 guard 的调用方(用户主动翻页/搜索)行为与此前逐字一致。
     if (opts.guard && !opts.guard()) return;
     setSourcesTotal(result.total_count);
+    // Only an unfiltered page reflects the notebook's true source total; a search query
+    // returns the matched subset, which must not become the Ask surfaces' count.
+    if (!q) setNotebookSourceTotal(result.total_count);
     setSources(result.items);
     setSourcesPage(pageNum);
   }
@@ -2080,6 +2088,7 @@ export default function Home() {
     setTitleDraft(notebook.name);
     setSources(sourcesPage.items);
     setSourcesTotal(sourcesPage.total_count);
+    setNotebookSourceTotal(sourcesPage.total_count);
     setSourcesPage(0);
     setSourceQuery("");
     setBuildingKg(shouldResumeKgBuild(notebook));
@@ -2375,6 +2384,7 @@ export default function Home() {
     const uploaded = await uploadSources(currentNotebookId, formData);
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
     setSourcesTotal((t) => t + uploaded.length);
+    setNotebookSourceTotal((t) => t + uploaded.length);
     await loadNotebookCollection();
     setStagedFiles([]);
     setStagedDocTypes([]);
@@ -2402,6 +2412,7 @@ export default function Home() {
         // Ask source count / welcome text — now driven by sourcesTotal — don't go stale
         // after a URL import until the next source-page fetch.
         setSourcesTotal((t) => t + result.created.length);
+        setNotebookSourceTotal((t) => t + result.created.length);
         await loadNotebookCollection();
       }
       setUrlRejected(result.rejected);
@@ -2451,6 +2462,7 @@ export default function Home() {
     await deleteSourceRequest(source.id);
     setSources((previous) => previous.filter((item) => item.id !== source.id));
     setSourcesTotal((t) => Math.max(0, t - 1));
+    setNotebookSourceTotal((t) => Math.max(0, t - 1));
     if (sourceDetail?.id === source.id) {
       setSourceDetail(null);
       setSourceElements([]);
@@ -4188,7 +4200,7 @@ export default function Home() {
                   onAbort={abortAsk}
                   running={asking}
                 >
-                  <span>{sourcesTotal} 个来源</span>
+                  <span>{notebookSourceTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
                       <button
