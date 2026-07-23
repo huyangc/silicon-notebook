@@ -168,7 +168,13 @@ def _fail_lifecycle(lease: object, exc: BaseException) -> None:
         if state is None or state.lease is not lease or state.status != "failing":
             return
         readiness.mark_error(safe_error)
-        _active_lifecycle = None
+        # Cleanup is complete, but the failed ASGI context still owns this
+        # lifecycle until its finally block releases the exact lease. Keeping
+        # the tombstone prevents another context from becoming ready while the
+        # failed one is still alive and serving the process-global gate.
+        state.repository = None
+        state.repository_factory = None
+        state.status = "failed"
     # Never attach the original exception: a third-party driver may carry raw
     # conninfo in its traceback even though our adapter errors do not.
     logger.error("startup FAILED — service stays not-ready: %s", safe_error)
@@ -223,28 +229,34 @@ def close_repository(
     """Close only the exact repository owned by the active lifespan cycle.
 
     Missing, stale, mismatched, and already-closed lease/instance pairs are
-    strict no-ops. There is deliberately no wildcard form: a lifespan that did
-    not acquire ownership can never close another lifespan's repository.
+    strict no-ops. The sole no-repository form is the exact lease of a failed
+    startup whose pool/cache were already cleaned; its owning lifespan uses
+    ``(lease, None)`` to release the retained failure tombstone. There is no
+    wildcard form that could close another lifespan's repository.
     """
     global _active_lifecycle
-    if lease is None or repository_instance is None:
+    if lease is None:
         return
     with _cleanup_lock:
         state = _active_lifecycle
-        if (
-            state is None
-            or state.lease is not lease
-            or state.repository is not repository_instance
-            or state.status != "ready"
-        ):
+        if state is None or state.lease is not lease:
             return
-        state.status = "closing"
-        repository_factory = state.repository_factory
+        failed = state.status == "failed" and repository_instance is None
+        ready = (
+            state.status == "ready"
+            and repository_instance is not None
+            and state.repository is repository_instance
+        )
+        if not failed and not ready:
+            return
+        state.status = "closing_failed" if failed else "closing"
+        repository_factory = None if failed else state.repository_factory
 
     # The reservation remains active while the exact pool is closed and its
     # cache entry cleared, so a fresh cycle cannot race cleanup.
     try:
-        _close_repository_instance(repository_instance)
+        if not failed:
+            _close_repository_instance(repository_instance)
     finally:
         if repository_factory is not None:
             _clear_repository_cache(repository_factory)
@@ -254,7 +266,7 @@ def close_repository(
                 state is not None
                 and state.lease is lease
                 and state.repository is repository_instance
-                and state.status == "closing"
+                and state.status == ("closing_failed" if failed else "closing")
             ):
                 # State/cache cleanup must survive driver close failures.
                 readiness.mark_stopped()

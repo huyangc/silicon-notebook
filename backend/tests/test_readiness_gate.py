@@ -84,9 +84,13 @@ def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, cap
     from app.services import startup_warmup
 
     secret = "postgresql://secret-user:secret-password@db.example:5432/notebook"
+    calls = []
 
     def fail_repository():
+        calls.append("factory")
         raise RuntimeError(f"driver leaked {secret}")
+
+    fail_repository.cache_clear = lambda: calls.append("clear")
 
     monkeypatch.setattr(deps, "repository", fail_repository)
     monkeypatch.setattr(
@@ -108,6 +112,17 @@ def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, cap
     diagnostics = snapshot["error"] + "\n" + caplog.text
     assert "secret-user" not in diagnostics
     assert "secret-password" not in diagnostics
+
+    # Construction failure keeps its exact lease until the owning context's
+    # finally; stale cleanup cannot release it or mutate the error snapshot.
+    assert startup_warmup.begin_lifecycle() is None
+    startup_warmup.close_repository(object(), None)
+    assert readiness.snapshot() == snapshot
+    assert calls == ["factory", "clear"]
+    startup_warmup.close_repository(lease, None)
+    assert readiness.snapshot()["phase"] == "stopped"
+    startup_warmup.close_repository(lease, None)
+    assert calls == ["factory", "clear"]
 
 
 def test_two_lifespans_start_and_close_distinct_exact_repositories(monkeypatch):
@@ -214,6 +229,98 @@ def test_overlapping_lifespan_fails_before_yield_and_cannot_outlive_owner(
 
     asyncio.run(exercise())
     assert calls == ["factory", "warm", "close", "clear"]
+
+
+def test_failed_lifespan_retains_ownership_until_exit_then_next_cycle_starts(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.main import _lifespan
+    from app.services import startup_warmup
+
+    calls: list[str] = []
+    instances = []
+    error_published = threading.Event()
+    ready_published = threading.Event()
+    original_mark_error = readiness.mark_error
+    original_mark_ready = readiness.mark_ready
+
+    def mark_error(error: str) -> None:
+        original_mark_error(error)
+        error_published.set()
+
+    def mark_ready() -> None:
+        original_mark_ready()
+        ready_published.set()
+
+    def repository():
+        index = len(instances) + 1
+        calls.append(f"factory{index}")
+
+        def warm(**_kwargs):
+            calls.append(f"warm{index}")
+            if index == 1:
+                raise RuntimeError("first lifecycle warm failure")
+            return 0
+
+        fake = SimpleNamespace(
+            warm_open_path_caches=warm,
+            close=lambda: calls.append(f"close{index}"),
+        )
+        instances.append(fake)
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(readiness, "mark_error", mark_error)
+    monkeypatch.setattr(readiness, "mark_ready", mark_ready)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    async def exercise() -> None:
+        loser_entered = False
+        async with _lifespan(SimpleNamespace()):
+            assert await asyncio.to_thread(error_published.wait, 2)
+            assert readiness.snapshot()["phase"] == "error"
+            assert client.get("/api/health").status_code == 503
+            assert client.post("/mcp").status_code == 503
+
+            with pytest.raises(startup_warmup.LifecycleAlreadyActiveError):
+                async with _lifespan(SimpleNamespace()):
+                    loser_entered = True
+            assert loser_entered is False
+            assert readiness.snapshot()["phase"] == "error"
+            assert calls == ["factory1", "warm1", "close1", "clear"]
+
+        assert readiness.snapshot()["phase"] == "stopped"
+        assert readiness.is_ready() is False
+
+        async with _lifespan(SimpleNamespace()):
+            assert await asyncio.to_thread(ready_published.wait, 2)
+            assert readiness.is_ready() is True
+            assert calls == [
+                "factory1",
+                "warm1",
+                "close1",
+                "clear",
+                "factory2",
+                "warm2",
+            ]
+        assert readiness.snapshot()["phase"] == "stopped"
+
+    asyncio.run(exercise())
+    assert len(instances) == 2
+    assert calls == [
+        "factory1",
+        "warm1",
+        "close1",
+        "clear",
+        "factory2",
+        "warm2",
+        "close2",
+        "clear",
+    ]
 
 
 def test_close_repository_without_active_cycle_is_noop_and_never_calls_factory(
@@ -342,8 +449,9 @@ def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_f
 
     # Lifespan shutdown after the failed startup must be idempotent and must
     # not construct a brand-new cached repository merely to close it.
-    startup_warmup.close_repository(lease, fake)
-    startup_warmup.close_repository(lease, fake)
+    startup_warmup.close_repository(lease, None)
+    assert readiness.snapshot()["phase"] == "stopped"
+    startup_warmup.close_repository(lease, None)
     assert calls == ["repository", "close", "clear"]
 
 
@@ -551,7 +659,10 @@ def test_startup_failure_releases_lease_for_fresh_retry(monkeypatch):
     assert failed_lease is not None
     assert startup_warmup.run_startup(failed_lease) is None
     assert readiness.snapshot()["phase"] == "error"
-    startup_warmup.close_repository(failed_lease, instances[0])
+    assert startup_warmup.begin_lifecycle() is None
+    assert startup_warmup.run_startup(failed_lease) is None
+    startup_warmup.close_repository(failed_lease, None)
+    assert readiness.snapshot()["phase"] == "stopped"
     assert calls == ["factory1", "warm1", "close1", "clear"]
 
     retry_lease = startup_warmup.begin_lifecycle()

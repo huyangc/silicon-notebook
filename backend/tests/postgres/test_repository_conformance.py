@@ -505,18 +505,22 @@ def test_startup_warm_failure_immediately_closes_real_postgres_pool(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("warm failed")),
     )
     readiness.reset()
+    lease = None
     try:
         lease = startup_warmup.begin_lifecycle()
         assert lease is not None
         startup_warmup.run_startup(lease)
         assert readiness.snapshot()["phase"] == "error"
+        assert startup_warmup.begin_lifecycle() is None
         assert repository._runtime.database._closed is True
         assert cleared == [True]
         with pytest.raises(Exception):
             with repository._runtime.database.connect():
                 pass
     finally:
+        startup_warmup.close_repository(lease, None)
         repository.close()
+    assert readiness.snapshot()["phase"] == "stopped"
 
 
 def test_concurrent_startup_constructs_and_closes_one_real_postgres_pool(
