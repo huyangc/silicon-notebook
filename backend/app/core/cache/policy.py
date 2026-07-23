@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Dict, List, Optional, Sequence
 
 
@@ -54,6 +55,20 @@ def embedding_batch_dim(vectors: Sequence[Sequence[float]]) -> int:
     return dims.pop()
 
 
+def embedding_all_finite(vector: Sequence[float]) -> bool:
+    """向量每个分量都是**有限数值**（非 NaN/±inf、且确实是数）。
+
+    `math.isfinite` 对 numpy 标量也经 `__float__` 生效；碰到根本不是数的元素
+    （None/str/…）会抛 TypeError，这里一并按「不是有限向量」处理并返回 False——
+    绝不把异常抛给调用方（准入判定不在 try 里，异常会窜进主流程，违反「缓存故障
+    永不影响主流程」）。生成器写法遇到第一个坏值就短路。
+    """
+    try:
+        return all(math.isfinite(x) for x in vector)
+    except (TypeError, ValueError):
+        return False
+
+
 def is_cacheable_embedding(vector: Sequence[float], expected_dim: int) -> bool:
     """这一条向量值不值得写进缓存。
 
@@ -62,19 +77,24 @@ def is_cacheable_embedding(vector: Sequence[float], expected_dim: int) -> bool:
     后果比 LLM 侧更隐蔽——零向量在检索层不报错，只是静默零召回；而且**服务恢复
     也修不好**：命中缓存就不会再打后端，只能手动删缓存文件，而没人知道要去删。
 
-    两道门：
+    三道门：
 
     1. **空向量**：`[]`（或任何 len 0）一律不写。这是实测到的退化形态。
     2. **与本批公共维度不符**：`expected_dim` 由 embedding_batch_dim 给出，
        批内维度不一致时它是 0，于是整批都写不进去。
+    3. **含非有限值**：尺寸正确却带 `NaN`/`inf` 的向量（provider 偶发返回）——长度、
+       维度两道门都过得去，写进去会被 `_encode` 序列化、重放整个 TTL，把 NaN 灌进
+       相似度计算（污染排序/阈值）。要求每个分量都是有限数值（embedding_all_finite）。
 
     expected_dim 是**必填位置参数**，不给默认值：留了默认值，调用方漏传就会静默
-    退化成只剩第 1 道门，而那正是本次评审抓到的缺陷形状。
+    退化成只剩第 1 道门，而那正是上一轮评审抓到的缺陷形状。
     """
     n = len(vector)
     if n == 0:
         return False
-    return n == expected_dim
+    if n != expected_dim:
+        return False
+    return embedding_all_finite(vector)
 
 
 def llm_key(
