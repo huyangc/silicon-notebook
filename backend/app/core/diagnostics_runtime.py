@@ -47,6 +47,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     (),
     ("analytics",),
     ("analytics", "content-overview"),
+    ("checkup",),
     ("memories",),
     ("memories", "from-answer"),
     ("answer-memory-links",),
