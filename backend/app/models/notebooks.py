@@ -81,6 +81,12 @@ class NotebookSummary(BaseModel):
     base_kg_available: bool = False
     # 本 notebook 挂载的参考库列表(0..N)。基准库不再全局唯一,也不再隐式参与检索。
     base_notebooks: List[NotebookRef] = Field(default_factory=list)
+    # 该 notebook 在**任一可用问答模式下能否产出有据回答**:有可见来源、或任意 chunk
+    # (含 knowhow 格子——它没有可见来源却可检索)、或已建 KG、或挂载参考库有 KG、或该用户
+    # 有 confirmed memory,任一即为真。前端据此禁用"空库"的问答输入框——判定所需的隐藏
+    # knowhow chunk、confirmed memory 与 base+overlay 配置前端都看不到,故由后端权威计算。
+    # 仅单库 get() 精确回填;列表投影恒为默认 True(列表不消费此字段,永不误禁)。
+    ask_available: bool = True
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
     # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);

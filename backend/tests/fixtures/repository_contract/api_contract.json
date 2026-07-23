@@ -4226,6 +4226,11 @@
               "title": "Access Scope",
               "type": "string"
             },
+            "ask_available": {
+              "default": true,
+              "title": "Ask Available",
+              "type": "boolean"
+            },
             "base_kg_available": {
               "default": false,
               "title": "Base Kg Available",
@@ -14614,6 +14619,7 @@
     "notebook_summary": {
       "access": "owner",
       "access_scope": "",
+      "ask_available": true,
       "base_kg_available": false,
       "base_notebooks": [],
       "counts": {

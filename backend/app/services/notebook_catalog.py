@@ -247,6 +247,21 @@ class NotebookSummaryQuery:
                 row,
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
             )
+            # ask_available: 该库能否在任一模式下产出有据回答(见 NotebookSummary 字段注释)。
+            # 短路顺序把已算好的布尔放前面(base_kg_available/kg_ready 无额外查询),都为假才
+            # 落到两个廉价 EXISTS(chunk / 该用户的 confirmed memory)——即只有"看着像空"的库
+            # 才多查那两下。仅此单库路径回填;列表投影保持默认 True。
+            summary.ask_available = bool(
+                summary.base_kg_available
+                or summary.kg_ready
+                or self.queries.notebook_has_chunk(db, notebook_id)
+                or (
+                    user_id is not None
+                    and self.queries.notebook_has_confirmed_memory(
+                        db, notebook_id, user_id
+                    )
+                )
+            )
             job_row = (
                 self.kg_build_jobs.latest_on(db, notebook_id)
                 if self.kg_build_jobs is not None
