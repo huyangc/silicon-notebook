@@ -42,12 +42,12 @@ def _add_chunk(db, notebook_id, source_id, chunk_id):
     )
 
 
-def _add_kg_object(db, notebook_id, object_id):
+def _add_kg_object(db, notebook_id, object_id, status="approved"):
     db.execute(
         "INSERT INTO knowledge_objects "
         "(id,notebook_id,object_type,status,created_at,updated_at) "
         "VALUES (?,?,?,?,?,?)",
-        (object_id, notebook_id, "concept", "approved", NOW, NOW),
+        (object_id, notebook_id, "concept", status, NOW, NOW),
     )
 
 
@@ -96,6 +96,32 @@ def test_kg_ready_notebook_is_ask_available(repo):
     summary = repo.get_notebook(nb.id)
     assert summary.kg_ready is True
     assert summary.ask_available is True
+
+
+def test_deprecated_only_kg_is_not_ask_available(repo):
+    """P2-1 反向护栏:本库只有 deprecated 的 knowledge_objects(无 chunk/参考库/memory)。
+    检索排除 deprecated,故没有可用证据——kg_ready 为真(既有全应用口径含 deprecated)但
+    ask_available 必须为假,不能只因"建过图"就放行。"""
+    nb = repo.create_notebook(NotebookCreate(name="deprecated-kg"))
+    with repo._write() as db:
+        _add_kg_object(db, nb.id, "ko-dep", status="deprecated")
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_ready is True          # 既有口径:建过图
+    assert summary.ask_available is False     # 但无可用证据,禁止对话
+
+
+def test_deprecated_only_base_kg_is_not_ask_available(repo):
+    """P2-1 反向护栏(参考库侧):挂载的参考库只有 deprecated KG —— base_kg_available
+    为真(含 deprecated)但没有可用证据,ask_available 必须为假。"""
+    base = repo.create_notebook(NotebookCreate(name="dep-ref"))
+    with repo._write() as db:
+        _add_kg_object(db, base.id, "ko-base-dep", status="deprecated")
+    repo.mark_notebook_base(base.id)
+    nb = repo.create_notebook(NotebookCreate(name="mounts-dep-base"))
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    summary = repo.get_notebook(nb.id)
+    assert summary.base_kg_available is True   # 既有口径:挂的参考库建过图
+    assert summary.ask_available is False       # 但只有 deprecated,无可用证据
 
 
 def test_mounted_base_with_kg_is_ask_available(repo):

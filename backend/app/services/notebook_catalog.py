@@ -248,13 +248,21 @@ class NotebookSummaryQuery:
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
             )
             # ask_available: 该库能否在任一模式下产出有据回答(见 NotebookSummary 字段注释)。
-            # 短路顺序把已算好的布尔放前面(base_kg_available/kg_ready 无额外查询),都为假才
-            # 落到两个廉价 EXISTS(chunk / 该用户的 confirmed memory)——即只有"看着像空"的库
-            # 才多查那两下。仅此单库路径回填;列表投影保持默认 True。
+            # 判据对齐检索口径:KG 只算**可用状态**(USABLE_STATUSES,排除 deprecated),故不
+            # 直接用 kg_ready/base_kg_available(含 deprecated),而用 usable 版查询。短路:
+            # has_chunk 覆盖绝大多数库(可见来源 + knowhow 格子;可用活跃 KG 必有 chunk),
+            # 放最前;usable-KG 查询用已算好的 kg_ready/base_kg_available 做便宜预过滤(为假
+            # 则连查都免了);confirmed-memory 查询垫底。仅此单库路径回填;列表投影保持默认 True。
             summary.ask_available = bool(
-                summary.base_kg_available
-                or summary.kg_ready
-                or self.queries.notebook_has_chunk(db, notebook_id)
+                self.queries.notebook_has_chunk(db, notebook_id)
+                or (
+                    summary.kg_ready
+                    and self.queries.notebook_has_usable_kg(db, notebook_id)
+                )
+                or (
+                    summary.base_kg_available
+                    and self.queries.notebook_has_usable_base_kg(db, notebook_id)
+                )
                 or (
                     user_id is not None
                     and self.queries.notebook_has_confirmed_memory(

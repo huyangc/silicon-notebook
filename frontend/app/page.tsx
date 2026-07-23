@@ -1797,6 +1797,27 @@ export default function Home() {
       })
       .catch(reportError);
   }
+  // P2-2(codex PR#334 第4轮):knowhow 投影是防抖后台任务,关闭抽屉时 chunk 可能还没落库,
+  // 一次性重拉会漏掉;若当前被禁,关闭后做一段有界轮询,直到 ask_available 翻真或超时
+  // (~最多 8×2s)。仅在被禁时轮询、翻真即停,故对已可用的库零开销。
+  function pollAskAvailabilityAfterKnowhow() {
+    const nb = activeNotebookIdRef.current;
+    if (!nb || currentNotebook?.ask_available !== false) return;
+    let tries = 0;
+    const tick = () => {
+      if (activeNotebookIdRef.current !== nb) return; // 已切库,放弃
+      getNotebook(nb)
+        .then((refreshed) => {
+          if (activeNotebookIdRef.current !== nb) return;
+          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+          if (refreshed.ask_available === false && ++tries < 8) {
+            window.setTimeout(tick, 2000);
+          }
+        })
+        .catch(reportError);
+    };
+    window.setTimeout(tick, 2000);
+  }
   // 进入(或切回)问答页签且当前被禁时重查——覆盖 Memory 页签确认后切回 Ask 的场景。
   useEffect(() => {
     if (chatMode === "ask") refreshAskAvailabilityIfBlocked();
@@ -2899,8 +2920,8 @@ export default function Home() {
   function closeKnowhow() {
     setKnowhowNavigation((current) => closeKnowhowNavigation(current));
     // P2:knowhow 抽屉是覆盖层、不改 chatMode,故上面的 chatMode effect 不会触发。关闭
-    // 回到问答框时若当前被禁,重拉一次——新建/导入的 knowhow 表已产出可检索 chunk 则解禁。
-    refreshAskAvailabilityIfBlocked();
+    // 回到问答框时若当前被禁,轮询到投影产出 chunk 为止——新建/导入的 knowhow 表解禁对话。
+    pollAskAvailabilityAfterKnowhow();
   }
 
   async function openAnalytics() {
