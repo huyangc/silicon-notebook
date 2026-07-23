@@ -77,6 +77,14 @@ class SourceEmbeddingService:
                 notebook_id, rows, created_at=self.now()
             )
 
+    def _evict_matrix(self, notebook_id: str, table: str) -> None:
+        """Drop retrieval's brute-force ``_vector_matrix`` cache entry for
+        ``table`` after a paged (re-)embed — see ``invalidate_vector_matrix`` in
+        __init__. Called from a ``finally`` so a page-flush failure still evicts
+        the pages that already committed. No-op when unwired (offline/test)."""
+        if self.invalidate_vector_matrix is not None:
+            self.invalidate_vector_matrix(notebook_id, table)
+
     @staticmethod
     def _warm_up(embedder: Any) -> None:
         # Pre-create the embedder's HTTP client single-threaded to avoid a lazy-init
@@ -282,25 +290,30 @@ class SourceEmbeddingService:
         # live-vector peak. One commit_every-sized page bounds live vectors to
         # commit_every*embed_batch_size AND preserves the "≤commit_every batches
         # ⇒ a single write transaction" contract (one flush per page).
-        for pstart in range(0, len(batches), commit_every):
-            chunk = batches[pstart:pstart + commit_every]
-            buf: list = []
-            for part in self._map_embedding_batches(
-                _embed_only,
-                chunk,
-                task_prefix="emb-kg",
-                workload_id=workload_id,
-            ):
-                buf.extend(part)
-            done += sum(len(b) for b in chunk)
-            if buf:
-                self.flush_object_vectors(notebook_id, buf)
+        try:
+            for pstart in range(0, len(batches), commit_every):
+                chunk = batches[pstart:pstart + commit_every]
+                buf: list = []
+                for part in self._map_embedding_batches(
+                    _embed_only,
+                    chunk,
+                    task_prefix="emb-kg",
+                    workload_id=workload_id,
+                ):
+                    buf.extend(part)
+                done += sum(len(b) for b in chunk)
+                if buf:
+                    self.flush_object_vectors(notebook_id, buf)
+                if progress:
+                    progress(done, total)
             if progress:
-                progress(done, total)
-        if progress:
-            progress(total, total)
-        if self.invalidate_vector_matrix is not None:
-            self.invalidate_vector_matrix(notebook_id, "knowledge_embeddings")
+                progress(total, total)
+        finally:
+            # Evict even if a page flush raised: earlier pages may already be
+            # committed, and a same-second re-embed leaves (COUNT(*),
+            # MAX(created_at)) unchanged — a stale matrix would otherwise survive
+            # the failure.
+            self._evict_matrix(notebook_id, "knowledge_embeddings")
 
     def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
@@ -332,26 +345,27 @@ class SourceEmbeddingService:
         # replace_relation_vectors is a per-row INSERT OR REPLACE upsert, so
         # flushing per page is safe (no delete-all-for-notebook).
         page_sz = max(1, self.settings.embed_commit_batches)
-        for pstart in range(0, len(batches), page_sz):
-            rows: list = []
-            for part in self._map_embedding_batches(
-                _embed_only,
-                batches[pstart:pstart + page_sz],
-                task_prefix="emb-rel",
-                workload_id=workload_id,
-            ):
-                rows.extend(part)
-            if rows:
-                # Fresh timestamp per page (parity with flush_object_vectors);
-                # correctness against retrieval's (count, max_created_at) matrix
-                # cache is GUARANTEED by the invalidate_vector_matrix call below,
-                # which is clock-independent (a same-second re-embed would leave
-                # the version key unchanged).
-                self.vectors.replace_relation_vectors(
-                    notebook_id, rows, created_at=self.now()
-                )
-        if self.invalidate_vector_matrix is not None:
-            self.invalidate_vector_matrix(notebook_id, "relation_embeddings")
+        try:
+            for pstart in range(0, len(batches), page_sz):
+                rows: list = []
+                for part in self._map_embedding_batches(
+                    _embed_only,
+                    batches[pstart:pstart + page_sz],
+                    task_prefix="emb-rel",
+                    workload_id=workload_id,
+                ):
+                    rows.extend(part)
+                if rows:
+                    # Fresh timestamp per page (parity with flush_object_vectors);
+                    # correctness against retrieval's (count, max_created_at)
+                    # matrix cache is GUARANTEED by the _evict_matrix finally
+                    # below, which is clock-independent (a same-second re-embed
+                    # leaves the version key unchanged) and abort-safe.
+                    self.vectors.replace_relation_vectors(
+                        notebook_id, rows, created_at=self.now()
+                    )
+        finally:
+            self._evict_matrix(notebook_id, "relation_embeddings")
 
     def embed_chunk_ids(self, notebook_id: str, rows: List[dict]) -> None:
         """Incremental embed for an EXPLICIT list of chunks — knowhow-tables
@@ -425,24 +439,25 @@ class SourceEmbeddingService:
         # replace_chunk_vectors is a per-row INSERT OR REPLACE upsert, so
         # flushing per page is safe (no delete-all-for-notebook).
         page_sz = max(1, self.settings.embed_commit_batches)
-        for pstart in range(0, len(batches), page_sz):
-            out: list = []
-            for part in self._map_embedding_batches(
-                _emb,
-                batches[pstart:pstart + page_sz],
-                task_prefix="emb-ck",
-                workload_id=workload_id,
-            ):
-                out.extend(part)
-            if out:
-                # Fresh timestamp per page (see embed_relations_batch);
-                # correctness is guaranteed by the invalidate_vector_matrix call
-                # below, not by created_at advancing.
-                self.vectors.replace_chunk_vectors(
-                    notebook_id, out, created_at=self.now()
-                )
-        if self.invalidate_vector_matrix is not None:
-            self.invalidate_vector_matrix(notebook_id, "chunk_embeddings")
+        try:
+            for pstart in range(0, len(batches), page_sz):
+                out: list = []
+                for part in self._map_embedding_batches(
+                    _emb,
+                    batches[pstart:pstart + page_sz],
+                    task_prefix="emb-ck",
+                    workload_id=workload_id,
+                ):
+                    out.extend(part)
+                if out:
+                    # Fresh timestamp per page (see embed_relations_batch);
+                    # correctness is guaranteed by the _evict_matrix finally, not
+                    # by created_at advancing.
+                    self.vectors.replace_chunk_vectors(
+                        notebook_id, out, created_at=self.now()
+                    )
+        finally:
+            self._evict_matrix(notebook_id, "chunk_embeddings")
 
     def backfill_knowledge_embeddings(self, db, notebook_id: str,
                                       objects: List[dict], progress=None) -> None:
