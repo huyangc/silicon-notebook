@@ -2,86 +2,48 @@
 
 [English README](./README.md)
 
-`silicon-notebook` 是一个面向半导体研发团队的 knowhow notebook 平台。它把上传的技术文档转化成可查询的知识图谱（Concept / Claim / Formula / Procedure 对象），并提供元素级 evidence 引用与接地多轮问答。
+`silicon-notebook` 是面向半导体工程团队的来源可追溯 knowhow 笔记本。它把 PDF、Markdown、DOCX、PPTX、CSV、XLSX 材料转成可搜索的来源元素、结构化知识、带引用回答、私有 Memory、knowhow 表和深度报告。
 
-## 当前范围
+当前目标是可供真实团队使用的本地 beta：后端采用 FastAPI + SQLite，前端采用 Next.js。不要求 Docker、GPU、数据库服务或本地模型服务。OpenAI 兼容的聊天、嵌入、重排和 MinerU 服务都是可选的 URL 集成；未配置时，确定性降级仍可维持核心流程。
 
-当前仓库已进入以 KG-native 管线为核心的本机真实 beta 闭环：
+## 核心能力
 
-- Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
-- `frontend/` 下的 Next.js / React / TypeScript 前端
-- 由部署者统一管理 OpenAI-compatible chat、embedding 与 rerank 服务；workload 绑定及每服务 `max_concurrency` 集中写入一个 TOML
-- 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
-- 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
-- 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（经共享 KG job scheduler 异步执行）
-- **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
-- PDF/DOCX/PPTX 走 MinerU（公式/表格/版面、内嵌图片）；本机或未配置时回退 pypdf（仅纯文本）
-- MinerU 抽取的内嵌图片在来源正文内联展示；图注与文字保持可搜索
-- 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
-- KG-native 接地问答：逐句 `[k_i]` 引用（渲染为紧凑编号引用；模型直接输出的数字复合引用如 `[1, 2, 3]` 在能映射到已知引用时也可点击）、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
-- **推理模式的类型化查询期推导：** agent 可调用 `follow_chain`，把有证据的两跳 `A→B→C` 临时组合成 `A→C`；首版只允许 `derived_from / kind_of / prerequisite_of / precedes / part_of`。两条直接关系各自保留可引用的关系证据；被拒绝、无 quote、类型或 `validity_scope` 冲突的路径 fail-closed；推论明确标作「推断」，且绝不写回 KG。该能力不新增 migration、索引或历史回填；查询只对既有 source/target 索引做有界抽样，高度节点无法在预算内确认时直接放弃推论。
-- 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`chunk` 基线只从当前 active notebook 读取 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 使用 federated KG 路径。exact-score 的 `base` 次序只适用于知识对象命中：`federated_retrieve()` 不改相关度分数，分数更高的 personal hit 仍排在前面；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。
-- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改），并由它持有原有 notebook。管理员可在用户使用总览通过 `PATCH /api/admin/users/{user_id}/role` 授予或撤销 `admin` 角色；内置管理员和当前操作管理员自身不可被降级，已有会话会在下一次请求时读取到新权限。任何管理员都可将 notebook 发布为公共知识库。公共知识库对普通用户的列表隐藏，但可在每个笔记本的参考库选择器里发现，仅对显式挂载了它们的笔记本参与检索。升级到 schema 20 不会回填挂载：所有既有笔记本挂载数清零，联邦检索对它们全部停止，直到用户自己显式挂载一个参考库。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
-- **分享链接**：owner 可发布不透明 notebook 链接；小 notebook 复制到接收者账号，大 notebook 以只读成员方式加入。写权限仍归 owner；当前没有实时协同编辑或修改密码流程。
-- **绑定 notebook 的私有 Memory**：用户可手动把 Ask 回答生成可编辑预览，并在确认后沉淀为可复用 Memory。外层提供用户级总 Memory 页面，notebook 卡片显示当前用户的数量，工作区为 **问答**（Ask） | **知识库**（Knowledge） | **记忆**（Memory） | **深度报告**（Deep Report）。外部 Agent 可经 MCP 提交 `candidate`；它只在同一用户、同一 notebook 的获授权 Agent 间共享，用户确认前不会进入正式 Ask/搜索/报告检索。
-- 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
-- 深度报告（两阶段后台任务）：notebook 级「深度报告」动作把一个问题变成多节技术报告。**阶段1（秒级）**:STORM 式多视角规划器——先做零 LLM 语料侦察（来源标题 + KG 命中 + chunk 出处,大纲不再盲规划）——预写出大纲,每节带**专家视角 / 跨视角张力 / 证据充分性判定**（充足/薄弱/缺失 + 缺口说明,来自零 LLM 检索探针 + rewrite 模型上的 Judge）;用户在**大纲编辑器**里审阅/修改后再确认。**阶段2（几分钟,确认后）**:每节独立跑一次完整 `reasoning` 深挖（节间并行,各自独立检索预算）,按三层证据纪律撰写（`[k]` 库内引用 /（推断）库内推断 /【通识】库外通识，行内标注且提示未经验证），最后汇总加执行摘要、参考文献，以及（仅当某节缺库内支撑时）结尾一行「局限」说明。研究深度控件为五个命名档「概览/标准/深入/详尽/穷尽」（默认「标准」，= 每节 reflect 步预算，在生成按钮旁弹出选择）用充分程度换时延；章节按 `KG_JOB_CONCURRENCY` 并行深挖，前端显示逐节实时进度（`section_status`）。以可取消的后台 job 运行；每份报告可下 `.md`，或多选批量下 `reports.zip`
-- 边可信与治理：每条边的可信信号（evidence / 同源佐证 / 类型合法性）+ 高风险边优先的审核队列；被审核拒绝的边从图推理中排除
-- 知识治理：通过 `/knowledge-types` + `/knowledge?type=...` 浏览任意对象类型，状态生命周期，重复检测与合并；`deprecated` 对象从检索和 1-hop 扩展中排除。个人→基准节点晋升（propose → under_review → approve/reject），批准时去重入库，配套策展晋升队列
-- 统一 KG：跨文档概念聚类（`concept_clusters`），待合并审核
-- Object 级 KG 可视化：Concept / Claim / Formula / Procedure 节点，类型形状、边标签、多选过滤、按类型分组侧栏
-- Notebook 集合页（网格/紧凑/列表、编辑/删除）；点击「＋ 新建」直接创建 `Untitled notebook` 并进入，无弹窗
-- 第一版不使用 Docker
+- 结构化来源摄取；MinerU 配置后可保留元素级证据、公式、表格和文档内图片。
+- 带紧凑引用的多轮问答，支持 `chunk`、`reasoning` 和实验性的 `graph` 检索模式。
+- Concept / Claim / Formula / Procedure 知识抽取、治理、统一图谱可视化和个人知识向公共库提交。
+- 与笔记本绑定、仅创建者可见的 Memory，并通过受限 MCP 向外部 Agent 提供访问。
+- 自由列 knowhow 表、Markdown 格子、确定性图谱映射、历史/里程碑和隔离的代码附件。
+- 两阶段深度报告：大纲编辑、分节推理、实时进度、取消，以及 Markdown/ZIP 导出。
+- 多账号所有权、公共参考库、分享链接、复制/只读成员和管理员控制。
+- 结构化 JSONL 日志、有界生产诊断、离线批量摄取、检索回放、迁移和回填工具。
 
-PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发不需要。
+完整产品行为和端点契约见[产品与 API 参考](./docs/product-and-api_zh.md)。
 
-## 架构边界
+## 快速开始
 
-- 后端 endpoint body 位于由 `backend/app/api/routes.py` 组合的领域 FastAPI router；聚合层只负责 composition/order，不承载产品 handler，也不提供兼容导出。边界测试直接检查领域 router 的 endpoint 所有权，并以语义 AST 检查聚合组合声明；不要假设 `include_router()` 一定把子路由平铺，因为新版 FastAPI 会保留惰性的 included-router 节点。领域 Pydantic model 位于 `backend/app/models/`；`backend/app/models/schemas.py` 是旧导入的兼容 facade，re-export 同一批 model object。
-- `SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade。application service 不拼装主业务库 SQL。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。store 共享一个 `SqliteDatabase` 连接工厂、写锁与版本闸 `SqliteMigrator`；service 保留顺序与策略。facade 每个操作要么是显式兼容 adapter，要么是源码守卫验证的单跳委托，真实目标必须与 ownership manifest 一致。消费者依赖 `backend/app/repositories/ports.py` 中可执行、按消费者划分的小型 Protocol；依赖方向单向——facade → runtime → services → stores → SQLite——未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层，调用方不动。`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim，请求 Context、`_COPY_CHUNK`、`_remap_json_ids` 等旧导出继续可 import。
-- `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
-- 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
+### 环境要求
 
-当前 schema 版本为 27。已提交的 v9 兼容 fixture 会经由 v10–v27 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁瘦身的簇映射切换段增加 kg_canonical_scratch 表，v25 不可逆地清除已存的用户模型凭据与旧状态并新增按服务 ID 存储的部署级模型服务健康状态，v26 增加 knowhow 表变更流水与命名里程碑，v27 增加 sources.chunked_at 完成标记，使「已就绪但无分块」的来源历史可判定（合法的零分块解析 vs 中途失败的分块）。
-- `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
-- workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
-- 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
+- Python 3.13 或更高版本
+- Node.js 20 或更高版本及 npm
+- git
 
-## 部署
+只有当 pip 无法使用 `numpy`、`rustworkx`、`hnswlib` 等包的预编译 wheel 时，才需要 C/C++ 工具链。
 
-silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
-**无需 GPU、无需数据库服务、无需本地模型服务**。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
-远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf 回退
-（`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
-
-### 前置条件
-
-- **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
-  `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
-  重现（见 `backend/app/repositories/sqlite/database.py`）。
-- **Node.js ≥ 20** 与 npm
-- **git**
-- C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
-  仅当 pip 不得不从源码编译时,才需装 Xcode Command Line Tools(macOS)或
-  `build-essential`(Debian/Ubuntu)。
-
-### 1 · 安装
+### 安装
 
 ```bash
 git clone <repo-url> silicon-notebook
 cd silicon-notebook
 
-# 后端 —— 装进一个隔离的 Python 环境
 python3 -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 python -m pip install --upgrade pip
 python -m pip install -r backend/requirements.txt
 
-# 前端
 ( cd frontend && npm install )
 ```
 
-### 2 · 配置
+### 配置
 
 ```bash
 cp .env.example .env
@@ -89,1119 +51,104 @@ mkdir -p .local
 cp model-services.example.toml .local/model-services.toml
 ```
 
-`MODEL_SERVICES_CONFIG` 指向部署者维护的 TOML。编辑其中的 `[services]` 与
-`[bindings]`，为每个物理服务设置 `max_concurrency`，并只把 `api_key_env` 引用的密钥
-写入 `.env`。删除配置路径或把它置空，会明确进入确定性离线模式（仅关键词检索，无模型
-抽取/作答）。用户不能提供或覆盖模型凭据、端点、模型名和容量。
+如需模型回答和知识抽取，编辑 `.local/model-services.toml`，把 workload 绑定到物理服务，设置每个服务的 `max_concurrency`，并只把 `api_key_env` 指定的密钥放进 `.env`。
 
-- **嵌入维度**——`EMBED_DIM` 必须等于所绑定 embedding 模型的输出维度。可选
-  `EMBED_RUNTIME_DIM`（默认 `0`=关）把相似度空间截断到前 N 维 + re-normalize（MRL），
-  使进程内矩阵 / ANN 内存约 `EMBED_DIM/N`× 缩减,而库内原生向量保留为真相源。开关它需
-  重建 scale 索引,见 [docs/runtime-dim-truncation-runbook.md](docs/runtime-dim-truncation-runbook.md)。
-  **切勿改小 `EMBED_DIM` 来降维** —— 那会把全部存量向量当异维丢弃。
-- **PDF 高保真**(可选)—— 一个 MinerU 端点,见 [用 MinerU 解析 PDF](#用-mineru-解析-pdf);
-  保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
+若要明确使用确定性/离线降级，在 `.env` 中留空：
 
-`.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
-服务、绑定与容量模板；[配置](#配置)按组列出常用项。
-
-#### 从旧版逐角色 `.env` 升级
-
-已有部署可把废弃的 `OPENAI_COMPAT_*`、`KG_LLM_*`、`EMBED_*`、`RERANK_*`
-配置转换为系统统一配置：
-
-```bash
-# 默认只预览：读取 .env，不写任何文件。
-python scripts/migrate_legacy_model_env.py --env .env
-
-# 检查服务列表和推算容量后，生成 TOML，并只改写 .env 中由脚本管理的模型字段。
-python scripts/migrate_legacy_model_env.py --env .env --apply
+```text
+MODEL_SERVICES_CONFIG=
 ```
 
-应用迁移前会备份 `.env`，并把当前文件及所有含密钥的备份权限收紧为 `0600`；密钥会
-保留在新命名的 `.env` 槽位中，不会写入 TOML，也不会打印到终端。脚本保留旧版角色
-回退关系，并把 endpoint/model/key 完全相同的角色
-合并为同一个物理服务。初始容量由旧的 `KG_EXTRACT_WORKERS`、`KG_ASK_RESERVE` 和
-`EMBED_CONCURRENCY` 推算，仅作为迁移初值，必须按服务商的真实物理容量复核。可重复传入
-`--max-concurrency general=20 --max-concurrency embedding=4` 覆盖推算值。安装流程生成且
-尚未改动的示例 TOML 可直接替换；其他已存在的 TOML 应先检查，仅在确认替换时使用
-`--force`。被替换的文件都会先备份。
+`.env.example` 是非服务配置和密钥槽位的权威清单；`model-services.example.toml` 是服务、绑定和容量模板。远程访问、CORS、模型调度、认证、MinerU 配置和升级说明见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
-**远程访问——浏览器在另一台机器上**(不是服务器),所以**不能用 `localhost`/`127.0.0.1`**
-(那在每个访客自己机器上解析,连不到服务器)。
-
-**单台同机部署推荐(同源反代):** Next.js 前端把 `/api/*` 转发到本机后端
-(`frontend/next.config.mjs`),浏览器只跟前端同源通信。前端用相对的 `/api` 即可——
-**免 CORS、后端无需对外暴露**:
+### 运行
 
 ```bash
-# frontend/.env.local (NEXT_PUBLIC_* 构建期烘焙 → 改后要重新 build)
-NEXT_PUBLIC_API_BASE_URL=/api
-```
-
-后端可留在 `127.0.0.1:8000`(反代在本机转发),只需前端端口对外可达。后端不在
-`127.0.0.1:8000` 时用 `BACKEND_PROXY_TARGET` 覆盖。
-
-**另一种——前后端在不同 host(双 origin 直连):** 把前端指向后端可达 URL,并在后端放行前端来源:
-
-```bash
-# frontend/.env.local (构建期烘焙)
-NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
-# 后端仓库根 .env — 逗号分隔的允许来源;不能用 `*`(开了 credentials)
-SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
-```
-
-再让 uvicorn 加 `--host 0.0.0.0`(或 `BACKEND_HOST=0.0.0.0 npm run dev`)使 API 对外可达。
-
-### 3 · 运行
-
-**没有迁移 / seed 步骤**——首次启动时后端会自建 SQLite 表结构,并创建 `.local/storage`
-与 `.local/logs` 目录,只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
-进行中的抽取后台任务,让上传卡在 `extracting`。
-
-所有相对路径(数据库、存储、日志、`.env`)都在**代码里锚定到仓库根**,与启动脚本
-`cd` 进哪个目录无关——启动目录从此不重要。后端首行日志会打印解析后的绝对路径
-(`paths: db=... storage=... log_dir=...`),不确定某次启动到底用的哪个 `.local/`
-时看它即可。离线 CLI(`scripts/batch_ingest.py`)与下面两种服务启动方式,解析到的
-都是同一个仓库根 `.local/`。
-
-**启动脚本要求仓库根存在 `.env`**(`npm run dev` / `npm run start`):缺失时直接报错
-退出,而不是悄悄用空白默认值启动;如果发现改名残骸(如 `.env.local`)会点名提示改回
-——注意 Next.js 自己打印的「Environments: .env.local」只代表**前端**读到了它,后端只读
-`.env`。后端进程启动时也做同样检查(仅当存在残骸文件才硬报错;单纯缺 `.env` 只告警并
-照常启动,全新 checkout 与容器纯环境变量部署不受影响)。纯环境变量部署可设
-`ALLOW_NO_ENV_FILE=1` 显式跳过。
-
-```bash
-# 开发 —— 前后端一起(后端支持 reload)
 npm run dev
 ```
 
-```bash
-# 生产 —— 先 build 前端,再同时提供两个服务(后端单进程)
-npm run start
+浏览器打开 <http://127.0.0.1:3000>。全新数据库会创建内置 `admin` 账号，本地默认密码为 `admin`；绑定到非回环地址时必须配置非默认的 `SILICON_NOTEBOOK_ADMIN_PASSWORD`。
 
-# 停止前后端(可从任意终端执行,无需回到 start 进程 Ctrl-C)
+生产模式固定一个后端 worker，使进程内模型调度器成为整个部署的容量边界：
+
+```bash
+npm run start
 npm run stop
 ```
 
-`npm run start` 调用 `scripts/prod.sh`:前端 `next build` + `next start`,后端
-`uvicorn --workers 1`,两者日志都落 `.local/logs/`。设 `SKIP_BUILD=1` 可复用已构建好
-的 `frontend/.next`(如预构建镜像场景)。可用 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT`
-覆盖监听地址/端口。后端默认只监听 `127.0.0.1`；显式绑定非 loopback 地址时必须
-配置非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
+目标机没有 npm/node 或 root 权限时，先用 `bash scripts/pack.sh` 构建离线包，再按 [packaging/DEPLOY.md](./packaging/DEPLOY.md) 部署。
 
-生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
-Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
-采集事故；见[生产事故即时采集](#生产事故即时采集)。先重启会丢掉命令需要关联的
-活跃请求、锁、进程与线程栈证据。
-
-`npm run stop` 调用 `scripts/stop.sh`:停掉正在监听后端 `PORT` 与前端 `FRONTEND_PORT`
-(缺省 `8000` / `3000`)的进程。它与 start 一样先 source 仓库根 `.env` 解析端口,所以若
-你用自定义 `PORT` / `FRONTEND_PORT` 启动,停止时也传同样的值。脚本先发 `SIGTERM`,等待
-后再对残留进程 `SIGKILL`;没有服务在跑时是空操作。定位监听进程优先用 `ss`(Ubuntu/Linux
-的 iproute2 基础包自带),回落 `lsof`(macOS 默认有)再回落 `fuser`——三者至少有其一即可。
-
-> **一次性迁移注意**——如果你此前用 `npm run dev`(或手动 `cd backend && uvicorn ...`)
-> 在路径锚定上线之前的版本启动过,数据可能落在 `backend/.local` 而非仓库根的
-> `.local`。升级后二选一:①合并进去(在仓库根执行 `mv backend/.local/* .local/`,先
-> 检查有无冲突);②用绝对路径 env 显式保留原位置
-> (`SILICON_NOTEBOOK_STORAGE_DIR=/abs/path/storage`、
-> `DATABASE_URL=sqlite:////abs/path/silicon_notebook.db`——绝对 sqlite 路径注意四条
-> 斜杠)——绝对路径的 env 值永远原样尊重,不会被重新锚定。
-
-### 4 · 验证
+### 验证
 
 ```bash
-curl -s http://127.0.0.1:8000/api/health   # {"status":"ok","llm_configured":...}
-bash scripts/check.sh                        # hermetic smoke + 全量 pytest + 前端 test/tsc/build
-```
-
-`scripts/check.sh` 同时会跑下列契约守卫;改动它们各自看护的代码时,也可以单独跑:
-
-```bash
-PYTHONPATH=backend python scripts/check_ask_modes_contract.py            # 提问模式 id 集合
-PYTHONPATH=backend python scripts/check_object_type_labels_contract.py   # object_type 显示名
-PYTHONPATH=backend python scripts/check_ui_vocabulary.py                 # 界面词汇
-```
-
-后端会把结构化 JSONL 日志写入 `.local/logs/`(`requests` / `events` / `llm`);跟踪一次
-上传或排查卡住的 source 见[可观测性 / 日志](#可观测性--日志)。
-
-### 5 · 离线打包(目标机没有 npm/node)
-
-要部署到一台**没有 npm/node**、只有 Python 包索引、且**无 root** 的机器:在一台**有 Node、
-且 OS/CPU 架构与目标机一致**的打包机上产出自包含 tar 包,再拷过去一键装:
-
-```bash
-bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.tar.gz
-```
-
-`pack.sh` 把前端构建成 Next.js **standalone** 服务,捆绑一份**便携 Node 运行时**(匹配打包机
-架构)来跑它,并预编译一个包含全部 Python 依赖的 **wheelhouse**——这样 `hnswlib` / `scipy`
-等编译型包在目标机上无需编译器。因为打包机与目标机同 OS/同架构,包内每个二进制都能直接运行。
-
-目标机上——无需 npm/node、无需 root:
-
-```bash
-tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
-cd    silicon_notebook_<version>_<os>-<arch>
-./install.sh    # 建用户态 venv;优先用 wheelhouse 离线装依赖
-                # (缺的再从 pip 源在线补);生成 .env
-mkdir -p .local
-cp model-services.example.toml .local/model-services.toml
-vi .local/model-services.toml  # 服务、workload 绑定、每服务 max_concurrency
-vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
-./start.sh      # 便携 node 跑 standalone 前端 + venv 的 uvicorn 后端
-./stop.sh       # 停止两者
-```
-
-打包机可配置项:`NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL`(便携 Node 来源)、
-`SKIP_WHEELHOUSE=1`(改为目标机在线装依赖)、`PIP_INDEX_URL`、`PACK_PYTHON`。目标机可配置项:
-`PYTHON_BIN`、`PIP_INDEX_URL`、`FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST` / `PORT`。
-打包机的 Python **小版本**应与目标机一致,否则预编译 wheel 装不上(install.sh 会自动回退在线
-安装)。目标侧细节见包内 `DEPLOY.md`。
-
-## 产品流程
-
-外层页面为 notebook 集合页（KG-native 管线）：
-
-1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
-2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。
-3. 后端（异步后台作业）：结构化 Markdown 解析 → 分块 + 向量化——源处理完即可做 chunk-native 问答。
-4. **KG 抽取按需触发**（见下方「KG 抽取触发」）：摄取期仅当该 notebook 已有 KG、或 `KG_AUTO_EXTRACT=true` 时才抽。`KG_JOB_CONCURRENCY` 只控制并行来源任务；每次抽取模型调用都由 `kg_extract` workload 所绑定服务的系统调度器准入，因此服务 TOML 中的 `max_concurrency` 始终是唯一模型容量上限。抽完的新源随后增量融入统一 KG。
-5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
-6. 混合检索（bi-gram 关键词 + float32 矩阵语义）驱动 KG-native 问答：答案含逐句 `[k_i]` 引用，支持多轮会话，并沿 KG 关系做 1-hop 邻居扩展。
-7. 统一 KG 跨文档聚合概念；待合并的跨文档概念对可逐一确认或拒绝。
-
-进入单个 notebook 后：
-
-- 顶栏：左上角只保留可编辑 notebook 标题；notebook 描述在没有对话时显示到问答欢迎态里，顶部工具栏在桌面宽度下保持各动作标签完整。
-- 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。所有面向用户的来源计数只计这组可见的导入来源，排除隐藏的 `memory` / `knowhow` 投影来源。网络来源检索暂不开放。
-- 主栏：四个 tab——**问答**（Ask）、**知识库**（Knowledge）、**记忆**（Memory）、**深度报告**（Deep Report）。Ask 提供逐句 `[k_i]` 引用、三种检索模式、多轮会话、实时推理轨迹与反馈；会话历史收进 Ask 顶栏的单行 `历史 N` 入口和可展开管理面板，旁边的 `+` 会直接开始新会话。Knowledge 负责动态类型浏览与治理；Memory 只显示当前用户绑定在此 notebook 的私有记录；Deep Report 负责两阶段报告、大纲审阅、进度、导出、取消和删除。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。transport 断连只停止向当前客户端继续推送；导航、刷新或 transport 丢失后 detached Ask job 仍在后台运行并可保存最终回答。用户点击中断则调用 `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`，由后端设置取消事件，使 worker / LLM 路径停止，且不保存被取消的最终回答。主工作区保持两列且没有固定 Studio 右栏。
-- 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
-- 「分析」菜单本身只包含晋升队列（admin）、发布/撤回公共知识库（admin）与边审查队列。看板、Schema、全屏知识图谱是其他顶栏动作；当前不再暴露已退役的内容生成或派生规则动作。现有 notebook 分析视图提供独立的 Memory 和 Knowhow 内容资产卡片：Memory 指标严格限定为当前登录用户和当前 notebook（admin 也不跨用户汇总），Knowhow 指标遵循 notebook 的既有读取权限。卡片只展示计数、健康度/最近活动摘要和跳转入口；浏览与编辑仍复用现有的 Memory、Knowhow 页面和编辑器。
-
-知识对象类型的显示名只有一份真源：后端 `app/services/extraction_profiles.py` 的 `OBJECT_TYPE_LABELS`，由 `GET /notebooks/{id}/knowledge-types` 以 `KnowledgeTypeCount.label` 下发给前端。凡是拿得到这个 API label 的调用点——Knowledge 浏览器的类型 tab 与条目——一律直接使用它，因此用户自定义类型（例如 knowhow 表列名投影出来的类型）同样能显示正确的中文名。只拿得到 `object_type` 字符串的调用点——引用浮层与知识图谱画布/侧栏——回落到前端内置小表 `frontend/app/kg-type-model.ts` 的 `KG_TYPE_LABELS`；`kg-type-mark.tsx` 消费并 re-export 该模型供共用渲染。该表逐字等于后端常量；`scripts/check_object_type_labels_contract.py` 作为硬门挂在 `scripts/check.sh` 里，两份一旦漂移即构建失败。未知/自定义类型一律原样显示其 `object_type`，绝不 TitleCase 成臆造的英文。这两张表的键都由用户可控字符串索引，查表必须走 `Object.hasOwn(...)` 而非裸下标：`constructor`、`__proto__` 会命中原型链上继承的函数/对象，而不是「查不到」。
-
-面向用户的文案另有一份词汇契约，真源是 `AGENTS.md`「界面词汇表」：表中每一行把一个内部词（基准库、chunk、KG、抽取、投影、晋升、schema、deprecated……）映射到界面唯一允许使用的说法。内部名保留在代码、类型、注释与架构文档里——只有渲染给用户看的字符串才改写；而**被持久化**而非被渲染的值（`Untitled notebook` 这个默认库名、协议上的 enum id）属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们。`scripts/check_ui_vocabulary.py` 作为硬门挂在 `scripts/check.sh` 里执行该表，其**作用域跟着信任边界走、不跟着目录树走**：既扫描 `frontend/app` 每个源文件的渲染文本——字符串字面量加 JSX 文本节点，并先剥离注释、标识符、正则体与 `${…}` / `{…}` 插值——也扫描后端每处 `user_error(status, "…")` 的消息字面量，因为 `api/deps.py` 恰恰只给这批 4xx `detail` 打上 `X-User-Message: 1`，而 deny-by-default 的前端见到该标记就把它原样显示给用户。打标记等于声明「这是给人看的文案」，那就同样受这份词表约束；此前把守卫圈在 `frontend/app` 里，正是「仅管理员可设置基准库」「仅管理员可管理晋升队列」四条 403 一路上屏而守卫全绿的原因。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内——它永远不上屏，detail 是诊断 / MCP 契约，这条分界由 `backend/tests/test_user_error.py` 守。任一侧命中黑名单词即构建失败。另有一条独立守卫 `frontend/app/raw-enum-fallback.test.mjs`（由 `npm run test` 递归收集，因而同样是 `scripts/check.sh` 的硬门），拒绝「兜底即原值」（`MAP[x] ?? x`，以及通过正规 API 达成同一效果的 `label(map, x, x)`）：这种查表一旦后端新增枚举值，就会把英文 id 直接渲染给用户；应改用 `frontend/app/vocabulary.ts` 的 `label(MAP, value, fallback)`，它强制传中性兜底词，使该 bug 写不出来。该检查跑在真正的 TypeScript AST 上而非正则：渲染位置的 `M[x] ?? x` 与内部归一化的 `ALIASES[v] ?? v` **语法形状完全一致**，只有上下文能区分泄漏与正常代码——正则版误报了后者，又整个漏掉了 `M?.[x] ?? x`、`getLabels()[x] ?? x` 与 `label(m, x, x)`。它自己的文件头如实写明仍然看不到的部分（先算进变量再渲染、`alert(...)` 这类非 JSX 出口），诚实标注优于假装全覆盖。若确实要原样透出**用户自己写的**字符串（自定义 `object_type`、用户自建的 schema 字段名），则显式写成 `Object.hasOwn(...) ? ... : raw`，顺带规避上面那个原型链隐患。该守卫是词黑名单而非语义检查：有两行只覆盖其无歧义的复合形态——图谱视图里裸用「节点」「边」是正当的，且「边」与「旁边」「边框」同形。`backend/tests/test_ui_vocabulary_guard.py` 存放它的正例与反例，并额外在「词汇表新增一行却既没有对应规则、也没有登记豁免理由」时失败，使黑名单无法悄悄退化成只覆盖词表的一个子集。
-
-重新解析保留 source 行与原始文件：替换 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。
-
-可见导入来源计数与物理记账刻意分离：隐藏的 Memory/Knowhow 投影来源不会出现在来源栏或面向用户的计数中，但 `size.sources`、复制阈值、存储统计和后台调度仍按物理行计数。`has_unindexed_content` 也会在可见导入来源增量为零但派生内容发生变化时保留 scale-index 更新决策。
-
-notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
-
-## Knowhow 表
-
-notebook 内的 **Knowhow 表** 动作（与知识图谱并列，单开一个面板）管理 **knowhow 表**：把领域经验沉淀成一行行经验记录，列名自由命名。首个实例是半导体时序违例排查（行=违例类型；列=现象识别、根因分析、修复方法、依赖工具），但列名完全是用户自定义文本，不锁定词表。建表可以从**导入**开始（xlsx/csv/Markdown，预览时给出列→内容类型的映射建议）：新表导入会让用户选择“属性按列”（默认，首行为表头）或“属性按行”（首列为属性名），后端在预览与确认导入前自动把属性行表转置成内部统一的属性列表；追加导入与投影管线仍只处理属性列表。也可以用**建表向导**从零搭建（先定列名表头，再填行）。填值两条路可自由混用：应用内经**格子编辑器**（markdown 编辑默认单栏专注、可切「并列对比」或「铺满预览」且按会话记忆、图片粘贴或拖拽即可上传、自动本地草稿（每条离开路径都会先把未保存内容同步落成可恢复的本地草稿、落不进就不离开，经 Esc／点背景／× 关闭或切换格子会先确认）、保存并下一格连续录入），或线下走 **Excel 模板往返**：按当前表头下载 `.xlsx` 模板（表头行冻结），批量填写后上传追加（提交前会预览未匹配列，以及行标题与已有行重名的提示）。
-
-至多一列可被指定为整张表的**行标题列**（表级设置，不是逐列打标）。设置后，表中每个非空格子都会成为知识图谱节点——节点的类型就是所在列名——并用 `about` 边连回该行的行标题格；同一列里不同行出现的相同值会归并成一个节点（十行都引用同一个工具，就是一个工具节点带十条入边）。不设置行标题列，整张表就只参与检索——格子照常切成 chunk 供问答使用，但不建任何图谱节点，适合每行是一条记录而非一个具名概念的流水型表格。
-
-投影状态是整表完成契约，不是逐行进度捷径：整表的 chunk、embedding、知识对象/关系、变更序号与图缓存通知全部完成前，行保持 `pending`/`syncing`；只有这些收尾工作成功后才发布 `synced`。因此调用方观察到所有行均已结束时，可以立即读取完整图谱，不受后台线程调度先后的影响。状态发布还必须匹配本轮读取的表变更序号：旧任务绝不能覆盖并发新编辑留下的 `pending`，新版本由已排队的下一轮任务处理。
-
-每列还带一个**内容类型**——仅作确定性解析提示，从不调用 LLM：**方法步骤**列解析成有序步骤列表，**工具/事物**列按列表项/换行拆分并去重成多个节点，**普通**列整格作为一个节点。格子编辑器与行详情抽屉都提供显式的**优化表达**按钮（绝不自动触发）：调用系统为 `knowhow_optimize` 绑定的服务，在保持原意的前提下规整结构与措辞，原文与建议对照展示，只有逐格确认后才会回填。
-
-Ask 引用命中 knowhow 格子时会直接跳转到该行的详情抽屉，而非通用来源视图。notebook 深拷贝会把 knowhow 表完整带过去——表、列、行、格子、代码附件在副本里全部重新映射 id——且不重跑 embedding，未变化的格子文本在副本里复用原向量。
-
-外部 Agent 接入面（HTTP + MCP、判别集、代码附件）见 [Memory 与 Agent MCP](#memory-与-agent-mcp)；HTTP 路径清单见 [API](#api)。
-
-## Memory 与 Agent MCP
-
-Memory 必须由用户手动选择、归创建者私有，并且始终绑定到且只绑定到一个 notebook。
-在 Ask 回答上点击“保存到 Memory”后，后端先生成标题、正文和标签预览，用户可编辑，
-只有最终确认才写入 `confirmed` Memory。预览模型未配置或失败时，系统确定性地用问题作
-标题，并用移除显示引用后的回答作正文。当该 Memory 所属 notebook 非 base 库且已开启
-知识图谱抽取（与上传来源同一判定门）时，确认动作与“保存到 Memory”弹窗会显示默认勾选的
-“同时抽取到知识图谱”复选框；勾选后用与上传逐字相同的抽取管线把该 confirmed Memory 抽进
-该 notebook 自己的 KG，记为对用户不可见、不进任何来源列表与计数的隐藏合成源，可在每次
-确认时取消；base 库除外，只经下文的晋升人审进入 KG。总 Memory 页面只聚合当前登录用户的数据；
-notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook 局部视图。总数与待确认数
-始终按 owner 全量统计，不随状态、搜索或 notebook 筛选变化；notebook 筛选项来自有界的 owner
-聚合查询，不做逐 notebook 查询。
-
-生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
-token 具备 `memory:read_candidates` 时，同一用户、当前所选 notebook 下获授权的所有 Agent
-profile 都可检索它。Candidate 永远不会进入正式 notebook Ask、notebook 搜索、Deep Report
-或 `search_notebook_context`；只有用户确认后才进入正式平面。Rejected/deprecated 在两个
-平面都排除。检索先判断相关性，权威只在同等相关或冲突证据间生效：
-`candidate < personal 原始证据 < confirmed Memory < base KG/base 原始证据`。
-
-Candidate provenance 会保存创建它的 Agent profile id/name 与每一条提交的 evidence ref，但绝不
-保存 bearer token。服务端逐条按 candidate 的 owner 与 notebook 校验，并保存 `validated` 或
-`invalid` 状态及有界原因；历史未验证或无效引用仍可由 owner 查看，但绝不会标成 trusted 或成为
-可晋升 evidence。Candidate 详情、审核与 provenance API/UI 都只对 owner 开放。把 Ask 回答保存为
-Memory 时，后端会在写 Memory、revision、provenance 的同一个 `BEGIN IMMEDIATE` 事务内再次校验
-owner/member 实时权限，因此并发撤销分享不会留下半写入 Memory。
-
-Memory 输入在 API 与 service 两层统一归一化并 fail-closed：title/content 去除首尾空白后必须非空。
-当前上限为 title 80 字符、content 40,000 字符、tag 最多 20 个且每个 80 字符、审核/candidate
-reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多 50 条且序列化 UTF-8
-32,768 bytes、client request id 200 字符。HTTP 违规返回 422；MCP/内部调用也经过同一 service 校验。
-嵌套 NaN、正负 Infinity 会在持久化前被拒绝，合法 JSON null 则保持原样往返。
-MCP 提案严格使用这些 Core 上限，不再叠加更窄的重复限制。
-tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直接拒绝。
-
-总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
-Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
-`knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-`ask:execute`、`knowhow:code` 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
-SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
-loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
-启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
-（并恢复 Host/Origin 校验），并把 `MCP_PUBLIC_URL` 设为公开的 HTTPS `/mcp` URL。
-过期时间必须带明确时区偏移；浏览器把本地 `datetime-local` 转成 UTC，后端按 UTC 瞬间归一化保存。
-无时区 datetime 会被拒绝，不会按服务端本地时区猜测。
-
-Codex 推荐把签发的 token 放入环境变量，再注册服务：
-
-```bash
-export SILICON_NOTEBOOK_AGENT_TOKEN='<一次性显示的 token>'
-codex mcp add silicon-notebook --url http://127.0.0.1:8000/mcp \
-  --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
-```
-
-当前本机 Claude Code CLI 接受 HTTP transport 和显式 Authorization header：
-
-```bash
-claude mcp add --transport http silicon-notebook http://127.0.0.1:8000/mcp \
-  --header "Authorization: Bearer <一次性显示的 token>"
-```
-
-Claude Code 可能把这段原始 header 保存到本机配置。应使用最小 scope、短有效期，保护
-本机配置，并在使用后撤销/轮换；不要假设该 header 会做 shell 环境变量插值。
-
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的十一个工具是：
-`list_notebooks`、`select_notebook`、`search_agent_memory`、
-`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`、
-`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row`、
-`put_knowhow_cell_code`。
-服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
-不可信 evidence，不是可执行的 Agent 指令。
-
-四个 knowhow 工具与 `/api/agent/knowhow/...` 下的 HTTP 端点（见 [API](#api)）共用同一套
-service 函数，HTTP 与 MCP 不会在响应形状上走样。`list_knowhow_tables`、
-`get_knowhow_discrimination`、`get_knowhow_row` 需要 `knowledge:read`；
-`get_knowhow_discrimination` 对设有行标题列的表按行返回标题，以及每个方法步骤列的
-`{column_id, column_name, text, code_status}`（表未设行标题列则返回 400），供 Agent
-据此跑自己的判别逻辑挑选适用的修复方法。`get_knowhow_row` 返回一行的完整格子文本
-（方法步骤/工具事物列另带 `steps`/`items`）及该行全部**代码附件**的代码本体。代码附件
-是外部 Agent 针对某格方法已经写好的代码——notebook 从不生成也不执行，也从不进
-embedding/chunk/索引/KG 投影——其新鲜度（`implemented`/`stale`/`none`）在读取时用格子
-当前内容的 hash 与附件保存时的 hash 比对推导；判别集只带这个三态，不带代码本体，以控制
-体积。读代码依然只需要 `knowledge:read`；只有写入（`put_knowhow_cell_code`，以及对应的
-HTTP `PUT`/`DELETE .../code`）才需要 `knowhow:code`——一个既要读现有代码又要写新版本的
-token，两个 scope 都要授予。
-
-只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
-候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。提案会固定精确的
-来源 revision、脱敏候选快照和审核所见 evidence；编辑或弃用审核中的 Memory 会在同一事务中废止
-旧提案并重置晋升状态，编辑后可重新提交。当前 provenance 会清除 proposal 指针，固定提案只保留在
-快照与队列历史中。批准时会重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，
-并在写事务内校验固定 revision 与 notebook，再复用 KG dedupe/merge 创建或合并一个或多个 Base KG 对象；批准/拒绝会记录当前登录的
-admin reviewer，API 与晋升审计记录完整的 `base_object_ids`。这一过程不会改变或暴露原私有 Memory。
-删除 notebook 会级联删除所有成员绑定到它的私有 Memory，因此删除弹窗会提示这一生命周期
-后果，但不会泄露成员身份或数量。
-
-仓库内固定 Memory 评测计算 Recall@5、MRR、nDCG，以及三项零容忍计数：candidate 进入正式
-平面、跨用户、跨 notebook 泄漏。A/B harness 比较 no-Memory、KB-only 与
-KB+confirmed-Memory 三种检索条件。
-
-## KG 抽取触发
-
-源解析 + 向量化完成后即可做 chunk-native 检索，因此 **KG 抽取按 notebook「按需开启」，并非每次上传都抽**：
-
-| 上传时 notebook 状态 | 是否抽 KG | 怎么触发 |
-|---|---|---|
-| 尚无 KG（新库） | **不**自动抽 | 按需构建：`POST /api/notebooks/{id}/kg/build`（界面：notebook 的**「构建知识图谱」**动作；在无 KG 的库上选「深入分析」组——即 `strict` 的 `reasoning` / `graph`——时也会提示构建） |
-| 已有 KG | 每个新源**自动后台抽取** | 无需手动触发——续抽以保持 KG 完整；新源随后增量融入跨文档统一 KG |
-
-摄取期判定 = `KG_AUTO_EXTRACT 或 该 notebook 已有 KG`：
-
-- `KG_AUTO_EXTRACT`（默认 `false`）——为 `true` 时**所有** notebook 每次上传都抽 KG。
-- 否则仅当该 notebook 已有 KG 对象时，上传才抽。
-
-即：**首次 opt-in**（构建 KG，或设 `KG_AUTO_EXTRACT=true`），之后新文档自动抽取 + 融合。整库重抽用 `POST /api/notebooks/{id}/kg/rebuild`；离线批量构建见「离线批量摄取」一节。
-
-### KG 构建故障隔离
-
-手动整理/全部重新分析会创建持久化、任务级的 `kg_build_jobs` 记录；同一 notebook
-同时只允许一项 KG 任务运行。Notebook 与索引状态 API 会返回
-`probing → extracting → stopping → finished`、来源进度和经过审查的用户提示。
-前端刷新后仍能恢复该状态；失败后显示「继续分析未完成内容」。
-
-每次 KG 模型请求使用 `KG_LLM_TIMEOUT_SECONDS`（默认 `60` 秒），瞬态错误最多重试
-`KG_LLM_MAX_RETRIES` 次（默认 `2`，允许 `0..3`）。若服务持续不可达，或认证失败/
-请求被永久拒绝，本次任务共享的中断控制会阻止继续发起请求，取消尚未开始的
-source/window 工作，在首个窗口确认熔断时、窗口级与来源级 drain 开始前就持久化
-`stopping`，再等待已经开始的调用安全退出。中断范围只限当前 notebook 的本次 KG
-任务，不影响其他 notebook 或之后重新发起的任务。可用性探测会显式绕过 LLM 响应
-缓存且不回写缓存，旧的成功探测不能在当前模型已经不可用时放行破坏性重建。
-
-已完成来源的结果会保留；同一来源的 object/relation 分块共用一个 SQLite 事务，被
-中断或写入失败的来源不会留下半成品；旧版本遗留但最新 extraction run 已失败的图也
-仍判定为未完成。之后普通「继续分析」只处理未完成来源。只有显式「全部重新分析」
-会清空已有 KG，而且会在删除前先探测模型服务。若进程重启时仍有 running job，启动
-恢复会把 job 与 running extraction run 标为 failed，并把所有遗留的 `extracting`
-来源恢复为 `parsed`，包括尚未来得及创建 extraction run 就中断的来源。extraction
-run 进入完成或失败终态后还会精确失效该 notebook 的待处理来源缓存，避免轮询长期把
-已完成来源误报为未完成。
-
-前端用 notebook、workspace epoch 与请求 epoch 共同约束建库响应归属，并在持久化 job
-仍为 `running` 时持续轮询，不再用固定时限伪造本地完成。安全结构化事件覆盖
-`kg_build_started`、`kg_build_progress`、`kg_build_circuit_opened`、
-`kg_build_stopping`、`kg_build_succeeded` 与 `kg_build_failed`，不记录 provider
-诊断、prompt、来源正文、token 或凭据。
-
-## 检索模式（问答）
-
-`POST /ask` 按 `mode` 分派——注册表 `backend/app/services/ask_modes.py` 是唯一真源（默认 `chunk`）。联合范围按路径区分：`chunk` 基线 active-only；可选 KG overlay / PPR 可加入 federated KG 与 base-backed chunk；`graph` / `reasoning` 走 federated KG。`federated_retrieve()` 的知识对象命中不改 score，只在完全平局时以 `base` 为第二排序键；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。这些排序信号不进入接地阈值。
-
-| 模式 | 分组 | 需 KG | 一句话 |
-|------|------|-------|--------|
-| **`chunk`**（默认） | general | 否 | chunk-native 通用问答：大召回 → 选择 → 长上下文综合 → 引用绑回源 chunk。 |
-| **`graph`** | strict | 是 | 对跨文档知识图谱做单趟个性化 PageRank（PPR）传播。 |
-| **`reasoning`** | strict | 是 | agentic 迭代 plan → retrieve → reflect → answer（流式输出实时轨迹）。 |
-
-### id 与显示名
-
-上表的 id（`chunk` / `reasoning` / `graph`，以及分组 id `general` / `strict`）是**协议**：`POST /ask` 收的是它，历史会话与书签存的是它，后端注册表 `backend/app/services/ask_modes.py` 声明的也是它。它们是稳定量，不因为「名字不好听」而改。
-
-界面上**显示**的名字是另一层，纯 UI，归前端注册表 `frontend/app/ask-modes.ts` 所有：
-
-| 协议 id | 问答面板显示名 |
-|---|---|
-| `chunk` | 通用问答 |
-| 分组 `strict`（选择器给出的入口，组内默认引擎是 `reasoning`） | 深入分析 |
-| `reasoning` | 逐步推理 |
-| `graph` | 关联追溯 |
-
-该注册表的 `groupLabel()` / `modeLabel()` 是唯一读取口：前端任何其它文件都不得硬编码显示名，散文里提到就用模板插值。两边由 `ask-modes.test.mjs` 强制——它递归扫描 `frontend/app`，当前显示名出现在注册表之外即失败，退休名（严格推理 / 深挖推理 / 图谱多跳）复活也失败。因此改显示名只是改注册表一行，不动任何 id、请求/响应载荷或已存会话；id 集合另由 `scripts/check_ask_modes_contract.py` 跨前后端锁同步。
-
-**`chunk` —— chunk-native，含可选 chunk×graph mix。**
-- *基线：* chunk 大召回（`CHUNK_RECALL`）→ MMR / 多子查询配额多样性选择（`CHUNK_MMR_K`）→ 长上下文综合，不碰 KG。
-- *mix*（仅当 `CHUNK_KG_OVERLAY_ENABLED=true` **且** 配齐 qwen3-rerank **且** 有 KG 时生效）：三路并池——(a) 向量 chunk、(b) query 种子周围的 KG 局部结构（实体 + 其 1-hop 关系，只检索一次）、(c) 这些 KG 对象背后的源 chunk——round-robin 合并 → qwen3 cross-encoder rerank → 按 token 预算装填（`MAX_ENTITY_TOKENS` / `MAX_RELATION_TOKENS` / `MAX_TOTAL_TOKENS`）。答案在同一套 `[k]` 映射里同时引用 chunk 与 KG 项，接地跨 chunk ∪ KG。未配 rerank 或无 KG 时**字节等价回退**到基线。（忠实 LightRAG 的 `mix` 模式。）
-
-**`graph` —— 跨文档 KG 上的 PPR。** 经 `federated_retrieve` 取种子（KG 实体 + 其源 chunk；`RELATION_RETRIEVAL_ENABLED=true` 时再融合关系索引命中）作为 HippoRAG 式**个性化 PageRank**（`GRAPH_PPR_ENABLED`，默认开）的个性化向量，通过共享知识图谱把相关度跨文档传播；排名靠前的 chunk 喂出接地答案，`[k]` 锚点指向 KG 对象/关系。`GRAPH_PPR_ENABLED=false` 时回退为沿推理边的有界 BFS。
-
-**`reasoning` —— agentic 深挖检索。** 委托 `ReasoningRetriever`：拆解问题、检索（与 `graph` 同样走 PPR 传播）、反思是否充分，按需扩图/加子查询直到能回答——经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。遇到显式推导问题时可调用 `follow_chain`：通过两轮有界邻接抽样复用既有 source/target 索引，再确定性检查类型、状态、审核、evidence 与 `validity_scope`；两条存储关系作为可引用前提，`A→C` 只作为带「推断」标记的查询期结论。高度节点抽样被截断且无法证明不存在直接边时，宁可不推。严格 / KG 接地。
-
-退役 id `fast`、`global` 透明映射到 `chunk`（旧会话/书签不会 422）；其余未知 mode 返回 HTTP 422。
-
-## API
-
-当前 beta 的关键 API：
-
-- `GET /api/notebooks`、`POST /api/notebooks`、`PATCH /api/notebooks/{id}`、`DELETE /api/notebooks/{id}`
-- `GET /api/notebooks/{id}/analytics`
-- `GET /api/notebooks/{id}/analytics/content-overview` —— 面向当前查看者的内容资产：`memory`（`total`、`confirmed`、`candidate`，最多三条最近 `id`/`title`/`status`/`updated_at`）与 `knowhow`（`table_count`、`row_count`、`projection_pending`、`projection_failed`、`stale_code_count`，最多三条最近表摘要）
-- `POST /api/notebooks/{id}/sources` — multipart 文件上传（异步解析/抽取）
-- `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`
-- `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
-- `GET /api/notebooks/{id}/graph`
-- Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`），以及显式的建议式 LLM 表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`）
-- `GET /api/notebooks/{id}/search?q=`
-- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；联合范围遵循上文各 mode 的边界）
-- `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（先发带 `job_id` 的 `started` 事件，再发进度/最终事件）；transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
-- `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
-- `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；设置取消事件并在保存被取消的最终回答前停止 worker
-- `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
-- `POST /api/answers/{answer_id}/feedback`
-- Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview`、`POST /api/notebooks/{id}/memories/from-answer`
-- Agent 接入：`GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
-- Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `knowledge:read`，代码写入需要 `knowhow:code`（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
-- 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
-- `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
-- `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
-- `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
-- 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 可发布为公共知识库，personal = 默认用户笔记）；`base` notebook 只有在被其它笔记本显式挂载后才参与该笔记本的检索（`GET`/`PUT /api/notebooks/{id}/bases`，候选列表见 `GET /api/notebooks/{id}/mountable`）。
-- 参考库挂载：`GET /api/notebooks/{id}/bases` → `MountedBase[]`（本 notebook 的挂载边，含置灰的失效边）；`PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → 全量替换，返回更新后的 `MountedBase[]`（含不可挂载的 id 时 400；仅 owner 可写）；`GET /api/notebooks/{id}/mountable` → `NotebookRef[]`（可挂候选：所有公共知识库，加上本 notebook 自己同 owner 的库）。
-- 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
-- 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
-- 深度报告（两阶段）：`POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`;跑**阶段1 规划**后停在 `status=outline_ready`（`auto_generate=true` 则一路直出）。`GET .../reports/{rid}` 轮询状态 + 富 `outline`（每节 视角/张力/充分性）+ `content_md` + 实时 `section_status`。`PATCH .../reports/{rid}/outline` body `{sections}` 编辑草案大纲（仅 `outline_ready` 态,无有效节 422）。`POST .../reports/{rid}/generate` body `{depth?}` 启**阶段2 生成**（仅从 `outline_ready`,否则 409）。另 `GET /reports`（列表）、`POST .../cancel`、`DELETE`、`POST .../reports/export` `{report_ids}` → `reports.zip`。章节按 `KG_JOB_CONCURRENCY` 并行深挖。
-
-当前持久化/API 契约是 `reports` 表与 `/reports` API；已退役的内容工作室存储与路由不属于当前 runtime。
-
-## 配置
-
-所有模型服务均通过 URL 端点接入，不启动本地模型服务。
-
-### 系统模型服务、调度与诊断
-
-模型 endpoint、协议、模型名、工作负载绑定与服务容量都由部署者统一管理，不再由用户配置。
-把 `model-services.example.toml` 复制为 `.local/model-services.toml`，设置
-`MODEL_SERVICES_CONFIG=.local/model-services.toml`，并在 `.env` 中只填写各服务
-`api_key_env` 所引用的密钥。仓库中的示例不含凭证；`MODEL_SERVICES_CONFIG` 留空时，
-系统明确进入离线 / 确定性降级。
-
-每个 `[services.<id>]` 表配置 `display_name`、`kind`、`protocol`、`base_url`、
-`model`、`api_key_env` 与 `max_concurrency`；`[bindings]` 把稳定的 workload id
-（如 `ask_answer`、`reasoning_agent`、`kg_extract`、
-`retrieval_query_embedding`、`retrieval_rerank`）映射到物理服务。多个 workload
-可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
-是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
-
-调度策略固定在代码中：
-
-- 每个物理服务最多同时运行 `max_concurrency` 个调用；不同服务拥有独立槽位；
-- 总队列上限为 `10 × max_concurrency`，单个 actor 最多排队
-  `2 × max_concurrency` 项；
-- 调度按 8 个 interactive : 2 个 report : 1 个 background 的固定节奏循环，
-  每个优先级内按 actor 轮转，因此持续交互流量下后台工作仍会前进；
-- 排队截止时间固定为 interactive 30 秒、report 300 秒、background 1800 秒，
-  派发前会响应取消；
-- 致命 provider 错误立即打开熔断器；连续 3 次瞬态错误也会打开。冷却 30 秒后只允许
-  1 个 half-open 恢复探针。
-
-调度器与熔断状态只存在于进程内。生产必须只运行一个后端进程：
-`scripts/prod.sh` 固定 Uvicorn `--workers 1`。多 worker 会把声明的服务并发度成倍放大，
-并把队列、熔断与健康状态分裂到多个进程。
-
-普通用户看到的**模型服务**面板是只读的，展示脱敏后的系统服务身份、绑定 workload、
-最近健康状态、active/maximum、排队数、最老等待时间和熔断状态。
-`GET /api/model-services/status` 只读本地状态，绝不自动探测上游。只有 admin 可通过
-`POST /api/admin/model-services/{service_id}/test` 或
-`POST /api/admin/model-services/test-all` 显式测试一个或全部服务。endpoint、凭证、
-provider 响应正文和原始异常只保留在服务端日志。
-
-Ask / 模型错误会尽量携带物理服务、workload、安全模型名与 `support_id`。用户遇到问题时，
-应把 support id 提交给维护人员；维护人员结合服务端日志与只读服务面板即可定位坏掉的模型服务。
-本地检索 / 索引错误不会把 provider 标为异常。
-
-个人模型配置路由和可编辑配置页面已经删除。schema v24 会在与版本戳相同的事务中，
-不可逆地把历史 `user_profiles.model_settings` 全部覆盖成 `{}`，并删除旧的逐用户健康状态。
-如需把历史凭证留作外部记录，升级前先备份数据库；应用不会恢复或继续使用这些值。
-
-模型调用超时、重试、输出预算与 batch 大小仍是普通 workload 调优项。`EMBED_DIM` 必须与绑定的
-embedding 模型输出维度一致。KG 来源级并行仍由 `KG_JOB_CONCURRENCY` 控制，自适应抽取窗口使用
-`kg_extract` 所绑定服务的容量；两者都不能覆盖服务 `max_concurrency`。
-
-**按核数自动调参：** 本地 CPU 工作仍可按机器缩放：
-
-```text
-KG_CLUSTER_ANN_THREADS   # 概念聚类 hnswlib 线程；0（默认）= min(cpu核数, 32)
-```
-
-`scripts/dev.sh` / `scripts/prod.sh` 会通过 `scripts/autotune.sh` 调整本地 OMP/BLAS
-线程，但不会改变任何模型服务容量。
-
-**数据库：**
-
-```text
-DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
-DB_WRITE_LOCK_STATS         # 开启进程级 SQLite 写锁 wait/hold 观测（默认 true）
-DB_WRITE_LOCK_WARN_MS       # wait/hold 超过此毫秒数即记一条限流的 db_write_lock_slow 事件（默认 200）
-DB_WRITE_LOCK_FLUSH_SECONDS # 周期性 db_write_lock_stats 快照的发出间隔（秒），也是 db_write_lock_slow 按调用点的限流窗口（默认 60）
-SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
-DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
-SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
-```
-
-**检索：**
-
-```text
-RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
-REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社区兄弟）保底席位（默认 3）
-REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
-```
-
-**可伸缩检索索引：** 规模大到不可拷贝的 notebook（与 notebook 拷贝/分享判定同一阈值——
-字节数或 chunk+node 行数超过配置上限）会自动构建/刷新检索索引，无需手动点按钮或跑 CLI：
-在来源抽取完成后、KG 重建后，以及查询首次发现无索引时兜底触发。默认会排队到低峰窗口而非
-立即构建。
-
-```text
-SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 true）
-SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
-```
-
-**检索 / KG 增强（GraphRAG + ToG-3 借鉴，Phase 1+2）：**
-
-opt-in（默认关）与默认开混合。默认开：`ANSWER_CONTEXT_*`、`KG_QUERY_REFINE_ENABLED`，以及 KG 质量增强 `KG_REFINE` / `KG_GLEANING` / `KG_CONCEPT_DESC`。其余请**逐个开启**并用
-评测脚本（`backend/app/eval`）验证——RRF + 重排 + 精炼三个全开会回归。
-
-```text
-LLM_CACHE_ENABLED            # 把 LLM 响应缓存到独立 sqlite（默认 false）
-LLM_CACHE_PATH               # 缓存 DB 路径（默认 .local/llm_cache.db）
-KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 true）
-KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 true）
-KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
-KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
-KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
-ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
-ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
-RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
-RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
-KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
-QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
-GLOBAL_MAX_COMMUNITIES       # 兼容保留；退役的 `global` mode 已是 `chunk` 别名，此值当前不被消费（默认 20）
-RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
-RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
-KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
-KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
-CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
-CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
-CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
-RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）
-MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
-MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
-MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
-REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
-REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000）
-REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
-REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
-```
-
-**两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
-（`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法
-`mark_notebook_base()` 设置；把一个 notebook 发布为 `base` 并不会让它自动全局共享——
-其它每个 notebook 都必须显式把它挂为参考库（持久化在 `notebook_bases`，经
-`GET`/`PUT /api/notebooks/{id}/bases` 管理、`GET /api/notebooks/{id}/mountable` 发现候选）
-之后，它才会加入该 notebook 的检索参与集。tier 感知联合检索不改相关度分数：相关度是
-第一排序键，`base` 仅在参与集内命中相关度分数完全相同时作为第二排序键。答案里的 base
-优先冲突规则是独立的合成策略，对来自已挂载 base notebook 的证据始终生效。
-可选的图推理 Ask 模式（`mode="graph"`）多跳遍历用固定默认 `max_depth=3`、`max_fan_out=8`
-（经 `getattr` 读取 settings，因此将来加 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env 覆盖无需改代码）。
-边可信打分、策展审核队列、个人→基准晋升同样是行为，不由 env 控制。
-
-**用户系统：**
-
-```text
-SILICON_NOTEBOOK_ADMIN_PASSWORD   # admin 登录密码（本地默认 "admin"；production/对外监听
-                                  # 必须配置非默认值）
-SILICON_NOTEBOOK_AUTH_OPTIONAL    # true = 无 token 请求回退为 admin（仅本地/测试）；
-                                  # false（默认）= 所有请求必须登录
-AUTH_SESSION_TOUCH_INTERVAL_SECONDS # session 滑动续期写库间隔（默认 300 秒）
-```
-
-**MinerU（PDF 解析）：**
-
-```text
-MINERU_MODE             # off（默认） | http | cli
-MINERU_API_URL          # 远端 mineru-api 端点（http 模式）
-MINERU_BACKEND          # pipeline | vlm-auto-engine | vlm-http-client | vlm-sglang-client
-MINERU_VLM_SERVER_URL   # 独立 VLM 推理服务器 URL
-MINERU_PARSE_METHOD     # auto | txt | ocr
-MINERU_LANG             # 如 en、ch
-MINERU_MODEL_SOURCE     # huggingface | modelscope
-MINERU_TIMEOUT_SECONDS  # MinerU 调用超时
-MINERU_FORMULA_ENABLE   # true/false
-MINERU_TABLE_ENABLE     # true/false
-MINERU_RETURN_IMAGES    # 是否保留 PDF/DOCX/PPTX 文档中的内嵌图片（默认开 true；设 0/false 仅保留文字与图注）
-MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出丢弃）
-MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
-```
-
-**日志：**
-
-```text
-LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
-EVENT_LOG_ENABLED / EVENT_LOG_DIR
-SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000）
-SILICON_NOTEBOOK_CORS_ORIGINS
-```
-
-`.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
-
-所需 chat workload 未绑定时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
-
-## 可观测性 / 日志
-
-后端通过统一的 `EventLogger`（`app/core/event_logging.py`）输出结构化日志：每条事件一行 JSONL 写入 `.local/logs/`，并附控制台简要行。写日志是 best-effort，绝不影响它所观测的请求或管线；未配置模型时 LLM 通道为 no-op。
-
-- `requests.jsonl` — 每个 HTTP 请求（方法、路径、状态码、耗时、`request_id`）。超过 `SLOW_REQUEST_MS`（默认 3000ms）标 `SLOW`；响应头带 `X-Request-Id` 关联前后端。
-- `events.jsonl` — 异步来源管线：各阶段（`parse` / `embed` / `extract`）耗时与每次状态机跃迁。卡住时能看到当前阶段及已运行时长；失败记录真实异常（以及来源的 `error_message`）。
-- `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及 deterministic fallback 容易让人忽略的错误。
-
-浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时点名是哪个来源。来源的 `error_message` 由后端写成 Python 异常字符串，因此进 console 而不上屏。
-
-错误信息按受众分流。用户看到的一律是中文：前端把 HTTP 状态码映射成人话（「没有权限进行这个操作」「没找到，可能已被删除」），裸状态码和后端异常原文都不会出现在界面上。**除非后端明确声明「这句是写给用户的」，否则一概不原样展示**——API 会给这类响应打上 `X-User-Message` 头，只有它们才透传（如「用户名已被占用」，比泛化文案更具体）。其余一律泛化，**包括恰好是中文的后端文本**：像「解析失败：不支持的文件类型」这种串，同样可能是一条原始异常，光看内容分不出来。5xx 无论有没有标记都泛化，避免内部错误外泄。压根没产生 HTTP 响应的失败（断连、后端没起来、藏在流式事件、后台任务记录、失败的报告、来源解析失败里的错误串）走同一条规则，不会把原文直接印出来。
-
-开发者与 MCP agent 看到的东西不变：后端 `detail` 在 API 响应和日志里保持原样，而完整诊断——状态码、状态文本、原始响应正文、以及能和 `requests.jsonl` 对上的 `X-Request-Id`——在每次请求失败时写进 DevTools console；凡是被界面换成泛化文案的错误，其原文也一并进 console。所以「它说我没权限」这类问题靠 console 里的 request id 定位，而不是猜是哪道校验拒的。
-
-### 生产事故即时采集
-
-在 Ubuntu 24.04 上通过 `npm run start` 启动的部署中，SSH 到主机，在**卡顿仍在发生时**
-从仓库根执行主命令：
-
-```bash
-ssh <production-host>
-cd <silicon-notebook-repository>
-python3 scripts/diag.py incident
-```
-
-正常的单 Uvicorn worker 会自动发现。若报告显示进程发现为 missing、ambiguous 或
-incomplete，请从服务管理器或主机监听信息取得**仍在运行**的后端 PID，然后重试；不要重启：
-
-```bash
-python3 scripts/diag.py incident --pid <backend-pid>
-```
-
-默认结果是一段可整体复制、最多 **32 KiB** 的 UTF-8 文本。所有采集共享一个最长 10 秒
-的总截止时间；进程采样、两次线程栈、loopback 健康探测、有界历史日志读取，以及自身最多
-一秒的 DB 探测都消耗同一个时间预算。后端把 `SIGUSR1` 注册为**不终止进程**的全 Python
-线程 faulthandler dump；它只采线程栈，不采任何局部变量值，成功采集后后端继续存活。
-
-运行态心跳每两秒原子写入 `.local/diagnostics/runtime.json`；超过六秒即判 stale，活跃工作
-字段不会参与高置信结论。线程栈采集使用 `.local/diagnostics/incident.lock`，追加到
-`.local/diagnostics/thread-dumps.log`；一次成功采集后 dump 文件保持在 8 MiB 内。只读 DB
-分析使用 `.local/diagnostics/db-snapshots/` 下的有界临时快照。采集器只允许创建、替换或
-截断这些诊断工件。运行时只接受当前用户控制的 `0700` diagnostics 目录，以及同一用户拥有、
-单硬链接、普通文件类型的 `0600` heartbeat/dump 文件；已有路径不安全或目录路径被替换时，
-诊断降级且不会跟随链接或截断敌对目标。
-
-按以下顺序解释输出：
-
-- `Confidence-ranked diagnoses` 最多列三个确定性规则生成的假设。`high` / `medium` / `low`
-  表示证据强度，不等于确定性；单个弱信号不会被宣称为根因。
-- `Observations`、`Relevant stacks`、`Database and host signals`、`Log metadata` 给出排序所用
-  的元数据证据链；`Safe next commands/actions` 只建议下一步检查，不执行修复。
-- `Missing/degraded evidence` 是正式结果而非被隐藏的错误。snapshot stale 通常说明采集太晚；
-  PID 缺失或歧义时用上面的 `--pid` 重试。DB busy/locked、权限不足、deadline、损坏或 malformed
-  日志、信号路径不可用、进程/文件发生竞态时，对应证据会被排除，其余采集继续。
-- 空闲部署可能正确报告没有多信号结论达到有效置信度。应在操作肉眼可见地卡住时重跑，不能用
-  空闲采集臆造根因。
-
-可复制输出绝不打印原始不透明 id：允许出现的 notebook/request/job 引用会一致地映射为假名，
-其它原始 id 直接省略。它也绝不打印用户控制的原始文件名、request body、来源正文、Ask 问题/回答、prompt 或模型消息、Memory/Knowhow 内容、SQL
-文本或参数、authorization header、cookie、token、secret、原始命令行或局部变量。即使输出已
-脱敏，分享给可信团队之外的人之前仍必须人工复核。
-
-`incident` 不需要 root 或第三方 Python 包，不 import `app`，也不会重启或终止进程。七个诊断
-命令对应用数据都只读：不执行 delete/其它业务写入，不做 SQLite checkpoint/vacuum/analyze/reindex，
-不跑 migration，也不自动修复。`incident` 仅可按上述约束维护有界的
-`.local/diagnostics/` 工件。
-
-### 七命令诊断速查
-
-`scripts/diag.py` 只提供以下七个命令：
-
-| 命令 | 用途 | 运行边界 |
-| --- | --- | --- |
-| `python3 scripts/diag.py incident` | 首选的线上即时有界采集；自动发现不能唯一选中 worker 时加 `--pid <backend-pid>`。 | Ubuntu/Linux 活体进程证据；纯 stdlib，不 import app。 |
-| `python3 scripts/diag.py slow --since 24 --deep` | 从历史日志、DB 聚合与 scale-index manifest 分析慢路径；`--deep` 会增加可能耗时数分钟的只读 DB 检查。裸跑 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib，不 import app。 |
-| `python3 scripts/diag.py latency --last 500` | 从 `ask_stage` 事件统计各 Ask 阶段 P50/P95/max。 | 离线、纯 stdlib，不 import app。 |
-| `python3 scripts/diag.py locks --top 20` | 从 `db_write_lock_slow` / `db_write_lock_stats` 事件按调用点聚合 SQLite 写锁争用。 | 离线、纯 stdlib，不 import app。 |
-| `python3 scripts/diag.py open --local .local` | 分析打开笔记本的查询/端点耗时、缓存冷成本与 mutation-sequence churn。 | 离线、纯 stdlib，不 import app。 |
-| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | 有界、源端无副作用地采集 SQLite/WAL/表/FK 索引/query plan 证据。 | 离线、纯 stdlib，不 import app。 |
-| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 仅用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、不 import app；不执行检索、不回显查询/正文、不构造 repository、不迁移、不用 SQLite 打开源库。 |
-
-`base-recall` 与 `db` 共用 `O_NOATIME` pin、非阻塞锁、文件身份复核的 DB/WAL 拷贝，只在自己
-拥有的快照上执行固定聚合投影。安全边界不可用时只输出 category-only 降级信息，绝不回退为活体
-SQLite 连接。单段 UTF-8 报告最多 32 KiB，只含计数、固定状态标签和本次报告内假名；不包含原始
-notebook/user/report/object/chunk id、标题、问题、正文、文件名、路径、异常、凭据或 secret。
-
-历史读取器会覆盖、去重并限制 `requests`、`events`、`llm` 三通道的全部支持布局：legacy
-`<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip
-`<channel>-YYYY-MM-DD.jsonl.gz`，以及下一层 per-user 日志目录。malformed 行和字节/时间窗口截断
-会作为 degraded metadata 报告。既有独立引擎脚本继续可用于存量运维笔记与 cron；新操作优先走
-这个七命令统一入口。
-
-`python3 scripts/diag.py locks [--log PATH] [--top N]` —— 从 `events.jsonl` 按调用点聚合
-SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「页面卡住」），`hold` 是持锁时长
-（谁害的）。按 `hold_max` 降序，最该改的排最前。输出两张表：超阈值违规
-（`db_write_lock_slow`，按 site 限流，只见「尾巴」）与周期性全量快照
-（`db_write_lock_stats`，不做阈值过滤，但只是某一时刻的累计快照）——某个调用点即使从未
-超阈值也可能很忙，这种情况只有第二张表能看见。采集阈值由 `DB_WRITE_LOCK_WARN_MS` 控制
-（默认 200）。
-
-**日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
-
-## 用 MinerU 解析 PDF
-
-PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 时才调用它，否则回退到 pypdf 纯文本。
-
-- **本机 / 无 GPU**：保持 `MINERU_MODE=off`，PDF 走 pypdf（仅纯文本）。
-- **GPU 部署机（推荐 HTTP 服务）**：把 MinerU 作为独立服务运行，让后端指向它：
-
-  ```bash
-  pip install -U "mineru[all]"      # 在 GPU 机器上
-  mineru-api --host 0.0.0.0 --port 8000
-  ```
-
-  然后在后端设置：
-
-  ```text
-  MINERU_MODE=http
-  MINERU_API_URL=http://<gpu-host>:8000
-  MINERU_BACKEND=pipeline
-  MINERU_FORMULA_ENABLE=true
-  MINERU_TABLE_ENABLE=true
-  MINERU_TIMEOUT_SECONDS=600
-  ```
-
-- **同机 Python API**：如果 `mineru` Python 包与后端装在同一台机器，可改用 `MINERU_MODE=cli`（无需 `MINERU_API_URL`）。这个模式会在隔离子进程里调用 `mineru.cli.common.do_parse/read_fn`，不会调用 `mineru` shell 命令；因为部分 MinerU 版本的 CLI 会自行拉起本地 API server，长文档场景下更容易卡住。
-
-- **远端 VLM 推理服务器**：若只想把 VLM 模型卸载到一台独立的 vllm/sglang 服务器（而非整套 `mineru-api`），用 client 后端并指向该服务器：
-
-  ```text
-  MINERU_BACKEND=vlm-http-client        # 或 vlm-sglang-client
-  MINERU_VLM_SERVER_URL=http://<vlm-host>:30000
-  ```
-
-  `http` 与 `cli` 两种模式都生效；非 client 后端会忽略该 URL。
-
-- **Apple Silicon 本地（MLX，离线）**：Apple Silicon 的 Mac 没有 NVIDIA GPU，但可用 MLX 加速 MinerU，因此本地也能跑同质的高保真解析：
-
-  ```bash
-  python -m pip install -U "mineru[core]"
-  mineru-models-download -s huggingface -m vlm     # 一次性(~GB)；HF 慢可用 -s modelscope
-  ```
-
-  然后在本机 `.env` 写：
-
-  ```text
-  MINERU_MODE=cli
-  MINERU_BACKEND=vlm-auto-engine     # Apple Silicon 上走 MLX
-  MINERU_PARSE_METHOD=auto           # 如需对齐手工 MinerU 结果，可改 txt/ocr
-  MINERU_LANG=en                     # 可选；已知 PDF 语言时建议设置
-  MINERU_MODEL_SOURCE=huggingface
-  MINERU_TIMEOUT_SECONDS=1800        # 本地 VLM 跑完整论文可能超过 10 分钟
-  ```
-
-  `.env.example` 默认仍保持 `MINERU_MODE=off`，让其他环境默认离线安全。
-
-**URL 来源（「添加链接」）优先用本地 MinerU。** 只要配置了本地 MinerU 服务（`MINERU_MODE=http`/`cli`），公开 PDF 链接就由本地解析：后端下载后走与文件上传相同的「本地 MinerU→pypdf」路径。为防 SSRF，下载器会校验初始地址和每次重定向，拒绝 localhost、私网、link-local 与保留地址；内部文档请改用文件上传。`MINERU_API_TOKEN` 云端（mineru.net）仅在未配置本地 MinerU 时作为回退——一旦走本地，绝不会再静默调用云端。添加链接需要本地 MinerU 或云端 token 二者其一。文件上传遵循同一条规则：本地 MinerU 未配置、仅配置了云端 token 时，上传文件同样经该云端 v4 路径解析（含图片、公式、表格），云端调用失败会自动回落 pypdf。
-
-MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。桌面端的来源详情窗口使用常规关闭按钮，并可按住标题栏拖动——应用里其它居中浮动弹窗（模型服务状态、添加来源、知识/图谱、报告、各类确认框）同样可拖动，共用同一套拖动 hook；窄屏继续使用固定弹窗布局，详情正文保持独立滚动。
-
-### 单文件解析自检(`scripts/mineru_probe.py`)
-
-一个单文件诊断脚本，把一个文件(`.pdf`/`.docx`/`.pptx`)沿**应用上传时的同一条内联路径**发出去——即配置好的 MinerU 服务(`MINERU_MODE=http` → `/file_parse`，或 `MINERU_MODE=cli`)，再经同样的 `content_list` → `SourceElement` 映射——并报告能否解析。用于在把某个 MinerU 部署接入摄取前，确认它可达、且确实能解析给定文件。
-
-```bash
-python scripts/mineru_probe.py /path/to/paper.pdf
-python scripts/mineru_probe.py /path/to/paper.pdf --dump /tmp/content_list.json
-```
-
-它会先打印从仓库根 `.env` 读到的生效 MinerU 配置——含 `http_proxy`/`no_proxy` 对 MinerU URL 的解析结果（内网调用被正向代理静默接管是 `504` 的常见根因；注意 `no_proxy` 不识别 `10.0.0.0/8` 这类 CIDR 网段，只认精确主机）——再给出原始块数/类型分布，以及映射后的结构化元素数。退出码 `0`=解析成功(≥1 个元素)；`1`=根本没发请求(MinerU 未开/配置缺失，或文件不存在)；`2`=已发送但失败(不可达、超时、HTTP 错、或返回空/映射为 0 元素)，每种都附一句分类排障提示。它会 import backend 并读仓库根 `.env`，请从主 checkout 根目录运行。本探针只覆盖内联 `MINERU_MODE` 路径——不含 mineru.net 云端(URL 来源)与下面的异步 `/tasks` 批量端点。
-
-### 批量 PDF→Markdown 解析(`scripts/mineru_batch_parse.py`)
-
-独立于 backend 之外的部署侧 CLI,用于批量/离线预解析一整个 PDF 目录(如一批书),对接你自己的 MinerU 部署,产出供下面「离线批量摄取」消费:PDF 目录 → `mineru_batch_parse.py` → Markdown 目录 → `batch_ingest.py` → KG。它递归扫描 `--src` 下的 PDF,把每个文件提交到内网 MinerU server 的**异步** `/tasks` API(提交→轮询→取结果),轮流分派到各配置的 server(每台各自有并发上限),产出与源目录同构的 `.md` 文件树到 `--out`。这与上面应用内联的单文件上传解析(`MINERU_MODE=http`,MinerU 同步的 `/file_parse` 接口)以及 mineru.net 云端路径都是独立的两条路——请指向你自己的、支持异步 API 的 MinerU server。
-
-配置走 `.env`(`MINERU_BATCH_*`,见 `.env.example`)——`--env-file` 用来指定加载哪个 `.env` 文件(默认 `./.env`)——每个 key 都可用对应的命令行参数按次覆盖(`--servers`、`--src`、`--out`、`--list <文件>` 显式给路径列表而非递归扫描、`--limit N` 限制处理文件数)。重跑会跳过已生成的 `.md`;每个文件的结果(`ok`/`skip`/`fail`,若 Ctrl-C 中断则还没轮到的文件记为 `cancelled`)都会追加进一份 JSONL manifest(默认 `{MINERU_BATCH_OUT_DIR}/_manifest.jsonl`),可续跑、可审计;Ctrl-C 会让进行中的文件跑完,但不再派发新的,重跑会重试所有 `fail`/`cancelled`。`--only-failed` 只重跑上次记为 `fail` 的文件(也会列在 `failed.txt` 里)。
-
-```bash
-# .env 里配好(MINERU_BATCH_SERVERS / _SRC_DIR / _OUT_DIR ...)
-python scripts/mineru_batch_parse.py --dry-run      # 预览 server 分配
-python scripts/mineru_batch_parse.py                # 正式跑
-python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的文件
-```
-
-脚本不 import 任何 backend 代码——只依赖标准库和 `requests`(backend 已有此依赖)——通过普通 HTTP 与 MinerU server 通信,运行它的机器因此不需要 GPU/torch。
-
-### 离线批量摄取(目录 → KG)
-
-把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
-先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
-
-```bash
-# 1) 解析+分块+向量(无 LLM):新建库须用 --notebook-name 指定名字
-PYTHONPATH=backend python scripts/batch_ingest.py ingest --input-dir /path/to/md_dir --notebook-name "我的库"
-
-# 2) 先小范围验证 KG 质量(只抽前 50 个未抽源)
-PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 50
-
-# 3) 整批抽 KG(幂等,跳过已抽;失败可重跑续抽)
-PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
-
-# 或一条命令跑完(ingest 然后 kg)
-PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "我的库"
-
-# 为基准层 notebook 构建可伸缩检索索引(离线;静态基准重建 KG 后需重跑)
-PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
-
-# 补该 notebook 缺失的 chunk + 节点向量（幂等；需绑定 `chunk_embedding`）
-PYTHONPATH=backend python scripts/batch_ingest.py embed --notebook-id nb-xxxx
-
-# 一次性存储迁移：把旧的 JSON 文本向量转成 float32 BLOB（幂等，不调用模型）
-PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --notebook-id nb-xxxx
-PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --all-notebooks --workers 8
-
-# 主动回填「来源删除反查表」（幂等，不调用模型）
-PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxxx
-PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-notebooks
-
-# 补已解析论文源缺失的元数据（幂等；需绑定 `paper_metadata`，不调用 embedding）
-PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
-PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx --force
-
-# 修复历史空源:对无 source_elements(上次 parse 未落地)的存量源重新 parse 补 elements,再重抽 KG
-PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
-```
-
-`embed` 子命令只补**缺失**的 chunk、element 与 KG 节点向量（例如某次被限流后留下的空洞）。必须给 `--notebook-id` 且系统配置至少已绑定 `chunk_embedding`；`source_element_embedding` 与 `knowledge_object_embedding` 未绑定时对应类型跳过。它本身就是补向量的命令，故**忽略 `--allow-no-embed`**，`chunk_embedding` 未绑定时直接报错退出。
-
-`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**（故不需要任何模型服务绑定），且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(32, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
-
-`backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。它不调用模型，且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
-
-`metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按源逐行打印（`[meta <done>/<total>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
-
-`reparse` 子命令修复一类历史存量:某些源已建、`parse_status` 看似前进,却没有 `source_elements`(上次 parse 中断或未落地)。KG 抽取有一道零-LLM 接地校验——每个 LLM 抽出的节点必须把引文匹配回该源的某个 element,否则丢弃;一个源若没有任何 element,抽出的节点会被**整源丢光**,导致 `knowledge_objects` 一行不增(抽了等于白抽),且直接重抽永远补不出。旧版 `all` 的续跑分流曾用「有没有 KG」当「是否已 parse」,把这类无-elements 源当成「已 parse、缺 KG」直接送去抽取,正是踩中此坑(该分流已修正,新导入不再遇到)。本命令对该 notebook 内所有缺 `source_elements` 的源重新跑 `process_source`(parse → 生成 elements),收尾一次 KG rebuild;有 elements 的源自动跳过(幂等、可中断重跑)。`--limit N` 只处理前 N 个;`--no-rebuild` 跳过收尾聚类(分批场景)。必须给 `--notebook-id`。
-
-**MRL 截断质量 spike(`app.eval.mrl_truncation`)。** 回答「把存量向量截断到前 1024/2048 维(+ re-normalize),检索质量掉多少」——这既是进程内向量内存瘦身(4096→1024 约 ÷4)的前置,也是 pgvector HNSW 建索引(维度上限 2000/4000)的 gate。只读、流式分块(百万行表内存有界),并总是先打印该 notebook 四张 embeddings 表的行数。
-
-```bash
-# 邻居保持率模式(默认):零 API 调用,任意 notebook 可跑——
-# 从表内采样向量当查询,对比原维 vs 截断维的 top-K 排名重合率
-( cd backend && python -m app.eval.mrl_truncation )                          # 自动挑最大的 notebook
-( cd backend && python -m app.eval.mrl_truncation --notebook nb-xxxx --tables knowledge,chunk,relation --dims 2048,1024 )
-# 超大表(如百万级 relation):语料侧也抽样——排名在同一子集内对比,
-# 原维 vs 截断维的相对结论依然成立(稀疏子集读数略偏乐观;边界值请全量复核)
-( cd backend && python -m app.eval.mrl_truncation --tables relation --sample-rows 50000 )
-
-# gold 模式（需绑定 `chunk_embedding` workload；每题按原生维 embed 一次）：
-# 对提交在仓库里的 gold 集算各截断档的 recall@12 / MRR 相对衰减
-( cd backend && python -m app.eval.mrl_truncation --gold app/eval/recall_gold.yaml --notebook nb-b37185f4ae )
-```
-
-判据(出自 pgvector 迁移评审 spec):2048 档 recall@12 相对降 ≤1pt 且 top-10 重合 ≥0.9 → `halfvec 2048`;1024 档降 ≤3pt → `vector 1024`;降 >5pt 该档不通过。把整段输出贴回即可出结论。
-
-**大型基础 KG(10^5–10^6 对象)。** 末尾的 unified 聚类是流式的(内存随**唯一归一化概念名数**而非总对象数有界),所以 `kg` 不物化全量向量即可扩展。超大语料可分批抽取、末尾一次聚类:
-
-```bash
-# 分批抽取(跳过昂贵的末尾聚类),按需重复
-PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --limit 1000 --no-rebuild
-# 末尾只聚类 +(重)建 scale 索引,不再抽取
-PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --rebuild-only
-```
-
-`--limit` 只限本轮**抽取**的来源数;最终聚类始终覆盖整个 notebook。大库(见上文 `SCALE_INDEX_AUTO_ENABLED`)在 `kg` 重建后会**自动重建**可伸缩检索索引(不会陈旧)。`KG_CLUSTER_REP_ANN_MAX`(默认 2,000,000)封顶 rep-ANN 规模——超出则分片建索引并 WARNING(绝不静默截断)。
-
-**批处理并发。** `--workers` 只控制来源/文档任务，省略时回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析；`vectors-to-blob` 中则表示解析/重编码进程池大小（默认 `min(32, CPU核数)`；`1` 关闭该进程池）。
-
-`all`、`kg`、`reparse`、`metadata`、`ingest` 和 `embed` 里的每次模型调用，都与在线请求共用系统模型服务调度器。各 workload 所绑定服务只从部署 TOML 读取一个模型容量参数 `max_concurrency`；批处理 CLI 不再提供模型并发覆盖项，增大 `--workers` 也不会乘大该服务上限。若一次限流留下缺失向量，之后用 `embed` 子命令补修。
-
-例如：模型容量已经在部署 TOML 声明后，可单独提高来源管线并发：
-
-```bash
-PYTHONPATH=backend python scripts/batch_ingest.py reparse \
-  --notebook-id nb-xxxx \
-  --workers 32 \
-  --pool-report-interval 5
-```
-
-- `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
-
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
-
-前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
-
-### 检索回放对照(`scripts/replay_retrieval.py`)
-
-性能优化改动前后,证明"检索效果不变"的验收工具:拿一份固定问题集跑 reasoning 检索原语(`federated_retrieve` + `ppr_retrieve`),**不调用任何答案 LLM**,把命中的 id/分数序列存成 JSON;两次运行的输出可逐问题 diff。
-
-```bash
-# 记录一次（需绑定 `chunk_embedding`，使用真实查询向量；仅读检索原语，不需要 chat 模型）
-python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
-
-# --full:额外跑一遍完整 reasoning 编排层(plan/reflect 用固定子查询 + 立即 answer 的 stub 代替 LLM,
-# 验证编排层改动的确定性部分等价),子查询从 plan.json 里取
-python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt \
-    --full --plan-file plan.json --out before.json
-
-# 改动后重新记录一次,再对照两份输出
-python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out after.json
-python scripts/replay_retrieval.py --compare before.json after.json                  # --mode exact(默认):id + 分数序列须逐位相同
-python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # 只比较前 k 个 id 的集合重叠率与序(允许分数因 float32 化等改动而漂移)
-```
-
-`questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = `"admin"`)。
-
-退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败（`retrieval_query_embedding` 未绑定、notebook 不存在、或属主用户不存在）——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
-
-### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
-
-离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个公共知识库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入,包括各自持有的参考库挂载边(`notebook_bases`)。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。多领域部署下一侧可能不止一个公共知识库:本工具不支持这种形态、也不会替你猜——若任一侧存在不止一个 `tier='base'` 的 notebook,会立即中止并点名是哪一侧、列出全部候选,而不是自作主张选一个。
-
-```bash
-PYTHONPATH=backend python scripts/merge_dbs.py \
-  --db-a A/silicon_notebook.db --storage-a A/storage \
-  --db-b B/silicon_notebook.db --storage-b B/storage \
-  --keep-base a \
-  --out merged/silicon_notebook.db --out-storage merged/storage \
-  --assume-same-users
-```
-
-- `--keep-base a|b` —— 保留哪侧的 base notebook(通常选更全的那侧)。
-- `--assume-same-users` —— 两库存在相同 user id 时必须加此项,用于确认两侧确实是同一个人的账号,否则工具会中止以避免内容归属错乱。
-- `--dry-run` —— 只迁移+校验+打印将会导入哪些 notebook,不产出任何文件;即使 `--out` 已存在也能预览。
-- `--force` —— 覆盖已存在的 `--out` 文件。
-
-前提条件:两侧各自必须恰好有一个 `tier='base'` 的公共知识库(见上);除共享的 base 外,两库的 notebook id 不得重叠——一旦撞车,工具会中止并列出冲突的 id。
-
-**重要提醒:** `--db-a`/`--db-b` 要指向已静置(先停服务)的数据库文件。工具只拷贝 `.db` 文件本身,正在运行的部署若有未落盘的 `-wal` sidecar 不会被带上——直接对着运行中的实例合并可能静默丢失最近的写入。(工具自身做 schema 迁移时的写入会在使用前 checkpoint 回 `.db`,这部分是安全的;这条提醒针对的是你提供的源文件本身。)
-
-**落败一侧 base 自己的参考库挂载边:** 合并后保留的 base notebook(`--keep-base` 那一侧)只保留它自己的参考库挂载边;如果**另一侧**的 base notebook 曾挂载过别的参考库,这些挂载边不会被带过来——这和该 base 名下其它 notebook-scoped 数据(它自己的 sources、chunks、knowledge objects……)的既定规则完全一致。两侧其它(个人)notebook 自己持有的挂载边则原样全部并入,不受影响。
-
-合并完成后,把 `merged/` 产出(db + storage)部署到要保留下来的那台主机,首次启动后在 app 内触发一次索引重建(「重建索引」/「刷新图谱」)以重新生成 `kg_index`/`kg_viz`/ANN 等未被拷贝的产物。
-
-### 补齐存量待批晋升候选的目标公共知识库(`scripts/backfill_promotion_targets.py`)
-
-升级到 `SCHEMA_VERSION>=20`(多领域参考库)会给 `promotion_candidates` 加一列
-`target_base_id`,但迁移只加列、**不回填**存量行。任何在升级前就已创建、此时仍处
-`proposed`/`under_review` 的晋升候选,`target_base_id` 都是空串,批准时会失败
-(target_base_id 只在候选首次提交时可设,没有别的接口能事后补写)。如果部署库里可能有
-这类存量候选,升级后先跑一次本工具处理;它按 propose 时同一条规则解析每一行的目标——
-经该候选所属 notebook 已挂载的公共知识库(挂 0 个则阻塞、恰好 1 个自动解析、多个则需要
-显式指定),复用同一个 `GovernanceStore.mounted_public_base_ids` 判定,不另写一份。
-
-```bash
-PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/silicon_notebook.db list
-PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/silicon_notebook.db apply \
-  [--set NOTEBOOK_ID=BASE_ID ...] [--dry-run]
-```
-
-- `list` —— 只读报告:列出每条 `target_base_id` 为空的 `proposed`/`under_review` 候选,
-  按 notebook 分组,附带该 notebook 已挂载的公共知识库与每条候选的解析结果预览。
-- `apply` —— 为每条能无歧义解析的候选(自动解析,或经 `--set` 指定)写入
-  `target_base_id`;仍阻塞(该 notebook 未挂载任何公共知识库)或仍有歧义(挂了多个、
-  又没给匹配的 `--set`)的候选原样不动并在报告里列出,挂载/补 `--set` 后再跑一次即可
-  只处理剩下的部分。默认直接写库(与 `merge_dbs.py` 的约定一致);加 `--dry-run` 只
-  预览、不写库。
-- `--set NOTEBOOK_ID=BASE_ID` —— 给挂载了不止一个公共知识库的 notebook 显式指定目标,
-  必需时才用,可重复用于多个 notebook。目标若不在该 notebook 的挂载集合内,整次运行
-  会在任何写入之前直接中止(不会出现部分写入)。
-
-和 `merge_dbs.py` 「总是写全新输出」的约定不同,本工具直接就地修改你给的 `--db` 路径;
-如果该库还没迁移到 `SCHEMA_VERSION>=20` 则拒绝运行。
-
-**重要提醒:** 运行 `apply` 前请先停止后端服务——本工具直接打开 `--db` 文件且不设
-`busy_timeout`,若后端正持有该库的活跃事务,同时写入可能相互冲突。
-### 回填存量 knowhow 格子的 Markdown 格式(`scripts/backfill_knowhow_md.py`)
-
-Knowhow 表格已经对新导入/追加的数据、以及格子级「整理格式」操作自动做 Excel 习惯排版规整(Tab 缩进的 `•` 项目符号、`A.`/`a.` 分节/子项编号、软换行等清理成干净的 CommonMark),但这个规整不会回溯性地应用到规整功能上线之前就已存在的格子。这个一次性 CLI 用于给指定 notebook 的这些存量格子补做同样的规整。
-
-**先 dry-run,再按评审过的 plan 文件写入。** dry-run 绝不写库,而是把完整计划写成一个 JSON plan 文件(并打印其路径),供你逐条评审;随后 `--apply --plan` 按【那个文件】逐条写入——落库的就是你评审过的,不会重新规划。
-
-**默认 dry-run 是只读的,随时可安全执行。** 默认(纯规则)dry-run 以只读方式打开数据库,不会构造可写仓库,因此对着正在运行/繁忙的后端跑也安全。`--use-llm`(需要改写模型)和 `--apply`(写库)则以【可写】方式打开数据库——打开时可能执行尚未完成的 schema 迁移与崩溃恢复,工具会在这么做时打印一行提示,建议在后端空闲时再执行这两种。
-
-```bash
-# dry-run(默认):打印每格 before/after/来源 + 汇总,并写出 plan 文件
-#(默认 .local/backfill_plans/knowhow_md_<notebook>_<时间戳>.json)——不写库
-PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx
-
-# 评审 plan 文件无误后,按它逐条写入(确定性规则,不涉及 LLM)——任何 --apply 都【必须】带 --plan
-PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --apply --plan <plan.json>
-
-# 改走 LLM 重排(每格「重排 -> 内容不变式校验 -> 规则兜底」):先 dry-run 评审,再按
-# 评审过的 plan 写入(同样的 --apply --plan 握手)
-PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm
-PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm --apply --plan <plan.json>
-```
-
-- `--notebook`(必填)—— 要回填的 notebook。
-- `--apply` —— 真正写入;它【必须】带 `--plan PATH`,按该评审过的 plan 文件逐条写入。某个格子若在评审后被人改过(当前内容与 plan 记录的 `before` 不一致)会被【跳过并报告】,绝不覆盖已经改动过的目标。每个写入的行标记为 pending,交由投影重算其 KG/步骤(重投影在命令退出前同步完成)。不带 `--plan` 的 `--apply` 是【硬错误】:apply 时从【当前】库重新规划,会把评审后被改过的格子也带进来写入却从未被评审(`--use-llm` 更甚——改写模型随机,重新规划连候选都不同)——所以请先 dry-run、评审其 plan 文件,再按【那份】写入。
-- `--use-llm` —— 改走系统为 `knowhow_reformat` 绑定的服务逐格重排（自带零 LLM 的内容不变式校验，校验不过会自动退回确定性规则），而不是默认那套随时可用的规则规整器。若该 workload 未绑定、或其结果未过校验已退回规则，工具会打印明确的 `WARNING`，不会悄悄假装 LLM 生效了。
-- `--save-plan PATH` —— 覆盖 dry-run 写出 plan 文件的路径。
-- `--plan PATH` —— 要写入的评审过的 plan 文件(见 `--apply`)。
-
-**行标题(anchor)列绝不参与规整**——不论是导入、追加还是本回填等【批量】路径:它是分组键,必须字节稳定,规整它会让刚被改动的行与既有概念组的键失配、组被劈开。(只有编辑器里【显式】的单格「整理格式」——有人逐格评审建议、且同组兄弟行一起改写——才可以动它。)
-
-这项并发契约只适用于编辑器交互式整行/整表规整批次的保存单元；普通共享格编辑和普通
-API 不获得此保证。批次打开时会冻结完整表快照，但仅为由完整 anchor-group 保存单元覆盖的
-每个非空 anchor 分组冻结精确成员集合（合并共享列扇写或单例完整组）。同一个 SQLite 写
-事务会逐一重新校验全部写目标的 expected 内容基线、当前行标题列指定，以及这些被覆盖冻结
-分组的精确成员。多行 anchor 分组里的非共享列是合法子集写：只校验其写目标基线，不做整组
-成员集 guard。适用的任一内容、anchor 或成员漂移都会使整个保存单元以 HTTP 409 拒绝，且
-绝不部分写入。UI 会保留刚生成的规整候选并标记为陈旧，要求用户重新运行规整，并在关闭
-批量弹窗后刷新整表。
-
-v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员检查以同一归一化表达式做等值查询。因此完整 anchor 分组仍 fail-closed，但在写事务中按分组查找而不再扫描整列。
-
-必须在主 checkout 根目录下运行(需要真实的 `.env`/数据库配置,与上面的 `batch_ingest.py`/`replay_retrieval.py` 一样)。可安全重复执行:再按同一个 plan 应用一次是 no-op(每个已应用的格子当前内容都已不再等于它记录的 `before`)。
-
-## 当前限制
-
-- 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
-- 大文档摄取已加固：贪心窗口化 KG 抽取（成本线性），并发 embedding 逐批落库。极大规模下可再接入 `sqlite-vec`。
-- Ask 不再在请求路径里同步补齐 embedding 或全量扫描 source elements；使用已有的关键词/向量索引，在维护任务运行时仍保持响应；并输出每阶段计时（`ask_stage` 事件）。
-- 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
-- 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
-- KG 抽取需要在系统模型 TOML 中绑定 `kg_extract` workload；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
-- 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
-- Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
-- PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。在 PostgreSQL repository 实现前，非 `sqlite:///` 的 `DATABASE_URL` 会直接报错，不再静默落到本地数据库。
-- `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
-- 用户记忆保持手动 opt-in，当前没有自动记忆行为。
-
-## 验证
-
-运行：
-
-```bash
+curl -s http://127.0.0.1:8000/api/health
 bash scripts/check.sh
 ```
 
-这是完整的本地离线门禁，并行运行三个有界 lane：`check_backend.sh` 执行完整 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、`tsc --noEmit` 与 production build。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+`scripts/check.sh` 是完整的离线本地门：后端测试、smoke/契约检查、前端测试与类型检查，以及生产前端构建。
 
-验收时使用项目一直采用的 Homebrew/Miniconda Python：
+## 产品流程
 
-```bash
-PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+1. 新建笔记本。系统立即打开 `Untitled notebook`，不会预先要求填写元数据。
+2. 导入来源文件。解析过程生成结构化来源元素和可搜索内容块。
+3. 通过基于内容块的检索立即问答；知识图谱可按需构建，也可为所有上传开启自动抽取。
+4. 浏览和治理抽取知识、查看全屏图谱，并在需要联合检索时挂载公共参考库。
+5. 把有价值的回答保存为与笔记本绑定的私有 Memory，维护 knowhow 表，或生成深度报告。
+6. 通过链接分享笔记本：小笔记本复制，大笔记本只读加入；beta 不提供实时协同编辑。
+
+笔记本内部保持两列布局：左侧是用户导入的来源，主区域依次为**问答**、**知识库**、**记忆**和**深度报告**。
+
+详细产品行为、检索语义、MCP 工具和端点路径见[产品与 API 参考](./docs/product-and-api_zh.md)。
+
+## 架构概览
+
+```text
+浏览器
+  → Next.js 前端
+  → FastAPI /api 与 Streamable HTTP /mcp
+  → 应用服务与 repository ports
+  → SQLite + 本地来源/索引/日志存储
+
+可选外部服务
+  → OpenAI 兼容 chat / embedding / rerank
+  → MinerU HTTP、隔离 CLI 或云端降级
 ```
 
-完整门禁并发运行三个 lane：backend、contracts、frontend。`check_backend.sh` 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 60 秒；CI 各 lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。
+- SQLite 默认位于 `.local/silicon_notebook.db`；上传文件和生成工件位于 `.local/`。
+- 生产后端刻意保持单 worker，因为模型队列、熔断、健康和取消状态都在进程内。
+- 默认 `chunk` 检索只读取当前笔记本；图谱增强和推理路径可通过显式挂载的公共库联合检索。
+- 候选 Review Queue 已退出当前流程；知识治理直接作用于已存知识对象。
+- PostgreSQL/pgvector 仍是后续方向；当前非 SQLite 的 `DATABASE_URL` 会直接失败。
 
-### GitHub Actions CI
+运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
-`.github/workflows/ci.yml` 把同一套完整门禁暴露为唯一的
-`CI / full-gate` 检查。它在目标为 `master` 的 PR、`master` push 与手动触发时
-运行，环境固定为 `ubuntu-24.04`、Python 3.13、Node.js 22。workflow 从
-`backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
-测试选择完整委托给 `scripts/check.sh`。
+## 文档导航
 
-已提交的 OpenAPI 契约是字节语义冻结契约，因此
-`backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
-`2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑完整门禁时，
-才同步升级这两个框架。
+| 需求 | 文档 |
+| --- | --- |
+| 产品行为、检索模式、Memory/MCP、knowhow、API、当前限制 | [产品与 API 参考](./docs/product-and-api_zh.md) |
+| 安装、源码/生产部署、模型服务、配置项 | [部署与配置](./docs/deployment-and-configuration_zh.md) |
+| 日志、事故采集、MinerU、批量摄取、回放、迁移、回填 | [运维、诊断与摄取工具](./docs/operations_zh.md) |
+| 验证、CI、开发流程、测试和文档契约 | [开发与仓库契约](./docs/development_zh.md) |
+| 详细运行时架构 | [architecture.md](./architecture.md) |
+| 按脚本查找命令 | [scripts/README.md](./scripts/README.md) |
+| 离线部署包目标机说明 | [packaging/DEPLOY.md](./packaging/DEPLOY.md) |
+| KG schema | [schema/README.md](./schema/README.md) |
+| 产品规格完成状态 | [fangan_done.md](./fangan_done.md) |
 
-该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
-限制为 4，避免 GitHub 托管 runner 过度抢占。后端安装设置
-`HNSWLIB_NO_NATIVE=1` 并禁用 pip wheel cache：`hnswlib` 默认会用
-`-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
-runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
-生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。20 分钟 timeout 包含依赖安装，
-与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
-`CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
-并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
+每份拆出的专题文档顶部都提供中英文跳转。
 
-CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
-路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置
-定位，禁止依赖开发机 checkout 绝对路径或 `HOME`，测试也不得读取仓库外源文档。
-测试启动时直接导入的第三方包必须声明在 `backend/requirements.txt`；干净 hosted
-runner 必须从该文件和 `frontend/package-lock.json` 安装，并且只凭这些声明即可
-全绿。各 lane 时长继续输出供观察，60 秒内目标只约束已验证的 Apple Silicon
-Homebrew warm gate。
+## 当前边界
 
-依赖仓库外 PDF 解析产物的 gold 生成、构建与校验脚本仍属于 developer-only
-工具并保持在 `scripts/check.sh` 之外；该例外绝不适用于已提交测试。
-
-## 开发流程
-
-每开始一个新的特性开发任务，默认先新建 git worktree，并在该 worktree 内基于新 feature 分支开发；完成后从该分支提交 PR。不要为了特性开发直接在本地主 checkout 里切分支。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。
-
-对于已经批准的多步骤实施计划，默认采用 subagent-driven development：每个任务交给一个全新的实现子 Agent，并在进入下一任务前完成该任务范围内的规格符合性与代码质量审查。纯调研、设计、状态汇报和只读审查不要求创建 worktree 或使用子 Agent。
-
-`CLAUDE.md` 是 Claude Code 在本仓库的操作规范：Claude Code 只自动加载 `CLAUDE.md` 与 `.claude/rules/`，不会加载 `AGENTS.md`，因此该文件内联了必须随时在线的红线，并给出 `AGENTS.md` 的章节索引；两者冲突时以 `AGENTS.md` 为准，刻意的例外由 `CLAUDE.md` 穷举列出。也正因为 Claude Code 读的是它而不是 `AGENTS.md`，`CLAUDE.md` 属于四份文档同步集合的一员。其中最硬的一条是**起子代理必须显式选模型，不得默认继承主 Agent**，按任务需要的判断力分层——需要判断力（写计划、评审、架构取舍、疑难归因）用 `opus`，规格已定死的转录型实现用 `sonnet`，纯检索定位用 `haiku`。这条由 PreToolUse 硬门 `.claude/hooks/require-subagent-model.py` 强制：没显式传 `model`、且 `subagent_type` 未在 `.claude/agents/` 中钉好模型的调用会被拒绝。`.claude/agents/` 已提供三个钉好模型的角色：`impl-task`（sonnet）、`spec-review`（opus）、`code-quality-review`（opus）。`backend/tests/test_claude_subagent_model_hook.py` 是这个 hook 的回归网：以子进程方式跑真实脚本，两个方向都覆盖——既盖「绕过」（让继承模型的调用溜过去），也盖「误拦」（把合法调用堵死，逼人绕开守卫）。
-
-PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要逐字贴回 PR**——零意见的轮次要贴，手动补跑的轮次也要贴，并附上触发方式、完整命令、head SHA、退出码与输出字节数，便于核对评审确实跑过、结论没被转述失真。判一轮成功要**退出码为 0 且输出非空**两个条件：codex 被 SIGTERM 杀掉时退出码同样是 0，只看退出码会贴出一条空评论、看起来像通过。P0/P1 阻塞并停下来交人决定；P2/P3 不阻塞、可如实说明后不改；优先级标签解析不出来时保守拦人而不是默认放行。评审意见可以在核实后驳回（codex 评的是 diff，未必了解运行时事实），但驳回要同时给出 PR 上的理由与证据、代码里记录取舍的注释，以及钉住既有行为的回归用例。合入一律需要人明确同意。评审的自动化本身是开发者本机的 Claude Code hook、不是仓库产物，新 clone 上没有它——规则依然成立，那就手动跑；机制细节见 `CLAUDE.md`。
-
-### 测试架构
-
-- 后端与前端静态契约使用模块路径、限定 scope、操作种类、目标和审核后的计数等语义身份。源码位置只能作为诊断元数据；行号、offset、CSS 顺序和源码切片都不得用来标识预期站点。
-- 前端 `*.test.mjs` 用 `node:test` 覆盖纯逻辑，以及少量有明确理由的架构/安全/词汇/入口契约；`*.component.test.tsx` 用 Vitest、jsdom 与 Testing Library，通过 role、用户动作和状态验证可见行为。
-- 组件行为不得由 CSS 几何或源码布局钉死。普通特性重构只有在可观察契约改变时才应修改测试。
-- 已提交测试不得使用 skip/xfail/todo/only 禁用；repository policy 会同时检查测试入口及其 helper 模块，并禁止绕过共享 semantic-source 适配器直接读取生产源码。
-- 前端源码策略必须保持有界：通过语法规则拒绝 AST 位置/集合顺序 API，以及源码语义命名值上的文本位置操作；共享 `semantic-source.mjs` 只能暴露 AST 语义，不能把文本切片、分行、下标或长度当作契约。不要为此实现整套 JavaScript 数据流解释器，普通数组操作仍然合法。
-- backend 测试会在 xdist worker 启动前，由主进程预热一份仓库本地 Matplotlib 字体缓存。必须保留这个 controller 边界，不能让每个图谱 worker 各自重复枚举 macOS 字体。
+- 本地持久化仍是 SQLite；PostgreSQL/pgvector 尚未成为生产存储。
+- Docker 不是一期默认工作流，也不是运行前提。
+- 公式、表格、版面和扫描 PDF 的高保真解析需要 MinerU；`MINERU_MODE=off` 使用 pypdf 文本降级。
+- 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。
+- 图谱问答仍为 opt-in/实验能力，默认模式是 `chunk`。
+- Memory 只能由用户主动选择保存，并且仅创建者可见。
+- 分享是复制或只读成员，不是实时协同编辑。
+- Web/网络来源搜索仍是禁用的未来入口。
 
 ## 文档维护
 
-后续只要产品行为、启动方式、架构或开发约束发生变化，需要同步更新：
-
-- `README.md`
-- `README_zh.md`
-- `AGENTS.md`
+根 README 只保留项目入口信息。详细行为写入上表对应的权威文档，中英文版本保持一致。安装、产品行为、架构或开发约束变化时，仍需同步更新 `README.md`、`README_zh.md`、`AGENTS.md`、`CLAUDE.md`，并更新对应的专题文档。

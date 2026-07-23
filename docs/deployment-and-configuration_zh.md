@@ -1,0 +1,403 @@
+# 部署与配置
+
+[返回 README](../README_zh.md) · [English](./deployment-and-configuration.md)
+
+本文是源码 checkout 的详细部署与配置参考。最短本地路径见仓库根 README；离线部署包目标机说明见 [packaging/DEPLOY.md](../packaging/DEPLOY.md)。
+
+## 部署
+
+silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
+**无需 GPU、无需数据库服务、无需本地模型服务**。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
+远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf 回退
+（`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
+
+### 前置条件
+
+- **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
+  `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
+  重现（见 `backend/app/repositories/sqlite/database.py`）。
+- **Node.js ≥ 20** 与 npm
+- **git**
+- C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
+  仅当 pip 不得不从源码编译时,才需装 Xcode Command Line Tools(macOS)或
+  `build-essential`(Debian/Ubuntu)。
+
+### 1 · 安装
+
+```bash
+git clone <repo-url> silicon-notebook
+cd silicon-notebook
+
+# 后端 —— 装进一个隔离的 Python 环境
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+python -m pip install --upgrade pip
+python -m pip install -r backend/requirements.txt
+
+# 前端
+( cd frontend && npm install )
+```
+
+### 2 · 配置
+
+```bash
+cp .env.example .env
+mkdir -p .local
+cp model-services.example.toml .local/model-services.toml
+```
+
+`MODEL_SERVICES_CONFIG` 指向部署者维护的 TOML。编辑其中的 `[services]` 与
+`[bindings]`，为每个物理服务设置 `max_concurrency`，并只把 `api_key_env` 引用的密钥
+写入 `.env`。删除配置路径或把它置空，会明确进入确定性离线模式（仅关键词检索，无模型
+抽取/作答）。用户不能提供或覆盖模型凭据、端点、模型名和容量。
+
+- **嵌入维度**——`EMBED_DIM` 必须等于所绑定 embedding 模型的输出维度。可选
+  `EMBED_RUNTIME_DIM`（默认 `0`=关）把相似度空间截断到前 N 维 + re-normalize（MRL），
+  使进程内矩阵 / ANN 内存约 `EMBED_DIM/N`× 缩减,而库内原生向量保留为真相源。开关它需
+  重建 scale 索引,见 [docs/runtime-dim-truncation-runbook.md](./runtime-dim-truncation-runbook.md)。
+  **切勿改小 `EMBED_DIM` 来降维** —— 那会把全部存量向量当异维丢弃。
+- **PDF 高保真**(可选)—— 一个 MinerU 端点，见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)；
+  保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
+
+`.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
+服务、绑定与容量模板；[配置](#配置)按组列出常用项。
+
+#### 从旧版逐角色 `.env` 升级
+
+已有部署可把废弃的 `OPENAI_COMPAT_*`、`KG_LLM_*`、`EMBED_*`、`RERANK_*`
+配置转换为系统统一配置：
+
+```bash
+# 默认只预览：读取 .env，不写任何文件。
+python scripts/migrate_legacy_model_env.py --env .env
+
+# 检查服务列表和推算容量后，生成 TOML，并只改写 .env 中由脚本管理的模型字段。
+python scripts/migrate_legacy_model_env.py --env .env --apply
+```
+
+应用迁移前会备份 `.env`，并把当前文件及所有含密钥的备份权限收紧为 `0600`；密钥会
+保留在新命名的 `.env` 槽位中，不会写入 TOML，也不会打印到终端。脚本保留旧版角色
+回退关系，并把 endpoint/model/key 完全相同的角色
+合并为同一个物理服务。初始容量由旧的 `KG_EXTRACT_WORKERS`、`KG_ASK_RESERVE` 和
+`EMBED_CONCURRENCY` 推算，仅作为迁移初值，必须按服务商的真实物理容量复核。可重复传入
+`--max-concurrency general=20 --max-concurrency embedding=4` 覆盖推算值。安装流程生成且
+尚未改动的示例 TOML 可直接替换；其他已存在的 TOML 应先检查，仅在确认替换时使用
+`--force`。被替换的文件都会先备份。
+
+**远程访问——浏览器在另一台机器上**(不是服务器),所以**不能用 `localhost`/`127.0.0.1`**
+(那在每个访客自己机器上解析,连不到服务器)。
+
+**单台同机部署推荐(同源反代):** Next.js 前端把 `/api/*` 转发到本机后端
+(`frontend/next.config.mjs`),浏览器只跟前端同源通信。前端用相对的 `/api` 即可——
+**免 CORS、后端无需对外暴露**:
+
+```bash
+# frontend/.env.local (NEXT_PUBLIC_* 构建期烘焙 → 改后要重新 build)
+NEXT_PUBLIC_API_BASE_URL=/api
+```
+
+后端可留在 `127.0.0.1:8000`(反代在本机转发),只需前端端口对外可达。后端不在
+`127.0.0.1:8000` 时用 `BACKEND_PROXY_TARGET` 覆盖。
+
+**另一种——前后端在不同 host(双 origin 直连):** 把前端指向后端可达 URL,并在后端放行前端来源:
+
+```bash
+# frontend/.env.local (构建期烘焙)
+NEXT_PUBLIC_API_BASE_URL=http://<backend-host>:8000/api
+# 后端仓库根 .env — 逗号分隔的允许来源;不能用 `*`(开了 credentials)
+SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
+```
+
+再让 uvicorn 加 `--host 0.0.0.0`(或 `BACKEND_HOST=0.0.0.0 npm run dev`)使 API 对外可达。
+
+### 3 · 运行
+
+**没有迁移 / seed 步骤**——首次启动时后端会自建 SQLite 表结构,并创建 `.local/storage`
+与 `.local/logs` 目录,只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
+进行中的抽取后台任务,让上传卡在 `extracting`。
+
+所有相对路径(数据库、存储、日志、`.env`)都在**代码里锚定到仓库根**,与启动脚本
+`cd` 进哪个目录无关——启动目录从此不重要。后端首行日志会打印解析后的绝对路径
+(`paths: db=... storage=... log_dir=...`),不确定某次启动到底用的哪个 `.local/`
+时看它即可。离线 CLI(`scripts/batch_ingest.py`)与下面两种服务启动方式,解析到的
+都是同一个仓库根 `.local/`。
+
+**启动脚本要求仓库根存在 `.env`**(`npm run dev` / `npm run start`):缺失时直接报错
+退出,而不是悄悄用空白默认值启动;如果发现改名残骸(如 `.env.local`)会点名提示改回
+——注意 Next.js 自己打印的「Environments: .env.local」只代表**前端**读到了它,后端只读
+`.env`。后端进程启动时也做同样检查(仅当存在残骸文件才硬报错;单纯缺 `.env` 只告警并
+照常启动,全新 checkout 与容器纯环境变量部署不受影响)。纯环境变量部署可设
+`ALLOW_NO_ENV_FILE=1` 显式跳过。
+
+```bash
+# 开发 —— 前后端一起(后端支持 reload)
+npm run dev
+```
+
+```bash
+# 生产 —— 先 build 前端,再同时提供两个服务(后端单进程)
+npm run start
+
+# 停止前后端(可从任意终端执行,无需回到 start 进程 Ctrl-C)
+npm run stop
+```
+
+`npm run start` 调用 `scripts/prod.sh`:前端 `next build` + `next start`,后端
+`uvicorn --workers 1`,两者日志都落 `.local/logs/`。设 `SKIP_BUILD=1` 可复用已构建好
+的 `frontend/.next`(如预构建镜像场景)。可用 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT`
+覆盖监听地址/端口。后端默认只监听 `127.0.0.1`；显式绑定非 loopback 地址时必须
+配置非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
+
+生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
+Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
+采集事故；见[生产事故即时采集](./operations_zh.md#生产事故即时采集)。先重启会丢掉命令需要关联的
+活跃请求、锁、进程与线程栈证据。
+
+`npm run stop` 调用 `scripts/stop.sh`:停掉正在监听后端 `PORT` 与前端 `FRONTEND_PORT`
+(缺省 `8000` / `3000`)的进程。它与 start 一样先 source 仓库根 `.env` 解析端口,所以若
+你用自定义 `PORT` / `FRONTEND_PORT` 启动,停止时也传同样的值。脚本先发 `SIGTERM`,等待
+后再对残留进程 `SIGKILL`;没有服务在跑时是空操作。定位监听进程优先用 `ss`(Ubuntu/Linux
+的 iproute2 基础包自带),回落 `lsof`(macOS 默认有)再回落 `fuser`——三者至少有其一即可。
+
+> **一次性迁移注意**——如果你此前用 `npm run dev`(或手动 `cd backend && uvicorn ...`)
+> 在路径锚定上线之前的版本启动过,数据可能落在 `backend/.local` 而非仓库根的
+> `.local`。升级后二选一:①合并进去(在仓库根执行 `mv backend/.local/* .local/`,先
+> 检查有无冲突);②用绝对路径 env 显式保留原位置
+> (`SILICON_NOTEBOOK_STORAGE_DIR=/abs/path/storage`、
+> `DATABASE_URL=sqlite:////abs/path/silicon_notebook.db`——绝对 sqlite 路径注意四条
+> 斜杠)——绝对路径的 env 值永远原样尊重,不会被重新锚定。
+
+### 4 · 验证
+
+```bash
+curl -s http://127.0.0.1:8000/api/health   # {"status":"ok","llm_configured":...}
+bash scripts/check.sh                        # hermetic smoke + 全量 pytest + 前端 test/tsc/build
+```
+
+`scripts/check.sh` 同时会跑下列契约守卫;改动它们各自看护的代码时,也可以单独跑:
+
+```bash
+PYTHONPATH=backend python scripts/check_ask_modes_contract.py            # 提问模式 id 集合
+PYTHONPATH=backend python scripts/check_object_type_labels_contract.py   # object_type 显示名
+PYTHONPATH=backend python scripts/check_ui_vocabulary.py                 # 界面词汇
+```
+
+后端会把结构化 JSONL 日志写入 `.local/logs/`(`requests` / `events` / `llm`);跟踪一次
+上传或排查卡住的 source 见[可观测性 / 日志](./operations_zh.md#可观测性--日志)。
+
+### 5 · 离线打包(目标机没有 npm/node)
+
+要部署到一台**没有 npm/node**、只有 Python 包索引、且**无 root** 的机器:在一台**有 Node、
+且 OS/CPU 架构与目标机一致**的打包机上产出自包含 tar 包,再拷过去一键装:
+
+```bash
+bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.tar.gz
+```
+
+`pack.sh` 把前端构建成 Next.js **standalone** 服务,捆绑一份**便携 Node 运行时**(匹配打包机
+架构)来跑它,并预编译一个包含全部 Python 依赖的 **wheelhouse**——这样 `hnswlib` / `scipy`
+等编译型包在目标机上无需编译器。因为打包机与目标机同 OS/同架构,包内每个二进制都能直接运行。
+
+目标机上——无需 npm/node、无需 root:
+
+```bash
+tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
+cd    silicon_notebook_<version>_<os>-<arch>
+./install.sh    # 建用户态 venv;优先用 wheelhouse 离线装依赖
+                # (缺的再从 pip 源在线补);生成 .env
+mkdir -p .local
+cp model-services.example.toml .local/model-services.toml
+vi .local/model-services.toml  # 服务、workload 绑定、每服务 max_concurrency
+vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
+./start.sh      # 便携 node 跑 standalone 前端 + venv 的 uvicorn 后端
+./stop.sh       # 停止两者
+```
+
+打包机可配置项:`NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL`(便携 Node 来源)、
+`SKIP_WHEELHOUSE=1`(改为目标机在线装依赖)、`PIP_INDEX_URL`、`PACK_PYTHON`。目标机可配置项:
+`PYTHON_BIN`、`PIP_INDEX_URL`、`FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST` / `PORT`。
+打包机的 Python **小版本**应与目标机一致,否则预编译 wheel 装不上(install.sh 会自动回退在线
+安装)。目标侧细节见包内 `DEPLOY.md`。
+
+## 配置
+
+所有模型服务均通过 URL 端点接入，不启动本地模型服务。
+
+### 系统模型服务、调度与诊断
+
+模型 endpoint、协议、模型名、工作负载绑定与服务容量都由部署者统一管理，不再由用户配置。
+把 `model-services.example.toml` 复制为 `.local/model-services.toml`，设置
+`MODEL_SERVICES_CONFIG=.local/model-services.toml`，并在 `.env` 中只填写各服务
+`api_key_env` 所引用的密钥。仓库中的示例不含凭证；`MODEL_SERVICES_CONFIG` 留空时，
+系统明确进入离线 / 确定性降级。
+
+每个 `[services.<id>]` 表配置 `display_name`、`kind`、`protocol`、`base_url`、
+`model`、`api_key_env` 与 `max_concurrency`；`[bindings]` 把稳定的 workload id
+（如 `ask_answer`、`reasoning_agent`、`kg_extract`、
+`retrieval_query_embedding`、`retrieval_rerank`）映射到物理服务。多个 workload
+可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
+是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
+
+调度策略固定在代码中：
+
+- 每个物理服务最多同时运行 `max_concurrency` 个调用；不同服务拥有独立槽位；
+- 总队列上限为 `10 × max_concurrency`，单个 actor 最多排队
+  `2 × max_concurrency` 项；
+- 调度按 8 个 interactive : 2 个 report : 1 个 background 的固定节奏循环，
+  每个优先级内按 actor 轮转，因此持续交互流量下后台工作仍会前进；
+- 排队截止时间固定为 interactive 30 秒、report 300 秒、background 1800 秒，
+  派发前会响应取消；
+- 致命 provider 错误立即打开熔断器；连续 3 次瞬态错误也会打开。冷却 30 秒后只允许
+  1 个 half-open 恢复探针。
+
+调度器与熔断状态只存在于进程内。生产必须只运行一个后端进程：
+`scripts/prod.sh` 固定 Uvicorn `--workers 1`。多 worker 会把声明的服务并发度成倍放大，
+并把队列、熔断与健康状态分裂到多个进程。
+
+普通用户看到的**模型服务**面板是只读的，展示脱敏后的系统服务身份、绑定 workload、
+最近健康状态、active/maximum、排队数、最老等待时间和熔断状态。
+`GET /api/model-services/status` 只读本地状态，绝不自动探测上游。只有 admin 可通过
+`POST /api/admin/model-services/{service_id}/test` 或
+`POST /api/admin/model-services/test-all` 显式测试一个或全部服务。endpoint、凭证、
+provider 响应正文和原始异常只保留在服务端日志。
+
+Ask / 模型错误会尽量携带物理服务、workload、安全模型名与 `support_id`。用户遇到问题时，
+应把 support id 提交给维护人员；维护人员结合服务端日志与只读服务面板即可定位坏掉的模型服务。
+本地检索 / 索引错误不会把 provider 标为异常。
+
+个人模型配置路由和可编辑配置页面已经删除。schema v24 会在与版本戳相同的事务中，
+不可逆地把历史 `user_profiles.model_settings` 全部覆盖成 `{}`，并删除旧的逐用户健康状态。
+如需把历史凭证留作外部记录，升级前先备份数据库；应用不会恢复或继续使用这些值。
+
+模型调用超时、重试、输出预算与 batch 大小仍是普通 workload 调优项。`EMBED_DIM` 必须与绑定的
+embedding 模型输出维度一致。KG 来源级并行仍由 `KG_JOB_CONCURRENCY` 控制，自适应抽取窗口使用
+`kg_extract` 所绑定服务的容量；两者都不能覆盖服务 `max_concurrency`。
+
+**按核数自动调参：** 本地 CPU 工作仍可按机器缩放：
+
+```text
+KG_CLUSTER_ANN_THREADS   # 概念聚类 hnswlib 线程；0（默认）= min(cpu核数, 32)
+```
+
+`scripts/dev.sh` / `scripts/prod.sh` 会通过 `scripts/autotune.sh` 调整本地 OMP/BLAS
+线程，但不会改变任何模型服务容量。
+
+**数据库：**
+
+```text
+DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
+DB_WRITE_LOCK_STATS         # 开启进程级 SQLite 写锁 wait/hold 观测（默认 true）
+DB_WRITE_LOCK_WARN_MS       # wait/hold 超过此毫秒数即记一条限流的 db_write_lock_slow 事件（默认 200）
+DB_WRITE_LOCK_FLUSH_SECONDS # 周期性 db_write_lock_stats 快照的发出间隔（秒），也是 db_write_lock_slow 按调用点的限流窗口（默认 60）
+SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
+DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
+SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
+```
+
+**检索：**
+
+```text
+RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
+REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社区兄弟）保底席位（默认 3）
+REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
+```
+
+**可伸缩检索索引：** 规模大到不可拷贝的 notebook（与 notebook 拷贝/分享判定同一阈值——
+字节数或 chunk+node 行数超过配置上限）会自动构建/刷新检索索引，无需手动点按钮或跑 CLI：
+在来源抽取完成后、KG 重建后，以及查询首次发现无索引时兜底触发。默认会排队到低峰窗口而非
+立即构建。
+
+```text
+SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 true）
+SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
+```
+
+**检索 / KG 增强（GraphRAG + ToG-3 借鉴，Phase 1+2）：**
+
+opt-in（默认关）与默认开混合。默认开：`ANSWER_CONTEXT_*`、`KG_QUERY_REFINE_ENABLED`，以及 KG 质量增强 `KG_REFINE` / `KG_GLEANING` / `KG_CONCEPT_DESC`。其余请**逐个开启**并用
+评测脚本（`backend/app/eval`）验证——RRF + 重排 + 精炼三个全开会回归。
+
+```text
+LLM_CACHE_ENABLED            # 把 LLM 响应缓存到独立 sqlite（默认 false）
+LLM_CACHE_PATH               # 缓存 DB 路径（默认 .local/llm_cache.db）
+KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 true）
+KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 true）
+KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
+KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
+KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
+ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
+ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
+RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
+RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
+KG_QUERY_REFINE_ENABLED      # 答题前做问题感知证据精炼（默认 true）
+QUERY_REFINE_MAX_CHARS       # 喂给精炼的证据最大字符数（默认 4000）
+GLOBAL_MAX_COMMUNITIES       # 兼容保留；退役的 `global` mode 已是 `chunk` 别名，此值当前不被消费（默认 20）
+RELATION_RETRIEVAL_ENABLED   # 图/推理种子的关系向量检索（默认 false，按需开启待评测）
+RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数（默认 8）
+KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
+KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
+CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
+CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
+CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
+RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）
+MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
+MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
+MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
+REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
+REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000）
+REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
+REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
+```
+
+**两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
+（`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法
+`mark_notebook_base()` 设置；把一个 notebook 发布为 `base` 并不会让它自动全局共享——
+其它每个 notebook 都必须显式把它挂为参考库（持久化在 `notebook_bases`，经
+`GET`/`PUT /api/notebooks/{id}/bases` 管理、`GET /api/notebooks/{id}/mountable` 发现候选）
+之后，它才会加入该 notebook 的检索参与集。tier 感知联合检索不改相关度分数：相关度是
+第一排序键，`base` 仅在参与集内命中相关度分数完全相同时作为第二排序键。答案里的 base
+优先冲突规则是独立的合成策略，对来自已挂载 base notebook 的证据始终生效。
+可选的图推理 Ask 模式（`mode="graph"`）多跳遍历用固定默认 `max_depth=3`、`max_fan_out=8`
+（经 `getattr` 读取 settings，因此将来加 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env 覆盖无需改代码）。
+边可信打分、策展审核队列、个人→基准晋升同样是行为，不由 env 控制。
+
+**用户系统：**
+
+```text
+SILICON_NOTEBOOK_ADMIN_PASSWORD   # admin 登录密码（本地默认 "admin"；production/对外监听
+                                  # 必须配置非默认值）
+SILICON_NOTEBOOK_AUTH_OPTIONAL    # true = 无 token 请求回退为 admin（仅本地/测试）；
+                                  # false（默认）= 所有请求必须登录
+AUTH_SESSION_TOUCH_INTERVAL_SECONDS # session 滑动续期写库间隔（默认 300 秒）
+```
+
+**MinerU（PDF 解析）：**
+
+```text
+MINERU_MODE             # off（默认） | http | cli
+MINERU_API_URL          # 远端 mineru-api 端点（http 模式）
+MINERU_BACKEND          # pipeline | vlm-auto-engine | vlm-http-client | vlm-sglang-client
+MINERU_VLM_SERVER_URL   # 独立 VLM 推理服务器 URL
+MINERU_PARSE_METHOD     # auto | txt | ocr
+MINERU_LANG             # 如 en、ch
+MINERU_MODEL_SOURCE     # huggingface | modelscope
+MINERU_TIMEOUT_SECONDS  # MinerU 调用超时
+MINERU_FORMULA_ENABLE   # true/false
+MINERU_TABLE_ENABLE     # true/false
+MINERU_RETURN_IMAGES    # 是否保留 PDF/DOCX/PPTX 文档中的内嵌图片（默认开 true；设 0/false 仅保留文字与图注）
+MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出丢弃）
+MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
+```
+
+**日志：**
+
+```text
+LLM_LOG_ENABLED / LLM_LOG_PATH / LLM_LOG_MAX_CHARS
+EVENT_LOG_ENABLED / EVENT_LOG_DIR
+SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000）
+SILICON_NOTEBOOK_CORS_ORIGINS
+```
+
+`.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+
+所需 chat workload 未绑定时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。

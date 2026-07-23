@@ -17,6 +17,22 @@ from tests.test_repository_protocol_coverage import protocol_calls
 
 
 ROOT = Path(__file__).resolve().parents[2]
+DOCUMENTATION_BUNDLES = {
+    "README.md": (
+        "README.md",
+        "docs/product-and-api.md",
+        "docs/deployment-and-configuration.md",
+        "docs/operations.md",
+        "docs/development.md",
+    ),
+    "README_zh.md": (
+        "README_zh.md",
+        "docs/product-and-api_zh.md",
+        "docs/deployment-and-configuration_zh.md",
+        "docs/operations_zh.md",
+        "docs/development_zh.md",
+    ),
+}
 CONTRACT_DOCS = (
     "README.md",
     "README_zh.md",
@@ -38,6 +54,13 @@ REMEDIATION_DOCS = (
 
 
 def _read(name: str) -> str:
+    paths = DOCUMENTATION_BUNDLES.get(name, (name,))
+    return "\n\n".join(
+        (ROOT / path).read_text(encoding="utf-8") for path in paths
+    )
+
+
+def _read_file(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
@@ -50,6 +73,29 @@ def _between(name: str, start: str, end: str | None = None) -> str:
 def _assert_phrases(expected: dict[str, str]) -> None:
     for name, phrase in expected.items():
         assert phrase in _read(name), f"{name} is missing contract phrase: {phrase}"
+
+
+def test_root_readmes_are_entrypoints_for_complete_language_doc_bundles():
+    expected_entry_sections = {
+        "README.md": ("## Quick start", "## Documentation"),
+        "README_zh.md": ("## 快速开始", "## 文档导航"),
+    }
+    retired_detail_sections = {
+        "README.md": ("## Architecture Boundaries", "## Memory and Agent MCP"),
+        "README_zh.md": ("## 架构边界", "## Memory 与 Agent MCP"),
+    }
+
+    for root_name, bundle in DOCUMENTATION_BUNDLES.items():
+        root_text = _read_file(root_name)
+        for heading in expected_entry_sections[root_name]:
+            assert heading in root_text
+        for heading in retired_detail_sections[root_name]:
+            assert heading not in root_text
+        for detail_path in bundle[1:]:
+            assert f"./{detail_path}" in root_text, (
+                f"{root_name} does not link canonical detail document {detail_path}"
+            )
+            assert (ROOT / detail_path).is_file()
 
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
