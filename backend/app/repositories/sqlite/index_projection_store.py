@@ -509,10 +509,19 @@ class IndexProjectionStore:
         object_ids=None = whole-notebook load with a COUNT(*) n_hint so
         build_matrix preallocates (the frozen build-scale memory diet) —
         deliberately BYPASSES the query-time vector cache: a build's multi-GB
-        matrices must never become LRU entries. A list = fold's bounded delta
-        load, batched through the facade's IN-clause chunking with the
-        connection held open across the generator (frozen `_delta_vecs`
-        shape); an empty list returns ([], []). Both paths truncate through
+        matrices must never become LRU entries. The row cursor is STREAMED
+        straight into build_matrix — never .fetchall()'d first. At 8M×4096-dim
+        scale the whole-table result set is ~130GB of native BLOBs, and
+        materialising it alongside the preallocated (already truncated) matrix
+        is exactly what OOM-killed the offline `index` build (relation load:
+        ~130GB transient on top of the ~78GB KG/chunk residents → ~208GB).
+        Streaming keeps only ONE decoded row resident on top of the prealloc,
+        so peak load memory is the output matrix, not the raw BLOB column. The
+        connection stays open for the whole single-pass consumption because the
+        return runs inside the `with`. A list = fold's bounded delta load,
+        batched through the facade's IN-clause chunking with the connection
+        held open across the generator (frozen `_delta_vecs` shape); an empty
+        list returns ([], []). Both paths truncate through
         build_matrix(runtime_dim=...) — the dim-consumption point moves here
         UNCHANGED (漏消费点 = 静默零召回)."""
         from app.services.vector_index import build_matrix, resolve_runtime_dim
@@ -522,11 +531,11 @@ class IndexProjectionStore:
                 n_hint = db.execute(
                     f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
                     (notebook_id,)).fetchone()["c"]
-                rows = db.execute(
+                cursor = db.execute(
                     f"SELECT {id_column} AS vid, vector FROM {table} WHERE notebook_id=?",
-                    (notebook_id,)).fetchall()
+                    (notebook_id,))
                 return build_matrix(
-                    ((r["vid"], r["vector"]) for r in rows),
+                    ((r["vid"], r["vector"]) for r in cursor),
                     n_hint=n_hint, runtime_dim=runtime_dim)
         if not object_ids:
             return [], []
