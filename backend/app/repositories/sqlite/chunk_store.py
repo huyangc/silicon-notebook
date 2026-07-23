@@ -54,9 +54,16 @@ class ChunkStore:
         chunks: Sequence[ChunkWrite],
         *,
         created_at: str,
+        mark_chunked_at: str | None = None,
     ) -> None:
         """幂等:先删该 source 旧 chunk(级联删 chunk_embeddings)。chunk 行与其
-        chunks_fts 行在同一个写事务里换血——FTS 插入失败连 chunk 行一起回滚。"""
+        chunks_fts 行在同一个写事务里换血——FTS 插入失败连 chunk 行一起回滚。
+
+        ``mark_chunked_at`` 非 None 时,在**同一事务**内把 sources.chunked_at 置成它
+        (完成标记与它所认证的 chunk 数据原子提交——否则 0-chunk 成功的源崩在
+        「chunks 已提交、marker 未提交」之间会留下 chunks=0+chunked_at=NULL,正好被
+        H3 误判为损坏)。``build_chunks_for_source`` 传时间戳;knowhow 投影器**不传**
+        (它按格子复用本方法、传空 chunks,那些隐藏源不该被打完成标记)。"""
         rows = [(c.id, notebook_id, source_id, c.text,
                  c.section_path, json.dumps(list(c.element_ids)), created_at)
                 for c in chunks]
@@ -71,6 +78,10 @@ class ChunkStore:
                 "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                 "VALUES (?,?,?,?,?,?,?)", rows)
             self._insert_fts_rows(db, [(r[0], r[1], r[3]) for r in rows])
+            if mark_chunked_at is not None:
+                db.execute(
+                    "UPDATE sources SET chunked_at = ? WHERE id = ?",
+                    (mark_chunked_at, source_id))
 
     def _insert_fts_rows(self, connection: sqlite3.Connection, rows: list) -> None:
         connection.executemany(

@@ -185,7 +185,8 @@ def _h3_real_damage(repo, sid):
 def test_zero_chunk_success_sets_chunked_at(repo):
     # 纯标题 md: heading-only elements -> build_chunks 返回 [] -> 0 chunk, 但分块
     # 本身成功 -> chunked_at 打上时刻。这是 build_chunks_for_source 直线代码、无
-    # early-return 的确证: 0-chunk 路径也走到末尾的 mark_chunked。
+    # early-return 的确证: 0-chunk 路径也走到 replace_source_chunks(mark_chunked_at=)
+    # 的原子打标。
     nb, sid = _seed_source_with_elements(repo, ["A Pure Title"], element_type="heading")
     repo._build_chunks_for_source(sid)
     assert _counts(repo, sid) == (1, 0)         # elements>0, 0 chunk
