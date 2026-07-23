@@ -35,13 +35,14 @@ class _ContentOpenAI:
 
 
 def _client(tmp_path, monkeypatch, content):
-    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://llm.example.test")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "m")
+    # Transport identity is passed explicitly (system service registry model);
+    # Settings no longer carries openai_compat_base_url/api_key/model.
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_CACHE_ENABLED", "true")
     monkeypatch.setenv("LLM_CACHE_PATH", str(tmp_path / "cache.db"))
-    client = OpenAICompatibleClient(Settings())
+    client = OpenAICompatibleClient(
+        Settings(), base_url="https://llm.example.test", api_key="k", model="m",
+    )
     fake = _ContentOpenAI(content)
     monkeypatch.setattr(client, "client", lambda: fake)
     return client, fake
