@@ -216,6 +216,10 @@ def test_kg_fragment_validator_accepts_usable_shapes():
 
 
 def test_refine_validator_shape():
+    # The window-less DEGRADED entry (no nodes to bound-check against): keeps the
+    # structural + type(index) is int + keep bool checks; only the range check is
+    # dropped (it is unknowable without the node list — see the nodes-closed tests
+    # in tests/kg/test_extract.py).
     assert _refine_response_cacheable('{"items": [{"index": 0, "keep": true}]}') is True
     assert _refine_response_cacheable('{"items": []}') is True  # keep-all = empty decisions
     assert _refine_response_cacheable('{"items": "nope"}') is False
@@ -223,3 +227,9 @@ def test_refine_validator_shape():
     assert _refine_response_cacheable('{}') is False  # absent items != keep-all
     assert _refine_response_cacheable('{"error": "quota"}') is False
     assert _refine_response_cacheable('{"items": [{"garbage": 1}]}') is False  # no index/keep
+    # bool is an int subclass — `index: true` must NOT be treated as an integer
+    # index (downstream would consume it as index 1). type(index) is int excludes it,
+    # so even the degraded entry (no range check) rejects it.
+    assert _refine_response_cacheable('{"items": [{"index": true, "keep": false}]}') is False
+    # keep must be a real bool, not just present.
+    assert _refine_response_cacheable('{"items": [{"index": 0, "keep": 1}]}') is False

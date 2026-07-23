@@ -105,32 +105,60 @@ def _kg_fragment_cacheable(content: str) -> bool:
     return _fragment_grounds_something(content, [])
 
 
-def _refine_response_cacheable(content: str) -> bool:
-    """Cache-admission shape gate for the refine schema (REFINE_SCHEMA_HINT,
-    ``{"items":[{"index":0,"keep":true}]}``). Same tightening rationale as
-    ``_kg_fragment_cacheable``: cache only a reply we are sure is a real refine
-    result, since skipping a doubtful one costs just a re-fetch.
+def _refine_response_grounds(content: str, nodes: List[Node]) -> bool:
+    """Cache-admission gate for the refine schema (REFINE_SCHEMA_HINT,
+    ``{"items":[{"index":0,"keep":true}]}``), closed over the CURRENT node list the
+    same way ``_fragment_grounds_something`` closes over the window elements. Same
+    tightening rationale as ``_kg_fragment_cacheable``: cache only a reply we are sure
+    is a real refine result, since skipping a doubtful one costs just a re-fetch.
 
-    ``refine_nodes`` consumes ``data["items"]`` as a list and acts on each entry's
-    integer ``index`` + boolean ``keep`` (dropping the node when ``keep is False``);
-    a reply with no ``items`` key, a wrong-typed ``items``, an ``error`` envelope,
-    or entries missing those decision fields is not a usable refine result. A
-    genuine "keep everything" is ``{"items":[]}`` (empty list, no drops), NOT an
-    absent key — so absence is rejected, not treated as empty."""
+    ``refine_nodes`` consumes ``data["items"]`` and, per entry, indexes
+    ``nodes[index]`` and drops that node when ``keep is False``. So a usable reply
+    requires, for EVERY item:
+
+    - ``type(index) is int`` — ``type() is``, NOT ``isinstance``: ``bool`` is a
+      subclass of ``int`` in Python, so ``isinstance(True, int)`` is True and an
+      ``index: true`` would sail through and be consumed as index 1. ``type() is int``
+      excludes ``True``/``False``.
+    - ``0 <= index < len(nodes)`` WHEN the node list is known (the real refine call
+      closes it in): an out-of-range index is silently ignored downstream, so a reply
+      full of them refines nothing — freezing that no-op for the 90-day TTL is the
+      poison. With NO nodes (the window-less degraded entry / test doubles) the bound
+      is unknowable, so it degrades to the type check only (conservative: it can only
+      ever mean "re-fetch", never "cache junk").
+    - ``keep`` is a real ``bool``.
+
+    A genuine "keep everything" is ``{"items":[]}`` (empty list, no drops), NOT an
+    absent key — so absence / a wrong-typed ``items`` / an ``error`` envelope is
+    rejected, not treated as empty. Passed to chat_json as response_validator; a fault
+    there conservatively skips the write (OpenAICompatibleClient.
+    _response_validator_allows). On a cache HIT this same gate re-judges the stored
+    value against the current nodes, so any laxer-era poison is treated as a miss."""
     data = safe_json(content)
-    if not isinstance(data, dict):
-        return False
-    if "error" in data:
+    if not isinstance(data, dict) or "error" in data:
         return False
     items = data.get("items")
     if not isinstance(items, list):
         return False
     for it in items:
-        if (not isinstance(it, dict)
-                or not isinstance(it.get("index"), int)
-                or not isinstance(it.get("keep"), bool)):
+        if not isinstance(it, dict):
+            return False
+        index = it.get("index")
+        if type(index) is not int:  # bool is an int subclass — exclude True/False
+            return False
+        if not isinstance(it.get("keep"), bool):
+            return False
+        if nodes and not (0 <= index < len(nodes)):
             return False
     return True
+
+
+def _refine_response_cacheable(content: str) -> bool:
+    """Degraded (node-less) entry to ``_refine_response_grounds`` for callers/tests
+    with no ``nodes`` to bound-check against — keeps the structural + ``type(index)
+    is int`` + ``keep`` bool checks and drops only the range check (see there). Real
+    refine callers pass a nodes-closed validator, so the bound is enforced there."""
+    return _refine_response_grounds(content, [])
 
 
 def _extract_call_kwargs(
@@ -305,7 +333,9 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
             [{"role": "user",
               "content": refine_prompt(section_path, records_block, elements_block)}],
             REFINE_SCHEMA_HINT,
-            **_extract_call_kwargs(client, _refine_response_cacheable),
+            **_extract_call_kwargs(
+                client, lambda content: _refine_response_grounds(content, nodes)
+            ),
         )
         data = safe_json(raw)
     except KgBuildAborted:
