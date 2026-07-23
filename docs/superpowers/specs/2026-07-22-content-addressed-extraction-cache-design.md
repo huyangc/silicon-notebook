@@ -352,15 +352,30 @@ redis 仍满足 CacheBackend: True
 
 ## 三个安全阀
 
-### 1. 绝不缓存空响应（已实现，重构中必须保持）
+### 1. 只缓存真正可用的响应（已实现，重构中必须保持）
 
 输出预算烧光时 `chat_json` 会落到 `"{}"` 回退（即
-`reasoning-empty-content-degeneration` 记录的那个退化）。**缓存 `"{}"` 等于把一次
-偶发退化永久固化。**
+`reasoning-empty-content-degeneration` 记录的那个退化）。**缓存一次偶发退化等于把它
+永久固化整个 TTL。** 写入门是**四道**，任一不过就不写（`backend/app/core/llm.py` 写入处
+`if cache is not None and ckey and is_cacheable_llm_response(content, finish_reason)
+and _response_validator_allows(response_validator, content)`）：
 
-现有代码**已经做对了**：`backend/app/core/llm.py` 写入处的条件是
-`if cache and ckey and content != "{}"`。本次重构不得削弱该条件——须补一条守卫
-测试锁定它，并做变异验证（去掉 `content != "{}"` 后测试必须转红）。
+1. **非空回退 `"{}"`**、**`json.loads` 解析不了**、**`finish_reason == "length"`**——
+   前三道由 `is_cacheable_llm_response`（`core/cache/policy.py`）承担，是 schema-agnostic
+   的通用可用性判断。
+2. **调用方 schema 校验（`response_validator`）**——第四道。前三道拦不住「语法合法但
+   违反调用方 schema」的响应：KG 抽取拿到 `{"nodes":"invalid"}`（`nodes` 该是 list 却是
+   string）能过 `json.loads`，下游 `safe_json` + 抽取静默产出 **0 对象**，缓存 90 天后
+   每次重解析都命中这个 0。`chat_json` 因此接受一个可选 `response_validator: (str)->bool`
+   （默认 `None`＝无 schema 意见，ask/answer 等**不传**，行为一字不变）；KG 抽取三处
+   （`extract_window`/gleaning/refine，见 `services/kg/extract.py`）传入
+   `_kg_fragment_cacheable`/`_refine_response_cacheable`，**复用抽取自己的 `safe_json` +
+   形状判断**（`nodes`/`edges`/`items` 存在时必须是 list，缺省算合法空窗——别写太严把好
+   响应也挡了）。validator 抛异常＝保守地不缓存（`_response_validator_allows` try/except
+   兜底），**缓存故障永不炸主流程**。
+
+本次重构不得削弱任一道——四道门须**逐门**变异验证（逐一去掉后对应守卫测试必须转红；
+守卫在 `tests/test_cache_response_validator.py` 与既有 `tests/test_llm_cache.py`）。
 
 embed 侧对称要求：空向量列表、长度与输入不符的响应，一律不写入缓存。
 

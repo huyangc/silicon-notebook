@@ -192,6 +192,7 @@ class JsonChatClientPort(Protocol):
         max_tokens: Optional[int] = None,
         cancel_event: CancelEvent = None,
         bypass_cache: bool = False,
+        response_validator: Optional[Callable[[str], bool]] = None,
     ) -> str: ...
 
 

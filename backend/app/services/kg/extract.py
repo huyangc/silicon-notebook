@@ -4,7 +4,7 @@ only an integer "ev" label per node/edge, and the backend maps it back to that
 source element's exact text/offsets (drop ungroundable nodes). Node types
 constrained to the 4; edges to the vocab."""
 from __future__ import annotations
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.core.llm import cap_kwargs
 from app.services.kg.json_utils import safe_json
@@ -26,6 +26,60 @@ _KG_SCHEMA_HINT = (
     'prerequisite_of|defines|part_of|composed_of|kind_of|used_in|precedes",'
     '"source":"<local_id>","target":"<local_id>","ev":0}]}'
 )
+
+
+def _kg_fragment_cacheable(content: str) -> bool:
+    """Cache-admission shape gate for the KG-fragment schema (_KG_SCHEMA_HINT).
+
+    is_cacheable_llm_response already rejects the empty "{}" fallback, unparseable
+    JSON and budget-truncated replies, but a syntactically valid reply can still
+    violate this schema: e.g. ``{"nodes":"invalid"}`` parses fine, yet ``nodes``
+    must be a LIST — the extractor iterates ``data.get("nodes") or []`` and would
+    silently produce 0 grounded objects, and caching that freezes the 0 for the
+    whole TTL (with every re-parse hitting it). Mirror the extractor's OWN
+    consumption rather than inventing a second schema: ``nodes``/``edges`` must
+    each be a list WHEN PRESENT (absent is a legitimately empty window — the
+    downstream ``or []`` handles it, so do not over-reject and block good empties).
+    Passed to chat_json as response_validator; a fault there conservatively skips
+    the write (see OpenAICompatibleClient._response_validator_allows)."""
+    data = safe_json(content)
+    if not isinstance(data, dict):
+        return False
+    for key in ("nodes", "edges"):
+        value = data.get(key)
+        if value is not None and not isinstance(value, list):
+            return False
+    return True
+
+
+def _refine_response_cacheable(content: str) -> bool:
+    """Cache-admission shape gate for the refine schema (REFINE_SCHEMA_HINT):
+    ``refine_nodes`` consumes ``data["items"]`` as a list (drops it otherwise),
+    so a wrong-typed ``items`` is an unusable reply. Same reasoning/leniency as
+    ``_kg_fragment_cacheable``: list when present, absent is fine."""
+    data = safe_json(content)
+    if not isinstance(data, dict):
+        return False
+    items = data.get("items")
+    return items is None or isinstance(items, list)
+
+
+def _extract_call_kwargs(
+    client: Any, validator: Callable[[str], bool]
+) -> Dict[str, Any]:
+    """chat_json extras for the KG-extraction calls: the per-call max_tokens
+    override (cap_kwargs) plus the cache-admission ``response_validator``. BOTH
+    are gated on the client exposing ``settings`` — the hand-rolled test doubles
+    in kg/test_extract.py etc. expose neither ``settings`` nor ``**kwargs``, so
+    passing either kwarg would TypeError. Real clients (OpenAICompatibleClient
+    and its run-control / concurrency wrappers) all carry ``settings`` and accept
+    both, so this mirrors the existing ``**cap_kwargs`` gating exactly — no double
+    that survives today's splat regresses, and every cache-backed client still
+    gets the validator."""
+    kwargs = cap_kwargs(client, "kg_extract_max_tokens")
+    if getattr(client, "settings", None) is not None:
+        kwargs["response_validator"] = validator
+    return kwargs
 
 
 def _prompt(labeled_text: str, section_path: str, doc_type: str,
@@ -182,7 +236,7 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
             [{"role": "user",
               "content": refine_prompt(section_path, records_block, elements_block)}],
             REFINE_SCHEMA_HINT,
-            **cap_kwargs(client, "kg_extract_max_tokens"),
+            **_extract_call_kwargs(client, _refine_response_cacheable),
         )
         data = safe_json(raw)
     except KgBuildAborted:
@@ -227,7 +281,7 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
     for _ in range(max_rounds):
         try:
             raw = client.chat_json(messages, _KG_SCHEMA_HINT,
-                                   **cap_kwargs(client, "kg_extract_max_tokens"))
+                                   **_extract_call_kwargs(client, _kg_fragment_cacheable))
             data = safe_json(raw)
         except KgBuildAborted:
             raise
@@ -277,7 +331,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             [{"role": "user",
               "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
             _KG_SCHEMA_HINT,
-            **cap_kwargs(client, "kg_extract_max_tokens"),
+            **_extract_call_kwargs(client, _kg_fragment_cacheable),
         )
         data = safe_json(raw)
     except KgBuildAborted:
