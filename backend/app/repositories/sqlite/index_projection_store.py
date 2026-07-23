@@ -34,6 +34,13 @@ ScaleGraphEdges = (
     " | tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]"
 )
 
+# Batch size for the whole-notebook embedding cursor stream (embedding_matrix,
+# object_ids=None). fetchmany() this many rows at a time instead of row-by-row:
+# it bounds the native-dim BLOBs held on top of the preallocated matrix (the
+# OOM fix) AND avoids per-row _DiagnosticCursor.__next__ instrumentation on the
+# online build path. See embedding_matrix's docstring for the full rationale.
+_MATRIX_FETCH_BATCH = 10_000
+
 
 @dataclass(frozen=True)
 class ScaleGraphRows:
@@ -509,16 +516,25 @@ class IndexProjectionStore:
         object_ids=None = whole-notebook load with a COUNT(*) n_hint so
         build_matrix preallocates (the frozen build-scale memory diet) —
         deliberately BYPASSES the query-time vector cache: a build's multi-GB
-        matrices must never become LRU entries. The row cursor is STREAMED
-        straight into build_matrix — never .fetchall()'d first. At 8M×4096-dim
-        scale the whole-table result set is ~130GB of native BLOBs, and
-        materialising it alongside the preallocated (already truncated) matrix
-        is exactly what OOM-killed the offline `index` build (relation load:
-        ~130GB transient on top of the ~78GB KG/chunk residents → ~208GB).
-        Streaming keeps only ONE decoded row resident on top of the prealloc,
-        so peak load memory is the output matrix, not the raw BLOB column. The
-        connection stays open for the whole single-pass consumption because the
-        return runs inside the `with`. A list = fold's bounded delta load,
+        matrices must never become LRU entries. The row cursor is streamed in
+        bounded fetchmany(_MATRIX_FETCH_BATCH) batches — never .fetchall()'d
+        whole, never iterated row-by-row. Both bounds are load-bearing at
+        8M-row scale:
+          • Memory: the whole-table result set is ~130GB of native BLOBs at
+            8M×4096-dim; materialising it alongside the preallocated (already
+            truncated) matrix is exactly what OOM-killed the offline `index`
+            build (relation load: ~130GB transient on top of the ~78GB KG/chunk
+            residents → ~208GB). A batch bounds the raw BLOBs held on top of the
+            output matrix to _MATRIX_FETCH_BATCH rows.
+          • CPU/lock: _DiagnosticCursor.__next__ is instrumented, so row-by-row
+            iteration would enter sql_scope for EVERY embedding — on the online
+            build path (diagnostics runtime installed) that is normalize-SQL +
+            the global diagnostics lock twice + a writer wake per row, tens of
+            millions of times. fetchmany() is instrumented once per batch;
+            iterating the returned plain list is native (no instrumented
+            __next__).
+        The connection stays open for the whole single-pass consumption because
+        the return runs inside the `with`. A list = fold's bounded delta load,
         batched through the facade's IN-clause chunking with the connection
         held open across the generator (frozen `_delta_vecs` shape); an empty
         list returns ([], []). Both paths truncate through
@@ -534,9 +550,17 @@ class IndexProjectionStore:
                 cursor = db.execute(
                     f"SELECT {id_column} AS vid, vector FROM {table} WHERE notebook_id=?",
                     (notebook_id,))
+
+                def _stream_rows():
+                    while True:
+                        batch = cursor.fetchmany(_MATRIX_FETCH_BATCH)
+                        if not batch:
+                            break
+                        for row in batch:
+                            yield row["vid"], row["vector"]
+
                 return build_matrix(
-                    ((r["vid"], r["vector"]) for r in cursor),
-                    n_hint=n_hint, runtime_dim=runtime_dim)
+                    _stream_rows(), n_hint=n_hint, runtime_dim=runtime_dim)
         if not object_ids:
             return [], []
 
