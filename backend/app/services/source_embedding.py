@@ -33,6 +33,7 @@ class SourceEmbeddingService:
         parallelism: Callable[[str], int],
         event_log: EventLogger,
         now: Callable[[], str],
+        invalidate_vector_matrix: "Callable[[str, str], None] | None" = None,
     ) -> None:
         self.settings = settings
         self.sources = sources
@@ -42,6 +43,15 @@ class SourceEmbeddingService:
         self.parallelism = parallelism
         self.event_log = event_log
         self.now = now
+        # (notebook_id, embedding_table) -> drop retrieval's brute-force
+        # _vector_matrix cache entry for that table. Paged (re-)embedding flushes
+        # across several transactions; the cache is version-keyed on
+        # (COUNT(*), MAX(created_at)), and a same-second re-embed of existing
+        # rows changes neither, so a matrix built mid-pagination could be served
+        # stale forever. Invalidating once the write completes is the
+        # clock-independent guarantee (None = unwired: offline/test callers that
+        # never build the cache). See the three batch embedders.
+        self.invalidate_vector_matrix = invalidate_vector_matrix
 
     def embed_knowledge(
         self, object_id: str, notebook_id: str, payload: dict
@@ -289,6 +299,8 @@ class SourceEmbeddingService:
                 progress(done, total)
         if progress:
             progress(total, total)
+        if self.invalidate_vector_matrix is not None:
+            self.invalidate_vector_matrix(notebook_id, "knowledge_embeddings")
 
     def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。
@@ -330,20 +342,16 @@ class SourceEmbeddingService:
             ):
                 rows.extend(part)
             if rows:
-                # Fresh timestamp PER PAGE — parity with the pre-existing objects
-                # path (flush_object_vectors also flushes per commit_every with a
-                # fresh now()). A shared created_at across pages defeats
-                # retrieval's (count, max_created_at)-keyed _vector_matrix cache:
-                # re-embed upserts leave COUNT(*) unchanged, so only an advancing
-                # created_at bumps the version. Residual (shared with the objects
-                # path, predates this change): the clock is second-resolution, so
-                # pages finishing within one second still collide — a limitation
-                # of the (count, second-created_at) cache key itself, whose proper
-                # fix is a monotonic version in the retrieval cache, out of scope
-                # for this memory-diet change.
+                # Fresh timestamp per page (parity with flush_object_vectors);
+                # correctness against retrieval's (count, max_created_at) matrix
+                # cache is GUARANTEED by the invalidate_vector_matrix call below,
+                # which is clock-independent (a same-second re-embed would leave
+                # the version key unchanged).
                 self.vectors.replace_relation_vectors(
                     notebook_id, rows, created_at=self.now()
                 )
+        if self.invalidate_vector_matrix is not None:
+            self.invalidate_vector_matrix(notebook_id, "relation_embeddings")
 
     def embed_chunk_ids(self, notebook_id: str, rows: List[dict]) -> None:
         """Incremental embed for an EXPLICIT list of chunks — knowhow-tables
@@ -427,13 +435,14 @@ class SourceEmbeddingService:
             ):
                 out.extend(part)
             if out:
-                # Fresh timestamp PER PAGE — see embed_relations_batch: a shared
-                # created_at across pages would strand a mid-pagination partial
-                # re-embed in retrieval's (count, max_created_at)-keyed matrix
-                # cache (upserts don't change COUNT(*)).
+                # Fresh timestamp per page (see embed_relations_batch);
+                # correctness is guaranteed by the invalidate_vector_matrix call
+                # below, not by created_at advancing.
                 self.vectors.replace_chunk_vectors(
                     notebook_id, out, created_at=self.now()
                 )
+        if self.invalidate_vector_matrix is not None:
+            self.invalidate_vector_matrix(notebook_id, "chunk_embeddings")
 
     def backfill_knowledge_embeddings(self, db, notebook_id: str,
                                       objects: List[dict], progress=None) -> None:

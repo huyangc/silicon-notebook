@@ -490,6 +490,15 @@ class RepositoryRuntime:
             parallelism=self.models.parallelism,
             event_log=self.event_log,
             now=self.seams.now,
+            # Drop retrieval's brute-force _vector_matrix cache for a table after
+            # a paged (re-)embed — the version key (COUNT(*), MAX(created_at))
+            # can't see a same-second re-embed of existing rows (see the batch
+            # embedders). Same VectorCache the retrieval snapshots read.
+            invalidate_vector_matrix=(
+                lambda notebook_id, table: self.retrieval_snapshots.invalidate(
+                    f"{notebook_id}:matrix:{table}"
+                )
+            ),
         )
         self.source_chunking = SourceChunkingService(
             settings=self.settings,
