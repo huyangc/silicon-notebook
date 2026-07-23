@@ -4175,7 +4175,7 @@ export default function Home() {
                       </div>
                     ))}
                     {asking && (
-                      <div className="chat-turn">
+                      <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
                         {pendingQuestion && <div className="chat-user">{pendingQuestion}</div>}
                         <div className="chat-assistant chat-thinking">
                           {groupOf(pendingMode) === "strict" ? (
@@ -4302,7 +4302,15 @@ export default function Home() {
                 </AskComposer>
               )}
               {chatMode === "ask" && (
-                <ChatTurnNav questions={turns.map((turn) => turn.question)} scrollRef={chatBodyRef} />
+                <ChatTurnNav
+                  questions={
+                    asking && pendingQuestion
+                      ? [...turns.map((turn) => turn.question), pendingQuestion]
+                      : turns.map((turn) => turn.question)
+                  }
+                  scrollRef={chatBodyRef}
+                  sessionId={conversationId}
+                />
               )}
             </section>
 
