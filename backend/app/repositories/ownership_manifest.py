@@ -1392,6 +1392,7 @@ SURFACE_MEMBERS = (
         owner='ModelProvider',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>.measure_speed', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='configured'),
@@ -1401,10 +1402,12 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='configured'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
         ),
     ),
     SurfaceMember(
@@ -2108,6 +2111,8 @@ SURFACE_MEMBERS = (
         owner='SQLiteMaintenanceAdapter',
         kind='property',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/backfill_relation_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/gen_recall_gold.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='maintenance'),

@@ -360,6 +360,33 @@ class ScaleArtifactRuntime:
 
     # ------------------------------ status and scheduling
 
+    def state_signature(self, notebook_id: str) -> tuple:
+        """H7 体检 memo 的**廉价**失效键:变则 status() 的 state 可能变,但**不**跑 _index_delta 的
+        全量 source-id 扫(codex P2:大库上每次 /checkup 都全量扫过期判定太贵)。构成——
+
+        - ``version_signal``:数据变更信号(unified_kg_state 单行读)。**唯一的 chunk 写入者会 bump
+          kg_mutation_seq**(见 knowledge_counts_cache 头注释),故新 chunk / KG 都在此反映;runtime_dim
+          等 settings 也在其 tail 里 → 覆盖 delta_over 的 chunk 侧与 dim_stale。
+        - manifest 的 ``(exists, mtime_ns)``:捕获任何 manifest 重写——build / fold / rebuild(**即便
+          version 串不变**:rebuild 刻意保持 kg_mutation_seq 稳定却换了 watermark_sources,单靠 seq 会
+          漏这次 delta 归零)、以及 .tmp+swap 原子换目录。
+        - ``building`` / ``queued``:纯内存态转换(无 DB 信号),build 起止直接改这两个集合。
+
+        盲区仅剩「不 bump seq 的 embedding 变更改 version_facts」——但 status() 自身的 version() 也
+        memo 在 version_signal 上、**同一盲区**,故本键不会比 status() 更陈旧。异常由调用方(Checkup
+        service)fail-soft 兜住,这里不吞。"""
+        out_dir = self.artifacts.scale_dir(notebook_id)
+        try:
+            manifest_ident = (True, (out_dir / "manifest.json").stat().st_mtime_ns)
+        except OSError:
+            manifest_ident = (False, 0)  # 不存在/取不到 → 未建索引态(H7=0)
+        return (
+            tuple(self.projections.version_signal(notebook_id)),
+            manifest_ident,
+            notebook_id in self.building,
+            notebook_id in self.idle_queue,
+        )
+
     def status(self, notebook_id: str) -> dict:
         # status() consumes ONLY the notebook's tier; read it with a cheap PK
         # query instead of rebuilding the full NotebookSummary (from_row's 5

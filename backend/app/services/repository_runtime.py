@@ -332,6 +332,11 @@ class RepositoryRuntime:
             scale_index_state=(
                 lambda nb: str(self.scale_artifacts.status(nb).get("state", ""))
             ),
+            # H7 memo 的廉价失效键:签名不变即复用 state 结论,不跑上面昂贵的 status()/_index_delta
+            # 全量扫(codex P2)。签名构成见 ScaleArtifactRuntime.state_signature。
+            index_state_signature=(
+                lambda nb: self.scale_artifacts.state_signature(nb)
+            ),
             # H8 缓存键 = 磁盘 manifest 身份(rebuild/fold 换新 version 即失效),**不是**
             # version_signal——后者与磁盘产物解耦,用它当键损坏清不掉(评审 B1)。同一个
             # scale_artifact_store 也供下面的探针,来源一致。

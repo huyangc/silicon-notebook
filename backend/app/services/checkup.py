@@ -18,8 +18,11 @@
   报旧值,故每次直读(per-nb 索引查询,可接受)。
 - H6:已 memo 在 kg_mutation_seq 上(QueryStore.visible_pending_kg_source_count——排除
   memory/knowhow 合成源,与 H2/H3 及看板「知识图谱」行同口径),O(1)。
-- H7:读索引状态的 `state` 字段;不折进 kg_mutation_seq(嵌入变更改 version_facts 却不 bump
-  seq,seq-memo 会漏报),故每次直读一次索引状态(与看板打开同代价)。
+- H7:读索引状态的 `state` 字段。按**廉价签名**(version_signal + manifest mtime + building/queued,
+  见 ScaleArtifactRuntime.state_signature)memo:签名不变即复用,避免大库上每次 /checkup 都跑
+  status()→_index_delta 的全量 source-id 扫(codex P2)。签名是 status() stale 判定输入的廉价超集,
+  故缓存绝不比 status() 自身更陈旧;不折进裸 kg_mutation_seq(rebuild 不 bump seq 却换 watermark
+  →由 mtime 补上;嵌入变更改 version_facts 也不 bump seq——与 status() 自身的 version() memo 同盲区)。
 - H8:需真 load 一次磁盘产物做交叉校验,故按磁盘 **manifest 身份**(exists + manifest.version)缓存
   「健康」结论——rebuild/fold(`.tmp`+swap 原子)换新 manifest.version 即失效。**不用 version_signal**:
   它只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,与磁盘产物解耦(评审 B1:用它当键会
@@ -48,6 +51,9 @@ _H8_CACHE_MAX = 256
 # 时身份不变——只靠身份键会把「探过之后才损坏」的索引永远当健康。TTL 让健康结论定期复检,
 # 使 post-probe 磁盘损坏最终可见(损坏结论本就不缓存、每次现探)。300s:检索热路径外,足够低频。
 _H8_CACHE_TTL = 300.0
+# H7 memo 的有界化(同 H8:LRU、进程内、重启即空)。H7 不需 TTL:签名含 manifest mtime → 任何
+# 产物重写都失效,不像 H8 的 (exists,version) 身份会漏「探后被外部截断」而需 TTL 兜底。
+_H7_CACHE_MAX = 256
 
 
 @dataclass(frozen=True)
@@ -120,7 +126,10 @@ class CheckupService:
     - ``database``:H2/H3/H6 的一个读快照(三条 QueryStore 静态查询共用同一 connection)。
     - ``count_missing_chunk_vectors`` / ``count_missing_element_vectors``:H4/H5,resolve 到
       maintenance 的直连 COUNT(判据与「实际可补数」逐字一致)。
-    - ``scale_index_state``:H7,返回索引状态的 `state` 字符串('stale' 即过期/维度失配)。
+    - ``scale_index_state``:H7,返回索引状态的 `state` 字符串('stale' 即过期/维度失配)——昂贵
+      (内含 _index_delta 全量 source-id 扫),只在下面的签名变化时才调。
+    - ``index_state_signature``:H7 memo 的**廉价**失效键(version_signal + manifest mtime +
+      building/queued);签名不变即复用上次的 state 结论、不跑 ``scale_index_state``(codex P2)。
     - ``index_manifest_identity``:H8 的缓存键 `(exists, manifest.version)`——磁盘产物身份,
       rebuild/fold 换新 version 即失效(**不是** version_signal:后者与磁盘产物解耦,见 H8 说明)。
     - ``probe_index_integrity``:H8 的磁盘探针(never-raise,见模块级 probe_scale_index_integrity)。
@@ -135,6 +144,7 @@ class CheckupService:
         count_missing_chunk_vectors: Callable[[str, "set[str]"], int],
         count_missing_element_vectors: Callable[[str, "set[str]"], int],
         scale_index_state: Callable[[str], str],
+        index_state_signature: Callable[[str], Any],
         index_manifest_identity: Callable[[str], "tuple[bool, Any]"],
         probe_index_integrity: Callable[[str], int],
         active_source_ids: Callable[[], "set[str]"],
@@ -145,6 +155,7 @@ class CheckupService:
         self._count_missing_chunk_vectors = count_missing_chunk_vectors
         self._count_missing_element_vectors = count_missing_element_vectors
         self._scale_index_state = scale_index_state
+        self._index_state_signature = index_state_signature
         self._index_manifest_identity = index_manifest_identity
         self._probe_index_integrity = probe_index_integrity
         self._active_source_ids = active_source_ids
@@ -155,6 +166,11 @@ class CheckupService:
         # rebuild/fold 换新 version 即失效。重启即空。move_to_end + popitem(last=False) LRU 有界化。
         self._h8_cache: "OrderedDict[str, tuple[Any, int, float]]" = OrderedDict()
         self._h8_cache_lock = threading.Lock()
+        # 进程内 H7 memo:nb -> (signature, h7_value)。签名是 status() stale 判定输入的廉价超集,
+        # 命中即跳过昂贵的 status()/_index_delta 全量扫(codex P2)。0/1 都缓存(两向翻转都被签名
+        # 捕获,无粘滞);异常不缓存。move_to_end + popitem(last=False) LRU 有界化。重启即空。
+        self._h7_cache: "OrderedDict[str, tuple[Any, int]]" = OrderedDict()
+        self._h7_cache_lock = threading.Lock()
 
     # ------------------------------------------------------------------ run
     def run(self, notebook_id: str) -> CheckupResult:
@@ -202,13 +218,38 @@ class CheckupService:
 
     # ------------------------------------------------------------ H7 / H8
     def _h7_index_stale(self, notebook_id: str) -> int:
-        """索引过期/维度失配 → 1,否则 0。fail-soft:索引状态探针有额外失败面(delta 计算 /
-        磁盘),单点失败不该拖垮 H2/H3 这些用户最需要的源级项,异常时保守判「未过期」(0)。"""
+        """索引过期/维度失配 → 1,否则 0。
+
+        memo(codex P2:大库上每次 /checkup 都跑 status()→_index_delta 全量扫 source-id 太贵):
+        先取**廉价签名**,签名与上次相同即复用上次结论、**不**跑昂贵的 ``scale_index_state``。签名是
+        status() stale 判定所有输入的廉价超集(见 ScaleArtifactRuntime.state_signature),故缓存绝不
+        比 status() 自身更陈旧;H7 两向翻转(新数据 bump seq、rebuild/fold 换 manifest mtime)都被
+        签名捕获,故 0/1 都可缓存、无粘滞。
+
+        fail-soft:签名或状态探针任一异常,都保守判「未过期」(0)且**不写缓存**——索引状态有额外
+        失败面(delta 计算 / 磁盘),单点失败不该拖垮 H2/H3 这些用户最需要的源级项;不缓存异常结论
+        以免把偶发失败粘成长期误判(下次现探)。"""
         try:
-            return 1 if self._scale_index_state(notebook_id) == "stale" else 0
-        except Exception:  # noqa: BLE001 — 探针 fail-soft,保守判未过期
+            signature = self._index_state_signature(notebook_id)
+        except Exception:  # noqa: BLE001 — 连廉价签名都取不到:保守判未过期,不缓存
+            self._warn("H7 索引签名取不到(保守判未过期):%s", notebook_id)
+            return 0
+        with self._h7_cache_lock:
+            cached = self._h7_cache.get(notebook_id)
+            if cached is not None and cached[0] == signature:
+                self._h7_cache.move_to_end(notebook_id)
+                return cached[1]
+        try:
+            value = 1 if self._scale_index_state(notebook_id) == "stale" else 0
+        except Exception:  # noqa: BLE001 — 状态探针 fail-soft:保守判未过期,不缓存
             self._warn("H7 索引状态探针失败(保守判未过期):%s", notebook_id)
             return 0
+        with self._h7_cache_lock:
+            self._h7_cache[notebook_id] = (signature, value)
+            self._h7_cache.move_to_end(notebook_id)
+            while len(self._h7_cache) > _H7_CACHE_MAX:
+                self._h7_cache.popitem(last=False)
+        return value
 
     def _h8_index_integrity(self, notebook_id: str) -> int:
         """索引产物损坏 → 1,否则 0。

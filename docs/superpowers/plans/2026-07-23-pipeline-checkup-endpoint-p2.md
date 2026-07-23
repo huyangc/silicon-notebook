@@ -152,21 +152,33 @@ def h8_index_integrity(nb_id):
 - `sample` 的上界 N(给前端展示够用即可,如 20)。已实现:20。
 - checkup 是否要一个「上次体检时刻」的轻记录(纯前端展示,不持久化亦可)。
 
-## 十、已知非阻塞项(codex 评审记录,待后续加固)
+## 十、已知非阻塞项(codex 评审记录)
 
-codex 多轮评审后仍有几处**非阻塞**的边角,经与用户权衡后本 PR 不修、留作独立加固:
+codex 多轮评审的边角项。本 PR(官方 PR 第 1 轮反馈)已修其中三处,余两处仍非阻塞、留作独立加固。
 
-- **backfill accepted 只到 workload 「或」粒度**(codex 第 4 轮 P2):`configured(chunk) or
-  configured(element)` 只要有一种嵌入配了就返 accepted=true。若只配了 element、而损坏的是 H4
-  chunk 向量,chunk backfill 是 no-op 但仍报受理、前端空转轮询。要治须按「本次损坏属哪个
-  workload」返 per-workload 结果——需要端点知道用户点的是 H4 还是 H5(当前前端把 H4/H5 合并成
-  一个「补齐向量」CTA),改动面较大。
+**已修(本 PR,官方第 1 轮)**
+
+- **backfill 与 reparse 串行化**(官方第 1 轮 P1;亦即第 4 轮 P1「排除活跃源极窄残留」的彻底修法):
+  不再用「快照活跃租约作 exclude」的弱办法(有「快照后、读取前才开始 reparse」的残留窗口),改为
+  `_backfill_vectors_job` **逐源持 P1.5 的分块锁、锁内现读现嵌**——与 process_source 的 element 换血
+  (同一把锁,锁内先 clear_embeddings 再换 elements、复用 `el-<sid>-<idx>` id)互斥,故复用 id 不再可能
+  挂上永久陈旧向量。旧的 exclude 管道(`batch_ingest.backfill_*` / `missing_*_rows` 的 `exclude_source_ids`)
+  已回退;H4/H5 **计数**侧的 `exclude_source_ids`(排除在途嵌入的源,免误报缺向量)保留。
+- **backfill accepted 按损坏所属 workload 精判**(官方第 1 轮 P2;取代第 4 轮记录的「或」粒度):端点改为
+  「某类缺向量确实存在 **且**其嵌入 workload 已配」才受理(短路 COUNT:未配某类就不跑那类计数)。
+  「损坏是 element、却只配了 chunk」不再假受理→前端不再「修复中」空转轮询。计数不排活跃租约(是看板
+  H4/H5 排除口径的超集,故看板显示有损坏时端点必也判有,不会误拒)。
+- **H7 索引状态 memo**(官方第 1 轮 P2):大库上每次 /checkup 都跑 status()→`_index_delta` 全量扫
+  source-id 太贵。改为按**廉价签名**(`version_signal` + manifest mtime + building/queued,见
+  `ScaleArtifactRuntime.state_signature`)缓存 state 结论,签名不变即复用、不跑昂贵状态计算。签名是
+  status() stale 判定输入的廉价超集,故缓存绝不比 status() 自身更陈旧;含 mtime 以捕获「rebuild 保持
+  kg_mutation_seq 稳定却换 watermark」这类单靠 seq 会漏的场景,故 0/1 两向翻转都被捕获、可缓存无粘滞。
+
+**仍非阻塞(留作独立加固)**
+
 - **H8 的 ANN 校验只到「文件存在」**(codex 第 4 轮 P2):主 ann.bin 存在但**内容**截断/非法
   HNSW 时,探针判健康。要治须真 hnswlib 打开校验——但那正是懒加载想避开的开销,且高频探针里
   每次真 load ANN 代价不小。当前已校验:manifest 计数/数组长度失配 + 主 ANN 文件存在性 + 健康
   缓存 300s TTL(post-probe 损坏最终可见)。内容级 ANN 校验留作独立改动。
-- **backfill 排除活跃源有极窄残留**(codex 第 4 轮 P1 的残留):已快照活跃租约并排除(覆盖
-  「backfill 启动时源已在 reparse」主场景),但**快照后、读取前才开始 reparse**的源覆盖不到。
-  要全覆盖须把 backfill 与源替换串行化(如复用 P1.5 的 per-source 分块锁扩展到 backfill)。
 - **铃铛签名只含 H 码集合**(codex 第 4 轮 P3):同一类型(如 H2)已有告警时,新增的同类型损坏
   源不会让已读/已关的铃铛复活。要治须把计数/有界样本身份纳入签名。
