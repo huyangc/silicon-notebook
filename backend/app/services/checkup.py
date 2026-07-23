@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -42,6 +43,11 @@ _SAMPLE_CAP = 20
 # H8 version_signal 缓存的有界化:进程内只保留最近访问的 N 个 notebook(LRU)。看板逐个
 # 打开,工作集本就是个位数~几十;上界只为防「几十万 notebook 全被探过一遍」的无界增长。
 _H8_CACHE_MAX = 256
+# H8 健康结论的缓存**有界存活**:manifest 身份不变时也最多缓存这么久,过期即重探一次。
+# 理由(codex):manifest.version 是内容派生的、外部截断/损坏数组或 ann.bin 而不动 manifest
+# 时身份不变——只靠身份键会把「探过之后才损坏」的索引永远当健康。TTL 让健康结论定期复检,
+# 使 post-probe 磁盘损坏最终可见(损坏结论本就不缓存、每次现探)。300s:检索热路径外,足够低频。
+_H8_CACHE_TTL = 300.0
 
 
 @dataclass(frozen=True)
@@ -83,7 +89,17 @@ def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None) -> int:
         if not os.path.exists(manifest_path):
             return 0
         index = _scale_index_module.load_scale_index(str(scale_dir))
-        return 0 if index is not None else 1
+        if index is None:
+            return 1  # manifest 计数/数组长度失配
+        # ⚠ load_scale_index 只校验 .npy 数组、**不校验 ANN 二进制**——ANN 索引懒加载
+        # (延迟由检索侧用 ann_path 打开),故 ann.bin 缺失/损坏它照样返 ScaleIndex(codex)。
+        # 主 ANN 有标签(n_ann>0)却没落盘文件 → 检索时开不了 → 判损坏。chunk/relation ANN
+        # 是可选产物(load_scale_index 本就容忍缺失),不在此升级成整份损坏。
+        if getattr(index, "ann_labels", None) and not os.path.exists(
+            getattr(index, "ann_path", "") or ""
+        ):
+            return 1
+        return 0
     except Exception:  # noqa: BLE001 — 探针绝不 raise 进体检热路径,保守判「未损坏」
         if logger is not None:
             try:
@@ -137,7 +153,7 @@ class CheckupService:
         # 进程内 H8 缓存:nb -> (manifest_version, 0)。**只缓存「健康」结论**(见 _h8 说明:
         # 损坏结论从不进缓存,每次现探,以免修复后仍粘住误报)。键是磁盘 manifest 身份,
         # rebuild/fold 换新 version 即失效。重启即空。move_to_end + popitem(last=False) LRU 有界化。
-        self._h8_cache: "OrderedDict[str, tuple[Any, int]]" = OrderedDict()
+        self._h8_cache: "OrderedDict[str, tuple[Any, int, float]]" = OrderedDict()
         self._h8_cache_lock = threading.Lock()
 
     # ------------------------------------------------------------------ run
@@ -214,9 +230,13 @@ class CheckupService:
             return 0  # 未建索引:不是损坏,廉价短路(不 load、不缓存)
         with self._h8_cache_lock:
             cached = self._h8_cache.get(notebook_id)
-            if cached is not None and cached[0] == manifest_version:
+            if (
+                cached is not None
+                and cached[0] == manifest_version
+                and (time.monotonic() - cached[2]) < _H8_CACHE_TTL
+            ):
                 self._h8_cache.move_to_end(notebook_id)
-                return cached[1]  # 本代产物已探过健康(缓存只存 0)
+                return cached[1]  # 本代产物、TTL 内已探过健康(缓存只存 0)
         # 磁盘探针放在锁外(IO 可能慢);probe 契约上 never-raise,仍兜一层。
         try:
             result = int(self._probe_index_integrity(notebook_id))
@@ -225,7 +245,7 @@ class CheckupService:
             return 0
         with self._h8_cache_lock:
             if result == 0:
-                self._h8_cache[notebook_id] = (manifest_version, 0)
+                self._h8_cache[notebook_id] = (manifest_version, 0, time.monotonic())
                 self._h8_cache.move_to_end(notebook_id)
                 while len(self._h8_cache) > _H8_CACHE_MAX:
                     self._h8_cache.popitem(last=False)
