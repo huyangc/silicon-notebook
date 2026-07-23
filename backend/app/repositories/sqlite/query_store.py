@@ -86,6 +86,35 @@ class QueryStore:
         return bool(row[0])
 
     @staticmethod
+    def notebook_has_chunk(db: sqlite3.Connection, notebook_id: str) -> bool:
+        """本库是否有任意 chunk。chunks 表**不按 source_type 区分**——文档 chunk 与
+        knowhow 格子 chunk 同表,是默认 chunk 模式实际能检索到的证据全集。故这是
+        NotebookSummary.ask_available 的关键信号:visible_source_count 排除掉的
+        knowhow-only 库(尤其无锚点列、零 knowledge_objects 的表)在这里为真——它没有
+        可见来源、没有 KG,却仍可对话。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id = ?)",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row[0])
+
+    @staticmethod
+    def notebook_has_confirmed_memory(
+        db: sqlite3.Connection, notebook_id: str, user_id: str
+    ) -> bool:
+        """本库对该用户是否有**已确认** memory。只有 confirmed 会被 ask 注入为证据
+        (candidate 不算),且 memory 按 created_by 私有——检索侧就是按当前用户取 confirmed
+        memory,故此处同样按 user_id 限定(与 counts["memories"] 的 all-status 计数口径
+        不同,是有意的)。用于 NotebookSummary.ask_available:无来源/无 KG 但有 confirmed
+        memory 的库仍可对话。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM memory_items "
+            "WHERE notebook_id = ? AND created_by = ? AND status = 'confirmed')",
+            (notebook_id, user_id),
+        ).fetchone()
+        return bool(row[0])
+
+    @staticmethod
     def pending_kg_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         # Served from the seq-gated count cache (one correlated scan per
         # kg_mutation_seq instead of ~2s per open at 48k sources).

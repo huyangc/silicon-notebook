@@ -334,6 +334,7 @@
     "notebook": {
       "access": "owner",
       "access_scope": "private",
+      "ask_available": true,
       "base_kg_available": false,
       "base_notebooks": [],
       "counts": {
