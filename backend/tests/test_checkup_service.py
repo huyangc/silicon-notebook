@@ -227,10 +227,18 @@ def test_h3_miss_active_lease(repo):
 
 
 # --------------------------------------------------------------------- H6
+def _bump_kg_seq(repo, notebook_id):
+    """裸 SQL seed 不 bump kg_mutation_seq,而 H6 走 seq-gated 计数缓存
+    (visible_pending_kg_source_count)——真实加源(process_source)会 bump seq、令该缓存失效。
+    H6 用例补这一下,否则先前被别处(NotebookSummary 看板)按旧 seq 填过的缓存会返回陈旧 0。"""
+    repo._mark_unified_kg_dirty(notebook_id)
+
+
 def test_h6_hit_pending_kg(repo):
     """有 elements、无任何(completed)KG → pending。chunked_at 置位以隔离掉 H3。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="extracted", chunked_at=_NOW, n_elements=1)
+    _bump_kg_seq(repo, nb.id)
     result = repo._runtime.checkup.run(nb.id)
     h6 = _check(result, "H6")
     assert h6.count == 1
@@ -242,6 +250,22 @@ def test_h6_miss_completed_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_source(repo, nb.id, parse_status="extracted", chunked_at=_NOW, n_elements=1)
     _seed_completed_kg(repo, nb.id, sid)
+    _bump_kg_seq(repo, nb.id)
+    assert _check(repo._runtime.checkup.run(nb.id), "H6").count == 0
+
+
+def test_h6_miss_hidden_synthetic_source(repo):
+    """knowhow/memory 合成源有 elements、却不走文档 KG 抽取——H6 用 visible_ 口径
+    (排除 memory/knowhow),不该把它算成「待分析」。否则挂 knowhow 表的库会与看板
+    「知识图谱」行(同用 visible_ 口径)自相矛盾、healthy 恒 false、点分析新增也修不掉
+    (评审阻塞项:H6 曾误用全集 pending_kg_source_count)。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    # 合成源有 elements、无 completed KG:全集口径会命中 H6,visible_ 口径应排除。
+    _seed_source(repo, nb.id, source_type="knowhow", parse_status="extracted",
+                 chunked_at=_NOW, n_elements=1)
+    _seed_source(repo, nb.id, source_type="memory", parse_status="extracted",
+                 chunked_at=_NOW, n_elements=1)
+    _bump_kg_seq(repo, nb.id)
     assert _check(repo._runtime.checkup.run(nb.id), "H6").count == 0
 
 
