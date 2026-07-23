@@ -183,14 +183,34 @@ def test_kg_fragment_validator_rejects_wrong_typed_containers():
     assert _kg_fragment_cacheable('{"edges": 5}') is False
 
 
+def test_kg_fragment_validator_rejects_error_envelopes_and_junk_entries():
+    # Round-7 tightening: a real extraction ALWAYS emits nodes as a list. Replies
+    # that ground to 0 objects but would DIFFER on retry (error envelopes) or are
+    # simply malformed (junk node entries) must not be frozen for the whole TTL.
+    assert _kg_fragment_cacheable('{"error": "quota"}') is False  # no nodes + error
+    assert _kg_fragment_cacheable('{"nodes": [], "error": "partial"}') is False  # error env
+    assert _kg_fragment_cacheable('{"nodes": [{"garbage": 1}]}') is False  # typeless junk
+    assert _kg_fragment_cacheable('{"nodes": [{"type": "Widget"}]}') is False  # off-vocab type
+    assert _kg_fragment_cacheable('{"nodes": [{"type": "Concept"}, 5]}') is False  # non-dict entry
+
+
 def test_kg_fragment_validator_accepts_usable_shapes():
-    assert _kg_fragment_cacheable('{"nodes": [], "edges": []}') is True
+    assert _kg_fragment_cacheable('{"nodes": [], "edges": []}') is True  # legit empty window
     assert _kg_fragment_cacheable('{"nodes": [{"type": "Concept"}]}') is True
-    assert _kg_fragment_cacheable('{}') is True  # legitimately empty window
+    assert _kg_fragment_cacheable(
+        '{"nodes": [{"local_id": "a", "type": "Concept", "name": "x", "ev": 0}],'
+        ' "edges": []}'
+    ) is True  # a normal, fully-formed extraction
+    # No `nodes` key is error/malformed, NOT a legit empty window (that is
+    # {"nodes":[],...}); is_cacheable_llm_response already rejects a bare "{}".
+    assert _kg_fragment_cacheable('{}') is False
 
 
 def test_refine_validator_shape():
     assert _refine_response_cacheable('{"items": [{"index": 0, "keep": true}]}') is True
-    assert _refine_response_cacheable('{}') is True
+    assert _refine_response_cacheable('{"items": []}') is True  # keep-all = empty decisions
     assert _refine_response_cacheable('{"items": "nope"}') is False
     assert _refine_response_cacheable('{"items": 7}') is False
+    assert _refine_response_cacheable('{}') is False  # absent items != keep-all
+    assert _refine_response_cacheable('{"error": "quota"}') is False
+    assert _refine_response_cacheable('{"items": [{"garbage": 1}]}') is False  # no index/keep
