@@ -120,6 +120,40 @@ def test_prune_uses_seq_not_timestamp_so_clock_skew_cannot_punch_holes(hist, sto
     )
 
 
+def test_prune_keeps_a_recent_entry_wedged_between_old_ones(hist, store, table):
+    """codex 第 3 轮 P2：时钟回拨让 created_at 非单调时，只能删「从最老起、每条
+    都够老的最长连续前缀」。一条较新的记录（created_at ≥ cutoff）即使夹在老
+    记录之间，也必须保留——旧实现取 MAX(seq WHERE old) 会跳过它、连带删掉。"""
+    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    for i in range(4):
+        store.update_knowhow_cell(row, table["plain"], f"第{i}版")
+    head = hist.head_seq(table["id"])
+
+    with hist.database.write() as db:
+        # 除 head 外：seq 1、2 老；seq 3 是较新的（时钟未回拨）；seq 4 又是老的
+        # （被回拨到 cutoff 之前）。连续前缀应止于 seq 2——seq 3（新）必须留下。
+        db.execute(
+            "UPDATE knowhow_changes SET created_at = '2000-01-01T00:00:00' "
+            "WHERE table_id = ? AND seq IN (1, 2, 4)",
+            (table["id"],),
+        )
+        db.execute(
+            "UPDATE knowhow_changes SET created_at = '2050-01-01T00:00:00' "
+            "WHERE table_id = ? AND seq = 3",
+            (table["id"],),
+        )
+
+    hist.prune(table["id"], "2001-01-01T00:00:00")
+
+    remaining = sorted(c["seq"] for c in hist.list_changes(table["id"], limit=100))
+    assert 3 in remaining, (
+        f"较新的 seq 3 夹在老记录之间，绝不能被删；实际剩余={remaining}"
+    )
+    assert remaining == list(range(3, head + 1)), (
+        f"应只删连续前缀 seq 1、2，剩 3..{head}；实际={remaining}"
+    )
+
+
 def test_milestone_pointing_at_a_pruned_seq_survives_as_stale(hist, store, table):
     row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
     old_seq = hist.head_seq(table["id"])
