@@ -732,6 +732,10 @@ class RepositoryRuntime:
             raise RuntimeError(
                 "wire_scale_builder requires wire_scale_artifacts() first"
             )
+        # Capture the plain snapshot cache (NOT self) so the builder's
+        # unified-cache eviction closure holds no path back to the repository —
+        # test_retained_scale_runtime_does_not_transitively_retain_repository.
+        snapshots = self.retrieval_snapshots
         self.scale_builder = ScaleIndexBuilder(
             settings=self.settings,
             projections=self.index_projections,
@@ -750,6 +754,12 @@ class RepositoryRuntime:
             building_lock=building_lock,
             notify_index_done=notify_index_done,
             now=self.seams.now,
+            # Release full_viz_graph('object')'s cached whole-graph dict after
+            # viz_arrays so it doesn't ride resident through persist. Targeted
+            # (unified_cache only), not the invalidate_kg family sweep.
+            invalidate_unified_cache=(
+                lambda nb: snapshots.invalidate_unified(nb)
+            ),
         )
         return self.scale_builder
 

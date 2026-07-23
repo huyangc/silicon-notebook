@@ -38,6 +38,47 @@ def test_build_scale_index_writes_artifacts(repo):
     assert len(idf_arr) == len(node_ids_arr) == G.shape[0] == G.shape[1]
 
 
+def test_build_frees_matrices_and_hands_persist_prebuilt_anns(repo, monkeypatch):
+    """Memory diet (OOM audit P0-3): build() pre-builds every ANN inline and
+    frees the matrix BEFORE persist, so save_scale_index receives prebuilt_*
+    hnsw handles — never the multi-GB matrices — and the whole-object-graph
+    unified_cache dict is evicted right after viz_arrays. Reverting to
+    matrices-at-persist (the old shape) fails here."""
+    import app.services.kg.scale_index as si
+
+    captured: dict = {}
+    real_save = si.save_scale_index
+
+    def spy_save(out_dir, **kw):
+        captured.update(kw)
+        return real_save(out_dir, **kw)
+
+    monkeypatch.setattr(si, "save_scale_index", spy_save)
+    invalidated: list = []
+    monkeypatch.setattr(
+        repo._runtime.scale_builder, "invalidate_unified_cache",
+        lambda nb: invalidated.append(nb),
+    )
+
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [{"source_local_id": "b", "target_local_id": "a", "edge_type": "depends_on", "evidence": []}])
+    repo.rebuild_unified_kg(nb.id)
+    repo._runtime.scale_builder.build(nb.id)
+
+    # matrices freed → not handed to persist
+    assert captured.get("ann_vectors") is None             # KG matrix freed post-synonym
+    assert "chunk_ann_vectors" not in captured             # freed after chunk ANN built
+    assert "relation_ann_vectors" not in captured          # freed after relation ANN built
+    # persist writes prebuilt hnsw handles instead (keys always present)
+    assert "prebuilt_chunk_ann" in captured and "prebuilt_relation_ann" in captured
+    assert captured.get("prebuilt_ann") is not None        # KG index built inline (has embeddings)
+    # the whole-object-graph dict was evicted after viz_arrays
+    assert nb.id in invalidated
+
+
 def test_build_scale_index_adds_cluster_bridge(repo):
     """cluster_groups must produce hub nodes in node_ids so PPR can propagate
     across merged concept clusters (synonym bridges)."""
