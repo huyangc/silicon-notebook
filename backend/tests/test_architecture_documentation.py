@@ -96,52 +96,84 @@ def test_postgres_shadow_bootstrap_orders_v2_before_replication_guards():
     )
 
 
-def test_repository_backend_selection_documentation_matches_the_interim_runtime():
+def test_repository_backend_selection_documentation_matches_the_direct_runtime():
     _assert_phrases(
         {
             "README.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
             "README_zh.md": "DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。",
             "AGENTS.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
+            "CLAUDE.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
             "architecture.md": "DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。",
         }
     )
     _assert_phrases(
         {
-            "README.md": "SQLite is the available and default backend.",
-            "README_zh.md": "SQLite 是当前可用的默认后端。",
-            "AGENTS.md": "SQLite is the available and default backend.",
-            "architecture.md": "SQLite 是当前可用的默认后端。",
+            "README.md": "SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.",
+            "README_zh.md": "SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。",
+            "AGENTS.md": "SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.",
+            "CLAUDE.md": "SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.",
+            "architecture.md": "SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。",
         }
     )
     _assert_phrases(
         {
-            "README.md": "PostgreSQL selection currently fails closed as unavailable until the adapter is implemented; it never falls back to SQLite.",
-            "README_zh.md": "PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。",
-            "AGENTS.md": "PostgreSQL selection currently fails closed as unavailable until the adapter is implemented; it never falls back to SQLite.",
-            "architecture.md": "PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。",
+            "README.md": "Exactly one active repository backend is selected centrally from `DATABASE_URL`.",
+            "README_zh.md": "运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。",
+            "AGENTS.md": "Exactly one active repository backend is selected centrally from `DATABASE_URL`.",
+            "CLAUDE.md": "Exactly one active repository backend is selected centrally from `DATABASE_URL`.",
+            "architecture.md": "运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。",
         }
     )
-    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md"):
+    for name in (
+        "README.md",
+        "README_zh.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "architecture.md",
+        "packaging/DEPLOY.md",
+    ):
         assert "SHADOW_DATABASE_URL" in _read(name)
-    for name in ("README.md", "AGENTS.md"):
         text = _read(name)
-        assert "SHADOW_DATABASE_URL remains inert" in text
-        assert "does not perform a migration or switch the repository" not in text
-    for name in ("README_zh.md", "architecture.md"):
-        text = _read(name)
-        assert "SHADOW_DATABASE_URL 仍不生效" in text
-        assert "不会执行迁移或切换 repository" not in text
+        assert "DATABASE_URL" in text
+        assert "bytea" in text
+        assert "pgvector" in text
+        assert "--workers 1" in text
+    assert "does not copy, migrate, or synchronize existing data" in _read("README.md")
+    assert "不会复制、迁移或同步既有数据" in _read("README_zh.md")
 
-    _assert_phrases(
-        {
-            "README.md": "The repository factory selects PostgreSQL from DATABASE_URL and currently fails closed because its adapter is unavailable; it never falls back to SQLite.",
-            "README_zh.md": "repository factory 会根据 DATABASE_URL 选择 PostgreSQL；当前因 adapter 尚不可用而显式失败，绝不回落到 SQLite。",
-        }
+
+def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritative():
+    offline = _read("scripts/check.sh")
+    assert "check_postgres.sh" not in offline
+    assert "TEST_POSTGRES_URL" not in offline
+    assert "postgres_integration" not in offline
+
+    postgres = _read("scripts/check_postgres.sh")
+    assert 'TEST_POSTGRES_URL:?TEST_POSTGRES_URL is required' in postgres
+    assert "-m postgres_integration" in postgres
+    assert "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED" in postgres
+    assert "TEST_POSTGRES_NON_C_URL" in postgres
+    assert "TEST_POSTGRES_NON_UTF_URL" in postgres
+    assert "database_status" in postgres
+    assert "redact_database_url" in postgres
+
+    workflow = _read(".github/workflows/ci.yml")
+    for phrase in (
+        "postgres-integration:",
+        "postgres:17",
+        "--health-cmd",
+        "NOSUPERUSER",
+        "NOCREATEDB",
+        "NOCREATEROLE",
+        "LOCALE_PROVIDER icu",
+        "SQL_ASCII",
+        "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: \"1\"",
+        "bash scripts/check_postgres.sh",
+    ):
+        assert phrase in workflow
+    assert "scripts/check_postgres.sh" not in _between(
+        ".github/workflows/ci.yml", "full-gate:", "postgres-integration:"
     )
-    assert "it does not yet migrate data or switch the repository" not in _read(
-        "README.md"
-    )
-    assert "尚不会迁移数据或切换 repository" not in _read("README_zh.md")
 
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():

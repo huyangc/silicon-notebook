@@ -1,4 +1,4 @@
-"""GitHub Actions must remain a read-only wrapper around the complete gate."""
+"""GitHub Actions keeps offline and PostgreSQL gates isolated and least-privilege."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -65,11 +65,11 @@ def test_ci_events_permissions_and_concurrency_are_bounded() -> None:
     assert "secrets." not in repr(workflow)
 
 
-def test_ci_job_installs_declared_dependencies_and_runs_only_the_complete_gate() -> None:
+def test_offline_ci_job_installs_declared_dependencies_and_runs_only_complete_gate() -> None:
     workflow = _load_workflow()
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    assert set(jobs) == {"full-gate"}
+    assert set(jobs) == {"full-gate", "postgres-integration"}
     job = jobs["full-gate"]
     assert isinstance(job, dict)
 
@@ -122,6 +122,76 @@ def test_ci_job_installs_declared_dependencies_and_runs_only_the_complete_gate()
         "PYTHON_BIN": "python",
         "BACKEND_PYTEST_WORKERS": "4",
     }
+
+
+def test_postgres_ci_job_uses_pg17_least_privilege_targets_and_only_pg_gate() -> None:
+    workflow = _load_workflow()
+    job = workflow["jobs"]["postgres-integration"]
+    assert isinstance(job, dict)
+    assert job["name"] == "postgres-integration"
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["timeout-minutes"] == "25"
+
+    services = job["services"]
+    assert isinstance(services, dict)
+    assert set(services) == {"postgres"}
+    service = services["postgres"]
+    assert service["image"] == "postgres:17"
+    assert service["env"] == {
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_PASSWORD": "ci-only-admin-password",
+        "POSTGRES_DB": "postgres",
+    }
+    assert service["ports"] == ["5432:5432"]
+    assert "pg_isready -U postgres -d postgres" in service["options"]
+
+    checkout = _uses_step(
+        job,
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    )
+    assert checkout["with"] == {"persist-credentials": "false"}
+    python = _uses_step(
+        job,
+        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+    )
+    assert python["with"] == {"python-version": "3.13"}
+
+    provision = _named_step(job, "Provision least-privilege PostgreSQL test targets")
+    command = provision["run"]
+    for phrase in (
+        "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION",
+        "silicon_notebook_ci_test",
+        "silicon_notebook_non_c_test",
+        "LOCALE_PROVIDER icu ICU_LOCALE 'en-US'",
+        "silicon_notebook_non_utf_test",
+        "ENCODING 'SQL_ASCII'",
+    ):
+        assert phrase in command
+    assert "print(" not in command
+
+    gate = _named_step(job, "Run isolated PostgreSQL integration gate")
+    assert gate["run"] == "bash scripts/check_postgres.sh"
+    env = gate["env"]
+    assert env["PYTHON_BIN"] == "python"
+    assert env["POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED"] == "1"
+    for key in (
+        "TEST_POSTGRES_URL",
+        "TEST_POSTGRES_NON_C_URL",
+        "TEST_POSTGRES_NON_UTF_URL",
+    ):
+        assert env[key].startswith(
+            "postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/"
+        )
+        assert "postgres@" not in env[key]
+
+    run_commands = [
+        step["run"]
+        for step in job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    assert [command for command in run_commands if "scripts/check" in command] == [
+        "bash scripts/check_postgres.sh"
+    ]
 
 
 def test_ci_builds_hnswlib_portably_without_reusing_native_wheels() -> None:

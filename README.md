@@ -8,7 +8,7 @@
 
 This repository targets a local real-team beta loop built around a KG-native pipeline:
 
-- Python FastAPI backend; SQLite persistence at `.local/silicon_notebook.db`
+- Python FastAPI backend; SQLite (shipped default) or PostgreSQL persistence selected by `DATABASE_URL`
 - Next.js / React / TypeScript frontend under `frontend/`
 - OpenAI-compatible LLM endpoint for KG extraction, grounded answers, and deep reports; embeddings configured independently via `EMBED_*` variables
 - Deterministic fallbacks when no LLM/embedder is configured — the whole pipeline runs offline
@@ -33,7 +33,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Notebook collection (grid/compact/list, edit/delete); clicking `＋ 新建` creates an `Untitled notebook` and enters it immediately — no dialog
 - No Docker in the first version
 
-PostgreSQL + pgvector remain the future production/team-beta direction; local development does not require them.
+SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default. PostgreSQL stores vectors as `bytea`; pgvector is not installed or required.
 
 ## Architecture Boundaries
 
@@ -225,6 +225,122 @@ PYTHONPATH=backend python scripts/check_ui_vocabulary.py                 # user-
 
 The backend writes structured JSONL logs under `.local/logs/` (`requests` / `events` /
 `llm`); see [Observability](#observability) to follow an upload or diagnose a stuck source.
+
+### Database backend selection and safe switching
+
+`DATABASE_URL` selects the formal repository backend through one repository factory.
+Exactly one active repository backend is selected centrally from `DATABASE_URL`. SQLite
+and PostgreSQL are both available direct backends; SQLite remains the shipped default.
+The factory never falls back to the other backend when configuration or startup fails.
+`SHADOW_DATABASE_URL` is reserved and validated, but remains inert: it does not copy,
+migrate, or synchronize existing data and cannot select the active repository.
+
+Install the declared backend dependencies, create the normal repo-root `.env`, then use
+the existing single-worker lifecycle commands:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+cp .env.example .env                 # first checkout only; then edit in place
+
+PYTHON_BIN="$PWD/.venv/bin/python" scripts/backend.sh status
+PYTHON_BIN="$PWD/.venv/bin/python" scripts/backend.sh start
+curl -fsS http://127.0.0.1:8000/api/ready
+```
+
+Copy/paste-valid active-backend values are:
+
+```dotenv
+# Shipped default. A relative path is anchored at the repository root.
+DATABASE_URL=sqlite:///.local/silicon_notebook.db
+
+# PostgreSQL. Percent-encode special characters in user/password fields.
+DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+```
+
+An absolute SQLite path uses four slashes, for example
+`sqlite:////srv/silicon-notebook/silicon_notebook.db`. Legacy `postgres://` is accepted
+and normalized to `postgresql://`. `scripts/backend.sh status` prints only a safe identity:
+`database=sqlite path=...` or `database=postgresql host=... db=...`; userinfo, passwords,
+and connection query options are redacted from status, readiness errors, and startup logs.
+
+#### A. Boot a fresh/empty PostgreSQL database directly
+
+1. As a PostgreSQL administrator, create a UTF8 database owned by a dedicated login with
+   `NOSUPERUSER NOCREATEDB NOCREATEROLE`. Take a PostgreSQL backup if reusing any target;
+   the supported direct-boot path assumes the target is new/empty.
+2. Stop the backend: `PYTHON_BIN="$PWD/.venv/bin/python" scripts/backend.sh stop`.
+3. Put the PostgreSQL URL in `.env` as `DATABASE_URL`. Keep
+   `SILICON_NOTEBOOK_STORAGE_DIR` pointed at the intended upload store.
+4. Start once with the existing `--workers 1` lifecycle command. Startup opens the bounded
+   Psycopg pool, runs checksummed migrations automatically under an advisory lock, seeds the
+   built-in account, and does not require pgvector. Embeddings remain float32 bytes in `bytea`.
+5. Require both `scripts/backend.sh status` to name the expected host/database and
+   `curl -fsS http://127.0.0.1:8000/api/ready` to return `ready: true` before traffic.
+
+Pool safety controls are `POSTGRES_POOL_MIN_SIZE` (default `1`),
+`POSTGRES_POOL_MAX_SIZE` (`10`), `POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS` (`10`),
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS` (`30`), and `POSTGRES_LOCK_TIMEOUT_SECONDS` (`5`).
+Size the database connection limit for the single application worker plus maintenance and
+backup sessions; do not remove the finite acquisition/statement/lock timeouts.
+
+#### B. Switch from PostgreSQL back to the original SQLite file
+
+1. Quiesce writes and stop the backend before editing `.env`.
+2. Confirm the original SQLite database and its `-wal`/`-shm` sidecars are on the expected
+   filesystem, then set `DATABASE_URL=sqlite:////absolute/path/to/original.db` (or the
+   repo-relative shipped default above).
+3. Start with `--workers 1`; verify the safe status identity, `/api/ready`, login, notebook
+   counts, and several representative source/Ask/Memory reads before restoring traffic.
+
+This changes which independent datastore is visible; it does not replay PostgreSQL writes
+into SQLite. A rollback is lossless only when no writes occurred after PostgreSQL cutover,
+or when those writes were explicitly reconciled and verified by an external migration.
+
+#### C. Backup, rollback, and verification boundary
+
+- Stop/quiesce the writer before every URL change. For SQLite, use the SQLite backup API
+  (for example `sqlite3 /path/live.db ".backup '/secure/sqlite-before-switch.db'"`); with a
+  stopped backend, checkpointing `PRAGMA wal_checkpoint(TRUNCATE)` first also folds the WAL.
+  Never copy only the main file while a live WAL may contain committed pages.
+- For PostgreSQL, take and restore tested logical/physical backups with normal PostgreSQL
+  tools (for example `pg_dump --format=custom` and `pg_restore`) using `.pgpass`/a service
+  definition so credentials do not enter shell history or logs.
+- Record row/count/application smoke results before and after the switch. Treat
+  `/api/ready` plus representative authenticated reads as the traffic gate; `/api/health`
+  alone is only liveness. If startup/migration fails, keep traffic stopped, restore the
+  backup or original URL, then re-run readiness and smoke verification.
+
+#### D. Existing-data SQLite → PostgreSQL
+
+Changing `DATABASE_URL` alone does not copy, migrate, or synchronize existing data. This
+adapter phase has no dual-write, shadow replication, or cutover implementation.
+`SHADOW_DATABASE_URL` is reserved/validated only and does not enable synchronization.
+Until the forward-shadow phase is implemented and protected, the supported safe choices
+are a fresh PostgreSQL target or a stop-the-world migration performed and verified with
+external tooling. There is deliberately no in-repository data-migration command to run.
+
+#### E. Switch decision table
+
+| Desired state | `DATABASE_URL` | Data that appears | Safe rollback condition |
+|---|---|---|---|
+| Continue shipped SQLite | `sqlite:///.local/silicon_notebook.db` | Rows in that SQLite file | Consistent SQLite backup is available |
+| Fresh PostgreSQL boot | `postgresql://user:password@host:5432/new_db` | New PG database; only bootstrap rows initially | Return to untouched SQLite before PG writes, or reconcile them explicitly |
+| Return to original SQLite | `sqlite:////absolute/path/original.db` | The SQLite snapshot as last written there | PG-only writes are intentionally discarded or externally reconciled |
+| Move existing SQLite data to PG | PostgreSQL URL **after** an external stopped migration | Only data the external migration copied and verified | Both backups retained; reconciliation/rollback procedure tested |
+
+Use this pre-switch checklist: identify both databases without exposing credentials; stop
+the backend; take consistent backups; verify target UTF8/ownership/capacity; set exactly one
+`DATABASE_URL`; retain `--workers 1`; start and wait for automatic migrations; check safe
+status, `/api/ready`, auth, counts, and representative reads; then admit writes. Switching
+back after PostgreSQL writes does not replay those writes to SQLite.
+
+The implemented adapter design and plan are
+[PostgreSQL shadow/cutover design](docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md)
+and [repository adapter plan](docs/superpowers/plans/2026-07-22-postgresql-repository-adapter.md).
+The [forward-shadow synchronization plan](docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md)
+is explicitly future work and is not implemented.
 
 ### 5 · Offline packaging (target has no npm/node)
 
@@ -726,7 +842,7 @@ SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local
 ```
 
 DATABASE_URL selects the formal repository backend through one repository factory.
-SQLite is the available and default backend. PostgreSQL selection currently fails closed as unavailable until the adapter is implemented; it never falls back to SQLite. Settings accepts `postgresql://` and legacy `postgres://` URLs (normalizing the legacy scheme), URL diagnostics redact credentials and options, and SHADOW_DATABASE_URL remains inert until the later shadow-sync phase.
+Exactly one active repository backend is selected centrally from `DATABASE_URL`. SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default. Settings accepts `postgresql://` and legacy `postgres://` URLs (normalizing the legacy scheme), URL diagnostics redact credentials and options, and SHADOW_DATABASE_URL remains inert until the later shadow-sync phase. PostgreSQL vectors use `bytea`; pgvector is neither installed nor required. Production startup remains `--workers 1`.
 
 **Retrieval:**
 
@@ -1209,7 +1325,7 @@ Must be run from the main checkout root (it needs the real `.env`/database confi
 - LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
 - Notebook sharing is link-based copy/read-only membership, not live collaborative editing; owners retain write authority.
-- PostgreSQL + pgvector are not required for the local beta, and SQLite is the currently available default backend. The repository factory selects PostgreSQL from DATABASE_URL and currently fails closed because its adapter is unavailable; it never falls back to SQLite. Selecting a backend is separate from migrating existing data.
+- PostgreSQL is optional for the local beta; SQLite remains the shipped default. Direct PostgreSQL startup is supported, stores vectors in `bytea`, and does not require pgvector. Selecting a backend is separate from migrating existing data; no dual-write/shadow synchronization exists in this phase.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
 - User memory remains manual opt-in only; no automatic memory behavior has been added.
 
@@ -1233,12 +1349,31 @@ The Apple Silicon warm gate hard target is at most 60 seconds. CI lane timings a
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` exposes the same complete gate as the single
-`CI / full-gate` check. It runs for pull requests targeting `master`, pushes
+`.github/workflows/ci.yml` exposes the same complete offline gate as
+`CI / full-gate`. It runs for pull requests targeting `master`, pushes
 to `master`, and manual dispatches on `ubuntu-24.04` with Python 3.13 and
 Node.js 22. The workflow installs from `backend/requirements.txt` and
 `frontend/package-lock.json`, then delegates test selection entirely to
 `scripts/check.sh`.
+
+A separate `CI / postgres-integration` job starts PostgreSQL 17 and invokes only
+`scripts/check_postgres.sh`; it is never called by the offline gate. The job provisions a
+dedicated `NOSUPERUSER NOCREATEDB NOCREATEROLE` application role, its UTF8 primary test
+database, a UTF8 ICU database whose default collation is non-C for full schema parity, and
+a SQL_ASCII database used only to prove migration 0001 fails transactionally before the
+ledger or business DDL exists. Local PostgreSQL 16 can run the ordinary lane twice:
+
+```bash
+TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_local_test \
+  PYTHON_BIN=.venv/bin/python bash scripts/check_postgres.sh
+```
+
+The PostgreSQL 17 non-C/non-UTF auxiliary targets are authoritative in CI; local runs skip
+those two tests unless `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` are supplied.
+Setting `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` makes their absence a hard pre-test error.
+The script's connection preflight prints only the redacted backend identity and runs only
+the `postgres_integration` marker, serially, so the global migration advisory lock is not
+mistaken for a per-schema parallel lock.
 
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
@@ -1254,7 +1389,7 @@ CPU features. The portable build trades a small ANN speedup for deterministic
 CI; production wheelhouses may still target their declared deployment CPU.
 Its 20-minute timeout includes dependency installation and is intentionally
 separate from the under-60-second local Apple Silicon warm-gate target.
-`CI / full-gate` is initially observational; make it a required `master` check
+The two CI checks are initially observational; make them required `master` checks
 only after stable green pull-request and post-merge runs have been observed
 and the user explicitly approves the branch-protection change.
 
@@ -1295,3 +1430,4 @@ When product behavior, setup, architecture, or development constraints change, u
 - `README.md`
 - `README_zh.md`
 - `AGENTS.md`
+- `CLAUDE.md`

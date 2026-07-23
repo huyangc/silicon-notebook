@@ -4,13 +4,14 @@ This file is the working contract for future agents and developers in this repos
 
 ## Documentation Sync
 
-When making changes that affect setup, product behavior, architecture, or development constraints, update all three files together:
+When making changes that affect setup, product behavior, architecture, or development constraints, update all four files together:
 
 - `README.md`
 - `README_zh.md`
 - `AGENTS.md`
+- `CLAUDE.md`
 
-Do not update only one language README when the same information should be available in both.
+Do not update only one language README when the same information should be available in both. `CLAUDE.md` imports this file so Claude Code receives the same working contract; keep that import and any summary text current.
 
 ## Tracking Completed Spec Features
 
@@ -169,7 +170,7 @@ interactive-reformat anchor-membership expression index (v21); v22 adds durable
 notebook-scoped KG build jobs; v23 adds per-user latest model-service status;
 v24 deduplicates legacy cluster memberships and enforces one membership per
 notebook, object type, and member object.
-- DATABASE_URL selects the formal repository backend through one repository factory. SQLite is the available and default backend. PostgreSQL selection currently fails closed as unavailable until the adapter is implemented; it never falls back to SQLite. Settings accepts `postgresql://` and legacy `postgres://` URLs (normalizing the latter), while SHADOW_DATABASE_URL remains inert and cannot select the active backend. URL diagnostics must redact credentials and options. Unsupported schemes also fail closed and must never silently fall back to `.local`.
+- DATABASE_URL selects the formal repository backend through one repository factory. Exactly one active repository backend is selected centrally from `DATABASE_URL`. SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default. Settings accepts `postgresql://` and legacy `postgres://` URLs (normalizing the latter), while SHADOW_DATABASE_URL remains inert and cannot select the active backend. URL diagnostics and `scripts/backend.sh status` must redact credentials/options and print only `database=sqlite path=...` or `database=postgresql host=... db=...`. Unsupported schemes and startup failures fail closed and must never silently fall back to `.local` or the other backend.
 - KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, knowledge/element/chunk/relation embeddings, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`, `ask_jobs`, `ask_trace_steps`, and `reports`; sharing uses notebook share fields plus `notebook_members`. The independent Memory layer uses `memory_items`, `memory_revisions`, `memory_provenance`, `memory_embeddings`, `agent_profiles`, `agent_access_tokens`, and `agent_token_notebooks`; Memory is never inserted into source/chunk/KG tables, and KG promotion creates a separate governed object. Embedding vectors are persisted locally and assembled into versioned float32 matrices or scale indexes. Graph/reasoning paths build or load federated graph state while preserving tier provenance.
 - All graph consumers (federated traversal, PPR, scale-index build/delta) must share the same usable-relation rule and exclude `review_status='rejected'`. Direction rendered to the LLM is always stored `source_object_id → target_object_id`. In-memory graph size guards cover the active notebook plus every mounted reference library.
 - Upgrading to schema 20 does not backfill `notebook_bases`: every pre-existing notebook starts with zero mounted reference libraries, and federation stays off for it until a user explicitly mounts one.
@@ -185,6 +186,15 @@ notebook, object type, and member object.
 - Cross-document concept-merge candidates must be bounded and reviewable. LLM merge review operates on small pending candidate batches, never the entire concept set at once.
 - Re-running parse/extraction preserves the source row and original file, replaces source elements/chunks and their embeddings, and removes extraction runs plus source-derived knowledge before writing rebuilt state.
 - Deleting a source uses the same source-derived cleanup, then deletes the source row (cascading source-owned records) and local file. Do not claim unrelated artifact cleanup that the repository does not perform.
+
+### Database Backend And Switching Contract
+
+- The single factory is the only backend-selection branch. Request/services consume the same repository ports; they must not inspect a SQL dialect or import the opposite adapter. PostgreSQL construction uses its own persistence bundle and stores, checksummed migrations, bounded Psycopg pool, and startup lifecycle lease so a losing/failed warmup cannot close the winning pool. PostgreSQL vectors are float32 bytes in `bytea`; pgvector is not installed or required.
+- Both active backends auto-run their own migrations at startup. Production and packaged launch stay `--workers 1`. PostgreSQL deployments retain finite pool acquisition, statement, and lock timeouts. Readiness and status errors expose only redacted database identity.
+- A backend switch is an operational stop/change/start boundary: quiesce writes, stop the backend, take a consistent backup, change exactly one `DATABASE_URL`, start, then require safe status, `/api/ready`, auth, counts, and representative reads before traffic. SQLite backup must use the backup API or a stopped/checkpointed DB including WAL semantics; PostgreSQL uses tested standard backups.
+- Changing `DATABASE_URL` does not copy, migrate, or synchronize existing data. `SHADOW_DATABASE_URL` is reserved/validated only and cannot enable dual-write or replication. The current supported choices are a fresh target or a stop-the-world externally verified migration. Switching back after PostgreSQL writes does not replay them into SQLite; lossless rollback requires no post-cutover writes or explicit reconciliation.
+- Keep the detailed switch decision table and runbooks synchronized in `README.md`, `README_zh.md`, and `packaging/DEPLOY.md`. The adapter design/plan is implemented; `docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md` is future work and must not be described as available.
+- `scripts/check.sh` stays offline and must never start/contact PostgreSQL. `scripts/check_postgres.sh` requires a dedicated `TEST_POSTGRES_URL`, redacts its preflight, and runs only `-m postgres_integration`. CI owns a separate PostgreSQL 17 job using a least-privilege app role, a UTF8/non-C-default database for schema parity, and a non-UTF database that must reject migration 0001 transactionally before ledger/business DDL. Local PostgreSQL 16 is valid for the ordinary lane; the PG17 auxiliary checks are authoritative in CI.
 
 ## Python Environment
 
@@ -377,10 +387,11 @@ assertion for every host.
 
 ### GitHub Actions CI
 
-- `.github/workflows/ci.yml` is a read-only wrapper around
-  `scripts/check.sh`; never duplicate test roots or frontend commands in the
-  workflow.
-- `CI / full-gate` runs on pull requests to `master`, pushes to `master`, and
+- `.github/workflows/ci.yml` keeps `full-gate` as a read-only wrapper around
+  `scripts/check.sh`; never duplicate its offline test roots or frontend commands. The
+  separate `postgres-integration` job is the only service-backed exception and delegates
+  exclusively to `scripts/check_postgres.sh`.
+- `CI / full-gate` and `CI / postgres-integration` run on pull requests to `master`, pushes to `master`, and
   manual dispatches on `ubuntu-24.04` with Python 3.13, Node.js 22, and four
   backend pytest workers.
 - Keep model/deployment secrets out of this workflow. Package-manager caches

@@ -27,7 +27,7 @@
 
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
-- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。SQLite 是当前可用的默认后端。PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。SHADOW_DATABASE_URL 仍不生效。
+- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。`SHADOW_DATABASE_URL` 只保留/校验，不参与 active backend 选择或同步。
 - SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`。模型向量以 float32 BLOB 持久化（历史 JSON 文本向量保持可读、可批量转换），并在查询时装配为有界的 float32 numpy 矩阵或显式维护的 scale index。
 
 ### 2.2 Repository 组合与兼容 facade
@@ -37,7 +37,7 @@
 - **SQLite 持久化**：`backend/app/repositories/sqlite/` 下是 identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / memory / query / index-projection 等领域 store。这些 store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。它们共享唯一的 `SqliteDatabase`（connection factory、WAL/busy_timeout PRAGMA、实例级写锁）。application service 不拼装主业务库 SQL，只保留业务顺序、策略与 transaction seat。`SqliteMigrator` 持有 `SCHEMA_VERSION` 与版本化迁移注册表；启动顺序固定为 migrate → 恢复中断的 merge-review/Ask job → seed 与 admin 原地升级，后两步不进版本闸、每次启动照跑。
 - **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）与 `backend/app/repositories/filesystem/`（scale/viz 索引工件）。
 - **业务编排**：application services（摄取、检索、evidence context、Ask、报告、KG lifecycle/governance、分享/深拷贝、scale runtime）由 runtime 组装；service 不直接拼 SQL。SQLite 专用的运维能力（批量 backfill、raw build/fold、诊断投影）归 maintenance adapter，不进入可移植 ports。
-- **消费者契约**：`backend/app/repositories/ports.py` 按消费者划分可执行的小型 Protocol；最小 Protocol-only fake 可运行其声明支持的 Ask chunk/reasoning/graph/stream、report 与 evaluation 路径，不需要 facade 或 private runtime。`app/services/repository.py` 保留为兼容 import 入口。未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层（本地 beta 不实现）。
+- **消费者契约**：`backend/app/repositories/ports.py` 按消费者划分可执行的小型 Protocol；最小 Protocol-only fake 可运行其声明支持的 Ask chunk/reasoning/graph/stream、report 与 evaluation 路径，不需要 facade 或 private runtime。`app/services/repository.py` 保留为兼容 import 入口。SQLite 与 PostgreSQL adapter 都在这批相同 ports 后提供 store；application code 不做 dialect 分支。
 - **运行态与启动补偿**：`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有，组合完成后的受支持替换会同步到全部既有消费者。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再重新抛出提交异常；成功 worker 的顺序及 Ask begin/save/finish/cleanup transaction checkpoint 不变。
 - **旧库兼容**：迁移版本闸 + 冻结 v9 fixture（`backend/tests/fixtures/repository_v9/`、`test_repository_v9_fixture.py`）+ `test_legacy_db_compat.py` schema golden 共同守护「重构前创建的数据库直接打开、迁移、读取」。`scripts/verify_repository_snapshot.py` 以 backup-only 方式验证真实旧库：逐版本 migration manifest 精确列出允许新增的表/列/index/trigger/view，稳定 seed manifest 只接受指定主键与值；SQLite URI 路径经百分号编码。repository 只在临时 backup/storage 上构造；cleanup 失败时只输出保留的 backup 路径，不输出私有行。原 DB/WAL metadata 与 SHM 的存在性/大小都必须不变；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
@@ -56,6 +56,35 @@ anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化�
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
+
+### 2.2.1 PostgreSQL adapter、生命周期与切换边界
+
+- `app/repositories/factory.py` 是唯一 backend choice：它只根据已校验的
+  `DATABASE_URL` 选择 `SQLiteRepository` 或 `PostgresRepository`。任何 service/store
+  都不得反向 import 另一 adapter 或根据 dialect 分支。不支持的 scheme、建连、
+  migration 与 warmup 失败都 fail closed，不回落到另一库。
+- `app/repositories/postgres/bundle.py` 是 PostgreSQL 唯一 composition root，组合
+  identity/notebook/sharing/source/chunk/embedding/knowledge/governance/index/Ask/report/
+  Memory/Knowhow/query/unified-KG store。这些 store 只依赖同一个有界
+  `PostgresDatabase` pool；用 row lock/advisory lock/transaction isolation 表达跨进程并发，
+  不复制 SQLite 的进程内全局写锁。向量是 float32 `bytea`，不安装也不需要
+  pgvector。
+- 启动流程的 repository lifecycle lease 覆盖 factory 构造、checksummed PostgreSQL
+  migration、中断任务恢复、warmup 与 readiness 发布。只有当前 lease 可将自己的
+  repository 发布为 ready；被取代/失败的 warmup 不得关闭 winner 的 pool。关机在
+  warmup thread 结束后关闭精确的 repository/pool。部署仍用 `--workers 1`，pool
+  acquire/statement/lock timeout 保持有界。
+- `scripts/backend.sh status` 通过中性 URL parser 仅输出
+  `database=sqlite path=...` 或 `database=postgresql host=... db=...`；凭据与 query option
+  从 status、readiness 错误和 pool 诊断中隐去。
+- 切换是“停写 → 停后端 → 一致备份 → 改唯一 `DATABASE_URL` → 启动自动 migration
+  → status/`/api/ready`/认证与代表性读取验证 → 放流量”的运维边界。只改 URL 不会
+  复制、迁移或同步既有数据。`SHADOW_DATABASE_URL` 仍只保留/校验，本阶段没有
+  dual-write、shadow replication 或 cutover。切回 SQLite 不会回放 PG-only 写入。详细决策表、
+  backup/WAL 语义与 rollback 条件见两份 README 及 `packaging/DEPLOY.md`。
+- adapter 计划已交付；
+  `docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md` 是明确的未来工作，
+  尚未实现。
 
 ### 2.3 API、模型与领域服务
 
@@ -247,7 +276,7 @@ Repository 侧的 persistence 与业务编排已按上表分层完成；应用�
 4. **前端 workspace 状态拆分**（计划项）：先增加可迁移的 helper/hook 行为测试，再抽 `useAskSession`、`useSourceLibrary`、`useKnowledgeGraphWorkspace` 与对应 panel；不引入新全局状态库，不改轮询节奏。
 5. **FastAPI application lifecycle**（计划项）：repository 内部 runtime 组合、retrieval/Ask/report service 与取消/重连 characterization test 已交付；FastAPI lifespan 管理的 application runtime、executor shutdown 与统一应用生命周期仍延后为独立工作。
 
-非目标包括一次性 clean-architecture 重写、在本轮引入 PostgreSQL/SQLAlchemy/容器/新模型服务，或借整改改变公开 API、数据库表、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
+非目标包括一次性 clean-architecture 重写、SQLAlchemy/容器/新模型服务、本阶段实现 PostgreSQL 双写/影子同步，或借整改改变公开 API、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
 
 ## 7. 验证命令
 
@@ -276,6 +305,19 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 cd frontend
 npm run build
 ```
+
+PostgreSQL 集成门禁与离线门禁完全分开：
+
+```bash
+TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_local_test \
+  PYTHON_BIN=python3 bash scripts/check_postgres.sh
+```
+
+`scripts/check_postgres.sh` 先以隐去凭据的 identity 做连接预检，然后只运行
+`-m postgres_integration`。CI 的独立 PostgreSQL 17 job 用非 superuser app role，
+并额外在 UTF8/ICU/non-C-default 数据库跑完整 schema parity，在 SQL_ASCII 数据库
+验证 migration 0001 在 ledger/业务 DDL 前事务性失败。本地 PostgreSQL 16 可用于普通
+integration；PG17 的两个辅助目标以 CI 为权威。`scripts/check.sh` 始终离线，不启动也不连接 PostgreSQL。
 
 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；backend 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖；每个 lane
 拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js

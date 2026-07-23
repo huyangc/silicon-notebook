@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -64,6 +65,12 @@ def postgres_scope() -> ScopedPostgres:
     base_url = os.environ.get("TEST_POSTGRES_URL")
     if not base_url:
         pytest.skip("TEST_POSTGRES_URL is not configured")
+    with _isolated_postgres_scope(base_url) as scoped:
+        yield scoped
+
+
+@contextmanager
+def _isolated_postgres_scope(base_url: str):
     _require_dedicated_test_database(base_url)
 
     import psycopg
@@ -106,6 +113,24 @@ def postgres_scope() -> ScopedPostgres:
 
 
 @pytest.fixture
+def postgres_non_c_scope() -> ScopedPostgres:
+    base_url = os.environ.get("TEST_POSTGRES_NON_C_URL")
+    if not base_url:
+        pytest.skip("TEST_POSTGRES_NON_C_URL is not configured")
+    with _isolated_postgres_scope(base_url) as scoped:
+        yield scoped
+
+
+@pytest.fixture
+def postgres_non_utf_scope() -> ScopedPostgres:
+    base_url = os.environ.get("TEST_POSTGRES_NON_UTF_URL")
+    if not base_url:
+        pytest.skip("TEST_POSTGRES_NON_UTF_URL is not configured")
+    with _isolated_postgres_scope(base_url) as scoped:
+        yield scoped
+
+
+@pytest.fixture
 def postgres_settings(postgres_scope: ScopedPostgres) -> Settings:
     return Settings(
         database_url=postgres_scope.url,
@@ -125,6 +150,38 @@ def postgres_database(postgres_settings: Settings):
         postgres_settings,
         Path(__file__).resolve().parents[3],
     )
+    try:
+        yield database
+    finally:
+        database.close()
+
+
+def _database_for_scope(scope: ScopedPostgres):
+    from app.repositories.postgres.database import PostgresDatabase
+
+    settings = Settings(
+        database_url=scope.url,
+        postgres_pool_min_size=1,
+        postgres_pool_max_size=2,
+        postgres_pool_acquire_timeout_seconds=1,
+        postgres_statement_timeout_seconds=10,
+        postgres_lock_timeout_seconds=2,
+    )
+    return PostgresDatabase(settings, Path(__file__).resolve().parents[3])
+
+
+@pytest.fixture
+def postgres_non_c_database(postgres_non_c_scope: ScopedPostgres):
+    database = _database_for_scope(postgres_non_c_scope)
+    try:
+        yield database
+    finally:
+        database.close()
+
+
+@pytest.fixture
+def postgres_non_utf_database(postgres_non_utf_scope: ScopedPostgres):
+    database = _database_for_scope(postgres_non_utf_scope)
     try:
         yield database
     finally:

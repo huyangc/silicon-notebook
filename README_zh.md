@@ -8,7 +8,7 @@
 
 当前仓库已进入以 KG-native 管线为核心的本机真实 beta 闭环：
 
-- Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
+- Python FastAPI 后端；由 `DATABASE_URL` 选择 SQLite（发行默认）或 PostgreSQL 持久化
 - `frontend/` 下的 Next.js / React / TypeScript 前端
 - OpenAI-compatible LLM 端点，用于 KG 抽取、接地回答和深度报告；embedding 通过 `EMBED_*` 独立配置
 - 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
@@ -33,7 +33,7 @@
 - Notebook 集合页（网格/紧凑/列表、编辑/删除）；点击「＋ 新建」直接创建 `Untitled notebook` 并进入，无弹窗
 - 第一版不使用 Docker
 
-PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发不需要。
+SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。PostgreSQL 以 `bytea` 存储向量，不安装也不需要 pgvector。
 
 ## 架构边界
 
@@ -197,6 +197,116 @@ PYTHONPATH=backend python scripts/check_ui_vocabulary.py                 # 界�
 
 后端会把结构化 JSONL 日志写入 `.local/logs/`(`requests` / `events` / `llm`);跟踪一次
 上传或排查卡住的 source 见[可观测性 / 日志](#可观测性--日志)。
+
+### 数据库后端选择与安全切换
+
+DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。
+运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite
+和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。配置或启动失败时，factory
+绝不回落到另一个后端。`SHADOW_DATABASE_URL` 只是预留且会校验的配置；它
+不会复制、迁移或同步既有数据，也不能选择 active repository。
+
+安装已声明的后端依赖、创建仓库根 `.env`，然后使用既有单 worker 启停命令：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r backend/requirements.txt
+cp .env.example .env                 # 仅首次 checkout；之后原地修改
+
+PYTHON_BIN="$PWD/.venv/bin/python" scripts/backend.sh status
+PYTHON_BIN="$PWD/.venv/bin/python" scripts/backend.sh start
+curl -fsS http://127.0.0.1:8000/api/ready
+```
+
+可直接复制的 active-backend 配置：
+
+```dotenv
+# 发行默认；相对路径会锚定到仓库根。
+DATABASE_URL=sqlite:///.local/silicon_notebook.db
+
+# PostgreSQL；user/password 中的特殊字符需百分号编码。
+DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+```
+
+SQLite 绝对路径使用四条斜线，例如
+`sqlite:////srv/silicon-notebook/silicon_notebook.db`。旧 `postgres://` 会归一化为
+`postgresql://`。`scripts/backend.sh status` 只打印安全 identity：
+`database=sqlite path=...` 或 `database=postgresql host=... db=...`；状态、readiness
+错误与启动日志都会隐去 userinfo、密码和连接 query option。
+
+#### A. 直接启动全新/空 PostgreSQL
+
+1. 以 PostgreSQL 管理员创建 UTF8 数据库，owner 是专用登录角色，且该角色是
+   `NOSUPERUSER NOCREATEDB NOCREATEROLE`。若复用任何 target，先做 PostgreSQL
+   备份；支持的 direct-boot 路径假设 target 是全新/空库。
+2. 停后端：`PYTHON_BIN="$PWD/.venv/bin/python" scripts/backend.sh stop`。
+3. 在 `.env` 中把 `DATABASE_URL` 改为 PostgreSQL URL；同时确认
+   `SILICON_NOTEBOOK_STORAGE_DIR` 指向预期上传文件目录。
+4. 使用既有 `--workers 1` 生命周期命令启动。启动会打开有界 Psycopg pool，
+   在 advisory lock 下自动跑 checksummed migration，初始化内置账号；不需要
+   pgvector，embedding 仍以 float32 字节存在 `bytea`。
+5. 放流量前，必须同时确认 `scripts/backend.sh status` 指向预期 host/database，
+   且 `curl -fsS http://127.0.0.1:8000/api/ready` 返回 `ready: true`。
+
+pool 安全参数是 `POSTGRES_POOL_MIN_SIZE`(默认 `1`)、`POSTGRES_POOL_MAX_SIZE`
+(`10`)、`POSTGRES_POOL_ACQUIRE_TIMEOUT_SECONDS`(`10`)、
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS`(`30`) 和 `POSTGRES_LOCK_TIMEOUT_SECONDS`(`5`)。
+按单 application worker 加 maintenance/backup session 评估数据库连接上限；不要去掉
+有界 acquire/statement/lock timeout。
+
+#### B. 从 PostgreSQL 切回原 SQLite 文件
+
+1. 修改 `.env` 前先停写并停止后端。
+2. 确认原 SQLite 主文件及 `-wal`/`-shm` sidecar 位于预期文件系统，再设
+   `DATABASE_URL=sqlite:////absolute/path/to/original.db`(或上面的仓库相对默认值)。
+3. 以 `--workers 1` 启动；放流量前核对安全 status identity、`/api/ready`、
+   登录、notebook 数量以及若干代表性 source/Ask/Memory 读取。
+
+这个动作只是切换可见的独立 datastore，不会把 PostgreSQL 写入回放到 SQLite。
+只有 PostgreSQL 切换后没有任何新写入，或这些写入已用外部迁移显式对账并验证，
+回滚才是无损的。
+
+#### C. 备份、回滚与验证边界
+
+- 每次改 URL 前都停写/停后端。SQLite 使用 SQLite backup API，例如
+  `sqlite3 /path/live.db ".backup '/secure/sqlite-before-switch.db'"`；后端已停时可先跑
+  `PRAGMA wal_checkpoint(TRUNCATE)` 把 WAL 折叠进主文件。活跃 WAL 可能含已提交页，
+  不要只拷贝主文件。
+- PostgreSQL 用标准工具生成并演练逻辑/物理备份(例如
+  `pg_dump --format=custom` 与 `pg_restore`)；使用 `.pgpass`/service definition，
+  避免凭据进 shell history 或日志。
+- 切换前后记录 row/count/application smoke 结果。`/api/ready` 加代表性认证读取是
+  放流量闸门；`/api/health` 单独只代表 liveness。若启动/migration 失败，
+  保持停流量，恢复备份或原 URL，再重跑 readiness 与 smoke。
+
+#### D. 存量数据 SQLite → PostgreSQL
+
+只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。当前 adapter 阶段没有
+dual-write、shadow replication 或 cutover 实现。`SHADOW_DATABASE_URL` 只保留/校验，
+不会启用同步。forward-shadow 实现并成为受保护闸门前，安全支持的选项只有
+全新 PostgreSQL target，或停机后用外部工具迁移且完整对账。本仓库故意不提供
+一条虚构的数据迁移命令。
+
+#### E. 切换决策表
+
+| 目标状态 | `DATABASE_URL` | 会出现的数据 | 安全回滚条件 |
+|---|---|---|---|
+| 继续发行默认 SQLite | `sqlite:///.local/silicon_notebook.db` | 该 SQLite 文件中的行 | 有一份一致 SQLite 备份 |
+| 全新 PostgreSQL 启动 | `postgresql://user:password@host:5432/new_db` | 新 PG 库；初始只有 bootstrap 行 | PG 新写入前回原 SQLite，或显式对账 |
+| 回原 SQLite | `sqlite:////absolute/path/original.db` | SQLite 上次停笔的快照 | 明确放弃 PG-only 写入或已外部对账 |
+| 存量 SQLite 迁到 PG | **外部停机迁移后**的 PG URL | 仅外部工具复制且验证的数据 | 两端备份都保留，且已演练对账/回滚 |
+
+切换前 checklist：在不暴露凭据的情况下确认两端 identity；停后端；做一致备份；
+验证 target UTF8/owner/capacity；只设一个 `DATABASE_URL`；保持 `--workers 1`；启动并等自动
+migration；检查安全 status、`/api/ready`、认证、数量和代表性读取；最后再放写。
+PostgreSQL 产生新写入后切回 SQLite，这些写入不会被回放。
+
+已实现 adapter 所依据的文档是
+[PostgreSQL shadow/cutover 设计](docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md)
+与 [repository adapter 计划](docs/superpowers/plans/2026-07-22-postgresql-repository-adapter.md)。
+[forward-shadow 同步计划](docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md)
+是明确的未来工作，当前未实现。
 
 ### 5 · 离线打包(目标机没有 npm/node)
 
@@ -590,9 +700,10 @@ SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storag
 ```
 
 DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。
-SQLite 是当前可用的默认后端。PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。
+运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。
 Settings 同时接受 `postgresql://` 与旧版 `postgres://` URL（后者会归一化），URL
-诊断会隐藏凭据和连接选项，SHADOW_DATABASE_URL 仍不生效，留待后续影子同步阶段。
+诊断会隐藏凭据和连接选项，SHADOW_DATABASE_URL 仍不生效，留待后续影子同步阶段。PostgreSQL
+向量使用 `bytea`，不安装也不需要 pgvector；生产启动仍是 `--workers 1`。
 
 **检索：**
 
@@ -1051,7 +1162,7 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
 - Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
-- PostgreSQL + pgvector 暂不阻塞本机 beta，SQLite 是当前可用的默认后端。repository factory 会根据 DATABASE_URL 选择 PostgreSQL；当前因 adapter 尚不可用而显式失败，绝不回落到 SQLite。后端选择与既有数据迁移是两件独立的事。
+- 本机 beta 不强制 PostgreSQL，SQLite 仍是发行默认。已支持直接 PostgreSQL 启动，向量存于 `bytea`，不需要 pgvector。后端选择与存量数据迁移是两件独立的事；本阶段没有双写/影子同步。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
 
@@ -1075,11 +1186,29 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` 把同一套完整门禁暴露为唯一的
+`.github/workflows/ci.yml` 把同一套完整离线门禁暴露为
 `CI / full-gate` 检查。它在目标为 `master` 的 PR、`master` push 与手动触发时
 运行，环境固定为 `ubuntu-24.04`、Python 3.13、Node.js 22。workflow 从
 `backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
 测试选择完整委托给 `scripts/check.sh`。
+
+另一个独立 `CI / postgres-integration` job 启动 PostgreSQL 17，且只调用
+`scripts/check_postgres.sh`；离线门禁绝不调它。job 创建专用
+`NOSUPERUSER NOCREATEDB NOCREATEROLE` application role、其 UTF8 主测试库、
+默认排序非 C 的 UTF8 ICU 库（跑完整 schema parity），以及只用于证明
+migration 0001 在 ledger/业务 DDL 之前事务性失败的 SQL_ASCII 库。本地
+PostgreSQL 16 可把普通 lane 连跑两次：
+
+```bash
+TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_local_test \
+  PYTHON_BIN=.venv/bin/python bash scripts/check_postgres.sh
+```
+
+PostgreSQL 17 的 non-C/non-UTF 辅助 target 以 CI 为权威；本地未提供
+`TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` 时会跳过这两项。
+`POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` 会让任一辅助库缺失在测试前硬失败。
+脚本连接预检只输出隐去凭据的 backend identity，并串行运行唯一
+`postgres_integration` marker，避免把全局 migration advisory lock 误当成每 schema 的并行锁。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
@@ -1094,7 +1223,7 @@ runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN �
 生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。20 分钟 timeout 包含依赖安装，
 与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
 `CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
-并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
+并由用户明确批准分支保护变更，才把两个检查设为 `master` 的 required check。
 
 CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
 路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置
@@ -1129,3 +1258,4 @@ Homebrew warm gate。
 - `README.md`
 - `README_zh.md`
 - `AGENTS.md`
+- `CLAUDE.md`

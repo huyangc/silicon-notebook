@@ -681,8 +681,7 @@ def _normalize_postgres_default(raw: object, postgres_type: str) -> Any:
     raise AssertionError(f"unexpected default {value!r} for {postgres_type}")
 
 
-@pytest.mark.postgres_integration
-def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_database):
+def _assert_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
     contract = _reviewed_contract()
@@ -837,6 +836,33 @@ def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_dat
         "idx_memory_items_tags_trgm",
     ):
         assert "C" in explicit_indexes[name]["collations"], name
+
+
+@pytest.mark.postgres_integration
+def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_database):
+    _assert_packaged_postgres_schema_has_bidirectional_semantic_parity(
+        postgres_database
+    )
+
+
+@pytest.mark.postgres_integration
+def test_schema_parity_on_utf8_database_with_non_c_default_collation(
+    postgres_non_c_database,
+):
+    with postgres_non_c_database.connect() as conn:
+        database = conn.execute(
+            "SELECT current_setting('server_encoding') AS encoding, "
+            "datcollate,datctype,datlocprovider,daticulocale "
+            "FROM pg_database WHERE datname=current_database()"
+        ).fetchone()
+    assert database["encoding"] == "UTF8"
+    assert database["datlocprovider"] == "i"
+    assert database["daticulocale"]
+    assert database["datcollate"] not in {"C", "POSIX"}
+    assert database["datctype"] not in {"C", "POSIX"}
+    _assert_packaged_postgres_schema_has_bidirectional_semantic_parity(
+        postgres_non_c_database
+    )
 
 
 @pytest.mark.postgres_integration

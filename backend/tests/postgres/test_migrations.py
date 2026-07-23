@@ -228,6 +228,28 @@ def test_failed_migration_rolls_back_ddl_and_ledger(postgres_database):
     assert ledger["relation"] is None
 
 
+def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
+    postgres_non_utf_database,
+):
+    import psycopg
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    with pytest.raises(psycopg.errors.RaiseException, match="server_encoding must be UTF8"):
+        PostgresMigrator(postgres_non_utf_database).migrate()
+
+    with postgres_non_utf_database.connect() as conn:
+        encoding = conn.execute(
+            "SELECT current_setting('server_encoding') AS value"
+        ).fetchone()["value"]
+        relations = conn.execute(
+            "SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f')"
+        ).fetchall()
+    assert encoding != "UTF8"
+    assert relations == []
+
+
 def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
