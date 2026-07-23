@@ -189,8 +189,12 @@ def test_process_source_zeroes_chunked_at_when_writing_new_elements(
     md.write_text("# Heading\n\nSome body text for elements.\n", encoding="utf-8")
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id, file_path=str(md))
-    # 模拟上一代已成功分块: reprocess 之前 chunked_at 是非 NULL。
-    repo._runtime.source_store.mark_chunked(sid, "2020-01-01T00:00:00")
+    # 模拟上一代已成功分块: reprocess 之前 chunked_at 是非 NULL。生产侧 chunked_at
+    # 只由 replace_source_chunks 的 mark_chunked_at 随 chunk 原子提交,这里直接写这
+    # 一列建 setup(无独立的 store 置方法)。
+    with repo._write() as db:
+        db.execute("UPDATE sources SET chunked_at=? WHERE id=?",
+                   ("2020-01-01T00:00:00", sid))
 
     observed = {}
 
@@ -325,6 +329,43 @@ def test_active_lease_released_on_propagating_baseexception(
         repo.process_source(sid)
 
     assert sid not in service._active_sources, "传出出口后租约残留(pop 不在 finally)"
+
+
+def test_active_lease_is_refcounted_across_overlapping_invocations(
+    repo, tmp_path, monkeypatch
+):
+    """引用计数:同一源被并发处理时(上传后台 job 未完时 owner 又点 parse),先完成的
+    invocation 不能撤掉仍在跑者的租约。用 probe 在'处理中'那一刻模拟第二个并发
+    invocation 也进入(给计数再加一,1→2);第一个 process_source 返回、finally 减一后
+    (2→1),租约必须仍含该源——否则仍在跑的第二个会在途缺 elements/chunks 被体检误报
+    损坏。
+
+    **变异锚点**:把 finally 的「减一、归零才 pop」改回无条件 ``pop(source_id, None)``,
+    这条会红(先完成者把仍在跑者的租约一起撤了,计数语义退化成布尔在场)。"""
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading\n\nSome body text for elements.\n", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    service = repo._runtime.source_ingestion
+
+    def probe(source_id):
+        # 模拟另一个并发 invocation 也进入了(第二次 stamp,计数 1→2)。
+        with service._active_sources_lock:
+            service._active_sources[source_id] = (
+                service._active_sources.get(source_id, 0) + 1
+            )
+
+    monkeypatch.setattr(
+        repo._runtime.source_chunking, "build_chunks_for_source", probe
+    )
+    repo.process_source(sid)
+
+    # 第一个 invocation 的 finally 把计数 2→1,租约仍在(模拟的第二个还没 finally)。
+    assert sid in service._active_sources, "先完成的 invocation 撤掉了仍在跑者的租约"
+    assert service._active_sources[sid] == 1
+    # 清理模拟的第二个 invocation 的租约,免得污染后续用例。
+    with service._active_sources_lock:
+        service._active_sources.pop(sid, None)
 
 
 class _ElementBlockingEmbedder:

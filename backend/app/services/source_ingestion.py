@@ -176,12 +176,15 @@ class SourceIngestionService:
         self._paper_meta_generation = 0
         # 源级活跃租约(进程内;重启即空=没人在处理,恰是崩溃后的正确答案,故不参与
         # 启动清算)。镜像 kg_building / _paper_meta_backfilling 的进程内单飞惯例:
-        # process_source 进入时 stamp、finally 释放。职责是「在途误报抑制」——体检
+        # process_source 进入时给计数加一、finally 减一。职责是「在途误报抑制」——体检
         # endpoint 与 process_source 同进程可并发,在途源瞬时没 elements/没 chunks,
         # 纯产物判据会误报损坏,租约声明「有活线程在弄,别报」。崩溃检测归 parse_status
-        # + 启动清算,不靠这个内存集。source_id → started_at(ISO 串);P2 体检把它当
-        # memo 之外的 Python 后置过滤(active 集减法)。
-        self._active_sources: dict[str, str] = {}
+        # + 启动清算,不靠这个内存集。值是**引用计数**而非时间戳:同一源可被并发处理
+        # (上传后台 job 未完时 owner 又点 parse),两个 invocation 各加一次,先完成者
+        # 减到 1(仍活)、后完成者减到 0 才撤租——用时间戳会被后来者覆盖、令先完成者的
+        # finally 撤错人(镜像上面 _paper_meta_backfilling 的世代守卫,这里用计数更简)。
+        # source_id → 活跃 invocation 数;P2 体检把 keys() 当 active 集做减法。
+        self._active_sources: dict[str, int] = {}
         self._active_sources_lock = threading.Lock()
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
@@ -473,11 +476,14 @@ class SourceIngestionService:
                 }
             )
 
-        # 进入即取内存租约(在置 parsing 之前;started_at 复用上面算好的 now)。见
-        # __init__ 处说明:职责是在途误报抑制,不是崩溃检测。下面 try 的 finally
-        # 覆盖所有出口释放,否则该源会被体检永久误抑制直到进程重启。
+        # 进入即取内存租约(在置 parsing 之前)。见 __init__ 处说明:职责是在途误报
+        # 抑制,不是崩溃检测。租约是**引用计数**——同一源可被并发处理(上传后台 job
+        # 未完时 owner 又点 POST /sources/{id}/parse),每个 invocation 各加一次、
+        # finally 各减一次,计数归零才真正撤租;否则先完成的 invocation 会撤掉仍在跑
+        # 的另一个的租约,令其在途缺 elements/chunks 被体检误报损坏。下面 try 的
+        # finally 覆盖所有出口做减。
         with self._active_sources_lock:
-            self._active_sources[source_id] = now
+            self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
         try:
             # 置 'parsing' 放在 try 内首行(不在 try 外):否则这句 DB 写若因磁盘满/
             # 写锁异常/库损坏抛出,会在进 try 前传出、绕过下面 finally 的租约释放,
@@ -704,11 +710,16 @@ class SourceIngestionService:
         finally:
             # 覆盖 try 的所有出口——成功 return、上面的 except 落 'failed'(KgBuildAborted
             # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的
-            # BaseException:一律释放内存租约。置 'parsing' 也在 try 内(见上),故进入
-            # try 后再无未覆盖的泄漏边。刻意早于下面的 maybe_enqueue_scale_fold,后者是
-            # 独立的空闲收尾、不需要持租约。
+            # BaseException:一律给租约计数减一。置 'parsing' 也在 try 内(见上),故进入
+            # try 后再无未覆盖的泄漏边。计数归零才真正撤租(见 stamp 处:并发处理同一源
+            # 时先完成者不能撤掉仍在跑者的租约)。刻意早于下面的 maybe_enqueue_scale_fold,
+            # 后者是独立的空闲收尾、不需要持租约。
             with self._active_sources_lock:
-                self._active_sources.pop(source_id, None)
+                remaining = self._active_sources.get(source_id, 0) - 1
+                if remaining > 0:
+                    self._active_sources[source_id] = remaining
+                else:
+                    self._active_sources.pop(source_id, None)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
