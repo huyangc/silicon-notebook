@@ -157,3 +157,103 @@ def test_embedding_matrix_unscoped_scoped_and_empty(repo):
     assert scoped.shape == (1, 16)
     assert projections.embedding_matrix(
         nb.id, "knowledge_embeddings", "object_id", object_ids=[]) == ([], [])
+
+
+def test_embedding_matrix_reads_keyset_pages_not_one_snapshot(repo, monkeypatch):
+    """Guard: the whole-notebook load (object_ids=None) must read bounded keyset
+    pages — each an INDEPENDENT `rowid > ?` statement — never one whole-table
+    read and never row-by-row. A single statement (.fetchall() the whole table,
+    or one long-lived streaming cursor) pins ONE WAL read snapshot for the
+    entire multi-million-row build, blocking checkpoints while concurrent writes
+    append frames → unbounded `-wal` growth (the P1 codex flagged on PR#340
+    round 2). Keyset pages exhaust each statement before the next begins, so the
+    snapshot is released between pages. Row-by-row iteration additionally hits
+    the instrumented _DiagnosticCursor.__next__ (round 1's per-row sql_scope:
+    the global diagnostics lock twice + a writer wake per embedding). Reverting
+    to any of those shapes must fail here."""
+    import app.repositories.sqlite.index_projection_store as ips
+    from app.repositories.sqlite.database import _DiagnosticCursor
+
+    nb = _seeded_notebook(repo)                       # 2 KG objects → 2 vectors
+    projections = repo._runtime.index_projections
+    object_ids = repo._gather_kg_graph(nb.id)[3]
+    assert len(object_ids) >= 2                        # need >1 row to span pages
+
+    monkeypatch.setattr(ips, "_MATRIX_FETCH_BATCH", 1)   # force multi-page reads
+
+    counts = {"paged": 0, "next": 0}
+    real_execute = _DiagnosticCursor.execute
+    real_next = _DiagnosticCursor.__next__
+
+    def spy_execute(self, sql, parameters=(), /):
+        # count only the paged vector reads (rowid keyset), not the COUNT(*)
+        if "knowledge_embeddings" in sql and "rowid >" in sql:
+            counts["paged"] += 1
+        return real_execute(self, sql, parameters)
+
+    monkeypatch.setattr(_DiagnosticCursor, "execute", spy_execute)
+    monkeypatch.setattr(_DiagnosticCursor, "__next__",
+                        lambda self: (counts.__setitem__("next", counts["next"] + 1)
+                                      or real_next(self)))
+
+    ids, matrix = projections.embedding_matrix(
+        nb.id, "knowledge_embeddings", "object_id")
+
+    # completeness: correct + fully shaped regardless of page boundaries
+    assert set(ids) == set(object_ids)
+    assert matrix.shape == (len(object_ids), 16)
+    # shape of the read: ≥2 independent keyset pages, never per-row __next__.
+    # (whole-table fetchall or a single streaming cursor issue no `rowid >`
+    # statement, so both collapse counts["paged"] to 0 and fail here.)
+    assert counts["paged"] >= 2              # bounded rowid>? pages; snapshot freed between
+    assert counts["next"] == 0               # never the instrumented per-row path
+
+
+def test_embedding_matrix_dedups_concurrent_replace(repo, monkeypatch):
+    """Guard (codex PR#340 round 3): keyset paginates by rowid, but the embedding
+    writers use INSERT OR REPLACE — a refresh deletes+reinserts the row at a
+    LARGER rowid. If a row is refreshed after the scan passed its old rowid it
+    re-surfaces in a later page; without de-duplication build_matrix would carry
+    both the stale and the current vector under one id (silent index corruption
+    behind an up-to-date manifest). The load must yield each id exactly once.
+    Simulate the race: right after the first page is read, REPLACE the object it
+    returned — moving its rowid past the rest, exactly what a concurrent re-embed
+    does — then assert the id still appears once."""
+    from app.repositories.sqlite.database import _DiagnosticCursor
+    import app.repositories.sqlite.index_projection_store as ips
+
+    nb = _seeded_notebook(repo)                       # objects a, b → 2 vectors
+    projections = repo._runtime.index_projections
+    object_ids = repo._gather_kg_graph(nb.id)[3]
+    assert len(object_ids) >= 2
+
+    monkeypatch.setattr(ips, "_MATRIX_FETCH_BATCH", 1)   # one row per page
+
+    real_fetchall = _DiagnosticCursor.fetchall
+    state = {"fired": False}
+
+    def fetchall_then_replace(self):
+        rows = real_fetchall(self)
+        # after the FIRST paged vector read, refresh that row on a separate
+        # (concurrent) write connection so INSERT OR REPLACE bumps its rowid
+        if (not state["fired"] and len(rows) == 1
+                and set(rows[0].keys()) >= {"rid", "vid", "vector"}):
+            state["fired"] = True
+            with repo._write() as w:
+                w.execute(
+                    "INSERT OR REPLACE INTO knowledge_embeddings "
+                    "(object_id, notebook_id, vector, created_at) "
+                    "VALUES (?,?,?,?)",
+                    (rows[0]["vid"], nb.id, rows[0]["vector"],
+                     "2026-01-02T00:00:00"))
+        return rows
+
+    monkeypatch.setattr(_DiagnosticCursor, "fetchall", fetchall_then_replace)
+
+    ids, matrix = projections.embedding_matrix(
+        nb.id, "knowledge_embeddings", "object_id")
+
+    assert state["fired"]                          # the rowid-move race actually ran
+    assert len(ids) == len(set(ids))               # no duplicate id survived
+    assert set(ids) == set(object_ids)             # complete, each id exactly once
+    assert matrix.shape[0] == len(ids)             # matrix rows align 1:1 with ids

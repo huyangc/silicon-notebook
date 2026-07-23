@@ -39,6 +39,14 @@ ScaleGraphEdges = (
     " | tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]"
 )
 
+# Page size for the whole-notebook embedding keyset scan (embedding_matrix,
+# object_ids=None). Each keyset page (rowid > last LIMIT this) is an independent
+# statement: it bounds the native-dim BLOBs held on top of the preallocated
+# matrix (the OOM fix), avoids per-row _DiagnosticCursor.__next__
+# instrumentation, and releases the WAL read snapshot between pages so a long
+# online build never blocks checkpoints. See embedding_matrix's docstring.
+_MATRIX_FETCH_BATCH = 10_000
+
 
 @dataclass(frozen=True)
 class ScaleGraphRows:
@@ -543,10 +551,41 @@ class IndexProjectionStore:
         object_ids=None = whole-notebook load with a COUNT(*) n_hint so
         build_matrix preallocates (the frozen build-scale memory diet) —
         deliberately BYPASSES the query-time vector cache: a build's multi-GB
-        matrices must never become LRU entries. A list = fold's bounded delta
-        load, batched through the facade's IN-clause chunking with the
-        connection held open across the generator (frozen `_delta_vecs`
-        shape); an empty list returns ([], []). Both paths truncate through
+        matrices must never become LRU entries. Rows are read in bounded keyset
+        pages (rowid > last LIMIT _MATRIX_FETCH_BATCH), each an independent
+        fully-exhausted statement — never .fetchall()'d whole, never iterated
+        row-by-row, never a single long-lived streaming cursor. Four properties
+        are load-bearing at 8M-row scale:
+          • Memory: the whole-table result set is ~130GB of native BLOBs at
+            8M×4096-dim; materialising it alongside the preallocated (already
+            truncated) matrix is exactly what OOM-killed the offline `index`
+            build (relation load: ~130GB transient on top of the ~78GB KG/chunk
+            residents → ~208GB). A page bounds the raw BLOBs held on top of the
+            output matrix to _MATRIX_FETCH_BATCH rows.
+          • CPU/lock: _DiagnosticCursor.__next__ is instrumented, so row-by-row
+            iteration would enter sql_scope for EVERY embedding — on the online
+            build path (diagnostics runtime installed) that is normalize-SQL +
+            the global diagnostics lock twice + a writer wake per row, tens of
+            millions of times. A page pays that once, then iterates a plain
+            list (native, no instrumented __next__).
+          • WAL: each page's statement is exhausted before the next begins, so
+            no read snapshot spans the whole build. A single streaming cursor
+            would pin one snapshot for the (hours-long) build, blocking WAL
+            checkpoints while concurrent writes append frames → unbounded `-wal`
+            growth. build_matrix's n_hint tolerates the row-count drift a
+            cross-page concurrent write may cause.
+          • Consistency: rowid is NOT stable across pages — INSERT OR REPLACE
+            re-embeds delete+reinsert a refreshed row at a larger rowid, so a
+            row refreshed after the scan passed it re-surfaces in a later page.
+            _stream_rows de-duplicates by id (keeps the first occurrence), so an
+            id never lands in the ANN twice (stale + current); without it the
+            persisted index would silently carry duplicate/stale entries under
+            an up-to-date manifest.
+        The connection stays open across the paged consumption because the
+        return runs inside the `with`. A list = fold's bounded delta load,
+        batched through the facade's IN-clause chunking with the connection
+        held open across the generator (frozen `_delta_vecs` shape); an empty
+        list returns ([], []). Both paths truncate through
         build_matrix(runtime_dim=...) — the dim-consumption point moves here
         UNCHANGED (漏消费点 = 静默零召回)."""
         from app.services.vector_index import build_matrix, resolve_runtime_dim
@@ -556,12 +595,49 @@ class IndexProjectionStore:
                 n_hint = db.execute(
                     f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
                     (notebook_id,)).fetchone()["c"]
-                rows = db.execute(
-                    f"SELECT {id_column} AS vid, vector FROM {table} WHERE notebook_id=?",
-                    (notebook_id,)).fetchall()
+                def _stream_rows():
+                    # Keyset pagination by rowid, de-duplicated. Each page is an
+                    # INDEPENDENT, fully-exhausted statement, so the WAL read
+                    # snapshot is released between pages — a single long-lived
+                    # cursor would pin ONE snapshot for the whole
+                    # multi-million-row build and block WAL checkpoints under
+                    # concurrent writes → unbounded `-wal` growth. But rowid is
+                    # NOT stable across the scan: the embedding writers use
+                    # INSERT OR REPLACE (embedding_store.py), which
+                    # deletes+reinserts a refreshed row at a LARGER rowid. A row
+                    # refreshed after the scan passed its old rowid would
+                    # re-surface in a later page, and build_matrix would then
+                    # hold BOTH the stale and the current vector under one id.
+                    # `seen` keeps the FIRST occurrence (the value at the id's
+                    # original scan position — snapshot-consistent; the refreshed
+                    # vector is picked up by the next fold/rebuild) and drops any
+                    # re-surfacing, so every id enters the matrix exactly once.
+                    # `rowid > ?` walks idx_{table}_nb in rowid order. n_hint
+                    # (COUNT at start) is an estimate; build_matrix tolerates the
+                    # drift dedup and concurrent writes introduce.
+                    seen: set = set()
+                    last_rowid = 0
+                    while True:
+                        page = db.execute(
+                            f"SELECT rowid AS rid, {id_column} AS vid, vector "
+                            f"FROM {table} WHERE notebook_id=? AND rowid > ? "
+                            f"ORDER BY rowid LIMIT ?",
+                            (notebook_id, last_rowid, _MATRIX_FETCH_BATCH),
+                        ).fetchall()
+                        if not page:
+                            break
+                        for row in page:
+                            vid = row["vid"]
+                            if vid in seen:
+                                continue
+                            seen.add(vid)
+                            yield vid, row["vector"]
+                        last_rowid = page[-1]["rid"]
+                        if len(page) < _MATRIX_FETCH_BATCH:
+                            break
+
                 return build_matrix(
-                    ((r["vid"], r["vector"]) for r in rows),
-                    n_hint=n_hint, runtime_dim=runtime_dim)
+                    _stream_rows(), n_hint=n_hint, runtime_dim=runtime_dim)
         if not object_ids:
             return [], []
 
