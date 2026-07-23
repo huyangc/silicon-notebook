@@ -1276,6 +1276,38 @@ class SourceIngestionService:
             return reparsed
         return self.sources.get_source(source_id)
 
+    def _suffix_correction_pending(
+        self, fresh: SourceDetail, used_source: SourceDetail
+    ) -> bool:
+        """定型后这一行是否还有一个待收口的后缀（解析器）纠正。两道判据取并集——
+        必须同时看 file_name **和** file_path，否则 'queued' 未启动时换后缀会漏掉
+        （round-8 P2-3）：
+
+        (a) 行上当前 file_name 的 parser_class ≠ **本次流水线实际用的 parser**
+            （used_source.file_name，process_source 开头捕获、贯穿解析）。这抓的是
+            「parsing/extracting 在飞时到达的改名」——那时改名落在 process_source 读
+            行（line 883）之后，used 仍是旧后缀，与新 fresh 名不一致即触发。
+
+        (b) 行上当前 file_name 的 parser_class ≠ 行上当前 **file_path** 的后缀
+            （仅对有盘上文件的上传源；URL/Memory 源 file_path 为空、跳过）。这抓的是
+            「'queued' worker 未启动时换后缀」：reuse 的在飞分支只改 file_name 不改
+            file_path，且改名落在 process_source 读行**之前**，于是 used==fresh、(a)
+            看不见；但 file_path 的后缀已陈旧（云端 MinerU 按 Path(file_path).name、
+            raw-text 读按 path 后缀分派 → 按旧类型处理），行内部不自洽。收口按新
+            file_name 重写 file_path、整条重跑即修复。
+
+        正常态永不误报：上传源 file_path 恒与 file_name 同后缀（write_upload 按
+        file_name 落盘、settled reparse 的 repoint 两者一起改），唯一的不一致就是在飞
+        改名只动了 file_name 这一种——正是要收口的。收口 repoint 会把 file_path 改回
+        与 file_name 同后缀，下一轮 (a)(b) 皆一致 → 终止（叠加轮数上限双保险）。"""
+        want = parser_class(fresh.file_name or "")
+        if want != parser_class(used_source.file_name or ""):
+            return True  # (a) 在飞（parsing/extracting）改名，used 是旧后缀
+        fp = fresh.file_path or ""
+        if fp and want != parser_class(fp):
+            return True  # (b) 'queued' 未启动时改名只动 file_name，file_path 后缀陈旧
+        return False
+
     def _reconcile_pending_suffix(
         self,
         source_id: str,
@@ -1288,10 +1320,12 @@ class SourceIngestionService:
 
         换后缀重传撞上正在跑的流水线时，reuse_uploaded_source 只把新 file_name 记到
         行上（持久化意图），绝不动这条流水线正按 file_path 读的盘上文件。流水线跑完
-        （已定型、没有任何流水线在读它的文件）后，若行上当前 file_name 的 parser_class
-        与本次实际用的 parser（used_source.file_name，本次 process_source 开头捕获、
-        贯穿解析）不一致，说明那次纠正还悬着——现在可以安全地 repoint（重写盘上文件）
-        并整条重跑一次。
+        （已定型、没有任何流水线在读它的文件）后，若还有待收口的后缀纠正
+        （_suffix_correction_pending：file_name 与「实际用的 parser」或「file_path 后缀」
+        任一不一致），说明那次纠正还悬着——现在可以安全地 repoint（重写盘上文件）并
+        整条重跑一次。⚠ 判据必须同时看 file_path 后缀，否则 'queued' worker 未启动时
+        换后缀（reuse 只改 file_name、改名又落在 process_source 读行之前 → used==fresh）
+        会漏收口，行永久停在 file_name/file_path 后缀不一致（round-8 P2-3）。
 
         原子认领 claim_reparse_if_settled（与 P2-1 settled reparse 同一守卫）防止与
         并发的 settled 源重传打架：恰有一个把终态翻成 'queued' 并拥有重跑，另一方
@@ -1303,9 +1337,7 @@ class SourceIngestionService:
         保留当前终态 + 告警，不再重跑（同构于 _extract_reconciling_doc_type 的轮数
         耗尽处理）。无纠正时零额外成本（一次主键读 + parser_class 比对，无模型/网络）。"""
         fresh = self.sources.get_source(source_id)
-        if parser_class(fresh.file_name or "") == parser_class(
-            used_source.file_name or ""
-        ):
+        if not self._suffix_correction_pending(fresh, used_source):
             return None  # 没有在飞后缀纠正待收口（常路，含所有普通首传/重传）
         if reparse_round >= _SUFFIX_RECONCILE_MAX_ROUNDS:
             self.event_log.logger.warning(
