@@ -1,11 +1,16 @@
-"""缓存准入的第四道门：调用方提供的 schema 级 response_validator。
+"""缓存的准入门：现在是 **opt-in** —— 调用方传 response_validator 才参与缓存。
 
-is_cacheable_llm_response 只做「非空 / 可解析 / 非 length」——一个语法合法但违反
-调用方 schema 的响应（KG 抽取拿到 {"nodes":"invalid"}，nodes 该是 list 却是 string）
-能过前三道门 → 缓存 90 天 → 下游静默产出 0 对象、重解析一直命中坏值。第四道门让
-知道自己形状的调用方（KG 抽取）把这类响应挡在缓存外；ask/answer 不传 validator，
-行为一字不变。
+Codex 第 6 轮 / 用户拍板：不传 validator 的调用方（Ask、paper_meta、summary、schema
+归纳、query rewrite…）既不写也不读缓存。一次性关掉整个投毒类——此前它们偶发拿到
+`[]`/error 形状也会被缓存 90 天，重试/reparse 一直复用坏值。占 93% 成本的 KG 抽取三处
+（extract_window/gleaning/refine）传 validator → 保持缓存。
+
+两道门**各自独立**、可逐门变异：
+- 写入门：`response_validator is not None`（+ is_cacheable + validator 形状）。
+- 命中门：`response_validator is not None` 才 `cache.get` 并 serve。
+cache/ckey 对每个非 bypass 调用都算出来，所以去掉任一门都能被对应测试单独抓红。
 """
+from app.core.cache import llm_key
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
 from app.services.kg.extract import _kg_fragment_cacheable, _refine_response_cacheable
@@ -45,7 +50,40 @@ def _client(tmp_path, monkeypatch, content):
 _MSGS = [{"role": "user", "content": "extract a kg fragment"}]
 
 
-# ------------------------------------------------------- the cache-write gate
+def _expected_key(client, schema_hint="{}", user_content="extract a kg fragment"):
+    """The exact key chat_json builds: system message prepended, base_url in the
+    key, generation params resolved (temperature/top_p default 1.0, max_tokens =
+    the global default)."""
+    system = {
+        "role": "system",
+        "content": (
+            "You are the extraction and reasoning engine for "
+            "silicon-notebook. Return valid JSON only, no markdown fences. "
+            f"Schema hint: {schema_hint}"
+        ),
+    }
+    full = [system, {"role": "user", "content": user_content}]
+    mt = client.settings.openai_compat_max_tokens
+    eff = mt if isinstance(mt, int) and mt > 0 else None
+    return llm_key(
+        client.model, full, schema_hint, client.base_url,
+        temperature=1.0, top_p=1.0, max_tokens=eff,
+    )
+
+
+# ------------------------------------------------------- the cache-WRITE gate
+
+def test_schema_valid_reply_with_validator_is_cached(tmp_path, monkeypatch):
+    """opt-in happy path: a well-shaped KG fragment WITH a validator caches, so
+    the second identical call is a hit (one endpoint call total)."""
+    good = ('{"nodes": [{"local_id": "a", "type": "Concept", "name": "x", "ev": 0}],'
+            ' "edges": []}')
+    client, fake = _client(tmp_path, monkeypatch, good)
+    client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
+    client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
+    assert fake.calls == 1, "validator + 合格响应必须缓存（第二次是 hit）"
+    assert client._get_cache().get(_expected_key(client)) == good
+
 
 def test_schema_invalid_reply_is_not_cached(tmp_path, monkeypatch):
     """{"nodes":"invalid"} passes the empty/parse/length gates but violates the
@@ -58,24 +96,27 @@ def test_schema_invalid_reply_is_not_cached(tmp_path, monkeypatch):
     assert fake.calls == 2, "schema-invalid reply must not be cached (re-hits endpoint)"
 
 
-def test_schema_valid_reply_is_still_cached(tmp_path, monkeypatch):
-    """A well-shaped KG fragment must cache exactly like any usable reply — the
-    validator must not be so strict it blocks good responses."""
-    good = ('{"nodes": [{"local_id": "a", "type": "Concept", "name": "x", "ev": 0}],'
-            ' "edges": []}')
-    client, fake = _client(tmp_path, monkeypatch, good)
-    client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
-    client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
-    assert fake.calls == 1, "schema-valid reply must be cached (second call is a hit)"
+def test_no_validator_reply_is_not_written(tmp_path, monkeypatch):
+    """opt-in WRITE gate (isolated): a validator-LESS call must write NOTHING,
+    even for a reply that would pass is_cacheable_llm_response. Asserted by
+    inspecting the backend directly — a plain re-call would also blame the hit
+    gate. Mutation: drop `response_validator is not None` from the write gate ->
+    this good reply gets written -> the key is present -> RED."""
+    client, fake = _client(tmp_path, monkeypatch, '{"nodes": []}')
+    client.chat_json(_MSGS, "{}")
+    assert fake.calls == 1
+    assert client._get_cache().get(_expected_key(client)) is None, (
+        "opt-out: 不传 validator 时任何响应都不该被写进缓存"
+    )
 
 
-def test_no_validator_preserves_existing_caching(tmp_path, monkeypatch):
-    """ask/answer callers pass no validator: even a KG-shape-invalid reply caches
-    exactly as before (default None => the fourth door is open)."""
-    client, fake = _client(tmp_path, monkeypatch, '{"nodes": "invalid"}')
+def test_no_validator_reply_is_not_served_or_written_end_to_end(tmp_path, monkeypatch):
+    """The user-visible contract: a validator-less call is transparent to the
+    cache — two identical calls both reach the endpoint (no hit ever served)."""
+    client, fake = _client(tmp_path, monkeypatch, '{"nodes": []}')
     client.chat_json(_MSGS, "{}")
     client.chat_json(_MSGS, "{}")
-    assert fake.calls == 1, "with no validator the old caching behavior is unchanged"
+    assert fake.calls == 2, "不传 validator：连续两次同调用都打 upstream"
 
 
 def test_validator_that_raises_conservatively_skips_cache(tmp_path, monkeypatch):
@@ -91,29 +132,22 @@ def test_validator_that_raises_conservatively_skips_cache(tmp_path, monkeypatch)
     assert fake.calls == 2, "validator fault -> skip write, never cache, never crash"
 
 
-# ------------------------------------------------------- the cache-HIT gate (P2-3)
+# --------------------------------------------------------- the cache-HIT gate
 
-def test_a_cache_hit_that_fails_the_validator_is_not_served(tmp_path, monkeypatch):
-    """A value written WITHOUT a validator (or before one was tightened) must not
-    be handed verbatim to a later validator-bearing caller. The hit is re-judged
-    by that caller's validator; a reject is treated as a MISS and the call falls
-    through to the endpoint (whose fresh reply the write gate then re-judges).
-    Without this, one poisoned entry propagates a bad extraction for the whole TTL."""
-    client, fake = _client(tmp_path, monkeypatch, '{"nodes": "invalid"}')
-    # 1st call, NO validator: the schema-invalid reply passes the empty/parse/
-    # length gates and IS cached — exactly the poison the hit gate must refuse.
-    client.chat_json(_MSGS, "{}")
-    assert fake.calls == 1, "前提：无 validator 时坏值确实被写进了缓存"
-    # 2nd call, same key, now WITH a validator that rejects that shape. The cached
-    # value must NOT be served — the call must re-hit the endpoint.
-    r = client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
-    assert r == '{"nodes": "invalid"}'
-    assert fake.calls == 2, (
-        "命中一个不过 validator 的坏值必须当 miss 处理、走真实调用，而不是原样返回"
-    )
+def test_no_validator_does_not_read_a_prepopulated_hit(tmp_path, monkeypatch):
+    """opt-in HIT gate (isolated): pre-seed the cache with a GOOD value at the
+    exact key, then call WITHOUT a validator. It must NOT be served — the call
+    goes to the endpoint. Mutation: drop the `response_validator is not None`
+    guard around the serve -> the seeded value is handed back -> 0 endpoint
+    calls -> RED."""
+    client, fake = _client(tmp_path, monkeypatch, '{"nodes": [{"type": "Concept"}]}')
+    client._get_cache().put(_expected_key(client), '{"nodes": []}', tag="m")
+    out = client.chat_json(_MSGS, "{}")
+    assert fake.calls == 1, "不传 validator 时预置命中不得被 serve（必须打 upstream）"
+    assert out == '{"nodes": [{"type": "Concept"}]}', "返回的是 upstream 的新响应，不是缓存"
 
 
-def test_a_cache_hit_that_satisfies_the_validator_is_still_served(tmp_path, monkeypatch):
+def test_validator_bearing_call_is_served_a_good_hit(tmp_path, monkeypatch):
     """The hit gate must not block GOOD cached values: a well-shaped reply written
     with a validator is served on the next validator-bearing call (no re-hit)."""
     good = '{"nodes": [{"type": "Concept"}], "edges": []}'
@@ -123,14 +157,19 @@ def test_a_cache_hit_that_satisfies_the_validator_is_still_served(tmp_path, monk
     assert fake.calls == 1, "满足 validator 的好值仍必须命中（第二次是 hit）"
 
 
-def test_ask_path_hit_without_a_validator_is_unaffected(tmp_path, monkeypatch):
-    """ask/answer callers pass no validator: a hit is served exactly as before
-    (default None => the hit gate is open), even for a KG-shape-invalid value.
-    Guards the fix against over-reaching into the ask/answer path."""
-    client, fake = _client(tmp_path, monkeypatch, '{"nodes": "invalid"}')
-    client.chat_json(_MSGS, "{}")
-    client.chat_json(_MSGS, "{}")
-    assert fake.calls == 1, "不传 validator 的命中不受影响（行为一字不变）"
+def test_a_cache_hit_that_fails_the_validator_is_not_served(tmp_path, monkeypatch):
+    """A value present at the key (e.g. written earlier by a laxer validator, or
+    seeded) must not be handed to a validator-bearing caller if it fails THAT
+    validator. The reject is treated as a MISS: the call falls through to the
+    endpoint (whose fresh reply the write gate then re-judges)."""
+    client, fake = _client(tmp_path, monkeypatch, '{"nodes": [{"type": "Concept"}]}')
+    # Seed poison directly (opt-in means a validator-less write can't create it).
+    client._get_cache().put(_expected_key(client), '{"nodes": "invalid"}', tag="m")
+    r = client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
+    assert fake.calls == 1, (
+        "命中一个不过 validator 的坏值必须当 miss 处理、走真实调用，而不是原样返回"
+    )
+    assert r == '{"nodes": [{"type": "Concept"}]}'
 
 
 # ------------------------------------------------------- the validators' shape

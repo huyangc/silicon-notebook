@@ -352,32 +352,50 @@ redis 仍满足 CacheBackend: True
 
 ## 三个安全阀
 
-### 1. 只缓存真正可用的响应（已实现，重构中必须保持）
+### 1. 缓存 opt-in + 只缓存真正可用的响应（已实现，重构中必须保持）
 
-输出预算烧光时 `chat_json` 会落到 `"{}"` 回退（即
-`reasoning-empty-content-degeneration` 记录的那个退化）。**缓存一次偶发退化等于把它
-永久固化整个 TTL。** 写入门是**四道**，任一不过就不写（`backend/app/core/llm.py` 写入处
-`if cache is not None and ckey and is_cacheable_llm_response(content, finish_reason)
-and _response_validator_allows(response_validator, content)`）：
+**缓存默认不缓存——调用方传 `response_validator` 才缓存（opt-in）。** 这是 Codex 第 6 轮
+后用户拍板的方向：`response_validator` 从「第四道门」升级为**缓存开关**。理由是逐个调用方
+补 validator 一直在漏（第 4/5/6 轮同一投毒主题逐步放大）：`chat_json` 的绝大多数调用方
+（Ask、paper_meta、summary、schema 归纳、query rewrite…）**不传** validator，它们偶发拿到
+`[]`/error 形状的响应也会被缓存 90 天，Ask 重试复用坏值、reparse 一直中毒。翻成 opt-in 一次
+关掉整个类：**不传 validator 就既不写也不读缓存**（对调用方透明，正确性保留，只失去性能）。
+占 93% 成本的 KG 抽取三处（`extract_window`/gleaning/refine，见 `services/kg/extract.py`）
+本就传 validator（`_kg_fragment_cacheable`/`_refine_response_cacheable`），保持缓存；其余
+不传的调用方失去缓存是**预期的、安全优先的取舍**（它们要么低频、要么响应因子每次都变、
+要么 best-effort 优雅降级，缓存收益有限）。
+
+`response_validator` 是**两道门共用**的开关（`backend/app/core/llm.py`）：
+
+- **命中门**：`if response_validator is not None:` 才 `cache.get` 并 serve；且命中值必须仍过
+  该 validator（validator 不进 key，同一 key 上别的调用方写的值会在这里被重判，拒绝＝当
+  miss、落到真实调用，其新响应由写入门再判）。
+- **写入门**：`if cache is not None and ckey and response_validator is not None and
+  is_cacheable_llm_response(content, finish_reason) and
+  _response_validator_allows(response_validator, content)`。
+
+写入门除了 opt-in 开关，仍保留三道**可用性**门（对 validator-bearing 调用方生效）：
 
 1. **非空回退 `"{}"`**、**`json.loads` 解析不了**、**`finish_reason == "length"`**——
-   前三道由 `is_cacheable_llm_response`（`core/cache/policy.py`）承担，是 schema-agnostic
-   的通用可用性判断。
-2. **调用方 schema 校验（`response_validator`）**——第四道。前三道拦不住「语法合法但
-   违反调用方 schema」的响应：KG 抽取拿到 `{"nodes":"invalid"}`（`nodes` 该是 list 却是
-   string）能过 `json.loads`，下游 `safe_json` + 抽取静默产出 **0 对象**，缓存 90 天后
-   每次重解析都命中这个 0。`chat_json` 因此接受一个可选 `response_validator: (str)->bool`
-   （默认 `None`＝无 schema 意见，ask/answer 等**不传**，行为一字不变）；KG 抽取三处
-   （`extract_window`/gleaning/refine，见 `services/kg/extract.py`）传入
-   `_kg_fragment_cacheable`/`_refine_response_cacheable`，**复用抽取自己的 `safe_json` +
-   形状判断**（`nodes`/`edges`/`items` 存在时必须是 list，缺省算合法空窗——别写太严把好
-   响应也挡了）。validator 抛异常＝保守地不缓存（`_response_validator_allows` try/except
-   兜底），**缓存故障永不炸主流程**。
+   由 `is_cacheable_llm_response`（`core/cache/policy.py`）承担，schema-agnostic 的通用
+   可用性判断。输出预算烧光时 `chat_json` 落到 `"{}"` 回退（即
+   `reasoning-empty-content-degeneration` 记录的退化），缓存一次偶发退化等于永久固化整个 TTL。
+2. **调用方 schema 形状（validator 本身）**——前三道拦不住「语法合法但违反调用方 schema」
+   的响应：KG 抽取拿到 `{"nodes":"invalid"}`（`nodes` 该是 list 却是 string）能过 `json.loads`，
+   下游 `safe_json` + 抽取静默产出 **0 对象**，缓存 90 天后每次重解析都命中这个 0。validator
+   **复用抽取自己的 `safe_json` + 形状判断**（`nodes`/`edges`/`items` 存在时必须是 list，缺省
+   算合法空窗——别写太严把好响应也挡了）。validator 抛异常＝保守地不缓存
+   （`_response_validator_allows` try/except 兜底），**缓存故障永不炸主流程**。
 
-本次重构不得削弱任一道——四道门须**逐门**变异验证（逐一去掉后对应守卫测试必须转红；
-守卫在 `tests/test_cache_response_validator.py` 与既有 `tests/test_llm_cache.py`）。
+`bypass_cache=True`（健康探针）路径不变：整段读/写都跳过。
 
-embed 侧对称要求：空向量列表、长度与输入不符的响应，一律不写入缓存。
+两道 opt-in 门 + 三道可用性门必须**逐门**变异验证（逐一削弱后对应守卫测试必须转红）：
+cache/ckey 对每个非 bypass 调用都算出来，所以命中门与写入门的 `response_validator is not None`
+可**各自单独**被变异抓红（守卫在 `tests/test_cache_response_validator.py`；is_cacheable 与
+缓存键各门在 `tests/test_cache_factory.py`、`tests/test_llm_cache.py`）。
+
+embed 侧对称要求：空向量列表、长度与输入不符的响应，一律不写入缓存。（embed 缓存不在本次
+opt-in 范围内——它另有强不变式护栏，且 embedding 无「违反调用方 schema」这一类退化。）
 
 ### 2. 测试隔离
 

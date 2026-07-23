@@ -63,18 +63,28 @@ def _configured_client(tmp_path, monkeypatch):
 
 
 def test_chat_json_caches_identical_calls(tmp_path, monkeypatch):
+    # Caching is opt-in: a caller participates by supplying a response_validator.
     client, fake = _configured_client(tmp_path, monkeypatch)
     msgs = [{"role": "user", "content": "same question"}]
-    r1 = client.chat_json(msgs, "{}")
-    r2 = client.chat_json(msgs, "{}")
+    r1 = client.chat_json(msgs, "{}", response_validator=lambda _c: True)
+    r2 = client.chat_json(msgs, "{}", response_validator=lambda _c: True)
     assert r1 == r2 == '{"ok": 1}'
     assert fake.calls == 1               # second call served from cache
+
+
+def test_chat_json_without_validator_is_not_cached(tmp_path, monkeypatch):
+    # Opt-in: no validator => neither read nor write; both calls hit the endpoint.
+    client, fake = _configured_client(tmp_path, monkeypatch)
+    msgs = [{"role": "user", "content": "same question"}]
+    client.chat_json(msgs, "{}")
+    client.chat_json(msgs, "{}")
+    assert fake.calls == 2               # opt-out path -> no caching
 
 
 def test_chat_json_cache_disabled(tmp_path, monkeypatch):
     client, fake = _configured_client(tmp_path, monkeypatch)
     monkeypatch.setattr(client.settings, "llm_cache_enabled", False)
     msgs = [{"role": "user", "content": "q"}]
-    client.chat_json(msgs, "{}")
-    client.chat_json(msgs, "{}")
+    client.chat_json(msgs, "{}", response_validator=lambda _c: True)
+    client.chat_json(msgs, "{}", response_validator=lambda _c: True)
     assert fake.calls == 2               # no caching -> two endpoint calls

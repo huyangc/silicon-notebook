@@ -308,6 +308,21 @@ def _cached_value(spy):
     return spy.inner.get(spy.keys[-1])
 
 
+def _opt_in(client):
+    """缓存是 opt-in——调用方传 response_validator 才参与。本文件测的是
+    is_cacheable / 缓存键那几道门，与 opt-in 开关正交，所以给每个调用默认挂一个
+    放行 validator 把开关打开，命中/写入逻辑才会被真正走到。显式传 validator 的
+    调用（如没有）会被尊重；bypass_cache 路径照旧整体跳过。"""
+    real = client.chat_json
+
+    def wrapped(*args, **kwargs):
+        kwargs.setdefault("response_validator", lambda _c: True)
+        return real(*args, **kwargs)
+
+    client.chat_json = wrapped
+    return client
+
+
 def _client(tmp_path, monkeypatch, *, content='{"ok": 1}', finish_reason="stop"):
     """真 SqliteCacheBackend + fake upstream 的 client。返回 (client, fake, spy)。
 
@@ -325,7 +340,7 @@ def _client(tmp_path, monkeypatch, *, content='{"ok": 1}', finish_reason="stop")
         LLM_CACHE_PATH=str(tmp_path / "cache.db"),
     )
     spy = _KeySpy(make_cache_backend(settings))
-    client = OpenAICompatibleClient(settings, cache=spy)
+    client = _opt_in(OpenAICompatibleClient(settings, cache=spy))
     fake = _FakeOpenAI(content=content, finish_reason=finish_reason)
     monkeypatch.setattr(client, "client", lambda: fake)
     return client, fake, spy
@@ -556,7 +571,10 @@ def test_cold_cache_accepts_its_first_write(tmp_path, monkeypatch):
     assert not backend, "前提失效：本测试用的后端在空时必须是 falsy"
     client = OpenAICompatibleClient(settings, cache=backend)
     monkeypatch.setattr(client, "client", lambda: _FakeOpenAI())
-    client.chat_json([{"role": "user", "content": "q"}], "{}")
+    # opt-in：写入需调用方传 validator（本测试锁的是 `cache is not None` 写法）。
+    client.chat_json(
+        [{"role": "user", "content": "q"}], "{}", response_validator=lambda _c: True
+    )
     assert backend.stored, "冷缓存没能完成它的第一次写入"
 
 
@@ -587,7 +605,7 @@ def _client_on(tmp_path, monkeypatch, *, base_url, api_key, backend):
         OPENAI_COMPAT_MODEL="m",             # 同名模型：评审场景的前提
         LLM_LOG_ENABLED=False,
     )
-    client = OpenAICompatibleClient(settings, cache=backend)
+    client = _opt_in(OpenAICompatibleClient(settings, cache=backend))
     fake = _FakeOpenAI()
     monkeypatch.setattr(client, "client", lambda: fake)
     return client, fake

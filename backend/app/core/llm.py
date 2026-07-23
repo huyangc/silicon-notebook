@@ -82,14 +82,19 @@ def strip_json_fences(text: str) -> str:
 def _response_validator_allows(
     validator: Optional[Callable[[str], bool]], content: str
 ) -> bool:
-    """Cache-admission gate for a caller-supplied response_validator.
+    """Shape check for a caller-supplied response_validator (content, not
+    participation).
 
-    None means "no schema opinion" -> allow (existing callers keep caching
-    exactly as before). Otherwise the validator judges the reply's shape; a
-    validator that raises is treated as "do not cache" — a cache fault (or a
-    buggy validator) must NEVER break the LLM call, and when in doubt about a
-    reply's usability the safe move is to skip the write, not freeze a possibly
-    bad value for the whole TTL."""
+    Under opt-in caching the OPT-IN decision is made by the caller (chat_json's
+    `response_validator is not None` gates), so in normal flow this helper is
+    only ever invoked with a non-None validator. The None -> True branch is kept
+    deliberately: it is a defensive no-op AND the pivot a per-gate mutation flips
+    (drop a gate's `is not None` and a None validator would leak through here,
+    turning the corresponding guard test red). A supplied validator judges the
+    reply's shape; a validator that raises is treated as "do not cache" — a cache
+    fault (or a buggy validator) must NEVER break the LLM call, and when in doubt
+    about a reply's usability the safe move is to skip the write, not freeze a
+    possibly bad value for the whole TTL."""
     if validator is None:
         return True
     try:
@@ -253,6 +258,18 @@ class OpenAICompatibleClient:
         _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
         effective_max_tokens = _mt if isinstance(_mt, int) and _mt > 0 else None
         # Best-effort cache lookup: a cache fault must never break the call.
+        # The response cache is OPT-IN (Codex round 6 / user decision): a caller
+        # participates ONLY by supplying a response_validator. cache/ckey are
+        # resolved for every non-bypass call so the hit gate and the write gate
+        # below stay INDEPENDENTLY exercisable, but a validator-less caller is
+        # neither served a hit (the hit gate) nor written (the write gate) — its
+        # call simply runs uncached (correctness preserved, only the perf win
+        # forgone). This closes an entire poisoning class at once: a validator-
+        # less caller (Ask, paper-meta, summaries, schema induction, query
+        # rewrite, …) could previously freeze a degenerate []/error reply for the
+        # whole TTL and replay it on every retry/reparse. The 93%-cost path (KG
+        # extraction) passes validators and keeps caching. See the design doc's
+        # safety-valve §1.
         cache = None
         ckey = ""
         if not bypass_cache:
@@ -272,22 +289,21 @@ class OpenAICompatibleClient:
                     temperature=temperature, top_p=top_p,
                     max_tokens=effective_max_tokens,
                 )
-                cached = cache.get(ckey)
-                # A hit is only served if it still satisfies the caller's
-                # response_validator — the SAME fourth-door gate the write path
-                # applies below. A value written WITHOUT a validator (or before a
-                # validator was tightened) can otherwise be handed verbatim to a
-                # later validator-bearing caller, propagating a bad extraction for
-                # the whole TTL. A rejected hit is treated as a MISS: fall through
-                # to the real call, whose fresh response the write gate re-judges
-                # (overwrite or skip). _response_validator_allows keeps the None
-                # case open (existing callers hit exactly as before) and a raising
-                # validator conservatively rejects — a cache fault must never break
-                # the call (still inside the bypass_cache-guarded try).
-                if cached is not None and _response_validator_allows(
-                    response_validator, cached
-                ):
-                    return cached
+                # Opt-in HIT gate: only a validator-bearing caller may be served a
+                # cached reply, and only if the cached value still satisfies THAT
+                # validator. The validator is NOT part of the key, so a value
+                # written by some other validator-bearing caller at the same key
+                # is re-judged here; a reject is treated as a MISS and falls
+                # through to the real call, whose fresh response the write gate
+                # re-judges. _response_validator_allows keeps a raising validator
+                # conservative (treated as reject) so a cache/validator fault
+                # never breaks the call (still inside the bypass_cache try).
+                if response_validator is not None:
+                    cached = cache.get(ckey)
+                    if cached is not None and _response_validator_allows(
+                        response_validator, cached
+                    ):
+                        return cached
             except Exception:
                 cache, ckey = None, ""
         kwargs: Dict[str, Any] = {
@@ -408,18 +424,29 @@ class OpenAICompatibleClient:
             # its first entry, `len()` stays 0 forever, and the cache never turns
             # "truthy". Identity check sidesteps that trap entirely.
             #
-            # The caller-supplied response_validator is the fourth door: policy's
+            # The caller-supplied response_validator is the OPT-IN SWITCH and the
+            # fourth door in one. Opt-in (response_validator is not None): a caller
+            # without a validator never writes — we can't vouch for its reply's
+            # shape, so freezing it for the TTL is the poisoning risk this closes.
+            # For validator-bearing callers the fourth door still applies: policy's
             # is_cacheable_llm_response is schema-agnostic (any parseable non-"{}"
             # non-truncated reply passes), but a syntactically valid reply can
             # still violate the CALLER's schema — e.g. KG extraction receiving
             # {"nodes":"invalid"} (nodes must be a list). That parses, produces 0
             # grounded objects, and — cached 90d — freezes that 0 while every
-            # re-parse keeps hitting it. Callers that know their shape pass a
-            # validator; it runs here (see _response_validator_allows: a validator
-            # fault conservatively skips the write rather than crashing the call).
-            if cache is not None and ckey and is_cacheable_llm_response(
-                content, finish_reason
-            ) and _response_validator_allows(response_validator, content):
+            # re-parse keeps hitting it. The validator runs here (see
+            # _response_validator_allows: a validator fault conservatively skips
+            # the write rather than crashing the call). `response_validator is not
+            # None` is load-bearing, not redundant: cache/ckey are resolved for
+            # every non-bypass call (see the hit gate above), so this clause is
+            # what actually keeps validator-less replies out of the store.
+            if (
+                cache is not None
+                and ckey
+                and response_validator is not None
+                and is_cacheable_llm_response(content, finish_reason)
+                and _response_validator_allows(response_validator, content)
+            ):
                 try:
                     # tag=model: evict_tag(model) is how a model-service swap
                     # drops exactly this model's entries. An untagged write
