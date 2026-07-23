@@ -395,9 +395,12 @@ class ScaleIndexBuilder:
 
     def _index_delta(self, notebook_id: str) -> dict:
         current_sources = self.projections.source_ids(notebook_id)
-        manifest = self.artifacts.read_manifest(
-            self.artifacts.scale_dir(notebook_id)
-        )
+        try:
+            manifest = self.artifacts.read_manifest(
+                self.artifacts.scale_dir(notebook_id)
+            )
+        except Exception:  # noqa: BLE001 — 损坏 manifest:read_manifest 刻意 raise。等价于
+            manifest = None  # 「无可用索引」(下面 None/missing 分支同款)→ 视作全量待建,须重建。
         if manifest is None:
             return {
                 "delta_sources": sorted(current_sources),
