@@ -2398,6 +2398,10 @@ export default function Home() {
           ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
           ...result.created,
         ]);
+        // Keep the total in step with the page (mirrors the file-upload path), so the
+        // Ask source count / welcome text — now driven by sourcesTotal — don't go stale
+        // after a URL import until the next source-page fetch.
+        setSourcesTotal((t) => t + result.created.length);
         await loadNotebookCollection();
       }
       setUrlRejected(result.rejected);
