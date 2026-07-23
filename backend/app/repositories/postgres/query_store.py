@@ -208,6 +208,38 @@ class QueryStore:
         return int(row["c"])
 
     @staticmethod
+    def sources_missing_chunks(db: Any, notebook_id: str) -> set:
+        """H3(缺分块)候选集的 postgres 镜像——判据与 sqlite QueryStore.sources_missing_chunks
+        逐字一致(有 elements、chunked_at IS NULL、排除 memory/knowhow 隐藏合成源);减活跃租约
+        由 CheckupService 在 service 层做。见 sqlite 版 docstring 的完整设计说明。"""
+        return {
+            row["id"] for row in db.execute(
+                "SELECT s.id AS id FROM sources s "
+                "WHERE s.notebook_id = %s "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND s.chunked_at IS NULL "
+                "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+    @staticmethod
+    def sources_without_elements(db: Any, notebook_id: str) -> set:
+        """H2(空源)候选集的 postgres 镜像——判据与 sqlite QueryStore.sources_without_elements
+        逐字一致(parse_status 白名单 parsed/extracting/extracted、无 source_elements、排除
+        memory/knowhow);减活跃租约由 CheckupService 在 service 层做。见 sqlite 版 docstring。"""
+        return {
+            row["id"] for row in db.execute(
+                "SELECT s.id AS id FROM sources s "
+                "WHERE s.notebook_id = %s "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND s.parse_status IN ('parsed', 'extracting', 'extracted') "
+                "AND NOT EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+    @staticmethod
     def visible_source_count(db: Any, notebook_id: str) -> int:
         """NotebookSummary's user-facing source count — excludes Memory-derived
         AND knowhow-table hidden synthetic sources (source_type IN ('memory',
