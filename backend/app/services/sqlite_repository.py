@@ -249,7 +249,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 
 @dataclass(frozen=True)
@@ -662,6 +662,12 @@ class SQLiteRepository:
         self._runtime.wire_ask(retrieval=lambda: self.retrieval)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize()
+        # Startup schema work is not application traffic.  In particular, the
+        # v25 credential scrub intentionally uses the instrumented write path;
+        # discard those samples before the fully initialized repository is
+        # published so runtime lock diagnostics start from a clean baseline.
+        if self._runtime.database.stats is not None:
+            self._runtime.database.stats.reset()
 
     def current_user(self) -> UserProfile:
         return self._runtime.identity.current_user()

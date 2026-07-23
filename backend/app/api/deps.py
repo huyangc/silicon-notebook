@@ -324,6 +324,13 @@ def model_status_service() -> ModelStatusService:
     return repository()._runtime.model_status  # type: ignore[attr-defined]
 
 
+def model_provider_if_initialized():
+    """Return the process-owned provider without constructing a repository."""
+    if not repository.cache_info().currsize:
+        return None
+    return repository()._runtime.models  # type: ignore[attr-defined]
+
+
 def model_service_binding_summary() -> dict[str, bool]:
     """Read-only readiness summary with no service identity or live diagnostics."""
     models = repository()._runtime.models  # type: ignore[attr-defined]

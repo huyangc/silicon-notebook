@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""PreToolUse 硬门：起子代理必须显式选模型，不得默认继承主 agent。
+
+Claude Code 的 `Agent` 工具在不传 `model` 时会继承主 agent 的模型，于是一个
+只需要 haiku 的检索任务和一个需要 opus 的评审任务花同样的钱、拿同样的判断力。
+本门把「选模型」从可选项变成必答题，判据写在 `CLAUDE.md`「子代理规范」。
+
+放行条件（任一成立即放行）：
+
+1. `tool_input.model` 已显式给出；
+2. `subagent_type` 命中仓库/用户的 `.claude/agents/` 定义，且该定义的
+   frontmatter 钉了具体模型（`model: inherit` 不算钉，视同未选）；
+3. `subagent_type == "fork"` —— fork 语义上必须继承父模型，传 `model` 无效。
+
+否则 deny，并把分层判据回给主 agent，让它补一个 `model` 重发。
+
+失败策略是 **fail-open**：任何内部异常（JSON 读坏、agents 目录读不了）都放行。
+这是规范守卫不是安全边界，不该因为自己的 bug 把用户的子代理全堵死。但 fail-open
+的爆炸半径要画在**单份定义**上：一份角色定义读坏只让它自己不算数，绝不能升级成
+整道门静默关闭——那种失败零信号，没人会发现门已经不在了。
+
+已知且可接受的摩擦：插件自带的角色（`~/.claude/plugins/*/agents/*.md`）不在扫描
+范围内，调用它们会被拦。补一个 `model` 即可通过，且按工具契约显式 `model` 本就
+优先于定义里的 frontmatter，所以判据不受影响。
+
+契约：stdin 收 PreToolUse 事件 JSON，stdout 回 `hookSpecificOutput`。
+
+`.claude/settings.json` 里的调用串尾部有 `|| true`，也是为 fail-open：本脚本无论
+放行还是拦截都以 0 退出（拦截靠 stdout 的 JSON），所以非零只可能来自「脚本或
+解释器不存在」。而 PreToolUse 的退出码 2 语义恰是「拦截」，不兜住的话缺文件会
+让守卫翻成 fail-closed，拿一段裸 Python 报错堵掉每一次子代理调用。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+# 工具在 2.x 里叫 `Agent`，历史别名 `Task` 仍被运行时接受，两个都要认。
+SUBAGENT_TOOLS = {"Agent", "Task"}
+
+# fork 继承父模型是语义要求，不是偷懒（见 Agent 工具说明）。
+#
+# 刻意只豁免**显式**的 `fork`：省略 `subagent_type` 在本 harness 里等于默认
+# general-purpose，而「不带模型的 general-purpose 调用」正是本门的头号拦截
+# 对象，把它当成隐式 fork 豁免掉等于把门整个掏空。
+MODEL_EXEMPT_SUBAGENT_TYPES = {"fork"}
+
+# 「填了但不算做出选择」的值：YAML 的三种空/null 写法，以及显式继承。
+#
+# 刻意**不**用「已知模型白名单」——白名单会随新模型上线而过期，到时候合法的
+# 角色定义会被误拦。本门要判的是「有没有做出选择」，不是「模型 id 合不合法」。
+NON_CHOICE_MODEL_VALUES = {"", "inherit", "null", "none", "~"}
+
+# 本解析器只认单行标量。块标量（`|` `>`）、锚与别名（`&` `*`）、标签（`!`）、
+# 流式集合（`[` `{`）它读不懂——`model: >-` 后接缩进的 `inherit` 是合法 YAML，
+# Claude Code 解析成 `inherit`，而这里只看得到 `>-`，会误判成钉死了模型。
+#
+# 遇到这些形态一律当作「未选」：宁可误拦（补个 model 就过）也不能放过一个
+# 实际仍会继承父模型的定义。不引 YAML 依赖是刻意的——hook 要在任何解释器下
+# 都能跑，为一个极端边缘形态换掉这个前提不划算。
+UNSUPPORTED_SCALAR_PREFIXES = ("|", ">", "&", "*", "!", "[", "{")
+
+DENY_REASON = """本仓库规范：起子代理必须显式选模型，不得默认继承主 agent（见 CLAUDE.md「子代理规范」）。
+
+请给这次 Agent 调用补一个 `model`，按**任务需要多少判断力**选，不是按任务大小：
+
+- `opus`   —— 需要判断力：写实现计划、规格/代码评审、架构取舍、疑难 bug 归因、
+              安全审查，以及任何「要能推翻既有结论」的活。
+- `sonnet` —— 规格已定死的转录型实现：计划写明了改哪些文件怎么改、机械重构、
+              补测试、文档同步、照既定模式扩展。
+- `haiku`  —— 纯检索定位清点：找文件、列符号、grep 汇总，只需汇报不需推理。
+
+拿不准就上 `opus`：返工一次的成本远高于模型差价。`inherit` 不算已选——它保留的
+正是本门要禁的继承语义。
+
+或者改用已钉好模型的仓库角色（`subagent_type`），无需再传 `model`：
+{roster}"""
+
+
+def _iter_agent_files(root: Path):
+    """列出一个 .claude/agents 目录下的所有定义（含子目录）。"""
+    agents_dir = root / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return
+    yield from sorted(agents_dir.rglob("*.md"))
+
+
+def _yaml_scalar(raw: object) -> str:
+    """把一个 YAML 标量归一到可判定的形态：剥行内注释、剥引号、去空白。
+
+    必须剥注释，否则 `model: inherit # 跟主 agent 走` 会被当成钉死了一个叫
+    `inherit # 跟主 agent 走` 的模型而放行，可 Claude Code 的 YAML 解析看到的
+    是 `inherit`，实际跑起来仍然继承主 agent——硬门被绕过。
+    """
+    text = str(raw or "").strip()
+    if text[:1] in {'"', "'"}:
+        quote = text[0]
+        end = text.find(quote, 1)
+        return (text[1:end] if end > 0 else text[1:]).strip()
+    for idx, ch in enumerate(text):
+        # YAML：`#` 位于行首、或前面是空白时，才起注释作用。
+        if ch == "#" and (idx == 0 or text[idx - 1].isspace()):
+            return text[:idx].strip()
+    return text
+
+
+def _is_simple_scalar(raw: object) -> bool:
+    """这个值是不是本解析器读得懂的单行标量。"""
+    return not _yaml_scalar(raw).startswith(UNSUPPORTED_SCALAR_PREFIXES)
+
+
+def _is_chosen_model(raw: object) -> bool:
+    """这个 model 值算不算「主动做出了选择」。"""
+    value = _yaml_scalar(raw).lower()
+    return bool(value) and value not in NON_CHOICE_MODEL_VALUES and _is_simple_scalar(raw)
+
+
+def _parse_frontmatter(path: Path) -> dict[str, str]:
+    """极简 YAML frontmatter 读取：只取顶层 `key: value` 标量。
+
+    不引第三方 YAML 依赖——hook 要在任何解释器下都能跑，而我们只需要
+    `name` 和 `model` 两个标量字段。值一律保持原样，由 `_yaml_scalar` 归一。
+    """
+    try:
+        # 必须一并接住 UnicodeDecodeError（是 ValueError 不是 OSError）：本仓库的
+        # 角色定义正文是中文，任何一份被存成 GBK，解码异常就会逃出这层 per-file
+        # 容错、一路冒到 main() 的兜底 fail-open，整道门当场静默全失效。
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return {}
+    if not text.startswith("---"):
+        return {}
+    lines = text.splitlines()
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if not line or line[0].isspace() or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def _pinned_agent_models(project_dir: Path) -> dict[str, str]:
+    """{subagent_type: model}，只收 frontmatter 钉了具体模型的定义。
+
+    `inherit` 被刻意排除：它就是「跟主 agent 走」，正是本门要拦的行为。
+
+    作用域优先级必须跟 Claude Code 一致——项目级 `.claude/agents/` 压过用户级
+    `~/.claude/agents/`。所以名字**一出现就占位**，不管它钉没钉模型：否则
+    「项目级同名定义没钉模型 + 用户级同名定义钉了模型」会让本门拿用户级那条
+    放行，而真正跑起来的是项目级那条、模型仍然继承主 agent，硬门被绕过。
+    """
+    pinned: dict[str, str] = {}
+    claimed: set[str] = set()
+    for root in (project_dir, Path.home()):
+        scope_has_unreadable_name = False
+        for path in _iter_agent_files(root):
+            try:
+                fields = _parse_frontmatter(path)
+                raw_name = fields.get("name")
+                # `name` 用了读不懂的形态时真名无从得知：退回文件名占位，并拒绝
+                # 让这份定义贡献「已钉」条目。
+                readable_name = _is_simple_scalar(raw_name)
+                if not readable_name:
+                    scope_has_unreadable_name = True
+                name = (_yaml_scalar(raw_name) if readable_name else "") or path.stem
+                if name in claimed:
+                    continue
+                claimed.add(name)
+                model = fields.get("model")
+                if readable_name and _is_chosen_model(model):
+                    pinned[name] = _yaml_scalar(model).lower()
+            except Exception:  # noqa: BLE001
+                # per-file 降级：一份定义读坏不该拖垮整轮扫描，更不该冒到
+                # main() 的兜底把整道门关掉。
+                continue
+        if scope_has_unreadable_name:
+            # 本作用域里有定义的真名读不出来 —— 它可能占着任意一个名字，而
+            # 退回文件名占位只在 stem 恰好等于真名时才堵得住。继续采信低优先级
+            # 作用域的 pin，就可能把那个名字放行、实际跑的却是这份没钉模型的
+            # 定义。到此为止，fail-closed。
+            break
+    return pinned
+
+
+def _allow() -> None:
+    sys.exit(0)
+
+
+def _deny(reason: str) -> None:
+    json.dump(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        },
+        sys.stdout,
+        ensure_ascii=False,
+    )
+    sys.exit(0)
+
+
+def evaluate(payload: object, project_dir: Path) -> str | None:
+    """判定一次工具调用：放行返回 `None`，拦截返回给主 agent 的理由。
+
+    与进程边界解耦，只读 `.claude/agents/`，所以测试可以直接调它跑判定矩阵，
+    不必为每条用例起一个解释器——那种测法会往测试套件里灌进几十次进程冷启动，
+    把同批跑的、带时间预算的用例挤爆（本仓库的 `test_diag_db.py` 就有一条给
+    「起解释器 + 跑完脚本」只留 0.25 秒的用例）。进程契约另有少量用例专门守。
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    if payload.get("tool_name") not in SUBAGENT_TOOLS:
+        return None
+
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return None
+
+    # 调用点写 `model: inherit` 保留的正是本门要禁的语义，等同于没选。
+    if _is_chosen_model(tool_input.get("model")):
+        return None
+
+    subagent_type = str(tool_input.get("subagent_type") or "").strip()
+    if subagent_type in MODEL_EXEMPT_SUBAGENT_TYPES:
+        return None
+
+    pinned = _pinned_agent_models(project_dir)
+    if subagent_type in pinned:
+        return None
+
+    roster = (
+        "\n".join(f"  - {name} → {model}" for name, model in sorted(pinned.items()))
+        or "  （当前没有已钉模型的角色定义）"
+    )
+    return DENY_REASON.format(roster=roster)
+
+
+def _resolve_project_dir(payload: object) -> Path:
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or cwd or ".")
+
+
+def main() -> None:
+    payload = json.load(sys.stdin)
+    reason = evaluate(payload, _resolve_project_dir(payload))
+    if reason is None:
+        _allow()
+    _deny(reason)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:  # noqa: BLE001 —— fail-open，见模块 docstring
+        sys.exit(0)

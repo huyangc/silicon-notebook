@@ -2,6 +2,12 @@
 """Backup-only verification that the current repository opens a pre-refactor
 SQLite database without changing it.
 
+"Opens" here means a full SERVER start: construct the repository (migrate +
+seed) and then run the startup crash-recovery sweep, which the server's
+lifespan drives explicitly (``app/services/startup_warmup.py::run_startup``)
+rather than the repository constructor. Modelling only the constructor would
+understate what a real boot does to the database.
+
 ~~~text
 python scripts/verify_repository_snapshot.py \
   --database PATH \
@@ -1634,6 +1640,14 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
             return_value=SystemModelServiceRegistry({}, {}),
         ):
             repo = SQLiteRepository(settings)
+            # Startup crash recovery is no longer a construction side effect
+            # (it moved to app/services/startup_warmup.py::run_startup so
+            # offline CLIs stop settling the server's in-progress rows). This
+            # tool must keep modelling a real SERVER start — otherwise it would
+            # report "nothing changes" while the actual boot still normalizes
+            # these rows, i.e. a rosier picture than production. Driven
+            # explicitly here, against the disposable BACKUP copy.
+            repo._recover_interrupted_jobs()
             reads = exercise_reads(repo, backup_path)
 
         column_plan = {
@@ -1832,7 +1846,43 @@ MIGRATION_MANIFEST[(22, 23)] = {
     "views": {},
 }
 
-# v24: deployment-wide model-service health plus an irreversible data-only
+# v24: write-lock slimming improvement point 2 (design doc §5.5) — the
+# kg_canonical_scratch preparation-segment scratch table (seed -> canonical
+# mapping) that swap_cluster_map_from_scratch's pure-SQL swap joins against
+# kg_cluster_scratch. Same appended-here convention as v22/v23 above.
+KG_CANONICAL_SCRATCH_TABLE = {
+    "kg_canonical_scratch": """CREATE TABLE kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                )""",
+}
+KG_CANONICAL_SCRATCH_INDEX = {
+    "idx_kg_canonical_scratch_nb_run_seed":
+        """CREATE INDEX idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 24, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_CANONICAL_SCRATCH_TABLE},
+        "indexes": {**manifest["indexes"], **KG_CANONICAL_SCRATCH_INDEX},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(23, 24)] = {
+    "tables": KG_CANONICAL_SCRATCH_TABLE,
+    "columns": {},
+    "indexes": KG_CANONICAL_SCRATCH_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
+# v25: deployment-wide model-service health plus an irreversible data-only
 # scrub of per-user settings and legacy status rows. The retained v23 table and
 # user_profiles column are unchanged structurally; compare_snapshots validates
 # the only permitted row changes separately.
@@ -1851,13 +1901,13 @@ SYSTEM_MODEL_SERVICE_STATUS_TABLE = {
                 )""",
 }
 MIGRATION_MANIFEST = {
-    (key[0], 24, *key[2:]): {
+    (key[0], 25, *key[2:]): {
         **manifest,
         "tables": {**manifest["tables"], **SYSTEM_MODEL_SERVICE_STATUS_TABLE},
     }
     for key, manifest in MIGRATION_MANIFEST.items()
 }
-MIGRATION_MANIFEST[(23, 24)] = {
+MIGRATION_MANIFEST[(24, 25)] = {
     "tables": SYSTEM_MODEL_SERVICE_STATUS_TABLE,
     "columns": {},
     "indexes": {},

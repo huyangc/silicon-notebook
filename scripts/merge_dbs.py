@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=24) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=25) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -33,7 +33,8 @@ NOTEBOOK_SCOPED_TABLES = [
     "concept_clusters", "concept_comentions", "concept_merge_candidates",
     "canonical_relations", "communities", "community_members", "mention_edges",
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
-    "kg_cluster_scratch", "kg_conflict_candidates", "merge_review_jobs",
+    "kg_cluster_scratch", "kg_canonical_scratch", "kg_conflict_candidates",
+    "merge_review_jobs",
     "promotion_candidates", "derived_rule_candidates", "extraction_runs",
     "extraction_candidates", "articles", "article_claims", "conversations",
     "answers", "feedback", "ask_jobs", "kg_build_jobs", "reports", "memory_items",

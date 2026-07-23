@@ -213,12 +213,6 @@
       },
       {
         "kind": "import",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
         "path": "scripts/kg_product_smoke.py",
         "scope": "<module>",
         "target": "app.services.sqlite_repository:SQLiteRepository"
@@ -1414,6 +1408,27 @@
     "scope": "module",
     "signature": "() -> 'str'"
   },
+  "_recover_interrupted_jobs": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/startup_warmup.py",
+        "scope": "<module>.run_startup",
+        "target": "_recover_interrupted_jobs"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/verify_repository_snapshot.py",
+        "scope": "<module>.verify_snapshot",
+        "target": "_recover_interrupted_jobs"
+      }
+    ],
+    "kind": "private_wrapper",
+    "owner": "SqliteDatabase",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self) -> 'None'"
+  },
   "_remap_json_ids": {
     "consumers": [
       {
@@ -1492,6 +1507,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.memory_preview_client",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.model_provider_if_initialized",
         "target": "_runtime"
       },
       {
@@ -4624,6 +4645,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_element_embeddings",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_node_embeddings",
         "target": "configured"
       },
@@ -5212,21 +5239,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, job_id: 'str') -> 'bool'"
-  },
-  "federated_retrieve": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>.main",
-        "target": "federated_retrieve"
-      }
-    ],
-    "kind": "method",
-    "owner": "RetrievalService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, active_notebook_id: 'str', query: 'str', types: 'Optional[Iterable[str]]' = None, w_keyword: 'float' = 0.4, w_semantic: 'float' = 0.6) -> 'List[RetrievedKnowledge]'"
   },
   "find_duplicates": {
     "consumers": [
@@ -5892,12 +5904,6 @@
         "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.set_notebook_bases_route",
         "target": "list_notebook_bases"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>.main",
-        "target": "list_notebook_bases"
       }
     ],
     "kind": "method",
@@ -6061,6 +6067,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._count_missing_element_vectors",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._count_missing_node_vectors",
         "target": "maintenance"
       },
@@ -6080,6 +6092,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_chunk_embeddings",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_element_embeddings",
         "target": "maintenance"
       },
       {
@@ -6163,12 +6181,6 @@
       {
         "kind": "attribute",
         "path": "scripts/denoise_reextract_nb.py",
-        "scope": "<module>.main",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
         "scope": "<module>.main",
         "target": "maintenance"
       },
@@ -6413,12 +6425,6 @@
         "kind": "patch",
         "path": "backend/tests/test_rebuild_communities.py",
         "scope": "<module>.test_large_no_index_refuses_without_igraph",
-        "target": "notebook_copy_stats"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>.main",
         "target": "notebook_copy_stats"
       }
     ],
@@ -7569,12 +7575,6 @@
       },
       {
         "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>.main",
-        "target": "retrieval"
-      },
-      {
-        "kind": "attribute",
         "path": "scripts/replay_retrieval.py",
         "scope": "<module>.record_run",
         "target": "retrieval"
@@ -7653,12 +7653,6 @@
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.scale_index_status",
         "target": "scale_index_status"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>.main",
-        "target": "scale_index_status"
       }
     ],
     "kind": "method",
@@ -7666,21 +7660,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
-  },
-  "scale_ppr": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "scripts/diag_base_report.py",
-        "scope": "<module>.main",
-        "target": "scale_ppr"
-      }
-    ],
-    "kind": "method",
-    "owner": "RetrievalService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str', question: 'str') -> 'List[Tuple[str, float]]'"
   },
   "search_notebook": {
     "consumers": [

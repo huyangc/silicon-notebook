@@ -29,7 +29,7 @@ def test_fresh_db_is_stamped_to_current_schema_version(tmp_path):
     assert _user_version(repo) == sr.SCHEMA_VERSION
 
 
-def test_migration_24_irreversibly_scrubs_user_model_credentials_and_old_status(tmp_path):
+def test_migration_25_irreversibly_scrubs_user_model_credentials_and_old_status(tmp_path):
     repo = _repo(tmp_path)
     with repo._write() as db:
         db.execute(
@@ -55,9 +55,9 @@ def test_migration_24_irreversibly_scrubs_user_model_credentials_and_old_status(
             "VALUES ('user-local','llm','fp','error',0,'upstream','observed_failure',"
             "'2030-01-01T00:00:00+00:00')"
         )
-        db.execute("PRAGMA user_version = 23")
+        db.execute("PRAGMA user_version = 24")
 
-    assert repo._migrate() == [24]
+    assert repo._migrate() == [25]
 
     with repo._connect() as db:
         settings = db.execute(
@@ -79,7 +79,7 @@ def test_migration_24_irreversibly_scrubs_user_model_credentials_and_old_status(
     assert "recovery_probe" in table_sql
 
 
-def test_migration_24_rolls_back_scrub_table_and_version_when_stamp_fails(
+def test_migration_25_rolls_back_scrub_table_and_version_when_stamp_fails(
     tmp_path, monkeypatch
 ):
     repo = _repo(tmp_path)
@@ -96,7 +96,7 @@ def test_migration_24_rolls_back_scrub_table_and_version_when_stamp_fails(
             "'2030-01-01T00:00:00+00:00')"
         )
         db.execute("DROP TABLE system_model_service_status")
-        db.execute("PRAGMA user_version = 23")
+        db.execute("PRAGMA user_version = 24")
 
     original_write = repo._runtime.database.write
 
@@ -105,7 +105,7 @@ def test_migration_24_rolls_back_scrub_table_and_version_when_stamp_fails(
         with original_write() as db:
             class FailingConnection:
                 def execute(self, sql, parameters=()):
-                    if "PRAGMA user_version = 24" in str(sql):
+                    if "PRAGMA user_version = 25" in str(sql):
                         raise RuntimeError("injected version stamp failure")
                     return db.execute(sql, parameters)
 
@@ -120,7 +120,7 @@ def test_migration_24_rolls_back_scrub_table_and_version_when_stamp_fails(
         repo._migrate()
 
     with repo._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 24
         assert db.execute(
             "SELECT model_settings FROM user_profiles WHERE user_id='user-local'"
         ).fetchone()[0] == original_settings
@@ -181,7 +181,11 @@ def test_add_column_if_missing_skips_absent_table(tmp_path):
 
 def test_interrupted_merge_job_recovered_on_restart_even_via_fast_path(tmp_path):
     """崩溃兜底：卡在 'running' 的 merge_review_jobs 必须在每次重启被标记 failed，
-    即便 schema 已最新、迁移走了快路径也不能漏(否则该 notebook 的单飞守卫永久卡死)。"""
+    即便 schema 已最新、迁移走了快路径也不能漏(否则该 notebook 的单飞守卫永久卡死)。
+
+    清算已从构造副作用改为服务端启动路径显式调用(见
+    tests/test_startup_recovery_ownership.py),但「版本闸快路径不得吞掉它」这条
+    仍然成立且仍需钉住——两者是独立的代码路径,快路径只短路 _migrate。"""
     s = Settings(database_url=f"sqlite:///{tmp_path}/t.db")
     repo = SQLiteRepository(s)
     with repo._write() as db:
@@ -190,8 +194,9 @@ def test_interrupted_merge_job_recovered_on_restart_even_via_fast_path(tmp_path)
             "VALUES ('nb1', 'n', 't', 't')")
         db.execute(
             "INSERT INTO merge_review_jobs (notebook_id, status) VALUES ('nb1', 'running')")
-    # 模拟重启：同库上重建 repo（schema 已最新 → _migrate 走快路径）
-    SQLiteRepository(s)
+    # 模拟服务端重启：同库上重建 repo（schema 已最新 → _migrate 走快路径）+ 显式清算
+    restarted = SQLiteRepository(s)
+    restarted._recover_interrupted_jobs()
     with repo._connect() as db:
         status = db.execute(
             "SELECT status FROM merge_review_jobs WHERE notebook_id='nb1'").fetchone()["status"]

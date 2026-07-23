@@ -303,7 +303,7 @@ class NotebookStore:
         """Delete the notebooks row in ONE committed transaction and return the
         source file paths for the caller to remove AFTER the commit (DB first,
         files second — never the other way around)."""
-        with self.database.write() as db:
+        with self.database.write(operation="notebook.delete") as db:
             source_rows = db.execute(
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
                 (notebook_id,),

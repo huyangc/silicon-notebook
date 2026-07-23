@@ -16,12 +16,14 @@ from app.api.deps import (
     USER_MESSAGE_HEADER,
     get_current_user,
     mcp_memory_repository,
+    model_provider_if_initialized,
     repository,
     shutdown_repository_if_initialized,
 )
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
 from app.api.routes import router
+from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
@@ -61,6 +63,37 @@ async def _lifespan(app: FastAPI):
         if startup_worker is not None:
             await asyncio.to_thread(startup_worker.join)
         shutdown_repository_if_initialized()
+
+
+def _diagnostic_concurrency_snapshot(*, models=None) -> dict:
+    from app.services.kg import scheduler
+
+    result = {"kg": scheduler.stats()}
+    if models is None:
+        models = model_provider_if_initialized()
+        if models is None:
+            return result
+    registry = getattr(models, "registry", None)
+    if registry is None:
+        return result
+
+    # runtime.json 保持有界、无凭据的类别级视图；按物理服务的
+    # 调度细节和故障定位由管理员模型服务状态接口提供。
+    groups: dict[str, dict[str, int]] = {}
+    group_for_kind = {"chat": "llm", "embedding": "embedding", "rerank": "rerank"}
+    for service in registry.services():
+        group = group_for_kind.get(service.kind)
+        if group is None:
+            continue
+        snapshot = models.scheduler_snapshot(service.id)
+        aggregate = groups.setdefault(
+            group, {"active": 0, "maximum": 0, "waiting": 0}
+        )
+        aggregate["active"] += snapshot.active
+        aggregate["maximum"] += snapshot.maximum
+        aggregate["waiting"] += snapshot.queued
+    result.update(groups)
+    return result
 
 
 def _env_file_preflight() -> None:
@@ -118,8 +151,14 @@ def create_app() -> FastAPI:
         # with the repository migration/cache warm-up readiness lifecycle.
         inner = mcp_server.streamable_http_app()
         async with inner.router.lifespan_context(inner):
-            async with _lifespan(_app):
-                yield
+            root_dir = Path(__file__).resolve().parents[2]
+            with diagnostics.activate_runtime(
+                root_dir / ".local" / "diagnostics",
+                readiness_provider=readiness.snapshot,
+                concurrency_provider=_diagnostic_concurrency_snapshot,
+            ):
+                async with _lifespan(_app):
+                    yield
 
     # 日志归档：启动时后台扫一遍「非今天」的天文件并 gzip，best-effort、不阻塞启动。
     from app.core.event_logging import archive_stale_days, _archive_pool
@@ -164,40 +203,46 @@ def create_app() -> FastAPI:
         request_id = new_id("req")
         start = time.perf_counter()
         client = request.client.host if request.client else ""
-        try:
-            response = await call_next(request)
-        except Exception as exc:
+        with diagnostics.request_scope(
+            request_id, request.method, request.url.path
+        ):
+            try:
+                with diagnostics.diagnostic_phase("http.dispatch"):
+                    response = await call_next(request)
+            except Exception as exc:
+                latency_ms = round((time.perf_counter() - start) * 1000)
+                request_log.emit(
+                    {
+                        "id": request_id,
+                        "kind": "http",
+                        "method": request.method,
+                        "path": request.url.path,
+                        "status": "error",
+                        "latency_ms": latency_ms,
+                        "client": client,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                raise
             latency_ms = round((time.perf_counter() - start) * 1000)
+            slow = latency_ms >= settings.slow_request_ms
+            status = "slow" if slow else (
+                "ok" if response.status_code < 500 else "error"
+            )
             request_log.emit(
                 {
                     "id": request_id,
                     "kind": "http",
                     "method": request.method,
                     "path": request.url.path,
-                    "status": "error",
+                    "status_code": response.status_code,
+                    "status": status,
                     "latency_ms": latency_ms,
                     "client": client,
-                    "error": f"{type(exc).__name__}: {exc}",
                 }
             )
-            raise
-        latency_ms = round((time.perf_counter() - start) * 1000)
-        slow = latency_ms >= settings.slow_request_ms
-        status = "slow" if slow else ("ok" if response.status_code < 500 else "error")
-        request_log.emit(
-            {
-                "id": request_id,
-                "kind": "http",
-                "method": request.method,
-                "path": request.url.path,
-                "status_code": response.status_code,
-                "status": status,
-                "latency_ms": latency_ms,
-                "client": client,
-            }
-        )
-        response.headers["X-Request-Id"] = request_id
-        return response
+            response.headers["X-Request-Id"] = request_id
+            return response
 
     @app.middleware("http")
     async def readiness_gate(request: Request, call_next):

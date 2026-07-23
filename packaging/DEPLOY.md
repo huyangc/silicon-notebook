@@ -1,7 +1,9 @@
 # 离线部署包 — 目标机说明
 
 本包是**自包含**的:内含便携 Node 运行时(跑前端)+ 预编译的 Python 依赖(wheelhouse)。
-目标机**无需 npm/node、无需 root**,只需一个 `python3`(≥ 3.10)和一个可用的 pip 源。
+目标机**无需 npm/node、无需 root**,只需一个 `python3`(≥ 3.13;SQLite 写锁公平性依赖
+CPython 3.13 的 PyMutex 交接语义,见 `backend/app/repositories/sqlite/database.py`)
+和一个可用的 pip 源。
 
 ## 目录结构
 

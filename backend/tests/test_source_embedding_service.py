@@ -125,6 +125,7 @@ def test_runtime_composes_source_embedding_service(repo):
     assert isinstance(service, SourceEmbeddingService)
     expected = {
         "embed_source",
+        "embed_elements_batch",
         "embed_objects_batch",
         "embed_relations_batch",
         "embed_chunks_for_source",

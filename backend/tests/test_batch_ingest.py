@@ -12,7 +12,7 @@ from app.core.request_context import get_request_user, set_request_user, reset_r
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.services import batch_ingest as bi
-from tests.model_testkit import RecordingModelProvider
+from tests.model_testkit import RecordingModelProvider, bind_embedding_client
 
 
 @pytest.fixture
@@ -185,6 +185,59 @@ def test_run_ingest_dedup_skips_on_rerun(repo, tmp_path):
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?", (nb_id,)).fetchone()["c"]
     assert nsrc == 3
+
+
+def test_run_ingest_releases_the_claim_when_the_claimant_fails(repo, tmp_path, monkeypatch):
+    """认领只代表「这个内容由我这一份来做」,不代表已摄取。认领者失败必须交回认领,
+    否则后面同内容的副本会看到 digest 已被认领而直接 skipped —— 一次瞬时失败
+    (存储/SQLite 抖动)就让这份内容整轮都进不来,而在有认领集合之前它本可以由下一个
+    副本重试成功。workers=1 保证副本按序处理,让「先失败、后重试」可确定性复现。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-claim-release")
+    body = "# Same\n\nIdentical body " + "r" * 200
+    a = tmp_path / "a.md"; a.write_text(body, encoding="utf-8")
+    b = tmp_path / "b.md"; b.write_text(body, encoding="utf-8")
+
+    # 打桩点选在 repo.maintenance 上(认领之后、upload 之前的那次查库),刻意**不**给
+    # facade 的 repo.upload_sources 打桩:那会往冻结的 facade 契约里塞 test-only patch 记录。
+    real_lookup = repo.maintenance.source_id_by_hash
+    calls = {"n": 0}
+
+    def _flaky(notebook_id_, digest_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient sqlite blip")
+        return real_lookup(notebook_id_, digest_)
+
+    monkeypatch.setattr(repo.maintenance, "source_id_by_hash", _flaky)
+
+    counts = bi.run_ingest(repo, nb_id, [a, b], workers=1)
+
+    assert counts["failed"] == 1
+    assert counts["uploaded"] == 1, "认领没被交回,第二个副本失去了重试机会"
+    assert counts["skipped"] == 0
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"] == 1
+
+
+def test_run_ingest_same_run_duplicate_files_skip_not_reparse(repo, tmp_path):
+    """同一次运行里两个内容相同的文件:第一个 uploaded、第二个 skipped。
+
+    没有本次运行的认领集合时,第二个要多跑一次 source_id_by_hash 查库才能判出重复;
+    认领集合让它在做任何事之前就短路。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-dup")
+    body = "# Same\n\nIdentical body " + "q" * 200
+    a = tmp_path / "a.md"; a.write_text(body, encoding="utf-8")
+    b = tmp_path / "b.md"; b.write_text(body, encoding="utf-8")
+
+    counts = bi.run_ingest(repo, nb_id, [a, b], workers=1)
+
+    assert counts["uploaded"] == 1 and counts["skipped"] == 1
+    assert counts["failed"] == 0
+    with repo._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert nsrc == 1                                # 同内容只建一个源
 
 
 def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
@@ -636,6 +689,272 @@ def test_main_embed_requires_notebook_id(repo, capsys):
     rc = bi.main(["embed"])
     assert rc == 2
     assert "notebook-id" in capsys.readouterr().err
+
+
+# ── element 向量的缺失查询与补齐 ──────────────────────────────────────────────
+# run_ingest 现在通过系统模型调度同时生成 chunk / element 向量。因此补齐用例
+# 显式删除 element 向量来模拟旧数据、中断任务或人工清理后的待回填状态。
+
+class _TextRecordingEmbedder(FakeEmbedder):
+    """FakeEmbedder + 记录每次真正送给 embedder 的文本(断言截断规则/只补缺失用)。"""
+
+    def __init__(self, dim, seen):
+        super().__init__(dim=dim)
+        self.seen = seen
+
+    def embed_texts(self, texts):
+        self.seen.extend(texts)
+        return super().embed_texts(texts)
+
+
+def _element_rows(repo, source_id):
+    with repo._connect() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT id, text FROM source_elements WHERE source_id=? ORDER BY id",
+            (source_id,)).fetchall()]
+
+
+def _source_ids(repo, notebook_id):
+    with repo._connect() as db:
+        return [r["id"] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? ORDER BY id",
+            (notebook_id,)).fetchall()]
+
+
+def _delete_element_vectors(repo, notebook_id):
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM element_embeddings WHERE notebook_id=?",
+            (notebook_id,),
+        )
+
+
+def _insert_element(repo, source_id, element_id, text):
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            (element_id, source_id, "paragraph", "p1", text, "{}", now))
+
+
+def test_py_whitespace_constant_covers_every_python_strip_char():
+    """PY_WHITESPACE 必须就是 str.strip() 的字符全集——缺失查询拿它当 TRIM 字符集,
+    少一个字符就有一类元素「算缺失但永远补不上」,补齐命令不收敛。"""
+    from app.repositories.sqlite.maintenance import PY_WHITESPACE
+
+    assert set(PY_WHITESPACE) == {
+        chr(c) for c in range(0x110000) if chr(c).isspace()
+    }
+
+
+def test_missing_element_rows_exclude_blank_text(repo, tmp_path):
+    """空白文本元素不算缺失:embed_source 会跳过它们(text.strip() 为空),它们永远不会
+    有向量。若算进缺失,补齐命令每次都报「还有 N 个缺失」、每次都试着嵌入空串 → 永不
+    收敛的脏状态。含纯制表符/换行/全角空格——SQLite 裸 TRIM() 只去半角空格,挡不住。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-blank")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    sid = _source_ids(repo, nb_id)[0]
+    bi.backfill_element_embeddings(repo, nb_id)      # 先把真实元素补齐
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    for i, blank in enumerate(["", "   ", "\t\n", "　　", "\xa0"]):
+        _insert_element(repo, sid, f"el-blank-{i}", blank)   # 全部无向量
+
+    rows = repo.maintenance.missing_element_embedding_rows(nb_id)
+
+    assert [r["id"] for r in rows] == []                     # 一个都不算缺失
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.backfill_element_embeddings(repo, nb_id) == 0   # 仍然 0 项可补
+    _insert_element(repo, sid, "el-real", " 有内容的段落 ")    # 对照:非空白才算缺失
+    assert [r["id"] for r in repo.maintenance.missing_element_embedding_rows(nb_id)] == [
+        "el-real"]
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 1
+
+
+def test_missing_element_rows_are_scoped_to_the_notebook(repo, tmp_path):
+    """缺失查询按 notebook 限定(source_elements 表本身没有 notebook_id,靠 JOIN sources)。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_a = bi.ensure_notebook(repo, None, "nb-a")
+    nb_b = bi.ensure_notebook(repo, None, "nb-b")
+    bi.run_ingest(repo, nb_a, bi.iter_files(d), workers=1)
+    _delete_element_vectors(repo, nb_a)
+    n_a = repo.maintenance.count_missing_element_vectors(nb_a)
+
+    assert n_a > 0                                            # A 有缺
+    assert repo.maintenance.count_missing_element_vectors(nb_b) == 0   # B 不受影响
+    assert all(r["source_id"] in _source_ids(repo, nb_a)
+               for r in repo.maintenance.missing_element_embedding_rows(nb_a))
+    assert repo.maintenance.missing_element_embedding_rows(nb_b) == []
+
+
+def test_backfill_element_embeddings_fills_missing_and_is_idempotent(repo, tmp_path):
+    """补齐后全部有向量、第二遍 0 项可补(幂等);再删掉一部分重跑时,只有被删的那些
+    重新送进 embedder(INSERT OR REPLACE upsert 只碰缺的,不整源重嵌)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-el")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
+    _delete_element_vectors(repo, nb_id)
+    total = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert total >= 3                                         # 多源、多 element
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == total
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.backfill_element_embeddings(repo, nb_id) == 0   # 幂等
+
+    with repo._connect() as db:                               # 制造部分缺失
+        eids = [r["element_id"] for r in db.execute(
+            "SELECT element_id FROM element_embeddings WHERE notebook_id=? "
+            "ORDER BY element_id", (nb_id,)).fetchall()]
+    deleted = eids[:2]
+    with repo._write() as db:
+        db.executemany("DELETE FROM element_embeddings WHERE element_id=?",
+                       [(eid,) for eid in deleted])
+    seen = []
+    bind_embedding_client(
+        repo,
+        _TextRecordingEmbedder(dim=16, seen=seen),
+        workload_ids=("source_element_embedding",),
+    )
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == len(deleted)
+
+    assert len(seen) == len(deleted)                          # 只重嵌了被删的那两条
+    with repo._connect() as db:
+        want = {r["text"] for r in db.execute(
+            "SELECT text FROM source_elements WHERE id IN (?,?)", tuple(deleted)
+        ).fetchall()}
+    assert set(seen) == want
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_groups_rows_by_source(repo, tmp_path):
+    """待补行跨多个源:replace_element_vectors 是 per-source 签名(source_id, notebook_id,
+    rows),必须按 source_id 分组逐组落库——落错组会让 element_embeddings.source_id 指向
+    别的源(按源删向量/按源重嵌都会走错)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-group")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
+    _delete_element_vectors(repo, nb_id)
+    sids = _source_ids(repo, nb_id)
+    assert len(sids) >= 2
+    missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert len({r["source_id"] for r in
+                repo.maintenance.missing_element_embedding_rows(nb_id)}) == len(sids)
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == missing
+
+    with repo._connect() as db:                               # 每行的 source_id 都对得上
+        mismatched = db.execute(
+            "SELECT COUNT(*) c FROM element_embeddings v JOIN source_elements e "
+            "ON e.id = v.element_id WHERE v.notebook_id=? AND v.source_id != e.source_id",
+            (nb_id,)).fetchone()["c"]
+        per_source = {r["source_id"]: r["c"] for r in db.execute(
+            "SELECT source_id, COUNT(*) c FROM element_embeddings WHERE notebook_id=? "
+            "GROUP BY source_id", (nb_id,)).fetchall()}
+    assert mismatched == 0
+    assert set(per_source) == set(sids)                       # 每个源都写到了
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_persists_before_all_embedding_finishes(repo, tmp_path, monkeypatch):
+    """向量必须**分页**推进:每页算完立刻落库,而不是全算完再统一写。
+
+    直接测内存不现实,但分页有个等价的可观测性质:落库会与嵌入**交错**发生。
+    不分页时必然是「所有 embed → 才开始 write」。这条断言正是钉住那个差别——
+    注意光把落库循环写成「逐批」是**无效**的:_map_embedding_batches 返回
+    list[list](内部等全部 future 完成再收集),遍历它时向量早已全在内存里;
+    必须在喂进去之前分页。"""
+    d = _make_md_dir(tmp_path, n=3)
+    nb_id = bi.ensure_notebook(repo, None, "nb-stream")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    _delete_element_vectors(repo, nb_id)
+    missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert missing >= 3, "样本太小,分不出多页 → 本用例无检出力"
+
+    svc = repo._runtime.source_embedding
+    # 页大小 = 模型服务并行度 * embed_batch_size,都压到 1 → 每行一页。
+    monkeypatch.setattr(repo.settings, "embed_batch_size", 1)
+    monkeypatch.setitem(
+        repo._runtime.models.parallelism_by_workload,
+        "source_element_embedding",
+        1,
+    )
+
+    events: list[str] = []
+    real_embed = svc.embedder
+
+    def _recording_embedder(workload_id):
+        inner = real_embed(workload_id)
+
+        class _Rec:
+            def embed_texts(self, texts):
+                events.append("embed")
+                return inner.embed_texts(texts)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        return _Rec()
+
+    real_write = svc.vectors.replace_element_vectors
+
+    def _recording_write(*args, **kwargs):
+        events.append("write")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(svc, "embedder", _recording_embedder)
+    monkeypatch.setattr(svc.vectors, "replace_element_vectors", _recording_write)
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == missing
+
+    assert "write" in events and "embed" in events
+    last_embed = len(events) - 1 - events[::-1].index("embed")
+    first_write = events.index("write")
+    assert first_write < last_embed, (
+        "所有 embed 都跑完才开始 write —— 向量没有分页落库,大库上会 OOM", events)
+
+
+def test_backfill_element_embeddings_truncates_by_settings_not_hardcoded_2000(repo, tmp_path):
+    """补齐路径的截断必须用 settings.embed_truncate_chars(与 embed_source 同构),不是
+    embed_chunks_batch 里硬编码的 2000。默认值恰好也是 2000 → 必须把配置调成非 2000
+    才有检出力,这里用 137。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-trunc")
+    p = tmp_path / "long.md"
+    p.write_text("# Long\n\n" + "词" * 5000, encoding="utf-8")
+    bi.run_ingest(repo, nb_id, [p], workers=1)
+    sid = _source_ids(repo, nb_id)[0]
+    assert any(len(r["text"]) > 2000 for r in _element_rows(repo, sid))   # 有超长元素
+    _delete_element_vectors(repo, nb_id)
+    seen = []
+    bind_embedding_client(
+        repo,
+        _TextRecordingEmbedder(dim=16, seen=seen),
+        workload_ids=("source_element_embedding",),
+    )
+    repo.settings.embed_truncate_chars = 137                  # 非默认值,否则本断言零检出力
+
+    assert bi.backfill_element_embeddings(repo, nb_id) > 0
+
+    assert seen
+    assert max(len(t) for t in seen) == 137                   # 真按 137 截,不是 2000
+
+
+def test_run_embed_fills_missing_element_vectors(repo, tmp_path):
+    """run_embed 三侧并列:chunk / element / 节点都盘点 → 补齐 → 复盘归零。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-embed3")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    _delete_element_vectors(repo, nb_id)
+    element_missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert element_missing > 0
+
+    out = bi.run_embed(repo, nb_id)
+
+    assert out["element_missing_before"] == element_missing
+    assert out["elements_embedded"] == element_missing
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.run_embed(repo, nb_id)["element_missing_before"] == 0   # 幂等
 
 
 def test_main_embed_requires_embed_even_with_allow_no_embed(repo, tmp_path, monkeypatch, capsys):
@@ -1658,6 +1977,10 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
     lock = threading.Lock()
     active = 0
     peak = 0
+    # 结构性判据：模型 workload 绑定的服务并行度为 3，因此同时只能有
+    # 3 个 metadata producer 到达 barrier；容量只来自服务配置。
+    barrier = threading.Barrier(3, timeout=10)
+    barrier_broke = threading.Event()
 
     monkeypatch.setattr(
         service.sources,
@@ -1684,7 +2007,13 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
             active += 1
             peak = max(peak, active)
         try:
-            time.sleep(0.04)
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                # 并发度不足 12(或第一个到齐者已超时把 barrier 打破)。记标志后
+                # 正常返回,让剩下的 worker 立即穿过已破的 barrier —— 测试干净地
+                # 红在下面的断言上,而不是挂住。
+                barrier_broke.set()
             return "stored"
         finally:
             with lock:
@@ -1693,6 +2022,10 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
     monkeypatch.setattr(service, "ensure_paper_metadata", ensure)
     counts = service.backfill_paper_metadata(nb_id)
 
+    assert not barrier_broke.is_set(), (
+        "3 个 worker 没能同时在途 —— paper_metadata 未使用服务并行度 "
+        f"3（最高只观察到 {peak} 路同时活动）"
+    )
     assert counts["total"] == 12
     assert counts["stored"] == 12
     assert peak == 3

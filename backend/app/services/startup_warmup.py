@@ -1,4 +1,4 @@
-"""Background startup: migrate + warm open-path caches, then flip readiness.
+"""Background startup: migrate + recover + warm open-path caches, then flip readiness.
 
 Kicked off in a daemon thread by the FastAPI lifespan so uvicorn serves
 ``/api/ready`` immediately while every app route stays 503 until warm-up
@@ -6,6 +6,13 @@ completes. The first login after a restart therefore never pays migration + the
 cold per-notebook count recompute (``knowledge_counts_cache`` starts empty each
 process) — that cost moves here, behind the readiness gate, so users only ever
 see a "服务启动中" screen instead of a multi-second hang.
+
+Crash recovery lives here, not in ``SQLiteRepository.__init__``: this module is
+the ONLY place that owns the "this process is the server, everything still
+marked in-progress is last boot's wreckage" claim. Offline CLIs construct their
+own repository and must not make that claim (they would flip rows the running
+server is still working on). It runs BEFORE ``mark_ready()`` so no route can
+accept new work while the wreckage is still standing.
 
 Robustness: migration failure keeps the service not-ready (an un-migrated schema
 is unusable); per-notebook warm failures are best-effort inside
@@ -24,9 +31,10 @@ logger = logging.getLogger("silicon_notebook.startup")
 
 
 def run_startup() -> None:
-    """Construct the repository (runs migrations + seed), warm the open-path
-    count caches for every notebook, then mark the service ready. Any exception
-    is captured into the readiness state — it must never crash the server."""
+    """Construct the repository (runs migrations + seed), settle the rows left
+    in-progress by the previous process, warm the open-path count caches for
+    every notebook, then mark the service ready. Any exception is captured into
+    the readiness state — it must never crash the server."""
     try:
         from app.services.model_provider import (
             validate_process_local_scheduler_deployment,
@@ -39,7 +47,10 @@ def run_startup() -> None:
         from app.api.deps import repository
 
         repo = repository()  # construct + migrate + seed (the heavy one-time cost)
-        logger.info("startup: migrations done; warming open-path caches…")
+        # 崩溃兜底：把上次进程遗留的「进行中」行结算掉。必须在 mark_ready() 之前——
+        # 就绪门之后业务路由才会放行，用户不可能在残骸还没翻正时发起新任务。
+        repo._recover_interrupted_jobs()
+        logger.info("startup: migrations + recovery done; warming open-path caches…")
 
         readiness.set_phase("warming", "预热笔记本计数缓存")
 

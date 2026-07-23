@@ -53,10 +53,10 @@ def test_fresh_schema_matches_committed_contract(tmp_path):
         "否则说明重构意外改动了表结构，会破坏既有库加载。")
 
 
-def test_v24_schema_version_is_current(tmp_path):
+def test_v25_schema_version_is_current(tmp_path):
     repo = _repo(tmp_path)
     with repo._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 25
 
 
 def test_deployed_v22_db_upgrades_through_system_model_service_status(tmp_path):
@@ -71,7 +71,7 @@ def test_deployed_v22_db_upgrades_through_system_model_service_status(tmp_path):
 
     repo1 = SQLiteRepository(settings)
     with repo1._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 24
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 25
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='model_service_status'"
@@ -79,6 +79,29 @@ def test_deployed_v22_db_upgrades_through_system_model_service_status(tmp_path):
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' "
             "AND name='system_model_service_status'"
+        ).fetchone() is not None
+
+
+def test_deployed_v23_db_upgrades_kg_canonical_scratch_schema(tmp_path):
+    """_migration_24 的同款守卫：已部署到 v23 的库（有 model_service_status，
+    缺写锁瘦身改造点 2 的 kg_canonical_scratch）必须在重新加载时补建该表。
+    版本闸 `if current >= SCHEMA_VERSION: return []` 对已部署库短路，所以新表
+    只能靠**追加** _migration_N 才会在这类库上真正建出来。"""
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path}/v23.db",
+        storage_dir=str(tmp_path / "storage"),
+    )
+    repo0 = SQLiteRepository(settings)
+    with repo0._write() as db:
+        db.execute("DROP TABLE kg_canonical_scratch")
+        db.execute("PRAGMA user_version = 23")
+
+    repo1 = SQLiteRepository(settings)
+    with repo1._connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 25
+        assert db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='kg_canonical_scratch'"
         ).fetchone() is not None
 
 
@@ -103,8 +126,10 @@ def test_legacy_unversioned_db_loads_without_data_loss(tmp_path):
                              "WHERE source='builtin' LIMIT 1").fetchone()["object_type"]
         db.execute("DELETE FROM object_schemas WHERE object_type=?", (deleted,))
 
-    # 3) 用当前代码重新加载同一个库文件（= 生产升级路径）
+    # 3) 用当前代码重新加载同一个库文件（= 生产升级路径 = 构造 + 服务端启动清算；
+    #    清算不再是构造副作用，见 tests/test_startup_recovery_ownership.py）
     repo1 = SQLiteRepository(settings)
+    repo1._recover_interrupted_jobs()
 
     assert repo1._migrate() == []  # 已迁移到位，二次走快路径不再重迁移
     with repo1._connect() as db:

@@ -22,10 +22,14 @@ CHANNELS: Dict[str, str] = {
     "requests": "requests.jsonl",
 }
 
-# 正则表达式：日期参数验证与提取
+# 正则表达式：日期参数验证与提取。两个按天正则锚定匹配"channel 前缀截掉后剩下的
+# 整段"（调用方先用 glob(f"{channel}-*.jsonl[.gz]") 保证前缀字面匹配、再切片去掉
+# 前缀），而不是在完整文件名里 search 日期子串——否则像 `events-foo-2026-07-21.jsonl`
+# 这种文件会被 search 命中"-2026-07-21.jsonl"子串，误当成 channel `events` 的按天
+# 文件（真实 stem 其实是 `events-foo`）。
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_PLAIN_DATE_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl$")
-_GZ_DATE_RE = re.compile(r"-(\d{4}-\d{2}-\d{2})\.jsonl\.gz$")
+_PLAIN_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl$")
+_GZ_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.jsonl\.gz$")
 
 # 按天分文件读取窗口的上限（防止单次窗口读取吃满内存/耗时过长）。
 MAX_RECORDS_PER_WINDOW = 50_000
@@ -57,20 +61,83 @@ def load_records(path: Path) -> Tuple[List[Dict[str, Any]], int]:
     return records, malformed
 
 
+def _dated_paths_in_dir(d: Path, channel: str) -> List[Path]:
+    """目录 d 下某 channel 的按天文件：明文 `<channel>-YYYY-MM-DD.jsonl` 与归档后
+    的 `<channel>-YYYY-MM-DD.jsonl.gz`（event_logging.py 的 _target_path_for_day /
+    _gzip_day_file 两种产物），按日期升序。复用 available_days 已用的两个正则，
+    与之保持同一套「什么算按天文件」的判定——都是先用 glob 保证字面前缀
+    `<channel>-` 匹配，再对切掉前缀后的剩余部分做锚定 match，因此 stem 必须
+    整段等于 channel，不会把 `<channel>-<其它东西>-YYYY-MM-DD.jsonl` 误收进来。"""
+    prefix = f"{channel}-"
+    # 每天最多一份：明文与 .gz 会同时存在——_gzip_day_file 在 os.replace(tmp, gz)
+    # 与 plain.unlink() 之间必然两份都在，而且它整段 `except Exception: pass`，
+    # unlink 失败时两份会**永久**并存。两份都收进来会让 parse_llm_log /
+    # read_ask_stage_records 把同一天算两遍（调用数、重试、token、延迟样本全部虚高）。
+    # 取舍与 resolve_day_path 一致：明文优先于 .gz（明文是正在写的那份，且解压零成本）。
+    by_day: dict[str, Path] = {}
+    for p in d.glob(f"{channel}-*.jsonl"):
+        m = _PLAIN_DATE_RE.match(p.name[len(prefix):])
+        if m:
+            by_day[m.group(1)] = p                    # 明文无条件胜出
+    for p in d.glob(f"{channel}-*.jsonl.gz"):
+        m = _GZ_DATE_RE.match(p.name[len(prefix):])
+        if m:
+            by_day.setdefault(m.group(1), p)          # 仅在当天没有明文时才用 .gz
+    return [by_day[day] for day in sorted(by_day)]
+
+
 def expand_channel_paths(channel_file: Path) -> List[Path]:
-    """给定全局 channel 文件路径（如 .../logs/events.jsonl），返回:
-      1) 该全局文件本身（若存在，兼容历史日志），
-      2) 所有 per-user 子目录的同名文件（.../logs/*/events.jsonl，按路径排序）。
-    供 eval / 离线聚合读取所有用户的日志。不递归、不混入其它 channel。"""
+    """给定全局 channel 文件路径（如 .../logs/events.jsonl），返回该 channel 在
+    EventLogger 实际写入的全部文件（app/core/event_logging.py）：
+      1) 该全局无日期文件本身（若存在，兼容历史日志 / 未跨过按天分文件上线日的
+         部署），
+      2) 全局目录下该 channel 的全部按天文件（明文 + 已归档 .gz，按日期升序 —
+         一个实际部署的无日期文件在跨过第一个自然日后就不再更新，只看它会
+         静默漏掉几乎全部数据），
+      3) 所有 per-user 子目录下 1)+2) 的同构文件（按子目录路径排序）。
+    供 eval / 离线聚合读取所有用户、所有日子的日志。不递归、不混入其它 channel。
+    返回的路径可能是 .gz —— 读取内容一律用本模块的 read_lines()，不要自己
+    read_text()/open()（那会把 gzip 的二进制字节当 UTF-8 硬解码）。
+    """
     channel_file = Path(channel_file)
     log_dir = channel_file.parent
     name = channel_file.name
+    channel = channel_file.stem
     out: List[Path] = []
     if channel_file.exists():
         out.append(channel_file)
-    if log_dir.exists():
-        out.extend(sorted(log_dir.glob(f"*/{name}")))
+    if not log_dir.exists():
+        return out
+    out.extend(_dated_paths_in_dir(log_dir, channel))
+    for sub in sorted(log_dir.iterdir()):
+        if not sub.is_dir():
+            continue
+        sub_file = sub / name
+        if sub_file.exists():
+            out.append(sub_file)
+        out.extend(_dated_paths_in_dir(sub, channel))
     return out
+
+
+def read_lines(path: Path) -> List[str]:
+    """按行读取一个日志文件，明文与 .gz 归档透明：.gz 走 gzip 流式解压 + 文本
+    模式，其余直接 read_text；两者都用 errors="replace" 容忍历史脏字节 /
+    非 UTF-8 行，不因单个坏字节抛 UnicodeDecodeError 炸掉整个聚合。不存在 /
+    是目录 / 截断或损坏的 gz 一律静默跳过（返回 []），不让调用方逐个 try/except。
+
+    是 expand_channel_paths() 返回路径的标准读取方式——parse_llm_log
+    (app/eval/speed.py) 与 read_ask_stage_records (app/eval/ask_latency.py)
+    都经它，不再各自维护 read_text()/open()。与 scripts/diag.py 里的
+    _read_lines 保持同一套行为；那边是纯 stdlib、不能 import app，因此维护一份
+    独立镜像（不能直接 import 这里）。
+    """
+    try:
+        if path.name.endswith(".gz"):
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                return fh.read().splitlines()
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except (FileNotFoundError, IsADirectoryError, OSError, EOFError):
+        return []
 
 
 def _text_blob(rec: Dict[str, Any]) -> str:
@@ -208,15 +275,17 @@ def valid_date_param(date: str) -> bool:
 
 
 def available_days(dir: Path, channel: str) -> List[str]:
-    """枚举目录中按天分文件的日志文件。返回日期列表（降序），末尾追加 'legacy'（若存在）。"""
+    """枚举目录中按天分文件的日志文件。返回日期列表（降序），末尾追加 'legacy'（若存在）。
+    与 _dated_paths_in_dir 同一套 stem 精确匹配规则（见其 docstring）。"""
     days = set()
+    prefix = f"{channel}-"
     if dir.exists():
         for p in dir.glob(f"{channel}-*.jsonl"):
-            m = _PLAIN_DATE_RE.search(p.name)
+            m = _PLAIN_DATE_RE.match(p.name[len(prefix):])
             if m:
                 days.add(m.group(1))
         for p in dir.glob(f"{channel}-*.jsonl.gz"):
-            m = _GZ_DATE_RE.search(p.name)
+            m = _GZ_DATE_RE.match(p.name[len(prefix):])
             if m:
                 days.add(m.group(1))
     out = sorted(days, reverse=True)

@@ -62,7 +62,8 @@ def test_all_writes_go_through_write_lock():
     CONNECT_BLOCK = re.compile(r"with\s+[\w.]*(?:_connect|\.connect)\(\)\s+as\s+\w+:")
     WRITE_BLOCK = re.compile(r"with\s+[\w.]*(?:_write|\.write)\(\)\s+as\s+\w+:")
     # 起步单线程, 不并发, 豁免。_migration_N = 版本化 schema 迁移步骤(基线=_migration_1);
-    # _recover_interrupted_jobs = 启动崩溃兜底。均由 __init__ 在对外服务前调用。
+    # _recover_interrupted_jobs = 启动崩溃兜底。前者由 __init__ 在对外服务前调用,
+    # 后者由服务端 lifespan(startup_warmup.run_startup)在就绪门之前调用一次。
     # CREATE TABLE DDL 里 "ON DELETE CASCADE" 外键子句触发 DELETE 关键字误报(非真实
     # DML 写), 故版本化迁移步骤(_migration_*)整类豁免。
     ALLOW_EXACT = {"_migrate", "_recover_interrupted_jobs", "_seed"}

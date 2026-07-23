@@ -2,7 +2,7 @@
 """离线批量摄取(目录 → notebook → source/chunk(+embed) → KG → 概念簇)。
 
 复用现有管线,不重写解析/分块/抽取。两阶段:
-  ingest  无 LLM:upload_sources(同步 parse+chunk),摄取期 EMBED 置空 → 收尾低并发补 chunk 向量
+  ingest  upload_sources(同步 parse+chunk+系统调度 embedding) → 收尾补缺失向量
   kg      LLM:对尚无 KG 的 source 抽取 → 一次 rebuild_unified_kg → 补节点向量;per-source 融合关
 CLI 见 scripts/batch_ingest.py 与 README「离线批量摄取」。
 """
@@ -224,6 +224,7 @@ def source_id_by_hash(repo: BatchIngestRepository, notebook_id: str, digest: str
     return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
+
 def _resolve_owner_profile(
     repo: BatchIngestRepository, owner: Optional[str]
 ) -> UserProfile:
@@ -254,13 +255,44 @@ def run_ingest(
     workers: int = 4,
     log: LogFn | None = None,
 ) -> dict[str, int]:
-    """Phase 1: parse, chunk and embed through the configured system service."""
+    """Phase 1: parse, chunk and embed through the configured system service.
+
+    跳过判据是内容哈希:命中即视为已摄取。这条判据**认账偏早**——file_hash 是
+    INSERT 时写的(早于 parse),所以 parse 中途被中断的源 hash 已在库、内容却是空的,
+    再跑 ingest 也不会补。刻意保持现状,不在这里做「有没有跑完」的推断:
+    (elements, chunks, parse_status) 这三个可观测信号无法区分「分块失败但仍置
+    extracted」与「纯标题 md 成功解析出零 chunk」——两者状态完全相同、正确答案相反;
+    `parsed` 同样既是活跃过渡态又是中断残留态。要判准需要持久化的完成标记与活跃租约
+    (schema 变更),见 docs/superpowers/specs/2026-07-22-pipeline-damage-recovery-design.md。
+    存量补救走显式的 `reparse` 子命令(它按「有没有 source_elements」选目标)。
+    """
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
+
+    # 同一次运行内的重复文件(输入目录里两个内容相同的文件)按内容哈希认领一次即可。
+    # 主要作用不是省一次查库,而是挡住并发下的双重建源:没有它时两个同内容文件会同时
+    # 查到「尚未摄取」、双双 upload,建出两个重复源。线程安全:_one 在池里并发跑。
+    #
+    # 已知边界(codex 第 8 轮 P2,经权衡后不修):并发处理时,若副本 B 在认领者 A 失败
+    # **之前**就读到了认领并返回 skipped,A 事后交回认领也救不了 B —— 该内容本轮一份
+    # 都没进来。之所以接受:A 失败时**什么都没提交**,内容不在库里,重跑 ingest 即补上;
+    # 而彻底消除需要 per-digest 的完成条件变量(副本阻塞等认领者出结果),复杂度与收益
+    # 不成比例。对照未引入认领集合时的行为(双双上传、建出重复源),本实现是净改善。
+    # 保留行为由 test_run_ingest_same_run_duplicate_files_skip_not_reparse 与
+    # test_run_ingest_releases_the_claim_when_the_claimant_fails 钉住。
+    claimed: set[str] = set()
+    claim_lock = threading.Lock()
+
     def _one(path: Path) -> tuple[str, Path, str | None]:
+        digest: str | None = None
         try:
             content = path.read_bytes()
-            if already_ingested(repo, notebook_id, sha256_bytes(content)):
+            digest = sha256_bytes(content)
+            with claim_lock:
+                if digest in claimed:
+                    return ("skipped", path, None)
+                claimed.add(digest)
+            if already_ingested(repo, notebook_id, digest):
                 return ("skipped", path, None)
             repo.upload_sources(
                 notebook_id,
@@ -269,6 +301,13 @@ def run_ingest(
             )
             return ("uploaded", path, None)
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
+            # 认领失败就交回去:认领只代表「这个内容由我这一份来做」,不代表已摄取。
+            # 不释放的话,后面同内容的副本会看到 digest 已被认领而直接 skipped——
+            # 一次瞬时失败(存储/SQLite 抖动)就让这份内容整轮都进不来,而在有认领集合
+            # 之前它本可以由下一个副本重试成功。
+            if digest is not None:
+                with claim_lock:
+                    claimed.discard(digest)
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
     total = len(files)
@@ -320,6 +359,41 @@ def backfill_chunk_embeddings(
         except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
             print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
     return done
+
+
+def backfill_element_embeddings(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+) -> int:
+    """补该 notebook 缺失的 element 向量(只补缺失,幂等),返回落库行数。EMBED 未配则跳过。
+
+    与 chunk/节点两侧并列的第三条补齐路径:此前 element 侧只有「整源重跑」一条路,
+    写了一半的源(部分 element 有向量、部分没有)没有任何增量修法。
+
+    已知边界(codex 第 5/6/8 轮 P2,经权衡后本 PR 不修):待补行的**文本**是一次
+    fetchall 全读进内存的,大库上这部分内存与待补文本总量成正比。之所以不在这里改:
+    chunk 侧的 missing_chunk_embedding_rows 是**完全同构**的既有实现,只把 element 侧
+    改成分页会让两侧行为不一致、给后续维护埋坑;要治应两侧一起改成 keyset 分页,
+    作为独立改动提。本 PR 已把**向量**侧的内存做了分页——向量才是 GB 级的大头
+    (几十万 element × 1024 维 float),文本通常小一到两个数量级。
+    保留行为(向量确实分页落库)由
+    test_backfill_element_embeddings_persists_before_all_embedding_finishes 钉住。
+    element_embeddings 走 INSERT OR REPLACE upsert,只补缺失不会动同源已有的向量。"""
+    if not repo.configured("source_element_embedding"):
+        return 0
+    mnt = repo.maintenance
+    rows = mnt.missing_element_embedding_rows(notebook_id)
+    if not rows:
+        print("[embed] 无缺失 element 向量,跳过", flush=True)
+        return 0
+    print(f"[embed] 补缺失 element 向量:{len(rows)} 个", flush=True)
+    return mnt.embed_elements_batch(
+        notebook_id,
+        [
+            {"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]}
+            for r in rows
+        ],
+    )
 
 
 def run_kg(repo: BatchIngestRepository, notebook_id: str,
@@ -672,29 +746,43 @@ def _count_missing_node_vectors(
     return repo.maintenance.count_missing_node_vectors(notebook_id)
 
 
+def _count_missing_element_vectors(
+    repo: BatchIngestRepository, notebook_id: str
+) -> int:
+    return repo.maintenance.count_missing_element_vectors(notebook_id)
+
+
 def run_embed(
     repo: BatchIngestRepository, notebook_id: str
 ) -> dict[str, int]:
-    """补该 notebook 缺失的 chunk + 节点向量(幂等,只补缺失)。
+    """补该 notebook 缺失的 chunk + element + 节点向量(幂等,只补缺失)。
 
     先 SQL 盘点缺失数并打印,再 backfill_chunk_embeddings(missing_only=True) +
-    backfill_node_embeddings(节点本就只补缺失),最后打印 after 盘点。
+    backfill_element_embeddings + backfill_node_embeddings(节点本就只补缺失),
+    最后打印 after 盘点。
     """
     chunk_missing = _count_missing_chunk_vectors(repo, notebook_id)
+    element_missing = _count_missing_element_vectors(repo, notebook_id)
     node_missing = _count_missing_node_vectors(repo, notebook_id)
-    print(f"embed: 缺失盘点 chunk={chunk_missing} node={node_missing}", flush=True)
+    print(f"embed: 缺失盘点 chunk={chunk_missing} element={element_missing} "
+          f"node={node_missing}", flush=True)
 
     chunks_embedded = backfill_chunk_embeddings(repo, notebook_id, missing_only=True)
+    elements_embedded = backfill_element_embeddings(repo, notebook_id)
     nodes_embedded = backfill_node_embeddings(repo, notebook_id)
 
     chunk_after = _count_missing_chunk_vectors(repo, notebook_id)
+    element_after = _count_missing_element_vectors(repo, notebook_id)
     node_after = _count_missing_node_vectors(repo, notebook_id)
-    print(f"embed done: 补 chunk={chunks_embedded} node(扫描)={nodes_embedded};"
-          f"剩余缺失 chunk={chunk_after} node={node_after}", flush=True)
+    print(f"embed done: 补 chunk={chunks_embedded} element={elements_embedded} "
+          f"node(扫描)={nodes_embedded};剩余缺失 chunk={chunk_after} "
+          f"element={element_after} node={node_after}", flush=True)
     return {
         "chunks_embedded": chunks_embedded,
+        "elements_embedded": elements_embedded,
         "nodes_embedded": nodes_embedded,
         "chunk_missing_before": chunk_missing,
+        "element_missing_before": element_missing,
         "node_missing_before": node_missing,
     }
 

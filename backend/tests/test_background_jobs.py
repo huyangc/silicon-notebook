@@ -5,8 +5,12 @@ per-user 日志归属 _log_owner 才能在 worker 线程生效，否则回退 us
 顶层异常兜底不让 worker 静默崩溃。
 """
 import contextvars
+import logging
 import threading
 
+import pytest
+
+from app.core import diagnostics_runtime as diagnostics
 from app.services import background_jobs
 
 _probe = contextvars.ContextVar("bg_probe", default="DEFAULT")
@@ -108,3 +112,217 @@ def test_submit_returns_named_daemon_thread():
     assert t.name == "named-job"
     assert t.daemon is True
     assert done.wait(timeout=5)
+
+
+def test_submit_reports_active_and_completed_job(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_job():
+        started.set()
+        assert release.wait(timeout=5)
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(blocked_job, name="diagnostic-job")
+        assert started.wait(timeout=5)
+        active = runtime.snapshot()["active_jobs"]
+        assert len(active) == 1
+        assert active[0]["name"] == "background_job"
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        snapshot = runtime.snapshot()
+        assert snapshot["active_jobs"] == []
+        assert snapshot["recent_jobs"][-1]["name"] == "background_job"
+        assert snapshot["recent_jobs"][-1]["status"] == "done"
+
+
+def test_submit_reports_failed_job_as_error(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_job():
+        started.set()
+        assert release.wait(timeout=5)
+        raise RuntimeError("expected diagnostic test failure")
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(failing_job, name="failing-diagnostic-job")
+        assert started.wait(timeout=5)
+        assert runtime.snapshot()["active_jobs"][0]["name"] == "background_job"
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        snapshot = runtime.snapshot()
+        assert snapshot["active_jobs"] == []
+        assert snapshot["recent_jobs"][-1]["name"] == "background_job"
+        assert snapshot["recent_jobs"][-1]["status"] == "error"
+
+
+def test_submit_keeps_job_active_until_pending_notification_finishes(
+    tmp_path, monkeypatch
+):
+    notification_started = threading.Event()
+    release_notification = threading.Event()
+
+    def notify(_user_id: str) -> None:
+        notification_started.set()
+        assert release_notification.wait(timeout=5)
+
+    monkeypatch.setattr(background_jobs, "_resolve_job_user", lambda: "user-safe")
+    monkeypatch.setattr(background_jobs.pending_bus, "mark_dirty", notify)
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(
+            lambda: None,
+            name="pending-notification-job",
+            notify_pending=True,
+        )
+        assert notification_started.wait(timeout=5)
+        active = runtime.snapshot()["active_jobs"]
+        assert len(active) == 1
+        assert active[0]["name"] == "background_job"
+
+        release_notification.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        snapshot = runtime.snapshot()
+        assert snapshot["active_jobs"] == []
+        assert snapshot["recent_jobs"][-1]["status"] == "done"
+
+
+@pytest.mark.parametrize(
+    "label,expected",
+    [
+        ("buildkg-nb-private123", "buildkg"),
+        ("report-plan-report-private123", "report-plan"),
+        ("knowhow-project-table-private123", "knowhow-project"),
+        ("knowhow-asset-sweep:nb-private123", "knowhow-asset-sweep"),
+        ("ask-reasoning", "ask-reasoning"),
+    ],
+)
+def test_submit_separates_thread_name_from_safe_diagnostic_operation(
+    tmp_path, label, expected
+):
+    started = threading.Event()
+    release = threading.Event()
+
+    def representative_worker():
+        started.set()
+        assert release.wait(timeout=5)
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(representative_worker, name=label)
+        assert started.wait(timeout=5)
+        assert thread.name == label
+        active = runtime.snapshot()["active_jobs"]
+        assert active[0]["name"] == expected
+        assert "private123" not in str(active)
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def test_explicit_unallowlisted_name_does_not_inspect_callable_metadata():
+    done = threading.Event()
+    name_accessed = threading.Event()
+
+    class CallableWithBrokenName:
+        @property
+        def __name__(self):
+            name_accessed.set()
+            raise RuntimeError("diagnostic metadata unavailable")
+
+        def __call__(self):
+            done.set()
+
+    thread = background_jobs.submit(
+        CallableWithBrokenName(), name="ordinary-thread-name"
+    )
+    assert done.wait(timeout=5)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not name_accessed.is_set()
+
+
+def test_unnamed_callable_object_does_not_inspect_arbitrary_name_property():
+    done = threading.Event()
+    name_accessed = threading.Event()
+
+    class CallableWithBlockingName:
+        @property
+        def __name__(self):
+            name_accessed.set()
+            raise RuntimeError("must not inspect callable objects")
+
+        def __call__(self):
+            done.set()
+
+    thread = background_jobs.submit(CallableWithBlockingName())
+    assert done.wait(timeout=5)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not name_accessed.is_set()
+
+
+def test_unnamed_ordinary_function_uses_bounded_code_name(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def ordinary_worker() -> None:
+        started.set()
+        assert release.wait(timeout=5)
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(ordinary_worker)
+        assert started.wait(timeout=5)
+        assert runtime.snapshot()["active_jobs"][0]["name"] == "ordinary_worker"
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def test_failed_job_log_uses_safe_operation_instead_of_raw_entity_id(caplog):
+    def fail() -> None:
+        raise RuntimeError("expected failure")
+
+    with caplog.at_level(logging.ERROR, logger="silicon_notebook.jobs"):
+        thread = background_jobs.submit(
+            fail, name="report-gen-report-private123"
+        )
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert "background job failed: report-gen" in caplog.text
+    assert "report-private123" not in caplog.text

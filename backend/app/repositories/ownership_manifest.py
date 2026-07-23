@@ -109,7 +109,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/bench_sqlite_writes.py', scope='<module>._make_repo', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/build_chunks.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/reextract_notebook.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
@@ -558,6 +557,17 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='_recover_interrupted_jobs',
+        owner='SqliteDatabase',
+        kind='private_wrapper',
+        consumers=(
+            ConsumerSite(path='backend/app/services/startup_warmup.py', scope='<module>.run_startup', kind='attribute', target='_recover_interrupted_jobs'),
+            ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.verify_snapshot', kind='attribute', target='_recover_interrupted_jobs'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='_remap_json_ids',
         owner='NotebookSharingService',
         kind='private_wrapper',
@@ -597,6 +607,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.model_provider_if_initialized', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.model_service_binding_summary', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.model_status_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_access_repository', kind='attribute', target='_runtime'),
@@ -1354,6 +1365,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._dispatch_main', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_chunk_embeddings', kind='attribute', target='configured'),
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_element_embeddings', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='configured'),
@@ -1651,16 +1663,6 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
-        name='federated_retrieve',
-        owner='RetrievalService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='federated_retrieve'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
         name='find_duplicates',
         owner='KnowledgeGovernanceService',
         kind='method',
@@ -1918,7 +1920,6 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.list_notebook_bases_route', kind='attribute', target='list_notebook_bases'),
             ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='list_notebook_bases'),
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='list_notebook_bases'),
         ),
         patches=(
         ),
@@ -1998,10 +1999,12 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._backfill_source_index_for_notebook', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._backfill_table_to_blob', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._count_missing_chunk_vectors', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._count_missing_element_vectors', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._count_missing_node_vectors', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._resolve_owner_profile', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.already_ingested', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_chunk_embeddings', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_element_embeddings', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_index', kind='attribute', target='maintenance'),
@@ -2016,7 +2019,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/build_chunks.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>._run_status', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>.main', kind='attribute', target='maintenance'),
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.grounding_ok', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.insert_source', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.main', kind='attribute', target='maintenance'),
@@ -2140,7 +2142,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_builds_with_igraph', kind='patch', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_refuses_without_igraph', kind='patch', target='notebook_copy_stats'),
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='notebook_copy_stats'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_builds_with_igraph', kind='patch', target='notebook_copy_stats'),
@@ -2518,7 +2519,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.federated_retrieve', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.federated_retrieve_relations', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.scale_ppr', kind='attribute', target='retrieval'),
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='retrieval'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='retrieval'),
         ),
         patches=(
@@ -2570,17 +2570,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.scale_index_status', kind='attribute', target='scale_index_status'),
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='scale_index_status'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='scale_ppr',
-        owner='RetrievalService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='scale_ppr'),
         ),
         patches=(
         ),

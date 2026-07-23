@@ -203,6 +203,14 @@ class Settings(BaseSettings):
     embed_rate_limit_base_delay: float = Field(2.0, validation_alias="EMBED_RATE_LIMIT_BASE_DELAY")
     # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
     db_busy_timeout_ms: int = Field(30000, validation_alias="DB_BUSY_TIMEOUT_MS")
+    # 写锁观测(wait/hold per 调用点):详见 write_lock_stats.py。默认开,警戒线 200ms,
+    # 每 site 每刷新窗口最多报一条违规(flush_interval_s)。
+    db_write_lock_stats_enabled: bool = Field(
+        True, validation_alias="DB_WRITE_LOCK_STATS")
+    db_write_lock_warn_ms: int = Field(
+        200, validation_alias="DB_WRITE_LOCK_WARN_MS")
+    db_write_lock_flush_seconds: int = Field(
+        60, validation_alias="DB_WRITE_LOCK_FLUSH_SECONDS")
     # 复用连接下每条连接长期持有 page cache;总内存 = 连接数 × |cache_size|。
     # 负值=KB。默认 16MB(低于旧 64MB)以在 O(线程数) 条连接下控总内存;可按部署上调。
     sqlite_cache_size_kb: int = Field(-16384, validation_alias="SQLITE_CACHE_SIZE_KB")

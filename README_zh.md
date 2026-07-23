@@ -21,7 +21,7 @@
 - KG-native 接地问答：逐句 `[k_i]` 引用（渲染为紧凑编号引用；模型直接输出的数字复合引用如 `[1, 2, 3]` 在能映射到已知引用时也可点击）、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
 - **推理模式的类型化查询期推导：** agent 可调用 `follow_chain`，把有证据的两跳 `A→B→C` 临时组合成 `A→C`；首版只允许 `derived_from / kind_of / prerequisite_of / precedes / part_of`。两条直接关系各自保留可引用的关系证据；被拒绝、无 quote、类型或 `validity_scope` 冲突的路径 fail-closed；推论明确标作「推断」，且绝不写回 KG。该能力不新增 migration、索引或历史回填；查询只对既有 source/target 索引做有界抽样，高度节点无法在预算内确认时直接放弃推论。
 - 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`chunk` 基线只从当前 active notebook 读取 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 使用 federated KG 路径。exact-score 的 `base` 次序只适用于知识对象命中：`federated_retrieve()` 不改相关度分数，分数更高的 personal hit 仍排在前面；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。
-- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改）；admin 持有原有 notebook 并是唯一可将 notebook 发布为公共知识库的用户。公共知识库对普通用户的列表隐藏，但可在每个笔记本的参考库选择器里发现，仅对显式挂载了它们的笔记本参与检索。升级到 schema 20 不会回填挂载：所有既有笔记本挂载数清零，联邦检索对它们全部停止，直到用户自己显式挂载一个参考库。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
+- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改），并由它持有原有 notebook。管理员可在用户使用总览通过 `PATCH /api/admin/users/{user_id}/role` 授予或撤销 `admin` 角色；内置管理员和当前操作管理员自身不可被降级，已有会话会在下一次请求时读取到新权限。任何管理员都可将 notebook 发布为公共知识库。公共知识库对普通用户的列表隐藏，但可在每个笔记本的参考库选择器里发现，仅对显式挂载了它们的笔记本参与检索。升级到 schema 20 不会回填挂载：所有既有笔记本挂载数清零，联邦检索对它们全部停止，直到用户自己显式挂载一个参考库。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
 - **分享链接**：owner 可发布不透明 notebook 链接；小 notebook 复制到接收者账号，大 notebook 以只读成员方式加入。写权限仍归 owner；当前没有实时协同编辑或修改密码流程。
 - **绑定 notebook 的私有 Memory**：用户可手动把 Ask 回答生成可编辑预览，并在确认后沉淀为可复用 Memory。外层提供用户级总 Memory 页面，notebook 卡片显示当前用户的数量，工作区为 **问答**（Ask） | **知识库**（Knowledge） | **记忆**（Memory） | **深度报告**（Deep Report）。外部 Agent 可经 MCP 提交 `candidate`；它只在同一用户、同一 notebook 的获授权 Agent 间共享，用户确认前不会进入正式 Ask/搜索/报告检索。
 - 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
@@ -42,7 +42,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 24。已提交的 v9 兼容 fixture 会经由 v10–v24 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 曾增加每用户最新模型服务状态；v24 不可逆地清除已存的用户模型凭据与旧状态，并新增按服务 ID 存储的部署级模型服务健康状态。
+当前 schema 版本为 25。已提交的 v9 兼容 fixture 会经由 v10–v25 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁瘦身的簇映射切换段增加 kg_canonical_scratch 表；v25 不可逆地清除已存的用户模型凭据与旧状态，并新增按服务 ID 存储的部署级模型服务健康状态。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
 - workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
 - 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
@@ -56,7 +56,9 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
 
 ### 前置条件
 
-- **Python ≥ 3.11**
+- **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
+  `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
+  重现（见 `backend/app/repositories/sqlite/database.py`）。
 - **Node.js ≥ 20** 与 npm
 - **git**
 - C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
@@ -166,6 +168,11 @@ npm run stop
 的 `frontend/.next`(如预构建镜像场景)。可用 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT`
 覆盖监听地址/端口。后端默认只监听 `127.0.0.1`；显式绑定非 loopback 地址时必须
 配置非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
+
+生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
+Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
+采集事故；见[生产事故即时采集](#生产事故即时采集)。先重启会丢掉命令需要关联的
+活跃请求、锁、进程与线程栈证据。
 
 `npm run stop` 调用 `scripts/stop.sh`:停掉正在监听后端 `PORT` 与前端 `FRONTEND_PORT`
 (缺省 `8000` / `3000`)的进程。它与 start 一样先 source 仓库根 `.env` 解析端口,所以若
@@ -560,6 +567,9 @@ KG_CLUSTER_ANN_THREADS   # 概念聚类 hnswlib 线程；0（默认）= min(cpu�
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
+DB_WRITE_LOCK_STATS         # 开启进程级 SQLite 写锁 wait/hold 观测（默认 true）
+DB_WRITE_LOCK_WARN_MS       # wait/hold 超过此毫秒数即记一条限流的 db_write_lock_slow 事件（默认 200）
+DB_WRITE_LOCK_FLUSH_SECONDS # 周期性 db_write_lock_stats 快照的发出间隔（秒），也是 db_write_lock_slow 按调用点的限流窗口（默认 60）
 SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
 DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
@@ -687,13 +697,91 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 
 开发者与 MCP agent 看到的东西不变：后端 `detail` 在 API 响应和日志里保持原样，而完整诊断——状态码、状态文本、原始响应正文、以及能和 `requests.jsonl` 对上的 `X-Request-Id`——在每次请求失败时写进 DevTools console；凡是被界面换成泛化文案的错误，其原文也一并进 console。所以「它说我没权限」这类问题靠 console 里的 request id 定位，而不是猜是哪道校验拒的。
 
-部署机慢因排查可直接在持有 `.local/` 的机器上运行 `python3 scripts/diag_slow.py`。
-脚本除汇总请求、事件和 LLM 延迟外，还会基于 DB 聚合与 scale-index manifest 输出
-strict reasoning / PPR 路径审计，用来判断大库是否只走 indexed core、chunk/relation ANN
-是否齐全、delta 策略是否会放开未索引部分，以及跨 base 的路径是否可能触碰 active 全量向量。
-该报告同时是统一诊断入口 `scripts/diag.py` 的 `slow` 子命令（`diag.py slow | latency | base-recall`）——
-把三个「分析慢现象」的工具收敛到一个命令：离线的 `slow` / `latency` 子命令保持纯 stdlib、不 import app，
-可在裸机上直接跑；`base-recall` 才懒加载 app，用于诊断深度报告为何不引用 base 库。
+### 生产事故即时采集
+
+在 Ubuntu 24.04 上通过 `npm run start` 启动的部署中，SSH 到主机，在**卡顿仍在发生时**
+从仓库根执行主命令：
+
+```bash
+ssh <production-host>
+cd <silicon-notebook-repository>
+python3 scripts/diag.py incident
+```
+
+正常的单 Uvicorn worker 会自动发现。若报告显示进程发现为 missing、ambiguous 或
+incomplete，请从服务管理器或主机监听信息取得**仍在运行**的后端 PID，然后重试；不要重启：
+
+```bash
+python3 scripts/diag.py incident --pid <backend-pid>
+```
+
+默认结果是一段可整体复制、最多 **32 KiB** 的 UTF-8 文本。所有采集共享一个最长 10 秒
+的总截止时间；进程采样、两次线程栈、loopback 健康探测、有界历史日志读取，以及自身最多
+一秒的 DB 探测都消耗同一个时间预算。后端把 `SIGUSR1` 注册为**不终止进程**的全 Python
+线程 faulthandler dump；它只采线程栈，不采任何局部变量值，成功采集后后端继续存活。
+
+运行态心跳每两秒原子写入 `.local/diagnostics/runtime.json`；超过六秒即判 stale，活跃工作
+字段不会参与高置信结论。线程栈采集使用 `.local/diagnostics/incident.lock`，追加到
+`.local/diagnostics/thread-dumps.log`；一次成功采集后 dump 文件保持在 8 MiB 内。只读 DB
+分析使用 `.local/diagnostics/db-snapshots/` 下的有界临时快照。采集器只允许创建、替换或
+截断这些诊断工件。运行时只接受当前用户控制的 `0700` diagnostics 目录，以及同一用户拥有、
+单硬链接、普通文件类型的 `0600` heartbeat/dump 文件；已有路径不安全或目录路径被替换时，
+诊断降级且不会跟随链接或截断敌对目标。
+
+按以下顺序解释输出：
+
+- `Confidence-ranked diagnoses` 最多列三个确定性规则生成的假设。`high` / `medium` / `low`
+  表示证据强度，不等于确定性；单个弱信号不会被宣称为根因。
+- `Observations`、`Relevant stacks`、`Database and host signals`、`Log metadata` 给出排序所用
+  的元数据证据链；`Safe next commands/actions` 只建议下一步检查，不执行修复。
+- `Missing/degraded evidence` 是正式结果而非被隐藏的错误。snapshot stale 通常说明采集太晚；
+  PID 缺失或歧义时用上面的 `--pid` 重试。DB busy/locked、权限不足、deadline、损坏或 malformed
+  日志、信号路径不可用、进程/文件发生竞态时，对应证据会被排除，其余采集继续。
+- 空闲部署可能正确报告没有多信号结论达到有效置信度。应在操作肉眼可见地卡住时重跑，不能用
+  空闲采集臆造根因。
+
+可复制输出绝不打印原始不透明 id：允许出现的 notebook/request/job 引用会一致地映射为假名，
+其它原始 id 直接省略。它也绝不打印用户控制的原始文件名、request body、来源正文、Ask 问题/回答、prompt 或模型消息、Memory/Knowhow 内容、SQL
+文本或参数、authorization header、cookie、token、secret、原始命令行或局部变量。即使输出已
+脱敏，分享给可信团队之外的人之前仍必须人工复核。
+
+`incident` 不需要 root 或第三方 Python 包，不 import `app`，也不会重启或终止进程。七个诊断
+命令对应用数据都只读：不执行 delete/其它业务写入，不做 SQLite checkpoint/vacuum/analyze/reindex，
+不跑 migration，也不自动修复。`incident` 仅可按上述约束维护有界的
+`.local/diagnostics/` 工件。
+
+### 七命令诊断速查
+
+`scripts/diag.py` 只提供以下七个命令：
+
+| 命令 | 用途 | 运行边界 |
+| --- | --- | --- |
+| `python3 scripts/diag.py incident` | 首选的线上即时有界采集；自动发现不能唯一选中 worker 时加 `--pid <backend-pid>`。 | Ubuntu/Linux 活体进程证据；纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py slow --since 24 --deep` | 从历史日志、DB 聚合与 scale-index manifest 分析慢路径；`--deep` 会增加可能耗时数分钟的只读 DB 检查。裸跑 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py latency --last 500` | 从 `ask_stage` 事件统计各 Ask 阶段 P50/P95/max。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py locks --top 20` | 从 `db_write_lock_slow` / `db_write_lock_stats` 事件按调用点聚合 SQLite 写锁争用。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py open --local .local` | 分析打开笔记本的查询/端点耗时、缓存冷成本与 mutation-sequence churn。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | 有界、源端无副作用地采集 SQLite/WAL/表/FK 索引/query plan 证据。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 仅用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、不 import app；不执行检索、不回显查询/正文、不构造 repository、不迁移、不用 SQLite 打开源库。 |
+
+`base-recall` 与 `db` 共用 `O_NOATIME` pin、非阻塞锁、文件身份复核的 DB/WAL 拷贝，只在自己
+拥有的快照上执行固定聚合投影。安全边界不可用时只输出 category-only 降级信息，绝不回退为活体
+SQLite 连接。单段 UTF-8 报告最多 32 KiB，只含计数、固定状态标签和本次报告内假名；不包含原始
+notebook/user/report/object/chunk id、标题、问题、正文、文件名、路径、异常、凭据或 secret。
+
+历史读取器会覆盖、去重并限制 `requests`、`events`、`llm` 三通道的全部支持布局：legacy
+`<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip
+`<channel>-YYYY-MM-DD.jsonl.gz`，以及下一层 per-user 日志目录。malformed 行和字节/时间窗口截断
+会作为 degraded metadata 报告。既有独立引擎脚本继续可用于存量运维笔记与 cron；新操作优先走
+这个七命令统一入口。
+
+`python3 scripts/diag.py locks [--log PATH] [--top N]` —— 从 `events.jsonl` 按调用点聚合
+SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「页面卡住」），`hold` 是持锁时长
+（谁害的）。按 `hold_max` 降序，最该改的排最前。输出两张表：超阈值违规
+（`db_write_lock_slow`，按 site 限流，只见「尾巴」）与周期性全量快照
+（`db_write_lock_stats`，不做阈值过滤，但只是某一时刻的累计快照）——某个调用点即使从未
+超阈值也可能很忙，这种情况只有第二张表能看见。采集阈值由 `DB_WRITE_LOCK_WARN_MS` 控制
+（默认 200）。
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 
@@ -821,7 +909,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 ```
 
-`embed` 子命令只补**缺失**的 chunk 与 KG 节点向量（例如某次被限流后留下的空洞）。必须给 `--notebook-id` 且系统配置已绑定 `chunk_embedding`——它本身就是补向量的命令，故**忽略 `--allow-no-embed`**，该 workload 未绑定时直接报错退出。
+`embed` 子命令只补**缺失**的 chunk、element 与 KG 节点向量（例如某次被限流后留下的空洞）。必须给 `--notebook-id` 且系统配置至少已绑定 `chunk_embedding`；`source_element_embedding` 与 `knowledge_object_embedding` 未绑定时对应类型跳过。它本身就是补向量的命令，故**忽略 `--allow-no-embed`**，`chunk_embedding` 未绑定时直接报错退出。
 
 `vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**（故不需要任何模型服务绑定），且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(32, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
 
@@ -875,9 +963,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 并绑定 `paper_metadata`。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
 
-前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按所选阶段绑定所需 workload（尤其是 `chunk_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`（此时跳过 chunk/KG 向量），绝不静默；所需 chat workload 未绑定的阶段会明确失败。重复文件按内容哈希自动跳过；进度写 `<storage>/batch_ingest/<notebook>.jsonl`，中断后重跑自动续。
+前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
 ### 检索回放对照(`scripts/replay_retrieval.py`)
 
@@ -1074,6 +1162,10 @@ Homebrew warm gate。
 每开始一个新的特性开发任务，默认先新建 git worktree，并在该 worktree 内基于新 feature 分支开发；完成后从该分支提交 PR。不要为了特性开发直接在本地主 checkout 里切分支。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。
 
 对于已经批准的多步骤实施计划，默认采用 subagent-driven development：每个任务交给一个全新的实现子 Agent，并在进入下一任务前完成该任务范围内的规格符合性与代码质量审查。纯调研、设计、状态汇报和只读审查不要求创建 worktree 或使用子 Agent。
+
+`CLAUDE.md` 是 Claude Code 在本仓库的操作规范：Claude Code 只自动加载 `CLAUDE.md` 与 `.claude/rules/`，不会加载 `AGENTS.md`，因此该文件内联了必须随时在线的红线，并给出 `AGENTS.md` 的章节索引；两者冲突时以 `AGENTS.md` 为准，刻意的例外由 `CLAUDE.md` 穷举列出。也正因为 Claude Code 读的是它而不是 `AGENTS.md`，`CLAUDE.md` 属于四份文档同步集合的一员。其中最硬的一条是**起子代理必须显式选模型，不得默认继承主 Agent**，按任务需要的判断力分层——需要判断力（写计划、评审、架构取舍、疑难归因）用 `opus`，规格已定死的转录型实现用 `sonnet`，纯检索定位用 `haiku`。这条由 PreToolUse 硬门 `.claude/hooks/require-subagent-model.py` 强制：没显式传 `model`、且 `subagent_type` 未在 `.claude/agents/` 中钉好模型的调用会被拒绝。`.claude/agents/` 已提供三个钉好模型的角色：`impl-task`（sonnet）、`spec-review`（opus）、`code-quality-review`（opus）。`backend/tests/test_claude_subagent_model_hook.py` 是这个 hook 的回归网：以子进程方式跑真实脚本，两个方向都覆盖——既盖「绕过」（让继承模型的调用溜过去），也盖「误拦」（把合法调用堵死，逼人绕开守卫）。
+
+PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要逐字贴回 PR**——零意见的轮次要贴，手动补跑的轮次也要贴，并附上触发方式、完整命令、head SHA、退出码与输出字节数，便于核对评审确实跑过、结论没被转述失真。判一轮成功要**退出码为 0 且输出非空**两个条件：codex 被 SIGTERM 杀掉时退出码同样是 0，只看退出码会贴出一条空评论、看起来像通过。P0/P1 阻塞并停下来交人决定；P2/P3 不阻塞、可如实说明后不改；优先级标签解析不出来时保守拦人而不是默认放行。评审意见可以在核实后驳回（codex 评的是 diff，未必了解运行时事实），但驳回要同时给出 PR 上的理由与证据、代码里记录取舍的注释，以及钉住既有行为的回归用例。合入一律需要人明确同意。评审的自动化本身是开发者本机的 Claude Code hook、不是仓库产物，新 clone 上没有它——规则依然成立，那就手动跑；机制细节见 `CLAUDE.md`。
 
 ### 测试架构
 

@@ -21,7 +21,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - KG-native grounded Q&A: sentence-level `[k_i]` citations (rendered as compact numbered references, including model-emitted numeric groups like `[1, 2, 3]` when they map to known references), multi-turn conversations, 1-hop KG neighbour expansion, and a live, expandable one-line agent trace for reasoning mode
 - **Typed query-time inference in reasoning mode:** the agent can call `follow_chain` to compose an evidence-backed two-hop `A→B→C` path into a transient `A→C` inference for `derived_from / kind_of / prerequisite_of / precedes / part_of`. Both direct hops remain independently citable relation evidence, rejected/ungrounded/scope-conflicting paths fail closed, the inferred conclusion is explicitly marked as reasoning, and no inferred edge is written back to the KG. The feature adds no migration, new index, or historical backfill; bounded samples use the existing source/target relation indexes and ambiguous high-degree paths are skipped.
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). Baseline `chunk` retrieval reads chunks from the active notebook only; optional KG overlay/PPR can add federated KG context and base-backed chunks, while `graph` and `reasoning` use federated KG paths. The exact-score `base` tie-break applies only to knowledge-object hits returned by `federated_retrieve()`: scores stay unchanged and a higher-scoring personal hit still wins. `federated_retrieve_relations()` remains score-only. Separately, when base and personal evidence contradict during answer synthesis, the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor.
-- **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; a user's library contains owned notebooks plus large shared notebooks they explicitly joined read-only. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it); the admin owns pre-existing notebooks and is the only user who can publish a notebook as a public knowledge base. Base notebooks are hidden from regular users' lists but are discoverable through each notebook's reference-library picker, and participate in retrieval only for notebooks that explicitly mount them. Upgrading an existing deployment to schema 20 does not backfill mounts: every pre-existing notebook starts with zero mounted reference libraries, and federation stays off for it until a user explicitly mounts one. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
+- **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; a user's library contains owned notebooks plus large shared notebooks they explicitly joined read-only. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it) and owns pre-existing notebooks. Administrators can grant or revoke the `admin` role from the user-usage page through `PATCH /api/admin/users/{user_id}/role`; the built-in administrator and the active administrator's own role cannot be revoked. Role changes are observed by existing sessions on their next request. Any administrator can publish a notebook as a public knowledge base. Base notebooks are hidden from regular users' lists but are discoverable through each notebook's reference-library picker, and participate in retrieval only for notebooks that explicitly mount them. Upgrading an existing deployment to schema 20 does not backfill mounts: every pre-existing notebook starts with zero mounted reference libraries, and federation stays off for it until a user explicitly mounts one. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
 - **Share links**: owners can publish an opaque notebook link. Small notebooks are copied into the recipient's account; large notebooks are joined as read-only membership. Write access stays with the owner, and there is no live collaborative editing or change-password flow.
 - **Notebook-bound private Memory**: users can manually turn an Ask answer into an editable preview and confirm it as reusable Memory. The collection has a user-level Memory page; notebook cards show the current user's count, and each workspace exposes **问答** (Ask) | **知识库** (Knowledge) | **记忆** (Memory) | **深度报告** (Deep Report). External Agents can submit `candidate` Memory through MCP; candidates are shared only among that same user's authorized Agents in the same notebook and do not enter formal Ask/search/report retrieval until the user confirms them.
 - Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
@@ -42,16 +42,18 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 24. The committed v9 compatibility fixture
-upgrades through migrations v10–v24 and remains readable. Those migrations
+The current schema version is 25. The committed v9 compatibility fixture
+upgrades through migrations v10–v25 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
 reference-library mounts plus promotion targets (v20), and the normalized
 interactive-reformat anchor-membership expression index (v21); v22 adds durable
 notebook-scoped KG build jobs; v23 added per-user latest model-service status;
-v24 irreversibly scrubs stored per-user model credentials and legacy status,
-then adds deployment-wide model-service health persistence keyed by service ID.
+v24 adds the kg_canonical_scratch table for the write-lock-slimming cluster-map
+swap; v25 irreversibly scrubs stored per-user model credentials and legacy
+status, then adds deployment-wide model-service health persistence keyed by
+service ID.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
@@ -67,7 +69,9 @@ when no model service or MinerU parser is configured.
 
 ### Prerequisites
 
-- **Python ≥ 3.11**
+- **Python ≥ 3.13** — the SQLite write lock's fairness depends on CPython 3.13's
+  `PyMutex`-backed `threading.Lock` handoff; older interpreters silently regress to
+  writer starvation (see `backend/app/repositories/sqlite/database.py`).
 - **Node.js ≥ 20** and npm
 - **git**
 - A C/C++ toolchain is needed *only as a fallback* — `numpy`, `rustworkx`, and `hnswlib`
@@ -190,6 +194,13 @@ to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports. The backend
 defaults to `127.0.0.1`; binding it to a non-loopback address requires a non-default
 `SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
+
+The supported production diagnostics target is Ubuntu 24.04 running this normal
+`npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
+leave it running and capture the incident **while the hang is still present**; see
+[Live production incident capture](#live-production-incident-capture). Restarting first
+destroys the active-request, lock, process, and stack evidence the command is designed
+to correlate.
 
 `npm run stop` runs `scripts/stop.sh`, which terminates whatever is listening on the
 backend `PORT` and frontend `FRONTEND_PORT` (default `8000` / `3000`) — it sources the
@@ -644,6 +655,9 @@ local OMP/BLAS threads. This does not change any model-service capacity.
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
+DB_WRITE_LOCK_STATS         # enable process-wide SQLite write-lock wait/hold instrumentation (default true)
+DB_WRITE_LOCK_WARN_MS       # wait/hold threshold in ms that logs a rate-limited db_write_lock_slow event (default 200)
+DB_WRITE_LOCK_FLUSH_SECONDS # interval in seconds for the periodic db_write_lock_stats snapshot, and the per-call-site rate-limit window for db_write_lock_slow (default 60)
 SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
 DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
@@ -794,15 +808,111 @@ Error messages are split by audience. What a user sees is always Chinese: the fr
 
 What a developer or an MCP agent sees is unchanged: backend `detail` stays as-is in the API response and in the logs, and the full diagnostic — status, status text, the raw response body, and the `X-Request-Id` that correlates with `requests.jsonl` — is written to the DevTools console on every failed request, alongside the original text of any error the UI replaced with a generic message. So "it says I have no permission" is answered by reading the console's request id, not by guessing which check rejected it.
 
-For deployment slow-path triage, run `python3 scripts/diag_slow.py` on the host that owns
-`.local/`. Besides request/event/LLM summaries, it prints a strict-reasoning / PPR audit
-from DB aggregates and scale-index manifests so large libraries can be checked for
-indexed-core coverage, chunk/relation ANN availability, delta policy, and cross-base paths
-that may still touch full active vectors. This report is also the `slow` subcommand of the
-unified diagnostics entry `scripts/diag.py` (`diag.py slow | latency | base-recall`), which
-gathers the three slow-phenomenon tools under one command — the offline `slow` / `latency`
-subcommands stay stdlib-only and app-free so they run on a bare host, while `base-recall`
-lazily loads the app to diagnose why deep reports skip the base library.
+### Live production incident capture
+
+On an Ubuntu 24.04 deployment started with `npm run start`, SSH to the host and run the
+primary command from the repository root **during the hang**:
+
+```bash
+ssh <production-host>
+cd <silicon-notebook-repository>
+python3 scripts/diag.py incident
+```
+
+The normal single Uvicorn worker is discovered automatically. If the report says process
+discovery was missing, ambiguous, or incomplete, obtain the already-running backend PID
+from the service supervisor or host listener metadata and retry without restarting it:
+
+```bash
+python3 scripts/diag.py incident --pid <backend-pid>
+```
+
+The default result is one copyable UTF-8 text block of at most **32 KiB**. Collection has
+one shared deadline of at most 10 seconds; process sampling, two stack captures, loopback
+health probes, bounded historical-log reads, and a DB probe whose own budget is at most
+one second all consume that same deadline. `SIGUSR1` is registered by the backend as a
+non-terminating, all-Python-thread faulthandler dump. It captures stack frames only—never
+local-variable values—and a successful capture leaves the backend alive.
+
+The live heartbeat is written atomically every two seconds to
+`.local/diagnostics/runtime.json`; a snapshot older than six seconds is treated as stale
+and its active-work fields are excluded from high-confidence findings. Stack capture uses
+`.local/diagnostics/incident.lock` and appends to
+`.local/diagnostics/thread-dumps.log`; the dump file is bounded to 8 MiB after a successful
+capture. Read-only DB analysis uses bounded temporary snapshots below
+`.local/diagnostics/db-snapshots/`. These diagnostic artifacts are the only files the
+collector may create, replace, or truncate. The runtime accepts only an owner-controlled
+`0700` diagnostics directory and owner-owned, single-link regular `0600` heartbeat/dump
+files; unsafe pre-existing paths or path replacement degrade diagnostics without following
+links or truncating the hostile target.
+
+Read the output in this order:
+
+- `Confidence-ranked diagnoses` lists at most three deterministic hypotheses. `high`,
+  `medium`, and `low` describe evidence strength, not certainty; a lone weak signal is not
+  presented as a root cause.
+- `Observations`, `Relevant stacks`, `Database and host signals`, and `Log metadata` show
+  the metadata chain behind the ranking. `Safe next commands/actions` recommends what to
+  inspect next but never performs remediation.
+- `Missing/degraded evidence` is part of the result, not a failure to hide. A stale
+  snapshot usually means the command was run after the incident; a missing/ambiguous PID
+  calls for the explicit `--pid` retry. DB busy/locked, permission denial, deadline,
+  malformed/corrupt logs, an unavailable signal path, or a raced process/file causes that
+  evidence source to be excluded while the remaining collectors continue.
+- An idle deployment may correctly say that no multi-signal diagnosis reached a useful
+  confidence level. Re-run it while the operation is visibly stuck; do not infer a cause
+  from an idle capture.
+
+Copyable output never prints raw opaque identifiers: allow-listed notebook/request/job
+references are pseudonymized consistently, and other raw IDs are omitted. It also never
+prints user-controlled filenames, request bodies, source text, Ask
+questions/answers, prompts or model messages, Memory/Knowhow content, SQL text or
+parameters, authorization headers, cookies, tokens, secrets, raw command lines, or local
+variables. Even sanitized output should be reviewed before it is shared outside the
+trusted team.
+
+The incident path needs no root privileges or third-party Python packages, does not import
+`app`, and never restarts or terminates a process. All diagnostic commands are read-only
+with respect to application data: they do not execute deletes or other product writes,
+checkpoint/vacuum/analyze/reindex SQLite, run migrations, or auto-remediate. `incident`
+may only maintain its bounded `.local/diagnostics/` artifacts as described above.
+
+### Seven-command diagnostics reference
+
+`scripts/diag.py` exposes exactly these seven commands:
+
+| Command | Intended use | Runtime boundary |
+| --- | --- | --- |
+| `python3 scripts/diag.py incident` | Primary live, bounded incident capture; add `--pid <backend-pid>` when automatic discovery cannot select exactly one worker. | Ubuntu/Linux live process evidence; stdlib-only, app-free. |
+| `python3 scripts/diag.py slow --since 24 --deep` | Historical slow-path report from logs, DB aggregates, and scale-index manifests; `--deep` adds potentially minutes-long read-only DB checks. Bare `python3 scripts/diag.py` still means `slow`. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py latency --last 500` | P50/P95/max by Ask stage from `ask_stage` events. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py locks --top 20` | SQLite write-lock contention aggregated by call site from `db_write_lock_slow` / `db_write_lock_stats` events. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py open --local .local` | Diagnose notebook-open query and endpoint latency, cache cold cost, and mutation-sequence churn. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | Bounded source-side-effect-free SQLite/WAL/table/FK-index/query-plan evidence. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | Diagnose mounted-base availability and the latest report's tier-reference counts using metadata only. | Bounded source-side-effect-free SQLite snapshot; stdlib-only, app-free; no retrieval, query/content echo, repository construction, migration, or source SQLite open. |
+
+`base-recall` uses the same `O_NOATIME`-pinned, non-blocking, identity-validated DB/WAL copy as
+`db`, then runs a fixed aggregate projection against the owned snapshot. If that safety boundary
+is unavailable, it emits category-only degraded evidence instead of falling back to a live SQLite
+connection. Its one UTF-8 report is capped at 32 KiB and contains only counts, fixed status labels,
+and per-run pseudonyms—never raw notebook/user/report/object/chunk IDs, titles, questions, content,
+filenames, paths, exceptions, credentials, or secrets.
+
+Historical readers cover, deduplicate, and bound all supported layouts for the
+`requests`, `events`, and `llm` channels: legacy `<channel>.jsonl`, daily
+`<channel>-YYYY-MM-DD.jsonl`, daily gzip `<channel>-YYYY-MM-DD.jsonl.gz`, and one-level
+per-user log directories. Malformed rows and byte/window truncation are reported as
+degraded metadata. Existing standalone engine scripts remain runnable for established
+operator notes and cron jobs; the seven-command dispatcher is the preferred entry point.
+
+`python3 scripts/diag.py locks [--log PATH] [--top N]` aggregates SQLite write-lock
+contention by call site. `wait` is how long a writer queued for the lock (what users feel
+as a stalled page); `hold` is how long a writer held it (who caused it). Sorted by
+`hold_max`, worst first. It prints two tables: threshold-crossing violations
+(`db_write_lock_slow`, rate-limited, so only the tail above the threshold) and the periodic
+full-distribution snapshot (`db_write_lock_stats`, unfiltered but a point-in-time cumulative
+view) — a call site can be busy without ever crossing the threshold, and that only shows up
+in the second table. Tune the capture threshold with `DB_WRITE_LOCK_WARN_MS` (default 200).
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 
@@ -988,9 +1098,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` — in the `all`, `kg`, and `reparse` phases, print producer/source business-pool utilization every N seconds (default 15; `0` disables it). This is not the model-capacity authority; inspect the read-only Model Services status for per-service running/queued counts, health, and breaker state.
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding.
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding.
 
-Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `kg_extract`, and `paper_metadata`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors (chunk/KG vectors are then skipped), never silently; phases whose required chat workload is unbound fail clearly. Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
+Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, and `paper_metadata`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
 
 ### Retrieval replay diff (`scripts/replay_retrieval.py`)
 
@@ -1190,6 +1300,10 @@ applies to committed tests.
 For every new feature development task, create a new git worktree by default, start a new feature branch inside that worktree, complete the work there, and open a PR from that branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, keep working there.
 
 For approved multi-step implementation plans, use subagent-driven development by default: assign each task to a fresh implementation subagent and require task-scoped specification and code-quality review before moving on. Research, design, status, and review-only work does not require a worktree or subagents.
+
+`CLAUDE.md` is the Claude Code operating standard for this repository. Claude Code auto-loads only `CLAUDE.md` and `.claude/rules/`, never `AGENTS.md`, so that file inlines the red lines that must stay resident and indexes the `AGENTS.md` sections to consult on demand; `AGENTS.md` remains the source of truth where the two disagree, and `CLAUDE.md` enumerates the few deliberate exceptions. Because Claude Code reads it and not `AGENTS.md`, `CLAUDE.md` is part of the four-file documentation-sync set. Its hardest rule is that **spawning a subagent must state the model explicitly instead of inheriting the main agent's** — tiered by how much judgment the task needs: `opus` for judgment work (writing plans, review, architectural trade-offs, hard diagnoses), `sonnet` for transcription-shaped implementation whose spec is already pinned down, `haiku` for pure search and location. The PreToolUse gate `.claude/hooks/require-subagent-model.py` enforces it: a call that passes no `model` and whose `subagent_type` is not pinned to a model in `.claude/agents/` is denied. Three pinned roles ship in `.claude/agents/`: `impl-task` (sonnet), `spec-review` (opus), and `code-quality-review` (opus). `backend/tests/test_claude_subagent_model_hook.py` is the hook's regression net — it runs the real script over a subprocess boundary and covers both directions, the bypasses that would let an inherited-model call through and the false denials that would push people to work around the gate.
+
+A pull request must be reviewed by codex before it is merged, and **every round's raw output is posted verbatim to the PR** — rounds that raise nothing included, rounds run by hand included — alongside the trigger, the exact command, the head SHA, and the exit code with output size, so a reader can confirm the run happened and was not paraphrased away. A round counts as successful only when the exit code is zero **and** the output is non-empty: a review killed by SIGTERM also exits zero, and trusting the exit code alone posts an empty comment that reads as a pass. P0/P1 findings block and stop for a human decision; P2/P3 do not block and may be declined with a stated reason; output whose priority tags cannot be parsed blocks conservatively instead of defaulting to a pass. A finding may be rejected on the merits — codex reviews the diff and does not always know the runtime facts — but a rejection must carry its reasoning and evidence on the PR, a comment recording the trade-off in the code, and a regression test pinning the behavior that was kept. Merging always requires explicit human approval. The review automation itself is a per-developer Claude Code hook rather than a repository artifact, so a fresh clone will not have it; the rule stands regardless, and `CLAUDE.md` documents the manual command.
 
 ### Test architecture
 

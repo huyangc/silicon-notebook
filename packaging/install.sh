@@ -11,11 +11,12 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 log() { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[install:错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
-# --- 1) python 版本校验(numpy2 / pydantic 2.12 需 >= 3.10) ---
+# --- 1) python 版本校验(SQLite 写锁公平性依赖 CPython 3.13 的 PyMutex 交接语义,
+#        需 >= 3.13;numpy2 / pydantic 2.12 本身只需 >= 3.10,3.13 是更严格的下限) ---
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "找不到 $PYTHON_BIN;设 PYTHON_BIN 指向目标机 python3。"
-"$PYTHON_BIN" - <<'PY' || die "python 版本过低,需 >= 3.10。"
+"$PYTHON_BIN" - <<'PY' || die "python 版本过低,需 >= 3.13。"
 import sys
-raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)
+raise SystemExit(0 if sys.version_info[:2] >= (3, 13) else 1)
 PY
 log "python: $("$PYTHON_BIN" -V 2>&1) @ $(command -v "$PYTHON_BIN")"
 

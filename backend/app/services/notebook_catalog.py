@@ -18,6 +18,7 @@ from app.models.notebooks import (
     NotebookUpdate,
 )
 from app.models.ask import NotebookSearchResponse, SearchHit
+from app.core import diagnostics_runtime as diagnostics
 from app.repositories.ports import KgBuildJobStorePort
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and
@@ -378,16 +379,18 @@ class NotebookCatalogService:
 
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing
-        file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
+        with diagnostics.diagnostic_phase("notebook_delete.db"):
+            file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
         # DB deletion is committed above; only then remove files on disk —
         # source files first, then the notebook's pasted-image asset
         # directory (knowhow-tables PR-2+3 Task 14; unconditional, from the
         # construction-injected live storage root, so the real HTTP delete
         # route — which reaches this service directly, not via the facade —
         # gets the cleanup too).
-        for file_path in file_paths:
-            _delete_source_file(file_path)
-        _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
+        with diagnostics.diagnostic_phase("notebook_delete.files"):
+            for file_path in file_paths:
+                _delete_source_file(file_path)
+            _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

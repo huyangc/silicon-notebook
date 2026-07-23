@@ -339,7 +339,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_23(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_25(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -365,9 +365,13 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_23(tmp_path):
     fixture copy to current and rolling back EXACTLY what every post-v13
     migration adds — including _migration_15's index, _migration_16's tables
     (which also absorb _migration_19's column + index), _migration_17's
-    tables, _migration_18's table, _migration_20's table + column, and the
+    tables, _migration_18's table, _migration_20's table + column, the
     _migration_21 normalized-anchor index, _migration_22's durable KG
-    build-job table, and _migration_23's per-user model-service status, or
+    build-job table, _migration_23's per-user model-service status, and
+    _migration_24's kg_canonical_scratch table (write-lock slimming
+    improvement point 2's cluster-map-swap preparation scratch table — no
+    separate index rollback needed, DROP TABLE takes its index with it), and
+    _migration_25's system model-service status table, or
     the constructed 'v13' would retain them and the hop would under-report
     its additions."""
     from app.core.config import Settings
@@ -388,7 +392,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_23(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
-        rollback.execute("DROP TABLE system_model_service_status")        # _migration_24
+        rollback.execute("DROP TABLE system_model_service_status")        # _migration_25
+        rollback.execute("DROP TABLE kg_canonical_scratch")              # _migration_24
         rollback.execute("DROP TABLE model_service_status")               # _migration_23
         rollback.execute("DROP TABLE kg_build_jobs")                     # _migration_22
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")  # _migration_21
@@ -423,7 +428,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_23(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_to_23(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -434,6 +439,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_23(tmp_path):
     rollback = sqlite3.connect(database)
     try:
         rollback.execute("DROP TABLE system_model_service_status")
+        rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
@@ -465,7 +471,7 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
-def test_deployed_v21_database_verifies_through_migrations_22_and_23(tmp_path):
+def test_deployed_v21_database_verifies_through_migrations_22_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -476,6 +482,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_and_23(tmp_path):
     rollback = sqlite3.connect(database)
     try:
         rollback.execute("DROP TABLE system_model_service_status")
+        rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("PRAGMA user_version = 21")
@@ -490,7 +497,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_and_23(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v22_database_verifies_through_model_service_status(tmp_path):
+def test_deployed_v22_database_verifies_through_migrations_23_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -501,6 +508,7 @@ def test_deployed_v22_database_verifies_through_model_service_status(tmp_path):
     rollback = sqlite3.connect(database)
     try:
         rollback.execute("DROP TABLE system_model_service_status")
+        rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
@@ -514,7 +522,8 @@ def test_deployed_v22_database_verifies_through_model_service_status(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_credential_and_status_scrub(tmp_path):
+def test_deployed_v23_database_verifies_kg_scratch_and_model_status_scrub(tmp_path):
+    """A v23 database must verify cleanly through both v24 and v25."""
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -524,6 +533,7 @@ def test_deployed_v23_database_verifies_credential_and_status_scrub(tmp_path):
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
         rollback.execute("DROP TABLE system_model_service_status")
+        rollback.execute("DROP TABLE kg_canonical_scratch")
         rollback.execute(
             "UPDATE user_profiles SET model_settings=? WHERE user_id='user-local'",
             ('{"llm":{"api_key":"credential-must-be-scrubbed"}}',),

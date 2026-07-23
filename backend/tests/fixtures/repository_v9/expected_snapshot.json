@@ -1199,6 +1199,11 @@
         "type": "index"
       },
       {
+        "name": "idx_kg_canonical_scratch_nb_run_seed",
+        "sql_sha256": "a8457f423f0ba9cc169baadcf22fb6e4d6c3e100cb679efff0feec5d9c26f9ad",
+        "type": "index"
+      },
+      {
         "name": "idx_kg_cluster_scratch_nb_run",
         "sql_sha256": "63dda4f6c99afb18cd60dd4f9107f4aef2dd87368713947c8dee6f6c108da7bf",
         "type": "index"
@@ -1584,6 +1589,11 @@
         "type": "table"
       },
       {
+        "name": "kg_canonical_scratch",
+        "sql_sha256": "5d95fa01f2e9fb5570a90ab2b814a7f32db91fb178cb3a1d6ad0b262d41cf594",
+        "type": "table"
+      },
+      {
         "name": "kg_cluster_scratch",
         "sql_sha256": "99d623abe3512d8074f90faea3ba34e41af1042e09da59e2c8fe4432a08e7e0c",
         "type": "table"
@@ -1829,6 +1839,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 24
+    "user_version": 25
   }
 }

@@ -108,6 +108,9 @@ class RepositoryRuntime:
             job_workers=settings.kg_job_concurrency,
         )
         self.database = SqliteDatabase(settings, root_dir)
+        # Write-lock observations share the existing per-user event channel.
+        if self.database.stats is not None:
+            self.database.stats.sink = self.event_log.emit
         self.identity = IdentityStore(
             self.database,
             settings,
@@ -939,6 +942,7 @@ class RepositoryRuntime:
             connect=connect,
             close_local=close_local,
             write=write,
+            bulk_write=self.database.bulk_write,
             get_notebook=get_notebook, current_user_id=current_user_id,
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,

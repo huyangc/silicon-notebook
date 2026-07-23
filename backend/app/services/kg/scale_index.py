@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import scipy.sparse as sp
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,48 +46,134 @@ class ScaleIndex:
     relation_ann_handle: object = None  # 惰性缓存的 relation ANN handle(不落盘)
 
 
+def _unusable(out_dir: str, detail: str):
+    """索引产物不可信时的统一出口:记一条 warning(含目录与具体失配项,便于运维
+    定位)并返回 None。None 对调用方等价于「没建过」,会触发全量重建。**绝不
+    raise**——加载在检索热路径上,响亮地退化成「无索引」远好过把错配的索引
+    静默返回。"""
+    _logger.warning("scale index at %s is unusable: %s", out_dir, detail)
+    return None
+
+
+def _manifest_count(manifest: dict, key: str):
+    """取 manifest 里的计数字段。缺键(老索引根本没写过 n_ann/n_viz_nodes 这类
+    键)或不是整数 → None,表示「这一项不参与校验」。older-index-stays-valid:
+    缺键一律放行,绝不能把老索引判成损坏。"""
+    value = manifest.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _first_mismatch(checks) -> str | None:
+    """checks: [(名称, 期望, 实际)]。期望为 None 表示该项不参与校验(缺键)。
+    返回第一条失配的人可读描述;全部通过返回 None。"""
+    for label, expected, actual in checks:
+        if expected is not None and expected != actual:
+            return f"{label}不一致(期望 {expected},实际 {actual})"
+    return None
+
+
 def load_scale_index(out_dir: str):
     """从 out_dir 加载持久化的 ScaleIndex。manifest 不存在或目录不存在时返回 None。
-    ANN 索引不预加载（延迟由调用方按需用 ann_path 打开）。"""
+    ANN 索引不预加载（延迟由调用方按需用 ann_path 打开）。
+
+    加载时顺带做一层零成本的自洽校验:manifest 计数 vs 数组长度、数组之间的
+    形状关系。任一产物读不出来、或任一项失配 → 记 warning 并返回 None(与
+    「没建过」等价,调用方据此走全量重建)。这一层是为了兜住已经躺在盘上的坏
+    索引——历史上全量重建直写活目录,崩在中途会留下「旧 manifest + 半截数组」
+    这种看着能加载、其实描述的是别的数据的目录。
+    校验一律只在 manifest 里该键存在时生效(older-index-stays-valid),可选产物
+    (viz / chunk_ann / relation_ann)只在本次真的读出来了才比对——文件不存在时
+    维持既有的「跳过该可选产物」语义,不升级成整份索引损坏。"""
     mpath = os.path.join(out_dir, "manifest.json")
     if not os.path.exists(mpath):
         return None
-    with open(mpath) as fh:
-        manifest = json.load(fh)
-    transition = sp.load_npz(os.path.join(out_dir, "graph.npz"))
-    node_ids = list(np.load(os.path.join(out_dir, "node_ids.npy"), allow_pickle=True))
-    idf = np.load(os.path.join(out_dir, "idf.npy"))
-    chunk_index = np.load(os.path.join(out_dir, "chunk_index.npy"))
-    ann_labels = list(np.load(os.path.join(out_dir, "ann_labels.npy"), allow_pickle=True))
+    try:
+        with open(mpath) as fh:
+            manifest = json.load(fh)
+    except Exception as exc:  # noqa: BLE001 — 半截/损坏的 manifest 也是「不可信」
+        return _unusable(out_dir, f"manifest.json 读不出来({exc!r})")
+    if not isinstance(manifest, dict):
+        return _unusable(out_dir, "manifest.json 不是一个对象")
+
+    # 核心产物:任一缺失/反序列化失败都视为损坏(broad except 是刻意的——任何
+    # 读不出来的理由都指向同一个结论:这份索引不能用)。
+    try:
+        transition = sp.load_npz(os.path.join(out_dir, "graph.npz"))
+        node_ids = list(np.load(os.path.join(out_dir, "node_ids.npy"), allow_pickle=True))
+        idf = np.load(os.path.join(out_dir, "idf.npy"))
+        chunk_index = np.load(os.path.join(out_dir, "chunk_index.npy"))
+        ann_labels = list(np.load(os.path.join(out_dir, "ann_labels.npy"), allow_pickle=True))
+    except Exception as exc:  # noqa: BLE001
+        return _unusable(out_dir, f"核心产物读不出来({exc!r})")
+
+    n_nodes = len(node_ids)
+    detail = _first_mismatch([
+        ("manifest.n_nodes 与 node_ids.npy 行数",
+         _manifest_count(manifest, "n_nodes"), n_nodes),
+        # 写入端两条路径都保证转移阵是 len(node_ids) 阶方阵:
+        # build_transition_arrays 直接按 (n, n) 建,fold 走 splice_active 同样按
+        # combined_ids 的长度建。冻结的 v9 老工件也满足(既有兼容用例已在断言)。
+        ("graph.npz 行数与 node_ids.npy 行数", n_nodes, int(transition.shape[0])),
+        ("graph.npz 列数与 node_ids.npy 行数", n_nodes, int(transition.shape[1])),
+        # idf 同理:full 逐 node_id append,fold 里 fold_arrays 按 len(node_ids)
+        # 开数组,两条路径都恰好一一对应。
+        ("idf.npy 长度与 node_ids.npy 行数", n_nodes, int(len(idf))),
+        ("manifest.n_ann 与 ann_labels.npy 行数",
+         _manifest_count(manifest, "n_ann"), len(ann_labels)),
+    ])
+    if detail is not None:
+        return _unusable(out_dir, detail)
 
     viz_ids = viz_adj = viz_deg = viz_types = viz_names = viz_edges = None
-    if manifest.get("has_viz"):
-        viz_npz = os.path.join(out_dir, "viz.npz")
-        viz_adj_path = os.path.join(out_dir, "viz_adj.npz")
-        if os.path.exists(viz_npz) and os.path.exists(viz_adj_path):
-            with np.load(viz_npz, allow_pickle=True) as z:
-                viz_ids = list(z["viz_ids"])
-                viz_deg = z["viz_deg"]
-                viz_types = list(z["viz_types"])
-                viz_names = list(z["viz_names"])
-                viz_edges = json.loads(str(z["viz_edges"]))
-            viz_adj = sp.load_npz(viz_adj_path)
+    chunk_ann_labels = chunk_ann_path = None
+    relation_ann_labels = relation_ann_path = None
+    try:
+        if manifest.get("has_viz"):
+            viz_npz = os.path.join(out_dir, "viz.npz")
+            viz_adj_path = os.path.join(out_dir, "viz_adj.npz")
+            if os.path.exists(viz_npz) and os.path.exists(viz_adj_path):
+                with np.load(viz_npz, allow_pickle=True) as z:
+                    viz_ids = list(z["viz_ids"])
+                    viz_deg = z["viz_deg"]
+                    viz_types = list(z["viz_types"])
+                    viz_names = list(z["viz_names"])
+                    viz_edges = json.loads(str(z["viz_edges"]))
+                viz_adj = sp.load_npz(viz_adj_path)
 
-    chunk_ann_labels = None
-    chunk_ann_path = None
-    if manifest.get("has_chunk_ann"):
-        labpath = os.path.join(out_dir, "chunk_ann_labels.npy")
-        if os.path.exists(labpath):
-            chunk_ann_labels = list(np.load(labpath, allow_pickle=True))
-            chunk_ann_path = os.path.join(out_dir, "chunk_ann.bin")
+        if manifest.get("has_chunk_ann"):
+            labpath = os.path.join(out_dir, "chunk_ann_labels.npy")
+            if os.path.exists(labpath):
+                chunk_ann_labels = list(np.load(labpath, allow_pickle=True))
+                chunk_ann_path = os.path.join(out_dir, "chunk_ann.bin")
 
-    relation_ann_labels = None
-    relation_ann_path = None
-    if manifest.get("has_relation_ann"):
-        rlabpath = os.path.join(out_dir, "relation_ann_labels.npy")
-        if os.path.exists(rlabpath):
-            relation_ann_labels = list(np.load(rlabpath, allow_pickle=True))
-            relation_ann_path = os.path.join(out_dir, "relation_ann.bin")
+        if manifest.get("has_relation_ann"):
+            rlabpath = os.path.join(out_dir, "relation_ann_labels.npy")
+            if os.path.exists(rlabpath):
+                relation_ann_labels = list(np.load(rlabpath, allow_pickle=True))
+                relation_ann_path = os.path.join(out_dir, "relation_ann.bin")
+    except Exception as exc:  # noqa: BLE001
+        return _unusable(out_dir, f"可选产物读不出来({exc!r})")
+
+    # 可选产物的计数与主索引出自同一次写入,失配即证明那次写入不完整——与主
+    # 产物一视同仁判损坏。
+    optional_checks = []
+    if viz_ids is not None:
+        optional_checks.append((
+            "manifest.n_viz_nodes 与 viz.npz 节点数",
+            _manifest_count(manifest, "n_viz_nodes"), len(viz_ids)))
+    if chunk_ann_labels is not None:
+        optional_checks.append((
+            "manifest.n_chunk_ann 与 chunk_ann_labels.npy 行数",
+            _manifest_count(manifest, "n_chunk_ann"), len(chunk_ann_labels)))
+    if relation_ann_labels is not None:
+        optional_checks.append((
+            "manifest.n_relation_ann 与 relation_ann_labels.npy 行数",
+            _manifest_count(manifest, "n_relation_ann"), len(relation_ann_labels)))
+    detail = _first_mismatch(optional_checks)
+    if detail is not None:
+        return _unusable(out_dir, detail)
 
     return ScaleIndex(
         node_ids=node_ids,

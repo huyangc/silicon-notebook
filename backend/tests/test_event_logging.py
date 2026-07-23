@@ -144,6 +144,66 @@ def test_expand_channel_paths(tmp_path):
     assert rels == ["events.jsonl", "user-3a8f9c2b1d/events.jsonl", "user-local/events.jsonl"]
 
 
+def test_expand_channel_paths_reads_dated_file(tmp_path):
+    """EventLogger.emit 实际写入的是按天文件(`events-YYYY-MM-DD.jsonl`,见
+    _target_path_for_day),expand_channel_paths 必须发现它,不能只认无日期名。"""
+    from app.services.log_reader import expand_channel_paths
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events-2026-07-20.jsonl").write_text("d1\n", encoding="utf-8")
+
+    paths = expand_channel_paths(logs / "events.jsonl")
+    assert logs / "events-2026-07-20.jsonl" in paths
+
+
+def test_expand_channel_paths_reads_gzipped_dated_file(tmp_path):
+    """归档器(_gzip_day_file)压缩后的按天文件(`.jsonl.gz`)也必须被发现。"""
+    import gzip
+    from app.services.log_reader import expand_channel_paths
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    with gzip.open(logs / "events-2026-07-19.jsonl.gz", "wt", encoding="utf-8") as fh:
+        fh.write("d0\n")
+
+    paths = expand_channel_paths(logs / "events.jsonl")
+    assert logs / "events-2026-07-19.jsonl.gz" in paths
+
+
+def test_expand_channel_paths_reads_dated_file_in_per_user_subdir(tmp_path):
+    """per-user 子目录里的按天文件同样要并入(EventLogger(per_user=True) 写的
+    正是这个形状)。"""
+    from app.services.log_reader import expand_channel_paths
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    sub = logs / "user-local"
+    sub.mkdir()
+    (sub / "events-2026-07-20.jsonl").write_text("u1\n", encoding="utf-8")
+
+    paths = expand_channel_paths(logs / "events.jsonl")
+    assert sub / "events-2026-07-20.jsonl" in paths
+
+
+def test_expand_channel_paths_rejects_lookalike_stem(tmp_path):
+    """`events-foo-2026-07-21.jsonl` 的 stem 是 `events-foo`,不是 `events`——
+    channel `events` 的按天发现不能把它收进来。此前 _dated_paths_in_dir 只用
+    `search()` 在完整文件名里找日期子串(不锚定、不核对 stem),这种"channel 前缀
+    恰好也是另一个真 channel 前缀"的文件会被误吞进错误的 channel(scripts/diag.py
+    一直是严格全等匹配,这条测试让 log_reader 与之保持一致)。"""
+    from app.services.log_reader import expand_channel_paths, available_days
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "events-2026-07-20.jsonl").write_text("real\n", encoding="utf-8")
+    (logs / "events-foo-2026-07-21.jsonl").write_text("lookalike\n", encoding="utf-8")
+
+    paths = expand_channel_paths(logs / "events.jsonl")
+    assert logs / "events-2026-07-20.jsonl" in paths
+    assert logs / "events-foo-2026-07-21.jsonl" not in paths
+
+    days = available_days(logs, "events")
+    assert "2026-07-20" in days
+    assert "2026-07-21" not in days
+
+
 def test_llm_log_dir_aligned():
     from app.core.event_logging import llm_log_dir_aligned, _ROOT_DIR
     # 默认：llm_log_path 的父目录与 event_log_dir 都相对、锚定到同一处 → 对齐
