@@ -1239,7 +1239,16 @@ class SourceIngestionService:
         content = self.source_files.read_bytes(
             getattr(used_source, "file_path", "") or ""
         )
-        self._repoint_reused_file(source_id, used_source, fresh.file_name, content)
+        # ⚠ file_name 必须**认领之后重读**，不能用上面认领之前读到的 fresh：认领把行翻成
+        # 'queued'（在飞）后、到这次 repoint 之间，若并发的换后缀重传走了在飞分支（此刻行
+        # 是 'queued'）又把一个更新的 file_name 记到行上，拿陈旧的 fresh.file_name 去 repoint
+        # 会用旧后缀重写文件、并把行上更新的意图盖回旧值；紧接着重跑那条流水线捕获的是被
+        # 盖回的旧名，其完成时的 recheck（fresh vs used）随即看到二者一致 → 那次更新的纠正
+        # 被静默丢掉（Codex 第 6 轮 P2-2，本特性第 5 轮收口自己引入的竞态）。重读锁住
+        # 「认领 → 读名 → repoint」三步对 file_name 的一致性；发生在本次 repoint **之后** 的
+        # 改名仍留在行上、由重跑那条流水线自己的 _reconcile 收口（同一循环不变式）。
+        latest = self.sources.get_source(source_id)
+        self._repoint_reused_file(source_id, used_source, latest.file_name, content)
         return self.process_source(
             source_id, hooks, _reparse_round=reparse_round + 1
         )

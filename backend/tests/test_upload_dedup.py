@@ -610,6 +610,73 @@ def test_in_flight_suffix_correction_never_rewrites_the_file_being_parsed(
     assert after == before, "在飞行中不得重写正在被解析的盘上文件"
 
 
+def test_rename_after_the_reconcile_claim_uses_the_latest_suffix_not_the_stale_one(
+    live_repo, monkeypatch
+):
+    """P2-2（第 5 轮收口自己引入的竞态，Codex 第 6 轮）：_reconcile_pending_suffix
+    的认领把行翻成 'queued'（在飞）后、到 repoint 之间，若并发的换后缀重传走在飞分支
+    又记了更新的 file_name，repoint 必须用**认领之后重读**的最新后缀，而不是认领之前
+    读到的旧值——否则更新的纠正会被旧值盖掉，且下一轮 recheck（fresh vs used）随即看到
+    二者一致而永不回访，静默丢失。
+
+    时间线：上传 data.csv（P1 跑）→ 抽取中并发重传 data.md（记为待收口意图）→ P1 定型
+    → 收口 reconcile 认领赢（行 'queued'）→ **认领后、repoint 前** 另一条真实线程重传
+    data.txt（在飞分支再改名）→ repoint 必须用 data.txt 整条重解析，最终落 data.txt。
+
+    变异验证：把 _reconcile_pending_suffix 里 repoint 的 latest.file_name 换回认领前的
+    fresh.file_name 后，最终落 data.md，本测试转红。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    _patch_parse(monkeypatch, [_element("body")])
+
+    body = b"col1,col2\n1,2"
+
+    # 抽取中（in-flight）用不同解析器的后缀重传一次，制造「待收口的后缀纠正」，让流水线
+    # 跑完触发 _reconcile_pending_suffix（与上面 in-flight 收口用例同一手法）。
+    extract_calls = {"n": 0}
+
+    def fake_extract(source_id, **_kw):
+        extract_calls["n"] += 1
+        if extract_calls["n"] == 1:
+            _upload_named(live_repo, nb, content=body, name="data.md")
+
+    monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
+
+    # 认领赢之后、repoint 之前：另一条**真实线程**再换一次后缀（行此刻 'queued'，走在飞
+    # 分支只改名）。join 保证它在 reconcile 重读 file_name 之前落库——正是 P2-2 的窗口。
+    real_claim = ingestion.sources.claim_reparse_if_settled
+    injected = {"done": False}
+
+    def claim_then_concurrent_rename(source_id):
+        won = real_claim(source_id)
+        if won and not injected["done"]:
+            injected["done"] = True
+            t = threading.Thread(
+                target=lambda: _upload_named(live_repo, nb, content=body, name="data.txt")
+            )
+            t.start()
+            t.join(5)
+        return won
+
+    monkeypatch.setattr(
+        ingestion.sources, "claim_reparse_if_settled", claim_then_concurrent_rename
+    )
+
+    sid = _upload_named(live_repo, nb, content=body, name="data.csv")[0].id
+
+    assert injected["done"], "前提：收口 reconcile 必须真的认领成功并触发并发改名注入"
+    final = live_repo.get_source(sid)
+    assert final.file_name == "data.txt", (
+        f"repoint 必须用认领后重读的最新后缀 data.txt，而非认领前的 data.md；实际 {final.file_name}"
+    )
+    assert final.file_path.endswith("data.txt"), (
+        "repoint 把盘上文件按最新后缀重写，file_path 与 file_name 同步"
+    )
+    assert final.parse_status == "extracted", "补跑完照样落终态"
+    assert len(live_repo.list_sources(nb)) == 1, "始终只有一行"
+
+
 def test_an_unchanged_doc_type_costs_exactly_one_extraction(
     repo, notebook_id, settled, monkeypatch
 ):
