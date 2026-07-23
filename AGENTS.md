@@ -100,7 +100,7 @@ Inside a notebook:
   - The side panel should provide a type-grouped node overview (Concept, Claim, Formula, Procedure, plus future types) and selected-node relation/evidence details.
 - Do not show a fixed right-column Studio sidebar in the primary notebook workspace.
   - Keep the source column + four-tab (`问答 (Ask) | 知识库 (Knowledge) | 记忆 (Memory) | 深度报告 (Deep Report)`) main column as the two-column workspace.
-  - The Analysis menu itself contains only the promotion queue (admin), tier toggle (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions. The existing analytics view has separate Memory and Knowhow content-asset cards served by `GET /api/notebooks/{id}/analytics/content-overview`: Memory totals/statuses/recent rows are scoped to the authenticated viewer and requested notebook (never admin cross-user analytics); Knowhow table/row, projection pending/failed, stale-code, and recent-table metrics follow notebook read access. Cards navigate only to the existing Memory and Knowhow pages/editors, whose write restrictions remain authoritative; do not add another browser/editor.
+  - The Analysis menu itself contains only the promotion queue (admin), tier toggle (admin), and edge-review queue. Dashboard and the full-screen Knowledge Graph are separate top-toolbar actions; the graph Schema (object-type/field management, admin-only — the interface name is 「图谱 Schema」, see 界面词汇表) is reached from a button inside the Knowledge Graph view header, not a separate top-toolbar action. The existing analytics view has separate Memory and Knowhow content-asset cards served by `GET /api/notebooks/{id}/analytics/content-overview`: Memory totals/statuses/recent rows are scoped to the authenticated viewer and requested notebook (never admin cross-user analytics); Knowhow table/row, projection pending/failed, stale-code, and recent-table metrics follow notebook read access. Cards navigate only to the existing Memory and Knowhow pages/editors, whose write restrictions remain authoritative; do not add another browser/editor.
   - Do not document or reintroduce retired content-generation, article, or derived-rule controls as current UI.
 - The candidate Review Queue was removed: the KG extractor writes approved knowledge objects directly (no candidate staging). Knowledge governance is dedupe/merge over the objects in the Knowledge browser.
 
@@ -272,10 +272,12 @@ Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, to
 | 孤立节点 / 补连边 | 没建立关联的内容 / 补上关联 |
 | 边审 / 边审查队列 | 关系审核 / 关系审核队列 |
 | Memory（残留英文散文） | 记忆 |
-| schema（散文） | 内容类型 / 抽取字段 |
+| schema（散文） | 内容类型 / 抽取字段（图谱对象类型/字段管理功能的界面名放行为「图谱 Schema」，见下） |
 | deprecated（toast 直出） | 已弃用 |
 
 **「概念」不是图谱对象的统称。** 图谱是**对象级**的：内置 `concept` / `claim` / `formula` / `procedure` 四型（真源 `extraction_profiles.OBJECT_TYPE_LABELS`），外加 knowhow 表以列名生成的自定义 `object_type`。「概念」只是其中**一种**类型的界面名（`概念 Concept`），把计数、引用锚点、入图提示统称为「概念」等于把其余类型降格，用户按图索骥时对不上。统称一律用**知识对象**（强调它在图谱里是个可定位的东西）或**知识条目**（强调它是一条知识内容），按语境择一。knowhow 侧尤其注意：`概念` 在那里另有所指（anchor 分组，见 `knowhow-matrix-drawer.tsx` 的徽章），复用会撞义。
+
+**「图谱 Schema」是 schema 行放行的唯一复合短语。** 图谱对象类型与字段管理功能（原顶层导航「内容类型」，现已并入知识图谱视图的头部入口，仍 admin 门控）的界面名，经产品决策（2026-07-23）定为「图谱 Schema」——EDA / 芯片场景下用户反而熟悉 "Schema" 一词。守卫 `check_ui_vocabulary.py` 的 `SANCTIONED_UI` 只放行「图谱 Schema」这一个短语（匹配前像剥 `${…}` 插值一样先剥掉），**裸 `schema` / 裸 `Schema`（不带「图谱」前缀）仍照抓**；`backend/tests/test_ui_vocabulary_guard.py::test_图谱Schema放行但裸schema仍抓` 钉住这个放行的窄度。这是全表唯一保留英文单词做界面词的例外。
 
 **刻意保留、不要误杀**：**知识图谱**（用户词典里的词，只杀 KG / 建图 / 入图 等缩写变体）、**索引**（书后索引式心智模型，只杀 CSR / ANN / 暴力检索 修饰）、**「知识库」作 Knowledge tab 名**（`workspace-model.ts` 的 `CHAT_MODES`；lint 分不清 tab 名与误用，故不进黑名单）、**裸「节点」/「边」**（图谱视图里画出来的就是节点与边，属表中说的「图谱技术上下文」；且「边」与旁边 / 边框 / 边距同形，lint 判不了——故黑名单只收无歧义的复合形态：孤立节点 / 补连边 / 关系边 / 边审。散文里的裸用靠人工对照本表把关）。
 

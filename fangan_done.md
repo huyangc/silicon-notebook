@@ -80,7 +80,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   - 回答含 citation 与 👍/👎 反馈；引用在前端以 `[1]`、`[2]` 顺序编号展示，点击引用会在答案面板内展开详情（避免浮窗越界）；模型直接输出的数字复合引用（如 `[1, 2, 3]`）在每个编号都能映射到已知引用时也会拆成可点击引用；答案正文支持 Markdown/code/formula/table 渲染，并提供复制按钮；chat 菜单可清空对话。
 - **候选知识治理**：候选知识列表、evidence 与 approve / reject 后端能力保留；左侧 Source Stack 不再显示独立「审核队列」按钮，避免出现无效入口。
 - **source detail 结构化渲染**：`formula` 元素用 KaTeX 排版（失败回退原始 LaTeX）、`table` 元素用 sanitized `table_html` 渲染、其余文本 + element_type 徽标。
-- 「分析」菜单当前只含晋升队列（admin）、tier 切换（admin）与边审查队列；看板、Schema、全屏知识图谱为其他顶栏动作。当前没有文章、思维导图、信息图或派生规则入口。
+- 「分析」菜单当前只含晋升队列（admin）、tier 切换（admin）与边审查队列；看板、全屏知识图谱为其他顶栏动作，图谱 Schema（仅管理员）已移入知识图谱视图头部的「图谱 Schema」按钮。当前没有文章、思维导图、信息图或派生规则入口。
 
 ## 6. Source 上传与管理（异步闭环）
 
