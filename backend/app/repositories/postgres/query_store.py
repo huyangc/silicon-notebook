@@ -23,6 +23,7 @@ from app.repositories.postgres.search import (
     notebook_source_rows,
 )
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
+from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.notebook_scale import NotebookScaleFacts
 
 
@@ -129,6 +130,51 @@ class QueryStore:
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
             "WHERE notebook_id=%s) AS exists",
             (notebook_id,),
+        ).fetchone()
+        return bool(row["exists"])
+
+    @staticmethod
+    def notebook_has_usable_kg(db: Any, notebook_id: str) -> bool:
+        """本库是否有**可用状态**的 knowledge_objects(USABLE_STATUSES,排除 deprecated)。
+        与 sqlite 同义,驱动 NotebookSummary.ask_available(见 PR#334)。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
+            "WHERE notebook_id=%s AND status=ANY(%s)) AS exists",
+            (notebook_id, list(USABLE_STATUSES)),
+        ).fetchone()
+        return bool(row["exists"])
+
+    @staticmethod
+    def notebook_has_usable_base_kg(db: Any, notebook_id: str) -> bool:
+        """本库挂载的参考库中是否有任一含**可用状态** KG。与 sqlite 同义(PR#334)。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 " + MOUNT_JOIN + MOUNT_VALID
+            + " AND EXISTS(SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.notebook_id = b.id AND ko.status=ANY(%s))) AS exists",
+            (notebook_id, list(USABLE_STATUSES)),
+        ).fetchone()
+        return bool(row["exists"])
+
+    @staticmethod
+    def notebook_has_chunk(db: Any, notebook_id: str) -> bool:
+        """本库是否有任意 chunk(文档 + knowhow 格子同表)。驱动 ask_available:
+        knowhow-only 库无可见来源、无 KG 却可检索(PR#334)。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM chunks WHERE notebook_id=%s) AS exists",
+            (notebook_id,),
+        ).fetchone()
+        return bool(row["exists"])
+
+    @staticmethod
+    def notebook_has_confirmed_memory(
+        db: Any, notebook_id: str, user_id: str
+    ) -> bool:
+        """本库对该用户是否有**已确认** memory(confirmed-only + user-scoped,与检索侧
+        及 sqlite 一致)。驱动 ask_available(PR#334)。"""
+        row = db.execute(
+            "SELECT EXISTS(SELECT 1 FROM memory_items "
+            "WHERE notebook_id=%s AND created_by=%s AND status='confirmed') AS exists",
+            (notebook_id, user_id),
         ).fetchone()
         return bool(row["exists"])
 

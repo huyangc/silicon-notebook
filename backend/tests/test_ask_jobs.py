@@ -164,6 +164,7 @@ def test_cancel_endpoint_wins_before_final_answer_save_atomically(tmp_path, monk
     from app.api import ask_routes
 
     repo = ask_routes.repository()
+    seed_ask_evidence(repo, nb)  # PR#334:空库 ask 会 409,先塞一条证据
     store = repo._runtime.ask_state
     job_started = threading.Event()
     save_entered = threading.Event()
@@ -228,6 +229,7 @@ def test_sync_ask_cancel_endpoint_returns_no_final_answer_or_empty_conversation(
     from app.api import ask_routes
 
     repo = ask_routes.repository()
+    seed_ask_evidence(repo, nb)  # PR#334:空库 ask 会 409,先塞一条证据
     store = repo._runtime.ask_state
     job_started = threading.Event()
     save_entered = threading.Event()
