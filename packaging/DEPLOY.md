@@ -81,6 +81,19 @@ SQLite 绝对路径例子是
 
 ### A. 全新 PostgreSQL 直接启动
 
+`pg_trgm` 必须安装在 `public` schema。应用数据库 owner 必须有权执行
+`CREATE EXTENSION pg_trgm`，否则 DBA 必须在首次应用启动前预装到 `public`。用不含
+凭据的 SQL 验证：
+
+```sql
+SELECT e.extname, n.nspname
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.extname = 'pg_trgm';
+```
+
+预期是 `pg_trgm | public`；无行表示尚未安装，其他 schema 会让 migration fail closed。
+
 1. DBA 创建专用 UTF8 空库和 login owner；应是
    `NOSUPERUSER NOCREATEDB NOCREATEROLE`，有足够连接/磁盘容量，并且备份策略已演练。
 2. `./stop.sh`，确认旧 backend 已停止；绝不边写边改 URL。
@@ -137,6 +150,13 @@ SQLite。只有 PG 切换后无新写入，或所有 PG-only 写入已经外部�
 设计边界见
 `docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md`，已交付 adapter 见
 `docs/superpowers/plans/2026-07-22-postgresql-repository-adapter.md`；forward-shadow 文档是未实现的下一阶段。
+
+### F. 离线 batch ingest 边界
+
+`batch_ingest.py` 的变更阶段仅支持 SQLite。若 active `DATABASE_URL` 是 PostgreSQL，
+CLI 会在构造 SQLite repository 前返回状态码 `2`，且错误不打印 URL/密码。PostgreSQL
+请使用正常应用/API 上传与 KG/reindex 流程；不要把 SQLite maintenance 命令指向 PG。
+`--dry-run` 只扫描文件系统，不构造 repository，因此两种配置都可使用。
 
 ## 排障
 

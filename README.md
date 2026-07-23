@@ -271,6 +271,21 @@ and connection query options are redacted from status, readiness errors, and sta
 
 #### A. Boot a fresh/empty PostgreSQL database directly
 
+`pg_trgm` must be installed in the `public` schema before the search-index migration can
+finish. The application database owner must either be allowed to run
+`CREATE EXTENSION pg_trgm` or a DBA must preinstall it in `public`. Verify the prerequisite
+without putting a connection URL or password in the command output:
+
+```sql
+SELECT e.extname, n.nspname
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.extname = 'pg_trgm';
+```
+
+The expected row is `pg_trgm | public`; no row means the DBA must install it before first
+application startup, and any other schema is rejected by migration.
+
 1. As a PostgreSQL administrator, create a UTF8 database owned by a dedicated login with
    `NOSUPERUSER NOCREATEDB NOCREATEROLE`. Take a PostgreSQL backup if reusing any target;
    the supported direct-boot path assumes the target is new/empty.
@@ -1097,6 +1112,11 @@ The script imports no backend code — only the standard library plus `requests`
 Ingest a directory of Markdown (and the occasional PDF) through the existing
 pipeline, in two phases: `ingest` (no LLM, fast — chunk Q&A works immediately),
 then `kg` (LLM extraction, separately resumable).
+
+`scripts/batch_ingest.py` mutation phases are SQLite-only. With a PostgreSQL
+`DATABASE_URL`, they fail before constructing a SQLite repository; use the normal app/API
+upload plus KG/reindex flows instead. `--dry-run` remains a filesystem-only scan and works
+with either configured backend.
 
 ```bash
 # 1) parse + chunk + embeddings (no LLM); --notebook-name is required when creating a notebook

@@ -25,3 +25,8 @@ owner exists before scoped SIGINT/SIGTERM handlers; handlers record the first pe
 without raising in a factory-return window, and factories register pgpass/Popen resources
 before a checkpoint acts. Cleanup boundedly reaps the child, removes credentials, restores
 handlers, and returns 130/143; signal-terminated children map to `128+signum`.
+
+`batch_ingest` mutation phases are SQLite-only; PostgreSQL uses the normal app/API upload
+and KG/reindex flows, while `--dry-run` remains filesystem-only. PostgreSQL startup also
+requires `pg_trgm` in `public`: the app database owner must be allowed to create it or a DBA
+must preinstall it. Keep the existing READMEs, architecture, and packaging runbook synchronized.

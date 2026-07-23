@@ -209,6 +209,64 @@ def test_main_dry_run_lists_files(repo, tmp_path, capsys):
     assert "dry-run" in out and "3 files" in out
 
 
+def test_main_postgres_mutation_fails_before_sqlite_repository(monkeypatch, capsys):
+    secret_url = (
+        "postgresql://batch-user:do-not-leak@db.example.test:5432/"
+        "silicon_notebook?sslmode=require"
+    )
+    monkeypatch.setenv("DATABASE_URL", secret_url)
+    constructed = False
+
+    def _unexpected_sqlite_repository(_settings):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("PostgreSQL batch mutation must not construct SQLiteRepository")
+
+    monkeypatch.setattr(bi, "SQLiteRepository", _unexpected_sqlite_repository)
+
+    rc = bi.main(["index", "--notebook-id", "nb-existing"])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert constructed is False
+    assert "SQLite-only" in captured.err
+    assert "app/API" in captured.err
+    assert "KG/reindex" in captured.err
+    combined_output = captured.out + captured.err
+    assert secret_url not in combined_output
+    assert "do-not-leak" not in combined_output
+
+
+def test_arg_parser_help_classifies_batch_ingest_as_sqlite_only(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        bi.main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "SQLite-only" in capsys.readouterr().out
+
+
+def test_main_postgres_dry_run_remains_filesystem_only(
+    monkeypatch, tmp_path, capsys
+):
+    d = _make_md_dir(tmp_path, n=2)
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql://batch-user:do-not-leak@db.example.test:5432/silicon_notebook",
+    )
+
+    def _unexpected_sqlite_repository(_settings):
+        raise AssertionError("dry-run must not construct SQLiteRepository")
+
+    monkeypatch.setattr(bi, "SQLiteRepository", _unexpected_sqlite_repository)
+
+    rc = bi.main(["ingest", "--input-dir", str(d), "--dry-run"])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "dry-run" in captured.out and "3 files" in captured.out
+    assert "do-not-leak" not in captured.out + captured.err
+
+
 def test_main_requires_input_dir_for_ingest(repo, capsys):
     rc = bi.main(["ingest"])
     assert rc == 2

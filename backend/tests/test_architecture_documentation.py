@@ -238,6 +238,34 @@ def test_backend_specific_retrieval_limits_and_selectable_architecture_are_quali
     assert "FastAPI + SQLite + Next.js" not in architecture
 
 
+def test_batch_ingest_backend_boundary_and_postgres_extension_prerequisite_are_documented():
+    _assert_phrases(
+        {
+            "README.md": "`scripts/batch_ingest.py` mutation phases are SQLite-only",
+            "README_zh.md": "`scripts/batch_ingest.py` 的变更阶段仅支持 SQLite",
+            "AGENTS.md": "`batch_ingest` mutation phases are SQLite-only",
+            "CLAUDE.md": "`batch_ingest` mutation phases are SQLite-only",
+            "architecture.md": "`batch_ingest` 的 mutation phase 仅支持 SQLite",
+            "packaging/DEPLOY.md": "`batch_ingest.py` 的变更阶段仅支持 SQLite",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "`pg_trgm` must be installed in the `public` schema",
+            "README_zh.md": "`pg_trgm` 必须安装在 `public` schema",
+            "packaging/DEPLOY.md": "`pg_trgm` 必须安装在 `public` schema",
+        }
+    )
+    for name in (
+        "README.md",
+        "README_zh.md",
+        "packaging/DEPLOY.md",
+    ):
+        text = _read(name)
+        assert "FROM pg_extension e" in text
+        assert "JOIN pg_namespace n" in text
+
+
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
     """Documentation records stable ownership, not source layout or totals."""
     _assert_phrases(

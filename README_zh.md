@@ -240,6 +240,20 @@ SQLite 绝对路径使用四条斜线，例如
 
 #### A. 直接启动全新/空 PostgreSQL
 
+`pg_trgm` 必须安装在 `public` schema，搜索索引 migration 才能完成。应用数据库 owner
+必须有权执行 `CREATE EXTENSION pg_trgm`，否则由 DBA 预先安装到 `public`。以下诊断 SQL
+不包含连接 URL 或密码：
+
+```sql
+SELECT e.extname, n.nspname
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.extname = 'pg_trgm';
+```
+
+预期结果是 `pg_trgm | public`；无结果表示首次启动应用前须由 DBA 安装，若位于其他 schema，
+migration 会 fail closed。
+
 1. 以 PostgreSQL 管理员创建 UTF8 数据库，owner 是专用登录角色，且该角色是
    `NOSUPERUSER NOCREATEDB NOCREATEROLE`。若复用任何 target，先做 PostgreSQL
    备份；支持的 direct-boot 路径假设 target 是全新/空库。
@@ -931,6 +945,10 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
+
+`scripts/batch_ingest.py` 的变更阶段仅支持 SQLite。若 `DATABASE_URL` 指向
+PostgreSQL，它会在构造 SQLite repository 前失败；请改用正常应用/API 上传及 KG/reindex
+流程。`--dry-run` 仍是纯文件系统扫描，两种已配置后端都可使用。
 
 ```bash
 # 1) 解析+分块+向量(无 LLM):新建库须用 --notebook-name 指定名字

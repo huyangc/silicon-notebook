@@ -77,6 +77,13 @@ anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化�
 - `scripts/backend.sh status` 通过中性 URL parser 仅输出
   `database=sqlite path=...` 或 `database=postgresql host=... db=...`；凭据与 query option
   从 status、readiness 错误和 pool 诊断中隐去。
+- `batch_ingest` 的 mutation phase 仅支持 SQLite：组合根在构造
+  `SQLiteRepository` 前用中性 URL identity 判定并拒绝 PostgreSQL，错误不回显 URL/凭据；
+  `--dry-run` 仍是后端无关的纯文件扫描。PostgreSQL 的导入与 KG/reindex 通过正常
+  application/API 流程执行，SQLite maintenance port 不扩散到 portable repository surface。
+- PostgreSQL checksummed migration 依赖数据库级 `pg_trgm`，且固定安装在 `public`
+  schema；应用数据库 owner 必须可执行 `CREATE EXTENSION pg_trgm`，否则 DBA 在首次
+  应用启动前预装。migration 对位于其他 schema 的同名 extension fail closed。
 - 切换是“停写 → 停后端 → 一致备份 → 改唯一 `DATABASE_URL` → 启动自动 migration
   → status/`/api/ready`/认证与代表性读取验证 → 放流量”的运维边界。只改 URL 不会
   复制、迁移或同步既有数据。`SHADOW_DATABASE_URL` 仍只保留/校验，本阶段没有
