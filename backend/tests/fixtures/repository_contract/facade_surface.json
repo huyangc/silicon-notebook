@@ -5778,6 +5778,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.ask_notebook.run_ask",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.list_notebooks.load",
         "target": "get_notebook"
       },
