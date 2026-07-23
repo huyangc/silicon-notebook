@@ -1391,6 +1391,7 @@ SURFACE_MEMBERS = (
         owner='ModelProvider',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>.measure_speed', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._dispatch_main', kind='attribute', target='configured'),

@@ -121,6 +121,9 @@ def test_backfill_vectors_accepts_and_schedules(tmp_path, monkeypatch):
     headers, _ = _register(client, "b00300302")
     nb = _notebook(client, headers, "bf")
 
+    from app.api.deps import repository
+
+    monkeypatch.setattr(repository(), "configured", lambda wid: True)  # 有嵌入服务
     calls = _spy_submit_job(monkeypatch)
     r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
     assert r.status_code == 200, r.text
@@ -129,6 +132,51 @@ def test_backfill_vectors_accepts_and_schedules(tmp_path, monkeypatch):
     fn, args = calls[0]
     assert getattr(fn, "__name__", "") == "_backfill_vectors_job"
     assert args[1] == nb  # (repo, notebook_id)
+
+
+def test_backfill_vectors_rejects_when_embedding_unconfigured(tmp_path, monkeypatch):
+    """两个嵌入 workload 都没配 → backfill 会完全 no-op → 不假受理(codex):accepted=false、
+    不排 job。否则前端说「已开始」空转轮询、H4/H5 永不清。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "f00300306")
+    nb = _notebook(client, headers, "bf-unconf")
+
+    from app.api.deps import repository
+
+    monkeypatch.setattr(repository(), "configured", lambda wid: False)  # 未配嵌入
+    calls = _spy_submit_job(monkeypatch)
+    r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["accepted"] is False
+    assert len(calls) == 0  # 未配 → 一个 job 都不排
+
+
+def test_reparse_rejects_hidden_projection_source(tmp_path, monkeypatch):
+    """memory/knowhow 隐藏合成源无 file_path、由投影服务维护——即便属于本 notebook,也不能喂给
+    文档解析 process_source(会标失败/清派生态)。owner 从引用数据带来的隐藏源 id 静默跳过(codex)。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "g00300307")
+    nb = _notebook(client, headers, "hidden")
+
+    from app.api.deps import repository
+
+    repo = repository()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "created_at,updated_at) VALUES ('src-kh',?,?,'knowhow','ready','ready',?,?)",
+            (nb, "hidden", _NOW, _NOW),
+        )
+
+    calls = _spy_submit_job(monkeypatch)
+    r = client.post(
+        f"/api/notebooks/{nb}/sources/reparse",
+        headers=headers,
+        json={"source_ids": ["src-kh"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["scheduled"] == []  # 隐藏源不排
+    assert len(calls) == 0
 
 
 def test_repair_endpoints_reject_stranger(tmp_path, monkeypatch):

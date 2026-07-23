@@ -103,8 +103,8 @@ def _service(repo, notebook_id="nb-x", **overrides):
     逻辑而不碰真索引/真 maintenance。"""
     defaults = dict(
         database=repo._runtime.database,
-        count_missing_chunk_vectors=lambda nb: 0,
-        count_missing_element_vectors=lambda nb: 0,
+        count_missing_chunk_vectors=lambda nb, exclude: 0,
+        count_missing_element_vectors=lambda nb, exclude: 0,
         scale_index_state=lambda nb: "indexed",
         index_manifest_identity=lambda nb: (True, "ver-const"),
         probe_index_integrity=lambda nb: 0,
@@ -271,20 +271,47 @@ def test_h6_miss_hidden_synthetic_source(repo):
 
 # ------------------------------------------------------------------ H4/H5
 def test_h4_maps_missing_chunk_vectors(repo):
-    hit = _service(repo, count_missing_chunk_vectors=lambda nb: 3)
+    hit = _service(repo, count_missing_chunk_vectors=lambda nb, exclude: 3)
     h4 = _check(hit.run("nb-x"), "H4")
     assert h4.count == 3 and h4.fix == "backfill_vectors" and h4.sample == []
     assert hit.run("nb-x").healthy is False
-    miss = _service(repo, count_missing_chunk_vectors=lambda nb: 0)
+    miss = _service(repo, count_missing_chunk_vectors=lambda nb, exclude: 0)
     assert _check(miss.run("nb-x"), "H4").count == 0
 
 
 def test_h5_maps_missing_element_vectors(repo):
-    hit = _service(repo, count_missing_element_vectors=lambda nb: 5)
+    hit = _service(repo, count_missing_element_vectors=lambda nb, exclude: 5)
     h5 = _check(hit.run("nb-x"), "H5")
     assert h5.count == 5 and h5.fix == "backfill_vectors" and h5.sample == []
-    miss = _service(repo, count_missing_element_vectors=lambda nb: 0)
+    miss = _service(repo, count_missing_element_vectors=lambda nb, exclude: 0)
     assert _check(miss.run("nb-x"), "H5").count == 0
+
+
+def test_count_missing_element_vectors_excludes_given_sources(repo):
+    """maintenance 计数的 exclude_source_ids 真排除指定源(H5 减活跃租约的底座,codex)。
+    chunk 侧 count_missing_chunk_vectors 是对称 SQL(AND source_id NOT IN),同款。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)  # 有 element、无向量
+    b = _seed_source(repo, nb.id, parse_status="extracted", n_elements=3)
+    mnt = repo._runtime.maintenance_component
+    assert mnt.count_missing_element_vectors(nb.id) == 5           # 全缺(2+3)
+    assert mnt.count_missing_element_vectors(nb.id, {a}) == 3      # 排除 a → 只剩 b 的 3
+    assert mnt.count_missing_element_vectors(nb.id, {a, b}) == 0   # 全排除
+
+
+def test_h4_h5_pass_active_lease_snapshot_to_counts(repo):
+    """H4/H5 把活跃租约快照传给计数 seam(codex:正在嵌入的源 chunk/element 已在、向量还没落,
+    是正常在途,不该算缺向量——由 count 的 exclude_source_ids 排除)。"""
+    seen: dict[str, set] = {}
+    svc = _service(
+        repo,
+        count_missing_chunk_vectors=lambda nb, exclude: seen.__setitem__("chunk", set(exclude)) or 0,
+        count_missing_element_vectors=lambda nb, exclude: seen.__setitem__("elem", set(exclude)) or 0,
+        active_source_ids=lambda: {"src-embedding"},
+    )
+    svc.run("nb-x")
+    assert seen["chunk"] == {"src-embedding"}
+    assert seen["elem"] == {"src-embedding"}
 
 
 # --------------------------------------------------------------------- H7

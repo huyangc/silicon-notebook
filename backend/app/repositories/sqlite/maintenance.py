@@ -454,17 +454,24 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             ]
 
-    def count_missing_element_vectors(self, notebook_id: str) -> int:
+    def count_missing_element_vectors(
+        self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
+    ) -> int:
         """missing_element_embedding_rows 的计数版(盘点用)。判据必须与它逐字一致,
-        否则「盘点数」和「实际可补数」会对不上。"""
+        否则「盘点数」和「实际可补数」会对不上。``exclude_source_ids`` 排除指定源的 element——
+        体检 H5 传活跃租约快照,免得把**正在嵌入**的源误报缺向量(codex);CLI 盘点不传、逐字一致。"""
+        exclude = tuple(exclude_source_ids or ())
+        clause = (
+            f" AND e.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+        )
         with self._runtime.database.connect() as db:
             return db.execute(
                 "SELECT COUNT(*) c FROM source_elements e "
                 "JOIN sources s ON s.id = e.source_id "
                 "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
-                "WHERE v.element_id = e.id)",
-                (notebook_id, PY_WHITESPACE),
+                "WHERE v.element_id = e.id)" + clause,
+                (notebook_id, PY_WHITESPACE, *exclude),
             ).fetchone()["c"]
 
     def embed_elements_batch(self, notebook_id: str, items: list[dict]) -> int:
@@ -535,12 +542,21 @@ class SQLiteMaintenanceAdapter:
             ).fetchone()["c"]
         return objs, emb
 
-    def count_missing_chunk_vectors(self, notebook_id: str) -> int:
+    def count_missing_chunk_vectors(
+        self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
+    ) -> int:
+        """缺 chunk 向量的 chunk 数。``exclude_source_ids`` 排除指定源的 chunk——体检 H4 传
+        活跃租约快照,免得把**正在嵌入**的源(chunk 已在、向量还没落)误报成损坏(codex);
+        CLI 盘点不传、口径不变。"""
+        exclude = tuple(exclude_source_ids or ())
+        clause = (
+            f" AND c.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+        )
         with self._runtime.database.connect() as db:
             return db.execute(
                 "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
-                "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
-                (notebook_id,),
+                "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)" + clause,
+                (notebook_id, *exclude),
             ).fetchone()["c"]
 
     def count_missing_node_vectors(self, notebook_id: str) -> int:
