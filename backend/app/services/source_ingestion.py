@@ -186,6 +186,28 @@ class SourceIngestionService:
         # source_id → 活跃 invocation 数;P2 体检把 keys() 当 active 集做减法。
         self._active_sources: dict[str, int] = {}
         self._active_sources_lock = threading.Lock()
+        # 源级分块串行锁(per-source):同一源的并发 reparse 必须在「换 elements →
+        # 建 chunks + 置 marker」这段串行,否则一次 invocation 可能读到 A 代 elements、
+        # 另一次把它换成 B 代、第一次再把基于 A 代的 chunks 连同 marker 写回,留下
+        # 「B 代 elements + A 代 chunks + marker 已置」的假完成(codex 第 2 轮 P2)。
+        # 只锁 build_chunks 不够——换 elements 若不持同一把锁,仍能插进「读→写」之间;
+        # 故锁必须连续覆盖 replace_elements 到 build_chunks。懒创建、与上面租约同生命
+        # 周期:refcount 归零(无活跃 invocation)时一并清除,免得每见一个源就永久留锁。
+        # get-or-create 在 _active_sources_lock 下做,但**获取锁本身**在该 meta 锁之外
+        # (否则持 meta 锁等 per-source 锁会死锁)。
+        self._source_chunk_locks: dict[str, threading.Lock] = {}
+
+    def _source_chunk_lock(self, source_id: str) -> threading.Lock:
+        """取(或懒创建)某源的分块串行锁。仅在 _active_sources_lock 下 get-or-create
+        锁对象(快),**不**在这里 acquire——调用方拿到后自行 ``with`` 获取,以免持 meta
+        锁阻塞在 per-source 锁上造成死锁。清除在 process_source 的 finally 里,与租约
+        refcount 归零同步(那一刻无活跃 invocation 持锁,可安全 pop)。"""
+        with self._active_sources_lock:
+            lock = self._source_chunk_locks.get(source_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._source_chunk_locks[source_id] = lock
+            return lock
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -570,55 +592,61 @@ class SourceIngestionService:
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
-            # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
-            with self.write() as db:
-                self.clear_source_extraction_state(
-                    db,
-                    source_id,
-                    source.notebook_id,
-                    clear_embeddings=True,
-                )
-                self.sources.replace_elements(
-                    db,
-                    source_id,
-                    [
-                        SourceElementWrite(
-                            id=f"el-{source_id}-{index:04d}",
-                            element_type=element.element_type,
-                            location_label=element.location_label,
-                            text=element.text,
-                            metadata=element.metadata,
-                        )
-                        for index, element in enumerate(elements, start=1)
-                    ],
-                    created_at=now,
-                )
-                # 新代 elements 落库即令旧分块完成标记失效——同一写事务内归零
-                # chunked_at,无崩溃窗口。分块会在下面(:585)成功后重新置位;若分块
-                # 失败则留 NULL,正是 H3 的损坏信号。刻意就地一条而非折进
-                # clear_source_extraction_state(后者也被 KG 抽取复用、发生在分块之后)。
-                self.sources.clear_chunked_at(db, source_id)
-            # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/失败/
-            # hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
-            summary = self.summarize_source(source.title, elements)
-            self.set_source_status(source_id, "parsed", summary=summary)
+            # per-source 分块串行锁:把「换 elements → 建 chunks + 置 marker」整段串起来
+            # (见 __init__ 说明)。锁必须从 replace_elements 一直持到 build_chunks 之后,
+            # 否则并发同源 reparse 会交错出「B 代 elements + A 代 chunks + marker 已置」的
+            # 假完成。中间的 summarize/paper_meta(LLM)也在锁内——对**罕见**的并发同源
+            # reparse 是正确的串行;单写(常见)路径下锁无竞争、零额外开销。
+            with self._source_chunk_lock(source_id):
+                # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
+                with self.write() as db:
+                    self.clear_source_extraction_state(
+                        db,
+                        source_id,
+                        source.notebook_id,
+                        clear_embeddings=True,
+                    )
+                    self.sources.replace_elements(
+                        db,
+                        source_id,
+                        [
+                            SourceElementWrite(
+                                id=f"el-{source_id}-{index:04d}",
+                                element_type=element.element_type,
+                                location_label=element.location_label,
+                                text=element.text,
+                                metadata=element.metadata,
+                            )
+                            for index, element in enumerate(elements, start=1)
+                        ],
+                        created_at=now,
+                    )
+                    # 新代 elements 落库即令旧分块完成标记失效——同一写事务内归零
+                    # chunked_at,无崩溃窗口。分块会在下面成功后重新置位;若分块
+                    # 失败则留 NULL,正是 H3 的损坏信号。刻意就地一条而非折进
+                    # clear_source_extraction_state(后者也被 KG 抽取复用、发生在分块之后)。
+                    self.sources.clear_chunked_at(db, source_id)
+                # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/
+                # 失败/hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
+                summary = self.summarize_source(source.title, elements)
+                self.set_source_status(source_id, "parsed", summary=summary)
 
-            # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
-            # 失败不阻塞流水线。落库在终态转换前,前端轮询随状态变化带到。
-            self.ensure_paper_metadata(source, elements=elements, force=True)
+                # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
+                # 失败不阻塞流水线。落库在终态转换前,前端轮询随状态变化带到。
+                self.ensure_paper_metadata(source, elements=elements, force=True)
 
-            # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
-            # best-effort: 失败不阻塞既有 parse->extract 流水线。
-            try:
-                self.chunking.build_chunks_for_source(source_id)
-            except Exception:
-                self.event_log.logger.exception("chunk build failed for %s", source_id)
-                # Chunk build may have committed chunks (source now parsed =>
-                # pending KG) then failed before its kg_mutation_seq bump; with
-                # auto-extract off no later write bumps it. Drop the seq-gated
-                # chunk/pending memos so the next open recomputes, not serves stale.
-                from app.repositories.sqlite import knowledge_counts_cache
-                knowledge_counts_cache.invalidate(notebook_id)
+                # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
+                # best-effort: 失败不阻塞既有 parse->extract 流水线。
+                try:
+                    self.chunking.build_chunks_for_source(source_id)
+                except Exception:
+                    self.event_log.logger.exception("chunk build failed for %s", source_id)
+                    # Chunk build may have committed chunks (source now parsed =>
+                    # pending KG) then failed before its kg_mutation_seq bump; with
+                    # auto-extract off no later write bumps it. Drop the seq-gated
+                    # chunk/pending memos so the next open recomputes, not serves stale.
+                    from app.repositories.sqlite import knowledge_counts_cache
+                    knowledge_counts_cache.invalidate(notebook_id)
 
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks
@@ -720,6 +748,10 @@ class SourceIngestionService:
                     self._active_sources[source_id] = remaining
                 else:
                     self._active_sources.pop(source_id, None)
+                    # refcount 归零=无活跃 invocation 持该源的分块锁,顺手清掉,免得
+                    # 每见一个源就永久留一把锁(有界化)。remaining>0 时不能清——还有
+                    # invocation 在跑、可能正持或将取这把锁。
+                    self._source_chunk_locks.pop(source_id, None)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
