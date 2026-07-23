@@ -533,6 +533,83 @@ def test_retype_during_the_first_uploads_extraction_is_applied_not_lost(
     assert len(live_repo.list_sources(nb)) == 1
 
 
+# ------------------------------- 在飞行中发生的后缀（解析器）纠正不得丢失（P2-2）
+
+def test_in_flight_suffix_correction_is_applied_at_completion_not_lost(
+    live_repo, monkeypatch
+):
+    """在飞行中换后缀重传（不同解析器）：流水线跑完必须补一次整条重解析（用新解析器），
+    而不是静默丢掉用户的后缀纠正。
+
+    换后缀重传撞上正在跑的流水线时，reuse 只把新 file_name 记到行上（绝不动正在被读
+    的盘上文件），由流水线跑完时的 _reconcile_pending_suffix 收口：一旦定型，行上
+    file_name 的 parser_class 与本次实际用的 parser 不一致就整条重跑一次。抽取每条
+    流水线跑一次，故它看到的 file_name 序列就是「实际解析用的名字」序列。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    _patch_parse(monkeypatch, [_element("body")])
+
+    body = b"col1,col2\n1,2"
+    parsed_names: list[str] = []   # 每次流水线跑到抽取时行上的 file_name = 本次解析用的名字
+
+    def fake_extract(source_id, **_kw):
+        parsed_names.append(live_repo.get_source(source_id).file_name)
+        if len(parsed_names) == 1:
+            # 抽取正在跑（行此刻 'extracting'）：用户用不同解析器的后缀重传同一字节。
+            assert live_repo.get_source(source_id).parse_status == "extracting"
+            _upload_named(live_repo, nb, content=body, name="data.md")
+
+    monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
+
+    sid = _upload_named(live_repo, nb, content=body, name="data.csv")[0].id
+
+    assert parsed_names == ["data.csv", "data.md"], (
+        f"跑完必须用新解析器的名字整条重解析一次；实际解析序列 {parsed_names}"
+    )
+    assert live_repo.get_source(sid).file_name == "data.md", "后缀纠正最终落库"
+    assert live_repo.get_source(sid).file_path.endswith("data.md"), (
+        "收口 repoint 把盘上文件按新名重写，file_path 与 file_name 同步"
+    )
+    assert live_repo.get_source(sid).parse_status == "extracted", "补跑完照样落终态"
+    assert len(live_repo.list_sources(nb)) == 1, "始终只有一行"
+
+
+def test_in_flight_suffix_correction_never_rewrites_the_file_being_parsed(
+    live_repo, monkeypatch
+):
+    """安全约束：在飞行中收到换后缀重传时，绝不能重写/删除正在被这条流水线读的盘上
+    文件（会破坏在跑的 parse）。只把新 file_name 记到行上，盘上文件原样不动。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    _patch_parse(monkeypatch, [_element("body")])
+
+    body = b"col1,col2\n1,2"
+    # 观测记到列表、断言放在流水线**外面**——若在 fake_extract 内断言，会被
+    # process_source 的 try/except 吞掉（还会被收口重跑掩盖），变异就抓不到。
+    observations: list = []
+
+    def fake_extract(source_id, **_kw):
+        if observations:
+            return   # 只观测第一次抽取（in-flight）；收口重跑时不再动作
+        # 抽取正在跑（in-flight）：拿到这条流水线正在读的盘上文件的内容快照。
+        path = live_repo.get_source(source_id).file_path
+        before = ingestion.source_files.read_bytes(path)
+        _upload_named(live_repo, nb, content=body, name="data.md")   # 换后缀重传
+        after = ingestion.source_files.read_bytes(path)
+        observations.append((before, after))
+
+    monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
+    _upload_named(live_repo, nb, content=body, name="data.csv")
+
+    assert len(observations) == 1, "安全观测必须真的执行过"
+    before, after = observations[0]
+    assert before == body, "前提：流水线正在读这份字节"
+    assert after is not None, "在飞行中不得删除正在被解析的盘上文件"
+    assert after == before, "在飞行中不得重写正在被解析的盘上文件"
+
+
 def test_an_unchanged_doc_type_costs_exactly_one_extraction(
     repo, notebook_id, settled, monkeypatch
 ):
@@ -762,19 +839,30 @@ def test_reupload_with_a_different_suffix_that_maps_to_the_same_parser_is_not_a_
     assert repo.get_source(sid).file_name == "a.md", "解析器没变就不改名"
 
 
-def test_reupload_with_a_different_suffix_while_in_flight_does_not_reparse(
+def test_reupload_with_a_different_suffix_while_in_flight_persists_intent_but_does_not_reparse(
     repo, notebook_id
 ):
-    """还在飞行中（queued/parsing/extracting）的行不因换后缀而重排——那条正在跑
-    的流水线拥有这个文件，重排会让同一行并发两条流水线（与既有「不重入」一致）。"""
+    """还在飞行中（queued/parsing/extracting）的行不因换后缀而当场重排——那条正在跑
+    的流水线拥有这个文件，重排会让同一行并发两条流水线（与既有「不重入」一致）。但
+    用户的后缀纠正**不能静默丢失**：把新 file_name 持久化到行上（不动盘上文件），
+    由那条流水线跑完时收口（见 _reconcile_pending_suffix）。"""
     body = b"a,b\n1,2"
     sid = _upload_named(repo, notebook_id, content=body, name="d.csv")[0].id
     assert repo.get_source(sid).parse_status == "queued"   # 打桩的 process_source 让它停在 queued
+    original_path = repo.get_source(sid).file_path
     repo.process_calls.clear()
 
-    _upload_named(repo, notebook_id, content=body, name="d.md")
+    second = _upload_named(repo, notebook_id, content=body, name="d.md")
 
-    assert repo.process_calls == [], "在飞行中的行绝不因换后缀重排"
+    assert repo.process_calls == [], "在飞行中的行绝不因换后缀当场重排"
+    assert repo.get_source(sid).file_name == "d.md", (
+        "用户的后缀纠正必须持久化到行上（意图），跑完才收口——不能静默丢失"
+    )
+    assert repo.get_source(sid).file_path == original_path, (
+        "但绝不动正在被这条流水线读的盘上文件（file_path 不变）"
+    )
+    assert second[0].file_name == "d.md", "返回值如实带上现在的文件名"
+    assert repo.get_source(sid).parse_status == "queued", "状态未被翻动（仍在飞行中）"
 
 
 # ============================================================ 并发竞态（真线程）

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 
 def safe_filename(file_name: str) -> str:
@@ -77,3 +77,20 @@ class SourceFileStore:
         return self.read_source_text(
             getattr(source, "file_path", "") or "", fallback_elements
         )
+
+    def read_bytes(self, file_path: str) -> Optional[bytes]:
+        """Raw bytes of a stored source file, or None when the path is empty or
+        the file is gone. Used by the in-flight suffix-correction reconcile
+        (SourceIngestionService._reconcile_pending_suffix): once the pipeline that
+        was READING this file has settled, the file is repointed to the corrected
+        name — and since the content is byte-identical (that is what dedup keys
+        on), the corrected file is written from THESE bytes. A missing file
+        degrades to None so the caller falls back to a name-only repoint rather
+        than raising (same resolve_path boundary as read_source_text)."""
+        path = file_path or ""
+        if not path:
+            return None
+        try:
+            return Path(self.resolve_path(path)).read_bytes()
+        except OSError:
+            return None
