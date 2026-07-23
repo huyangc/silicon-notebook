@@ -327,6 +327,18 @@ def _spy_map_batches(service, monkeypatch):
     return calls
 
 
+def _spy_now(service, monkeypatch):
+    counter = {"n": 0}
+    real = service.now
+
+    def spy():
+        counter["n"] += 1
+        return real()
+
+    monkeypatch.setattr(service, "now", spy)
+    return counter
+
+
 def test_embed_objects_batch_pages_before_mapping(tmp_path, monkeypatch):
     r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")   # page = 2 batches
     nb = r.create_notebook(NotebookCreate(name="nb"))
@@ -349,6 +361,7 @@ def test_embed_relations_batch_pages_before_mapping(tmp_path, monkeypatch):
     nb = r.create_notebook(NotebookCreate(name="nb"))
     _bind(r, "relation_embedding", _RecordingEmbedder(dim=8))
     calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+    now_calls = _spy_now(r._runtime.source_embedding, monkeypatch)
     # record through the store seat (relation_embeddings FKs knowledge_relations;
     # the paging shape, not the FK, is what's under test — mirrors
     # test_embed_relations_batch_isolates_failed_batches)
@@ -364,6 +377,8 @@ def test_embed_relations_batch_pages_before_mapping(tmp_path, monkeypatch):
     assert len(calls) >= 3                                            # paged, not one shot
     assert max(calls) <= 2                                            # each map call ≤ one page
     assert len(persisted) == 55                                      # every vector flushed across pages
+    assert now_calls["n"] >= 3           # fresh created_at PER PAGE: version advances so retrieval's
+                                         # (count,max_created_at) matrix cache can't strand a partial re-embed
 
 
 def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
@@ -371,6 +386,7 @@ def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
     nb = r.create_notebook(NotebookCreate(name="nb"))
     _bind(r, "chunk_embedding", _RecordingEmbedder(dim=8))
     calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+    now_calls = _spy_now(r._runtime.source_embedding, monkeypatch)
     persisted: list = []
     monkeypatch.setattr(
         r._runtime.embedding_store, "replace_chunk_vectors",
@@ -384,3 +400,4 @@ def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
     assert len(calls) >= 3
     assert max(calls) <= 2
     assert len(persisted) == 55
+    assert now_calls["n"] >= 3           # fresh created_at per page (see relations guard)

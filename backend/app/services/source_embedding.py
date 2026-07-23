@@ -320,7 +320,6 @@ class SourceEmbeddingService:
         # replace_relation_vectors is a per-row INSERT OR REPLACE upsert, so
         # flushing per page is safe (no delete-all-for-notebook).
         page_sz = max(1, self.settings.embed_commit_batches)
-        now = self.now()
         for pstart in range(0, len(batches), page_sz):
             rows: list = []
             for part in self._map_embedding_batches(
@@ -331,8 +330,14 @@ class SourceEmbeddingService:
             ):
                 rows.extend(part)
             if rows:
+                # Fresh timestamp PER PAGE (mirrors flush_object_vectors). A
+                # shared created_at across pages defeats retrieval's
+                # (count, max_created_at)-keyed _vector_matrix cache: re-embed
+                # upserts leave COUNT(*) unchanged, so only an advancing
+                # created_at bumps the version — a shared one lets a matrix built
+                # mid-pagination (a partial re-embed) stay cached indefinitely.
                 self.vectors.replace_relation_vectors(
-                    notebook_id, rows, created_at=now
+                    notebook_id, rows, created_at=self.now()
                 )
 
     def embed_chunk_ids(self, notebook_id: str, rows: List[dict]) -> None:
@@ -407,7 +412,6 @@ class SourceEmbeddingService:
         # replace_chunk_vectors is a per-row INSERT OR REPLACE upsert, so
         # flushing per page is safe (no delete-all-for-notebook).
         page_sz = max(1, self.settings.embed_commit_batches)
-        now = self.now()
         for pstart in range(0, len(batches), page_sz):
             out: list = []
             for part in self._map_embedding_batches(
@@ -418,8 +422,12 @@ class SourceEmbeddingService:
             ):
                 out.extend(part)
             if out:
+                # Fresh timestamp PER PAGE — see embed_relations_batch: a shared
+                # created_at across pages would strand a mid-pagination partial
+                # re-embed in retrieval's (count, max_created_at)-keyed matrix
+                # cache (upserts don't change COUNT(*)).
                 self.vectors.replace_chunk_vectors(
-                    notebook_id, out, created_at=now
+                    notebook_id, out, created_at=self.now()
                 )
 
     def backfill_knowledge_embeddings(self, db, notebook_id: str,
