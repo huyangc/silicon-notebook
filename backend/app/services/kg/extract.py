@@ -33,35 +33,77 @@ def _kg_fragment_cacheable(content: str) -> bool:
 
     is_cacheable_llm_response already rejects the empty "{}" fallback, unparseable
     JSON and budget-truncated replies, but a syntactically valid reply can still
-    violate this schema: e.g. ``{"nodes":"invalid"}`` parses fine, yet ``nodes``
-    must be a LIST — the extractor iterates ``data.get("nodes") or []`` and would
-    silently produce 0 grounded objects, and caching that freezes the 0 for the
-    whole TTL (with every re-parse hitting it). Mirror the extractor's OWN
-    consumption rather than inventing a second schema: ``nodes``/``edges`` must
-    each be a list WHEN PRESENT (absent is a legitimately empty window — the
-    downstream ``or []`` handles it, so do not over-reject and block good empties).
+    be a NON-extraction that must never be frozen for the 90-day TTL. The prior
+    gate was deliberately lax (list-when-present, absent-is-fine) and therefore
+    admitted two poison shapes: an error envelope like ``{"error":"quota"}`` (no
+    ``nodes`` key at all → treated as a "legit empty window") and a ``nodes`` list
+    full of junk entries (``{"nodes":[{"garbage":1}]}``) — both ground to 0 objects
+    and, once cached, make every re-parse replay the 0. Skipping a doubtful reply
+    costs only one cache miss (the reply is still USED this call, just re-fetched
+    next time), so tighten to "cache only when we are sure it is a real extraction"
+    and mirror what extract_window ACTUALLY consumes:
+
+    - A real extraction ALWAYS emits ``nodes`` as a LIST — even an empty window is
+      ``{"nodes":[],"edges":[]}``. A reply with no ``nodes`` key, or a non-list one,
+      is error/malformed, NOT a legit empty window → reject.
+    - An ``error`` key (or any error-envelope shape) is a transient failure that
+      would differ on retry → never cache.
+    - ``edges`` when present must be a list.
+    - Each PRESENT node must clear extract_window's own first-line consumption gate
+      (``isinstance(it, dict) and it.get("type") in NODE_TYPES``) — the field that
+      decides whether the entry becomes an object. A list where any entry fails
+      that gate is (at least partly) junk; do not cache it. Groundability (ev/name
+      vs the window's elements) is NOT re-checked here: it depends on ``elements``
+      the validator does not have, and it is deterministic for this cache key
+      anyway (the elements' text is IN the key), so a typed node is a real reply.
+
     Passed to chat_json as response_validator; a fault there conservatively skips
-    the write (see OpenAICompatibleClient._response_validator_allows)."""
+    the write (see OpenAICompatibleClient._response_validator_allows). On a cache
+    HIT this same gate re-judges the stored value, so any laxer-era poison already
+    in the cache is treated as a miss and re-fetched."""
     data = safe_json(content)
     if not isinstance(data, dict):
         return False
-    for key in ("nodes", "edges"):
-        value = data.get(key)
-        if value is not None and not isinstance(value, list):
+    if "error" in data:
+        return False
+    nodes = data.get("nodes")
+    if not isinstance(nodes, list):
+        return False
+    edges = data.get("edges")
+    if edges is not None and not isinstance(edges, list):
+        return False
+    for it in nodes:
+        if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
             return False
     return True
 
 
 def _refine_response_cacheable(content: str) -> bool:
-    """Cache-admission shape gate for the refine schema (REFINE_SCHEMA_HINT):
-    ``refine_nodes`` consumes ``data["items"]`` as a list (drops it otherwise),
-    so a wrong-typed ``items`` is an unusable reply. Same reasoning/leniency as
-    ``_kg_fragment_cacheable``: list when present, absent is fine."""
+    """Cache-admission shape gate for the refine schema (REFINE_SCHEMA_HINT,
+    ``{"items":[{"index":0,"keep":true}]}``). Same tightening rationale as
+    ``_kg_fragment_cacheable``: cache only a reply we are sure is a real refine
+    result, since skipping a doubtful one costs just a re-fetch.
+
+    ``refine_nodes`` consumes ``data["items"]`` as a list and acts on each entry's
+    integer ``index`` + boolean ``keep`` (dropping the node when ``keep is False``);
+    a reply with no ``items`` key, a wrong-typed ``items``, an ``error`` envelope,
+    or entries missing those decision fields is not a usable refine result. A
+    genuine "keep everything" is ``{"items":[]}`` (empty list, no drops), NOT an
+    absent key — so absence is rejected, not treated as empty."""
     data = safe_json(content)
     if not isinstance(data, dict):
         return False
+    if "error" in data:
+        return False
     items = data.get("items")
-    return items is None or isinstance(items, list)
+    if not isinstance(items, list):
+        return False
+    for it in items:
+        if (not isinstance(it, dict)
+                or not isinstance(it.get("index"), int)
+                or not isinstance(it.get("keep"), bool)):
+            return False
+    return True
 
 
 def _extract_call_kwargs(
