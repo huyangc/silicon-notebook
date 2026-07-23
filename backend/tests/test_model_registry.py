@@ -111,6 +111,24 @@ source_summary = "general"''',
     )
 
 
+def test_registry_accepts_legacy_dashscope_rerank_protocol(tmp_path):
+    path = _write_config(
+        tmp_path / "models.toml",
+        _service(
+            service_id="rerank",
+            kind="rerank",
+            protocol="dashscope",
+            api_key_env="RERANK_KEY",
+        ) + '\n[bindings]\nretrieval_rerank = "rerank"',
+    )
+
+    registry = SystemModelServiceRegistry.load(
+        _settings(path), {"RERANK_KEY": "secret"}
+    )
+
+    assert registry.service_for("retrieval_rerank").protocol == "dashscope"
+
+
 def test_checked_in_example_is_credential_free_and_loads_when_keys_are_supplied():
     root = Path(__file__).resolve().parents[2]
     template = root / "model-services.example.toml"

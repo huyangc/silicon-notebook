@@ -122,6 +122,31 @@ answers). Users cannot supply or override model credentials, endpoints, models, 
 secret slots; `model-services.example.toml` is the service/binding/capacity template.
 [Configuration](#configuration) groups the common ones.
 
+#### Upgrading an old role-based `.env`
+
+Existing deployments can convert the retired `OPENAI_COMPAT_*`, `KG_LLM_*`,
+`EMBED_*`, and `RERANK_*` settings into the system-owned configuration:
+
+```bash
+# Preview only; reads .env and writes nothing.
+python scripts/migrate_legacy_model_env.py --env .env
+
+# After reviewing the service list and inferred capacities, create the TOML and
+# rewrite only the managed model assignments in .env.
+python scripts/migrate_legacy_model_env.py --env .env --apply
+```
+
+The apply step backs up `.env`, tightens the active file and every backup containing
+secrets to mode `0600`, keeps secrets in newly named `.env` slots, and writes no
+credentials to the TOML or terminal. It preserves legacy role fallbacks and folds
+identical endpoints/models/keys into one physical service. Initial capacities are
+inferred from the retired `KG_EXTRACT_WORKERS`, `KG_ASK_RESERVE`, and
+`EMBED_CONCURRENCY` values; they are migration estimates, so verify them against each
+provider's real capacity. Override an estimate with a repeatable option such as
+`--max-concurrency general=20 --max-concurrency embedding=4`. An unchanged example
+TOML created by setup can be replaced directly. Any other existing output must be
+reviewed first and requires `--force`; every replaced file is backed up.
+
 **Remote access — note the browser is on a *different* machine** than the server, so it
 cannot use `localhost`/`127.0.0.1` (those resolve to each visitor's own machine).
 

@@ -136,7 +136,7 @@ _TOP_LEVEL_KEYS = frozenset({"services", "bindings"})
 _PROTOCOLS: Mapping[str, frozenset[str]] = MappingProxyType({
     "chat": frozenset({"openai"}),
     "embedding": frozenset({"openai", "dashscope"}),
-    "rerank": frozenset({"openai"}),
+    "rerank": frozenset({"openai", "dashscope"}),
 })
 _LEGACY_MODEL_ACTIVATION_VARS = (
     "OPENAI_COMPAT_BASE_URL",

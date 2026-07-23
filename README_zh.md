@@ -105,6 +105,28 @@ cp model-services.example.toml .local/model-services.toml
 `.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
 服务、绑定与容量模板；[配置](#配置)按组列出常用项。
 
+#### 从旧版逐角色 `.env` 升级
+
+已有部署可把废弃的 `OPENAI_COMPAT_*`、`KG_LLM_*`、`EMBED_*`、`RERANK_*`
+配置转换为系统统一配置：
+
+```bash
+# 默认只预览：读取 .env，不写任何文件。
+python scripts/migrate_legacy_model_env.py --env .env
+
+# 检查服务列表和推算容量后，生成 TOML，并只改写 .env 中由脚本管理的模型字段。
+python scripts/migrate_legacy_model_env.py --env .env --apply
+```
+
+应用迁移前会备份 `.env`，并把当前文件及所有含密钥的备份权限收紧为 `0600`；密钥会
+保留在新命名的 `.env` 槽位中，不会写入 TOML，也不会打印到终端。脚本保留旧版角色
+回退关系，并把 endpoint/model/key 完全相同的角色
+合并为同一个物理服务。初始容量由旧的 `KG_EXTRACT_WORKERS`、`KG_ASK_RESERVE` 和
+`EMBED_CONCURRENCY` 推算，仅作为迁移初值，必须按服务商的真实物理容量复核。可重复传入
+`--max-concurrency general=20 --max-concurrency embedding=4` 覆盖推算值。安装流程生成且
+尚未改动的示例 TOML 可直接替换；其他已存在的 TOML 应先检查，仅在确认替换时使用
+`--force`。被替换的文件都会先备份。
+
 **远程访问——浏览器在另一台机器上**(不是服务器),所以**不能用 `localhost`/`127.0.0.1`**
 (那在每个访客自己机器上解析,连不到服务器)。
 

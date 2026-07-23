@@ -38,6 +38,13 @@ RETIRED_MODEL_SYMBOLS = {
     "EMBED_CONCURRENCY",
     "KG_ASK_RESERVE",
 }
+LEGACY_MODEL_MIGRATION_FILE = "scripts/migrate_legacy_model_env.py"
+LEGACY_MODEL_MIGRATION_ENV_SYMBOLS = {
+    "USER_MODEL_CONFIG_POLICY",
+    "KG_EXTRACT_WORKERS",
+    "EMBED_CONCURRENCY",
+    "KG_ASK_RESERVE",
+}
 RETIRED_REPOSITORY_CLIENT_ATTRS = {
     "llm_client",
     "reasoning_llm_client",
@@ -182,7 +189,11 @@ def test_retired_model_configuration_and_gate_symbols_are_absent():
                 offenders.append(f"{relative}:{node.lineno}:{node.arg}")
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for symbol in RETIRED_MODEL_SYMBOLS | retired_routes:
-                    if symbol in node.value:
+                    allowed_migration_input = (
+                        relative == LEGACY_MODEL_MIGRATION_FILE
+                        and symbol in LEGACY_MODEL_MIGRATION_ENV_SYMBOLS
+                    )
+                    if symbol in node.value and not allowed_migration_input:
                         offenders.append(f"{relative}:{node.lineno}:{symbol}")
     assert offenders == []
 

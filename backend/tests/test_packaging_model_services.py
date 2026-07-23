@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +59,73 @@ def test_packaged_model_service_guidance_uses_system_toml_only():
     ):
         assert required in guidance
     assert "离线" in guidance
+
+
+def test_release_bundle_includes_legacy_model_env_migration_helper():
+    pack_script = _text(ROOT / "scripts" / "pack.sh")
+
+    assert "scripts/migrate_legacy_model_env.py" in pack_script
+    assert "chmod +x \"$STAGE/scripts/migrate_legacy_model_env.py\"" in pack_script
+
+
+def test_packaged_migration_helper_runs_with_bundled_python_layout(tmp_path):
+    bundle = tmp_path / "bundle"
+    (bundle / "scripts").mkdir(parents=True)
+    (bundle / "backend").mkdir()
+    (bundle / ".local").mkdir()
+    (bundle / ".venv" / "bin").mkdir(parents=True)
+    shutil.copytree(ROOT / "backend" / "app", bundle / "backend" / "app")
+    shutil.copy2(
+        ROOT / "scripts" / "migrate_legacy_model_env.py",
+        bundle / "scripts" / "migrate_legacy_model_env.py",
+    )
+    shutil.copy2(
+        ROOT / "model-services.example.toml",
+        bundle / "model-services.example.toml",
+    )
+    shutil.copy2(
+        ROOT / "model-services.example.toml",
+        bundle / ".local" / "model-services.toml",
+    )
+    bundled_python = bundle / ".venv" / "bin" / "python"
+    bundled_python.symlink_to(sys.executable)
+    legacy_env = """OPENAI_COMPAT_BASE_URL=https://llm.example/v1
+OPENAI_COMPAT_API_KEY=legacy-secret
+OPENAI_COMPAT_MODEL=legacy-model
+REWRITE_LLM_MODEL=fast-model
+KG_EXTRACT_WORKERS=2
+KG_ASK_RESERVE=3
+"""
+    (bundle / ".env").write_text(legacy_env, encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            str(bundled_python),
+            "scripts/migrate_legacy_model_env.py",
+            "--env",
+            ".env",
+            "--apply",
+        ],
+        cwd=bundle,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = tomllib.loads(
+        (bundle / ".local" / "model-services.toml").read_text(encoding="utf-8")
+    )
+    assert generated["services"]["general"]["max_concurrency"] == 5
+    assert generated["bindings"]["report_sufficiency"] == "rewrite"
+    assert generated["bindings"]["knowhow_optimize"] == "rewrite"
+    assert "legacy-secret" not in result.stdout + result.stderr
+    backup = bundle / ".env.pre-system-models.bak"
+    assert backup.read_text(
+        encoding="utf-8"
+    ) == legacy_env
+    assert (bundle / ".env").stat().st_mode & 0o777 == 0o600
+    assert backup.stat().st_mode & 0o777 == 0o600
 
 
 def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
