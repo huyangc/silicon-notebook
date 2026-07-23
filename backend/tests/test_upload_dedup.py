@@ -8,7 +8,9 @@ source 行会引爆权限、删除级联与归属问题。
 源是不是真的摄取成功了，否则用户最自然的重试动作（把同一个文件再传一次）会静默
 变成 no-op 还弹「已上传」。
 """
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
@@ -773,3 +775,57 @@ def test_reupload_with_a_different_suffix_while_in_flight_does_not_reparse(
     _upload_named(repo, notebook_id, content=body, name="d.md")
 
     assert repo.process_calls == [], "在飞行中的行绝不因换后缀重排"
+
+
+# ============================================================ 并发竞态（真线程）
+# 这些用例用真线程 + Barrier 强制两个上传同时抵达认领点，复现串行测试挡不住的
+# TOCTOU。变异（把原子认领换回无条件写）后它们必须转红。
+
+
+def test_concurrent_reupload_of_a_failed_source_starts_only_one_pipeline(
+    repo, notebook_id, monkeypatch
+):
+    """P1：两个并发上传同一失败源。两者都在任一方写 'queued' 之前读到
+    parse_status=='failed'，若各自无条件调度就会给同一行起两条流水线（互相清对方的
+    抽取状态/KG 产物 + 白烧一份解析/模型开销）。原子认领（WHERE parse_status='failed'
+    的守卫 UPDATE，全局写锁串行）保证恰有一个 rowcount==1 去调度。"""
+    payload = [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
+                                  content=b"hello world")]
+    sid = repo.upload_sources(notebook_id, payload, scheduler=lambda _s: None)[0].id
+    repo._runtime.source_ingestion.set_source_status(
+        sid, "failed", error_message="mineru down"
+    )
+
+    # Barrier 把两个线程钉在认领点上同时放行——都已在方法开头读到 'failed'，于是
+    # 都进失败分支、都调用 claim_failed_for_retry。真正的串行由认领里的写锁决定。
+    store = repo._runtime.source_store
+    real_claim = store.claim_failed_for_retry
+    barrier = threading.Barrier(2, timeout=5)
+
+    def racing_claim(source_id):
+        barrier.wait()
+        return real_claim(source_id)
+
+    monkeypatch.setattr(store, "claim_failed_for_retry", racing_claim)
+
+    scheduled: list[str] = []
+    sched_lock = threading.Lock()
+
+    def sched(source_id):
+        with sched_lock:
+            scheduled.append(source_id)
+
+    def do_upload():
+        return repo.upload_sources(notebook_id, payload, scheduler=sched)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(do_upload)
+        f2 = pool.submit(do_upload)
+        f1.result(timeout=10)
+        f2.result(timeout=10)
+
+    assert scheduled == [sid], (
+        f"并发重试同一失败源只能排队一条流水线，实际排了 {scheduled}"
+    )
+    assert repo.get_source(sid).parse_status == "queued"
+    assert len(repo.list_sources(notebook_id)) == 1

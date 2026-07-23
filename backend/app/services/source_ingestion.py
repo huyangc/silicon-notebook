@@ -482,24 +482,32 @@ class SourceIngestionService:
         if reparse:
             self._repoint_reused_file(source_id, summary, file_name, content)
 
-        if reparse or summary.parse_status == "failed":
-            # 失败源 / 后缀变了的源整条流水线重跑：解析产物本来就不可信（失败）或
-            # 来自错的解析器（换后缀），重跑顺带用上新类型/新解析器。
-            # 排队前先把状态翻出终态，这一步不是装饰，它同时兑现两件事：
-            # ① 让重试看得见。scheduler 是异步的，返回时 process_source 未必已经
-            #    开始，本次响应里这一行还会是终态 'failed'，而前端只对非终态轮询
-            #    （failed/extracted 之外一律轮询），于是这次重试对用户完全隐形，
-            #    直到他自己刷新页面。
-            # ② 让重试不被重复触发。'queued' 就是「已经入队」的标记：这个窗口里
-            #    用户再传一次同一个文件，会落到下面「在跑的行不重入」的默认分支，
-            #    而不是把同一条源第二次排进队列（同一行两条流水线并发解析+抽取，
-            #    互相清对方的产物，还白烧一份 MinerU/LLM 开销）。
-            # 顺带清掉上一轮的 error_message：它已经不再描述这一行现在的状态。
+        if reparse:
+            # 后缀（解析器）变了的源整条流水线重跑：解析产物来自错的解析器（换后缀），
+            # 重跑顺带用上新类型/新解析器（_repoint_reused_file 已把文件按新名重写）。
+            # 排队前先把状态翻出终态，这一步不是装饰：它让重试对前端可见（前端只对
+            # 非终态轮询，仍是终态的行会被判「已结束」而不再刷新），也是「已入队」标记
+            # （挡住这个窗口里的重复触发）。顺带清掉上一轮的 error_message。
             self.set_source_status(source_id, "queued", error_message="")
             if scheduler is not None:
                 scheduler(source_id)
             else:
                 self.process_source(source_id, hooks)
+        elif summary.parse_status == "failed":
+            # 失败源重试：解析产物本来就不可信（失败），重跑整条流水线。
+            # ⚠ 认领必须原子：两个并发上传同一失败源都在任一方写 'queued' 之前读到
+            # summary.parse_status=='failed'，若都无条件 set 'queued'+调度，就会给同一行
+            # 起两条流水线（互相 replace_elements / 清对方的抽取状态与 KG 产物，还白烧
+            # 一份解析/模型开销）。claim_failed_for_retry 是一条 WHERE parse_status='failed'
+            # 的守卫 UPDATE，进程全局写锁让两个并发恰有一个 rowcount==1：
+            # ① 抢到（翻出 'failed'→'queued'，兼作「已入队」标记与 error_message 清理）→
+            #    调度重试；② 没抢到（另一次已认领）→ 绝不重入，返回既有行。
+            if self.sources.claim_failed_for_retry(source_id):
+                self._emit_status(source_id, "queued", "")
+                if scheduler is not None:
+                    scheduler(source_id)
+                else:
+                    self.process_source(source_id, hooks)
         elif (
             retyped
             and summary.parse_status == "extracted"
@@ -713,6 +721,23 @@ class SourceIngestionService:
         return imported
 
     # ------------------------------------------------------------ pipeline
+    def _emit_status(
+        self, source_id: str, status: str, error_message: str = ""
+    ) -> None:
+        """Emit a status-machine transition to the event log. Split out of
+        set_source_status so the atomic-claim paths (claim_failed_for_retry /
+        claim_reextract_if_extracted), whose conditional UPDATE already wrote the
+        row, can surface the SAME visible transition without a second,
+        unconditional DB write that would defeat the guard."""
+        self.event_log.emit(
+            {
+                "kind": "status",
+                "source_id": source_id,
+                "status": status,
+                "error": error_message or "",
+            }
+        )
+
     def set_source_status(
         self,
         source_id: str,
@@ -725,14 +750,7 @@ class SourceIngestionService:
             source_id, status, summary=summary, error_message=error_message
         )
         # Emit every status-machine transition so it is visible in the event log.
-        self.event_log.emit(
-            {
-                "kind": "status",
-                "source_id": source_id,
-                "status": status,
-                "error": error_message or "",
-            }
-        )
+        self._emit_status(source_id, status, error_message)
 
     def should_extract_kg(self, notebook_id: str) -> bool:
         """摄取期是否抽 KG:全局开关开,或该 notebook 已有 KG(续抽保持完整)。"""

@@ -475,6 +475,33 @@ class SourceStore:
             "UPDATE sources SET chunked_at = NULL WHERE id = ?", (source_id,)
         )
 
+    def claim_failed_for_retry(self, source_id: str) -> bool:
+        """Atomically flip a FAILED source to 'queued' to claim a retry, returning
+        whether THIS caller won the claim.
+
+        Backs the upload path's failed-source retry (SourceIngestionService.
+        reuse_uploaded_source): two concurrent re-uploads of the same failed row
+        both read parse_status=='failed' before either writes, and would both
+        schedule process_source on the one row — two pipelines that
+        replace_elements / clear each other's extraction state and KG products,
+        plus a wasted parse/LLM pass. The guarded UPDATE closes it: a single
+        conditional statement is atomic under the process-global write lock, so of
+        two concurrent callers exactly one sees rowcount==1 (it flipped
+        failed->queued and schedules); the loser's WHERE finds parse_status is no
+        longer 'failed' -> rowcount 0 -> False (it must NOT reschedule; the winner
+        already owns the rerun). Clears error_message like set_status('queued')
+        did: last round's failure no longer describes the row. Mirrors
+        kg_build_job_store's rowcount claims; no BEGIN IMMEDIATE needed — one
+        WHERE-guarded UPDATE is atomic on its own."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE sources SET parse_status='queued', status='queued', "
+                "error_message='', updated_at=? "
+                "WHERE id=? AND parse_status='failed'",
+                (self.now(), source_id),
+            )
+        return cursor.rowcount == 1
+
     def update_file_hash(
         self,
         source_id: str,
