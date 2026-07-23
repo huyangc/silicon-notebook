@@ -19,6 +19,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -37,7 +38,7 @@ from app.repositories.postgres.schema_manifest import (
     POSTGRES_SCHEMA_MANIFEST,
     SQLITE_RETIRED_TABLES,
 )
-from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.bundle import SqlitePersistenceBundleFactory
 from app.repositories.sqlite.migrations import SqliteMigrator
 from app.services.vector_index import decode_vector, encode_vector
 
@@ -435,7 +436,18 @@ def prepare_upgraded_snapshot(
     shutil.copy2(snapshot_path, working)
     os.chmod(working, 0o600)
     settings = Settings(database_url=_sqlite_url(working))
-    database = SqliteDatabase(settings, root_dir)
+    bundle = SqlitePersistenceBundleFactory().create(
+        settings=settings,
+        root_dir=root_dir,
+        seams=SimpleNamespace(
+            new_id=lambda prefix: f"{prefix}-{uuid.uuid4().hex}",
+            now=lambda: datetime.now(timezone.utc).isoformat(),
+            copy_chunk_size=lambda: 500,
+            remap_json_ids=lambda value, _maps: value,
+            in_chunk_size=lambda: 500,
+        ),
+    )
+    database = bundle.database
     try:
         applied = tuple(SqliteMigrator(database, settings).migrate())
     except Exception as exc:
