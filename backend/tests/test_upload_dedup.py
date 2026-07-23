@@ -378,15 +378,37 @@ def test_reupload_with_the_same_doc_type_does_not_reextract(
     assert repo.process_calls == []
 
 
-def test_unknown_doc_type_counts_as_no_opinion_not_as_a_change(
+def test_explicit_auto_detect_resets_the_stored_doc_type_and_reextracts(
     repo, notebook_id, settled
 ):
-    """比较在两侧归一化之后做：'auto'/未知值归一成 ''，等同于没意见。"""
+    """显式选「自动检测」（前端为该选项提交约定哨兵 "auto"）必须能把一条已按具体
+    类型定型的源重置回自动——否则 UI 上根本无法把类型改回自动。与「没表态」相反
+    （后者保留旧值，见下一条）。normalize 把 "auto"→""，区别只能在归一化前从原始
+    入参读（explicit_auto）。
+
+    变异验证：把 reuse 里 retyped 的 `or explicit_auto` 去掉（只认 bool(incoming)）→
+    "auto" 归一成 "" 被当没意见 → doc_type 停在 textbook → 本测试转红。"""
     sid = settled(doc_type="textbook")
 
-    _upload(repo, notebook_id, doc_type="auto")
+    second = _upload(repo, notebook_id, doc_type="auto")
 
-    assert repo.get_source(sid).doc_type == "textbook"
+    assert second[0].id == sid and second[0].reused is True, "仍复用同一行"
+    assert repo.get_source(sid).doc_type == "", "显式自动检测必须把类型重置回自动（''）"
+    assert second[0].doc_type == "", "返回值如实带上现在生效的（自动）类型"
+    assert repo.extract_calls == [sid], "重置类型必须按新（自动）profile 重抽 KG"
+    assert repo.process_calls == [], "内容没变，绝不重新解析"
+
+
+def test_a_genuinely_unknown_doc_type_still_counts_as_no_opinion(
+    repo, notebook_id, settled
+):
+    """只有约定哨兵 "auto" 触发重置；其余未知串（非哨兵、非 profile）仍当「没表态」、
+    保留旧值，绝不误重置——否则任何脏输入都会静默把类型冲成自动。"""
+    sid = settled(doc_type="textbook")
+
+    _upload(repo, notebook_id, doc_type="zzz-not-a-profile")
+
+    assert repo.get_source(sid).doc_type == "textbook", "未知串（非哨兵）不得覆盖已存类型"
     assert repo.extract_calls == []
 
 

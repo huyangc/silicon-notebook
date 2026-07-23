@@ -1,9 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { summarizeUpload } from "./source-upload.ts";
+import { summarizeUpload, docTypeForUpload } from "./source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
+
+// ------------------------------------ 显式「自动检测」→ 哨兵 "auto"（能重置已定型类型）
+
+test("docTypeForUpload: 空串（界面上的自动检测）→ 哨兵 'auto'（让后端区分显式自动 vs 没表态）", () => {
+  assert.equal(docTypeForUpload(""), "auto");
+  assert.equal(docTypeForUpload("   "), "auto");
+});
+
+test("docTypeForUpload: 具体 profile id 原样透传", () => {
+  assert.equal(docTypeForUpload("textbook"), "textbook");
+  assert.equal(docTypeForUpload("academic_paper"), "academic_paper");
+});
 
 test("summarizeUpload: 全是新建 → 全部计入新增，文案就是老的那句", () => {
   const outcome = summarizeUpload([src("a", false), src("b", false)]);

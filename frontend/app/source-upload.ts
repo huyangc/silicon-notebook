@@ -1,5 +1,19 @@
 import type { UploadedSource } from "./workspace-model.ts";
 
+/** 上传时把界面上的文档类型选择转成给后端的**线路值**。
+ *
+ *  界面里空串是「自动检测」这个**显式选择**（下拉选项 value=""）。但后端在内容判重
+ *  沿用既有来源时，把「空/没传」当作「没意见、保留原有类型」——于是对一条已按具体
+ *  类型定型的来源，用户在 UI 里选「自动检测」再重传，会被当成没意见而无法真正改回
+ *  自动。为把「显式选自动检测」与「没表态」区分开，这里把空串映射成约定哨兵
+ *  ``"auto"``：后端 normalize 仍得到 ""（自动检测），但 reuse 路径能借哨兵识别这是
+ *  一次显式的「重置回自动」。具体 profile id 原样透传。
+ *
+ *  对新建来源无副作用：后端 upload 侧对 ""/"auto" 一律 normalize 成 ""。 */
+export function docTypeForUpload(staged: string): string {
+  return (staged ?? "").trim() === "" ? "auto" : staged;
+}
+
 export type UploadOutcome = {
   /** 这次真正新建的来源——只有这些才该计入来源总数（按 id 去重后，批内自我重复
    *  的回声只算一次）。 */

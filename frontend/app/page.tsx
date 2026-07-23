@@ -98,7 +98,7 @@ import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
-import { summarizeUpload } from "./source-upload.ts";
+import { summarizeUpload, docTypeForUpload } from "./source-upload.ts";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -2503,7 +2503,9 @@ export default function Home() {
     if (!currentNotebookId || stagedFiles.length === 0) return;
     const formData = new FormData();
     stagedFiles.forEach((file) => formData.append("files", file));
-    stagedDocTypes.forEach((dt) => formData.append("doc_types", dt));
+    // 空串（界面上的「自动检测」）转成哨兵 "auto"，让后端能把「显式选自动检测」与
+    // 「没表态」区分开——前者对已定型来源要重置回自动，后者保留旧类型（docTypeForUpload）。
+    stagedDocTypes.forEach((dt) => formData.append("doc_types", docTypeForUpload(dt)));
     // 上传前各来源的文档类型：内容判重会沿用既有来源，但用户新选的类型仍会写进
     // 去并触发按新类型重抽——只有对着上传前的值才看得出这次到底改没改。
     const docTypesBefore = new Map(sources.map((source) => [source.id, source.doc_type ?? ""]));
