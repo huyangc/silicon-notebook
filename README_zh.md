@@ -1207,11 +1207,12 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
 PostgreSQL 17 的 non-C/non-UTF 辅助 target 以 CI 为权威；本地未提供
 `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` 时会跳过这两项。
 `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` 会让任一辅助库缺失在测试前硬失败。
-Python 预检会在 pytest 前验证全部已配置 URL，拒绝调用方注入的 libpq
-`options`，只输出隐去凭据的 backend identity，并串行运行唯一
-`postgres_integration` marker，避免把全局 migration advisory lock 误当成每 schema
-的并行锁。pytest 只收到无密码的 `TEST_POSTGRES_*` URL；各 target 独立的 URL/
-`PGPASSWORD` 凭据会转入权限为 0600 的临时 `PGPASSFILE`，结束后删除。
+Python 预检会在 pytest 前验证全部已配置 URL。query 严格白名单只接受一个经审查的
+`sslmode`；身份、凭据、service/file、`options`、未知、畸形与重复覆盖项都会在连接前
+失败。预检还会复核有效 host/port/user/database，只输出隐去凭据的 backend identity，
+并串行运行唯一 `postgres_integration` marker。pytest 只收到最小白名单环境和无密码的
+`TEST_POSTGRES_*` URL；各 target 精确匹配的 URL/`PGPASSWORD` 凭据排在复制的继承
+pgpass 行之前，写入权限为 0600 的临时 `PGPASSFILE`，写入/关闭/测试失败或中断都会删除。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic

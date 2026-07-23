@@ -161,14 +161,21 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
     for phrase in (
         "to_jsonb(d) AS catalog",
         "PGPASSFILE",
-        "os.chmod(pgpass_path, 0o600)",
+        "os.chmod(path, 0o600)",
+        "_CHILD_ENV_ALLOWLIST",
+        "conninfo_to_dict",
+        "target.sanitized_url",
         '"--tb=short"',
         '"--maxfail=1"',
     ):
         assert phrase in launcher
     assert "datlocale" in catalog_helpers
     assert "daticulocale" in catalog_helpers
-    assert "target.sanitized_url" in launcher
+    assert "os.environ.copy()" not in launcher
+    assert launcher.index("generated_bytes + existing_bytes") > launcher.index(
+        "generated_bytes ="
+    )
+    assert '_SAFE_CONNECTION_QUERY_KEYS = {"sslmode"}' in catalog_helpers
 
     workflow = _read(".github/workflows/ci.yml")
     for phrase in (

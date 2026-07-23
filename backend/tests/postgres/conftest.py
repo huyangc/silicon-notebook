@@ -19,6 +19,16 @@ _DEDICATED_DATABASE = re.compile(
     r"^silicon_notebook_(?:test(?:_[a-z0-9_]+)?|[a-z0-9_]+_test)$"
 )
 _TEST_SCHEMA = re.compile(r"^sn_t4_[0-9a-f]{32}$")
+_MALFORMED_PERCENT_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
+_SAFE_CONNECTION_QUERY_KEYS = {"sslmode"}
+_SAFE_SSLMODES = {
+    "disable",
+    "allow",
+    "prefer",
+    "require",
+    "verify-ca",
+    "verify-full",
+}
 
 
 @dataclass(frozen=True)
@@ -57,16 +67,44 @@ def _safe_ascii_text(
     raise RuntimeError(f"PostgreSQL {label} must be ASCII text")
 
 
-def _validate_test_url_options(url: str) -> None:
-    """Apply one fail-closed libpq-option policy to every integration target."""
+def _validate_test_url_options(url: str) -> tuple[tuple[str, str], ...]:
+    """Parse a test URL query strictly and return canonical safe behavior only."""
     database_identity(url)
     parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    if any(key.lower() == "options" for key, _value in query):
-        raise RuntimeError(
-            "PostgreSQL integration URLs must not set libpq options; "
-            "the fixture owns search_path"
+    if _MALFORMED_PERCENT_ESCAPE.search(parts.query):
+        raise RuntimeError("PostgreSQL integration URL query is malformed")
+    try:
+        query = parse_qsl(
+            parts.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+            max_num_fields=8,
         )
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError("PostgreSQL integration URL query is malformed") from exc
+
+    canonical: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_key, value in query:
+        key = raw_key.lower()
+        if key in seen:
+            raise RuntimeError("PostgreSQL integration URL query repeats a parameter")
+        seen.add(key)
+        if key == "options":
+            raise RuntimeError(
+                "PostgreSQL integration URLs must not set libpq options; "
+                "the fixture owns search_path"
+            )
+        if key not in _SAFE_CONNECTION_QUERY_KEYS:
+            raise RuntimeError(
+                "PostgreSQL integration URL query parameter is not allowed"
+            )
+        if key == "sslmode" and value.lower() not in _SAFE_SSLMODES:
+            raise RuntimeError("PostgreSQL integration sslmode is invalid")
+        canonical.append((key, value.lower()))
+    return tuple(canonical)
 
 
 def _database_catalog(row: Mapping[str, Any]) -> DatabaseCatalog:
@@ -141,9 +179,9 @@ def _require_dedicated_test_database(
 def _url_with_search_path(url: str, schema: str) -> str:
     if not _TEST_SCHEMA.fullmatch(schema):
         raise RuntimeError("refusing to use an unvalidated PostgreSQL test schema")
-    _validate_test_url_options(url)
+    safe_query = _validate_test_url_options(url)
     parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
+    query = list(safe_query)
     query.append(("options", f"-csearch_path={schema}"))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
 

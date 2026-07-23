@@ -1371,12 +1371,14 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
 The PostgreSQL 17 non-C/non-UTF auxiliary targets are authoritative in CI; local runs skip
 those two tests unless `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` are supplied.
 Setting `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` makes their absence a hard pre-test error.
-The Python preflight validates every configured URL before pytest, rejects caller-owned
-libpq `options`, prints only the redacted backend identity, and runs only the
-`postgres_integration` marker, serially, so the global migration advisory lock is not
-mistaken for a per-schema parallel lock. Pytest receives password-free `TEST_POSTGRES_*`
-URLs; distinct URL/`PGPASSWORD` credentials are moved into a mode-0600 temporary
-`PGPASSFILE` and removed afterward.
+The Python preflight validates every configured URL before pytest. Its strict query
+allowlist accepts only one reviewed `sslmode`; identity, credential, service/file,
+`options`, unknown, malformed, and repeated overrides fail before any connection. It
+rechecks effective host/port/user/database, prints only the redacted backend identity, and
+runs only the `postgres_integration` marker serially. Pytest receives a minimal allowlisted
+environment and password-free `TEST_POSTGRES_*` URLs. Exact per-target URL/`PGPASSWORD`
+credentials are written before any copied inherited pgpass lines in a mode-0600 temporary
+`PGPASSFILE`; write/close/test failures and interrupts remove it.
 
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
