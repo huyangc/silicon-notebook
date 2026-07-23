@@ -22,7 +22,7 @@ def test_no_cache_satisfies_protocol():
 
 def test_injected_cache_used_for_hit(monkeypatch, tmp_path):
     """When a CacheBackend is injected, a pre-seeded hit is returned without
-    calling the real LLM."""
+    calling the real LLM — for an opt-in (validator-bearing) caller."""
     import json
     from app.core.cache import llm_key
     from app.core.config import Settings
@@ -65,8 +65,11 @@ def test_injected_cache_used_for_hit(monkeypatch, tmp_path):
     lc.put(key, '{"answer": "cached"}')
     assert injected_client._cache is lc
 
-    # chat_json must return the cached value without touching the network
-    result = injected_client.chat_json([user_msg], schema_hint)
+    # chat_json must return the cached value without touching the network.
+    # Opt-in caching: a validator-bearing caller reads the hit (the value passes).
+    result = injected_client.chat_json(
+        [user_msg], schema_hint, response_validator=lambda _c: True
+    )
     assert json.loads(result)["answer"] == "cached"
 
 
