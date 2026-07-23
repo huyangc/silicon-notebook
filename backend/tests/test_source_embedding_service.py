@@ -416,3 +416,31 @@ def test_invalidate_vector_matrix_wiring_evicts_the_real_cache(repo):
         nb.id, "knowledge_embeddings"
     )
     assert not cache.peek(key, ("v0",))                             # evicted by the wired callback
+
+
+def test_paged_embed_evicts_matrix_even_when_a_page_flush_raises(tmp_path, monkeypatch):
+    """Guard (codex PR#342 round 3 P2): if a LATER page's flush raises, the
+    matrix cache must still be evicted — earlier pages already committed, and a
+    same-second re-embed leaves (COUNT(*), MAX(created_at)) unchanged, so a
+    stale matrix would otherwise survive the failure. Eviction runs in a
+    finally; the exception still propagates. Dropping the finally fails here."""
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="1")   # 1 batch/page → many pages
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    _bind(r, "knowledge_object_embedding", _RecordingEmbedder(dim=8))
+    invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
+
+    flushes = {"n": 0}
+
+    def flaky_flush(notebook_id, rows):
+        flushes["n"] += 1
+        if flushes["n"] == 2:                                        # blow up on the 2nd page
+            raise RuntimeError("page 2 flush boom")
+
+    monkeypatch.setattr(r._runtime.source_embedding, "flush_object_vectors", flaky_flush)
+
+    items = [{"_oid": f"ko-{i}", "payload": {"name": f"c{i}"}} for i in range(30)]  # 3 pages
+    with pytest.raises(RuntimeError, match="page 2 flush boom"):
+        r._embed_objects_batch(nb.id, items)
+
+    assert flushes["n"] == 2                                         # aborted mid-pagination
+    assert (nb.id, "knowledge_embeddings") in invalidated           # ...yet the matrix was still evicted
