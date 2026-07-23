@@ -114,6 +114,7 @@ import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
 import { AskSessionHeaderActions } from "./ask-session-header";
+import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { SourceDetailWindow } from "./source-detail-window";
@@ -4150,7 +4151,7 @@ export default function Home() {
                 ) : (
                   <div className="chat-thread">
                     {turns.map((turn, index) => (
-                      <div className="chat-turn" key={turn.response.answer_id || index}>
+                      <div className="chat-turn" id={chatTurnDomId(index)} key={turn.response.answer_id || index}>
                         <div className="chat-user">{turn.question}</div>
                         <div className="chat-assistant">
                           <AnswerView
@@ -4299,6 +4300,9 @@ export default function Home() {
                     )}
                   </div>
                 </AskComposer>
+              )}
+              {chatMode === "ask" && (
+                <ChatTurnNav questions={turns.map((turn) => turn.question)} scrollRef={chatBodyRef} />
               )}
             </section>
 
