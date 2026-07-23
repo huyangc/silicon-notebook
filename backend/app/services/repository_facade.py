@@ -52,6 +52,7 @@ from app.models.sources import (
     SourceElement,
     SourceImportRequest,
     SourceSummary,
+    UploadedSourceSummary,
 )
 from app.models.ask import (
     AnswerAnchor,
@@ -1443,7 +1444,7 @@ class RepositoryFacade:
         notebook_id: str,
         files: Iterable[UploadedSourceFile],
         scheduler: Optional[Callable[[str], None]] = None,
-    ) -> List[SourceSummary]:
+    ) -> List[UploadedSourceSummary]:
         return self._runtime.source_ingestion.upload_sources_compat(
             notebook_id, files, scheduler
         )
