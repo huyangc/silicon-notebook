@@ -15,7 +15,11 @@ import pytest
 from app.core.config import Settings
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
-from tests.postgres.conftest import _url_with_search_path
+from tests.postgres.conftest import (
+    _database_catalog,
+    _url_with_search_path,
+    _validate_database_catalog,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -850,16 +854,17 @@ def test_schema_parity_on_utf8_database_with_non_c_default_collation(
     postgres_non_c_database,
 ):
     with postgres_non_c_database.connect() as conn:
-        database = conn.execute(
-            "SELECT current_setting('server_encoding') AS encoding, "
-            "datcollate,datctype,datlocprovider,daticulocale "
-            "FROM pg_database WHERE datname=current_database()"
+        row = conn.execute(
+            "SELECT current_database() AS database, "
+            "current_setting('server_encoding') AS encoding, "
+            "to_jsonb(d) AS catalog FROM pg_database AS d "
+            "WHERE datname=current_database()"
         ).fetchone()
-    assert database["encoding"] == "UTF8"
-    assert database["datlocprovider"] == "i"
-    assert database["daticulocale"]
-    assert database["datcollate"] not in {"C", "POSIX"}
-    assert database["datctype"] not in {"C", "POSIX"}
+    catalog = _database_catalog(row)
+    _validate_database_catalog(catalog, expected="non-c")
+    assert catalog.encoding == "UTF8"
+    assert catalog.provider == "i"
+    assert catalog.provider_locale == "en-US"
     _assert_packaged_postgres_schema_has_bidirectional_semantic_parity(
         postgres_non_c_database
     )

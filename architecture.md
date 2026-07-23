@@ -19,7 +19,7 @@
 - notebook 内页是来源栏 + 主区域的两列 workspace，主区域有 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab；没有固定 Studio 右栏。
 - Memory 独立于 source/chunk/KG，始终绑定创建者和一个 notebook；Agent candidate 与 confirmed-only notebook 正式检索是两个隔离平面。
 
-本地 beta 保持 FastAPI + SQLite + Next.js 的双进程形态，不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 pypdf 回退。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
+本地 beta 保持 FastAPI + Next.js 的双进程形态；正式 repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择，发行默认仍是 SQLite，因此默认开发不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 pypdf 回退。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
 ## 2. 运行时组件
 
@@ -313,7 +313,9 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
   PYTHON_BIN=python3 bash scripts/check_postgres.sh
 ```
 
-`scripts/check_postgres.sh` 先以隐去凭据的 identity 做连接预检，然后只运行
+`scripts/check_postgres.sh` 的 Python launcher 先统一验证三个 URL、拒绝 libpq
+`options` 并以隐去凭据的 identity 做连接预检；pytest 只接收无密码 URL，各 target
+的凭据通过权限 0600 的临时 `PGPASSFILE` 传入并在结束后删除，然后只运行
 `-m postgres_integration`。CI 的独立 PostgreSQL 17 job 用非 superuser app role，
 并额外在 UTF8/ICU/non-C-default 数据库跑完整 schema parity，在 SQL_ASCII 数据库
 验证 migration 0001 在 ledger/业务 DDL 前事务性失败。本地 PostgreSQL 16 可用于普通

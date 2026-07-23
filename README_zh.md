@@ -1154,7 +1154,7 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 
 ## 当前限制
 
-- 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
+- 在发行默认的 SQLite 后端上，检索使用 SQLite 关键词候选（含 CJK bi-gram）+ 每 notebook 的 float32 矩阵语义检索；直接 PostgreSQL 后端改用 `pg_trgm`/`ILIKE` 关键词候选，并继续对 `bytea` 向量做相同的应用层 float32 语义排序。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）；SQLite BM25/FTS5 与 PostgreSQL pgvector 仍是后续放量选项。
 - 大文档摄取已加固：贪心窗口化 KG 抽取（成本线性），并发 embedding 逐批落库。极大规模下可再接入 `sqlite-vec`。
 - Ask 不再在请求路径里同步补齐 embedding 或全量扫描 source elements；使用已有的关键词/向量索引，在维护任务运行时仍保持响应；并输出每阶段计时（`ask_stage` 事件）。
 - 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
@@ -1207,8 +1207,11 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
 PostgreSQL 17 的 non-C/non-UTF 辅助 target 以 CI 为权威；本地未提供
 `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` 时会跳过这两项。
 `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` 会让任一辅助库缺失在测试前硬失败。
-脚本连接预检只输出隐去凭据的 backend identity，并串行运行唯一
-`postgres_integration` marker，避免把全局 migration advisory lock 误当成每 schema 的并行锁。
+Python 预检会在 pytest 前验证全部已配置 URL，拒绝调用方注入的 libpq
+`options`，只输出隐去凭据的 backend identity，并串行运行唯一
+`postgres_integration` marker，避免把全局 migration advisory lock 误当成每 schema
+的并行锁。pytest 只收到无密码的 `TEST_POSTGRES_*` URL；各 target 独立的 URL/
+`PGPASSWORD` 凭据会转入权限为 0600 的临时 `PGPASSFILE`，结束后删除。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic

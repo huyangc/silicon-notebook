@@ -1317,7 +1317,7 @@ Must be run from the main checkout root (it needs the real `.env`/database confi
 
 ## Current Limitations
 
-- Retrieval uses SQLite keyword (CJK bi-gram) + float32 matrix semantic search with per-notebook cache. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach). BM25/FTS5 and pgvector are deferred for larger scale.
+- On the shipped SQLite default, retrieval uses SQLite keyword candidates (including CJK bi-grams) plus per-notebook float32-matrix semantic search. The direct PostgreSQL backend uses `pg_trgm`/`ILIKE` keyword candidates and retains the same application-owned float32 semantic ranking over `bytea` vectors. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach); SQLite BM25/FTS5 and PostgreSQL pgvector remain deferred scale options.
 - Large-document ingestion is hardened: greedy-window KG extraction (cost scales linearly with document size), concurrent embedding with per-batch DB writes, and extraction-first pipeline. For very large corpora, adding `sqlite-vec` is a natural next step.
 - Ask no longer performs synchronous embedding backfill or a full source-element scan; it uses available keyword/vector indexes and stays responsive while maintenance jobs run. Ask emits per-stage timing (`ask_stage` events).
 - Unified KG rebuild is explicit and observable via `GET /notebooks/{id}/unified-kg/status`; ingesting a source marks the graph dirty instead of rebuilding synchronously, and opening the graph overlay no longer auto-rebuilds (refresh on demand).
@@ -1371,9 +1371,12 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
 The PostgreSQL 17 non-C/non-UTF auxiliary targets are authoritative in CI; local runs skip
 those two tests unless `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` are supplied.
 Setting `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` makes their absence a hard pre-test error.
-The script's connection preflight prints only the redacted backend identity and runs only
-the `postgres_integration` marker, serially, so the global migration advisory lock is not
-mistaken for a per-schema parallel lock.
+The Python preflight validates every configured URL before pytest, rejects caller-owned
+libpq `options`, prints only the redacted backend identity, and runs only the
+`postgres_integration` marker, serially, so the global migration advisory lock is not
+mistaken for a per-schema parallel lock. Pytest receives password-free `TEST_POSTGRES_*`
+URLs; distinct URL/`PGPASSWORD` credentials are moved into a mode-0600 temporary
+`PGPASSFILE` and removed afterward.
 
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`

@@ -149,6 +149,8 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
     assert "postgres_integration" not in offline
 
     postgres = _read("scripts/check_postgres.sh")
+    launcher = _read("backend/tests/postgres/lane.py")
+    catalog_helpers = _read("backend/tests/postgres/conftest.py")
     assert 'TEST_POSTGRES_URL:?TEST_POSTGRES_URL is required' in postgres
     assert "-m postgres_integration" in postgres
     assert "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED" in postgres
@@ -156,6 +158,17 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
     assert "TEST_POSTGRES_NON_UTF_URL" in postgres
     assert "database_status" in postgres
     assert "redact_database_url" in postgres
+    for phrase in (
+        "to_jsonb(d) AS catalog",
+        "PGPASSFILE",
+        "os.chmod(pgpass_path, 0o600)",
+        '"--tb=short"',
+        '"--maxfail=1"',
+    ):
+        assert phrase in launcher
+    assert "datlocale" in catalog_helpers
+    assert "daticulocale" in catalog_helpers
+    assert "target.sanitized_url" in launcher
 
     workflow = _read(".github/workflows/ci.yml")
     for phrase in (
@@ -174,6 +187,21 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
     assert "scripts/check_postgres.sh" not in _between(
         ".github/workflows/ci.yml", "full-gate:", "postgres-integration:"
     )
+
+
+def test_backend_specific_retrieval_limits_and_selectable_architecture_are_qualified():
+    readme = _read("README.md")
+    readme_zh = _read("README_zh.md")
+    architecture = _read("architecture.md")
+    assert "On the shipped SQLite default" in readme
+    assert "PostgreSQL backend uses `pg_trgm`/`ILIKE`" in readme
+    assert "在发行默认的 SQLite 后端上" in readme_zh
+    assert "PostgreSQL 后端改用 `pg_trgm`/`ILIKE`" in readme_zh
+    assert (
+        "repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择"
+        in architecture
+    )
+    assert "FastAPI + SQLite + Next.js" not in architecture
 
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():

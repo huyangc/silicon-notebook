@@ -5,6 +5,8 @@ import threading
 
 import pytest
 
+from tests.postgres.conftest import _safe_ascii_text
+
 
 pytestmark = pytest.mark.postgres_integration
 
@@ -246,7 +248,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
             "SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
             "WHERE n.nspname=current_schema() AND c.relkind IN ('r','p','v','m','S','f')"
         ).fetchall()
-    assert encoding != "UTF8"
+    assert _safe_ascii_text(encoding, "server encoding") != "UTF8"
     assert relations == []
 
 

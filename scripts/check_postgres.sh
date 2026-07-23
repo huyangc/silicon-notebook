@@ -27,68 +27,8 @@ export EMBED_PROVIDER="" EMBED_BASE_URL="" EMBED_API_KEY="" EMBED_MODEL=""
 export RERANK_MODEL="" RERANK_API_KEY=""
 export MINERU_MODE="off" MINERU_API_TOKEN=""
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" - <<'PY'
-import os
-import re
-import sys
-
-import psycopg
-from psycopg.rows import dict_row
-
-from app.core.database_url import database_identity, database_status, redact_database_url
-
-
-DEDICATED = re.compile(r"^silicon_notebook_(?:test(?:_[a-z0-9_]+)?|[a-z0-9_]+_test)$")
-
-
-def fail(label: str, url: str, reason: str) -> None:
-    # Both helpers intentionally discard userinfo and query options. Never print
-    # a raw conninfo or the original driver exception.
-    safe = database_status(url)
-    _ = redact_database_url(url)
-    print(f"PostgreSQL {label} preflight failed: {safe} ({reason})", file=sys.stderr)
-    raise SystemExit(2)
-
-
-def inspect(label: str, env_name: str, expected: str) -> None:
-    url = os.environ.get(env_name)
-    if not url:
-        return
-    try:
-        identity = database_identity(url)
-        if identity.scheme != "postgresql" or not DEDICATED.fullmatch(identity.database):
-            fail(label, url, "target must be a dedicated silicon_notebook_*_test database")
-        with psycopg.connect(url, row_factory=dict_row, connect_timeout=5) as connection:
-            row = connection.execute(
-                "SELECT current_database() AS database, "
-                "current_setting('server_encoding') AS encoding, "
-                "datcollate,datctype FROM pg_database WHERE datname=current_database()"
-            ).fetchone()
-        if str(row["database"]) != identity.database:
-            fail(label, url, "database identity mismatch")
-        encoding = str(row["encoding"])
-        if expected == "utf8" and encoding != "UTF8":
-            fail(label, url, "server_encoding must be UTF8")
-        if expected == "non-c":
-            if encoding != "UTF8":
-                fail(label, url, "non-C target must be UTF8")
-            if str(row["datcollate"]) in {"C", "POSIX"} or str(row["datctype"]) in {"C", "POSIX"}:
-                fail(label, url, "database default collation must be non-C")
-        if expected == "non-utf" and encoding == "UTF8":
-            fail(label, url, "negative target must not be UTF8")
-    except SystemExit:
-        raise
-    except BaseException:
-        fail(label, url, "connection or identity check failed")
-    print(f"PostgreSQL {label} preflight ok: {database_status(url)}")
-
-
-inspect("primary", "TEST_POSTGRES_URL", "utf8")
-inspect("non-C UTF8", "TEST_POSTGRES_NON_C_URL", "non-c")
-inspect("non-UTF negative", "TEST_POSTGRES_NON_UTF_URL", "non-utf")
-PY
-
+# The Python launcher owns URL parsing, database_status/redact_database_url
+# diagnostics, password-free pytest URLs, and the `-m postgres_integration`
+# selection. Keeping conninfo parsing out of shell prevents accidental echoing.
 cd "$ROOT_DIR/backend"
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m pytest -p no:cacheprovider \
-  -n 0 \
-  -m postgres_integration tests/postgres
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m tests.postgres.lane

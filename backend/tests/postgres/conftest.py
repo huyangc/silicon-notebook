@@ -6,6 +6,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
@@ -27,26 +28,122 @@ class ScopedPostgres:
     schema: str
 
 
-def _require_dedicated_test_database(url: str, actual_database: str | None = None) -> str:
+@dataclass(frozen=True)
+class DatabaseCatalog:
+    database: str
+    encoding: str
+    provider: str | None
+    provider_locale: str | None
+    datcollate: str | None
+    datctype: str | None
+
+
+def _safe_ascii_text(
+    value: object,
+    label: str,
+    *,
+    allow_none: bool = False,
+) -> str | None:
+    """Normalize PostgreSQL identity/catalog text without repr-coercing bytes."""
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bytes):
+        try:
+            return value.decode("ascii", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(f"PostgreSQL {label} must be ASCII text") from exc
+    if isinstance(value, str):
+        return value
+    raise RuntimeError(f"PostgreSQL {label} must be ASCII text")
+
+
+def _validate_test_url_options(url: str) -> None:
+    """Apply one fail-closed libpq-option policy to every integration target."""
+    database_identity(url)
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    if any(key.lower() == "options" for key, _value in query):
+        raise RuntimeError(
+            "PostgreSQL integration URLs must not set libpq options; "
+            "the fixture owns search_path"
+        )
+
+
+def _database_catalog(row: Mapping[str, Any]) -> DatabaseCatalog:
+    raw_catalog = row.get("catalog")
+    if not isinstance(raw_catalog, Mapping):
+        raise RuntimeError("PostgreSQL database catalog response is invalid")
+
+    def optional(key: str) -> str | None:
+        return _safe_ascii_text(raw_catalog.get(key), key, allow_none=True)
+
+    # PostgreSQL 16 names the ICU locale daticulocale; PostgreSQL 17 renamed it
+    # to datlocale. Reading the full catalog row as jsonb lets one query work on
+    # both versions without referring to a column that does not exist.
+    provider_locale = optional("datlocale") or optional("daticulocale")
+    return DatabaseCatalog(
+        database=_safe_ascii_text(row.get("database"), "database"),
+        encoding=_safe_ascii_text(row.get("encoding"), "server encoding"),
+        provider=optional("datlocprovider"),
+        provider_locale=provider_locale,
+        datcollate=optional("datcollate"),
+        datctype=optional("datctype"),
+    )
+
+
+def _validate_database_catalog(
+    catalog: DatabaseCatalog,
+    *,
+    expected: str,
+) -> None:
+    if expected in {"utf8", "non-c"} and catalog.encoding != "UTF8":
+        raise RuntimeError("server_encoding must be UTF8")
+    if expected == "non-utf" and catalog.encoding == "UTF8":
+        raise RuntimeError("negative target must not be UTF8")
+    if expected != "non-c":
+        return
+
+    c_locales = {"C", "POSIX"}
+    if catalog.provider == "i":
+        if not catalog.provider_locale or catalog.provider_locale.upper() in c_locales:
+            raise RuntimeError("ICU provider locale must be non-C")
+        return
+    if catalog.provider == "c":
+        if (
+            not catalog.datcollate
+            or not catalog.datctype
+            or catalog.datcollate.upper() in c_locales
+            or catalog.datctype.upper() in c_locales
+        ):
+            raise RuntimeError("libc database collation must be non-C")
+        return
+    raise RuntimeError("non-C target uses an unsupported locale provider")
+
+
+def _require_dedicated_test_database(
+    url: str, actual_database: object | None = None
+) -> str:
+    _validate_test_url_options(url)
     expected = database_identity(url).database
     if not _DEDICATED_DATABASE.fullmatch(expected):
         raise RuntimeError(
             "TEST_POSTGRES_URL must name a dedicated silicon_notebook_*_test database"
         )
-    if actual_database is not None and actual_database != expected:
-        raise RuntimeError("TEST_POSTGRES_URL database identity does not match the server")
+    if actual_database is not None and (
+        _safe_ascii_text(actual_database, "database") != expected
+    ):
+        raise RuntimeError(
+            "TEST_POSTGRES_URL database identity does not match the server"
+        )
     return expected
 
 
 def _url_with_search_path(url: str, schema: str) -> str:
     if not _TEST_SCHEMA.fullmatch(schema):
         raise RuntimeError("refusing to use an unvalidated PostgreSQL test schema")
+    _validate_test_url_options(url)
     parts = urlsplit(url)
     query = parse_qsl(parts.query, keep_blank_values=True)
-    if any(key.lower() == "options" for key, _value in query):
-        raise RuntimeError(
-            "TEST_POSTGRES_URL must not set libpq options; the fixture owns search_path"
-        )
     query.append(("options", f"-csearch_path={schema}"))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
 
@@ -82,7 +179,7 @@ def _isolated_postgres_scope(base_url: str):
     scoped_url = _url_with_search_path(base_url, schema)
     with psycopg.connect(base_url, autocommit=True, row_factory=dict_row) as conn:
         actual = conn.execute("SELECT current_database() AS name").fetchone()["name"]
-        _require_dedicated_test_database(base_url, str(actual))
+        _require_dedicated_test_database(base_url, actual)
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
 
     try:
@@ -95,8 +192,8 @@ def _isolated_postgres_scope(base_url: str):
             identity = conn.execute(
                 "SELECT current_database() AS database, current_schema() AS schema"
             ).fetchone()
-            _require_dedicated_test_database(base_url, str(identity["database"]))
-            if identity["schema"] != schema:
+            _require_dedicated_test_database(base_url, identity["database"])
+            if _safe_ascii_text(identity["schema"], "schema") != schema:
                 raise RuntimeError(
                     "scoped TEST_POSTGRES_URL did not select its isolated schema"
                 )
@@ -106,7 +203,7 @@ def _isolated_postgres_scope(base_url: str):
             raise RuntimeError("refusing to drop an unvalidated PostgreSQL test schema")
         with psycopg.connect(base_url, autocommit=True) as conn:
             actual = conn.execute("SELECT current_database()").fetchone()[0]
-            _require_dedicated_test_database(base_url, str(actual))
+            _require_dedicated_test_database(base_url, actual)
             conn.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
             )

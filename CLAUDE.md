@@ -13,4 +13,6 @@ PostgreSQL vectors use `bytea`; pgvector is not installed or required,
 and production remains `--workers 1`. `SHADOW_DATABASE_URL` is reserved/validated only and
 does not copy, migrate, synchronize, or enable dual-write. Status/readiness diagnostics must
 redact credentials and options. Follow the stop/backup/change/start/`/api/ready` switch and
-rollback contract in `AGENTS.md` and the READMEs.
+rollback contract in `AGENTS.md` and the READMEs. The PostgreSQL integration launcher gives
+pytest only password-free URLs and transports per-target credentials through a temporary
+mode-0600 `PGPASSFILE`.
