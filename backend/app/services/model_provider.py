@@ -698,13 +698,39 @@ class RuntimeModelProvider:
     def _raw_embedding(self, service: ModelServiceDefinition):
         from app.services.embedding_dashscope import DashscopeEmbedder
 
-        return DashscopeEmbedder(
+        embedder = DashscopeEmbedder(
             self.settings,
             base_url=service.base_url,
             api_key=service.api_key,
             model=service.model,
             max_connections=service.max_concurrency,
         )
+        # 内容寻址缓存包装——**生产 embedding 的唯一构造点**。ScheduledEmbedder.raw
+        # 就是这个返回值，其 embed_texts/dim 都透过 raw，于是生产流量真正走缓存
+        # （dim 由 CachedEmbedder.__getattr__ 透传 inner.dim）。探针走 make_embedder
+        # （master 架构下 make_embedder 不含缓存）、离线走 _UnconfiguredEmbedder，
+        # 两者都不经过这里，天然不缓存——与「健康探针命中缓存会假绿」的要求一致。
+        # 缓存默认开；关闭时不包装，省去每批 key 计算的开销。缓存后端构造要碰磁盘
+        # （建目录/表/WAL），失败一律降级为「不缓存」而非打死 embedder 工厂——与
+        # llm.py 的 _get_cache 外层 try 对称，「缓存故障永不影响主流程」。
+        if getattr(self.settings, "llm_cache_enabled", False):
+            try:
+                from app.core.cache import make_cache_backend
+                backend = make_cache_backend(self.settings)
+            except Exception:
+                backend = None
+            if backend is not None:
+                from app.services.cached_embedder import CachedEmbedder
+                embedder = CachedEmbedder(
+                    embedder,
+                    backend,
+                    model=service.model,
+                    truncate_chars=int(getattr(self.settings, "embed_truncate_chars", 2000)),
+                    # 服务身份进缓存键：同 model 名、不同 base_url（per-user 模型
+                    # 配置）不得共用全局缓存条目。base_url 非秘密；api_key 绝不入键。
+                    base_url=service.base_url,
+                )
+        return embedder
 
     def _raw_rerank(self, service: ModelServiceDefinition) -> RerankClient:
         return RerankClient(
