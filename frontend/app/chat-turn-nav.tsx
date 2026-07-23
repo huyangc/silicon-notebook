@@ -90,6 +90,26 @@ export function ChatTurnNav({ questions, scrollRef }: ChatTurnNavProps) {
     };
   }, [recompute, scrollRef]);
 
+  // 切换会话时轮数可能不变（count 不变 → 上面的 effect 不重跑），但每轮内容/高度已变，
+  // 又不会触发 scroll 事件；用内容签名驱动一次重算，避免高亮停留在上一个会话。
+  const signature = questions.join("\n");
+  useEffect(() => {
+    recompute();
+  }, [signature, recompute]);
+
+  // 长会话里导轨会内部滚动——让高亮的圆点始终留在导轨可视范围内（只滚导轨，不动页面）。
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const rail = nav.querySelector<HTMLElement>(".chat-turn-nav-rail");
+    const btn = nav.querySelectorAll<HTMLElement>(".chat-turn-nav-dotbtn")[active];
+    if (!rail || !btn) return;
+    const railBox = rail.getBoundingClientRect();
+    const btnBox = btn.getBoundingClientRect();
+    if (btnBox.top < railBox.top) rail.scrollTop -= railBox.top - btnBox.top + 6;
+    else if (btnBox.bottom > railBox.bottom) rail.scrollTop += btnBox.bottom - railBox.bottom + 6;
+  }, [active]);
+
   // --- 放大镜 ---
   const dots = (): HTMLElement[] => {
     const nav = navRef.current;
@@ -172,7 +192,7 @@ export function ChatTurnNav({ questions, scrollRef }: ChatTurnNavProps) {
     lockTimer.current = window.setTimeout(() => {
       lockRef.current = false;
     }, 700);
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    el.scrollIntoView({ behavior: reduceRef.current ? "auto" : "smooth", block: "start" });
     const bubble = el.querySelector(".chat-user");
     if (bubble instanceof HTMLElement) {
       bubble.classList.remove("chat-user-flash");

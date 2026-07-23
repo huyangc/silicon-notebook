@@ -60,4 +60,29 @@ describe("ChatTurnNav", () => {
     );
     expect(firstTurn?.querySelector(".chat-user")).toHaveClass("chat-user-flash");
   });
+
+  test("reduced-motion 下点击跳转改用瞬时滚动", async () => {
+    const user = userEvent.setup();
+    const w = window as unknown as { matchMedia?: unknown };
+    const prev = w.matchMedia;
+    w.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query.includes("reduce"),
+      media: query,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      onchange: null,
+      dispatchEvent: () => false,
+    }));
+    try {
+      render(<Harness questions={["一", "二", "三"]} />);
+      await user.click(screen.getByRole("button", { name: "二" }));
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith(
+        expect.objectContaining({ behavior: "auto" }),
+      );
+    } finally {
+      w.matchMedia = prev;
+    }
+  });
 });
