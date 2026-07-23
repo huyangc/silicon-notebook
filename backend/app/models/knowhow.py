@@ -228,6 +228,32 @@ class KnowhowCellOptimizeResult(BaseModel):
     suggestion_md: str
 
 
+# --- knowhow row completion: suggestion-only inference from sibling rows ---
+
+
+class KnowhowRowCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Omitted means every currently blank, non-anchor column. Validation and
+    # de-duplication are intentionally performed by the service against the
+    # live table schema, where anchor/non-empty/unknown targets can be rejected
+    # together with a user-readable 400 instead of becoming a generic 422.
+    target_column_ids: Optional[List[str]] = None
+
+
+class KnowhowRowCompletionSuggestion(BaseModel):
+    column_id: str
+    suggestion_md: Optional[str]
+    confidence: Literal["high", "medium", "low"]
+    based_on_row_ids: List[str] = Field(default_factory=list)
+    basis: str
+    abstain_reason: str
+
+
+class KnowhowRowCompleteResult(BaseModel):
+    suggestions: List[KnowhowRowCompletionSuggestion] = Field(default_factory=list)
+
+
 # --- knowhow-md-normalize Task 4: /reformat HTTP endpoint result ------------
 # Same suggestion-only contract as KnowhowCellOptimizeResult above, but
 # reformat_cell (Task 3) is internally graceful about an unconfigured LLM
@@ -362,7 +388,8 @@ class KnowhowTransferRequest(BaseModel):
 # an honest "who/what changed this" badge; swallowing a bad value would make
 # that badge quietly lie instead of failing loudly.
 VALID_ORIGINS = frozenset({
-    "user", "llm_optimize", "llm_reformat", "import", "agent", "revert", "backfill",
+    "user", "llm_optimize", "llm_reformat", "llm_complete", "import", "agent",
+    "revert", "backfill",
 })
 
 

@@ -118,6 +118,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("knowhow", None, "columns", None),
     ("knowhow", None, "rows"),
     ("knowhow", None, "rows", None),
+    ("knowhow", None, "rows", None, "complete"),
     ("knowhow", None, "rows", None, "cells", None),
     ("knowhow", None, "rows", None, "cells", None, "optimize"),
     ("knowhow", None, "rows", None, "cells", None, "reformat"),

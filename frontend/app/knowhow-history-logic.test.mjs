@@ -75,6 +75,7 @@ test("summarizeChange: 未知 kind 落到默认文案，不抛异常", () => {
 test("originLabel: 已知来源给中文标签", () => {
   assert.equal(originLabel("llm_reformat"), "格式规整");
   assert.equal(originLabel("llm_optimize"), "表达优化");
+  assert.equal(originLabel("llm_complete"), "智能补全");
   assert.equal(originLabel("import"), "导入");
   assert.equal(originLabel("revert"), "回退");
   assert.equal(originLabel("agent"), "Agent");

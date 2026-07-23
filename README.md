@@ -12,7 +12,7 @@ The current target is a local real-team beta: FastAPI + SQLite on the backend an
 - Grounded multi-turn Ask with compact citations and `chunk`, `reasoning`, and experimental `graph` retrieval modes.
 - Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, and personal-to-base promotion.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
-- Free-form knowhow tables with Markdown cells, deterministic graph projection, history, milestones, and isolated code attachments.
+- Free-form knowhow tables with Markdown cells, explicit empty-cell completion suggestions, deterministic graph projection, history, milestones, and isolated code attachments.
 - Two-stage deep reports with editable outlines, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.

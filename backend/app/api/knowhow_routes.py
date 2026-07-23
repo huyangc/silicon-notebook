@@ -37,6 +37,8 @@ from app.models.knowhow import (
     KnowhowMilestoneCreate,
     KnowhowRevertRequest,
     KnowhowRow,
+    KnowhowRowCompleteRequest,
+    KnowhowRowCompleteResult,
     KnowhowRowCreate,
     KnowhowTableCreate,
     KnowhowTableDetail,
@@ -837,6 +839,36 @@ def optimize_knowhow_cell(
     except knowhow_api.KnowhowOptimizeUnavailable as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"suggestion_md": suggestion_md}
+
+
+# Suggestion-only row completion. This is write/owner gated because it is an
+# authoring action, but it neither mutates the table nor schedules projection;
+# accepted suggestions return through the existing guarded PATCH cell route.
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete",
+    response_model=KnowhowRowCompleteResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def complete_knowhow_row(
+    notebook_id: str,
+    table_id: str,
+    row_id: str,
+    body: KnowhowRowCompleteRequest,
+) -> dict:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    if not any(row["id"] == row_id for row in table["rows"]):
+        raise user_error(400, "行定位不合法")
+    try:
+        return knowhow_api.complete_row(
+            repo, table, row_id, body.target_column_ids
+        )
+    except ModelNotConfiguredError:
+        raise user_error(400, "尚未配置模型，无法智能补全")
+    except ValueError:
+        raise user_error(400, "无法补全当前行，请检查目标列和已知内容")
+    except knowhow_api.KnowhowCompletionUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 # --- knowhow-md-normalize Task 4: /reformat HTTP endpoint (design doc §③-

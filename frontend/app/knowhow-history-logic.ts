@@ -34,6 +34,7 @@ const ORIGIN_LABELS: Record<string, string> = {
   user: "",
   llm_optimize: "表达优化",
   llm_reformat: "格式规整",
+  llm_complete: "智能补全",
   import: "导入",
   agent: "Agent",
   revert: "回退",

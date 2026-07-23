@@ -1425,15 +1425,18 @@ class KnowhowStore:
         ``updates`` may span several tables (each entry carries its own
         ``table_id``), so this records ONE ``cell_update`` entry PER DISTINCT
         written table — never one entry mixing rows from different tables —
-        appended after every ``mutation_seq`` bump. ``before`` reuses each
-        entry's ``expected_before``, already proven equal to the stored value
-        by phase 1 — no second read."""
+        appended after every ``mutation_seq`` bump. A never-written cell is
+        presented on the table wire as ``""`` and therefore compares equal to
+        ``expected_before=""``, while its history ``before`` remains ``None``
+        so a revert deletes the newly inserted cell instead of materializing an
+        empty one. Stored cells reuse the exact phase-1 value."""
         if not updates:
             return {"written": [], "conflict": False}
         now = self.now()
         written: list[tuple[str, str]] = []
         written_table_ids: list[str] = []
         by_table: "dict[str, list[dict]]" = {}
+        before_values: "dict[tuple[str, str], str | None]" = {}
         with self.database.write() as db:
             # F1 (cross-process atomicity): reserve the write lock BEFORE phase 1
             # re-reads, for the same reason as update_knowhow_cells_bulk_guarded
@@ -1547,9 +1550,21 @@ class KnowhowStore:
                     "WHERE row_id = ? AND column_id = ?",
                     (row_id, column_id),
                 ).fetchone()
-                current = current_row["content_md"] if current_row is not None else None
-                if current != expected_before:
+                stored_before = (
+                    current_row["content_md"] if current_row is not None else None
+                )
+                # get_knowhow_table omits a never-written cell from ``cells``;
+                # every client reads that as "". Treat the same wire snapshot as
+                # equal here, while retaining None separately for exact history
+                # reversal (see phase 2 below).
+                current_matches = (
+                    expected_before in (None, "")
+                    if stored_before is None
+                    else stored_before == expected_before
+                )
+                if not current_matches:
                     return {"written": [], "conflict": True}
+                before_values[(row_id, column_id)] = stored_before
                 if anchor_guard:
                     # Re-read THIS row's anchor cell under the same lock and compare
                     # to the frozen snapshot value; a moved/cleared anchor (!=
@@ -1599,7 +1614,7 @@ class KnowhowStore:
                 written.append((row_id, column_id))
                 by_table.setdefault(table_id, []).append({
                     "row_id": row_id, "column_id": column_id,
-                    "before": expected_before, "after": content_md,
+                    "before": before_values[(row_id, column_id)], "after": content_md,
                 })
                 if table_id not in written_table_ids:
                     written_table_ids.append(table_id)

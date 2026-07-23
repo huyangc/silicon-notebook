@@ -367,6 +367,14 @@
       "kind": "independent_private",
       "path": "backend/app/services/knowhow/api.py",
       "reason": "knowhow orchestration constructs narrow services from runtime ports",
+      "scope": "<module>.complete_row",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/api.py",
+      "reason": "knowhow orchestration constructs narrow services from runtime ports",
       "scope": "<module>.optimize_cell",
       "target": "_runtime"
     },

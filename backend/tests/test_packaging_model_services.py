@@ -119,6 +119,7 @@ KG_ASK_RESERVE=3
     assert generated["services"]["general"]["max_concurrency"] == 5
     assert generated["bindings"]["report_sufficiency"] == "rewrite"
     assert generated["bindings"]["knowhow_optimize"] == "rewrite"
+    assert generated["bindings"]["knowhow_complete"] == "rewrite"
     assert "legacy-secret" not in result.stdout + result.stderr
     backup = bundle / ".env.pre-system-models.bak"
     assert backup.read_text(
