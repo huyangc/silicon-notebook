@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from app.core.request_context import reset_request_user, set_request_user
@@ -504,7 +506,9 @@ def test_startup_warm_failure_immediately_closes_real_postgres_pool(
     )
     readiness.reset()
     try:
-        startup_warmup.run_startup()
+        lease = startup_warmup.begin_lifecycle()
+        assert lease is not None
+        startup_warmup.run_startup(lease)
         assert readiness.snapshot()["phase"] == "error"
         assert repository._runtime.database._closed is True
         assert cleared == [True]
@@ -513,6 +517,64 @@ def test_startup_warm_failure_immediately_closes_real_postgres_pool(
                 pass
     finally:
         repository.close()
+
+
+def test_concurrent_startup_constructs_and_closes_one_real_postgres_pool(
+    postgres_settings, monkeypatch
+):
+    from app.api import deps
+    from app.core import readiness
+    from app.repositories.postgres.repository import PostgresRepository
+    from app.services import startup_warmup
+
+    factory_constructed = threading.Event()
+    release_factory = threading.Event()
+    created = []
+    cleared = []
+    results = []
+
+    def repository_factory():
+        repository = PostgresRepository(postgres_settings)
+        created.append(repository)
+        factory_constructed.set()
+        assert release_factory.wait(timeout=5)
+        return repository
+
+    repository_factory.cache_clear = lambda: cleared.append(True)
+    monkeypatch.setattr(deps, "repository", repository_factory)
+    monkeypatch.setattr(
+        startup_warmup,
+        "_reproject_legacy_knowhow_tables",
+        lambda _repo: None,
+    )
+
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+    winner = threading.Thread(
+        target=lambda: results.append(startup_warmup.run_startup(lease))
+    )
+    winner.start()
+    assert factory_constructed.wait(timeout=5)
+
+    loser_lease = startup_warmup.begin_lifecycle()
+    assert loser_lease is None
+    assert startup_warmup.run_startup(loser_lease) is None
+    startup_warmup.close_repository(loser_lease, None)
+    assert len(created) == 1
+    assert created[0]._runtime.database._closed is False
+    assert readiness.snapshot()["phase"] == "migrating"
+
+    release_factory.set()
+    winner.join(timeout=10)
+    assert not winner.is_alive()
+    assert results == [created[0]]
+    assert readiness.is_ready() is True
+    assert created[0]._runtime.database._closed is False
+
+    startup_warmup.close_repository(lease, created[0])
+    assert created[0]._runtime.database._closed is True
+    assert cleared == [True]
+    assert readiness.snapshot()["phase"] == "stopped"
 
 
 def test_postgres_last_knowhow_table_delete_sweeps_asset_row_and_file(

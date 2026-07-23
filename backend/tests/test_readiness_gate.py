@@ -7,8 +7,10 @@ reachable so the frontend can poll and show a "服务启动中" screen. The auto
 toggle it explicitly to exercise both states.
 """
 import asyncio
+import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.core import readiness
@@ -62,15 +64,16 @@ def test_run_startup_migrates_warms_and_flips_ready():
     daemon thread does in production."""
     from app.services import startup_warmup
 
-    readiness.reset()
-    repo = startup_warmup.run_startup()  # synchronous here (prod runs it in a thread)
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+    repo = startup_warmup.run_startup(lease)  # synchronous here (prod uses a thread)
     try:
         snap = readiness.snapshot()
         assert snap["phase"] == "ready"
         assert readiness.is_ready() is True
         assert snap["error"] is None
     finally:
-        startup_warmup.close_repository(repo)
+        startup_warmup.close_repository(lease, repo)
 
 
 def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, caplog):
@@ -91,8 +94,9 @@ def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, cap
         "get_settings",
         lambda: SimpleNamespace(database_url=secret),
     )
-    readiness.reset()
-    startup_warmup.run_startup()
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+    startup_warmup.run_startup(lease)
 
     snapshot = readiness.snapshot()
     assert snapshot["ready"] is False
@@ -164,6 +168,54 @@ def test_two_lifespans_start_and_close_distinct_exact_repositories(monkeypatch):
     ]
 
 
+def test_overlapping_lifespan_fails_before_yield_and_cannot_outlive_owner(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.main import _lifespan
+    from app.services import startup_warmup
+
+    calls: list[str] = []
+    fake = SimpleNamespace(
+        warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 0,
+        close=lambda: calls.append("close"),
+    )
+
+    def repository():
+        calls.append("factory")
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    async def wait_ready() -> None:
+        deadline = time.monotonic() + 2
+        while not readiness.is_ready() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert readiness.is_ready() is True
+
+    async def exercise() -> None:
+        loser_entered = False
+        async with _lifespan(SimpleNamespace()):
+            await wait_ready()
+            with pytest.raises(
+                startup_warmup.LifecycleAlreadyActiveError,
+                match="repository lifecycle is active",
+            ):
+                async with _lifespan(SimpleNamespace()):
+                    loser_entered = True
+            assert loser_entered is False
+            assert readiness.is_ready() is True
+            assert calls == ["factory", "warm"]
+        assert readiness.snapshot()["phase"] == "stopped"
+
+    asyncio.run(exercise())
+    assert calls == ["factory", "warm", "close", "clear"]
+
+
 def test_close_repository_without_active_cycle_is_noop_and_never_calls_factory(
     monkeypatch,
 ):
@@ -179,7 +231,7 @@ def test_close_repository_without_active_cycle_is_noop_and_never_calls_factory(
     repository.cache_clear = lambda: calls.append("clear")
     monkeypatch.setattr(deps, "repository", repository)
 
-    startup_warmup.close_repository()
+    startup_warmup.close_repository(None, None)
 
     assert calls == []
 
@@ -215,18 +267,22 @@ def test_close_failure_still_stops_clears_and_allows_a_fresh_next_cycle(
     monkeypatch.setattr(deps, "repository", repository)
     monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
 
-    first = startup_warmup.run_startup()
+    first_lease = startup_warmup.begin_lifecycle()
+    assert first_lease is not None
+    first = startup_warmup.run_startup(first_lease)
     assert first is instances[0]
     assert readiness.is_ready() is True
-    startup_warmup.close_repository(first)
+    startup_warmup.close_repository(first_lease, first)
     assert readiness.is_ready() is False
     assert readiness.snapshot()["phase"] == "stopped"
 
-    second = startup_warmup.run_startup()
+    second_lease = startup_warmup.begin_lifecycle()
+    assert second_lease is not None
+    second = startup_warmup.run_startup(second_lease)
     assert second is instances[1]
     assert second is not first
     assert readiness.is_ready() is True
-    startup_warmup.close_repository(second)
+    startup_warmup.close_repository(second_lease, second)
     assert readiness.is_ready() is False
     assert readiness.snapshot()["phase"] == "stopped"
     assert calls == [
@@ -275,8 +331,9 @@ def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_f
         "get_settings",
         lambda: SimpleNamespace(database_url="sqlite:////tmp/safe.db"),
     )
-    readiness.reset()
-    assert startup_warmup.run_startup() is None
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+    assert startup_warmup.run_startup(lease) is None
 
     assert calls == ["repository", "close", "clear"]
     assert readiness.snapshot()["phase"] == "error"
@@ -285,6 +342,232 @@ def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_f
 
     # Lifespan shutdown after the failed startup must be idempotent and must
     # not construct a brand-new cached repository merely to close it.
-    startup_warmup.close_repository()
-    startup_warmup.close_repository()
+    startup_warmup.close_repository(lease, fake)
+    startup_warmup.close_repository(lease, fake)
     assert calls == ["repository", "close", "clear"]
+
+
+def test_concurrent_cold_start_has_one_owner_and_loser_cannot_close_winner(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.services import startup_warmup
+
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+    calls: list[str] = []
+    results: list[object] = []
+
+    fake = SimpleNamespace(
+        warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 0,
+        close=lambda: calls.append("close"),
+    )
+
+    def repository():
+        calls.append("factory")
+        factory_entered.set()
+        assert release_factory.wait(timeout=2)
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+
+    winner = threading.Thread(
+        target=lambda: results.append(startup_warmup.run_startup(lease))
+    )
+    winner.start()
+    assert factory_entered.wait(timeout=2)
+    before_loser = readiness.snapshot()
+
+    loser_results: list[tuple[object | None, object | None]] = []
+
+    def lose_startup_race() -> None:
+        loser_lease = startup_warmup.begin_lifecycle()
+        loser_results.append((loser_lease, startup_warmup.run_startup(loser_lease)))
+
+    loser = threading.Thread(target=lose_startup_race)
+    loser.start()
+    loser.join(timeout=2)
+    assert not loser.is_alive()
+    assert loser_results == [(None, None)]
+    assert calls == ["factory"]
+    assert readiness.snapshot() == before_loser
+
+    # A lifespan that failed to acquire a lease has no wildcard shutdown power.
+    startup_warmup.close_repository(None, None)
+    assert readiness.snapshot() == before_loser
+    assert calls == ["factory"]
+
+    release_factory.set()
+    winner.join(timeout=2)
+    assert not winner.is_alive()
+    assert results == [fake]
+    assert calls == ["factory", "warm"]
+    assert readiness.is_ready() is True
+    assert client.get("/api/ready").json()["ready"] is True
+
+    # Loser exit remains a strict no-op after the winner reaches ready.
+    startup_warmup.close_repository(None, None)
+    assert readiness.is_ready() is True
+    assert calls == ["factory", "warm"]
+
+    startup_warmup.close_repository(lease, fake)
+    assert calls == ["factory", "warm", "close", "clear"]
+    assert readiness.snapshot()["phase"] == "stopped"
+
+
+def test_overlap_after_warming_started_does_not_construct_or_mutate_readiness(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.services import startup_warmup
+
+    warm_entered = threading.Event()
+    release_warm = threading.Event()
+    calls: list[str] = []
+    result: list[object] = []
+
+    def warm(**_kwargs):
+        calls.append("warm")
+        warm_entered.set()
+        assert release_warm.wait(timeout=2)
+        return 0
+
+    fake = SimpleNamespace(warm_open_path_caches=warm, close=lambda: calls.append("close"))
+
+    def repository():
+        calls.append("factory")
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+    winner = threading.Thread(
+        target=lambda: result.append(startup_warmup.run_startup(lease))
+    )
+    winner.start()
+    assert warm_entered.wait(timeout=2)
+    warming = readiness.snapshot()
+    assert warming["phase"] == "warming"
+
+    loser_lease = startup_warmup.begin_lifecycle()
+    assert loser_lease is None
+    assert startup_warmup.run_startup(loser_lease) is None
+    startup_warmup.close_repository(None, None)
+    assert readiness.snapshot() == warming
+    assert calls == ["factory", "warm"]
+
+    release_warm.set()
+    winner.join(timeout=2)
+    assert not winner.is_alive()
+    assert result == [fake]
+    assert readiness.is_ready() is True
+    startup_warmup.close_repository(lease, fake)
+    assert calls == ["factory", "warm", "close", "clear"]
+
+
+def test_stale_lease_wrong_repository_and_double_shutdown_are_noops(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.services import startup_warmup
+
+    calls: list[str] = []
+    fake = SimpleNamespace(
+        warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 0,
+        close=lambda: calls.append("close"),
+    )
+
+    def repository():
+        calls.append("factory")
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    lease = startup_warmup.begin_lifecycle()
+    assert lease is not None
+    assert startup_warmup.run_startup(lease) is fake
+    assert readiness.is_ready() is True
+
+    startup_warmup.close_repository(object(), fake)
+    startup_warmup.close_repository(lease, object())
+    assert calls == ["factory", "warm"]
+    assert readiness.is_ready() is True
+
+    startup_warmup.close_repository(lease, fake)
+    assert calls == ["factory", "warm", "close", "clear"]
+    assert readiness.snapshot()["phase"] == "stopped"
+    startup_warmup.close_repository(lease, fake)
+    assert calls == ["factory", "warm", "close", "clear"]
+    assert readiness.snapshot()["phase"] == "stopped"
+
+
+def test_startup_failure_releases_lease_for_fresh_retry(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.core import config
+    from app.services import startup_warmup
+
+    calls: list[str] = []
+    instances = []
+
+    def repository():
+        index = len(instances) + 1
+        calls.append(f"factory{index}")
+
+        def warm(**_kwargs):
+            calls.append(f"warm{index}")
+            if index == 1:
+                raise RuntimeError("first warm fails")
+            return 0
+
+        fake = SimpleNamespace(
+            warm_open_path_caches=warm,
+            close=lambda: calls.append(f"close{index}"),
+        )
+        instances.append(fake)
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(config, "get_settings", lambda: SimpleNamespace(database_url="sqlite:///safe.db"))
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    failed_lease = startup_warmup.begin_lifecycle()
+    assert failed_lease is not None
+    assert startup_warmup.run_startup(failed_lease) is None
+    assert readiness.snapshot()["phase"] == "error"
+    startup_warmup.close_repository(failed_lease, instances[0])
+    assert calls == ["factory1", "warm1", "close1", "clear"]
+
+    retry_lease = startup_warmup.begin_lifecycle()
+    assert retry_lease is not None
+    assert retry_lease is not failed_lease
+    assert readiness.snapshot()["phase"] == "starting"
+    assert startup_warmup.run_startup(retry_lease) is instances[1]
+    assert readiness.is_ready() is True
+    startup_warmup.close_repository(retry_lease, instances[1])
+    assert calls == [
+        "factory1",
+        "warm1",
+        "close1",
+        "clear",
+        "factory2",
+        "warm2",
+        "close2",
+        "clear",
+    ]

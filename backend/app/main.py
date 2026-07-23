@@ -40,17 +40,26 @@ async def _lifespan(app: FastAPI):
     # Run migration + cache warm-up OFF the event loop (daemon thread) so uvicorn
     # binds and serves /api/ready immediately; the readiness gate keeps app routes
     # at 503 until run_startup() flips readiness. See app/services/startup_warmup.
-    from app.services.startup_warmup import close_repository, run_startup
+    from app.services.startup_warmup import (
+        LifecycleAlreadyActiveError,
+        begin_lifecycle,
+        close_repository,
+        run_startup,
+    )
 
-    # Every ASGI lifespan entry is a fresh ownership cycle, including repeated
-    # TestClient/embedded-server cycles in one process. Reset synchronously so no
-    # request can observe a stale ready flag before the startup thread begins.
-    readiness.reset()
-    readiness.set_phase("starting", "后端启动中")
+    # Reserve ownership before resetting readiness or touching the composition
+    # factory. An overlapping lifespan fails before yield: it cannot become an
+    # unowned server context that outlives the actual repository owner.
+    lease = begin_lifecycle()
+    if lease is None:
+        raise LifecycleAlreadyActiveError(
+            "cannot enter ASGI lifespan while the repository lifecycle is active"
+        )
+
     started = {"repository": None}
 
     def _start() -> None:
-        started["repository"] = run_startup()
+        started["repository"] = run_startup(lease)
 
     startup_thread = threading.Thread(
         target=_start, name="startup-warmup", daemon=True
@@ -63,7 +72,7 @@ async def _lifespan(app: FastAPI):
         # still be borrowing it. Production shutdown is rare and correctness
         # is more important than a short shutdown timeout.
         startup_thread.join()
-        close_repository(started["repository"])
+        close_repository(lease, started["repository"])
 
 
 def _env_file_preflight() -> None:
