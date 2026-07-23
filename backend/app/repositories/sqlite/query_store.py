@@ -179,6 +179,66 @@ class QueryStore:
         return int(row["count"])
 
     @staticmethod
+    def sources_missing_chunks(db: sqlite3.Connection, notebook_id: str) -> set:
+        """H3(缺分块)的 SQL 候选集:本 notebook 下**有 elements、却没有分块完成标记**
+        (`chunked_at IS NULL`)的用户源 source_id 集合。P1.5 的 chunked_at 是世代感知的
+        完成标记——分块成功(含纯标题 0-chunk)才置位、失败留 NULL,故 NULL 即「本代
+        elements 没成功走完分块」的损坏信号(承 source-completion-marker 设计)。
+
+        ⚠ **排除 source_type IN ('memory','knowhow')**:这些隐藏合成源不走
+        build_chunks_for_source 的置位路径(knowhow 投影器复用 replace_source_chunks 时
+        **不传** mark_chunked_at,见 P1.5 收 codex 第 1 轮),chunked_at 恒为 NULL——含进来
+        会把每个隐藏源误报缺分块。H3 本就是用户可见体检项,只看 list_sources 口径的用户源。
+
+        返回的是**候选集**:调用方(CheckupService)还要减去内存活跃租约快照
+        (在途 reparse 的源瞬时 chunked_at=NULL 属正常、非损坏),减法在 service 层做——
+        store 只出 SQL 判据,不碰进程内运行态。"""
+        return {
+            row["id"] for row in db.execute(
+                "SELECT s.id AS id FROM sources s "
+                "WHERE s.notebook_id = ? "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND s.chunked_at IS NULL "
+                "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+    @staticmethod
+    def sources_without_elements(db: sqlite3.Connection, notebook_id: str) -> set:
+        """H2(空源)的 SQL 候选集:本 notebook 下**解析已终态、却没有任何 source_elements**
+        的用户源 source_id 集合——「流水线声称处理过、却没落下任何解析产物」的损坏信号
+        (承 pipeline-damage-recovery 设计「二·体检层」H2,是 knowledge_store.sources_with_elements
+        的对称取反)。
+
+        判据三条:
+        - `source_type NOT IN ('memory','knowhow')`:与 H3 / list_sources 同口径,只看用户可见源;
+          隐藏合成源(Memory 派生 / knowhow 投影)本就不走文档解析,无 elements 是常态、非损坏。
+        - `parse_status IN ('parsed','extracting','extracted')`:**白名单**——只有「终态且本应已成功
+          落下解析产物」的源,无 elements 才是「解析未落地」的损坏。刻意用白名单而非黑名单(承 P1.5
+          回填同款状态集):它精确排除了所有「无 elements 属正常」的态——`queued`/`parsing`(在途,
+          瞬时无 elements)、`metadata-only`(仅导入元数据、内容待用户上传,`source_ingestion.py:315`
+          按设计无 elements,黑名单会把它误报成损坏+建议 reparse,而正确动作是「上传文件」)、
+          `failed`(解析已明确失败、错误已呈现给用户,不是「静默空源」,已由错误态面对用户,不该再
+          被体检当损坏复报)。H2 抓的是**看着成功、却静默没落 elements** 的那种损坏。
+        - `NOT EXISTS source_elements`:无任何解析产物。走 idx_source_elements_source(source_id)。
+
+        返回的是**候选集**:调用方(CheckupService)还要减去内存活跃租约快照(在途解析的源瞬时
+        无 elements 属正常、非损坏),减法在 service 层做——store 只出 SQL 判据,不碰进程内运行态
+        (与 sources_missing_chunks 同一分工)。走 idx_sources_nb_parse_status_type
+        (notebook_id, parse_status, source_type)。"""
+        return {
+            row["id"] for row in db.execute(
+                "SELECT s.id AS id FROM sources s "
+                "WHERE s.notebook_id = ? "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND s.parse_status IN ('parsed', 'extracting', 'extracted') "
+                "AND NOT EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+    @staticmethod
     def mounted_bases_row(db: sqlite3.Connection, notebook_id: str):
         """本库挂载的有效参考库 + 各自是否有 KG —— 一次查询同时供 NotebookSummary 的
         base_notebooks 与 base_kg_available。"""
