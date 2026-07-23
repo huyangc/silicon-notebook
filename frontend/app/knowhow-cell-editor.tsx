@@ -616,12 +616,16 @@ export interface KnowhowCellEditorProps {
   onClose: () => void;
   /** knowhow 表版本管理 Task 16：切到格子浮窗第三态（历史）——编辑态能挂载
    * 到画面上本就证明 canEdit 为真（见本文件其余「编辑态无需再判 canEdit」的
-   * 既有取向），故不需要像预览态那样额外说明"不受 canEdit 门控"；这里就是
-   * 单纯的一个新增顶层入口。直接调用、不经过未保存内容守卫（pendingLeave/
-   * commitLeave 那一整套）——组件卸载时既有的草稿落盘兜底（见下方 mountedRef
-   * 清理 effect 注释）已覆盖"父级直接切走 cellModal.mode"这类离开路径，未落盘
-   * 的文字会被同步写进本地草稿键、不会丢，与「返回列表/切笔记本/切到别的格」
-   * 这几个既有的无守卫离开路径同等对待。 */
+   * 既有取向），故不需要像预览态那样额外说明"不受 canEdit 门控"。
+   *
+   * codex 第 6 轮 P2：编辑态的 History 按钮**经 performLeave({kind:"history"})**
+   * 走与 Esc/关闭同一套 commitLeave 草稿落盘守卫，不再直调本回调。早前直调的
+   * 理由是「卸载兜底会把未落盘文字写进草稿、不会丢」——但那条 mountedRef 清理
+   * effect 调 flushDraft **忽略了返回值**，localStorage 满/不可用时草稿没写成、
+   * 编辑器照样卸载、文字静默丢失，与「refuses to leave if that write fails」这条
+   * 不变量相悖。经 commitLeave 后：落盘成功即打开历史（无二次确认，纯粹切页签），
+   * 失败则首次拦下+DRAFT_FLUSH_FAILED 警告、二次强制放行（存储坏了也不把用户
+   * 永久关在弹窗里）。预览态的 History 按钮没有未保存文字，仍直调本回调。 */
   onHistory: () => void;
   /** 「本行其他格子」条目可点击切换——透传给 KnowhowRowContext，未传入时该
    * 区保持纯展示。编辑态本身已隐含 canEdit（能进到这一态就说明有写权限），
@@ -977,9 +981,10 @@ export function KnowhowCellEditor({
       setLeaveAfterUpload(null);
       leaveAfterUploadRef.current = null;
       if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
+      else if (intent.kind === "history") onHistory();
       else onClose();
     },
-    [flushDraft, onSwitchCell, onClose],
+    [flushDraft, onSwitchCell, onClose, onHistory],
   );
   // 上传收尾（可能晚于好几次重渲染）要调到**当前**这版 commitLeave，而不是发起
   // 上传那一帧闭包里的旧版（它捕获的 onClose/onSwitchCell 可能已经换过）。
@@ -1412,9 +1417,15 @@ export function KnowhowCellEditor({
               )}
             </div>
             <div className="kh-modal-header-actions">
-              {/* knowhow 表版本管理 Task 16：直接调 onHistory，不经 requestClose 那套
-                  未保存内容守卫——理由见 KnowhowCellEditorProps.onHistory 注释。 */}
-              <button type="button" className="kh-preview-edit-button" onClick={onHistory}>
+              {/* knowhow 表版本管理 Task 16（codex 第 6 轮 P2 修）：经 performLeave 走
+                  与 Esc/关闭同一套草稿落盘守卫——落盘成功即打开历史，失败首次拦下+
+                  警告、二次强制放行，绝不静默丢未保存文字。理由见
+                  KnowhowCellEditorProps.onHistory 注释。 */}
+              <button
+                type="button"
+                className="kh-preview-edit-button"
+                onClick={() => performLeave({ kind: "history" })}
+              >
                 <HistoryIcon size={14} /> {HISTORY_LABEL}
               </button>
               <button

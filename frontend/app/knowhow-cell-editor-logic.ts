@@ -269,7 +269,15 @@ export const DRAFT_FLUSH_FAILED_MESSAGE =
 // 是footer 分支落了草稿、二次 Esc 强制关闭那条没落，才漏了内容）。
 
 // 一次「带未保存改动的离开」意图：关闭整窗，或切到本行另一格。
-export type LeaveIntent = { kind: "close" } | { kind: "switch"; columnId: string };
+// "history"（codex 第 6 轮 P2）：编辑态点「历史」也是一条离开路径——它切到格子
+// 浮窗的历史页签、卸载编辑器。和 close/switch 一样必须先经草稿落盘守卫
+// （commitLeave）：落盘成功即打开历史，失败则首次拦下+警告、二次强制放行，绝不
+// 在存储不可用时静默丢掉未保存文字。只在编辑器 header 的 History 按钮就地构造，
+// 不经 resolveCloseRequest/resolveSwitchRequest（那两个只产 close/switch）。
+export type LeaveIntent =
+  | { kind: "close" }
+  | { kind: "switch"; columnId: string }
+  | { kind: "history" };
 
 // 决策的两个出口：next=守卫状态的下一个值（null 表示清除/不显示守卫）；leave=需
 // 要立刻执行的离开动作（null 表示暂不离开，只是弹/收守卫）。

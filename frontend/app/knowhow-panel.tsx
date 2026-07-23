@@ -944,13 +944,17 @@ export function KnowhowPanel({
   // （合并共享列扇写 / 单例组）下发，故「带 anchorGuard ⟺ 该走 guarded 端点」恒成立；多行组的
   // **非共享列**是有意子集写、不带守卫，仍走单格端点。**手动格子编辑 / 优化整行**不带 anchorGuard、
   // 单目标恒落单格端点（无组可离、last-write-wins），逐字不变。
-  // origin（knowhow 表版本管理 Task 16 评审修复）：格子历史「恢复此版本」与
-  // 手动编辑/批量规整保存共用这同一个函数——三者唯一的区别是变更流水上要留
-  // 下什么 origin，不是"要不要走 anchor 分组批量写判定"（那套判定对三者一视
-  // 同仁）。省略时不进请求体，退回后端默认 "user"——手动编辑器/优化整行既有
-  // 调用点字节不变；恢复的调用点（本文件 KnowhowCellHistory 挂载处）显式传
-  // "revert"。第 7 个位置参数，与 patchKnowhowCell/batchPatchKnowhowCells 的
-  // 同名参数一致（见 knowhow-model.ts 对应注释）。
+  // origin（knowhow 表版本管理 Task 16 评审修复）：格子历史「恢复此版本」、
+  // 手动编辑、批量规整保存共用这同一个函数——各流唯一的区别是变更流水上要留
+  // 下什么 origin，不是"要不要走 anchor 分组批量写判定"（那套判定一视同仁）。
+  // 省略时不进请求体、退回后端默认 "user"：手动编辑器与「优化整行」接受
+  // （onAcceptCell）既有调用点字节不变（真人在编辑，last-write-wins）。显式传
+  // origin 的两条：① 恢复（本文件 KnowhowCellHistory 挂载处）传 "revert"；
+  // ② **批量规整**（KnowhowReformatBatchModal 的 onSaveCell）传 "llm_reformat"
+  // ——它是自动保存 LLM 规整结果的循环，不是人手一格复核，必须留下真实来源，
+  // 否则「格式规整」徽章对这条主流程永不出现（codex 第 6 轮 P2）。单格规整
+  // 是用户复核后走编辑器手动保存，按 "user" 处理、不在此列。第 7 个位置参数，
+  // 与 patchKnowhowCell/batchPatchKnowhowCells 的同名参数一致（见 knowhow-model.ts）。
   async function handleCellSave(
     rowId: string,
     columnId: string,
@@ -4671,6 +4675,7 @@ interface KnowhowReformatBatchModalProps {
     expectedByRowId: Map<string, string>,
     targetRowIds: string[],
     anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
+    origin?: string,
   ) => Promise<void>;
   /** F（review）：保存阶段发生过 stale 跳过（preflight 比对 或 409）时回调——请父级重取
    * 整表，把陈旧的 detail 快照（喂给下一次批量的 rows/originalMd 基线之源）换新，否则关掉
@@ -4961,6 +4966,11 @@ function KnowhowReformatBatchModal({
           }
         : undefined;
       try {
+        // origin（codex 第 6 轮 P2）：批量规整是**自动保存** LLM 规整结果的循环，
+        // 每格都要在变更流水里归因为 "llm_reformat"，否则落后端默认 "user"、
+        // 「格式规整」徽章对这条主流程永不出现（后端 patch_knowhow_cells_batch
+        // 正是为此保留 origin 白名单校验）。单格规整是用户复核后手动保存、按
+        // "user" 处理，与此无关。
         await onSaveCell(
           rep.rowId,
           rep.columnId,
@@ -4968,6 +4978,7 @@ function KnowhowReformatBatchModal({
           expectedByRowId,
           targetRowIds,
           anchorGuard,
+          "llm_reformat",
         );
         if (!mountedRef.current) return;
         setBatch((state) => unit.members.reduce((s, m) => applyReformatSaveSuccess(s, m.rowId, m.columnId), state));
