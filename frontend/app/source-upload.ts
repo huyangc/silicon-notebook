@@ -20,17 +20,24 @@ export function uploadDocTypeFields(
   }));
 }
 
-/** auto-detect 回填：只填仍为空（``""`` = 自动检测）的项，绝不覆盖用户已选的值。
+/** auto-detect 回填：只填**未被用户表态过**的空项，绝不覆盖用户已选的值。
+ *
+ *  跳过条件是「有值 **或** touched」，不是单看「有值」：检测是异步的，回填落地时用户
+ *  可能已经先选了具体类型、又改回「自动检测」——此刻值为空但 ``touched[i]===true``。
+ *  只看「值空不空」会把这个显式的「自动检测」当成没表态、填成检测结果，上传就发成
+ *  ``explicit=1`` + 检测类型，把复用源改成与用户显式选择相反的类型。所以 touched 的槽
+ *  一律跳过（哪怕为空）。
  *
  *  **只产出类型、不碰 touched**：auto-detect 是系统建议、不是用户表态。调用方回填后
- *  touched 数组保持原样（仍未表态），这正是「重传没动下拉框 → 发 explicit=0 → 后端
- *  保留既有类型」这条链路的起点。``detectedByIndex[i]`` 是第 i 个文件的检测结果
- *  （``undefined`` = 没检测出/无建议）。 */
+ *  touched 数组保持原样，这正是「重传没动下拉框 → 发 explicit=0 → 后端保留既有类型」
+ *  这条链路的起点。``detectedByIndex[i]`` 是第 i 个文件的检测结果（``undefined`` =
+ *  没检测出/无建议）；``touched`` 与 ``types`` 同序等长（省略/越界项按未表态处理）。 */
 export function fillAutoDetectedTypes(
   types: readonly string[],
   detectedByIndex: ReadonlyArray<string | undefined>,
+  touched: readonly boolean[] = [],
 ): string[] {
-  return types.map((dt, i) => (dt ? dt : (detectedByIndex[i] ?? dt)));
+  return types.map((dt, i) => (dt || touched[i] ? dt : (detectedByIndex[i] ?? dt)));
 }
 
 /** 用户手动改了第 ``index`` 项的类型下拉框 → 该项标记为「用户显式设置」。 */

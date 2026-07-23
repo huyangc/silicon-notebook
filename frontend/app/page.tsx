@@ -734,6 +734,12 @@ export default function Home() {
   // 自动回填不置位（那是系统建议、非用户表态）；上传时据此发 doc_type_explicit，让后端
   // 只在用户显式表态时才改/重置复用来源的类型（见 uploadDocTypeFields / 后端 reuse 路径）。
   const [stagedDocTypeTouched, setStagedDocTypeTouched] = useState<boolean[]>([]);
+  // detectStagedTypes 是异步的：检测在飞时用户改了下拉框，回填必须看**最新**的 touched，
+  // 而闭包捕获的 stagedDocTypeTouched 是发起那一刻的旧值。用 ref 镜像最新值，回填时读它。
+  const stagedDocTypeTouchedRef = useRef<boolean[]>([]);
+  useEffect(() => {
+    stagedDocTypeTouchedRef.current = stagedDocTypeTouched;
+  }, [stagedDocTypeTouched]);
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
@@ -2488,10 +2494,14 @@ export default function Home() {
       const byName: Record<string, string> = {};
       results.forEach((r) => { if (r.doc_type_id) byName[r.name] = r.doc_type_id; });
       if (Object.keys(byName).length === 0) return;
-      // 按 fullList 的位置回填；只填仍为空的项，不覆盖用户已手动选择的。**绝不动
-      // stagedDocTypeTouched**——这是系统建议、不是用户表态，重传时才会发 explicit=0。
+      // 按 fullList 的位置回填；只填**未被用户表态过**的项（值空且未 touched），既不
+      // 覆盖已选的具体类型、也不覆盖「检测在飞时用户改回自动检测」这种空但 touched 的
+      // 显式选择。touched 读 ref 的最新值（闭包里的 stagedDocTypeTouched 是发起那刻的旧
+      // 值）。**绝不动 stagedDocTypeTouched**——auto-detect 是系统建议、不是用户表态。
       const detected = fullList.map((file) => byName[file.name]);
-      setStagedDocTypes((prev) => fillAutoDetectedTypes(prev, detected));
+      setStagedDocTypes((prev) =>
+        fillAutoDetectedTypes(prev, detected, stagedDocTypeTouchedRef.current),
+      );
     } catch {
       // 检测失败不影响上传：保持"自动检测"，用户可手动选。
     }
