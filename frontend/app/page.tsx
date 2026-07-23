@@ -4850,9 +4850,9 @@ export default function Home() {
                   // 它、保存表单会被后端 400 拒绝(见 notebook-bases.ts mergeMountCandidates
                   // 与 routes.py set_notebook_bases_route 的联动说明)。
                   const groups = groupMountable(mergeMountCandidates(mountable, mountEdges));
-                  const render = (title: string, list: MountedBase[]) =>
+                  const render = (title: string, list: MountedBase[], variant: "public" | "mine") =>
                     list.length === 0 ? null : (
-                      <div className="base-picker-group" key={title}>
+                      <div className={`base-picker-group base-picker-group--${variant}`} key={title}>
                         <span className="base-picker-group-title">{title}</span>
                         {list.map((n) => {
                           const dead = !n.active;
@@ -4882,8 +4882,8 @@ export default function Home() {
                     );
                   return (
                     <>
-                      {render("公共知识库", groups.public)}
-                      {render("我的笔记本", groups.mine)}
+                      {render("公共知识库", groups.public, "public")}
+                      {render("我的笔记本", groups.mine, "mine")}
                       {groups.public.length === 0 && groups.mine.length === 0 && (
                         <p className="base-picker-empty">暂无可挂载的知识库。</p>
                       )}

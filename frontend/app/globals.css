@@ -2952,16 +2952,32 @@ button.chat-session-card {
   opacity: 0.56;
 }
 
+/* 两行布局:输入框 + 发送独占上排(输入拿满宽,不与控件抢横向空间);来源数 / 模式标签 /
+   提示语落在下排 .chat-input-controls,可换行。旧版把四者塞进一行 grid
+   (minmax(0,1fr) auto auto 48px),会把输入挤窄、长 placeholder 折行被裁,并暴露
+   textarea 的 resize 手柄。 */
 .chat-input-bar {
   margin: 0 18px 18px;
-  min-height: 72px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto 48px;
-  align-items: center;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   border: 1px solid #d9dfeb;
   border-radius: 14px;
-  padding: 10px 12px 10px 18px;
+  padding: 12px 14px 12px 18px;
+}
+
+.chat-input-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.chat-input-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .ask-mode-control {
@@ -3027,26 +3043,29 @@ button.chat-session-card {
   margin-left: 4px;
 }
 
-/* 多领域基准库(Task 14):无图但挂了参考库时的提示——挂载库可能不止一个，
-   文案比旧版「借用底层库（base）」长得多，强制独占一行，和上方 mode-tab/
-   mode-engine 按钮行留出呼吸空间，不挤在同一行尾部。选择器比 .chat-input-bar
-   span 更具体（两个类 vs 一类+一元素），才能压过它的 13px/#667085，回到与
-   .mode-hint 一致的弱化提示语气，而不是喧宾夺主。 */
+/* 多领域基准库(Task 14):无图但挂了参考库时的提示——挂载库可能不止一个，文案较长。
+   composer 改两行布局后，提示与 mode-tab 同处 .chat-input-controls 的换行 flex 行，
+   有空间就跟在按钮后、不够就整体换行，不再需要 flex-basis:100% 强行独占一行。选择器
+   仍比 .chat-input-bar span 更具体（两个类 vs 一类+一元素），压过它的 13px/#667085，
+   回到与 .mode-hint 一致的弱化提示语气。 */
 .ask-mode-control .chat-hint {
-  flex-basis: 100%;
-  margin-top: 6px;
   color: #98a2b3;
   font-size: 11px;
   line-height: 1.5;
 }
 
 .chat-input {
-  min-height: 36px;
-  max-height: 120px;
-  resize: vertical;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 28px;
+  max-height: 160px;
+  resize: none;
+  overflow-y: auto;   /* JS 自动增高封顶 160px 后内部滚动 */
   border: 0;
   outline: 0;
   color: #20242a;
+  line-height: 1.5;
+  padding: 3px 0;
 }
 
 .chat-input:disabled {
@@ -6400,8 +6419,30 @@ button.chat-session-card {
 .base-picker-empty,
 .base-picker-hint { font-size: 12px; opacity: .7; margin: 0; }
 .base-picker-hint { color: var(--warning, #b8860b); }
-.base-picker-group { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-.base-picker-group-title { font-size: 12px; opacity: .6; }
+.base-picker-group { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; }
+.base-picker-group:first-child { margin-top: 2px; }
+/* 分组标题(公共知识库 / 我的笔记本)从 12px/opacity.6 的弱灰升级为带彩色小竖条的加粗
+   小标签:①有明确视觉落点(竖条+加粗) ②两组用不同色区分(公共=蓝、我的=灰)。竖条走
+   ::before,不动 markup 里的文案。 */
+.base-picker-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #475467;
+}
+.base-picker-group-title::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 4px;
+  height: 13px;
+  border-radius: 2px;
+  background: #94a3b8;
+}
+.base-picker-group--public .base-picker-group-title::before { background: var(--blue); }
 /* 审查 M1/M2:.base-picker-row 落在一个 <label> 元素上,又嵌在 .edit-form 表单里——
    .edit-form label(特异性 0,1,1)压过纯类选择器 .base-picker-row(0,1,0),会静默把
    gap 从设计值 8px 吃成 7px。这里用 .base-picker-group 父类限定把特异性提到 (0,2,0)
