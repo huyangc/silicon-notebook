@@ -384,6 +384,54 @@ def test_expired_sweep_survives_deploy_variable_limit(tmp_path):
     assert c.volume() == 100, f"清扫未归还容量计量：{c.volume()}"
 
 
+def test_expired_entries_are_swept_on_writes_independent_of_capacity(tmp_path):
+    """TTL 清理必须独立于容量压力。_evict_if_needed 没超 size_limit 就早返回（默认
+    2 GiB 很难满），缓存远未满时从此再没被读到的过期条目会永不清理，活得远超
+    ttl_seconds——弱化「删库后残留有上界」的隐私保证。put 的写路径按节流无条件清扫，
+    不看是否超限。
+
+    关键：断言只看 len()/volume()/stats() 直读，**绝不** get() 那两个过期 key——get 自己
+    也查 TTL 并顺手删掉过期条目，会把「写路径没独立清扫」这个 bug 糊成假绿。
+
+    变异验证：去掉 put 里的 self._maybe_sweep_expired(db, now) → 缓存远未满、
+    _evict_if_needed 早返回 → 两条过期条目永不被写路径清扫 → len 停在 3 → 本测试转红。
+    """
+    c = _mk(tmp_path, size_limit=10**9, ttl_seconds=100_000, sweep_interval=0)
+    now = time.time()
+    c.put("stale1", "z" * 100)
+    c.put("stale2", "z" * 100)
+    # 造两条已过期条目（created_at 早于 ttl 截止线）。总量 300 字节 ≪ 10^9，绝不触发淘汰。
+    _poke_timestamps(c, "stale1", created_at=now - 200_000)
+    _poke_timestamps(c, "stale2", created_at=now - 200_000)
+
+    c.put("fresh", "z" * 100)   # 一次写；容量远未满，_evict_if_needed 必早返回
+
+    # 直读终态，绝不 get() 过期 key（那会掩盖 bug）。
+    assert len(c) == 1, f"过期条目必须被写路径独立清扫；还剩 {len(c)} 条说明清扫没跑"
+    assert c.volume() == 100, f"清扫未归还容量计量：{c.volume()}"
+    assert c.stats()["entries"] == 1
+    assert c.get("fresh") == "z" * 100, "未过期条目不受影响"
+
+
+def test_write_path_sweep_is_throttled_not_every_put(tmp_path, monkeypatch):
+    """写路径清扫必须节流，不能上每一次 put 的热路径。默认 sweep_interval=3600：进程
+    第一次 put 清一次（_last_sweep 初值 0，「删库后残留有上界」也靠它兑现），此后一
+    小时窗口内的 put 都跳过。size_limit=10^9 保证 _evict_if_needed 永不触发它内部那次
+    清扫，于是计数只反映写路径节流清扫。
+
+    变异验证：去掉节流、每次 put 都清 → 计数变 5；或去掉写路径清扫 → 计数变 0。
+    两者都让本测试转红。"""
+    c = _mk(tmp_path, size_limit=10**9, ttl_seconds=100_000)  # 不传 sweep_interval=生产默认 3600
+    calls = []
+    real = c._sweep_expired
+    monkeypatch.setattr(c, "_sweep_expired", lambda db: calls.append(1) or real(db))
+    for i in range(5):
+        c.put(f"k{i}", "v")
+    assert len(calls) == 1, (
+        f"一小时窗口内多次 put 只清扫一次（首次），实际清扫了 {len(calls)} 次"
+    )
+
+
 def test_concurrent_put_get_is_consistent(tmp_path):
     """多线程并发 put/get：连接改为线程内复用后必须不出错、不丢数据。
 

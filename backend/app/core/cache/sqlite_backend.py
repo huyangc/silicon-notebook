@@ -3,6 +3,13 @@
 只实现实际需要的能力。刻意不做多进程栅栏、大对象磁盘外溢、事务等——单机单
 进程部署用不到。
 
+TTL 清理走两条独立的路径，缺一不可：① get 命中时对**被读到**的过期条目查+删；
+② put 写路径上按时间节流地无条件清扫（_maybe_sweep_expired）。只有 ① 时，从此
+再没被读到的过期条目会永不清理（缓存默认 2 GiB 很难满，容量淘汰那条清扫轮不到
+它们），活得远超 ttl_seconds——弱化「删库后残留有上界」这个隐私保证。② 把兑现钉
+在写路径上、与容量压力解耦；节流（_last_sweep，进程内不落盘）避免它上每一次 put
+的热路径。
+
 粗粒度 LRU：命中时不是每次都写 used_at，只有距上次刷新超过 refresh_window 才写。
 cache hit 是热路径，逐次 UPDATE 会把"读"变成"写"，在高命中率场景（reparse 重跑）
 下写放大非常可观。牺牲一点淘汰精度换掉绝大部分写。
@@ -84,12 +91,14 @@ class SqliteCacheBackend:
         ttl_seconds: float = 90 * 86400,
         refresh_window: float = 3600.0,
         headroom: float = 0.9,
+        sweep_interval: float = 3600.0,
     ) -> None:
         self.path = path
         self.size_limit = size_limit
         self.ttl_seconds = ttl_seconds
         self.refresh_window = refresh_window
         self.headroom = headroom      # 裁到上限的 90%，避免每次 put 都触发裁剪
+        self.sweep_interval = sweep_interval  # 写路径上过期清扫的节流间隔（见 _maybe_sweep_expired）
         self._lock = threading.Lock()
         self._local = threading.local()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +121,10 @@ class SqliteCacheBackend:
         # 进程内命中计数（不落盘：重启归零即可，用于观察当前进程的缓存效用）。
         self._hits = 0
         self._misses = 0
+        # 写路径过期清扫的节流时钟（不落盘，与 hits/misses 同款）。0 = 本进程第一次 put
+        # 必清一次，之后每 sweep_interval 秒至多清一次——把「删库后残留有上界」这个隐私
+        # 保证的兑现钉在写路径上，不再依赖容量是否触顶。
+        self._last_sweep = 0.0
         # 启动即校准 total_bytes。增量计量会被**进程崩溃**（写了 cache 行还没写
         # meta 就被 SIGKILL）打漂，而漂移只累积不自愈，虚高到越过 size_limit 就会
         # 触发"为满足幻影字节把健康条目全删光"。代价是一条 SELECT SUM(size)，每个
@@ -180,6 +193,11 @@ class SqliteCacheBackend:
                 "UPDATE meta SET v = v + ? WHERE k='total_bytes'",
                 (size - (prev["size"] if prev else 0),),
             )
+            # TTL 清理必须独立于容量压力：_evict_if_needed 没超 size_limit 就早返回
+            # （默认 2 GiB 很难满），那时再没被读到的过期条目永不清理，活得远超
+            # ttl_seconds。这里在写路径上按时间节流地无条件清扫（不看是否超限），排在
+            # _evict_if_needed 之前——先归还过期空间，淘汰再据扣减后的 total 判断。
+            self._maybe_sweep_expired(db, now)
             self._evict_if_needed(db)
 
     # ------------------------------------------------------------------ 淘汰
@@ -217,6 +235,23 @@ class SqliteCacheBackend:
         db.execute("DELETE FROM cache WHERE created_at < ?", (cutoff,))
         db.execute("UPDATE meta SET v = v - ? WHERE k='total_bytes'", (freed,))
         return freed
+
+    def _maybe_sweep_expired(self, db: sqlite3.Connection, now: float) -> None:
+        """写路径上按时间节流地清扫过期条目，**独立于**容量是否触顶。
+
+        为什么不能只靠 _evict_if_needed 里那次清扫：它没超 size_limit 就早返回，缓存
+        没填满时过期条目永不被清（TTL 只在 get 时对被读到的条目查+删，never-again-read
+        的残留不受任何约束），活得远超 ttl_seconds——这弱化了「删库后残留有上界」这个
+        隐私理由。
+
+        为什么要节流：_sweep_expired 走 idx_cache_created 范围删，过期少时很便宜，但
+        put 是热路径，不能让它上**每一次** put。节流时钟放进程内（_last_sweep，不落盘），
+        距上次清扫不到 sweep_interval 就跳过；到点才清一次，并把时钟推到 now。清扫本身
+        走条件删（无 IN 展开），对部署机的变量上限安全。"""
+        if now - self._last_sweep < self.sweep_interval:
+            return
+        self._last_sweep = now
+        self._sweep_expired(db)
 
     def _evict_if_needed(self, db: sqlite3.Connection) -> None:
         total = db.execute(
