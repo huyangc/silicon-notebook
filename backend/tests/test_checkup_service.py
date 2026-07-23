@@ -457,6 +457,27 @@ def test_h8_lru_evicts_least_recently_used(repo, monkeypatch):
     assert calls == ["nb-1", "nb-2", "nb-3", "nb-2"]
 
 
+def test_h8_healthy_cache_expires_after_ttl(repo, monkeypatch):
+    """健康缓存有界存活:manifest 身份不变时 TTL 内命中不重探,超 TTL 即重探一次
+    (codex:探过后外部截断/损坏而不动 manifest,身份不变靠 TTL 复检才能重新发现)。"""
+    import app.services.checkup as checkup_mod
+
+    clock = [1000.0]
+    monkeypatch.setattr(checkup_mod.time, "monotonic", lambda: clock[0])
+    calls = []
+    svc = _service(
+        repo,
+        index_manifest_identity=lambda nb: (True, "ver-fixed"),  # 身份始终不变
+        probe_index_integrity=lambda nb: calls.append(nb) or 0,
+    )
+    svc.run("nb-x")
+    svc.run("nb-x")
+    assert len(calls) == 1  # TTL 内、身份不变 → 命中缓存
+    clock[0] += checkup_mod._H8_CACHE_TTL + 1  # 时钟越过 TTL
+    svc.run("nb-x")
+    assert len(calls) == 2  # 身份仍不变,但超 TTL → 重探一次
+
+
 # --------------------------- module-level disk probe (H8 判据落点) ----------
 def test_probe_no_manifest_is_not_corrupt(tmp_path):
     # manifest.json 不存在 = 未建索引,不是损坏。
@@ -487,6 +508,23 @@ def test_probe_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.services.kg.scale_index.load_scale_index", _boom)
     assert probe_scale_index_integrity(tmp_path) == 0
+
+
+def test_probe_flags_missing_ann_binary(tmp_path, monkeypatch):
+    """load_scale_index 只校验 .npy、不校验 ANN 二进制(懒加载):主 ANN 有标签(n_ann>0)却
+    没 ann.bin 文件 → 判损坏(codex),否则坏索引报健康、检索时才开不了。"""
+    (tmp_path / "manifest.json").write_text("{}")
+
+    class _Idx:
+        ann_labels = ["a", "b"]                 # n_ann>0
+        ann_path = str(tmp_path / "ann.bin")    # 但文件不存在
+
+    monkeypatch.setattr(
+        "app.services.kg.scale_index.load_scale_index", lambda d: _Idx()
+    )
+    assert probe_scale_index_integrity(tmp_path) == 1   # ann.bin 缺 → 损坏
+    (tmp_path / "ann.bin").write_bytes(b"x")
+    assert probe_scale_index_integrity(tmp_path) == 0   # 补上 → 健康
 
 
 # ------------------------------------------------------ sample boundedness

@@ -1317,7 +1317,13 @@ export default function Home() {
   // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
   const runBackfillVectors = async (nb: string) => {
     try {
-      await backfillVectors(nb);
+      const r = await backfillVectors(nb);
+      if (!r.accepted) {
+        // 后端未配嵌入服务 → 不受理(codex):提示配置、**不** arm 轮询——否则空转 10min、
+        // 而缺向量永远补不上、H4/H5 清不掉。
+        setToast("未配置嵌入服务，无法补齐检索向量");
+        return;
+      }
       setToast("已开始补齐检索向量；完成后会自动更新");
       bumpCheckupRepairPoll();
       reloadCheckup(nb);
