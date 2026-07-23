@@ -165,6 +165,11 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
         "_CHILD_ENV_ALLOWLIST",
         "conninfo_to_dict",
         "_run_isolated_gate",
+        "subprocess.Popen",
+        "start_new_session",
+        "_launcher_signal_handlers",
+        "_terminate_and_reap",
+        "128 + interruption.signum",
         '"--preflight"',
         "target.sanitized_url",
         '"--tb=short"',
@@ -196,6 +201,22 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
     assert "scripts/check_postgres.sh" not in _between(
         ".github/workflows/ci.yml", "full-gate:", "postgres-integration:"
     )
+
+
+def test_quick_start_describes_sqlite_as_the_default_not_the_only_backend():
+    english = _read("README.md")
+    chinese = _read("README_zh.md")
+    normalized_english = " ".join(english.split())
+    assert "shipped-default SQLite quick start" in normalized_english
+    assert "accessible PostgreSQL server" in normalized_english
+    assert "migrates the selected datastore" in normalized_english
+    assert "发行默认的 SQLite 快速启动" in chinese
+    assert "可访问的 PostgreSQL 服务" in chinese
+    assert "迁移当前选中的数据存储" in chinese
+    assert "over\na local SQLite database. It requires" not in english
+    assert "creates the SQLite\nschema" not in english
+    assert "数据落在本地 SQLite" not in chinese
+    assert "自建 SQLite 表结构" not in chinese
 
 
 def test_backend_specific_retrieval_limits_and_selectable_architecture_are_qualified():

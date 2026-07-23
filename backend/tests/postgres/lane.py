@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,15 @@ _CHILD_ENV_ALLOWLIST = {
     "TMPDIR",
     "TZ",
 }
+_CHILD_REAP_TIMEOUT_SECONDS = 5.0
+
+
+class _LauncherSignal(BaseException):
+    """A scoped launcher signal that must unwind credential/child ownership."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(signum)
 
 
 @dataclass(frozen=True)
@@ -140,16 +150,25 @@ def _unlink_pgpass_file(
     suppress_errors: bool,
     unlink_fn: Callable[[Path], None] | None = None,
 ) -> None:
-    failure: BaseException | None = None
+    failure: Exception | None = None
+    interruption: BaseException | None = None
     for _attempt in range(2):
         try:
             if unlink_fn is None:
                 path.unlink(missing_ok=True)
             else:
                 unlink_fn(path)
-            return
         except BaseException as exc:
-            failure = exc
+            if isinstance(exc, Exception):
+                failure = exc
+            elif interruption is None:
+                interruption = exc
+        else:
+            if interruption is not None:
+                raise interruption
+            return
+    if interruption is not None:
+        raise interruption
     if not suppress_errors and failure is not None:
         raise RuntimeError("could not remove temporary PostgreSQL credential file") from None
 
@@ -184,17 +203,25 @@ def _create_pgpass_file(
             try:
                 close_fn(owned_descriptor)
             except BaseException as exc:
-                if failure is None:
+                if failure is None or not isinstance(exc, Exception):
                     failure = exc
 
     if failure is not None:
         if path is not None:
-            _unlink_pgpass_file(
-                path,
-                suppress_errors=True,
-                unlink_fn=unlink_fn,
-            )
-        raise RuntimeError("could not create temporary PostgreSQL credential file") from None
+            try:
+                _unlink_pgpass_file(
+                    path,
+                    suppress_errors=True,
+                    unlink_fn=unlink_fn,
+                )
+            except BaseException as cleanup_interruption:
+                if isinstance(failure, Exception):
+                    failure = cleanup_interruption
+        if isinstance(failure, Exception):
+            raise RuntimeError(
+                "could not create temporary PostgreSQL credential file"
+            ) from None
+        raise failure
     if path is None:
         raise RuntimeError("could not create temporary PostgreSQL credential file")
     return path
@@ -263,7 +290,7 @@ def _inspect_target(target: _Target) -> bool:
         if catalog.database != identity.database:
             raise RuntimeError("PostgreSQL database identity mismatch")
         _validate_database_catalog(catalog, expected=target.expected)
-    except BaseException:
+    except Exception:
         print(
             f"PostgreSQL {target.label} preflight failed: "
             f"{target.safe_status} (connection or identity check failed)",
@@ -331,52 +358,148 @@ def _run_preflight(
     *,
     capture_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "tests.postgres.lane", "--preflight"],
-        cwd=BACKEND_ROOT,
-        env=child_env,
-        check=False,
-        text=True,
+    return _run_child(
+        _preflight_command(),
+        child_env,
         capture_output=capture_output,
     )
 
 
-def _run_pytest_in_environment(child_env: dict[str, str]) -> int:
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "-p",
-            "no:cacheprovider",
-            "-n",
-            "0",
-            "--tb=short",
-            "--maxfail=1",
-            "-m",
-            "postgres_integration",
-            "tests/postgres",
-        ],
-        cwd=BACKEND_ROOT,
-        env=child_env,
-        check=False,
+def _preflight_command() -> list[str]:
+    return [sys.executable, "-m", "tests.postgres.lane", "--preflight"]
+
+
+def _pytest_command() -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-n",
+        "0",
+        "--tb=short",
+        "--maxfail=1",
+        "-m",
+        "postgres_integration",
+        "tests/postgres",
+    ]
+
+
+def _conventional_child_status(returncode: int) -> int:
+    return 128 + abs(returncode) if returncode < 0 else returncode
+
+
+def _signal_owned_child(process: subprocess.Popen[str], signum: int) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signum)
+        else:
+            process.send_signal(signum)
+    except ProcessLookupError:
+        return
+
+
+def _terminate_and_reap(process: subprocess.Popen[str]) -> None:
+    """Boundedly stop the exact child/session and always reap its leader."""
+    if process.poll() is None:
+        _signal_owned_child(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=_CHILD_REAP_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _signal_owned_child(process, signal.SIGKILL)
+        process.wait(timeout=_CHILD_REAP_TIMEOUT_SECONDS)
+
+    # The leader is reaped, but a descendant could have survived SIGTERM. The
+    # child owns a fresh POSIX session/process group, so this cannot target the
+    # launcher or an unrelated sibling.
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        _signal_owned_child(process, signal.SIGKILL)
+
+
+def _run_child(
+    command: list[str],
+    child_env: dict[str, str],
+    *,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    process: subprocess.Popen[str] | None = None
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=BACKEND_ROOT,
+            env=child_env,
+            text=True,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            start_new_session=os.name == "posix",
+        )
+        stdout, stderr = process.communicate()
+    except BaseException:
+        if process is not None:
+            try:
+                _terminate_and_reap(process)
+            except Exception:
+                # Preserve the signal/KeyboardInterrupt being unwound. The
+                # bounded TERM/KILL/reap sequence has already been attempted.
+                pass
+        raise
+    return subprocess.CompletedProcess(
+        command,
+        _conventional_child_status(process.returncode),
+        stdout,
+        stderr,
     )
+
+
+def _run_pytest_in_environment(child_env: dict[str, str]) -> int:
+    completed = _run_child(_pytest_command(), child_env)
     return completed.returncode
+
+
+@contextmanager
+def _launcher_signal_handlers():
+    """Turn SIGINT/SIGTERM into scoped Python unwinding, then restore handlers."""
+    previous = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    interruption: _LauncherSignal | None = None
+
+    def unwind(signum, _frame):
+        nonlocal interruption
+        if interruption is None:
+            interruption = _LauncherSignal(signum)
+            raise interruption
+
+    try:
+        for signum in previous:
+            signal.signal(signum, unwind)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _run_pytest(targets: list[_Target]) -> int:
     """Unit-testable compatibility wrapper around the isolated pytest launch."""
-    with _pytest_environment(targets) as child_env:
-        return _run_pytest_in_environment(child_env)
+    with _launcher_signal_handlers():
+        with _pytest_environment(targets) as child_env:
+            return _run_pytest_in_environment(child_env)
 
 
 def _run_isolated_gate(targets: list[_Target]) -> int:
     """Run preflight and pytest inside one exact environment/pgpass lifetime."""
-    with _pytest_environment(targets) as child_env:
-        preflight = _run_preflight(child_env)
-        if preflight.returncode != 0:
-            return preflight.returncode
-        return _run_pytest_in_environment(child_env)
+    with _launcher_signal_handlers():
+        with _pytest_environment(targets) as child_env:
+            preflight = _run_preflight(child_env)
+            if preflight.returncode != 0:
+                return preflight.returncode
+            return _run_pytest_in_environment(child_env)
 
 
 def _preflight_mode_main() -> int:
@@ -411,7 +534,7 @@ def _preflight_mode_main() -> int:
             target = _prepare_target(label, env_name, expected)
             if target is not None and target.url_password is not None:
                 raise RuntimeError("isolated preflight URL contains a password")
-        except BaseException:
+        except Exception:
             print(
                 f"PostgreSQL {label} preflight failed: invalid database configuration",
                 file=sys.stderr,
@@ -436,7 +559,7 @@ def main() -> int:
     for label, env_name, expected in specs:
         try:
             target = _prepare_target(label, env_name, expected)
-        except BaseException:
+        except Exception:
             print(
                 f"PostgreSQL {label} preflight failed: invalid database configuration",
                 file=sys.stderr,
@@ -447,7 +570,11 @@ def main() -> int:
 
     try:
         return _run_isolated_gate(targets)
-    except BaseException:
+    except _LauncherSignal as interruption:
+        return 128 + interruption.signum
+    except KeyboardInterrupt:
+        return 130
+    except Exception:
         print(
             "PostgreSQL integration gate failed: credential transport or test "
             "launcher error",

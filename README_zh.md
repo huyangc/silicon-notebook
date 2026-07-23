@@ -50,10 +50,12 @@ SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQL
 
 ## 部署
 
-silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端——数据落在本地 SQLite。
-**无需 GPU、无需数据库服务、无需本地模型服务**。LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
-远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf 回退
-（`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
+silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端。发行默认的 SQLite 快速启动
+**无需 GPU、数据库服务或本地模型服务**；改选 PostgreSQL 时则需要可访问的 PostgreSQL 服务、
+PostgreSQL 依赖与已配置的 `DATABASE_URL`。
+LLM、嵌入和 rerank 仍只通过 URL 服务访问；MinerU 则独立支持
+远端 HTTP（`MINERU_MODE=http`）、同机隔离子进程（`MINERU_MODE=cli`）或 pypdf
+回退（`MINERU_MODE=off`）。未配置模型服务或 MinerU parser 时，整条管线以确定性回退离线运行。
 
 ### 前置条件
 
@@ -130,9 +132,10 @@ SILICON_NOTEBOOK_CORS_ORIGINS=http://<frontend-host>:3000
 
 ### 3 · 运行
 
-**没有迁移 / seed 步骤**——首次启动时后端会自建 SQLite 表结构,并创建 `.local/storage`
-与 `.local/logs` 目录,只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉
-进行中的抽取后台任务,让上传卡在 `extracting`。
+**无需手工迁移 / seed 步骤**——启动时后端会迁移当前选中的数据存储（发行默认的 SQLite
+文件或已配置的 PostgreSQL 数据库），创建 `.local/storage` 与 `.local/logs` 目录，并在全新
+数据库中只 seed 本地用户。后端务必**不带 `--reload`**:reload 重启会杀掉进行中的抽取
+后台任务,让上传卡在 `extracting`。
 
 所有相对路径(数据库、存储、日志、`.env`)都在**代码里锚定到仓库根**,与启动脚本
 `cd` 进哪个目录无关——启动目录从此不重要。后端首行日志会打印解析后的绝对路径

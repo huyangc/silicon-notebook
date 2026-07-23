@@ -59,12 +59,15 @@ notebook, object type, and member object.
 
 ## Deployment
 
-silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend — over
-a local SQLite database. It requires **no GPU, no database server, and no local model
-server**. LLM, embeddings, and rerank stay URL-based; MinerU separately supports remote
-HTTP (`MINERU_MODE=http`), an isolated same-host subprocess (`MINERU_MODE=cli`), or the
-pypdf fallback (`MINERU_MODE=off`). The pipeline runs offline with deterministic fallbacks
-when no model service or MinerU parser is configured.
+silicon-notebook runs as two processes — a FastAPI backend and a Next.js frontend. The
+shipped-default SQLite quick start requires **no GPU, database server, or local model
+server**. Selecting PostgreSQL instead requires an accessible PostgreSQL server, the
+PostgreSQL dependencies, and a configured `DATABASE_URL`.
+LLM, embeddings, and rerank stay URL-based; MinerU separately supports
+remote HTTP (`MINERU_MODE=http`), an isolated same-host subprocess
+(`MINERU_MODE=cli`), or the pypdf fallback (`MINERU_MODE=off`). The
+pipeline runs offline with deterministic fallbacks when no model service or MinerU parser
+is configured.
 
 ### Prerequisites
 
@@ -148,9 +151,10 @@ reachable from other machines.
 
 ### 3 · Run
 
-There is **no migration or seed step** — on first boot the backend creates the SQLite
-schema and the `.local/storage` and `.local/logs` directories, and seeds only the local
-user. Always run the backend **without `--reload`**: a reload restart kills in-flight
+There is **no manual migration or seed step** — on startup the backend migrates the selected
+datastore (the shipped-default SQLite file or the configured PostgreSQL database), creates
+the `.local/storage` and `.local/logs` directories, and seeds only the local user on a fresh
+database. Always run the backend **without `--reload`**: a reload restart kills in-flight
 ingestion background tasks and leaves uploads stuck at `extracting`.
 
 All relative paths (database, storage, logs, `.env`) are **anchored to the repo root in

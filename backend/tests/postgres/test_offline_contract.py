@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
@@ -90,6 +92,23 @@ def _run_postgres_gate(url: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         timeout=30,
     )
+
+
+def _wait_for_file(path: Path, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {path.name}")
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def test_psycopg_binary_and_pool_have_explicit_compatible_major_ranges():
@@ -381,12 +400,12 @@ def test_pytest_child_environment_drops_parent_database_and_libpq_secrets(
     assert "Traceback" not in complete_output
     captured: dict[str, object] = {}
 
-    def fake_run(*args, **kwargs):
-        captured["args"] = args
-        captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(args[0], 0, "", "")
+    def fake_child(command, child_env, *, capture_output=False):
+        captured["args"] = (command,)
+        captured["env"] = child_env
+        return subprocess.CompletedProcess(command, 0, "", "")
 
-    monkeypatch.setattr(postgres_lane.subprocess, "run", fake_run)
+    monkeypatch.setattr(postgres_lane, "_run_child", fake_child)
     assert _run_pytest([target]) == 0
     child_env = captured["env"]
     assert isinstance(child_env, dict)
@@ -447,11 +466,11 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
     assert target is not None
     calls: list[tuple[list[str], dict[str, str]]] = []
 
-    def fake_run(command, **kwargs):
-        calls.append((command, kwargs["env"]))
+    def fake_child(command, child_env, *, capture_output=False):
+        calls.append((command, child_env))
         return subprocess.CompletedProcess(command, 0)
 
-    monkeypatch.setattr(postgres_lane.subprocess, "run", fake_run)
+    monkeypatch.setattr(postgres_lane, "_run_child", fake_child)
     assert _run_isolated_gate([target]) == 0
     assert len(calls) == 2
     preflight_command, preflight_env = calls[0]
@@ -468,6 +487,169 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
     assert "sentinel-" not in rendered
     assert "poison-" not in rendered
     assert not Path(preflight_env["PGPASSFILE"]).exists()
+
+
+def test_signalled_child_exit_is_mapped_to_conventional_shell_status(
+    monkeypatch,
+):
+    class SignalExitProcess:
+        pid = 7654321
+        returncode = -signal.SIGTERM
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(
+        postgres_lane.subprocess,
+        "Popen",
+        lambda *args, **kwargs: SignalExitProcess(),
+    )
+    assert _run_isolated_gate([]) == 128 + signal.SIGTERM
+
+
+def test_main_maps_keyboard_interrupt_without_generic_launcher_error(
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://lane_user:sentinel-keyboard-secret@db.example/"
+        "silicon_notebook_keyboard_test",
+    )
+    monkeypatch.delenv("TEST_POSTGRES_NON_C_URL", raising=False)
+    monkeypatch.delenv("TEST_POSTGRES_NON_UTF_URL", raising=False)
+    observed_path: Path | None = None
+
+    def interrupted(_command, child_env, *, capture_output=False):
+        nonlocal observed_path
+        observed_path = Path(child_env["PGPASSFILE"])
+        assert observed_path.exists()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(postgres_lane, "_run_child", interrupted)
+    assert postgres_lane.main() == 130
+    assert observed_path is not None and not observed_path.exists()
+    captured = capsys.readouterr()
+    assert "launcher error" not in (captured.out + captured.err)
+    assert "sentinel-" not in (captured.out + captured.err)
+
+
+def test_launcher_restores_prior_signal_handlers():
+    before = {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    }
+    with postgres_lane._launcher_signal_handlers():
+        assert all(
+            signal.getsignal(signum) is not handler
+            for signum, handler in before.items()
+        )
+    assert {
+        signum: signal.getsignal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM)
+    } == before
+
+
+def test_child_cleanup_uses_bounded_term_then_kill_and_reaps(monkeypatch):
+    calls: list[tuple[str, int | float | None]] = []
+
+    class StubbornProcess:
+        pid = 7654321
+
+        def poll(self):
+            return None
+
+        def wait(self, *, timeout):
+            calls.append(("wait", timeout))
+            if len([entry for entry in calls if entry[0] == "wait"]) == 1:
+                raise subprocess.TimeoutExpired("blocked-child", timeout)
+            return -signal.SIGKILL
+
+    def fake_killpg(_pid, signum):
+        if signum == 0:
+            raise ProcessLookupError
+        calls.append(("signal", signum))
+
+    monkeypatch.setattr(postgres_lane.os, "killpg", fake_killpg)
+    postgres_lane._terminate_and_reap(StubbornProcess())
+    assert calls == [
+        ("signal", signal.SIGTERM),
+        ("wait", postgres_lane._CHILD_REAP_TIMEOUT_SECONDS),
+        ("signal", signal.SIGKILL),
+        ("wait", postgres_lane._CHILD_REAP_TIMEOUT_SECONDS),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("phase", "signum", "expected_status"),
+    [
+        ("preflight", signal.SIGTERM, 143),
+        ("pytest", signal.SIGTERM, 143),
+        ("preflight", signal.SIGINT, 130),
+        ("pytest", signal.SIGINT, 130),
+    ],
+)
+def test_launcher_signal_reaps_blocked_child_and_removes_pgpass(
+    tmp_path,
+    phase,
+    signum,
+    expected_status,
+):
+    if os.name != "posix":
+        return
+    pid_file = tmp_path / "blocked-child.pid"
+    blocker = [
+        sys.executable,
+        "-c",
+        (
+            "import os,time; from pathlib import Path; "
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+            "time.sleep(60)"
+        ),
+    ]
+    success = [sys.executable, "-c", "raise SystemExit(0)"]
+    wrapper = (
+        "from tests.postgres import lane; "
+        f"lane._preflight_command=lambda: {blocker if phase == 'preflight' else success!r}; "
+        f"lane._pytest_command=lambda: {blocker if phase == 'pytest' else success!r}; "
+        "raise SystemExit(lane.main())"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "backend")
+    env["TMPDIR"] = str(tmp_path)
+    env["TEST_POSTGRES_URL"] = (
+        "postgresql://lane_user:sentinel-signal-secret@db.example/"
+        "silicon_notebook_signal_test"
+    )
+    env.pop("TEST_POSTGRES_NON_C_URL", None)
+    env.pop("TEST_POSTGRES_NON_UTF_URL", None)
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", wrapper],
+        cwd=REPO_ROOT / "backend",
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    child_pid: int | None = None
+    try:
+        _wait_for_file(pid_file)
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        assert list(tmp_path.glob("silicon-notebook-pgpass-*"))
+        launcher.send_signal(signum)
+        stdout, stderr = launcher.communicate(timeout=10)
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=5)
+        if child_pid is not None and _process_exists(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+    output = stdout + stderr
+    assert launcher.returncode == expected_status
+    assert child_pid is not None and not _process_exists(child_pid)
+    assert not list(tmp_path.glob("silicon-notebook-pgpass-*"))
+    assert "sentinel-" not in output
+    assert "Traceback" not in output
 
 
 @pytest.mark.postgres_integration
@@ -692,6 +874,48 @@ def test_pgpass_cleanup_retries_unlink_without_hiding_the_write_failure(
     assert created and not created[0].exists()
     captured = capsys.readouterr()
     assert "sentinel-" not in (captured.out + captured.err)
+
+
+def test_pgpass_creation_preserves_keyboard_interrupt_after_cleanup(
+    monkeypatch,
+    capsys,
+):
+    created: list[Path] = []
+    original_mkstemp = postgres_lane.tempfile.mkstemp
+
+    def recording_mkstemp(*args, **kwargs):
+        descriptor, raw_path = original_mkstemp(*args, **kwargs)
+        created.append(Path(raw_path))
+        return descriptor, raw_path
+
+    def interrupted_write(_descriptor, _payload):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(postgres_lane.tempfile, "mkstemp", recording_mkstemp)
+    with pytest.raises(KeyboardInterrupt):
+        _create_pgpass_file(
+            b"sentinel-keyboard-pgpass-secret",
+            write_fn=interrupted_write,
+        )
+    assert created and not created[0].exists()
+    captured = capsys.readouterr()
+    assert "sentinel-" not in (captured.out + captured.err)
+
+
+def test_preflight_does_not_swallow_keyboard_interrupt(monkeypatch):
+    monkeypatch.setenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://lane_user@db.example/silicon_notebook_keyboard_test",
+    )
+    target = _prepare_target("primary", "TEST_POSTGRES_URL", "utf8")
+    assert target is not None
+
+    def interrupted_connect(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(postgres_lane.psycopg, "connect", interrupted_connect)
+    with pytest.raises(KeyboardInterrupt):
+        postgres_lane._inspect_target(target)
 
 
 def test_pgpass_is_removed_when_pytest_launcher_is_interrupted(monkeypatch):
