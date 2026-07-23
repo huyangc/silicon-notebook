@@ -304,3 +304,83 @@ def test_unconfigured_embedder_paths_are_noops(tmp_path, monkeypatch):
         "SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?",
         (nb.id,),
     ) == 0
+
+
+# ----------------------------------------------- OOM: page before mapping
+# _map_embedding_batches collects a whole call's results into memory
+# (list(pool.map(...))), so handing it EVERY batch at once holds every vector
+# simultaneously — ~32GB at 8M objects / ~33GB at 8M relations. The batch
+# embedders must page (commit_every-sized) and map ONE page at a time. These
+# guards spy on _map_embedding_batches and assert no single call ever sees more
+# than one page of batches, while every vector still lands. Reverting any of the
+# three to a single all-batches map call fails here.
+
+def _spy_map_batches(service, monkeypatch):
+    calls = []
+    real = service._map_embedding_batches
+
+    def spy(fn, batches, *, task_prefix, workload_id):
+        calls.append(len(batches))
+        return real(fn, batches, task_prefix=task_prefix, workload_id=workload_id)
+
+    monkeypatch.setattr(service, "_map_embedding_batches", spy)
+    return calls
+
+
+def test_embed_objects_batch_pages_before_mapping(tmp_path, monkeypatch):
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")   # page = 2 batches
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    _bind(r, "knowledge_object_embedding", _RecordingEmbedder(dim=8))
+    calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+
+    items = [{"_oid": f"ko-{i}", "payload": {"name": f"concept number {i}"}}
+             for i in range(55)]                                      # 6 batches / page 2
+    r._embed_objects_batch(nb.id, items)
+
+    assert len(calls) >= 3                                            # paged, not one shot
+    assert max(calls) <= 2                                            # each map call ≤ one page
+    assert _count(
+        r, "SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)
+    ) == 55                                                          # every vector still lands
+
+
+def test_embed_relations_batch_pages_before_mapping(tmp_path, monkeypatch):
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    _bind(r, "relation_embedding", _RecordingEmbedder(dim=8))
+    calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+    # record through the store seat (relation_embeddings FKs knowledge_relations;
+    # the paging shape, not the FK, is what's under test — mirrors
+    # test_embed_relations_batch_isolates_failed_batches)
+    persisted: list = []
+    monkeypatch.setattr(
+        r._runtime.embedding_store, "replace_relation_vectors",
+        lambda notebook_id, rows, *, created_at: persisted.extend(rid for rid, _ in rows),
+    )
+
+    items = [{"_rid": f"rel-{i}", "text": f"relation number {i}"} for i in range(55)]
+    r._embed_relations_batch(nb.id, items)
+
+    assert len(calls) >= 3                                            # paged, not one shot
+    assert max(calls) <= 2                                            # each map call ≤ one page
+    assert len(persisted) == 55                                      # every vector flushed across pages
+
+
+def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
+    r = _make_repo(tmp_path, monkeypatch, EMBED_COMMIT_BATCHES="2")
+    nb = r.create_notebook(NotebookCreate(name="nb"))
+    _bind(r, "chunk_embedding", _RecordingEmbedder(dim=8))
+    calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+    persisted: list = []
+    monkeypatch.setattr(
+        r._runtime.embedding_store, "replace_chunk_vectors",
+        lambda notebook_id, rows, *, created_at: persisted.extend(cid for cid, _ in rows),
+    )
+
+    items = [{"_oid": f"ck-{i}", "payload": {"text": f"chunk number {i}"}}
+             for i in range(55)]
+    r._embed_chunks_batch(nb.id, items)
+
+    assert len(calls) >= 3
+    assert max(calls) <= 2
+    assert len(persisted) == 55

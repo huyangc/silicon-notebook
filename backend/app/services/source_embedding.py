@@ -264,23 +264,29 @@ class SourceEmbeddingService:
 
         total = len(pending)
         done = 0
-        buf: list = []
-        parts = self._map_embedding_batches(
-            _embed_only,
-            batches,
-            task_prefix="emb-kg",
-            workload_id=workload_id,
-        )
-        for bi, part in enumerate(parts, 1):
-            buf.extend(part)
-            done += len(batches[bi - 1])
-            if bi % commit_every == 0:
+        # Page the batches BEFORE mapping. _map_embedding_batches materialises a
+        # whole call's results (list(pool.map(...))), so feeding it EVERY batch
+        # at once holds every object vector in memory simultaneously (~32GB at
+        # 8M objects) — an OOM in the very command meant to repair a big
+        # library; `commit_every` used to bound only the write cadence, not the
+        # live-vector peak. One commit_every-sized page bounds live vectors to
+        # commit_every*embed_batch_size AND preserves the "≤commit_every batches
+        # ⇒ a single write transaction" contract (one flush per page).
+        for pstart in range(0, len(batches), commit_every):
+            chunk = batches[pstart:pstart + commit_every]
+            buf: list = []
+            for part in self._map_embedding_batches(
+                _embed_only,
+                chunk,
+                task_prefix="emb-kg",
+                workload_id=workload_id,
+            ):
+                buf.extend(part)
+            done += sum(len(b) for b in chunk)
+            if buf:
                 self.flush_object_vectors(notebook_id, buf)
-                buf = []
-                if progress:
-                    progress(done, total)
-        if buf:
-            self.flush_object_vectors(notebook_id, buf)
+            if progress:
+                progress(done, total)
         if progress:
             progress(total, total)
 
@@ -308,19 +314,26 @@ class SourceEmbeddingService:
                 return []
             return [(rid, vec) for (rid, _), vec in zip(batch, vectors)]
 
-        rows = []
-        for part in self._map_embedding_batches(
-            _embed_only,
-            batches,
-            task_prefix="emb-rel",
-            workload_id=workload_id,
-        ):
-            rows.extend(part)
-        if not rows:
-            return
-        self.vectors.replace_relation_vectors(
-            notebook_id, rows, created_at=self.now()
-        )
+        # Page before mapping (see embed_objects_batch): _map_embedding_batches
+        # collects a whole call's vectors into memory, so mapping ALL batches at
+        # once would hold every relation vector at once (~33GB at 8M relations).
+        # replace_relation_vectors is a per-row INSERT OR REPLACE upsert, so
+        # flushing per page is safe (no delete-all-for-notebook).
+        page_sz = max(1, self.settings.embed_commit_batches)
+        now = self.now()
+        for pstart in range(0, len(batches), page_sz):
+            rows: list = []
+            for part in self._map_embedding_batches(
+                _embed_only,
+                batches[pstart:pstart + page_sz],
+                task_prefix="emb-rel",
+                workload_id=workload_id,
+            ):
+                rows.extend(part)
+            if rows:
+                self.vectors.replace_relation_vectors(
+                    notebook_id, rows, created_at=now
+                )
 
     def embed_chunk_ids(self, notebook_id: str, rows: List[dict]) -> None:
         """Incremental embed for an EXPLICIT list of chunks — knowhow-tables
@@ -389,19 +402,25 @@ class SourceEmbeddingService:
                 return []
             return [(cid, v) for (cid, _), v in zip(batch, vecs)]
 
-        out = []
-        for part in self._map_embedding_batches(
-            _emb,
-            batches,
-            task_prefix="emb-ck",
-            workload_id=workload_id,
-        ):
-            out.extend(part)
-        if not out:
-            return
-        self.vectors.replace_chunk_vectors(
-            notebook_id, out, created_at=self.now()
-        )
+        # Page before mapping (see embed_objects_batch): mapping ALL batches at
+        # once holds every chunk vector in memory (~7GB at 1.7M chunks).
+        # replace_chunk_vectors is a per-row INSERT OR REPLACE upsert, so
+        # flushing per page is safe (no delete-all-for-notebook).
+        page_sz = max(1, self.settings.embed_commit_batches)
+        now = self.now()
+        for pstart in range(0, len(batches), page_sz):
+            out: list = []
+            for part in self._map_embedding_batches(
+                _emb,
+                batches[pstart:pstart + page_sz],
+                task_prefix="emb-ck",
+                workload_id=workload_id,
+            ):
+                out.extend(part)
+            if out:
+                self.vectors.replace_chunk_vectors(
+                    notebook_id, out, created_at=now
+                )
 
     def backfill_knowledge_embeddings(self, db, notebook_id: str,
                                       objects: List[dict], progress=None) -> None:
