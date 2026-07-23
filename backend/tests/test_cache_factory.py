@@ -332,15 +332,15 @@ def _client(tmp_path, monkeypatch, *, content='{"ok": 1}', finish_reason="stop")
     len()`，而 __len__ 既不在 CacheBackend 也不在 CacheAdmin 里。
     """
     settings = Settings(
-        OPENAI_COMPAT_BASE_URL="https://llm.example.test",
-        OPENAI_COMPAT_API_KEY="k",
-        OPENAI_COMPAT_MODEL="m",
         LLM_LOG_ENABLED=False,
         LLM_CACHE_ENABLED=True,
         LLM_CACHE_PATH=str(tmp_path / "cache.db"),
     )
     spy = _KeySpy(make_cache_backend(settings))
-    client = _opt_in(OpenAICompatibleClient(settings, cache=spy))
+    client = _opt_in(OpenAICompatibleClient(
+        settings, base_url="https://llm.example.test", api_key="k", model="m",
+        cache=spy,
+    ))
     fake = _FakeOpenAI(content=content, finish_reason=finish_reason)
     monkeypatch.setattr(client, "client", lambda: fake)
     return client, fake, spy
@@ -348,16 +348,18 @@ def _client(tmp_path, monkeypatch, *, content='{"ok": 1}', finish_reason="stop")
 
 # ------------------------------------------------------------------ 写入准入
 def test_empty_json_fallback_is_never_cached(tmp_path, monkeypatch):
-    """upstream 交白卷时 chat_json 回退 "{}"；缓存它等于把一次偶发退化固化 90 天。
+    """upstream 交白卷时 chat_json 如实返回空串 ""（master #328 起不再兜底成 "{}"，
+    见 test_llm_client.test_raw_client_preserves_empty_success）；缓存空响应等于把一次
+    偶发退化固化 90 天。
 
     行为断言（对删除与移动两种变异都免疫）：条目数 0，且第二次仍真的打了 upstream。
     """
     client, fake, spy = _client(tmp_path, monkeypatch, content="")
     msgs = [{"role": "user", "content": "q"}]
-    assert client.chat_json(msgs, "{}") == "{}"
-    assert client.chat_json(msgs, "{}") == "{}"
-    assert _cached_value(spy) is None, "空回退被写进了缓存"
-    assert fake.calls == 2, "第二次没重新请求 upstream —— 说明命中了缓存里的空回退"
+    assert client.chat_json(msgs, "{}") == ""
+    assert client.chat_json(msgs, "{}") == ""
+    assert _cached_value(spy) is None, "空响应被写进了缓存"
+    assert fake.calls == 2, "第二次没重新请求 upstream —— 说明命中了缓存里的空响应"
 
 
 def test_truncated_json_is_never_cached(tmp_path, monkeypatch):
@@ -561,15 +563,13 @@ def test_cold_cache_accepts_its_first_write(tmp_path, monkeypatch):
     锁的是 llm.py 用 `cache is not None` 而非真值判断这一写法。
     变异验证：llm.py 的 `cache is not None` 改回 `cache` 后本测试必须转红。
     """
-    settings = Settings(
-        OPENAI_COMPAT_BASE_URL="https://llm.example.test",
-        OPENAI_COMPAT_API_KEY="k",
-        OPENAI_COMPAT_MODEL="m",
-        LLM_LOG_ENABLED=False,
-    )
+    settings = Settings(LLM_LOG_ENABLED=False)
     backend = _FalsyWhenEmptyBackend()
     assert not backend, "前提失效：本测试用的后端在空时必须是 falsy"
-    client = OpenAICompatibleClient(settings, cache=backend)
+    client = OpenAICompatibleClient(
+        settings, base_url="https://llm.example.test", api_key="k", model="m",
+        cache=backend,
+    )
     monkeypatch.setattr(client, "client", lambda: _FakeOpenAI())
     # opt-in：写入需调用方传 validator（本测试锁的是 `cache is not None` 写法）。
     client.chat_json(
@@ -599,13 +599,11 @@ def test_llm_writes_are_tagged_with_the_model(tmp_path, monkeypatch):
 
 def _client_on(tmp_path, monkeypatch, *, base_url, api_key, backend):
     """一个指向 base_url/api_key、model 名固定为 'm' 的 client，共用传入的 backend。"""
-    settings = Settings(
-        OPENAI_COMPAT_BASE_URL=base_url,
-        OPENAI_COMPAT_API_KEY=api_key,
-        OPENAI_COMPAT_MODEL="m",             # 同名模型：评审场景的前提
-        LLM_LOG_ENABLED=False,
-    )
-    client = _opt_in(OpenAICompatibleClient(settings, cache=backend))
+    settings = Settings(LLM_LOG_ENABLED=False)
+    # 同名模型 'm'、不同 base_url/api_key：评审场景的前提（服务身份进 key）。
+    client = _opt_in(OpenAICompatibleClient(
+        settings, base_url=base_url, api_key=api_key, model="m", cache=backend,
+    ))
     fake = _FakeOpenAI()
     monkeypatch.setattr(client, "client", lambda: fake)
     return client, fake
