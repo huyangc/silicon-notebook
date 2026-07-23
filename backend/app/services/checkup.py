@@ -16,7 +16,8 @@
   elements/chunks 属正常、非损坏)。
 - H4/H5:直连 COUNT——向量 embed 成功路径**不 bump kg_mutation_seq**,折进 seq-memo 会一直
   报旧值,故每次直读(per-nb 索引查询,可接受)。
-- H6:已 memo 在 kg_mutation_seq 上(QueryStore.pending_kg_source_count),O(1)。
+- H6:已 memo 在 kg_mutation_seq 上(QueryStore.visible_pending_kg_source_count——排除
+  memory/knowhow 合成源,与 H2/H3 及看板「知识图谱」行同口径),O(1)。
 - H7:读索引状态的 `state` 字段;不折进 kg_mutation_seq(嵌入变更改 version_facts 却不 bump
   seq,seq-memo 会漏报),故每次直读一次索引状态(与看板打开同代价)。
 - H8:需真 load 一次磁盘产物做交叉校验,故按磁盘 **manifest 身份**(exists + manifest.version)缓存
@@ -150,7 +151,10 @@ class CheckupService:
         with self._database.connect() as db:
             h2_hits = QueryStore.sources_without_elements(db, notebook_id) - active
             h3_hits = QueryStore.sources_missing_chunks(db, notebook_id) - active
-            h6_count = int(QueryStore.pending_kg_source_count(db, notebook_id))
+            # ⚠ 用 visible_ 口径(排除 memory/knowhow 合成源),与 H2/H3 及看板「知识图谱」行
+            # 对齐(评审:全集口径会把有 elements、却不走文档 KG 抽取的 knowhow 合成源算进
+            # H6→与 KG 行「0 待分析」自相矛盾、healthy 恒 false 且点「分析新增」修不掉)。
+            h6_count = int(QueryStore.visible_pending_kg_source_count(db, notebook_id))
         checks = [
             CheckupItem("H2", len(h2_hits), _sample(h2_hits), "reparse"),
             CheckupItem("H3", len(h3_hits), _sample(h3_hits), "reparse"),
