@@ -3,6 +3,8 @@
 repo-level: test_kg_search_lexical, test_kg_search_all_fields
 api-level:  test_kg_search_endpoint_lexical
 """
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -160,6 +162,12 @@ def test_kg_search_endpoint_returns_hit_fields(client):
 
     # Get the singleton repo from the app
     with TestClient(app) as c:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if c.get("/api/ready").json()["ready"]:
+                break
+            time.sleep(0.01)
+        assert c.get("/api/ready").json()["ready"] is True
         nb_id = c.post("/api/notebooks", json={"name": "search-test"}).json()["id"]
         repo = get_repo()
         repo.store_kg(nb_id, None, [

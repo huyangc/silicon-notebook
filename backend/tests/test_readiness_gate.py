@@ -6,6 +6,9 @@ reachable so the frontend can poll and show a "服务启动中" screen. The auto
 ``_mark_service_ready`` conftest fixture marks ready before each test; here we
 toggle it explicitly to exercise both states.
 """
+import asyncio
+import time
+
 from fastapi.testclient import TestClient
 
 from app.core import readiness
@@ -60,11 +63,14 @@ def test_run_startup_migrates_warms_and_flips_ready():
     from app.services import startup_warmup
 
     readiness.reset()
-    startup_warmup.run_startup()  # synchronous here (prod runs it in a thread)
-    snap = readiness.snapshot()
-    assert snap["phase"] == "ready"
-    assert readiness.is_ready() is True
-    assert snap["error"] is None
+    repo = startup_warmup.run_startup()  # synchronous here (prod runs it in a thread)
+    try:
+        snap = readiness.snapshot()
+        assert snap["phase"] == "ready"
+        assert readiness.is_ready() is True
+        assert snap["error"] is None
+    finally:
+        startup_warmup.close_repository(repo)
 
 
 def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, caplog):
@@ -100,24 +106,140 @@ def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, cap
     assert "secret-password" not in diagnostics
 
 
-def test_close_repository_closes_and_clears_the_cached_composition(monkeypatch):
+def test_two_lifespans_start_and_close_distinct_exact_repositories(monkeypatch):
     from types import SimpleNamespace
 
+    from app.api import deps
+    from app.main import _lifespan
+    from app.services import startup_warmup
+
+    calls: list[str] = []
+    instances = []
+
+    def repository():
+        index = len(instances) + 1
+        calls.append(f"start{index}")
+        fake = SimpleNamespace(
+            warm_open_path_caches=lambda **_kwargs: calls.append(f"warm{index}") or 0,
+            close=lambda: calls.append(f"close{index}"),
+        )
+        instances.append(fake)
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    async def wait_ready() -> None:
+        deadline = time.monotonic() + 2
+        while not readiness.is_ready() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert readiness.is_ready() is True
+
+    async def exercise() -> None:
+        async with _lifespan(SimpleNamespace()):
+            await wait_ready()
+            assert readiness.snapshot()["phase"] == "ready"
+        assert readiness.is_ready() is False
+        assert readiness.snapshot()["phase"] == "stopped"
+        async with _lifespan(SimpleNamespace()):
+            await wait_ready()
+            assert readiness.snapshot()["phase"] == "ready"
+        assert readiness.is_ready() is False
+        assert readiness.snapshot()["phase"] == "stopped"
+
+    asyncio.run(exercise())
+
+    assert len(instances) == 2
+    assert instances[0] is not instances[1]
+    assert calls == [
+        "start1",
+        "warm1",
+        "close1",
+        "clear",
+        "start2",
+        "warm2",
+        "close2",
+        "clear",
+    ]
+
+
+def test_close_repository_without_active_cycle_is_noop_and_never_calls_factory(
+    monkeypatch,
+):
     from app.api import deps
     from app.services import startup_warmup
 
     calls = []
-    fake = SimpleNamespace(close=lambda: calls.append("close"))
 
     def repository():
-        return fake
+        calls.append("factory")
+        raise AssertionError("shutdown must not construct a repository")
 
     repository.cache_clear = lambda: calls.append("clear")
     monkeypatch.setattr(deps, "repository", repository)
 
     startup_warmup.close_repository()
 
-    assert calls == ["close", "clear"]
+    assert calls == []
+
+
+def test_close_failure_still_stops_clears_and_allows_a_fresh_next_cycle(
+    monkeypatch, caplog
+):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.services import startup_warmup
+
+    calls = []
+    instances = []
+
+    def repository():
+        index = len(instances) + 1
+        calls.append(f"start{index}")
+
+        def close():
+            calls.append(f"close{index}")
+            if index == 1:
+                raise RuntimeError("close detail must not escape")
+
+        fake = SimpleNamespace(
+            warm_open_path_caches=lambda **_kwargs: calls.append(f"warm{index}") or 0,
+            close=close,
+        )
+        instances.append(fake)
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None)
+
+    first = startup_warmup.run_startup()
+    assert first is instances[0]
+    assert readiness.is_ready() is True
+    startup_warmup.close_repository(first)
+    assert readiness.is_ready() is False
+    assert readiness.snapshot()["phase"] == "stopped"
+
+    second = startup_warmup.run_startup()
+    assert second is instances[1]
+    assert second is not first
+    assert readiness.is_ready() is True
+    startup_warmup.close_repository(second)
+    assert readiness.is_ready() is False
+    assert readiness.snapshot()["phase"] == "stopped"
+    assert calls == [
+        "start1",
+        "warm1",
+        "close1",
+        "clear",
+        "start2",
+        "warm2",
+        "close2",
+        "clear",
+    ]
+    assert "close detail" not in caplog.text
 
 
 def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_fails(
@@ -154,7 +276,7 @@ def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_f
         lambda: SimpleNamespace(database_url="sqlite:////tmp/safe.db"),
     )
     readiness.reset()
-    startup_warmup.run_startup()
+    assert startup_warmup.run_startup() is None
 
     assert calls == ["repository", "close", "clear"]
     assert readiness.snapshot()["phase"] == "error"
@@ -164,6 +286,5 @@ def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_f
     # Lifespan shutdown after the failed startup must be idempotent and must
     # not construct a brand-new cached repository merely to close it.
     startup_warmup.close_repository()
-    assert calls == ["repository", "close", "clear", "clear"]
     startup_warmup.close_repository()
-    assert calls == ["repository", "close", "clear", "clear", "clear"]
+    assert calls == ["repository", "close", "clear"]

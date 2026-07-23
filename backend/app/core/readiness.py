@@ -25,7 +25,9 @@ from app.core.database_url import database_status
 _lock = threading.Lock()
 _state = {
     "ready": False,
-    "phase": "starting",   # starting -> migrating -> warming -> ready | error
+    # Active cycle: starting -> migrating -> warming -> ready | error.
+    # Lifespan exit publishes the separate terminal ``stopped`` state.
+    "phase": "starting",
     "detail": "",
     "error": None,          # str when phase == "error"
     "warmed_notebooks": 0,
@@ -69,6 +71,19 @@ def mark_error(error: str) -> None:
         _state["error"] = error
 
 
+def mark_stopped() -> None:
+    """Publish the post-lifespan state without retaining stale readiness."""
+    with _lock:
+        _state.update(
+            ready=False,
+            phase="stopped",
+            detail="",
+            error=None,
+            warmed_notebooks=0,
+            total_notebooks=0,
+        )
+
+
 def is_ready() -> bool:
     with _lock:
         return bool(_state["ready"])
@@ -80,8 +95,7 @@ def snapshot() -> dict:
 
 
 def reset() -> None:
-    """Back to the pre-startup not-ready state. For tests exercising the gate;
-    the process default is already not-ready until the lifespan warm-up runs."""
+    """Begin a fresh lifecycle in the pre-startup, not-ready state."""
     with _lock:
         _state.update(ready=False, phase="starting", detail="", error=None,
                       warmed_notebooks=0, total_notebooks=0)

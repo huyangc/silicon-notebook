@@ -4,6 +4,7 @@ import json
 import inspect
 from pathlib import Path
 import threading
+import time
 
 from fastapi.testclient import TestClient
 
@@ -127,6 +128,12 @@ def _runtime_serialization(tmp_path, monkeypatch):
     test_app = app_main.create_app()
 
     with TestClient(test_app) as client:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if client.get("/api/ready").json()["ready"]:
+                break
+            time.sleep(0.01)
+        assert client.get("/api/ready").json()["ready"] is True
         created = client.post(
             "/api/notebooks",
             json={

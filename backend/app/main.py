@@ -40,29 +40,30 @@ async def _lifespan(app: FastAPI):
     # Run migration + cache warm-up OFF the event loop (daemon thread) so uvicorn
     # binds and serves /api/ready immediately; the readiness gate keeps app routes
     # at 503 until run_startup() flips readiness. See app/services/startup_warmup.
-    from app.services.startup_warmup import run_startup
+    from app.services.startup_warmup import close_repository, run_startup
 
-    # Tests mark readiness ready up-front (conftest) and drive the app without a
-    # real warm-up; skip spawning the thread there so it can't touch a torn-down
-    # tmp DB. In production readiness starts not-ready, so the thread runs.
-    startup_thread = None
-    if not readiness.is_ready():
-        readiness.set_phase("starting", "后端启动中")
-        startup_thread = threading.Thread(
-            target=run_startup, name="startup-warmup", daemon=True
-        )
-        startup_thread.start()
+    # Every ASGI lifespan entry is a fresh ownership cycle, including repeated
+    # TestClient/embedded-server cycles in one process. Reset synchronously so no
+    # request can observe a stale ready flag before the startup thread begins.
+    readiness.reset()
+    readiness.set_phase("starting", "后端启动中")
+    started = {"repository": None}
+
+    def _start() -> None:
+        started["repository"] = run_startup()
+
+    startup_thread = threading.Thread(
+        target=_start, name="startup-warmup", daemon=True
+    )
+    startup_thread.start()
     try:
         yield
     finally:
         # Do not close a PostgreSQL pool while the migration/warmup thread may
         # still be borrowing it. Production shutdown is rare and correctness
         # is more important than a short shutdown timeout.
-        if startup_thread is not None:
-            startup_thread.join()
-        from app.services.startup_warmup import close_repository
-
-        close_repository()
+        startup_thread.join()
+        close_repository(started["repository"])
 
 
 def _env_file_preflight() -> None:
