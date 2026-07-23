@@ -48,6 +48,20 @@ def _seed_source(repo, notebook_id: str, sid: str) -> None:
         )
 
 
+def _seed_source_with_elements(repo, notebook_id: str, sid: str, n: int = 2) -> None:
+    """种 source + n 个非空 element(无 embedding)→ count_missing_element_vectors == n
+    (H5 缺 element 向量的损坏,给 backfill 受理判定造真实待补量)。"""
+    _seed_source(repo, notebook_id, sid)
+    with repo._write() as db:
+        for i in range(1, n + 1):
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", f"text {i}", "{}", _NOW),
+            )
+
+
 def _spy_submit_job(monkeypatch):
     """打桩 kg_scheduler.submit_job,记录 (fn, args) 而不真跑后台。"""
     calls = []
@@ -123,6 +137,7 @@ def test_backfill_vectors_accepts_and_schedules(tmp_path, monkeypatch):
 
     from app.api.deps import repository
 
+    _seed_source_with_elements(repository(), nb, "src-bf")  # H5 缺 element 向量的损坏
     monkeypatch.setattr(repository(), "configured", lambda wid: True)  # 有嵌入服务
     calls = _spy_submit_job(monkeypatch)
     r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
@@ -149,6 +164,47 @@ def test_backfill_vectors_rejects_when_embedding_unconfigured(tmp_path, monkeypa
     assert r.status_code == 200, r.text
     assert r.json()["accepted"] is False
     assert len(calls) == 0  # 未配 → 一个 job 都不排
+
+
+def test_backfill_vectors_rejects_when_damage_workload_unconfigured(tmp_path, monkeypatch):
+    """损坏是 element 向量(H5)、却只配了 chunk 嵌入 → 该类补不动 → 不假受理(codex P2:按损坏
+    所属 workload 精判;粗判 `configured(chunk) or configured(element)` 会假受理→前端「修复中」
+    空转轮询、而 H5 永不清)。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "h00300308")
+    nb = _notebook(client, headers, "bf-mismatch")
+
+    from app.api.deps import repository
+
+    _seed_source_with_elements(repository(), nb, "src-el")  # 只有 element 缺向量、无 chunk
+    monkeypatch.setattr(
+        repository(), "configured", lambda wid: wid == "chunk_embedding"  # 只配 chunk
+    )
+    calls = _spy_submit_job(monkeypatch)
+    r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["accepted"] is False  # 缺的是 element、element 未配 → 不受理
+    assert len(calls) == 0
+
+
+def test_backfill_vectors_accepts_when_matching_workload_configured(tmp_path, monkeypatch):
+    """损坏是 element 向量、且 element 嵌入已配 → 受理并排 job(即便 chunk 未配:各类独立判,
+    有一类「已配 + 有缺」即受理)。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "i00300309")
+    nb = _notebook(client, headers, "bf-match")
+
+    from app.api.deps import repository
+
+    _seed_source_with_elements(repository(), nb, "src-el2")
+    monkeypatch.setattr(
+        repository(), "configured", lambda wid: wid == "source_element_embedding"
+    )
+    calls = _spy_submit_job(monkeypatch)
+    r = client.post(f"/api/notebooks/{nb}/backfill-vectors", headers=headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["accepted"] is True
+    assert len(calls) == 1
 
 
 def test_reparse_rejects_hidden_projection_source(tmp_path, monkeypatch):

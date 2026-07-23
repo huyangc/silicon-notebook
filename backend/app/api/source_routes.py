@@ -252,29 +252,45 @@ def reparse_sources(
 
 
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
-    """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。复用 batch_ingest
-    的既有 backfill,EMBED 未配则各自跳过。best-effort:一侧失败不拦另一侧。
+    """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。EMBED 未配则跳过。
 
-    ⚠ 先**快照活跃租约**并把这些源排除出补齐(codex P1):正在 reparse 的源 element/chunk id
-    复用,给它算旧代文本的向量、在替换后才提交,会挂上永久陈旧向量(后续缺向量检查也发现不了,
-    因为向量「在」只是内容旧)。被排除的源反正会由它自己的 reparse 管线重嵌,不会漏补。
-    (残留:快照后、读取前才开始 reparse 的源覆盖不到,窗口极窄;要全覆盖须与替换串行化,
-    留作独立加固——本 PR 覆盖「backfill 启动时已在 reparse」这个 codex 报的主场景。)"""
-    from app.services import batch_ingest
-
-    active = repo._runtime._active_source_ids_snapshot()
-    try:
-        batch_ingest.backfill_chunk_embeddings(
-            repo, notebook_id, missing_only=True, exclude_source_ids=active
-        )
-    except Exception:  # noqa: BLE001 — 后台 job 自负错误,一侧失败不拦另一侧
-        pass
-    try:
-        batch_ingest.backfill_element_embeddings(
-            repo, notebook_id, exclude_source_ids=active
-        )
-    except Exception:  # noqa: BLE001
-        pass
+    ⚠ **逐源持 P1.5 的分块锁、锁内读→嵌**(codex P1):element/chunk id 在 reparse 时复用,
+    并发补齐若在锁外读到旧代行、embedding 后在替换之后才提交,会给新文本挂上**永久陈旧向量**
+    (后续缺向量检查也发现不了——向量「在」,只是内容旧)。持该源的分块锁 → 与 reparse 的
+    element 换血(process_source 同样持它)互斥;且在锁内才读缺失行,故读到的行在补齐提交前
+    不会被 reparse 换掉——彻底关掉「快照后才开始 reparse」的残留窗口(取代旧的快照-排除法)。
+    best-effort:一源失败不拦其余。"""
+    mnt = repo.maintenance
+    ingestion = repo._runtime.source_ingestion
+    chunk_ok = repo.configured("chunk_embedding")
+    elem_ok = repo.configured("source_element_embedding")
+    if not (chunk_ok or elem_ok):
+        return
+    # 先廉价定位「有缺失向量的源」(锁外读,仅用于挑要处理哪些源;真正补齐在锁内重读)。
+    sources = {r["source_id"] for r in mnt.missing_chunk_embedding_rows(notebook_id)}
+    sources |= {r["source_id"] for r in mnt.missing_element_embedding_rows(notebook_id)}
+    for source_id in sources:
+        with ingestion._source_chunk_lock(source_id):
+            try:
+                if chunk_ok:
+                    rows = mnt.missing_chunk_embedding_rows(notebook_id, only_source_id=source_id)
+                    if rows:
+                        mnt.embed_chunks_batch(
+                            notebook_id,
+                            [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
+                        )
+            except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
+                pass
+            try:
+                if elem_ok:
+                    rows = mnt.missing_element_embedding_rows(notebook_id, only_source_id=source_id)
+                    if rows:
+                        mnt.embed_elements_batch(
+                            notebook_id,
+                            [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
+                        )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 @router.post(
@@ -288,13 +304,22 @@ def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
     凡调 embedding 的修复不自动)。补完后 H4/H5 计数下降,前端重拉 checkup 反映。
     用完整 facade(``repository()``)——backfill 需要 maintenance/configured(BatchIngestRepository)。"""
     repo = repository()
-    # ⚠ 两个嵌入 workload 都没配 → backfill 会完全 no-op(batch_ingest 各自 configured 门跳过),
-    # 别假受理(codex):否则前端说「已开始」+ 空转轮询 10min,而 H4/H5 永远清不掉。返 accepted=false,
-    # 前端据此提示「未配置嵌入服务」而非「修复中」。
-    if not (
+    mnt = repo.maintenance
+    # 按**损坏所属的 workload** 精判受理(codex P2):某类缺向量确实存在**且**其嵌入 workload 已配,
+    # job 才补得动该类。粗判 `configured(chunk) or configured(element)` 会在「损坏是 element、却只配
+    # 了 chunk」时假受理→前端「修复中」空转轮询、而 H5 永远清不掉。短路:未配某类就不跑那类 COUNT。
+    # 计数不排活跃租约:看板 H4/H5 是排除活跃后的口径,本处是其超集,故看板显示有损坏时这里必也判
+    # 有缺——不会误拒用户看到的损坏(在途嵌入的源即便被算进来,job 也在其分块锁内 no-op,无害)。
+    chunk_fixable = (
         repo.configured("chunk_embedding")
-        or repo.configured("source_element_embedding")
-    ):
+        and mnt.count_missing_chunk_vectors(notebook_id) > 0
+    )
+    elem_fixable = (
+        repo.configured("source_element_embedding")
+        and mnt.count_missing_element_vectors(notebook_id) > 0
+    )
+    if not (chunk_fixable or elem_fixable):
+        # 无「已配 + 有缺」的类 → job 必 no-op。accepted=false,前端据此提示而非「修复中」。
         return RepairScheduledResult(accepted=False)
     kg_scheduler.submit_job(_backfill_vectors_job, repo, notebook_id)
     return RepairScheduledResult(accepted=True)

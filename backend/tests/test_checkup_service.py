@@ -106,6 +106,9 @@ def _service(repo, notebook_id="nb-x", **overrides):
         count_missing_chunk_vectors=lambda nb, exclude: 0,
         count_missing_element_vectors=lambda nb, exclude: 0,
         scale_index_state=lambda nb: "indexed",
+        # 默认每次返回全新 sentinel → H7 memo 永不命中,seam-injection 测试仍见每次 scale_index_state
+        # 调用(缓存行为由下面注入受控签名的专测覆盖)。
+        index_state_signature=lambda nb: object(),
         index_manifest_identity=lambda nb: (True, "ver-const"),
         probe_index_integrity=lambda nb: 0,
         active_source_ids=lambda: set(),
@@ -299,38 +302,43 @@ def test_count_missing_element_vectors_excludes_given_sources(repo):
     assert mnt.count_missing_element_vectors(nb.id, {a, b}) == 0   # 全排除
 
 
-def test_missing_element_rows_excludes_given_sources(repo):
-    """missing_element_embedding_rows 的 exclude_source_ids 排除指定源(backfill 排除活跃源的
-    底座,codex P1:避免给正在 reparse 的源——element id 复用——算旧代文本向量)。"""
+def test_missing_element_rows_only_source_id(repo):
+    """missing_element_embedding_rows 的 only_source_id 只取某源的缺向量行——体检 backfill 逐源
+    持分块锁、锁内按此现读现嵌(codex P1:element id 在 reparse 时复用,锁内读→嵌避免挂陈旧向量)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)
     b = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
     mnt = repo._runtime.maintenance_component
     assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id)} == {a, b}
-    assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, {a})} == {b}
+    assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=a)} == {a}
+    assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=b)} == {b}
 
 
-def test_backfill_job_excludes_active_lease_sources(repo, monkeypatch):
-    """_backfill_vectors_job 先快照活跃租约、并把这些源传给两个 backfill 作 exclude
-    (codex P1:正在 reparse 的源不补,免得挂上永久陈旧向量)。"""
-    monkeypatch.setattr(
-        repo._runtime, "_active_source_ids_snapshot", lambda: {"src-reparsing"}
-    )
-    seen: dict[str, set] = {}
-    from app.services import batch_ingest
+def test_backfill_job_embeds_under_per_source_lock(repo, monkeypatch):
+    """_backfill_vectors_job 逐源持 P1.5 分块锁、锁内读→嵌(codex P1:与 reparse 的 element 换血
+    互斥——process_source 在同一把锁内先 clear_embeddings 再换 elements,复用 el-<sid>-<idx> id;
+    补齐若在锁外读旧代行、嵌后在换血之后落库,会给新文本挂上永久陈旧向量)。验证嵌入发生时本源
+    分块锁确处于持有态,且只嵌本源的行。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)
+    monkeypatch.setattr(repo, "configured", lambda wid: True)
     from app.api import source_routes
 
-    monkeypatch.setattr(
-        batch_ingest, "backfill_chunk_embeddings",
-        lambda r, n, missing_only, exclude_source_ids: seen.__setitem__("chunk", set(exclude_source_ids)),
-    )
-    monkeypatch.setattr(
-        batch_ingest, "backfill_element_embeddings",
-        lambda r, n, exclude_source_ids: seen.__setitem__("elem", set(exclude_source_ids)),
-    )
-    source_routes._backfill_vectors_job(repo, "nb-x")
-    assert seen["chunk"] == {"src-reparsing"}
-    assert seen["elem"] == {"src-reparsing"}
+    ingestion = repo._runtime.source_ingestion
+    mnt = repo._runtime.maintenance_component
+    seen: dict = {}
+
+    def _spy_elem(notebook_id, items):
+        # 嵌入时,本源的分块锁必须处于持有态(锁内读→嵌);记录被嵌的源集。
+        seen["locked"] = ingestion._source_chunk_lock(sid).locked()
+        seen["sources"] = {it["source_id"] for it in items}
+        return len(items)
+
+    monkeypatch.setattr(mnt, "embed_elements_batch", _spy_elem)
+    monkeypatch.setattr(mnt, "embed_chunks_batch", lambda notebook_id, items: None)
+    source_routes._backfill_vectors_job(repo, nb.id)
+    assert seen.get("locked") is True   # 锁内嵌
+    assert seen.get("sources") == {sid}
 
 
 def test_h4_h5_pass_active_lease_snapshot_to_counts(repo):
@@ -367,6 +375,45 @@ def test_h7_fail_soft_on_probe_error(repo):
     svc = _service(repo, scale_index_state=_boom)
     # 探针异常不 raise 出体检热路径,保守判「未过期」。
     assert _check(svc.run("nb-x"), "H7").count == 0
+
+
+def test_h7_caches_by_signature(repo):
+    """H7 按廉价签名 memo(codex P2):签名不变 → 复用、不重跑昂贵状态计算;签名变(新数据
+    bump seq / rebuild 换 mtime)→ 重跑一次。"""
+    sig = {"v": ("sig-A",)}
+    calls = []
+
+    def _state(nb):
+        calls.append(nb)
+        return "stale"
+
+    svc = _service(repo, index_state_signature=lambda nb: sig["v"], scale_index_state=_state)
+    assert _check(svc.run("nb-x"), "H7").count == 1
+    assert _check(svc.run("nb-x"), "H7").count == 1
+    assert len(calls) == 1  # 同签名,第二次命中缓存不重跑昂贵 status()
+
+    sig["v"] = ("sig-B",)
+    assert _check(svc.run("nb-x"), "H7").count == 1
+    assert len(calls) == 2  # 签名变,重跑一次
+
+
+def test_h7_error_result_not_cached(repo):
+    """H7 状态探针异常:保守判未过期(0)且**不写缓存**——即便签名不变,下次仍现探
+    (不把偶发失败粘成长期误判)。"""
+    state = {"boom": True}
+    calls = []
+
+    def _state(nb):
+        calls.append(nb)
+        if state["boom"]:
+            raise RuntimeError("delta probe blew up")
+        return "indexed"
+
+    svc = _service(repo, index_state_signature=lambda nb: ("sig-const",), scale_index_state=_state)
+    assert _check(svc.run("nb-x"), "H7").count == 0  # 异常 → 0
+    state["boom"] = False
+    assert _check(svc.run("nb-x"), "H7").count == 0  # 未缓存 → 同签名仍现探(此刻 indexed → 0)
+    assert len(calls) == 2
 
 
 # --------------------------------------------------------------------- H8

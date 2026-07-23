@@ -328,21 +328,19 @@ def backfill_chunk_embeddings(
     repo: BatchIngestRepository,
     notebook_id: str,
     missing_only: bool = False,
-    exclude_source_ids: "set[str] | None" = None,
 ) -> int:
     """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
 
     - missing_only=False(默认):遍历每个 source 调 _embed_chunks_for_source 全量重嵌
       (INSERT OR REPLACE upsert),返回处理的 *source* 数。
     - missing_only=True:只补缺向量的 chunk(NOT EXISTS),一次 _embed_chunks_batch,
-      返回补的 *chunk* 数(无缺失则跳过返回 0)。``exclude_source_ids`` 仅对 missing_only 生效:
-      排除正在 reparse 的活跃源(codex P1:避免旧代文本向量在替换后提交挂上永久陈旧向量)。
+      返回补的 *chunk* 数(无缺失则跳过返回 0)。
     """
     if not repo.configured("chunk_embedding"):
         return 0
     mnt = repo.maintenance
     if missing_only:
-        rows = mnt.missing_chunk_embedding_rows(notebook_id, exclude_source_ids)
+        rows = mnt.missing_chunk_embedding_rows(notebook_id)
         items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
         if not items:
             print("[embed] 无缺失 chunk 向量,跳过", flush=True)
@@ -367,11 +365,8 @@ def backfill_chunk_embeddings(
 def backfill_element_embeddings(
     repo: BatchIngestRepository,
     notebook_id: str,
-    exclude_source_ids: "set[str] | None" = None,
 ) -> int:
     """补该 notebook 缺失的 element 向量(只补缺失,幂等),返回落库行数。EMBED 未配则跳过。
-    ``exclude_source_ids`` 排除正在 reparse 的活跃源(codex P1:element id 复用,旧代文本向量
-    在替换后提交会挂上永久陈旧向量)。CLI 不传、口径不变。
 
     与 chunk/节点两侧并列的第三条补齐路径:此前 element 侧只有「整源重跑」一条路,
     写了一半的源(部分 element 有向量、部分没有)没有任何增量修法。
@@ -388,7 +383,7 @@ def backfill_element_embeddings(
     if not repo.configured("source_element_embedding"):
         return 0
     mnt = repo.maintenance
-    rows = mnt.missing_element_embedding_rows(notebook_id, exclude_source_ids)
+    rows = mnt.missing_element_embedding_rows(notebook_id)
     if not rows:
         print("[embed] 无缺失 element 向量,跳过", flush=True)
         return 0

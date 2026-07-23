@@ -4809,6 +4809,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_vectors",
         "target": "configured"
       },
@@ -4861,6 +4867,12 @@
         "target": "configured"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
+        "target": "configured"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/backfill_kg_embeddings.py",
         "scope": "<module>.main",
@@ -4875,7 +4887,16 @@
     ],
     "kind": "method",
     "owner": "ModelProvider",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
+        "target": "configured"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, workload_id: 'str') -> 'bool'"
   },
@@ -6360,6 +6381,18 @@
   },
   "maintenance": {
     "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_vectors",
+        "target": "maintenance"
+      },
       {
         "kind": "attribute",
         "path": "backend/app/scripts/backfill_relation_embeddings.py",
