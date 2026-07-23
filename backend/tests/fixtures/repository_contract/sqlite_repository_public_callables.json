@@ -239,7 +239,7 @@
   "update_notebook": "(self, notebook_id: 'str', payload: 'NotebookUpdate') -> 'NotebookSummary'",
   "update_object_schema": "(self, object_type: 'str', payload: 'ObjectSchemaUpdate') -> 'ObjectSchemaModel'",
   "update_report": "(self, notebook_id: 'str', report_id: 'str', *, status=None, progress=None, error=None, outline=None, sections=None, gaps=None, references=None, content_md=None, section_status=None) -> 'None'",
-  "upload_sources": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'List[SourceSummary]'",
+  "upload_sources": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'List[UploadedSourceSummary]'",
   "upsert_knowhow_cell_code": "(self, row_id: 'str', column_id: 'str', code_text: 'str', language: 'str', updated_by: 'str', cell_content_hash: 'str', actor: 'str' = '', origin: 'str' = 'user') -> 'str'",
   "user_can_access_notebook": "(self, notebook_id: 'str', user_id: 'str') -> 'bool'",
   "user_can_read_answer": "(self, answer_id: 'str', user_id: 'str') -> 'bool'",
