@@ -159,47 +159,51 @@ def test_embedding_matrix_unscoped_scoped_and_empty(repo):
         nb.id, "knowledge_embeddings", "object_id", object_ids=[]) == ([], [])
 
 
-def test_embedding_matrix_streams_in_batches_not_per_row(repo, monkeypatch):
-    """Guard: the whole-notebook load (object_ids=None) must stream the cursor
-    via fetchmany() in bounded batches — never .fetchall() the whole table (the
-    ~130GB native-BLOB transient that OOM-killed the offline `index` build) and
-    never iterate row-by-row. Row-by-row hits the instrumented
-    _DiagnosticCursor.__next__, which enters sql_scope for EVERY embedding: on
-    the online build path (diagnostics runtime installed) that is the global
-    diagnostics lock twice + a writer wake per row, tens of millions of times at
-    8M-row scale — the P1 codex flagged on PR#340. Reverting to either shape
-    must fail here."""
+def test_embedding_matrix_reads_keyset_pages_not_one_snapshot(repo, monkeypatch):
+    """Guard: the whole-notebook load (object_ids=None) must read bounded keyset
+    pages — each an INDEPENDENT `rowid > ?` statement — never one whole-table
+    read and never row-by-row. A single statement (.fetchall() the whole table,
+    or one long-lived streaming cursor) pins ONE WAL read snapshot for the
+    entire multi-million-row build, blocking checkpoints while concurrent writes
+    append frames → unbounded `-wal` growth (the P1 codex flagged on PR#340
+    round 2). Keyset pages exhaust each statement before the next begins, so the
+    snapshot is released between pages. Row-by-row iteration additionally hits
+    the instrumented _DiagnosticCursor.__next__ (round 1's per-row sql_scope:
+    the global diagnostics lock twice + a writer wake per embedding). Reverting
+    to any of those shapes must fail here."""
     import app.repositories.sqlite.index_projection_store as ips
     from app.repositories.sqlite.database import _DiagnosticCursor
 
     nb = _seeded_notebook(repo)                       # 2 KG objects → 2 vectors
     projections = repo._runtime.index_projections
     object_ids = repo._gather_kg_graph(nb.id)[3]
-    assert len(object_ids) >= 2                        # need >1 row to span batches
+    assert len(object_ids) >= 2                        # need >1 row to span pages
 
-    monkeypatch.setattr(ips, "_MATRIX_FETCH_BATCH", 1)   # force multi-batch reads
+    monkeypatch.setattr(ips, "_MATRIX_FETCH_BATCH", 1)   # force multi-page reads
 
-    counts = {"fetchmany": 0, "next": 0, "fetchall": 0}
-    real_fetchmany = _DiagnosticCursor.fetchmany
+    counts = {"paged": 0, "next": 0}
+    real_execute = _DiagnosticCursor.execute
     real_next = _DiagnosticCursor.__next__
-    real_fetchall = _DiagnosticCursor.fetchall
-    monkeypatch.setattr(_DiagnosticCursor, "fetchmany",
-                        lambda self, *a, **k: (counts.__setitem__("fetchmany", counts["fetchmany"] + 1)
-                                               or real_fetchmany(self, *a, **k)))
+
+    def spy_execute(self, sql, parameters=(), /):
+        # count only the paged vector reads (rowid keyset), not the COUNT(*)
+        if "knowledge_embeddings" in sql and "rowid >" in sql:
+            counts["paged"] += 1
+        return real_execute(self, sql, parameters)
+
+    monkeypatch.setattr(_DiagnosticCursor, "execute", spy_execute)
     monkeypatch.setattr(_DiagnosticCursor, "__next__",
                         lambda self: (counts.__setitem__("next", counts["next"] + 1)
                                       or real_next(self)))
-    monkeypatch.setattr(_DiagnosticCursor, "fetchall",
-                        lambda self: (counts.__setitem__("fetchall", counts["fetchall"] + 1)
-                                      or real_fetchall(self)))
 
     ids, matrix = projections.embedding_matrix(
         nb.id, "knowledge_embeddings", "object_id")
 
-    # completeness: correct + fully shaped regardless of batch boundaries
+    # completeness: correct + fully shaped regardless of page boundaries
     assert set(ids) == set(object_ids)
     assert matrix.shape == (len(object_ids), 16)
-    # shape of the read: batched fetchmany, NOT fetchall, NOT per-row __next__
-    assert counts["fetchmany"] >= 2          # ≥ ceil(n / batch=1) bounded reads
+    # shape of the read: ≥2 independent keyset pages, never per-row __next__.
+    # (whole-table fetchall or a single streaming cursor issue no `rowid >`
+    # statement, so both collapse counts["paged"] to 0 and fail here.)
+    assert counts["paged"] >= 2              # bounded rowid>? pages; snapshot freed between
     assert counts["next"] == 0               # never the instrumented per-row path
-    assert counts["fetchall"] == 0           # never the whole-table materialisation
