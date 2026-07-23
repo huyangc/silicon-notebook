@@ -4,7 +4,9 @@ from app.services.kg.extract import (
     extract_window,
     _prompt,
     _fragment_grounds_something,
+    _refine_response_grounds,
 )
+from app.services.kg.models import Node
 from app.services.kg.parsing import SourceElementQ
 from app.services.kg.run_control import KgBuildAborted, KgBuildFailure
 
@@ -185,3 +187,66 @@ def test_cache_gate_rejects_error_envelopes_even_with_elements():
             {"type": "Concept", "name": "analog signal", "ev": 0}, 5]}),
         ELEMENTS,
     ) is True
+
+
+# ------------------------------- refine cache gate: index type + range vs nodes
+
+# refine 决策针对**当前 node 列表**:refine_nodes 用 index 索引 nodes[index]。缓存门
+# 必须闭包在这份列表上(与 _fragment_grounds_something 闭包 elements 同构)。
+_REFINE_NODES = [
+    Node(id="n0", type="Concept", name="alpha"),
+    Node(id="n1", type="Claim", name="beta"),
+]  # len 2 → 合法 index ∈ {0, 1}
+
+
+def test_refine_gate_caches_a_legal_in_range_decision():
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": 0, "keep": False}]}), _REFINE_NODES
+    ) is True
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": 1, "keep": True}]}), _REFINE_NODES
+    ) is True
+    # 「全保留」= 空决策列表,不是缺 items 键。
+    assert _refine_response_grounds('{"items": []}', _REFINE_NODES) is True
+
+
+def test_refine_gate_rejects_out_of_range_index():
+    """越界 index(999 ≫ len(nodes)=2)下游被 refine_nodes 静默忽略,这条回复其实什么都
+    没精修——把这个 no-op 固化整个 TTL 就是毒。闭包在 nodes 上才挡得住。
+    变异验证:去掉 `0 <= index < len(nodes)` 范围门后本测试转红(degraded 入口无 nodes、
+    挡不住这个变异)。"""
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": 999, "keep": False}]}), _REFINE_NODES
+    ) is False
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": -1, "keep": False}]}), _REFINE_NODES
+    ) is False
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": 2, "keep": False}]}), _REFINE_NODES  # == len,越界
+    ) is False
+    # 一条合法 + 一条越界:整份回复仍不可信(有坏决策)→ 不缓存。
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": 0, "keep": True}, {"index": 999, "keep": False}]}),
+        _REFINE_NODES,
+    ) is False
+
+
+def test_refine_gate_rejects_bool_index_even_when_in_range():
+    """bool 是 int 子类:`index: true` 会被下游当成 index 1(恰好在界内!)消费。
+    `type(index) is int` 排除 True/False,与范围无关。
+    变异验证:把 `type(index) is not int` 换成 `not isinstance(index, int)` 后本测试转红。"""
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": True, "keep": False}]}), _REFINE_NODES  # True==1,界内
+    ) is False
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": False, "keep": False}]}), _REFINE_NODES  # False==0,界内
+    ) is False
+
+
+def test_refine_gate_structural_rejections_hold_with_nodes():
+    assert _refine_response_grounds('{"error": "quota"}', _REFINE_NODES) is False
+    assert _refine_response_grounds('{"items": "nope"}', _REFINE_NODES) is False
+    assert _refine_response_grounds('{}', _REFINE_NODES) is False  # 缺 items ≠ 全保留
+    assert _refine_response_grounds(
+        json.dumps({"items": [{"index": 0, "keep": 1}]}), _REFINE_NODES  # keep 非 bool
+    ) is False
