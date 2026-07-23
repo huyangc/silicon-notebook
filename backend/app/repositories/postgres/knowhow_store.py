@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence
+import re
+from typing import Callable, Iterable, Sequence
 
 from app.repositories.ports import KNOWHOW_COLUMN_KINDS
 from app.repositories.postgres._store_utils import (
@@ -49,6 +50,8 @@ VALID_KINDS = KNOWHOW_COLUMN_KINDS
 #: one exception — its initial column list may name the anchor inline (it
 #: validates the at-most-one rule itself).
 _NON_ANCHOR_KINDS = frozenset({"procedure", "entity", "attribute"})
+_ASSET_IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\(asset://([A-Za-z0-9_-]+)\)")
+
 
 class KnowhowStore:
     """PostgreSQL row persistence for knowhow tables, assets, and code.
@@ -83,12 +86,14 @@ class KnowhowStore:
         self.now = normalized_clock(now)
 
     @staticmethod
-    def _lock_table(db, table_id: str) -> None:
+    def _lock_table(db, table_id: str):
         row = db.execute(
-            "SELECT id FROM knowhow_tables WHERE id=%s FOR UPDATE", (table_id,)
+            "SELECT id, notebook_id FROM knowhow_tables WHERE id=%s FOR UPDATE",
+            (table_id,),
         ).fetchone()
         if row is None:
             raise KeyError(table_id)
+        return row
 
     @classmethod
     def _lock_table_for_row(cls, db, row_id: str) -> str:
@@ -635,7 +640,15 @@ class KnowhowStore:
         row_id = self.new_id("khrow")
         now = self.now()
         with self.database.write() as db:
-            self._lock_table(db, table_id)
+            table = self._lock_table(db, table_id)
+            # Writer lock order is always table -> sorted assets -> row/cells.
+            # Import/append routes all converge here, so parsing the actual new
+            # cell text closes the historical add-row asset-validation bypass.
+            self._lock_required_assets(
+                db,
+                str(table["notebook_id"]),
+                self._required_asset_ids((), (cells or {}).values()),
+            )
             if position is None:
                 count_row = db.execute(
                     "SELECT COUNT(*) AS n FROM knowhow_rows WHERE table_id = %s",
@@ -707,6 +720,51 @@ class KnowhowStore:
             db.execute("DELETE FROM knowhow_rows WHERE id = %s", (row_id,))
 
     # -------------------------------------------------------------- cells
+    @staticmethod
+    def _required_asset_ids(
+        explicit: Sequence[str], contents: Iterable[str]
+    ) -> tuple[str, ...]:
+        """Canonical asset set named either by the caller or by new Markdown.
+
+        The regex mirrors the rendered image form used by the API. Literal
+        ``asset://`` examples in prose/code are not live references and should
+        not turn a harmless formatting write into an asset lookup.
+        """
+        ids = {str(asset_id) for asset_id in explicit if str(asset_id)}
+        for content in contents:
+            ids.update(_ASSET_IMAGE_REF_RE.findall(str(content or "")))
+        return tuple(sorted(ids))
+
+    @staticmethod
+    def _lock_required_assets(
+        db, notebook_id: str, require_assets: Sequence[str]
+    ) -> tuple[str, ...]:
+        """Lock and validate a writer's complete canonical asset set.
+
+        PostgreSQL does not have SQLite's process-wide write mutex. Every cell
+        writer therefore holds its table row first, then takes ``FOR KEY
+        SHARE`` on each distinct asset in lexical order, and only then mutates
+        cells. GC takes only the same sorted asset rows with ``FOR UPDATE``.
+        The shared order prevents asset/asset deadlocks; omitting table locks
+        from GC prevents table/asset inversion.
+
+        Missing rows are collected rather than raising early, so every existing
+        id in the requested set is locked before the full-set validation fails.
+        """
+        ordered = tuple(sorted({str(asset_id) for asset_id in require_assets}))
+        missing: list[str] = []
+        for asset_id in ordered:
+            row = db.execute(
+                "SELECT id FROM notebook_assets "
+                "WHERE id=%s AND notebook_id=%s FOR KEY SHARE",
+                (asset_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                missing.append(asset_id)
+        if missing:
+            raise ValueError(f"asset {missing[0]} is not available here")
+        return ordered
+
     def _require_assets_exist(
         self, db, row_id: str, require_assets: Sequence[str]
     ) -> None:
@@ -733,13 +791,7 @@ class KnowhowStore:
         ).fetchone()
         if owner is None:
             raise ValueError(f"row {row_id} does not exist")
-        for asset_id in require_assets:
-            row = db.execute(
-                "SELECT 1 FROM notebook_assets WHERE id = %s AND notebook_id = %s LIMIT 1",
-                (asset_id, owner["notebook_id"]),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"asset {asset_id} is not available here")
+        self._lock_required_assets(db, str(owner["notebook_id"]), require_assets)
 
     def update_knowhow_cell(
         self,
@@ -760,14 +812,19 @@ class KnowhowStore:
         caller because the orphan-asset sweeper deletes rows concurrently: a
         caller that verified existence first would be reading state that the
         sweeper can invalidate before this write lands, committing a live cell
-        reference to a deleted asset. Both sides now decide under the same
-        write lock, so one of them always loses cleanly — the sweeper's own
-        re-check sees the new reference and spares the asset, or this write
-        sees the deletion and refuses."""
+        reference to a deleted asset. The writer's ``FOR KEY SHARE`` and GC's
+        ``FOR UPDATE`` conflict on the same asset row and are held to commit,
+        so one side always loses cleanly — the sweeper's locked re-check sees
+        the new reference and spares the asset, or this write sees the committed
+        deletion and refuses."""
         now = self.now()
         with self.database.write() as db:
             self._lock_table_for_row(db, row_id)
-            self._require_assets_exist(db, row_id, require_assets)
+            self._require_assets_exist(
+                db,
+                row_id,
+                self._required_asset_ids(require_assets, (content_md,)),
+            )
             db.execute(
                 "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s) "
@@ -823,7 +880,11 @@ class KnowhowStore:
             self._lock_table_for_row(db, row_ids[0])
             # row_ids share a table (documented above), so any of them resolves
             # the same notebook.
-            self._require_assets_exist(db, row_ids[0], require_assets)
+            self._require_assets_exist(
+                db,
+                row_ids[0],
+                self._required_asset_ids(require_assets, (content_md,)),
+            )
             for row_id in row_ids:
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
@@ -912,6 +973,7 @@ class KnowhowStore:
         skipped: list[tuple[str, str]] = []
         already_applied: list[tuple[str, str]] = []
         rejected: list[tuple[str, str]] = []
+        to_write: list[tuple[str, str, str, str]] = []
         written_table_ids: list[str] = []
         with self.database.write() as db:
             # Lock every aggregate table before the phase-1 compare. This
@@ -959,6 +1021,20 @@ class KnowhowStore:
                     else:
                         skipped.append((row_id, column_id))
                     continue
+                to_write.append((table_id, row_id, column_id, content_md))
+
+            # The reviewed-plan path used to write inline during classification,
+            # which left no point where its complete future asset set could be
+            # locked. Classify every target first, then take the same canonical
+            # table -> sorted-assets -> cells order as interactive writers.
+            self._lock_required_assets(
+                db,
+                notebook_id,
+                self._required_asset_ids(
+                    (), tuple(content for _table, _row, _column, content in to_write)
+                ),
+            )
+            for table_id, row_id, column_id, content_md in to_write:
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                     "VALUES (%s, %s, %s, %s, %s) "
@@ -1215,7 +1291,14 @@ class KnowhowStore:
             # row resolves the same notebook (mirrors update_knowhow_cells checking
             # against row_ids[0]). A miss raises ValueError -> whole tx rolls back,
             # nothing written -> caller returns the legacy 400 (not a 409).
-            self._require_assets_exist(db, updates[0][1], require_assets)
+            self._require_assets_exist(
+                db,
+                updates[0][1],
+                self._required_asset_ids(
+                    require_assets,
+                    tuple(content for _table, _row, _column, _before, content in updates),
+                ),
+            )
             # Phase 2: every entry cleared → write them all in this transaction.
             for table_id, row_id, column_id, expected_before, content_md in updates:
                 db.execute(

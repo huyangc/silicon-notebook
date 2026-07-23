@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -14,6 +15,7 @@ from app.models.memory import MemoryWrite
 from app.repositories.postgres.ask_state_store import AskStateStore
 from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.knowhow_store import KnowhowStore
+from app.repositories.postgres.maintenance import PostgresMaintenanceAdapter
 from app.repositories.postgres.memory_store import MemoryStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.services.repository_runtime import RepositoryCompatibilitySeams
@@ -610,6 +612,276 @@ def _knowhow_race_store(postgres_database):
         for _ in range(2)
     ]
     return store, table_id, anchor_id, procedure_id, row_ids
+
+
+def _insert_gc_asset(store, tmp_path, suffix: str):
+    asset_id = store.insert_notebook_asset(
+        "nb-memory-race", f"{suffix}.png", "image/png", 3, "owner-race"
+    )
+    asset_dir = tmp_path / "assets" / "nb-memory-race"
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    asset_path = asset_dir / f"{asset_id}.png"
+    asset_path.write_bytes(b"png")
+    return asset_id, asset_path
+
+
+@pytest.mark.postgres_integration
+def test_asset_writer_first_blocks_gc_then_gc_rechecks_and_retains_reference(
+    postgres_database, tmp_path, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store, _table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
+        postgres_database
+    )
+    asset_id, asset_path = _insert_gc_asset(store, tmp_path, "writer-first")
+    maintenance = PostgresMaintenanceAdapter(
+        SimpleNamespace(database=postgres_database, storage_dir=tmp_path)
+    )
+    writer_locked = threading.Event()
+    allow_writer_commit = threading.Event()
+    gc_lock_attempted = threading.Event()
+    gc_lock_acquired = threading.Event()
+    original_require = store._lock_required_assets
+    original_gc_lock = maintenance._lock_candidate_assets
+
+    def hold_writer_lock(db, notebook_id, asset_ids):
+        result = original_require(db, notebook_id, asset_ids)
+        writer_locked.set()
+        assert allow_writer_commit.wait(timeout=5)
+        return result
+
+    def observe_gc_lock(db, notebook_id, asset_ids):
+        gc_lock_attempted.set()
+        result = original_gc_lock(db, notebook_id, asset_ids)
+        gc_lock_acquired.set()
+        return result
+
+    monkeypatch.setattr(store, "_lock_required_assets", hold_writer_lock)
+    monkeypatch.setattr(maintenance, "_lock_candidate_assets", observe_gc_lock)
+    content = f"![kept](asset://{asset_id})"
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writer = executor.submit(
+            store.update_knowhow_cell,
+            row_ids[0],
+            procedure_id,
+            content,
+            [asset_id],
+        )
+        assert writer_locked.wait(timeout=5)
+        sweep = executor.submit(
+            maintenance.sweep_orphan_assets, "nb-memory-race"
+        )
+        assert gc_lock_attempted.wait(timeout=5)
+        assert not gc_lock_acquired.wait(timeout=0.1)
+        allow_writer_commit.set()
+        writer.result(timeout=10)
+        assert sweep.result(timeout=10) == {"removed": 0}
+
+    assert store.get_notebook_asset(asset_id) is not None
+    assert asset_path.is_file()
+    assert store.get_knowhow_table(_table_id)["rows"][0]["cells"][procedure_id] == content
+
+
+@pytest.mark.postgres_integration
+def test_asset_gc_first_blocks_writer_then_writer_rolls_back_missing_reference(
+    postgres_database, tmp_path, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
+        postgres_database
+    )
+    asset_id, asset_path = _insert_gc_asset(store, tmp_path, "gc-first")
+    maintenance = PostgresMaintenanceAdapter(
+        SimpleNamespace(database=postgres_database, storage_dir=tmp_path)
+    )
+    gc_locked = threading.Event()
+    allow_gc_finish = threading.Event()
+    writer_lock_attempted = threading.Event()
+    writer_lock_acquired = threading.Event()
+    original_require = store._lock_required_assets
+    original_gc_lock = maintenance._lock_candidate_assets
+
+    def hold_gc_lock(db, notebook_id, asset_ids):
+        result = original_gc_lock(db, notebook_id, asset_ids)
+        gc_locked.set()
+        assert allow_gc_finish.wait(timeout=5)
+        return result
+
+    def observe_writer_lock(db, notebook_id, asset_ids):
+        writer_lock_attempted.set()
+        result = original_require(db, notebook_id, asset_ids)
+        writer_lock_acquired.set()
+        return result
+
+    monkeypatch.setattr(maintenance, "_lock_candidate_assets", hold_gc_lock)
+    monkeypatch.setattr(store, "_lock_required_assets", observe_writer_lock)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        sweep = executor.submit(
+            maintenance.sweep_orphan_assets, "nb-memory-race"
+        )
+        assert gc_locked.wait(timeout=5)
+        writer = executor.submit(
+            store.update_knowhow_cell,
+            row_ids[0],
+            procedure_id,
+            f"![gone](asset://{asset_id})",
+            [asset_id],
+        )
+        assert writer_lock_attempted.wait(timeout=5)
+        assert not writer_lock_acquired.wait(timeout=0.1)
+        allow_gc_finish.set()
+        assert sweep.result(timeout=10) == {"removed": 1}
+        with pytest.raises(ValueError, match=asset_id):
+            writer.result(timeout=10)
+
+    assert store.get_notebook_asset(asset_id) is None
+    assert not asset_path.exists()
+    assert store.get_knowhow_table(table_id)["rows"][0]["cells"][procedure_id] == "old"
+
+
+@pytest.mark.postgres_integration
+def test_multi_asset_writers_canonicalize_opposite_orders_without_deadlock_and_validate_all(
+    postgres_database, tmp_path, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store, table_a, _anchor_a, procedure_a, rows_a = _knowhow_race_store(
+        postgres_database
+    )
+    table_b = store.create_knowhow_table(
+        "nb-memory-race",
+        "Other table",
+        "",
+        [{"name": "Procedure", "role": "procedure"}],
+        "owner-race",
+    )
+    procedure_b = store.get_knowhow_table(table_b)["columns"][0]["id"]
+    row_b = store.add_knowhow_row(table_b, {procedure_b: "old"})
+    asset_a, _path_a = _insert_gc_asset(store, tmp_path, "multi-a")
+    asset_b, _path_b = _insert_gc_asset(store, tmp_path, "multi-b")
+    original_lock = store._lock_required_assets
+    barriers = [threading.Barrier(2)]
+    observed_orders: list[tuple[str, ...]] = []
+    observed_lock = threading.Lock()
+
+    def synchronized_lock(db, notebook_id, asset_ids):
+        ordered = tuple(sorted(set(asset_ids)))
+        with observed_lock:
+            observed_orders.append(ordered)
+        barriers[0].wait(timeout=5)
+        return original_lock(db, notebook_id, asset_ids)
+
+    monkeypatch.setattr(store, "_lock_required_assets", synchronized_lock)
+
+    def save(row_id, column_id, requested):
+        content = f"![a](asset://{asset_a}) ![b](asset://{asset_b})"
+        store.update_knowhow_cell(row_id, column_id, content, requested)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            save, rows_a[0], procedure_a, [asset_b, asset_a, asset_b]
+        )
+        second = executor.submit(
+            save, row_b, procedure_b, [asset_a, asset_b]
+        )
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert observed_orders == [tuple(sorted((asset_a, asset_b)))] * 2
+
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE knowhow_cells SET content_md='old' "
+            "WHERE (row_id=%s AND column_id=%s) OR (row_id=%s AND column_id=%s)",
+            (rows_a[0], procedure_a, row_b, procedure_b),
+        )
+        connection.execute("DELETE FROM notebook_assets WHERE id=%s", (asset_b,))
+
+    barriers[0] = threading.Barrier(2)
+    observed_orders.clear()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            save, rows_a[0], procedure_a, [asset_b, asset_a]
+        )
+        second = executor.submit(
+            save, row_b, procedure_b, [asset_a, asset_b]
+        )
+        for future in (first, second):
+            with pytest.raises(ValueError, match=asset_b):
+                future.result(timeout=10)
+    assert observed_orders == [tuple(sorted((asset_a, asset_b)))] * 2
+    assert store.get_knowhow_table(table_a)["rows"][0]["cells"][procedure_a] == "old"
+    assert store.get_knowhow_table(table_b)["rows"][0]["cells"][procedure_b] == "old"
+
+
+@pytest.mark.postgres_integration
+def test_every_postgres_cell_insert_path_rejects_a_missing_rendered_asset(
+    postgres_database,
+):
+    """Add/import, merged, CLI-guarded, and interactive-guarded share one guard."""
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
+        postgres_database
+    )
+    missing = "asset-missing-race"
+    content = f"![missing](asset://{missing})"
+
+    with pytest.raises(ValueError, match=missing):
+        # Fresh import and append both converge on add_knowhow_row.
+        store.add_knowhow_row(table_id, {procedure_id: content})
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cells(row_ids, procedure_id, content)
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cells_bulk_guarded(
+            "nb-memory-race",
+            [(table_id, row_ids[0], procedure_id, "old", content)],
+        )
+    with pytest.raises(ValueError, match=missing):
+        store.update_knowhow_cells_guarded_atomic(
+            "nb-memory-race",
+            [(table_id, row_ids[0], procedure_id, "old", content)],
+        )
+
+    final = store.get_knowhow_table(table_id)
+    assert len(final["rows"]) == 2
+    assert [row["cells"][procedure_id] for row in final["rows"]] == ["old", "old"]
+
+
+@pytest.mark.postgres_integration
+def test_asset_file_unlink_failure_cannot_leave_a_validatable_broken_row(
+    postgres_database, tmp_path, monkeypatch
+):
+    """A filesystem failure may leak a file, never a live row without a file."""
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
+        postgres_database
+    )
+    asset_id, asset_path = _insert_gc_asset(store, tmp_path, "unlink-failure")
+    maintenance = PostgresMaintenanceAdapter(
+        SimpleNamespace(database=postgres_database, storage_dir=tmp_path)
+    )
+    path_type = type(asset_path)
+    original_unlink = path_type.unlink
+
+    def fail_target_unlink(path, *args, **kwargs):
+        if path == asset_path:
+            raise OSError("simulated unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "unlink", fail_target_unlink)
+    assert maintenance.sweep_orphan_assets("nb-memory-race") == {"removed": 1}
+    assert store.get_notebook_asset(asset_id) is None
+    assert asset_path.is_file()  # safe unreachable leak, not a broken live row
+    with pytest.raises(ValueError, match=asset_id):
+        store.update_knowhow_cell(
+            row_ids[0],
+            procedure_id,
+            f"![missing](asset://{asset_id})",
+        )
+    assert store.get_knowhow_table(table_id)["rows"][0]["cells"][procedure_id] == "old"
 
 
 @pytest.mark.postgres_integration

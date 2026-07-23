@@ -1,19 +1,50 @@
 """PostgreSQL maintenance operations required by normal product flows."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 import threading
 import time
 from typing import Any
 
 
+logger = logging.getLogger("silicon_notebook.postgres.maintenance")
+
+
 class PostgresMaintenanceAdapter:
-    """Backend-owned asset GC with the same safety contract as SQLite."""
+    """Backend-owned asset GC with PostgreSQL cross-process row locking."""
 
     def __init__(self, runtime: Any) -> None:
         self._runtime = runtime
         self._orphan_first_seen: dict[tuple[str, str], float] = {}
         self._orphan_marks_lock = threading.Lock()
+
+    @staticmethod
+    def _lock_candidate_assets(
+        db, notebook_id: str, asset_ids: list[str]
+    ) -> tuple[str, ...]:
+        """Take every surviving GC candidate row in canonical order.
+
+        Cell writers hold their table first and then take these same sorted
+        rows ``FOR KEY SHARE``. GC deliberately takes asset locks only (never a
+        table lock), all ``FOR UPDATE``, so the global order is:
+
+        writer: table -> sorted assets -> cell
+        GC:                 sorted assets -> recheck/delete
+
+        This avoids table/asset inversion and asset/asset deadlocks while
+        making the final reference check authoritative across processes.
+        """
+        locked: list[str] = []
+        for asset_id in sorted(set(asset_ids)):
+            row = db.execute(
+                "SELECT id FROM notebook_assets "
+                "WHERE id=%s AND notebook_id=%s AND source_id IS NULL FOR UPDATE",
+                (asset_id, notebook_id),
+            ).fetchone()
+            if row is not None:
+                locked.append(str(row["id"]))
+        return tuple(locked)
 
     def sweep_orphan_assets(
         self,
@@ -87,7 +118,6 @@ class PostgresMaintenanceAdapter:
         if not unreferenced:
             return {"removed": 0}
 
-        asset_dir = Path(self._runtime.storage_dir) / "assets" / notebook_id
         removed: list[str] = []
         with self._runtime.database.write() as db:
             grace_waived = waive_grace_if_no_tables and (
@@ -97,7 +127,15 @@ class PostgresMaintenanceAdapter:
                 ).fetchone()
                 is None
             )
-            for asset_id in unreferenced if grace_waived else orphan_ids:
+            candidates = unreferenced if grace_waived else orphan_ids
+            # Acquire ALL candidate locks before rechecking even one reference.
+            # A writer that won first holds KEY SHARE, so we wait and then see
+            # its committed cell. If GC won first, writers wait here until the
+            # row deletion commits, then fail full-set validation and roll back.
+            locked_candidates = self._lock_candidate_assets(
+                db, notebook_id, candidates
+            )
+            for asset_id in locked_candidates:
                 still_unreferenced = (
                     db.execute(
                         "SELECT 1 FROM knowhow_cells c "
@@ -112,9 +150,6 @@ class PostgresMaintenanceAdapter:
                     with self._orphan_marks_lock:
                         self._orphan_first_seen.pop((notebook_id, asset_id), None)
                     continue
-                for stale_file in asset_dir.glob(f"{asset_id}.*"):
-                    if stale_file.is_file():
-                        stale_file.unlink(missing_ok=True)
                 removed.append(asset_id)
             if removed:
                 with db.cursor() as cursor:
@@ -122,6 +157,23 @@ class PostgresMaintenanceAdapter:
                         "DELETE FROM notebook_assets WHERE id=%s",
                         [(asset_id,) for asset_id in removed],
                     )
+
+        # Filesystem deletion is intentionally AFTER the row-delete transaction
+        # commits. Deleting a file inside a transaction and then rolling the DB
+        # back would resurrect an asset row whose file is gone; a waiting writer
+        # could subsequently save a live broken reference. DB-first means a
+        # commit/rollback failure touches no file. A later unlink failure can
+        # only leak an unreachable orphan file because no writer can validate
+        # the now-absent asset row. Missing files remain harmless/idempotent.
+        asset_dir = Path(self._runtime.storage_dir) / "assets" / notebook_id
+        for asset_id in removed:
+            for stale_file in asset_dir.glob(f"{asset_id}.*"):
+                if not stale_file.is_file():
+                    continue
+                try:
+                    stale_file.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("orphan asset file cleanup failed")
         with self._orphan_marks_lock:
             for asset_id in removed:
                 self._orphan_first_seen.pop((notebook_id, asset_id), None)
