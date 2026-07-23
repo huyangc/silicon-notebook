@@ -520,8 +520,8 @@ class IndexProjectionStore:
         matrices must never become LRU entries. Rows are read in bounded keyset
         pages (rowid > last LIMIT _MATRIX_FETCH_BATCH), each an independent
         fully-exhausted statement — never .fetchall()'d whole, never iterated
-        row-by-row, never a single long-lived streaming cursor. Three
-        properties are load-bearing at 8M-row scale:
+        row-by-row, never a single long-lived streaming cursor. Four properties
+        are load-bearing at 8M-row scale:
           • Memory: the whole-table result set is ~130GB of native BLOBs at
             8M×4096-dim; materialising it alongside the preallocated (already
             truncated) matrix is exactly what OOM-killed the offline `index`
@@ -540,6 +540,13 @@ class IndexProjectionStore:
             checkpoints while concurrent writes append frames → unbounded `-wal`
             growth. build_matrix's n_hint tolerates the row-count drift a
             cross-page concurrent write may cause.
+          • Consistency: rowid is NOT stable across pages — INSERT OR REPLACE
+            re-embeds delete+reinsert a refreshed row at a larger rowid, so a
+            row refreshed after the scan passed it re-surfaces in a later page.
+            _stream_rows de-duplicates by id (keeps the first occurrence), so an
+            id never lands in the ANN twice (stale + current); without it the
+            persisted index would silently carry duplicate/stale entries under
+            an up-to-date manifest.
         The connection stays open across the paged consumption because the
         return runs inside the `with`. A list = fold's bounded delta load,
         batched through the facade's IN-clause chunking with the connection
@@ -555,20 +562,26 @@ class IndexProjectionStore:
                     f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
                     (notebook_id,)).fetchone()["c"]
                 def _stream_rows():
-                    # Keyset pagination by rowid: every page is an INDEPENDENT,
-                    # fully-exhausted statement, so the WAL read snapshot is
-                    # released between pages. A single long-lived cursor (plain
-                    # streaming) would instead pin ONE read snapshot for the
-                    # whole multi-million-row build — on the online rebuild path
-                    # that blocks WAL checkpoints while concurrent imports keep
-                    # appending frames, so `-wal` grows unbounded for the
-                    # (potentially hours-long) build and can exhaust disk. The
-                    # `rowid > ?` range walks idx_{table}_nb in rowid order; the
-                    # last row of each page advances the cursor. build_matrix's
-                    # n_hint tolerates the row-count drift a cross-page
-                    # concurrent write may introduce (over-estimate → prealloc
-                    # slice; under-estimate → list overflow), so pagination
-                    # never spanning a single snapshot is safe here.
+                    # Keyset pagination by rowid, de-duplicated. Each page is an
+                    # INDEPENDENT, fully-exhausted statement, so the WAL read
+                    # snapshot is released between pages — a single long-lived
+                    # cursor would pin ONE snapshot for the whole
+                    # multi-million-row build and block WAL checkpoints under
+                    # concurrent writes → unbounded `-wal` growth. But rowid is
+                    # NOT stable across the scan: the embedding writers use
+                    # INSERT OR REPLACE (embedding_store.py), which
+                    # deletes+reinserts a refreshed row at a LARGER rowid. A row
+                    # refreshed after the scan passed its old rowid would
+                    # re-surface in a later page, and build_matrix would then
+                    # hold BOTH the stale and the current vector under one id.
+                    # `seen` keeps the FIRST occurrence (the value at the id's
+                    # original scan position — snapshot-consistent; the refreshed
+                    # vector is picked up by the next fold/rebuild) and drops any
+                    # re-surfacing, so every id enters the matrix exactly once.
+                    # `rowid > ?` walks idx_{table}_nb in rowid order. n_hint
+                    # (COUNT at start) is an estimate; build_matrix tolerates the
+                    # drift dedup and concurrent writes introduce.
+                    seen: set = set()
                     last_rowid = 0
                     while True:
                         page = db.execute(
@@ -580,7 +593,11 @@ class IndexProjectionStore:
                         if not page:
                             break
                         for row in page:
-                            yield row["vid"], row["vector"]
+                            vid = row["vid"]
+                            if vid in seen:
+                                continue
+                            seen.add(vid)
+                            yield vid, row["vector"]
                         last_rowid = page[-1]["rid"]
                         if len(page) < _MATRIX_FETCH_BATCH:
                             break
