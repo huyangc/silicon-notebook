@@ -41,6 +41,7 @@ from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
+    paper_meta_doc_type_eligible,
     paper_meta_prompt,
     verify_paper_meta,
 )
@@ -472,6 +473,13 @@ class SourceIngestionService:
         retyped = doc_type_explicit and incoming_doc_type != stored_doc_type
         if retyped:
             self.sources.set_doc_type(source_id, incoming_doc_type)
+            # 新类型不再合格抽论文元数据(如 academic→textbook)→ 清掉旧论文元数据。
+            # 否则元数据抽取 gate 会跳过这条源、不再刷新,而 SourceStore 仍拿旧标题/
+            # 作者把它当论文展示/搜索/计数。合格→合格(如 auto→academic)不动;
+            # 判定复用抽取侧同一 predicate(paper_meta_doc_type_eligible),两处不会漂移。
+            # incoming_doc_type 已 normalize,直接喂 predicate。幂等:无元数据行则 no-op。
+            if not paper_meta_doc_type_eligible(incoming_doc_type):
+                self.sources.clear_paper_meta(source_id)
 
         if summary.parse_status == "failed":
             # 失败源重试：解析产物本来就不可信（失败），重跑整条流水线。
@@ -1531,11 +1539,11 @@ class SourceIngestionService:
             return "disabled"
         if source.type in ("memory", "knowhow"):
             return "skipped"
-        doc_type = (
-            self.normalize_doc_type(getattr(source, "doc_type", "") or "")
-            or "academic_paper"
-        )
-        if doc_type != "academic_paper":
+        # 抽取合格判定与「retype 到不合格类型清旧元数据」共用同一 predicate
+        # (paper_meta_doc_type_eligible),单一定义点、不会各写一半再漂移。传入归一化
+        # 后的值('' 表自动/默认,predicate 视为合格)。
+        doc_type = self.normalize_doc_type(getattr(source, "doc_type", "") or "")
+        if not paper_meta_doc_type_eligible(doc_type):
             return "skipped"
         # From here on EVERYTHING is inside the try: the idempotency read,
         # the LLM-configured probe, element/text hydration and the LLM call

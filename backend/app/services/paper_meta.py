@@ -18,6 +18,20 @@ PAPER_META_SCHEMA_HINT = (
     '"venue":"","year":2024,"doi":"","keywords":[""]}'
 )
 
+# 合格做论文元数据抽取的 doc_type 集合(已 normalize_doc_type 归一化后的口径):
+# '' = 自动/默认(下游 `or "academic_paper"` 归入论文侧)与 academic_paper。其它已知
+# 类型(textbook 等)不合格。**唯一定义点**:抽取 gate(ensure_paper_metadata)与
+# 「retype 到不合格类型时清旧元数据」共用同一判定,避免两处各写一遍再各自漂移。
+PAPER_META_DOC_TYPES = ("", "academic_paper")
+
+
+def paper_meta_doc_type_eligible(doc_type: str) -> bool:
+    """这个 doc_type 是否合格抽取论文元数据。传入必须是 **normalize_doc_type 归一化
+    后**的值(已知 profile id,或 '' 表自动/默认);本函数只做集合判定、不重判词表。
+    合格 → 会抽/展示论文元数据;不合格(如 textbook)→ 抽取被 skip,retype 到它时
+    应清掉旧元数据(见 SourceIngestionService.reuse_uploaded_source)。"""
+    return (doc_type or "") in PAPER_META_DOC_TYPES
+
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 # 年份接地用:先挖空疑似 DOI / arXiv-ID 的 token,防年份候选命中其中的数字
 # 游程(如 10.1109/ABCD.2031.999999 里的 2031、arXiv:2007.12345v2 里的 2007)。
