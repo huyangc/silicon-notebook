@@ -103,6 +103,16 @@ class MigrationResult:
 
 
 @dataclass(frozen=True)
+class MigrationVerification:
+    source_path: str
+    snapshot_path: str
+    target_redacted_url: str
+    target_schema: str
+    total_rows: int
+    tables: tuple[TableMigrationStat, ...]
+
+
+@dataclass(frozen=True)
 class _PostgresColumn:
     name: str
     data_type: str
@@ -1043,6 +1053,208 @@ def _write_receipt(path: Path, payload: Mapping[str, Any]) -> Path:
         temporary.unlink(missing_ok=True)
         raise
     return path
+
+
+def _load_migration_receipt(path: Path) -> tuple[Path, Mapping[str, Any]]:
+    raw = Path(path)
+    if raw.is_symlink():
+        raise SqliteToPostgresMigrationError(
+            "migration receipt must not be a symlink"
+        )
+    try:
+        resolved = raw.resolve(strict=True)
+        if not resolved.is_file() or resolved.stat().st_size > 4 * 1024 * 1024:
+            raise SqliteToPostgresMigrationError("migration receipt is invalid")
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except SqliteToPostgresMigrationError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SqliteToPostgresMigrationError(
+            "migration receipt could not be read safely"
+        ) from exc
+    if not isinstance(payload, Mapping) or payload.get("format") != (
+        "silicon-notebook-sqlite-to-postgres-v1"
+    ):
+        raise SqliteToPostgresMigrationError("migration receipt format is invalid")
+    return resolved, payload
+
+
+def _receipt_text(mapping: Mapping[str, Any], key: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value:
+        raise SqliteToPostgresMigrationError("migration receipt is incomplete")
+    return value
+
+
+def _receipt_integer(mapping: Mapping[str, Any], key: str) -> int:
+    value = mapping.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SqliteToPostgresMigrationError("migration receipt is incomplete")
+    return value
+
+
+def _receipt_mapping(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = mapping.get(key)
+    if not isinstance(value, Mapping):
+        raise SqliteToPostgresMigrationError("migration receipt is incomplete")
+    return value
+
+
+def _receipt_table_stats(payload: Mapping[str, Any]) -> tuple[TableMigrationStat, ...]:
+    raw_tables = payload.get("tables")
+    if not isinstance(raw_tables, list):
+        raise SqliteToPostgresMigrationError("migration receipt is incomplete")
+    stats: list[TableMigrationStat] = []
+    seen: set[str] = set()
+    for raw in raw_tables:
+        if not isinstance(raw, Mapping):
+            raise SqliteToPostgresMigrationError("migration receipt is incomplete")
+        table = _receipt_text(raw, "table")
+        checksum = _receipt_text(raw, "checksum")
+        rows = _receipt_integer(raw, "rows")
+        if (
+            table in seen
+            or table not in set(POSTGRES_BUSINESS_TABLES)
+            or not re.fullmatch(r"[0-9a-f]{64}", checksum)
+        ):
+            raise SqliteToPostgresMigrationError(
+                "migration receipt table manifest is invalid"
+            )
+        seen.add(table)
+        stats.append(TableMigrationStat(table=table, rows=rows, checksum=checksum))
+    if seen != set(POSTGRES_BUSINESS_TABLES):
+        raise SqliteToPostgresMigrationError(
+            "migration receipt table manifest is incomplete"
+        )
+    return tuple(stats)
+
+
+def verify_migration_receipt(
+    *,
+    source_path: Path,
+    target_url: str,
+    receipt_path: Path,
+    work_dir: Path,
+    root_dir: Path,
+    batch_rows: int = DEFAULT_BATCH_ROWS,
+    progress: Callable[[str], None] = print,
+) -> MigrationVerification:
+    """Revalidate a completed import before atomically activating PostgreSQL.
+
+    This deliberately repeats the expensive source snapshot and target checksum
+    passes.  A receipt proves what was imported, not that the stopped SQLite
+    source and PostgreSQL target are still at that exact state at cutover time.
+    """
+    if batch_rows <= 0:
+        raise SqliteToPostgresMigrationError("batch_rows must be positive")
+    _, payload = _load_migration_receipt(receipt_path)
+    source_receipt = _receipt_mapping(payload, "source")
+    snapshot_receipt = _receipt_mapping(payload, "snapshot")
+    target_receipt = _receipt_mapping(payload, "target")
+    expected_source = Path(_receipt_text(source_receipt, "path")).resolve()
+    actual_source = _validate_source_path(source_path)
+    if actual_source != expected_source:
+        raise SqliteToPostgresMigrationError(
+            "migration receipt belongs to a different SQLite source"
+        )
+
+    expected_snapshot = Path(_receipt_text(snapshot_receipt, "path"))
+    sealed_snapshot, sealed_hash = validate_existing_snapshot(
+        snapshot_path=expected_snapshot,
+        work_dir=work_dir,
+    )
+    if sealed_hash != _receipt_text(snapshot_receipt, "sha256"):
+        raise SqliteToPostgresMigrationError(
+            "migration receipt snapshot hash does not match the sealed snapshot"
+        )
+
+    expected_redacted_target = _receipt_text(target_receipt, "redacted_url")
+    try:
+        actual_redacted_target = redact_database_url(target_url)
+    except ValueError as exc:
+        raise SqliteToPostgresMigrationError(
+            "migration target URL is invalid"
+        ) from exc
+    if actual_redacted_target != expected_redacted_target:
+        raise SqliteToPostgresMigrationError(
+            "migration receipt belongs to a different PostgreSQL target"
+        )
+    expected_schema = _receipt_text(target_receipt, "schema")
+    expected_stats = _receipt_table_stats(payload)
+    expected_total = _receipt_integer(payload, "total_rows")
+    if sum(stat.rows for stat in expected_stats) != expected_total:
+        raise SqliteToPostgresMigrationError(
+            "migration receipt total row count is inconsistent"
+        )
+
+    progress("正在确认停写后的 SQLite 与迁移快照完全一致…")
+    current_snapshot, current_hash = create_consistent_snapshot(
+        source_path=actual_source,
+        work_dir=work_dir,
+        progress=progress,
+    )
+    if current_hash != sealed_hash:
+        raise SqliteToPostgresMigrationError(
+            "SQLite source changed after the migration snapshot; run a new final migration"
+        )
+
+    progress("正在按 receipt 重新校验 PostgreSQL 全表 checksum…")
+    database = _postgres_database(target_url, root_dir)
+    try:
+        if PostgresMigrator(database).current_version() != (
+            POSTGRES_SCHEMA_MANIFEST.postgres_version
+        ):
+            raise SqliteToPostgresMigrationError(
+                "PostgreSQL target schema version changed after migration"
+            )
+        with database.write(isolation_level="repeatable read") as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            actual_schema = str(
+                connection.execute("SELECT current_schema() AS name").fetchone()["name"]
+            )
+            if actual_schema != expected_schema:
+                raise SqliteToPostgresMigrationError(
+                    "PostgreSQL target schema differs from the migration receipt"
+                )
+            columns = _postgres_columns(connection)
+            if set(columns) != set(POSTGRES_BUSINESS_TABLES):
+                raise SqliteToPostgresMigrationError(
+                    "PostgreSQL target table manifest changed after migration"
+                )
+            for position, expected in enumerate(expected_stats, start=1):
+                progress(
+                    f"ACTIVATION VERIFY {position}/{len(expected_stats)} {expected.table}"
+                )
+                actual = _target_digest(
+                    connection,
+                    table=expected.table,
+                    columns=columns[expected.table],
+                    batch_rows=batch_rows,
+                )
+                if (
+                    actual.count != expected.rows
+                    or actual.hexdigest() != expected.checksum
+                ):
+                    raise SqliteToPostgresMigrationError(
+                        f"PostgreSQL target no longer matches receipt table {expected.table}"
+                    )
+    except SqliteToPostgresMigrationError:
+        raise
+    except Exception as exc:
+        raise SqliteToPostgresMigrationError(
+            "PostgreSQL activation verification failed"
+        ) from exc
+    finally:
+        database.close()
+
+    return MigrationVerification(
+        source_path=str(actual_source),
+        snapshot_path=str(current_snapshot),
+        target_redacted_url=actual_redacted_target,
+        target_schema=expected_schema,
+        total_rows=expected_total,
+        tables=expected_stats,
+    )
 
 
 def migrate(

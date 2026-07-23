@@ -164,23 +164,26 @@ python scripts/migrate_sqlite_to_postgres.py \
    scheduler；等进行中写入结束后停止后端。
 2. 创建一个**新的空最终 PostgreSQL 数据库**。演练目标保存的是旧时间点，会被工具主动拒绝。
    同时按部署策略完成 SQLite、PostgreSQL 常规备份与恢复演练。
-3. 对已停止的 SQLite 源重新执行 preview 与 `--apply`，不要用旧 `--snapshot`。保留最终 sealed
-   snapshot 和 receipt。确认新部署仍能访问同一个 `SILICON_NOTEBOOK_STORAGE_DIR`；若换主机，
-   单独复制并校验这个目录，因为 DB importer 不复制文件。
-4. 先备份 `.env`，再只改唯一 selector。SQLite 写法：
+3. 对已停止的 SQLite 源重新执行 preview，然后用一个命令完成最终迁移和本地配置原子激活
+   （所有路径必须是绝对路径）：
 
-   ```text
-   DATABASE_URL=sqlite:///.local/silicon_notebook.db
+   ```bash
+   python scripts/migrate_sqlite_to_postgres.py \
+     --source /absolute/path/to/.local/silicon_notebook.db \
+     --work-dir /protected/path/postgres-migration \
+     --apply \
+     --activate-env /absolute/path/to/.env \
+     --confirm-service-stopped
    ```
 
-   PostgreSQL 写法：
-
-   ```text
-   DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/FINAL_DB
-   ```
-
-   不要拿 `SHADOW_DATABASE_URL` 当 selector，也不要留下两行未注释的 `DATABASE_URL`。重启后端；
-   部署仍固定 `--workers 1`。
+   激活阶段会再次生成 SQLite 快照并重算 PostgreSQL 每张表的 checksum，全部匹配 receipt 后才
+   原子替换 `.env`；不匹配时 `.env` 保持不变。保留最终 sealed snapshot、receipt 和权限受限的
+   `.env.pre-postgres-*.bak`。确认新部署仍能访问同一个 `SILICON_NOTEBOOK_STORAGE_DIR`；若换主机，
+   单独复制并校验这个目录，因为 DB importer 不复制文件。已经完成迁移且 SQLite 此后一直停写时，
+   可用 `--activation-receipt /absolute/path/migration-*.receipt.json` 代替 `--apply`，仍会执行相同
+   的全量校验。CLI 把 PostgreSQL 写成唯一 `DATABASE_URL`，旧 SQLite URL 只保存为惰性的
+   `SHADOW_DATABASE_URL`；CLI 不负责停止或启动进程。
+4. 重启后端，部署仍固定 `--workers 1`。receipt 校验和启动之间不要再手工改 selector。
 5. 放流量前要求 `curl -fsS http://127.0.0.1:8000/api/ready` 返回 `"ready": true`；分别用 admin
    和普通用户登录；按 receipt 核对 notebook/source 数量；检查搜索和 Ask/Knowledge/Memory/
    Knowhow/report 代表性读取与引用文件；最后做一次明确批准的 canary 写入并等其后台任务结束。
