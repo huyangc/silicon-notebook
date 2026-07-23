@@ -16,7 +16,9 @@ import {
 } from "./agent-token-model";
 import { requestJson } from "./api-client.ts";
 import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
+import { FloatingModalCard } from "./floating-modal-card";
 import { resolvePromotionTarget, type MountedBase } from "./notebook-bases";
+import { useFloatingWindow } from "./use-floating-window";
 import {
   canEditMemory,
   canPromoteMemory,
@@ -1284,14 +1286,16 @@ export function MemoryPanel({
       <Pagination page={page} pageSize={MEMORY_PAGE_SIZE} total={total} busy={loading} onPage={setPage} />
       {pendingDelete && (
         <div className="utility-modal utility-modal-top" role="dialog" aria-modal="true" aria-label="确认删除">
-          <div className="utility-modal-card memory-confirm-card">
-            <h3>{pendingDelete.kind === "bulk" ? `删除选中的 ${selectedIds.size} 条记忆？` : "删除这条记忆？"}</h3>
+          <FloatingModalCard storageKey="memory.delete.window" className="utility-modal-card memory-confirm-card">
+            {(floating) => (<>
+            <h3 {...floating.dragHandleProps}>{pendingDelete.kind === "bulk" ? `删除选中的 ${selectedIds.size} 条记忆？` : "删除这条记忆？"}</h3>
             <p>删除后不可恢复。</p>
             <div className="memory-dialog-actions">
               <button type="button" disabled={Boolean(busyId)} onClick={() => setPendingDelete(null)}>取消</button>
               <button type="button" className="danger" disabled={Boolean(busyId)} onClick={confirmDelete}>删除</button>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </div>
       )}
       {/* C4「复制/移动到…」：单条来自卡片操作区(source=该条自己的
@@ -1332,8 +1336,9 @@ export function MemoryPanel({
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionMemory(null); }}
         >
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="memory.promotion.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>选择贡献目标</h2>
                 <p>这条记忆所在的笔记本挂载了多个公共知识库，请选择要进入哪一个。</p>
@@ -1360,7 +1365,8 @@ export function MemoryPanel({
                 </button>
               ))}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
     </section>
@@ -1391,6 +1397,7 @@ export function MemorySaveDialog({
   const mountedRef = useRef(true);
   const previewControllerRef = useRef<AbortController | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
+  const floating = useFloatingWindow({ storageKey: "memory.save.window", resizable: false });
 
   useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
     previewControllerRef.current?.abort();
@@ -1478,8 +1485,8 @@ export function MemorySaveDialog({
 
   return (
     <section className="utility-modal memory-save-modal" role="dialog" aria-modal="true" aria-label="保存回答到记忆">
-      <div className="utility-modal-card memory-save-card">
-        <header>
+      <div ref={floating.cardRef} className="utility-modal-card memory-save-card" style={floating.style}>
+        <header {...floating.dragHandleProps}>
           <div className="memory-save-title">
             <span className="memory-save-icon"><Bookmark size={16} /></span>
             <div>

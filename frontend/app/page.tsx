@@ -101,6 +101,7 @@ import {
   testAllSystemModelServices,
   testSystemModelService,
 } from "./model-services.ts";
+import { FloatingModalCard } from "./floating-modal-card";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
@@ -1990,6 +1991,18 @@ export default function Home() {
       return null;
     }
   }
+
+  // While the model-service panel is open, keep 并发/排队/最久等待 relatively live by
+  // re-reading the status snapshot every 2s. The GET is in-memory only (no model calls),
+  // so it stays cheap; it is gated to panel-open and torn down on close. 延迟/上次检查
+  // stay probe-driven by design — making those live would mean actively pinging models.
+  useEffect(() => {
+    if (!modelPanelOpen) return;
+    const poll = window.setInterval(() => { void refreshModelStatus(); }, 2000);
+    return () => window.clearInterval(poll);
+    // refreshModelStatus only touches refs + setState (stable); gate solely on open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelPanelOpen]);
 
   async function loadNotebookCollection() {
     // The model status request reads only the persisted local snapshot. It is
@@ -4275,8 +4288,9 @@ export default function Home() {
 
       {createOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setCreateOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.create.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>新建笔记本</h2>
                 <p>只需名称与描述。描述留空时会在你添加首批来源后自动生成。文档类型在上传每个文件时选择。</p>
@@ -4295,14 +4309,16 @@ export default function Home() {
                 <button className="sort-button" onClick={() => setCreateOpen(false)}>取消</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {shareModal && currentNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setShareModal(null); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.share.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>分享「{currentNotebook.name}」</h2>
                 <p>{shareModal.copyable
@@ -4332,14 +4348,16 @@ export default function Home() {
                 <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {sharedPreview && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedPreview(null); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.sharedPreview.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>{sharedPreview.name}</h2>
                 <p>由 {sharedPreview.owner_display} 分享 · {sharedPreview.source_count} 来源 · {sharedPreview.node_count} 节点 · {sharedPreview.edge_count} 边</p>
@@ -4389,14 +4407,16 @@ export default function Home() {
                 <button className="sort-button" onClick={() => setSharedPreview(null)}>取消</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {sharedByMeOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedByMeOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>已分享</h2>
                 <p>你分享出去的笔记本。较小的可被他人拷贝为独立副本;较大的以只读方式共享,下方列出已加入的只读成员。</p>
@@ -4463,14 +4483,16 @@ export default function Home() {
                 <button className="new-pill" onClick={() => setSharedByMeOpen(false)}>完成</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {sourceModalOpen && (
         <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSourceModalOpen(false); }}>
-          <div className="source-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="source.add.window" className="source-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
@@ -4565,7 +4587,8 @@ export default function Home() {
                 </div>
               </div>
             )}
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -4581,8 +4604,9 @@ export default function Home() {
 
       {editingNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true">
-          <div className="utility-modal-card notebook-edit-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>编辑笔记本</h2>
                 <p>第一版先手动修改标题、描述和领域；后续会由大模型从来源中补全。</p>
@@ -4657,14 +4681,16 @@ export default function Home() {
                 <button type="submit" className="new-pill">保存</button>
               </div>
             </form>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {deleteNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true">
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.delete.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>删除笔记本</h2>
                 <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；{NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING}</p>
@@ -4680,14 +4706,16 @@ export default function Home() {
               <button className="sort-button" onClick={() => setDeleteNotebook(null)}>取消</button>
               <button className="new-pill danger-pill" onClick={() => confirmDeleteNotebook().catch(reportError)}>确认</button>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {infoModal && (
         <section className="utility-modal utility-modal-top" role="dialog" aria-modal="true">
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="info.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>{infoModal.title}</h2>
                 <p>{infoModal.message}</p>
@@ -4735,7 +4763,8 @@ export default function Home() {
                 ))
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -4839,8 +4868,9 @@ export default function Home() {
 
       {analytics && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics(); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="analytics.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>知识分析看板</h2>
                 <p>回答质量、审核进度、知识覆盖、来源状态与索引构建状态的本机统计。</p>
@@ -5057,14 +5087,16 @@ export default function Home() {
                 <p className="tool-hint">加载索引与构建状态…</p>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {schemaModalOpen && capabilities.canManageSchemas && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSchemaModalOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>内容类型管理</h2>
                 <p>管理要分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
@@ -5082,14 +5114,16 @@ export default function Home() {
                 onInduce={() => induceSchemas().catch(reportError)}
               />
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {graphOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setGraphOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="graph.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>知识关系图</h2>
                 <p>由各知识对象的关系字段（related_concepts / claims / formulas / procedures）解析出的关联，供蕴含分析与冲突检测使用。</p>
@@ -5118,7 +5152,8 @@ export default function Home() {
                 </div>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5457,8 +5492,9 @@ export default function Home() {
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setPromoOpen(false); }}
         >
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="promotion.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>内容审核</h2>
                 <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入所选的目标公共知识库。</p>
@@ -5553,7 +5589,8 @@ export default function Home() {
                 </div>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5564,8 +5601,9 @@ export default function Home() {
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionObjectId(null); }}
         >
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="promotionTarget.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>选择贡献目标</h2>
                 <p>本笔记本挂载了多个公共知识库，请选择这条知识要进入哪一个。</p>
@@ -5588,7 +5626,8 @@ export default function Home() {
                 </button>
               ))}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5599,8 +5638,9 @@ export default function Home() {
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setEdgeReviewOpen(false); }}
         >
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="edgeReview.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>关系审核队列</h2>
                 <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
@@ -5644,7 +5684,8 @@ export default function Home() {
                 </div>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 

@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import { requestJson } from "./api-client.ts";
 import { toUserMessage } from "./errors.ts";
+import { useFloatingWindow } from "./use-floating-window";
 import type { NotebookSummary } from "./workspace-model.ts";
 import { destinationNotebooks, type TransferMode } from "./transfer-model.ts";
 
@@ -46,6 +47,7 @@ export function DestinationPicker({
   const [mode, setMode] = useState<TransferMode>("copy");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const floating = useFloatingWindow({ storageKey: "transfer.picker.window", resizable: false });
 
   // allowMove 从 true 翻成 false 时把 mode 拽回 copy。当前调用方都是「每次传输重新
   // 挂载一个新实例」,所以 mode 不可能在 allowMove=false 的实例上变成 move;但这是
@@ -92,8 +94,8 @@ export function DestinationPicker({
 
   return (
     <div className="utility-modal utility-modal-top" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="utility-modal-card narrow transfer-picker-card">
-        <h3>{title}</h3>
+      <div ref={floating.cardRef} className="utility-modal-card narrow transfer-picker-card" style={floating.style}>
+        <h3 {...floating.dragHandleProps}>{title}</h3>
         <label className="transfer-target-field">
           目标笔记本
           <select value={target} disabled={busy} onChange={(e) => setTarget(e.target.value)}>

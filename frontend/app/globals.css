@@ -4268,14 +4268,17 @@ button.chat-session-card {
   padding: 20px 24px 24px;
 }
 
-.model-service-toolbar {
+/* 标题栏右侧的操作簇：「测试全部」+ 关闭 ×，成组右对齐、顶端对齐标题。 */
+.model-service-header-actions {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
+  align-items: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
 .model-service-test-all {
   font-weight: 750;
+  white-space: nowrap;
 }
 
 .model-service-status-list {
@@ -5009,15 +5012,6 @@ button.chat-session-card {
 
   .model-service-body {
     padding-inline: 14px;
-  }
-
-  .model-service-toolbar {
-    justify-content: stretch;
-  }
-
-  .model-service-test-all {
-    width: 100%;
-    white-space: normal;
   }
 
   .model-service-metrics {

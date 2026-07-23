@@ -8,6 +8,7 @@ import {
   type ModelServicesStatus,
 } from "./model-services.ts";
 import { SupportIdCopy } from "./support-id-copy";
+import { useFloatingWindow } from "./use-floating-window";
 import { label, MODEL_SERVICE_STATUS_ERROR } from "./vocabulary";
 
 function checkedTime(item: ModelServiceStatusItem): string {
@@ -156,6 +157,7 @@ export function ModelServicePanel({
   const serviceRefs = useRef<Record<string, HTMLElement | null>>({});
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
+  const floating = useFloatingWindow({ storageKey: "modelService.window", resizable: false });
   const anyTesting = Object.values(testingServiceIds).some(Boolean);
 
   useEffect(() => {
@@ -224,17 +226,14 @@ export function ModelServicePanel({
       aria-labelledby="model-service-title"
       onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}
     >
-      <div className="utility-modal-card model-service-card">
-        <div className="source-modal-header">
+      <div ref={floating.cardRef} className="utility-modal-card model-service-card" style={floating.style}>
+        <div className="source-modal-header" {...floating.dragHandleProps}>
           <div>
             <h2 id="model-service-title">模型服务状态</h2>
             <p>模型由系统统一管理；此处展示实时并发和最近检查结果</p>
           </div>
-          <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭模型服务" onClick={onClose}>×</button>
-        </div>
-        <div className="source-detail-body model-service-body">
-          {isAdmin && (
-            <div className="model-service-toolbar">
+          <div className="model-service-header-actions">
+            {isAdmin && (
               <button
                 type="button"
                 className="sort-button model-service-test-all"
@@ -243,8 +242,11 @@ export function ModelServicePanel({
               >
                 {allTesting ? "测试全部中…" : "测试全部"}
               </button>
-            </div>
-          )}
+            )}
+            <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭模型服务" onClick={onClose}>×</button>
+          </div>
+        </div>
+        <div className="source-detail-body model-service-body">
           {!status ? (
             <p className="tool-hint">正在读取模型状态…</p>
           ) : status.services.length === 0 ? (
