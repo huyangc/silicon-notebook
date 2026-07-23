@@ -91,7 +91,8 @@ from app.services.knowhow.ids import (
     cell_chunk_id,
     element_id,
 )
-from app.services.source_embedding import EmbeddingProviderFailure, SourceEmbeddingService
+from app.services.model_work import ModelProviderError
+from app.services.source_embedding import SourceEmbeddingService
 from app.services.vector_index import decode_vector
 
 _CHUNK_CHAR_LIMIT = 4000
@@ -415,7 +416,7 @@ class KnowhowProjector:
                         failed = True
                         self.note_model_error(
                             "knowhow_vector_restore",
-                            self.settings.embed_model,
+                            "",
                             exc,
                             service="embedding",
                             provider_failure=False,
@@ -424,21 +425,18 @@ class KnowhowProjector:
                 if embed_targets and not failed:
                     try:
                         self.embedding.embed_chunk_ids(notebook_id, embed_targets)
-                    except EmbeddingProviderFailure as exc:
+                    except ModelProviderError as exc:
                         failed = True
                         self.note_model_error(
                             "knowhow_embed",
-                            self.settings.embed_model,
-                            exc.__cause__ or exc,
-                            service="embedding",
-                            provider_failure=True,
-                            failed_fingerprint=exc.failed_fingerprint,
+                            exc,
+                            workload_id="knowhow_embedding",
                         )
                     except Exception as exc:  # noqa: BLE001 — local vector write is best-effort
                         failed = True
                         self.note_model_error(
                             "knowhow_vector_persist",
-                            self.settings.embed_model,
+                            "",
                             exc,
                             service="embedding",
                             provider_failure=False,

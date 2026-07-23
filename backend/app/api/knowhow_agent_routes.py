@@ -145,9 +145,17 @@ async def put_agent_cell_code(
         not_found_detail="Row not found",
     ) as actor:
         try:
+            # knowhow 表版本管理 Task 13 code review: this route is reachable
+            # by EITHER a session user or an Agent Bearer token (see the
+            # module docstring / user_or_agent_scope) — origin must reflect
+            # WHICH one actually wrote this, not silently default to "user"
+            # for both (put_cell_code's own default), or an agent-authored
+            # code attachment would be indistinguishable from a human's in
+            # the history timeline.
             return await run_in_threadpool(
                 knowhow_api.put_cell_code, repo, row_id, column_id,
                 body.code_text, body.language, actor.actor_label,
+                origin="agent" if actor.is_agent else "user",
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
@@ -165,9 +173,14 @@ async def delete_agent_cell_code(row_id: str, column_id: str, request: Request) 
     async with user_or_agent_scope(
         request, location["notebook_id"], "knowhow:code", write=True,
         not_found_detail="Row not found",
-    ):
+    ) as actor:
         try:
-            await run_in_threadpool(knowhow_api.delete_cell_code, repo, row_id, column_id)
+            # Same origin-attribution fix as put_agent_cell_code above.
+            await run_in_threadpool(
+                knowhow_api.delete_cell_code, repo, row_id, column_id,
+                actor=actor.actor_label,
+                origin="agent" if actor.is_agent else "user",
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except KeyError:

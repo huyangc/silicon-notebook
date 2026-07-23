@@ -6,23 +6,67 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import (
     admin_query_repository,
     get_current_user,
+    model_status_service,
+    identity_repository,
     repository,
     require_notebook_access,
     user_error,
 )
 from app.models.admin import (
     AdminUserNotebook,
+    AdminUserRoleResult,
+    AdminUserRoleUpdate,
+    AdminUserUploadLimitResult,
     AdminUserUsage,
     PromoteRequest,
     PromotionApproveResult,
     PromotionCandidate,
     PromotionRejectRequest,
+    UploadLimitDefaultResult,
+    UploadLimitDefaultUpdate,
+    UploadLimitUpdate,
 )
 from app.models.identity import UserProfile
+from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
+from app.services.model_status import ModelStatusService
+from app.repositories.identity_errors import (
+    BuiltinAdminDemotionError,
+    SelfDemotionError,
+)
 from app.services.pending_bus import pending_bus
 
 
 router = APIRouter()
+
+
+@router.post(
+    "/admin/model-services/{service_id}/test",
+    response_model=ModelServiceStatusItem,
+)
+def test_system_model_service(
+    service_id: str,
+    user: UserProfile = Depends(get_current_user),
+    status_service: ModelStatusService = Depends(model_status_service),
+) -> ModelServiceStatusItem:
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可测试模型服务")
+    try:
+        return status_service.test_one(service_id, actor_id=user.id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Model service not found")
+
+
+@router.post(
+    "/admin/model-services/test-all",
+    response_model=ModelServicesStatus,
+)
+def test_all_system_model_services(
+    user: UserProfile = Depends(get_current_user),
+    status_service: ModelStatusService = Depends(model_status_service),
+) -> ModelServicesStatus:
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可测试模型服务")
+    return status_service.test_all(actor_id=user.id)
 
 
 # --- Governance: promotion queue (Track F) ------------------------------
@@ -102,7 +146,96 @@ async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> Lis
     loop = asyncio.get_running_loop()
     rows = await loop.run_in_executor(None, admin_query_repository().list_user_usage)
     online = pending_bus.online_user_ids()
-    return [AdminUserUsage(**row, is_online=row["id"] in online) for row in rows]
+    return [
+        AdminUserUsage(
+            **row,
+            is_online=row["id"] in online,
+            role_mutable=row["id"] not in {"user-local", user.id},
+        )
+        for row in rows
+    ]
+
+
+@router.patch("/admin/users/{user_id}/role", response_model=AdminUserRoleResult)
+def update_admin_user_role(
+    user_id: str,
+    payload: AdminUserRoleUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserRoleResult:
+    """Grant or revoke administrator access. Existing sessions observe it next request."""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户权限")
+    try:
+        result = identity_repository().set_user_role(user.id, user_id, payload.role)
+    except PermissionError:
+        raise user_error(403, "仅管理员可管理用户权限")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="User not found")
+    except BuiltinAdminDemotionError:
+        raise user_error(409, "内置管理员权限不可撤销")
+    except SelfDemotionError:
+        raise user_error(409, "不能撤销当前账户的管理员权限")
+    return AdminUserRoleResult(**result)
+
+
+@router.get(
+    "/admin/settings/upload-limit-default", response_model=UploadLimitDefaultResult
+)
+def get_upload_limit_default(
+    user: UserProfile = Depends(get_current_user),
+) -> UploadLimitDefaultResult:
+    """当前全局默认「每笔记本文档数量上限」。仅 admin。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看文档上限设置")
+    return UploadLimitDefaultResult(
+        limit=identity_repository().global_document_limit_default()
+    )
+
+
+@router.patch(
+    "/admin/settings/upload-limit-default", response_model=UploadLimitDefaultResult
+)
+def update_upload_limit_default(
+    payload: UploadLimitDefaultUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> UploadLimitDefaultResult:
+    """设置全局默认「每笔记本文档数量上限」。仅 admin。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可修改文档上限设置")
+    try:
+        result = identity_repository().set_global_document_limit_default(
+            user.id, payload.limit
+        )
+    except PermissionError:
+        raise user_error(403, "仅管理员可修改文档上限设置")
+    except ValueError:
+        raise user_error(400, "文档上限需在 1 到 100000 之间")
+    return UploadLimitDefaultResult(**result)
+
+
+@router.patch(
+    "/admin/users/{user_id}/upload-limit", response_model=AdminUserUploadLimitResult
+)
+def update_admin_user_upload_limit(
+    user_id: str,
+    payload: UploadLimitUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserUploadLimitResult:
+    """给某用户设/清「每笔记本文档数量上限」覆盖值(limit=null 清除、回落全局默认)。
+    仅 admin。返回改动后该用户的生效上限与是否仍为覆盖值。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户文档上限")
+    try:
+        result = identity_repository().set_user_document_limit_override(
+            user.id, user_id, payload.limit
+        )
+    except PermissionError:
+        raise user_error(403, "仅管理员可管理用户文档上限")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="User not found")
+    except ValueError:
+        raise user_error(400, "文档上限需在 1 到 100000 之间")
+    return AdminUserUploadLimitResult(**result)
 
 
 @router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])

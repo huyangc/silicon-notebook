@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -101,27 +101,19 @@ import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledge
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import {
-  MODEL_ROLES,
-  type ModelRole,
   type ModelServiceStatusItem,
   type ModelServicesStatus,
-  type ServiceForm,
-  type StatusModelRole,
   fetchModelServiceStatus,
-  fetchModelSettings,
-  modelSettingsForms,
-  saveModelSettings,
-  testAllCurrentModelServices,
-  testCurrentModelService,
-  testModelService,
-} from "./model-settings.ts";
+  testAllSystemModelServices,
+  testSystemModelService,
+} from "./model-services.ts";
+import { FloatingModalCard } from "./floating-modal-card";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
   acceptModelServiceStatusSnapshot,
   applyModelServiceTestResult,
   deriveModelServiceSummaryView,
-  prepareModelSettingsSave,
   type ModelTestActivity,
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
@@ -202,7 +194,8 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, MODEL_TEST_ERROR } from "./vocabulary";
+import { resolveDocumentCapacity } from "./document-limit";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -386,7 +379,7 @@ function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary
   return GENERIC_PROMPTS;
 }
 
-function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[]): WelcomeCopy {
+function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[], total: number): WelcomeCopy {
   const notebookPurpose = notebook?.purpose?.trim();
   if (sources.length === 0) {
     return {
@@ -398,7 +391,7 @@ function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary
   const topic = sourceTopicLabel(notebook, sources);
   return {
     title: `围绕 ${topic} 提问`,
-    description: notebookPurpose || `已导入 ${sources.length} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
+    description: notebookPurpose || `已导入 ${total} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
     prompts: promptChipsFor(notebook, sources),
   };
 }
@@ -674,6 +667,13 @@ export default function Home() {
   const [outerView, setOuterView] = useState<"notebooks" | "memory">("notebooks");
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [sourcesTotal, setSourcesTotal] = useState(0);
+  // sourcesTotal follows the source-list filter (it holds the search-matched count
+  // while a source search is active, which pagination needs). The Ask composer / welcome
+  // copy instead want the notebook's imported-source total regardless of that filter, so
+  // track it separately: updated only on unfiltered loads and on source mutations.
+  // 文档上限门控也复用它：notebookSourceTotal 是不受来源搜索过滤影响的可见文档真实
+  // 总数（与后端 list_sources_page 无过滤时的 total_count 同口径，排除 memory/knowhow）。
+  const [notebookSourceTotal, setNotebookSourceTotal] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
   const [sourceQuery, setSourceQuery] = useState("");
@@ -719,18 +719,15 @@ export default function Home() {
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   const [toast, setToast] = useState("");
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
-  const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
-  const [modelTesting, setModelTesting] = useState<Partial<Record<ModelRole, string>>>({});
   const [modelStatusState, setModelStatusState] = useState({
     status: null as ModelServicesStatus | null,
     unavailable: false,
   });
   const modelStatus = modelStatusState.status;
   const modelStatusUnavailable = modelStatusState.unavailable;
-  const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
-  const [modelPanelSaving, setModelPanelSaving] = useState(false);
+  const [highlightedModelServiceId, setHighlightedModelServiceId] = useState<string | null>(null);
   const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({
-    roles: {}, drafts: {}, all: false,
+    services: {}, all: false,
   });
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
@@ -814,9 +811,7 @@ export default function Home() {
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
-  const modelPanelRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
-  const modelPanelSavingRef = useRef(false);
   const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
@@ -1767,7 +1762,7 @@ export default function Home() {
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
-  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources), [currentNotebook, sources]);
+  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources, notebookSourceTotal), [currentNotebook, sources, notebookSourceTotal]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentKgBuildView = kgBuildPresentation(
@@ -2011,6 +2006,30 @@ export default function Home() {
     }
   }
 
+  // While the model-service panel is open, keep 并发/排队/最久等待 relatively live by
+  // re-reading the status snapshot every 2s. The GET is in-memory only (no model calls),
+  // so it stays cheap; it is gated to panel-open and torn down on close. 延迟/上次检查
+  // stay probe-driven by design — making those live would mean actively pinging models.
+  // Serialize: schedule the next poll only after the current one settles (not a fixed
+  // interval), so a request slower than 2s can't pile up overlapping in-flight polls —
+  // which, because refreshModelStatus bumps modelStatusRequestRef at request start, would
+  // otherwise keep discarding every response and never update under sustained latency.
+  useEffect(() => {
+    if (!modelPanelOpen) return;
+    let cancelled = false;
+    let timer = 0;
+    const scheduleNext = () => {
+      timer = window.setTimeout(async () => {
+        await refreshModelStatus();
+        if (!cancelled) scheduleNext();
+      }, 2000);
+    };
+    scheduleNext();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+    // refreshModelStatus only touches refs + setState (stable); gate solely on open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelPanelOpen]);
+
   async function loadNotebookCollection() {
     // The model status request reads only the persisted local snapshot. It is
     // deliberately detached so a missing status endpoint cannot hide notebooks.
@@ -2024,8 +2043,8 @@ export default function Home() {
       healthResponse.status !== "ok"
         ? "服务连接异常"
         : healthResponse.llm_configured
-          ? "服务正常"
-          : "服务正常 · 模型未配置",
+        ? "服务正常"
+          : "服务正常 · 模型服务不可用",
     );
     setNotebooks(notebookResponse);
     if (docTypeOptions.length === 0) {
@@ -2067,6 +2086,9 @@ export default function Home() {
     // 不传 guard 的调用方(用户主动翻页/搜索)行为与此前逐字一致。
     if (opts.guard && !opts.guard()) return;
     setSourcesTotal(result.total_count);
+    // Only an unfiltered page reflects the notebook's true source total; a search query
+    // returns the matched subset, which must not become the Ask surfaces' count.
+    if (!q) setNotebookSourceTotal(result.total_count);
     setSources(result.items);
     setSourcesPage(pageNum);
   }
@@ -2100,6 +2122,7 @@ export default function Home() {
     setTitleDraft(notebook.name);
     setSources(sourcesPage.items);
     setSourcesTotal(sourcesPage.total_count);
+    setNotebookSourceTotal(sourcesPage.total_count);
     setSourcesPage(0);
     setSourceQuery("");
     setBuildingKg(shouldResumeKgBuild(notebook));
@@ -2395,6 +2418,7 @@ export default function Home() {
     const uploaded = await uploadSources(currentNotebookId, formData);
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
     setSourcesTotal((t) => t + uploaded.length);
+    setNotebookSourceTotal((t) => t + uploaded.length);
     await loadNotebookCollection();
     setStagedFiles([]);
     setStagedDocTypes([]);
@@ -2418,6 +2442,16 @@ export default function Home() {
           ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
           ...result.created,
         ]);
+        // Maintain only the Ask surfaces' count (notebookSourceTotal, unfiltered) optimistically.
+        // sourcesTotal (source-list pagination + Source Stack header) is deliberately left to
+        // re-sync on the next source-page fetch: it tracks the *applied* source-search filter, and
+        // there is no reliable applied-query signal here — sourceQuery is the editable draft (search
+        // applies only on Enter), not necessarily what produced the current page — so optimistically
+        // bumping it risks either a stale count or a phantom filtered page. This matches the pre-#332
+        // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
+        // bump is pre-existing and out of scope here. 文档上限门控也读 notebookSourceTotal，
+        // 故链接导入 +N 后满额判定同步跟进。
+        setNotebookSourceTotal((t) => t + result.created.length);
         await loadNotebookCollection();
       }
       setUrlRejected(result.rejected);
@@ -2467,6 +2501,7 @@ export default function Home() {
     await deleteSourceRequest(source.id);
     setSources((previous) => previous.filter((item) => item.id !== source.id));
     setSourcesTotal((t) => Math.max(0, t - 1));
+    setNotebookSourceTotal((t) => Math.max(0, t - 1));
     if (sourceDetail?.id === source.id) {
       setSourceDetail(null);
       setSourceElements([]);
@@ -2904,7 +2939,7 @@ export default function Home() {
     try {
       await updateObjectSchema(objectType, patch);
       await loadSchemas();
-      setToast("内容类型已更新");
+      setToast("类型已更新");
     } finally {
       setSchemaBusy(false);
     }
@@ -3138,7 +3173,7 @@ export default function Home() {
     try {
       const proposals = await proposeObjectSchemas(currentNotebookId);
       await loadSchemas();
-      setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或未配置 LLM）");
+      setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或模型服务暂不可用）");
     } finally {
       setSchemaBusy(false);
     }
@@ -3395,68 +3430,27 @@ export default function Home() {
     window.location.reload();
   }
 
-  async function openModelPanel(role: StatusModelRole | null = null) {
-    const requestId = ++modelPanelRequestRef.current;
+  function openModelPanel(serviceId: string | null = null) {
     modelPanelReturnFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    const coordinator = modelTestCoordinatorRef.current;
-    coordinator.invalidateDrafts();
-    setModelTesting({});
-    setModelTestActivity(coordinator.snapshot());
-    setHighlightedModelRole(role);
+    setHighlightedModelServiceId(serviceId);
     setModelPanelOpen(true);
     void refreshModelStatus();
-    try {
-      const view = await fetchModelSettings();
-      const forms = modelSettingsForms(view);
-      if (requestId === modelPanelRequestRef.current) setModelForms(forms);
-    } catch (e) {
-      if (requestId === modelPanelRequestRef.current) {
-        setModelPanelOpen(false);
-        modelPanelReturnFocusRef.current?.focus();
-        reportError(e);
-      }
-    }
   }
 
   function closeModelPanel() {
-    modelPanelRequestRef.current += 1;
     setModelPanelOpen(false);
-    setHighlightedModelRole(null);
+    setHighlightedModelServiceId(null);
   }
 
-  async function saveModelPanel() {
+  async function runSystemModelTest(serviceId: string): Promise<ModelServiceStatusItem | null> {
     const coordinator = modelTestCoordinatorRef.current;
-    if (!modelForms || modelPanelSavingRef.current || coordinator.hasInFlight()) return;
-    const payload = prepareModelSettingsSave(modelForms);
-    if (!payload) return;
-    modelPanelSavingRef.current = true;
-    coordinator.invalidateConfiguration();
-    setModelTesting({});
-    modelStatusRequestRef.current += 1;
-    setModelPanelSaving(true);
-    try {
-      const view = await saveModelSettings(payload);
-      setModelForms(modelSettingsForms(view));
-      await refreshModelStatus();
-      setToast("模型服务配置已保存");
-    } catch (e) {
-      reportError(e);
-    } finally {
-      modelPanelSavingRef.current = false;
-      setModelPanelSaving(false);
-    }
-  }
-
-  async function runCurrentModelTest(role: StatusModelRole): Promise<ModelServiceStatusItem | null> {
-    const coordinator = modelTestCoordinatorRef.current;
-    if (modelPanelSavingRef.current) return null;
-    const ticket = coordinator.beginOne(role);
+    const ticket = coordinator.beginOne(serviceId);
     if (!ticket) return null;
     setModelTestActivity(coordinator.snapshot());
     try {
-      const item = await testCurrentModelService(role);
+      const item = await testSystemModelService(serviceId);
       if (!coordinator.isCurrent(ticket)) return null;
       modelStatusRequestRef.current += 1;
       setModelStatusState((current) => applyModelServiceTestResult(current, item, "single"));
@@ -3471,50 +3465,18 @@ export default function Home() {
     }
   }
 
-  async function runAllCurrentModelTests() {
+  async function runAllSystemModelTests() {
     const coordinator = modelTestCoordinatorRef.current;
-    if (modelPanelSavingRef.current) return;
     const ticket = coordinator.beginAll();
     if (!ticket) return;
     setModelTestActivity(coordinator.snapshot());
     try {
-      const result = await testAllCurrentModelServices();
+      const result = await testAllSystemModelServices();
       if (!coordinator.isCurrent(ticket)) return;
       modelStatusRequestRef.current += 1;
       setModelStatusState((current) => applyModelServiceTestResult(current, result, "all"));
     } catch (e) {
       if (coordinator.isCurrent(ticket)) reportError(e);
-    } finally {
-      coordinator.finish(ticket);
-      setModelTestActivity(coordinator.snapshot());
-    }
-  }
-
-  async function runModelTest(role: ModelRole) {
-    const coordinator = modelTestCoordinatorRef.current;
-    if (!modelForms || modelPanelSavingRef.current) return;
-    const ticket = coordinator.beginDraft(role);
-    if (!ticket) return;
-    const f = modelForms[role];
-    setModelTestActivity(coordinator.snapshot());
-    setModelTesting((m) => ({ ...m, [role]: "测试中…" }));
-    try {
-      const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
-        f.keyDirty ? f.api_key : null);
-      if (!coordinator.isCurrent(ticket)) return;
-      // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
-      // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
-      setModelTesting((m) => ({
-        ...m,
-        [role]: r.ok
-          ? `通 ${r.latency_ms}ms`
-          : `失败：${label(MODEL_TEST_ERROR, r.code, "连接未通过")}`,
-      }));
-    } catch (e) {
-      if (coordinator.isCurrent(ticket)) {
-        setModelTesting((m) => ({ ...m, [role]: "失败" }));
-        reportError(e);
-      }
     } finally {
       coordinator.finish(ticket);
       setModelTestActivity(coordinator.snapshot());
@@ -3542,6 +3504,16 @@ export default function Home() {
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
   // 只读共享库(Phase 2):无写权,门控写按钮 + 显示只读徽章/退出入口。
   const isReader = currentNotebook?.access === "reader";
+  // 文档数量上限:管理员豁免(写路径 owner-only ⇒ 当前用户即 owner);document_limit
+  // 只在 getNotebook 详情里是真值(列表投影是 0 哨兵),故 0/缺失当「未知」不门控。
+  // 计数用 notebookSourceTotal(不受来源搜索过滤影响的真实可见文档总数),不用 sourcesTotal
+  // ——后者在搜索态是匹配子集计数,会让满额笔记本在搜索时误判未满。
+  const docCapacity = resolveDocumentCapacity({
+    isAdmin: currentUser?.role === "admin",
+    documentLimit: currentNotebook?.document_limit,
+    documentCount: notebookSourceTotal,
+  });
+  const atDocCapacityHint = "已达该笔记本的文档数量上限，无法继续添加文档。";
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
     currentUser?.role ?? "",
@@ -3809,12 +3781,8 @@ export default function Home() {
                   <LayoutDashboard size={17} />
                   <span>看板</span>
                 </button>
-                {capabilities.canManageSchemas && (
-                  <button className="workspace-nav-button" onClick={openSchemas}>
-                    <Database size={17} />
-                    <span>内容类型</span>
-                  </button>
-                )}
+                {/* 图谱 Schema(原「内容类型」)已并入知识图谱视图,入口挪到 kg-view 头部
+                    的「图谱 Schema」按钮(仍 admin 门控),此处不再单列顶层导航项。 */}
                 <button className="workspace-nav-button" onClick={() => openKgView()}>
                   <Network size={17} />
                   <span>知识图谱</span>
@@ -3830,15 +3798,23 @@ export default function Home() {
                   </button>
                 )}
                 <button className="workspace-nav-button" onClick={() => openModelPanel()}>
+                  <Cpu size={17} />
                   <span>模型服务</span>
                 </button>
-                <button className="workspace-nav-button" onClick={() => setInfoModal({
-                  title: "设置",
-                  message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与笔记本编辑入口。`,
-                  actions: capabilities.canWriteNotebook
-                    ? [{ label: "编辑当前笔记本", primary: true, action: () => openNotebookEditor(currentNotebook).catch(reportError) }]
-                    : []
-                })}>
+                {/* 设置直接进入笔记本编辑器(去掉原先「设置弹窗 → 编辑当前笔记本」的二级跳转);
+                    只读访客拿不到 editor 数据(listMountable/listBases 是 owner-only,访客 404),
+                    故只读时退回一句只读说明,不打开编辑器。 */}
+                <button className="workspace-nav-button" onClick={() => {
+                  if (capabilities.canWriteNotebook) {
+                    openNotebookEditor(currentNotebook).catch(reportError);
+                  } else {
+                    setInfoModal({
+                      title: "设置",
+                      message: "当前笔记本为只读；模型服务由系统统一管理。",
+                      actions: []
+                    });
+                  }
+                }}>
                   <Settings size={17} />
                   <span>设置</span>
                 </button>
@@ -4225,9 +4201,9 @@ export default function Home() {
                             buildingScaleIndex={buildingScaleIndex}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
-                            onTestModel={runCurrentModelTest}
-                            onOpenModelSettings={(role) => { void openModelPanel(role); }}
-                            testingModelRoles={modelTestActivity.roles}
+                            onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
+                            onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
+                            testingModelServices={modelTestActivity.services}
                             testingAllModels={modelTestActivity.all}
                           />
                         </div>
@@ -4305,7 +4281,7 @@ export default function Home() {
                   onAbort={abortAsk}
                   running={asking}
                 >
-                  <span>{sources.length} 个来源</span>
+                  <span>{notebookSourceTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
                       <button
@@ -4396,8 +4372,9 @@ export default function Home() {
 
       {createOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setCreateOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.create.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>新建笔记本</h2>
                 <p>只需名称与描述。描述留空时会在你添加首批来源后自动生成。文档类型在上传每个文件时选择。</p>
@@ -4416,14 +4393,16 @@ export default function Home() {
                 <button className="sort-button" onClick={() => setCreateOpen(false)}>取消</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {shareModal && currentNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setShareModal(null); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.share.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>分享「{currentNotebook.name}」</h2>
                 <p>{shareModal.copyable
@@ -4453,14 +4432,16 @@ export default function Home() {
                 <button className="new-pill" onClick={() => setShareModal(null)}>完成</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {sharedPreview && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedPreview(null); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.sharedPreview.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>{sharedPreview.name}</h2>
                 <p>由 {sharedPreview.owner_display} 分享 · {sharedPreview.source_count} 来源 · {sharedPreview.node_count} 节点 · {sharedPreview.edge_count} 边</p>
@@ -4510,14 +4491,16 @@ export default function Home() {
                 <button className="sort-button" onClick={() => setSharedPreview(null)}>取消</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {sharedByMeOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSharedByMeOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.sharedByMe.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>已分享</h2>
                 <p>你分享出去的笔记本。较小的可被他人拷贝为独立副本;较大的以只读方式共享,下方列出已加入的只读成员。</p>
@@ -4584,34 +4567,48 @@ export default function Home() {
                 <button className="new-pill" onClick={() => setSharedByMeOpen(false)}>完成</button>
               </div>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {sourceModalOpen && (
         <section className="source-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSourceModalOpen(false); }}>
-          <div className="source-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="source.add.window" className="source-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
               <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
-            <label className="drop-zone">
-              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
+            {docCapacity.show && (
+              <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
+                <span className="source-doc-capacity-count">文档 {docCapacity.count} / {docCapacity.limit}</span>
+                {docCapacity.atCapacity && (
+                  <span className="source-doc-capacity-hint">
+                    已达该笔记本的文档数量上限，如需继续添加，请先删除部分文档，或联系管理员调整上限。
+                  </span>
+                )}
+              </div>
+            )}
+            <label className={`drop-zone${docCapacity.atCapacity ? " is-disabled" : ""}`} title={docCapacity.atCapacity ? atDocCapacityHint : undefined}>
+              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={docCapacity.atCapacity} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
               <small>支持 {SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。</small>
             </label>
             <div className="source-action-row">
-              <label className="source-action-button">
+              <label className={`source-action-button${docCapacity.atCapacity ? " is-disabled" : ""}`} title={docCapacity.atCapacity ? atDocCapacityHint : undefined}>
                 <Upload size={18} strokeWidth={2.5} /> 上传文件
-                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
+                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={docCapacity.atCapacity} />
               </label>
               <button
                 type="button"
                 className={`source-action-button${linkSectionOpen ? " is-active" : ""}`}
+                disabled={docCapacity.atCapacity}
+                title={docCapacity.atCapacity ? atDocCapacityHint : undefined}
                 onClick={() => { setUrlRejected([]); setLinkSectionOpen((open) => !open); }}
               >
                 <ExternalLink size={18} strokeWidth={2.5} /> 添加链接
@@ -4638,7 +4635,7 @@ export default function Home() {
                   </div>
                 )}
                 <div className="tag-row">
-                  <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources().catch(reportError)}>
+                  <button className="new-pill" disabled={urlBusy || docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => submitUrlSources().catch(reportError)}>
                     {urlBusy ? "添加中…" : "添加并解析"}
                   </button>
                   <button className="sort-button" onClick={() => { setUrlText(""); setUrlRejected([]); setLinkSectionOpen(false); }}>取消</button>
@@ -4681,12 +4678,13 @@ export default function Home() {
                   ))}
                 </div>
                 <div className="tag-row">
-                  <button className="new-pill" onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
+                  <button className="new-pill" disabled={docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
                   <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); }}>清空</button>
                 </div>
               </div>
             )}
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -4702,21 +4700,28 @@ export default function Home() {
 
       {editingNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true">
-          <div className="utility-modal-card notebook-edit-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.edit.window" className="utility-modal-card notebook-edit-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>编辑笔记本</h2>
-                <p>第一版先手动修改标题、描述和领域；后续会由大模型从来源中补全。</p>
+                <h2>笔记本设置</h2>
+                <p>编辑当前笔记本的信息与参考库。模型服务由系统统一管理。</p>
               </div>
               <button className="icon-button" onClick={() => setEditingNotebook(null)} title="Close">×</button>
             </div>
-            <form className="edit-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
-              <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
-              <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
-              <label>领域关键词<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
-              <div className="base-picker">
-                <span className="base-picker-title">参考库</span>
-                <p className="base-picker-desc">检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
+            <form className="edit-form notebook-settings-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
+              <section className="settings-section">
+                <div className="settings-section-head"><h3>基本信息</h3></div>
+                <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
+                <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
+                <label>领域关键词<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
+              </section>
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>参考库</h3>
+                  <p>检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
+                </div>
+                <div className="base-picker">
                 {(() => {
                   // 最终整支审查 BLOCKER 1:必须渲染 mountable ∪ mountEdges 的并集,而不是
                   // 只渲染 mountable——失效边(active=false)按 MOUNT_VALID_EXPR 定义永远不在
@@ -4767,25 +4772,33 @@ export default function Home() {
                 {mountCostHint(mountedIds.length) && (
                   <p className="base-picker-hint">{mountCostHint(mountedIds.length)}</p>
                 )}
-              </div>
-              <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
-              <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
-              <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
-              <label>分类 taxonomy（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
-              <label>访问范围<input name="access_scope" defaultValue={editingNotebook.access_scope ?? ""} maxLength={80} /></label>
-              <div className="modal-actions">
+                </div>
+              </section>
+              <section className="settings-section">
+                <div className="settings-section-head"><h3>更多信息</h3></div>
+                <div className="settings-grid-2">
+                  <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
+                  <label>访问范围<input name="access_scope" defaultValue={editingNotebook.access_scope ?? ""} maxLength={80} /></label>
+                </div>
+                <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
+                <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
+                <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
+              </section>
+              <div className="modal-actions settings-footer">
                 <button type="button" className="sort-button" onClick={() => setEditingNotebook(null)}>取消</button>
                 <button type="submit" className="new-pill">保存</button>
               </div>
             </form>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {deleteNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true">
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="notebook.delete.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>删除笔记本</h2>
                 <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；{NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING}</p>
@@ -4801,14 +4814,16 @@ export default function Home() {
               <button className="sort-button" onClick={() => setDeleteNotebook(null)}>取消</button>
               <button className="new-pill danger-pill" onClick={() => confirmDeleteNotebook().catch(reportError)}>确认</button>
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {infoModal && (
         <section className="utility-modal utility-modal-top" role="dialog" aria-modal="true">
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="info.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>{infoModal.title}</h2>
                 <p>{infoModal.message}</p>
@@ -4856,7 +4871,8 @@ export default function Home() {
                 ))
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -4960,8 +4976,9 @@ export default function Home() {
 
       {analytics && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics(); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="analytics.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>知识分析看板</h2>
                 <p>回答质量、审核进度、知识覆盖、来源状态与索引构建状态的本机统计。</p>
@@ -5178,17 +5195,19 @@ export default function Home() {
                 <p className="tool-hint">加载索引与构建状态…</p>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {schemaModalOpen && capabilities.canManageSchemas && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setSchemaModalOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="schema.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>内容类型管理</h2>
-                <p>管理要分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
+                <h2>图谱 Schema</h2>
+                <p>管理要从来源中分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
               </div>
               <button className="icon-button" onClick={() => setSchemaModalOpen(false)} title="Close">×</button>
             </div>
@@ -5203,14 +5222,16 @@ export default function Home() {
                 onInduce={() => induceSchemas().catch(reportError)}
               />
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
       {graphOpen && (
         <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setGraphOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="graph.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>知识关系图</h2>
                 <p>由各知识对象的关系字段（related_concepts / claims / formulas / procedures）解析出的关联，供蕴含分析与冲突检测使用。</p>
@@ -5239,7 +5260,8 @@ export default function Home() {
                 </div>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5247,7 +5269,22 @@ export default function Home() {
         <section className="kg-view" role="dialog" aria-modal="true">
           <div className="kg-view-header">
             <div><h2>知识图谱</h2><p>Object 级知识图谱：Concept / Claim / Formula / Procedure 同屏展示。节点名称、类型形状和边标签直接画在主视图中。</p></div>
-            <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
+            <div className="kg-view-header-actions">
+              {/* 「图谱 Schema」= 原顶层导航「内容类型」,已并入本视图(仍 admin 门控):
+                  定义要从来源中分析出的知识对象类型与字段。打开的是既有 SchemaManager
+                  弹窗(utility-modal z:60 > kg-view z:50,正确叠在本视图之上)。 */}
+              {capabilities.canManageSchemas && (
+                <button
+                  type="button"
+                  className="sort-button kg-schema-button"
+                  onClick={openSchemas}
+                  title="定义要从来源中分析出的知识对象类型与字段"
+                >
+                  <Database size={16} /> 图谱 Schema
+                </button>
+              )}
+              <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
+            </div>
           </div>
           <div className="kg-view-body">
             <aside className="kg-rail">
@@ -5578,8 +5615,9 @@ export default function Home() {
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setPromoOpen(false); }}
         >
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="promotion.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>内容审核</h2>
                 <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入所选的目标公共知识库。</p>
@@ -5674,7 +5712,8 @@ export default function Home() {
                 </div>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5685,8 +5724,9 @@ export default function Home() {
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionObjectId(null); }}
         >
-          <div className="utility-modal-card narrow">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="promotionTarget.window" className="utility-modal-card narrow">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>选择贡献目标</h2>
                 <p>本笔记本挂载了多个公共知识库，请选择这条知识要进入哪一个。</p>
@@ -5709,7 +5749,8 @@ export default function Home() {
                 </button>
               ))}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5720,8 +5761,9 @@ export default function Home() {
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setEdgeReviewOpen(false); }}
         >
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
+          <FloatingModalCard storageKey="edgeReview.window" className="utility-modal-card">
+            {(floating) => (<>
+            <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
                 <h2>关系审核队列</h2>
                 <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
@@ -5765,7 +5807,8 @@ export default function Home() {
                 </div>
               )}
             </div>
-          </div>
+            </>)}
+          </FloatingModalCard>
         </section>
       )}
 
@@ -5773,29 +5816,16 @@ export default function Home() {
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
-      {modelPanelOpen && modelForms && (
+      {modelPanelOpen && (
         <ModelServicePanel
-          forms={modelForms}
           status={modelStatus}
-          highlightedRole={highlightedModelRole}
-          draftTestResults={modelTesting}
-          onFormChange={(role, form) => {
-            if (modelPanelSavingRef.current) return;
-            const coordinator = modelTestCoordinatorRef.current;
-            coordinator.invalidateDraft(role);
-            setModelTesting((current) => ({ ...current, [role]: "" }));
-            setModelTestActivity(coordinator.snapshot());
-            setModelForms((current) => current && ({ ...current, [role]: form }));
-          }}
-          onTestDraft={(role) => { void runModelTest(role); }}
-          onTestCurrent={async (role) => { await runCurrentModelTest(role); }}
-          onTestAll={runAllCurrentModelTests}
+          highlightedServiceId={highlightedModelServiceId}
+          isAdmin={currentUser.role === "admin"}
+          onTestOne={async (serviceId) => { await runSystemModelTest(serviceId); }}
+          onTestAll={runAllSystemModelTests}
           onClose={closeModelPanel}
-          onSave={() => { void saveModelPanel(); }}
-          testingRoles={modelTestActivity.roles}
-          draftTestingRoles={modelTestActivity.drafts}
+          testingServiceIds={modelTestActivity.services}
           allTesting={modelTestActivity.all}
-          saving={modelPanelSaving}
           returnFocusTo={modelPanelReturnFocusRef.current}
         />
       )}
@@ -6052,7 +6082,7 @@ const FIELD_LABELS: Record<string, string> = {
 
 /**
  * 知识对象字段名的界面名。未命中时**刻意**原样显示 key —— 与 relationLabel 的中性
- * 兜底相反,理由是 object schema 允许用户自建类型与字段(「内容类型管理」里的新增
+ * 兜底相反,理由是 object schema 允许用户自建类型与字段(「图谱 Schema」里的新增
  * 类型 / 归纳候选),此时 key 就是用户自己起的名字,原样显示才诚实;换成中性词反而
  * 把用户唯一能辨认这个字段的信息抹掉。故它不是「兜底即原值」那个 bug,而是一条经
  * 评审的透出路径,写法与 kg-type-mark.tsx 透出自定义 object_type 保持一致。

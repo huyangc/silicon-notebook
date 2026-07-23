@@ -7,6 +7,7 @@ import {
   SAVE_AND_NEXT_LABEL,
   CANCEL_LABEL,
   EDIT_LABEL,
+  HISTORY_LABEL,
   ROW_CONTEXT_TOGGLE_LABEL,
   RESTORE_DRAFT_LABEL,
   DISCARD_DRAFT_LABEL,
@@ -124,6 +125,28 @@ test("底部三按钮文案：与规格②路A 原文逐字一致", () => {
 
 test("EDIT_LABEL: 与规格⑤「编辑」按钮同词", () => {
   assert.strictEqual(EDIT_LABEL, "编辑");
+});
+
+test("HISTORY_LABEL: knowhow 表版本管理 Task 16「历史」入口按钮同词", () => {
+  assert.strictEqual(HISTORY_LABEL, "历史");
+});
+
+// 接线（Task 16 + codex 第 6 轮 P2）：两个「历史」按钮的离开语义不同——
+//  · 预览态：只读、无未保存文字 → onClick 直调 onHistory；
+//  · 编辑态：可能有未保存文字 → onClick 经 performLeave({kind:"history"}) 走
+//    与 Esc/关闭同一套 commitLeave 草稿落盘守卫，绝不在存储不可用时静默丢字。
+// 变异验证：把编辑态按钮改回 onClick={onHistory}（绕开守卫），本测试转红
+// （直调计数变 2、经守卫计数变 0）。手法同本文件其余「按 onClick 绑定找按钮」，
+// 不依赖源码行号/排版。
+test("接线（Task 16 / codex#6 P2）：预览态直调 onHistory；编辑态经 performLeave 走草稿守卫", () => {
+  const buttons = jsxElements(editorModule, "button");
+  const onClicks = buttons.map(({ bindings }) => bindings?.onClick).filter(Boolean);
+  const directHistory = onClicks.filter((expr) => expr === "onHistory");
+  assert.equal(directHistory.length, 1, "只有预览态那一个直调 onHistory");
+  const guardedHistory = onClicks.filter(
+    (expr) => expr.includes("performLeave") && expr.includes("history"),
+  );
+  assert.equal(guardedHistory.length, 1, "编辑态经 performLeave({kind:'history'}) 走草稿守卫");
 });
 
 test("ROW_CONTEXT_TOGGLE_LABEL: 与任务简报原话「本行其他格子」一致", () => {

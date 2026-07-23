@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { httpErrorStatus } from "./errors.ts";
 
 import {
   rewriteAssetUrls,
@@ -32,6 +33,16 @@ import {
   fetchKnowhowRowCodeByColumn,
   mapCitationKnowhowRef,
   uploadNotebookAsset,
+  fetchKnowhowHistory,
+  fetchKnowhowChange,
+  fetchKnowhowHistoryDiff,
+  fetchKnowhowCellHistory,
+  revertKnowhowTable,
+  parseKnowhowRevertFailure,
+  KnowhowRevertError,
+  createKnowhowMilestone,
+  deleteKnowhowMilestone,
+  pruneKnowhowHistory,
 } from "./knowhow-model.ts";
 
 const healthTables = [
@@ -443,6 +454,37 @@ test("patchKnowhowCell: 省略 expectedBefore 时请求体不含 expected_before
   });
 });
 
+// --- patchKnowhowCell: origin（knowhow 表版本管理 Task 14，第 7 个位置参数）---
+// 后端 KnowhowCellPatch.origin 契约：省略时不进请求体，退回后端默认 "user"
+// （既有手动编辑器调用点字节不变）；"从历史恢复此格" 等新调用点需要显式传
+// "revert"，时间线上才分得清"手动改的"与"从历史恢复的"。
+
+test("patchKnowhowCell: 省略 origin 时请求体不带该字段", () => {
+  const wire = { row_id: "r1", column_id: "c1", content_md: "x", projection_status: "pending" };
+  return withFetchStub(wire, async (calls) => {
+    await patchKnowhowCell("nb-1", "t1", "r1", "c1", "x");
+    assert.deepStrictEqual(bodyOf(calls[0]), { content_md: "x" });
+  });
+});
+
+test("patchKnowhowCell: 传 origin 时请求体带 origin（从历史恢复要能区分来源）", () => {
+  const wire = { row_id: "r1", column_id: "c1", content_md: "x", projection_status: "pending" };
+  return withFetchStub(wire, async (calls) => {
+    await patchKnowhowCell("nb-1", "t1", "r1", "c1", "x", undefined, "revert");
+    assert.deepStrictEqual(bodyOf(calls[0]), { content_md: "x", origin: "revert" });
+  });
+});
+
+test("patchKnowhowCell: origin 与 expectedBefore 同时提供时请求体两个键都带（批量规整保存路径）", () => {
+  const wire = { row_id: "r1", column_id: "c1", content_md: "x", projection_status: "pending" };
+  return withFetchStub(wire, async (calls) => {
+    await patchKnowhowCell("nb-1", "t1", "r1", "c1", "x", "旧内容", "llm_reformat");
+    assert.deepStrictEqual(bodyOf(calls[0]), {
+      content_md: "x", expected_before: "旧内容", origin: "llm_reformat",
+    });
+  });
+});
+
 // --- reformatKnowhowCell（P1-a：回带 source_md）------------------------------
 
 test("reformatKnowhowCell: POST 到 .../reformat，响应 source_md 映射为 sourceMd（连同 candidate/source/changed）", () => {
@@ -558,6 +600,26 @@ test("batchPatchKnowhowCells: 省略 anchor 守卫时请求体不含 anchor_colu
     const body = bodyOf(calls[0]);
     assert.strictEqual("anchor_column_id" in body, false);
     assert.strictEqual("expected_anchor" in body, false);
+  });
+});
+
+// --- batchPatchKnowhowCells: origin（knowhow 表版本管理 Task 14）--------------
+// 合并/共享格的批量规整回填走这条端点保存，需要自己的 origin 才能在时间线上
+// 被记成 "llm_reformat" 而不是永远静默落回默认的 "user"（design doc §8.1 尾）。
+
+test("batchPatchKnowhowCells: 省略 origin 时请求体不带该字段", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", { columnId: "c1", rowIds: ["r1"], contentMd: "x" });
+    assert.strictEqual("origin" in bodyOf(calls[0]), false);
+  });
+});
+
+test("batchPatchKnowhowCells: 传 origin 时请求体带 origin", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1", rowIds: ["r1"], contentMd: "x", origin: "llm_reformat",
+    });
+    assert.strictEqual(bodyOf(calls[0]).origin, "llm_reformat");
   });
 });
 
@@ -1024,5 +1086,385 @@ test("importKnowhowPreview: 清空行标题（anchorIndex=null）→ 发 anchor_
   return withFetchStub(WIRE_PREVIEW, async (calls) => {
     await importKnowhowPreview("nb-1", new Blob(["x"]), "columns", null);
     assert.strictEqual(calls[0].init.body.get("anchor_index"), "-1");
+  });
+});
+
+// =============================================================================
+// knowhow 表版本管理 Task 14：历史时间线 / 单条详情 / 两版对比 / 单格历史 /
+// 回退 / 里程碑 / 清理——wire 契约测试。
+//
+// 这些端点由 Task 12 落地在 backend/app/api/knowhow_routes.py，四个读端点没有
+// 独立 response_model（路由把 store 的 dict 原样返回），字段名逐一对照
+// backend/app/repositories/sqlite/knowhow_history_store.py /
+// backend/app/services/knowhow/history.py 的真实返回值写就，不是本任务简报
+// 定稿前的猜测（差异见任务报告）。每个测试都断言 URL 不含双 /api——PR#207 的
+// 教训是后端 TestClient 直打不经前端拼接，看不出这类问题，只有这层契约测试
+// 才是真正的防线。
+// =============================================================================
+
+// --- fetchKnowhowHistory -----------------------------------------------------
+
+test("fetchKnowhowHistory: GET .../history（无可选参数时 URL 不带查询串），响应字段名映射", () => {
+  const wire = {
+    head_seq: 53,
+    changes: [
+      {
+        id: "khchg-53", table_id: "t1", seq: 53, kind: "cell_update", actor: "user-1",
+        origin: "user", fingerprint: "fp-53", note: "",
+        created_at: "2026-07-22T14:30:00",
+        payload: { cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "B" }] },
+      },
+    ],
+    milestones: [
+      {
+        id: "khms-1", table_id: "t1", seq: 40, name: "v1.0", note: "上线里程碑",
+        created_by: "user-1", created_at: "2026-07-20T00:00:00", stale: false,
+      },
+    ],
+  };
+  return withFetchStub(wire, async (calls) => {
+    const page = await fetchKnowhowHistory("nb-1", "t1");
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/history$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.deepStrictEqual(page, {
+      headSeq: 53,
+      changes: [
+        {
+          id: "khchg-53", tableId: "t1", seq: 53, kind: "cell_update", actor: "user-1",
+          origin: "user", fingerprint: "fp-53", note: "",
+          createdAt: "2026-07-22T14:30:00",
+          payload: { cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "B" }] },
+        },
+      ],
+      milestones: [
+        {
+          id: "khms-1", tableId: "t1", seq: 40, name: "v1.0", note: "上线里程碑",
+          createdBy: "user-1", createdAt: "2026-07-20T00:00:00", stale: false,
+        },
+      ],
+    });
+  });
+});
+
+test("fetchKnowhowHistory: beforeSeq/limit/milestonesOnly 三个可选参数各自映射为 before_seq/limit/milestones_only", () => {
+  const wire = { head_seq: 10, changes: [], milestones: [] };
+  return withFetchStub(wire, async (calls) => {
+    await fetchKnowhowHistory("nb-1", "t1", 42, 20, true);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/history\?/);
+    const url = new URL(calls[0].url);
+    assert.strictEqual(url.searchParams.get("before_seq"), "42");
+    assert.strictEqual(url.searchParams.get("limit"), "20");
+    assert.strictEqual(url.searchParams.get("milestones_only"), "true");
+  });
+});
+
+test("fetchKnowhowHistory: 里程碑数组为空、changes 为空时也能正常映射（新建表首次拉取）", () => {
+  return withFetchStub({ head_seq: 0, changes: [], milestones: [] }, async () => {
+    const page = await fetchKnowhowHistory("nb-1", "t1");
+    assert.deepStrictEqual(page, { headSeq: 0, changes: [], milestones: [] });
+  });
+});
+
+// --- fetchKnowhowChange -------------------------------------------------------
+
+test("fetchKnowhowChange: GET .../history/{seq}，单条变更详情字段名映射", () => {
+  const wire = {
+    id: "khchg-12", table_id: "t1", seq: 12, kind: "column_rename", actor: "user-2",
+    origin: "user", fingerprint: "fp-12", note: "",
+    created_at: "2026-07-15T10:00:00",
+    payload: { column_id: "c1", before: "旧名", after: "新名" },
+  };
+  return withFetchStub(wire, async (calls) => {
+    const change = await fetchKnowhowChange("nb-1", "t1", 12);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/history\/12$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.deepStrictEqual(change, {
+      id: "khchg-12", tableId: "t1", seq: 12, kind: "column_rename", actor: "user-2",
+      origin: "user", fingerprint: "fp-12", note: "",
+      createdAt: "2026-07-15T10:00:00",
+      payload: { column_id: "c1", before: "旧名", after: "新名" },
+    });
+  });
+});
+
+// --- fetchKnowhowHistoryDiff ---------------------------------------------------
+
+test("fetchKnowhowHistoryDiff: GET .../history/diff?from=&to=，五键响应全部字段名映射", () => {
+  const wire = {
+    cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "C" }],
+    rows_added: [
+      {
+        row_id: "r9", position: 3, created_at: "2026-07-21T00:00:00",
+        cells: { c1: "新行内容" },
+        code: [{ column_id: "c1", code_text: "print(1)", language: "python", cell_content_hash: "h1", updated_by: "user-1" }],
+      },
+    ],
+    rows_removed: [],
+    columns: [{ column_id: "c2", before: { name: "旧列名" }, after: { name: "新列名" } }],
+    table_meta: { before: { title: "旧标题", description: "" }, after: { title: "新标题", description: "" } },
+  };
+  return withFetchStub(wire, async (calls) => {
+    const diff = await fetchKnowhowHistoryDiff("nb-1", "t1", 10, 20);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/history\/diff\?from=10&to=20$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.deepStrictEqual(diff, {
+      cells: [{ rowId: "r1", columnId: "c1", before: "A", after: "C" }],
+      rowsAdded: [
+        {
+          rowId: "r9", position: 3, createdAt: "2026-07-21T00:00:00",
+          cells: { c1: "新行内容" },
+          code: [{ columnId: "c1", codeText: "print(1)", language: "python", cellContentHash: "h1", updatedBy: "user-1" }],
+        },
+      ],
+      rowsRemoved: [],
+      columns: [{ columnId: "c2", before: { name: "旧列名" }, after: { name: "新列名" } }],
+      tableMeta: { before: { title: "旧标题", description: "" }, after: { title: "新标题", description: "" } },
+    });
+  });
+});
+
+test("fetchKnowhowHistoryDiff: table_meta 为 null（区间内表元无净变化）时原样映射为 null", () => {
+  const wire = { cells: [], rows_added: [], rows_removed: [], columns: [], table_meta: null };
+  return withFetchStub(wire, async () => {
+    const diff = await fetchKnowhowHistoryDiff("nb-1", "t1", 10, 20);
+    assert.strictEqual(diff.tableMeta, null);
+  });
+});
+
+// --- fetchKnowhowCellHistory ---------------------------------------------------
+
+test("fetchKnowhowCellHistory: GET .../rows/{row}/cells/{col}/history，数组每项字段名映射", () => {
+  const wire = [
+    { seq: 8, actor: "user-1", origin: "llm_reformat", created_at: "2026-07-18T00:00:00", before: "旧值", after: "新值" },
+    { seq: 3, actor: "user-1", origin: "user", created_at: "2026-07-10T00:00:00", before: null, after: "旧值" },
+  ];
+  return withFetchStub(wire, async (calls) => {
+    const entries = await fetchKnowhowCellHistory("nb-1", "t1", "r1", "c1");
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/cells\/c1\/history$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.deepStrictEqual(entries, [
+      { seq: 8, actor: "user-1", origin: "llm_reformat", createdAt: "2026-07-18T00:00:00", before: "旧值", after: "新值" },
+      { seq: 3, actor: "user-1", origin: "user", createdAt: "2026-07-10T00:00:00", before: null, after: "旧值" },
+    ]);
+  });
+});
+
+test("fetchKnowhowCellHistory: 提供 limit 时 URL 带 ?limit=", () => {
+  return withFetchStub([], async (calls) => {
+    await fetchKnowhowCellHistory("nb-1", "t1", "r1", "c1", 5);
+    assert.match(calls[0].url, /\/history\?limit=5$/);
+  });
+});
+
+// --- revertKnowhowTable --------------------------------------------------------
+// 请求体字段名 target_seq / expected_head_seq 锁定后端 KnowhowRevertRequest
+// 契约（app/models/knowhow.py）；响应字段名 seq / target_seq 锁定
+// KnowhowHistoryStore.revert_to 的真实返回形状。
+
+test("revertKnowhowTable: POST 到 /revert，请求体锁定字段名", () => {
+  return withFetchStub({ seq: 54, target_seq: 12 }, async (calls) => {
+    const result = await revertKnowhowTable("nb-1", "t1", 12, 53);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/revert$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(bodyOf(calls[0]), { target_seq: 12, expected_head_seq: 53 });
+    assert.deepStrictEqual(result, { seq: 54, targetSeq: 12 });
+  });
+});
+
+test("revertKnowhowTable: 回退到当前 head 的 no-op 分支——响应 seq 就是 head 本身，targetSeq 原样回声", () => {
+  return withFetchStub({ seq: 53, target_seq: 53 }, async (calls) => {
+    const result = await revertKnowhowTable("nb-1", "t1", 53, 53);
+    assert.deepStrictEqual(bodyOf(calls[0]), { target_seq: 53, expected_head_seq: 53 });
+    assert.deepStrictEqual(result, { seq: 53, targetSeq: 53 });
+  });
+});
+
+// revertKnowhowTable 的三种失败（409 head 陈旧 / 400 指纹不一致 / 500 后置校验
+// 失败）后端返回结构化 detail={"code","message"}（见 knowhow_routes.py
+// revert_knowhow_table），不是 user_error() 打过 X-User-Message 头的纯字符串。
+// 共享错误层 errors.ts 的可展示通道（pickUserDetail）只认字符串/字符串数组形
+// 状的 detail，对象形状会被判定为"抠不出来"而返回空串——即使能抠出来，这条
+// 路径也没有 X-User-Message 头，闸1（信任）本来就不会放行，单靠共享层三种错误
+// 都会被 throwHumanizedHttpError 兜底成按状态码泛化的通用中文，后端为这三种
+// 场景各写的具体中文（"这张表刚被其他人改过，请刷新后重试" 等）永远不会穿透
+// 到界面。评审问题 1 的修复：revertKnowhowTable 内部先用
+// parseKnowhowRevertFailure 探测这三种结构化失败，命中就抛 KnowhowRevertError
+// 把后端原文（.message）与机器码（.code）都带出来；未命中（如目标 seq 不存
+// 在的 404，或未来新增而前端还不认识的 code）落回既有 throwHumanizedHttpError
+// ——同 knowhow-transfer.ts parseCleanupFailure/KnowhowSourceCleanupError 的
+// 既有先例。下面三条各验证一个 code，最后一条验证未知 code 时仍正确落回既有
+// 兜底（不会被强行误判命中）。
+test("revertKnowhowTable: 409 knowhow_history_stale——抛 KnowhowRevertError，带出后端原文与 code", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: { code: "knowhow_history_stale", message: "这张表刚被其他人改过，请刷新后重试" },
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } }, // 无 X-User-Message 头
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 409 拒绝"),
+      (error) => {
+        assert.ok(error instanceof KnowhowRevertError);
+        assert.strictEqual(error.code, "knowhow_history_stale");
+        assert.strictEqual(error.message, "这张表刚被其他人改过，请刷新后重试");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+test("revertKnowhowTable: 400 knowhow_history_inconsistent——抛 KnowhowRevertError，带出后端原文与 code", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "knowhow_history_inconsistent",
+          message: "表的当前内容与变更历史对不上，回退已中止",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 400 拒绝"),
+      (error) => {
+        assert.ok(error instanceof KnowhowRevertError);
+        assert.strictEqual(error.code, "knowhow_history_inconsistent");
+        assert.strictEqual(error.message, "表的当前内容与变更历史对不上，回退已中止");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+test("revertKnowhowTable: 500 knowhow_revert_verify_failed——抛 KnowhowRevertError，带出后端原文与 code", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "knowhow_revert_verify_failed",
+          message: "回退结果校验失败，已放弃本次回退，表未被改动",
+        },
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 500 拒绝"),
+      (error) => {
+        assert.ok(error instanceof KnowhowRevertError);
+        assert.strictEqual(error.code, "knowhow_revert_verify_failed");
+        assert.strictEqual(error.message, "回退结果校验失败，已放弃本次回退，表未被改动");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+test("revertKnowhowTable: 未知 code 时落回既有兜底（不强行误判命中，仍走共享人话层）", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ detail: { code: "some_future_code", message: "以后可能新增的另一种失败" } }),
+      { status: 409, headers: { "Content-Type": "application/json" } }, // 无 X-User-Message 头
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 409 拒绝"),
+      (error) => {
+        assert.ok(!(error instanceof KnowhowRevertError));
+        // 落回既有共享人话层：状态码穿透可分流，但具体文案被泛化成通用中文
+        // ——parseKnowhowRevertFailure 对不认识的 code 没有强行命中。
+        assert.strictEqual(httpErrorStatus(error), 409);
+        assert.strictEqual(error.message, "操作有冲突，请刷新后重试");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+// parseKnowhowRevertFailure 的一条防御性分支单测：code 本身认识（三者之一），
+// 但状态码对不上后端 except 分支实际会用的那个值——理论不应发生（后端每个
+// code 只从一处 raise，status 恒定），但要确认解析函数不会仅凭 code 已知就
+// 误判命中，同 parseCleanupFailure 严格校验 status===409 的既有取向一致。
+test("parseKnowhowRevertFailure: code 已知但 status 对不上时返回 null", () => {
+  assert.strictEqual(
+    parseKnowhowRevertFailure(400, {
+      detail: { code: "knowhow_history_stale", message: "这张表刚被其他人改过，请刷新后重试" },
+    }),
+    null,
+  );
+});
+
+// --- createKnowhowMilestone / deleteKnowhowMilestone --------------------------
+// 请求体字段名 seq / name / note 锁定 KnowhowMilestoneCreate 契约。
+
+test("createKnowhowMilestone: POST 到 .../milestones，请求体字段名锁定，响应映射（create 端点响应无 stale 键，兜底 false）", () => {
+  const wire = {
+    id: "khms-9", table_id: "t1", seq: 30, name: "v2.0", note: "发布前快照",
+    created_by: "user-1", created_at: "2026-07-22T00:00:00",
+  };
+  return withFetchStub(wire, async (calls) => {
+    const milestone = await createKnowhowMilestone("nb-1", "t1", 30, "v2.0", "发布前快照");
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/milestones$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(bodyOf(calls[0]), { seq: 30, name: "v2.0", note: "发布前快照" });
+    assert.deepStrictEqual(milestone, {
+      id: "khms-9", tableId: "t1", seq: 30, name: "v2.0", note: "发布前快照",
+      createdBy: "user-1", createdAt: "2026-07-22T00:00:00", stale: false,
+    });
+  });
+});
+
+test("createKnowhowMilestone: note 省略时默认空串，仍然进请求体（后端字段非 Optional，省略与显式空串对后端等价）", () => {
+  const wire = {
+    id: "khms-10", table_id: "t1", seq: 31, name: "v2.1", note: "",
+    created_by: "user-1", created_at: "2026-07-22T00:00:00",
+  };
+  return withFetchStub(wire, async (calls) => {
+    await createKnowhowMilestone("nb-1", "t1", 31, "v2.1");
+    assert.deepStrictEqual(bodyOf(calls[0]), { seq: 31, name: "v2.1", note: "" });
+  });
+});
+
+test("deleteKnowhowMilestone: DELETE 到 .../milestones/{id}", () => {
+  return withFetchStub(null, async (calls) => {
+    await deleteKnowhowMilestone("nb-1", "t1", "khms-9");
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/milestones\/khms-9$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.strictEqual(calls[0].init.method, "DELETE");
+  });
+});
+
+// --- pruneKnowhowHistory --------------------------------------------------------
+// 请求体字段名 before_days 锁定 KnowhowHistoryPruneRequest 契约；响应
+// {removed:number} 已是合法 camelCase，无需映射。
+
+test("pruneKnowhowHistory: POST 到 .../history/prune，请求体字段名锁定", () => {
+  return withFetchStub({ removed: 17 }, async (calls) => {
+    const result = await pruneKnowhowHistory("nb-1", "t1", 90);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/history\/prune$/);
+    assert.doesNotMatch(calls[0].url, /\/api\/api\//, "双 /api 会 404（PR#207）");
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(bodyOf(calls[0]), { before_days: 90 });
+    assert.deepStrictEqual(result, { removed: 17 });
+  });
+});
+
+test("pruneKnowhowHistory: removed=0（没有比截止时间更老的流水）时如实返回", () => {
+  return withFetchStub({ removed: 0 }, async () => {
+    const result = await pruneKnowhowHistory("nb-1", "t1", 3650);
+    assert.deepStrictEqual(result, { removed: 0 });
   });
 });

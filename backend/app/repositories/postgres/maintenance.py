@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any
 
+from app.repositories.postgres._store_utils import normalize_timestamp
+
 
 logger = logging.getLogger("silicon_notebook.postgres.maintenance")
 
@@ -18,6 +20,49 @@ class PostgresMaintenanceAdapter:
         self._runtime = runtime
         self._orphan_first_seen: dict[tuple[str, str], float] = {}
         self._orphan_marks_lock = threading.Lock()
+
+    def recover_interrupted_jobs(self) -> None:
+        """Settle process-owned work abandoned by a previous backend process."""
+        now = normalize_timestamp(self._runtime.seams.now())
+        with self._runtime.database.write() as db:
+            db.execute(
+                "UPDATE merge_review_jobs SET status='failed', "
+                "error='中断:服务重启' WHERE status='running'"
+            )
+            db.execute(
+                "UPDATE ask_jobs SET status='interrupted', "
+                "error='中断:服务重启' WHERE status='running'"
+            )
+            db.execute(
+                "UPDATE knowhow_rows SET projection_status='failed' "
+                "WHERE projection_status IN ('syncing','pending')"
+            )
+            db.execute(
+                "UPDATE sources SET status='parsed',parse_status='parsed',"
+                "error_message='',updated_at=%s WHERE parse_status='extracting'",
+                (now,),
+            )
+            db.execute(
+                "UPDATE sources SET status='failed',parse_status='failed',"
+                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析。',"
+                "updated_at=%s WHERE parse_status IN ('queued','parsing')",
+                (now,),
+            )
+            db.execute(
+                "UPDATE extraction_runs SET status='failed',"
+                "error_message='worker_interrupted: 服务重启导致知识图谱分析中断',"
+                "updated_at=%s WHERE run_type='kg' AND status='running'",
+                (now,),
+            )
+            db.execute(
+                "UPDATE kg_build_jobs SET status='failed',stage='finished',"
+                "error_code='worker_interrupted',"
+                "error_message='服务重启导致本次分析中断；已完成内容已保留，可继续分析未完成内容。',"
+                "updated_at=%s,finished_at=%s WHERE status='running'",
+                (now, now),
+            )
+            db.execute("DELETE FROM kg_cluster_scratch")
+            db.execute("DELETE FROM kg_canonical_scratch")
 
     @staticmethod
     def _lock_candidate_assets(

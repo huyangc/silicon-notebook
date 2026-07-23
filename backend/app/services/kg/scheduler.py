@@ -1,8 +1,9 @@
-"""Process-global concurrency for KG extraction.
+"""Process-global producer pools for KG extraction.
 
 Two SEPARATE singleton thread pools:
-- window pool  (max=KG_EXTRACT_WORKERS): every extract_window LLM call; FIFO,
-  the single global cap shared across all documents (intra- + inter-doc).
+- window pool: sized once from ``provider.parallelism("kg_extract")``.  It is
+  only a producer pool; the model service scheduler owns the actual shared
+  admission cap across all workloads bound to that service.
 - job pool     (max=KG_JOB_CONCURRENCY): one process_source per document.
 
 They MUST be separate: a job thread blocks waiting on window futures; if it
@@ -34,6 +35,8 @@ _job_max = 0
 _active_lock = threading.Lock()
 _window_active = 0
 _job_active = 0
+_window_waiting = 0
+_job_waiting = 0
 
 
 def _build(window_workers: int, job_workers: int) -> None:
@@ -52,7 +55,14 @@ def _ensure() -> None:
     with _lock:
         if _window_pool is None or _job_pool is None:
             s = Settings()
-            _build(s.kg_extract_workers, s.kg_job_concurrency)
+            _build(1, s.kg_job_concurrency)
+
+
+def initialize(*, window_workers: int, job_workers: int) -> None:
+    """Install provider-derived producer sizes once, before first submission."""
+    with _lock:
+        if _window_pool is None or _job_pool is None:
+            _build(window_workers, job_workers)
 
 
 def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
@@ -62,10 +72,16 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
     preserved even when many windows run concurrently."""
     _ensure()
     ctx = contextvars.copy_context()
+    ticket = {"started": False}
+    global _window_waiting
+    with _active_lock:
+        _window_waiting += 1
 
     def _run():
-        global _window_active
+        global _window_active, _window_waiting
         with _active_lock:
+            ticket["started"] = True
+            _window_waiting -= 1
             _window_active += 1
         try:
             return fn(*args, **kwargs)
@@ -73,7 +89,26 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
             with _active_lock:
                 _window_active -= 1
 
-    return _window_pool.submit(ctx.run, _run)
+    try:
+        fut = _window_pool.submit(ctx.run, _run)
+    except BaseException:
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _window_waiting -= 1
+        raise
+
+    def _cancelled_before_start(completed: cf.Future) -> None:
+        global _window_waiting
+        if not completed.cancelled():
+            return
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _window_waiting -= 1
+
+    fut.add_done_callback(_cancelled_before_start)
+    return fut
 
 
 def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
@@ -84,10 +119,16 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
     (每用户 KG_LLM 的命脉,不得退化成裸 submit(fn))。"""
     _ensure()
     ctx = contextvars.copy_context()
+    ticket = {"started": False}
+    global _job_waiting
+    with _active_lock:
+        _job_waiting += 1
 
     def _run():
-        global _job_active
+        global _job_active, _job_waiting
         with _active_lock:
+            ticket["started"] = True
+            _job_waiting -= 1
             _job_active += 1
         try:
             return ctx.run(fn, *args, **kwargs)   # PRESERVED copy_context propagation
@@ -95,7 +136,25 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
             with _active_lock:
                 _job_active -= 1
 
-    fut = _job_pool.submit(_run)
+    try:
+        fut = _job_pool.submit(_run)
+    except BaseException:
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _job_waiting -= 1
+        raise
+
+    def _cancelled_before_start(completed: cf.Future) -> None:
+        global _job_waiting
+        if not completed.cancelled():
+            return
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _job_waiting -= 1
+
+    fut.add_done_callback(_cancelled_before_start)
     fut.add_done_callback(_log_job_exception)
     return fut
 
@@ -106,7 +165,9 @@ def stats() -> dict:
     with _active_lock:
         return {
             "window_active": _window_active, "window_max": _window_max,
+            "window_waiting": _window_waiting,
             "job_active": _job_active, "job_max": _job_max,
+            "job_waiting": _job_waiting,
         }
 
 
@@ -131,16 +192,14 @@ def job_concurrency() -> int:
 
 def configure(*, window_workers: int | None = None, job_workers: int | None = None) -> None:
     """Rebuild both pools with explicit sizes (falls back to settings for any
-    omitted value). Used by tests and by the offline CLI's
-    batch_ingest._batch_concurrency_scope, which is the sole batch pool
-    configuration owner. Phase helpers only submit work to the installed
-    pools. The pools otherwise read an independent Settings() at first use, so
-    repo.settings changes do not reach them."""
+    omitted value). This is a test/maintenance reset seam; production installs
+    the model-derived size through ``initialize`` and never overrides it from
+    request or CLI capacity knobs."""
     with _lock:
         s = Settings()
         _shutdown_locked()
         _build(
-            window_workers if window_workers is not None else s.kg_extract_workers,
+            window_workers if window_workers is not None else 1,
             job_workers if job_workers is not None else s.kg_job_concurrency,
         )
 

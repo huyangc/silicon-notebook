@@ -11,14 +11,28 @@ import time
 
 
 def _make_repo(db_path):
-    os.environ["DATABASE_URL"] = f"sqlite:///{db_path}"
-    os.environ.setdefault("SILICON_NOTEBOOK_STORAGE_DIR", db_path + "_storage")
-    os.environ["EVENT_LOG_ENABLED"] = "false"
-    os.environ["LLM_LOG_ENABLED"] = "false"
-    # 不配 EMBED_* → embedder_configured False → store_kg 不嵌入(纯写基准)
     from app.core.config import Settings
+    from app.core.event_logging import EventLogger
+    from app.services.model_provider import RuntimeModelProvider
+    from app.services.model_registry import SystemModelServiceRegistry
     from app.services.sqlite_repository import SQLiteRepository
-    return SQLiteRepository(Settings())
+
+    settings = Settings(
+        database_url=f"sqlite:///{db_path}",
+        storage_dir=db_path + "_storage",
+        model_services_config="",
+        event_log_enabled=False,
+        llm_log_enabled=False,
+    )
+    # The write benchmark is offline by contract. Pin an explicit empty
+    # registry so ambient MODEL_SERVICES_CONFIG/.env values cannot bind a
+    # workload or create a network-backed model adapter.
+    models = RuntimeModelProvider(
+        settings,
+        EventLogger(settings, channel="bench-models"),
+        registry=SystemModelServiceRegistry({}, {}),
+    )
+    return SQLiteRepository(settings, model_provider=models)
 
 
 def _objs(worker, n):

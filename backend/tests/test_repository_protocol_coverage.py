@@ -332,7 +332,6 @@ def test_sqlite_stores_structurally_satisfy_every_persistence_bundle_port():
         "unified_kg": UnifiedKgStore,
     }
     stores = {name: object.__new__(store) for name, store in sqlite_stores.items()}
-    stores["identity"].model_config_cache = {}
     bundle = SimpleNamespace(
         **{
             bundle_name: stores[bundle_name]

@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate, AskRequest
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 class _GlobalLLM:
@@ -28,7 +30,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -43,7 +45,7 @@ def _prep_reports(repo):
                   [{"source_local_id": "A", "target_local_id": "B", "edge_type": "supports", "evidence": []}])
     repo.rebuild_communities(nb.id)
     repo.settings.kg_community_summary_enabled = True
-    repo.llm_client = _GlobalLLM()
+    bind_chat_client(repo, "ask_answer", _GlobalLLM())
     repo.summarize_communities(nb.id)   # generate reports via stub
     return nb
 
@@ -55,6 +57,6 @@ def _prep_reports(repo):
 def test_global_ask_missing_notebook_raises(repo):
     # P4-5: mode="global" now aliases to "chunk" via _RETIRED_MODES.
     # chunk on a missing notebook should raise KeyError (route -> 404).
-    repo.llm_client = _GlobalLLM()
+    bind_chat_client(repo, "ask_answer", _GlobalLLM())
     with pytest.raises(KeyError):
         repo.ask("nb-does-not-exist", AskRequest(question="x", mode="global"))

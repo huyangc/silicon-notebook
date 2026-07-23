@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _SeqLLM:
@@ -24,14 +26,15 @@ def arepo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
-    monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    r = SQLiteRepository(Settings(), model_provider=RecordingModelProvider())
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
+
+
+def _bind_reasoning(repo, client):
+    bind_chat_client(repo, "reasoning_agent", client)
+    bind_chat_client(repo, "evidence_refine", client)
+    bind_chat_client(repo, "ask_answer", client)
 
 
 def _seed(repo):
@@ -45,20 +48,79 @@ def _seed(repo):
 
 def test_reasoning_ask_returns_trace_and_evidence_level(arepo):
     nb = _seed(arepo)
-    arepo.llm_client = _SeqLLM(
+    _bind_reasoning(arepo, _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],
-        answer={"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True})
+        answer={"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True}))
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert resp.reasoning_trace and resp.reasoning_trace[0].step_type == "plan"
+    assert ("chat", "reasoning_agent") in arepo._runtime.models.calls
+    assert ("chat", "evidence_refine") in arepo._runtime.models.calls
+    assert ("chat", "ask_answer") in arepo._runtime.models.calls
     assert resp.evidence_level in {"grounded", "overview", "inferred"}
     assert resp.conversation_id
 
 
+def test_reasoning_uses_distinct_planning_refinement_and_answer_workloads(arepo):
+    class _Planner:
+        configured = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.calls += 1
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+            assert "next_action" in schema_hint
+            return json.dumps({"next_action": "answer", "sufficient": True})
+
+    class _Refiner:
+        configured = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert '"relevant"' in schema_hint
+            self.calls += 1
+            return json.dumps({"relevant": ["RTL到GDSII是标准实现流程"]})
+
+    class _Answer:
+        configured = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert '"answer"' in schema_hint
+            self.calls += 1
+            return json.dumps({
+                "answer": "RTL到GDSII是标准实现流程 [k1].",
+                "grounded": True,
+            })
+
+    planner, refiner, answer = _Planner(), _Refiner(), _Answer()
+    bind_chat_client(arepo, "reasoning_agent", planner)
+    bind_chat_client(arepo, "evidence_refine", refiner)
+    bind_chat_client(arepo, "ask_answer", answer)
+    arepo.settings.kg_query_refine_enabled = True
+    nb = _seed(arepo)
+
+    response = arepo.ask(
+        nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning")
+    )
+
+    assert response.answer
+    assert planner.calls >= 2
+    assert refiner.calls == 1
+    assert answer.calls == 1
+
+
 def test_fast_mode_unaffected_and_no_trace(arepo):
     nb = _seed(arepo)
-    arepo.llm_client = _SeqLLM(plan={}, reflects=[],
-                               answer={"answer": "x", "grounded": False})
+    _bind_reasoning(arepo, _SeqLLM(plan={}, reflects=[],
+                                   answer={"answer": "x", "grounded": False}))
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程"))  # 默认 fast
     assert resp.reasoning_trace is None
 
@@ -69,7 +131,7 @@ def test_reasoning_degrades_gracefully_on_llm_error(arepo):
         configured = True
         def chat_json(self, messages, schema_hint, **kwargs):
             raise RuntimeError("boom")
-    arepo.llm_client = _BoomLLM()
+    _bind_reasoning(arepo, _BoomLLM())
     # LLM 全程抛错: run 内 plan/reflect 各自容错降级,answer 合成失败被吞,
     # 但检索不依赖 LLM,故仍返回合法 AskResponse(轨迹与候选仍在)。
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
@@ -98,12 +160,12 @@ def test_reasoning_expand_then_answer_end_to_end(arepo):
     claim = next((h for h in arepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                   if h.object_type == "claim"), None)
     assert claim is not None
-    arepo.llm_client = _SeqLLM(
+    _bind_reasoning(arepo, _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
         reflects=[
             {"next_action": "expand_graph", "expand": {"object_id": claim.object_id}},
             {"next_action": "answer", "sufficient": True}],
-        answer={"answer": "流程概述 [k1],其布线步骤见 [k2].", "grounded": True})
+        answer={"answer": "流程概述 [k1],其布线步骤见 [k2].", "grounded": True}))
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     step_kinds = [t.step_type for t in resp.reasoning_trace]
     assert "expand" in step_kinds
@@ -114,12 +176,12 @@ def test_reasoning_expand_then_answer_end_to_end(arepo):
 
 def test_reasoning_search_elements_fallback_path(arepo):
     nb = _seed_graph(arepo)
-    arepo.llm_client = _SeqLLM(
+    _bind_reasoning(arepo, _SeqLLM(
         plan={"sub_queries": [{"query": "完全不相关的冷门问题zzz"}]},
         reflects=[
             {"next_action": "search_elements", "elements_query": "zzz"},
             {"next_action": "answer", "sufficient": True}],
-        answer={"answer": "知识库未覆盖,以下为推断。", "grounded": False})
+        answer={"answer": "知识库未覆盖,以下为推断。", "grounded": False}))
     resp = arepo.ask(nb.id, AskRequest(question="冷门zzz", mode="reasoning"))
     assert any(t.step_type == "fallback" for t in resp.reasoning_trace)
     # inferred 的根因: LLM 答案无 [k] 标记 → anchors 为空 → classify_evidence 落入 inferred
@@ -130,10 +192,10 @@ def test_reasoning_search_elements_fallback_path(arepo):
 
 def test_reasoning_conversation_persists(arepo):
     nb = _seed_graph(arepo)
-    arepo.llm_client = _SeqLLM(
+    _bind_reasoning(arepo, _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],
-        answer={"answer": "答案 [k1].", "grounded": True})
+        answer={"answer": "答案 [k1].", "grounded": True}))
     t1 = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     detail = arepo.get_conversation(t1.conversation_id)
     assert detail.turn_count == 1
@@ -145,10 +207,10 @@ def test_reasoning_service_streams_trace_with_explicit_user_id(arepo):
     """Task 24: reasoning 引擎在 AskService 上以显式 keyword-only user_id 运行,
     on_trace 逐步上流、答案照存 —— 与 facade 路径同一引擎、同一语义。"""
     nb = _seed(arepo)
-    arepo.llm_client = _SeqLLM(
+    _bind_reasoning(arepo, _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],
-        answer={"answer": "服务级答案 [k1].", "grounded": True})
+        answer={"answer": "服务级答案 [k1].", "grounded": True}))
     service = arepo._runtime.ask_service()
     steps = []
     resp = service.ask_reasoning(

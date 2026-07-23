@@ -1,4 +1,4 @@
-"""Background startup: migrate + warm open-path caches, then flip readiness.
+"""Background startup: migrate + recover + warm open-path caches, then flip readiness.
 
 Kicked off in a daemon thread by the FastAPI lifespan so uvicorn serves
 ``/api/ready`` immediately while every app route stays 503 until warm-up
@@ -6,6 +6,13 @@ completes. The first login after a restart therefore never pays migration + the
 cold per-notebook count recompute (``knowledge_counts_cache`` starts empty each
 process) — that cost moves here, behind the readiness gate, so users only ever
 see a "服务启动中" screen instead of a multi-second hang.
+
+Crash recovery lives here, not in ``SQLiteRepository.__init__``: this module is
+the ONLY place that owns the "this process is the server, everything still
+marked in-progress is last boot's wreckage" claim. Offline CLIs construct their
+own repository and must not make that claim (they would flip rows the running
+server is still working on). It runs BEFORE ``mark_ready()`` so no route can
+accept new work while the wreckage is still standing.
 
 Robustness: migration failure keeps the service not-ready (an un-migrated schema
 is unusable); per-notebook warm failures are best-effort inside
@@ -69,7 +76,6 @@ def _start_lifecycle(lease: object) -> bool:
         state.status = "constructing"
         readiness.set_phase("migrating", "应用数据库迁移")
         return True
-
 
 def _record_repository_factory(lease: object, repository_factory: object) -> bool:
     with _cleanup_lock:
@@ -181,9 +187,9 @@ def _fail_lifecycle(lease: object, exc: BaseException) -> None:
 
 
 def run_startup(lease: object | None) -> object | None:
-    """Construct the repository (runs migrations + seed), warm the open-path
-    count caches for every notebook, then mark the service ready. Any exception
-    is captured into the readiness state — it must never crash the server.
+    """Construct the repository, recover interrupted work, warm caches, and
+    then mark the service ready. Any exception is captured into readiness and
+    must never crash the server.
 
     ``lease`` must have been obtained from :func:`begin_lifecycle` before this
     function is called. Returns the exact warmed repository instance. Lifespan
@@ -192,6 +198,11 @@ def run_startup(lease: object | None) -> object | None:
     if lease is None or not _start_lifecycle(lease):
         return None
     try:
+        from app.services.model_provider import (
+            validate_process_local_scheduler_deployment,
+        )
+
+        validate_process_local_scheduler_deployment()
         logger.info("startup: constructing repository (runs schema migrations)…")
         # Imported lazily so module import stays cheap and side-effect free.
         from app.api.deps import repository as repository_factory
@@ -199,6 +210,10 @@ def run_startup(lease: object | None) -> object | None:
         if not _record_repository_factory(lease, repository_factory):
             return None
         repo = repository_factory()  # construct + migrate + seed
+        # Server startup is the only owner allowed to settle rows left in an
+        # in-progress state by the previous process. Offline CLIs must not make
+        # this claim while a live backend may still own those jobs.
+        repo._recover_interrupted_jobs()
         if not _bind_repository_and_begin_warmup(lease, repo):
             # Defensive only: a valid lease cannot be detached during startup.
             # If that invariant is ever broken, do not leak the just-created
@@ -206,7 +221,7 @@ def run_startup(lease: object | None) -> object | None:
             _close_repository_instance(repo)
             _clear_repository_cache(repository_factory)
             return None
-        logger.info("startup: migrations done; warming open-path caches…")
+        logger.info("startup: migrations + recovery done; warming open-path caches…")
 
         def _progress(done: int, total: int) -> None:
             _set_warmup_progress(lease, done, total)

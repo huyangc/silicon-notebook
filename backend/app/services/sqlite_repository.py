@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
@@ -43,8 +43,14 @@ from app.services.sqlite_notebook_sharing import _remap_json_ids
 class SQLiteRepository(RepositoryFacade):
     """Preserve the historical SQLite API while isolating backend concerns."""
 
-    def __init__(self, settings: Settings) -> None:
-        super().__init__(settings, SqlitePersistenceBundleFactory())
+    def __init__(
+        self, settings: Settings, *, model_provider: Any | None = None
+    ) -> None:
+        super().__init__(
+            settings,
+            SqlitePersistenceBundleFactory(),
+            model_provider=model_provider,
+        )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
         self._migrator.initialize()
@@ -113,35 +119,44 @@ class SQLiteRepository(RepositoryFacade):
     def _add_column_if_missing(db, table: str, column: str, coldef: str) -> None:
         return SqliteMigrator.add_column_if_missing(db, table, column, coldef)
 
+    def _run_migration(self, version: int) -> None:
+        return getattr(self._migrator, f"_migration_{version}")()
+
     def _migration_1(self) -> None:
-        return self._migrator._migration_1()
+        return self._run_migration(1)
 
     def _migration_2(self) -> None:
-        return self._migrator._migration_2()
+        return self._run_migration(2)
 
     def _migration_3(self) -> None:
-        return self._migrator._migration_3()
+        return self._run_migration(3)
 
     def _migration_4(self) -> None:
-        return self._migrator._migration_4()
+        return self._run_migration(4)
 
     def _migration_5(self) -> None:
-        return self._migrator._migration_5()
+        return self._run_migration(5)
 
     def _migration_6(self) -> None:
-        return self._migrator._migration_6()
+        return self._run_migration(6)
 
     def _migration_7(self) -> None:
-        return self._migrator._migration_7()
+        return self._run_migration(7)
 
     def _migration_8(self) -> None:
-        return self._migrator._migration_8()
+        return self._run_migration(8)
 
     def _migration_9(self) -> None:
-        return self._migrator._migration_9()
+        return self._run_migration(9)
 
     def _migration_10(self) -> None:
-        return self._migrator._migration_10()
+        return self._run_migration(10)
+
+    def _migration_19(self) -> None:
+        return self._run_migration(19)
+
+    def _migration_27(self) -> None:
+        return self._run_migration(27)
 
     def _recover_interrupted_jobs(self) -> None:
         return self._migrator.recover_interrupted_jobs()

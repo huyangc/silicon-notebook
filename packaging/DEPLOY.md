@@ -1,7 +1,9 @@
 # 离线部署包 — 目标机说明
 
 本包是**自包含**的:内含便携 Node 运行时(跑前端)+ 预编译的 Python 依赖(wheelhouse)。
-目标机**无需 npm/node、无需 root**,只需一个 `python3`(≥ 3.10)和一个可用的 pip 源。
+目标机**无需 npm/node、无需 root**,只需一个 `python3`(≥ 3.13;SQLite 写锁公平性依赖
+CPython 3.13 的 PyMutex 交接语义,见 `backend/app/repositories/sqlite/database.py`)
+和一个可用的 pip 源。
 
 ## 目录结构
 
@@ -10,9 +12,10 @@ backend/       后端源码(FastAPI,纯 python)
 frontend/      前端 standalone 产物(node server.js,自带精简 node_modules)
 node/          便携 node 运行时(bin/node)
 wheelhouse/    预编译的 python 依赖 wheel(离线安装用;若打包时 SKIP_WHEELHOUSE 则无)
-scripts/       运行时脚本(autotune.sh)
+scripts/       运行时/升级脚本(autotune.sh、migrate_legacy_model_env.py)
 .env.example   配置模板
-install.sh     一键安装(建 venv + 装依赖 + 生成 .env + 自检)
+model-services.example.toml  系统模型服务模板(无密钥)
+install.sh     一键安装(建 venv + 装依赖 + 生成模型 TOML/.env + 自检)
 start.sh       启动(venv uvicorn 后端 + 便携 node 前端)
 stop.sh        停止
 ```
@@ -25,13 +28,49 @@ cd silicon_notebook_<version>_linux-<arch>
 
 ./install.sh            # 建 .venv、装 python 依赖、生成 .env、就绪自检(不启动服务)
 
-vi .env                 # 必填:模型服务 URL(OPENAI_COMPAT_* / EMBED_* / RERANK_* …)
-                        # 服务靠这些 URL 才能工作,缺失不会静默降级
+vi .local/model-services.toml
+                        # 配置 [services.<id>] 的协议/URL/模型/api_key_env/
+                        # max_concurrency，以及 [bindings] 的 workload→服务绑定
+
+vi .env                 # 这里只填写 api_key_env 所引用的密钥；endpoint、模型名、
+                        # bindings 和并发容量都不在 .env 配置
 
 ./start.sh              # 启动;默认后端 127.0.0.1:8000、前端 127.0.0.1:3000
 ```
 
 浏览器打开前端地址即可。停止用 `./stop.sh`。
+
+`install.sh` 在 `.local/model-services.toml` 缺失时从无密钥模板生成它；文件已存在时
+原样保留。`.env.example` 默认令 `MODEL_SERVICES_CONFIG=.local/model-services.toml`，因此
+默认路径在安装后一定存在。若部署明确不使用任何模型服务，可在 `.env` 留空：
+
+```bash
+MODEL_SERVICES_CONFIG=
+```
+
+此时系统以离线/确定性降级运行；不会尝试旧的逐角色 endpoint 配置。
+
+从旧版 `.env` 升级时，可在启动前使用仓库内迁移助手：
+
+```bash
+.venv/bin/python scripts/migrate_legacy_model_env.py --env .env          # 默认只预览
+.venv/bin/python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后应用
+```
+
+它会保留非模型环境变量，把旧的聊天、KG、embedding 和 rerank 配置转换为系统服务
+TOML 与新的密钥槽位。推算出的并发容量仅是迁移初值，应用前应复核；可用可重复的
+`--max-concurrency ROLE=N` 覆盖。目标 TOML 若只是安装器生成且未改动的模板，可直接
+替换；其他已存在配置需显式传入 `--force`。两种情况都会先备份旧文件，并把当前
+`.env` 与含密钥的备份权限收紧为 `0600`。脚本不会把密钥写入 TOML 或输出到终端。
+
+### 模型服务 TOML 约定
+
+- `[services.<id>]` 定义一个物理 chat、embedding 或 rerank 服务；`max_concurrency`
+  是该物理服务唯一的模型并发容量，同服务的所有 workload 共用同一调度器。
+- `[bindings]` 把稳定 workload id（如 `ask_answer`、`kg_extract`、
+  `retrieval_query_embedding`）绑定到同种类服务。
+- `api_key_env` 只写密钥环境变量名；实际密钥只填进 `.env`，不要写进 TOML。
+- 一个后端进程统一维护队列、熔断与健康状态；`start.sh` 固定 `--workers 1`，避免容量倍增。
 
 ## 常用可配置项
 
@@ -51,6 +90,7 @@ vi .env                 # 必填:模型服务 URL(OPENAI_COMPAT_* / EMBED_* / RE
 | `BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
 | `MCP_REQUIRE_HTTPS` | `0` | MCP 是否强制 HTTPS。默认关(允许内网明文+放宽 Host 校验);公网设 `1` |
 | `PORT` | `8000` | 后端端口 |
+| `MODEL_SERVICES_CONFIG` | `.local/model-services.toml` | 系统模型服务 TOML；留空即明确离线运行 |
 | `SILICON_NOTEBOOK_ADMIN_PASSWORD` | — | 对外暴露(非 loopback)时**必须**设为非默认值,否则拒绝启动 |
 | `ALLOW_NO_ENV_FILE` | `0` | 设 `1` 则允许无 `.env`、仅用系统环境变量启动 |
 

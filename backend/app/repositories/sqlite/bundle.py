@@ -16,10 +16,12 @@ from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+from app.repositories.sqlite.knowhow_history_store import KnowhowHistoryStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
+from app.repositories.sqlite.model_status_store import ModelStatusStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.report_store import ReportStore
@@ -53,12 +55,14 @@ class SqlitePersistenceBundle(PersistenceBundle):
     index_projection: IndexProjectionStore
     kg_build_jobs: KgBuildJobStore
     knowhow: KnowhowStore
+    knowhow_history: KnowhowHistoryStore
     knowhow_transfer: KnowhowTransferStore
     memory: MemoryStore
     queries: QueryStore
     reports: ReportStore
     ask_state: AskStateStore
     unified_kg: UnifiedKgStore
+    model_status: ModelStatusStore
 
 
 class SqlitePersistenceBundleFactory:
@@ -68,10 +72,9 @@ class SqlitePersistenceBundleFactory:
         settings: Settings,
         root_dir: Path,
         seams: RepositorySeams,
-        model_config_cache: dict[str, object],
     ) -> SqlitePersistenceBundle:
         database = SqliteDatabase(settings, root_dir)
-        identity = IdentityStore(database, settings, model_config_cache)
+        identity = IdentityStore(database, settings)
         notebooks = NotebookStore(database, new_id=seams.new_id, now=seams.now)
         sharing = SharingStore(
             database,
@@ -96,9 +99,12 @@ class SqlitePersistenceBundleFactory:
             database, new_id=seams.new_id, now=seams.now
         )
         knowhow = KnowhowStore(database, new_id=seams.new_id, now=seams.now)
+        knowhow_history = KnowhowHistoryStore(
+            database, new_id=seams.new_id, now=seams.now
+        )
         knowhow_transfer = KnowhowTransferStore(database)
         memory = MemoryStore(database, new_id=seams.new_id, now=seams.now)
-        queries = QueryStore(database)
+        queries = QueryStore(database, settings)
         reports = ReportStore(
             database,
             new_id=seams.new_id,
@@ -107,6 +113,7 @@ class SqlitePersistenceBundleFactory:
         )
         ask_state = AskStateStore(database, seams)
         unified_kg = UnifiedKgStore(database, seams.now)
+        model_status = ModelStatusStore(database)
         return SqlitePersistenceBundle(
             database=database,
             identity=identity,
@@ -120,10 +127,12 @@ class SqlitePersistenceBundleFactory:
             index_projection=index_projection,
             kg_build_jobs=kg_build_jobs,
             knowhow=knowhow,
+            knowhow_history=knowhow_history,
             knowhow_transfer=knowhow_transfer,
             memory=memory,
             queries=queries,
             reports=reports,
             ask_state=ask_state,
             unified_kg=unified_kg,
+            model_status=model_status,
         )

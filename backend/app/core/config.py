@@ -78,13 +78,19 @@ class Settings(BaseSettings):
     auth_session_touch_interval_seconds: int = Field(
         300, validation_alias="AUTH_SESSION_TOUCH_INTERVAL_SECONDS"
     )
+    # 每个笔记本「用户可见文档」数量的全局默认上限。管理员可在 app_settings 里覆盖
+    # 全局默认、或给某用户单独设覆盖值(user_profiles.upload_document_limit);两者都
+    # 缺省时回退到此值。pydantic-settings v2 下 Field(env=) 失效,必须用 validation_alias。
+    user_upload_document_limit: int = Field(
+        20, validation_alias="USER_UPLOAD_DOCUMENT_LIMIT"
+    )
     # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
     # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
-    user_model_config_policy: str = Field("fallback", validation_alias="USER_MODEL_CONFIG_POLICY")
+    # Deployment-owned system model-service registry. An empty path explicitly
+    # selects deterministic/offline model behavior; relative paths are anchored
+    # to the repository root below so startup CWD cannot change the deployment.
+    model_services_config: str = Field("", validation_alias="MODEL_SERVICES_CONFIG")
 
-    openai_compat_base_url: str = Field("", validation_alias="OPENAI_COMPAT_BASE_URL")
-    openai_compat_api_key: str = Field("", validation_alias="OPENAI_COMPAT_API_KEY")
-    openai_compat_model: str = Field("", validation_alias="OPENAI_COMPAT_MODEL")
     openai_compat_timeout_seconds: int = Field(
         60,
         validation_alias="OPENAI_COMPAT_TIMEOUT_SECONDS",
@@ -141,22 +147,6 @@ class Settings(BaseSettings):
     # sibling_peers 的最小桥 claim 数(低于此不算同类伙伴)。
     sibling_min_bridge: int = Field(2, validation_alias="SIBLING_MIN_BRIDGE")
 
-    # 推理搜索 (mode=reasoning) 专用 LLM 端点（可选）。三项全部非空时推理路径改用此
-    # 模型，与全局 OPENAI_COMPAT_* 解耦；任一为空 → 整体回退全局。超时/重试沿用
-    # reasoning_timeout_seconds / reasoning_max_retries，此处不另设。
-    reasoning_llm_base_url: str = Field("", validation_alias="REASONING_LLM_BASE_URL")
-    reasoning_llm_api_key: str = Field("", validation_alias="REASONING_LLM_API_KEY")
-    reasoning_llm_model: str = Field("", validation_alias="REASONING_LLM_MODEL")
-    # 查询改写/扩展专用快模型(如 DeepSeek v4-fast)。只填 MODEL 即启用,base_url/api_key
-    # 缺省则复用主 OPENAI_COMPAT_* 端点;未填则改写/扩展回退到主模型。
-    rewrite_llm_base_url: str = Field("", validation_alias="REWRITE_LLM_BASE_URL")
-    rewrite_llm_api_key: str = Field("", validation_alias="REWRITE_LLM_API_KEY")
-    rewrite_llm_model: str = Field("", validation_alias="REWRITE_LLM_MODEL")
-    # KG 构建/融合专用 LLM 端点（可选，批量离线任务）。三项全部非空时 KG 路径改用此
-    # 模型（重抽取/融合/冲突消解/概念描述）；任一为空 → 整体回退全局主模型。
-    kg_llm_base_url: str = Field("", validation_alias="KG_LLM_BASE_URL")
-    kg_llm_api_key: str = Field("", validation_alias="KG_LLM_API_KEY")
-    kg_llm_model: str = Field("", validation_alias="KG_LLM_MODEL")
     kg_llm_timeout_seconds: int = Field(
         60,
         gt=0,
@@ -174,10 +164,6 @@ class Settings(BaseSettings):
     paper_meta_enabled: bool = Field(True, validation_alias="PAPER_META_ENABLED")
     paper_meta_head_chars: int = Field(4000, validation_alias="PAPER_META_HEAD_CHARS")
 
-    embed_provider: str = Field("", validation_alias="EMBED_PROVIDER")          # ""(off) | dashscope
-    embed_model: str = Field("", validation_alias="EMBED_MODEL")
-    embed_base_url: str = Field("", validation_alias="EMBED_BASE_URL")
-    embed_api_key: str = Field("", validation_alias="EMBED_API_KEY")
     embed_dim: int = Field(1024, validation_alias="EMBED_DIM")
     # 运行时向量维度(MRL 前缀截断 + re-normalize):所有相似度/矩阵/ANN 在截断后
     # 空间进行;0 = 关闭(不截断,行为零变化)。EMBED_DIM 语义固定为「存储/模型原生
@@ -196,8 +182,6 @@ class Settings(BaseSettings):
     kg_window_min_chars: int = Field(4000, validation_alias="KG_WINDOW_MIN_CHARS")
     kg_window_max_chars: int = Field(8000, validation_alias="KG_WINDOW_MAX_CHARS")
     kg_window_overlap_chars: int = Field(450, validation_alias="KG_WINDOW_OVERLAP_CHARS")
-    # KG 抽取并发线程数。
-    kg_extract_workers: int = Field(16, validation_alias="KG_EXTRACT_WORKERS")
     # KG 抽取单次输出 token 上限:一个窗口可能抽出很多节点/关系(JSON 较大),给足避免
     # 截断(截断→JSON 坏→静默空抽取)。也是原「输出太大超时」处的上限兜底而非目标。
     kg_extract_max_tokens: int = Field(51200, validation_alias="KG_EXTRACT_MAX_TOKENS")
@@ -220,13 +204,11 @@ class Settings(BaseSettings):
     kg_tier2_ann_pad_factor: int = Field(4, validation_alias="KG_TIER2_ANN_PAD_FACTOR")
     # unified 聚类 rep-ANN 上限:唯一 name-seed 超此值则分片建 ANN + WARNING(绝不静默截断)。
     kg_cluster_rep_ann_max: int = Field(2_000_000, validation_alias="KG_CLUSTER_REP_ANN_MAX")
-    # 同时抽取的文档数上限（作业池容量）。窗口级并发仍由 KG_EXTRACT_WORKERS 全局封顶。
+    # 同时抽取的文档数上限（业务作业池容量）。模型调用由服务 scheduler 全局封顶。
     kg_job_concurrency: int = Field(8, validation_alias="KG_JOB_CONCURRENCY")
     # 0 = auto:未显式设置时按核数解析为 min(cpu_count, 32)(见 _resolve_core_bound_defaults)。
     # 这是唯一按本机核数缩放的 KG 旋钮——服务端绑定旋钮(EXTRACT/JOB/EMBED)刻意不跟核数走。
     kg_cluster_ann_threads: int = Field(0, validation_alias="KG_CLUSTER_ANN_THREADS")
-    # LLM 连接池为交互式 ask 预留的连接数（连接池容量 = KG_EXTRACT_WORKERS + 此值）。
-    kg_ask_reserve: int = Field(64, validation_alias="KG_ASK_RESERVE")
     # 单文档窗口数超过此值 → 记 WARN（不截断、不丢弃，仍全量抽取）。
     kg_window_warn_threshold: int = Field(1200, validation_alias="KG_WINDOW_WARN_THRESHOLD")
     # 孤立节点补连: 默认开启。抽取后(inline)及 build_notebook_kg 末尾(backfill)用确定性
@@ -238,16 +220,19 @@ class Settings(BaseSettings):
     embed_batch_size: int = Field(10, validation_alias="EMBED_BATCH_SIZE")
     embed_commit_batches: int = Field(50, validation_alias="EMBED_COMMIT_BATCHES")
     embed_persist_chunk: int = Field(200, validation_alias="EMBED_PERSIST_CHUNK")
-    # 元素向量化并发度（并行发出的 batch 请求数；dashscope 单请求 batch≤10）。
-    # 注意：批量并发上传多文档时，每文档各自以此并发嵌入，峰值会叠加，过高会打爆
-    # embedding 服务 QPS（429 limit_requests）导致向量缺失；配合下面的 429 退避重试，
-    # 默认取一个温和值。账户 QPS 高时可上调。
-    embed_concurrency: int = Field(8, validation_alias="EMBED_CONCURRENCY")
     # embedding 限流（429）退避重试：批量摄取易瞬时超 QPS，退避到窗口恢复而非丢批。
     embed_rate_limit_retries: int = Field(5, validation_alias="EMBED_RATE_LIMIT_RETRIES")
     embed_rate_limit_base_delay: float = Field(2.0, validation_alias="EMBED_RATE_LIMIT_BASE_DELAY")
     # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
     db_busy_timeout_ms: int = Field(30000, validation_alias="DB_BUSY_TIMEOUT_MS")
+    # 写锁观测(wait/hold per 调用点):详见 write_lock_stats.py。默认开,警戒线 200ms,
+    # 每 site 每刷新窗口最多报一条违规(flush_interval_s)。
+    db_write_lock_stats_enabled: bool = Field(
+        True, validation_alias="DB_WRITE_LOCK_STATS")
+    db_write_lock_warn_ms: int = Field(
+        200, validation_alias="DB_WRITE_LOCK_WARN_MS")
+    db_write_lock_flush_seconds: int = Field(
+        60, validation_alias="DB_WRITE_LOCK_FLUSH_SECONDS")
     # 复用连接下每条连接长期持有 page cache;总内存 = 连接数 × |cache_size|。
     # 负值=KB。默认 16MB(低于旧 64MB)以在 O(线程数) 条连接下控总内存;可按部署上调。
     sqlite_cache_size_kb: int = Field(-16384, validation_alias="SQLITE_CACHE_SIZE_KB")
@@ -289,13 +274,9 @@ class Settings(BaseSettings):
     # 落到 _unified_graph_full(全量拉取+多 GB 缓存,49 万对象库会打满 64GB 内存)。
     viz_default_limit: int = Field(300, validation_alias="VIZ_DEFAULT_LIMIT")
     # qwen3-rerank (DashScope text-rerank) 配置
-    rerank_model: str = Field("", validation_alias="RERANK_MODEL")
-    rerank_base_url: str = Field("https://dashscope.aliyuncs.com/api/v1", validation_alias="RERANK_BASE_URL")
-    rerank_api_key: str = Field("", validation_alias="RERANK_API_KEY")
     rerank_max_docs: int = Field(500, validation_alias="RERANK_MAX_DOCS")
     # rerank 接口风格:dashscope=DashScope 原生 text-rerank(嵌套 input/output);
     # openai=OpenAI 兼容(vLLM/Cohere 等)的 {base}/rerank(扁平 body、顶层 results)。
-    rerank_api_style: str = Field("dashscope", validation_alias="RERANK_API_STYLE")
     relation_retrieval_enabled: bool = Field(False, validation_alias="RELATION_RETRIEVAL_ENABLED")
     relation_seed_top_n: int = Field(8, validation_alias="RELATION_SEED_TOP_N")
     # P0-1/2: 关系候选池上限(有关系向量时,先按向量 sim 取 top-N 候选再 hydrate 文本
@@ -613,6 +594,9 @@ class Settings(BaseSettings):
         if self.storage_dir and not Path(self.storage_dir).is_absolute():
             self.storage_dir = str(_ROOT_DIR / self.storage_dir)
 
+        if self.model_services_config and not Path(self.model_services_config).is_absolute():
+            self.model_services_config = str(_ROOT_DIR / self.model_services_config)
+
         if database_identity(self.database_url).scheme != "sqlite":
             return self
 
@@ -621,46 +605,6 @@ class Settings(BaseSettings):
         if raw_path and not Path(raw_path).is_absolute():
             self.database_url = f"{prefix}{_ROOT_DIR / raw_path}"
         return self
-
-    @property
-    def llm_configured(self) -> bool:
-        return bool(
-            self.openai_compat_base_url
-            and self.openai_compat_api_key
-            and self.openai_compat_model
-        )
-
-    @property
-    def reasoning_llm_configured(self) -> bool:
-        return bool(
-            self.reasoning_llm_base_url
-            and self.reasoning_llm_api_key
-            and self.reasoning_llm_model
-        )
-
-    @property
-    def reasoning_llm_partially_configured(self) -> bool:
-        """有些 REASONING_LLM_* 填了但非全填（疑似配漏，将整体回退全局）。"""
-        vals = [self.reasoning_llm_base_url, self.reasoning_llm_api_key, self.reasoning_llm_model]
-        return any(vals) and not all(vals)
-
-    @property
-    def rewrite_llm_configured(self) -> bool:
-        """设了 REWRITE_LLM_MODEL 即启用专用快改写模型(base_url/api_key 缺省复用主端点)。"""
-        return bool(self.rewrite_llm_model)
-
-    @property
-    def kg_llm_configured(self) -> bool:
-        return bool(self.kg_llm_base_url and self.kg_llm_api_key and self.kg_llm_model)
-
-    @property
-    def embedder_configured(self) -> bool:
-        return bool(
-            (self.embed_provider or "").strip().lower() == "dashscope"  # 大小写不敏感:DashScope 也算配置
-            and (self.embed_base_url or "").strip()
-            and (self.embed_api_key or "").strip()
-            and (self.embed_model or "").strip()
-        )
 
     @property
     def mineru_enabled(self) -> bool:

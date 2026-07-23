@@ -2,6 +2,12 @@
 """Backup-only verification that the current repository opens a pre-refactor
 SQLite database without changing it.
 
+"Opens" here means a full SERVER start: construct the repository (migrate +
+seed) and then run the startup crash-recovery sweep, which the server's
+lifespan drives explicitly (``app/services/startup_warmup.py::run_startup``)
+rather than the repository constructor. Modelling only the constructor would
+understate what a real boot does to the database.
+
 ~~~text
 python scripts/verify_repository_snapshot.py \
   --database PATH \
@@ -48,6 +54,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from unittest import mock
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +64,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.config import Settings
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
+from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
 from app.services.sqlite_repository import (
     SCHEMA_VERSION,
     SQLiteRepository,
@@ -82,6 +90,7 @@ SPECIAL_TABLES = (
     "sources",
     "extraction_runs",
     "kg_build_jobs",
+    "model_service_status",
 )
 
 # The admin in-place upgrade (`_seed`) rewrites exactly these user-local
@@ -831,25 +840,7 @@ def offline_settings(database: Path, storage: Path) -> Settings:
     settings = Settings(
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
-        openai_compat_base_url="",
-        openai_compat_api_key="",
-        openai_compat_model="",
-        reasoning_llm_base_url="",
-        reasoning_llm_api_key="",
-        reasoning_llm_model="",
-        rewrite_llm_base_url="",
-        rewrite_llm_api_key="",
-        rewrite_llm_model="",
-        kg_llm_base_url="",
-        kg_llm_api_key="",
-        kg_llm_model="",
-        embed_provider="",
-        embed_model="",
-        embed_base_url="",
-        embed_api_key="",
-        rerank_model="",
-        rerank_base_url="",
-        rerank_api_key="",
+        model_services_config="",
         mineru_mode="off",
         mineru_api_url="",
         mineru_vlm_server_url="",
@@ -865,14 +856,12 @@ def offline_settings(database: Path, storage: Path) -> Settings:
 
 
 def _assert_offline(settings: Settings) -> None:
+    registry = SystemModelServiceRegistry.load(settings, environ={})
     offline_checks = {
-        "llm_configured": settings.llm_configured,
-        "reasoning_llm_configured": settings.reasoning_llm_configured,
-        "rewrite_llm_configured": settings.rewrite_llm_configured,
-        "kg_llm_configured": settings.kg_llm_configured,
-        "embedder_configured": settings.embedder_configured,
-        "rerank_model": bool(settings.rerank_model),
-        "rerank_base_url": bool(settings.rerank_base_url),
+        "model_services": any(
+            registry.service_for(workload_id) is not None
+            for workload_id in WORKLOADS
+        ),
         "mineru_enabled": settings.mineru_enabled,
         "mineru_cloud_enabled": settings.mineru_cloud_enabled,
         "scale_index_auto_enabled": settings.scale_index_auto_enabled,
@@ -1114,7 +1103,7 @@ def snapshot_database(
                 row_count=row_count,
                 digest=digest,
             )
-            if name == "concept_clusters" and user_version < 24:
+            if name == "concept_clusters" and user_version < 29:
                 cluster_v24_projection = _cluster_v24_projection(
                     digest_conn,
                     digest_columns,
@@ -1172,6 +1161,8 @@ def _empty_normalized() -> Dict[str, int]:
         "seeded_object_schemas": 0,
         "admin_upgraded": 0,
         "concept_clusters": 0,
+        "scrubbed_model_profiles": 0,
+        "scrubbed_model_statuses": 0,
     }
 
 
@@ -1181,6 +1172,8 @@ def _compare_special_rows(
     post_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
     normalized: Dict[str, int],
     problems: List[str],
+    *,
+    allow_model_scrub: bool = False,
 ) -> None:
     def rows_equal(pre: Dict[str, Any], post: Dict[str, Any], skip: frozenset) -> bool:
         keys = set(pre) | set(post)
@@ -1202,8 +1195,21 @@ def _compare_special_rows(
     for key, pre_row in pre_rows.items():
         post_row = post_rows.get(key)
         if post_row is None:
+            if allow_model_scrub and table == "model_service_status":
+                normalized["scrubbed_model_statuses"] += 1
+                continue
             problems.append(f"table={table} reason=row-deleted")
             continue
+        if allow_model_scrub and table == "user_profiles":
+            if (
+                post_row.get("model_settings") == "{}"
+                and rows_equal(
+                    pre_row, post_row, frozenset({"model_settings"})
+                )
+            ):
+                if pre_row.get("model_settings") != "{}":
+                    normalized["scrubbed_model_profiles"] += 1
+                continue
         if table == "users" and pre_row.get("id") == "user-local":
             if not rows_equal(pre_row, post_row, ADMIN_UPGRADE_COLUMNS):
                 problems.append(f"table={table} reason=admin-row-changed-beyond-upgrade")
@@ -1436,7 +1442,7 @@ def compare_snapshots(
             continue
         if (
             name == "concept_clusters"
-            and pre.user_version < 24 <= post.user_version
+            and pre.user_version < 29 <= post.user_version
         ):
             projection = pre.cluster_v24_projection
             if projection is None:
@@ -1456,6 +1462,9 @@ def compare_snapshots(
                 post.special_rows.get(name, {}),
                 normalized,
                 problems,
+                allow_model_scrub=(
+                    pre.user_version < 25 <= post.user_version
+                ),
             )
             if problems:
                 for problem in problems:
@@ -1692,8 +1701,24 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
         ):
             raise _fail("repository would be constructed with the original storage")
 
-        with _no_network():
+        # Pin registry resolution to an explicit empty registry for the whole
+        # repository lifetime.  This preserves the repository's public
+        # constructor seam used by the verifier's mutation probes and prevents
+        # hostile process/.env model variables from activating any provider.
+        with _no_network(), mock.patch.object(
+            SystemModelServiceRegistry,
+            "load",
+            return_value=SystemModelServiceRegistry({}, {}),
+        ):
             repo = SQLiteRepository(settings)
+            # Startup crash recovery is no longer a construction side effect
+            # (it moved to app/services/startup_warmup.py::run_startup so
+            # offline CLIs stop settling the server's in-progress rows). This
+            # tool must keep modelling a real SERVER start — otherwise it would
+            # report "nothing changes" while the actual boot still normalizes
+            # these rows, i.e. a rosier picture than production. Driven
+            # explicitly here, against the disposable BACKUP copy.
+            repo._recover_interrupted_jobs()
             reads = exercise_reads(repo, backup_path)
 
         column_plan = {
@@ -1892,18 +1917,228 @@ MIGRATION_MANIFEST[(22, 23)] = {
     "views": {},
 }
 
-# v24: cluster writers are serialized at the repository boundary, while this
-# database constraint remains the final guard against duplicate membership.
-# Migration 24 deterministically removes legacy duplicates before creating it;
-# row cleanup is validated by the ordinary data-digest comparison, and the
-# schema manifest therefore contains only the new index.
+# v24: write-lock slimming improvement point 2 (design doc §5.5) — the
+# kg_canonical_scratch preparation-segment scratch table (seed -> canonical
+# mapping) that swap_cluster_map_from_scratch's pure-SQL swap joins against
+# kg_cluster_scratch. Same appended-here convention as v22/v23 above.
+KG_CANONICAL_SCRATCH_TABLE = {
+    "kg_canonical_scratch": """CREATE TABLE kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                )""",
+}
+KG_CANONICAL_SCRATCH_INDEX = {
+    "idx_kg_canonical_scratch_nb_run_seed":
+        """CREATE INDEX idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed)""",
+}
+
+# v25: knowhow table version control — an append-only per-table change log
+# (knowhow_changes) plus user-named checkpoints (knowhow_milestones). The
+# milestone table deliberately has no FK to knowhow_changes: rows survive
+# change-history cleanup as inert "stale" markers instead of cascading away.
+KNOWHOW_HISTORY_TABLES = {
+    "knowhow_changes": """CREATE TABLE knowhow_changes (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  kind TEXT NOT NULL,
+                  actor TEXT NOT NULL DEFAULT '',
+                  origin TEXT NOT NULL DEFAULT 'user',
+                  payload_json TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, seq)
+                )""",
+    "knowhow_milestones": """CREATE TABLE knowhow_milestones (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  name TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, name)
+                )""",
+}
+KNOWHOW_HISTORY_INDEXES = {
+    "idx_knowhow_changes_table":
+        """CREATE INDEX idx_knowhow_changes_table
+                  ON knowhow_changes(table_id, seq DESC)""",
+    "idx_knowhow_milestones_table":
+        """CREATE INDEX idx_knowhow_milestones_table
+                  ON knowhow_milestones(table_id, seq DESC)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 24, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_CANONICAL_SCRATCH_TABLE},
+        "indexes": {**manifest["indexes"], **KG_CANONICAL_SCRATCH_INDEX},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(23, 24)] = {
+    "tables": KG_CANONICAL_SCRATCH_TABLE,
+    "columns": {},
+    "indexes": KG_CANONICAL_SCRATCH_INDEX,
+    "triggers": {},
+    "views": {},
+}
+# v25: deployment-wide model-service health plus an irreversible data-only
+# scrub of per-user settings and legacy status rows. The retained v23 table and
+# user_profiles column are unchanged structurally; compare_snapshots validates
+# the only permitted row changes separately.
+SYSTEM_MODEL_SERVICE_STATUS_TABLE = {
+    "system_model_service_status": """CREATE TABLE system_model_service_status (
+                  service_id TEXT PRIMARY KEY,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (
+                    trigger IN ('manual_test', 'observed_failure', 'recovery_probe')
+                  ),
+                  support_id TEXT NOT NULL DEFAULT '',
+                  checked_at TEXT NOT NULL
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 25, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SYSTEM_MODEL_SERVICE_STATUS_TABLE},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(24, 25)] = {
+    "tables": SYSTEM_MODEL_SERVICE_STATUS_TABLE,
+    "columns": {},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v26 层级联在 v25 之上：字典推导把上面每条 (X, 25) 条目再重基到 (X, 26) 并叠加
+# knowhow 历史两表，随后显式登记 (25, 26) hop —— 与 v25 对 v24 所做的一模一样。
+# ⚠️ 必须排在 v25 model-service 层之后（knowhow 迁移是 _migration_26，在 master
+# 的 _migration_25 之上），否则两个 (24,25) hop 会互相覆盖、丢掉到 v26 的登记。
+MIGRATION_MANIFEST = {
+    (key[0], 26, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KNOWHOW_HISTORY_TABLES},
+        "indexes": {**manifest["indexes"], **KNOWHOW_HISTORY_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(25, 26)] = {
+    "tables": KNOWHOW_HISTORY_TABLES,
+    "columns": {},
+    "indexes": KNOWHOW_HISTORY_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+# v27 (P1.5, source completion marker): sources.chunked_at — the persistent
+# "this generation of elements finished chunking" marker that makes an
+# extracted+0-chunk source's history decidable (legit 0-chunk vs interrupted
+# chunk build). Renumbered from v26 after a number collision: #328 took
+# _migration_25 (credential scrub) and #327 took _migration_26 (knowhow history),
+# so this segment MUST sit after BOTH — its broadcast lifts every (X, 26) key
+# (knowhow's v26 layer included) to (X, 27). Unlike the new-table bumps above,
+# this adds a COLUMN to an existing table — so the broadcast segment below merges
+# into each manifest's ``columns["sources"]`` nested dict (preserving the
+# memory_id column the pre-v14 hops already carry) rather than only unioning
+# ``tables``/``indexes``. Nested-merge, never overwrite.
+SOURCES_CHUNKED_AT_COLUMN = {
+    "chunked_at": ("chunked_at", "TEXT", 0, None, 0),
+}
+# v28 层级联在 v27 之上：每笔记本文档数量上限 —— app_settings 全局设置 KV 表 +
+# user_profiles.upload_document_limit 可空列。字典推导把上面每条 (X, 27) 条目重基到
+# (X, 28) 并叠加 app_settings 表与该列，随后显式登记 (27, 28) hop —— 与前面各层同款。
+# app_settings 是全新表（每条 hop 的 tables allowlist 都含它）；user_profiles 自 v1
+# baseline 就存在（其 model_settings 列在 v9 fixture 里已具备，故不是迁移新增），所以
+# upload_document_limit 是每条 hop 唯一新增的 user_profiles 列，属于 columns allowlist
+# （镜像 v20 对 promotion_candidates.target_base_id 的处理）。SQL 文本与已部署库
+# sqlite_master 存储逐字一致（"IF NOT EXISTS" 被 SQLite 剥除）。
+APP_SETTINGS_TABLE = {
+    "app_settings": (
+        "CREATE TABLE app_settings (\n"
+        "                  key TEXT PRIMARY KEY,\n"
+        "                  value TEXT NOT NULL,\n"
+        "                  updated_at TEXT NOT NULL\n"
+        "                )"
+    ),
+}
+USER_PROFILES_UPLOAD_LIMIT_COLUMN = {
+    "upload_document_limit": ("upload_document_limit", "INTEGER", 0, None, 0),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 27, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "sources": {
+                **manifest["columns"].get("sources", {}),
+                **SOURCES_CHUNKED_AT_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST = {
+    (key[0], 28, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **APP_SETTINGS_TABLE},
+        "columns": {
+            **manifest["columns"],
+            "user_profiles": {
+                **manifest["columns"].get("user_profiles", {}),
+                **USER_PROFILES_UPLOAD_LIMIT_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+# The single-hop (26, 27) entry. No fixture exercises a pure v26→v27 replay
+# today, so the broadcast segment above — which stamps chunked_at onto every
+# (X, 27) key — is what the live tests actually go through. This entry is kept
+# for structural completeness (a future v26 rollback fixture would key straight
+# into it) and to mirror the append convention; verified load-bearing by
+# mutating the broadcast segment (not this line) — see the P1.5 commit.
+MIGRATION_MANIFEST[(26, 27)] = {
+    "tables": {},
+    "columns": {"sources": SOURCES_CHUNKED_AT_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+# The single-hop (27, 28) entry — 每笔记本文档数量上限层。同上，无 fixture 走纯
+# v27→v28 replay，靠上面的 (X,28) 广播段实际生效；保留此条以镜像 append 约定、
+# 并供未来 v27 回滚 fixture 直接命中。
+MIGRATION_MANIFEST[(27, 28)] = {
+    "tables": APP_SETTINGS_TABLE,
+    "columns": {"user_profiles": USER_PROFILES_UPLOAD_LIMIT_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v29: serialize cluster membership at the repository boundary and retain a
+# database-level uniqueness guard.  This number deliberately follows master's
+# v24-v28 migrations; migration 29 also performs deterministic legacy duplicate
+# cleanup before creating the index.
 CLUSTER_MEMBERSHIP_UNIQUE_INDEX = {
     "uq_clusters_notebook_type_member":
         """CREATE UNIQUE INDEX uq_clusters_notebook_type_member
                   ON concept_clusters(notebook_id, object_type, member_object_id)""",
 }
 MIGRATION_MANIFEST = {
-    (key[0], 24, *key[2:]): {
+    (key[0], 29, *key[2:]): {
         **manifest,
         "indexes": {
             **manifest["indexes"],
@@ -1912,7 +2147,7 @@ MIGRATION_MANIFEST = {
     }
     for key, manifest in MIGRATION_MANIFEST.items()
 }
-MIGRATION_MANIFEST[(23, 24)] = {
+MIGRATION_MANIFEST[(28, 29)] = {
     "tables": {},
     "columns": {},
     "indexes": CLUSTER_MEMBERSHIP_UNIQUE_INDEX,

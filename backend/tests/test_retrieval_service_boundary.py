@@ -64,7 +64,8 @@ def test_reasoning_retriever_accepts_ports_without_sqlite_repository():
             return []
 
     class _Models:
-        reasoning_llm_client = type("LLM", (), {"configured": False})()
+        def chat(self, workload_id):
+            return type("LLM", (), {"configured": False})()
 
     class _Communities:
         def mounted_base_ids(self, active_notebook_id):

@@ -57,6 +57,7 @@ import {
   Columns2,
   Edit3,
   Eye,
+  History as HistoryIcon,
   ImagePlus,
   List,
   ListChecks,
@@ -91,6 +92,7 @@ import {
   DISCARD_DRAFT_LABEL,
   DRAFT_BANNER_TEXT,
   EDIT_LABEL,
+  HISTORY_LABEL,
   PROCEDURE_HINT_TEXT,
   REFORMAT_SERVER_STALE_MESSAGE,
   REFORMAT_STALE_MESSAGE,
@@ -279,7 +281,12 @@ function KnowhowImage({ src, alt, apiBase }: { src?: string; alt?: string; apiBa
 // 阅读长内容想全屏，不代表长期偏好。
 // ---------------------------------------------------------------------------
 
-const FULLSCREEN_STORAGE_KEY = "knowhow.cellModal.fullscreen";
+// knowhow 表版本管理 Task 16：导出给 knowhow-cell-history.tsx（格子浮窗第三态
+// ——历史）复用——三态必须共用同一个 sessionStorage 键，切页签时浮窗位置/
+// 全屏选择才不会跳动（预览态/编辑态两个既有消费方也是各自 mount 一份
+// useFullscreenToggle 实例但读写同一个键，效果等同「共享」，见下方
+// useFullscreenToggle 注释）。
+export const FULLSCREEN_STORAGE_KEY = "knowhow.cellModal.fullscreen";
 // 导出给 knowhow-matrix-drawer.tsx 的全屏切换按钮复用——图标/aria/title 文案
 // 与格子浮窗保持逐字一致（任务要求「与格子浮窗一致」），不在那个文件另开一份
 // 可能措辞漂移的拷贝。
@@ -287,6 +294,11 @@ export const FULLSCREEN_LABEL = "全屏";
 export const RESTORE_SIZE_LABEL = "还原大小";
 const PREVIEW_MODE_TAG = "查看";
 const EDITING_MODE_TAG = "编辑中";
+// knowhow 表版本管理 Task 16：格子浮窗第三态（历史）的模式徽标文案——导出给
+// knowhow-cell-history.tsx 使用（PREVIEW_MODE_TAG/EDITING_MODE_TAG 两个都只
+// 在本文件内部消费，故保持私有；这一个额外被另一个文件的组件用到，才需要
+// export，两者的可见性差异只是"消费方是否跨文件"，不代表待遇不一致）。
+export const HISTORY_MODE_TAG = "历史";
 
 // storageKey 参数化（原为格子浮窗写死 FULLSCREEN_STORAGE_KEY）+ 导出：概念
 // 矩阵抽屉（knowhow-matrix-drawer.tsx）补全屏时复用同一份实现风格（sessionStorage
@@ -450,6 +462,11 @@ export interface KnowhowCellPreviewProps {
   canEdit: boolean;
   onEdit: () => void;
   onClose: () => void;
+  /** knowhow 表版本管理 Task 16：切到格子浮窗第三态（历史）——与 onEdit 同级
+   * 的顶层入口，但不受 canEdit 门控（规格⑦「只读成员看得到历史」，只有历史
+   * 页签内部的「恢复此版本」按钮才按 canEdit 收紧，见 knowhow-cell-
+   * history.tsx）。 */
+  onHistory: () => void;
   /** 整表详情——用来渲染「本行其他格子」定位区（含当前列高亮）。仅读，本
    * 组件不改。传入后浮层就能显示行内其他列的摘要，用户一眼看到当前格子在
    * 整行的哪个位置。可选（个别调用方 table 尚未加载完全时不传，此时不显示
@@ -471,6 +488,7 @@ export function KnowhowCellPreview({
   canEdit,
   onEdit,
   onClose,
+  onHistory,
   table,
   rowId,
   onSwitchCell,
@@ -531,6 +549,11 @@ export function KnowhowCellPreview({
                   <Edit3 size={14} /> {EDIT_LABEL}
                 </button>
               )}
+              {/* knowhow 表版本管理 Task 16：不受 canEdit 门控——只读成员也该看得到
+                  这一格的历史（规格⑦），只是历史页签内部的「恢复此版本」按钮才收紧。 */}
+              <button type="button" className="kh-preview-edit-button" onClick={onHistory}>
+                <HistoryIcon size={14} /> {HISTORY_LABEL}
+              </button>
               <button
                 type="button"
                 className="icon-button"
@@ -591,6 +614,19 @@ export interface KnowhowCellEditorProps {
    * 决定报给 panel——panel 更新 cellModal 状态，本组件靠 key 变化重新挂载。 */
   onNavigate: (rowId: string, columnId: string) => void;
   onClose: () => void;
+  /** knowhow 表版本管理 Task 16：切到格子浮窗第三态（历史）——编辑态能挂载
+   * 到画面上本就证明 canEdit 为真（见本文件其余「编辑态无需再判 canEdit」的
+   * 既有取向），故不需要像预览态那样额外说明"不受 canEdit 门控"。
+   *
+   * codex 第 6 轮 P2：编辑态的 History 按钮**经 performLeave({kind:"history"})**
+   * 走与 Esc/关闭同一套 commitLeave 草稿落盘守卫，不再直调本回调。早前直调的
+   * 理由是「卸载兜底会把未落盘文字写进草稿、不会丢」——但那条 mountedRef 清理
+   * effect 调 flushDraft **忽略了返回值**，localStorage 满/不可用时草稿没写成、
+   * 编辑器照样卸载、文字静默丢失，与「refuses to leave if that write fails」这条
+   * 不变量相悖。经 commitLeave 后：落盘成功即打开历史（无二次确认，纯粹切页签），
+   * 失败则首次拦下+DRAFT_FLUSH_FAILED 警告、二次强制放行（存储坏了也不把用户
+   * 永久关在弹窗里）。预览态的 History 按钮没有未保存文字，仍直调本回调。 */
+  onHistory: () => void;
   /** 「本行其他格子」条目可点击切换——透传给 KnowhowRowContext，未传入时该
    * 区保持纯展示。编辑态本身已隐含 canEdit（能进到这一态就说明有写权限），
    * panel 侧无需再额外按 canEdit 判断是否传入，见该文件调用处注释。 */
@@ -613,6 +649,7 @@ export function KnowhowCellEditor({
   onSave,
   onNavigate,
   onClose,
+  onHistory,
   onSwitchCell,
   onServerStale,
 }: KnowhowCellEditorProps) {
@@ -944,9 +981,10 @@ export function KnowhowCellEditor({
       setLeaveAfterUpload(null);
       leaveAfterUploadRef.current = null;
       if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
+      else if (intent.kind === "history") onHistory();
       else onClose();
     },
-    [flushDraft, onSwitchCell, onClose],
+    [flushDraft, onSwitchCell, onClose, onHistory],
   );
   // 上传收尾（可能晚于好几次重渲染）要调到**当前**这版 commitLeave，而不是发起
   // 上传那一帧闭包里的旧版（它捕获的 onClose/onSwitchCell 可能已经换过）。
@@ -1379,6 +1417,17 @@ export function KnowhowCellEditor({
               )}
             </div>
             <div className="kh-modal-header-actions">
+              {/* knowhow 表版本管理 Task 16（codex 第 6 轮 P2 修）：经 performLeave 走
+                  与 Esc/关闭同一套草稿落盘守卫——落盘成功即打开历史，失败首次拦下+
+                  警告、二次强制放行，绝不静默丢未保存文字。理由见
+                  KnowhowCellEditorProps.onHistory 注释。 */}
+              <button
+                type="button"
+                className="kh-preview-edit-button"
+                onClick={() => performLeave({ kind: "history" })}
+              >
+                <HistoryIcon size={14} /> {HISTORY_LABEL}
+              </button>
               <button
                 type="button"
                 className="icon-button"

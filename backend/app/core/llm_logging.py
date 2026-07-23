@@ -11,8 +11,10 @@ Logging never affects the main flow.
 
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, _ROOT_DIR, new_id
@@ -20,6 +22,21 @@ from app.core.event_logging import EventLogger, _ROOT_DIR, new_id
 
 def new_interaction_id() -> str:
     return new_id("llm")
+
+
+_INTERACTION_SUPPORT_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "llm_interaction_support_id", default=""
+)
+
+
+@contextmanager
+def interaction_support_scope(support_id: str) -> Iterator[None]:
+    """Correlate a raw protocol log with its scheduled invocation."""
+    token = _INTERACTION_SUPPORT_ID.set(str(support_id))
+    try:
+        yield
+    finally:
+        _INTERACTION_SUPPORT_ID.reset(token)
 
 
 class LLMInteractionLogger:
@@ -54,6 +71,9 @@ class LLMInteractionLogger:
         return self._events.clip(text)
 
     def log(self, record: Dict[str, Any]) -> None:
+        support_id = _INTERACTION_SUPPORT_ID.get()
+        if support_id and not record.get("support_id"):
+            record = {**record, "support_id": support_id}
         kind = record.get("kind", "?")
         model = record.get("model", "?")
         latency = record.get("latency_ms", "?")

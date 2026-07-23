@@ -178,6 +178,88 @@ def test_sweep_does_not_treat_code_attachment_text_as_a_reference(repo):
     assert repo.get_notebook_asset(asset["id"]) is None
 
 
+def test_sweep_reclaims_an_asset_referenced_only_by_a_deleted_rows_code_attachment(repo):
+    """Task 13 code review: a naive ``kind NOT IN ('cell_code_put',
+    'cell_code_delete')`` exclusion only keeps CODE-ONLY kinds out of the
+    history scan — but ``row_delete``'s own payload embeds the deleted row's
+    remembered code attachments (a ``code`` array) in the SAME payload as its
+    genuine ``cells``. An asset:// substring that lives ONLY inside that
+    code array must still not count as a keeper reference once the row
+    holding it is deleted, or it becomes permanently unreclaimable (removed
+    stays 0 forever — this is the exact scenario the review reproduced)."""
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)
+    _table_id, row_id, column_id = _make_cell(repo, nb, "plain note, no image")
+    repo.upsert_knowhow_cell_code(
+        row_id, column_id, f"# see asset://{asset['id']}", "python", "u1", "hash1"
+    )
+
+    repo.delete_knowhow_row(row_id)  # CASCADEs the code row; row_delete's
+    # payload embeds its code_text right alongside the row's genuine cells.
+
+    result = repo.maintenance.sweep_orphan_assets(nb)
+
+    assert result == {"removed": 1}
+    assert repo.get_notebook_asset(asset["id"]) is None
+
+
+def test_sweep_reclaims_an_asset_referenced_only_by_a_deleted_columns_code_attachment(repo):
+    """Same gap as the row_delete case above, but for column_delete's own
+    ``code`` array (a different, top-level payload shape from row_delete's
+    per-row nested one — both must be excluded, not just one)."""
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)
+    _table_id, row_id, column_id = _make_cell(repo, nb, "plain note, no image")
+    repo.upsert_knowhow_cell_code(
+        row_id, column_id, f"# see asset://{asset['id']}", "python", "u1", "hash1"
+    )
+
+    repo.delete_knowhow_column(column_id)
+
+    result = repo.maintenance.sweep_orphan_assets(nb)
+
+    assert result == {"removed": 1}
+    assert repo.get_notebook_asset(asset["id"]) is None
+
+
+def test_classification_and_recheck_share_the_same_reference_predicate(repo, monkeypatch):
+    """Task 13 code review: sweep_orphan_assets has TWO reference-determination
+    call sites (the classification read, and the in-transaction re-check that
+    closes the race against a concurrent cell save) — they must be the exact
+    SAME code, not two independently hand-duplicated SQL strings. A prior
+    implementation's own mutation test retracted each copy ONE AT A TIME and
+    saw both go red, which looks like proof the two agree — it is not: the
+    two sites are ANDed together (an asset is deleted only if BOTH say
+    "unreferenced"), so with either copy still conservative, retracting only
+    the OTHER one can't surface a divergence between them. This test instead
+    asserts STRUCTURAL identity: patch the shared predicate and confirm it is
+    invoked once per phase (classification, then the write-phase re-check)
+    for the SAME asset — impossible if the two sites were separate code."""
+    from app.repositories.sqlite import maintenance as maintenance_mod
+
+    nb = _mk_notebook(repo)
+    asset = _upload(repo, nb)  # unreferenced: one candidate for both phases
+
+    calls: list[str] = []
+    original = maintenance_mod.SQLiteMaintenanceAdapter._is_asset_referenced
+
+    def _spy(self, db, notebook_id, asset_id):
+        calls.append(asset_id)
+        return original(self, db, notebook_id, asset_id)
+
+    monkeypatch.setattr(
+        maintenance_mod.SQLiteMaintenanceAdapter, "_is_asset_referenced", _spy
+    )
+
+    result = repo.maintenance.sweep_orphan_assets(nb)
+
+    assert result == {"removed": 1}
+    assert calls == [asset["id"], asset["id"]], (
+        "expected exactly one classification-phase call and one write-phase "
+        "re-check call, both through the SAME shared predicate"
+    )
+
+
 def test_sweep_is_scoped_to_the_given_notebook(repo):
     nb1 = _mk_notebook(repo, "N1")
     nb2 = _mk_notebook(repo, "N2")
@@ -196,6 +278,86 @@ def test_sweep_is_scoped_to_the_given_notebook(repo):
 def test_sweep_on_notebook_with_no_assets_returns_zero(repo):
     nb = _mk_notebook(repo)
     assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 0}
+
+
+# ---------------------------------------------------------------------------
+# knowhow 表版本管理 Task 13 (spec §7.1): historical references keep an asset
+# alive too, not just the currently-live cell content. store/hist mirror the
+# same fixture names test_knowhow_history_hooks.py already established (raw
+# store, not the facade, so update_knowhow_cell can be called with only its
+# own 3 required positional args — no notebook/table plumbing needed).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def store(repo):
+    return repo._runtime.knowhow_store
+
+
+@pytest.fixture
+def hist(repo):
+    return repo._runtime.knowhow_history_store
+
+
+@pytest.fixture
+def table(repo, store) -> dict:
+    """A fresh notebook + two-column table (anchor + plain) with one row —
+    just enough surface for update_knowhow_cell to rewrite ``row_a``'s
+    ``plain`` cell back and forth across an asset reference."""
+    notebook_id = _mk_notebook(repo)
+    table_id = store.create_knowhow_table(
+        notebook_id, "T", "",
+        [{"name": "概念", "role": "anchor"}, {"name": "备注", "role": "attribute"}],
+    )
+    detail = store.get_knowhow_table(table_id)
+    anchor, plain = detail["columns"][0]["id"], detail["columns"][1]["id"]
+    row_a = store.add_knowhow_row(table_id, {anchor: "A"})
+    return {
+        "id": table_id, "notebook_id": notebook_id,
+        "anchor": anchor, "plain": plain, "row_a": row_a,
+    }
+
+
+@pytest.fixture
+def asset_id(repo, table) -> str:
+    return _upload(repo, table["notebook_id"])["id"]
+
+
+def test_asset_referenced_only_by_history_is_not_swept(repo, store, table, asset_id):
+    store.update_knowhow_cell(
+        table["row_a"], table["plain"], f"![图](asset://{asset_id})"
+    )
+    store.update_knowhow_cell(table["row_a"], table["plain"], "图没了")
+
+    repo.maintenance.sweep_orphan_assets(table["notebook_id"], min_age_seconds=0)
+
+    assert repo._runtime.knowhow_store.get_notebook_asset(asset_id) is not None, (
+        "历史里还引用着它——回收了就没法回退回带图的版本"
+    )
+
+
+def test_asset_becomes_collectable_after_history_is_pruned(repo, store, hist, table, asset_id):
+    store.update_knowhow_cell(
+        table["row_a"], table["plain"], f"![图](asset://{asset_id})"
+    )
+    store.update_knowhow_cell(table["row_a"], table["plain"], "图没了")
+    # 第三次编辑，且这次改动跟这个 asset 毫无关系——prune 永远保留 head 那一条
+    # （spec §7.7，否则前置指纹守卫失去参照）。如果 head 恰好停在"图没了"那
+    # 条，它自己的 payload 里 before 字段仍然原样嵌着这个引用，prune 再狠也
+    # 删不掉它，资产永远不会被判定为可回收——这条测试要证明的是"清理历史之后
+    # 真的能回收"，所以 head 必须先挪到一条彻底不提这张图的流水上，prune 才能
+    # 真正删掉最后一条还提着它的流水。
+    store.update_knowhow_cell(table["row_a"], table["plain"], "跟这张图完全无关的内容")
+    with hist.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_changes SET created_at='2000-01-01T00:00:00' WHERE table_id=?",
+            (table["id"],),
+        )
+    hist.prune(table["id"], "2001-01-01T00:00:00")
+
+    repo.maintenance.sweep_orphan_assets(table["notebook_id"], min_age_seconds=0)
+
+    assert repo._runtime.knowhow_store.get_notebook_asset(asset_id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +414,31 @@ def test_http_delete_notebook_route_removes_asset_file_and_dir(tmp_path, monkeyp
     assert resp.status_code == 204, resp.text
     assert not asset_file.exists()
     assert not asset_dir.exists()
+
+
+def test_content_strings_in_payload_rejects_unregistered_kind():
+    """content_strings_in_payload must fail fast on unknown kind to prevent
+    silent asset reference leaks from future kinds that carry cell content
+    but forget to register here."""
+    from app.repositories.sqlite.knowhow_history_store import (
+        content_strings_in_payload,
+    )
+
+    # Known kinds pass (even if they produce empty lists).
+    # 这 14 个刻意逐字写死、与 spec §4.1 的 kind 枚举一一对应，不从模块反推——
+    # 反推会让断言退化成同义反复。⚠️ 别把 md_normalize.py 里 markdown 分词器的
+    # kind（"autolink" 等）加进来，那是同名不同物、与变更流水无关。
+    for kind in (
+        "cell_update", "revert", "row_add", "import_append", "row_delete",
+        "table_create", "column_delete", "column_add", "column_rename",
+        "column_kind", "anchor_set", "table_meta", "cell_code_put",
+        "cell_code_delete",
+    ):
+        result = content_strings_in_payload(kind, {})
+        assert isinstance(result, list), f"kind={kind} should return a list"
+
+    # Unknown kind raises
+    with pytest.raises(ValueError) as exc_info:
+        content_strings_in_payload("unknown_kind_future_breach", {})
+    assert "未登记的 kind" in str(exc_info.value)
+    assert "unknown_kind_future_breach" in str(exc_info.value)

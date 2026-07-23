@@ -33,7 +33,7 @@ from app.repositories.ports import (
 from app.repositories.source_files import SourceFileStore, safe_filename
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
-from app.services.kg.client import safe_json
+from app.services.kg.json_utils import safe_json
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
@@ -117,8 +117,7 @@ class SourceIngestionService:
         delete_source_images: Callable[[str], None],
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
+        model_clients: Any,
         normalize_doc_type: Callable[[str], str],
         default_notebook_names: Iterable[str],
         # --- TEMPORARY KG/catalog callbacks (Task 13/15 targets) ----------
@@ -156,8 +155,7 @@ class SourceIngestionService:
         self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
         self.mineru_cloud_client = mineru_cloud_client
-        self.llm = llm
-        self.kg_llm = kg_llm
+        self.model_clients = model_clients
         self.normalize_doc_type = normalize_doc_type
         self.default_notebook_names = default_notebook_names
         self.clear_source_extraction_state = clear_source_extraction_state
@@ -182,6 +180,40 @@ class SourceIngestionService:
         # 先来者的 finally 不能把后来者的 entry 弹掉；_one 里的 done 更新也
         # 只能改属于自己 gen 的 entry，避免"最新一次"语义下的 done 串扰。
         self._paper_meta_generation = 0
+        # 源级活跃租约(进程内;重启即空=没人在处理,恰是崩溃后的正确答案,故不参与
+        # 启动清算)。镜像 kg_building / _paper_meta_backfilling 的进程内单飞惯例:
+        # process_source 进入时给计数加一、finally 减一。职责是「在途误报抑制」——体检
+        # endpoint 与 process_source 同进程可并发,在途源瞬时没 elements/没 chunks,
+        # 纯产物判据会误报损坏,租约声明「有活线程在弄,别报」。崩溃检测归 parse_status
+        # + 启动清算,不靠这个内存集。值是**引用计数**而非时间戳:同一源可被并发处理
+        # (上传后台 job 未完时 owner 又点 parse),两个 invocation 各加一次,先完成者
+        # 减到 1(仍活)、后完成者减到 0 才撤租——用时间戳会被后来者覆盖、令先完成者的
+        # finally 撤错人(镜像上面 _paper_meta_backfilling 的世代守卫,这里用计数更简)。
+        # source_id → 活跃 invocation 数;P2 体检把 keys() 当 active 集做减法。
+        self._active_sources: dict[str, int] = {}
+        self._active_sources_lock = threading.Lock()
+        # 源级分块串行锁(per-source):同一源的并发 reparse 必须在「换 elements →
+        # 建 chunks + 置 marker」这段串行,否则一次 invocation 可能读到 A 代 elements、
+        # 另一次把它换成 B 代、第一次再把基于 A 代的 chunks 连同 marker 写回,留下
+        # 「B 代 elements + A 代 chunks + marker 已置」的假完成(codex 第 2 轮 P2)。
+        # 只锁 build_chunks 不够——换 elements 若不持同一把锁,仍能插进「读→写」之间;
+        # 故锁必须连续覆盖 replace_elements 到 build_chunks。懒创建、与上面租约同生命
+        # 周期:refcount 归零(无活跃 invocation)时一并清除,免得每见一个源就永久留锁。
+        # get-or-create 在 _active_sources_lock 下做,但**获取锁本身**在该 meta 锁之外
+        # (否则持 meta 锁等 per-source 锁会死锁)。
+        self._source_chunk_locks: dict[str, threading.Lock] = {}
+
+    def _source_chunk_lock(self, source_id: str) -> threading.Lock:
+        """取(或懒创建)某源的分块串行锁。仅在 _active_sources_lock 下 get-or-create
+        锁对象(快),**不**在这里 acquire——调用方拿到后自行 ``with`` 获取,以免持 meta
+        锁阻塞在 per-source 锁上造成死锁。清除在 process_source 的 finally 里,与租约
+        refcount 归零同步(那一刻无活跃 invocation 持锁,可安全 pop)。"""
+        with self._active_sources_lock:
+            lock = self._source_chunk_locks.get(source_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._source_chunk_locks[source_id] = lock
+            return lock
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -198,10 +230,10 @@ class SourceIngestionService:
         return self.import_sources(notebook_id, payload, self.pipeline_hooks())
 
     def add_url_sources_compat(
-        self, notebook_id: str, urls: Iterable[str], scheduler=None
+        self, notebook_id: str, urls: Iterable[str], scheduler=None, capacity=None
     ) -> AddUrlSourcesResult:
         return self.add_url_sources(
-            notebook_id, urls, scheduler, self.pipeline_hooks()
+            notebook_id, urls, scheduler, self.pipeline_hooks(), capacity=capacity
         )
 
     def upload_sources_compat(
@@ -247,7 +279,7 @@ class SourceIngestionService:
 
     def summarize(self, title: str, elements: List[SourceElement]) -> str:
         text = "\n".join(element.text for element in elements[:12])
-        llm = self.llm()
+        llm = self.model_clients.chat("source_summary")
         if llm.configured and text.strip():
             try:
                 raw = llm.chat_json(
@@ -304,9 +336,14 @@ class SourceIngestionService:
         urls: Iterable[str],
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
+        capacity: "int | None" = None,
     ) -> AddUrlSourcesResult:
-        """逐 URL 初筛(非 PDF/不可达/超限→rejected,不建来源);通过的建 source_url
-        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。"""
+        """逐 URL 初筛(空白跳过;非 PDF/不可达→rejected,不建来源);通过的建 source_url
+        来源并交由现有 process_source(有 scheduler 则后台,否则同步)。未配置 token→报错。
+
+        capacity 是「每笔记本文档数量上限」的剩余额度(None=不限,如 admin 笔记本):容量
+        按**成功探测逐条**扣减——探测通过但额度已用尽的 URL 进 rejected(超限原因),不消耗
+        配额。故一个无效链接不会拖累整批,接近上限时仍能建成额度内的有效来源。"""
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         # 本地 MinerU 或云端任一可用即可；本地优先（内网场景数据不出网）。
         if not (
@@ -317,6 +354,7 @@ class SourceIngestionService:
             )
         created: List[SourceSummary] = []
         rejected: List[RejectedUrl] = []
+        budget = capacity  # None=不限;int=剩余可建数,每建成一个 -1
         for raw in urls:
             url = (raw or "").strip()
             if not url:
@@ -324,6 +362,11 @@ class SourceIngestionService:
             probe = remote_sources.probe_pdf(url)
             if not probe.ok:
                 rejected.append(RejectedUrl(url=url, reason=probe.reason))
+                continue
+            if budget is not None and budget <= 0:
+                rejected.append(
+                    RejectedUrl(url=url, reason="已达该笔记本的文档数量上限，未添加")
+                )
                 continue
             source_id = self.new_id("src")
             self.sources.insert_source(
@@ -346,6 +389,8 @@ class SourceIngestionService:
             else:
                 self.process_source(source_id, hooks)
             created.append(self.sources.get_source(source_id))
+            if budget is not None:
+                budget -= 1
         return AddUrlSourcesResult(created=created, rejected=rejected)
 
     def upload_sources(
@@ -472,8 +517,21 @@ class SourceIngestionService:
                 }
             )
 
-        self.set_source_status(source_id, "parsing")
+        # 进入即取内存租约(在置 parsing 之前)。见 __init__ 处说明:职责是在途误报
+        # 抑制,不是崩溃检测。租约是**引用计数**——同一源可被并发处理(上传后台 job
+        # 未完时 owner 又点 POST /sources/{id}/parse),每个 invocation 各加一次、
+        # finally 各减一次,计数归零才真正撤租;否则先完成的 invocation 会撤掉仍在跑
+        # 的另一个的租约,令其在途缺 elements/chunks 被体检误报损坏。下面 try 的
+        # finally 覆盖所有出口做减。
+        with self._active_sources_lock:
+            self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
         try:
+            # 置 'parsing' 放在 try 内首行(不在 try 外):否则这句 DB 写若因磁盘满/
+            # 写锁异常/库损坏抛出,会在进 try 前传出、绕过下面 finally 的租约释放,
+            # 令该源被体检永久误抑制(假阴性)直到重启。放进来后其失败由 except 兜住
+            # 落 'failed'、finally 照常 pop。stamp(上一行,锁内 dict 赋值)不抛,留在
+            # try 外无妨。
+            self.set_source_status(source_id, "parsing")
             t = time.perf_counter()
             stage("parse", "start", t)
             # Task 9: 清掉这个源之前遗留的 MinerU 图片资产(行+盘)——必须在下面
@@ -553,49 +611,60 @@ class SourceIngestionService:
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
-            # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
-            with self.write() as db:
-                self.clear_source_extraction_state(
-                    db,
-                    source_id,
-                    source.notebook_id,
-                    clear_embeddings=True,
-                )
-                self.sources.replace_elements(
-                    db,
-                    source_id,
-                    [
-                        SourceElementWrite(
-                            id=f"el-{source_id}-{index:04d}",
-                            element_type=element.element_type,
-                            location_label=element.location_label,
-                            text=element.text,
-                            metadata=element.metadata,
-                        )
-                        for index, element in enumerate(elements, start=1)
-                    ],
-                    created_at=now,
-                )
-            # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/失败/
-            # hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
-            summary = self.summarize_source(source.title, elements)
-            self.set_source_status(source_id, "parsed", summary=summary)
+            # per-source 分块串行锁:把「换 elements → 建 chunks + 置 marker」整段串起来
+            # (见 __init__ 说明)。锁必须从 replace_elements 一直持到 build_chunks 之后,
+            # 否则并发同源 reparse 会交错出「B 代 elements + A 代 chunks + marker 已置」的
+            # 假完成。中间的 summarize/paper_meta(LLM)也在锁内——对**罕见**的并发同源
+            # reparse 是正确的串行;单写(常见)路径下锁无竞争、零额外开销。
+            with self._source_chunk_lock(source_id):
+                # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
+                with self.write() as db:
+                    self.clear_source_extraction_state(
+                        db,
+                        source_id,
+                        source.notebook_id,
+                        clear_embeddings=True,
+                    )
+                    self.sources.replace_elements(
+                        db,
+                        source_id,
+                        [
+                            SourceElementWrite(
+                                id=f"el-{source_id}-{index:04d}",
+                                element_type=element.element_type,
+                                location_label=element.location_label,
+                                text=element.text,
+                                metadata=element.metadata,
+                            )
+                            for index, element in enumerate(elements, start=1)
+                        ],
+                        created_at=now,
+                    )
+                    # 新代 elements 落库即令旧分块完成标记失效——同一写事务内归零
+                    # chunked_at,无崩溃窗口。分块会在下面成功后重新置位;若分块
+                    # 失败则留 NULL,正是 H3 的损坏信号。刻意就地一条而非折进
+                    # clear_source_extraction_state(后者也被 KG 抽取复用、发生在分块之后)。
+                    self.sources.clear_chunked_at(db, source_id)
+                # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/
+                # 失败/hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
+                summary = self.summarize_source(source.title, elements)
+                self.set_source_status(source_id, "parsed", summary=summary)
 
-            # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
-            # 失败不阻塞流水线。落库在终态转换前,前端轮询随状态变化带到。
-            self.ensure_paper_metadata(source, elements=elements, force=True)
+                # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
+                # 失败不阻塞流水线。落库在终态转换前,前端轮询随状态变化带到。
+                self.ensure_paper_metadata(source, elements=elements, force=True)
 
-            # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
-            # best-effort: 失败不阻塞既有 parse->extract 流水线。
-            try:
-                self.chunking.build_chunks_for_source(source_id)
-            except Exception:
-                self.event_log.logger.exception("chunk build failed for %s", source_id)
-                # Chunk build may have committed chunks (source now parsed =>
-                # pending KG) then failed before its kg_mutation_seq bump; with
-                # auto-extract off no later write bumps it. Drop the seq-gated
-                # chunk/pending memos so the next open recomputes, not serves stale.
-                self.invalidate_knowledge_counts(notebook_id)
+                # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
+                # best-effort: 失败不阻塞既有 parse->extract 流水线。
+                try:
+                    self.chunking.build_chunks_for_source(source_id)
+                except Exception:
+                    self.event_log.logger.exception("chunk build failed for %s", source_id)
+                    # Chunk build may have committed chunks (source now parsed =>
+                    # pending KG) then failed before its kg_mutation_seq bump; with
+                    # auto-extract off no later write bumps it. Drop the seq-gated
+                    # chunk/pending memos so the next open recomputes, not serves stale.
+                    self.invalidate_knowledge_counts(notebook_id)
 
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks
@@ -684,6 +753,23 @@ class SourceIngestionService:
                 summary="Parsing failed; see source error.",
                 error_message=str(exc),
             )
+        finally:
+            # 覆盖 try 的所有出口——成功 return、上面的 except 落 'failed'(KgBuildAborted
+            # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的
+            # BaseException:一律给租约计数减一。置 'parsing' 也在 try 内(见上),故进入
+            # try 后再无未覆盖的泄漏边。计数归零才真正撤租(见 stamp 处:并发处理同一源
+            # 时先完成者不能撤掉仍在跑者的租约)。刻意早于下面的 maybe_enqueue_scale_fold,
+            # 后者是独立的空闲收尾、不需要持租约。
+            with self._active_sources_lock:
+                remaining = self._active_sources.get(source_id, 0) - 1
+                if remaining > 0:
+                    self._active_sources[source_id] = remaining
+                else:
+                    self._active_sources.pop(source_id, None)
+                    # refcount 归零=无活跃 invocation 持该源的分块锁,顺手清掉,免得
+                    # 每见一个源就永久留一把锁(有界化)。remaining>0 时不能清——还有
+                    # invocation 在跑、可能正持或将取这把锁。
+                    self._source_chunk_locks.pop(source_id, None)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
@@ -726,7 +812,7 @@ class SourceIngestionService:
                 labels.append(label)
 
         name_val, desc_val = "", ""
-        llm_client = self.llm()
+        llm_client = self.model_clients.chat("notebook_metadata")
         if llm_client.configured:
             block = "\n".join(
                 f"- {r['title']} "
@@ -1013,15 +1099,24 @@ class SourceIngestionService:
         # early-return and the exception path can't keep serving pre-delete counts.
         self.invalidate_knowledge_counts(source.notebook_id)
         try:
-            kg_llm_client = kg_client if kg_client is not None else self.kg_llm()
-            if not getattr(kg_llm_client, "configured", False):
+            kg_llm_client = kg_client if kg_client is not None else self.model_clients
+            if not (
+                kg_llm_client.configured("kg_extract")
+                if callable(getattr(kg_llm_client, "configured", None))
+                else getattr(kg_llm_client, "configured", False)
+            ):
                 self.finish_extraction_run(run_id, "completed", "no-llm")
                 return
             raw_text = self.source_files.read_source_text(
                 getattr(source, "file_path", "") or "", elements
             )
+            model_parallelism = (
+                kg_llm_client.parallelism("kg_extract")
+                if callable(getattr(kg_llm_client, "parallelism", None))
+                else 1
+            )
             n_chars = kg_ingest.plan_window_size(
-                len(raw_text), self.settings.kg_extract_workers,
+                len(raw_text), model_parallelism,
                 self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
                 override=self.settings.kg_window_target_chars,
             )
@@ -1100,6 +1195,8 @@ class SourceIngestionService:
         source: "SourceSummary | SourceDetail",
         elements: Optional[List[SourceElement]] = None,
         force: bool = False,
+        *,
+        client: Any | None = None,
     ) -> str:
         """单源论文元数据抽取(best-effort,幂等)。返回状态串 stored/not_paper/
         skipped/disabled/no_llm/no_text/failed,仅供调用方统计,不进状态机。
@@ -1131,7 +1228,7 @@ class SourceIngestionService:
         try:
             if not force and self.sources.get_paper_meta(source.id) is not None:
                 return "skipped"
-            client = self.kg_llm()
+            client = client or self.model_clients.chat("paper_metadata")
             if not getattr(client, "configured", False):
                 return "no_llm"
             if elements is None:
@@ -1201,8 +1298,9 @@ class SourceIngestionService:
     ) -> dict:
         """批量补抽缺论文元数据的源(CLI phase=metadata 与应用内端点共用)。
         幂等键=meta 行存在;失败源不落行,重跑自动重试(断点续跑)。有界并发
-        (受 kg_job_concurrency 约束),任务级 copy_context 传播 per-user
-        模型配置。返回 {"total": N, "<status>": n, ...} 计数。成功收尾
+        取自 ``paper_metadata`` 所绑定模型服务的并行度，并在原始 worker
+        启动前解析一次 workload client。返回
+        {"total": N, "<status>": n, ...} 计数。成功收尾
         (stored>0)经 pending_bus 广播 paper_meta_done 铃铛事件,见
         _notify_paper_meta_done。"""
         nb_row = self.notebooks.get_row(notebook_id)  # KeyError if missing
@@ -1212,10 +1310,14 @@ class SourceIngestionService:
         counts: dict = {"total": len(targets)}
         if not targets:
             return counts
+        # Resolve the workload-bound adapter before raw worker threads. The
+        # scheduler remains the authoritative global cap; matching the pool to
+        # this service avoids manufacturing excess blocked worker calls.
+        paper_client = self.model_clients.chat("paper_metadata")
         workers = max(
             1,
             min(
-                int(getattr(self.settings, "kg_job_concurrency", 4)),
+                self.model_clients.parallelism("paper_metadata"),
                 len(targets),
             ),
         )
@@ -1241,7 +1343,9 @@ class SourceIngestionService:
                 nonlocal done
                 try:
                     row = self.sources.get_source(source_id)
-                    status = self.ensure_paper_metadata(row, force=force)
+                    status = self.ensure_paper_metadata(
+                        row, force=force, client=paper_client
+                    )
                 except Exception:
                     status = "failed"
                     self.event_log.logger.exception(

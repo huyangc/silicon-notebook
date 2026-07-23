@@ -16,6 +16,8 @@ from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _FakeKgLLM:
@@ -76,16 +78,13 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
-    monkeypatch.setenv("EMBED_DIM", "16")
     for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    provider = RecordingModelProvider()
+    r = SQLiteRepository(Settings(), model_provider=provider)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+    r.recording_model_provider = provider
     return r
 
 
@@ -129,13 +128,15 @@ def _insert_source(repo, notebook_id, source_id, *, text=HEAD_TEXT,
 
 def test_ensure_stores_verified_meta(repo, notebook_id, service):
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
+    repo.recording_model_provider.calls.clear()
     source = _insert_source(repo, notebook_id, "src-1")
 
     status = service.ensure_paper_metadata(source)
 
     assert status == "stored"
     assert fake.calls == 1
+    assert ("chat", "paper_metadata") in repo.recording_model_provider.calls
     meta = repo.get_paper_meta("src-1")
     assert meta is not None
     assert meta["is_paper"] is True
@@ -148,7 +149,7 @@ def test_ensure_stores_verified_meta(repo, notebook_id, service):
 
 def test_ensure_idempotent_skip(repo, notebook_id, service):
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
     assert service.ensure_paper_metadata(source) == "stored"
 
@@ -160,7 +161,7 @@ def test_ensure_idempotent_skip(repo, notebook_id, service):
 
 def test_ensure_force_reextracts(repo, notebook_id, service):
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
     assert service.ensure_paper_metadata(source) == "stored"
 
@@ -172,7 +173,7 @@ def test_ensure_force_reextracts(repo, notebook_id, service):
 
 def test_not_paper_marker_prevents_retry(repo, notebook_id, service):
     fake = _FakeKgLLM({"is_paper": False})
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
 
     status = service.ensure_paper_metadata(source)
@@ -196,7 +197,7 @@ def test_not_paper_marker_prevents_retry(repo, notebook_id, service):
 def test_no_llm_returns_no_llm_without_row(repo, notebook_id, service):
     fake = _FakeKgLLM(PAYLOAD)
     fake.configured = False
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
 
     status = service.ensure_paper_metadata(source)
@@ -208,7 +209,7 @@ def test_no_llm_returns_no_llm_without_row(repo, notebook_id, service):
 
 def test_memory_source_gated(repo, notebook_id, service):
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1", source_type="memory")
 
     status = service.ensure_paper_metadata(source)
@@ -222,7 +223,7 @@ def test_knowhow_source_gated(repo, notebook_id, service):
     """姊妹场景:source.type 门控是单个 in ("memory", "knowhow") 检查,两个成员
     都要各自覆盖,免得元组打错字只有一半被测试兜住。"""
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1", source_type="knowhow")
 
     status = service.ensure_paper_metadata(source)
@@ -234,7 +235,7 @@ def test_knowhow_source_gated(repo, notebook_id, service):
 
 def test_textbook_doc_type_gated(repo, notebook_id, service):
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1", doc_type="textbook")
 
     status = service.ensure_paper_metadata(source)
@@ -245,7 +246,7 @@ def test_textbook_doc_type_gated(repo, notebook_id, service):
 
 def test_disabled_setting_gates(repo, notebook_id, service, monkeypatch):
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     monkeypatch.setattr(repo.settings, "paper_meta_enabled", False)
     source = _insert_source(repo, notebook_id, "src-1")
 
@@ -261,7 +262,7 @@ def test_disabled_setting_gates(repo, notebook_id, service, monkeypatch):
 
 
 def test_llm_exception_is_swallowed(repo, notebook_id, service):
-    repo._kg_llm_client = _RaisingLLM()
+    bind_chat_client(repo, "paper_metadata", _RaisingLLM())
     source = _insert_source(repo, notebook_id, "src-1")
 
     status = service.ensure_paper_metadata(source)
@@ -279,7 +280,7 @@ def test_setup_phase_exception_is_swallowed(repo, notebook_id, service, monkeypa
     (process_source / run_extraction's historical-source catch-up, which
     both run KG extraction right after this call)."""
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
 
     def _boom(*_a, **_k):
@@ -304,7 +305,7 @@ def test_ensure_non_object_json_fails_without_row(repo, notebook_id, service):
     「已判定非论文」,压掉后续重试。ensure_paper_metadata 必须在 unwrap 后仍非
     dict 时 raise,让外层 except 落到 failed(不写行,下次可重试)。"""
     fake = _RawJsonLLM("[]")
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
 
     status = service.ensure_paper_metadata(source)
@@ -318,7 +319,7 @@ def test_ensure_single_element_array_json_is_unwrapped(repo, notebook_id, servic
     """姊妹场景:模型把同一个合法 payload 包了一层数组(常见 LLM 误习惯)。这
     应该被无损展开、正常入库,而不是被上面那条防护误伤。"""
     fake = _RawJsonLLM(json.dumps([PAYLOAD]))
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source = _insert_source(repo, notebook_id, "src-1")
 
     status = service.ensure_paper_metadata(source)
@@ -341,7 +342,7 @@ def test_run_extraction_catch_up(repo, notebook_id, monkeypatch):
     import app.services.kg_ingest as kg_ingest
 
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source_id = "src-1"
     _insert_source(repo, notebook_id, source_id)
     assert repo.get_paper_meta(source_id) is None
@@ -371,7 +372,7 @@ def test_run_extraction_catch_up_is_idempotent_on_rerun(repo, notebook_id, monke
     import app.services.kg_ingest as kg_ingest
 
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
     source_id = "src-1"
     source = _insert_source(repo, notebook_id, source_id)
     assert repo._runtime.source_ingestion.ensure_paper_metadata(source) == "stored"
@@ -410,7 +411,8 @@ def test_backfill_counts_and_progress(repo, notebook_id, monkeypatch):
     monkeypatch.setattr(pb_module.pending_bus, "mark_dirty", lambda uid: None)
 
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
+    repo.recording_model_provider.calls.clear()
     _insert_source(repo, notebook_id, "src-1")
     _insert_source(repo, notebook_id, "src-2")
     _insert_source(repo, notebook_id, "src-3")
@@ -436,6 +438,9 @@ def test_backfill_counts_and_progress(repo, notebook_id, monkeypatch):
     assert {c[2] for c in calls} == {"src-1", "src-2"}        # src-3 excluded (has meta)
     assert {c[0] for c in calls} == {1, 2}                    # done counted 1..N
     assert fake.calls == 2
+    assert repo.recording_model_provider.calls.count(
+        ("chat", "paper_metadata")
+    ) == 1  # resolved once before the raw worker pool
 
     counts2 = repo.backfill_paper_metadata(notebook_id)
     assert counts2 == {"total": 0}
@@ -459,7 +464,7 @@ def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service
     _insert_source(repo, notebook_id, "src-a")
     _insert_source(repo, notebook_id, "src-b")
     fake = _FakeKgLLM(PAYLOAD)
-    repo._kg_llm_client = fake
+    bind_chat_client(repo, "paper_metadata", fake)
 
     captured = {"during": None}
     original = service.ensure_paper_metadata
@@ -490,7 +495,7 @@ def test_backfill_runtime_pops_on_exception(repo, notebook_id, service, monkeypa
     """每个 source 内异常被 _one 内 try 吞成 status=failed；finally 保证
     dict pop、counts 累加 failed。"""
     _insert_source(repo, notebook_id, "src-c")
-    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+    bind_chat_client(repo, "paper_metadata", _FakeKgLLM(PAYLOAD))
 
     def _boom(*a, **kw):
         raise RuntimeError("boom")
@@ -524,7 +529,7 @@ def test_backfill_generation_guard_protects_foreign_entry(
     附带断言 paper_meta_backfill_progress 剥掉 _gen（对外只暴露 total/done）。
     """
     _insert_source(repo, notebook_id, "src-race")
-    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+    bind_chat_client(repo, "paper_metadata", _FakeKgLLM(PAYLOAD))
 
     def _clobber_then_delegate(source, **kw):
         # 模拟"后来者 B 已经覆盖 A 的 entry"：把整条 entry 换成外来 _gen
@@ -562,7 +567,7 @@ def test_backfill_emits_paper_meta_done_on_success(repo, notebook_id, service, m
     entry 必须在 emit 之前就已经 pop 掉，否则 mark_dirty 用仍含 building
     项的旧快照重算，铃铛会在 done toast 后瞬间又闪回"补全中"。"""
     _insert_source(repo, notebook_id, "src-x")
-    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+    bind_chat_client(repo, "paper_metadata", _FakeKgLLM(PAYLOAD))
 
     events: list = []
     marked: list = []
@@ -599,7 +604,7 @@ def test_backfill_no_done_on_zero_queue(repo, notebook_id, monkeypatch):
 def test_backfill_no_done_on_all_failed(repo, notebook_id, service, monkeypatch):
     """全 failed 不 emit done（stored=0 视为无成果）。"""
     _insert_source(repo, notebook_id, "src-y")
-    repo._kg_llm_client = _RaisingLLM()
+    bind_chat_client(repo, "paper_metadata", _RaisingLLM())
     events: list = []
     from app.services import pending_bus as pb_module
     monkeypatch.setattr(pb_module.pending_bus, "emit",
@@ -621,7 +626,7 @@ def test_backfill_superseded_generation_does_not_emit_done(
     覆盖时保持沉默，且不误弹 B 的 live entry。
     """
     _insert_source(repo, notebook_id, "src-superseded")
-    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+    bind_chat_client(repo, "paper_metadata", _FakeKgLLM(PAYLOAD))
 
     events: list = []
     from app.services import pending_bus as pb_module
@@ -664,7 +669,7 @@ def test_backfill_publishes_pending_snapshot_after_registering(
     推出去的快照压根不含这一项,等于没修。
     """
     _insert_source(repo, notebook_id, "src-pub")
-    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+    bind_chat_client(repo, "paper_metadata", _FakeKgLLM(PAYLOAD))
 
     seen_building: list = []
     from app.services import pending_bus as pb_module
@@ -695,7 +700,7 @@ def test_backfill_all_non_paper_still_reports_completion(
     """
     _insert_source(repo, notebook_id, "src-np1")
     _insert_source(repo, notebook_id, "src-np2")
-    repo._kg_llm_client = _FakeKgLLM({"is_paper": False})
+    bind_chat_client(repo, "paper_metadata", _FakeKgLLM({"is_paper": False}))
 
     events: list = []
     from app.services import pending_bus as pb_module

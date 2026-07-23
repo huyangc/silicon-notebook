@@ -171,7 +171,7 @@ class SchemaRegistryService:
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         with self.database.connect() as db:
             existing = self.knowledge.existing_schema_types(db)
-        llm_client = self.models.llm_client
+        llm_client = self.models.chat("schema_induction")
         if not llm_client.configured:
             return [m for m in self.list_object_schemas() if m.status == "proposed"]
         elements = self.sources.notebook_element_sample(notebook_id)

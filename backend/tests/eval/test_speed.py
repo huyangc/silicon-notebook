@@ -37,6 +37,24 @@ def test_parse_llm_log_filters_by_ts(tmp_path):
     assert stats["total_tokens"] == 500
 
 
+def test_parse_llm_log_reads_gzipped_dated_file(tmp_path):
+    """expand_channel_paths(见 log_reader.py)如今也会返回归档器压缩后的按天
+    文件(`llm-YYYY-MM-DD.jsonl.gz`,per-user 日志一天一滚,归档器每天自动压缩
+    昨天的文件)。parse_llm_log 必须能读到里面的记录,而不是把 gzip 的二进制字节
+    当 UTF-8 文本硬解码,炸出未捕获的 UnicodeDecodeError(旧实现只 catch
+    FileNotFoundError,对 UnicodeDecodeError 完全不设防)。"""
+    import gzip
+    p = tmp_path / "llm.jsonl"  # 全局 channel 路径;传入 parse_llm_log 时本身可以不存在
+    rec = {"ts": "2026-06-06T12:00:00", "kind": "chat", "status": "ok",
+           "latency_ms": 2000, "usage": {"total_tokens": 500}}
+    with gzip.open(tmp_path / "llm-2026-06-06.jsonl.gz", "wt", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+    stats = parse_llm_log(str(p), since_ts="2026-06-06T11:00:00")
+    assert stats["calls"] == 1
+    assert stats["latency_p50_s"] == 2.0
+    assert stats["total_tokens"] == 500
+
+
 def test_recommend_max_chars_excludes_failed():
     from app.eval.speed import recommend_max_chars
     measured = [

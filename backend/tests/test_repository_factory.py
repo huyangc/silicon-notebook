@@ -600,8 +600,7 @@ def test_runtime_consumes_the_injected_persistence_bundle(tmp_path):
     assert recorded["settings"] is settings
     assert recorded["root_dir"] is tmp_path
     assert recorded["seams"] is seams
-    assert recorded["model_config_cache"] is runtime.model_config_cache
-    assert runtime.identity.model_config_cache is runtime.model_config_cache
+    assert "model_config_cache" not in recorded
     assert runtime.database is bundle.database
     assert runtime.identity is bundle.identity
     assert runtime.notebook_store is bundle.notebooks

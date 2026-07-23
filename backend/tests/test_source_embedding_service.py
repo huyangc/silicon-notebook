@@ -3,8 +3,7 @@
 COMPUTE orchestration extracted off the facade.
 
 Invariants under test:
-- the embedder is a LATE-BOUND facade seam: ``repo.embedder = fake`` after
-  construction is what every embed path calls;
+- every method resolves its explicit workload through the system provider;
 - the embedder's HTTP-client warm-up (``_ensure``) runs once, single-threaded,
   before the worker pool — and a warm-up failure never aborts embedding;
 - element texts are truncated to ``embed_truncate_chars`` before compute;
@@ -22,6 +21,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services import sqlite_repository
 from app.services.source_embedding import SourceEmbeddingService
+from tests.model_testkit import RecordingModelProvider
 
 
 def _make_repo(tmp_path, monkeypatch, **env):
@@ -29,15 +29,30 @@ def _make_repo(tmp_path, monkeypatch, **env):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")   # embedder_configured=True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "10")
-    monkeypatch.setenv("EMBED_CONCURRENCY", "8")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
-    return sqlite_repository.SQLiteRepository(Settings())
+    provider = RecordingModelProvider(
+        parallelism_by_workload={
+            "source_element_embedding": 8,
+            "knowledge_object_embedding": 8,
+            "relation_embedding": 8,
+            "chunk_embedding": 8,
+            "knowhow_embedding": 8,
+        }
+    )
+    repository = sqlite_repository.SQLiteRepository(
+        Settings(model_services_config=""), model_provider=provider
+    )
+    repository.recording_model_provider = provider
+    return repository
+
+
+def _bind(repo, workload_id, embedder):
+    repo.recording_model_provider.embedding_clients = {
+        **repo.recording_model_provider.embedding_clients,
+        workload_id: embedder,
+    }
 
 
 @pytest.fixture
@@ -110,6 +125,7 @@ def test_runtime_composes_source_embedding_service(repo):
     assert isinstance(service, SourceEmbeddingService)
     expected = {
         "embed_source",
+        "embed_elements_batch",
         "embed_objects_batch",
         "embed_relations_batch",
         "embed_chunks_for_source",
@@ -124,9 +140,10 @@ def test_embed_source_warms_up_late_bound_embedder_once(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _insert_source_with_elements(repo, nb.id, 25)   # 3 batches (10,10,5)
     emb = _RecordingEmbedder(dim=8)
-    repo.embedder = emb                                    # post-construction seam
+    _bind(repo, "source_element_embedding", emb)
 
     repo._embed_source(sid)
+    assert ("embedding", "source_element_embedding") in repo.recording_model_provider.calls
 
     assert emb.events.count("ensure") == 1                 # warm-up exactly once
     assert emb.events[0] == "ensure"                       # ... and before compute
@@ -142,7 +159,7 @@ def test_embed_source_warmup_failure_is_swallowed(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _insert_source_with_elements(repo, nb.id, 12)
     emb = _RecordingEmbedder(dim=8, ensure_raises=True)
-    repo.embedder = emb
+    _bind(repo, "source_element_embedding", emb)
 
     repo._embed_source(sid)                                # must not raise
 
@@ -160,7 +177,7 @@ def test_embed_source_truncates_element_texts(tmp_path, monkeypatch):
         trunc_repo, nb.id, 3, text="x" * 500 + "-{i}"
     )
     emb = _RecordingEmbedder(dim=8)
-    trunc_repo.embedder = emb
+    _bind(trunc_repo, "source_element_embedding", emb)
 
     trunc_repo._embed_source(sid)
 
@@ -170,7 +187,7 @@ def test_embed_source_truncates_element_texts(tmp_path, monkeypatch):
 # ------------------------------------------------ object flush facade seat
 def test_embed_objects_batch_flush_rides_facade_seat(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.embedder = _RecordingEmbedder(dim=8)
+    _bind(repo, "knowledge_object_embedding", _RecordingEmbedder(dim=8))
     flushes = []
     real_flush = repo._runtime.source_embedding.flush_object_vectors
 
@@ -183,6 +200,7 @@ def test_embed_objects_batch_flush_rides_facade_seat(repo, monkeypatch):
              for i in range(35)]
 
     repo._embed_objects_batch(nb.id, items)
+    assert ("embedding", "knowledge_object_embedding") in repo.recording_model_provider.calls
 
     assert sum(flushes) == 35                              # every vector flushed via the seat
     assert _count(
@@ -194,7 +212,7 @@ def test_embed_objects_batch_flush_rides_facade_seat(repo, monkeypatch):
 
 def test_embed_objects_batch_flush_errors_propagate(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.embedder = _RecordingEmbedder(dim=8)
+    _bind(repo, "knowledge_object_embedding", _RecordingEmbedder(dim=8))
 
     def broken_flush(notebook_id, rows):
         raise RuntimeError("simulated flush interrupt")
@@ -210,7 +228,7 @@ def test_embed_objects_batch_flush_errors_propagate(repo, monkeypatch):
 def test_embed_relations_batch_isolates_failed_batches(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     emb = _RecordingEmbedder(dim=8, fail_substr="relation number 15")
-    repo.embedder = emb
+    _bind(repo, "relation_embedding", emb)
     persisted = []
     monkeypatch.setattr(
         repo._runtime.embedding_store,
@@ -222,6 +240,7 @@ def test_embed_relations_batch_isolates_failed_batches(repo, monkeypatch):
     items = [{"_rid": f"rel-{i}", "text": f"relation number {i}"} for i in range(30)]
 
     repo._embed_relations_batch(nb.id, items)
+    assert ("embedding", "relation_embedding") in repo.recording_model_provider.calls
 
     # batch [10..19] contains the sentinel and is dropped; the rest reach the store
     assert len(persisted) == 20
@@ -244,9 +263,10 @@ def test_embed_chunks_for_source_isolates_failed_batches(repo):
             "SELECT id, text FROM chunks WHERE source_id=? LIMIT 1", (sid,)
         ).fetchone()
     emb = _RecordingEmbedder(dim=8, fail_substr=victim["text"][:60])
-    repo.embedder = emb
+    _bind(repo, "chunk_embedding", emb)
 
     repo._embed_chunks_for_source(sid)
+    assert ("embedding", "chunk_embedding") in repo.recording_model_provider.calls
 
     embedded = _count(
         repo,
@@ -264,14 +284,15 @@ def test_unconfigured_embedder_paths_are_noops(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_PROVIDER", "")
-    bare_repo = sqlite_repository.SQLiteRepository(Settings())
+    bare_repo = sqlite_repository.SQLiteRepository(
+        Settings(model_services_config=""),
+        model_provider=RecordingModelProvider(),
+    )
     nb = bare_repo.create_notebook(NotebookCreate(name="nb"))
 
     class _Boom:
         def __getattr__(self, name):
             raise AssertionError("embedder must not be touched when unconfigured")
-
-    bare_repo.embedder = _Boom()
 
     bare_repo._embed_source("src-missing")                 # returns before get_source
     bare_repo._embed_objects_batch(nb.id, [{"_oid": "ko-1", "payload": {"name": "x"}}])

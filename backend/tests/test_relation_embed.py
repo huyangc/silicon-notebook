@@ -4,6 +4,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 from app.services.retrieval import relation_embed_text
+from tests.model_testkit import RecordingModelProvider
 
 
 @pytest.fixture
@@ -11,13 +12,14 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    # embedder_configured needs all four vars set so embed paths activate
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "http://fake-embed")
-    monkeypatch.setenv("EMBED_API_KEY", "fake-key")
-    monkeypatch.setenv("EMBED_MODEL", "fake-model")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    embedder = FakeEmbedder(dim=16)
+    models = RecordingModelProvider(embedding_clients={
+        "knowledge_object_embedding": embedder,
+        "relation_embedding": embedder,
+    })
+    r = SQLiteRepository(
+        Settings(model_services_config=""), model_provider=models
+    )
     return r
 
 
@@ -82,9 +84,11 @@ def test_backfill_relation_embeddings_fills_missing(repo):
     nb = _seed_two_node_relation(repo)
     with repo._write() as db:
         db.execute("DELETE FROM relation_embeddings WHERE notebook_id=?", (nb.id,))
+    repo._runtime.models.calls.clear()
     repo._backfill_relation_embeddings(nb.id)
     with repo._connect() as db:
         n = db.execute(
             "SELECT COUNT(*) AS c FROM relation_embeddings WHERE notebook_id=?",
             (nb.id,)).fetchone()["c"]
     assert n == 1
+    assert ("embedding", "relation_embedding") in repo._runtime.models.calls

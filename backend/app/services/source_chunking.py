@@ -51,8 +51,17 @@ class SourceChunkingService:
         rows = [ChunkWrite(id=self.new_id("ck"), text=c["text"],
                            section_path=c["section_path"],
                            element_ids=tuple(c["element_ids"])) for c in chunk_dicts]
+        now = self.now()
+        # 分块成功(build_chunks 正常返回,**含产 0 chunk 的纯标题 md**)才走到这里:
+        # 把完成标记 chunked_at 与它认证的 chunk 数据在**同一事务**里提交(mark_chunked_at
+        # 参数)——否则 0-chunk 成功的源崩在「chunks 已提交、marker 未提交」之间会留下
+        # chunks=0+chunked_at=NULL,正好被 H3 误判为损坏。放在 build_chunks_for_source 里
+        # 而非 process_source,让 chunk_and_embed_source / scripts/build_chunks.py 等所有
+        # 分块路径统一打标;本函数直线代码、无 early-return,replace_source_chunks 对空 rows
+        # 也照常提交,故 0-chunk 路径同样置值。失败会在上面某步抛出、到不了这里 →
+        # chunked_at 留 NULL,正是 H3 的损坏信号。knowhow 投影器不走本路径,其隐藏源不打标。
         self.chunks.replace_source_chunks(
-            source_id, notebook_id, rows, created_at=self.now()
+            source_id, notebook_id, rows, created_at=now, mark_chunked_at=now
         )
         # Unconditionally bump kg_mutation_seq: chunk rows just changed, and every
         # chunk-derived cache (:elemchunk/:entchunk/:ppr_graph/scale-index version)
@@ -61,6 +70,7 @@ class SourceChunkingService:
         # freshly uploaded source's chunks stay invisible to warm caches forever
         # (no TTL, no other invalidation). Dirty=1 is also semantically right for
         # a pure chunk upload: a new source means the unified KG is stale anyway.
+        # 注:此调用在 chunked_at 已随 chunks 原子提交**之后**,故其失败不再留假损坏。
         self.mark_unified_dirty(notebook_id)
 
     def chunk_and_embed_source(self, source_id: str) -> None:

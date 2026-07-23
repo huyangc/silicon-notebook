@@ -4,6 +4,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.knowhow import transfer as kh_transfer
+from tests.model_testkit import bind_all_embedding_clients
 
 COLUMNS = [
     {"name": "违例类型", "role": "anchor"},
@@ -24,12 +25,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     r = SQLiteRepository(Settings())
-    r.embedder = _FakeEmbedder()
+    bind_all_embedding_clients(r, _FakeEmbedder())
     return r
 
 def _nb(repo, name="KH"):
@@ -76,13 +73,13 @@ def test_copy_reprojection_reuses_vectors_zero_reembed(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
     _project(repo, src_tid)  # 先把源投影好，产出 chunks + chunk_embeddings
-    repo.embedder.call_count = 0  # 归零，之后只观察 copy 引发的 embed
+    repo._runtime.models.embedding("retrieval_query_embedding").call_count = 0  # 归零，之后只观察 copy 引发的 embed
 
     new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
     _settle(repo, new_tid)  # 等重投影落地（copy_table 自己已调度）
 
     # K-1：chunk_embeddings 已随拷贝以稳定 id 落库 → 重投影零重嵌入
-    assert repo.embedder.call_count == 0
+    assert repo._runtime.models.embedding("retrieval_query_embedding").call_count == 0
 
 
 def test_copy_is_retrievable_in_target_via_lexical_and_vector(repo):
@@ -359,8 +356,8 @@ def test_move_does_not_delete_source_row_added_after_copy_snapshot(repo, monkeyp
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_row_add(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_row_add(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         # 模拟并发写者：就在 copy_table 的事务提交之后、move_table 走到自己的
         # 清理段之前，另一个请求往源表加了一行。
         repo_.add_knowhow_row(source_table_id, {cols["违例类型"]: "并发新增的行"})
@@ -562,8 +559,8 @@ def test_move_does_not_delete_source_table_title_edited_after_copy_snapshot(
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_title_edit(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_title_edit(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         # 模拟并发写者：就在 copy_table 的事务提交之后、move_table 走到自己的
         # 清理段之前，另一个请求改了源表的标题。
         repo_.update_knowhow_table_meta(source_table_id, title="并发改名后的标题")
@@ -599,8 +596,8 @@ def test_move_does_not_delete_source_column_renamed_after_copy_snapshot(
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_rename(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_rename(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         repo_.rename_knowhow_column(column_id, "并发改名后的列")
         return new_id
 
@@ -633,8 +630,8 @@ def test_move_does_not_delete_source_anchor_moved_after_copy_snapshot(
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_anchor_move(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_anchor_move(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         repo_.set_knowhow_anchor_column(source_table_id, new_anchor_id)
         return new_id
 
@@ -669,8 +666,8 @@ def test_move_does_not_delete_source_column_swapped_after_copy_snapshot(
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_swap(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_swap(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         repo_.add_knowhow_column(source_table_id, "替换列", "entity")
         repo_.delete_knowhow_column(extra_col_id)
         return new_id
@@ -914,8 +911,8 @@ def test_move_does_not_delete_source_cell_code_updated_by_changed_after_copy_sna
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_updated_by_change(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_updated_by_change(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         # 模拟并发写者：就在 copy_table 的事务提交之后、move_table 走到自己的
         # 清理段之前，另一个 agent 用完全相同的代码/语言/hash 重写了这个
         # cell 的代码附件，只换了 updated_by。

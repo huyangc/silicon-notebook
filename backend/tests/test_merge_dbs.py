@@ -285,16 +285,16 @@ def test_merge_core_conserves_rows_and_keeps_primary_base(tmp_path):
 def test_merge_core_preserves_model_status_with_primary_precedence(tmp_path):
     pa, pb, ca, cb = _seed_pair(tmp_path)
     ca.execute(
-        "INSERT INTO model_service_status VALUES (?,?,?,?,?,?,?,?)",
-        ("user-local", "llm", "fp-primary", "ok", 10, "", "manual_test", NOW),
+        "INSERT INTO system_model_service_status VALUES (?,?,?,?,?,?,?,?)",
+        ("chat", "fp-primary", "ok", 10, "", "manual_test", "support-a", NOW),
     )
     cb.execute(
-        "INSERT INTO model_service_status VALUES (?,?,?,?,?,?,?,?)",
-        ("user-local", "llm", "fp-secondary", "error", 20, "upstream", "manual_test", NOW),
+        "INSERT INTO system_model_service_status VALUES (?,?,?,?,?,?,?,?)",
+        ("chat", "fp-secondary", "error", 20, "upstream", "manual_test", "support-b", NOW),
     )
     cb.execute(
-        "INSERT INTO model_service_status VALUES (?,?,?,?,?,?,?,?)",
-        ("user-local", "embedding", "fp-embed", "ok", 30, "", "manual_test", NOW),
+        "INSERT INTO system_model_service_status VALUES (?,?,?,?,?,?,?,?)",
+        ("embed", "fp-embed", "ok", 30, "", "manual_test", "support-c", NOW),
     )
     ca.commit()
     cb.commit()
@@ -306,10 +306,10 @@ def test_merge_core_preserves_model_status_with_primary_precedence(tmp_path):
 
     with sqlite3.connect(out) as merged:
         rows = merged.execute(
-            "SELECT service, config_fingerprint FROM model_service_status "
-            "WHERE user_id='user-local' ORDER BY service"
+            "SELECT service_id, config_fingerprint FROM system_model_service_status "
+            "ORDER BY service_id"
         ).fetchall()
-    assert rows == [("embedding", "fp-embed"), ("llm", "fp-primary")]
+    assert rows == [("chat", "fp-primary")]
 
 
 def test_merge_core_fts_queryable_for_imported_notebook(tmp_path):

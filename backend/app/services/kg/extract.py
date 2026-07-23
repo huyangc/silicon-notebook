@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.core.llm import cap_kwargs
-from app.services.kg.client import safe_json
+from app.services.kg.json_utils import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
 from app.services.kg.run_control import KgBuildAborted
@@ -264,7 +264,9 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
 
 def extract_window(client: Any, elements: List[SourceElementQ], section_path: str,
                    doc_type: str, win_idx: int = 0, refine: bool = False,
-                   gleaning_rounds: int = 0, base_filter: bool = False
+                   gleaning_rounds: int = 0, base_filter: bool = False,
+                   refine_client: Any | None = None,
+                   glean_client: Any | None = None,
                    ) -> Tuple[List[Node], List[Edge]]:
     if not elements:
         return [], []
@@ -303,14 +305,14 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     if gleaning_rounds and nodes:
-        _glean_nodes(client, elements, section_path, doc_type, raw, nodes, win_idx,
+        _glean_nodes(glean_client or client, elements, section_path, doc_type, raw, nodes, win_idx,
                      gleaning_rounds, base_filter=base_filter)
     if refine and nodes:
         # refine is best-effort: a failure (incl. hard transport errors that
         # refine_nodes re-raises) must NOT discard a successfully extracted
         # window — degrade to unfiltered nodes instead.
         try:
-            kept = refine_nodes(client, elements, nodes, section_path)
+            kept = refine_nodes(refine_client or client, elements, nodes, section_path)
         except KgBuildAborted:
             raise
         except Exception:

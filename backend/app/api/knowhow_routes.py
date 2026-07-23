@@ -3,9 +3,11 @@
 Agent Knowhow stays in app.api.knowhow_agent_routes.
 """
 
+import sqlite3
+from datetime import datetime, timedelta
 from typing import Any, List, Optional, Union
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
@@ -19,6 +21,7 @@ from app.api.deps import (
 )
 from app.models.identity import UserProfile
 from app.models.knowhow import (
+    VALID_ORIGINS,
     KnowhowAppendPreview,
     KnowhowAppendResult,
     KnowhowCellOptimizeResult,
@@ -29,7 +32,10 @@ from app.models.knowhow import (
     KnowhowColumn,
     KnowhowColumnCreate,
     KnowhowColumnPatch,
+    KnowhowHistoryPruneRequest,
     KnowhowImportPreview,
+    KnowhowMilestoneCreate,
+    KnowhowRevertRequest,
     KnowhowRow,
     KnowhowRowCreate,
     KnowhowTableCreate,
@@ -38,9 +44,15 @@ from app.models.knowhow import (
     KnowhowTableSummary,
     KnowhowTransferRequest,
 )
+from app.repositories.sqlite.knowhow_history_store import (
+    HistoryInconsistent,
+    HistoryStale,
+    RevertVerifyFailed,
+)
 from app.services.knowhow import api as knowhow_api
+from app.services.knowhow import history as knowhow_history
 from app.services.knowhow import transfer as _kh_transfer
-from app.services.model_config import ModelNotConfiguredError
+from app.services.model_work import ModelNotConfiguredError
 
 
 router = APIRouter()
@@ -97,6 +109,7 @@ async def import_knowhow_table(
     columns_json: str = Form(...),
     anchor_index: Optional[int] = Form(None),
     orientation: str = Form("columns"),
+    user: UserProfile = Depends(get_current_user),
 ) -> KnowhowTableDetail:
     """Parse -> validate -> create table -> insert every row -> schedule a
     debounced background full-table projection (ProjectionScheduler — PR-2+3
@@ -112,12 +125,16 @@ async def import_knowhow_table(
     ``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form
     field (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the
     row-title designation is named ONLY via anchor_index, never inline)."""
+    # knowhow 表版本管理 Task 13: user.id 传给 import_table 作为创世流水的
+    # actor（origin="import" 在 import_table 内部设置）——不写进上面的
+    # docstring，理由同 create_knowhow_table 旁的注释（FastAPI 把它当 OpenAPI
+    # description 发布，会改动冻结的 api_contract.json）。
     repo = repository()
     data = await file.read()
     try:
         table_id = knowhow_api.import_table(
             repo, notebook_id, file.filename or "import", data, title,
-            columns_json, anchor_index, orientation,
+            columns_json, anchor_index, orientation, actor=user.id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -273,18 +290,25 @@ def _require_row_in_table(table: dict, row_id: str) -> None:
     response_model=KnowhowTableDetail,
     dependencies=[Depends(require_notebook_access)],
 )
-def create_knowhow_table(notebook_id: str, body: KnowhowTableCreate) -> dict:
+def create_knowhow_table(
+    notebook_id: str, body: KnowhowTableCreate,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
     """Create-table wizard backend: an EMPTY table (title + column
     definitions only, no grid/rows — mirrors import_table's create step
     minus the file). Does not schedule a reprojection (nothing to project
     yet on a zero-row table); the first row/cell mutation schedules the
     table's first real run."""
+    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给创世流水（不写进上面
+    # 的 docstring——FastAPI 把路由函数 docstring 当 OpenAPI description 发布，
+    # 加一段说明文字会改变冻结的 api_contract.json，本任务未改这个端点的
+    # wire 形状，不该触发那份契约重生成）。
     repo = repository()
     try:
         table_id = knowhow_api.create_table(
             repo, notebook_id, body.title,
             [{"name": column.name, "kind": column.kind} for column in body.columns],
-            body.anchor_index,
+            body.anchor_index, actor=user.id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -296,7 +320,10 @@ def create_knowhow_table(notebook_id: str, body: KnowhowTableCreate) -> dict:
     response_model=KnowhowTableDetail,
     dependencies=[Depends(require_notebook_access)],
 )
-def patch_knowhow_table(notebook_id: str, table_id: str, patch: KnowhowTablePatch) -> dict:
+def patch_knowhow_table(
+    notebook_id: str, table_id: str, patch: KnowhowTablePatch,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
     """title/description/anchor_column_id are all optional; anchor_column_id
     additionally distinguishes "omitted" (leave alone) from "explicit null"
     (clear the row-title designation) via ``model_fields_set`` — omission and
@@ -305,16 +332,20 @@ def patch_knowhow_table(notebook_id: str, table_id: str, patch: KnowhowTablePatc
     table still schedules reprojection: the table title feeds every row's
     chunk section_path label (design doc §④), so renaming it is itself a
     content change from the projector's point of view."""
+    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给下面两处可能的 store
+    # 写入（不写进上面的 docstring，理由同 create_knowhow_table 旁的注释）。
     repo = repository()
     _require_table(repo, notebook_id, table_id)
     fields_set = patch.model_fields_set
     try:
         if "anchor_column_id" in fields_set:
-            repo.set_knowhow_anchor_column(table_id, patch.anchor_column_id)
+            repo.set_knowhow_anchor_column(table_id, patch.anchor_column_id, actor=user.id)
         title = patch.title if "title" in fields_set else None
         description = patch.description if "description" in fields_set else None
         if title is not None or description is not None:
-            repo.update_knowhow_table_meta(table_id, title=title, description=description)
+            repo.update_knowhow_table_meta(
+                table_id, title=title, description=description, actor=user.id,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -326,11 +357,16 @@ def patch_knowhow_table(notebook_id: str, table_id: str, patch: KnowhowTablePatc
     response_model=KnowhowColumn,
     dependencies=[Depends(require_notebook_access)],
 )
-def add_knowhow_column(notebook_id: str, table_id: str, body: KnowhowColumnCreate) -> dict:
+def add_knowhow_column(
+    notebook_id: str, table_id: str, body: KnowhowColumnCreate,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
     repo = repository()
     _require_table(repo, notebook_id, table_id)
     try:
-        column_id = repo.add_knowhow_column(table_id, body.name, body.kind, body.position)
+        column_id = repo.add_knowhow_column(
+            table_id, body.name, body.kind, body.position, actor=user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -345,7 +381,8 @@ def add_knowhow_column(notebook_id: str, table_id: str, body: KnowhowColumnCreat
     dependencies=[Depends(require_notebook_access)],
 )
 def patch_knowhow_column(
-    notebook_id: str, table_id: str, column_id: str, body: KnowhowColumnPatch
+    notebook_id: str, table_id: str, column_id: str, body: KnowhowColumnPatch,
+    user: UserProfile = Depends(get_current_user),
 ) -> dict:
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
@@ -353,9 +390,9 @@ def patch_knowhow_column(
     fields_set = body.model_fields_set
     try:
         if "name" in fields_set and body.name is not None:
-            repo.rename_knowhow_column(column_id, body.name)
+            repo.rename_knowhow_column(column_id, body.name, actor=user.id)
         if "kind" in fields_set and body.kind is not None:
-            repo.set_knowhow_column_kind(column_id, body.kind)
+            repo.set_knowhow_column_kind(column_id, body.kind, actor=user.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -369,11 +406,14 @@ def patch_knowhow_column(
     status_code=204,
     dependencies=[Depends(require_notebook_access)],
 )
-def delete_knowhow_column(notebook_id: str, table_id: str, column_id: str) -> None:
+def delete_knowhow_column(
+    notebook_id: str, table_id: str, column_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> None:
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     _require_column_in_table(table, column_id)
-    repo.delete_knowhow_column(column_id)
+    repo.delete_knowhow_column(column_id, actor=user.id)
     knowhow_api.get_scheduler(repo).schedule(table_id)
 
 
@@ -382,13 +422,16 @@ def delete_knowhow_column(notebook_id: str, table_id: str, column_id: str) -> No
     response_model=KnowhowRow,
     dependencies=[Depends(require_notebook_access)],
 )
-def add_knowhow_row(notebook_id: str, table_id: str, body: KnowhowRowCreate) -> dict:
+def add_knowhow_row(
+    notebook_id: str, table_id: str, body: KnowhowRowCreate,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     valid_column_ids = {column["id"] for column in table["columns"]}
     if set(body.cells) - valid_column_ids:
         raise user_error(400, "格子对应的列不属于本表")
-    row_id = repo.add_knowhow_row(table_id, body.cells, body.position)
+    row_id = repo.add_knowhow_row(table_id, body.cells, body.position, actor=user.id)
     knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)
     return next(r for r in updated["rows"] if r["id"] == row_id)
@@ -399,11 +442,14 @@ def add_knowhow_row(notebook_id: str, table_id: str, body: KnowhowRowCreate) -> 
     status_code=204,
     dependencies=[Depends(require_notebook_access)],
 )
-def delete_knowhow_row(notebook_id: str, table_id: str, row_id: str) -> None:
+def delete_knowhow_row(
+    notebook_id: str, table_id: str, row_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> None:
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     _require_row_in_table(table, row_id)
-    repo.delete_knowhow_row(row_id)
+    repo.delete_knowhow_row(row_id, actor=user.id)
     knowhow_api.get_scheduler(repo).schedule(table_id)
 
 
@@ -413,7 +459,8 @@ def delete_knowhow_row(notebook_id: str, table_id: str, row_id: str) -> None:
     dependencies=[Depends(require_notebook_access)],
 )
 def patch_knowhow_cell(
-    notebook_id: str, table_id: str, row_id: str, column_id: str, body: KnowhowCellPatch
+    notebook_id: str, table_id: str, row_id: str, column_id: str, body: KnowhowCellPatch,
+    user: UserProfile = Depends(get_current_user),
 ) -> dict:
     """Returns {row_id,column_id,content_md,projection_status} so the caller
     can refresh just this row's sync badge without re-fetching the whole
@@ -421,7 +468,17 @@ def patch_knowhow_cell(
     table-scoped membership check (belongs to THIS table_id, not merely SOME
     table) and the store's own validate_cell_target (same-table pairing) —
     both funnel into the same 400 "格子定位不合法" so a client sees one
-    consistent error regardless of which check actually caught it."""
+    consistent error regardless of which check actually caught it.
+
+    knowhow 表版本管理 Task 12: ``body.origin`` is validated FIRST — a pure
+    in-memory check with no DB lookups, and a hard 400 on anything outside
+    VALID_ORIGINS (never a lenient default; see KnowhowCellPatch.origin's own
+    docstring for why)."""
+    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给下面实际执行的那次
+    # store 写入（不写进上面的 docstring，理由同 create_knowhow_table 旁的
+    # 注释）。
+    if body.origin not in VALID_ORIGINS:
+        raise user_error(400, "未知的变更来源")
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     if (
@@ -457,6 +514,7 @@ def patch_knowhow_cell(
                 notebook_id,
                 [(table_id, row_id, column_id, body.expected_before, body.content_md)],
                 require_assets=added_assets,
+                actor=user.id, origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -474,7 +532,8 @@ def patch_knowhow_cell(
         )
         try:
             repo.update_knowhow_cell(
-                row_id, column_id, body.content_md, require_assets=added_assets
+                row_id, column_id, body.content_md,
+                require_assets=added_assets, actor=user.id, origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -507,11 +566,23 @@ def patch_knowhow_cell(
     dependencies=[Depends(require_notebook_access)],
 )
 def patch_knowhow_cells_batch(
-    notebook_id: str, table_id: str, body: KnowhowCellsBatchPatch
+    notebook_id: str, table_id: str, body: KnowhowCellsBatchPatch,
+    user: UserProfile = Depends(get_current_user),
 ) -> list:
     """Returns one {row_id,column_id,content_md,projection_status} entry per
     row in body.row_ids, in the same order — same shape patch_knowhow_cell
-    returns for a single row, just as a list."""
+    returns for a single row, just as a list.
+
+    knowhow 表版本管理 Task 12: ``body.origin`` validated first, same as
+    patch_knowhow_cell — this endpoint is the merged-cell fan-out's save path
+    (see the module docstring above), so it needs the identical whitelist
+    check or a batch reformat-accept could never be attributed as
+    'llm_reformat' in the history timeline."""
+    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给下面实际执行的那次
+    # store 写入（不写进上面的 docstring，理由同 create_knowhow_table 旁的
+    # 注释）。
+    if body.origin not in VALID_ORIGINS:
+        raise user_error(400, "未知的变更来源")
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     row_ids = body.row_ids
@@ -580,6 +651,7 @@ def patch_knowhow_cells_batch(
                 require_assets=added_assets,
                 anchor_column_id=anchor_column_id,
                 expected_anchor=expected_anchor,
+                actor=user.id, origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -604,7 +676,8 @@ def patch_knowhow_cells_batch(
         )
         try:
             repo.update_knowhow_cells(
-                row_ids, body.column_id, body.content_md, require_assets=added_assets
+                row_ids, body.column_id, body.content_md,
+                require_assets=added_assets, actor=user.id, origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -694,6 +767,7 @@ async def append_knowhow_rows(
     table_id: str,
     file: UploadFile = File(...),
     mode: str = Form("preview"),
+    user: UserProfile = Depends(get_current_user),
 ) -> dict:
     """Excel append import (design doc §② 路B): matches the uploaded file's
     header BY COLUMN NAME against the table's existing columns (never by
@@ -703,6 +777,10 @@ async def append_knowhow_rows(
     performs the identical alignment, actually appends the rows, and
     schedules a debounced reprojection exactly like every other mutating
     knowhow endpoint."""
+    # knowhow 表版本管理 Task 13: user.id 传给 commit_append，成为整批新行
+    # 那一条 import_append 流水的 actor（origin="import" 在 commit_append
+    # 内部设置）——不写进上面的 docstring，理由同 create_knowhow_table 旁的
+    # 注释。
     if mode not in ("preview", "commit"):
         # 分类:这不是用户文案。mode 是 Form 参数,UI 永远不会发错值,只有 API/MCP
         # 客户端会踩;「mode 必须是 preview 或 commit」对真人毫无意义。故降级成普通
@@ -714,7 +792,9 @@ async def append_knowhow_rows(
     try:
         if mode == "preview":
             return knowhow_api.preview_append(table, file.filename or "append", data)
-        added = knowhow_api.commit_append(repo, table_id, table, file.filename or "append", data)
+        added = knowhow_api.commit_append(
+            repo, table_id, table, file.filename or "append", data, actor=user.id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -815,6 +895,239 @@ def reformat_knowhow_cell(
     return result
 
 
+# --- knowhow 表版本管理 Task 12: 历史时间线 / 单条详情 / 两版对比 / 单格历史 /
+# 回退 / 里程碑增删 / 清理的 HTTP 端点 ---------------------------------------
+# design doc `2026-07-22-knowhow-table-version-control-design.md` §8.1。存储层
+# （Task 8-9）与服务层（Task 11：aggregate_diff 纯函数 + revert_table 编排）都
+# 已就绪；这里只是把 facade 的一跳委托方法接到 HTTP 上。四个读端点直接透传
+# store 的 dict 形状（无 response_model，同 reproject_knowhow_table 等既有薄
+# 端点一致的写法）；写端点做校验 + 调度重投影 + （仅 revert）专属错误码映射。
+#
+# 路由注册顺序有一处硬约束：GET .../history/diff 必须排在 GET .../history/{seq}
+# 前面。原因：两者都是 GET，Starlette 按注册顺序找第一个路径匹配的路由，一旦
+# 命中就不会因为该路由自身的参数校验失败而回退去试下一条。本文件用
+# `{seq:int}` 把"必须是数字"这条约束前移进路由正则本身（FastAPI/Starlette 的
+# IntegerConvertor 只匹配数字片段），所以字面量子路径如 "diff"/"prune" 在路由
+# 匹配阶段就已经与这条路由无关，不再依赖注册顺序——但顺序仍然保持"diff 在
+# 前"，作为纵深防御，也是给未来在 {seq} 后面再加字面量子路径的人一个明显的
+# 排列范例。
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/history",
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_knowhow_history(
+    notebook_id: str,
+    table_id: str,
+    # 纵深防御（codex P2）：limit 必须正且有界。SQLite 把 LIMIT -1 当作"无限"，
+    # 不挡的话任何读者都能一次拉回整表历史（反序列化 + 传输放大）。上限 500。
+    limit: int = Query(50, gt=0, le=500),
+    before_seq: Optional[int] = None,
+    milestones_only: bool = False,
+) -> dict:
+    """时间线分页（spec §8.1 行 1）。响应体固定 3 个键：``head_seq``（当前
+    最新 seq——前端拿它做"陈旧"比对，revert 请求体里的 expected_head_seq 就是
+    这个值的回声）、``changes``（seq 倒序，``before_seq`` 严格小于用于向更旧
+    翻页）、``milestones``（本表全部命名里程碑，含 stale 标记，§4.2）。
+
+    ``milestones_only=true`` 时把本页 ``changes`` 按里程碑 seq 集合过滤——这是
+    一次性的单页内过滤，不会为了凑够 ``limit`` 条而多轮翻页：里程碑本来就稀疏，
+    这只是前端"只看里程碑"筛选的展示层需求，不值得为它引入内部多轮翻页的
+    复杂度与延迟。
+
+    ``head_seq``/``changes``/``milestones`` 三者由 ``knowhow_history_page`` 在
+    **同一读快照**里一次取出（codex 第 4 轮 P1）：早前分三次 store 调用取，
+    一条夹在中间提交的并发编辑会让 ``head_seq`` 领先于 ``changes`` 里最新一条，
+    用户没看见它却能确认回退、陈旧守卫还照放，把这条未见编辑抹掉。
+    ``milestones_only`` 的过滤是纯展示层，落在快照之后、对一致性无影响。"""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    page = repo.knowhow_history_page(table_id, limit, before_seq)
+    changes = page["changes"]
+    if milestones_only:
+        milestone_seqs = {milestone["seq"] for milestone in page["milestones"]}
+        changes = [change for change in changes if change["seq"] in milestone_seqs]
+    return {
+        "head_seq": page["head_seq"],
+        "changes": changes,
+        "milestones": page["milestones"],
+    }
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/history/diff",
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_knowhow_history_diff(
+    notebook_id: str,
+    table_id: str,
+    from_seq: int = Query(..., alias="from"),
+    to_seq: int = Query(..., alias="to"),
+) -> dict:
+    """两版净变化（spec §8.1 行 3 / §6.5）——纯计算：只读区间 ``(from, to]``
+    的流水再折叠，不碰任何写路径，也不校验 from/to 是否真实存在（区间落空
+    时 aggregate_diff 对空列表的输出就是全 5 个键的"无变化"形状，天然合理）。
+    必须注册在 .../history/{seq} 之前，见本节顶部的路由顺序说明。"""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    changes = repo.knowhow_changes_between(table_id, from_seq, to_seq)
+    return knowhow_history.aggregate_diff(changes)
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/history/{seq:int}",
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_knowhow_change(notebook_id: str, table_id: str, seq: int) -> dict:
+    """单条变更详情（spec §8.1 行 2）——payload 原样返回，前端用它渲染这一次
+    改动的红绿 diff。"""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    change = repo.get_knowhow_change(table_id, seq)
+    if change is None:
+        raise HTTPException(status_code=404, detail="Change not found")
+    return change
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/history",
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_knowhow_cell_history(
+    notebook_id: str, table_id: str, row_id: str, column_id: str,
+    limit: int = Query(50, gt=0, le=500),  # 纵深防御（codex P2）：同 get_knowhow_history
+) -> list:
+    """单格历史时间线（spec §8.1 行 4）——最新在前。row_id/column_id 的
+    table-scoped 校验与 patch_knowhow_cell 同款（同一 URL 形状的姊妹端点，见
+    该函数文档字符串）。"""
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    if (
+        not any(row["id"] == row_id for row in table["rows"])
+        or not any(column["id"] == column_id for column in table["columns"])
+    ):
+        raise user_error(400, "格子定位不合法")
+    return repo.knowhow_cell_history(table_id, row_id, column_id, limit)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/revert",
+    dependencies=[Depends(require_notebook_access)],
+)
+def revert_knowhow_table(
+    notebook_id: str, table_id: str, body: KnowhowRevertRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
+    """整表回退到 ``target_seq``（spec §8.1 行 5 / §6.1）。错误映射（spec
+    §8.1 表）：head 已变→409 knowhow_history_stale；前置指纹不一致→400
+    knowhow_history_inconsistent；后置校验失败（已整事务回滚，表未被改动）→
+    500 knowhow_revert_verify_failed；target_seq 不存在/不属于本表→404（无
+    oracle，同本文件"不存在"与"越权"统一 404 的既定约定）。重放本体 + 提交后
+    的重投影调度都在 knowhow_history.revert_table 里，这里只做错误码翻译。"""
+    repo = repository()
+    try:
+        knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    try:
+        return knowhow_history.revert_table(
+            repo, notebook_id, table_id,
+            body.target_seq, body.expected_head_seq, user.id,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Change not found")
+    except HistoryStale:
+        raise HTTPException(status_code=409, detail={
+            "code": "knowhow_history_stale",
+            "message": "这张表刚被其他人改过，请刷新后重试",
+        })
+    except HistoryInconsistent:
+        raise HTTPException(status_code=400, detail={
+            "code": "knowhow_history_inconsistent",
+            "message": "表的当前内容与变更历史对不上，回退已中止",
+        })
+    except RevertVerifyFailed:
+        raise HTTPException(status_code=500, detail={
+            "code": "knowhow_revert_verify_failed",
+            "message": "回退结果校验失败，已放弃本次回退，表未被改动",
+        })
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/milestones",
+    dependencies=[Depends(require_notebook_access)],
+)
+def create_knowhow_milestone(
+    notebook_id: str, table_id: str, body: KnowhowMilestoneCreate,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
+    """给一个 ``seq`` 命名（spec §8.1 行 6 / §4.2）——零快照，只是一条指针
+    记录。``seq`` 必须已经是这张表的一条真实流水，否则 404（同 revert 的
+    "目标不存在无 oracle"约定，防止一个里程碑从创建那一刻起就指向空气；
+    get_knowhow_change 按 table_id+seq 联合查询，"seq 不存在"与"seq 属于别的
+    表"天然统一成同一个 None）。重名：这张表的 ``UNIQUE(table_id, name)``
+    让 store 直接抛 ``sqlite3.IntegrityError``（store 自己的文档字符串明确
+    "这里不做预检，省一次往返"，把翻译成用户文案的职责留给了这一层）——接住
+    它转成 400，而不是让用户看见一坨裸的 500 异常堆栈。"""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    # 事务外预检 = 快速失败给出明确 404；真正堵 TOCTOU 的是 create_milestone
+    # 写事务内的复检（codex P2），那里 seq 不存在会 raise KeyError，下面接住转
+    # 同一个 404（"目标不存在无 oracle"约定）。
+    if repo.get_knowhow_change(table_id, body.seq) is None:
+        raise HTTPException(status_code=404, detail="Change not found")
+    try:
+        return repo.create_knowhow_milestone(
+            table_id, body.seq, body.name, body.note, user.id
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Change not found")
+    except sqlite3.IntegrityError:
+        raise user_error(400, "这个里程碑名字已经用过了，换一个试试")
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/milestones/{milestone_id}",
+    status_code=204,
+    dependencies=[Depends(require_notebook_access)],
+)
+def delete_knowhow_milestone(notebook_id: str, table_id: str, milestone_id: str) -> None:
+    """spec §8.1 行 7。store 的 ``delete_milestone`` 本身按 ``table_id``
+    限定作用域，且对"已经不存在"静默 no-op（同本文件其余 delete 端点的既定
+    约定），所以这里除了确认表本身存在/属于本 notebook 之外不需要再做额外的
+    归属校验——一个属于别的表的 milestone_id 传进来，WHERE 子句天然不命中
+    任何行，等同于"什么都没删"，不会误删。"""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    repo.delete_knowhow_milestone(table_id, milestone_id)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/history/prune",
+    dependencies=[Depends(require_notebook_access)],
+)
+def prune_knowhow_history(
+    notebook_id: str, table_id: str, body: KnowhowHistoryPruneRequest,
+) -> dict:
+    """删掉最老的连续前缀（spec §8.1 行 8 / §7.7）。``before_days`` 换算成
+    ISO 截止时间：用与本仓库各 store 模块的 ``_now()`` 相同的"去掉微秒的
+    naive 本地时间 isoformat"形状，才能和 ``knowhow_changes.created_at``
+    做字面量字符串比较——两者格式必须一致，否则 SQL 里的字符串 ``<``
+    比较会失真。
+
+    §7.1 的已知代价在这里兑现：被清理掉的历史很可能是某些图片在库里唯一还
+    "活着"的引用来源，删完之后这些图片才终于可能被判定为孤儿——所以清理
+    完成后主动触发一次绕过节流的资产清扫（``min_interval=0``），而不是干等
+    下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。"""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    cutoff_iso = (
+        (datetime.now() - timedelta(days=body.before_days))
+        .replace(microsecond=0)
+        .isoformat()
+    )
+    result = repo.prune_knowhow_history(table_id, cutoff_iso)
+    knowhow_api.maybe_sweep_orphan_assets(repo, notebook_id, min_interval=0, background=True)
+    return result
 
 
 # --- knowhow 表跨 notebook 传输（复制/移动） -------------------------------

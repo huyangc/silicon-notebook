@@ -1,103 +1,123 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import {
-  MODEL_ROLES,
-  MODEL_ROLE_LABELS,
-  type ModelRole,
+  modelServiceDisplayName,
+  type ModelServiceStatusItem,
   type ModelServicesStatus,
-  type ServiceForm,
-  type StatusModelRole,
-} from "./model-settings.ts";
+} from "./model-services.ts";
+import { SupportIdCopy } from "./support-id-copy";
+import { useFloatingWindow } from "./use-floating-window";
 import { label, MODEL_SERVICE_STATUS_ERROR } from "./vocabulary";
 
-
-const BASE_URL_PLACEHOLDERS: Record<ModelRole, string> = {
-  llm: "https://api.openai.com/v1",
-  reasoning_llm: "https://api.deepseek.com/v1",
-  rewrite_llm: "https://api.openai.com/v1",
-  kg_llm: "https://api.openai.com/v1",
-  rerank: "https://dashscope.aliyuncs.com/api/v1",
-};
-
-
-function checkedTime(
-  iso: string,
-  trigger: ModelServicesStatus["services"][number]["trigger"] | "",
-): string {
-  if (!iso) return "尚未测试";
-  const timestamp = new Date(iso);
-  if (!Number.isFinite(timestamp.getTime())) return "尚未测试";
-  const prefix = trigger === "observed_failure" ? "最近失败" : "上次测试";
+function checkedTime(item: ModelServiceStatusItem): string {
+  if (!item.checked_at) return "尚未检查";
+  const timestamp = new Date(item.checked_at);
+  if (!Number.isFinite(timestamp.getTime())) return "尚未检查";
+  const prefix = item.trigger === "observed_failure" ? "最近失败" : "上次检查";
   return `${prefix} ${timestamp.toLocaleString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
   })}`;
 }
 
+function waitText(milliseconds: number): string {
+  return milliseconds >= 1000
+    ? `${(milliseconds / 1000).toFixed(milliseconds % 1000 === 0 ? 0 : 1)}s`
+    : `${milliseconds}ms`;
+}
 
-function statusPresentation(item: ModelServicesStatus["services"][number] | undefined): {
+function statusPresentation(item: ModelServiceStatusItem): {
   text: string;
   tone: "ok" | "warn" | "bad" | "muted";
 } {
-  if (!item) return { text: "状态未知", tone: "muted" };
-  if (!item.configured || item.status === "unconfigured") return { text: "未配置", tone: "muted" };
-  if (item.status === "ok") return { text: `正常 ${item.latency_ms}ms`, tone: "ok" };
-  if (item.status === "error") {
-    return {
-      text: `异常 · ${label(MODEL_SERVICE_STATUS_ERROR, item.code, "连接未通过")}`,
-      tone: "bad",
-    };
-  }
-  return { text: "待测试", tone: "warn" };
+  if (item.status === "ok") return { text: "正常", tone: "ok" };
+  if (item.status === "busy") return { text: "繁忙", tone: "warn" };
+  if (item.status === "circuit_open") return { text: "熔断中", tone: "bad" };
+  if (item.status === "half_open") return { text: "恢复探测中", tone: "warn" };
+  if (item.status === "error") return { text: "异常", tone: "bad" };
+  return { text: "待检查", tone: "muted" };
 }
 
-
-function EffectiveStatusRow({
-  role,
-  status,
+function ModelServiceCard({
+  item,
+  highlighted,
+  isAdmin,
   testing,
-  disabled,
+  testDisabled,
   onTest,
+  register,
 }: {
-  role: StatusModelRole;
-  status: ModelServicesStatus["services"][number] | undefined;
+  item: ModelServiceStatusItem;
+  highlighted: boolean;
+  isAdmin: boolean;
   testing: boolean;
-  disabled: boolean;
-  onTest: (role: StatusModelRole) => void;
+  testDisabled: boolean;
+  onTest: (serviceId: string) => void;
+  register: (element: HTMLElement | null) => void;
 }) {
-  const presentation = statusPresentation(status);
+  const presentation = statusPresentation(item);
+  const name = modelServiceDisplayName(item);
+  const failure = item.code
+    ? label(MODEL_SERVICE_STATUS_ERROR, item.code, "服务调用未通过")
+    : "";
   return (
-    <div className={`model-service-status-row tone-${presentation.tone}`}>
-      <div>
-        <small>当前使用</small>
-        <strong>{status?.model || "尚未配置"}</strong>
-        <span>{status?.source === "user" ? "个人设置" : status?.source === "system" ? "系统设置" : "未配置"}</span>
+    <article
+      ref={register}
+      role="group"
+      aria-label={name}
+      aria-current={highlighted ? "true" : undefined}
+      tabIndex={highlighted ? -1 : undefined}
+      className={`model-service-status-card tone-${presentation.tone}${highlighted ? " is-highlighted" : ""}`}
+    >
+      <header className="model-service-status-card-header">
+        <div>
+          <h3>{name}</h3>
+          {item.model && <p>{item.model}</p>}
+        </div>
+        <span className={`model-service-state tone-${presentation.tone}`}>{presentation.text}</span>
+      </header>
+
+      <div className="model-service-metrics">
+        <div><small>并发</small><strong>{item.active} / {item.maximum}</strong></div>
+        <div><small>队列</small><strong>排队 {item.queued}</strong></div>
+        <div><small>最久等待</small><strong>{item.queued > 0 ? waitText(item.oldest_wait_ms) : "—"}</strong></div>
+        <div><small>延迟</small><strong>{item.checked_at ? `${item.latency_ms}ms` : "—"}</strong></div>
       </div>
-      <div className="model-service-status-result">
-        <strong>{presentation.text}</strong>
-        <time dateTime={status?.checked_at || undefined}>
-          {checkedTime(status?.checked_at || "", status?.trigger || "")}
-        </time>
+
+      <div className="model-service-workloads">
+        <small>使用位置</small>
+        <div>
+          {item.workloads.length > 0
+            ? item.workloads.map((workload) => <span key={workload.id}>{workload.label || "模型任务"}</span>)
+            : <span>暂无任务</span>}
+        </div>
       </div>
-      <button type="button" disabled={disabled} onClick={() => onTest(role)}>
-        {testing ? "测试中…" : "测试当前使用"}
-      </button>
-    </div>
+
+      <div className="model-service-status-meta">
+        <time dateTime={item.checked_at || undefined}>{checkedTime(item)}</time>
+        {failure && <span>失败类别：{failure}</span>}
+        <SupportIdCopy supportId={item.support_id} className="model-service-support-id" />
+      </div>
+
+      {isAdmin && (
+        <button
+          type="button"
+          className="sort-button model-service-test-one"
+          disabled={testDisabled}
+          onClick={() => onTest(item.service_id)}
+        >
+          {testing ? "测试中…" : "测试服务"}
+        </button>
+      )}
+    </article>
   );
 }
 
 
 export function ModelServiceSummaryButton({
-  text,
-  tone,
-  title,
-  onOpen,
+  text, tone, title, onOpen,
 }: {
   text: string;
   tone: "ok" | "warn" | "bad" | "connecting";
@@ -114,74 +134,56 @@ export function ModelServiceSummaryButton({
 
 
 export function ModelServicePanel({
-  forms,
   status,
-  highlightedRole,
-  draftTestResults,
-  onFormChange,
-  onTestDraft,
-  onTestCurrent,
+  highlightedServiceId,
+  isAdmin,
+  onTestOne,
   onTestAll,
   onClose,
-  onSave,
-  testingRoles,
-  draftTestingRoles,
+  testingServiceIds,
   allTesting,
-  saving = false,
   returnFocusTo = null,
 }: {
-  forms: Record<ModelRole, ServiceForm>;
   status: ModelServicesStatus | null;
-  highlightedRole: StatusModelRole | null;
-  draftTestResults: Partial<Record<ModelRole, string>>;
-  onFormChange: (role: ModelRole, form: ServiceForm) => void;
-  onTestDraft: (role: ModelRole) => void;
-  onTestCurrent: (role: StatusModelRole) => Promise<void>;
+  highlightedServiceId: string | null;
+  isAdmin: boolean;
+  onTestOne: (serviceId: string) => Promise<void>;
   onTestAll: () => Promise<void>;
   onClose: () => void;
-  onSave: () => void;
-  testingRoles: Partial<Record<StatusModelRole, boolean>>;
-  draftTestingRoles: Partial<Record<ModelRole, boolean>>;
+  testingServiceIds: Record<string, boolean>;
   allTesting: boolean;
-  saving?: boolean;
   returnFocusTo?: HTMLElement | null;
 }) {
-  const roleRefs = useRef<Partial<Record<StatusModelRole, HTMLFieldSetElement | null>>>({});
+  const serviceRefs = useRef<Record<string, HTMLElement | null>>({});
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
-  const statusByRole = useMemo(
-    () => new Map((status?.services ?? []).map((item) => [item.service, item])),
-    [status],
-  );
-  const anyRoleTesting = Object.values(testingRoles).some(Boolean);
-  const anyDraftTesting = Object.values(draftTestingRoles).some(Boolean);
-  const anyFormDirty = MODEL_ROLES.some((role) => {
-    const form = forms[role];
-    return form.baseUrlDirty || form.modelDirty || form.keyDirty;
-  });
+  const floating = useFloatingWindow({ storageKey: "modelService.window", resizable: false });
+  const anyTesting = Object.values(testingServiceIds).some(Boolean);
 
+  // Focus the highlighted card (or the close button) when the dialog opens, when
+  // the highlight target changes, or once status first loads (so the target card
+  // exists to receive focus). Gate on `statusLoaded` (a boolean), NOT the whole
+  // `status` object: while the panel is open it re-polls every 2s, and depending
+  // on `status` would re-steal keyboard focus / reset scroll on every poll.
+  const statusLoaded = status !== null;
   useEffect(() => {
-    if (highlightedRole) {
-      const fieldset = roleRefs.current[highlightedRole];
-      if (!fieldset) return;
-      fieldset.focus();
-      fieldset.scrollIntoView?.({ block: "center", behavior: "smooth" });
-      return;
+    const highlighted = highlightedServiceId ? serviceRefs.current[highlightedServiceId] : null;
+    if (highlighted) {
+      highlighted.focus();
+      highlighted.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    } else {
+      closeButtonRef.current?.focus();
     }
-    closeButtonRef.current?.focus();
-    if (!dialogRef.current?.contains(document.activeElement)) {
-      dialogRef.current?.focus();
-    }
-  }, [highlightedRole]);
+  }, [highlightedServiceId, statusLoaded]);
 
   useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape" && !saving) onClose();
+      if (event.key === "Escape") onClose();
       if (event.key !== "Tab") return;
       const dialog = dialogRef.current;
       if (!dialog) return;
       const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+        'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
       ));
       if (focusable.length === 0) {
         event.preventDefault();
@@ -191,6 +193,11 @@ export function ModelServicePanel({
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !focusable.includes(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
       if (event.shiftKey && (active === first || !dialog.contains(active))) {
         event.preventDefault();
         last.focus();
@@ -201,172 +208,71 @@ export function ModelServicePanel({
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, saving]);
+  }, [onClose]);
 
-  useEffect(() => () => {
-    returnFocusTo?.focus();
-  }, [returnFocusTo]);
+  useEffect(() => () => { returnFocusTo?.focus(); }, [returnFocusTo]);
 
-  async function runCurrentTest(role: StatusModelRole) {
-    if (allTesting || testingRoles[role]) return;
-    try {
-      await onTestCurrent(role);
-    } catch {
-      // The page-level orchestrator reports the humanized error and owns the lock.
-    }
+  async function runOne(serviceId: string) {
+    if (allTesting || testingServiceIds[serviceId]) return;
+    try { await onTestOne(serviceId); } catch { /* page owns the user-facing error */ }
   }
 
-  async function runAllTests() {
-    if (allTesting || anyRoleTesting) return;
-    try {
-      await onTestAll();
-    } catch {
-      // The page-level orchestrator reports the humanized error and owns the lock.
-    }
-  }
-
-  function fieldsetProps(role: StatusModelRole) {
-    const highlighted = highlightedRole === role;
-    return {
-      ref: (element: HTMLFieldSetElement | null) => { roleRefs.current[role] = element; },
-      className: `edit-form model-service-fieldset${highlighted ? " is-highlighted" : ""}`,
-      tabIndex: highlighted ? -1 : undefined,
-      "aria-current": highlighted ? ("true" as const) : undefined,
-    };
+  async function runAll() {
+    if (allTesting || anyTesting) return;
+    try { await onTestAll(); } catch { /* page owns the user-facing error */ }
   }
 
   return (
     <section
-      className="utility-modal model-service-modal"
       ref={dialogRef}
+      className="utility-modal model-service-modal"
       role="dialog"
       tabIndex={-1}
       aria-modal="true"
       aria-labelledby="model-service-title"
-      onClick={(event) => { if (event.currentTarget === event.target && !saving) onClose(); }}
+      onClick={(event) => { if (event.currentTarget === event.target) onClose(); }}
     >
-      <div className="utility-modal-card model-service-card">
-        <div className="source-modal-header">
+      <div ref={floating.cardRef} className="utility-modal-card model-service-card" style={floating.style}>
+        <div className="source-modal-header" {...floating.dragHandleProps}>
           <div>
-            <h2 id="model-service-title">模型服务</h2>
-            <p>编辑个人设置，或查看当前实际使用的模型；API Key 只写不回显</p>
+            <h2 id="model-service-title">模型服务状态</h2>
+            <p>模型由系统统一管理；此处展示实时并发和最近检查结果</p>
           </div>
-          <button
-            type="button"
-            ref={closeButtonRef}
-            className="icon-button"
-            aria-label="关闭模型服务"
-            disabled={saving}
-            onClick={onClose}
-          >
-            ×
-          </button>
+          <div className="model-service-header-actions">
+            {isAdmin && (
+              <button
+                type="button"
+                className="sort-button model-service-test-all"
+                disabled={allTesting || anyTesting}
+                onClick={runAll}
+              >
+                {allTesting ? "测试全部中…" : "测试全部"}
+              </button>
+            )}
+            <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭模型服务" onClick={onClose}>×</button>
+          </div>
         </div>
         <div className="source-detail-body model-service-body">
-          <p className="tool-hint model-service-hint">
-            Base URL 只需填到服务根地址（通常以 <code>/v1</code> 结尾），系统会自动拼接接口路径。
-            下方“当前使用”来自已保存设置；修改表单后可先测试未保存设置，再保存。
-          </p>
-          <div className="model-service-toolbar">
-            <button
-              type="button"
-              className="sort-button model-service-test-all"
-              disabled={allTesting || anyRoleTesting || anyDraftTesting || saving}
-              onClick={runAllTests}
-            >
-              {allTesting ? "正在测试全部模型…" : "测试当前使用的全部模型"}
-            </button>
-          </div>
-          {MODEL_ROLES.map((role) => {
-            const form = forms[role];
-            const savedTesting = allTesting || Boolean(testingRoles[role]);
-            const roleDisabled = savedTesting
-              || saving
-              || Boolean(draftTestingRoles[role]);
-            return (
-              <fieldset key={role} {...fieldsetProps(role)}>
-                <legend>{MODEL_ROLE_LABELS[role]}</legend>
-                <EffectiveStatusRow
-                  role={role}
-                  status={statusByRole.get(role)}
-                  testing={savedTesting}
-                  disabled={roleDisabled}
-                  onTest={runCurrentTest}
+          {!status ? (
+            <p className="tool-hint">正在读取模型状态…</p>
+          ) : status.services.length === 0 ? (
+            <p className="tool-hint">暂无模型服务</p>
+          ) : (
+            <div className="model-service-status-list">
+              {status.services.map((item) => (
+                <ModelServiceCard
+                  key={item.service_id}
+                  item={item}
+                  highlighted={highlightedServiceId === item.service_id}
+                  isAdmin={isAdmin}
+                  testing={allTesting || Boolean(testingServiceIds[item.service_id])}
+                  testDisabled={allTesting || anyTesting}
+                  onTest={(serviceId) => { void runOne(serviceId); }}
+                  register={(element) => { serviceRefs.current[item.service_id] = element; }}
                 />
-                <div className="model-service-draft-grid">
-                  <label>Base URL
-                    <input
-                      value={form.base_url}
-                      disabled={saving}
-                      placeholder={BASE_URL_PLACEHOLDERS[role]}
-                      onChange={(event) => onFormChange(role, {
-                        ...form,
-                        base_url: event.target.value,
-                        baseUrlDirty: true,
-                      })}
-                    />
-                  </label>
-                  <label>Model
-                    <input
-                      value={form.model}
-                      disabled={saving}
-                      onChange={(event) => onFormChange(role, {
-                        ...form,
-                        model: event.target.value,
-                        modelDirty: true,
-                      })}
-                    />
-                  </label>
-                  <label>API Key
-                    <input
-                      type="password"
-                      placeholder="未改动则保留原 key"
-                      value={form.api_key}
-                      disabled={saving}
-                      onChange={(event) => onFormChange(role, {
-                        ...form,
-                        api_key: event.target.value,
-                        keyDirty: true,
-                      })}
-                    />
-                  </label>
-                </div>
-                <div className="model-service-draft-actions">
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={roleDisabled}
-                    onClick={() => onTestDraft(role)}
-                  >
-                    测试未保存设置
-                  </button>
-                  <span role="status">{draftTestResults[role] || ""}</span>
-                </div>
-              </fieldset>
-            );
-          })}
-          <fieldset {...fieldsetProps("embedding")}>
-            <legend>{MODEL_ROLE_LABELS.embedding}</legend>
-            <EffectiveStatusRow
-              role="embedding"
-              status={statusByRole.get("embedding")}
-              testing={allTesting || Boolean(testingRoles.embedding)}
-              disabled={allTesting || saving || Boolean(testingRoles.embedding)}
-              onTest={runCurrentTest}
-            />
-            <p className="model-service-admin-guidance">由管理员维护系统配置</p>
-          </fieldset>
-          <div className="modal-actions model-service-footer">
-            <button type="button" className="sort-button" disabled={saving} onClick={onClose}>取消</button>
-            <button
-              type="button"
-              className="new-pill"
-              disabled={!anyFormDirty || saving || allTesting || anyRoleTesting || anyDraftTesting}
-              onClick={onSave}
-            >
-              {saving ? "保存中…" : "保存"}
-            </button>
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </section>

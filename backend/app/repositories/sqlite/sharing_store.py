@@ -6,6 +6,7 @@ from typing import Callable, Sequence
 
 from app.core.config import Settings
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.knowhow_history_store import record_change
 
 # knowhow-table content, PR-2+3 Task 13: knowledge_objects/knowledge_relations
 # derived FROM a knowhow hidden source stay EXCLUDED from a deep copy — they
@@ -388,6 +389,64 @@ class SharingStore:
             with self.database.write() as db:
                 for data in rows[index:index + chunk_size]:
                     self.insert_row(db, table, data)
+
+    def seed_copied_knowhow_genesis(
+        self,
+        table_ids: Sequence[str],
+        *,
+        new_id: Callable[[str], str],
+        now: Callable[[], str],
+        actor: str,
+        note: str,
+    ) -> None:
+        """整本 notebook 深拷贝后，为每个拷贝来的 knowhow 表补一条 ``table_create``
+        创世流水（codex 第 2 轮 P2）。
+
+        单表传输（``copy_table``/``move_table``）早就在自己事务的最后记了这条
+        流水，但整本深拷贝走的是本 store 的批量 ``insert_copy_rows``、绕过了那条
+        hook——于是拷贝来的表没有任何可回退到的创世点：它的第一次编辑会成为
+        seq 1 并带上一个"编辑后"的指纹，谁都无法把表恢复到刚拷贝好的样子。
+
+        **必须在该表的列/行/格/代码全部插完之后调用**：``record_change`` 记的
+        指纹要反映拷贝完成后的完整表状态。title/description/columns 刻意从库里
+        现查（而非依赖调用方手里可能已被 insert seat 改过的 dict），payload 形状
+        与 ``create_knowhow_table``/``copy_table`` 产出的创世流水完全一致
+        （``rows`` 恒为 ``[]``）。``origin='import'`` 同 ``copy_table``——这是一次性
+        整表搬运、不是逐格手敲，复制/移动的语义由 ``note`` 如实区分。
+        """
+        if not table_ids:
+            return
+        with self.database.write() as db:
+            for table_id in table_ids:
+                trow = db.execute(
+                    "SELECT title, description FROM knowhow_tables WHERE id = ?",
+                    (table_id,),
+                ).fetchone()
+                if trow is None:
+                    continue  # 防御：表已不在（正常拷贝路径不会发生）
+                columns = [
+                    {
+                        "id": c["id"], "name": c["name"],
+                        "role": c["role"], "position": c["position"],
+                    }
+                    for c in db.execute(
+                        "SELECT id, name, role, position FROM knowhow_columns "
+                        "WHERE table_id = ? ORDER BY position",
+                        (table_id,),
+                    ).fetchall()
+                ]
+                record_change(
+                    db, new_id=new_id, now=now, table_id=table_id,
+                    kind="table_create",
+                    payload={
+                        "table": {
+                            "title": trow["title"], "description": trow["description"],
+                        },
+                        "columns": columns,
+                        "rows": [],
+                    },
+                    actor=actor, origin="import", note=note,
+                )
 
     def insert_fts_rows(
         self,

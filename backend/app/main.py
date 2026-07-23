@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import threading
@@ -15,14 +16,18 @@ from app.api.deps import (
     USER_MESSAGE_HEADER,
     get_current_user,
     mcp_memory_repository,
+    model_provider_if_initialized,
     repository,
+    shutdown_repository_if_initialized,
 )
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
 from app.api.routes import router
+from app.core import diagnostics_runtime as diagnostics
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.services.model_provider import validate_process_local_scheduler_deployment
 from app.services.pending_bus import pending_bus
 
 logger = logging.getLogger("silicon_notebook.startup")
@@ -50,6 +55,15 @@ async def _lifespan(app: FastAPI):
     # Reserve ownership before resetting readiness or touching the composition
     # factory. An overlapping lifespan fails before yield: it cannot become an
     # unowned server context that outlives the actual repository owner.
+    # Tests may mark readiness ready up-front and drive a preconstructed
+    # repository; do not reset or replace that fixture-owned lifecycle.
+    if readiness.is_ready():
+        try:
+            yield
+        finally:
+            shutdown_repository_if_initialized()
+        return
+
     lease = begin_lifecycle()
     if lease is None:
         raise LifecycleAlreadyActiveError(
@@ -71,8 +85,39 @@ async def _lifespan(app: FastAPI):
         # Do not close a PostgreSQL pool while the migration/warmup thread may
         # still be borrowing it. Production shutdown is rare and correctness
         # is more important than a short shutdown timeout.
-        startup_thread.join()
+        await asyncio.to_thread(startup_thread.join)
         close_repository(lease, started["repository"])
+
+
+def _diagnostic_concurrency_snapshot(*, models=None) -> dict:
+    from app.services.kg import scheduler
+
+    result = {"kg": scheduler.stats()}
+    if models is None:
+        models = model_provider_if_initialized()
+        if models is None:
+            return result
+    registry = getattr(models, "registry", None)
+    if registry is None:
+        return result
+
+    # runtime.json 保持有界、无凭据的类别级视图；按物理服务的
+    # 调度细节和故障定位由管理员模型服务状态接口提供。
+    groups: dict[str, dict[str, int]] = {}
+    group_for_kind = {"chat": "llm", "embedding": "embedding", "rerank": "rerank"}
+    for service in registry.services():
+        group = group_for_kind.get(service.kind)
+        if group is None:
+            continue
+        snapshot = models.scheduler_snapshot(service.id)
+        aggregate = groups.setdefault(
+            group, {"active": 0, "maximum": 0, "waiting": 0}
+        )
+        aggregate["active"] += snapshot.active
+        aggregate["maximum"] += snapshot.maximum
+        aggregate["waiting"] += snapshot.queued
+    result.update(groups)
+    return result
 
 
 def _env_file_preflight() -> None:
@@ -98,6 +143,7 @@ def _env_file_preflight() -> None:
 
 
 def create_app() -> FastAPI:
+    validate_process_local_scheduler_deployment()
     _env_file_preflight()
     settings = get_settings()
 
@@ -129,8 +175,14 @@ def create_app() -> FastAPI:
         # with the repository migration/cache warm-up readiness lifecycle.
         inner = mcp_server.streamable_http_app()
         async with inner.router.lifespan_context(inner):
-            async with _lifespan(_app):
-                yield
+            root_dir = Path(__file__).resolve().parents[2]
+            with diagnostics.activate_runtime(
+                root_dir / ".local" / "diagnostics",
+                readiness_provider=readiness.snapshot,
+                concurrency_provider=_diagnostic_concurrency_snapshot,
+            ):
+                async with _lifespan(_app):
+                    yield
 
     # 日志归档：启动时后台扫一遍「非今天」的天文件并 gzip，best-effort、不阻塞启动。
     from app.core.event_logging import archive_stale_days, _archive_pool
@@ -154,13 +206,12 @@ def create_app() -> FastAPI:
     logger.info("paths: %s storage=%s log_dir=%s", database, storage_dir, log_dir)
 
     # 启动 autotune 报告：一眼可查本次进程实际解析到的核绑定旋钮值（KG_CLUSTER_ANN_THREADS
-    # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型端并发旋钮
-    # （KG_EXTRACT_WORKERS/KG_JOB_CONCURRENCY/EMBED_CONCURRENCY）不随本机核数缩放，
-    # 升级核数不会改变它们，需要更高吞吐要先扩模型/embed 服务端。
+    # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型服务容量
+    # 由 MODEL_SERVICES_CONFIG 的 max_concurrency 管理，不随本机核数缩放。
     from app.services.batch_ingest import _BACKFILL_DEFAULT_WORKERS
     logger.info(
         "autotune: kg_cluster_ann_threads=%d backfill_default_workers=%d "
-        "(模型端并发旋钮 EXTRACT/JOB/EMBED 与本机核数无关,不自动缩放)",
+        "(模型服务 max_concurrency 与本机核数无关,不自动缩放)",
         settings.kg_cluster_ann_threads, _BACKFILL_DEFAULT_WORKERS,
     )
 
@@ -178,40 +229,46 @@ def create_app() -> FastAPI:
         request_id = new_id("req")
         start = time.perf_counter()
         client = request.client.host if request.client else ""
-        try:
-            response = await call_next(request)
-        except Exception as exc:
+        with diagnostics.request_scope(
+            request_id, request.method, request.url.path
+        ):
+            try:
+                with diagnostics.diagnostic_phase("http.dispatch"):
+                    response = await call_next(request)
+            except Exception as exc:
+                latency_ms = round((time.perf_counter() - start) * 1000)
+                request_log.emit(
+                    {
+                        "id": request_id,
+                        "kind": "http",
+                        "method": request.method,
+                        "path": request.url.path,
+                        "status": "error",
+                        "latency_ms": latency_ms,
+                        "client": client,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                raise
             latency_ms = round((time.perf_counter() - start) * 1000)
+            slow = latency_ms >= settings.slow_request_ms
+            status = "slow" if slow else (
+                "ok" if response.status_code < 500 else "error"
+            )
             request_log.emit(
                 {
                     "id": request_id,
                     "kind": "http",
                     "method": request.method,
                     "path": request.url.path,
-                    "status": "error",
+                    "status_code": response.status_code,
+                    "status": status,
                     "latency_ms": latency_ms,
                     "client": client,
-                    "error": f"{type(exc).__name__}: {exc}",
                 }
             )
-            raise
-        latency_ms = round((time.perf_counter() - start) * 1000)
-        slow = latency_ms >= settings.slow_request_ms
-        status = "slow" if slow else ("ok" if response.status_code < 500 else "error")
-        request_log.emit(
-            {
-                "id": request_id,
-                "kind": "http",
-                "method": request.method,
-                "path": request.url.path,
-                "status_code": response.status_code,
-                "status": status,
-                "latency_ms": latency_ms,
-                "client": client,
-            }
-        )
-        response.headers["X-Request-Id"] = request_id
-        return response
+            response.headers["X-Request-Id"] = request_id
+            return response
 
     @app.middleware("http")
     async def readiness_gate(request: Request, call_next):

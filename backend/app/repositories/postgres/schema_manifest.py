@@ -28,10 +28,10 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v24. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v29. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=24,
-    postgres_version=7,
+    sqlite_version=29,
+    postgres_version=8,
 )

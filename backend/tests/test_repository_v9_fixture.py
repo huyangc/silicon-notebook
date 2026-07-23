@@ -96,10 +96,15 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # migration、v17 source_paper_meta/source_authors 表 migration、v18
     # knowhow_cell_code 表 + role 词表重映射 migration、v19
     # notebook_assets.source_id 列 + 索引 migration、v20 notebook_bases 挂载
-    # 表 + promotion_candidates.target_base_id 列，以及 v21 normalized-anchor
-    # expression index、v22 kg_build_jobs migration，以及 v23
-    # model_service_status migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 24
+    # 表 + promotion_candidates.target_base_id 列，v21 normalized-anchor
+    # expression index、v22 kg_build_jobs migration、v23 model_service_status
+    # migration、v24 写锁瘦身改造点 2 的 kg_canonical_scratch 表 migration、
+    # v25 凭据清除 + 系统模型服务状态表(#328)、v26 knowhow_changes/
+    # knowhow_milestones 表 migration(#327)、v27 P1.5 的 sources.chunked_at
+    # 完成标记列 migration，以及 v28 app_settings 表 + user_profiles.
+    # upload_document_limit 列 migration，以及 v29 cluster membership 唯一
+    # 索引与确定性存量去重 migration 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 29
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

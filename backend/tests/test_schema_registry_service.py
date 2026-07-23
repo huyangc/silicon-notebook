@@ -16,6 +16,7 @@ from app.models.schemas import (
     ObjectSchemaUpdate,
 )
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
 
 
 @pytest.fixture
@@ -24,7 +25,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings())
+    provider = RecordingModelProvider()
+    repository = SQLiteRepository(Settings(), model_provider=provider)
+    repository.recording_model_provider = provider
+    return repository
 
 
 def _insert_element(repo, notebook_id: str, text: str) -> str:
@@ -129,7 +133,7 @@ def test_delete_builtin_schema_is_refused(repo):
 def test_propose_schemas_unconfigured_is_a_noop_returning_proposals(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _insert_element(repo, nb.id, "Flow doc with steps and owners.")
-    assert not repo.llm_client.configured
+    assert not repo._runtime.models.configured("schema_induction")
     assert repo.propose_schemas(nb.id) == []
 
 
@@ -152,11 +156,11 @@ def test_propose_schemas_persists_new_types_and_suppresses_existing(repo, monkey
         '"not-a-dict"'
         ']}'
     )
-    # production-compatible seam: the llm_client setter writes the runtime
-    # model provider the SchemaRegistryService consumes
-    monkeypatch.setattr(repo, "llm_client", fake)
+    # Bind exactly the runtime workload consumed by SchemaRegistryService.
+    bind_chat_client(repo, "schema_induction", fake)
     proposals = repo.propose_schemas(nb.id)
     assert fake.calls == 1
+    assert ("chat", "schema_induction") in repo.recording_model_provider.calls
     assert [m.object_type for m in proposals] == ["design_review"]
     model = proposals[0]
     assert model.status == "proposed"
@@ -174,17 +178,17 @@ def test_propose_schemas_fail_open_on_malformed_and_model_error(repo, monkeypatc
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _insert_element(repo, nb.id, "text")
     malformed = _FakeLLM("{not json")
-    monkeypatch.setattr(repo, "llm_client", malformed)
+    bind_chat_client(repo, "schema_induction", malformed)
     assert repo.propose_schemas(nb.id) == []
     boom = _FakeLLM("{}", boom=True)
-    monkeypatch.setattr(repo, "llm_client", boom)
+    bind_chat_client(repo, "schema_induction", boom)
     assert repo.propose_schemas(nb.id) == []
 
 
 def test_propose_schemas_without_elements_skips_llm(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     fake = _FakeLLM('{"new_types": []}')
-    monkeypatch.setattr(repo, "llm_client", fake)
+    bind_chat_client(repo, "schema_induction", fake)
     assert repo.propose_schemas(nb.id) == []
     assert fake.calls == 0
 
@@ -199,7 +203,7 @@ def test_propose_schemas_unconfigured_does_not_scan_notebook(repo, monkeypatch):
         ),
     )
 
-    assert not repo.llm_client.configured
+    assert not repo._runtime.models.configured("schema_induction")
     assert repo.propose_schemas(nb.id) == []
 
 

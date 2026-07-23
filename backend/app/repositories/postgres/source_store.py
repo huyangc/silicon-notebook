@@ -104,6 +104,21 @@ class SourceStore:
             items=items, total_count=total, offset=offset, limit=limit
         )
 
+    def visible_document_count(self, notebook_id: str) -> int:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
+                "AND source_type NOT IN ('memory','knowhow')",
+                (notebook_id,),
+            ).fetchone()
+        return int(row["c"])
+
+    @staticmethod
+    def clear_chunked_at(connection, source_id: str) -> None:
+        connection.execute(
+            "UPDATE sources SET chunked_at=NULL WHERE id=%s", (source_id,)
+        )
+
     def get_source(self, source_id: str) -> SourceDetail:
         with self.database.connect() as connection:
             row = connection.execute(

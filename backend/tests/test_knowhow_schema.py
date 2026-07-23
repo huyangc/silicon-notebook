@@ -142,8 +142,10 @@ def test_startup_recovery_marks_orphaned_knowhow_rows_failed(tmp_path):
     """Post-restart, knowhow rows still 'syncing'/'pending' are orphaned in the
     single-process model (background_jobs don't survive a restart, and no other
     code path ever revisits them) — startup recovery (_recover_interrupted_jobs,
-    re-run on every construction) must flip BOTH to 'failed' so the retry
-    affordance surfaces, while leaving already-settled rows untouched."""
+    which the server's lifespan calls explicitly; it is NOT a construction side
+    effect any more, see startup_warmup.run_startup) must flip BOTH to 'failed'
+    so the retry affordance surfaces, while leaving already-settled rows
+    untouched."""
     settings = Settings(
         database_url=f"sqlite:///{tmp_path}/recover.db",
         storage_dir=str(tmp_path / "storage"),
@@ -169,8 +171,11 @@ def test_startup_recovery_marks_orphaned_knowhow_rows_failed(tmp_path):
                 (rid, status),
             )
 
-    # Reopen on the same DB — construction re-runs _recover_interrupted_jobs.
+    # Reopen on the same DB and drive recovery the way the server's startup
+    # path does — explicitly, once, before readiness (construction alone no
+    # longer recovers; see test_startup_recovery_ownership.py).
     repo2 = SQLiteRepository(settings)
+    repo2._recover_interrupted_jobs()
     with repo2._connect() as db:
         statuses = {
             r["id"]: r["projection_status"]

@@ -25,6 +25,10 @@
     },
     "notebook_bases": {
       "ck_notebook_bases_distinct": "NOTEBOOK_ID < > BASE_NOTEBOOK_ID"
+    },
+    "system_model_service_status": {
+      "ck_system_model_service_status_status": "STATUS IN ('OK', 'ERROR')",
+      "ck_system_model_service_status_trigger": "TRIGGER IN ('MANUAL_TEST', 'OBSERVED_FAILURE', 'RECOVERY_PROBE')"
     }
   },
   "normalizations": {
@@ -109,7 +113,7 @@
     "knowledge_objects",
     "source_elements"
   ],
-  "ordinary_table_count": 55,
+  "ordinary_table_count": 60,
   "postgres_extension_schemas": {
     "pg_trgm": "public"
   },
@@ -119,7 +123,7 @@
   "postgres_internal_tables": [
     "silicon_schema_migrations"
   ],
-  "postgres_version": 7,
+  "postgres_version": 8,
   "rebuilt": {
     "fts_internal_tables": [
       "chunks_fts_config",
@@ -170,6 +174,10 @@
     ],
     "notebook_bases": [
       "NOTEBOOK_ID < > BASE_NOTEBOOK_ID"
+    ],
+    "system_model_service_status": [
+      "STATUS IN ('OK', 'ERROR')",
+      "TRIGGER IN ('MANUAL_TEST', 'OBSERVED_FAILURE', 'RECOVERY_PROBE')"
     ]
   },
   "sqlite_explicit_indexes": [
@@ -602,6 +610,26 @@
         {
           "column": "run_id",
           "descending": false
+        },
+        {
+          "column": "seed",
+          "descending": false
+        }
+      ],
+      "name": "idx_kg_canonical_scratch_nb_run_seed",
+      "predicate": null,
+      "table": "kg_canonical_scratch",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "run_id",
+          "descending": false
         }
       ],
       "name": "idx_kg_cluster_scratch_nb_run",
@@ -658,11 +686,43 @@
         {
           "column": "table_id",
           "descending": false
+        },
+        {
+          "column": "seq",
+          "descending": true
+        }
+      ],
+      "name": "idx_knowhow_changes_table",
+      "predicate": null,
+      "table": "knowhow_changes",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "table_id",
+          "descending": false
         }
       ],
       "name": "idx_knowhow_columns_table",
       "predicate": null,
       "table": "knowhow_columns",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "table_id",
+          "descending": false
+        },
+        {
+          "column": "seq",
+          "descending": true
+        }
+      ],
+      "name": "idx_knowhow_milestones_table",
+      "predicate": null,
+      "table": "knowhow_milestones",
       "unique": false
     },
     {
@@ -1351,8 +1411,8 @@
     }
   ],
   "sqlite_internal_tables": [],
-  "sqlite_table_count": 72,
-  "sqlite_version": 24,
+  "sqlite_table_count": 77,
+  "sqlite_version": 29,
   "tables": {
     "agent_access_tokens": {
       "classification": "replicated",
@@ -1661,6 +1721,40 @@
       ],
       "primary_key": [
         "id"
+      ],
+      "unique_keys": []
+    },
+    "app_settings": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "key",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "value",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "updated_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "key"
       ],
       "unique_keys": []
     },
@@ -3028,6 +3122,70 @@
         }
       ]
     },
+    "kg_canonical_scratch": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "notebook_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "run_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seed",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "canonical_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_description",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "canonical_desc_sig",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [],
+      "unique_keys": []
+    },
     "kg_cluster_scratch": {
       "classification": "replicated",
       "columns": [
@@ -3469,6 +3627,116 @@
         }
       ]
     },
+    "knowhow_changes": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "table_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "kind",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "actor",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "user",
+          "name": "origin",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "payload_json",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "fingerprint",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "note",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "table_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_tables"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "table_id",
+            "seq"
+          ],
+          "predicate": null
+        }
+      ]
+    },
     "knowhow_columns": {
       "classification": "replicated",
       "columns": [
@@ -3530,6 +3798,92 @@
         "id"
       ],
       "unique_keys": []
+    },
+    "knowhow_milestones": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "table_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "seq",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "note",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "created_by",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "created_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "columns": [
+            "table_id"
+          ],
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION",
+          "references_columns": [
+            "id"
+          ],
+          "references_table": "knowhow_tables"
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_keys": [
+        {
+          "columns": [
+            "table_id",
+            "name"
+          ],
+          "predicate": null
+        }
+      ]
     },
     "knowhow_rows": {
       "classification": "replicated",
@@ -5943,6 +6297,14 @@
           "postgres_type": "text",
           "sqlite_not_null": false,
           "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "chunked_at",
+          "nullable": true,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
         }
       ],
       "foreign_keys": [
@@ -5969,6 +6331,80 @@
           "predicate": "memory_id IS NOT NULL AND memory_id != ''"
         }
       ]
+    },
+    "system_model_service_status": {
+      "classification": "replicated",
+      "columns": [
+        {
+          "default": null,
+          "name": "service_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": false,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "config_fingerprint",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "status",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": 0,
+          "name": "latency_ms",
+          "nullable": false,
+          "postgres_type": "bigint",
+          "sqlite_not_null": true,
+          "sqlite_type": "INTEGER"
+        },
+        {
+          "default": "",
+          "name": "code",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "trigger",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": "",
+          "name": "support_id",
+          "nullable": false,
+          "postgres_type": "text",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "checked_at",
+          "nullable": false,
+          "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        }
+      ],
+      "foreign_keys": [],
+      "primary_key": [
+        "service_id"
+      ],
+      "unique_keys": []
     },
     "unified_kg_state": {
       "classification": "replicated",
@@ -6162,6 +6598,14 @@
           "postgres_type": "jsonb",
           "sqlite_not_null": true,
           "sqlite_type": "TEXT"
+        },
+        {
+          "default": null,
+          "name": "upload_document_limit",
+          "nullable": true,
+          "postgres_type": "bigint",
+          "sqlite_not_null": false,
+          "sqlite_type": "INTEGER"
         }
       ],
       "foreign_keys": [

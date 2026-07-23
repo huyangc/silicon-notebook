@@ -17,6 +17,7 @@ from app.models.notebooks import (
     NotebookUpdate,
 )
 from app.models.ask import NotebookSearchResponse, SearchHit
+from app.core import diagnostics_runtime as diagnostics
 from app.repositories.ports import (
     IdentityStorePort,
     KgBuildJobStorePort,
@@ -356,17 +357,31 @@ class NotebookCatalogService:
         warm-up; best-effort per notebook inside ``warm_all``. Returns the count."""
         return self._queries.warm_open_path_caches(progress)
 
+    def _fill_document_limit(
+        self, summary: NotebookSummary, notebook_id: str
+    ) -> NotebookSummary:
+        """回填 owner 的「每笔记本文档数量上限」有效值(前端来源面板据此 + 来源列表
+        total_count 显示「文档 X / 上限」)。仅详情/创建路径回填;列表投影保持默认。"""
+        owner_id, _owner_role = self._identity.notebook_owner(notebook_id)
+        summary.document_limit = self._identity.effective_document_limit(owner_id)
+        return summary
+
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         user_id = self._identity.current_user().id
         notebook_id = self._store.create_row(payload, user_id)
-        return self._summaries.get(notebook_id, user_id=user_id)
+        return self._fill_document_limit(
+            self._summaries.get(notebook_id, user_id=user_id), notebook_id
+        )
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary:
-        return self._summaries.get(
+        return self._fill_document_limit(
+            self._summaries.get(
+                notebook_id,
+                kg_building=notebook_id in self.kg_building,
+                paper_meta_backfilling=self._paper_meta_backfilling(notebook_id),
+                user_id=self._identity.current_user().id,
+            ),
             notebook_id,
-            kg_building=notebook_id in self.kg_building,
-            paper_meta_backfilling=self._paper_meta_backfilling(notebook_id),
-            user_id=self._identity.current_user().id,
         )
 
     def update_notebook(
@@ -378,16 +393,18 @@ class NotebookCatalogService:
 
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing
-        file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
+        with diagnostics.diagnostic_phase("notebook_delete.db"):
+            file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
         # DB deletion is committed above; only then remove files on disk —
         # source files first, then the notebook's pasted-image asset
         # directory (knowhow-tables PR-2+3 Task 14; unconditional, from the
         # construction-injected live storage root, so the real HTTP delete
         # route — which reaches this service directly, not via the facade —
         # gets the cleanup too).
-        for file_path in file_paths:
-            _delete_source_file(file_path)
-        _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
+        with diagnostics.diagnostic_phase("notebook_delete.files"):
+            for file_path in file_paths:
+                _delete_source_file(file_path)
+            _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

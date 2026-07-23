@@ -1,6 +1,6 @@
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.common import Evidence
 
@@ -62,6 +62,52 @@ class AdminUserUsage(BaseModel):
     reports: int
     last_active: Optional[str] = None
     is_online: bool = False
+    role_mutable: bool = True
+    # 该用户当前生效的「每笔记本文档数量上限」及其是否为单独覆盖值。
+    # upload_limit = COALESCE(用户覆盖值, 全局默认);overridden=True 表示这是
+    # 给该用户单独设的覆盖值,False 表示继承全局默认。
+    upload_limit: int = 0
+    upload_limit_overridden: bool = False
+
+
+class AdminUserRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["admin", "user"]
+
+
+class AdminUserRoleResult(BaseModel):
+    id: str
+    username: str
+    role: Literal["admin", "user"]
+
+
+class UploadLimitUpdate(BaseModel):
+    """PATCH /admin/users/{id}/upload-limit 请求体:给某用户设/清「每笔记本文档
+    数量上限」覆盖值。limit=null 表示清除覆盖、回落全局默认。"""
+    model_config = ConfigDict(extra="forbid")
+
+    limit: Optional[int] = None
+
+
+class UploadLimitDefaultUpdate(BaseModel):
+    """PATCH /admin/settings/upload-limit-default 请求体:设置全局默认上限。"""
+    model_config = ConfigDict(extra="forbid")
+
+    limit: int
+
+
+class UploadLimitDefaultResult(BaseModel):
+    """GET/PATCH /admin/settings/upload-limit-default 响应:当前全局默认上限。"""
+    limit: int
+
+
+class AdminUserUploadLimitResult(BaseModel):
+    """PATCH /admin/users/{id}/upload-limit 响应:改动后该用户的生效上限与是否覆盖。"""
+    id: str
+    username: str
+    upload_limit: int
+    upload_limit_overridden: bool
 
 
 class AdminUserNotebook(BaseModel):

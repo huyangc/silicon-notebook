@@ -1,6 +1,6 @@
 # silicon-notebook 架构
 
-更新日期：2026-07-23
+更新日期：2026-07-22
 
 本文记录当前已经由代码与绿色回归测试固定的运行时边界。部署、环境变量全集与产品操作说明以 `README.md`、`README_zh.md` 和 `.env.example` 为准；协作约束以 `AGENTS.md` 为准。架构整改采用 contract-first strangler，不用文档中的目标结构反向描述尚未发生的迁移。
 
@@ -19,84 +19,59 @@
 - notebook 内页是来源栏 + 主区域的两列 workspace，主区域有 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab；没有固定 Studio 右栏。
 - Memory 独立于 source/chunk/KG，始终绑定创建者和一个 notebook；Agent candidate 与 confirmed-only notebook 正式检索是两个隔离平面。
 
-本地 beta 保持 FastAPI + Next.js 的双进程形态；正式 repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择，发行默认仍是 SQLite，因此默认开发不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。LLM、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 pypdf 回退。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
+本地 beta 保持 FastAPI + Next.js 的双进程形态，repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择；发行默认 SQLite 快速启动不要求 PostgreSQL、pgvector、Docker、GPU 或本地模型服务器。生产启动固定为一个 FastAPI/Uvicorn worker，保证进程内的系统模型服务调度器就是部署全局容量边界。chat、embedding 与 reranker 仍只通过 URL 服务访问。MinerU 是独立的解析适配器：`MINERU_MODE=http` 调用远端 `mineru-api`，`MINERU_MODE=cli` 在隔离子进程运行 MinerU Python API，`MINERU_MODE=off` 使用 pypdf 回退。未配置服务时使用离线、确定性的回退路径。全新数据库不创建 demo notebook 或合成来源。
 
 ## 2. 运行时组件
 
 ### 2.1 进程与持久化
 
-- `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由。
+- `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由；生产拓扑固定单 Uvicorn worker，不允许用多进程复制模型容量。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
-- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。`SHADOW_DATABASE_URL` 只保留/校验，不参与 active backend 选择或同步。
-- SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`。模型向量以 float32 BLOB 持久化（历史 JSON 文本向量保持可读、可批量转换），并在查询时装配为有界的 float32 numpy 矩阵或显式维护的 scale index。
+- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。`SHADOW_DATABASE_URL` 只保留/校验，不选择 active backend，也不启用同步。
+- SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`，模型向量存 float32 BLOB。PostgreSQL 使用有界 Psycopg pool、数据库事务/row/advisory lock 支持跨进程访问，向量存 float32 `bytea`；不安装也不需要 pgvector。
 
 ### 2.2 Repository 组合与兼容 facade
 
-`backend/app/services/repository_facade.py` 中的 `RepositoryFacade` 是注入 `RepositoryRuntime` bundle 之上的后端中立 facade。`backend/app/services/sqlite_repository.py` 中的 `SQLiteRepository` 是现有消费者使用的窄兼容包装器，只拥有 SQLite migration、maintenance 与历史兼容 adapter；唯一 repository factory 负责选择正式后端并构造组合根。公共方法只保留显式兼容 adapter 或单跳委托，不再通过 mixin 继承复用实现。AST guard 会验证每个委托的真实目标与 ownership manifest 一致，并限制包装器成员、SQLite import 与 SQL 执行；facade body 与 ownership debt 均为 0。依赖方向单向：factory/wrapper → facade → runtime → application services → stores；被抽出的 service/store 不得反向 import facade 或具体后端。
+`backend/app/services/repository_facade.py` 中的 `RepositoryFacade` 是后端中立 facade；唯一 factory 根据已验证的 `DATABASE_URL` 构造 `SQLiteRepository` 或 `PostgresRepository`，两者注入同一个 `RepositoryRuntime` 组合边界。公共方法只保留显式兼容 adapter 或单跳委托，不再通过 mixin 继承复用实现。AST guard 会验证每个委托的真实目标与 ownership manifest 一致；依赖方向单向：factory/wrapper → facade → runtime → application services → stores；service/store 不得反向 import facade、判断 SQL dialect 或 import 对侧 adapter。
 
 - **SQLite 持久化**：`backend/app/repositories/sqlite/` 下是 identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / memory / query / index-projection 等领域 store。这些 store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。它们共享唯一的 `SqliteDatabase`（connection factory、WAL/busy_timeout PRAGMA、实例级写锁）。application service 不拼装主业务库 SQL，只保留业务顺序、策略与 transaction seat。`SqliteMigrator` 持有 `SCHEMA_VERSION` 与版本化迁移注册表；启动顺序固定为 migrate → 恢复中断的 merge-review/Ask job → seed 与 admin 原地升级，后两步不进版本闸、每次启动照跑。
 - **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）与 `backend/app/repositories/filesystem/`（scale/viz 索引工件）。
 - **业务编排**：application services（摄取、检索、evidence context、Ask、报告、KG lifecycle/governance、分享/深拷贝、scale runtime）由 runtime 组装；service 不直接拼 SQL。SQLite 专用的运维能力（批量 backfill、raw build/fold、诊断投影）归 maintenance adapter，不进入可移植 ports。
-- **消费者契约**：`backend/app/repositories/ports.py` 按消费者划分可执行的小型 Protocol；最小 Protocol-only fake 可运行其声明支持的 Ask chunk/reasoning/graph/stream、report 与 evaluation 路径，不需要 facade 或 private runtime。`app/services/repository.py` 保留为兼容 import 入口。SQLite 与 PostgreSQL adapter 都在这批相同 ports 后提供 store；application code 不做 dialect 分支。
+- **消费者契约**：`backend/app/repositories/ports.py` 按消费者划分可执行的小型 Protocol；最小 Protocol-only fake 可运行其声明支持的 Ask chunk/reasoning/graph/stream、report 与 evaluation 路径，不需要 facade 或 private runtime。`app/services/repository.py` 保留为兼容 import 入口。SQLite 与 PostgreSQL adapter 均在同一 ports 后提供实现，application code 不做 dialect 分支。
 - **运行态与启动补偿**：`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有，组合完成后的受支持替换会同步到全部既有消费者。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再重新抛出提交异常；成功 worker 的顺序及 Ask begin/save/finish/cleanup transaction checkpoint 不变。
 - **旧库兼容**：迁移版本闸 + 冻结 v9 fixture（`backend/tests/fixtures/repository_v9/`、`test_repository_v9_fixture.py`）+ `test_legacy_db_compat.py` schema golden 共同守护「重构前创建的数据库直接打开、迁移、读取」。`scripts/verify_repository_snapshot.py` 以 backup-only 方式验证真实旧库：逐版本 migration manifest 精确列出允许新增的表/列/index/trigger/view，稳定 seed manifest 只接受指定主键与值；SQLite URI 路径经百分号编码。repository 只在临时 backup/storage 上构造；cleanup 失败时只输出保留的 backup 路径，不输出私有行。原 DB/WAL metadata 与 SHM 的存在性/大小都必须不变；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
-此后 master 先以 v11/v12 增加 SQLite 热路径索引，Agent Memory 在合并后使用 v13
-migration；当前 schema 版本为 24。已提交的 v9 兼容 fixture 会经由 v10–v24 migration
+当前 schema 版本为 29。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v29 migration
 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
 v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 为交互式规整的
 anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化表达式索引，v22
-增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 清理
-存量重复 cluster membership，并强制 `(notebook_id, object_type, member_object_id)`
-唯一。备份 verifier 以流式 count/digest 投影校验 v24 的精确 survivor 集，不把 cluster
-全表纳入启动归一化白名单；store
+增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁
+瘦身的簇映射切换段增加 kg_canonical_scratch 表，v25 不可逆清除已存用户模型凭据与
+旧状态并新增按服务 ID 存储的部署级健康状态，v26 增加 knowhow 表变更流水与命名
+里程碑，v27 增加 sources.chunked_at 完成标记使「已就绪但无分块」的来源历史可判定
+（合法零分块解析 vs 中途失败的分块），v28 新增 app_settings 全局设置表与可空的
+user_profiles.upload_document_limit 列（每笔记本文档数量上限），v29 确定性清理旧的重复
+cluster membership 并增加唯一索引；SQLite store
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
 
-### 2.2.1 PostgreSQL adapter、生命周期与切换边界
+### 2.2.1 PostgreSQL adapter 与切换边界
 
-- `app/repositories/factory.py` 是唯一 backend choice：它只根据已校验的
-  `DATABASE_URL` 选择 `SQLiteRepository` 或 `PostgresRepository`。任何 service/store
-  都不得反向 import 另一 adapter 或根据 dialect 分支。不支持的 scheme、建连、
-  migration 与 warmup 失败都 fail closed，不回落到另一库。
-- `app/repositories/postgres/bundle.py` 是 PostgreSQL 唯一 composition root，组合
-  identity/notebook/sharing/source/chunk/embedding/knowledge/governance/index/Ask/report/
-  Memory/Knowhow/query/unified-KG store。这些 store 只依赖同一个有界
-  `PostgresDatabase` pool；用 row lock/advisory lock/transaction isolation 表达跨进程并发，
-  不复制 SQLite 的进程内全局写锁。向量是 float32 `bytea`，不安装也不需要
-  pgvector。
-- 启动流程的 repository lifecycle lease 覆盖 factory 构造、checksummed PostgreSQL
-  migration、中断任务恢复、warmup 与 readiness 发布。只有当前 lease 可将自己的
-  repository 发布为 ready；被取代/失败的 warmup 不得关闭 winner 的 pool。关机在
-  warmup thread 结束后关闭精确的 repository/pool。部署仍用 `--workers 1`，pool
-  acquire/statement/lock timeout 保持有界。
-- `scripts/backend.sh status` 通过中性 URL parser 仅输出
-  `database=sqlite path=...` 或 `database=postgresql host=... db=...`；凭据与 query option
-  从 status、readiness 错误和 pool 诊断中隐去。
-- `batch_ingest` 的 mutation phase 仅支持 SQLite：组合根在构造
-  `SQLiteRepository` 前用中性 URL identity 判定并拒绝 PostgreSQL，错误不回显 URL/凭据；
-  `--dry-run` 仍是后端无关的纯文件扫描。PostgreSQL 的导入与 KG/reindex 通过正常
-  application/API 流程执行，SQLite maintenance port 不扩散到 portable repository surface。
-- PostgreSQL checksummed migration 依赖数据库级 `pg_trgm`，且固定安装在 `public`
-  schema；应用数据库 owner 必须可执行 `CREATE EXTENSION pg_trgm`，否则 DBA 在首次
-  应用启动前预装。migration 对位于其他 schema 的同名 extension fail closed。
-- 切换是“停写 → 停后端 → 一致备份 → 改唯一 `DATABASE_URL` → 启动自动 migration
-  → status/`/api/ready`/认证与代表性读取验证 → 放流量”的运维边界。只改 URL 不会
-  复制、迁移或同步既有数据。`SHADOW_DATABASE_URL` 仍只保留/校验，本阶段没有
-  dual-write、shadow replication 或 cutover。切回 SQLite 不会回放 PG-only 写入。详细决策表、
-  backup/WAL 语义与 rollback 条件见两份 README 及 `packaging/DEPLOY.md`。
-- adapter 计划已交付；
-  `docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md` 是明确的未来工作，
-  尚未实现。
+- `backend/app/repositories/factory.py` 是唯一 backend choice；PostgreSQL bundle 组合与 SQLite 对等的领域 store，共享一个有界 `PostgresDatabase` pool。启动 lease 覆盖 checksummed migration、恢复、warmup 与 readiness 发布，失败或被替换的实例只关闭自己的 pool。
+- 跨进程访问由 PostgreSQL 自身的 MVCC、row/advisory lock 与 transaction isolation 处理，可消除 SQLite 的单 writer 文件锁争用；它不能消除业务层锁序错误或长事务，因此 pool acquire、statement、lock timeout 仍保持有界。
+- 切换只允许“停写 → 停服务 → 一致备份 → 修改唯一 `DATABASE_URL` → 启动并自动 migration → status/`/api/ready`/认证/数量/代表性读取验证 → 放流量”。只改 URL 不复制数据。`SHADOW_DATABASE_URL` 不启用 dual-write；切回 SQLite 也不会回放 PG-only 写入。
+- PostgreSQL 依赖 `public.pg_trgm`，向量为 float32 `bytea`，不依赖 pgvector。生产仍用 `--workers 1`，因为模型 scheduler、breaker 与 cancellation registry 是进程内状态。
+- `batch_ingest` 的 mutation phase 仅支持 SQLite；PostgreSQL 使用正常 application/API 摄取与 KG/index 流程。离线 `scripts/check.sh` 不连接 PostgreSQL；`scripts/check_postgres.sh` 和 CI 的独立 PostgreSQL 16 lane 验证 adapter、migration 与跨进程语义。
 
 ### 2.3 API、模型与领域服务
 
 - `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。边界契约直接检查各 domain router 的 endpoint 所有权，并以语义 AST 固定 aggregate 的组合清单与 `include_router` 调用；不依赖框架是否把子路由平铺（新版 FastAPI 会保留 lazy included-router 节点）。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供十一个工具（七个 Memory/context 与四个 knowhow）的 scoped Streamable HTTP 面；`deps.py` 承载访问控制依赖。
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
+- `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
 - `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、mode 注册和 reasoning 迭代。
 - `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
@@ -113,20 +88,70 @@ anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化�
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 - `frontend/app/api-client.ts` is the shared transport，负责 base URL、认证 header、JSON/empty/Blob、trusted error、网络失败与 AbortSignal mechanics；七个 domain API module 仍拥有 endpoint path、body、response type 与产品策略。
 
-notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab。外层另有当前用户的总 Memory 页面，notebook 卡片数量可深链到局部 Memory tab。全屏 Knowledge Graph、看板和 Schema 是独立顶栏动作；「分析」菜单本身只含晋升队列（admin）、tier 切换（admin）与边审查队列。当前没有文章研究、思维导图、信息图或派生规则入口，也没有固定 Studio 右栏。
+notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab。外层另有当前用户的总 Memory 页面，notebook 卡片数量可深链到局部 Memory tab。全屏 Knowledge Graph 和看板是独立顶栏动作；图谱 Schema（知识对象类型/字段管理，仅管理员）已移入知识图谱视图头部的「图谱 Schema」按钮，不再是独立顶栏动作。「分析」菜单本身只含晋升队列（admin）、tier 切换（admin）与边审查队列。当前没有文章研究、思维导图、信息图或派生规则入口，也没有固定 Studio 右栏。
 
 ### 2.5 配置边界
 
-关键配置由 `.env.example` 作为字段真源；LLM、embedding 与 reranker 保持 URL 驱动，MinerU 单独按解析模式选择远端服务、隔离子进程或 pypdf 回退：
+系统模型配置由部署者统一管理，用户侧没有保存、编辑或测试草稿配置的能力。`.env.example` 是普通运行参数和密钥槽位真源，`model-services.example.toml` 是服务/绑定/容量模板；MinerU 单独按解析模式选择远端服务、隔离子进程或 pypdf 回退：
 
 - 数据与认证：`DATABASE_URL`、`SILICON_NOTEBOOK_STORAGE_DIR`、`SILICON_NOTEBOOK_ADMIN_PASSWORD`、`SILICON_NOTEBOOK_AUTH_OPTIONAL`。
-- LLM：`OPENAI_COMPAT_BASE_URL`、`OPENAI_COMPAT_API_KEY`、`OPENAI_COMPAT_MODEL`、`OPENAI_COMPAT_TIMEOUT_SECONDS`。
-- embedding：`EMBED_PROVIDER`、`EMBED_BASE_URL`、`EMBED_API_KEY`、`EMBED_MODEL`、`EMBED_DIM`。
+- 模型服务：`MODEL_SERVICES_CONFIG` 指向部署 TOML；`[services]` 声明服务种类、协议、URL、模型、`api_key_env` 和唯一容量参数 `max_concurrency`，`[bindings]` 把稳定 workload 映射到同种类服务。密钥只从 `.env` 中被 `api_key_env` 引用的变量读取；空路径是显式离线模式，非空但无效则启动失败。
+- 模型调用调优：`OPENAI_COMPAT_TIMEOUT_SECONDS`、各 workload 的输出预算/重试、`EMBED_DIM`、`EMBED_RUNTIME_DIM` 与 embedding batch 设置。它们不改变模型并发容量；`EMBED_DIM` 必须匹配所绑定模型。
 - PDF：`MINERU_MODE`、`MINERU_API_URL`、`MINERU_BACKEND`、`MINERU_PARSE_METHOD`、`MINERU_LANG`、`MINERU_TIMEOUT_SECONDS`。
-- KG / index 调度：`KG_AUTO_EXTRACT`、`KG_EXTRACT_WORKERS`、`KG_JOB_CONCURRENCY`、`SCALE_INDEX_AUTO_ENABLED`、`SCALE_INDEX_AUTO_WHEN`。
+- KG / index 调度：`KG_AUTO_EXTRACT`、`KG_JOB_CONCURRENCY`、自适应窗口参数、`SCALE_INDEX_AUTO_ENABLED`、`SCALE_INDEX_AUTO_WHEN`。来源 job 与本地 CPU/ANN 线程不是模型容量，所有模型调用仍受绑定服务的 `max_concurrency` 限制。
 - Agent MCP：`MCP_PUBLIC_URL`；默认允许远程明文 HTTP 并放宽 Host/Origin 校验（仅可信内网），启动会打印明文告警；公网部署设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS + DNS-rebinding 保护。
 
+模型服务状态是只读投影：`GET /api/model-services/status` 返回脱敏后的服务身份、workload 绑定、容量、运行/排队数、熔断与最近健康状态，不触发上游探测。只有 admin 能显式调用单服务或全服务 test endpoint。所有模型失败都携带安全 `support_id`，用户把它提交给维护人员，维护人员再以服务端日志关联具体坏掉的服务；状态与 UI 永不返回端点、凭据、provider body、prompt/response 或 raw exception。schema v24 已不可逆清空 `user_profiles.model_settings`、删除旧的逐用户健康行，并按部署服务 ID 持久化健康状态；个人配置路由与页面已下线。
+
 新增可由环境覆盖的 pydantic v2 setting 必须使用 `validation_alias`；列表类值按现有 `NoDecode` 约定解析。
+
+### 2.6 生产 DFX 诊断边界
+
+生产诊断目标是 Ubuntu 24.04 上从仓库根执行 `npm run start` 的双服务形态，后端保持单
+Uvicorn worker。它是内部基础设施，不新增前端 UI 或 API。卡顿现场的主路径是在操作仍然卡住时
+运行 `python3 scripts/diag.py incident`；自动发现不能唯一选中仓库范围内的生产 Uvicorn 进程时，
+才用 `--pid <backend-pid>` 绑定仍在运行的 worker，不能先重启再采集。
+
+进程内 `backend/app/core/diagnostics_runtime.py` 维护有界 registry：活跃 request/phase、background
+job、SQLite 操作、写锁 holder/waiter，以及 KG/LLM/embedding concurrency/readiness。所有 helper 在
+runtime 未安装时为 no-op，安装后也必须 exception-safe；观测失败不传播到业务调用，不获取 SQLite
+写锁，不改变 transaction 语义，也不按每条 SQL 持久化事件。SQL 只归一化为 verb/table/fingerprint，
+永不持久化参数。运行态每两秒原子更新 `.local/diagnostics/runtime.json`，六秒以上的心跳按 stale
+处理，不能参与高置信推断。machine-local snapshot 可保留精确 opaque notebook id 以关联只读 DB
+证据；copyable report 必须把 notebook/request/job id 稳定映射为本报告内假名，并省略其它原始
+opaque id。
+
+主线程把 `SIGUSR1` 注册为 `faulthandler` 的不终止进程、全 Python 线程栈 dump，`all_threads=True`
+且不采 locals。采集通过 `.local/diagnostics/incident.lock` 串行化，只读取本次追加的栈片段；
+`.local/diagnostics/thread-dumps.log` 在成功采集后保持不超过 8 MiB。SQLite 分析从源 DB/WAL 的有界
+副本读取，临时 workspace 位于 `.local/diagnostics/db-snapshots/`；源库不通过 SQLite 打开，不执行
+checkpoint/vacuum/analyze/reindex/migration 或任何业务写入。诊断只允许维护这些有界工件，不需要
+root，不重启/终止进程，也不自动修复。
+
+运行态文件安全边界固定为当前用户拥有的 `0700` diagnostics 目录，以及同一用户拥有、单硬链接、
+普通文件类型的 `0600` `runtime.json` / `thread-dumps.log`。writer 持有并复核目录 descriptor，临时
+heartbeat 使用不可预测文件名、descriptor-relative 写入和原子替换；符号链接、硬链接、FIFO/device、
+权限过宽或目录路径替换一律只增加降级计数，不跟随、不阻塞、不截断敌对目标。
+
+`scripts/diag_incident.py` 在同一个最长 10 秒的 monotonic deadline 下组合 PID identity、Linux
+`/proc` CPU/RSS/thread/FD/I/O/D-state、两次栈采样、loopback readiness、历史日志和最多一秒的 DB
+probe；任一来源 missing/ambiguous/stale/busy/permission/deadline/corrupt/raced 时记录 category-only
+degradation，并排除不完整信号，剩余采集继续。`scripts/diag_rules.py` 只消费 allow-listed metadata，
+确定性排序最多三个假设，输出 `high`/`medium`/`low` 证据强度和安全下一步；默认 stdout 是一段最多
+32 KiB 的 UTF-8 文本。空闲服务可以没有有效多信号结论，不能据此编造根因。
+
+统一入口精确包含 `incident`、`slow`、`latency`、`locks`、`open`、`db`、`base-recall` 七命令；裸调用仍为
+`slow`。七个命令及其 reporter 都是纯标准库、app-import-free。`base-recall` 复用 `db` 的
+`O_NOATIME` pin、非阻塞锁、身份复核和有界 DB/WAL 拷贝，只在诊断自己拥有的快照上运行固定聚合
+投影；它不构造 repository、不跑 application retrieval/migration、也不用 SQLite 打开源库。
+legacy `<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip
+`<channel>-YYYY-MM-DD.jsonl.gz` 与下一层 per-user 日志目录由共享 reader 有界读取、去重并统计
+malformed/truncated；独立旧引擎入口继续可运行。
+
+runtime snapshot 与 report 只含元数据；`base-recall` 的单段报告同样受 32 KiB 上限约束，只输出固定
+状态、计数与本次报告内假名。诊断不持久化/打印 request body、用户控制的原始文件名、来源与
+Ask/Memory/Knowhow 内容、prompt/model message、SQL 文本/参数、authorization/cookie/token/secret、
+原始进程命令行或局部变量。脱敏报告离开可信团队前仍须人工复核。
 
 ## 3. 核心数据流
 
@@ -146,7 +171,7 @@ source 状态沿 `queued → parsing → parsed → extracting → extracted` �
 
 ### 3.2 Ask 与 detached job
 
-所有 Ask 入口先让 `ask_jobs` 行持久化，并以 job 状态守卫最终 answer 的原子保存。阻塞式 `POST /api/notebooks/{id}/ask` 与 MCP `ask_notebook` 在当前调用内完成该生命周期，job id 只在服务内部使用；它们的公开回答不含 `job_id`，也不承诺 stream 的 progress、重连或显式取消协议。`POST /api/notebooks/{id}/ask/stream` 才会把 `job_id` 交给客户端、把后续 trace 写入 `ask_trace_steps`，让 cancellation event 注册在进程内，并启动脱离 transport 生命周期的 worker：
+`POST /api/notebooks/{id}/ask` 保留非流式兼容路径。`POST /api/notebooks/{id}/ask/stream` 先让 `ask_jobs` 行持久化 job 元数据与状态、让 `ask_trace_steps` 持久化后续 trace；cancellation event 注册在进程内，然后启动脱离 transport 生命周期的 worker：
 
 ```text
 stream start
@@ -168,7 +193,18 @@ transport disconnect / navigation / refresh
 
 服务重启后仍为 `running` 的 job 会转为 `interrupted`；进程内 cancellation event 不会跨重启恢复。`GET /api/notebooks/{id}/ask/jobs/{job_id}` 返回 `status`、`trace`、`answer_id` 等 job metadata，不直接返回 `AskResponse`；job 完成后，前端重新加载 conversation 取得已持久化的最终回答。前端 logout 仍会终止本地流并重置用户态，但 transport 生命周期本身不拥有后台 job。
 
-会话删除与上述 job 生命周期共用 conversation parent lease。显式删除看到任一 `running` job 时返回 409 且不改任何状态；批量清理在锁内重验 owner、活动时间和 running job，只返回实际删除的 `deleted_ids`（同时保留 `deleted` 计数）。确认可删除后，同一事务按 answer、terminal job trace、terminal job、conversation 清理，已删除的 job id 随即变为 404。锁序刻意不形成环：最终保存是 job→conversation；删除持有 conversation 时只做不加行锁的 running EXISTS，若命中立即拒绝/跳过，在无 running 后才删除不可再变化的 terminal job。
+### 3.2.1 系统模型服务调度
+
+```text
+业务调用选择稳定 workload + actor + 优先级 + deadline
+  → RuntimeModelProvider 解析 workload → physical service
+  → 该 service 的唯一 ServiceScheduler 排队/准入
+  → 获得并发席位后调用 raw transport
+  → 结果或故障更新同一 service 的 breaker / 健康观察
+  → 用户错误仅返回安全 service/model 标签 + support_id
+```
+
+每个物理服务独立执行 TOML `max_concurrency`，总队列上限为 `10 × max_concurrency`，单 actor 排队上限为 `2 × max_concurrency`。调度按 interactive:report:background 固定 `8:2:1`，同优先级内按 actor round-robin；排队截止时间分别为 30/300/1800 秒。一次 fatal 或连续三次 transient provider 故障打开 breaker 30 秒，half-open 只允许一个探测调用。不同 service id 的容量、队列与 breaker 互不影响；batch 与在线调用共用同一流程，业务 worker 数不能乘大模型并发。
 
 ### 3.3 联合检索与回答合成
 
@@ -237,6 +273,18 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 `knowhow:code`，跨 owner 探测一律统一 404、不暴露存在性。判别集按列全量返回（刻意不做语义预筛），
 行详情机器视图把图片剥成占位文本并附代码本体，供外部 Agent 自带判别/修复逻辑消费。
 
+每张 knowhow 表带完整变更历史（`knowhow_changes` + `knowhow_milestones`，schema v26）。15 个写方法
+在各自写事务的最后一步经模块级 `record_change` 追加一条流水，存受影响实体的 before/after 加**变更后的
+整表指纹**（复用传输守卫的 `_FINGERPRINT_SQL`，覆盖表元/列/行/格子/代码附件、刻意不含时间戳）；一条
+架构守卫（`test_knowhow_history_coverage_guard.py`）保证白名单外的写事务默认报红，防将来新增写路径漏挂。
+回退是纯 delta 反向重放：在一个写事务内先校验当前指纹等于最新流水的指纹（否则中止），从 head 逆序把
+before 写回到目标点（行/列**原样复用 id**，引用跳转与代码附件才不断），再校验结果指纹等于目标点的指纹
+（否则整事务回滚），最后追加一条 `revert` 流水——历史只增不减，故「回退的回退」天然成立。里程碑零快照，
+只是给某个 seq 起名；流水被「清理历史」删除后里程碑保留为「已失效」不级联删。清理只删最老的连续前缀
+（按 seq 不按 `created_at`，防时钟回拨挖洞）且永远保留 head。孤儿图片清扫器的存活引用集扩到历史流水，
+故图片进过格子后基本不再自动回收——代价是「清理历史」要等最后一次引用不在 head 上时才释放该图。回退提交
+后经同一个 `ProjectionScheduler` 触发全量重投影。详见 `docs/superpowers/specs/2026-07-22-knowhow-table-version-control-design.md`。
+
 ## 4. 关键行为契约
 
 - **断连不等于取消**：transport 断连只停止向该客户端继续推送；detached Ask worker 仍执行并可持久化。只有显式 cancel endpoint 能设置 cancellation event。
@@ -252,6 +300,7 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 - **证据与治理一致**：只有 usable knowledge status 进入检索；所有图消费者排除 `review_status='rejected'` 的关系，并保持存储的 `source_object_id → target_object_id` 方向。
 - **兼容 facade**：本阶段不改变 endpoint、SQLite schema、repository 公共方法、旧 import、前端交互或异步任务语义。
 - **本地 beta 约束**：无 Docker 默认流程、无强制外部服务、无 demo 数据；模型服务通过 URL，测试保持离线且不读取真实密钥。
+- **系统模型容量唯一性**：部署 TOML 的每服务 `max_concurrency` 是唯一模型容量；单进程 provider/scheduler 同时承接在线、后台、报告和批处理，不允许第二套 gate、用户覆盖或进程数乘法。
 
 ## 5. 当前模块边界
 
@@ -260,9 +309,10 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 | FastAPI 应用 | `backend/app/main.py` | 应用装配、中间件与 router 挂载；同步 SQLite 授权工作不能阻塞 event loop。 |
 | API | `backend/app/api/routes.py` + domain routers、`auth_routes.py`、`deps.py` | aggregate 只负责组合顺序，不提供兼容导出；endpoint body 按领域所有权放置，保持路径、依赖与 response schema。 |
 | API models | `backend/app/models/*.py` + `schemas.py` | domain module 是唯一 model definition 所有者；`schemas.py` 只作 legacy compatibility facade。 |
-| SQLite facade | `backend/app/services/sqlite_repository.py` | 兼容 facade：显式委托到 `RepositoryRuntime` 组合的 store/service，不再承载领域 SQL；旧 import 与测试接缝保持。 |
-| Repository stores | `backend/app/repositories/`（`sqlite/`、`source_files.py`、`filesystem/`、`ports.py`） | 主业务库 SQL 唯一所在；共享一个 `SqliteDatabase` 与版本闸 `SqliteMigrator`；ports 是消费者契约。 |
-| Identity | `backend/app/repositories/sqlite/identity_store.py` | 用户、session、模型配置、管理员用量；`sqlite_identity.py` 为兼容 shim。 |
+| Repository facade/factory | `backend/app/services/repository_facade.py`、`sqlite_repository.py`、`backend/app/repositories/factory.py` | 中立 facade + 唯一 backend choice；SQLite wrapper 只保留 migration/maintenance 兼容接缝。 |
+| Repository stores | `backend/app/repositories/`（`sqlite/`、`postgres/`、`source_files.py`、`filesystem/`、`ports.py`） | 每种 SQL 只在所属 adapter；两套 bundle 实现同一 ports，application 不判断 dialect。 |
+| Identity | `backend/app/repositories/sqlite/identity_store.py` | 用户、session、管理员用量与 v24 用户模型配置清理兼容；不再提供运行时个人模型配置；`sqlite_identity.py` 为兼容 shim。 |
+| 系统模型服务 | `backend/app/services/model_registry.py`、`model_provider.py`、`model_scheduler.py`、`model_circuit_breaker.py` + model-service status/admin routes | 部署 TOML 绑定 workload；provider 独占 adapter 解析，scheduler 按物理服务独占容量/队列/熔断；状态只读脱敏，admin 探测显式执行，support id 关联维护日志。 |
 | Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。 |
 | KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；所有消费者共享 usable relation 规则。 |
 | Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding 与 tier 次序保持分离；mode registry 是 mode 真源。 |
@@ -283,7 +333,7 @@ Repository 侧的 persistence 与业务编排已按上表分层完成；应用�
 4. **前端 workspace 状态拆分**（计划项）：先增加可迁移的 helper/hook 行为测试，再抽 `useAskSession`、`useSourceLibrary`、`useKnowledgeGraphWorkspace` 与对应 panel；不引入新全局状态库，不改轮询节奏。
 5. **FastAPI application lifecycle**（计划项）：repository 内部 runtime 组合、retrieval/Ask/report service 与取消/重连 characterization test 已交付；FastAPI lifespan 管理的 application runtime、executor shutdown 与统一应用生命周期仍延后为独立工作。
 
-非目标包括一次性 clean-architecture 重写、SQLAlchemy/容器/新模型服务、本阶段实现 PostgreSQL 双写/影子同步，或借整改改变公开 API、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
+非目标包括一次性 clean-architecture 重写、在本轮引入 SQLAlchemy/容器/新模型服务、实现应用内 dual-write/shadow replication，或借整改改变公开 API、检索排序、Ask 持久化、断连/取消语义和 UI 布局。
 
 ## 7. 验证命令
 
@@ -312,28 +362,6 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 cd frontend
 npm run build
 ```
-
-PostgreSQL 集成门禁与离线门禁完全分开：
-
-```bash
-TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_local_test \
-  PYTHON_BIN=python3 bash scripts/check_postgres.sh
-```
-
-`scripts/check_postgres.sh` 的 Python launcher 先统一验证三个 URL；query 白名单只允许
-单个 `sslmode`，拒绝身份/凭据/service/file/`options`/未知/重复覆盖并复核有效
-host/port/user/database。pytest 只接收最小白名单环境与无密码 URL；各 target 的精确
-凭据排在继承 pgpass 行之前。父进程只解析、不连接；无密码 preflight helper 与 pytest
-先后复用同一个最小白名单环境、清洗 URL 和 pgpass 文件，避免父进程 libpq 环境只重定向
-预检。凭据通过权限 0600 的临时 `PGPASSFILE` 传入。launcher 会先创建 resource owner，再
-安装 scoped SIGINT/SIGTERM handler；handler 不抛异步异常，只保留第一个 pending signal，
-并仅向已注册 child 发非阻塞 TERM。pgpass/Popen factory 返回后先把资源登记给 owner，再由
-checkpoint 响应 pending 状态，以有界 TERM→KILL fallback reap child、删除 pgpass、恢复原
-handler，并返回 130/143；child 的负 signal returncode 也统一为 `128+signum`。然后只运行
-`-m postgres_integration`。CI 的独立 PostgreSQL 16 job 用非 superuser app role，
-并额外在 UTF8/ICU/non-C-default 数据库跑完整 schema parity，在 SQL_ASCII 数据库
-验证 migration 0001 在 ledger/业务 DDL 前事务性失败。本地 PostgreSQL 16 可用于普通
-integration；PostgreSQL 16 的两个辅助目标以 CI 为权威。`scripts/check.sh` 始终离线，不启动也不连接 PostgreSQL。
 
 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；backend 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖；每个 lane
 拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js

@@ -179,7 +179,7 @@ def _run_arm(prompt_fn, windows, doc_type: str) -> Dict[str, Any]:
     from app.services.kg import extract as E
     from app.services.sqlite_repository import SQLiteRepository
     repo = SQLiteRepository(Settings())
-    client = repo.llm_client
+    client = repo.chat("kg_extract")
     all_nodes: List[Node] = []
     all_edges: List[Edge] = []
     tok = 0

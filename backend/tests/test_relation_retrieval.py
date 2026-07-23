@@ -5,6 +5,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -12,28 +13,18 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    # embedder_configured needs all four vars set so embed paths activate
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "http://fake-embed")
-    monkeypatch.setenv("EMBED_API_KEY", "fake-key")
-    monkeypatch.setenv("EMBED_MODEL", "fake-model")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
 @pytest.fixture
 def repo_no_embedder(tmp_path, monkeypatch):
-    """No EMBED_* env vars → embedder_configured=False, so _embed_relations_batch
-    is a no-op and relation_embeddings stays empty even though a FakeEmbedder is
-    manually attached (mirrors test_mix_overlay.py's real fixture shape — the
-    codebase's actual "no vector coverage" scenario, not a synthetic one)."""
+    """No configured embedding workload keeps relation embeddings empty."""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
-    return r
+    return SQLiteRepository(Settings(_env_file=None))
 
 
 def _rel(rid, text):

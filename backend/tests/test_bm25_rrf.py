@@ -1,5 +1,6 @@
 """纯函数测试: bm25_scores / rrf_fuse + ask() RRF 分支集成测试。"""
 from app.services.retrieval import bm25_scores, rrf_fuse
+from tests.model_testkit import bind_all_embedding_clients
 
 
 def test_bm25_ranks_specific_term_higher():
@@ -47,7 +48,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 

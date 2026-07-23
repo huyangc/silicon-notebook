@@ -4,6 +4,7 @@ from typing import Any
 
 from psycopg import Error, sql
 
+from app.core.config import Settings
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
     NotebookSearchResponse,
@@ -52,8 +53,11 @@ def _snippet(text: str, needle: str) -> str:
 
 
 class QueryStore:
-    def __init__(self, database: PostgresDatabase) -> None:
+    def __init__(
+        self, database: PostgresDatabase, settings: Settings | None = None
+    ) -> None:
         self.database = database
+        self.settings = settings
 
     def warm_open_path_caches(self, progress=None) -> int:
         """Warm PostgreSQL shared buffers for the same notebook-open queries."""
@@ -272,6 +276,24 @@ class QueryStore:
                     "GROUP BY created_by"
                 ).fetchall()
             }
+            overrides = {
+                row["k"]: int(row["v"])
+                for row in db.execute(
+                    "SELECT user_id AS k,upload_document_limit AS v "
+                    "FROM user_profiles WHERE upload_document_limit IS NOT NULL"
+                ).fetchall()
+            }
+            default_row = db.execute(
+                "SELECT value FROM app_settings "
+                "WHERE key='upload_document_limit_default'"
+            ).fetchone()
+        raw_default = default_row["value"] if default_row is not None else None
+        try:
+            global_default = int(raw_default)
+        except (TypeError, ValueError):
+            global_default = int(
+                self.settings.user_upload_document_limit if self.settings else 20
+            )
         return [
             {
                 "id": user["id"],
@@ -283,6 +305,8 @@ class QueryStore:
                 "conversations": conversations.get(user["id"], 0),
                 "reports": reports.get(user["id"], 0),
                 "last_active": iso_timestamp(active.get(user["id"])),
+                "upload_limit": overrides.get(user["id"], global_default),
+                "upload_limit_overridden": user["id"] in overrides,
             }
             for user in users
         ]

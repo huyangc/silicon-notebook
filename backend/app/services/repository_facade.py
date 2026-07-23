@@ -103,7 +103,7 @@ def _normalize_doc_type(doc_type: str) -> str:
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
-from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
+from app.services.model_work import ModelNotConfiguredError
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.repositories.bundle import PersistenceBundleFactory
 from app.services.repository_runtime import RepositoryRuntime, RepositoryCompatibilitySeams
@@ -298,6 +298,8 @@ class RepositoryFacade:
         self,
         settings: Settings,
         persistence_factory: PersistenceBundleFactory,
+        *,
+        model_provider: Any | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -326,6 +328,7 @@ class RepositoryFacade:
                 )._IN_CHUNK,
             ),
             persistence_factory=persistence_factory,
+            model_provider=model_provider,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the
@@ -356,14 +359,17 @@ class RepositoryFacade:
         # KG-dirty callback late-bound. Object-vector flushes are owned by the
         # source embedding service itself.
         self._runtime.wire_source_pipeline(
-            embedder=lambda: self._runtime.embedder,
+            embedder=self._runtime.models.embedding,
             mark_unified_dirty=lambda notebook_id: self._mark_unified_kg_dirty(
                 notebook_id
             ),
         )
-        from app.services.embedding import make_embedder
-        self.embedder = make_embedder(self.settings)
-        self._runtime.wire_memory(embedder=self.embedder)
+        query_embedder = self._runtime.models.embedding("retrieval_query_embedding")
+        self._runtime.set_embedder(query_embedder)
+        self._runtime.wire_memory(
+            persistence_embedder=self._runtime.models.embedding("memory_embedding"),
+            query_embedder=query_embedder,
+        )
         self.mineru_client = _compatibility_value(
             compatibility_module, "MinerUClient", MinerUClient
         )(settings)
@@ -376,7 +382,6 @@ class RepositoryFacade:
         # are runtime-owned (RetrievalSnapshotCache constructs them eagerly);
         # `_unified_cache` / `_vector_cache` below are write-through property
         # descriptors over those SAME objects — no facade-only copies.
-        self._user_model_cfg_cache = self._runtime.identity.model_config_cache
         # Bilingual-query hints are runtime-owned and shared by every consumer;
         # this compatibility property never retains a facade-only copy.
         # A stale hint affects query expansion only, never storage correctness.
@@ -577,8 +582,6 @@ class RepositoryFacade:
                 source_id, status, **kwargs),
             run_extraction=lambda source_id, **kwargs: _call_extraction_compat(
                 self._run_extraction, self._runtime.source_ingestion.run_extraction, source_id, kwargs),
-            llm=lambda: self.llm_client,
-            kg_llm=lambda: self.kg_llm_client,
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
             annotate_edge_support=lambda notebook_id, edges: (
                 self._annotate_edge_support(notebook_id, edges)
@@ -649,8 +652,6 @@ class RepositoryFacade:
             ),
             mineru_client=lambda: self.mineru_client,
             mineru_cloud_client=lambda: self.mineru_cloud_client,
-            llm=lambda: self.llm_client,
-            kg_llm=lambda: self.kg_llm_client,
             normalize_doc_type=_normalize_doc_type,
             default_notebook_names=_DEFAULT_NOTEBOOK_NAMES,
             clear_source_extraction_state=(
@@ -708,15 +709,6 @@ class RepositoryFacade:
     def _user_profile(self, user, profile) -> UserProfile:
         return self._runtime.identity._user_profile(user, profile)
 
-    def get_user_model_settings(self, user_id: str) -> dict:
-        return self._runtime.identity.get_user_model_settings(user_id)
-
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
-        return self._runtime.identity.set_user_model_settings(user_id, settings)
-
-    def resolve_model_config(self, user, role: str) -> ResolvedModelConfig:
-        return self._runtime.identity.resolve_model_config(user, role)
-
     def create_user(self, username: str, password: str) -> UserProfile:
         return self._runtime.identity.create_user(username, password)
 
@@ -732,6 +724,21 @@ class RepositoryFacade:
     def delete_session(self, token: str) -> None:
         return self._runtime.identity.delete_session(token)
 
+    def visible_document_count(self, notebook_id: str) -> int:
+        return self._runtime.source_store.visible_document_count(notebook_id)
+
+    def global_document_limit_default(self) -> int:
+        return self._runtime.identity.global_document_limit_default()
+
+    def user_document_limit_override(self, user_id: str) -> "int | None":
+        return self._runtime.identity.user_document_limit_override(user_id)
+
+    def effective_document_limit(self, user_id: "str | None") -> int:
+        return self._runtime.identity.effective_document_limit(user_id)
+
+    def notebook_owner(self, notebook_id: str) -> "tuple[str | None, str | None]":
+        return self._runtime.identity.notebook_owner(notebook_id)
+
     def list_user_usage(self) -> List[Dict[str, Any]]:
         return self._runtime.queries.list_user_usage()
 
@@ -744,106 +751,14 @@ class RepositoryFacade:
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         return self._runtime.queries.pending_actions_projection_rows(user_id)
 
-    def _system_llm_for(self, role: str):
-        return self._runtime.models._system_llm_for(role)
+    def chat(self, workload_id: str):
+        return self._runtime.models.chat(workload_id)
 
-    def _user_llm_cached(self, cfg: ResolvedModelConfig):
-        return self._runtime.models._user_llm_cached(cfg)
+    def configured(self, workload_id: str) -> bool:
+        return self._runtime.models.configured(workload_id)
 
-    def _llm_for_role(self, role: str):
-        return self._runtime.models._llm_for_role(role)
-
-    @property
-    def llm_client(self):
-        return self._runtime.models.llm_client
-
-    @llm_client.setter
-    def llm_client(self, client):
-        self._runtime.models.llm_client = client
-
-    @property
-    def reasoning_llm_client(self):
-        return self._runtime.models.reasoning_llm_client
-
-    @property
-    def rewrite_llm_client(self):
-        return self._runtime.models.rewrite_llm_client
-
-    @property
-    def kg_llm_client(self):
-        return self._runtime.models.kg_llm_client
-
-    @property
-    def rerank_client(self):
-        return self._runtime.models.rerank_client
-
-    @rerank_client.setter
-    def rerank_client(self, client):
-        self._runtime.models.rerank_client = client
-
-    @property
-    def _system_llm_client(self):
-        return self._runtime.models._system_llm_client
-
-    @_system_llm_client.setter
-    def _system_llm_client(self, client):
-        self._runtime.models._system_llm_client = client
-
-    @property
-    def _reasoning_llm_client(self):
-        return self._runtime.models._reasoning_llm_client
-
-    @_reasoning_llm_client.setter
-    def _reasoning_llm_client(self, client):
-        self._runtime.models._reasoning_llm_client = client
-
-    @property
-    def _rewrite_llm_client(self):
-        return self._runtime.models._rewrite_llm_client
-
-    @_rewrite_llm_client.setter
-    def _rewrite_llm_client(self, client):
-        self._runtime.models._rewrite_llm_client = client
-
-    @property
-    def _kg_llm_client(self):
-        return self._runtime.models._kg_llm_client
-
-    @_kg_llm_client.setter
-    def _kg_llm_client(self, client):
-        self._runtime.models._kg_llm_client = client
-
-    @property
-    def _system_rerank_client(self):
-        return self._runtime.models._system_rerank_client
-
-    @_system_rerank_client.setter
-    def _system_rerank_client(self, client):
-        self._runtime.models._system_rerank_client = client
-
-    @property
-    def _user_model_cfg_cache(self):
-        return self._runtime.identity.model_config_cache
-
-    @_user_model_cfg_cache.setter
-    def _user_model_cfg_cache(self, cache):
-        return self._runtime.set_model_config_cache(cache)
-
-    @property
-    def _user_llm_clients(self):
-        return self._runtime.models._user_llm_clients
-
-    @_user_llm_clients.setter
-    def _user_llm_clients(self, clients):
-        self._runtime.models._user_llm_clients = clients
-
-    @property
-    def _user_rerank_clients(self):
-        return self._runtime.models._user_rerank_clients
-
-    @_user_rerank_clients.setter
-    def _user_rerank_clients(self, clients):
-        self._runtime.models._user_rerank_clients = clients
+    def parallelism(self, workload_id: str) -> int:
+        return self._runtime.models.parallelism(workload_id)
 
     # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
     # (one owner). These handles are write-through descriptors over the SAME
@@ -991,6 +906,10 @@ class RepositoryFacade:
 
     def _connect(self) -> object:
         return self._runtime.database.connect()
+
+    def close(self) -> None:
+        """Drain process-owned model work and release this runtime once."""
+        self._runtime.close()
 
     @contextmanager
     def _write(self):
@@ -1503,9 +1422,10 @@ class RepositoryFacade:
         notebook_id: str,
         urls: Iterable[str],
         scheduler: Optional[Callable[[str], None]] = None,
+        capacity: Optional[int] = None,
     ) -> AddUrlSourcesResult:
         return self._runtime.source_ingestion.add_url_sources_compat(
-            notebook_id, urls, scheduler
+            notebook_id, urls, scheduler, capacity
         )
 
     def upload_sources(
@@ -3303,10 +3223,11 @@ class RepositoryFacade:
     # --- API) build directly on these exact names/signatures.
     def create_knowhow_table(
         self, notebook_id: str, title: str, description: str, columns: list,
-        created_by: str = "",
+        created_by: str = "", actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.create_knowhow_table(
-            notebook_id, title, description, columns, created_by
+            notebook_id, title, description, columns, created_by,
+            actor=actor, origin=origin,
         )
 
     def create_knowhow_table_with_rows(
@@ -3317,9 +3238,12 @@ class RepositoryFacade:
         columns: list,
         rows,
         created_by: str = "",
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.create_knowhow_table_with_rows(
-            notebook_id, title, description, columns, rows, created_by
+            notebook_id, title, description, columns, rows, created_by,
+            actor=actor, origin=origin,
         )
 
     def list_knowhow_tables(self, notebook_id: str) -> list:
@@ -3329,31 +3253,52 @@ class RepositoryFacade:
         return self._runtime.knowhow_store.get_knowhow_table(table_id)
 
     def add_knowhow_row(
-        self, table_id: str, cells: dict, position: Optional[int] = None
+        self, table_id: str, cells: dict, position: Optional[int] = None,
+        actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.add_knowhow_row(
-            table_id, cells, position
+            table_id, cells, position, actor=actor, origin=origin,
         )
 
-    def append_knowhow_rows(self, table_id: str, rows) -> list[str]:
-        return self._runtime.knowhow_store.append_knowhow_rows(table_id, rows)
+    def add_knowhow_rows(
+        self, table_id: str, rows: list, actor: str = "", origin: str = "user",
+    ) -> list[str]:
+        return self._runtime.knowhow_store.add_knowhow_rows(
+            table_id, rows, actor=actor, origin=origin,
+        )
+
+    def append_knowhow_rows(
+        self, table_id: str, rows, actor: str = "", origin: str = "user",
+    ) -> list[str]:
+        return self._runtime.knowhow_store.append_knowhow_rows(
+            table_id, rows, actor=actor, origin=origin,
+        )
 
     def update_knowhow_cell(
-        self, row_id: str, column_id: str, content_md: str, require_assets=()
+        self, row_id: str, column_id: str, content_md: str, require_assets=(),
+        actor: str = "", origin: str = "user",
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_cell(
-            row_id, column_id, content_md, require_assets
+            row_id, column_id, content_md, require_assets,
+            actor=actor, origin=origin,
         )
 
     def update_knowhow_cells(
-        self, row_ids: list, column_id: str, content_md: str, require_assets=()
+        self, row_ids: list, column_id: str, content_md: str, require_assets=(),
+        actor: str = "", origin: str = "user",
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_cells(
-            row_ids, column_id, content_md, require_assets
+            row_ids, column_id, content_md, require_assets,
+            actor=actor, origin=origin,
         )
 
-    def update_knowhow_cells_bulk_guarded(self, notebook_id: str, updates: list) -> dict:
-        return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(notebook_id, updates)
+    def update_knowhow_cells_bulk_guarded(
+        self, notebook_id: str, updates: list,
+        actor: str = "", origin: str = "user",
+    ) -> dict:
+        return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(
+            notebook_id, updates, actor=actor, origin=origin,
+        )
 
     def update_knowhow_cells_guarded_atomic(
         self,
@@ -3362,9 +3307,12 @@ class RepositoryFacade:
         require_assets=(),
         anchor_column_id=None,
         expected_anchor=None,
+        actor: str = "",
+        origin: str = "user",
     ) -> dict:
         return self._runtime.knowhow_store.update_knowhow_cells_guarded_atomic(
-            notebook_id, updates, require_assets, anchor_column_id, expected_anchor
+            notebook_id, updates, require_assets, anchor_column_id, expected_anchor,
+            actor=actor, origin=origin,
         )
 
     def delete_knowhow_table(self, table_id: str) -> dict:
@@ -3427,36 +3375,55 @@ class RepositoryFacade:
     def update_knowhow_table_meta(
         self, table_id: str, title: Optional[str] = None,
         description: Optional[str] = None,
+        actor: str = "", origin: str = "user",
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_table_meta(
-            table_id, title, description
+            table_id, title, description, actor=actor, origin=origin,
         )
 
     def set_knowhow_anchor_column(
-        self, table_id: str, column_id: Optional[str]
+        self, table_id: str, column_id: Optional[str],
+        actor: str = "", origin: str = "user",
     ) -> Optional[str]:
         return self._runtime.knowhow_store.set_knowhow_anchor_column(
-            table_id, column_id
+            table_id, column_id, actor=actor, origin=origin,
         )
 
     def add_knowhow_column(
-        self, table_id: str, name: str, kind: str, position: Optional[int] = None
+        self, table_id: str, name: str, kind: str, position: Optional[int] = None,
+        actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.add_knowhow_column(
-            table_id, name, kind, position
+            table_id, name, kind, position, actor=actor, origin=origin,
         )
 
-    def rename_knowhow_column(self, column_id: str, name: str) -> None:
-        return self._runtime.knowhow_store.rename_knowhow_column(column_id, name)
+    def rename_knowhow_column(
+        self, column_id: str, name: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.rename_knowhow_column(
+            column_id, name, actor=actor, origin=origin,
+        )
 
-    def set_knowhow_column_kind(self, column_id: str, kind: str) -> None:
-        return self._runtime.knowhow_store.set_knowhow_column_kind(column_id, kind)
+    def set_knowhow_column_kind(
+        self, column_id: str, kind: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.set_knowhow_column_kind(
+            column_id, kind, actor=actor, origin=origin,
+        )
 
-    def delete_knowhow_column(self, column_id: str) -> None:
-        return self._runtime.knowhow_store.delete_knowhow_column(column_id)
+    def delete_knowhow_column(
+        self, column_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_column(
+            column_id, actor=actor, origin=origin,
+        )
 
-    def delete_knowhow_row(self, row_id: str) -> None:
-        return self._runtime.knowhow_store.delete_knowhow_row(row_id)
+    def delete_knowhow_row(
+        self, row_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_row(
+            row_id, actor=actor, origin=origin,
+        )
 
     def validate_cell_target(self, row_id: str, column_id: str) -> None:
         return self._runtime.knowhow_store.validate_cell_target(row_id, column_id)
@@ -3464,16 +3431,23 @@ class RepositoryFacade:
     def upsert_knowhow_cell_code(
         self, row_id: str, column_id: str, code_text: str, language: str,
         updated_by: str, cell_content_hash: str,
+        actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.upsert_knowhow_cell_code(
-            row_id, column_id, code_text, language, updated_by, cell_content_hash
+            row_id, column_id, code_text, language, updated_by, cell_content_hash,
+            actor=actor, origin=origin,
         )
 
     def get_knowhow_cell_code(self, row_id: str, column_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_knowhow_cell_code(row_id, column_id)
 
-    def delete_knowhow_cell_code(self, row_id: str, column_id: str) -> None:
-        return self._runtime.knowhow_store.delete_knowhow_cell_code(row_id, column_id)
+    def delete_knowhow_cell_code(
+        self, row_id: str, column_id: str,
+        actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_cell_code(
+            row_id, column_id, actor=actor, origin=origin,
+        )
 
     def list_knowhow_cell_code(self, table_id: str) -> list:
         return self._runtime.knowhow_store.list_knowhow_cell_code(table_id)
@@ -3481,6 +3455,66 @@ class RepositoryFacade:
     # --- knowhow-tables PR-2+3 Task 10: agent surface one-hop delegate ----
     def get_knowhow_row_location(self, row_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_knowhow_row_location(row_id)
+
+    def knowhow_history_head_seq(self, table_id: str) -> int:
+        return self._runtime.knowhow_history_store.head_seq(table_id)
+
+    def list_knowhow_changes(
+        self, table_id: str, limit: int = 50, before_seq: "int | None" = None
+    ) -> list:
+        return self._runtime.knowhow_history_store.list_changes(
+            table_id, limit, before_seq
+        )
+
+    def knowhow_history_page(
+        self, table_id: str, limit: int = 50, before_seq: "int | None" = None
+    ) -> dict:
+        return self._runtime.knowhow_history_store.history_page(
+            table_id, limit, before_seq
+        )
+
+    def get_knowhow_change(self, table_id: str, seq: int) -> "dict | None":
+        return self._runtime.knowhow_history_store.get_change(table_id, seq)
+
+    def knowhow_changes_between(
+        self, table_id: str, from_seq: int, to_seq: int
+    ) -> list:
+        return self._runtime.knowhow_history_store.changes_between(
+            table_id, from_seq, to_seq
+        )
+
+    def knowhow_cell_history(
+        self, table_id: str, row_id: str, column_id: str, limit: int = 50
+    ) -> list:
+        return self._runtime.knowhow_history_store.cell_history(
+            table_id, row_id, column_id, limit
+        )
+
+    def revert_knowhow_table(
+        self, table_id: str, target_seq: int, expected_head_seq: int,
+        actor: str = "",
+    ) -> dict:
+        return self._runtime.knowhow_history_store.revert_to(
+            table_id, target_seq, expected_head_seq, actor
+        )
+
+    def create_knowhow_milestone(
+        self, table_id: str, seq: int, name: str, note: str, created_by: str
+    ) -> dict:
+        return self._runtime.knowhow_history_store.create_milestone(
+            table_id, seq, name, note, created_by
+        )
+
+    def delete_knowhow_milestone(self, table_id: str, milestone_id: str) -> None:
+        return self._runtime.knowhow_history_store.delete_milestone(
+            table_id, milestone_id
+        )
+
+    def list_knowhow_milestones(self, table_id: str) -> list:
+        return self._runtime.knowhow_history_store.list_milestones(table_id)
+
+    def prune_knowhow_history(self, table_id: str, before_iso: str) -> dict:
+        return self._runtime.knowhow_history_store.prune(table_id, before_iso)
 
     # --- paper-meta status: backfill progress one-hop delegates ----------
     def paper_meta_backfilling(self, notebook_id: str) -> bool:

@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=24) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=29) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -33,7 +33,8 @@ NOTEBOOK_SCOPED_TABLES = [
     "concept_clusters", "concept_comentions", "concept_merge_candidates",
     "canonical_relations", "communities", "community_members", "mention_edges",
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
-    "kg_cluster_scratch", "kg_conflict_candidates", "merge_review_jobs",
+    "kg_cluster_scratch", "kg_canonical_scratch", "kg_conflict_candidates",
+    "merge_review_jobs",
     "promotion_candidates", "derived_rule_candidates", "extraction_runs",
     "extraction_candidates", "articles", "article_claims", "conversations",
     "answers", "feedback", "ask_jobs", "kg_build_jobs", "reports", "memory_items",
@@ -60,6 +61,8 @@ CHILD_TABLES = [
     ("knowhow_rows", "knowhow_tables", "table_id", "id"),
     ("knowhow_cells", "knowhow_rows", "row_id", "id"),
     ("knowhow_cell_code", "knowhow_rows", "row_id", "id"),  # _migration_18: 格子代码附件(二级子表)
+    ("knowhow_changes", "knowhow_tables", "table_id", "id"),  # _migration_24: 变更流水
+    ("knowhow_milestones", "knowhow_tables", "table_id", "id"),  # _migration_24: 命名里程碑
     ("memory_provenance", "memory_items", "memory_id", "id"),
     ("memory_revisions", "memory_items", "memory_id", "id"),
     ("memory_embeddings", "memory_items", "memory_id", "id"),
@@ -69,14 +72,23 @@ CHILD_TABLES = [
 # 全局表: 主库优先取并集
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
-    "concept_whitelist", "model_service_status",
+    "concept_whitelist",
 ]
 
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 
 # 副库不导入(临时登录会话, 用户重登即可; primary 的随整库复制保留)
-SKIP_SECONDARY_TABLES = ["auth_sessions"]
+SKIP_SECONDARY_TABLES = [
+    "auth_sessions",
+    # Deployment health and the scrubbed legacy table belong to the primary
+    # deployment. Importing either from a secondary DB would mix runtimes.
+    "model_service_status",
+    "system_model_service_status",
+    # 全局设置 KV(含每笔记本文档数量上限的全局默认)属于 primary 部署;导入副库的
+    # app_settings 会覆盖 primary 的部署级配置,故与部署健康表同款只保 primary。
+    "app_settings",
+]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)
 KG_STATE_TABLES = ["kg_rebuild_checkpoint", "unified_kg_state", "kg_cluster_scratch"]
@@ -261,6 +273,8 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
             "knowhow_rows":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
             "knowhow_cells":     _knowhow_row_scope,
             "knowhow_cell_code": _knowhow_row_scope,
+            "knowhow_changes":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
+            "knowhow_milestones": f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
             "memory_provenance": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
             "memory_revisions":  f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
             "memory_embeddings": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",

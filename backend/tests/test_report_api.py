@@ -181,7 +181,15 @@ def test_report_export_skips_other_notebook_report(client, monkeypatch):
 
 def test_two_phase_report_lifecycle(client, monkeypatch):
     import app.api.report_routes as R
-    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    from app.api.deps import repository
+    from tests.model_testkit import bind_chat_client
+
+    class ConfiguredReportClient:
+        configured = True
+
+    report_repo = repository()
+    bind_chat_client(report_repo, "report_outline", ConfiguredReportClient())
+    bind_chat_client(report_repo, "report_section", ConfiguredReportClient())
     launched = {}
     monkeypatch.setattr(R, "_launch_plan_job", lambda repo,nb,rid,q,h,ag: launched.setdefault("plan", (rid, ag)))
     monkeypatch.setattr(R, "_launch_generate_job", lambda repo,nb,rid,q,d: launched.setdefault("gen", rid))
@@ -189,9 +197,8 @@ def test_two_phase_report_lifecycle(client, monkeypatch):
     r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question":"why?"})
     rid = r.json()["report_id"]; assert launched["plan"][0]==rid and launched["plan"][1] is False
     # 模拟 planning 完成:写 outline_ready + outline
-    from app.api.deps import repository
-    repository().update_report(nb["id"], rid, status="outline_ready",
-                               outline=[{"title":"A","scope":"s","sub_queries":["q"]}])
+    report_repo.update_report(nb["id"], rid, status="outline_ready",
+                              outline=[{"title":"A","scope":"s","sub_queries":["q"]}])
     d = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert d["status"]=="outline_ready" and d["outline"][0]["title"]=="A"
     # 编辑大纲

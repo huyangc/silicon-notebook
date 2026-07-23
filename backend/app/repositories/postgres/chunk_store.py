@@ -56,6 +56,7 @@ class ChunkStore:
         chunks: Sequence[ChunkWrite],
         *,
         created_at: TimestampInput,
+        mark_chunked_at: TimestampInput | None = None,
     ) -> None:
         created_at = normalize_timestamp(created_at)
         rows = [
@@ -82,6 +83,11 @@ class ChunkStore:
             self._insert_fts_rows(
                 connection, [(row[0], row[1], row[3]) for row in rows]
             )
+            if mark_chunked_at is not None:
+                connection.execute(
+                    "UPDATE sources SET chunked_at=%s WHERE id=%s",
+                    (normalize_timestamp(mark_chunked_at), source_id),
+                )
 
     def _insert_fts_rows(self, connection, rows: list) -> None:
         # PostgreSQL's GIN/trigram indexes update with chunks themselves.

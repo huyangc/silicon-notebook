@@ -4,12 +4,17 @@ import json
 import sqlite3
 from typing import Any
 
+from app.core.config import Settings, get_settings
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
     NotebookSearchResponse,
     SearchHit,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.identity_store import (
+    _UPLOAD_LIMIT_DEFAULT_KEY,
+    _resolve_global_default,
+)
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.notebook_scale import NotebookScaleFacts
@@ -29,8 +34,15 @@ def _snippet(text: str, needle: str) -> str:
 
 
 class QueryStore:
-    def __init__(self, database: SqliteDatabase) -> None:
+    def __init__(
+        self, database: SqliteDatabase, settings: "Settings | None" = None
+    ) -> None:
         self.database = database
+        # 注入的 settings 供 list_user_usage 解析全局文档上限默认的 config 回退。
+        # runtime 构造时总会传入(见 repository_runtime);唯一 settings=None 的构造点
+        # 是 NotebookCatalogService 的备用 QueryStore(它从不调 list_user_usage),
+        # 那条路径下再兜底到 get_settings()。
+        self.settings = settings
 
     def warm_open_path_caches(self, progress=None) -> int:
         from app.repositories.sqlite import knowledge_counts_cache
@@ -203,20 +215,45 @@ class QueryStore:
                     "GROUP BY created_by"
                 ).fetchall()
             }
-        return [
-            {
-                "id": user["id"],
-                "username": user["username"] or user["display_name"] or user["id"],
-                "role": user["role"],
-                "created_at": user["created_at"],
-                "notebooks": notebooks.get(user["id"], 0),
-                "sources": sources.get(user["id"], 0),
-                "conversations": conversations.get(user["id"], 0),
-                "reports": reports.get(user["id"], 0),
-                "last_active": active.get(user["id"]),
+            # 每笔记本文档数量上限:一次批量取所有 per-user 覆盖值(仅非空行),
+            # 再把全局默认解析一次 —— 都不 per-user 开连接/重复回退,满足效率约束。
+            overrides = {
+                row["k"]: int(row["v"])
+                for row in db.execute(
+                    "SELECT user_id AS k, upload_document_limit AS v FROM user_profiles "
+                    "WHERE upload_document_limit IS NOT NULL"
+                ).fetchall()
             }
-            for user in users
-        ]
+            default_row = db.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (_UPLOAD_LIMIT_DEFAULT_KEY,),
+            ).fetchone()
+        # 全局默认只算一次,供所有无覆盖用户共用;回退语义与强制路径同一真源
+        # (_resolve_global_default:坏值/缺省回退 config)。settings 缺省时(备用
+        # QueryStore,不走这条路)兜底 get_settings。
+        global_default = _resolve_global_default(
+            default_row["value"] if default_row is not None else None,
+            self.settings or get_settings(),
+        )
+        result: list[dict[str, Any]] = []
+        for user in users:
+            override = overrides.get(user["id"])
+            result.append(
+                {
+                    "id": user["id"],
+                    "username": user["username"] or user["display_name"] or user["id"],
+                    "role": user["role"],
+                    "created_at": user["created_at"],
+                    "notebooks": notebooks.get(user["id"], 0),
+                    "sources": sources.get(user["id"], 0),
+                    "conversations": conversations.get(user["id"], 0),
+                    "reports": reports.get(user["id"], 0),
+                    "last_active": active.get(user["id"]),
+                    "upload_limit": override if override is not None else global_default,
+                    "upload_limit_overridden": override is not None,
+                }
+            )
+        return result
 
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]:
         with self.database.connect() as db:

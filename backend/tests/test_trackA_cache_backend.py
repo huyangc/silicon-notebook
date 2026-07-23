@@ -48,13 +48,14 @@ def test_injected_cache_used_for_hit(monkeypatch, tmp_path):
     lc.put(key, '{"answer": "cached"}')
 
     # Construct client with injected cache; model/url/key must look configured
-    settings = Settings(
-        openai_compat_base_url="http://fake",
-        openai_compat_api_key="fake",
-        openai_compat_model=model,
-        llm_cache_enabled=False,   # disable auto-construct path; we inject
+    settings = Settings(llm_cache_enabled=False)
+    injected_client = OpenAICompatibleClient(
+        settings,
+        base_url="http://fake",
+        api_key="fake",
+        model=model,
+        cache=lc,
     )
-    injected_client = OpenAICompatibleClient(settings, cache=lc)
     assert injected_client._cache is lc
 
     # chat_json must return the cached value without touching the network
@@ -68,13 +69,14 @@ def test_no_cache_backend_injection_skips_cache(monkeypatch, tmp_path):
     from app.core.llm import OpenAICompatibleClient
     from app.core.llm_cache import NoCacheBackend
 
-    settings = Settings(
-        openai_compat_base_url="http://fake",
-        openai_compat_api_key="fake",
-        openai_compat_model="m",
-        llm_cache_enabled=False,
+    settings = Settings(llm_cache_enabled=False)
+    client = OpenAICompatibleClient(
+        settings,
+        base_url="http://fake",
+        api_key="fake",
+        model="m",
+        cache=NoCacheBackend(),
     )
-    client = OpenAICompatibleClient(settings, cache=NoCacheBackend())
     # _get_cache must return the injected NoCacheBackend
     assert isinstance(client._get_cache(), NoCacheBackend)
 
@@ -116,13 +118,14 @@ def test_chat_json_cache_bypass_uses_transport_and_does_not_overwrite_hit(
             usage=None,
         )
 
-    settings = Settings(
-        openai_compat_base_url="http://fake",
-        openai_compat_api_key="fake",
-        openai_compat_model=model,
-        llm_cache_enabled=False,
+    settings = Settings(llm_cache_enabled=False)
+    client = OpenAICompatibleClient(
+        settings,
+        base_url="http://fake",
+        api_key="fake",
+        model=model,
+        cache=cache,
     )
-    client = OpenAICompatibleClient(settings, cache=cache)
     monkeypatch.setattr(
         client,
         "client",

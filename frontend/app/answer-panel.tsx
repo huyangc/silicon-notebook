@@ -25,13 +25,15 @@ import {
 import { AnswerMarkdown } from "./answer-markdown";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
+import { copyTextSafely } from "./copy-text";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   modelFailureText,
+  sanitizeModelServiceId,
+  sanitizeModelSupportId,
   type ModelServiceStatusItem,
-  type StatusModelRole,
-} from "./model-settings.ts";
+} from "./model-services.ts";
 import {
   formatDuration,
   getReasoningTraceSummary,
@@ -39,6 +41,7 @@ import {
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
 import type { AskResponse } from "./workspace-model";
+import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
 
 
@@ -93,23 +96,6 @@ function referenceSource(reference: AnswerReference): string {
 function referenceLocation(reference: AnswerReference): string {
   if (reference.anchor) return reference.anchor.location_label || "";
   return reference.citation?.location_label || "";
-}
-
-
-async function copyTextToClipboard(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  document.body.removeChild(textarea);
 }
 
 
@@ -341,7 +327,7 @@ type AnswerModelError = NonNullable<AskResponse["model_errors"]>[number];
 
 function modelTestResultText(result: ModelServiceStatusItem): string {
   if (result.status === "ok") return `正常 ${result.latency_ms}ms`;
-  if (!result.configured || result.status === "unconfigured") return "尚未配置";
+  if (result.status === "busy") return `繁忙 ${result.active} / ${result.maximum}`;
   return `失败：${label(MODEL_SERVICE_STATUS_ERROR, result.code, "连接未通过")}`;
 }
 
@@ -349,43 +335,47 @@ function modelTestResultText(result: ModelServiceStatusItem): string {
 function ModelErrorPanel({
   errors,
   onTestModel,
-  onOpenModelSettings,
-  testingModelRoles = {},
+  onOpenModelStatus,
+  testingModelServices = {},
   testingAllModels = false,
 }: {
   errors: AnswerModelError[];
-  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem | null>;
-  onOpenModelSettings?: (service: StatusModelRole) => void;
-  testingModelRoles?: Partial<Record<StatusModelRole, boolean>>;
+  onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
+  onOpenModelStatus?: (serviceId: string) => void;
+  testingModelServices?: Record<string, boolean>;
   testingAllModels?: boolean;
 }) {
   const uniqueErrors = useMemo(() => {
     const seen = new Set<string>();
-    return errors.filter((error) => {
-      const key = `${error.service}\0${error.model}`;
+    return errors.map((error) => ({
+      error,
+      serviceId: sanitizeModelServiceId(error.service_id),
+      supportId: sanitizeModelSupportId(error.support_id),
+    })).filter(({ error, serviceId, supportId }) => {
+      const key = `${serviceId}\0${error.model}\0${supportId}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     });
   }, [errors]);
-  const testingServices = useRef(new Set<StatusModelRole>());
-  const [testing, setTesting] = useState<Partial<Record<StatusModelRole, boolean>>>({});
-  const [results, setResults] = useState<Partial<Record<StatusModelRole, string>>>({});
+  const testingServices = useRef(new Set<string>());
+  const [testing, setTesting] = useState<Record<string, boolean>>({});
+  const [results, setResults] = useState<Record<string, string>>({});
 
-  async function testService(service: StatusModelRole) {
-    if (!onTestModel || testingServices.current.has(service)) return;
-    testingServices.current.add(service);
-    setTesting((current) => ({ ...current, [service]: true }));
-    setResults((current) => ({ ...current, [service]: "" }));
+  async function testService(serviceId: string) {
+    if (!onTestModel || !serviceId || testingServices.current.has(serviceId)) return;
+    testingServices.current.add(serviceId);
+    setTesting((current) => ({ ...current, [serviceId]: true }));
+    setResults((current) => ({ ...current, [serviceId]: "" }));
     try {
-      const result = await onTestModel(service);
+      const result = await onTestModel(serviceId);
       if (!result) return;
-      setResults((current) => ({ ...current, [service]: modelTestResultText(result) }));
+      setResults((current) => ({ ...current, [serviceId]: modelTestResultText(result) }));
     } catch {
-      setResults((current) => ({ ...current, [service]: "失败：连接未通过" }));
+      setResults((current) => ({ ...current, [serviceId]: "失败：连接未通过" }));
     } finally {
-      testingServices.current.delete(service);
-      setTesting((current) => ({ ...current, [service]: false }));
+      testingServices.current.delete(serviceId);
+      setTesting((current) => ({ ...current, [serviceId]: false }));
     }
   }
 
@@ -393,31 +383,32 @@ function ModelErrorPanel({
     <section className="answer-model-error" aria-label="模型服务异常">
       <div className="answer-model-error-heading">⚠️ 本次回答可能不完整</div>
       <ul className="answer-model-error-list">
-        {uniqueErrors.map((error) => {
+        {uniqueErrors.map(({ error, serviceId, supportId }) => {
           const isTesting = testingAllModels
-            || Boolean(testingModelRoles[error.service])
-            || Boolean(testing[error.service]);
+            || Boolean(testingModelServices[serviceId])
+            || Boolean(testing[serviceId]);
           return (
-            <li key={`${error.service}\0${error.model}`}>
+            <li key={`${serviceId}\0${error.model}\0${supportId}`}>
               <span>{modelFailureText(error)}</span>
               <div className="answer-model-error-actions">
-                {onTestModel && (
+                {onTestModel && serviceId && (
                   <button
                     type="button"
                     disabled={isTesting}
-                    onClick={() => testService(error.service)}
+                    onClick={() => testService(serviceId)}
                   >
                     {isTesting ? "测试中…" : "测试此模型"}
                   </button>
                 )}
-                {onOpenModelSettings && (
-                  <button type="button" onClick={() => onOpenModelSettings(error.service)}>
-                    打开模型服务
+                {onOpenModelStatus && (
+                  <button type="button" onClick={() => onOpenModelStatus(serviceId)}>
+                    查看模型状态
                   </button>
                 )}
-                {results[error.service] && (
+                <SupportIdCopy supportId={supportId} className="answer-model-support-id" />
+                {results[serviceId] && (
                   <span className="answer-model-test-result" role="status">
-                    {results[error.service]}
+                    {results[serviceId]}
                   </span>
                 )}
               </div>
@@ -443,8 +434,8 @@ export function AnswerView({
   onSaveMemory,
   memorySaved,
   onTestModel,
-  onOpenModelSettings,
-  testingModelRoles,
+  onOpenModelStatus,
+  testingModelServices,
   testingAllModels,
 }: {
   answer: AskResponse;
@@ -462,9 +453,9 @@ export function AnswerView({
   buildingScaleIndex: boolean;
   onSaveMemory: (answerId: string) => void;
   memorySaved: boolean;
-  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem | null>;
-  onOpenModelSettings?: (service: StatusModelRole) => void;
-  testingModelRoles?: Partial<Record<StatusModelRole, boolean>>;
+  onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
+  onOpenModelStatus?: (serviceId: string) => void;
+  testingModelServices?: Record<string, boolean>;
   testingAllModels?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
@@ -485,8 +476,9 @@ export function AnswerView({
   }, [copied]);
 
   async function copyAnswer() {
-    await copyTextToClipboard(renderTextWithReferenceNumbers(answerText, references));
-    setCopied(true);
+    if (await copyTextSafely(renderTextWithReferenceNumbers(answerText, references))) {
+      setCopied(true);
+    }
   }
 
   return (
@@ -495,8 +487,8 @@ export function AnswerView({
         <ModelErrorPanel
           errors={answer.model_errors}
           onTestModel={onTestModel}
-          onOpenModelSettings={onOpenModelSettings}
-          testingModelRoles={testingModelRoles}
+          onOpenModelStatus={onOpenModelStatus}
+          testingModelServices={testingModelServices}
           testingAllModels={testingAllModels}
         />
       )}

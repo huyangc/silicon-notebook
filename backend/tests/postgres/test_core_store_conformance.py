@@ -21,6 +21,9 @@ from app.repositories.postgres.kg_build_job_store import (
     KgBuildJobStore as PostgresKgBuildJobStore,
 )
 from app.repositories.postgres.notebook_store import NotebookStore as PostgresNotebookStore
+from app.repositories.postgres.model_status_store import (
+    ModelStatusStore as PostgresModelStatusStore,
+)
 from app.repositories.postgres.schema_manifest import POSTGRES_ROWID_ORDINAL_TABLES
 from app.repositories.postgres.sharing_store import SharingStore as PostgresSharingStore
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
@@ -31,6 +34,9 @@ from app.repositories.sqlite.kg_build_job_store import (
     KgBuildJobStore as SqliteKgBuildJobStore,
 )
 from app.repositories.sqlite.notebook_store import NotebookStore as SqliteNotebookStore
+from app.repositories.sqlite.model_status_store import (
+    ModelStatusStore as SqliteModelStatusStore,
+)
 from app.repositories.sqlite.sharing_store import SharingStore as SqliteSharingStore
 from app.repositories.sqlite.source_store import SourceStore as SqliteSourceStore
 from app.services.notebook_catalog import NotebookSummaryQuery
@@ -45,6 +51,7 @@ class CoreStores:
     backend: str
     database: Any
     identity: Any
+    model_status: Any
     notebooks: Any
     sharing: Any
     sources: Any
@@ -76,7 +83,6 @@ def core_stores(request, tmp_path) -> CoreStores:
     def now() -> str:
         return NOW
 
-    model_cache: dict[str, object] = {}
 
     if backend == "sqlite":
         from app.repositories.sqlite.database import SqliteDatabase
@@ -91,7 +97,8 @@ def core_stores(request, tmp_path) -> CoreStores:
         stores = CoreStores(
             backend=backend,
             database=database,
-            identity=SqliteIdentityStore(database, settings, model_cache),
+            identity=SqliteIdentityStore(database, settings),
+            model_status=SqliteModelStatusStore(database),
             notebooks=SqliteNotebookStore(database, new_id=new_id, now=now),
             sharing=SqliteSharingStore(
                 database,
@@ -114,11 +121,12 @@ def core_stores(request, tmp_path) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     yield CoreStores(
         backend=backend,
         database=postgres_database,
-        identity=PostgresIdentityStore(postgres_database, postgres_settings, model_cache),
+        identity=PostgresIdentityStore(postgres_database, postgres_settings),
+        model_status=PostgresModelStatusStore(postgres_database),
         notebooks=PostgresNotebookStore(postgres_database, new_id=new_id, now=now),
         sharing=PostgresSharingStore(
             postgres_database,
@@ -301,52 +309,35 @@ def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
     assert _iso(touched["last_seen_at"]) > old_seen
 
 
-def test_identity_json_settings_and_monotonic_model_status(core_stores: CoreStores):
-    user = core_stores.identity.create_user("o00123456", "password-14")
-    initial = {
-        "llm": {
-            "base_url": "https://model.example/v1",
-            "api_key": "secret",
-            "model": "model-a",
-        }
-    }
-    core_stores.identity.set_user_model_settings(user.id, initial)
-    updated = core_stores.identity.patch_user_model_settings_atomic(
-        user.id,
-        {"llm": {"base_url": None, "api_key": "", "model": "model-b"}},
+def test_system_model_status_is_monotonic(core_stores: CoreStores):
+    core_stores.model_status.record(
+        service_id="llm",
+        config_fingerprint="new-fingerprint",
+        status="ok",
+        latency_ms=12,
+        code="",
+        trigger="manual_test",
+        support_id="support-new",
+        checked_at="2030-01-01T00:02:00+00:00",
     )
-    assert updated == {
-        "llm": {"base_url": "https://model.example/v1", "model": "model-b"}
-    }
-    assert core_stores.identity.get_user_model_settings(user.id) == updated
-
-    core_stores.identity.record_model_service_status(
-        user.id,
-        "llm",
-        "new-fingerprint",
-        "ok",
-        12,
-        "",
-        "manual_test",
-        "2030-01-01T00:02:00+00:00",
+    core_stores.model_status.record(
+        service_id="llm",
+        config_fingerprint="old-fingerprint",
+        status="error",
+        latency_ms=0,
+        code="upstream_error",
+        trigger="observed_failure",
+        support_id="support-old",
+        checked_at="2030-01-01T00:01:00+00:00",
     )
-    core_stores.identity.record_model_service_status(
-        user.id,
-        "llm",
-        "old-fingerprint",
-        "error",
-        0,
-        "upstream_error",
-        "observed_failure",
-        "2030-01-01T00:01:00+00:00",
-    )
-    status = core_stores.identity.get_model_service_statuses(user.id)["llm"]
+    status = core_stores.model_status.get_all()["llm"]
     assert status == {
         "config_fingerprint": "new-fingerprint",
         "status": "ok",
         "latency_ms": 12,
         "code": "",
         "trigger": "manual_test",
+        "support_id": "support-new",
         "checked_at": "2030-01-01T00:02:00.000000+00:00",
     }
 
@@ -412,7 +403,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -421,7 +412,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
     def clock() -> str:
         return naive_local.isoformat()
 
-    identity = PostgresIdentityStore(postgres_database, postgres_settings, {})
+    identity = PostgresIdentityStore(postgres_database, postgres_settings)
     notebooks = PostgresNotebookStore(postgres_database, new_id=new_id, now=clock)
     sharing = PostgresSharingStore(
         postgres_database,
@@ -490,7 +481,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -502,7 +493,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
     def clock() -> str:
         return clock_value
 
-    identity = PostgresIdentityStore(postgres_database, settings, {})
+    identity = PostgresIdentityStore(postgres_database, settings)
     notebooks = PostgresNotebookStore(postgres_database, new_id=new_id, now=clock)
     sharing = PostgresSharingStore(
         postgres_database,
@@ -555,7 +546,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -575,7 +566,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
         "utc_now",
         lambda: datetime(2026, 11, 1, 9, 31, tzinfo=timezone.utc),
     )
-    identity = PostgresIdentityStore(postgres_database, settings, {})
+    identity = PostgresIdentityStore(postgres_database, settings)
     notebooks = PostgresNotebookStore(
         postgres_database,
         new_id=new_id,

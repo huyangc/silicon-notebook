@@ -67,41 +67,69 @@ class UnifiedKgStore:
         )
 
     @staticmethod
-    def stream_scratch_rows(db: sqlite3.Connection, notebook_id: str, run_id: str):
-        return db.execute(
-            "SELECT object_id, seed FROM kg_cluster_scratch "
-            "WHERE notebook_id=? AND run_id=?", (notebook_id, run_id),
-        )
-
-    @staticmethod
-    def replace_cluster_rows_streamed(
+    def swap_cluster_map_from_scratch(
         db: sqlite3.Connection,
         notebook_id: str,
         object_type: str,
-        rows,
+        run_id: str,
+        created_at: str,
     ) -> None:
+        """Atomic swap segment (write-lock slimming, improvement point 2 —
+        design doc §5.5): replace ALL concept_clusters rows for
+        (notebook_id, object_type) in one pure-SQL DELETE + INSERT...SELECT —
+        no Python round-trip per row, no cross-connection cursor. Joins the
+        two scratch tables the preparation segment populated:
+          - kg_cluster_scratch   (notebook_id, run_id, object_id, seed) — object -> seed
+          - kg_canonical_scratch (notebook_id, run_id, seed, canonical_id, ...) — seed -> canonical
+
+        INNER JOIN on seed (not LEFT JOIN): a member object whose seed has no
+        canonical entry is skipped — exactly like the old Python
+        `if seed_to_canonical.get(seed) is None: continue`, since
+        kg_canonical_scratch is populated FROM that same seed_to_canonical
+        dict, an inner join is its SQL mirror.
+
+        No object_type column needed on either scratch table: both are
+        cleared and repopulated fresh before each object_type's call (see
+        _write_cluster_map_streamed / _stream_seed_reps), so at swap time
+        they hold ONLY this type's rows for this run_id.
+
+        id is minted in SQL (`'cc-' || lower(hex(randomblob(16)))`) — 128
+        bits of randomness per row (SQLite evaluates randomblob() fresh per
+        output row), same shape/collision-resistance as _new_id("cc") =
+        f"cc-{uuid4().hex}". Safe to generate here because concept_clusters.id
+        is a surrogate primary key with no reader anywhere (grepped: nothing
+        selects or joins on it) — that is what makes this segment pure SQL
+        instead of one uuid4() per member row in Python.
+
+        ORDER BY s.rowid: kg_cluster_scratch rows were inserted in the same
+        deterministic order stream_seed_rows/insert_scratch_rows produced
+        (ultimately ORDER BY rowid on knowledge_objects — see
+        _stream_seed_reps), so ordering the INSERT...SELECT by the scratch
+        table's own rowid reproduces today's exact concept_clusters
+        insertion order (PR#136: a plan/index change must never silently
+        perturb this).
+
+        Empty scratch (this type had zero members) still clears the type's
+        old rows: the DELETE is unconditional and runs even when the
+        INSERT...SELECT matches zero rows.
+        """
         db.execute(
             "DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
             (notebook_id, object_type),
         )
-        buf: list[tuple] = []
-        for row in rows:
-            buf.append(row)
-            if len(buf) >= 1000:
-                db.executemany(
-                    "INSERT INTO concept_clusters "
-                    "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
-                    "canonical_description,canonical_desc_sig,created_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)", buf,
-                )
-                buf.clear()
-        if buf:
-            db.executemany(
-                "INSERT INTO concept_clusters "
-                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
-                "canonical_description,canonical_desc_sig,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)", buf,
-            )
+        db.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+            "canonical_description,canonical_desc_sig,created_at) "
+            "SELECT 'cc-' || lower(hex(randomblob(16))), s.notebook_id, c.canonical_id, "
+            "s.object_id, c.canonical_name, ?, c.canonical_description, c.canonical_desc_sig, ? "
+            "FROM kg_cluster_scratch AS s "
+            "JOIN kg_canonical_scratch AS c "
+            "  ON c.notebook_id = s.notebook_id AND c.run_id = s.run_id AND c.seed = s.seed "
+            "WHERE s.notebook_id = ? AND s.run_id = ? "
+            "ORDER BY s.rowid",
+            (object_type, created_at, notebook_id, run_id),
+        )
 
     @staticmethod
     def cluster_description_rows(db: sqlite3.Connection, notebook_id: str):
@@ -418,6 +446,27 @@ class UnifiedKgStore:
     def insert_scratch_rows(db: sqlite3.Connection, rows: List[tuple]) -> None:
         db.executemany(
             "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (?,?,?,?)",
+            rows)
+
+    # ---------------------------------------------------- canonical scratch
+    # Preparation-segment table for swap_cluster_map_from_scratch (write-lock
+    # slimming improvement point 2): holds the seed -> canonical mapping
+    # (name/description/desc-sig) a rebuild just computed for ONE object_type,
+    # so the swap can join it against kg_cluster_scratch in pure SQL instead
+    # of a Python row-by-row construction inside the write lock.
+    @staticmethod
+    def clear_canonical_scratch_run(
+        db: sqlite3.Connection, notebook_id: str, run_id: str
+    ) -> None:
+        db.execute("DELETE FROM kg_canonical_scratch WHERE notebook_id=? AND run_id=?",
+                   (notebook_id, run_id))
+
+    @staticmethod
+    def insert_canonical_scratch_rows(db: sqlite3.Connection, rows: List[tuple]) -> None:
+        db.executemany(
+            "INSERT INTO kg_canonical_scratch "
+            "(notebook_id, run_id, seed, canonical_id, canonical_name, "
+            "canonical_description, canonical_desc_sig) VALUES (?,?,?,?,?,?,?)",
             rows)
 
     # -------------------------------------------------- rebuild checkpoints

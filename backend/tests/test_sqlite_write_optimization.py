@@ -3,6 +3,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -61,7 +62,8 @@ def test_all_writes_go_through_write_lock():
     CONNECT_BLOCK = re.compile(r"with\s+[\w.]*(?:_connect|\.connect)\(\)\s+as\s+\w+:")
     WRITE_BLOCK = re.compile(r"with\s+[\w.]*(?:_write|\.write)\(\)\s+as\s+\w+:")
     # 起步单线程, 不并发, 豁免。_migration_N = 版本化 schema 迁移步骤(基线=_migration_1);
-    # _recover_interrupted_jobs = 启动崩溃兜底。均由 __init__ 在对外服务前调用。
+    # _recover_interrupted_jobs = 启动崩溃兜底。前者由 __init__ 在对外服务前调用,
+    # 后者由服务端 lifespan(startup_warmup.run_startup)在就绪门之前调用一次。
     # CREATE TABLE DDL 里 "ON DELETE CASCADE" 外键子句触发 DELETE 关键字误报(非真实
     # DML 写), 故版本化迁移步骤(_migration_*)整类豁免。
     ALLOW_EXACT = {"_migrate", "_recover_interrupted_jobs", "_seed"}
@@ -98,10 +100,6 @@ def embed_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")     # embedder_configured == True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "10")
     r = SQLiteRepository(Settings())
 
@@ -109,7 +107,7 @@ def embed_repo(tmp_path, monkeypatch):
         def embed_texts(self, texts):
             return [[0.1, 0.2, 0.3] for _ in texts]
 
-    r.embedder = _FakeEmbedder()
+    bind_all_embedding_clients(r, _FakeEmbedder())
     return r
 
 

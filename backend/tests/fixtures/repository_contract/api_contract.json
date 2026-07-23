@@ -121,6 +121,80 @@
           "title": "AdminUserNotebook",
           "type": "object"
         },
+        "AdminUserRoleResult": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "role": {
+              "enum": [
+                "admin",
+                "user"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username",
+            "role"
+          ],
+          "title": "AdminUserRoleResult",
+          "type": "object"
+        },
+        "AdminUserRoleUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "role": {
+              "enum": [
+                "admin",
+                "user"
+              ],
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role"
+          ],
+          "title": "AdminUserRoleUpdate",
+          "type": "object"
+        },
+        "AdminUserUploadLimitResult": {
+          "description": "PATCH /admin/users/{id}/upload-limit 响应:改动后该用户的生效上限与是否覆盖。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "upload_limit": {
+              "title": "Upload Limit",
+              "type": "integer"
+            },
+            "upload_limit_overridden": {
+              "title": "Upload Limit Overridden",
+              "type": "boolean"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username",
+            "upload_limit",
+            "upload_limit_overridden"
+          ],
+          "title": "AdminUserUploadLimitResult",
+          "type": "object"
+        },
         "AdminUserUsage": {
           "properties": {
             "conversations": {
@@ -163,9 +237,24 @@
               "title": "Role",
               "type": "string"
             },
+            "role_mutable": {
+              "default": true,
+              "title": "Role Mutable",
+              "type": "boolean"
+            },
             "sources": {
               "title": "Sources",
               "type": "integer"
+            },
+            "upload_limit": {
+              "default": 0,
+              "title": "Upload Limit",
+              "type": "integer"
+            },
+            "upload_limit_overridden": {
+              "default": false,
+              "title": "Upload Limit Overridden",
+              "type": "boolean"
             },
             "username": {
               "title": "Username",
@@ -1814,6 +1903,11 @@
                 }
               ],
               "title": "Expected Before"
+            },
+            "origin": {
+              "default": "user",
+              "title": "Origin",
+              "type": "string"
             }
           },
           "required": [
@@ -1926,6 +2020,11 @@
                 }
               ],
               "title": "Expected Before"
+            },
+            "origin": {
+              "default": "user",
+              "title": "Origin",
+              "type": "string"
             },
             "row_ids": {
               "items": {
@@ -2094,6 +2193,21 @@
           "title": "KnowhowDiscriminationSet",
           "type": "object"
         },
+        "KnowhowHistoryPruneRequest": {
+          "properties": {
+            "before_days": {
+              "exclusiveMinimum": 0.0,
+              "maximum": 36500.0,
+              "title": "Before Days",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "before_days"
+          ],
+          "title": "KnowhowHistoryPruneRequest",
+          "type": "object"
+        },
         "KnowhowImportPreview": {
           "properties": {
             "anchor_suggestion": {
@@ -2135,6 +2249,29 @@
             "total_rows"
           ],
           "title": "KnowhowImportPreview",
+          "type": "object"
+        },
+        "KnowhowMilestoneCreate": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "seq": {
+              "title": "Seq",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "seq",
+            "name"
+          ],
+          "title": "KnowhowMilestoneCreate",
           "type": "object"
         },
         "KnowhowNewColumnInput": {
@@ -2243,6 +2380,24 @@
             "guessed_kind"
           ],
           "title": "KnowhowPreviewColumn",
+          "type": "object"
+        },
+        "KnowhowRevertRequest": {
+          "properties": {
+            "expected_head_seq": {
+              "title": "Expected Head Seq",
+              "type": "integer"
+            },
+            "target_seq": {
+              "title": "Target Seq",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "target_seq",
+            "expected_head_seq"
+          ],
+          "title": "KnowhowRevertRequest",
           "type": "object"
         },
         "KnowhowRow": {
@@ -3492,13 +3647,33 @@
               "title": "Model",
               "type": "string"
             },
-            "service": {
-              "default": "llm",
-              "title": "Service",
+            "service_id": {
+              "default": "",
+              "title": "Service Id",
+              "type": "string"
+            },
+            "service_name": {
+              "default": "",
+              "title": "Service Name",
               "type": "string"
             },
             "stage": {
               "title": "Stage",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
+              "type": "string"
+            },
+            "workload_id": {
+              "default": "",
+              "title": "Workload Id",
+              "type": "string"
+            },
+            "workload_label": {
+              "default": "",
+              "title": "Workload Label",
               "type": "string"
             }
           },
@@ -3511,6 +3686,11 @@
         },
         "ModelServiceStatusItem": {
           "properties": {
+            "active": {
+              "default": 0,
+              "title": "Active",
+              "type": "integer"
+            },
             "checked_at": {
               "default": "",
               "title": "Checked At",
@@ -3521,13 +3701,16 @@
               "title": "Code",
               "type": "string"
             },
-            "configured": {
-              "default": false,
-              "title": "Configured",
-              "type": "boolean"
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
             },
             "kind": {
-              "default": "llm",
+              "enum": [
+                "chat",
+                "embedding",
+                "rerank"
+              ],
               "title": "Kind",
               "type": "string"
             },
@@ -3536,79 +3719,67 @@
               "title": "Latency Ms",
               "type": "integer"
             },
+            "maximum": {
+              "default": 0,
+              "title": "Maximum",
+              "type": "integer"
+            },
             "model": {
               "default": "",
               "title": "Model",
               "type": "string"
             },
-            "required": {
-              "default": false,
-              "title": "Required",
-              "type": "boolean"
+            "oldest_wait_ms": {
+              "default": 0,
+              "title": "Oldest Wait Ms",
+              "type": "integer"
             },
-            "service": {
-              "title": "Service",
-              "type": "string"
+            "queued": {
+              "default": 0,
+              "title": "Queued",
+              "type": "integer"
             },
-            "source": {
-              "default": "none",
-              "title": "Source",
+            "service_id": {
+              "title": "Service Id",
               "type": "string"
             },
             "status": {
-              "default": "unconfigured",
+              "default": "untested",
+              "enum": [
+                "untested",
+                "ok",
+                "busy",
+                "error",
+                "circuit_open",
+                "half_open"
+              ],
               "title": "Status",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
               "type": "string"
             },
             "trigger": {
               "default": "",
               "title": "Trigger",
               "type": "string"
+            },
+            "workloads": {
+              "items": {
+                "$ref": "#/components/schemas/ModelWorkloadView"
+              },
+              "title": "Workloads",
+              "type": "array"
             }
           },
           "required": [
-            "service"
+            "service_id",
+            "display_name",
+            "kind"
           ],
           "title": "ModelServiceStatusItem",
-          "type": "object"
-        },
-        "ModelServiceUpdate": {
-          "properties": {
-            "api_key": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Api Key"
-            },
-            "base_url": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Base Url"
-            },
-            "model": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Model"
-            }
-          },
-          "title": "ModelServiceUpdate",
           "type": "object"
         },
         "ModelServicesStatus": {
@@ -3624,122 +3795,22 @@
           "title": "ModelServicesStatus",
           "type": "object"
         },
-        "ModelSettingsUpdate": {
+        "ModelWorkloadView": {
           "properties": {
-            "kg_llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "reasoning_llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "rerank": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "rewrite_llm": {
-              "anyOf": [
-                {
-                  "$ref": "#/components/schemas/ModelServiceUpdate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "title": "ModelSettingsUpdate",
-          "type": "object"
-        },
-        "ModelTestRequest": {
-          "properties": {
-            "api_key": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Api Key"
-            },
-            "base_url": {
-              "default": "",
-              "title": "Base Url",
+            "id": {
+              "title": "Id",
               "type": "string"
             },
-            "model": {
-              "default": "",
-              "title": "Model",
-              "type": "string"
-            },
-            "service": {
-              "title": "Service",
+            "label": {
+              "title": "Label",
               "type": "string"
             }
           },
           "required": [
-            "service"
+            "id",
+            "label"
           ],
-          "title": "ModelTestRequest",
-          "type": "object"
-        },
-        "ModelTestResult": {
-          "properties": {
-            "code": {
-              "default": "",
-              "title": "Code",
-              "type": "string"
-            },
-            "error": {
-              "default": "",
-              "title": "Error",
-              "type": "string"
-            },
-            "latency_ms": {
-              "default": 0,
-              "title": "Latency Ms",
-              "type": "integer"
-            },
-            "ok": {
-              "title": "Ok",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "ok"
-          ],
-          "title": "ModelTestResult",
+          "title": "ModelWorkloadView",
           "type": "object"
         },
         "MountedBase": {
@@ -3991,6 +4062,11 @@
               "default": "",
               "title": "Created Label",
               "type": "string"
+            },
+            "document_limit": {
+              "default": 0,
+              "title": "Document Limit",
+              "type": "integer"
             },
             "expected_questions": {
               "items": {
@@ -5814,6 +5890,54 @@
           "title": "UnifiedKgStatus",
           "type": "object"
         },
+        "UploadLimitDefaultResult": {
+          "description": "GET/PATCH /admin/settings/upload-limit-default 响应:当前全局默认上限。",
+          "properties": {
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "limit"
+          ],
+          "title": "UploadLimitDefaultResult",
+          "type": "object"
+        },
+        "UploadLimitDefaultUpdate": {
+          "additionalProperties": false,
+          "description": "PATCH /admin/settings/upload-limit-default 请求体:设置全局默认上限。",
+          "properties": {
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "limit"
+          ],
+          "title": "UploadLimitDefaultUpdate",
+          "type": "object"
+        },
+        "UploadLimitUpdate": {
+          "additionalProperties": false,
+          "description": "PATCH /admin/users/{id}/upload-limit 请求体:给某用户设/清「每笔记本文档\n数量上限」覆盖值。limit=null 表示清除覆盖、回落全局默认。",
+          "properties": {
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          "title": "UploadLimitUpdate",
+          "type": "object"
+        },
         "UserProfile": {
           "properties": {
             "display_name": {
@@ -5928,6 +6052,63 @@
           "summary": "Root"
         }
       },
+      "/api/admin/model-services/test-all": {
+        "post": {
+          "operationId": "test_all_system_model_services_api_admin_model_services_test_all_post",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServicesStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Test All System Model Services"
+        }
+      },
+      "/api/admin/model-services/{service_id}/test": {
+        "post": {
+          "operationId": "test_system_model_service_api_admin_model_services__service_id__test_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "service_id",
+              "required": true,
+              "schema": {
+                "title": "Service Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServiceStatusItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Test System Model Service"
+        }
+      },
       "/api/admin/online": {
         "get": {
           "description": "当前在线用户 id 集合(持有实时流连接)。仅 admin,纯读内存零 DB。",
@@ -5947,6 +6128,62 @@
             }
           },
           "summary": "List Online Users"
+        }
+      },
+      "/api/admin/settings/upload-limit-default": {
+        "get": {
+          "description": "当前全局默认「每笔记本文档数量上限」。仅 admin。",
+          "operationId": "get_upload_limit_default_api_admin_settings_upload_limit_default_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UploadLimitDefaultResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Get Upload Limit Default"
+        },
+        "patch": {
+          "description": "设置全局默认「每笔记本文档数量上限」。仅 admin。",
+          "operationId": "update_upload_limit_default_api_admin_settings_upload_limit_default_patch",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadLimitDefaultUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UploadLimitDefaultResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Upload Limit Default"
         }
       },
       "/api/admin/users": {
@@ -6014,6 +6251,106 @@
             }
           },
           "summary": "List Admin User Notebooks"
+        }
+      },
+      "/api/admin/users/{user_id}/role": {
+        "patch": {
+          "description": "Grant or revoke administrator access. Existing sessions observe it next request.",
+          "operationId": "update_admin_user_role_api_admin_users__user_id__role_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserRoleUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserRoleResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin User Role"
+        }
+      },
+      "/api/admin/users/{user_id}/upload-limit": {
+        "patch": {
+          "description": "给某用户设/清「每笔记本文档数量上限」覆盖值(limit=null 清除、回落全局默认)。\n仅 admin。返回改动后该用户的生效上限与是否仍为覆盖值。",
+          "operationId": "update_admin_user_upload_limit_api_admin_users__user_id__upload_limit_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadLimitUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserUploadLimitResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin User Upload Limit"
         }
       },
       "/api/agent-profiles": {
@@ -7464,169 +7801,6 @@
           "summary": "Me"
         }
       },
-      "/api/me/model-services/status": {
-        "get": {
-          "operationId": "get_model_services_status_api_me_model_services_status_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelServicesStatus"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Get Model Services Status"
-        }
-      },
-      "/api/me/model-services/test-all": {
-        "post": {
-          "operationId": "test_all_model_services_api_me_model_services_test_all_post",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelServicesStatus"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Test All Model Services"
-        }
-      },
-      "/api/me/model-services/{service}/test": {
-        "post": {
-          "operationId": "test_current_model_service_api_me_model_services__service__test_post",
-          "parameters": [
-            {
-              "in": "path",
-              "name": "service",
-              "required": true,
-              "schema": {
-                "title": "Service",
-                "type": "string"
-              }
-            }
-          ],
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelServiceStatusItem"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Test Current Model Service"
-        }
-      },
-      "/api/me/model-settings": {
-        "get": {
-          "operationId": "get_model_settings_api_me_model_settings_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "Get Model Settings"
-        },
-        "put": {
-          "operationId": "put_model_settings_api_me_model_settings_put",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelSettingsUpdate"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {}
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Put Model Settings"
-        }
-      },
-      "/api/me/model-settings/test": {
-        "post": {
-          "operationId": "test_model_service_api_me_model_settings_test_post",
-          "requestBody": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelTestRequest"
-                }
-              }
-            },
-            "required": true
-          },
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/ModelTestResult"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            },
-            "422": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "$ref": "#/components/schemas/HTTPValidationError"
-                  }
-                }
-              },
-              "description": "Validation Error"
-            }
-          },
-          "summary": "Test Model Service"
-        }
-      },
       "/api/me/pending-actions": {
         "get": {
           "description": "当前用户的待办快照：深度报告待确认 + 治理三队列 + 索引状态，供铃铛使用。\n只读转调 repository().pending_actions；聚合逻辑与三源覆盖见该方法本身\n（Task 1 已有专门单测），此处只做 HTTP 薄包装。",
@@ -8167,6 +8341,25 @@
             }
           },
           "summary": "Reject Memory"
+        }
+      },
+      "/api/model-services/status": {
+        "get": {
+          "description": "Return local sanitized state only; opening the panel never probes upstream.",
+          "operationId": "get_system_model_services_status_api_model_services_status_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServicesStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Get System Model Services Status"
         }
       },
       "/api/notebook-templates": {
@@ -10009,7 +10202,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/cells": {
         "patch": {
-          "description": "Returns one {row_id,column_id,content_md,projection_status} entry per\nrow in body.row_ids, in the same order — same shape patch_knowhow_cell\nreturns for a single row, just as a list.",
+          "description": "Returns one {row_id,column_id,content_md,projection_status} entry per\nrow in body.row_ids, in the same order — same shape patch_knowhow_cell\nreturns for a single row, just as a list.\n\nknowhow 表版本管理 Task 12: ``body.origin`` validated first, same as\npatch_knowhow_cell — this endpoint is the merged-cell fan-out's save path\n(see the module docstring above), so it needs the identical whitelist\ncheck or a batch reformat-accept could never be attributed as\n'llm_reformat' in the history timeline.",
           "operationId": "patch_knowhow_cells_batch_api_notebooks__notebook_id__knowhow__table_id__cells_patch",
           "parameters": [
             {
@@ -10243,6 +10436,397 @@
           "summary": "Patch Knowhow Column"
         }
       },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history": {
+        "get": {
+          "description": "时间线分页（spec §8.1 行 1）。响应体固定 3 个键：``head_seq``（当前\n最新 seq——前端拿它做\"陈旧\"比对，revert 请求体里的 expected_head_seq 就是\n这个值的回声）、``changes``（seq 倒序，``before_seq`` 严格小于用于向更旧\n翻页）、``milestones``（本表全部命名里程碑，含 stale 标记，§4.2）。\n\n``milestones_only=true`` 时把本页 ``changes`` 按里程碑 seq 集合过滤——这是\n一次性的单页内过滤，不会为了凑够 ``limit`` 条而多轮翻页：里程碑本来就稀疏，\n这只是前端\"只看里程碑\"筛选的展示层需求，不值得为它引入内部多轮翻页的\n复杂度与延迟。\n\n``head_seq``/``changes``/``milestones`` 三者由 ``knowhow_history_page`` 在\n**同一读快照**里一次取出（codex 第 4 轮 P1）：早前分三次 store 调用取，\n一条夹在中间提交的并发编辑会让 ``head_seq`` 领先于 ``changes`` 里最新一条，\n用户没看见它却能确认回退、陈旧守卫还照放，把这条未见编辑抹掉。\n``milestones_only`` 的过滤是纯展示层，落在快照之后、对一致性无影响。",
+          "operationId": "get_knowhow_history_api_notebooks__notebook_id__knowhow__table_id__history_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "exclusiveMinimum": 0,
+                "maximum": 500,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "before_seq",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Seq"
+              }
+            },
+            {
+              "in": "query",
+              "name": "milestones_only",
+              "required": false,
+              "schema": {
+                "default": false,
+                "title": "Milestones Only",
+                "type": "boolean"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Get Knowhow History Api Notebooks  Notebook Id  Knowhow  Table Id  History Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow History"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/diff": {
+        "get": {
+          "description": "两版净变化（spec §8.1 行 3 / §6.5）——纯计算：只读区间 ``(from, to]``\n的流水再折叠，不碰任何写路径，也不校验 from/to 是否真实存在（区间落空\n时 aggregate_diff 对空列表的输出就是全 5 个键的\"无变化\"形状，天然合理）。\n必须注册在 .../history/{seq} 之前，见本节顶部的路由顺序说明。",
+          "operationId": "get_knowhow_history_diff_api_notebooks__notebook_id__knowhow__table_id__history_diff_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "from",
+              "required": true,
+              "schema": {
+                "title": "From",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "to",
+              "required": true,
+              "schema": {
+                "title": "To",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Get Knowhow History Diff Api Notebooks  Notebook Id  Knowhow  Table Id  History Diff Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow History Diff"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/prune": {
+        "post": {
+          "description": "删掉最老的连续前缀（spec §8.1 行 8 / §7.7）。``before_days`` 换算成\nISO 截止时间：用与本仓库各 store 模块的 ``_now()`` 相同的\"去掉微秒的\nnaive 本地时间 isoformat\"形状，才能和 ``knowhow_changes.created_at``\n做字面量字符串比较——两者格式必须一致，否则 SQL 里的字符串 ``<``\n比较会失真。\n\n§7.1 的已知代价在这里兑现：被清理掉的历史很可能是某些图片在库里唯一还\n\"活着\"的引用来源，删完之后这些图片才终于可能被判定为孤儿——所以清理\n完成后主动触发一次绕过节流的资产清扫（``min_interval=0``），而不是干等\n下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。",
+          "operationId": "prune_knowhow_history_api_notebooks__notebook_id__knowhow__table_id__history_prune_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowHistoryPruneRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Prune Knowhow History Api Notebooks  Notebook Id  Knowhow  Table Id  History Prune Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Prune Knowhow History"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/{seq}": {
+        "get": {
+          "description": "单条变更详情（spec §8.1 行 2）——payload 原样返回，前端用它渲染这一次\n改动的红绿 diff。",
+          "operationId": "get_knowhow_change_api_notebooks__notebook_id__knowhow__table_id__history__seq__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "seq",
+              "required": true,
+              "schema": {
+                "title": "Seq",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Get Knowhow Change Api Notebooks  Notebook Id  Knowhow  Table Id  History  Seq  Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow Change"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/milestones": {
+        "post": {
+          "description": "给一个 ``seq`` 命名（spec §8.1 行 6 / §4.2）——零快照，只是一条指针\n记录。``seq`` 必须已经是这张表的一条真实流水，否则 404（同 revert 的\n\"目标不存在无 oracle\"约定，防止一个里程碑从创建那一刻起就指向空气；\nget_knowhow_change 按 table_id+seq 联合查询，\"seq 不存在\"与\"seq 属于别的\n表\"天然统一成同一个 None）。重名：这张表的 ``UNIQUE(table_id, name)``\n让 store 直接抛 ``sqlite3.IntegrityError``（store 自己的文档字符串明确\n\"这里不做预检，省一次往返\"，把翻译成用户文案的职责留给了这一层）——接住\n它转成 400，而不是让用户看见一坨裸的 500 异常堆栈。",
+          "operationId": "create_knowhow_milestone_api_notebooks__notebook_id__knowhow__table_id__milestones_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowMilestoneCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Create Knowhow Milestone Api Notebooks  Notebook Id  Knowhow  Table Id  Milestones Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Knowhow Milestone"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/milestones/{milestone_id}": {
+        "delete": {
+          "description": "spec §8.1 行 7。store 的 ``delete_milestone`` 本身按 ``table_id``\n限定作用域，且对\"已经不存在\"静默 no-op（同本文件其余 delete 端点的既定\n约定），所以这里除了确认表本身存在/属于本 notebook 之外不需要再做额外的\n归属校验——一个属于别的表的 milestone_id 传进来，WHERE 子句天然不命中\n任何行，等同于\"什么都没删\"，不会误删。",
+          "operationId": "delete_knowhow_milestone_api_notebooks__notebook_id__knowhow__table_id__milestones__milestone_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "milestone_id",
+              "required": true,
+              "schema": {
+                "title": "Milestone Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Knowhow Milestone"
+        }
+      },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/reproject": {
         "post": {
           "description": "Full-rebuild escape hatch (task brief: \"全量重投影逃生口，后台执行\") —\nschedules KnowhowProjector.project_table (NEVER the seq-gated incremental\npath, and NEVER a raw background_jobs.submit — always through\nProjectionScheduler, PR-2+3 Task 3) and responds immediately with a\nstatus body, mirroring build_kg/rebuild_kg's\nsynchronous-response-then-background-work shape exactly.",
@@ -10292,6 +10876,67 @@
             }
           },
           "summary": "Reproject Knowhow Table"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/revert": {
+        "post": {
+          "description": "整表回退到 ``target_seq``（spec §8.1 行 5 / §6.1）。错误映射（spec\n§8.1 表）：head 已变→409 knowhow_history_stale；前置指纹不一致→400\nknowhow_history_inconsistent；后置校验失败（已整事务回滚，表未被改动）→\n500 knowhow_revert_verify_failed；target_seq 不存在/不属于本表→404（无\noracle，同本文件\"不存在\"与\"越权\"统一 404 的既定约定）。重放本体 + 提交后\n的重投影调度都在 knowhow_history.revert_table 里，这里只做错误码翻译。",
+          "operationId": "revert_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__revert_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowRevertRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Revert Knowhow Table Api Notebooks  Notebook Id  Knowhow  Table Id  Revert Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Revert Knowhow Table"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows": {
@@ -10404,7 +11049,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}": {
         "patch": {
-          "description": "Returns {row_id,column_id,content_md,projection_status} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.",
+          "description": "Returns {row_id,column_id,content_md,projection_status} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.\n\nknowhow 表版本管理 Task 12: ``body.origin`` is validated FIRST — a pure\nin-memory check with no DB lookups, and a hard 400 on anything outside\nVALID_ORIGINS (never a lenient default; see KnowhowCellPatch.origin's own\ndocstring for why).",
           "operationId": "patch_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__patch",
           "parameters": [
             {
@@ -10477,6 +11122,87 @@
             }
           },
           "summary": "Patch Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/history": {
+        "get": {
+          "description": "单格历史时间线（spec §8.1 行 4）——最新在前。row_id/column_id 的\ntable-scoped 校验与 patch_knowhow_cell 同款（同一 URL 形状的姊妹端点，见\n该函数文档字符串）。",
+          "operationId": "get_knowhow_cell_history_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__history_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "exclusiveMinimum": 0,
+                "maximum": 500,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {},
+                    "title": "Response Get Knowhow Cell History Api Notebooks  Notebook Id  Knowhow  Table Id  Rows  Row Id  Cells  Column Id  History Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow Cell History"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize": {
@@ -13647,6 +14373,7 @@
         "sources": 1
       },
       "created_label": "fixture-date",
+      "document_limit": 20,
       "expected_questions": [],
       "id": "nb-api",
       "is_shared": true,

@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _ReportLLM:
@@ -21,8 +23,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    provider = RecordingModelProvider()
+    r = SQLiteRepository(Settings(), model_provider=provider)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
+    r.recording_model_provider = provider
     return r
 
 
@@ -48,21 +52,24 @@ def _seed(repo):
 
 
 def test_summarize_communities_generates_reports(repo):
-    repo.llm_client = _ReportLLM()
+    llm = _ReportLLM()
+    bind_chat_client(repo, "kg_community_summary", llm)
     repo.settings.kg_community_summary_enabled = True
     nb = _seed(repo)
     n = repo.summarize_communities(nb.id)
-    assert n >= 1 and repo.llm_client.calls >= 1
+    assert n >= 1 and llm.calls >= 1
+    assert ("chat", "kg_community_summary") in repo.recording_model_provider.calls
     reports = repo.get_community_reports(nb.id)
     assert reports and reports[0]["summary"] and reports[0]["title"]
     assert isinstance(reports[0]["findings"], list) and reports[0]["findings"]
 
 
 def test_summarize_communities_off_by_default(repo):
-    repo.llm_client = _ReportLLM()
+    llm = _ReportLLM()
+    bind_chat_client(repo, "kg_community_summary", llm)
     nb = _seed(repo)                       # kg_community_summary_enabled defaults False
     assert repo.summarize_communities(nb.id) == 0
-    assert repo.llm_client.calls == 0
+    assert llm.calls == 0
     assert repo.get_community_reports(nb.id) == []   # no reports persisted
 
 

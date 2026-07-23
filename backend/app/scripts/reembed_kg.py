@@ -12,8 +12,13 @@ def main() -> int:
         print("usage: reembed_kg <notebook_id>"); return 2
     nb = sys.argv[1]
     repo = SQLiteRepository(get_settings())
-    if not repo.settings.embedder_configured:
-        print("[reembed] ABORT: embedder 未配置 — 不清空向量(否则退化为关键词检索)。配置 EMBED_* 后重试。")
+    required = ("knowledge_object_embedding", "relation_embedding")
+    missing = [workload for workload in required if not repo.configured(workload)]
+    if missing:
+        print(
+            "[reembed] ABORT: missing system model workload(s): "
+            f"{', '.join(missing)} — vectors were not purged."
+        )
         return 2
     mnt = repo.maintenance
     mnt.purge_kg_embeddings(nb)

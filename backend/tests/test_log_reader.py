@@ -81,3 +81,42 @@ def test_paginate_before_since_limit(tmp_path):
     # boundary: since=0 returns strictly-newer records (excludes seq=0)
     newest, _ = log_reader.paginate(desc, before=None, since=0, limit=10)
     assert [r["seq"] for r in newest] == [4, 3, 2, 1]
+
+
+def test_expand_channel_paths_prefers_plain_over_gz_for_the_same_day(tmp_path):
+    """同一天的明文与 .gz 并存时只返回明文——两份都返回会让上层把这天算两遍。
+
+    这不是假想的竞态：event_logging._gzip_day_file 在 os.replace(tmp, gz) 与
+    plain.unlink() 之间必然两份都在，而且它整段 `except Exception: pass`,
+    unlink 失败时两份会永久并存。取舍与 resolve_day_path 一致(明文优先)。
+    """
+    import gzip
+
+    line = '{"ts":"2026-03-01T00:00:00","id":"x","kind":"chat"}\n'
+    (tmp_path / "llm-2026-03-01.jsonl").write_text(line, encoding="utf-8")
+    with gzip.open(tmp_path / "llm-2026-03-01.jsonl.gz", "wt", encoding="utf-8") as fh:
+        fh.write(line)
+    # 另一天只有 .gz —— 必须仍然被收进来
+    with gzip.open(tmp_path / "llm-2026-03-02.jsonl.gz", "wt", encoding="utf-8") as fh:
+        fh.write(line)
+
+    paths = log_reader.expand_channel_paths(tmp_path / "llm.jsonl")
+    names = [p.name for p in paths]
+
+    assert names == ["llm-2026-03-01.jsonl", "llm-2026-03-02.jsonl.gz"], names
+
+
+def test_expand_channel_paths_does_not_double_count_records(tmp_path):
+    """上一个测试的后果面:同一天两份并存时,读出来的记录不能翻倍。"""
+    import gzip
+
+    line = '{"ts":"2026-03-01T00:00:00","id":"x","kind":"chat"}\n'
+    (tmp_path / "llm-2026-03-01.jsonl").write_text(line, encoding="utf-8")
+    with gzip.open(tmp_path / "llm-2026-03-01.jsonl.gz", "wt", encoding="utf-8") as fh:
+        fh.write(line)
+
+    total = sum(
+        len([ln for ln in log_reader.read_lines(p) if ln.strip()])
+        for p in log_reader.expand_channel_paths(tmp_path / "llm.jsonl")
+    )
+    assert total == 1, f"同一天被读了 {total} 次"

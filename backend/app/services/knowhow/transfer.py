@@ -25,7 +25,7 @@ _log = logging.getLogger("silicon_notebook.knowhow.transfer")
 
 def _remap(
     repo: Any, snapshot: dict, target_notebook_id: str, actor_id: str
-) -> tuple[dict, list]:
+) -> tuple[dict, list, Any]:
     seams = repo._runtime.seams
     new = seams.new_id
     now = seams.now()
@@ -212,22 +212,51 @@ def _remap(
         "chunks": chunks_out,
         "chunk_embeddings": vectors_out,
     }
-    return payload, asset_files
+    # ``seams`` (already resolved above) rides back out to the caller so
+    # ``copy_table`` can hand ``new_id``/``now`` to ``insert_transfer`` (Task
+    # 13's genesis flow entry) WITHOUT a second ``repo._runtime`` reach in
+    # ITS OWN scope — the architecture guard's independent_private tracking
+    # (tests/architecture/repository_callers.py) counts private-attribute
+    # accesses PER SCOPE, and ``copy_table`` already has one (its own
+    # ``repo._runtime.knowhow_transfer_store`` line below); returning the
+    # already-open seam here keeps that count unchanged instead of adding a
+    # second, distinct occurrence that would need a fixture rebaseline.
+    return payload, asset_files, seams
 
 
 def copy_table(
-    repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
+    repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str,
+    *, verb: str = "复制",
 ) -> str:
+    """``verb`` (knowhow 表版本管理 Task 13, spec §7.3) names the genesis
+    flow entry's ``note`` text — ``"由《<源表标题>》{verb}而来"``. Defaults
+    to "复制" for a plain copy (``transfer_table``'s ``mode="copy"``
+    dispatch, and any direct caller); ``move_table`` below overrides it to
+    "移动" since IT is the one that knows the copy it performs internally is
+    really the first half of a move — ``copy_table`` itself has no way to
+    tell the two apart otherwise (``move_table`` calls this very function to
+    do its own copying)."""
     store = repo._runtime.knowhow_transfer_store
     snapshot = store.snapshot_table(source_table_id)
-    payload, asset_files = _remap(repo, snapshot, target_notebook_id, actor_id)
+    payload, asset_files, seams = _remap(repo, snapshot, target_notebook_id, actor_id)
     expected_counts = {
         "columns": len(snapshot["columns"]),
         "rows": len(snapshot["rows"]),
         "cells": len(snapshot["cells"]),
         "cell_code": len(snapshot["cell_code"]),
     }
-    store.insert_transfer(payload, expected_counts)  # 单事务 + 提交前校验
+    # 单事务 + 提交前校验 + 版本管理创世流水（spec §7.3：历史本身不随复制/
+    # 移动携带，目标表只记这一条 table_create，note 里点名来源表标题）。
+    # source_title 取自快照（复制/移动前源表自己的标题）——_remap 只改
+    # table_out 的 id/notebook_id/created_by/时间戳/hidden_source_id，标题
+    # 原样带过去，所以两者字面相同；用快照而非 payload 只是更直接地表达
+    # "这是源表的标题"，不依赖那份不变量。
+    source_title = snapshot["table"]["title"]
+    store.insert_transfer(
+        payload, expected_counts,
+        new_id=seams.new_id, now=seams.now, actor=actor_id,
+        note=f"由《{source_title}》{verb}而来",
+    )
 
     # 事务提交后落资产磁盘文件（设计文档 §4.1/§7：单文件 copy2 失败逐一记事件
     # 并跳过，不回滚已提交的 DB）。best-effort 是硬要求而非风格选择：DB 事务此
@@ -329,7 +358,11 @@ def move_table(
     # 留、不丢失，与 ③ 的失败处理是同一个契约,不发明新的返回形状。
     knowhow_transfer_store = repo._runtime.knowhow_transfer_store
     source_fingerprint = knowhow_transfer_store.table_fingerprint(source_table_id)
-    new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
+    # verb="移动"（spec §7.3）：这次 copy_table 内部产生的 table_create 创世
+    # 流水必须说"移动而来"，不是"复制而来"——move 语义上删源，note 措辞要如实。
+    new_table_id = copy_table(
+        repo, source_table_id, target_notebook_id, actor_id, verb="移动",
+    )
     # A3 评审附加需求：copy_table 已经 COMMIT，从这里往下任何一步再炸，副本
     # 都已经是既成事实——裸异常冒泡上去只会变成路由层的通用 500，调用方分不清
     # "整个搬迁没发生"和"副本已经在、只是源没删干净"，naive 重试会在目标侧

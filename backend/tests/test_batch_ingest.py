@@ -12,32 +12,41 @@ from app.core.config import Settings
 from app.core.request_context import get_request_user, set_request_user, reset_request_user
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
-from app.services.model_concurrency import (
-    ConcurrencySnapshot,
-    LimitedJsonChatClient,
-    activate_model_concurrency,
-    current_model_concurrency,
-)
 from app.services import batch_ingest as bi
+from tests.model_testkit import RecordingModelProvider, bind_embedding_client
 
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    """Hermetic repo + FakeEmbedder(embedder_configured=True). 镜像 test_chunk_embed.py。"""
+    """Hermetic repository with explicit system workload bindings."""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
-    for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
-               "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
-        monkeypatch.setenv(_k, "")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    embedder = FakeEmbedder(dim=16)
+    provider = RecordingModelProvider(
+        embedding_clients={
+            workload: embedder
+            for workload in (
+                "retrieval_query_embedding",
+                "source_element_embedding",
+                "chunk_embedding",
+                "knowledge_object_embedding",
+                "relation_embedding",
+                "memory_embedding",
+                "knowhow_embedding",
+            )
+        },
+        parallelism_by_workload={
+            "source_element_embedding": 2,
+            "chunk_embedding": 2,
+            "knowledge_object_embedding": 2,
+            "relation_embedding": 2,
+        },
+    )
+    r = SQLiteRepository(Settings(model_services_config=""), model_provider=provider)
+    monkeypatch.setattr(bi, "SQLiteRepository", lambda settings: r)
     return r
 
 
@@ -92,7 +101,7 @@ def test_already_ingested_detects_hash(repo):
 def test_run_ingest_creates_sources_chunks_embeddings_no_kg(repo, tmp_path):
     d = _make_md_dir(tmp_path, n=2)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    counts = bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    counts = bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
     assert counts["uploaded"] == 3 and counts["skipped"] == 0 and counts["failed"] == 0
     with repo._connect() as db:
         def c(sql, *a): return db.execute(sql, a).fetchone()["c"]
@@ -112,7 +121,7 @@ def test_backfill_chunk_embeddings_missing_only(repo, tmp_path):
     未删的行 created_at 不变(证明没重嵌已有的)。"""
     d = _make_md_dir(tmp_path, n=2)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)  # 全量嵌入
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)  # 全量嵌入
 
     with repo._connect() as db:
         rows = db.execute(
@@ -132,7 +141,7 @@ def test_backfill_chunk_embeddings_missing_only(repo, tmp_path):
         assert db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?",
                           (nb_id,)).fetchone()["c"] == len(kept)
 
-    n = bi.backfill_chunk_embeddings(repo, nb_id, conc=2, missing_only=True)
+    n = bi.backfill_chunk_embeddings(repo, nb_id, missing_only=True)
 
     assert n == k                                    # 只处理缺的
     with repo._connect() as db:
@@ -152,31 +161,84 @@ def test_backfill_chunk_embeddings_missing_only_noop_when_complete(repo, tmp_pat
     """全有向量时 missing_only=True 返回 0(无缺失则跳过)。"""
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=2)
-    assert bi.backfill_chunk_embeddings(repo, nb_id, conc=2, missing_only=True) == 0
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    assert bi.backfill_chunk_embeddings(repo, nb_id, missing_only=True) == 0
 
 
 def test_backfill_chunk_embeddings_default_full_reembed(repo, tmp_path):
     """missing_only 默认 False:仍走全量(遍历 source),返回处理的 source 数。"""
     d = _make_md_dir(tmp_path, n=2)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
                           (nb_id,)).fetchone()["c"]
-    assert bi.backfill_chunk_embeddings(repo, nb_id, conc=2) == nsrc   # 默认=全量按 source
+    assert bi.backfill_chunk_embeddings(repo, nb_id) == nsrc   # 默认=全量按 source
 
 
 def test_run_ingest_dedup_skips_on_rerun(repo, tmp_path):
     d = _make_md_dir(tmp_path, n=2)
     nb_id = bi.ensure_notebook(repo, None, "nb")
     files = bi.iter_files(d)
-    bi.run_ingest(repo, nb_id, files, workers=1, conc=2)
-    counts2 = bi.run_ingest(repo, nb_id, files, workers=1, conc=2)
+    bi.run_ingest(repo, nb_id, files, workers=1)
+    counts2 = bi.run_ingest(repo, nb_id, files, workers=1)
     assert counts2["uploaded"] == 0 and counts2["skipped"] == 3
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?", (nb_id,)).fetchone()["c"]
     assert nsrc == 3
+
+
+def test_run_ingest_releases_the_claim_when_the_claimant_fails(repo, tmp_path, monkeypatch):
+    """认领只代表「这个内容由我这一份来做」,不代表已摄取。认领者失败必须交回认领,
+    否则后面同内容的副本会看到 digest 已被认领而直接 skipped —— 一次瞬时失败
+    (存储/SQLite 抖动)就让这份内容整轮都进不来,而在有认领集合之前它本可以由下一个
+    副本重试成功。workers=1 保证副本按序处理,让「先失败、后重试」可确定性复现。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-claim-release")
+    body = "# Same\n\nIdentical body " + "r" * 200
+    a = tmp_path / "a.md"; a.write_text(body, encoding="utf-8")
+    b = tmp_path / "b.md"; b.write_text(body, encoding="utf-8")
+
+    # 打桩点选在 repo.maintenance 上(认领之后、upload 之前的那次查库),刻意**不**给
+    # facade 的 repo.upload_sources 打桩:那会往冻结的 facade 契约里塞 test-only patch 记录。
+    real_lookup = repo.maintenance.source_id_by_hash
+    calls = {"n": 0}
+
+    def _flaky(notebook_id_, digest_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient sqlite blip")
+        return real_lookup(notebook_id_, digest_)
+
+    monkeypatch.setattr(repo.maintenance, "source_id_by_hash", _flaky)
+
+    counts = bi.run_ingest(repo, nb_id, [a, b], workers=1)
+
+    assert counts["failed"] == 1
+    assert counts["uploaded"] == 1, "认领没被交回,第二个副本失去了重试机会"
+    assert counts["skipped"] == 0
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"] == 1
+
+
+def test_run_ingest_same_run_duplicate_files_skip_not_reparse(repo, tmp_path):
+    """同一次运行里两个内容相同的文件:第一个 uploaded、第二个 skipped。
+
+    没有本次运行的认领集合时,第二个要多跑一次 source_id_by_hash 查库才能判出重复;
+    认领集合让它在做任何事之前就短路。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-dup")
+    body = "# Same\n\nIdentical body " + "q" * 200
+    a = tmp_path / "a.md"; a.write_text(body, encoding="utf-8")
+    b = tmp_path / "b.md"; b.write_text(body, encoding="utf-8")
+
+    counts = bi.run_ingest(repo, nb_id, [a, b], workers=1)
+
+    assert counts["uploaded"] == 1 and counts["skipped"] == 1
+    assert counts["failed"] == 0
+    with repo._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert nsrc == 1                                # 同内容只建一个源
 
 
 def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
@@ -194,7 +256,7 @@ def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
 
     monkeypatch.setattr(repo, "build_notebook_kg", fake_build)
     monkeypatch.setattr(repo, "rebuild_unified_kg", fake_rebuild)
-    res = bi.run_kg(repo, nb_id, limit=None, conc=2)
+    res = bi.run_kg(repo, nb_id, limit=None)
     assert res["extracted"] == 2 and res["failed"] == 0
     assert res["clusters"] == 7
     assert calls["fusion_flag_during"] is False
@@ -285,15 +347,14 @@ def test_main_all_ingests_then_runs_kg(repo, tmp_path, monkeypatch):
     """`all` 现在走 run_all(process_source/extract_source + rebuild_unified_kg),
     不再走 build_notebook_kg。无向量模式下抽取 no-op,但 parse 流程跑通,3 个 source 建成。"""
     d = _make_md_dir(tmp_path, n=2)
-    monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr("app.services.source_ingestion.SourceIngestionService.run_extraction", lambda self, sid: None)
     monkeypatch.setattr(SQLiteRepository, "rebuild_unified_kg",
                         lambda self, nb, progress=None, force=False, fresh=False: 0)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
     rc = bi.main(["all", "--input-dir", str(d), "--notebook-name", "X", "--workers", "1",
                   "--allow-no-embed"])
     assert rc == 0
-    r2 = SQLiteRepository(Settings())
+    r2 = repo
     with r2._connect() as db:
         row = db.execute("SELECT id FROM notebooks WHERE name='X'").fetchone()
         assert row is not None
@@ -323,10 +384,11 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
 
-    repo.settings.kg_llm_base_url = "http://kg.example"
-    repo.settings.kg_llm_api_key = "k"
-    repo.settings.kg_llm_model = "kg-model"
-    res = bi.run_kg(repo, nb_id, limit=2, conc=2)
+    repo._runtime.models.chat_clients = {
+        **repo._runtime.models.chat_clients,
+        "kg_extract": _StubLLM(),
+    }
+    res = bi.run_kg(repo, nb_id, limit=2)
     assert res["extracted"] == 2
     assert len(extracted_calls) == 2          # 只抽前 2 个未抽源(targets[:limit])
 
@@ -335,7 +397,15 @@ class _StubLLM:
     configured = True; chat_json = lambda self, messages, response_schema_hint, **kwargs: '{"ok":true}'
 
 
-def test_run_kg_limit_parallelizes_sources_with_workers(repo, monkeypatch):
+def _bind_chat(repo, workload_id, client):
+    repo._runtime.models.chat_clients = {
+        **repo._runtime.models.chat_clients,
+        workload_id: client,
+    }
+
+
+def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
+    from app.services.kg import scheduler
     lock = threading.Lock()
     active = 0
     peak = 0
@@ -347,7 +417,10 @@ def test_run_kg_limit_parallelizes_sources_with_workers(repo, monkeypatch):
     monkeypatch.setattr(
         repo.maintenance, "kg_covered_source_ids", lambda notebook_id: set()
     )
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    repo._runtime.models.chat_clients = {
+        **repo._runtime.models.chat_clients,
+        "kg_extract": _StubLLM(),
+    }
 
     def extract(source_id):
         nonlocal active, peak
@@ -361,22 +434,13 @@ def test_run_kg_limit_parallelizes_sources_with_workers(repo, monkeypatch):
                 active -= 1
 
     monkeypatch.setattr(repo.maintenance, "run_extraction", extract)
-    effective = bi.EffectiveConcurrency(
-        workers=3,
-        llm=8,
-        embedding=2,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
+    bi.run_kg(
+        repo,
+        bi.ensure_notebook(repo, None, "nb-kg-limit"),
+        limit=6,
+        no_rebuild=True,
     )
-    with bi._batch_concurrency_scope(repo, effective):
-        bi.run_kg(
-            repo,
-            bi.ensure_notebook(repo, None, "nb-kg-limit"),
-            limit=6,
-            no_rebuild=True,
-        )
-    assert peak == 3
+    assert peak == min(len(targets), scheduler.job_concurrency())
 
 
 def _seed_sources(repo, nb_id, n, prefix):
@@ -399,7 +463,7 @@ def _seed_sources(repo, nb_id, n, prefix):
 
 def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
     """build_notebook_kg 跨源并发抽取(全局 job 池),逐源回调进度;全部成功。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-conc")
     sids = _seed_sources(repo, nb_id, 6, "src-c")
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid, **kwargs: None)
@@ -417,7 +481,7 @@ def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
 
 def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
     """单源抽取异常被隔离:计入 failed,其余照常 built。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-iso")
     sids = _seed_sources(repo, nb_id, 3, "src-i")
     bad = sids[1]
@@ -454,35 +518,23 @@ def test_ensure_notebook_unknown_owner_errors(repo):
         bi._resolve_owner_profile(repo, "a00999999")
 
 
-def test_main_new_notebook_owner_context_drives_model_and_scheduler_worker(
+def test_main_new_notebook_owner_context_reaches_scheduler_worker(
     repo, tmp_path, monkeypatch
 ):
     from app.services.kg.scheduler import submit_job
 
     owner = repo.create_user("b00123456", "pw123456")
-    repo.set_user_model_settings(
-        owner.id,
-        {
-            "llm": {
-                "base_url": "https://owner-new.example/v1",
-                "api_key": "owner-key",
-                "model": "owner-new-model",
-            }
-        },
-    )
     docs = tmp_path / "owner-new-docs"
     docs.mkdir()
     seen = {}
 
     def fake_run_ingest(repo_, notebook_id, files, **kwargs):
         seen["user_id"] = repo_.current_user().id
-        seen["model"] = repo_.kg_llm_client.model
         seen["worker_user_id"] = submit_job(
             lambda: repo_.current_user().id
         ).result(timeout=5)
         return {"uploaded": 0, "skipped": 0, "failed": 0}
 
-    monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(bi, "run_ingest", fake_run_ingest)
     assert get_request_user() is None
 
@@ -500,7 +552,6 @@ def test_main_new_notebook_owner_context_drives_model_and_scheduler_worker(
     assert rc == 0
     assert seen == {
         "user_id": owner.id,
-        "model": "owner-new-model",
         "worker_user_id": owner.id,
     }
     assert get_request_user() is None
@@ -512,20 +563,10 @@ def test_main_new_notebook_owner_context_drives_model_and_scheduler_worker(
     assert created_by == owner.id
 
 
-def test_main_existing_notebook_owner_context_drives_model_and_resets_on_failure(
+def test_main_existing_notebook_owner_context_resets_on_failure(
     repo, monkeypatch
 ):
     owner = repo.create_user("c00123456", "pw123456")
-    repo.set_user_model_settings(
-        owner.id,
-        {
-            "llm": {
-                "base_url": "https://owner-existing.example/v1",
-                "api_key": "owner-key",
-                "model": "owner-existing-model",
-            }
-        },
-    )
     token = set_request_user(owner)
     try:
         notebook_id = bi.ensure_notebook(
@@ -538,10 +579,8 @@ def test_main_existing_notebook_owner_context_drives_model_and_resets_on_failure
     def fail_reparse(repo_, notebook_id_, **kwargs):
         seen["notebook_id"] = notebook_id_
         seen["user_id"] = repo_.current_user().id
-        seen["model"] = repo_.kg_llm_client.model
         raise RuntimeError("phase failed")
 
-    monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(bi, "run_reparse", fail_reparse)
     assert get_request_user() is None
 
@@ -559,49 +598,7 @@ def test_main_existing_notebook_owner_context_drives_model_and_resets_on_failure
     assert seen == {
         "notebook_id": notebook_id,
         "user_id": owner.id,
-        "model": "owner-existing-model",
     }
-    assert get_request_user() is None
-
-
-def test_main_owner_context_resets_when_concurrency_setup_fails(
-    repo, monkeypatch
-):
-    owner = repo.create_user("d00123456", "pw123456")
-    token = set_request_user(owner)
-    try:
-        notebook_id = bi.ensure_notebook(
-            repo, None, "Owner setup failure"
-        )
-    finally:
-        reset_request_user(token)
-
-    class _FailingScope:
-        def __enter__(self):
-            assert get_request_user().id == owner.id
-            raise RuntimeError("scope setup failed")
-
-        def __exit__(self, *exc):
-            return False
-
-    monkeypatch.setenv("EMBED_PROVIDER", "")
-    monkeypatch.setattr(
-        bi,
-        "_batch_concurrency_scope",
-        lambda *_args, **_kwargs: _FailingScope(),
-    )
-
-    with pytest.raises(RuntimeError, match="scope setup failed"):
-        bi.main([
-            "reparse",
-            "--notebook-id",
-            notebook_id,
-            "--owner",
-            owner.username,
-            "--allow-no-embed",
-            "--no-rebuild",
-        ])
-
     assert get_request_user() is None
 
 
@@ -645,11 +642,14 @@ def test_arg_parser_concurrency_help_matches_positive_contract():
     assert "<=1" not in normalized
     assert "1 走原串行路径" in normalized
     assert "all/kg/reparse 阶段生效" in normalized
+    assert "--workers" in normalized
+    assert "--llm-conc" not in normalized
+    assert "--embed-conc" not in normalized
 
 
 def test_main_refuses_silent_no_embed(repo, tmp_path, monkeypatch, capsys):
     d = _make_md_dir(tmp_path, n=1)
-    monkeypatch.setenv("EMBED_PROVIDER", "")     # main 自建 repo → embedder 未配
+    repo._runtime.models.embedding_clients = {}
     rc = bi.main(["ingest", "--input-dir", str(d), "--notebook-name", "X"])
     assert rc == 2
     assert "allow-no-embed" in capsys.readouterr().err
@@ -657,10 +657,10 @@ def test_main_refuses_silent_no_embed(repo, tmp_path, monkeypatch, capsys):
 
 def test_main_allows_no_embed_with_flag(repo, tmp_path, monkeypatch):
     d = _make_md_dir(tmp_path, n=1)
-    monkeypatch.setenv("EMBED_PROVIDER", "")
+    repo._runtime.models.embedding_clients = {}
     rc = bi.main(["ingest", "--input-dir", str(d), "--notebook-name", "X", "--allow-no-embed"])
     assert rc == 0
-    r2 = SQLiteRepository(Settings())
+    r2 = repo
     with r2._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources").fetchone()["c"]
         nemb = db.execute("SELECT COUNT(*) c FROM chunk_embeddings").fetchone()["c"]
@@ -669,8 +669,11 @@ def test_main_allows_no_embed_with_flag(repo, tmp_path, monkeypatch):
 
 def test_run_kg_limit_requires_llm(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    with pytest.raises(RuntimeError):            # 无 KG/主 LLM → --limit 直接报错,不静默
-        bi.run_kg(repo, nb_id, limit=1, conc=2)
+    with pytest.raises(
+        RuntimeError,
+        match="kg_extract workload 未绑定系统模型服务",
+    ):                                           # 未绑定 workload → 直接报错,不静默
+        bi.run_kg(repo, nb_id, limit=1)
 
 
 # ── Task 2: embed 子命令 + run_embed ─────────────────────────────────────────
@@ -690,7 +693,7 @@ def test_run_embed_fills_missing_chunk_and_node_vectors(repo, tmp_path):
     """run_embed:盘点 → 补缺失 chunk(missing_only)+ 节点向量 → 归零。"""
     d = _make_md_dir(tmp_path, n=2)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
     _seed_node(repo, nb_id, "ko-1")
     _seed_node(repo, nb_id, "ko-2")
 
@@ -700,7 +703,7 @@ def test_run_embed_fills_missing_chunk_and_node_vectors(repo, tmp_path):
     with repo._write() as db:
         db.execute("DELETE FROM chunk_embeddings WHERE chunk_id=?", (cid,))
 
-    out = bi.run_embed(repo, nb_id, conc=2)
+    out = bi.run_embed(repo, nb_id)
 
     assert out["chunk_missing_before"] == 1
     assert out["node_missing_before"] == 2           # 两个 node 都还没向量
@@ -721,11 +724,9 @@ def test_run_embed_fills_missing_chunk_and_node_vectors(repo, tmp_path):
 def test_main_embed_end_to_end_zeroes_missing(repo, tmp_path, capsys, monkeypatch):
     """main(['embed','--notebook-id',id]) 端到端:跑完缺失归零,打印 phase=embed。
     main 自建 repo → 用 FakeEmbedder 替 make_embedder,与 fixture repo 同库。"""
-    monkeypatch.setattr("app.services.embedding.make_embedder",
-                        lambda settings: FakeEmbedder(dim=16))
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=2)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
     with repo._connect() as db:                      # 制造缺失
         cids = [r["chunk_id"] for r in db.execute(
             "SELECT chunk_id FROM chunk_embeddings WHERE notebook_id=?", (nb_id,)).fetchall()]
@@ -749,13 +750,279 @@ def test_main_embed_requires_notebook_id(repo, capsys):
     assert "notebook-id" in capsys.readouterr().err
 
 
+# ── element 向量的缺失查询与补齐 ──────────────────────────────────────────────
+# run_ingest 现在通过系统模型调度同时生成 chunk / element 向量。因此补齐用例
+# 显式删除 element 向量来模拟旧数据、中断任务或人工清理后的待回填状态。
+
+class _TextRecordingEmbedder(FakeEmbedder):
+    """FakeEmbedder + 记录每次真正送给 embedder 的文本(断言截断规则/只补缺失用)。"""
+
+    def __init__(self, dim, seen):
+        super().__init__(dim=dim)
+        self.seen = seen
+
+    def embed_texts(self, texts):
+        self.seen.extend(texts)
+        return super().embed_texts(texts)
+
+
+def _element_rows(repo, source_id):
+    with repo._connect() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT id, text FROM source_elements WHERE source_id=? ORDER BY id",
+            (source_id,)).fetchall()]
+
+
+def _source_ids(repo, notebook_id):
+    with repo._connect() as db:
+        return [r["id"] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? ORDER BY id",
+            (notebook_id,)).fetchall()]
+
+
+def _delete_element_vectors(repo, notebook_id):
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM element_embeddings WHERE notebook_id=?",
+            (notebook_id,),
+        )
+
+
+def _insert_element(repo, source_id, element_id, text):
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            (element_id, source_id, "paragraph", "p1", text, "{}", now))
+
+
+def test_py_whitespace_constant_covers_every_python_strip_char():
+    """PY_WHITESPACE 必须就是 str.strip() 的字符全集——缺失查询拿它当 TRIM 字符集,
+    少一个字符就有一类元素「算缺失但永远补不上」,补齐命令不收敛。"""
+    from app.repositories.sqlite.maintenance import PY_WHITESPACE
+
+    assert set(PY_WHITESPACE) == {
+        chr(c) for c in range(0x110000) if chr(c).isspace()
+    }
+
+
+def test_missing_element_rows_exclude_blank_text(repo, tmp_path):
+    """空白文本元素不算缺失:embed_source 会跳过它们(text.strip() 为空),它们永远不会
+    有向量。若算进缺失,补齐命令每次都报「还有 N 个缺失」、每次都试着嵌入空串 → 永不
+    收敛的脏状态。含纯制表符/换行/全角空格——SQLite 裸 TRIM() 只去半角空格,挡不住。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-blank")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    sid = _source_ids(repo, nb_id)[0]
+    bi.backfill_element_embeddings(repo, nb_id)      # 先把真实元素补齐
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    for i, blank in enumerate(["", "   ", "\t\n", "　　", "\xa0"]):
+        _insert_element(repo, sid, f"el-blank-{i}", blank)   # 全部无向量
+
+    rows = repo.maintenance.missing_element_embedding_rows(nb_id)
+
+    assert [r["id"] for r in rows] == []                     # 一个都不算缺失
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.backfill_element_embeddings(repo, nb_id) == 0   # 仍然 0 项可补
+    _insert_element(repo, sid, "el-real", " 有内容的段落 ")    # 对照:非空白才算缺失
+    assert [r["id"] for r in repo.maintenance.missing_element_embedding_rows(nb_id)] == [
+        "el-real"]
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 1
+
+
+def test_missing_element_rows_are_scoped_to_the_notebook(repo, tmp_path):
+    """缺失查询按 notebook 限定(source_elements 表本身没有 notebook_id,靠 JOIN sources)。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_a = bi.ensure_notebook(repo, None, "nb-a")
+    nb_b = bi.ensure_notebook(repo, None, "nb-b")
+    bi.run_ingest(repo, nb_a, bi.iter_files(d), workers=1)
+    _delete_element_vectors(repo, nb_a)
+    n_a = repo.maintenance.count_missing_element_vectors(nb_a)
+
+    assert n_a > 0                                            # A 有缺
+    assert repo.maintenance.count_missing_element_vectors(nb_b) == 0   # B 不受影响
+    assert all(r["source_id"] in _source_ids(repo, nb_a)
+               for r in repo.maintenance.missing_element_embedding_rows(nb_a))
+    assert repo.maintenance.missing_element_embedding_rows(nb_b) == []
+
+
+def test_backfill_element_embeddings_fills_missing_and_is_idempotent(repo, tmp_path):
+    """补齐后全部有向量、第二遍 0 项可补(幂等);再删掉一部分重跑时,只有被删的那些
+    重新送进 embedder(INSERT OR REPLACE upsert 只碰缺的,不整源重嵌)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-el")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
+    _delete_element_vectors(repo, nb_id)
+    total = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert total >= 3                                         # 多源、多 element
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == total
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.backfill_element_embeddings(repo, nb_id) == 0   # 幂等
+
+    with repo._connect() as db:                               # 制造部分缺失
+        eids = [r["element_id"] for r in db.execute(
+            "SELECT element_id FROM element_embeddings WHERE notebook_id=? "
+            "ORDER BY element_id", (nb_id,)).fetchall()]
+    deleted = eids[:2]
+    with repo._write() as db:
+        db.executemany("DELETE FROM element_embeddings WHERE element_id=?",
+                       [(eid,) for eid in deleted])
+    seen = []
+    bind_embedding_client(
+        repo,
+        _TextRecordingEmbedder(dim=16, seen=seen),
+        workload_ids=("source_element_embedding",),
+    )
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == len(deleted)
+
+    assert len(seen) == len(deleted)                          # 只重嵌了被删的那两条
+    with repo._connect() as db:
+        want = {r["text"] for r in db.execute(
+            "SELECT text FROM source_elements WHERE id IN (?,?)", tuple(deleted)
+        ).fetchall()}
+    assert set(seen) == want
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_groups_rows_by_source(repo, tmp_path):
+    """待补行跨多个源:replace_element_vectors 是 per-source 签名(source_id, notebook_id,
+    rows),必须按 source_id 分组逐组落库——落错组会让 element_embeddings.source_id 指向
+    别的源(按源删向量/按源重嵌都会走错)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-group")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2)
+    _delete_element_vectors(repo, nb_id)
+    sids = _source_ids(repo, nb_id)
+    assert len(sids) >= 2
+    missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert len({r["source_id"] for r in
+                repo.maintenance.missing_element_embedding_rows(nb_id)}) == len(sids)
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == missing
+
+    with repo._connect() as db:                               # 每行的 source_id 都对得上
+        mismatched = db.execute(
+            "SELECT COUNT(*) c FROM element_embeddings v JOIN source_elements e "
+            "ON e.id = v.element_id WHERE v.notebook_id=? AND v.source_id != e.source_id",
+            (nb_id,)).fetchone()["c"]
+        per_source = {r["source_id"]: r["c"] for r in db.execute(
+            "SELECT source_id, COUNT(*) c FROM element_embeddings WHERE notebook_id=? "
+            "GROUP BY source_id", (nb_id,)).fetchall()}
+    assert mismatched == 0
+    assert set(per_source) == set(sids)                       # 每个源都写到了
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_persists_before_all_embedding_finishes(repo, tmp_path, monkeypatch):
+    """向量必须**分页**推进:每页算完立刻落库,而不是全算完再统一写。
+
+    直接测内存不现实,但分页有个等价的可观测性质:落库会与嵌入**交错**发生。
+    不分页时必然是「所有 embed → 才开始 write」。这条断言正是钉住那个差别——
+    注意光把落库循环写成「逐批」是**无效**的:_map_embedding_batches 返回
+    list[list](内部等全部 future 完成再收集),遍历它时向量早已全在内存里;
+    必须在喂进去之前分页。"""
+    d = _make_md_dir(tmp_path, n=3)
+    nb_id = bi.ensure_notebook(repo, None, "nb-stream")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    _delete_element_vectors(repo, nb_id)
+    missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert missing >= 3, "样本太小,分不出多页 → 本用例无检出力"
+
+    svc = repo._runtime.source_embedding
+    # 页大小 = 模型服务并行度 * embed_batch_size,都压到 1 → 每行一页。
+    monkeypatch.setattr(repo.settings, "embed_batch_size", 1)
+    monkeypatch.setitem(
+        repo._runtime.models.parallelism_by_workload,
+        "source_element_embedding",
+        1,
+    )
+
+    events: list[str] = []
+    real_embed = svc.embedder
+
+    def _recording_embedder(workload_id):
+        inner = real_embed(workload_id)
+
+        class _Rec:
+            def embed_texts(self, texts):
+                events.append("embed")
+                return inner.embed_texts(texts)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        return _Rec()
+
+    real_write = svc.vectors.replace_element_vectors
+
+    def _recording_write(*args, **kwargs):
+        events.append("write")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(svc, "embedder", _recording_embedder)
+    monkeypatch.setattr(svc.vectors, "replace_element_vectors", _recording_write)
+
+    assert bi.backfill_element_embeddings(repo, nb_id) == missing
+
+    assert "write" in events and "embed" in events
+    last_embed = len(events) - 1 - events[::-1].index("embed")
+    first_write = events.index("write")
+    assert first_write < last_embed, (
+        "所有 embed 都跑完才开始 write —— 向量没有分页落库,大库上会 OOM", events)
+
+
+def test_backfill_element_embeddings_truncates_by_settings_not_hardcoded_2000(repo, tmp_path):
+    """补齐路径的截断必须用 settings.embed_truncate_chars(与 embed_source 同构),不是
+    embed_chunks_batch 里硬编码的 2000。默认值恰好也是 2000 → 必须把配置调成非 2000
+    才有检出力,这里用 137。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-trunc")
+    p = tmp_path / "long.md"
+    p.write_text("# Long\n\n" + "词" * 5000, encoding="utf-8")
+    bi.run_ingest(repo, nb_id, [p], workers=1)
+    sid = _source_ids(repo, nb_id)[0]
+    assert any(len(r["text"]) > 2000 for r in _element_rows(repo, sid))   # 有超长元素
+    _delete_element_vectors(repo, nb_id)
+    seen = []
+    bind_embedding_client(
+        repo,
+        _TextRecordingEmbedder(dim=16, seen=seen),
+        workload_ids=("source_element_embedding",),
+    )
+    repo.settings.embed_truncate_chars = 137                  # 非默认值,否则本断言零检出力
+
+    assert bi.backfill_element_embeddings(repo, nb_id) > 0
+
+    assert seen
+    assert max(len(t) for t in seen) == 137                   # 真按 137 截,不是 2000
+
+
+def test_run_embed_fills_missing_element_vectors(repo, tmp_path):
+    """run_embed 三侧并列:chunk / element / 节点都盘点 → 补齐 → 复盘归零。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-embed3")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)
+    _delete_element_vectors(repo, nb_id)
+    element_missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert element_missing > 0
+
+    out = bi.run_embed(repo, nb_id)
+
+    assert out["element_missing_before"] == element_missing
+    assert out["elements_embedded"] == element_missing
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.run_embed(repo, nb_id)["element_missing_before"] == 0   # 幂等
+
+
 def test_main_embed_requires_embed_even_with_allow_no_embed(repo, tmp_path, monkeypatch, capsys):
     """embed 子命令就是补向量:EMBED 未配 → return 2,且忽略 --allow-no-embed。"""
     nb_id = bi.ensure_notebook(repo, None, "nb")     # 用配好 EMBED 的 repo 先建库
-    monkeypatch.setenv("EMBED_PROVIDER", "")         # main 自建 repo → embedder 未配
+    repo._runtime.models.embedding_clients = {}
     rc = bi.main(["embed", "--notebook-id", nb_id, "--allow-no-embed"])
     assert rc == 2
-    assert "EMBED" in capsys.readouterr().err
+    assert "chunk_embedding 未绑定系统模型服务" in capsys.readouterr().err
 
 
 def test_arg_parser_embed_phase():
@@ -763,149 +1030,58 @@ def test_arg_parser_embed_phase():
     assert args.phase == "embed"
 
 
-def test_model_concurrency_cli_omission_inherits_settings(monkeypatch):
+def test_workers_cli_omission_inherits_business_orchestration_setting(monkeypatch):
     monkeypatch.setenv("KG_JOB_CONCURRENCY", "11")
-    monkeypatch.setenv("KG_EXTRACT_WORKERS", "13")
-    monkeypatch.setenv("EMBED_CONCURRENCY", "3")
     args = bi.build_arg_parser().parse_args(["reparse", "--notebook-id", "nb-x"])
     effective = bi._resolve_effective_concurrency(args, Settings(), "reparse")
-    assert (effective.workers, effective.llm, effective.embedding) == (11, 13, 3)
-    assert (
-        effective.workers_source,
-        effective.llm_source,
-        effective.embedding_source,
-    ) == ("env", "env", "env")
+    assert effective == bi.EffectiveConcurrency(workers=11, workers_source="env")
 
 
-def test_model_concurrency_cli_overrides_settings(monkeypatch):
+def test_workers_cli_overrides_business_orchestration_setting(monkeypatch):
     monkeypatch.setenv("KG_JOB_CONCURRENCY", "11")
-    monkeypatch.setenv("KG_EXTRACT_WORKERS", "13")
-    monkeypatch.setenv("EMBED_CONCURRENCY", "3")
     args = bi.build_arg_parser().parse_args([
-        "reparse", "--notebook-id", "nb-x",
-        "--workers", "20", "--llm-conc", "16", "--embed-conc", "2",
+        "reparse", "--notebook-id", "nb-x", "--workers", "20",
     ])
     effective = bi._resolve_effective_concurrency(args, Settings(), "reparse")
-    assert (effective.workers, effective.llm, effective.embedding) == (20, 16, 2)
-    assert effective.workers_source == "cli"
-    assert effective.llm_source == "cli"
-    assert effective.embedding_source == "cli"
+    assert effective == bi.EffectiveConcurrency(workers=20, workers_source="cli")
 
 
-@pytest.mark.parametrize(
-    "flag", ["--workers", "--llm-conc", "--embed-conc"]
-)
-def test_model_concurrency_rejects_non_positive_values(flag):
+def test_workers_rejects_non_positive_value():
     args = bi.build_arg_parser().parse_args([
-        "reparse", "--notebook-id", "nb-x", flag, "0",
+        "reparse", "--notebook-id", "nb-x", "--workers", "0",
     ])
     with pytest.raises(ValueError, match="positive"):
         bi._resolve_effective_concurrency(args, Settings(), "reparse")
 
 
-def test_main_reports_non_positive_model_concurrency(repo, capsys):
-    nb_id = bi.ensure_notebook(repo, None, "nb-invalid-concurrency")
-    rc = bi.main([
-        "reparse",
-        "--notebook-id",
-        nb_id,
-        "--embed-conc",
-        "0",
-        "--allow-no-embed",
-    ])
-    assert rc == 2
-    assert "positive integer" in capsys.readouterr().err
-
-
-def test_batch_concurrency_scope_configures_and_restores(repo, monkeypatch):
-    from app.services.kg import scheduler
-    from app.services.model_concurrency import current_model_concurrency
-
-    old_settings = (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    )
-    old_window = scheduler.max_workers()
-    old_job = scheduler.job_concurrency()
-    real_configure = scheduler.configure
-    configure_calls = []
-
-    def tracked_configure(**kwargs):
-        configure_calls.append(kwargs)
-        return real_configure(**kwargs)
-
-    monkeypatch.setattr(scheduler, "configure", tracked_configure)
-    effective = bi.EffectiveConcurrency(
-        workers=7, llm=5, embedding=2,
-        workers_source="cli", llm_source="cli", embedding_source="cli",
-    )
-
-    with bi._batch_concurrency_scope(repo, effective):
-        assert scheduler.job_concurrency() == 7
-        assert scheduler.max_workers() == 5
-        assert repo.settings.embed_concurrency == 2
-        assert current_model_concurrency() is not None
-
-    assert current_model_concurrency() is None
-    assert scheduler.job_concurrency() == old_job
-    assert scheduler.max_workers() == old_window
-    assert (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    ) == old_settings
-    assert configure_calls == [
-        {"window_workers": 5, "job_workers": 7},
-        {"window_workers": old_window, "job_workers": old_job},
-    ]
-
-
-def test_run_reparse_does_not_reconfigure_scheduler(repo, monkeypatch):
+def test_run_reparse_and_run_all_do_not_reconfigure_scheduler(repo, monkeypatch):
     from app.services.kg import scheduler
 
     configure_calls = []
     monkeypatch.setattr(
         scheduler, "configure", lambda **kwargs: configure_calls.append(kwargs)
     )
-    monkeypatch.setattr(
-        repo.maintenance, "source_ids", lambda notebook_id: []
-    )
+    monkeypatch.setattr(repo.maintenance, "source_ids", lambda notebook_id: [])
     monkeypatch.setattr(
         repo.maintenance, "sources_with_elements", lambda notebook_id: set()
+    )
+    monkeypatch.setattr(
+        repo, "rebuild_unified_kg",
+        lambda notebook_id, progress=None, force=False, fresh=False: 0,
+    )
+    monkeypatch.setattr(
+        bi, "backfill_node_embeddings", lambda repo, notebook_id: 0
     )
 
     bi.run_reparse(
         repo,
         bi.ensure_notebook(repo, None, "nb-reparse-owner"),
-        conc=2,
         no_rebuild=True,
     )
-
-    assert configure_calls == []
-
-
-def test_run_all_does_not_reconfigure_scheduler(repo, monkeypatch):
-    from app.services.kg import scheduler
-
-    configure_calls = []
-    monkeypatch.setattr(
-        scheduler, "configure", lambda **kwargs: configure_calls.append(kwargs)
-    )
-    monkeypatch.setattr(
-        repo,
-        "rebuild_unified_kg",
-        lambda notebook_id, progress=None, force=False, fresh=False: 0,
-    )
-    monkeypatch.setattr(
-        bi, "backfill_node_embeddings", lambda repo, notebook_id, conc: 0
-    )
-
     bi.run_all(
         repo,
         bi.ensure_notebook(repo, None, "nb-all-owner"),
         [],
-        conc=2,
         report_interval=0,
     )
 
@@ -916,477 +1092,10 @@ def test_run_all_has_no_phase_local_workers_parameter():
     assert "workers" not in inspect.signature(bi.run_all).parameters
 
 
-class _PeakRecorder:
-    configured = True
-    model = "peak-recorder"
-
-    def __init__(self, delay=0.05):
-        self.delay = delay
-        self.lock = threading.Lock()
-        self.active = 0
-        self.peak = 0
-
-    def _call(self):
-        with self.lock:
-            self.active += 1
-            self.peak = max(self.peak, self.active)
-        try:
-            time.sleep(self.delay)
-        finally:
-            with self.lock:
-                self.active -= 1
-
-    def chat_json(self, messages, schema="", **kwargs):
-        self._call()
-        return "{}"
-
-    def embed(self):
-        self._call()
-        return [0.0]
-
-
-class _FakeMaintenance:
-    def __init__(self, source_ids):
-        self._source_ids = source_ids
-
-    def sources_with_elements(self, notebook_id):
-        return set()
-
-    def source_ids(self, notebook_id):
-        return list(self._source_ids)
-
-
-class _ReparseConcurrencyRepo:
-    def __init__(self, llm, embed):
-        self.settings = SimpleNamespace(
-            kg_auto_extract=False,
-            kg_incremental_fusion_enabled=True,
-            kg_job_concurrency=8,
-            kg_extract_workers=6,
-            embed_concurrency=8,
-        )
-        self.maintenance = _FakeMaintenance(
-            [f"src-peak-{i}" for i in range(12)]
-        )
-        self._llm = llm
-        self._embed = embed
-
-    def process_source(self, source_id):
-        state = current_model_concurrency()
-        assert state is not None
-        LimitedJsonChatClient(self._llm, state.llm).chat_json([], "{}")
-        state.embedding.run(
-            self._embed.embed,
-            task_prefix="emb-el",
-        )
-        return SimpleNamespace(id=source_id)
-
-
-def test_reparse_llm_and_embedding_peaks_are_independent():
-    from app.services.kg import scheduler as kg_scheduler
-
-    llm = _PeakRecorder()
-    embed = _PeakRecorder()
-    repo = _ReparseConcurrencyRepo(llm, embed)
-
-    try:
-        kg_scheduler.configure(window_workers=6, job_workers=8)
-        with activate_model_concurrency(llm_max=6, embed_max=2) as state:
-            result = bi.run_reparse(
-                repo,
-                "nb-peak",
-                conc=2,
-                no_rebuild=True,
-                report_interval=0,
-            )
-            llm_snapshot = state.llm.snapshot()
-            embed_snapshot = state.embedding.snapshot()
-    finally:
-        kg_scheduler.reset()
-
-    assert result["reparsed"] == 12
-    assert result["failed"] == 0
-    assert 4 <= llm.peak <= 6
-    assert embed.peak == 2
-    assert llm_snapshot.active == llm_snapshot.waiting == 0
-    assert embed_snapshot.active == embed_snapshot.waiting == 0
-
-
-class _RunAllMaintenance:
-    def __init__(self, hash_to_source, resumed):
-        self._hash_to_source = hash_to_source
-        self._resumed = resumed
-
-    def source_id_by_hash(self, notebook_id, digest):
-        return self._hash_to_source.get(digest)
-
-    def kg_covered_source_ids(self, notebook_id):
-        return set()
-
-    def sources_with_elements(self, notebook_id):
-        return set(self._resumed)
-
-    def has_scale_index(self, notebook_id):
-        return False
-
-
-class _RunAllConcurrencyRepo:
-    def __init__(self, llm, embed, hash_to_source, resumed, source_max):
-        self.settings = SimpleNamespace(
-            kg_auto_extract=False,
-            kg_incremental_fusion_enabled=True,
-            kg_job_concurrency=3,
-            kg_extract_workers=3,
-            embed_concurrency=3,
-        )
-        self.maintenance = _RunAllMaintenance(hash_to_source, resumed)
-        self._llm = llm
-        self._embed = embed
-        self._source_max = source_max
-        self._source_lock = threading.Lock()
-        self._source_release = threading.Event()
-        self.source_active = 0
-        self.source_peak = 0
-
-    def _model_work(self, source_id):
-        with self._source_lock:
-            self.source_active += 1
-            self.source_peak = max(self.source_peak, self.source_active)
-            if self.source_active == self._source_max:
-                self._source_release.set()
-        try:
-            if not self._source_release.wait(timeout=1):
-                raise AssertionError("source job pool did not reach configured maximum")
-            state = current_model_concurrency()
-            assert state is not None
-            LimitedJsonChatClient(self._llm, state.llm).chat_json([], "{}")
-            state.embedding.run(self._embed.embed, task_prefix="emb-el")
-            return SimpleNamespace(id=source_id)
-        finally:
-            with self._source_lock:
-                self.source_active -= 1
-
-    def process_source(self, source_id):
-        return self._model_work(source_id)
-
-    def extract_source(self, source_id):
-        return self._model_work(source_id)
-
-    def upload_sources(self, notebook_id, files, scheduler=None):
-        assert scheduler is not None
-        for index, _file in enumerate(files):
-            scheduler(f"src-new-{index}")
-        return []
-
-    def rebuild_unified_kg(
-        self, notebook_id, progress=None, force=False, fresh=False
-    ):
-        return 0
-
-    def get_notebook(self, notebook_id):
-        return SimpleNamespace(tier="personal")
-
-
-def test_run_all_scope_keeps_source_llm_and_embedding_peaks_independent(
-    tmp_path, monkeypatch
-):
-    files = []
-    resumed = set()
-    hash_to_source = {}
-    for index in range(16):
-        path = tmp_path / f"source-{index}.md"
-        path.write_text(f"# Source {index}\n\nunique body {index}", encoding="utf-8")
-        files.append(path)
-        if index < 4:
-            source_id = f"src-resume-{index}"
-            resumed.add(source_id)
-            hash_to_source[bi.sha256_bytes(path.read_bytes())] = source_id
-
-    llm = _PeakRecorder()
-    embed = _PeakRecorder()
-    repo = _RunAllConcurrencyRepo(
-        llm, embed, hash_to_source, resumed, source_max=8
-    )
-    effective = bi.EffectiveConcurrency(
-        workers=8,
-        llm=6,
-        embedding=2,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
-    )
-    monkeypatch.setattr(
-        bi, "backfill_node_embeddings", lambda repo, notebook_id, conc: 0
-    )
-
-    with bi._batch_concurrency_scope(repo, effective) as state:
-        result = bi.run_all(
-            repo,
-            "nb-run-all-peak",
-            files,
-            conc=effective.embedding,
-            report_interval=0,
-        )
-        llm_snapshot = state.llm.snapshot()
-        embed_snapshot = state.embedding.snapshot()
-        from app.services.kg import scheduler as kg_scheduler
-        assert kg_scheduler.job_concurrency() == 8
-        assert kg_scheduler.max_workers() == 6
-
-    assert result["new"] == 12
-    assert result["resumed"] == 4
-    assert result["extracted"] == 16
-    assert result["failed"] == 0
-    assert repo.source_peak == 8
-    assert llm.peak == 6
-    assert embed.peak == 2
-    assert llm_snapshot.active == llm_snapshot.waiting == 0
-    assert embed_snapshot.active == embed_snapshot.waiting == 0
-
-
-def test_batch_scope_restore_failure_does_not_mask_phase_error(
-    repo, monkeypatch, capsys
-):
-    from app.services.kg import scheduler
-
-    effective = bi.EffectiveConcurrency(
-        workers=2,
-        llm=2,
-        embedding=1,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
-    )
-    real_configure = scheduler.configure
-    calls = 0
-
-    def flaky_configure(**kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise RuntimeError("restore failed")
-        return real_configure(**kwargs)
-
-    monkeypatch.setattr(scheduler, "configure", flaky_configure)
-    try:
-        with pytest.raises(ValueError, match="phase failed"):
-            with bi._batch_concurrency_scope(repo, effective):
-                raise ValueError("phase failed")
-        assert "failed to restore KG scheduler" in capsys.readouterr().err
-    finally:
-        scheduler.reset()
-
-
-def test_batch_scope_install_failure_restores_settings_and_scheduler(
-    repo, monkeypatch
-):
-    from app.services.kg import scheduler
-    from app.services.model_concurrency import current_model_concurrency
-
-    old_settings = (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    )
-    old_window = scheduler.max_workers()
-    old_job = scheduler.job_concurrency()
-    effective = bi.EffectiveConcurrency(
-        workers=7,
-        llm=5,
-        embedding=2,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
-    )
-    real_configure = scheduler.configure
-    calls = 0
-
-    def fail_install_once(**kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("install failed")
-        return real_configure(**kwargs)
-
-    monkeypatch.setattr(scheduler, "configure", fail_install_once)
-
-    with pytest.raises(RuntimeError, match="install failed"):
-        with bi._batch_concurrency_scope(repo, effective):
-            pytest.fail("phase must not start when scheduler installation fails")
-
-    assert calls == 2
-    assert current_model_concurrency() is None
-    assert scheduler.max_workers() == old_window
-    assert scheduler.job_concurrency() == old_job
-    assert (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    ) == old_settings
-
-
-def test_batch_scope_activation_failure_restores_settings_and_scheduler(
-    repo, monkeypatch
-):
-    from app.services.kg import scheduler
-    from app.services.model_concurrency import current_model_concurrency
-
-    old_settings = (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    )
-    old_window = scheduler.max_workers()
-    old_job = scheduler.job_concurrency()
-    effective = bi.EffectiveConcurrency(
-        workers=7,
-        llm=5,
-        embedding=2,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
-    )
-    real_configure = scheduler.configure
-    configure_calls = []
-
-    class _FailingActivation:
-        def __enter__(self):
-            raise RuntimeError("activation failed")
-
-        def __exit__(self, *exc):
-            return False
-
-    def tracked_configure(**kwargs):
-        configure_calls.append(kwargs)
-        return real_configure(**kwargs)
-
-    monkeypatch.setattr(scheduler, "configure", tracked_configure)
-    monkeypatch.setattr(
-        bi,
-        "activate_model_concurrency",
-        lambda **_kwargs: _FailingActivation(),
-    )
-
-    with pytest.raises(RuntimeError, match="activation failed"):
-        with bi._batch_concurrency_scope(repo, effective):
-            pytest.fail("phase must not start when model activation fails")
-
-    assert current_model_concurrency() is None
-    assert configure_calls == [
-        {"window_workers": 5, "job_workers": 7},
-        {"window_workers": old_window, "job_workers": old_job},
-    ]
-    assert (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    ) == old_settings
-
-
-def test_batch_scope_settings_restore_failure_does_not_mask_phase_error(
-    repo, monkeypatch, capsys
-):
-    from app.services.kg import scheduler
-
-    old_settings = (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    )
-    effective = bi.EffectiveConcurrency(
-        workers=7,
-        llm=5,
-        embedding=2,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
-    )
-    settings_type = type(repo.settings)
-    real_setattr = settings_type.__setattr__
-    real_configure = scheduler.configure
-    configure_calls = []
-
-    def fail_job_restore(settings, name, value):
-        if (
-            settings is repo.settings
-            and name == "kg_job_concurrency"
-            and value == old_settings[0]
-        ):
-            raise RuntimeError("settings restore failed")
-        return real_setattr(settings, name, value)
-
-    def tracked_configure(**kwargs):
-        configure_calls.append(kwargs)
-        return real_configure(**kwargs)
-
-    monkeypatch.setattr(settings_type, "__setattr__", fail_job_restore)
-    monkeypatch.setattr(scheduler, "configure", tracked_configure)
-    try:
-        with pytest.raises(ValueError, match="phase failed"):
-            with bi._batch_concurrency_scope(repo, effective):
-                raise ValueError("phase failed")
-
-        assert len(configure_calls) == 2
-        assert repo.settings.kg_extract_workers == old_settings[1]
-        assert repo.settings.embed_concurrency == old_settings[2]
-        assert "failed to restore batch setting kg_job_concurrency" in (
-            capsys.readouterr().err
-        )
-    finally:
-        real_setattr(repo.settings, "kg_job_concurrency", old_settings[0])
-        scheduler.reset()
-
-
-def test_batch_scope_settings_restore_failure_surfaces_after_success(
-    repo, monkeypatch
-):
-    from app.services.kg import scheduler
-
-    old_workers = repo.settings.kg_job_concurrency
-    effective = bi.EffectiveConcurrency(
-        workers=7,
-        llm=5,
-        embedding=2,
-        workers_source="cli",
-        llm_source="cli",
-        embedding_source="cli",
-    )
-    settings_type = type(repo.settings)
-    real_setattr = settings_type.__setattr__
-    real_configure = scheduler.configure
-    configure_calls = []
-
-    def fail_job_restore(settings, name, value):
-        if (
-            settings is repo.settings
-            and name == "kg_job_concurrency"
-            and value == old_workers
-        ):
-            raise RuntimeError("settings restore failed")
-        return real_setattr(settings, name, value)
-
-    def tracked_configure(**kwargs):
-        configure_calls.append(kwargs)
-        return real_configure(**kwargs)
-
-    monkeypatch.setattr(settings_type, "__setattr__", fail_job_restore)
-    monkeypatch.setattr(scheduler, "configure", tracked_configure)
-    try:
-        with pytest.raises(RuntimeError, match="settings restore failed"):
-            with bi._batch_concurrency_scope(repo, effective):
-                pass
-
-        assert len(configure_calls) == 2
-    finally:
-        real_setattr(repo.settings, "kg_job_concurrency", old_workers)
-        scheduler.reset()
-
-
-def test_main_prints_effective_concurrency(
+def test_main_prints_only_business_orchestration_concurrency(
     repo, monkeypatch, capsys
 ):
     nb_id = bi.ensure_notebook(repo, None, "nb-effective-concurrency")
-    monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(
         bi,
         "run_reparse",
@@ -1405,110 +1114,25 @@ def test_main_prints_effective_concurrency(
         nb_id,
         "--workers",
         "32",
-        "--llm-conc",
-        "24",
-        "--embed-conc",
-        "4",
-        "--allow-no-embed",
         "--no-rebuild",
     ])
 
     assert rc == 0
-    assert (
-        "concurrency: source=32(cli) llm=24(cli) embedding=4(cli)"
-        in capsys.readouterr().out
-    )
+    assert "concurrency: source=32(cli)" in capsys.readouterr().out
     manifest = Path(repo.storage_dir) / "batch_ingest" / f"{nb_id}.jsonl"
     event = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])
     event.pop("ts")
     assert event == {
         "phase": "concurrency",
         "workers": 32,
-        "llm": 24,
-        "embedding": 4,
         "workers_source": "cli",
-        "llm_source": "cli",
-        "embedding_source": "cli",
     }
-
-
-def test_pool_snapshot_reports_gate_truth():
-    line = bi._format_pool_snapshot(
-        "17:52:33",
-        {
-            "window_active": 7,
-            "window_max": 24,
-            "job_active": 29,
-            "job_max": 32,
-        },
-        llm=ConcurrencySnapshot(active=23, maximum=24, waiting=5),
-        embedding=ConcurrencySnapshot(active=4, maximum=4, waiting=18),
-        done=5,
-        total=40,
-    )
-    assert "LLM 23/24 waiting=5" in line
-    assert "embedding 4/4 waiting=18" in line
-    assert "source 29/32" in line
-    assert "源完成 5/40" in line
-
-
-def test_pool_reporter_emits_gate_truth(monkeypatch):
-    from app.services.kg import scheduler
-
-    llm_snapshot = ConcurrencySnapshot(active=3, maximum=5, waiting=7)
-    embedding_snapshot = ConcurrencySnapshot(active=2, maximum=2, waiting=11)
-
-    class _Gate:
-        def __init__(self, snapshot):
-            self._snapshot = snapshot
-
-        def snapshot(self):
-            return self._snapshot
-
-    class _State:
-        llm = _Gate(llm_snapshot)
-        embedding = _Gate(embedding_snapshot)
-
-    events = []
-    reporter = bi._PoolReporter(interval=1, total=9, log=events.append)
-    waits = iter([False, True])
-    monkeypatch.setattr(reporter._stop, "wait", lambda _interval: next(waits))
-    monkeypatch.setattr(bi, "current_model_concurrency", lambda: _State())
-    monkeypatch.setattr(
-        scheduler,
-        "stats",
-        lambda: {
-            "window_active": 4,
-            "window_max": 5,
-            "job_active": 6,
-            "job_max": 8,
-        },
-    )
-
-    reporter._loop()
-
-    assert events == [{
-        "phase": "pool",
-        "window_active": 4,
-        "window_max": 5,
-        "job_active": 6,
-        "job_max": 8,
-        "llm_active": 3,
-        "llm_max": 5,
-        "llm_waiting": 7,
-        "embed_active": 2,
-        "embed_max": 2,
-        "embed_waiting": 11,
-        "done": 0,
-        "total": 9,
-        "label": "",
-    }]
 
 
 def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     """run_all per-source 流水线:每个新文件建 source + 走 process_source 抽取(extracted=N),
     末尾一次 rebuild_unified_kg。强制 kg_auto_extract 让 process_source 走到 extract。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())   # configured=True → 走 extract 分支
+    _bind_chat(repo, "kg_extract", _StubLLM())
     d = _make_md_dir(tmp_path, n=2)                        # 2 个 docN.md + 1 个 nested.md = 3
     nb_id = bi.ensure_notebook(repo, None, "nb-all")
     extracted = []
@@ -1516,9 +1140,9 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     rebuild_calls = []
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: (rebuild_calls.append(nb), 5)[1])
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
 
-    res = bi.run_all(repo, nb_id, bi.iter_files(d), conc=2)
+    res = bi.run_all(repo, nb_id, bi.iter_files(d))
 
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
@@ -1531,46 +1155,10 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     assert rebuild_calls == [nb_id]               # 末尾恰好一次 rebuild
 
 
-def test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc(
-    repo, tmp_path, monkeypatch
-):
-    """run_all 不自行重配 scheduler；批次 controller 统一安装 source/LLM 上限。
-    run_all 自己临时覆盖的 embed_concurrency 仍须 finally 恢复。"""
-    from app.services.kg import scheduler as _sched
-
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
-    d = _make_md_dir(tmp_path, n=1)
-    nb_id = bi.ensure_notebook(repo, None, "nb-flags")
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
-    monkeypatch.setattr(repo, "rebuild_unified_kg",
-                        lambda nb, progress=None, force=False, fresh=False: 0)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
-
-    configure_calls = []
-    monkeypatch.setattr(_sched, "configure",
-                        lambda **kw: configure_calls.append(kw))
-    seen_embed_conc = {}
-    real_rebuild = repo.rebuild_unified_kg
-
-    def _spy_rebuild(nb, progress=None, force=False, fresh=False):  # rebuild 在 try 内 → 此刻应已被覆盖为 conc
-        seen_embed_conc["during"] = repo.settings.embed_concurrency
-        return real_rebuild(nb, progress=progress, force=force, fresh=fresh)
-    monkeypatch.setattr(repo, "rebuild_unified_kg", _spy_rebuild)
-
-    orig_embed_conc = repo.settings.embed_concurrency
-    try:
-        bi.run_all(repo, nb_id, bi.iter_files(d), conc=7)
-        assert configure_calls == []
-        assert seen_embed_conc["during"] == 7        # try 内 embed_concurrency 被设为 conc
-        assert repo.settings.embed_concurrency == orig_embed_conc       # finally 恢复
-    finally:
-        _sched.reset()                               # 避免污染全局池
-
-
 def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
     """已 parse(有 source_elements)、无 KG 的 source 走 extract_source 补抽,不重复新建。
     对照 test_run_all_reparses_existing_source_missing_elements:无 elements 的源才 reparse。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-resume")
     d = tmp_path / "docs"
     d.mkdir()
@@ -1601,9 +1189,9 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
     # 有 elements → 全部走 resume(extract_source);process_source 不应被调用
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
 
-    res = bi.run_all(repo, nb_id, files, conc=2)
+    res = bi.run_all(repo, nb_id, files)
 
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
@@ -1655,16 +1243,15 @@ def test_run_index_prints_stage_timings(repo, monkeypatch, capsys):
     assert "  [index] total: 40ms" in out
 
 
-def test_main_index_stays_outside_model_concurrency_scope(
-    repo, monkeypatch
-):
+def test_main_index_does_not_reconfigure_kg_scheduler(repo, monkeypatch):
+    from app.services.kg import scheduler
+
     nb_id = bi.ensure_notebook(repo, None, "nb-index-no-model-scope")
     seen = []
-
-    def forbidden_scope(*_args, **_kwargs):
-        raise AssertionError("index must not activate model concurrency")
-
-    monkeypatch.setattr(bi, "_batch_concurrency_scope", forbidden_scope)
+    configure_calls = []
+    monkeypatch.setattr(
+        scheduler, "configure", lambda **kwargs: configure_calls.append(kwargs)
+    )
     monkeypatch.setattr(
         bi,
         "run_index",
@@ -1678,7 +1265,7 @@ def test_main_index_stays_outside_model_concurrency_scope(
 
     assert rc == 0
     assert seen == [("user-local", nb_id)]
-    assert current_model_concurrency() is None
+    assert configure_calls == []
 
 
 # --- vectors-to-blob backfill CLI --------------------------------------------
@@ -1802,7 +1389,7 @@ def test_backfill_table_to_blob_malformed_row_does_not_loop_forever(repo):
 def test_run_vectors_to_blob_covers_all_embeddings_tables(repo, tmp_path, capsys):
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=1)  # chunk_embeddings via real path (BLOB already)
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1)  # chunk_embeddings via real path (BLOB already)
     _seed_node(repo, nb_id, "ko-1")
     _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
 
@@ -1919,7 +1506,6 @@ def test_main_vectors_to_blob_does_not_require_embedder_configured(repo, tmp_pat
     _seed_node(repo, nb_id, "ko-1")
     _seed_json_vector(repo, "knowledge_embeddings", "object_id", "ko-1", nb_id)
 
-    monkeypatch.setenv("EMBED_PROVIDER", "")  # main() builds a fresh unconfigured repo
     rc = bi.main(["vectors-to-blob", "--notebook-id", nb_id])
     assert rc == 0
     with repo._connect() as db:
@@ -2268,7 +1854,6 @@ def test_main_backfill_source_index_does_not_require_embedder_configured(repo, m
     nb_id = bi.ensure_notebook(repo, None, "nb")
     _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
 
-    monkeypatch.setenv("EMBED_PROVIDER", "")  # main() builds a fresh unconfigured repo
     rc = bi.main(["backfill-source-index", "--notebook-id", nb_id])
     assert rc == 0
     with repo._connect() as db:
@@ -2326,7 +1911,7 @@ def test_kg_fresh_alone_forces_rebuild(repo, monkeypatch):
 def test_run_all_fresh_flag_forces_rebuild(repo, monkeypatch, tmp_path):
     """同款漏洞回归,但对 run_all:其末尾 rebuild 调用原先硬编码 force=False,加 fresh 后
     必须变成 force=fresh,否则 --fresh 对 all 阶段也是假 no-op。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     d = _make_md_dir(tmp_path, n=1)
     nb_id = bi.ensure_notebook(repo, None, "nb-all-fresh")
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
@@ -2336,9 +1921,9 @@ def test_run_all_fresh_flag_forces_rebuild(repo, monkeypatch, tmp_path):
         seen["fresh"] = fresh
         return 0
     monkeypatch.setattr(repo, "rebuild_unified_kg", _fake_rebuild)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
 
-    bi.run_all(repo, nb_id, bi.iter_files(d), conc=1, fresh=True)
+    bi.run_all(repo, nb_id, bi.iter_files(d), fresh=True)
 
     assert seen == {"force": True, "fresh": True}
 
@@ -2355,7 +1940,6 @@ def test_main_kg_fresh_dispatches_force_and_fresh(repo, monkeypatch):
     fresh=True。main() 内部自建新 repo 实例,故按 test_main_all_ingests_then_runs_kg 的
     惯例在 SQLiteRepository 类级打桩(而非 fixture 的 repo 实例)。"""
     nb_id = bi.ensure_notebook(repo, None, "nb-cli-fresh")
-    monkeypatch.setenv("EMBED_PROVIDER", "")   # main 自建 repo → embedder 未配,--allow-no-embed 绕过
     seen = {}
     def _fake_rebuild(self, nb, progress=None, force=False, fresh=False):
         seen["force"] = force
@@ -2447,18 +2031,10 @@ class _FakeMetaLLM:
         return json.dumps(_META_PAYLOAD)
 
 
-def _patch_fake_llm(monkeypatch) -> _FakeMetaLLM:
-    """main() 内部自建新 SQLiteRepository 实例,其 RuntimeModelProvider 在
-    __init__ 里无条件构造 system 主 client = OpenAICompatibleClient(settings)
-    (kg/reasoning/rewrite 各自的专属 client 视 *_configured 决定是否再构造一个,
-    否则回落到这个 system 主 client)。故在工厂类级打桩,而非 fixture 的 repo
-    实例属性——镜像 test_main_embed_end_to_end_zeroes_missing 对 make_embedder
-    的做法(instance 级属性对 main() 自建的实例不可见)。同一 fake 会同时顶替
-    repo.llm_client 与 repo.kg_llm_client 的解析结果(system 回落链),两个都
-    configured=True,足以通过 run_metadata 的门控并支撑实际抽取调用。"""
+def _patch_fake_llm(repo) -> _FakeMetaLLM:
+    """Bind the exact system workload used by paper metadata backfill."""
     fake = _FakeMetaLLM()
-    monkeypatch.setattr("app.services.model_provider.OpenAICompatibleClient",
-                        lambda settings, **kw: fake)
+    _bind_chat(repo, "paper_metadata", fake)
     return fake
 
 
@@ -2488,10 +2064,17 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
     service = repo._runtime.source_ingestion
     source_ids = [f"src-meta-{i}" for i in range(12)]
     repo.settings.kg_job_concurrency = 12
-    repo.settings.kg_extract_workers = 3
+    repo._runtime.models.parallelism_by_workload = {
+        **repo._runtime.models.parallelism_by_workload,
+        "paper_metadata": 3,
+    }
     lock = threading.Lock()
     active = 0
     peak = 0
+    # 结构性判据：模型 workload 绑定的服务并行度为 3，因此同时只能有
+    # 3 个 metadata producer 到达 barrier；容量只来自服务配置。
+    barrier = threading.Barrier(3, timeout=10)
+    barrier_broke = threading.Event()
 
     monkeypatch.setattr(
         service.sources,
@@ -2512,13 +2095,19 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
         service, "_notify_paper_meta_done", lambda *args, **kwargs: None
     )
 
-    def ensure(source, force=False):
+    def ensure(source, force=False, client=None):
         nonlocal active, peak
         with lock:
             active += 1
             peak = max(peak, active)
         try:
-            time.sleep(0.04)
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                # 并发度不足 12(或第一个到齐者已超时把 barrier 打破)。记标志后
+                # 正常返回,让剩下的 worker 立即穿过已破的 barrier —— 测试干净地
+                # 红在下面的断言上,而不是挂住。
+                barrier_broke.set()
             return "stored"
         finally:
             with lock:
@@ -2527,9 +2116,13 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
     monkeypatch.setattr(service, "ensure_paper_metadata", ensure)
     counts = service.backfill_paper_metadata(nb_id)
 
+    assert not barrier_broke.is_set(), (
+        "3 个 worker 没能同时在途 —— paper_metadata 未使用服务并行度 "
+        f"3（最高只观察到 {peak} 路同时活动）"
+    )
     assert counts["total"] == 12
     assert counts["stored"] == 12
-    assert peak == 12
+    assert peak == 3
 
 
 def test_metadata_phase_requires_llm(repo, capsys):
@@ -2540,12 +2133,12 @@ def test_metadata_phase_requires_llm(repo, capsys):
     rc = bi.main(["metadata", "--notebook-id", nb_id])
 
     assert rc == 2
-    assert "LLM 未配置" in capsys.readouterr().err
+    assert "paper_metadata workload 未绑定模型服务" in capsys.readouterr().err
 
 
 def test_metadata_phase_requires_notebook(repo, monkeypatch, capsys):
     """LLM 已配但未给 --notebook-id → 返回 2,且绝不新建 notebook。"""
-    _patch_fake_llm(monkeypatch)
+    _patch_fake_llm(repo)
     with repo._connect() as db:
         before = db.execute("SELECT COUNT(*) c FROM notebooks").fetchone()["c"]
 
@@ -2561,7 +2154,7 @@ def test_metadata_phase_requires_notebook(repo, monkeypatch, capsys):
 def test_metadata_phase_backfills(repo, monkeypatch, capsys):
     """FakeLLM + 2 个缺 meta 源 → 返回 0;两源 get_paper_meta 非 None;再跑一次
     (幂等续跑)输出 total 0。"""
-    _patch_fake_llm(monkeypatch)
+    _patch_fake_llm(repo)
     nb_id = bi.ensure_notebook(repo, None, "nb-meta")
     _insert_meta_source(repo, nb_id, "src-1")
     _insert_meta_source(repo, nb_id, "src-2")
@@ -2584,8 +2177,7 @@ def test_metadata_phase_backfills(repo, monkeypatch, capsys):
 def test_metadata_phase_does_not_require_embedding_provider(
     repo, monkeypatch, capsys
 ):
-    _patch_fake_llm(monkeypatch)
-    monkeypatch.setenv("EMBED_PROVIDER", "")
+    _patch_fake_llm(repo)
     nb_id = bi.ensure_notebook(repo, None, "nb-meta-no-embed")
     _insert_meta_source(repo, nb_id, "src-no-embed")
 
@@ -2597,7 +2189,7 @@ def test_metadata_phase_does_not_require_embedding_provider(
 
 def test_metadata_phase_force(repo, monkeypatch, capsys):
     """--force → 已有元数据行的源也重抽(fake.calls 增加)。"""
-    fake = _patch_fake_llm(monkeypatch)
+    fake = _patch_fake_llm(repo)
     nb_id = bi.ensure_notebook(repo, None, "nb-meta")
     _insert_meta_source(repo, nb_id, "src-1")
     rc = bi.main(["metadata", "--notebook-id", nb_id])
@@ -2616,7 +2208,7 @@ def test_run_all_reparses_existing_source_missing_elements(repo, tmp_path, monke
     重新 parse 补 elements,而不是 extract_source 空抽。否则 build_records 的接地校验没有
     elements 可对照 → 每个 LLM 抽出的节点被丢弃 → objects=0(kg-ingest-count 根因)。
     行为证据:跑完后该源真的有了 elements(reparse 执行了 parse),而非停留在 0。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-reparse")
     d = tmp_path / "docs"
     d.mkdir()
@@ -2636,9 +2228,9 @@ def test_run_all_reparses_existing_source_missing_elements(repo, tmp_path, monke
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
 
-    res = bi.run_all(repo, nb_id, [p], conc=1)
+    res = bi.run_all(repo, nb_id, [p])
 
     assert res["new"] == 0 and res["resumed"] == 0 and res["reparsed"] == 1
     with repo._connect() as db:  # reparse 真的 parse 了 .md → 有 elements(不是空抽)
@@ -2650,7 +2242,7 @@ def test_run_all_reparses_existing_source_missing_elements(repo, tmp_path, monke
 def test_run_reparse_only_targets_sources_missing_elements(repo, tmp_path, monkeypatch):
     """reparse 子命令:只对 n_el=0(未成功 parse)的存量源重跑 process_source 补 elements,
     已有 elements 的源跳过。修复历史 run_all 分流把无-elements 源空抽(objects=0)的存量数据。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-reparse-cmd")
     now = "2026-01-01T00:00:00"
     d = tmp_path / "docs"
@@ -2671,9 +2263,9 @@ def test_run_reparse_only_targets_sources_missing_elements(repo, tmp_path, monke
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
 
-    res = bi.run_reparse(repo, nb_id, conc=1)
+    res = bi.run_reparse(repo, nb_id)
 
     assert res["reparsed"] == 1                    # 只有 src-a(无 elements)被 reparse
     with repo._connect() as db:
@@ -2692,7 +2284,6 @@ def test_main_reparse_requires_notebook_id(repo, capsys):
 def test_main_reparse_backfills_missing_elements(repo, tmp_path, monkeypatch):
     """reparse 子命令端到端:对无 elements 的存量源重新 parse 补 elements(LLM 未配 →
     抽取走 no-llm no-op,但 parse 真跑)。--no-rebuild 跳过收尾聚类。"""
-    monkeypatch.setenv("EMBED_PROVIDER", "")       # main 自建 repo → embedder 未配
     nb_id = bi.ensure_notebook(repo, None, "nb-rp")
     now = "2026-01-01T00:00:00"
     p = tmp_path / "a.md"
@@ -2718,7 +2309,7 @@ def test_run_reparse_disables_incremental_fusion_during_run(repo, tmp_path, monk
     """run_reparse 批量期必须关 per-source 增量融合。否则每源抽完都触发
     incremental_fuse_source(加载整库 cluster_map + 写 concept_clusters),几万源的库
     O(N²) 卡死;收尾的 rebuild_unified_kg 已做一次全量融合(同 run_all/run_kg)。结束恢复原值。"""
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    _bind_chat(repo, "kg_extract", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-fuse")
     now = "2026-01-01T00:00:00"
     p = tmp_path / "a.md"
@@ -2736,10 +2327,10 @@ def test_run_reparse_disables_incremental_fusion_during_run(repo, tmp_path, monk
         seen["fusion_during"] = repo.settings.kg_incremental_fusion_enabled
         return 0
     monkeypatch.setattr(repo, "rebuild_unified_kg", _spy_rebuild)
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
     orig = repo.settings.kg_incremental_fusion_enabled
 
-    bi.run_reparse(repo, nb_id, conc=1)
+    bi.run_reparse(repo, nb_id)
 
     assert seen["fusion_during"] is False                        # 批量期关了 per-source 融合
     assert repo.settings.kg_incremental_fusion_enabled == orig   # 结束恢复原值

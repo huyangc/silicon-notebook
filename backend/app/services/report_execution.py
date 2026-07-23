@@ -20,6 +20,8 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from app.services.model_work import ModelPriority, model_work_scope
+
 if TYPE_CHECKING:
     from app.core.config import Settings
 
@@ -94,9 +96,12 @@ class ReportExecutionCoordinator:
                         .get("depth", 2))
                 except Exception:
                     pass
-                self.engine_factory(user_id=user_id, cancel_event=cancel).run(
-                    notebook_id, report_id, question, history, depth=depth,
-                    auto_generate=auto_generate)
+                with model_work_scope(
+                    priority=ModelPriority.REPORT, parent_id=report_id
+                ):
+                    self.engine_factory(user_id=user_id, cancel_event=cancel).run(
+                        notebook_id, report_id, question, history, depth=depth,
+                        auto_generate=auto_generate)
             finally:
                 self.cancellations.unregister(report_id)
 
@@ -122,8 +127,11 @@ class ReportExecutionCoordinator:
 
         def worker():
             try:
-                self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
-                    notebook_id, report_id, question, depth=depth)
+                with model_work_scope(
+                    priority=ModelPriority.REPORT, parent_id=report_id
+                ):
+                    self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
+                        notebook_id, report_id, question, depth=depth)
             finally:
                 self.cancellations.unregister(report_id)
 

@@ -41,7 +41,6 @@ from typing import Any, Callable
 from app.repositories.knowhow_asset_refs import rendered_asset_ids
 from app.repositories.ports import KNOWHOW_COLUMN_KINDS as _STORE_KINDS
 from app.services import background_jobs
-from app.services.model_config import model_client_fingerprint
 from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column
 from app.services.knowhow.projection import KnowhowProjector
 
@@ -294,6 +293,7 @@ def import_table(
     columns_json: str,
     anchor_index: "int | None" = None,
     orientation: str = "columns",
+    actor: str = "",
 ) -> str:
     """Full import orchestration (task brief step 2): parse -> validate ->
     atomically create the table and insert every row+cell, with one
@@ -308,7 +308,13 @@ def import_table(
     GridParseError (bad file/orientation), column-validation failures
     (parse_import_columns), or the store's own name-uniqueness /
     at-most-one-anchor checks (create_knowhow_table) — routes.py's existing
-    400 idiom catches all of these uniformly."""
+    400 idiom catches all of these uniformly.
+
+    knowhow 表版本管理 Task 13: ``actor`` (the uploading user's id) is
+    threaded to every flow entry this import produces — the genesis
+    ``table_create`` AND every per-row ``row_add`` below — with
+    ``origin="import"`` so the history timeline can tell an imported table
+    apart from one built through the empty-table wizard."""
     grid = parse_grid(filename, data, orientation)
     columns = parse_import_columns(columns_json, grid, anchor_index)
     # 分组型表：anchor 列可能是"只写一次"的分组列（转置/合并型表的
@@ -350,7 +356,14 @@ def import_table(
             )
         normalized_rows.append(normalized_row)
     return repo.create_knowhow_table_with_rows(
-        notebook_id, title, "", columns, normalized_rows
+        notebook_id,
+        title,
+        "",
+        columns,
+        normalized_rows,
+        created_by=actor,
+        actor=actor,
+        origin="import",
     )
 
 
@@ -360,6 +373,7 @@ def create_table(
     title: str,
     columns: list[dict],
     anchor_index: "int | None",
+    actor: str = "",
 ) -> str:
     """Wizard backend (PR-2+3 Task 3): create an EMPTY table (no grid/rows) —
     mirrors ``import_table``'s create step minus parsing a file. ``columns``
@@ -369,9 +383,15 @@ def create_table(
     emptiness/uniqueness, the at-most-one-anchor rule, and the table title.
     Deliberately does NOT schedule a reprojection — a brand-new table has
     zero rows/cells, so there is nothing to project yet; the first row/cell
-    mutation schedules the table's first real run."""
+    mutation schedules the table's first real run.
+
+    knowhow 表版本管理 Task 13: ``actor`` (the creating user's id) is
+    threaded to the table's genesis ``table_create`` flow entry;
+    ``origin`` stays the store's own default (``"user"``) — an empty table
+    built through the wizard is an ordinary user action, unlike
+    ``import_table``'s ``origin="import"``."""
     merged = _columns_with_anchor(columns, anchor_index)
-    return repo.create_knowhow_table(notebook_id, title, "", merged)
+    return repo.create_knowhow_table(notebook_id, title, "", merged, actor=actor)
 
 
 # --- wire shaping: store `role` <-> wire `kind`, table-level anchor_column_id
@@ -854,7 +874,8 @@ def preview_append(table: dict, filename: str, data: bytes) -> dict:
 
 
 def commit_append(
-    repo: Any, table_id: str, table: dict, filename: str, data: bytes
+    repo: Any, table_id: str, table: dict, filename: str, data: bytes,
+    actor: str = "",
 ) -> int:
     """Append commit (design doc §② 路B "确认后追加导入"): re-parses and
     re-aligns the file (deliberately not trusting a client-supplied preview
@@ -907,6 +928,14 @@ def commit_append(
     # `A. Component` normalized to `**A. Component**` splits off from the
     # existing `A. Component` group even though the append preview matched them).
     batch_rows: list[dict[str, str]] = []
+    #
+    # knowhow 表版本管理 Task 13 (spec §5.4): collect every new row's cells
+    # FIRST, then hand the whole batch to ``append_knowhow_rows`` in ONE call —
+    # this is what makes the batch land as a SINGLE ``import_append`` flow
+    # entry instead of one ``row_add`` per row (the old per-row
+    # ``add_knowhow_row`` loop this replaced produced exactly that noise, and
+    # left the revert engine's ``import_append`` branch of ``_apply_before``
+    # permanently unreachable — see ``KnowhowStore.add_knowhow_rows``).
     for aligned_row in aligned_rows:
         cells = {}
         for i, value in enumerate(aligned_row):
@@ -917,7 +946,9 @@ def commit_append(
                 else md_normalize.safe_rule_normalize(value)[0]
             )
         batch_rows.append(cells)
-    repo.append_knowhow_rows(table_id, batch_rows)
+    repo.append_knowhow_rows(
+        table_id, batch_rows, actor=actor, origin="import"
+    )
     return len(aligned_rows)
 
 
@@ -937,7 +968,7 @@ def commit_append(
 # test_repository_callers_static.py/test_repository_surface_manifest.py;
 # inserting anything ABOVE them would shift those pins. This section needs
 # its OWN, SECOND `_runtime` reach (repo._runtime.models, to resolve the
-# per-user rewrite LLM client + note_model_error) — registered as a new,
+# system-managed workload client + note_model_error) — registered as a new,
 # separate entry in both guards (see task-8-report-pr23.md), not folded into
 # the existing build_projector registration.
 
@@ -986,9 +1017,8 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     的共享后端。**显式触发、suggestion-only、绝不写库**——回填走既有 PATCH cell
     端点（那才触发重投影）。是本特性唯一的新增 LLM 调用。
 
-    走 notebook 既有 LLM 配置（``repo._runtime.models.rewrite_llm_client``，
-    已含 per-user 模型配置解析——不同用户可各自配置改写模型），``cap_kwargs``
-    复用全局生成 max_tokens 上限（不新增专属预算旋钮——效率一等约束）。失败经
+    通过系统统一模型提供者解析 ``knowhow_optimize`` workload，``cap_kwargs``
+    复用该服务的生成 token 上限。失败经
     ``repo._runtime.models.note_model_error`` 走既有 model_error 可观测链路
     （events.jsonl；本调用不在 ask 上下文内，L2 sink 不适用，仅 L1 emit）。
 
@@ -1001,15 +1031,14 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     bad response) AFTER logging it via ``note_model_error`` (502) — routes.py
     maps each to its own status code."""
     from app.core.llm import cap_kwargs
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     if not content_md.strip():
         raise ValueError("格子为空，无需优化")
     models = repo._runtime.models  # type: ignore[attr-defined]
-    client = models.rewrite_llm_client
+    client = models.chat("knowhow_optimize")
     if not client.configured:
         raise ModelNotConfiguredError("尚未配置模型，无法优化表达")
-    model_label = getattr(client, "model", "") or ""
     try:
         raw = client.chat_json(
             [{"role": "user", "content": _optimize_cell_prompt(content_md, column_name, kind)}],
@@ -1025,12 +1054,7 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
         raise
     except Exception as exc:
         models.note_model_error(
-            "knowhow_optimize",
-            model_label,
-            exc,
-            service="rewrite_llm",
-            provider_failure=True,
-            failed_fingerprint=model_client_fingerprint(client),
+            "knowhow_optimize", exc, workload_id="knowhow_optimize"
         )
         raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
 
@@ -1095,13 +1119,11 @@ def llm_reformat(client: Any, content_md: str, column_name: str, kind: str) -> "
     内容」区分 rule/no-llm 与 rule/llm-failed，详见那边的 except 分支与顶部
     docstring。
 
-    ``client`` 由调用方（``reformat_cell``）解析好后传入，而不是在这里再从
-    ``repo._runtime.models`` 重新取一次——``rewrite_llm_client`` 是走 per-user
-    模型配置解析的 property（见 model_provider.py），避免同一次 reformat_cell
-    调用里把它解析两遍，也让本文件新增的 `_runtime` 私有面 reach 只多一个
-    落点（在 reformat_cell 里）而不是两个。"""
+    ``client`` 由调用方（``reformat_cell``）按 ``knowhow_reformat`` workload
+    解析好后传入，避免同一次调用重复解析，也让本文件新增的 ``_runtime``
+    私有面 reach 只多一个落点（在 reformat_cell 里）而不是两个。"""
     from app.core.llm import cap_kwargs
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     try:
         prompt = _reformat_cell_prompt(content_md, column_name, kind)
@@ -1125,12 +1147,10 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
     ``{"llm", "rule/llm-failed", "rule/no-llm"}``。**从不写库**（suggestion-
     only，与 optimize_cell 同规矩——回填走既有 PATCH cell 端点，那才触发重投影）。
 
-    ``rule/llm-failed`` vs ``rule/no-llm`` 不能只靠 client-None 判定区分：生产
-    环境 ``repo._runtime.models.rewrite_llm_client`` 从不是 None——未配置时
-    ``model_provider.py``(``_llm_for_role``)要么返回一个 ``.configured=False``
-    的哨兵（``chat_json`` 抛 ``ModelNotConfiguredError``），要么回退到系统
-    client（同样可能 ``.configured=False``，``chat_json`` 抛普通
-    ``RuntimeError``）。两种未配置形状都必须落 rule/no-llm，因此这里双重把关
+    ``rule/llm-failed`` vs ``rule/no-llm`` 不能只靠 client-None 判定区分：系统
+    provider 对未绑定的 ``knowhow_reformat`` workload 返回
+    ``.configured=False`` 的哨兵，也可能在调用时抛
+    ``ModelNotConfiguredError``。两种未配置形状都必须落 rule/no-llm，因此这里双重把关
     （belt-and-suspenders，两个都留着——见下方两处判定各自覆盖的用例）：
     ①前置 ``.configured`` 判定挡住「未配置且如实暴露 .configured=False」的
     形状，压根不调 LLM；②包一层 ``except ModelNotConfiguredError`` 兜底挡住
@@ -1138,12 +1158,12 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
     ``configured=False`` 已经会被①挡住，②纯粹是防御性兜底）。除此之外的任何
     异常（网络/超时/JSON 解析失败）或校验不过都仍是真的调了 LLM、只是结果不能
     用 → rule/llm-failed，不受这次改动影响。"""
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     raw = content_md or ""
     if not raw.strip():
         return {"candidate_md": raw, "source": "rule/no-llm", "changed": False}
-    client = getattr(repo._runtime.models, "rewrite_llm_client", None)
+    client = repo._runtime.models.chat("knowhow_reformat")
     if client is None or not getattr(client, "configured", True):
         cand = md_normalize.rule_normalize(raw)
         return {"candidate_md": cand, "source": "rule/no-llm", "changed": cand != raw}
@@ -1400,7 +1420,7 @@ def get_cell_code(repo: Any, row_id: str, column_id: str) -> dict:
 
 def put_cell_code(
     repo: Any, row_id: str, column_id: str, code_text: str, language: str,
-    updated_by: str,
+    updated_by: str, origin: str = "user",
 ) -> dict:
     """PUT .../cells/{col}/code service core (design doc §⑥-4): computes and
     stores ``cell_content_hash`` at save time from the CURRENT cell's net
@@ -1408,7 +1428,26 @@ def put_cell_code(
     projector's background debounce means the two can transiently differ
     right after an edit). Raises ``ValueError`` for blank ``code_text``
     ("代码内容不能为空") or a cross-table (row, column) pair
-    ("格子定位不合法"), ``KeyError`` for an unknown row."""
+    ("格子定位不合法"), ``KeyError`` for an unknown row.
+
+    knowhow 表版本管理 Task 13: ``updated_by`` (already resolved by both
+    callers — the HTTP agent route's ``RequestActor.actor_label``, the MCP
+    tool's ``principal.profile_name``) doubles as the flow entry's
+    ``actor`` — both express the same "who wrote this" concept, so no new
+    parameter/plumbing is needed on top of what already existed here.
+
+    ``origin`` (Task 13 code review fix): defaults to ``"user"`` for
+    backward compatibility, but every ACTUAL caller of this function is the
+    agent surface (HTTP ``knowhow_agent_routes.py`` and the MCP tool in
+    ``mcp_server.py`` — there is no session-facing PUT-code endpoint at all),
+    so leaving this at its default silently mislabels every code write as a
+    human "user" edit. Callers should pass ``origin="agent"`` (HTTP: when
+    ``actor.is_agent`` — a session caller writing through the SAME
+    dual-mode route is still a real "user"; MCP: unconditionally, since the
+    whole MCP surface is Agent-Bearer-only) so ``VALID_ORIGINS``'s
+    ``"agent"`` value — defined since Task 12 but never once produced before
+    this fix — actually gets used, matching this feature's own "honest
+    badge, never a silent default" contract (``models/knowhow.py``)."""
     if not str(code_text or "").strip():
         raise ValueError("代码内容不能为空")
     location = repo.get_knowhow_row_location(row_id)
@@ -1422,23 +1461,31 @@ def put_cell_code(
     content_hash = cell_content_hash(row["cells"].get(column_id, ""))
     repo.upsert_knowhow_cell_code(
         row_id, column_id, code_text, language or "", updated_by, content_hash,
+        actor=updated_by, origin=origin,
     )
     attachment = repo.get_knowhow_cell_code(row_id, column_id)
     return cell_code_view(row["cells"], column_id, attachment)
 
 
-def delete_cell_code(repo: Any, row_id: str, column_id: str) -> None:
+def delete_cell_code(
+    repo: Any, row_id: str, column_id: str, actor: str = "", origin: str = "user",
+) -> None:
     """DELETE .../cells/{col}/code service core. Idempotent (the store's own
     delete is a silent no-op when nothing exists to delete) — but an unknown
     ROW or a cross-table (row, column) pair still fails loud (``KeyError``/
     ``ValueError``), consistent with every other cell-scoped endpoint's
     validation, rather than silently no-op-ing an address that was never
-    valid in the first place."""
+    valid in the first place.
+
+    ``origin`` (Task 13 code review fix): same rationale as ``put_cell_
+    code``'s own — this function's only caller is the agent surface's
+    DELETE route, so it should pass ``origin="agent"``/``"user"`` based on
+    ``actor.is_agent`` rather than silently riding the default."""
     location = repo.get_knowhow_row_location(row_id)
     if location is None:
         raise KeyError(row_id)
     repo.validate_cell_target(row_id, column_id)
-    repo.delete_knowhow_cell_code(row_id, column_id)
+    repo.delete_knowhow_cell_code(row_id, column_id, actor=actor, origin=origin)
 
 
 __all__ = [

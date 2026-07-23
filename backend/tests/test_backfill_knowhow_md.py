@@ -28,6 +28,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import RecordingModelProvider
 
 _SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "backfill_knowhow_md.py"
 _spec = importlib.util.spec_from_file_location("backfill_knowhow_md", _SCRIPT)
@@ -61,6 +62,13 @@ def _dry_run_then_apply(notebook_id, plan_path, extra_args=()):
     assert rc == 0, "dry-run (plan save) failed"
     return main(["--notebook", notebook_id, *extra_args, "--apply", "--plan", str(plan_path)])
 
+
+def _bind_reformat(repo, client):
+    repo._runtime.models.chat_clients = {
+        **repo._runtime.models.chat_clients,
+        "knowhow_reformat": client,
+    }
+
 # Excel-flavored raw content (tab-indented `•` bullets, `A.` section marker) --
 # the exact shape rule_normalize/reformat_cell are built to clean up (same RAW
 # string convention test_knowhow_reformat.py uses).
@@ -73,7 +81,7 @@ CLEAN2 = "都已修复完毕"  # a second, wholly-clean row's cells
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'khmd.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    return SQLiteRepository(Settings())
+    return SQLiteRepository(Settings(model_services_config=""), model_provider=RecordingModelProvider())
 
 
 @pytest.fixture
@@ -250,7 +258,7 @@ class _BoomLLMClient:
 
 
 def test_use_llm_false_never_touches_the_llm_client(repo, nb_with_dirty_cells):
-    repo._rewrite_llm_client = _BoomLLMClient()
+    _bind_reformat(repo, _BoomLLMClient())
 
     plan = plan_backfill(repo, nb_with_dirty_cells, use_llm=False)
 
@@ -327,7 +335,7 @@ class _FakeLLMClient:
 def test_use_llm_true_delegates_to_reformat_cell(repo, nb_with_dirty_cells):
     good = "**A. 考量**\n\n- 增大 R:变慢\n- 增大 C:变化"  # format-only rewrite, passes content_invariant
     client = _FakeLLMClient(good)
-    repo._rewrite_llm_client = client
+    _bind_reformat(repo, client)
 
     plan = plan_backfill(repo, nb_with_dirty_cells, use_llm=True)
 
@@ -417,7 +425,7 @@ def nb_with_duplicate_cells(repo) -> str:
 
 def test_use_llm_true_dedupes_repeated_column_content(repo, nb_with_duplicate_cells):
     client = _CountingLLMClient()
-    repo._rewrite_llm_client = client
+    _bind_reformat(repo, client)
 
     plan = plan_backfill(repo, nb_with_duplicate_cells, use_llm=True)
 
@@ -476,6 +484,39 @@ def test_main_apply_flag_writes_changes(repo, nb_with_dirty_cells, tmp_path):
     assert not _any_dirty_markers(repo, nb_with_dirty_cells)
 
 
+def test_main_apply_records_backfill_origin_and_owner_actor(
+    repo, nb_with_dirty_cells, tmp_path,
+):
+    """knowhow 表版本管理 Task 13 code review: actor/origin threading through
+    the --apply path had ZERO test coverage anywhere (the only actor
+    assertion in the whole suite was a store-level test calling
+    update_knowhow_cell directly with a literal "user-1") — a mutation
+    reverting apply_reviewed_plan's real threaded ``actor``/``origin="backfill"``
+    back to their defaults left the entire 4817-test suite green. Assert the
+    real end-to-end shape: every ``cell_update`` flow entry --apply produces
+    carries ``origin="backfill"`` and ``actor`` == the notebook OWNER's
+    resolved id (``resolve_notebook_owner_profile`` — the same helper
+    ``--use-llm`` already relies on for its own per-user model resolution) —
+    never empty, never the manual editor's ``"user"``."""
+    table_id = repo.list_knowhow_tables(nb_with_dirty_cells)[0]["id"]
+    hist = repo._runtime.knowhow_history_store
+    seq_before = hist.head_seq(table_id)
+
+    rc = _dry_run_then_apply(nb_with_dirty_cells, tmp_path / "plan.json")
+    assert rc == 0
+
+    owner = repo.maintenance.resolve_notebook_owner_profile(nb_with_dirty_cells)
+    assert owner is not None, "test fixture assumption broken: notebook has no resolvable owner"
+
+    new_changes = [c for c in hist.list_changes(table_id, limit=50) if c["seq"] > seq_before]
+    cell_updates = [c for c in new_changes if c["kind"] == "cell_update"]
+    assert cell_updates, "apply must have actually written at least one cell"
+    for change in cell_updates:
+        assert change["origin"] == "backfill"
+        assert change["actor"] == owner.id
+        assert change["actor"] != ""
+
+
 def test_main_use_llm_unconfigured_prints_no_silent_degradation_warning(
     repo, nb_with_dirty_cells, capsys, tmp_path
 ):
@@ -497,9 +538,9 @@ def test_main_use_llm_unconfigured_prints_no_silent_degradation_warning(
 def test_main_use_llm_configured_prints_no_warning(
     repo, nb_with_dirty_cells, capsys, monkeypatch, tmp_path
 ):
-    repo._rewrite_llm_client = _FakeLLMClient(
+    _bind_reformat(repo, _FakeLLMClient(
         "**A. 考量**\n\n- 增大 R:变慢\n- 增大 C:变化"
-    )
+    ))
     # main() constructs its own SQLiteRepository(Settings()) internally (the
     # production entry point has no repo to inject) -- force it to reuse
     # THIS test's repo object (same process, fake client already installed)
@@ -524,12 +565,15 @@ def test_main_use_llm_configured_prints_no_warning(
 # row's projection_status 'pending' (update_knowhow_cell's existing, UNCHANGED
 # contract) -- unlike the HTTP cell-update route, nothing in this one-shot CLI
 # process ever schedules or RUNS the projector afterwards. Left 'pending', a
-# row is not just stale: the NEXT time ANY process constructs
-# SQLiteRepository, migrations.py::_recover_interrupted_jobs treats a still-
+# row is not just stale: the next SERVER START runs
+# migrations.py::_recover_interrupted_jobs, which treats a still-
 # 'pending'/'syncing' row as an abandoned crash artifact and flips it to
 # 'failed' (this actually happened in production: 10 rows in a real notebook
-# went to 'failed' after running this script). The fix adds a SEPARATE,
-# explicit reprojection step (``reproject_changed_tables``) that main() runs
+# went to 'failed' after running this script). Recovery no longer fires on
+# every SQLiteRepository construction (it moved to startup_warmup.run_startup,
+# so this CLI itself is harmless now), but a row left 'pending' still dies at
+# the next restart -- so the row must be settled here regardless. The fix adds
+# a SEPARATE, explicit reprojection step (``reproject_changed_tables``) that main() runs
 # synchronously, in-process, after the apply write returns and before main()
 # itself returns -- never a background schedule (that would just move the
 # same bug one layer down: a short-lived CLI process exits right past a
@@ -576,7 +620,7 @@ def test_apply_then_reproject_settles_rows_to_synced_with_new_projected_content(
     reproject_changed_tables function level (no CLI argv involved): after
     BOTH steps run, the affected row is 'synced' -- never 'pending' (the
     original bug) or 'failed' (what _recover_interrupted_jobs does to a
-    still-'pending' row on the next process construction) -- and the
+    still-'pending' row at the next server start) -- and the
     PROJECTED artifact (source_elements, read directly via SQL, not just the
     store's own cell) reflects the NEW, cleaned content rather than stale
     pre-backfill text or nothing at all."""
@@ -621,27 +665,31 @@ def test_main_apply_prints_what_was_reprojected(repo, nb_with_dirty_cells, capsy
     assert "重投影" in captured.out or "重投影" in captured.err
 
 
-def test_main_apply_survives_a_second_repository_construction_without_going_failed(
+def test_main_apply_survives_a_later_server_startup_recovery_without_going_failed(
     repo, nb_with_dirty_cells, tmp_path
 ):
     """The exact production incident this fix addresses (task brief: "10
     rows in a real notebook went to failed"): a row left 'pending' after
-    --apply survives only until the NEXT process constructs
-    SQLiteRepository -- migrations.py::_recover_interrupted_jobs
-    unconditionally flips any still-'pending'/'syncing' row to 'failed' on
-    EVERY construction (its crash-recovery heuristic: a background job that
-    outlived its process). Reprojecting synchronously before main() returns
-    must leave the row 'synced', so a SECOND, independent SQLiteRepository
-    construction against the SAME on-disk DB (this test's stand-in for "any
-    later process" -- the server restarting, another CLI run, ...) must NOT
-    reclassify it as 'failed'."""
+    --apply survives only until the next SERVER START --
+    migrations.py::_recover_interrupted_jobs flips any still-'pending'/
+    'syncing' row to 'failed' (its crash-recovery heuristic: a background job
+    that outlived its process). Reprojecting synchronously before main()
+    returns must leave the row 'synced', so a later server startup against the
+    SAME on-disk DB must NOT reclassify it as 'failed'.
+
+    Recovery is driven EXPLICITLY here because that is now the only way it
+    runs: it moved out of ``SQLiteRepository.__init__`` into
+    ``startup_warmup.run_startup`` (so this CLI's own repository construction
+    is no longer the trigger -- see test_startup_recovery_ownership.py). Left
+    as a bare second construction, this test would pass vacuously."""
     dirty_row_id = _find_row_id(repo, nb_with_dirty_cells, DIRTY)
 
     rc = _dry_run_then_apply(nb_with_dirty_cells, tmp_path / "plan.json")
     assert rc == 0
 
-    second_repo = SQLiteRepository(Settings())  # re-runs migrate/recover/seed
-    assert _row_status(second_repo, nb_with_dirty_cells, dirty_row_id) == "synced"
+    server_repo = SQLiteRepository(Settings())  # 服务端重启:构造 + 显式清算
+    server_repo._recover_interrupted_jobs()
+    assert _row_status(server_repo, nb_with_dirty_cells, dirty_row_id) == "synced"
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +808,7 @@ class _AlwaysBadReformatClient:
 def test_main_use_llm_llm_failed_prints_degradation_warning(
     repo, nb_with_dirty_cells, capsys, monkeypatch, tmp_path
 ):
-    repo._rewrite_llm_client = _AlwaysBadReformatClient()
+    _bind_reformat(repo, _AlwaysBadReformatClient())
     monkeypatch.setattr(bkmd, "SQLiteRepository", lambda *a, **k: repo)
 
     rc = main(["--notebook", nb_with_dirty_cells, "--use-llm", "--save-plan", str(tmp_path / "plan.json")])
@@ -890,7 +938,7 @@ def test_apply_with_plan_writes_reviewed_after_verbatim(
     repo, nb_with_dirty_cells, tmp_path, monkeypatch
 ):
     client = _TwoAnswerReformatClient()
-    repo._rewrite_llm_client = client
+    _bind_reformat(repo, client)
     monkeypatch.setattr(bkmd, "SQLiteRepository", lambda *a, **k: repo)
     plan_path = tmp_path / "plan.json"
     dirty_row_id = _find_row_id(repo, nb_with_dirty_cells, DIRTY)
@@ -1140,7 +1188,7 @@ def test_apply_from_plan_skip_report_comes_from_transaction_return_value(
     assert rc == 0
     capsys.readouterr()  # clear buffered dry-run output
 
-    def _fake_guarded(notebook_id, updates):
+    def _fake_guarded(notebook_id, updates, **kwargs):
         skipped = [(row, col) for (_t, row, col, _b, _a) in updates if row == r1]
         written = [(row, col) for (_t, row, col, _b, _a) in updates if row != r1]
         return {"written": written, "skipped": skipped, "rejected": []}
@@ -1158,9 +1206,9 @@ def test_apply_from_plan_skip_report_comes_from_transaction_return_value(
 # ---------------------------------------------------------------------------
 # P2: the DEFAULT (rules-only) dry-run must be FULLY READ-ONLY -- it opens the
 # DB mode=ro and NEVER constructs the write-capable SQLiteRepository (whose
-# __init__ runs migrations/seed/crash-recovery; _recover_interrupted_jobs flips
-# lingering 'pending' rows to 'failed'). --use-llm / --apply still construct the
-# repository and print a one-line DB-open notice.
+# __init__ runs migrations + seed, both of which WRITE; crash recovery is no
+# longer among them -- it moved to startup_warmup.run_startup). --use-llm /
+# --apply still construct the repository and print a one-line DB-open notice.
 # ---------------------------------------------------------------------------
 
 
@@ -1227,10 +1275,14 @@ def test_default_dry_run_works_against_os_read_only_db(
 def test_main_use_llm_dry_run_uses_repo_and_prints_db_open_notice(
     repo, nb_with_dirty_cells, capsys, monkeypatch, tmp_path
 ):
-    """--use-llm needs the per-user rewrite model client, so it DOES construct the
+    """--use-llm needs the system workload provider, so it DOES construct the
     repository -- and must print the one-line notice that opening the DB
     read-write may run pending migrations/recovery."""
-    repo._rewrite_llm_client = _FakeLLMClient("**A. 考量**\n\n- 增大 R:变慢\n- 增大 C:变化")
+    repo._runtime.models.chat_clients = {
+        "knowhow_reformat": _FakeLLMClient(
+            "**A. 考量**\n\n- 增大 R:变慢\n- 增大 C:变化"
+        )
+    }
     monkeypatch.setattr(bkmd, "SQLiteRepository", lambda *a, **k: repo)
 
     rc = main(
@@ -1316,85 +1368,14 @@ def test_plan_backfill_readonly_uri_is_still_read_only_for_weird_path(
 
 
 # ---------------------------------------------------------------------------
-# F1 (code review): --use-llm must resolve the rewrite model AS THE NOTEBOOK
-# OWNER. The CLI process has no request-user context, so the identity plumbing
-# would resolve the per-user rewrite client through its default (user-local),
-# IGNORING the notebook owner's per-user model configuration and potentially
-# sending the owner's private cell text to a different endpoint. The fix looks
-# the owner up (notebooks.created_by) and establishes that user's request
-# context (app.core.request_context.set_request_user, the same mechanism
-# background jobs use) before any LLM use; an unresolvable owner is a hard
-# error, not a silent fall-back to the wrong config.
+# System model service routing: --use-llm always requests the exact
+# knowhow_reformat workload and never resolves a notebook-owner endpoint.
 # ---------------------------------------------------------------------------
 
 
-def _make_owned_notebook(repo, owner):
-    """Create a one-table notebook (anchor + procedure, one dirty row) OWNED by
-    ``owner`` (created_by == owner.id) by planning it under that user's request
-    context."""
-    from app.core.request_context import reset_request_user, set_request_user
-
-    token = set_request_user(owner)
-    try:
-        nb_id = repo.create_notebook(
-            NotebookCreate(name="owned", purpose="p", primary_domain="d")
-        ).id
-        table_id = repo.create_knowhow_table(
-            nb_id, "t", "",
-            [{"name": "现象", "role": "anchor"}, {"name": "方法", "role": "procedure"}],
-        )
-        cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(table_id)["columns"]}
-        repo.add_knowhow_row(table_id, {cols["现象"]: "甲现象", cols["方法"]: DIRTY})
-    finally:
-        reset_request_user(token)
-    return nb_id
-
-
-def test_use_llm_resolves_the_notebook_owners_rewrite_client(
-    repo, tmp_path, monkeypatch, capsys
-):
-    """With two users configured with DIFFERENT rewrite models, --use-llm
-    planning against user B's notebook must resolve B's client -- NOT the
-    ambient/default (user-local) one the CLI would otherwise pick up with no
-    request context set."""
-    owner = repo.create_user("b00000002", "owner-pass-1234")
-    repo.set_user_model_settings(owner.id, {
-        "rewrite_llm": {"base_url": "https://owner/v1", "api_key": "sk-owner",
-                        "model": "model-OWNER-B"},
-    })
-    # the ambient default (user-local) is configured with a DIFFERENT model, so
-    # "resolved the owner's" is distinguishable from "resolved the default".
-    repo.set_user_model_settings("user-local", {
-        "rewrite_llm": {"base_url": "https://ambient/v1", "api_key": "sk-ambient",
-                        "model": "model-AMBIENT-DEFAULT"},
-    })
-    nb_id = _make_owned_notebook(repo, owner)
-
-    seen = {}
-
-    def _spy(r, before, name, role):
-        # resolves through the request context the CLI must have set to owner B
-        seen["model"] = r.rewrite_llm_client.model
-        return {"candidate_md": before, "source": "llm", "changed": False}
-
-    monkeypatch.setattr(bkmd, "reformat_cell", _spy)
-    monkeypatch.setattr(bkmd, "SQLiteRepository", lambda *a, **k: repo)
-
-    rc = main(["--notebook", nb_id, "--use-llm", "--save-plan", str(tmp_path / "p.json")])
-
-    assert rc == 0
-    assert seen["model"] == "model-OWNER-B"  # owner B's config, not the default's
-    msg = "".join(capsys.readouterr())
-    assert "b00000002" in msg  # CLI states whose model config is in effect
-
-
-def test_use_llm_refuses_when_notebook_owner_unresolvable_and_writes_nothing(
+def test_use_llm_uses_system_workload_even_when_owner_unresolvable(
     repo, nb_with_dirty_cells, tmp_path, monkeypatch, capsys
 ):
-    """If the notebook's created_by points at a user that no longer exists, the
-    owner cannot be resolved -> --use-llm is a HARD ERROR (no plan file, no DB
-    mutation), never a silent fall-back to the wrong (default) model config."""
-    # point created_by at a ghost user (owner unresolvable)
     conn = sqlite3.connect(Settings().sqlite_path)
     try:
         conn.execute(
@@ -1405,21 +1386,20 @@ def test_use_llm_refuses_when_notebook_owner_unresolvable_and_writes_nothing(
     finally:
         conn.close()
 
+    client = _FakeLLMClient("A. 考量\n\n- 增大 R：变慢\n- 增大 C：变化")
+    repo._runtime.models.chat_clients = {"knowhow_reformat": client}
     monkeypatch.setattr(bkmd, "SQLiteRepository", lambda *a, **k: repo)
-    # a spy that would blow up if planning (and thus any LLM use) were reached
-    monkeypatch.setattr(
-        bkmd, "reformat_cell",
-        lambda *a, **k: pytest.fail("must refuse before any LLM/plan work"),
-    )
     plan_path = tmp_path / "p.json"
 
-    rc = main(["--notebook", nb_with_dirty_cells, "--use-llm", "--save-plan", str(plan_path)])
+    rc = main([
+        "--notebook", nb_with_dirty_cells,
+        "--use-llm", "--save-plan", str(plan_path),
+    ])
 
-    assert rc != 0
-    assert not plan_path.exists()  # nothing planned/saved
-    assert _any_dirty_markers(repo, nb_with_dirty_cells)  # DB untouched
-    msg = "".join(capsys.readouterr())
-    assert "所有者" in msg  # explains the owner could not be resolved
+    assert rc == 0
+    assert plan_path.exists()
+    assert ("chat", "knowhow_reformat") in repo._runtime.models.calls
+    assert "系统 knowhow_reformat workload" in "".join(capsys.readouterr())
 
 
 # ---------------------------------------------------------------------------

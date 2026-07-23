@@ -21,12 +21,36 @@ const APPROVED_BARE_STATUS_ERRORS = Object.freeze({
 });
 const APPROVED_MESSAGE_READS = Object.freeze({
   "admin/usage/page.tsx|<module>.AdminUsagePage|property|message": {
-    count: 2,
-    reason: "one access is a forbidden sentinel and one is humanized view state",
+    count: 4,
+    reason: "one access is a forbidden sentinel; view, role-notice and limit-notice states contain fixed or humanized copy",
+  },
+  "admin/usage/page.tsx|<module>.AdminUsagePage.submitRoleChange|property|message": {
+    count: 1,
+    reason: "the role-update catch reads only the forbidden control-flow sentinel",
+  },
+  "admin/usage/page.tsx|<module>.AdminUsagePage.saveDefault|property|message": {
+    count: 1,
+    reason: "the default-limit catch reads only the forbidden control-flow sentinel",
+  },
+  "admin/usage/page.tsx|<module>.AdminUsagePage.submitLimitChange|property|message": {
+    count: 1,
+    reason: "the per-user limit catch reads only the forbidden control-flow sentinel",
   },
   "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
     count: 2,
     reason: "optimizer and reformatter error states are written through the humanization boundary",
+  },
+  "knowhow-history-drawer.tsx|<module>.KnowhowHistoryDrawer.handleRevert|property|message": {
+    count: 1,
+    reason: "revert failure is narrowed to KnowhowRevertError before its server-validated guidance is copied out",
+  },
+  "knowhow-model.ts|<module>.parseKnowhowRevertFailure|property|message": {
+    count: 3,
+    reason: "revert failure payload is schema-checked (code+status match) before its guidance is returned",
+  },
+  "knowhow-model.ts|<module>.revertKnowhowTable|property|message": {
+    count: 1,
+    reason: "validated revert-failure guidance is copied into its typed error",
   },
   "knowhow-panel.tsx|<module>.KnowhowPanel|property|message": {
     count: 1,
@@ -35,10 +59,6 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   "knowhow-transfer.ts|<module>.transferKnowhowTable|property|message": {
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
-  },
-  "model-settings.ts|<module>.modelFailureText|property|message": {
-    count: 1,
-    reason: "typed ModelFailureCode selects fixed copy and is never logged or rendered verbatim",
   },
   "page.tsx|<module>.Home|property|message": {
     count: 1,
@@ -294,7 +314,7 @@ test("critical catch boundaries call the shared humanization layer", async () =>
   assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("humanizedError"));
   assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("logDiagnostic"));
   assert.equal(
-    callsIn(findFunction(page, "runModelTest")).includes("logDiagnostic"),
+    callsIn(findFunction(page, "runSystemModelTest")).includes("logDiagnostic"),
     false,
   );
   assert.equal(
@@ -319,7 +339,7 @@ test("migrated clients use the shared transport boundary", async () => {
     "edge-review-queue.ts",
     "knowhow-model.ts",
     "knowhow-panel.tsx",
-    "model-settings.ts",
+    "model-services.ts",
     "memory-panel.tsx",
     "transfer-picker.tsx",
     "pending-center.tsx",
@@ -347,30 +367,27 @@ test("migrated clients use the shared transport boundary", async () => {
 
 
 test("model and report clients retain bounded diagnostics and scenario copy", async () => {
-  const modelSettings = await parseModule("model-settings.ts");
+  const modelServices = await parseModule("model-services.ts");
   const report = await parseModule("report-view.tsx");
   const guardedModelClients = [
-    "fetchModelSettings",
     "fetchModelServiceStatus",
-    "testCurrentModelService",
-    "testAllCurrentModelServices",
-    "saveModelSettings",
-    "testModelService",
+    "testSystemModelService",
+    "testAllSystemModelServices",
   ];
   for (const client of guardedModelClients) {
     assert.deepEqual(
-      callsIn(findFunction(modelSettings, client))
+      callsIn(findFunction(modelServices, client))
         .filter((target) => target === "requestJson"),
       ["requestJson"],
       `${client}: every model request must use the shared bounded transport`,
     );
   }
   assert.equal(
-    callsIn(modelSettings)
+    callsIn(modelServices)
       .filter((target) => target === "requestJson")
       .length,
     guardedModelClients.length,
-    "model-settings.ts has an unreviewed or missing HTTP error boundary",
+    "model-services.ts has an unreviewed or missing HTTP error boundary",
   );
   assert.equal(callsIn(report).includes("console.error"), false);
   assert.equal(callsIn(report).includes("logDiagnostic"), true);

@@ -11,11 +11,12 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 log() { printf '\033[1;34m[install]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[install:错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
-# --- 1) python 版本校验(numpy2 / pydantic 2.12 需 >= 3.10) ---
+# --- 1) python 版本校验(SQLite 写锁公平性依赖 CPython 3.13 的 PyMutex 交接语义,
+#        需 >= 3.13;numpy2 / pydantic 2.12 本身只需 >= 3.10,3.13 是更严格的下限) ---
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "找不到 $PYTHON_BIN;设 PYTHON_BIN 指向目标机 python3。"
-"$PYTHON_BIN" - <<'PY' || die "python 版本过低,需 >= 3.10。"
+"$PYTHON_BIN" - <<'PY' || die "python 版本过低,需 >= 3.13。"
 import sys
-raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)
+raise SystemExit(0 if sys.version_info[:2] >= (3, 13) else 1)
 PY
 log "python: $("$PYTHON_BIN" -V 2>&1) @ $(command -v "$PYTHON_BIN")"
 
@@ -61,15 +62,27 @@ else
   "${PIP[@]}" install ${index_args[@]+"${index_args[@]}"} -r "$REQ"
 fi
 
-# --- 4) .env ---
+# --- 4) 系统模型服务配置 ---
+MODEL_CONFIG_TEMPLATE="$SCRIPT_DIR/model-services.example.toml"
+MODEL_CONFIG="$SCRIPT_DIR/.local/model-services.toml"
+[[ -f "$MODEL_CONFIG_TEMPLATE" ]] || die "缺 $MODEL_CONFIG_TEMPLATE,包不完整。"
+mkdir -p "$SCRIPT_DIR/.local"
+if [[ -f "$MODEL_CONFIG" ]]; then
+  log ".local/model-services.toml 已存在,保留不动。"
+else
+  cp "$MODEL_CONFIG_TEMPLATE" "$MODEL_CONFIG"
+  log "已从 model-services.example.toml 生成 .local/model-services.toml。"
+fi
+
+# --- 5) .env ---
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
   log ".env 已存在,保留不动。"
 else
   cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-  log "已从 .env.example 生成 .env —— 启动前必须填模型服务 URL(OPENAI_COMPAT_* / EMBED_* / RERANK_* 等),否则问答不可用(不会静默降级)。"
+  log "已从 .env.example 生成 .env。请只填写模型 TOML 的 api_key_env 所引用密钥；服务定义、bindings 与 max_concurrency 在 .local/model-services.toml 管理。"
 fi
 
-# --- 5) 就绪自检(只读,不启动服务) ---
+# --- 6) 就绪自检(只读,不启动服务) ---
 log "自检 python 依赖…"
 "$SCRIPT_DIR/.venv/bin/python" - <<'PY' || die "python 依赖自检未通过,见上面缺失项。"
 import importlib.util, sys
@@ -92,9 +105,11 @@ cat <<EOF
 
 安装完成 ✅
 下一步:
-  1) 编辑 $SCRIPT_DIR/.env,填好模型服务 URL(要对外暴露再设非默认 SILICON_NOTEBOOK_ADMIN_PASSWORD)。
-  2) 启动:  ./start.sh
+  1) 编辑 $MODEL_CONFIG,配置 [services.*]、[bindings] 与每服务 max_concurrency。
+  2) 编辑 $SCRIPT_DIR/.env,只填写各服务 api_key_env 引用的密钥。
+     如需明确离线/确定性降级,把 MODEL_SERVICES_CONFIG 留空。
+  3) 启动:  ./start.sh
              (默认 loopback:后端 127.0.0.1:8000、前端 127.0.0.1:3000)
      对外:  FRONTEND_HOST=0.0.0.0 ./start.sh
-  3) 停止:  ./stop.sh
+  4) 停止:  ./stop.sh
 EOF

@@ -10,8 +10,11 @@
  *     成功后由面板打开网格、以「添加行」引导填值（逐格填写属 Task 7）。
  *   · KnowhowManageModal —— 管理菜单收拢：表信息（标题/描述）、行标题列
  *     设置（选择器 + 无行标题提示语）、列管理（加列/重命名/改类型/删列）、
- *     行管理（删行）。破坏性操作（删列/删行）走行内确认层，确认文案明示
- *     「连格子与代码附件一并删除」。
+ *     行管理（删行）、历史管理（清理 N 天前的变更流水，释放空间）。破坏性
+ *     操作（删列/删行/清理历史）走行内确认层，确认文案明示后果——删列/删行
+ *     提示「连格子与代码附件一并删除」，清理历史提示「无法回退到该时间点
+ *     之前，同时会释放历史引用的图片（head 例外，见 knowhow-manage-logic.ts
+ *     的 HISTORY_PRUNE_CONFIRM 头注释）」。
  *
  * 纯逻辑（向导表头状态机 / 选项与提示语 / payload 组装 / 表信息 patch）都在
  * knowhow-manage-logic.ts（无 JSX，供 knowhow-manage.test.mjs 直接 import——
@@ -33,6 +36,7 @@ import {
   patchKnowhowColumn,
   deleteKnowhowColumn,
   deleteKnowhowRow,
+  pruneKnowhowHistory,
   type ColumnKind,
   type KnowhowTableDetail,
 } from "./knowhow-model.ts";
@@ -53,6 +57,9 @@ import {
   assembleCreatePayload,
   COLUMN_DELETE_CONFIRM,
   ROW_DELETE_CONFIRM,
+  HISTORY_PRUNE_CONFIRM,
+  DEFAULT_HISTORY_PRUNE_DAYS,
+  parseHistoryPruneDays,
   tableMetaPatch,
   hasMetaChanges,
 } from "./knowhow-manage-logic.ts";
@@ -420,6 +427,14 @@ export function KnowhowManageModal({ notebookId, detail, onClose, onChanged }: K
   const [newColName, setNewColName] = useState("");
   const [newColKind, setNewColKind] = useState<ColumnKind>("attribute");
 
+  // --- 历史管理：上次清理结果。清理只裁剪不可见的变更流水（§7.7），不改变
+  // 表当前可见的行/列/格内容——onChanged 触发的重拉因此看不出任何变化，这份
+  // 状态是用户能看到「清理确实生效」的唯一信号（详见 ManageHistorySection
+  // 头注释）。不需要随 detail.id 重置：openTable/backToList 切换目标表时会
+  // 先 setManageOpen(false) 卸载整个 modal（knowhow-panel.tsx），本组件不会
+  // 在两张不同的表之间原地复用。 ---
+  const [historyPruneRemoved, setHistoryPruneRemoved] = useState<number | null>(null);
+
   return (
     <ManageModalShell
       label={`表管理：${detail.title}`}
@@ -594,6 +609,22 @@ export function KnowhowManageModal({ notebookId, detail, onClose, onChanged }: K
                 </div>
               )}
             </section>
+
+            {/* --- 历史管理（Task 17：清理历史，释放变更流水占用的空间）--- */}
+            <section className="knowhow-manage-section">
+              <h3>历史管理</h3>
+              <ManageHistorySection
+                pending={pending}
+                lastRemoved={historyPruneRemoved}
+                onPrune={(beforeDays) =>
+                  run(async () => {
+                    setHistoryPruneRemoved(null);
+                    const result = await pruneKnowhowHistory(notebookId, detail.id, beforeDays);
+                    setHistoryPruneRemoved(result.removed);
+                  })
+                }
+              />
+            </section>
           </div>
         </>
       )}
@@ -747,6 +778,81 @@ function ManageRowItem({ label, pending, onDelete }: { label: string; pending: b
         <Trash2 size={14} />
       </button>
     </div>
+  );
+}
+
+// 历史管理：天数输入 + 「清理」按钮 + 二次确认（confirming 局部状态镜像
+// ManageColumnRow/ManageRowItem 的既有写法）。清理这个动作只裁剪不可见的
+// 变更流水（§7.7），不改变表当前可见的行/列/格内容——onChanged 触发的重拉
+// 因此看不出任何变化。lastRemoved 是父组件在 run() 包裹的动作里一并写入的
+// 上次清理结果（run 本身只负责 pending/error/onChanged，不会把 action 的
+// 返回值带回来，故这份反馈状态放在父组件 KnowhowManageModal、经 prop 往下
+// 传），是用户唯一能看到「点击确实生效了」的信号——否则点「确认清理」后
+// 界面会像什么都没发生，正是 brief 强调的"以为功能坏了"的另一种表现形式。
+function ManageHistorySection({
+  pending,
+  lastRemoved,
+  onPrune,
+}: {
+  pending: boolean;
+  /** 上一次清理成功后端返回的 removed 计数；null=本次挂载后还未清理过。 */
+  lastRemoved: number | null;
+  onPrune: (beforeDays: number) => void;
+}) {
+  const [daysInput, setDaysInput] = useState(String(DEFAULT_HISTORY_PRUNE_DAYS));
+  const [confirming, setConfirming] = useState(false);
+  const days = parseHistoryPruneDays(daysInput);
+
+  if (confirming) {
+    return (
+      <div className="knowhow-manage-confirm" role="alert">
+        <span>{HISTORY_PRUNE_CONFIRM}</span>
+        <button
+          type="button"
+          className="knowhow-manage-confirm-yes"
+          disabled={pending}
+          onClick={() => {
+            setConfirming(false);
+            // days 在此处必非 null——进入 confirming 的按钮本身受 days===null
+            // 禁用，且天数输入框在 confirming 态下不渲染（不可编辑），二者之间
+            // daysInput 没有变化的机会。判空只是满足类型检查，非可达分支。
+            if (days !== null) onPrune(days);
+          }}
+        >
+          确认清理
+        </button>
+        <button type="button" className="knowhow-manage-confirm-no" onClick={() => setConfirming(false)}>
+          取消
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <label className="knowhow-manage-field">
+        <span>清理多少天前的历史</span>
+        <input
+          type="number"
+          min={1}
+          step={1}
+          value={daysInput}
+          onChange={(event) => setDaysInput(event.target.value)}
+          disabled={pending}
+        />
+      </label>
+      <div className="knowhow-manage-inline-actions">
+        <button
+          type="button"
+          className="sort-button knowhow-manage-small-button"
+          disabled={pending || days === null}
+          onClick={() => setConfirming(true)}
+        >
+          清理
+        </button>
+      </div>
+      {lastRemoved !== null && <p className="knowhow-manage-hint">已清理 {lastRemoved} 条历史记录</p>}
+    </>
   );
 }
 

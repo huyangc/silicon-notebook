@@ -30,6 +30,7 @@ SQL_REASON_BY_PATH = {
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark database",
     "scripts/backfill_knowhow_md.py": "read-only planning for an operator-supplied maintenance database",
     "scripts/diag_open_latency.py": "read-only host database diagnostic",
+    "scripts/diag_db.py": "read-only host database diagnostic",
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
@@ -56,7 +57,6 @@ FACADE_IMPORT_REASON_BY_PATH = {
     "scripts/bench_sqlite_writes.py": "synthetic benchmark composition root",
     "scripts/build_chunks.py": "offline CLI composition root",
     "scripts/denoise_reextract_nb.py": "offline CLI composition root",
-    "scripts/diag_base_report.py": "offline diagnostic composition root",
     "scripts/generate_repository_contract_fixtures.py": "contract fixture composition root",
     "scripts/kg_product_smoke.py": "offline smoke composition root",
     "scripts/reextract_notebook.py": "offline CLI composition root",
@@ -73,10 +73,16 @@ FACADE_IMPORT_TARGETS = {
 
 PRIVATE_REASON_BY_PATH = {
     "backend/app/api/deps.py": "composition root extracts narrow runtime ports",
+    "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/report_routes.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/source_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",
     "backend/app/services/knowhow/transfer.py": "knowhow transfer orchestration constructs its store and runtime seams",
+    "scripts/backfill_kg_embeddings.py": "offline CLI reads process-owned model scheduling limits",
+    "backend/app/services/startup_warmup.py": "server lifespan is the sole owner of crash recovery; deliberately not a public repository port",
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
+    "scripts/verify_repository_snapshot.py": "models a server start on a disposable backup, including the startup recovery sweep",
 }
 
 SQLITE_CONNECT_REASON_BY_PATH = {
@@ -85,6 +91,7 @@ SQLITE_CONNECT_REASON_BY_PATH = {
     "scripts/backfill_promotion_targets.py": "operator-supplied offline maintenance database",
     "scripts/backfill_knowhow_md.py": "read-only planning connection to an operator-supplied database",
     "scripts/diag_open_latency.py": "read-only host database diagnostic",
+    "scripts/diag_db.py": "read-only host database diagnostic",
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",

@@ -394,6 +394,36 @@ def test_import_creates_table_with_full_detail_rows_and_cells(tmp_path, monkeypa
         assert row["projection_status"] in ("pending", "syncing", "synced")
 
 
+def test_import_genesis_change_records_import_origin_and_the_uploading_users_id(
+    tmp_path, monkeypatch,
+):
+    """knowhow 表版本管理 Task 13 code review: actor/origin threading through
+    import_table had ZERO test coverage above the store layer (a mutation
+    reverting the real ``actor=user.id``/``origin="import"`` back to their
+    defaults left the entire 4817-test suite green). Assert the real
+    end-to-end shape: the import's genesis ``table_create`` flow entry
+    (seq==1) carries the uploading user's own id as actor and
+    ``origin="import"`` — distinguishing an imported table from one built
+    through the empty-table wizard (which stays ``origin="user"``, see
+    test_knowhow_editing_api.py's own create-table coverage)."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000550")
+    owner_id = client.get("/api/me", headers=owner_h).json()["id"]
+    nb = _mk_notebook(client, owner_h)
+
+    resp = _import_xlsx(client, owner_h, nb)
+    assert resp.status_code == 200, resp.text
+    table_id = resp.json()["id"]
+
+    genesis = client.get(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/history/1", headers=owner_h,
+    ).json()
+    assert genesis["kind"] == "table_create"
+    assert genesis["origin"] == "import"
+    assert genesis["actor"] == owner_id
+    assert genesis["actor"] != ""
+
+
 def test_import_rows_orientation_persists_the_normalized_preview_shape(
     tmp_path, monkeypatch
 ):

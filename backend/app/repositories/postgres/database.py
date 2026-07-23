@@ -9,7 +9,7 @@ import zlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import psycopg
 from psycopg import IsolationLevel
@@ -299,6 +299,24 @@ class PostgresDatabase:
                 yield conn
         finally:
             _WRITE_ACTIVE.reset(token)
+
+    def bulk_write(
+        self,
+        batches: Iterable[list[Any]],
+        apply: Callable[[psycopg.Connection[PostgresRow], list[Any]], None],
+    ) -> int:
+        """Apply each batch in its own transaction and retain prior commits.
+
+        PostgreSQL coordinates concurrent writers in the database, so this is
+        the backend-neutral counterpart of SQLite's short-transaction helper;
+        it deliberately adds no process-wide lock or inter-batch sleep.
+        """
+        count = 0
+        for batch in batches:
+            with self.write() as connection:
+                apply(connection, batch)
+            count += 1
+        return count
 
     @staticmethod
     def begin_guarded_write(conn: psycopg.Connection[PostgresRow]) -> None:

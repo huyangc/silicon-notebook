@@ -12,7 +12,8 @@
 // 才能联调。
 
 import { API_BASE } from "./api-config.ts";
-import { requestJson, requestVoid } from "./api-client.ts";
+import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
 
@@ -152,6 +153,11 @@ export type KnowhowCellsBatchPatchInput = {
   // 单独拦不住这类漂移）。两字段成对，缺一即不带该守卫（手动编辑器合并格省略）。
   anchorColumnId?: string;
   expectedAnchor?: string[];
+  // knowhow 表版本管理 Task 14：来源标记（如批量规整走这条路径时传
+  // "llm_reformat"）——省略时不进请求体，退回后端默认 "user"（既有手动编辑器
+  // 合并格调用点字节不变）。与后端 KnowhowCellsBatchPatch.origin 同一契约，见
+  // patchKnowhowCell 的 origin 参数注释。
+  origin?: string;
 };
 
 // --- 模板往返 / 追加导入类型（Task 6）--------------------------------------------
@@ -550,6 +556,14 @@ function mapCellPatchResult(wire: WireKnowhowCellPatchResult): KnowhowCellPatchR
 // 写事务内**比对当前落库内容，不一致就 409 拒写（nothing written）——批量规整保存
 // 走这条路。省略时不带该键，退回既有 last-write-wins（手动编辑器的语义，刻意不变：
 // 那是真人在编辑，不该被自己更早的快照挡下）。
+// origin（knowhow 表版本管理 Task 14，第 7 个位置参数——与 expectedBefore 同一
+// 层级的"追加可选位置参数"手法，不引入 options 对象、不动既有调用点）：谁/
+// 什么产生了这次写入，原样落进后端这条 knowhow_changes 流水（见后端
+// KnowhowCellPatch.origin 与设计文档 §4.1/§8.1）。省略时不进请求体，退回后端
+// 默认 "user"——手动编辑器的既有调用点字节不变；"从历史恢复某格"等新调用点
+// 显式传 "revert"，批量规整回填走 batchPatchKnowhowCells 的同名字段传
+// "llm_reformat"。后端对该字段做白名单校验（VALID_ORIGINS），非法值 400，
+// 前端不需要重复校验。
 export const patchKnowhowCell = (
   notebookId: string,
   tableId: string,
@@ -557,16 +571,17 @@ export const patchKnowhowCell = (
   columnId: string,
   contentMd: string,
   expectedBefore?: string,
+  origin?: string,
 ): Promise<KnowhowCellPatchResult> =>
   requestJson<WireKnowhowCellPatchResult>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}`,
     {
       method: "PATCH",
-      body: JSON.stringify(
-        expectedBefore === undefined
-          ? { content_md: contentMd }
-          : { content_md: contentMd, expected_before: expectedBefore },
-      ),
+      body: JSON.stringify({
+        content_md: contentMd,
+        ...(expectedBefore === undefined ? {} : { expected_before: expectedBefore }),
+        ...(origin === undefined ? {} : { origin }),
+      }),
       tag: "knowhow",
     },
   ).then(mapCellPatchResult);
@@ -596,6 +611,9 @@ export const batchPatchKnowhowCells = (
     body.anchor_column_id = input.anchorColumnId;
     body.expected_anchor = input.expectedAnchor;
   }
+  // knowhow 表版本管理 Task 14：同 patchKnowhowCell 的 origin 参数——省略时不
+  // 进请求体，退回后端默认 "user"。
+  if (input.origin !== undefined) body.origin = input.origin;
   return requestJson<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
     method: "PATCH",
     body: JSON.stringify(body),
@@ -761,6 +779,525 @@ export const uploadNotebookAsset = (
   form.append("file", file);
   return requestJson<UploadedAsset>(`/notebooks/${notebookId}/assets`, { method: "POST", body: form, signal, tag: "knowhow" });
 };
+
+// --- 版本管理（历史时间线/单条详情/两版对比/单格历史/回退/里程碑/清理，
+// knowhow 表版本管理 Task 14；HTTP 端点由 Task 12 落地，见
+// backend/app/api/knowhow_routes.py 与设计文档
+// docs/superpowers/specs/2026-07-22-knowhow-table-version-control-design.md
+// §8.1/§4.4）---------------------------------------------------------------
+//
+// 四个读端点（时间线/单条/diff/单格历史）在后端没有独立的 response_model——
+// 路由函数直接把 store 的 dict 形状原样返回（同 reproject_knowhow_table 等既
+// 有薄端点的写法，见 knowhow_routes.py 该节头部注释）。这里的 WireXxx 类型是
+// 照 store 方法（app/repositories/sqlite/knowhow_history_store.py）与服务层
+// aggregate_diff（app/services/knowhow/history.py）的真实返回形状逐字段核对
+// 写的，不是端点自己的类型声明——核对方式：直接读 store 代码，而不是照搬任务
+// 简报定稿前的猜测（简报字段名与下面这版有出入的地方，见本任务报告）。
+
+// 14 种变更类型（design doc §4.1，与后端 content_strings_in_payload 的
+// REGISTERED_KINDS 逐字对拍一致）。
+export type KnowhowChangeKind =
+  | "table_create" | "table_meta" | "anchor_set"
+  | "column_add" | "column_rename" | "column_kind" | "column_delete"
+  | "row_add" | "row_delete" | "cell_update"
+  | "cell_code_put" | "cell_code_delete" | "import_append" | "revert";
+
+export type KnowhowChange = {
+  id: string;
+  tableId: string;
+  seq: number;
+  kind: KnowhowChangeKind | string; // 未知值原样保留，不在前端收窄成字面量联合
+  actor: string;
+  origin: string;
+  fingerprint: string;
+  note: string;
+  createdAt: string;
+  // 原样透传后端 payload，不做逐 kind 递归 camelCase 转换——14 种 kind 形状差
+  // 异很大（design doc §4.4），转换成本和出错面都不小，而 payload 本就没有
+  // 统一形状可言。knowhow-history-logic.ts 的纯函数（summarizeChange/
+  // foldLocalChanges）直接按后端真实字段名(row_id/column_id/target_seq/rows 等
+  // snake_case)读取这个字段。
+  payload: Record<string, any>;
+};
+
+export type KnowhowMilestone = {
+  id: string;
+  tableId: string;
+  seq: number;
+  name: string;
+  note: string;
+  createdBy: string;
+  createdAt: string;
+  // 指向的 seq 是否已被「清理历史」删掉——里程碑本身仍保留，只是灰显失效
+  // （knowhow_milestones.seq 刻意不设 FK，design doc §4.2）。create 端点的
+  // 响应不带这个字段（刚创建的里程碑，目标 seq 此刻必然存在），兜底 false。
+  stale: boolean;
+};
+
+export type KnowhowHistoryPage = {
+  // 服务端当前最新 seq——revert 请求体的 expected_head_seq 就是它的回声；
+  // isStaleHead()（knowhow-history-logic.ts）用它判断前端手上的时间线是否
+  // 已经落后。
+  headSeq: number;
+  changes: KnowhowChange[]; // seq 倒序，见 before_seq 向更旧翻页
+  milestones: KnowhowMilestone[]; // 本表全部里程碑（含 stale 标记）
+};
+
+// 两版净变化的格子条目（服务端 aggregate_diff 的 cells 键）。与 knowhow-
+// history-logic.ts 本地折叠函数 foldLocalChanges 的 LocalDiffCell 同形状但
+// 类型不同——两者是各自独立的类型（一个来自服务端权威计算，一个来自客户端
+// 本地折叠），只是恰好同形。
+export type KnowhowHistoryDiffCell = {
+  rowId: string;
+  columnId: string;
+  before: string | null;
+  after: string | null;
+};
+
+export type KnowhowHistoryDiffCodeEntry = {
+  columnId: string;
+  codeText: string;
+  language: string;
+  cellContentHash: string;
+  updatedBy: string;
+};
+
+// rows_added/rows_removed 里的整行快照——与 row_add/row_delete payload 的
+// rows[] 条目同形状（design doc §4.4）：{row_id,position,created_at,cells,code}。
+export type KnowhowHistoryDiffRow = {
+  rowId: string;
+  position: number;
+  createdAt: string;
+  cells: Record<string, string>; // column_id -> content_md，键本身不转换
+  code: KnowhowHistoryDiffCodeEntry[];
+};
+
+// 列结构变更的字段子集：只包含区间内真正变化过的键（服务端 aggregate_diff
+// 只在 changed 时才收进该字段，见 history.py）。字段名 name/role/position 是
+// knowhow_columns 表的真实列名——历史子系统的 payload 从不使用"kind"这个
+// 只在 to_wire_column() 才生效的展示层改名（KnowhowColumn.role 同理，本文件
+// 顶部已有这个别名，见其注释），故这里字段名与 KnowhowColumn.role 一致，
+// 不需要额外转换。
+export type KnowhowHistoryDiffColumnFields = Partial<{ name: string; role: string; position: number }>;
+
+export type KnowhowHistoryDiffColumn = {
+  columnId: string;
+  before: KnowhowHistoryDiffColumnFields;
+  after: KnowhowHistoryDiffColumnFields;
+};
+
+export type KnowhowHistoryDiffTableMetaFields = { title: string; description: string };
+
+// 服务端 aggregate_diff() 的完整 5 键输出（app/services/knowhow/history.py）。
+// 与本文件其余 mapXxx 一致的做法：顶层 snake_case 键改名为 camelCase，内容
+// 本身字段名不含下划线的（row_id/column_id 除外，均已展开）原样保留。
+export type KnowhowHistoryDiff = {
+  cells: KnowhowHistoryDiffCell[];
+  rowsAdded: KnowhowHistoryDiffRow[];
+  rowsRemoved: KnowhowHistoryDiffRow[];
+  columns: KnowhowHistoryDiffColumn[];
+  // 区间内表元(title/description)有真实变化才非 null（design doc §6.5）。
+  tableMeta: { before: KnowhowHistoryDiffTableMetaFields; after: KnowhowHistoryDiffTableMetaFields } | null;
+};
+
+export type KnowhowCellHistoryEntry = {
+  seq: number;
+  actor: string;
+  origin: string;
+  createdAt: string;
+  before: string | null;
+  after: string | null;
+};
+
+// revert_to() 的返回形状（knowhow_history_store.py）：正常路径是新 revert
+// 流水的 seq；"回退到当前 head"这个 no-op 分支里则是当前 head 本身的 seq
+// （不产生新流水）——两种情况下 targetSeq 都原样回声请求里的 target_seq。
+export type KnowhowRevertResult = { seq: number; targetSeq: number };
+
+// --- 后端线上形状（snake_case）----------------------------------------------
+
+type WireKnowhowChange = {
+  id: string;
+  table_id: string;
+  seq: number;
+  kind: string;
+  actor: string;
+  origin: string;
+  fingerprint: string;
+  note: string;
+  created_at: string;
+  payload: Record<string, any>;
+};
+
+type WireKnowhowMilestone = {
+  id: string;
+  table_id: string;
+  seq: number;
+  name: string;
+  note: string;
+  created_by: string;
+  created_at: string;
+  // create 端点的响应不带这个键（见上面 KnowhowMilestone.stale 的注释）；
+  // list（随 history 一起回）恒带。
+  stale?: boolean;
+};
+
+type WireKnowhowHistoryPage = {
+  head_seq: number;
+  changes: WireKnowhowChange[];
+  milestones: WireKnowhowMilestone[];
+};
+
+type WireKnowhowHistoryDiffCodeEntry = {
+  column_id: string;
+  code_text: string;
+  language: string;
+  cell_content_hash: string;
+  updated_by: string;
+};
+
+type WireKnowhowHistoryDiffRow = {
+  row_id: string;
+  position: number;
+  created_at: string;
+  cells: Record<string, string>;
+  code: WireKnowhowHistoryDiffCodeEntry[];
+};
+
+type WireKnowhowHistoryDiffColumn = {
+  column_id: string;
+  before: KnowhowHistoryDiffColumnFields;
+  after: KnowhowHistoryDiffColumnFields;
+};
+
+type WireKnowhowHistoryDiff = {
+  cells: { row_id: string; column_id: string; before: string | null; after: string | null }[];
+  rows_added: WireKnowhowHistoryDiffRow[];
+  rows_removed: WireKnowhowHistoryDiffRow[];
+  columns: WireKnowhowHistoryDiffColumn[];
+  table_meta: {
+    before: KnowhowHistoryDiffTableMetaFields;
+    after: KnowhowHistoryDiffTableMetaFields;
+  } | null;
+};
+
+type WireKnowhowCellHistoryEntry = {
+  seq: number;
+  actor: string;
+  origin: string;
+  created_at: string;
+  before: string | null;
+  after: string | null;
+};
+
+type WireKnowhowRevertResult = { seq: number; target_seq: number };
+
+function mapChange(wire: WireKnowhowChange): KnowhowChange {
+  return {
+    id: wire.id,
+    tableId: wire.table_id,
+    seq: wire.seq,
+    // 无需 as 断言：KnowhowChange.kind 的类型本就是 KnowhowChangeKind | string，
+    // 一个 string 天然满足这个联合——断言只会误导读者以为这里发生了真实收窄。
+    kind: wire.kind,
+    actor: wire.actor,
+    origin: wire.origin,
+    fingerprint: wire.fingerprint,
+    note: wire.note,
+    createdAt: wire.created_at,
+    payload: wire.payload ?? {},
+  };
+}
+
+function mapMilestone(wire: WireKnowhowMilestone): KnowhowMilestone {
+  return {
+    id: wire.id,
+    tableId: wire.table_id,
+    seq: wire.seq,
+    name: wire.name,
+    note: wire.note ?? "",
+    createdBy: wire.created_by ?? "",
+    createdAt: wire.created_at,
+    stale: wire.stale ?? false,
+  };
+}
+
+function mapHistoryPage(wire: WireKnowhowHistoryPage): KnowhowHistoryPage {
+  return {
+    headSeq: wire.head_seq,
+    changes: (wire.changes ?? []).map(mapChange),
+    milestones: (wire.milestones ?? []).map(mapMilestone),
+  };
+}
+
+function mapHistoryDiffRow(row: WireKnowhowHistoryDiffRow): KnowhowHistoryDiffRow {
+  return {
+    rowId: row.row_id,
+    position: row.position,
+    createdAt: row.created_at,
+    cells: row.cells ?? {},
+    code: (row.code ?? []).map((entry) => ({
+      columnId: entry.column_id,
+      codeText: entry.code_text,
+      language: entry.language,
+      cellContentHash: entry.cell_content_hash,
+      updatedBy: entry.updated_by,
+    })),
+  };
+}
+
+function mapHistoryDiffColumn(column: WireKnowhowHistoryDiffColumn): KnowhowHistoryDiffColumn {
+  return { columnId: column.column_id, before: column.before ?? {}, after: column.after ?? {} };
+}
+
+function mapHistoryDiff(wire: WireKnowhowHistoryDiff): KnowhowHistoryDiff {
+  return {
+    cells: (wire.cells ?? []).map((cell) => ({
+      rowId: cell.row_id,
+      columnId: cell.column_id,
+      before: cell.before ?? null,
+      after: cell.after ?? null,
+    })),
+    rowsAdded: (wire.rows_added ?? []).map(mapHistoryDiffRow),
+    rowsRemoved: (wire.rows_removed ?? []).map(mapHistoryDiffRow),
+    columns: (wire.columns ?? []).map(mapHistoryDiffColumn),
+    tableMeta: wire.table_meta ?? null,
+  };
+}
+
+function mapCellHistoryEntry(entry: WireKnowhowCellHistoryEntry): KnowhowCellHistoryEntry {
+  return {
+    seq: entry.seq,
+    actor: entry.actor,
+    origin: entry.origin,
+    createdAt: entry.created_at,
+    before: entry.before ?? null,
+    after: entry.after ?? null,
+  };
+}
+
+function mapRevertResult(wire: WireKnowhowRevertResult): KnowhowRevertResult {
+  return { seq: wire.seq, targetSeq: wire.target_seq };
+}
+
+// 时间线分页：limit/milestonesOnly 是后端既支持、任务简报草稿未列出的查询
+// 参数（GET .../history?limit=&before_seq=&milestones_only=，见
+// get_knowhow_history），补上以支撑后续「向更旧翻页」与「只看里程碑」筛选，
+// 省得下一任务再回头改这个文件。三者都是尾部可选位置参数，省略时不带对应
+// query（不是空串/0），退回后端自己的默认值（limit=50/milestones_only=false）。
+export const fetchKnowhowHistory = (
+  notebookId: string,
+  tableId: string,
+  beforeSeq?: number,
+  limit?: number,
+  milestonesOnly?: boolean,
+): Promise<KnowhowHistoryPage> => {
+  const params = new URLSearchParams();
+  if (beforeSeq !== undefined) params.set("before_seq", String(beforeSeq));
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (milestonesOnly !== undefined) params.set("milestones_only", String(milestonesOnly));
+  const query = params.toString();
+  return requestJson<WireKnowhowHistoryPage>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/history${query ? `?${query}` : ""}`,
+    { tag: "knowhow" },
+  ).then(mapHistoryPage);
+};
+
+// 单条变更详情：payload 原样返回，供调用方渲染这一次改动的红绿 diff。
+export const fetchKnowhowChange = (
+  notebookId: string,
+  tableId: string,
+  seq: number,
+): Promise<KnowhowChange> =>
+  requestJson<WireKnowhowChange>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/history/${seq}`,
+    { tag: "knowhow" },
+  ).then(mapChange);
+
+// 两版净变化（服务端权威计算，纯只读——不等价于 knowhow-history-logic.ts 的
+// 本地 foldLocalChanges，见该文件对应注释）。⚠两版对比视图请用这个（服务端
+// 全量 diff，含列结构/表元变化），不要用本地折叠——本地折叠只覆盖 cells + 行
+// 增删，接错不会有类型错误，只会静默漏掉列/表元变化。
+export const fetchKnowhowHistoryDiff = (
+  notebookId: string,
+  tableId: string,
+  fromSeq: number,
+  toSeq: number,
+): Promise<KnowhowHistoryDiff> =>
+  requestJson<WireKnowhowHistoryDiff>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/history/diff?from=${fromSeq}&to=${toSeq}`,
+    { tag: "knowhow" },
+  ).then(mapHistoryDiff);
+
+// 单格历史时间线，最新在前。limit 同 fetchKnowhowHistory，省略时退回后端
+// 默认值（50）。
+export const fetchKnowhowCellHistory = (
+  notebookId: string,
+  tableId: string,
+  rowId: string,
+  columnId: string,
+  limit?: number,
+): Promise<KnowhowCellHistoryEntry[]> => {
+  const query = limit === undefined ? "" : `?limit=${limit}`;
+  return requestJson<WireKnowhowCellHistoryEntry[]>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/history${query}`,
+    { tag: "knowhow" },
+  ).then((entries) => entries.map(mapCellHistoryEntry));
+};
+
+// --- revert 三种结构化失败（评审问题 1 修复）------------------------------------
+//
+// 后端 revert 端点的三种失败（knowhow_routes.py revert_knowhow_table）返回
+// 结构化 detail={"code","message"}，不是 user_error() 打 X-User-Message 头的
+// 纯字符串——共享错误层 errors.ts 的可展示通道（pickUserDetail）只认字符串/
+// 字符串数组形状的 detail，对象形状会被判定为"抠不出来"而返回空串；这条路径
+// 也没有 X-User-Message 头，闸1（信任）本来就不会放行。两条都不满足，若什么
+// 都不做就会被 throwHumanizedHttpError 兜底成按状态码泛化的通用中文，后端为
+// 这三种场景精心写的具体中文（"这张表刚被其他人改过，请刷新后重试"等）用户
+// 一句都看不到。
+//
+// 解法照抄本仓库解决同类问题的先例——transfer 端点的 409
+// {code,new_table_id,message}：frontend/app/transfer-model.ts 的
+// parseCleanupFailure（纯函数，探测 status+已知 code）+
+// frontend/app/knowhow-transfer.ts 的 KnowhowSourceCleanupError（类型化异常）
+// + transferKnowhowTable（克隆 body 探测，命中转类型化异常，未命中落回
+// throwHumanizedHttpError）。下面的 parseKnowhowRevertFailure/
+// KnowhowRevertError/revertKnowhowTable 是同一模式在 revert 上的镜像——文案仍
+// 100% 来自后端，这里只负责把它从结构化 body 里取出来，不在前端编造/硬编码
+// 这三段话（后端改文案会自动同步，409/400/500 在别的端点还复用于完全不同的
+// 语义，前端不能按状态码猜文案）。
+export type KnowhowRevertFailureCode =
+  | "knowhow_history_stale"
+  | "knowhow_history_inconsistent"
+  | "knowhow_revert_verify_failed";
+
+// 三个 code 与后端三个 except 分支一一对应的 HTTP 状态：knowhow_history_stale
+// =409（head 已变，刷新重试）/ knowhow_history_inconsistent=400（前置指纹不
+// 一致，回退已中止）/ knowhow_revert_verify_failed=500（后置校验失败，已整表
+// 回滚，表未被改动）。解析时要求 status 与 code 成对匹配（不是只看 code 是否
+// 已知），同 parseCleanupFailure 校验 status===409 一样，是防止未来某个无关
+// 端点凑巧返回同形状 body 时被误判命中。
+const KNOWHOW_REVERT_FAILURE_STATUS: Record<KnowhowRevertFailureCode, number> = {
+  knowhow_history_stale: 409,
+  knowhow_history_inconsistent: 400,
+  knowhow_revert_verify_failed: 500,
+};
+
+export type KnowhowRevertFailure = { code: KnowhowRevertFailureCode; message: string };
+
+const FALLBACK_REVERT_FAILURE_MESSAGE = "回退未成功，请刷新后重试";
+
+/**
+ * 判定一个 HTTP 响应是否是 revert 端点结构化的 `{code,message}`（三种 code 之
+ * 一，见 KnowhowRevertFailureCode）。命中 → {code,message}；其余任何情况
+ * （status 与 code 对不上、code 不是这三者之一、detail 是普通字符串、body 根
+ * 本不是对象……）一律 null，调用方落回通用错误路径（含目标 seq 不存在的 404
+ * ——那条走的是普通字符串 detail，本就不该在这里命中）。纯函数，不摸网络——
+ * status/body 由调用方（res.status/已解析的 JSON）转手过来。
+ */
+export const parseKnowhowRevertFailure = (
+  status: number,
+  body: unknown,
+): KnowhowRevertFailure | null => {
+  if (typeof body !== "object" || body === null) return null;
+  const detail = (body as Record<string, unknown>).detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const d = detail as Record<string, unknown>;
+  if (typeof d.code !== "string") return null;
+  if (!(d.code in KNOWHOW_REVERT_FAILURE_STATUS)) return null;
+  const code = d.code as KnowhowRevertFailureCode;
+  if (KNOWHOW_REVERT_FAILURE_STATUS[code] !== status) return null;
+  const message = typeof d.message === "string" && d.message ? d.message : FALLBACK_REVERT_FAILURE_MESSAGE;
+  return { code, message };
+};
+
+// 类型化异常：调用方用 instanceof 分流（如 knowhow_history_stale → 提示刷新
+// 页面重来），.message 是后端原文（不再是 throwHumanizedHttpError 兜底的通用
+// 文案），.code 供需要按三种场景分别处理的调用方精确分流，不必做脆弱的文案
+// 匹配。同 KnowhowSourceCleanupError（knowhow-transfer.ts）的既有取向。
+export class KnowhowRevertError extends Error {
+  readonly code: KnowhowRevertFailureCode;
+
+  constructor(code: KnowhowRevertFailureCode, message: string) {
+    super(message);
+    this.name = "KnowhowRevertError";
+    this.code = code;
+  }
+}
+
+// 整表回退到 targetSeq。expectedHeadSeq 是前端上次拉时间线时看到的 head——
+// 服务端据此判断陈旧（与库内实际 head 不符 -> 409），并发编辑安全网的关键
+// 一环，永远必须传（不是可选参数）。
+//
+// 走 performApiRequest 而非 requestJson：需要在共享人话层兜底之前先探测上面
+// 的三种结构化失败。res.clone() 手法与 knowhow-transfer.ts
+// transferKnowhowTable 一致——body 只能消费一次（见 errors.ts readHttpError
+// 头注释），探测用克隆读，真正报错仍交给原始 res 走 throwHumanizedHttpError，
+// 不能在这里抢先吃掉。
+export const revertKnowhowTable = async (
+  notebookId: string,
+  tableId: string,
+  targetSeq: number,
+  expectedHeadSeq: number,
+): Promise<KnowhowRevertResult> => {
+  const res = await performApiRequest(`/notebooks/${notebookId}/knowhow/${tableId}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ target_seq: targetSeq, expected_head_seq: expectedHeadSeq }),
+    tag: "knowhow",
+  });
+  if (!res.ok) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await res.clone().text());
+    } catch {
+      parsed = undefined;
+    }
+    const failure = parseKnowhowRevertFailure(res.status, parsed);
+    if (failure) throw new KnowhowRevertError(failure.code, failure.message);
+    await throwHumanizedHttpError(res, "knowhow");
+  }
+  return mapRevertResult((await res.json()) as WireKnowhowRevertResult);
+};
+
+// 给某个 seq 命名。seq 必须是这张表真实存在的一条流水，否则 404；重名
+// （UNIQUE(table_id,name)）是 user_error() 打过标记的纯字符串 400，会正常
+// 经共享错误层展示给用户（与上面 revertKnowhowTable 的结构化错误体不同）。
+export const createKnowhowMilestone = (
+  notebookId: string,
+  tableId: string,
+  seq: number,
+  name: string,
+  note = "",
+): Promise<KnowhowMilestone> =>
+  requestJson<WireKnowhowMilestone>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/milestones`,
+    { method: "POST", body: JSON.stringify({ seq, name, note }), tag: "knowhow" },
+  ).then(mapMilestone);
+
+// 删除里程碑（只删指针，不牵动任何流水）；已经不存在时后端静默 no-op。
+export const deleteKnowhowMilestone = (
+  notebookId: string,
+  tableId: string,
+  milestoneId: string,
+): Promise<void> =>
+  requestVoid(
+    `/notebooks/${notebookId}/knowhow/${tableId}/milestones/${milestoneId}`,
+    { method: "DELETE", tag: "knowhow" },
+  );
+
+// 清理 N 天前的历史（只删最老连续前缀，head 永远保留，见 design doc §7.7）。
+// 响应 {removed:number} 本身已是合法 camelCase，无需 WireXxx+mapXxx（同本文件
+// UploadedAsset 的既有取向）。执行后端会顺带触发一次资产清扫（后台执行，
+// 不影响这次请求的响应时间）。
+export const pruneKnowhowHistory = (
+  notebookId: string,
+  tableId: string,
+  beforeDays: number,
+): Promise<{ removed: number }> =>
+  requestJson<{ removed: number }>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/history/prune`,
+    { method: "POST", body: JSON.stringify({ before_days: beforeDays }), tag: "knowhow" },
+  );
 
 // --- 纯 helper(单测) ------------------------------------------------------------
 

@@ -2,7 +2,7 @@
 """SQLite-only 离线批量摄取(目录 → notebook → source/chunk(+embed) → KG → 概念簇)。
 
 复用现有管线,不重写解析/分块/抽取。两阶段:
-  ingest  无 LLM:upload_sources(同步 parse+chunk),摄取期 EMBED 置空 → 收尾低并发补 chunk 向量
+  ingest  upload_sources(同步 parse+chunk+系统调度 embedding) → 收尾补缺失向量
   kg      LLM:对尚无 KG 的 source 抽取 → 一次 rebuild_unified_kg → 补节点向量;per-source 融合关
 CLI 见 scripts/batch_ingest.py 与 README「离线批量摄取」。
 """
@@ -17,10 +17,9 @@ import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.core.config import Settings
 from app.core.database_url import database_identity
@@ -31,16 +30,9 @@ from app.models.identity import UserProfile
 from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
-from app.services.model_concurrency import (
-    ConcurrencySnapshot,
-    ModelConcurrencyState,
-    activate_model_concurrency,
-    current_model_concurrency,
-)
 from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,
-    JsonChatClientPort,
     KGBuildResult,
     RebuildProgress,
     RepositoryRow,
@@ -60,8 +52,8 @@ class BatchIngestRepository(Protocol):
     settings: Settings
     storage_dir: Path
     maintenance: SQLiteMaintenancePort
-    llm_client: JsonChatClientPort
 
+    def configured(self, workload_id: str) -> bool: ...
     def current_user(self) -> UserProfile: ...
     def get_notebook(self, notebook_id: str) -> NotebookSummary: ...
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
@@ -87,11 +79,7 @@ class BatchIngestRepository(Protocol):
 @dataclass(frozen=True)
 class EffectiveConcurrency:
     workers: int
-    llm: int
-    embedding: int
     workers_source: str
-    llm_source: str
-    embedding_source: str
 
 
 def _positive(value: int, name: str) -> int:
@@ -114,93 +102,8 @@ def _resolve_effective_concurrency(
             args.workers if args.workers is not None else workers_default,
             "--workers",
         ),
-        llm=_positive(
-            args.llm_conc
-            if args.llm_conc is not None
-            else settings.kg_extract_workers,
-            "--llm-conc",
-        ),
-        embedding=_positive(
-            args.embed_conc
-            if args.embed_conc is not None
-            else settings.embed_concurrency,
-            "--embed-conc",
-        ),
         workers_source="cli" if args.workers is not None else "env",
-        llm_source="cli" if args.llm_conc is not None else "env",
-        embedding_source="cli" if args.embed_conc is not None else "env",
     )
-
-
-@contextmanager
-def _batch_concurrency_scope(
-    repo: BatchIngestRepository,
-    effective: EffectiveConcurrency,
-) -> Iterator[ModelConcurrencyState]:
-    from app.services.kg import scheduler
-
-    old_settings = (
-        repo.settings.kg_job_concurrency,
-        repo.settings.kg_extract_workers,
-        repo.settings.embed_concurrency,
-    )
-    old_window = scheduler.max_workers()
-    old_job = scheduler.job_concurrency()
-    phase_error: BaseException | None = None
-    try:
-        repo.settings.kg_job_concurrency = effective.workers
-        repo.settings.kg_extract_workers = effective.llm
-        repo.settings.embed_concurrency = effective.embedding
-        scheduler.configure(
-            window_workers=effective.llm,
-            job_workers=effective.workers,
-        )
-        with activate_model_concurrency(
-            llm_max=effective.llm,
-            embed_max=effective.embedding,
-        ) as state:
-            yield state
-    except BaseException as exc:
-        phase_error = exc
-        raise
-    finally:
-        cleanup_errors: list[tuple[str, BaseException]] = []
-        for name, old_value in zip(
-            (
-                "kg_job_concurrency",
-                "kg_extract_workers",
-                "embed_concurrency",
-            ),
-            old_settings,
-        ):
-            try:
-                setattr(repo.settings, name, old_value)
-            except BaseException as restore_error:
-                cleanup_errors.append(
-                    (f"batch setting {name}", restore_error)
-                )
-        try:
-            scheduler.configure(
-                window_workers=old_window,
-                job_workers=old_job,
-            )
-        except BaseException as restore_error:
-            cleanup_errors.append(("KG scheduler", restore_error))
-
-        if phase_error is not None:
-            for label, restore_error in cleanup_errors:
-                print(
-                    f"warning: failed to restore {label} after phase error: "
-                    f"{type(restore_error).__name__}: {restore_error}",
-                    file=sys.stderr,
-                )
-        elif len(cleanup_errors) == 1:
-            raise cleanup_errors[0][1]
-        elif cleanup_errors:
-            raise BaseExceptionGroup(
-                "batch concurrency cleanup failed",
-                [restore_error for _, restore_error in cleanup_errors],
-            )
 
 
 def _rebuild_progress(phase: str, i: int, n: int) -> None:
@@ -232,17 +135,14 @@ def _format_pool_snapshot(
     ts: str,
     s: Mapping[str, int],
     *,
-    llm: ConcurrencySnapshot,
-    embedding: ConcurrencySnapshot,
     done: int,
     total: int,
     label: str = "",
 ) -> str:
-    """Render gate-backed model utilization plus the source job pool."""
+    """Render producer-pool utilization; service admission is scheduler-owned."""
     tail = f" · 源完成 {done}/{total}" if total > 0 else (f" · {label}" if label else "")
     return (
-        f"[pool {ts}] LLM {llm.active}/{llm.maximum} waiting={llm.waiting}"
-        f" · embedding {embedding.active}/{embedding.maximum} waiting={embedding.waiting}"
+        f"[pool {ts}] model-producer {s['window_active']}/{s['window_max']}"
         f" · source {s['job_active']}/{s['job_max']}"
         + tail
     )
@@ -277,22 +177,9 @@ class _PoolReporter:
         while not self._stop.wait(self.interval):
             try:
                 s = _sched.stats()
-                state = current_model_concurrency()
-                llm_snapshot = (
-                    state.llm.snapshot()
-                    if state is not None
-                    else ConcurrencySnapshot(active=0, maximum=0, waiting=0)
-                )
-                embed_snapshot = (
-                    state.embedding.snapshot()
-                    if state is not None
-                    else ConcurrencySnapshot(active=0, maximum=0, waiting=0)
-                )
                 line = _format_pool_snapshot(
                     time.strftime("%H:%M:%S"),
                     s,
-                    llm=llm_snapshot,
-                    embedding=embed_snapshot,
                     done=self.done,
                     total=self.total,
                     label=self.label,
@@ -302,12 +189,6 @@ class _PoolReporter:
                     self.log({
                         "phase": "pool",
                         **s,
-                        "llm_active": llm_snapshot.active,
-                        "llm_max": llm_snapshot.maximum,
-                        "llm_waiting": llm_snapshot.waiting,
-                        "embed_active": embed_snapshot.active,
-                        "embed_max": embed_snapshot.maximum,
-                        "embed_waiting": embed_snapshot.waiting,
                         "done": self.done,
                         "total": self.total,
                         "label": self.label,
@@ -344,6 +225,7 @@ def source_id_by_hash(repo: BatchIngestRepository, notebook_id: str, digest: str
     return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
+
 def _resolve_owner_profile(
     repo: BatchIngestRepository, owner: Optional[str]
 ) -> UserProfile:
@@ -372,19 +254,46 @@ def run_ingest(
     notebook_id: str,
     files: Iterable[Path],
     workers: int = 4,
-    conc: int = 4,
     log: LogFn | None = None,
 ) -> dict[str, int]:
-    """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。"""
+    """Phase 1: parse, chunk and embed through the configured system service.
+
+    跳过判据是内容哈希:命中即视为已摄取。这条判据**认账偏早**——file_hash 是
+    INSERT 时写的(早于 parse),所以 parse 中途被中断的源 hash 已在库、内容却是空的,
+    再跑 ingest 也不会补。刻意保持现状,不在这里做「有没有跑完」的推断:
+    (elements, chunks, parse_status) 这三个可观测信号无法区分「分块失败但仍置
+    extracted」与「纯标题 md 成功解析出零 chunk」——两者状态完全相同、正确答案相反;
+    `parsed` 同样既是活跃过渡态又是中断残留态。要判准需要持久化的完成标记与活跃租约
+    (schema 变更),见 docs/superpowers/specs/2026-07-22-pipeline-damage-recovery-design.md。
+    存量补救走显式的 `reparse` 子命令(它按「有没有 source_elements」选目标)。
+    """
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "failed": 0}
-    orig_provider = repo.settings.embed_provider
-    repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
+
+    # 同一次运行内的重复文件(输入目录里两个内容相同的文件)按内容哈希认领一次即可。
+    # 主要作用不是省一次查库,而是挡住并发下的双重建源:没有它时两个同内容文件会同时
+    # 查到「尚未摄取」、双双 upload,建出两个重复源。线程安全:_one 在池里并发跑。
+    #
+    # 已知边界(codex 第 8 轮 P2,经权衡后不修):并发处理时,若副本 B 在认领者 A 失败
+    # **之前**就读到了认领并返回 skipped,A 事后交回认领也救不了 B —— 该内容本轮一份
+    # 都没进来。之所以接受:A 失败时**什么都没提交**,内容不在库里,重跑 ingest 即补上;
+    # 而彻底消除需要 per-digest 的完成条件变量(副本阻塞等认领者出结果),复杂度与收益
+    # 不成比例。对照未引入认领集合时的行为(双双上传、建出重复源),本实现是净改善。
+    # 保留行为由 test_run_ingest_same_run_duplicate_files_skip_not_reparse 与
+    # test_run_ingest_releases_the_claim_when_the_claimant_fails 钉住。
+    claimed: set[str] = set()
+    claim_lock = threading.Lock()
 
     def _one(path: Path) -> tuple[str, Path, str | None]:
+        digest: str | None = None
         try:
             content = path.read_bytes()
-            if already_ingested(repo, notebook_id, sha256_bytes(content)):
+            digest = sha256_bytes(content)
+            with claim_lock:
+                if digest in claimed:
+                    return ("skipped", path, None)
+                claimed.add(digest)
+            if already_ingested(repo, notebook_id, digest):
                 return ("skipped", path, None)
             repo.upload_sources(
                 notebook_id,
@@ -393,26 +302,31 @@ def run_ingest(
             )
             return ("uploaded", path, None)
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
+            # 认领失败就交回去:认领只代表「这个内容由我这一份来做」,不代表已摄取。
+            # 不释放的话,后面同内容的副本会看到 digest 已被认领而直接 skipped——
+            # 一次瞬时失败(存储/SQLite 抖动)就让这份内容整轮都进不来,而在有认领集合
+            # 之前它本可以由下一个副本重试成功。
+            if digest is not None:
+                with claim_lock:
+                    claimed.discard(digest)
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
     total = len(files)
-    try:
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            for i, (status, path, err) in enumerate(pool.map(_one, files), 1):
-                counts[status] += 1
-                log({"phase": "ingest", "path": str(path), "status": status, "error": err})
-                print(f"[ingest {i}/{total}] {Path(path).name}: {status}", flush=True)
-    finally:
-        repo.settings.embed_provider = orig_provider   # 恢复,供 backfill 使用
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for i, (status, path, err) in enumerate(pool.map(_one, files), 1):
+            counts[status] += 1
+            log({"phase": "ingest", "path": str(path), "status": status, "error": err})
+            print(f"[ingest {i}/{total}] {Path(path).name}: {status}", flush=True)
 
-    counts["sources_embedded"] = backfill_chunk_embeddings(repo, notebook_id, conc)
+    counts["sources_embedded"] = backfill_chunk_embeddings(
+        repo, notebook_id, missing_only=True
+    )
     return counts
 
 
 def backfill_chunk_embeddings(
     repo: BatchIngestRepository,
     notebook_id: str,
-    conc: int = 4,
     missing_only: bool = False,
 ) -> int:
     """补该 notebook 的 chunk 向量(低并发)。EMBED 未配则跳过。
@@ -422,46 +336,75 @@ def backfill_chunk_embeddings(
     - missing_only=True:只补缺向量的 chunk(NOT EXISTS),一次 _embed_chunks_batch,
       返回补的 *chunk* 数(无缺失则跳过返回 0)。
     """
-    if not repo.settings.embedder_configured:
+    if not repo.configured("chunk_embedding"):
         return 0
     mnt = repo.maintenance
-    orig_conc = repo.settings.embed_concurrency
-    repo.settings.embed_concurrency = conc
-    try:
-        if missing_only:
-            rows = mnt.missing_chunk_embedding_rows(notebook_id)
-            items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
-            if not items:
-                print("[embed] 无缺失 chunk 向量,跳过", flush=True)
-                return 0
-            print(f"[embed] 补缺失 chunk 向量:{len(items)} 个", flush=True)
-            mnt.embed_chunks_batch(notebook_id, items)
-            return len(items)
+    if missing_only:
+        rows = mnt.missing_chunk_embedding_rows(notebook_id)
+        items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
+        if not items:
+            print("[embed] 无缺失 chunk 向量,跳过", flush=True)
+            return 0
+        print(f"[embed] 补缺失 chunk 向量:{len(items)} 个", flush=True)
+        mnt.embed_chunks_batch(notebook_id, items)
+        return len(items)
 
-        done = 0
-        sids = mnt.source_ids(notebook_id)
-        n = len(sids)
-        for i, sid in enumerate(sids, 1):
-            try:
-                mnt.embed_chunks_for_source(sid)
-                done += 1
-                print(f"[embed {i}/{n}] {sid}", flush=True)
-            except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
-                print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
-        return done
-    finally:
-        repo.settings.embed_concurrency = orig_conc
+    done = 0
+    sids = mnt.source_ids(notebook_id)
+    n = len(sids)
+    for i, sid in enumerate(sids, 1):
+        try:
+            mnt.embed_chunks_for_source(sid)
+            done += 1
+            print(f"[embed {i}/{n}] {sid}", flush=True)
+        except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
+            print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
+    return done
+
+
+def backfill_element_embeddings(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+) -> int:
+    """补该 notebook 缺失的 element 向量(只补缺失,幂等),返回落库行数。EMBED 未配则跳过。
+
+    与 chunk/节点两侧并列的第三条补齐路径:此前 element 侧只有「整源重跑」一条路,
+    写了一半的源(部分 element 有向量、部分没有)没有任何增量修法。
+
+    已知边界(codex 第 5/6/8 轮 P2,经权衡后本 PR 不修):待补行的**文本**是一次
+    fetchall 全读进内存的,大库上这部分内存与待补文本总量成正比。之所以不在这里改:
+    chunk 侧的 missing_chunk_embedding_rows 是**完全同构**的既有实现,只把 element 侧
+    改成分页会让两侧行为不一致、给后续维护埋坑;要治应两侧一起改成 keyset 分页,
+    作为独立改动提。本 PR 已把**向量**侧的内存做了分页——向量才是 GB 级的大头
+    (几十万 element × 1024 维 float),文本通常小一到两个数量级。
+    保留行为(向量确实分页落库)由
+    test_backfill_element_embeddings_persists_before_all_embedding_finishes 钉住。
+    element_embeddings 走 INSERT OR REPLACE upsert,只补缺失不会动同源已有的向量。"""
+    if not repo.configured("source_element_embedding"):
+        return 0
+    mnt = repo.maintenance
+    rows = mnt.missing_element_embedding_rows(notebook_id)
+    if not rows:
+        print("[embed] 无缺失 element 向量,跳过", flush=True)
+        return 0
+    print(f"[embed] 补缺失 element 向量:{len(rows)} 个", flush=True)
+    return mnt.embed_elements_batch(
+        notebook_id,
+        [
+            {"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]}
+            for r in rows
+        ],
+    )
 
 
 def run_kg(repo: BatchIngestRepository, notebook_id: str,
-           limit: int | None = None, conc: int = 4, log: LogFn | None = None,
+           limit: int | None = None, log: LogFn | None = None,
            no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
            report_interval: int = 15) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
-    source job 与 LLM window 并发上限由外层 _batch_concurrency_scope 统一安装；
-    本函数只向已配置的 scheduler 提交 source job，不在 phase 内重配任一 pool。
-    conc 仅供本函数直接调用的 embedding helper 使用。
+    Model admission is owned by the system provider; this phase only submits
+    source jobs to the business orchestration pool.
 
     Flags:
       rebuild_only=True  — 跳过抽取,直接 rebuild_unified_kg + 节点向量(含 scale index)。
@@ -486,10 +429,9 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     res = {"extracted": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
     try:
         # ── 抽取阶段(rebuild_only 时跳过) ────────────────────────────────────
-        # 抽取驱动 KG-LLM window 池,故用 _PoolReporter 周期自报 KG-LLM vs embed 并发。
+        # 周期自报业务 producer/source 池；模型容量由 service scheduler 观测。
         if not rebuild_only:
-            llm_ok = (repo.settings.kg_llm_configured
-                      or getattr(repo.llm_client, "configured", False))
+            llm_ok = repo.configured("kg_extract")
             if limit is None:
                 # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
                 if llm_ok or not no_rebuild:
@@ -510,7 +452,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
             else:
                 if not llm_ok:
                     raise RuntimeError(
-                        "KG LLM 未配置(KG_LLM_* 或主 LLM 均未配):--limit 抽取只会产出 no-llm 空结果")
+                        "kg_extract workload 未绑定系统模型服务")
                 all_sids = mnt.source_ids(notebook_id)
                 kgful = mnt.kg_covered_source_ids(notebook_id)
                 targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
@@ -565,7 +507,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
             res["clusters"] = clusters
             log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
             print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id)
 
             # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────
             nb = repo.get_notebook(notebook_id)
@@ -584,7 +526,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
 
 
 def run_all(repo: BatchIngestRepository, notebook_id: str,
-            files: Iterable[Path], conc: int = 4,
+            files: Iterable[Path],
             log: LogFn | None = None, report_interval: int = 15,
             fresh: bool = False) -> dict[str, int]:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
@@ -597,9 +539,8 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     批量期强制 kg_auto_extract=True(让 process_source 走到 extract)且关 per-source 融合;
     finally 恢复两者原值。单 source 失败隔离,计入 failed,不连累其余。
 
-    并发上限由调用方的 batch controller 统一安装；本函数不重配 scheduler，
-    以免只传 job_workers 时把独立的 LLM window 上限重置为 Settings 默认值。
-    conc 仍用于传给本函数直接调用的 embedding helpers。
+    Provider throughput is fixed by the system model registry. This helper
+    submits business jobs and never mutates provider capacity.
 
     fresh=True — 透传给末尾的 rebuild_unified_kg:清空 rebuild checkpoint 并强制
       merge 审查/概念描述全量重跑(隐含 force=True,理由同 run_kg)。
@@ -609,10 +550,8 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     log = log or (lambda _e: None)
     orig_auto = repo.settings.kg_auto_extract
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
-    orig_embed_conc = repo.settings.embed_concurrency
     repo.settings.kg_auto_extract = True                 # 强制 process_source 走 extract 分支
     repo.settings.kg_incremental_fusion_enabled = False  # 批量期关 per-source 融合,收尾一次 rebuild
-    repo.settings.embed_concurrency = conc               # process_source 后台 chunk embed 并发
     files = list(files)
     res = {"new": 0, "resumed": 0, "reparsed": 0, "extracted": 0, "failed": 0,
            "clusters": 0, "nodes_embedded": 0}
@@ -659,7 +598,7 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
         for sid in resume_sids:
             futs[submit_job(repo.extract_source, sid)] = sid   # 只补抽 KG,不 embed
 
-        # ── 等待全部 job,逐个打印进度、统计(周期自报 KG-LLM vs embed 并发) ──────
+        # ── 等待全部 job,逐个打印进度、统计 producer/source 业务池 ──────
         total = len(futs)
         with _PoolReporter(report_interval, total=total, log=log) as reporter:
             for i, fut in enumerate(as_completed(futs), 1):
@@ -687,7 +626,7 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
             res["clusters"] = clusters
             log({"phase": "all", "status": "rebuilt", "clusters": clusters})
             print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id)
 
             nb = repo.get_notebook(notebook_id)
             if nb.tier == "base" or repo.maintenance.has_scale_index(notebook_id):
@@ -699,12 +638,11 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     finally:
         repo.settings.kg_auto_extract = orig_auto
         repo.settings.kg_incremental_fusion_enabled = orig_fusion
-        repo.settings.embed_concurrency = orig_embed_conc
     return res
 
 
 def run_reparse(repo: BatchIngestRepository, notebook_id: str,
-                limit: int | None = None, conc: int = 4,
+                limit: int | None = None,
                 log: LogFn | None = None, report_interval: int = 15,
                 no_rebuild: bool = False) -> dict[str, int]:
     """对 notebook 内无 source_elements(未成功 parse)的存量源重跑 process_source 补
@@ -716,20 +654,17 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
     节点被整源丢弃 → objects=0,且直接重抽永远补不出 KG。必须重新 parse 生成 elements。
     跨源并发提交到 KG job 池。有 elements 的源自动跳过(幂等)。
 
-    source job 与 LLM window 并发上限由外层 _batch_concurrency_scope 统一安装；
-    本函数只提交 job。conc 仅供 embedding helper/兼容设置使用。"""
+    Provider throughput is registry-owned; this function only submits jobs."""
     from app.services.kg.scheduler import submit_job
 
     log = log or (lambda _e: None)
     orig_auto = repo.settings.kg_auto_extract
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
-    orig_embed_conc = repo.settings.embed_concurrency
     repo.settings.kg_auto_extract = True                 # process_source 走到 extract
     # 批量期关 per-source 增量融合:否则每源抽完都触发 incremental_fuse_source,要加载整个
     # notebook 的 cluster_map + 写 concept_clusters,巨型库(几万源)O(N²) 会卡死(16 路争
     # vector_cache/写锁)。收尾的 rebuild_unified_kg 会做一次全量融合(与 run_all/run_kg 一致)。
     repo.settings.kg_incremental_fusion_enabled = False
-    repo.settings.embed_concurrency = conc
 
     res = {"reparsed": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
     try:
@@ -768,12 +703,11 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
             res["clusters"] = clusters
             log({"phase": "reparse", "status": "rebuilt", "clusters": clusters})
             print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id)
         return res
     finally:
         repo.settings.kg_auto_extract = orig_auto
         repo.settings.kg_incremental_fusion_enabled = orig_fusion
-        repo.settings.embed_concurrency = orig_embed_conc
 
 
 def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict[str, int]:
@@ -784,21 +718,16 @@ def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict[str, int]:
 
 
 def backfill_node_embeddings(
-    repo: BatchIngestRepository, notebook_id: str, conc: int = 4
+    repo: BatchIngestRepository, notebook_id: str
 ) -> int:
-    """补 KG 节点向量(复用 backfill_knowledge_embeddings;关系向量默认跳过)。EMBED 未配则跳过。"""
-    if not repo.settings.embedder_configured:
+    """补 KG 节点向量；未绑定 knowledge_object_embedding 时跳过。"""
+    if not repo.configured("knowledge_object_embedding"):
         return 0
     mnt = repo.maintenance
-    orig_conc = repo.settings.embed_concurrency
-    repo.settings.embed_concurrency = conc
-    try:
-        def _p(done: int, total: int) -> None:
-            end = "\n" if done >= total else "\r"
-            print(f"  节点向量: {done}/{total}", end=end, flush=True)
-        count = mnt.backfill_node_embeddings(notebook_id, progress=_p)
-    finally:
-        repo.settings.embed_concurrency = orig_conc
+    def _p(done: int, total: int) -> None:
+        end = "\n" if done >= total else "\r"
+        print(f"  节点向量: {done}/{total}", end=end, flush=True)
+    count = mnt.backfill_node_embeddings(notebook_id, progress=_p)
     # Backfilling node vectors changes the ANN inputs → mark dirty so the cluster
     # version's kg_mutation_seq advances (a later force=False rebuild must not skip
     # on the strength of unchanged object/decided counts alone).
@@ -818,29 +747,43 @@ def _count_missing_node_vectors(
     return repo.maintenance.count_missing_node_vectors(notebook_id)
 
 
+def _count_missing_element_vectors(
+    repo: BatchIngestRepository, notebook_id: str
+) -> int:
+    return repo.maintenance.count_missing_element_vectors(notebook_id)
+
+
 def run_embed(
-    repo: BatchIngestRepository, notebook_id: str, conc: int = 4
+    repo: BatchIngestRepository, notebook_id: str
 ) -> dict[str, int]:
-    """补该 notebook 缺失的 chunk + 节点向量(幂等,只补缺失)。
+    """补该 notebook 缺失的 chunk + element + 节点向量(幂等,只补缺失)。
 
     先 SQL 盘点缺失数并打印,再 backfill_chunk_embeddings(missing_only=True) +
-    backfill_node_embeddings(节点本就只补缺失),最后打印 after 盘点。
+    backfill_element_embeddings + backfill_node_embeddings(节点本就只补缺失),
+    最后打印 after 盘点。
     """
     chunk_missing = _count_missing_chunk_vectors(repo, notebook_id)
+    element_missing = _count_missing_element_vectors(repo, notebook_id)
     node_missing = _count_missing_node_vectors(repo, notebook_id)
-    print(f"embed: 缺失盘点 chunk={chunk_missing} node={node_missing}", flush=True)
+    print(f"embed: 缺失盘点 chunk={chunk_missing} element={element_missing} "
+          f"node={node_missing}", flush=True)
 
-    chunks_embedded = backfill_chunk_embeddings(repo, notebook_id, conc, missing_only=True)
-    nodes_embedded = backfill_node_embeddings(repo, notebook_id, conc)
+    chunks_embedded = backfill_chunk_embeddings(repo, notebook_id, missing_only=True)
+    elements_embedded = backfill_element_embeddings(repo, notebook_id)
+    nodes_embedded = backfill_node_embeddings(repo, notebook_id)
 
     chunk_after = _count_missing_chunk_vectors(repo, notebook_id)
+    element_after = _count_missing_element_vectors(repo, notebook_id)
     node_after = _count_missing_node_vectors(repo, notebook_id)
-    print(f"embed done: 补 chunk={chunks_embedded} node(扫描)={nodes_embedded};"
-          f"剩余缺失 chunk={chunk_after} node={node_after}", flush=True)
+    print(f"embed done: 补 chunk={chunks_embedded} element={elements_embedded} "
+          f"node(扫描)={nodes_embedded};剩余缺失 chunk={chunk_after} "
+          f"element={element_after} node={node_after}", flush=True)
     return {
         "chunks_embedded": chunks_embedded,
+        "elements_embedded": elements_embedded,
         "nodes_embedded": nodes_embedded,
         "chunk_missing_before": chunk_missing,
+        "element_missing_before": element_missing,
         "node_missing_before": node_missing,
     }
 
@@ -1093,12 +1036,9 @@ def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional
 def run_metadata(repo, args) -> int:
     """phase=metadata:补抽 notebook 内缺论文元数据的源(幂等可续跑;--force 重抽)。
     只作用于已解析的 academic_paper 源;原始 PDF 缺失也可跑(读 DB 内 elements)。"""
-    if not (
-        getattr(repo.kg_llm_client, "configured", False)
-        or getattr(repo.llm_client, "configured", False)
-    ):
-        print("error: LLM 未配置 → 无法抽取论文元数据。配置 OPENAI_COMPAT_* 或 "
-              "KG_LLM_* 后重试(CLI 不静默降级)。", file=sys.stderr)
+    if not repo.configured("paper_metadata"):
+        print("error: paper_metadata workload 未绑定模型服务 → 无法抽取论文元数据。"
+              "请配置 MODEL_SERVICES_CONFIG 后重试(CLI 不静默降级)。", file=sys.stderr)
         return 2
     if not args.notebook_id:
         print("error: --phase metadata 需要 --notebook-id(本 phase 不新建 notebook)。",
@@ -1152,11 +1092,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "vectors-to-blob 阶段为 json.loads/编码并行进程数"
                         f"(默认 min(32, CPU核数)={_BACKFILL_DEFAULT_WORKERS},1 走原串行路径,"
                         "不启动进程池;别到 64——单写 SQLite executemany + IPC 在 ~16-24 处封顶)")
-    p.add_argument("--llm-conc", type=int, default=None,
-                   help="传统 LLM 全局并发硬上限；省略时继承 KG_EXTRACT_WORKERS")
-    p.add_argument("--embed-conc", type=int, default=None,
-                   help="embedding 全局并发硬上限；省略时继承 EMBED_CONCURRENCY，"
-                        "与源/文档级并发独立")
     p.add_argument("--limit", type=int, default=None,
                    help="kg 阶段只抽前 N 个未抽源 / reparse 阶段只处理前 N 个缺 elements 源"
                         "(仅限制本次数量;最终 rebuild 仍覆盖全本 notebook)")
@@ -1170,11 +1105,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "(kg 与 all 阶段的收尾 rebuild 均适用;用于只换了 KG 模型/阈值、"
                         "数据没变的场景)。")
     p.add_argument("--allow-no-embed", action="store_true",
-                   help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
+                   help="chunk_embedding workload 未绑定时显式允许无向量降级"
+                        "(默认拒绝,防静默产出无向量库)")
     p.add_argument("--force", action="store_true",
                    help="metadata phase: 已有元数据行的源也重抽(prompt/校验升级后刷新)")
     p.add_argument("--pool-report-interval", type=int, default=15,
-                   help="每 N 秒自报线程池占用(KG-LLM/源/embed);0 关闭。"
+                   help="每 N 秒自报 producer/source 业务线程池占用;0 关闭。"
                         "all/kg/reparse 阶段生效")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
     return p
@@ -1219,18 +1155,14 @@ def _dispatch_main(
 
     if args.phase == "metadata":
         print(
-            "concurrency: "
-            f"source={effective.workers}({effective.workers_source}) "
-            f"llm={effective.llm}({effective.llm_source}) "
-            f"embedding={effective.embedding}({effective.embedding_source})",
+            f"concurrency: source={effective.workers}({effective.workers_source})",
             flush=True,
         )
-        with _batch_concurrency_scope(repo, effective):
-            return run_metadata(repo, args)
+        return run_metadata(repo, args)
 
     # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
     allow_no_embed = args.allow_no_embed and args.phase != "embed"
-    if not repo.settings.embedder_configured:
+    if not repo.configured("chunk_embedding"):
         if not allow_no_embed:
             extra = (
                 "\n  注意:embed 子命令用于补向量,--allow-no-embed 对它无效。"
@@ -1238,12 +1170,8 @@ def _dispatch_main(
                 else ""
             )
             print(
-                "error: EMBED 未就绪 → 不会产出向量(chunk/节点),检索将失效。\n"
-                f"  当前 EMBED_PROVIDER={(repo.settings.embed_provider or '').strip()!r}"
-                "(目前仅支持 'dashscope',大小写不敏感),且需 "
-                "EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL 都配齐。\n"
-                "  若确认 .env 已配:.env 按「当前工作目录」加载——请从含 .env "
-                "的仓库根(主 checkout,不是 worktree)运行。\n"
+                "error: chunk_embedding 未绑定系统模型服务 → 不会产出向量，检索将失效。\n"
+                "  请由维护人员检查 MODEL_SERVICES_CONFIG 中的服务与 workload 绑定。\n"
                 "  确实要无向量导入,请显式加 --allow-no-embed。"
                 + extra,
                 file=sys.stderr,
@@ -1262,17 +1190,10 @@ def _dispatch_main(
     log({
         "phase": "concurrency",
         "workers": effective.workers,
-        "llm": effective.llm,
-        "embedding": effective.embedding,
         "workers_source": effective.workers_source,
-        "llm_source": effective.llm_source,
-        "embedding_source": effective.embedding_source,
     })
     print(
-        "concurrency: "
-        f"source={effective.workers}({effective.workers_source}) "
-        f"llm={effective.llm}({effective.llm_source}) "
-        f"embedding={effective.embedding}({effective.embedding_source})",
+        f"concurrency: source={effective.workers}({effective.workers_source})",
         flush=True,
     )
 
@@ -1283,88 +1204,83 @@ def _dispatch_main(
         print(f"index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
         return 0
 
-    with _batch_concurrency_scope(repo, effective):
-        if args.phase == "all":
-            print("phase=all (pipelined)", flush=True)
-            _t = time.perf_counter()
-            r = run_all(
-                repo,
-                notebook_id,
-                iter_files(args.input_dir),
-                conc=effective.embedding,
-                log=log,
-                report_interval=args.pool_report_interval,
-                fresh=getattr(args, "fresh", False),
-            )
-            print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-            return 0
+    if args.phase == "all":
+        print("phase=all (pipelined)", flush=True)
+        _t = time.perf_counter()
+        r = run_all(
+            repo,
+            notebook_id,
+            iter_files(args.input_dir),
+            log=log,
+            report_interval=args.pool_report_interval,
+            fresh=getattr(args, "fresh", False),
+        )
+        print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+        return 0
 
-        if args.phase == "ingest":
-            files = iter_files(args.input_dir)
-            print(f"phase=ingest files={len(files)}", flush=True)
-            _t = time.perf_counter()
-            c = run_ingest(
-                repo,
-                notebook_id,
-                files,
-                workers=effective.workers,
-                conc=effective.embedding,
-                log=log,
-            )
-            print(
-                f"ingest done: {c} ({time.perf_counter() - _t:.1f}s)",
-                flush=True,
-            )
+    if args.phase == "ingest":
+        files = iter_files(args.input_dir)
+        print(f"phase=ingest files={len(files)}", flush=True)
+        _t = time.perf_counter()
+        c = run_ingest(
+            repo,
+            notebook_id,
+            files,
+            workers=effective.workers,
+            log=log,
+        )
+        print(
+            f"ingest done: {c} ({time.perf_counter() - _t:.1f}s)",
+            flush=True,
+        )
 
-        if args.phase == "kg":
-            no_rebuild = getattr(args, "no_rebuild", False)
-            rebuild_only = getattr(args, "rebuild_only", False)
-            fresh = getattr(args, "fresh", False)
-            print(
-                f"phase=kg limit={args.limit} no_rebuild={no_rebuild} "
-                f"rebuild_only={rebuild_only} fresh={fresh}",
-                flush=True,
-            )
-            _t = time.perf_counter()
-            r = run_kg(
-                repo,
-                notebook_id,
-                limit=args.limit,
-                conc=effective.embedding,
-                log=log,
-                no_rebuild=no_rebuild,
-                rebuild_only=rebuild_only,
-                fresh=fresh,
-                report_interval=args.pool_report_interval,
-            )
-            print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+    if args.phase == "kg":
+        no_rebuild = getattr(args, "no_rebuild", False)
+        rebuild_only = getattr(args, "rebuild_only", False)
+        fresh = getattr(args, "fresh", False)
+        print(
+            f"phase=kg limit={args.limit} no_rebuild={no_rebuild} "
+            f"rebuild_only={rebuild_only} fresh={fresh}",
+            flush=True,
+        )
+        _t = time.perf_counter()
+        r = run_kg(
+            repo,
+            notebook_id,
+            limit=args.limit,
+            log=log,
+            no_rebuild=no_rebuild,
+            rebuild_only=rebuild_only,
+            fresh=fresh,
+            report_interval=args.pool_report_interval,
+        )
+        print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
-        if args.phase == "reparse":
-            no_rebuild = getattr(args, "no_rebuild", False)
-            print(
-                f"phase=reparse limit={args.limit} no_rebuild={no_rebuild}",
-                flush=True,
-            )
-            _t = time.perf_counter()
-            r = run_reparse(
-                repo,
-                notebook_id,
-                limit=args.limit,
-                conc=effective.embedding,
-                log=log,
-                no_rebuild=no_rebuild,
-                report_interval=args.pool_report_interval,
-            )
-            print(
-                f"reparse done: {r} ({time.perf_counter() - _t:.1f}s)",
-                flush=True,
-            )
+    if args.phase == "reparse":
+        no_rebuild = getattr(args, "no_rebuild", False)
+        print(
+            f"phase=reparse limit={args.limit} no_rebuild={no_rebuild}",
+            flush=True,
+        )
+        _t = time.perf_counter()
+        r = run_reparse(
+            repo,
+            notebook_id,
+            limit=args.limit,
+            log=log,
+            no_rebuild=no_rebuild,
+            report_interval=args.pool_report_interval,
+        )
+        print(
+            f"reparse done: {r} ({time.perf_counter() - _t:.1f}s)",
+            flush=True,
+        )
 
-        if args.phase == "embed":
-            print(f"phase=embed notebook={notebook_id}", flush=True)
-            _t = time.perf_counter()
-            r = run_embed(repo, notebook_id, conc=effective.embedding)
-            print(f"embed done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+    if args.phase == "embed":
+        print(f"phase=embed notebook={notebook_id}", flush=True)
+        _t = time.perf_counter()
+        r = run_embed(repo, notebook_id)
+        print(f"embed done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     return 0
 

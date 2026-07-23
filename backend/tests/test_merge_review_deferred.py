@@ -5,6 +5,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 import app.services.sqlite_repository as repomod
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -12,13 +13,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "k")
-    monkeypatch.setenv("EMBED_MODEL", "m")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 

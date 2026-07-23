@@ -1,6 +1,5 @@
 import type { AskModeId } from "./ask-modes";
 import type { ReasoningTraceStep } from "./ask-stream";
-import type { ModelFailureCode, StatusModelRole } from "./model-settings";
 import type { NotebookRef } from "./notebook-bases";
 
 /**
@@ -56,6 +55,11 @@ export type NotebookSummary = {
   shared_from?: string;
   is_shared?: boolean;
   paper_meta_backfilling?: boolean;
+  /**
+   * owner 的有效文档数量上限。**只在 GET /notebooks/{id} 详情里是真值**——列表
+   * 投影(listNotebooks)里是 0 哨兵,别拿来门控。0/缺失一律当「未知」处理。
+   */
+  document_limit?: number;
 };
 
 export type MemoryOrigin = "ask_answer" | "external_agent";
@@ -286,10 +290,14 @@ export type AskResponse = {
   reasoning_trace?: ReasoningTraceStep[];
   mode?: AskModeId;
   model_errors?: {
-    service: StatusModelRole;
+    service_id: string;
+    service_name: string;
+    workload_id: string;
+    workload_label: string;
     stage: string;
     model: string;
-    message: ModelFailureCode;
+    message: string;
+    support_id: string;
   }[];
   index_required?: boolean;
 };

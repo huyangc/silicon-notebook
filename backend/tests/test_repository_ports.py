@@ -12,11 +12,10 @@ def test_sqlite_repository_does_not_inherit_aggregate_protocol():
 def test_required_protocol_catalogue_has_declared_operations():
     required = {
         "IdentityRepository": {
-            "current_user", "get_user_model_settings", "set_user_model_settings",
-            "get_model_service_statuses", "record_model_service_status",
-            "clear_model_service_statuses", "resolve_model_config", "create_user",
+            "current_user", "create_user",
             "authenticate_user", "create_session", "resolve_session", "delete_session",
         },
+        "ModelStatusStorePort": {"get_all", "record"},
         "NotebookSharingRepository": {"share_notebook", "unshare_notebook", "copy_notebook", "add_member", "remove_member", "join_shared", "leave_notebook"},
         "KnowledgeGovernanceRepository": {"update_knowledge", "merge_knowledge", "confirm_conflict", "approve_promotion", "reject_promotion"},
         "KnowledgeLifecycleRepository": {"build_notebook_kg", "rebuild_unified_kg", "unified_kg_status"},

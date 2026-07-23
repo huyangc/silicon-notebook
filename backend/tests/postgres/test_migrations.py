@@ -256,9 +256,9 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 7
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 24
-    assert len(PostgresMigrator(postgres_database).migrations) == 7
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 8
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 29
+    assert len(PostgresMigrator(postgres_database).migrations) == 8
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -301,9 +301,9 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     assert integrity_indexes <= indexes
     assert "idx_chunks_nb" not in indexes
     assert "idx_chunks_text_trgm" not in indexes
-    for version in (3, 4, 5, 6, 7):
+    for version in (3, 4, 5, 6, 7, 8):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 7
+    assert migrator.migrate() == 8
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -321,7 +321,7 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     assert "idx_chunks_nb" in final_indexes
     assert "idx_chunks_text_trgm" in final_indexes
     assert "uq_clusters_notebook_type_member" in final_indexes
-    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7]
+    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7, 8]
 
 
 def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_database):
@@ -364,7 +364,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 7
+    assert migrator.migrate() == 8
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "

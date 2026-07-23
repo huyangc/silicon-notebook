@@ -6,6 +6,7 @@ leakage_ratio > 0.6 的题剔除(泄漏)。生成后人工抽检并入 recall_go
 import argparse, json, yaml, random
 from app.core.config import get_settings
 from app.services.sqlite_repository import SQLiteRepository
+from app.services.kg.client import make_client
 from app.services.retrieval import _payload_text
 from app.eval.retrieval_metrics import leakage_ratio
 
@@ -34,20 +35,21 @@ def main() -> int:
     a = ap.parse_args()
     rng = random.Random(a.seed)
     repo = SQLiteRepository(get_settings())
-    assert repo.llm_client.configured, "LLM 未配置(.env)"
+    client = make_client("GOLDGEN_")
+    assert client.configured, "GOLDGEN_OPENAI_COMPAT_* 未配置"
     out, dropped = [], 0
     objs = repo.maintenance.gold_knowledge_object_rows(a.notebook)
     rels = repo.maintenance.relations_with_names(a.notebook)
     for r in rng.sample(objs, min(a.n_obj, len(objs))):
         src = _payload_text(json.loads(r["payload"] or "{}"))
-        q = _gen_question(repo.llm_client, src)
+        q = _gen_question(client, src)
         if q and leakage_ratio(q, src) <= _LEAK_MAX:
             out.append({"id": f"r-obj-{r['id'][-6:]}", "track": "reverse", "bucket": "node",
                         "question": q, "gold_object_ids": [r["id"]]})
         else:
             dropped += 1
     for r in rng.sample(rels, min(a.n_rel, len(rels))):
-        q = _gen_question(repo.llm_client, r["text"])
+        q = _gen_question(client, r["text"])
         if q and leakage_ratio(q, r["text"]) <= _LEAK_MAX:
             out.append({"id": f"r-rel-{r['id'][-6:]}", "track": "reverse", "bucket": "bridge",
                         "question": q, "gold_relation_ids": [r["id"]],

@@ -134,8 +134,8 @@ def test_move_source_changed_returns_distinct_code_and_never_suggests_deleting_s
 
     real_copy_table = kh_transfer.copy_table
 
-    def _copy_then_concurrent_row_add(repo_, source_table_id, target_notebook_id, actor_id):
-        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+    def _copy_then_concurrent_row_add(repo_, source_table_id, target_notebook_id, actor_id, **kwargs):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id, **kwargs)
         repo_.add_knowhow_row(source_table_id, {cols["违例类型"]: "并发新增的行"})
         return new_id
 

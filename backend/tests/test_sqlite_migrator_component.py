@@ -5,17 +5,22 @@ import pytest
 from app.repositories.sqlite.migrations import SCHEMA_VERSION, SqliteMigrator
 
 
-def test_initialize_orders_migrate_recover_seed():
+def test_initialize_orders_migrate_then_seed_and_never_recovers():
+    """initialize() = migrate + seed only. Crash recovery is deliberately NOT
+    part of it: every SQLiteRepository construction runs initialize(), and the
+    ~20 offline CLI construction sites must not get to declare the server's
+    in-progress rows dead. The server calls recover_interrupted_jobs()
+    explicitly from startup_warmup.run_startup instead."""
     m = SqliteMigrator(SimpleNamespace(), SimpleNamespace())
     calls = []
     m.migrate = lambda: calls.append("migrate") or []
     m.recover_interrupted_jobs = lambda: calls.append("recover")
     m.seed = lambda: calls.append("seed")
     assert m.initialize() == []
-    assert calls == ["migrate", "recover", "seed"]
+    assert calls == ["migrate", "seed"]
 
 
-def test_schema_version_constant_is_v24():
+def test_schema_version_constant_is_v29():
     # master v11/v12 hot-path indexes、Memory / Agent v13 migration、Task 1 的
     # sources.memory_id v14 migration、Task 5 的 parse_status/source_type 覆盖
     # 索引 v15 migration、knowhow-tables PR-1 Task 1 的五张新表 v16 migration、
@@ -23,13 +28,16 @@ def test_schema_version_constant_is_v24():
     # migration、PR-2+3 Task 1 的 cell_code 表 + role 词表重映射 v18 migration、
     # source-asset-linking Task 2 的 notebook_assets.source_id 列 v19 migration
     # 与多领域基准库 Task 1 的 notebook_bases 挂载表 + promotion_candidates.
-    # target_base_id 列 v20 migration、JS-trim anchor expression index v21 与
-    # KG 构建任务状态表 v22、每用户模型服务最新状态表 v23 与 cluster member
-    # 唯一性/存量去重 v24 均保留；与 facade 模块级 SCHEMA_VERSION 同步。
-    assert SCHEMA_VERSION == 24
+    # target_base_id 列 v20 migration、JS-trim anchor expression index v21、
+    # KG 构建任务状态表 v22、每用户模型服务最新状态表 v23、写锁瘦身改造点 2 的
+    # kg_canonical_scratch 表 v24、v25 清除用户模型凭据与旧状态并改为系统模型
+    # 服务状态、knowhow 表版本管理的 knowhow_changes/knowhow_milestones 两表 v26、
+    # v27 加源完成标记 sources.chunked_at 列、v28 每笔记本文档数量上限，
+    # v29 收敛合并前两条 v24 迁移线。
+    assert SCHEMA_VERSION == 29
 
 
-def test_v24_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
+def test_v29_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
     import sqlite3
 
     from app.core.config import Settings
@@ -42,7 +50,7 @@ def test_v24_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
         migrator.initialize()
         with database.connect() as db:
             db.execute("DROP INDEX uq_clusters_notebook_type_member")
-            db.execute("PRAGMA user_version = 23")
+            db.execute("PRAGMA user_version = 28")
             db.execute(
                 "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES (?,?,?,?)",
                 ("nb-cluster-migration", "clusters", "2026-01-01", "2026-01-01"),
@@ -73,7 +81,7 @@ def test_v24_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
                 ],
             )
 
-        assert migrator.migrate() == [24]
+        assert migrator.migrate() == [29]
         with database.connect() as db:
             rows = db.execute(
                 "SELECT id,canonical_id FROM concept_clusters "

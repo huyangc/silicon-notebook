@@ -88,7 +88,6 @@ def test_postgres_bundle_factory_returns_the_backend_neutral_protocol(
             remap_json_ids=lambda value, _maps: value,
             in_chunk_size=lambda: 900,
         ),
-        model_config_cache={},
     )
     try:
         assert isinstance(bundle, PersistenceBundle)
@@ -123,7 +122,6 @@ def test_postgres_bundle_closes_pool_when_migration_fails(
                 remap_json_ids=lambda value, _maps: value,
                 in_chunk_size=lambda: 900,
             ),
-            model_config_cache={},
         )
     assert factory._database is not None
     assert factory._database._closed is True
@@ -408,6 +406,9 @@ def test_postgres_restart_recovers_every_interrupted_job_and_preserves_terminal_
 
         restarted = PostgresRepository(postgres_settings)
         try:
+            # Construction/migration is safe for offline tooling. Only the
+            # server lifecycle claims abandoned process-owned work.
+            restarted._recover_interrupted_jobs()
             with restarted._runtime.database.connect() as db:
                 merge_rows = {
                     row["notebook_id"]: row

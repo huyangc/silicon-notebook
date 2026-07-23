@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any
 from uuid import uuid4
 
 from psycopg import errors
@@ -10,6 +10,10 @@ from psycopg import errors
 from app.core.config import Settings
 from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
+from app.repositories.identity_errors import (
+    BuiltinAdminDemotionError,
+    SelfDemotionError,
+)
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
     json_value,
@@ -18,32 +22,18 @@ from app.repositories.postgres._store_utils import (
     utc_now,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.services.model_config import (
-    MODEL_SERVICE_ROLES,
-    STATUS_SERVICE_ROLES,
-    ResolvedModelConfig,
-    model_config_fingerprint,
-    resolve_effective_config,
-    system_model_settings,
-)
+_UPLOAD_LIMIT_DEFAULT_KEY = "upload_document_limit_default"
+_DOCUMENT_LIMIT_MIN = 1
+_DOCUMENT_LIMIT_MAX = 100000
 
 
-def _status_checked_at(value: str) -> str:
-    from datetime import timezone
-
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("checked_at must be an offset-aware ISO timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("checked_at must be an offset-aware ISO timestamp")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
-
-
-def _status_timestamp(value: object) -> str:
-    if isinstance(value, datetime):
-        return value.isoformat(timespec="microseconds")
-    return iso_timestamp(value)
+def _resolve_global_default(raw_value: "str | None", settings: Settings) -> int:
+    if raw_value is not None:
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            pass
+    return int(settings.user_upload_document_limit)
 
 
 class IdentityStore:
@@ -53,11 +43,9 @@ class IdentityStore:
         self,
         database: PostgresDatabase,
         settings: Settings,
-        model_config_cache: dict[str, object],
     ) -> None:
         self.database = database
         self.settings = settings
-        self.model_config_cache = model_config_cache
 
     def current_user(self) -> UserProfile:
         context_user = get_request_user()
@@ -86,232 +74,6 @@ class IdentityStore:
             domain_focus=json_value(
                 profile_row.get("domain_focus") if profile_row else None, []
             ),
-        )
-
-    def get_user_model_settings(self, user_id: str) -> dict:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id=%s", (user_id,)
-            ).fetchone()
-        value = json_value(row["model_settings"] if row else None, {})
-        return value if isinstance(value, dict) else {}
-
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
-        with self.database.write() as connection:
-            connection.execute(
-                "UPDATE user_profiles SET model_settings=%s, updated_at=%s WHERE user_id=%s",
-                (jsonb(settings), utc_now(), user_id),
-            )
-        self.model_config_cache.pop(user_id, None)
-
-    def patch_user_model_settings_atomic(
-        self,
-        user_id: str,
-        patch: Mapping[str, Mapping[str, str | None] | None],
-    ) -> dict:
-        system = system_model_settings(self.settings)
-        policy = self.settings.user_model_config_policy
-        with self.database.write() as connection:
-            row = connection.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id=%s FOR UPDATE",
-                (user_id,),
-            ).fetchone()
-            stored = json_value(row["model_settings"] if row else None, {})
-            if not isinstance(stored, dict):
-                stored = {}
-            before = {
-                role: model_config_fingerprint(
-                    resolve_effective_config(stored, role, policy, system)
-                )
-                for role in STATUS_SERVICE_ROLES
-            }
-            for role in MODEL_SERVICE_ROLES:
-                role_patch = patch.get(role)
-                if not isinstance(role_patch, Mapping):
-                    continue
-                service = dict(stored.get(role) or {})
-                for field in ("base_url", "api_key", "model"):
-                    if field not in role_patch or role_patch[field] is None:
-                        continue
-                    value = role_patch[field]
-                    if value == "":
-                        service.pop(field, None)
-                    else:
-                        service[field] = value
-                if service:
-                    stored[role] = service
-                else:
-                    stored.pop(role, None)
-            connection.execute(
-                "UPDATE user_profiles SET model_settings=%s, updated_at=%s WHERE user_id=%s",
-                (jsonb(stored), utc_now(), user_id),
-            )
-            changed = [
-                role
-                for role in STATUS_SERVICE_ROLES
-                if model_config_fingerprint(
-                    resolve_effective_config(stored, role, policy, system)
-                )
-                != before[role]
-            ]
-            if changed:
-                connection.execute(
-                    "DELETE FROM model_service_status WHERE user_id=%s "
-                    f"AND service IN ({placeholders(changed)})",
-                    (user_id, *changed),
-                )
-        self.model_config_cache.pop(user_id, None)
-        return stored
-
-    def get_model_service_statuses(self, user_id: str) -> dict[str, dict[str, Any]]:
-        with self.database.connect() as connection:
-            rows = connection.execute(
-                "SELECT service,config_fingerprint,status,latency_ms,code,trigger,checked_at "
-                "FROM model_service_status WHERE user_id=%s",
-                (user_id,),
-            ).fetchall()
-        return {
-            row["service"]: {
-                "config_fingerprint": row["config_fingerprint"],
-                "status": row["status"],
-                "latency_ms": row["latency_ms"],
-                "code": row["code"],
-                "trigger": row["trigger"],
-                "checked_at": _status_timestamp(row["checked_at"]),
-            }
-            for row in rows
-        }
-
-    @staticmethod
-    def _upsert_model_service_status(
-        connection,
-        user_id: str,
-        service: str,
-        config_fingerprint: str,
-        status: str,
-        latency_ms: int,
-        code: str,
-        trigger: str,
-        checked_at: str,
-    ) -> None:
-        connection.execute(
-            "INSERT INTO model_service_status "
-            "(user_id,service,config_fingerprint,status,latency_ms,code,trigger,checked_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
-            "ON CONFLICT(user_id,service) DO UPDATE SET "
-            "config_fingerprint=excluded.config_fingerprint,status=excluded.status,"
-            "latency_ms=excluded.latency_ms,code=excluded.code,trigger=excluded.trigger,"
-            "checked_at=excluded.checked_at "
-            "WHERE excluded.checked_at > model_service_status.checked_at OR "
-            "(excluded.checked_at = model_service_status.checked_at AND "
-            "(CASE WHEN excluded.trigger='observed_failure' THEN 3 "
-            "WHEN excluded.status='error' THEN 2 ELSE 1 END) > "
-            "(CASE WHEN model_service_status.trigger='observed_failure' THEN 3 "
-            "WHEN model_service_status.status='error' THEN 2 ELSE 1 END))",
-            (
-                user_id,
-                service,
-                config_fingerprint,
-                status,
-                latency_ms,
-                code,
-                trigger,
-                checked_at,
-            ),
-        )
-
-    def record_model_service_status(
-        self,
-        user_id: str,
-        service: str,
-        config_fingerprint: str,
-        status: str,
-        latency_ms: int,
-        code: str,
-        trigger: str,
-        checked_at: str,
-    ) -> None:
-        checked_at = _status_checked_at(checked_at)
-        with self.database.write() as connection:
-            self._upsert_model_service_status(
-                connection,
-                user_id,
-                service,
-                config_fingerprint,
-                status,
-                latency_ms,
-                code,
-                trigger,
-                checked_at,
-            )
-
-    def record_model_service_status_if_current(
-        self,
-        user_id: str,
-        service: str,
-        expected_fingerprint: str,
-        status: str,
-        latency_ms: int,
-        code: str,
-        trigger: str,
-        checked_at: str,
-    ) -> bool:
-        if service not in STATUS_SERVICE_ROLES or not expected_fingerprint:
-            return False
-        checked_at = _status_checked_at(checked_at)
-        with self.database.write() as connection:
-            row = connection.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id=%s FOR UPDATE",
-                (user_id,),
-            ).fetchone()
-            stored = json_value(row["model_settings"] if row else None, {})
-            current = resolve_effective_config(
-                stored if isinstance(stored, dict) else {},
-                service,
-                self.settings.user_model_config_policy,
-                system_model_settings(self.settings),
-            )
-            if (
-                not current.configured
-                or model_config_fingerprint(current) != expected_fingerprint
-            ):
-                return False
-            self._upsert_model_service_status(
-                connection,
-                user_id,
-                service,
-                expected_fingerprint,
-                status,
-                latency_ms,
-                code,
-                trigger,
-                checked_at,
-            )
-        return True
-
-    def clear_model_service_statuses(
-        self, user_id: str, services: Sequence[str] | None = None
-    ) -> None:
-        if services is not None and not services:
-            return
-        with self.database.write() as connection:
-            if services is None:
-                connection.execute(
-                    "DELETE FROM model_service_status WHERE user_id=%s", (user_id,)
-                )
-            else:
-                connection.execute(
-                    "DELETE FROM model_service_status WHERE user_id=%s "
-                    f"AND service IN ({placeholders(services)})",
-                    (user_id, *services),
-                )
-
-    def resolve_model_config(self, user: UserProfile, role: str) -> ResolvedModelConfig:
-        return resolve_effective_config(
-            self.get_user_model_settings(user.id),
-            role,
-            self.settings.user_model_config_policy,
-            system_model_settings(self.settings),
         )
 
     def create_user(self, username: str, password: str) -> UserProfile:
@@ -436,3 +198,125 @@ class IdentityStore:
     def delete_session(self, token: str) -> None:
         with self.database.write() as connection:
             connection.execute("DELETE FROM auth_sessions WHERE token=%s", (token,))
+
+    def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
+        if role not in {"admin", "user"}:
+            raise ValueError("invalid role")
+        with self.database.write() as db:
+            actor = db.execute(
+                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id,username,role FROM users WHERE id=%s FOR UPDATE",
+                (user_id,),
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            if role == "user" and user_id == "user-local":
+                raise BuiltinAdminDemotionError("built-in admin cannot be demoted")
+            if role == "user" and user_id == actor_id:
+                raise SelfDemotionError("cannot demote the active administrator")
+            if target["role"] != role:
+                db.execute(
+                    "UPDATE users SET role=%s,updated_at=%s WHERE id=%s",
+                    (role, utc_now(), user_id),
+                )
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+                "role": role,
+            }
+
+    def _global_default_from(self, db) -> int:
+        row = db.execute(
+            "SELECT value FROM app_settings WHERE key=%s",
+            (_UPLOAD_LIMIT_DEFAULT_KEY,),
+        ).fetchone()
+        return _resolve_global_default(
+            row["value"] if row is not None else None, self.settings
+        )
+
+    def global_document_limit_default(self) -> int:
+        with self.database.connect() as db:
+            return self._global_default_from(db)
+
+    def user_document_limit_override(self, user_id: str) -> "int | None":
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT upload_document_limit FROM user_profiles WHERE user_id=%s",
+                (user_id,),
+            ).fetchone()
+        if row is None or row["upload_document_limit"] is None:
+            return None
+        return int(row["upload_document_limit"])
+
+    def effective_document_limit(self, user_id: "str | None") -> int:
+        if user_id is not None:
+            override = self.user_document_limit_override(user_id)
+            if override is not None:
+                return override
+        return self.global_document_limit_default()
+
+    def notebook_owner(self, notebook_id: str) -> "tuple[str | None, str | None]":
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT nb.created_by AS owner_id,u.role AS owner_role "
+                "FROM notebooks nb LEFT JOIN users u ON u.id=nb.created_by "
+                "WHERE nb.id=%s",
+                (notebook_id,),
+            ).fetchone()
+        if row is None:
+            return (None, None)
+        return (row["owner_id"], row["owner_role"])
+
+    def set_global_document_limit_default(
+        self, actor_id: str, value: int
+    ) -> dict[str, int]:
+        if not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
+            raise ValueError("document limit out of range")
+        with self.database.write() as db:
+            actor = db.execute(
+                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            db.execute(
+                "INSERT INTO app_settings(key,value,updated_at) VALUES(%s,%s,%s) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                "updated_at=excluded.updated_at",
+                (_UPLOAD_LIMIT_DEFAULT_KEY, str(value), utc_now()),
+            )
+        return {"limit": value}
+
+    def set_user_document_limit_override(
+        self, actor_id: str, user_id: str, value: "int | None"
+    ) -> dict:
+        if value is not None and not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
+            raise ValueError("document limit out of range")
+        with self.database.write() as db:
+            actor = db.execute(
+                "SELECT role FROM users WHERE id=%s FOR UPDATE", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id,username FROM users WHERE id=%s FOR UPDATE", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            cursor = db.execute(
+                "UPDATE user_profiles SET upload_document_limit=%s,updated_at=%s "
+                "WHERE user_id=%s",
+                (value, utc_now(), user_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(user_id)
+            effective = value if value is not None else self._global_default_from(db)
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+                "upload_limit": effective,
+                "upload_limit_overridden": value is not None,
+            }

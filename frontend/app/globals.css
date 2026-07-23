@@ -465,6 +465,11 @@ button {
   font-size: 16px;
 }
 
+.new-pill:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
 .collection-title {
   margin-bottom: 22px;
 }
@@ -4121,7 +4126,7 @@ button.chat-session-card {
   overflow: hidden;
 }
 
-.source-action-button:hover {
+.source-action-button:hover:not(:disabled):not(.is-disabled) {
   border-color: #0f6d7a;
   color: #0f6d7a;
 }
@@ -4137,6 +4142,43 @@ button.chat-session-card {
   inset: 0;
   opacity: 0;
   cursor: pointer;
+}
+
+/* 满额门控:file-input 型入口(drop-zone / 上传文件)是 <label>,无法 :disabled,
+   故内部 input 置 disabled(点击不触发)、外层加 .is-disabled 只做视觉降级。 */
+.source-action-button:disabled,
+.source-action-button.is-disabled,
+.drop-zone.is-disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+.source-action-button.is-disabled input,
+.drop-zone.is-disabled input {
+  cursor: not-allowed;
+}
+
+/* 满额门控:文档数量指示与超限说明,横排在弹窗头部下方、与卡片左右内边距对齐。 */
+.source-doc-capacity {
+  flex: 0 0 auto;
+  margin: 14px 24px 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  font-size: 14px;
+}
+.source-doc-capacity-count {
+  font-weight: 700;
+  color: var(--ink, #17202a);
+  font-variant-numeric: tabular-nums;
+}
+.source-doc-capacity.is-full .source-doc-capacity-count {
+  color: var(--red, #ba2d2d);
+}
+.source-doc-capacity-hint {
+  color: var(--amber, #9a5b00);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .staged-head {
@@ -4268,172 +4310,173 @@ button.chat-session-card {
   padding: 20px 24px 24px;
 }
 
-.model-service-hint {
-  margin: 0 0 12px;
-}
-
-.model-service-toolbar {
+/* 标题栏右侧的操作簇：「测试全部」+ 关闭 ×，成组右对齐、顶端对齐标题。 */
+.model-service-header-actions {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
+  align-items: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
 .model-service-test-all {
   font-weight: 750;
+  white-space: nowrap;
 }
 
-.model-service-fieldset {
+.model-service-status-list {
+  display: grid;
   gap: 12px;
-  margin: 0 0 12px;
+}
+
+.model-service-status-card {
+  position: relative;
+  display: grid;
+  gap: 14px;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
+  background: #fff;
   transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
 
-.model-service-fieldset legend {
-  padding: 0 6px;
-  color: #273244;
-  font-size: 14px;
-  font-weight: 750;
-}
-
-.model-service-fieldset.is-highlighted {
+.model-service-status-card.is-highlighted {
   border-color: #5477ef;
   background: #f7f9ff;
   box-shadow: 0 0 0 3px rgba(84, 119, 239, 0.15);
 }
 
-.model-service-fieldset:focus-visible {
+.model-service-status-card:focus-visible {
   outline: 2px solid rgba(31, 94, 255, 0.35);
   outline-offset: 2px;
 }
 
-.model-service-status-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
+.model-service-status-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
-  border: 1px solid #dfe5ee;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: #f8fafc;
 }
 
-.model-service-status-row > div {
-  min-width: 0;
+.model-service-status-card-header h3,
+.model-service-status-card-header p {
+  margin: 0;
 }
 
-.model-service-status-row > div:first-child {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: baseline;
-  gap: 2px 8px;
+.model-service-status-card-header h3 {
+  color: #273244;
+  font-size: 15px;
 }
 
-.model-service-status-row small {
+.model-service-status-card-header p {
+  margin-top: 3px;
   color: var(--muted);
-  font-size: 11px;
-}
-
-.model-service-status-row > div:first-child strong {
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
-.model-service-status-row > div:first-child span {
-  grid-column: 2;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.model-service-status-result {
-  display: grid;
-  justify-items: end;
-  gap: 2px;
-  white-space: nowrap;
-}
-
-.model-service-status-result time {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.model-service-status-row > button {
-  border: 1px solid #ccd5e2;
-  border-radius: 8px;
-  padding: 6px 9px;
-  background: #fff;
-  color: #344054;
-  font: inherit;
+.model-service-state {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #eef1f5;
+  color: #596273;
   font-size: 12px;
+  font-weight: 750;
+}
+
+.model-service-state.tone-ok {
+  background: #e8f7ef;
+  color: #17643c;
+}
+
+.model-service-state.tone-warn {
+  background: #fff3d7;
+  color: #8a5a00;
+}
+
+.model-service-state.tone-bad {
+  background: #ffe8e5;
+  color: #a12b20;
+}
+
+.model-service-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.model-service-metrics > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #f7f9fb;
+}
+
+.model-service-metrics small,
+.model-service-workloads small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.model-service-metrics strong {
+  color: #273244;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.model-service-workloads,
+.model-service-status-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.model-service-workloads > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-service-workloads span {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eef3ff;
+  color: #3657aa;
+  font-size: 11px;
+}
+
+.model-service-status-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.model-service-support-id {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.model-service-support-id button {
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: #3158d5;
+  font: inherit;
   font-weight: 700;
   cursor: pointer;
 }
 
-.model-service-status-row > button:hover:not(:disabled) {
-  border-color: #5477ef;
-  color: #3158d5;
+.model-service-support-id code,
+.answer-model-support-id code {
+  user-select: all;
+  overflow-wrap: anywhere;
 }
 
-.model-service-status-row > button:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.model-service-status-row.tone-ok {
-  border-color: #b7e4cf;
-  background: #f0faf5;
-}
-
-.model-service-status-row.tone-warn {
-  border-color: #ead3a5;
-  background: #fff9ec;
-}
-
-.model-service-status-row.tone-bad {
-  border-color: #f0bbb5;
-  background: #fff4f2;
-}
-
-.model-service-status-row.tone-muted {
-  color: #667085;
-}
-
-.model-service-draft-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
-}
-
-.model-service-draft-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.model-service-draft-actions span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.model-service-admin-guidance {
-  margin: 0;
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: #f2f4f7;
-  color: #596273;
-  font-size: 12px;
-}
-
-.model-service-footer {
-  position: sticky;
-  bottom: -24px;
-  margin: 16px -24px -24px;
-  padding: 16px 24px 24px;
-  border-top: 1px solid var(--line);
-  background: #fff;
+.model-service-test-one {
+  justify-self: end;
 }
 
 /* DestinationPicker(transfer-picker.tsx)—knowhow 表(C3)/Memory(C4)传输共用的
@@ -4597,6 +4640,77 @@ button.chat-session-card {
 .notebook-edit-card .edit-form {
   overflow-y: auto;
   min-height: 0; /* flex 子项默认 min-height:auto 会撑破限高,导致滚动条不生效 */
+}
+
+/* —— 笔记本设置表单:分组小节 + 两列网格 + 常驻底栏,只作用于这张卡(不碰共享 .edit-form) —— */
+.notebook-settings-form {
+  gap: 22px;          /* 小节之间比字段之间更疏 */
+  padding-bottom: 0;  /* 底部留给常驻底栏 */
+}
+
+.settings-section {
+  display: grid;
+  gap: 13px;
+}
+
+.settings-section-head {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-section-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.settings-section-head p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.settings-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+}
+
+@media (max-width: 560px) {
+  .settings-grid-2 { grid-template-columns: 1fr; }
+}
+
+/* 参考库单独成卡,与其它小节区分开 */
+.notebook-settings-form .base-picker {
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f7f9fc;
+}
+
+/* 输入聚焦态:细描边 + 柔和光环,替代浏览器默认 outline */
+.notebook-settings-form input:focus,
+.notebook-settings-form textarea:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.13);
+}
+
+/* 常驻底栏:表单可滚动时「保存/取消」不随内容滚走;负边距顶到卡片左右边,分隔线通栏 */
+.notebook-settings-form .settings-footer {
+  position: sticky;
+  bottom: 0;
+  margin: 6px -24px 0;
+  padding: 14px 24px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
 }
 
 .edit-form label {
@@ -5013,38 +5127,12 @@ button.chat-session-card {
     padding-inline: 14px;
   }
 
-  .model-service-toolbar {
-    justify-content: stretch;
+  .model-service-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .model-service-test-all {
-    width: 100%;
-    white-space: normal;
-  }
-
-  .model-service-status-row {
-    grid-template-columns: 1fr;
-    align-items: stretch;
-  }
-
-  .model-service-status-result {
-    justify-items: start;
-    white-space: normal;
-  }
-
-  .model-service-status-row > button {
-    justify-self: start;
-    white-space: normal;
-  }
-
-  .model-service-draft-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .model-service-footer {
-    margin-inline: -14px;
-    padding-inline: 14px;
-    flex-wrap: wrap;
+  .model-service-test-one {
+    justify-self: stretch;
   }
 
   .outer-nav {
@@ -5173,6 +5261,21 @@ button.chat-session-card {
   color: var(--muted);
   font-size: 13px;
   max-width: 82ch;
+}
+
+/* 头部右侧动作组:「图谱 Schema」(admin) + 关闭按钮同排右对齐,与标题顶端对齐。 */
+.kg-view-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.kg-schema-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .kg-action-stack {
@@ -6163,8 +6266,8 @@ button.chat-session-card {
 /* 多领域基准库 —— 编辑弹窗里的参考库多选。列对齐 + 长名省略号截断,与 .tier-badge
    群落同风格。 */
 .base-picker { display: flex; flex-direction: column; gap: 6px; }
-.base-picker-title { font-weight: 600; }
-.base-picker-desc,
+/* .base-picker-title / .base-picker-desc 随笔记本设置表单重构下线(标题/说明改由
+   .settings-section-head 承载),此处不再保留其死规则。 */
 .base-picker-empty,
 .base-picker-hint { font-size: 12px; opacity: .7; margin: 0; }
 .base-picker-hint { color: var(--warning, #b8860b); }

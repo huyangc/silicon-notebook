@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
+from tests.model_testkit import bind_chat_client
 
 
 class _DescLLM:
@@ -20,7 +22,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -40,7 +42,8 @@ def _seed_two_doc_concept(repo):
 
 
 def test_concept_desc_generated_for_merged_cluster(repo):
-    repo.llm_client = _DescLLM()
+    llm = _DescLLM()
+    bind_chat_client(repo, "kg_concept_description", llm)
     repo.settings.kg_concept_desc_enabled = True
     nb = _seed_two_doc_concept(repo)
     repo.rebuild_unified_kg(nb.id)
@@ -50,15 +53,16 @@ def test_concept_desc_generated_for_merged_cluster(repo):
                           "WHERE notebook_id=? AND object_type='concept' AND canonical_description!=''",
                           (nb.id,)).fetchall()
     assert rows and "output resistance" in rows[0]["canonical_description"]
-    assert repo.llm_client.calls >= 1
+    assert llm.calls >= 1
 
 
 def test_concept_desc_off_when_disabled(repo):
-    repo.llm_client = _DescLLM()
+    llm = _DescLLM()
+    bind_chat_client(repo, "kg_concept_description", llm)
     repo.settings.kg_concept_desc_enabled = False   # 默认已改为开(2026-06-18),这里显式关以测 off 路径
     nb = _seed_two_doc_concept(repo)
     repo.rebuild_unified_kg(nb.id)
-    assert repo.llm_client.calls == 0        # no LLM calls when disabled
+    assert llm.calls == 0        # no LLM calls when disabled
     with repo._connect() as db:
         rows = db.execute("SELECT canonical_description FROM concept_clusters WHERE notebook_id=?",
                           (nb.id,)).fetchall()
@@ -66,7 +70,7 @@ def test_concept_desc_off_when_disabled(repo):
 
 
 def test_node_context_uses_cluster_description(repo):
-    repo.llm_client = _DescLLM()
+    bind_chat_client(repo, "kg_concept_description", _DescLLM())
     repo.settings.kg_concept_desc_enabled = True
     nb = _seed_two_doc_concept(repo)
     repo.rebuild_unified_kg(nb.id)

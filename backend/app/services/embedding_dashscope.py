@@ -2,6 +2,7 @@
 from __future__ import annotations
 import time
 from typing import List
+import httpx
 from openai import OpenAI, RateLimitError
 from app.core.config import Settings
 
@@ -16,21 +17,32 @@ class DashscopeEmbedder:
         base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        max_connections: int | None = None,
     ):
         self.settings = settings
         self.dim = settings.embed_dim
-        self.base_url = settings.embed_base_url if base_url is None else base_url
-        self.api_key = settings.embed_api_key if api_key is None else api_key
-        self.model = settings.embed_model if model is None else model
+        self.base_url = (base_url or "").strip()
+        self.api_key = (api_key or "").strip()
+        self.model = (model or "").strip()
+        self.max_connections = max(1, int(max_connections or 1))
         self._client = None
 
     def _ensure(self):
         if self._client is None:
+            timeout = self.settings.openai_compat_timeout_seconds
+            http_client = httpx.Client(
+                timeout=timeout,
+                limits=httpx.Limits(
+                    max_connections=self.max_connections,
+                    max_keepalive_connections=self.max_connections,
+                ),
+            )
             self._client = OpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
-                timeout=self.settings.openai_compat_timeout_seconds,
+                timeout=timeout,
                 max_retries=0,  # don't amplify a network stall (see llm.py fix)
+                http_client=http_client,
             )
         return self._client
 
@@ -64,3 +76,31 @@ class DashscopeEmbedder:
 
     def embed_query(self, text: str) -> List[float]:
         return self.embed_texts([text])[0]
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model)
+
+    def close(self) -> None:
+        client = self._client
+        self._client = None
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+
+def build_dashscope_embedder(
+    settings: Settings,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+) -> DashscopeEmbedder:
+    """Construct the raw adapter inside its reviewed transport boundary."""
+    return DashscopeEmbedder(
+        settings,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+    )

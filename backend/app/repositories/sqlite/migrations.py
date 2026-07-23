@@ -12,7 +12,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 24
+# Both sides originally allocated migration 24 independently.  Version 29 is
+# the merge migration that makes either already-deployed lineage converge.
+SCHEMA_VERSION = 29
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1538,7 +1540,155 @@ class SqliteMigrator:
             )
 
     def _migration_24(self) -> None:
-        """Enforce one cluster membership per notebook, type, and object."""
+        """写锁瘦身改造点 2:concept_clusters 整表替换拆成【预备段(scratch)+
+        切换段(纯 SQL)】(design doc §5.5)。预备段把每个 object_type 算出的
+        seed→canonical 映射(canonical 名/描述及其签名)落进这张新 scratch 表;
+        切换段再用一条纯 SQL DELETE+INSERT...SELECT,把它和 kg_cluster_scratch
+        (object_id→seed)连接,一次性写 concept_clusters —— 写锁只覆盖切换段的
+        纯 SQL,不再覆盖预备段的 Python 计算与逐行 executemany 构造。
+
+        与 kg_cluster_scratch 同款:无主键、纯 transient、run_id 隔离并发
+        rebuild。不需要 object_type 列——_write_cluster_map_streamed 在写入
+        每个 type 前先清空本 run 的行(镜像 _stream_seed_reps 对
+        kg_cluster_scratch 的 clear-at-start),所以切换时表里只有当前 type
+        的行。索引支持 (notebook_id, run_id, seed) 上的等值连接(切换段的
+        JOIN 谓词)。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed);
+                """
+            )
+
+    def _migration_25(self) -> None:
+        """Irreversibly retire per-user model credentials and health rows."""
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            db.execute("UPDATE user_profiles SET model_settings = '{}'")
+            db.execute("DELETE FROM model_service_status")
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_model_service_status (
+                  service_id TEXT PRIMARY KEY,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (
+                    trigger IN ('manual_test', 'observed_failure', 'recovery_probe')
+                  ),
+                  support_id TEXT NOT NULL DEFAULT '',
+                  checked_at TEXT NOT NULL
+                )
+                """
+            )
+            # The irreversible scrub and its version stamp are one commit. A
+            # failed stamp must leave the database wholly at v24 so startup can
+            # safely retry instead of reporting v25 over partially scrubbed
+            # state (or committing the scrub while still reporting v24).
+            db.execute("PRAGMA user_version = 25")
+
+    def _migration_26(self) -> None:
+        """knowhow 表版本管理：变更流水 + 命名里程碑。
+
+        设计见 docs/superpowers/specs/2026-07-22-knowhow-table-version-control-design.md。
+        与 _migration_16/_migration_17 同款两层写法(仅新建表，不改 _migration_1
+        baseline；全新表无历史行，无列序顾虑)。
+
+        knowhow_milestones.seq 刻意**不设** FK 到 knowhow_changes：流水被
+        "清理历史"删除后里程碑要保留为"已失效标记"(灰显、不可回退)，
+        级联删掉用户亲手命名过的东西是不可接受的。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS knowhow_changes (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  kind TEXT NOT NULL,
+                  actor TEXT NOT NULL DEFAULT '',
+                  origin TEXT NOT NULL DEFAULT 'user',
+                  payload_json TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, seq)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_changes_table
+                  ON knowhow_changes(table_id, seq DESC);
+
+                CREATE TABLE IF NOT EXISTS knowhow_milestones (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  name TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_milestones_table
+                  ON knowhow_milestones(table_id, seq DESC);
+                """
+            )
+
+    def _migration_27(self) -> None:
+        """给 sources 补 chunked_at（本代 elements 已成功走完分块的时刻；NULL=未成功
+        分块）。存量回填见 spec E 节：凡老代码里跑到过分块步的源一律置 updated_at,
+        否则合法的纯标题/短文 md 会被 H3 集体误报缺分块。
+
+        撞号顺延:P1.5 原为 _migration_26,但 #327(knowhow 表版本管理)与 #328 先合入、
+        已占 _migration_26/SCHEMA 26,本迁移接在其后为 _migration_27、SCHEMA 27。"""
+        with self._connect() as db:
+            self.add_column_if_missing(db, "sources", "chunked_at", "TEXT")
+            db.execute(
+                "UPDATE sources SET chunked_at = updated_at "
+                "WHERE chunked_at IS NULL AND parse_status IN "
+                "('parsed','extracting','extracted')"
+            )
+
+    def _migration_28(self) -> None:
+        """每笔记本文档数量上限(per-user 可配)：app_settings KV 表 + user_profiles
+        新增可空列 upload_document_limit。
+
+        与近期迁移(v22/23/26/27)同款单层写法:新表/新列**只**在本步定义,不再回写
+        _migration_1 baseline。migrate() 对全新库全量 sweep 1..28,本步随之执行建表/
+        补列;已部署库(user_version>=1)也靠本步补齐。CREATE TABLE IF NOT EXISTS +
+        add_column_if_missing 均幂等。upload_document_limit 经 add_column_if_missing
+        追加,落在 user_profiles 末尾(model_settings 之后);全新库与升级库列序一致
+        (同 memory_id / doc_type 的列序约束)。"""
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self.add_column_if_missing(
+                db, "user_profiles", "upload_document_limit", "INTEGER"
+            )
+
+    def _migration_29(self) -> None:
+        """Reconcile the two migration-24 lineages after the PostgreSQL merge.
+
+        PostgreSQL-adapter builds used v24 for the cluster-membership unique
+        index, while master used it for ``kg_canonical_scratch``.  Repeating
+        both idempotent changes here makes upgrades from either lineage safe.
+        """
         with self._connect() as db:
             db.executescript(
                 """
@@ -1557,16 +1707,33 @@ class SqliteMigrator:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_clusters_notebook_type_member
                   ON concept_clusters(notebook_id, object_type, member_object_id);
+
+                CREATE TABLE IF NOT EXISTS kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed);
                 """
             )
 
     def _recover_interrupted_jobs(self) -> None:
-        """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
+        """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
         的行定义上就是上次崩溃/重启遗留的陈旧行，否则会永久卡死该 notebook 的单飞守卫。
         knowhow 行投影同理：background_jobs 不跨进程存活，重启后仍处 'syncing'/'pending'
         的行定义上是被遗弃的（没有任何代码路径会再回访它们），置 'failed' 以暴露前端的
         「重投影」重试入口，而非让它们看起来永久「同步中/待处理」。
+        解析中的源同理且更严重：'queued'/'parsing' 的源没有任何进程会再回访，留着就是
+        永久「排队中/解析中」的搁浅行——用户既看不到失败也无从重试。置 'failed' 让它落到
+        一个可重试的终态。注意**不能**像 'extracting' 那样回退成 'parsed'：搁浅源可能连
+        source_elements 都没有，标「已解析」是谎报，还会让它从「待处理」视图里消失。
+        只由服务端 lifespan 启动路径调用一次（见 initialize 的说明）。
         幂等——safe every boot。"""
         with self._connect() as db:
             db.execute(
@@ -1586,6 +1753,12 @@ class SqliteMigrator:
                 (now,),
             )
             db.execute(
+                "UPDATE sources SET status='failed', parse_status='failed', "
+                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析。', "
+                "updated_at=? WHERE parse_status IN ('queued','parsing')",
+                (now,),
+            )
+            db.execute(
                 "UPDATE extraction_runs SET status='failed', "
                 "error_message='worker_interrupted: 服务重启导致知识图谱分析中断', "
                 "updated_at=? WHERE run_type='kg' AND status='running'",
@@ -1599,6 +1772,15 @@ class SqliteMigrator:
                 "updated_at=?, finished_at=? WHERE status='running'",
                 (now, now),
             )
+            # 重聚类的两张 scratch 表是**纯瞬态**的:只有一次进行中的 rebuild 会读
+            # 自己那个 run_id 的行,进程重启后没有任何代码路径会再回访它们。
+            # rebuild 的 finally 只能兜住异常/取消,兜不住 SIGKILL / 掉电——那种情况
+            # 下 run_id 随进程一起消失,行就永久不可达(每张表都没有时间戳列,事后
+            # 也无从按年龄清理),几次被打断的大库 rebuild 就能把库撑起来。
+            # 与本函数其余各行同一条依据:后端单进程,启动这一刻不可能有 rebuild 在飞,
+            # 所以此时表里的任何行按定义都是上次崩溃的遗留。
+            db.execute("DELETE FROM kg_cluster_scratch")
+            db.execute("DELETE FROM kg_canonical_scratch")
 
     def _seed(self) -> None:
         now = _now()
@@ -1689,8 +1871,12 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            with self._connect() as db:
-                db.execute(f"PRAGMA user_version = {version}")
+            # v25 stamps itself inside the same BEGIN IMMEDIATE transaction as
+            # its irreversible credential/status scrub. Preserve the existing
+            # migration/stamp behavior byte-for-byte for v1-v24.
+            if version != 25:
+                with self._connect() as db:
+                    db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)
         return applied
 
@@ -1701,7 +1887,14 @@ class SqliteMigrator:
         self._seed()
 
     def initialize(self) -> list[int]:
+        """构造仓储时跑的那部分：migrate + seed，**不含**崩溃兜底。
+
+        恢复（``recover_interrupted_jobs``）已移交服务端 lifespan 启动路径显式调用
+        （``app/services/startup_warmup.py::run_startup``，在 ``mark_ready()`` 之前）。
+        理由：``SQLiteRepository.__init__`` 会无条件跑到这里，而离线 CLI／脚本每次
+        运行都会直接构造一个仓储——它们不是这个库的主人，没有资格把「进行中」的行
+        判成上次崩溃的残骸。旧行为下，跑一次离线脚本就会把服务端正在处理的 pending
+        行刷成 failed。"""
         applied = self.migrate()
-        self.recover_interrupted_jobs()
         self.seed()
         return applied

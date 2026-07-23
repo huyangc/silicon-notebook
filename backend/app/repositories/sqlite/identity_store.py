@@ -2,22 +2,17 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
-from app.repositories.sqlite.database import SqliteDatabase
-from app.services.model_config import (
-    MODEL_SERVICE_ROLES,
-    STATUS_SERVICE_ROLES,
-    ResolvedModelConfig,
-    model_config_fingerprint,
-    resolve_effective_config,
-    system_model_settings,
+from app.repositories.identity_errors import (
+    BuiltinAdminDemotionError,
+    SelfDemotionError,
 )
+from app.repositories.sqlite.database import SqliteDatabase
 
 
 def _now() -> str:
@@ -28,40 +23,45 @@ def _session_expiry(days: int = 30) -> str:
     return (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
 
 
-def _status_checked_at(value: str) -> str:
-    try:
-        parsed = datetime.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("checked_at must be an offset-aware ISO timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("checked_at must be an offset-aware ISO timestamp")
-    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
-
-
 def _new_user_id() -> str:
     return f"user-{uuid4().hex}"
 
 
-def _decode_model_settings(value: object) -> dict:
-    try:
-        parsed = json.loads(value) if value else {}
-    except (ValueError, TypeError):
-        parsed = {}
-    return parsed if isinstance(parsed, dict) else {}
+# app_settings key holding the global default per-notebook visible-document limit.
+# Admin overrides the global default by writing this key; absent -> config fallback.
+_UPLOAD_LIMIT_DEFAULT_KEY = "upload_document_limit_default"
+
+# 管理员可配置的「每笔记本文档数量上限」允许区间(全局默认与 per-user 覆盖共用)。
+# 下限 1(至少能放 1 篇);上限 100000(挡住误配的天文数字/负数/0)。越界由写方法
+# raise ValueError,端点翻成中文用户文案。
+_DOCUMENT_LIMIT_MIN = 1
+_DOCUMENT_LIMIT_MAX = 100000
+
+
+def _resolve_global_default(raw_value: "str | None", settings) -> int:
+    """把 app_settings 里存的原始值解析成全局默认「每笔记本文档数量上限」:合法整数
+    直接用,None 或非整数(坏配置)回退 config 的 USER_UPLOAD_DOCUMENT_LIMIT。这是
+    app_settings 读取 + config 回退的**单一真源**——IdentityStore 的只读入口/写事务
+    复算与 QueryStore 的用量列表都调它,避免两份拷贝日后静默漂移(如某处加了 clamp
+    另一处漏改)。纯函数(不碰连接),让批量路径能在自己已开的连接里取值后复用同一语义。"""
+    if raw_value is not None:
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            pass
+    return int(settings.user_upload_document_limit)
 
 
 class IdentityStore:
-    """SQLite identity, session, and per-user model-settings persistence."""
+    """SQLite identity and session persistence."""
 
     def __init__(
         self,
         database: SqliteDatabase,
         settings: Settings,
-        model_config_cache: dict[str, dict[str, Any]],
     ) -> None:
         self.database = database
         self.settings = settings
-        self.model_config_cache = model_config_cache
 
     def current_user(self) -> UserProfile:
         ctx_user = get_request_user()
@@ -86,218 +86,6 @@ class IdentityStore:
             username=user["username"] if "username" in user.keys() else "",
             memory_mode=profile["memory_mode"] if profile else "manual",
             domain_focus=json.loads(profile["domain_focus"]) if profile else [],
-        )
-
-    def get_user_model_settings(self, user_id: str) -> dict:
-        with self.database.connect() as db:
-            row = db.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-        return _decode_model_settings(row["model_settings"] if row else None)
-
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
-        with self.database.write() as db:
-            db.execute(
-                "UPDATE user_profiles SET model_settings = ?, updated_at = ? WHERE user_id = ?",
-                (json.dumps(settings, ensure_ascii=False), _now(), user_id),
-            )
-        self.model_config_cache.pop(user_id, None)
-
-    def patch_user_model_settings_atomic(
-        self,
-        user_id: str,
-        patch: Mapping[str, Mapping[str, str | None] | None],
-    ) -> dict:
-        """Patch settings and invalidate changed effective statuses atomically."""
-        system = system_model_settings(self.settings)
-        policy = self.settings.user_model_config_policy
-        with self.database.write() as db:
-            self.database.begin_immediate(db)
-            row = db.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            stored = _decode_model_settings(row["model_settings"] if row else None)
-
-            before = {
-                role: model_config_fingerprint(
-                    resolve_effective_config(stored, role, policy, system)
-                )
-                for role in STATUS_SERVICE_ROLES
-            }
-            for role in MODEL_SERVICE_ROLES:
-                role_patch = patch.get(role)
-                if not isinstance(role_patch, Mapping):
-                    continue
-                service = dict(stored.get(role) or {})
-                for field in ("base_url", "api_key", "model"):
-                    if field not in role_patch or role_patch[field] is None:
-                        continue
-                    value = role_patch[field]
-                    if value == "":
-                        service.pop(field, None)
-                    else:
-                        service[field] = value
-                if service:
-                    stored[role] = service
-                else:
-                    stored.pop(role, None)
-
-            db.execute(
-                "UPDATE user_profiles SET model_settings = ?, updated_at = ? WHERE user_id = ?",
-                (json.dumps(stored, ensure_ascii=False), _now(), user_id),
-            )
-            changed = [
-                role
-                for role in STATUS_SERVICE_ROLES
-                if model_config_fingerprint(
-                    resolve_effective_config(stored, role, policy, system)
-                ) != before[role]
-            ]
-            if changed:
-                placeholders = ", ".join("?" for _ in changed)
-                db.execute(
-                    "DELETE FROM model_service_status WHERE user_id = ? "
-                    f"AND service IN ({placeholders})",
-                    (user_id, *changed),
-                )
-        self.model_config_cache.pop(user_id, None)
-        return stored
-
-    def get_model_service_statuses(self, user_id: str) -> dict[str, dict[str, Any]]:
-        with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT service, config_fingerprint, status, latency_ms, code, trigger, checked_at "
-                "FROM model_service_status WHERE user_id = ?",
-                (user_id,),
-            ).fetchall()
-        return {
-            row["service"]: {
-                "config_fingerprint": row["config_fingerprint"],
-                "status": row["status"],
-                "latency_ms": row["latency_ms"],
-                "code": row["code"],
-                "trigger": row["trigger"],
-                "checked_at": row["checked_at"],
-            }
-            for row in rows
-        }
-
-    def record_model_service_status(
-        self,
-        user_id: str,
-        service: str,
-        config_fingerprint: str,
-        status: str,
-        latency_ms: int,
-        code: str,
-        trigger: str,
-        checked_at: str,
-    ) -> None:
-        checked_at = _status_checked_at(checked_at)
-        with self.database.write() as db:
-            self._upsert_model_service_status(
-                db, user_id, service, config_fingerprint, status, latency_ms,
-                code, trigger, checked_at,
-            )
-
-    def record_model_service_status_if_current(
-        self,
-        user_id: str,
-        service: str,
-        expected_fingerprint: str,
-        status: str,
-        latency_ms: int,
-        code: str,
-        trigger: str,
-        checked_at: str,
-    ) -> bool:
-        """Record status only if the originating effective identity is current."""
-        if service not in STATUS_SERVICE_ROLES or not expected_fingerprint:
-            return False
-        checked_at = _status_checked_at(checked_at)
-        with self.database.write() as db:
-            self.database.begin_immediate(db)
-            row = db.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            stored = _decode_model_settings(row["model_settings"] if row else None)
-            current = resolve_effective_config(
-                stored,
-                service,
-                self.settings.user_model_config_policy,
-                system_model_settings(self.settings),
-            )
-            if (
-                not current.configured
-                or model_config_fingerprint(current) != expected_fingerprint
-            ):
-                return False
-            self._upsert_model_service_status(
-                db, user_id, service, expected_fingerprint, status, latency_ms,
-                code, trigger, checked_at,
-            )
-        return True
-
-    @staticmethod
-    def _upsert_model_service_status(
-        db,
-        user_id: str,
-        service: str,
-        config_fingerprint: str,
-        status: str,
-        latency_ms: int,
-        code: str,
-        trigger: str,
-        checked_at: str,
-    ) -> None:
-        db.execute(
-            "INSERT INTO model_service_status "
-            "(user_id, service, config_fingerprint, status, latency_ms, code, trigger, checked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(user_id, service) DO UPDATE SET "
-            "config_fingerprint = excluded.config_fingerprint, "
-            "status = excluded.status, latency_ms = excluded.latency_ms, "
-            "code = excluded.code, trigger = excluded.trigger, "
-            "checked_at = excluded.checked_at "
-            "WHERE excluded.checked_at > model_service_status.checked_at "
-            "OR (excluded.checked_at = model_service_status.checked_at AND "
-            "(CASE WHEN excluded.trigger = 'observed_failure' THEN 3 "
-            "      WHEN excluded.status = 'error' THEN 2 ELSE 1 END) > "
-            "(CASE WHEN model_service_status.trigger = 'observed_failure' THEN 3 "
-            "      WHEN model_service_status.status = 'error' THEN 2 ELSE 1 END))",
-            (
-                user_id, service, config_fingerprint, status, latency_ms,
-                code, trigger, checked_at,
-            ),
-        )
-
-    def clear_model_service_statuses(
-        self, user_id: str, services: Sequence[str] | None = None
-    ) -> None:
-        if services is not None and not services:
-            return
-        with self.database.write() as db:
-            if services is None:
-                db.execute(
-                    "DELETE FROM model_service_status WHERE user_id = ?", (user_id,)
-                )
-                return
-            placeholders = ", ".join("?" for _ in services)
-            db.execute(
-                "DELETE FROM model_service_status WHERE user_id = ? "
-                f"AND service IN ({placeholders})",
-                (user_id, *services),
-            )
-
-    def resolve_model_config(self, user: UserProfile, role: str) -> ResolvedModelConfig:
-        return resolve_effective_config(
-            self.get_user_model_settings(user.id),
-            role,
-            self.settings.user_model_config_policy,
-            system_model_settings(self.settings),
         )
 
     def create_user(self, username: str, password: str) -> UserProfile:
@@ -407,3 +195,158 @@ class IdentityStore:
     def delete_session(self, token: str) -> None:
         with self.database.write() as db:
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+
+    def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
+        """Assign a user/admin role with authorization rechecked in the write txn."""
+        if role not in {"admin", "user"}:
+            raise ValueError("invalid role")
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            actor = db.execute(
+                "SELECT role FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id, username, role FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            if role == "user" and user_id == "user-local":
+                raise BuiltinAdminDemotionError("built-in admin cannot be demoted")
+            if role == "user" and user_id == actor_id:
+                raise SelfDemotionError("cannot demote the active administrator")
+            if target["role"] != role:
+                db.execute(
+                    "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+                    (role, _now(), user_id),
+                )
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+                "role": role,
+            }
+
+    # ---- 每笔记本文档数量上限:配额解析 ----
+    def _global_default_from(self, db) -> int:
+        """从已打开的连接 db 读 app_settings 的全局默认覆盖值,交 _resolve_global_default
+        解析(缺省/坏值回退 config)。抽成接收连接的私有 helper,让只读入口
+        (global_document_limit_default,自开读连接)与写事务内的复算
+        (set_user_document_limit_override 清除覆盖后要算回落值,复用写连接)共用同一次读。"""
+        row = db.execute(
+            "SELECT value FROM app_settings WHERE key = ?",
+            (_UPLOAD_LIMIT_DEFAULT_KEY,),
+        ).fetchone()
+        return _resolve_global_default(
+            row["value"] if row is not None else None, self.settings
+        )
+
+    def global_document_limit_default(self) -> int:
+        """全局默认「每笔记本文档数量上限」:优先 app_settings 的覆盖值,缺省回退
+        config 的 USER_UPLOAD_DOCUMENT_LIMIT(默认 20)。存的值非法(非整数)时也回退默认,
+        不让一条坏配置卡死所有上传。"""
+        with self.database.connect() as db:
+            return self._global_default_from(db)
+
+    def user_document_limit_override(self, user_id: str) -> "int | None":
+        """该用户的「每笔记本文档数量上限」覆盖值;NULL 或无 profile 行 → None
+        (= 继承全局默认)。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT upload_document_limit FROM user_profiles WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        if row is None or row["upload_document_limit"] is None:
+            return None
+        return int(row["upload_document_limit"])
+
+    def effective_document_limit(self, user_id: "str | None") -> int:
+        """用户有效上限 = COALESCE(用户覆盖值, 全局默认)。user_id 为 None(笔记本无
+        owner)时直接取全局默认。"""
+        if user_id is not None:
+            override = self.user_document_limit_override(user_id)
+            if override is not None:
+                return override
+        return self.global_document_limit_default()
+
+    def notebook_owner(self, notebook_id: str) -> "tuple[str | None, str | None]":
+        """(owner_id, owner_role) —— 文档数量上限的 admin 豁免与「按 owner 配额」解析。
+        owner 为 admin 的笔记本不受上限约束;notebook 不存在 → (None, None)。"""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT nb.created_by AS owner_id, u.role AS owner_role "
+                "FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by "
+                "WHERE nb.id = ?",
+                (notebook_id,),
+            ).fetchone()
+        if row is None:
+            return (None, None)
+        return (row["owner_id"], row["owner_role"])
+
+    # ---- 每笔记本文档数量上限:管理员写路径(镜像 set_user_role 的写事务复检) ----
+    def set_global_document_limit_default(
+        self, actor_id: str, value: int
+    ) -> dict[str, int]:
+        """管理员设置全局默认「每笔记本文档数量上限」(写 app_settings)。授权在写
+        事务内按 actor 现时角色复检(与 set_user_role 一致,避免读到已被降权的旧角色);
+        value 范围 1..100000,越界 → ValueError(由端点翻成用户文案)。"""
+        if not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
+            raise ValueError("document limit out of range")
+        now = _now()
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            actor = db.execute(
+                "SELECT role FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            db.execute(
+                "INSERT INTO app_settings(key, value, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (_UPLOAD_LIMIT_DEFAULT_KEY, str(value), now),
+            )
+            return {"limit": value}
+
+    def set_user_document_limit_override(
+        self, actor_id: str, user_id: str, value: "int | None"
+    ) -> dict:
+        """管理员给某用户设/清「每笔记本文档数量上限」覆盖值(写
+        user_profiles.upload_document_limit;value=None → SQL NULL = 清除覆盖、
+        回落全局默认)。授权写事务内复检;value 非空时范围 1..100000;目标用户不存在
+        → KeyError(端点翻成 404)。返回改动后的生效上限与是否仍为覆盖值。"""
+        if value is not None and not _DOCUMENT_LIMIT_MIN <= value <= _DOCUMENT_LIMIT_MAX:
+            raise ValueError("document limit out of range")
+        now = _now()
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            actor = db.execute(
+                "SELECT role FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id, username FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            # 目标用户已在上面确认存在;create_user/种子必建 user_profiles 行,故
+            # UPDATE 正常命中一行(NULL 覆盖即清除)。防御:若 profile 行竟缺失(仅
+            # 迁移前遗留库/外部改库可能),rowcount==0 → 响亮失败(端点翻成 404),
+            # 胜过静默 no-op 却回 200 谎报「已设置」(下次读又回落默认)。
+            cursor = db.execute(
+                "UPDATE user_profiles SET upload_document_limit = ?, updated_at = ? "
+                "WHERE user_id = ?",
+                (value, now, user_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(user_id)
+            # 清除覆盖后的生效值 = 全局默认;复用写连接算,与 global_document_limit_default
+            # 同一份回退逻辑(单一真源)。
+            effective = value if value is not None else self._global_default_from(db)
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+                "upload_limit": effective,
+                "upload_limit_overridden": value is not None,
+            }

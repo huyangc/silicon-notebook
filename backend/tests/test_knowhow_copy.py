@@ -36,6 +36,7 @@ from app.models.schemas import NotebookCreate
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.knowhow.projection import KnowhowProjector
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _FakeEmbedder:
@@ -66,10 +67,6 @@ def repo_factory(tmp_path, monkeypatch):
         monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
         monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
         monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-        monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-        monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-        monkeypatch.setenv("EMBED_API_KEY", "test-key")
-        monkeypatch.setenv("EMBED_MODEL", "test-model")
         return SQLiteRepository(Settings())
 
     return _make
@@ -83,8 +80,8 @@ def repo(repo_factory):
 @pytest.fixture
 def embedder(repo) -> _FakeEmbedder:
     emb = _FakeEmbedder()
-    repo.embedder = emb
-    assert repo.settings.embedder_configured
+    bind_all_embedding_clients(repo, emb)
+    assert repo.configured("knowhow_embedding")
     return emb
 
 
@@ -596,3 +593,37 @@ def test_schedule_failure_after_publish_never_compensates(
     # Files intact (compensation would have rmtree'd the assets tree).
     assets_dir = Path(repo.storage_dir) / "assets" / new_nb.id
     assert assets_dir.is_dir() and any(assets_dir.iterdir())
+
+
+def test_copied_table_gets_a_genesis_change_and_can_revert_to_the_copied_state(repo):
+    """codex 第 2 轮 P2：整本深拷贝来的 knowhow 表必须带一条 table_create 创世
+    流水（单表 copy_table 早有，此前整本深拷贝这条路径漏了）。否则拷贝表的第一次
+    编辑成 seq 1、无法回退到刚拷贝好的样子。"""
+    nb = _notebook(repo)
+    table_id, row_id, cols = _mk_table_with_row(repo, nb)
+
+    _mk_user(repo, "user-genesis")
+    new_nb = repo.copy_notebook(nb, new_owner_id="user-genesis")
+    new_table_id = _only_table_id(repo, new_nb.id)
+
+    hist = repo._runtime.knowhow_history_store
+
+    # 拷贝后恰好一条创世流水，kind=table_create、origin=import、note 提到"复制"。
+    changes = hist.list_changes(new_table_id, limit=10)
+    assert len(changes) == 1, "拷贝表应恰有一条创世流水"
+    genesis = changes[0]
+    assert genesis["kind"] == "table_create"
+    assert genesis["seq"] == 1
+    assert genesis["origin"] == "import"
+    assert "复制" in genesis["note"]
+
+    # 拷贝态是可回退的目标：编辑一格后回退到创世点，内容回到拷贝时的样子。
+    new_col_id = repo.get_knowhow_table(new_table_id)["columns"][1]["id"]
+    new_row_id = repo.get_knowhow_table(new_table_id)["rows"][0]["id"]
+    before = repo.get_knowhow_table(new_table_id)["rows"][0]["cells"].get(new_col_id, None)
+    repo.update_knowhow_cell(new_row_id, new_col_id, "拷贝后新编辑的内容")
+
+    hist.revert_to(new_table_id, target_seq=1, expected_head_seq=hist.head_seq(new_table_id))
+
+    restored = repo.get_knowhow_table(new_table_id)["rows"][0]["cells"].get(new_col_id, None)
+    assert restored == before, "回退到创世点后，格子应回到刚拷贝好的内容"

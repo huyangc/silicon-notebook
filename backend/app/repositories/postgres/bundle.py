@@ -17,10 +17,12 @@ from app.repositories.postgres.governance_store import GovernanceStore
 from app.repositories.postgres.identity_store import IdentityStore
 from app.repositories.postgres.index_projection_store import IndexProjectionStore
 from app.repositories.postgres.kg_build_job_store import KgBuildJobStore
+from app.repositories.postgres.knowhow_history_store import KnowhowHistoryStore
 from app.repositories.postgres.knowhow_store import KnowhowStore
 from app.repositories.postgres.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.memory_store import MemoryStore
+from app.repositories.postgres.model_status_store import ModelStatusStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.notebook_store import NotebookStore
 from app.repositories.postgres.query_store import QueryStore
@@ -49,7 +51,7 @@ def _in_batches(ids: object, seams: RepositorySeams):
 def _initialize(
     database: PostgresDatabase, settings: Settings, seams: RepositorySeams
 ) -> None:
-    """Migrate, then atomically recover work and seed bootstrap metadata.
+    """Migrate, then seed bootstrap metadata.
 
     This runs before any store is constructed. The only account inserted into
     a fresh database is the built-in admin; no notebook/source/demo data is
@@ -120,39 +122,6 @@ def _initialize(
                 ),
             )
 
-        # Preserve SQLite's restart recovery contract before traffic is ready.
-        connection.execute(
-            "UPDATE merge_review_jobs SET status='failed',"
-            "error='中断:服务重启' WHERE status='running'"
-        )
-        connection.execute(
-            "UPDATE ask_jobs SET status='interrupted',"
-            "error='中断:服务重启' WHERE status='running'"
-        )
-        connection.execute(
-            "UPDATE knowhow_rows SET projection_status='failed' "
-            "WHERE projection_status IN ('syncing','pending')"
-        )
-        connection.execute(
-            "UPDATE sources SET status='parsed',parse_status='parsed',"
-            "error_message='',updated_at=%s WHERE parse_status='extracting'",
-            (now,),
-        )
-        connection.execute(
-            "UPDATE extraction_runs SET status='failed',"
-            "error_message='worker_interrupted: 服务重启导致知识图谱分析中断',"
-            "updated_at=%s WHERE run_type='kg' AND status='running'",
-            (now,),
-        )
-        connection.execute(
-            "UPDATE kg_build_jobs SET status='failed',stage='finished',"
-            "error_code='worker_interrupted',"
-            "error_message='服务重启导致本次分析中断；已完成内容已保留，可继续分析未完成内容。',"
-            "updated_at=%s,finished_at=%s WHERE status='running'",
-            (now, now),
-        )
-
-
 @dataclass(frozen=True)
 class PostgresPersistenceBundle(PersistenceBundle):
     database: PostgresDatabase
@@ -167,12 +136,14 @@ class PostgresPersistenceBundle(PersistenceBundle):
     index_projection: IndexProjectionStore
     kg_build_jobs: KgBuildJobStore
     knowhow: KnowhowStore
+    knowhow_history: KnowhowHistoryStore
     knowhow_transfer: KnowhowTransferStore
     memory: MemoryStore
     queries: QueryStore
     reports: ReportStore
     ask_state: AskStateStore
     unified_kg: UnifiedKgStore
+    model_status: ModelStatusStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -189,13 +160,12 @@ class PostgresPersistenceBundleFactory:
         settings: Settings,
         root_dir: Path,
         seams: RepositorySeams,
-        model_config_cache: dict[str, object],
     ) -> PostgresPersistenceBundle:
         database = PostgresDatabase(settings, root_dir)
         self._database = database
         try:
             _initialize(database, settings, seams)
-            identity = IdentityStore(database, settings, model_config_cache)
+            identity = IdentityStore(database, settings)
             notebooks = NotebookStore(database, new_id=seams.new_id, now=seams.now)
             sharing = SharingStore(
                 database,
@@ -220,9 +190,12 @@ class PostgresPersistenceBundleFactory:
                 database, new_id=seams.new_id, now=seams.now
             )
             knowhow = KnowhowStore(database, new_id=seams.new_id, now=seams.now)
+            knowhow_history = KnowhowHistoryStore(
+                database, new_id=seams.new_id, now=seams.now
+            )
             knowhow_transfer = KnowhowTransferStore(database)
             memory = MemoryStore(database, new_id=seams.new_id, now=seams.now)
-            queries = QueryStore(database)
+            queries = QueryStore(database, settings)
             reports = ReportStore(
                 database,
                 new_id=seams.new_id,
@@ -231,6 +204,7 @@ class PostgresPersistenceBundleFactory:
             )
             ask_state = AskStateStore(database, seams)
             unified_kg = UnifiedKgStore(database, seams.now)
+            model_status = ModelStatusStore(database)
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -244,12 +218,14 @@ class PostgresPersistenceBundleFactory:
                 index_projection=index_projection,
                 kg_build_jobs=kg_build_jobs,
                 knowhow=knowhow,
+                knowhow_history=knowhow_history,
                 knowhow_transfer=knowhow_transfer,
                 memory=memory,
                 queries=queries,
                 reports=reports,
                 ask_state=ask_state,
                 unified_kg=unified_kg,
+                model_status=model_status,
             )
         except BaseException:
             database.close()

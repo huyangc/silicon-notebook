@@ -2548,9 +2548,13 @@ test("接线（F1/P1）：runSave 的规划、写目标和锚点守卫同源于�
   const saveCall = callSitesIn(runSave).find(
     ({ target }) => target === "onSaveCell",
   );
-  assert.deepEqual(saveCall?.arguments.slice(-2), [
+  // targetRowIds + anchorGuard 来自冻结快照；末位 origin 归因 "llm_reformat"
+  // ——批量规整是自动保存 LLM 结果的循环，必须留真实来源，否则落后端默认
+  // "user"、「格式规整」徽章对这条主流程永不出现（codex 第 6 轮 P2）。
+  assert.deepEqual(saveCall?.arguments.slice(-3), [
     "targetRowIds",
     "anchorGuard",
+    '"llm_reformat"',
   ]);
 });
 

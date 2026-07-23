@@ -1,0 +1,72 @@
+# Copy to .local/model-services.toml and set the referenced keys in .env.
+# This template deliberately contains no credentials.
+
+[services.general]
+display_name = "通用模型"
+kind = "chat"
+protocol = "openai"
+base_url = "https://llm.example.com/v1"
+model = "general-model"
+api_key_env = "SYSTEM_GENERAL_API_KEY"
+max_concurrency = 20
+
+[services.reasoning]
+display_name = "推理模型"
+kind = "chat"
+protocol = "openai"
+base_url = "https://reasoning.example.com/v1"
+model = "reasoning-model"
+api_key_env = "SYSTEM_REASONING_API_KEY"
+max_concurrency = 4
+
+[services.embedding]
+display_name = "向量模型"
+kind = "embedding"
+protocol = "dashscope"
+base_url = "https://embedding.example.com"
+model = "embedding-model"
+api_key_env = "SYSTEM_EMBEDDING_API_KEY"
+max_concurrency = 8
+
+[services.rerank]
+display_name = "重排模型"
+kind = "rerank"
+# Use "dashscope" for the native DashScope text-rerank API.
+protocol = "openai"
+base_url = "https://rerank.example.com/v1"
+model = "rerank-model"
+api_key_env = "SYSTEM_RERANK_API_KEY"
+max_concurrency = 8
+
+[bindings]
+ask_answer = "general"
+query_rewrite = "general"
+evidence_refine = "general"
+graph_chain_verify = "reasoning"
+report_sufficiency = "reasoning"
+memory_preview = "general"
+knowhow_optimize = "general"
+knowhow_reformat = "general"
+source_summary = "general"
+notebook_metadata = "general"
+paper_metadata = "general"
+kg_extract = "general"
+kg_refine = "general"
+kg_glean = "general"
+kg_merge_review = "general"
+kg_concept_description = "general"
+kg_community_summary = "general"
+kg_conflict_review = "general"
+schema_induction = "general"
+reasoning_agent = "reasoning"
+report_outline = "reasoning"
+report_section = "reasoning"
+report_summary = "reasoning"
+retrieval_query_embedding = "embedding"
+source_element_embedding = "embedding"
+chunk_embedding = "embedding"
+knowledge_object_embedding = "embedding"
+relation_embedding = "embedding"
+memory_embedding = "embedding"
+knowhow_embedding = "embedding"
+retrieval_rerank = "rerank"

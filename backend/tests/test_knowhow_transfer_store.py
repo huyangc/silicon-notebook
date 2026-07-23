@@ -130,10 +130,11 @@ def test_fingerprint_stable_when_nothing_changes(repo, store):
 #
 # The interleaving is a REAL background thread whose write goes through the
 # actual `SqliteDatabase.write()` + process-wide `write_lock` — deliberately
-# not a same-thread call. `write_lock` is a `threading.RLock`: a same-thread
-# reentrant acquire always succeeds regardless of whether the fix is
-# applied, so a same-thread hook could never distinguish "fixed" from
-# "buggy" here. Local imports (not module-level) so this test's own
+# not a same-thread call. Nested `write()` on ONE thread never blocks (the
+# lock is a plain `threading.Lock`, and re-entry is accounted for by
+# `write_depth`, not by lock reentrancy), so it always succeeds regardless of
+# whether the fix is applied — a same-thread hook could never distinguish
+# "fixed" from "buggy" here. Local imports (not module-level) so this test's own
 # threading/contextlib helpers don't shift the line-pinned `from
 # app.services.sqlite_repository import SQLiteRepository` at line 4
 # (test_repository_surface_manifest.py's KNOWHOW_TRANSFER_STORE_ALLOWED_

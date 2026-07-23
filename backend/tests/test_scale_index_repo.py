@@ -5,6 +5,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -12,11 +13,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
-                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "16"}.items():
+    for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -126,7 +126,7 @@ def _seed_base_with_chunk(repo):
                    ("eB", base.id, "concept", "approved", "",
                     json.dumps({"name": "MOSFET"}), ev, "sB", now, now))
         # knowledge embedding so the ANN index has a seedable vector
-        vec = repo.embedder.embed_query("MOSFET")
+        vec = repo._runtime.models.embedding("retrieval_query_embedding").embed_query("MOSFET")
         db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
                    "VALUES (?,?,?,?)", ("eB", base.id, json.dumps(vec), now))
     repo.rebuild_unified_kg(base.id)
@@ -253,7 +253,7 @@ def _seed_base_with_near_vector(repo, concept_name: str, concept_id: str,
                     json.dumps({"name": concept_name}), ev, source_id, now, now))
         # Use concept_name as the embedding text so FakeEmbedder produces a
         # deterministic vector tied to concept_name.
-        vec = repo.embedder.embed_query(concept_name)
+        vec = repo._runtime.models.embedding("retrieval_query_embedding").embed_query(concept_name)
         db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
                    "VALUES (?,?,?,?)", (concept_id, base.id, json.dumps(vec), now))
     repo.rebuild_unified_kg(base.id)
@@ -289,7 +289,7 @@ def test_cross_layer_synonym_bridge_adds_edges(repo, monkeypatch):
     # Rebuild settings so env vars are picked up.
     from app.core.config import Settings
     repo.settings = Settings()
-    repo.embedder.dim = 16  # already 16 from fixture
+    repo._runtime.models.embedding("retrieval_query_embedding").dim = 16  # already 16 from fixture
 
     # Concept names 'i' and 'j': FakeEmbedder(dim=16) cosine ~ 0.926 > 0.80.
     base = _seed_base_with_near_vector(
@@ -315,14 +315,14 @@ def test_cross_layer_synonym_bridge_adds_edges(repo, monkeypatch):
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("obj-act-j", active.id, "concept", "approved", "",
                     json.dumps({"name": "j"}), ev, "sAct", now, now))
-        vec_j = repo.embedder.embed_query("j")
+        vec_j = repo._runtime.models.embedding("retrieval_query_embedding").embed_query("j")
         db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
                    "VALUES (?,?,?,?)", ("obj-act-j", active.id, json.dumps(vec_j), now))
     repo.rebuild_unified_kg(active.id)
 
     # Verify that 'i' and 'j' are indeed similar enough with this embedder.
-    vec_i = np.array(repo.embedder.embed_query("i"), dtype=np.float64)
-    vec_j_arr = np.array(repo.embedder.embed_query("j"), dtype=np.float64)
+    vec_i = np.array(repo._runtime.models.embedding("retrieval_query_embedding").embed_query("i"), dtype=np.float64)
+    vec_j_arr = np.array(repo._runtime.models.embedding("retrieval_query_embedding").embed_query("j"), dtype=np.float64)
     sim_ij = float(np.dot(vec_i, vec_j_arr) /
                    (np.linalg.norm(vec_i) * np.linalg.norm(vec_j_arr)))
     assert sim_ij >= 0.80, (
@@ -390,7 +390,7 @@ def test_build_scale_index_writes_chunk_ann(repo):
         if not db.execute("SELECT COUNT(*) c FROM chunk_embeddings WHERE notebook_id=?",
                           (nb.id,)).fetchone()["c"]:
             for cid in ("c1", "c2"):
-                v = repo.embedder.embed_texts([cid])[0]
+                v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([cid])[0]
                 db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                            (cid, nb.id, json.dumps(v), now))
     repo.rebuild_unified_kg(nb.id)
@@ -529,7 +529,7 @@ def test_scale_index_status_and_rebuild(repo, monkeypatch):
         for cid in ("c1", "c2"):
             db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                        "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, "s1", f"text {cid}", "", "[]", now))
-            v = repo.embedder.embed_texts([cid])[0]
+            v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([cid])[0]
             db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                        (cid, nb.id, json.dumps(v), now))
     repo.rebuild_unified_kg(nb.id)
@@ -567,7 +567,7 @@ def test_build_scale_index_records_watermark_sources(repo):
                        "VALUES (?,?,?,?,?,?,?)", (sid, nb.id, "t", "md", "ready", now, now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                    "VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
-        v = repo.embedder.embed_texts(["c1"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["c1"])[0]
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                    ("c1", nb.id, json.dumps(v), now))
     repo.rebuild_unified_kg(nb.id)
@@ -588,7 +588,7 @@ def test_index_delta_after_new_source(repo):
                    "VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                    "VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
-        v = repo.embedder.embed_texts(["c1"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["c1"])[0]
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                    ("c1", nb.id, json.dumps(v), now))
     # 未索引 → 全是 delta
@@ -624,7 +624,7 @@ def test_scale_index_status_state_machine(repo, monkeypatch):
             for cid in cids:
                 db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                            "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, sid, "x", "", "[]", now))
-                v = repo.embedder.embed_texts([cid])[0]
+                v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([cid])[0]
                 db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                            (cid, nb.id, json.dumps(v), now))
         # Raw chunk insert bypasses build_chunks_for_source's seq bump; drop the
@@ -668,7 +668,7 @@ def test_fold_scale_index_delta(repo):
                 "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), "[]", sid, now, now))
             for tbl, key in [("chunk_embeddings", cid), ("knowledge_embeddings", oid)]:
-                v = repo.embedder.embed_texts([name])[0]
+                v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([name])[0]
                 col = "chunk_id" if tbl == "chunk_embeddings" else "object_id"
                 db.execute(
                     f"INSERT INTO {tbl} ({col},notebook_id,vector,created_at) VALUES (?,?,?,?)",
@@ -688,7 +688,7 @@ def test_fold_scale_index_delta(repo):
             "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             ("o3", nb.id, "concept", "approved", "", json.dumps({"name": "current mirror"}),
              "[]", "s2", now, now))
-        v = repo.embedder.embed_texts(["current mirror"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["current mirror"])[0]
         db.execute(
             "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             ("o3", nb.id, json.dumps(v), now))
@@ -750,7 +750,7 @@ def test_trigger_when_and_mode(repo, monkeypatch):
         now = "2026-07-01T00:00:00"
         db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
-        v = repo.embedder.embed_texts(["c1"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["c1"])[0]
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c1", nb.id, json.dumps(v), now))
         db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
     repo.rebuild_unified_kg(nb.id)
@@ -779,7 +779,7 @@ def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
         now = "2026-07-01T00:00:00"
         db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", ("s1", nb.id, "t", "md", "ready", now, now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)", ("c1", nb.id, "s1", "x", "", "[]", now))
-        v = repo.embedder.embed_texts(["c1"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["c1"])[0]
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c1", nb.id, json.dumps(v), now))
         db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
     repo.rebuild_unified_kg(nb.id)
@@ -792,7 +792,7 @@ def test_trigger_idle_then_fold_builds_via_fold(repo, monkeypatch):
         now = "2026-07-01T01:00:00"
         db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", ("s2", nb.id, "t2", "md", "ready", now, now))
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) VALUES (?,?,?,?,?,?,?)", ("c2", nb.id, "s2", "y", "", "[]", now))
-        v = repo.embedder.embed_texts(["c2"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["c2"])[0]
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)", ("c2", nb.id, json.dumps(v), now))
 
     # _resolve_scale_mode(auto) 应选 fold(有索引)

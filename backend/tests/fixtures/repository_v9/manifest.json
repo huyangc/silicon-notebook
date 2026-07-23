@@ -6,8 +6,8 @@
   },
   "expected_snapshot": {
     "path": "expected_snapshot.json",
-    "sha256": "2d9e399acd623b33d2b09c0ddf01ccd73f988f256cf8b8c9577baa313d68228a",
-    "size": 56552
+    "sha256": "c70459436e844f87c90a68aaa332a5807c45a263700e69a93bcfa2fdd0234ed2",
+    "size": 58263
   },
   "schema_version": 9,
   "source_commit": "3334626",

@@ -52,6 +52,7 @@ RUNTIME_COMPONENT_OWNERS = {
     "identity": "IdentityStore",
     "index_projections": "IndexProjectionStore",
     "kg_mutations": "KgMutationCoordinator",
+    "knowhow_history_store": "KnowhowHistoryStore",
     "knowhow_store": "KnowhowStore",
     "knowledge": "KnowledgeStore",
     "knowledge_governance": "KnowledgeGovernanceService",
@@ -59,7 +60,6 @@ RUNTIME_COMPONENT_OWNERS = {
     "knowledge_query": "KnowledgeQueryService",
     "models": "ModelProvider",
     "memory_service": "MemoryService",
-    "set_model_config_cache": "IdentityStore",
     "set_unified_cache": "RetrievalSnapshotCache",
     "set_auto_index_checked": "ScaleArtifactRuntime",
     "notebook_store": "NotebookStore",
@@ -596,12 +596,12 @@ class _NestedDelegateArgumentEscape:
 
 class _NestedSetterRhsEscape:
     @property
-    def llm_client(self):
-        return self._runtime.models.llm_client
+    def escape_property(self):
+        return self._runtime.models.chat("ask_answer")
 
-    @llm_client.setter
-    def llm_client(self, value):
-        self._runtime.models.llm_client = _global_response_helper(value)
+    @escape_property.setter
+    def escape_property(self, value):
+        self._runtime.models.test_adapter = _global_response_helper(value)
 
 
 class _ZeroOwnerSurface:
@@ -672,7 +672,8 @@ def test_sqlite_wrapper_has_only_explicit_migration_maintenance_compatibility_me
         "_migrate_legacy", "_add_column_if_missing", "_migration_1",
         "_migration_2", "_migration_3", "_migration_4", "_migration_5",
         "_migration_6", "_migration_7", "_migration_8", "_migration_9",
-        "_migration_10", "_recover_interrupted_jobs",
+        "_migration_10", "_migration_19", "_migration_27", "_run_migration",
+        "_recover_interrupted_jobs",
         "_recover_interrupted_jobs_legacy", "_seed", "_seed_legacy",
         "maintenance", "eval_insert_source_for_test",
         "_backfill_relation_embeddings", "_source_ids_from_evidence",
@@ -782,7 +783,7 @@ def test_facade_checker_rejects_nested_global_delegate_arguments():
 
 def test_facade_checker_rejects_nested_global_property_setter_rhs():
     violations = facade_body_violations(_NestedSetterRhsEscape)
-    assert [site[2] for site in violations] == ["llm_client"]
+    assert [site[2] for site in violations] == ["escape_property"]
 
 
 def test_facade_checker_rejects_zero_owner_properties_and_constants():

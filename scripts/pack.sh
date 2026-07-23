@@ -106,6 +106,8 @@ find "$STAGE/backend" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/de
 find "$STAGE/backend" -type f -name '*.py[co]' -delete 2>/dev/null || true
 mkdir -p "$STAGE/scripts"
 cp "$ROOT_DIR/scripts/autotune.sh" "$STAGE/scripts/autotune.sh"
+cp "$ROOT_DIR/scripts/migrate_legacy_model_env.py" \
+   "$STAGE/scripts/migrate_legacy_model_env.py"
 
 # --- 4) python wheelhouse(在同架构打包机上预编译,目标机离线可装) ---
 if [[ "${SKIP_WHEELHOUSE:-0}" == "1" ]]; then
@@ -129,7 +131,9 @@ cp "$ROOT_DIR/packaging/start.sh"   "$STAGE/start.sh"
 cp "$ROOT_DIR/packaging/stop.sh"    "$STAGE/stop.sh"
 cp "$ROOT_DIR/packaging/DEPLOY.md"  "$STAGE/DEPLOY.md"
 cp "$ROOT_DIR/.env.example"         "$STAGE/.env.example"
+cp "$ROOT_DIR/model-services.example.toml" "$STAGE/model-services.example.toml"
 chmod +x "$STAGE/install.sh" "$STAGE/start.sh" "$STAGE/stop.sh"
+chmod +x "$STAGE/scripts/migrate_legacy_model_env.py"
 cat > "$STAGE/VERSION" <<EOF
 version=$VERSION
 platform=${nos}-${narch}

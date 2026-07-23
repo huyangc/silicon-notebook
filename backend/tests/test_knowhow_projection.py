@@ -22,7 +22,9 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.knowhow.projection import KnowhowProjector, find_legacy_projected_table_ids
+from app.services.model_work import ModelProviderError
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import RecordingModelProvider
 
 
 class _FakeEmbedder:
@@ -40,7 +42,7 @@ class _FakeEmbedder:
         self.calls.append(texts)
         if self.fail_next:
             self.fail_next = False
-            raise RuntimeError("boom")
+            raise ModelProviderError("boom", code="provider_unavailable")
         return [[0.1, 0.2, 0.3] for _ in texts]
 
     @property
@@ -50,20 +52,19 @@ class _FakeEmbedder:
 
 @pytest.fixture
 def repo_factory(tmp_path, monkeypatch):
-    """Mirrors test_ask_embed_cache.py's repo_factory: four EMBED_* env vars
-    make Settings.embedder_configured (a read-only property) true, since it
-    cannot be set directly on an already-constructed Settings instance."""
+    """Build a repository with an explicit system-provider test seam."""
 
     def _make():
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
         monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
         monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
         monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-        monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-        monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-        monkeypatch.setenv("EMBED_API_KEY", "test-key")
-        monkeypatch.setenv("EMBED_MODEL", "test-model")
-        return SQLiteRepository(Settings())
+        provider = RecordingModelProvider()
+        repository = SQLiteRepository(
+            Settings(model_services_config=""), model_provider=provider
+        )
+        repository.recording_model_provider = provider
+        return repository
 
     return _make
 
@@ -76,8 +77,7 @@ def repo(repo_factory):
 @pytest.fixture
 def embedder(repo) -> _FakeEmbedder:
     emb = _FakeEmbedder()
-    repo.embedder = emb
-    assert repo.settings.embedder_configured  # confirm the real embed path, not an early-return no-op
+    repo.recording_model_provider.embedding_clients = {"knowhow_embedding": emb}
     return emb
 
 
@@ -1156,8 +1156,8 @@ def test_embedding_failure_marks_row_failed_without_raising(repo, projector, tab
 def test_embedding_failure_emits_through_model_error_channel(repo, projector, table_id, embedder):
     calls = []
     projector.note_model_error = (
-        lambda stage, model, exc, **kwargs: calls.append(
-            (stage, model, type(exc).__name__)
+        lambda stage, error, **kwargs: calls.append(
+            (stage, kwargs.get("workload_id"), type(error).__name__)
         )
     )
     store = repo._runtime.knowhow_store
@@ -1170,25 +1170,26 @@ def test_embedding_failure_emits_through_model_error_channel(repo, projector, ta
     projector.project_table(table_id)
 
     assert len(calls) == 1
-    stage, _model, exc_type = calls[0]
+    stage, workload_id, exc_type = calls[0]
     assert stage == "knowhow_embed"
-    assert exc_type == "RuntimeError"
+    assert workload_id == "knowhow_embedding"
+    assert exc_type == "ModelProviderError"
 
 
 def test_embedding_failure_reports_the_exact_client_that_made_the_call(
     repo, projector, table_id, embedder, monkeypatch
 ):
     calls = []
-    projector.note_model_error = (
-        lambda stage, model, exc, **kwargs: calls.append(kwargs)
+    projector.note_model_error = lambda stage, error, **kwargs: calls.append(
+        (stage, error, kwargs)
     )
-    setattr(embedder, "_model_status_fingerprint", "origin-fingerprint")
     replacement = _FakeEmbedder()
-    setattr(replacement, "_model_status_fingerprint", "replacement-fingerprint")
 
     def fail_after_replacement(_texts):
-        repo.embedder = replacement
-        raise RuntimeError("boom")
+        repo.recording_model_provider.embedding_clients = {
+            "knowhow_embedding": replacement
+        }
+        raise ModelProviderError("boom", code="provider_unavailable")
 
     monkeypatch.setattr(embedder, "embed_texts", fail_after_replacement)
     store = repo._runtime.knowhow_store
@@ -1200,13 +1201,10 @@ def test_embedding_failure_reports_the_exact_client_that_made_the_call(
 
     projector.project_table(table_id)
 
-    assert calls == [
-        {
-            "service": "embedding",
-            "provider_failure": True,
-            "failed_fingerprint": "origin-fingerprint",
-        }
-    ]
+    assert len(calls) == 1
+    assert calls[0][0] == "knowhow_embed"
+    assert calls[0][1].code == "provider_unavailable"
+    assert calls[0][2] == {"workload_id": "knowhow_embedding"}
 
 
 def test_local_vector_restore_failure_is_not_reported_as_provider_outage(
@@ -1363,8 +1361,10 @@ def test_unconfigured_embedder_is_not_a_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    repo = SQLiteRepository(Settings())
-    assert not repo.settings.embedder_configured
+    repo = SQLiteRepository(
+        Settings(model_services_config=""),
+        model_provider=RecordingModelProvider(),
+    )
 
     notebook_id = repo.create_notebook(
         NotebookCreate(name="t", purpose="p", primary_domain="d")

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
+import pytest
 
 from fastapi.testclient import TestClient
 
 from app.models.schemas import AskResponse
+from tests.model_testkit import bind_chat_client
+from app.services.model_work import (
+    ModelQueueFull, ModelQueueTimeout, ModelServiceUnavailable,
+)
 
 
 def test_citation_cleanup_preserves_code_math_and_array_indexes():
@@ -93,7 +98,18 @@ def test_preview_falls_back_deterministically_without_persisting(tmp_path, monke
     assert client.get("/api/memories", headers=headers).json()["total_count"] == 0
 
 
-def test_preview_llm_failure_uses_same_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "model_error",
+    [
+        RuntimeError("model unavailable"),
+        ModelQueueFull(support_id="mdl-memory-full"),
+        ModelQueueTimeout(support_id="mdl-memory-timeout"),
+        ModelServiceUnavailable(support_id="mdl-memory-unavailable"),
+    ],
+)
+def test_preview_llm_failure_uses_same_fallback(
+    tmp_path, monkeypatch, model_error
+):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'preview-fail.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
@@ -125,14 +141,15 @@ def test_preview_llm_failure_uses_same_fallback(tmp_path, monkeypatch):
         configured = True
 
         def chat_json(self, *args, **kwargs):
-            raise RuntimeError("model unavailable")
+            raise model_error
 
-    repo.llm_client = FailingClient()
+    bind_chat_client(repo, "memory_preview", FailingClient())
     preview = client.post(f"/api/answers/{answer_id}/memory-preview", headers=headers)
     assert preview.status_code == 200
     assert preview.json()["title"] == "Fallback title"
     assert preview.json()["content_md"] == "Fallback body"
     assert preview.json()["kg_extract_eligible"] is False
+    assert "memory_preview" in repo._runtime.models._test_chat_calls
 
 
 def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
@@ -200,7 +217,7 @@ def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
                 {"title": "LLM title", "content_md": "LLM body", "tags": ["llm"]}
             )
 
-    repo.llm_client = SuccessfulClient()
+    bind_chat_client(repo, "memory_preview", SuccessfulClient())
     llm_answer = repo._runtime.ask_state.save_answer(
         notebook_id,
         None,
@@ -214,3 +231,4 @@ def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
     assert llm_preview.status_code == 200, llm_preview.text
     assert llm_preview.json()["title"] == "LLM title"
     assert llm_preview.json()["kg_extract_eligible"] is True
+    assert "memory_preview" in repo._runtime.models._test_chat_calls

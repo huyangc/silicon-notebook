@@ -1,0 +1,194 @@
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { expect, test, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+  fetchMe: vi.fn(),
+  fetchAdminUsers: vi.fn(),
+  fetchOnlineIds: vi.fn(),
+  updateAdminUserRole: vi.fn(),
+  updateAdminUserUploadLimit: vi.fn(),
+  fetchUploadLimitDefault: vi.fn(),
+  updateUploadLimitDefault: vi.fn(),
+  fetchUserNotebooks: vi.fn(),
+}));
+
+vi.mock("./auth.ts", () => ({ fetchMe: mocks.fetchMe }));
+vi.mock("./admin/usage/api.ts", () => ({
+  FORBIDDEN_SENTINEL: "forbidden",
+  fetchAdminUsers: mocks.fetchAdminUsers,
+  fetchOnlineIds: mocks.fetchOnlineIds,
+  updateAdminUserRole: mocks.updateAdminUserRole,
+  updateAdminUserUploadLimit: mocks.updateAdminUserUploadLimit,
+  fetchUploadLimitDefault: mocks.fetchUploadLimitDefault,
+  updateUploadLimitDefault: mocks.updateUploadLimitDefault,
+}));
+vi.mock("./admin/usage/notebooks.ts", () => ({
+  fetchUserNotebooks: mocks.fetchUserNotebooks,
+  notebookStatusLabel: (value: string) => value,
+}));
+
+import AdminUsagePage from "./admin/usage/page";
+
+const rows = [
+  {
+    id: "user-local",
+    username: "admin",
+    role: "admin",
+    created_at: "2026-07-01T00:00:00",
+    notebooks: 1,
+    sources: 2,
+    conversations: 3,
+    reports: 4,
+    last_active: null,
+    is_online: false,
+    role_mutable: false,
+    upload_limit: 20,
+    upload_limit_overridden: false,
+  },
+  {
+    id: "user-target",
+    username: "a00123456",
+    role: "user",
+    created_at: "2026-07-02T00:00:00",
+    notebooks: 0,
+    sources: 0,
+    conversations: 0,
+    reports: 0,
+    last_active: null,
+    is_online: false,
+    role_mutable: true,
+    upload_limit: 20,
+    upload_limit_overridden: false,
+  },
+];
+
+// 每个用例都要自备实现(vitest 配了 restoreMocks,测试间会清实现)。
+function primeCommonMocks() {
+  mocks.fetchMe.mockResolvedValue({ id: "user-local", role: "admin" });
+  mocks.fetchAdminUsers.mockResolvedValue(rows);
+  mocks.fetchOnlineIds.mockResolvedValue([]);
+  mocks.fetchUploadLimitDefault.mockResolvedValue(20);
+}
+
+async function targetRow() {
+  const targetName = await screen.findByText("a00123456");
+  const row = targetName.closest("tr");
+  expect(row).not.toBeNull();
+  return within(row as HTMLTableRowElement);
+}
+
+test("管理员可在用户总览中二次确认并授予管理员权限", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUserRole.mockResolvedValue({
+    id: "user-target",
+    username: "a00123456",
+    role: "admin",
+  });
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  await user.click(target.getByRole("button", { name: "设为管理员" }));
+  expect(mocks.updateAdminUserRole).not.toHaveBeenCalled();
+  await user.click(target.getByRole("button", { name: "确认" }));
+
+  expect(await screen.findByText("已授予 a00123456 管理员权限")).toBeInTheDocument();
+  expect(mocks.updateAdminUserRole).toHaveBeenCalledWith("user-target", "admin");
+  expect(target.getByRole("button", { name: "撤销管理员" })).toBeInTheDocument();
+  const builtinRow = screen.getByText("admin").closest("tr");
+  expect(within(builtinRow as HTMLTableRowElement).getByText("当前账户")).toBeInTheDocument();
+});
+
+test("管理员可保存普通用户默认文档上限", async () => {
+  primeCommonMocks();
+  mocks.updateUploadLimitDefault.mockResolvedValue(35);
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  await targetRow(); // 等页面就绪
+
+  const input = screen.getByLabelText("普通用户默认文档上限");
+  await user.clear(input);
+  await user.type(input, "35");
+  // 无行处于编辑态时,页面上唯一的「保存」就是默认上限控件。
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  expect(mocks.updateUploadLimitDefault).toHaveBeenCalledWith(35);
+  expect(await screen.findByText("已将默认文档上限设为 35")).toBeInTheDocument();
+});
+
+test("非法默认上限即时拦截,不发起请求", async () => {
+  primeCommonMocks();
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  await targetRow();
+
+  const input = screen.getByLabelText("普通用户默认文档上限");
+  await user.clear(input);
+  await user.type(input, "0");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  expect(mocks.updateUploadLimitDefault).not.toHaveBeenCalled();
+  expect(await screen.findByText("请输入 1 到 100000 之间的整数")).toBeInTheDocument();
+});
+
+test("管理员可为某用户单独设置文档上限,行内标记转为自定义", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUserUploadLimit.mockResolvedValue({
+    id: "user-target",
+    username: "a00123456",
+    upload_limit: 50,
+    upload_limit_overridden: true,
+  });
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  let target = await targetRow();
+  expect(target.getByText("默认")).toBeInTheDocument();
+
+  await user.click(target.getByRole("button", { name: "编辑" }));
+  const input = target.getByLabelText("a00123456 的文档上限");
+  await user.clear(input);
+  await user.type(input, "50");
+  await user.click(target.getByRole("button", { name: "保存" }));
+
+  expect(mocks.updateAdminUserUploadLimit).toHaveBeenCalledWith("user-target", 50);
+  expect(await screen.findByText("已将 a00123456 的文档上限设为 50")).toBeInTheDocument();
+  target = await targetRow();
+  expect(target.getByText("50")).toBeInTheDocument();
+  expect(target.getByText("自定义")).toBeInTheDocument();
+});
+
+test("重置默认发送 null 覆盖并回落默认值", async () => {
+  primeCommonMocks();
+  mocks.updateAdminUserUploadLimit.mockResolvedValue({
+    id: "user-target",
+    username: "a00123456",
+    upload_limit: 20,
+    upload_limit_overridden: false,
+  });
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  await user.click(target.getByRole("button", { name: "编辑" }));
+  await user.click(target.getByRole("button", { name: "重置默认" }));
+
+  expect(mocks.updateAdminUserUploadLimit).toHaveBeenCalledWith("user-target", null);
+  expect(await screen.findByText("已恢复 a00123456 的文档上限为默认值（20）")).toBeInTheDocument();
+});
+
+test("管理员行的文档上限显示不限且不可编辑", async () => {
+  primeCommonMocks();
+  render(<AdminUsagePage />);
+  await targetRow(); // 等页面就绪
+
+  const builtinRow = screen.getByText("admin").closest("tr");
+  const builtin = within(builtinRow as HTMLTableRowElement);
+  expect(builtin.getByText("不限")).toBeInTheDocument();
+  expect(builtin.queryByRole("button", { name: "编辑" })).toBeNull();
+});

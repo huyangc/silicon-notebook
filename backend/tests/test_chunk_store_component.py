@@ -10,6 +10,7 @@ bodies):
 - source_elements_for_chunking keeps the zero-padded-id insertion order.
 """
 import json
+import sqlite3
 
 import pytest
 
@@ -106,6 +107,49 @@ def test_replace_source_chunks_rolls_back_chunks_and_fts_together(
             created_at="t",
         )
     assert chunk_store.source_chunks(source_id) == before
+
+
+def _chunked_at(repo, source_id):
+    with repo._connect() as db:
+        return db.execute(
+            "SELECT chunked_at FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["chunked_at"]
+
+
+def test_mark_chunked_at_commits_atomically_with_the_chunk_swap(
+    repo, chunk_store, source_id, notebook_id
+):
+    """mark_chunked_at 必须与它认证的 chunk 数据在**同一事务**里提交。这正是 codex
+    第 1 轮 P2 要的原子性——0-chunk 成功的源不能因 marker 与 chunks 分处两个事务而在
+    崩溃窗口里留下 chunks=0+chunked_at=NULL 被 H3 误判为损坏。
+
+    检出力关键:让 **chunked_at 的 UPDATE 本身**失败(装一个 BEFORE UPDATE OF
+    chunked_at 的 RAISE(ABORT) 触发器),断言 **chunks 一并回滚到旧值**。
+    - 正确码(UPDATE 与 chunks 同事务):UPDATE 触发 ABORT → 异常冒出 write() 块 →
+      __exit__ 整事务 rollback → chunk 的 DELETE/INSERT 一起回滚 → 旧 chunk 保留。
+    - 「挪出事务」变异(UPDATE 放在 chunks 提交后的独立 write()):chunks 先提交、
+      旧 chunk 已没,再触发 ABORT 也回滚不了已提交的 chunks → 断言 `== before` 红。
+    用「FTS 失败」测不出这个区别(FTS 在 UPDATE 之前抛,独立事务的 UPDATE 根本没执行
+    到,变异打空),所以这里精确让 UPDATE 那条失败。用永久触发器(存 sqlite_master、
+    跨连接可见)而非 monkeypatch——sqlite3.Connection 是 C 扩展类型无法 setattr。"""
+    before = chunk_store.source_chunks(source_id)
+    assert before  # fixture 预置了一个旧 chunk
+    with repo._write() as db:
+        db.execute(
+            "CREATE TRIGGER _t_block_chunked_at BEFORE UPDATE OF chunked_at ON sources "
+            "BEGIN SELECT RAISE(ABORT, 'chunked_at blocked'); END"
+        )
+    try:
+        with pytest.raises(sqlite3.Error, match="chunked_at blocked"):
+            chunk_store.replace_source_chunks(
+                source_id, notebook_id, [ChunkWrite("c-new", "x", "", ())],
+                created_at="t", mark_chunked_at="new-mark",
+            )
+        # UPDATE 触发 ABORT → 整事务回滚 → 旧 chunk 仍在(chunks 与 marker 同生共死)。
+        assert chunk_store.source_chunks(source_id) == before
+    finally:
+        with repo._write() as db:
+            db.execute("DROP TRIGGER _t_block_chunked_at")
 
 
 def test_replace_source_chunks_swaps_rows_fts_and_cascades_embeddings(

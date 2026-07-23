@@ -5,6 +5,7 @@ import inspect
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -119,11 +120,17 @@ def _runtime_serialization(tmp_path, monkeypatch):
     )
     repo = SQLiteRepository(settings)
 
+    def fixture_repository():
+        return repo
+
+    fixture_repository.cache_info = lambda: SimpleNamespace(currsize=1)
+    fixture_repository.cache_clear = lambda: None
+
     monkeypatch.setattr(app_main, "get_settings", lambda: settings)
-    monkeypatch.setattr(app_main, "repository", lambda: repo)
+    monkeypatch.setattr(app_main, "repository", fixture_repository)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
-    monkeypatch.setattr(deps, "repository", lambda: repo)
-    monkeypatch.setattr(ask_routes, "repository", lambda: repo)
+    monkeypatch.setattr(deps, "repository", fixture_repository)
+    monkeypatch.setattr(ask_routes, "repository", fixture_repository)
     monkeypatch.setattr(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
     test_app = app_main.create_app()
 

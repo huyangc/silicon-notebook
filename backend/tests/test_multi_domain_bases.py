@@ -8,6 +8,7 @@ from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -16,13 +17,13 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
 class TestSchema:
-    def test_schema_version_is_24(self):
-        assert SCHEMA_VERSION == 24
+    def test_schema_version_is_29(self):
+        assert SCHEMA_VERSION == 29
 
     def test_fresh_db_has_notebook_bases(self, repo):
         with repo._connect() as db:
@@ -86,7 +87,7 @@ class TestSchema:
             version = raw.execute("PRAGMA user_version").fetchone()[0]
         assert "notebook_bases" in names
         assert "target_base_id" in cols
-        assert version == 24
+        assert version == 29
 
 
 def _mount(repo, notebook_id, base_ids):

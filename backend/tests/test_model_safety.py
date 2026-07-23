@@ -83,10 +83,14 @@ def test_model_error_metadata_uses_explicit_allowlists():
 def test_model_error_schema_defaults_and_legacy_values_are_safe():
     defaulted = ModelError(stage="answer", message="missing_config")
     assert defaulted.model_dump() == {
-        "service": "llm",
+        "service_id": "",
+        "service_name": "",
+        "workload_id": "",
+        "workload_label": "",
         "stage": "answer",
         "model": "",
         "message": "missing_config",
+        "support_id": "",
     }
 
     legacy = ModelError(
@@ -96,35 +100,55 @@ def test_model_error_schema_defaults_and_legacy_values_are_safe():
         message="RuntimeError: private response",
     )
     assert legacy.model_dump() == {
-        "service": "llm",
+        "service_id": "",
+        "service_name": "",
+        "workload_id": "",
+        "workload_label": "",
         "stage": "model_call",
         "model": "",
         "message": "upstream_error",
+        "support_id": "",
     }
 
 
 @pytest.mark.parametrize(
-    ("stage", "service"),
+    ("stage", "workload_id"),
     [
         ("rerank", "rerank"),
-        ("embed", "embedding"),
-        ("chunk_ann_query", "embedding"),
-        ("rewrite", "rewrite_llm"),
-        ("kg_extract", "kg_llm"),
-        ("private_diagnostic", "llm"),
+        ("embed", "retrieval_query_embedding"),
+        ("chunk_ann_query", "retrieval_query_embedding"),
+        ("rewrite", "query_rewrite"),
+        ("report_section", "report_section"),
+        ("private_diagnostic", "ask_answer"),
     ],
 )
-def test_legacy_model_error_infers_service_before_stage_is_sanitized(stage, service):
-    error = ModelError(stage=stage, message="RuntimeError: private response")
-
-    assert error.service == service
-
-
-def test_explicit_model_error_service_wins_over_legacy_stage_inference():
+def test_model_error_uses_explicit_system_service_and_workload_metadata(
+    stage, workload_id
+):
     error = ModelError(
-        service="reasoning_llm",
-        stage="rerank",
+        service_id="primary-chat",
+        workload_id=workload_id,
+        stage=stage,
         message="RuntimeError: private response",
+        support_id="mdl-support-safe",
     )
 
-    assert error.service == "reasoning_llm"
+    assert error.service_id == "primary-chat"
+    assert error.workload_id == workload_id
+    assert error.support_id == "mdl-support-safe"
+    assert error.stage == safe_model_error_stage(stage)
+
+
+def test_explicit_system_service_metadata_wins_over_ignored_legacy_service():
+    error = ModelError(
+        service="reasoning_llm",
+        service_id="reasoning-chat",
+        workload_id="reasoning_agent",
+        stage="rerank",
+        message="RuntimeError: private response",
+        support_id="mdl-reasoning-safe",
+    )
+
+    assert error.service_id == "reasoning-chat"
+    assert error.workload_id == "reasoning_agent"
+    assert error.support_id == "mdl-reasoning-safe"

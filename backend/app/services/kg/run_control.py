@@ -97,6 +97,29 @@ class KgExtractionRunControl:
 
 
 def _failure_for(exc: Exception) -> KgBuildFailure | None:
+    code = str(getattr(exc, "code", "") or "")
+    if code in {
+        "model_queue_full",
+        "model_queue_timeout",
+        "model_service_unavailable",
+        "provider_rate_limited",
+        "provider_unavailable",
+    }:
+        return KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
+    if code == "provider_auth":
+        return KgBuildFailure("model_auth_failed", MODEL_AUTH_FAILED_MESSAGE)
+    if code in {
+        "unknown_model",
+        "model_not_found",
+        "model_rejected",
+        "protocol_mismatch",
+        "unsupported_protocol",
+        "capability_mismatch",
+        "unsupported_capability",
+    }:
+        return KgBuildFailure(
+            "model_request_rejected", MODEL_REQUEST_REJECTED_MESSAGE
+        )
     status = llm_status_code(exc)
     if is_transient_llm_error(exc):
         return KgBuildFailure("model_unavailable", MODEL_UNAVAILABLE_MESSAGE)
@@ -188,6 +211,31 @@ class TaskScopedKgClient:
                 first_failure = self.control.abort(failure)
                 raise KgBuildAborted(first_failure) from exc
         raise AssertionError("KG model attempt loop exited unexpectedly")
+
+
+class TaskScopedKgClients:
+    """Resolve and cache controlled adapters for all KG chat workloads."""
+
+    def __init__(self, provider: Any, settings: Settings, control: KgExtractionRunControl):
+        self._provider = provider
+        self._settings = settings
+        self.control = control
+        self._clients: dict[str, TaskScopedKgClient] = {}
+
+    def chat(self, workload_id: str) -> TaskScopedKgClient:
+        client = self._clients.get(workload_id)
+        if client is None:
+            client = TaskScopedKgClient(
+                self._provider.chat(workload_id), self._settings, self.control
+            )
+            self._clients[workload_id] = client
+        return client
+
+    def configured(self, workload_id: str) -> bool:
+        return self._provider.configured(workload_id)
+
+    def parallelism(self, workload_id: str) -> int:
+        return self._provider.parallelism(workload_id)
 
 
 def probe_kg_model(client: TaskScopedKgClient) -> None:

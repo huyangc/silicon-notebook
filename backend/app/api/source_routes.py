@@ -11,6 +11,7 @@ from app.api.deps import (
     require_notebook_access,
     require_notebook_read,
     source_repository,
+    user_error,
 )
 from app.models.identity import UserProfile
 from app.models.sources import (
@@ -54,6 +55,36 @@ def _validate_source_file(file_name: str, content_size: int | None = None) -> No
             raise HTTPException(status_code=413, detail="Uploaded source file is too large")
 
 
+def _document_capacity(notebook_id: str) -> "tuple[int, int] | None":
+    """(当前可见文档数, owner 有效上限) —— 「每笔记本文档数量上限」的单一计算点,供
+    上传/导入的批量预检与 URL 导入的逐条预算共用。owner 为 admin 的笔记本豁免 → None
+    (不限)。分享拷贝、离线批量摄取、Memory 派生源都走各自路径,不经这些 HTTP 端点。"""
+    repo = source_repository()
+    owner_id, owner_role = repo.notebook_owner(notebook_id)
+    if owner_role == "admin":
+        return None
+    return repo.visible_document_count(notebook_id), repo.effective_document_limit(owner_id)
+
+
+def _enforce_document_capacity(notebook_id: str, adding: int) -> None:
+    """建源前批量预检(上传/导入:提交的每个文件/条目都会入库,故按总数一次性判)。超限
+    整批 409。URL 导入不用它——URL 天然部分成功(空白/不可达/非 PDF 跳过),改由
+    add_url_sources 按成功探测逐条扣减 capacity,详见该端点。
+
+    check-then-insert 非原子:并发双提交存在极小 TOCTOU 窗口(可能略微超限)。这是刻意
+    取舍——为此加写锁/唯一约束不值当,偶尔多一两篇文档无害,下一次提交即被挡住。"""
+    cap = _document_capacity(notebook_id)
+    if cap is None:
+        return
+    current, limit = cap
+    if current + adding > limit:
+        raise user_error(
+            409,
+            f"该笔记本最多可添加 {limit} 篇文档，当前已有 {current} 篇，"
+            f"无法再添加 {adding} 篇。",
+        )
+
+
 @router.get("/notebooks/{notebook_id}/sources", response_model=PaginatedSources, dependencies=[Depends(require_notebook_read)])
 def list_sources(
     notebook_id: str,
@@ -72,6 +103,7 @@ def import_sources(
     try:
         for file in payload.files:
             _validate_source_file(file.file_name)
+        _enforce_document_capacity(notebook_id, len(payload.files))
         return source_repository().import_sources(notebook_id, payload)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
@@ -83,11 +115,17 @@ def add_url_sources(
     payload: AddUrlSourcesRequest,
 ) -> AddUrlSourcesResult:
     repo = source_repository()
+    # URL 导入天然部分成功(空白/不可达/非 PDF 会被跳过),故容量按**成功探测逐条**核算:
+    # 剩余额度 = 有效上限 − 当前数;超出的有效 URL 进 rejected(不消耗配额、不整批 409),
+    # 与「一个无效链接拖累整批」相反。admin 豁免 → capacity=None(不限)。
+    cap = _document_capacity(notebook_id)
+    capacity = None if cap is None else max(0, cap[1] - cap[0])
     try:
         return repo.add_url_sources(
             notebook_id,
             payload.urls,
             scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
+            capacity=capacity,
         )
     except MinerUCloudNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -103,6 +141,8 @@ async def upload_sources(
 ) -> List[SourceSummary]:
     try:
         repo = source_repository()
+        # 建源前先挡容量(在读取任何文件内容之前 fail-fast,不为超限的批次白读进内存)。
+        _enforce_document_capacity(notebook_id, len(files))
         uploaded_files = []
         for index, file in enumerate(files):
             file_name = file.filename or "source.bin"
@@ -213,9 +253,7 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
     """补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;
     LLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。"""
     repo = repository()
-    llm_ready = getattr(repo.kg_llm_client, "configured", False) or getattr(
-        repo.llm_client, "configured", False
-    )
+    llm_ready = repo._runtime.models.configured("paper_metadata")
     if not llm_ready:
         raise HTTPException(status_code=409, detail="LLM not configured")
     queued = len(repo.sources_missing_paper_meta(notebook_id))

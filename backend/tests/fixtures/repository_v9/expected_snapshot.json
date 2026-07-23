@@ -292,8 +292,12 @@
               {
                 "message": "upstream_error",
                 "model": "fixture-rerank",
-                "service": "rerank",
-                "stage": "rerank"
+                "service_id": "",
+                "service_name": "",
+                "stage": "rerank",
+                "support_id": "",
+                "workload_id": "",
+                "workload_label": ""
               }
             ],
             "reasoning_trace": [
@@ -343,6 +347,7 @@
         "sources": 1
       },
       "created_label": "2024年1月2日",
+      "document_limit": 20,
       "expected_questions": [
         "Why is gain stable?"
       ],
@@ -933,6 +938,7 @@
     ],
     "sources": [
       {
+        "chunked_at": "<timestamp>",
         "created_at": "<timestamp>",
         "doc_type": "textbook",
         "error_message": "",
@@ -980,6 +986,7 @@
         "memory_mode": "manual",
         "model_settings": {},
         "updated_at": "<timestamp>",
+        "upload_document_limit": null,
         "user_id": "<user-id-1>"
       },
       {
@@ -993,6 +1000,7 @@
         "memory_mode": "manual",
         "model_settings": {},
         "updated_at": "<timestamp>",
+        "upload_document_limit": null,
         "user_id": "<user-id-2>"
       },
       {
@@ -1002,6 +1010,7 @@
         "memory_mode": "manual",
         "model_settings": {},
         "updated_at": "<timestamp>",
+        "upload_document_limit": null,
         "user_id": "<user-id-3>"
       }
     ],
@@ -1195,6 +1204,11 @@
         "type": "index"
       },
       {
+        "name": "idx_kg_canonical_scratch_nb_run_seed",
+        "sql_sha256": "a8457f423f0ba9cc169baadcf22fb6e4d6c3e100cb679efff0feec5d9c26f9ad",
+        "type": "index"
+      },
+      {
         "name": "idx_kg_cluster_scratch_nb_run",
         "sql_sha256": "63dda4f6c99afb18cd60dd4f9107f4aef2dd87368713947c8dee6f6c108da7bf",
         "type": "index"
@@ -1215,8 +1229,18 @@
         "type": "index"
       },
       {
+        "name": "idx_knowhow_changes_table",
+        "sql_sha256": "836776f01434ca10040e0cc33728bfc7da562475f3f553307ad57b9e3cd755bc",
+        "type": "index"
+      },
+      {
         "name": "idx_knowhow_columns_table",
         "sql_sha256": "cd16d874c9db46a33aef415cff7eb033d1a3f09b008c2a40106ba6f6cb0b8d2e",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowhow_milestones_table",
+        "sql_sha256": "9f90d62e0919b0d3f2ae7aa8cfa27d12af9fe37659f475e866c3ced55c9ff34e",
         "type": "index"
       },
       {
@@ -1470,6 +1494,11 @@
         "type": "table"
       },
       {
+        "name": "app_settings",
+        "sql_sha256": "0e6bd5a69409bad3f0f5c16de07dec608f51e753a028395d4152d3ea31146b1a",
+        "type": "table"
+      },
+      {
         "name": "ask_jobs",
         "sql_sha256": "393b26cacbfa9da4d62c4f4c8bba973a33c561126c364993839c665d998047b9",
         "type": "table"
@@ -1585,6 +1614,11 @@
         "type": "table"
       },
       {
+        "name": "kg_canonical_scratch",
+        "sql_sha256": "5d95fa01f2e9fb5570a90ab2b814a7f32db91fb178cb3a1d6ad0b262d41cf594",
+        "type": "table"
+      },
+      {
         "name": "kg_cluster_scratch",
         "sql_sha256": "99d623abe3512d8074f90faea3ba34e41af1042e09da59e2c8fe4432a08e7e0c",
         "type": "table"
@@ -1640,8 +1674,18 @@
         "type": "table"
       },
       {
+        "name": "knowhow_changes",
+        "sql_sha256": "7d5a1cd0332f579a4b68617eaff68e8da2aae271062ff0fe1aafa6268ff2896a",
+        "type": "table"
+      },
+      {
         "name": "knowhow_columns",
         "sql_sha256": "1225567bf734ae454346b42afa1b0ff07f3b5ec854350a6d217333d8051b9307",
+        "type": "table"
+      },
+      {
+        "name": "knowhow_milestones",
+        "sql_sha256": "186203b845d691af8c40e2a110819e8d53b6d5b9b4ee23c2e6d6c1ec9441ceb3",
         "type": "table"
       },
       {
@@ -1791,7 +1835,12 @@
       },
       {
         "name": "sources",
-        "sql_sha256": "3b8f75cf9e142ccdd166aceb99c71b99f8ec581434256352df4a96190a5aa628",
+        "sql_sha256": "e3253ece4636a176c066004397dd968ce1aff7b2939a8ccd552b34f5e15c590f",
+        "type": "table"
+      },
+      {
+        "name": "system_model_service_status",
+        "sql_sha256": "e16364cc714469070d4a35fd34f5870ccc811a8ec9c4ab4d34f4d91b2d1ae495",
         "type": "table"
       },
       {
@@ -1801,7 +1850,7 @@
       },
       {
         "name": "user_profiles",
-        "sql_sha256": "c8f4b8d4f9072a816e10e2c0c5c332625a137aa659a0af9703ff36298b4a2cb8",
+        "sql_sha256": "f3c1e9abbbcdacde6818ca3e117f766ba5879392c4a54cf8e9afba4a6f726600",
         "type": "table"
       },
       {
@@ -1825,6 +1874,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 24
+    "user_version": 29
   }
 }

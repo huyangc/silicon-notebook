@@ -129,11 +129,10 @@ def test_persistence_bundle_factory_create_has_a_pinned_public_contract():
     parameters = tuple(signature.parameters.values())
 
     assert tuple(parameter.name for parameter in parameters) == (
-        "self", "settings", "root_dir", "seams", "model_config_cache",
+        "self", "settings", "root_dir", "seams",
     )
     assert tuple(parameter.kind for parameter in parameters) == (
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
         inspect.Parameter.KEYWORD_ONLY,
         inspect.Parameter.KEYWORD_ONLY,
         inspect.Parameter.KEYWORD_ONLY,
@@ -143,7 +142,6 @@ def test_persistence_bundle_factory_create_has_a_pinned_public_contract():
         "settings": Settings,
         "root_dir": Path,
         "seams": RepositorySeams,
-        "model_config_cache": dict[str, object],
         "return": PersistenceBundle,
     }
 

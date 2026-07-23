@@ -391,6 +391,40 @@ def test_append_commit_inserts_rows_and_schedules_reprojection(tmp_path, monkeyp
     assert values == {"过冲", "欠冲"}
 
 
+def test_append_commit_records_one_import_append_with_import_origin_and_actor(
+    tmp_path, monkeypatch,
+):
+    """knowhow 表版本管理 Task 13 code review: actor/origin threading through
+    commit_append had ZERO HTTP-level test coverage (a mutation reverting the
+    real ``actor=user.id``/``origin="import"`` to defaults left the entire
+    4817-test suite green). Assert the real end-to-end shape: the batch of
+    newly appended rows lands as ONE ``import_append`` flow entry, its
+    ``actor`` is the logged-in user's own id (not empty), and its ``origin``
+    is ``"import"`` (never the manual editor's ``"user"``)."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00002035")
+    owner_id = client.get("/api/me", headers=owner_h).json()["id"]
+    nb = _mk_notebook(client, owner_h)
+    table = _create_table(client, owner_h, nb)
+
+    resp = _append(
+        client, owner_h, nb, table["id"],
+        ["现象", "方法", "工具"],
+        [["过冲", "加阻尼", "示波器"], ["欠冲", "调走线", "万用表"]],
+        mode="commit",
+    )
+    assert resp.status_code == 200, resp.text
+
+    changes = client.get(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/history", headers=owner_h,
+    ).json()["changes"]
+    import_change = next(c for c in changes if c["kind"] == "import_append")
+    assert import_change["origin"] == "import"
+    assert import_change["actor"] == owner_id
+    assert import_change["actor"] != ""
+    assert len(import_change["payload"]["rows"]) == 2
+
+
 def test_append_commit_ignores_missing_and_extra_columns_same_as_preview(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00002031")

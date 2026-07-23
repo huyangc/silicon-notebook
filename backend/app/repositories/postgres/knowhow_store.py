@@ -9,6 +9,7 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.knowhow_history_store import record_change
 
 
 JS_TRIM_WHITESPACE = (
@@ -184,6 +185,8 @@ class KnowhowStore:
         description: str,
         columns: list[dict],
         created_by: str = "",
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Create a table + its column definitions (position = list order).
 
@@ -199,7 +202,7 @@ class KnowhowStore:
         title, names, kinds = self._validated_table_definition(title, columns)
         now = self.now()
         with self.database.write() as db:
-            table_id, _column_ids = self._insert_table_on(
+            table_id, column_ids = self._insert_table_on(
                 db,
                 notebook_id,
                 title,
@@ -208,6 +211,28 @@ class KnowhowStore:
                 kinds,
                 created_by,
                 now,
+            )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="table_create",
+                payload={
+                    "table": {"title": title, "description": description or ""},
+                    "columns": [
+                        {
+                            "id": column_id,
+                            "name": names[position],
+                            "role": kinds[position],
+                            "position": position,
+                        }
+                        for position, column_id in enumerate(column_ids)
+                    ],
+                    "rows": [],
+                },
+                actor=actor,
+                origin=origin,
             )
         return table_id
 
@@ -219,6 +244,8 @@ class KnowhowStore:
         columns: list[dict],
         rows: Sequence[Sequence[str]],
         created_by: str = "",
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Atomically create an imported table and every normalized row."""
         title, names, kinds = self._validated_table_definition(title, columns)
@@ -249,16 +276,50 @@ class KnowhowStore:
                     ),
                 ),
             )
+            created_rows: list[dict] = []
             for position, row in enumerate(normalized_rows):
                 cells = {
                     column_ids[index]: content
                     for index, content in enumerate(row)
                     if content
                 }
-                self._insert_knowhow_row_on(db, table_id, cells, position, now)
+                row_id = self._insert_knowhow_row_on(
+                    db, table_id, cells, position, now
+                )
+                created_rows.append(
+                    {
+                        "row_id": row_id,
+                        "position": position,
+                        "created_at": iso_timestamp(now),
+                        "cells": cells,
+                        "code": [],
+                    }
+                )
             db.execute(
                 "UPDATE knowhow_tables SET mutation_seq=mutation_seq+1 WHERE id=%s",
                 (table_id,),
+            )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="table_create",
+                payload={
+                    "table": {"title": title, "description": description or ""},
+                    "columns": [
+                        {
+                            "id": column_id,
+                            "name": names[position],
+                            "role": kinds[position],
+                            "position": position,
+                        }
+                        for position, column_id in enumerate(column_ids)
+                    ],
+                    "rows": created_rows,
+                },
+                actor=actor,
+                origin=origin,
             )
         return table_id
 
@@ -267,6 +328,8 @@ class KnowhowStore:
         table_id: str,
         title: "str | None" = None,
         description: "str | None" = None,
+        actor: str = "",
+        origin: str = "user",
     ) -> None:
         """Patch title and/or description in place (each ``None`` argument
         leaves that field untouched — the editing API's PATCH semantics for
@@ -295,17 +358,37 @@ class KnowhowStore:
         params.append(table_id)
         with self.database.write() as db:
             row = db.execute(
-                "SELECT id FROM knowhow_tables WHERE id=%s FOR UPDATE", (table_id,)
+                "SELECT id,title,description FROM knowhow_tables "
+                "WHERE id=%s FOR UPDATE", (table_id,)
             ).fetchone()
             if row is None:
                 return
             db.execute(
                 f"UPDATE knowhow_tables SET {', '.join(sets)} WHERE id = %s", params
             )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="table_meta",
+                payload={
+                    "before": {"title": row["title"], "description": row["description"]},
+                    "after": {
+                        "title": title if title is not None else row["title"],
+                        "description": (
+                            description if description is not None else row["description"]
+                        ),
+                    },
+                },
+                actor=actor,
+                origin=origin,
+            )
 
     # ------------------------------------------------------------ columns
     def set_knowhow_anchor_column(
-        self, table_id: str, column_id: "str | None"
+        self, table_id: str, column_id: "str | None",
+        actor: str = "", origin: str = "user",
     ) -> "str | None":
         """Designate ``column_id`` as the table's row-title (anchor) column,
         or clear the designation with ``None``. Returns the PREVIOUS anchor
@@ -331,12 +414,14 @@ class KnowhowStore:
                 (table_id,),
             ).fetchone()
             old_id = old_row["id"] if old_row is not None else None
+            new_role_before = None
             if column_id is not None:
                 target = db.execute(
-                    "SELECT table_id FROM knowhow_columns WHERE id = %s", (column_id,)
+                    "SELECT table_id,role FROM knowhow_columns WHERE id = %s", (column_id,)
                 ).fetchone()
                 if target is None or target["table_id"] != table_id:
                     raise ValueError("指定的列不属于本表")
+                new_role_before = target["role"]
             if column_id == old_id:
                 return old_id  # no-op move (incl. None -> None)
             if old_id is not None:
@@ -353,10 +438,27 @@ class KnowhowStore:
                 "UPDATE knowhow_tables SET updated_at = %s WHERE id = %s",
                 (self.now(), table_id),
             )
+            changed = []
+            if old_id is not None:
+                changed.append({
+                    "column_id": old_id, "before": "anchor", "after": "attribute"
+                })
+            if column_id is not None:
+                changed.append({
+                    "column_id": column_id,
+                    "before": new_role_before,
+                    "after": "anchor",
+                })
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="anchor_set", payload={"columns": changed},
+                actor=actor, origin=origin,
+            )
         return old_id
 
     def add_knowhow_column(
-        self, table_id: str, name: str, kind: str, position: "int | None" = None
+        self, table_id: str, name: str, kind: str, position: "int | None" = None,
+        actor: str = "", origin: str = "user",
     ) -> str:
         """Append a column (default position = MAX(position)+1 — NOT the
         column count: ``delete_knowhow_column`` leaves position gaps, and a
@@ -395,9 +497,21 @@ class KnowhowStore:
                 "VALUES (%s, %s, %s, %s, %s)",
                 (column_id, table_id, name, kind, position),
             )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="column_add",
+                payload={"column": {
+                    "id": column_id, "name": name, "role": kind,
+                    "position": position,
+                }},
+                actor=actor, origin=origin,
+            )
         return column_id
 
-    def rename_knowhow_column(self, column_id: str, name: str) -> None:
+    def rename_knowhow_column(
+        self, column_id: str, name: str,
+        actor: str = "", origin: str = "user",
+    ) -> None:
         """Rename one column (stored stripped). Raises ``KeyError`` for a
         missing column; ``ValueError`` for a blank name or a name already
         used by a SIBLING column (renaming to its own current name is a
@@ -407,11 +521,14 @@ class KnowhowStore:
             raise ValueError("列名不能为空")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT table_id FROM knowhow_columns WHERE id = %s", (column_id,)
+                "SELECT table_id,name FROM knowhow_columns WHERE id = %s", (column_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(column_id)
             self._lock_table(db, str(row["table_id"]))
+            before = row["name"]
+            if name == before:
+                return
             duplicate = db.execute(
                 "SELECT 1 FROM knowhow_columns WHERE table_id = %s AND name = %s AND id != %s",
                 (row["table_id"], name, column_id),
@@ -421,8 +538,17 @@ class KnowhowStore:
             db.execute(
                 "UPDATE knowhow_columns SET name = %s WHERE id = %s", (name, column_id)
             )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="column_rename",
+                payload={"column_id": column_id, "before": before, "after": name},
+                actor=actor, origin=origin,
+            )
 
-    def set_knowhow_column_kind(self, column_id: str, kind: str) -> None:
+    def set_knowhow_column_kind(
+        self, column_id: str, kind: str,
+        actor: str = "", origin: str = "user",
+    ) -> None:
         """Change one column's content kind. ``anchor`` is rejected here —
         the anchor designation is table-level state with its own setter
         (``set_knowhow_anchor_column``), which is also the only way a column
@@ -435,16 +561,27 @@ class KnowhowStore:
             raise ValueError(f"非法的列类型：{kind}")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT table_id FROM knowhow_columns WHERE id = %s", (column_id,)
+                "SELECT table_id,role FROM knowhow_columns WHERE id = %s", (column_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(column_id)
             self._lock_table(db, str(row["table_id"]))
+            before = row["role"]
+            if kind == before:
+                return
             db.execute(
                 "UPDATE knowhow_columns SET role = %s WHERE id = %s", (kind, column_id)
             )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="column_kind",
+                payload={"column_id": column_id, "before": before, "after": kind},
+                actor=actor, origin=origin,
+            )
 
-    def delete_knowhow_column(self, column_id: str) -> None:
+    def delete_knowhow_column(
+        self, column_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
         """Delete a column; its cells and cell-code attachments go with it
         (both child foreign keys use ``ON DELETE CASCADE``).
         Deleting the anchor column simply leaves the table anchorless — a
@@ -453,11 +590,38 @@ class KnowhowStore:
         position and tolerate gaps)."""
         with self.database.write() as db:
             row = db.execute(
-                "SELECT table_id FROM knowhow_columns WHERE id=%s", (column_id,)
+                "SELECT id,table_id,name,role,position FROM knowhow_columns "
+                "WHERE id=%s", (column_id,)
             ).fetchone()
-            if row is not None:
-                self._lock_table(db, str(row["table_id"]))
+            if row is None:
+                return
+            self._lock_table(db, str(row["table_id"]))
+            cells = [
+                dict(item) for item in db.execute(
+                    "SELECT row_id,content_md FROM knowhow_cells WHERE column_id=%s",
+                    (column_id,),
+                ).fetchall()
+            ]
+            code = [
+                dict(item) for item in db.execute(
+                    "SELECT row_id,code_text,language,updated_by,cell_content_hash "
+                    "FROM knowhow_cell_code WHERE column_id=%s", (column_id,),
+                ).fetchall()
+            ]
             db.execute("DELETE FROM knowhow_columns WHERE id = %s", (column_id,))
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="column_delete",
+                payload={
+                    "column": {
+                        "id": row["id"], "name": row["name"],
+                        "role": row["role"], "position": row["position"],
+                    },
+                    "cells": cells,
+                    "code": code,
+                },
+                actor=actor, origin=origin,
+            )
 
     def knowhow_table_health_inputs(self, notebook_id: str) -> list[dict]:
         with self.database.connect() as db:
@@ -726,7 +890,8 @@ class KnowhowStore:
 
     # --------------------------------------------------------------- rows
     def add_knowhow_row(
-        self, table_id: str, cells: dict[str, str], position: int | None = None
+        self, table_id: str, cells: dict[str, str], position: int | None = None,
+        actor: str = "", origin: str = "user",
     ) -> str:
         """Insert a row (default position = current row count, i.e.
         append) plus any provided cells, in one write transaction.
@@ -760,15 +925,36 @@ class KnowhowStore:
                     (table_id,),
                 ).fetchone()
                 position = count_row["n"]
-            return self._insert_knowhow_row_on(
-                db, table_id, dict(cells or {}), position, now
+            written_cells = dict(cells or {})
+            row_id = self._insert_knowhow_row_on(
+                db, table_id, written_cells, position, now
             )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="row_add",
+                payload={"rows": [{
+                    "row_id": row_id,
+                    "position": position,
+                    "created_at": iso_timestamp(now),
+                    "cells": written_cells,
+                    "code": [],
+                }]},
+                actor=actor,
+                origin=origin,
+            )
+        return row_id
 
     def append_knowhow_rows(
-        self, table_id: str, rows: Sequence[dict[str, str]]
+        self, table_id: str, rows: Sequence[dict[str, str]],
+        actor: str = "", origin: str = "user",
     ) -> list[str]:
         """Append every row atomically and bump the table sequence once."""
         batch_rows = [dict(row) for row in rows]
+        if not batch_rows:
+            return []
         now = self.now()
         with self.database.write() as db:
             table = self._lock_table(db, table_id)
@@ -801,17 +987,44 @@ class KnowhowStore:
                 (table_id,),
             ).fetchone()
             start_position = int(count_row["n"])
-            row_ids = [
-                self._insert_knowhow_row_on(
-                    db, table_id, cells, start_position + offset, now
+            row_ids: list[str] = []
+            payload_rows: list[dict] = []
+            for offset, cells in enumerate(batch_rows):
+                position = start_position + offset
+                row_id = self._insert_knowhow_row_on(
+                    db, table_id, cells, position, now
                 )
-                for offset, cells in enumerate(batch_rows)
-            ]
+                row_ids.append(row_id)
+                payload_rows.append({
+                    "row_id": row_id,
+                    "position": position,
+                    "created_at": iso_timestamp(now),
+                    "cells": cells,
+                    "code": [],
+                })
             db.execute(
                 "UPDATE knowhow_tables SET mutation_seq=mutation_seq+1 WHERE id=%s",
                 (table_id,),
             )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="import_append",
+                payload={"rows": payload_rows},
+                actor=actor,
+                origin=origin,
+            )
         return row_ids
+
+    def add_knowhow_rows(
+        self, table_id: str, rows: list[dict[str, str]],
+        actor: str = "", origin: str = "user",
+    ) -> list[str]:
+        return self.append_knowhow_rows(
+            table_id, rows, actor=actor, origin=origin
+        )
 
     def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
         with self.database.write() as db:
@@ -850,7 +1063,9 @@ class KnowhowStore:
             )
         return cursor.rowcount > 0
 
-    def delete_knowhow_row(self, row_id: str) -> None:
+    def delete_knowhow_row(
+        self, row_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
         """Delete a row; its cells and cell-code attachments go with it
         (``knowhow_cells.row_id`` and ``knowhow_cell_code.row_id`` are both
         ``ON DELETE CASCADE`` onto knowhow_rows). Silent no-op when already
@@ -858,11 +1073,38 @@ class KnowhowStore:
         sort by position and tolerate gaps)."""
         with self.database.write() as db:
             row = db.execute(
-                "SELECT table_id FROM knowhow_rows WHERE id=%s", (row_id,)
+                "SELECT id,table_id,position,created_at FROM knowhow_rows "
+                "WHERE id=%s", (row_id,)
             ).fetchone()
-            if row is not None:
-                self._lock_table(db, str(row["table_id"]))
+            if row is None:
+                return
+            self._lock_table(db, str(row["table_id"]))
+            cells = {
+                item["column_id"]: item["content_md"]
+                for item in db.execute(
+                    "SELECT column_id,content_md FROM knowhow_cells WHERE row_id=%s",
+                    (row_id,),
+                ).fetchall()
+            }
+            code = [
+                dict(item) for item in db.execute(
+                    "SELECT column_id,code_text,language,updated_by,cell_content_hash "
+                    "FROM knowhow_cell_code WHERE row_id=%s", (row_id,),
+                ).fetchall()
+            ]
             db.execute("DELETE FROM knowhow_rows WHERE id = %s", (row_id,))
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="row_delete",
+                payload={"rows": [{
+                    "row_id": row["id"],
+                    "position": row["position"],
+                    "created_at": iso_timestamp(row["created_at"]),
+                    "cells": cells,
+                    "code": code,
+                }]},
+                actor=actor, origin=origin,
+            )
 
     # -------------------------------------------------------------- cells
     @staticmethod
@@ -929,6 +1171,8 @@ class KnowhowStore:
         column_id: str,
         content_md: str,
         require_assets: Sequence[str] = (),
+        actor: str = "",
+        origin: str = "user",
     ) -> None:
         """Upsert one cell's content. One write transaction: the cell
         (insert or update-in-place via the ``UNIQUE(row_id, column_id)``
@@ -949,17 +1193,17 @@ class KnowhowStore:
         deletion and refuses."""
         now = self.now()
         with self.database.write() as db:
-            self._lock_table_for_row(db, row_id)
+            table_id = self._lock_table_for_row(db, row_id)
             current_row = db.execute(
                 "SELECT content_md FROM knowhow_cells "
                 "WHERE row_id=%s AND column_id=%s",
                 (row_id, column_id),
             ).fetchone()
-            current = current_row["content_md"] if current_row is not None else ""
+            before = current_row["content_md"] if current_row is not None else None
             self._require_assets_exist(
                 db,
                 row_id,
-                required_asset_ids(require_assets, ((current, content_md),)),
+                required_asset_ids(require_assets, ((before or "", content_md),)),
             )
             db.execute(
                 "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
@@ -978,6 +1222,21 @@ class KnowhowStore:
                 "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = %s)",
                 (row_id,),
             )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="cell_update",
+                payload={"cells": [{
+                    "row_id": row_id,
+                    "column_id": column_id,
+                    "before": before,
+                    "after": content_md,
+                }]},
+                actor=actor,
+                origin=origin,
+            )
 
     def update_knowhow_cells(
         self,
@@ -985,6 +1244,8 @@ class KnowhowStore:
         column_id: str,
         content_md: str,
         require_assets: Sequence[str] = (),
+        actor: str = "",
+        origin: str = "user",
     ) -> None:
         """Batch upsert the SAME (column, content) across MULTIPLE rows in
         ONE write transaction — the merged-cell "write the whole concept
@@ -1013,7 +1274,7 @@ class KnowhowStore:
             return
         now = self.now()
         with self.database.write() as db:
-            self._lock_table_for_row(db, row_ids[0])
+            table_id = self._lock_table_for_row(db, row_ids[0])
             # row_ids share a table (documented above), so any of them resolves
             # the same notebook.
             current_by_row = {
@@ -1035,7 +1296,15 @@ class KnowhowStore:
                     ),
                 ),
             )
+            changed_cells: list[dict] = []
             for row_id in row_ids:
+                before = current_by_row.get(row_id)
+                changed_cells.append({
+                    "row_id": row_id,
+                    "column_id": column_id,
+                    "before": before,
+                    "after": content_md,
+                })
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                     "VALUES (%s, %s, %s, %s, %s) "
@@ -1053,9 +1322,20 @@ class KnowhowStore:
                 "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = %s)",
                 (row_ids[0],),
             )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="cell_update",
+                payload={"cells": changed_cells},
+                actor=actor,
+                origin=origin,
+            )
 
     def update_knowhow_cells_bulk_guarded(
-        self, notebook_id: str, updates: list[tuple[str, str, str, str, str]]
+        self, notebook_id: str, updates: list[tuple[str, str, str, str, str]],
+        actor: str = "", origin: str = "user",
     ) -> "dict[str, list[tuple[str, str]]]":
         """Compare-and-write bulk cell writer for
         ``scripts/backfill_knowhow_md.py``'s ``--apply`` paths (TOCTOU +
@@ -1125,6 +1405,7 @@ class KnowhowStore:
         rejected: list[tuple[str, str]] = []
         to_write: list[tuple[str, str, str, str, str]] = []
         written_table_ids: list[str] = []
+        by_table: "dict[str, list[dict]]" = {}
         with self.database.write() as db:
             # Lock every aggregate table before the phase-1 compare. This
             # serializes guarded edits from other processes before any write.
@@ -1190,7 +1471,7 @@ class KnowhowStore:
                     ),
                 ),
             )
-            for table_id, row_id, column_id, _old_content, content_md in to_write:
+            for table_id, row_id, column_id, old_content, content_md in to_write:
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                     "VALUES (%s, %s, %s, %s, %s) "
@@ -1204,12 +1485,29 @@ class KnowhowStore:
                     (now, row_id),
                 )
                 written.append((row_id, column_id))
+                by_table.setdefault(table_id, []).append({
+                    "row_id": row_id,
+                    "column_id": column_id,
+                    "before": old_content,
+                    "after": content_md,
+                })
                 if table_id not in written_table_ids:
                     written_table_ids.append(table_id)
             for table_id in written_table_ids:
                 db.execute(
                     "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = %s",
                     (table_id,),
+                )
+            for written_table_id, cells in by_table.items():
+                record_change(
+                    db,
+                    new_id=self.new_id,
+                    now=self.now,
+                    table_id=written_table_id,
+                    kind="cell_update",
+                    payload={"cells": cells},
+                    actor=actor,
+                    origin=origin,
                 )
         return {
             "written": written,
@@ -1225,6 +1523,8 @@ class KnowhowStore:
         require_assets: Sequence[str] = (),
         anchor_column_id: "str | None" = None,
         expected_anchor: "Sequence[str] | None" = None,
+        actor: str = "",
+        origin: str = "user",
     ) -> "dict[str, object]":
         """ALL-OR-NOTHING compare-and-write for the interactive editor's
         batch-reformat save (concurrency P1 fix b, HTTP 409 on a concurrent
@@ -1304,6 +1604,7 @@ class KnowhowStore:
         now = self.now()
         written: list[tuple[str, str]] = []
         written_table_ids: list[str] = []
+        by_table: "dict[str, list[dict]]" = {}
         with self.database.write() as db:
             # Lock every aggregate table before phase 1 so compare-and-write
             # remains atomic across processes.
@@ -1473,12 +1774,29 @@ class KnowhowStore:
                     (now, row_id),
                 )
                 written.append((row_id, column_id))
+                by_table.setdefault(table_id, []).append({
+                    "row_id": row_id,
+                    "column_id": column_id,
+                    "before": expected_before,
+                    "after": content_md,
+                })
                 if table_id not in written_table_ids:
                     written_table_ids.append(table_id)
             for table_id in written_table_ids:
                 db.execute(
                     "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = %s",
                     (table_id,),
+                )
+            for written_table_id, cells in by_table.items():
+                record_change(
+                    db,
+                    new_id=self.new_id,
+                    now=self.now,
+                    table_id=written_table_id,
+                    kind="cell_update",
+                    payload={"cells": cells},
+                    actor=actor,
+                    origin=origin,
                 )
         return {"written": written, "conflict": False}
 
@@ -1509,6 +1827,8 @@ class KnowhowStore:
         language: str,
         updated_by: str,
         cell_content_hash: str,
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Insert-or-replace the ONE code attachment a cell may carry
         (``UNIQUE(row_id, column_id)`` conflict target). On update the row
@@ -1523,7 +1843,13 @@ class KnowhowStore:
         guarantee both halves exist."""
         now = self.now()
         with self.database.write() as db:
-            self._lock_table_for_row(db, row_id)
+            table_id = self._lock_table_for_row(db, row_id)
+            before_row = db.execute(
+                "SELECT code_text,language,updated_by,cell_content_hash "
+                "FROM knowhow_cell_code WHERE row_id=%s AND column_id=%s",
+                (row_id, column_id),
+            ).fetchone()
+            before = dict(before_row) if before_row is not None else None
             db.execute(
                 "INSERT INTO knowhow_cell_code "
                 "(id, row_id, column_id, code_text, language, updated_by, "
@@ -1543,6 +1869,26 @@ class KnowhowStore:
                 "SELECT id FROM knowhow_cell_code WHERE row_id = %s AND column_id = %s",
                 (row_id, column_id),
             ).fetchone()
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="cell_code_put",
+                payload={
+                    "row_id": row_id,
+                    "column_id": column_id,
+                    "before": before,
+                    "after": {
+                        "code_text": code_text,
+                        "language": language or "",
+                        "updated_by": updated_by or "",
+                        "cell_content_hash": cell_content_hash,
+                    },
+                },
+                actor=actor,
+                origin=origin,
+            )
         return row["id"]
 
     def get_knowhow_cell_code(self, row_id: str, column_id: str) -> "dict | None":
@@ -1553,14 +1899,39 @@ class KnowhowStore:
             ).fetchone()
         return _compat_row(row, "created_at", "updated_at") if row is not None else None
 
-    def delete_knowhow_cell_code(self, row_id: str, column_id: str) -> None:
+    def delete_knowhow_cell_code(
+        self, row_id: str, column_id: str,
+        actor: str = "", origin: str = "user",
+    ) -> None:
         """Silent no-op when there is nothing to delete (zero-row DELETE
         convention)."""
         with self.database.write() as db:
-            self._lock_table_for_row(db, row_id)
+            table_id = self._lock_table_for_row(db, row_id)
+            before_row = db.execute(
+                "SELECT code_text,language,updated_by,cell_content_hash "
+                "FROM knowhow_cell_code WHERE row_id=%s AND column_id=%s",
+                (row_id, column_id),
+            ).fetchone()
+            if before_row is None:
+                return
             db.execute(
                 "DELETE FROM knowhow_cell_code WHERE row_id = %s AND column_id = %s",
                 (row_id, column_id),
+            )
+            record_change(
+                db,
+                new_id=self.new_id,
+                now=self.now,
+                table_id=table_id,
+                kind="cell_code_delete",
+                payload={
+                    "row_id": row_id,
+                    "column_id": column_id,
+                    "before": dict(before_row),
+                    "after": None,
+                },
+                actor=actor,
+                origin=origin,
             )
 
     def get_knowhow_row_location(self, row_id: str) -> "dict | None":

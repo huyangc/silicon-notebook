@@ -214,7 +214,7 @@ def knowledge_harness(request, tmp_path) -> KnowledgeHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 7
+    assert PostgresMigrator(database).migrate() == 8
     _seed_catalog(database, "postgres")
     yield KnowledgeHarness(
         backend="postgres",
@@ -562,7 +562,7 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresEmbeddingStore(write=postgres_database.write)
     expected = np.asarray([0.125, -1.5, 3.25, 0.0], dtype=np.float32)
@@ -607,7 +607,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     valid = (
@@ -649,7 +649,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 def test_postgres_raw_graph_rows_keep_sqlite_json_text_contract(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -716,7 +716,7 @@ def test_postgres_raw_graph_rows_keep_sqlite_json_text_contract(postgres_databas
 def test_postgres_retrieve_neighbors_consumes_sqlite_compatible_rows(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     objects = [
@@ -817,7 +817,7 @@ def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -872,7 +872,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     query = "crowdout exact thermal phrase"
@@ -916,7 +916,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
 def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     with postgres_database.write() as connection:
@@ -1009,7 +1009,7 @@ def test_postgres_concurrent_cluster_appends_are_member_idempotent(
     """Two real transactions must not both pass the append membership check."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     first_reached = threading.Event()
@@ -1095,7 +1095,7 @@ def test_postgres_concurrent_cluster_replacements_publish_one_complete_final_set
     """A later replacement must erase, not mix with, the prior complete set."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     with postgres_database.write() as connection:
@@ -1213,7 +1213,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1392,7 +1392,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1485,7 +1485,7 @@ def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_databa
 def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1559,7 +1559,7 @@ def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_databas
 def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1639,7 +1639,7 @@ def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_databas
 def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1765,7 +1765,7 @@ def test_postgres_graph_build_order_and_equal_confidence_fanout_are_physical_ord
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     unified = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
@@ -1929,7 +1929,7 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-order-z", "ko-order-a", "ko-order-m"]
@@ -2112,7 +2112,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-follow-start", "ko-follow-a", "ko-follow-m", "ko-follow-z"]
@@ -2180,7 +2180,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 def test_postgres_query_store_multi_notebook_count_placeholders(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     rows = PostgresQueryStore(postgres_database).list_user_notebooks("user-golden")
     assert {row["id"] for row in rows} == {"nb-base", "nb-personal"}
@@ -2196,7 +2196,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     with postgres_database.write() as connection:
         for answer_id, question, created_at in (
@@ -2231,7 +2231,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 def test_postgres_unified_kg_temp_search_and_checkpoint_json(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     claims = (
@@ -2272,7 +2272,7 @@ def test_concurrent_equivalent_promotions_serialize_base_dedup(
     from app.repositories.postgres import governance_store as governance_module
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 7
+    assert PostgresMigrator(postgres_database).migrate() == 8
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())

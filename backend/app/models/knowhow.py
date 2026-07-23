@@ -116,6 +116,16 @@ class KnowhowCellPatch(BaseModel):
     # The batch-reformat save path sends it; the MANUAL cell editor omits it
     # (None) to keep its existing last-write-wins semantics.
     expected_before: Optional[str] = None
+    # knowhow 表版本管理 Task 12 (design doc §8.1 tail): who/what produced this
+    # write, recorded verbatim onto the knowhow_changes row the store already
+    # creates (Task 9) so the history timeline can show an origin badge
+    # ("LLM 优化" vs "手动改的" vs "从历史恢复"). Defaults to "user" (the manual
+    # editor never sends this field, preserving today's behavior byte-for-byte).
+    # MUST be validated against VALID_ORIGINS at the route — a lenient default
+    # here would repeat the anchor-feature's `kind = column.get("kind") or
+    # "attribute"` mistake (PR#281→#286: a wire typo silently downgraded to a
+    # default instead of a 400, so the whole feature shipped inert).
+    origin: str = "user"
 
 
 class KnowhowCellPatchResult(BaseModel):
@@ -153,6 +163,13 @@ class KnowhowCellsBatchPatch(BaseModel):
     # → the anchor is never re-read (byte-identical to expected_before-only).
     anchor_column_id: Optional[str] = None
     expected_anchor: Optional[List[str]] = None
+    # knowhow 表版本管理 Task 12: same field/same validation/same default as
+    # KnowhowCellPatch.origin above — this is the SECOND of the design doc's
+    # "两条既有回填路径" (§8.1 tail): a merged/shared cell's batch-reformat-
+    # accept fan-out writes through THIS endpoint, not the single-cell one, so
+    # it needs its own origin to ever be attributable as "llm_reformat" rather
+    # than silently defaulting to "user" forever.
+    origin: str = "user"
 
 
 # --- PR-2+3 Task 3: create-empty-table wizard backend --------------------------
@@ -325,3 +342,45 @@ class KnowhowTransferRequest(BaseModel):
 
     target_notebook_id: str
     mode: Literal["copy", "move"]
+
+
+# --- knowhow 表版本管理 Task 12: HTTP 端点的请求模型 -------------------------
+# design doc `2026-07-22-knowhow-table-version-control-design.md` §8.1/§4.1.
+# The four read endpoints (timeline / single change / diff / cell history)
+# return the store's own dict shapes verbatim — no dedicated response models,
+# same convention already used by this file's other thin pass-through routes
+# (e.g. reproject_knowhow_table's `-> dict`). Only the three WRITE bodies below
+# are new wire shapes, plus the `origin` field added to KnowhowCellPatch/
+# KnowhowCellsBatchPatch above.
+#
+# VALID_ORIGINS is the §4.1 whitelist. It is validated at the route with a
+# hard 400 for anything outside it — NEVER a lenient fallback. This codebase
+# has a concrete cautionary tale for the alternative: the anchor feature's
+# `kind = column.get("kind") or "attribute"` turned a client wire typo into a
+# silent default instead of a 400, and the whole feature shipped inert
+# (PR#281→#286). origin exists specifically so the history timeline can show
+# an honest "who/what changed this" badge; swallowing a bad value would make
+# that badge quietly lie instead of failing loudly.
+VALID_ORIGINS = frozenset({
+    "user", "llm_optimize", "llm_reformat", "import", "agent", "revert", "backfill",
+})
+
+
+class KnowhowRevertRequest(BaseModel):
+    target_seq: int
+    expected_head_seq: int
+
+
+class KnowhowMilestoneCreate(BaseModel):
+    seq: int
+    name: str
+    note: str = ""
+
+
+class KnowhowHistoryPruneRequest(BaseModel):
+    # 纵深防御（codex P2）：must be a positive, bounded day count. 负数会算出
+    # 一个未来的截止时间 → cutoff_seq 落到 head → 除 head 外整段历史被静默删光；
+    # 0 天会把刚刚发生的编辑也当作"N 天前"清掉。上限 36500（100 年）与前端
+    # parseHistoryPruneDays 对齐，同时挡住超大值。前端本就拦了这些，后端作为
+    # 契约边界必须自己再挡一次（非法值 → 422）。
+    before_days: int = Field(gt=0, le=36500)
