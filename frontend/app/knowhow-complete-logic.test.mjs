@@ -5,6 +5,9 @@ import {
   COMPLETION_CONFIDENCE_LABELS,
   canAcceptCompletionSuggestion,
   completableKnowhowColumns,
+  completionEvidenceForSuggestion,
+  completionEvidenceTierLabel,
+  completionRetrievalStatusLabel,
   completionSavePlan,
   completionReferenceLabel,
 } from "./knowhow-complete-logic.ts";
@@ -68,10 +71,32 @@ test("置信度文案固定为易读中文", () => {
 });
 
 test("canAcceptCompletionSuggestion: 放弃项或空建议不可接受", () => {
-  const base = { columnId: "c1", confidence: "low", basedOnRowIds: [], basis: "" };
+  const base = { columnId: "c1", confidence: "low", basedOnRowIds: [], evidenceKeys: [], basis: "" };
   assert.equal(canAcceptCompletionSuggestion({ ...base, suggestionMd: "建议", abstainReason: "" }), true);
   assert.equal(canAcceptCompletionSuggestion({ ...base, suggestionMd: null, abstainReason: "证据不足" }), false);
   assert.equal(canAcceptCompletionSuggestion({ ...base, suggestionMd: "建议", abstainReason: "证据冲突" }), false);
+});
+
+test("completionEvidenceForSuggestion: 只按当前建议 key 顺序返回去重后的已知证据", () => {
+  const suggestion = {
+    columnId: "c1", suggestionMd: "建议", confidence: "high", basedOnRowIds: [],
+    evidenceKeys: ["k2", "missing", "k1", "k2"], basis: "", abstainReason: "",
+  };
+  const evidence = [
+    { key: "k1", kind: "knowledge", objectType: "Claim", label: "证据一", excerptMd: "一", sourceTitle: "", locationLabel: "", tier: "personal" },
+    { key: "k2", kind: "chunk", objectType: "", label: "证据二", excerptMd: "二", sourceTitle: "资料", locationLabel: "第 2 节", tier: "base" },
+    { key: "k3", kind: "knowledge", objectType: "Concept", label: "其它列证据", excerptMd: "三", sourceTitle: "", locationLabel: "", tier: "personal" },
+  ];
+  assert.deepStrictEqual(completionEvidenceForSuggestion(suggestion, evidence).map((item) => item.key), ["k2", "k1"]);
+});
+
+test("补全检索元数据显示用户可读文案，不暴露内部 tier/status", () => {
+  assert.equal(completionEvidenceTierLabel("base"), "公共知识库");
+  assert.equal(completionEvidenceTierLabel("personal"), "个人知识库");
+  assert.equal(completionEvidenceTierLabel("unexpected"), "知识库");
+  assert.equal(completionRetrievalStatusLabel("succeeded"), "检索完成");
+  assert.equal(completionRetrievalStatusLabel("no_evidence"), "全库检索未找到可用证据");
+  assert.equal(completionRetrievalStatusLabel("internal-state"), "检索状态未知");
 });
 
 test("completionReferenceLabel: 已知 id 映射行标题，未知 id 不泄漏内部标识", () => {

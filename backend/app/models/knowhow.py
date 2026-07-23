@@ -2,6 +2,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.ask import TraceStep
+
 
 # --- knowhow-tables PR-1 Task 6 + PR-2+3 Task 3: import/table + editing API
 # response models -------------------------------------------------------------
@@ -246,12 +248,29 @@ class KnowhowRowCompletionSuggestion(BaseModel):
     suggestion_md: Optional[str]
     confidence: Literal["high", "medium", "low"]
     based_on_row_ids: List[str] = Field(default_factory=list)
+    evidence_keys: List[str] = Field(default_factory=list)
     basis: str
     abstain_reason: str
 
 
+class KnowhowCompletionEvidence(BaseModel):
+    key: str
+    kind: Literal["knowledge", "chunk", "element"]
+    object_type: str
+    label: str
+    excerpt_md: str
+    source_title: str
+    location_label: str
+    tier: Literal["base", "personal"] = "personal"
+
+
 class KnowhowRowCompleteResult(BaseModel):
     suggestions: List[KnowhowRowCompletionSuggestion] = Field(default_factory=list)
+    retrieval_mode: Literal["reasoning"] = "reasoning"
+    retrieval_scope: Literal["active_and_mounted"] = "active_and_mounted"
+    retrieval_status: Literal["succeeded", "no_evidence"]
+    reasoning_trace: List[TraceStep] = Field(default_factory=list)
+    evidence: List[KnowhowCompletionEvidence] = Field(default_factory=list)
 
 
 # --- knowhow-md-normalize Task 4: /reformat HTTP endpoint result ------------

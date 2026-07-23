@@ -67,6 +67,8 @@ import {
   X,
 } from "lucide-react";
 import { requestBlob } from "./api-client.ts";
+import { modeLabel } from "./ask-modes.ts";
+import { ReasoningTracePanel } from "./answer-panel.tsx";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
@@ -92,6 +94,7 @@ import {
   type KnowhowRow,
   type KnowhowColumn,
   type KnowhowCellCode,
+  type KnowhowRowCompletion,
   type KnowhowRowCompletionSuggestion,
   type Role,
   type ProjectionStatus,
@@ -100,6 +103,9 @@ import {
   COMPLETION_CONFIDENCE_LABELS,
   canAcceptCompletionSuggestion,
   completableKnowhowColumns,
+  completionEvidenceForSuggestion,
+  completionEvidenceTierLabel,
+  completionRetrievalStatusLabel,
   completionSavePlan,
   completionReferenceLabel,
 } from "./knowhow-complete-logic.ts";
@@ -3045,6 +3051,37 @@ export function KnowhowPanel({
           background: #fff;
         }
 
+        .kh-completion-retrieval {
+          display: grid;
+          gap: 9px;
+          padding: 12px;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          background: color-mix(in srgb, var(--soft) 72%, #fff);
+        }
+
+        .kh-completion-retrieval-meta,
+        .kh-completion-evidence-head,
+        .kh-completion-evidence-meta {
+          display: flex;
+          align-items: center;
+          gap: 7px;
+          flex-wrap: wrap;
+          min-width: 0;
+        }
+
+        .kh-completion-retrieval-meta span,
+        .kh-completion-evidence-head span,
+        .kh-completion-evidence-meta span {
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 2px 8px;
+          color: var(--muted);
+          background: #fff;
+          font-size: 11px;
+          overflow-wrap: anywhere;
+        }
+
         .kh-completion-item-head,
         .kh-completion-references,
         .kh-completion-item-actions,
@@ -3107,6 +3144,62 @@ export function KnowhowPanel({
           margin-top: 10px;
           font-size: 12px;
           color: var(--muted);
+        }
+
+        .kh-completion-evidence {
+          display: grid;
+          gap: 8px;
+          margin-top: 12px;
+        }
+
+        .kh-completion-evidence h5 {
+          margin: 0;
+          color: var(--text);
+          font-size: 12px;
+        }
+
+        .kh-completion-evidence-card {
+          min-width: 0;
+          padding: 10px;
+          border: 1px solid var(--line);
+          border-radius: 9px;
+          background: color-mix(in srgb, var(--soft) 55%, #fff);
+        }
+
+        .kh-completion-evidence-head {
+          justify-content: space-between;
+        }
+
+        .kh-completion-evidence-head strong,
+        .kh-completion-evidence-excerpt,
+        .kh-completion-no-evidence {
+          min-width: 0;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
+
+        .kh-completion-evidence-meta {
+          margin-top: 7px;
+        }
+
+        .kh-completion-evidence-excerpt {
+          margin-top: 8px;
+          color: var(--text);
+          font-size: 12px;
+        }
+
+        .kh-completion-evidence-excerpt > :first-child {
+          margin-top: 0;
+        }
+
+        .kh-completion-evidence-excerpt > :last-child {
+          margin-bottom: 0;
+        }
+
+        .kh-completion-no-evidence {
+          margin: 0;
+          color: var(--muted);
+          font-size: 12px;
         }
 
         .kh-completion-item-actions {
@@ -4585,7 +4678,8 @@ export function KnowhowRowCompletionModal({
       completionSavePlan(row.id, column.id, rows, anchorColumnId),
     ]),
   ));
-  const [suggestions, setSuggestions] = useState<KnowhowRowCompletionSuggestion[] | null>(null);
+  const [completion, setCompletion] = useState<KnowhowRowCompletion | null>(null);
+  const suggestions = completion?.suggestions ?? null;
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingColumnId, setSavingColumnId] = useState<string | null>(null);
   const [acceptedColumnIds, setAcceptedColumnIds] = useState<Set<string>>(() => new Set());
@@ -4598,18 +4692,19 @@ export function KnowhowRowCompletionModal({
 
   function requestSuggestions() {
     const requestId = ++requestRef.current;
-    setSuggestions(null);
+    setCompletion(null);
     setLoadError(null);
     completeKnowhowRow(notebookId, tableId, row.id, targetColumns.map((column) => column.id))
       .then((result) => {
         if (!mountedRef.current || requestRef.current !== requestId) return;
         const byColumnId = new Map(result.suggestions.map((suggestion) => [suggestion.columnId, suggestion]));
-        setSuggestions(
-          targetColumns.flatMap((column) => {
+        setCompletion({
+          ...result,
+          suggestions: targetColumns.flatMap((column) => {
             const suggestion = byColumnId.get(column.id);
             return suggestion ? [suggestion] : [];
           }),
-        );
+        });
       })
       .catch((error) => {
         if (!mountedRef.current || requestRef.current !== requestId) return;
@@ -4742,13 +4837,25 @@ export function KnowhowRowCompletionModal({
 
         <div className="kh-modal-body kh-completion-body">
           {suggestions === null && !loadError && (
-            <p className="kh-row-context-empty" role="status" aria-live="polite"><Loader2 size={15} className="spin" /> 正在参考表内记录生成建议…</p>
+            <p className="kh-row-context-empty" role="status" aria-live="polite"><Loader2 size={15} className="spin" /> 正在执行表内参考 + 全库推理检索并生成建议…</p>
           )}
           {loadError && (
             <div className="kh-completion-load-error">
               <p className="kh-inline-error" role="alert">{loadError}</p>
               <button type="button" onClick={requestSuggestions}>重试</button>
             </div>
+          )}
+          {completion && (
+            <section className="kh-completion-retrieval" aria-label="补全检索信息">
+              <div className="kh-completion-retrieval-meta">
+                <span>检索模式：{modeLabel("reasoning")}</span>
+                <span>范围：当前笔记本与已挂载参考库</span>
+                <span>{completionRetrievalStatusLabel(completion.retrievalStatus)}</span>
+              </div>
+              {completion.reasoningTrace.length > 0 && (
+                <ReasoningTracePanel steps={completion.reasoningTrace} />
+              )}
+            </section>
           )}
           {suggestions && suggestions.length === 0 && (
             <p className="kh-row-context-empty">暂时没有可用建议，你可以保留空白并稍后手动填写。</p>
@@ -4759,6 +4866,9 @@ export function KnowhowRowCompletionModal({
             const accepted = acceptedColumnIds.has(suggestion.columnId);
             const acceptable = canAcceptCompletionSuggestion(suggestion);
             const saving = savingColumnId === suggestion.columnId;
+            const linkedEvidence = completion
+              ? completionEvidenceForSuggestion(suggestion, completion.evidence)
+              : [];
             return (
               <section key={suggestion.columnId} className="kh-completion-item">
                 <div className="kh-completion-item-head">
@@ -4775,16 +4885,43 @@ export function KnowhowRowCompletionModal({
                   <p className="kh-completion-abstain">暂不建议填写：{suggestion.abstainReason.trim() || "现有记录不足以可靠判断"}</p>
                 )}
                 {suggestion.basis.trim() && <p className="kh-completion-basis">依据：{suggestion.basis}</p>}
-                {suggestion.basedOnRowIds.length > 0 && (
-                  <div className="kh-completion-references" aria-label="参考记录">
-                    <span>参考记录</span>
-                    {suggestion.basedOnRowIds.map((referenceRowId, index) => (
+                <div className="kh-completion-references" aria-label={`${column.name} 的表内参考`}>
+                  <span>表内参考</span>
+                  {suggestion.basedOnRowIds.length === 0 ? (
+                    <span className="kh-completion-no-evidence">未引用表内参考记录。</span>
+                  ) : suggestion.basedOnRowIds.map((referenceRowId, index) => (
                       <span key={`${referenceRowId}:${index}`} className="kh-completion-reference">
                         {completionReferenceLabel(referenceRowId, rows, columns)}
                       </span>
                     ))}
-                  </div>
-                )}
+                </div>
+                <div className="kh-completion-evidence" aria-label={`${column.name} 的知识库证据`}>
+                  <h5>知识库证据</h5>
+                  {linkedEvidence.length === 0 ? (
+                    <p className="kh-completion-no-evidence">此项未引用知识库证据。</p>
+                  ) : linkedEvidence.map((item) => (
+                    <article key={item.key} className="kh-completion-evidence-card">
+                      <div className="kh-completion-evidence-head">
+                        <strong>{item.label.trim() || "知识库证据"}</strong>
+                        <span>{completionEvidenceTierLabel(item.tier)}</span>
+                      </div>
+                      {(item.objectType.trim() || item.sourceTitle.trim() || item.locationLabel.trim()) && (
+                        <div className="kh-completion-evidence-meta">
+                          {item.objectType.trim() && <span>{item.objectType}</span>}
+                          {item.sourceTitle.trim() && <span>{item.sourceTitle}</span>}
+                          {item.locationLabel.trim() && <span>{item.locationLabel}</span>}
+                        </div>
+                      )}
+                      {item.excerptMd.trim() ? (
+                        <div className="kh-completion-evidence-excerpt">
+                          <KnowhowMarkdown md={item.excerptMd} notebookId={notebookId} apiBase={apiBase} inert />
+                        </div>
+                      ) : (
+                        <p className="kh-completion-no-evidence">未提供可展示的证据摘录。</p>
+                      )}
+                    </article>
+                  ))}
+                </div>
                 {saveErrors[suggestion.columnId] && <p className="kh-inline-error" role="alert">{saveErrors[suggestion.columnId]}</p>}
                 <div className="kh-completion-item-actions">
                   <button

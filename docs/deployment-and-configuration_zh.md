@@ -238,8 +238,10 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
-`knowhow_complete` 是供 Knowhow 单行空格显式生成建议的 interactive chat workload。需要此功能时，
-将它绑定到兼容的 chat 服务；未绑定或 provider 失败时不返回建议，应用绝不伪造离线补全结果。
+Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_agent` 对当前 notebook 与当前有效
+挂载参考库的联邦证据做规划和反思检索，`knowhow_complete` 再把这些证据与同表参考合成为结构化建议。
+需要此功能时必须把两者都绑定到兼容的 chat 服务；任一未绑定或任一阶段 provider 失败时都不返回建议，
+应用不会静默退成同表补全，也绝不伪造离线结果。
 
 调度策略固定在代码中：
 

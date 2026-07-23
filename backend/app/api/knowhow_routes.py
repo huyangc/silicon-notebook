@@ -861,7 +861,7 @@ def complete_knowhow_row(
         raise user_error(400, "行定位不合法")
     try:
         return knowhow_api.complete_row(
-            repo, table, row_id, body.target_column_ids
+            repo, notebook_id, table, row_id, body.target_column_ids
         )
     except ModelNotConfiguredError:
         raise user_error(400, "尚未配置模型，无法智能补全")

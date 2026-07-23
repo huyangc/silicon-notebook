@@ -271,10 +271,13 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
-`knowhow_complete` is an interactive chat workload for explicit, single-row
-Knowhow empty-cell suggestions. Bind it to a compatible chat service when this
-feature is wanted. Leaving it unbound, or a provider failure, yields no
-suggestion; the application never fabricates an offline completion.
+Knowhow row completion uses two interactive chat workloads: `reasoning_agent`
+plans and reflects over federated evidence from the active notebook and its
+valid mounted reference libraries, then `knowhow_complete` turns that evidence
+and the same-table examples into structured suggestions. Bind both to compatible
+chat services when this feature is wanted. Leaving either unbound, or a provider
+failure in either stage, yields no suggestion; the application never silently
+falls back to table-only or fabricates an offline completion.
 
 Scheduling policy is fixed in code:
 
