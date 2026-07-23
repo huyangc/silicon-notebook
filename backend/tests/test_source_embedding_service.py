@@ -327,16 +327,13 @@ def _spy_map_batches(service, monkeypatch):
     return calls
 
 
-def _spy_now(service, monkeypatch):
-    counter = {"n": 0}
-    real = service.now
-
-    def spy():
-        counter["n"] += 1
-        return real()
-
-    monkeypatch.setattr(service, "now", spy)
-    return counter
+def _spy_invalidate(service, monkeypatch):
+    invalidated = []
+    monkeypatch.setattr(
+        service, "invalidate_vector_matrix",
+        lambda notebook_id, table: invalidated.append((notebook_id, table)),
+    )
+    return invalidated
 
 
 def test_embed_objects_batch_pages_before_mapping(tmp_path, monkeypatch):
@@ -344,6 +341,7 @@ def test_embed_objects_batch_pages_before_mapping(tmp_path, monkeypatch):
     nb = r.create_notebook(NotebookCreate(name="nb"))
     _bind(r, "knowledge_object_embedding", _RecordingEmbedder(dim=8))
     calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
+    invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
 
     items = [{"_oid": f"ko-{i}", "payload": {"name": f"concept number {i}"}}
              for i in range(55)]                                      # 6 batches / page 2
@@ -354,6 +352,7 @@ def test_embed_objects_batch_pages_before_mapping(tmp_path, monkeypatch):
     assert _count(
         r, "SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)
     ) == 55                                                          # every vector still lands
+    assert (nb.id, "knowledge_embeddings") in invalidated            # matrix cache dropped after re-embed
 
 
 def test_embed_relations_batch_pages_before_mapping(tmp_path, monkeypatch):
@@ -361,7 +360,7 @@ def test_embed_relations_batch_pages_before_mapping(tmp_path, monkeypatch):
     nb = r.create_notebook(NotebookCreate(name="nb"))
     _bind(r, "relation_embedding", _RecordingEmbedder(dim=8))
     calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
-    now_calls = _spy_now(r._runtime.source_embedding, monkeypatch)
+    invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
     # record through the store seat (relation_embeddings FKs knowledge_relations;
     # the paging shape, not the FK, is what's under test — mirrors
     # test_embed_relations_batch_isolates_failed_batches)
@@ -377,8 +376,8 @@ def test_embed_relations_batch_pages_before_mapping(tmp_path, monkeypatch):
     assert len(calls) >= 3                                            # paged, not one shot
     assert max(calls) <= 2                                            # each map call ≤ one page
     assert len(persisted) == 55                                      # every vector flushed across pages
-    assert now_calls["n"] >= 3           # fresh created_at PER PAGE: version advances so retrieval's
-                                         # (count,max_created_at) matrix cache can't strand a partial re-embed
+    assert (nb.id, "relation_embeddings") in invalidated             # matrix cache dropped after re-embed
+                                         # (clock-independent: same-second paged re-embed can't strand a partial)
 
 
 def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
@@ -386,7 +385,7 @@ def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
     nb = r.create_notebook(NotebookCreate(name="nb"))
     _bind(r, "chunk_embedding", _RecordingEmbedder(dim=8))
     calls = _spy_map_batches(r._runtime.source_embedding, monkeypatch)
-    now_calls = _spy_now(r._runtime.source_embedding, monkeypatch)
+    invalidated = _spy_invalidate(r._runtime.source_embedding, monkeypatch)
     persisted: list = []
     monkeypatch.setattr(
         r._runtime.embedding_store, "replace_chunk_vectors",
@@ -400,4 +399,20 @@ def test_embed_chunks_batch_pages_before_mapping(tmp_path, monkeypatch):
     assert len(calls) >= 3
     assert max(calls) <= 2
     assert len(persisted) == 55
-    assert now_calls["n"] >= 3           # fresh created_at per page (see relations guard)
+    assert (nb.id, "chunk_embeddings") in invalidated                # matrix cache dropped after re-embed
+
+
+def test_invalidate_vector_matrix_wiring_evicts_the_real_cache(repo):
+    """End-to-end: the runtime-wired invalidate_vector_matrix actually evicts
+    retrieval's brute-force _vector_matrix cache entry (the guards above only
+    prove the embedders CALL it; this proves the wiring reaches the same
+    VectorCache retrieval reads)."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    cache = repo._runtime.retrieval_snapshots.vector_cache
+    key = f"{nb.id}:matrix:knowledge_embeddings"
+    cache.get(key, ("v0",), lambda: {"warm": True})
+    assert cache.peek(key, ("v0",))                                  # warmed
+    repo._runtime.source_embedding.invalidate_vector_matrix(
+        nb.id, "knowledge_embeddings"
+    )
+    assert not cache.peek(key, ("v0",))                             # evicted by the wired callback
