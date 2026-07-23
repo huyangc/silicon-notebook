@@ -24,17 +24,16 @@ def test_injected_cache_used_for_hit(monkeypatch, tmp_path):
     """When a CacheBackend is injected, a pre-seeded hit is returned without
     calling the real LLM."""
     import json
+    from app.core.cache import llm_key
     from app.core.config import Settings
     from app.core.llm import OpenAICompatibleClient
-    from app.core.llm_cache import LLMCache, cache_key
+    from app.core.llm_cache import LLMCache
 
     path = str(tmp_path / "c.db")
     lc = LLMCache(path)
-    # Pre-seed a hit
-    client = OpenAICompatibleClient.__new__(OpenAICompatibleClient)
-    # Build the exact key chat_json builds (system message is prepended)
     schema_hint = "{answer: str}"
     model = "test-model"
+    base_url = "http://fake"
     user_msg = {"role": "user", "content": "what is X?"}
     system_msg = {
         "role": "system",
@@ -44,18 +43,26 @@ def test_injected_cache_used_for_hit(monkeypatch, tmp_path):
             f"Schema hint: {schema_hint}"
         ),
     }
-    key = cache_key(model, [system_msg, user_msg], schema_hint)
-    lc.put(key, '{"answer": "cached"}')
 
-    # Construct client with injected cache; model/url/key must look configured
+    # Construct client with injected cache; model/url/key must look configured.
+    # Transport identity is passed explicitly (system service registry model).
     settings = Settings(llm_cache_enabled=False)
     injected_client = OpenAICompatibleClient(
         settings,
-        base_url="http://fake",
+        base_url=base_url,
         api_key="fake",
         model=model,
         cache=lc,
     )
+    # Pre-seed the exact key chat_json builds: system message is prepended; base_url
+    # isolates same-model-name-different-endpoint; and the effective generation
+    # params are part of the key. chat_json below passes none of them, so it
+    # resolves to temperature/top_p=1.0/1.0 and max_tokens=the global default.
+    key = llm_key(
+        model, [system_msg, user_msg], schema_hint, base_url,
+        temperature=1.0, top_p=1.0, max_tokens=settings.openai_compat_max_tokens,
+    )
+    lc.put(key, '{"answer": "cached"}')
     assert injected_client._cache is lc
 
     # chat_json must return the cached value without touching the network

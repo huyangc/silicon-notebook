@@ -78,13 +78,35 @@ def is_cacheable_embedding(vector: Sequence[float], expected_dim: int) -> bool:
 
 
 def llm_key(
-    model: str, messages: List[Dict[str, str]], schema_hint: str, base_url: str
+    model: str,
+    messages: List[Dict[str, str]],
+    schema_hint: str,
+    base_url: str,
+    *,
+    temperature: float = 1.0,
+    top_p: float = 1.0,
+    max_tokens: Optional[int] = None,
 ) -> str:
-    """LLM 响应的缓存键 = sha256(base_url + model + messages 全文 + schema_hint)。
+    """LLM 响应的缓存键 = sha256(base_url + model + messages 全文 + schema_hint +
+    有效生成参数 temperature/top_p/max_tokens)。
 
     prompt 全文进 key 意味着改 prompt 即自动全冷，不需要维护版本号。
-    temperature 是 chat_json 的固定常量，刻意排除；若将来加了 per-call
-    temperature，必须并入 key。
+
+    **生成参数进 key（本轮修复）**：`chat_json` 的 temperature/top_p/max_tokens 是
+    per-call 的（抽取用高 token 预算、答案合成用另一档）。相同 messages + schema 但
+    不同采样设置、或不同 token 预算是**语义不同的 upstream 请求**，绝不能共用一条
+    缓存。max_tokens 尤其关键：本仓库文档化的截断补救手段就是调大
+    `KG_EXTRACT_MAX_TOKENS` 重跑——若它不在 key 里，调大后仍会命中被截断的旧响应。
+    这与「截断响应不入缓存」（is_cacheable_llm_response）互为**两半**：那条防坏响应
+    被写入，这条防参数变了还命中旧响应。
+
+    ⚠ **必须传解析后的有效值，而非原始入参**：`chat_json` 里 max_tokens=None 会回落
+    到 `settings.openai_compat_max_tokens`。调用方须先解析出实际生效的预算再传进来，
+    否则 `max_tokens=None` 与显式传入等价默认值会算出两条不同 key（虚假 miss，白白
+    多打一次模型）。temperature/top_p 无 None 回落，直接用 chat_json 的入参即可——
+    默认值 1.0/1.0 正是 chat_json 的采样默认（DeepSeek-V4 官方推荐），因此这三个给
+    默认值是「有自然默认」的合理选择，与 base_url「无自然默认→必填」的取舍不同；
+    产品侧唯一构造点（chat_json）总是显式传入解析后的有效值。
 
     ``base_url`` 是**服务身份**，不是可选项：本仓库有 per-user 模型配置，两个用户
     可以配同一个 model 名却指向不同 endpoint。缓存是跨用户全局共享的，若 key 只认
@@ -94,12 +116,20 @@ def llm_key(
     间接暴露；同 endpoint 换 key 由 evict_tag(model) 逃生口兜底，无需入 key。所以
     这里刻意只取 base_url，不用含 api_key 的 model_config_fingerprint()。
 
-    位置参数、无默认值：漏传就是本次评审抓到的那类缺陷（不同服务静默共用一条
-    缓存），让调用方在签名层就无法忘记，与 is_cacheable_embedding 的 expected_dim
-    同一防呆思路。
+    base_url 位置参数、无默认值：漏传就是上一轮评审抓到的那类缺陷（不同服务静默
+    共用一条缓存），让调用方在签名层就无法忘记，与 is_cacheable_embedding 的
+    expected_dim 同一防呆思路。
     """
     payload = json.dumps(
-        {"base_url": base_url, "model": model, "messages": messages, "schema": schema_hint},
+        {
+            "base_url": base_url,
+            "model": model,
+            "messages": messages,
+            "schema": schema_hint,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+        },
         sort_keys=True, ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -199,6 +199,31 @@ def test_llm_key_deliberately_diverges_from_legacy_after_adding_base_url():
     )
 
 
+def test_llm_key_includes_generation_parameters():
+    """采样/预算参数（temperature / top_p / max_tokens）是 key 的一部分：相同 messages
+    + schema 但不同生成参数是**不同的 upstream 请求**，绝不能共用一条缓存。max_tokens
+    尤其关键——本仓库文档化的截断补救就是调大 KG_EXTRACT_MAX_TOKENS 重跑，若它不在
+    key 里，调大后仍会命中被截断的旧响应。
+
+    变异验证：把 policy.llm_key 材料里的任一参数（temperature / top_p / max_tokens）
+    从 payload 里删掉，对应那条断言即转红。
+    """
+    msgs = [{"role": "user", "content": "hello"}]
+    u = "https://llm.example.test"
+    base = llm_key("m", msgs, "{}", u, temperature=1.0, top_p=1.0, max_tokens=8192)
+    assert base != llm_key("m", msgs, "{}", u, temperature=0.2, top_p=1.0, max_tokens=8192), (
+        "不同 temperature 必须是不同的 key"
+    )
+    assert base != llm_key("m", msgs, "{}", u, temperature=1.0, top_p=0.5, max_tokens=8192), (
+        "不同 top_p 必须是不同的 key"
+    )
+    assert base != llm_key("m", msgs, "{}", u, temperature=1.0, top_p=1.0, max_tokens=51200), (
+        "不同 max_tokens 必须是不同的 key（调大预算重试不能命中被截断的旧响应）"
+    )
+    # 全同 → 稳定同 key（内容寻址不因入参顺序/重复调用而漂移）。
+    assert base == llm_key("m", msgs, "{}", u, temperature=1.0, top_p=1.0, max_tokens=8192)
+
+
 # --------------------------------------------------------------- fake upstream
 class _FakeStream:
     """流式替身：内容分两块发，finish_reason 只挂在最后一块（真实 SSE 的形状）。"""
@@ -421,6 +446,74 @@ def test_raising_max_tokens_refetches_after_truncation(tmp_path, monkeypatch):
     assert fake.calls == 2, "调大 max_tokens 后没重新请求 upstream"
     assert out == '{"objects": [{"name": "abc"}]}'
     assert fake.seen[-1]["max_tokens"] == 51200
+
+
+def test_larger_max_tokens_does_not_reuse_a_smaller_budget_entry(tmp_path, monkeypatch):
+    """评审场景，与「截断响应不入缓存」互补的另一半。
+
+    上一条（test_raising_max_tokens_refetches_after_truncation）靠的是**截断响应根本
+    没进缓存**（finish_reason=length 被写入准入门拦掉），所以调大预算必然重打——它
+    测的是准入门，而非 key 里有没有 max_tokens：把 max_tokens 从 key 删掉它照样绿。
+
+    这一条把 max_tokens **真的进了 key** 单独钉死：让第一次小预算响应是一个恰好合法、
+    且 upstream 没报 finish_reason 的结果（`{"objects": []}` + finish_reason=None）——
+    它过了全部三道准入门，**确实被写进了缓存**。随后按文档补救手段调大预算重试，绝不能
+    命中这条小预算的旧条目。小预算 vs 大预算是两次语义不同的 upstream 请求，只有
+    max_tokens 进 key 才能让第二次真正重新请求。
+
+    变异验证：把 max_tokens 从 policy.llm_key 材料里删掉（或 llm.py 不把有效值传进
+    去）后，第二次命中小预算旧缓存，fake.calls 停在 1，本测试转红。
+    """
+    client, fake, spy = _client(
+        tmp_path, monkeypatch, content='{"objects": []}', finish_reason=None)
+    msgs = [{"role": "user", "content": "extract"}]
+    first = client.chat_json(msgs, "{}", max_tokens=64)
+    assert first == '{"objects": []}'
+    assert _cached_value(spy) == '{"objects": []}', (
+        "前提失效：小预算的合法响应本应进缓存，否则这条测的就成了准入门而非 key"
+    )
+
+    fake.reply = ('{"objects": [{"name": "abc"}]}', "stop")
+    out = client.chat_json(msgs, "{}", max_tokens=51200)
+    assert fake.calls == 2, "调大 max_tokens 后命中了小预算的旧响应，没重新请求 upstream"
+    assert out == '{"objects": [{"name": "abc"}]}'
+
+
+def test_max_tokens_none_resolves_to_the_same_key_as_the_explicit_default(tmp_path, monkeypatch):
+    """防虚假 miss：chat_json 里 max_tokens=None 回落到 settings.openai_compat_max_tokens。
+    显式传入那个**同值**必须命中同一条缓存——key 用的是解析后的**有效值**，不是原始
+    入参。否则 None 与其等价默认值分叉成两条 key，白白多打一次模型。
+
+    变异验证：把 llm.py 喂给 llm_key 的 effective_max_tokens 换回原始 max_tokens（None
+    vs 8192）后，两次 key 分叉，第二次不再命中，fake.calls 变成 2，本测试转红。
+    """
+    client, fake, spy = _client(tmp_path, monkeypatch)
+    default_budget = client.settings.openai_compat_max_tokens
+    assert isinstance(default_budget, int) and default_budget > 0, "前提：全局预算是正整数"
+    msgs = [{"role": "user", "content": "same question"}]
+    client.chat_json(msgs, "{}", max_tokens=None)
+    key_none = spy.keys[-1]
+    client.chat_json(msgs, "{}", max_tokens=default_budget)
+    key_explicit = spy.keys[-1]
+    assert key_none == key_explicit, (
+        "max_tokens=None 与显式传入等价默认值产生了不同 key —— key 没用解析后的有效值"
+    )
+    assert fake.calls == 1, "等价的 max_tokens 没命中同一条缓存（第二次又打了 upstream）"
+
+
+def test_bypass_cache_never_touches_cache_regardless_of_generation_params(tmp_path, monkeypatch):
+    """健康探针走 bypass_cache=True：无论生成参数如何，都不查也不写缓存——否则模型
+    故障时缓存命中会显示假绿（model_status / kg run_control 探活正依赖这条）。
+
+    把生成参数纳入 key 的改动不得改变这条路径：effective_max_tokens 的求值挪到了
+    bypass 判断之前，但 llm_key/cache.get 仍必须留在 `if not bypass_cache` 之内。
+    """
+    client, fake, spy = _client(tmp_path, monkeypatch)
+    msgs = [{"role": "user", "content": "probe"}]
+    client.chat_json(msgs, "{}", bypass_cache=True, max_tokens=64)
+    client.chat_json(msgs, "{}", bypass_cache=True, max_tokens=64)
+    assert spy.keys == [], "bypass_cache 不应触碰缓存（连 get 都不该调）"
+    assert fake.calls == 2, "bypass_cache 仍命中了缓存（第二次没打 upstream）"
 
 
 class _FalsyWhenEmptyBackend:

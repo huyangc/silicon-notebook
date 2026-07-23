@@ -223,6 +223,15 @@ class OpenAICompatibleClient:
             *messages,
         ]
         model = self.model
+        # Resolve the effective completion budget up front — it feeds BOTH the
+        # cache key and the request kwargs, and the two must agree. max_tokens=None
+        # falls back to the global default; a non-positive result means "omit the
+        # param, let the server default apply". Using this *resolved* value (not
+        # the raw arg) in the key keeps max_tokens=None and an explicit
+        # equal-to-default value on ONE key (no false miss), while a larger budget
+        # — the documented truncation remedy — correctly lands on a different key.
+        _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
+        effective_max_tokens = _mt if isinstance(_mt, int) and _mt > 0 else None
         # Best-effort cache lookup: a cache fault must never break the call.
         cache = None
         ckey = ""
@@ -234,8 +243,15 @@ class OpenAICompatibleClient:
                 # global/cross-user — keying on model alone would hand the second
                 # user the first endpoint's response. api_key is deliberately NOT
                 # in the key (it leaks via stats()/logs; evict_tag covers a
-                # same-endpoint key rotation).
-                ckey = llm_key(model, full_messages, response_schema_hint, self.base_url)
+                # same-endpoint key rotation). Generation params (temperature /
+                # top_p / the resolved max_tokens) are in the key too: a different
+                # sampling setting or token budget is a semantically different
+                # request and must never reuse another call's response.
+                ckey = llm_key(
+                    model, full_messages, response_schema_hint, self.base_url,
+                    temperature=temperature, top_p=top_p,
+                    max_tokens=effective_max_tokens,
+                )
                 cached = cache.get(ckey)
                 if cached is not None:
                     return cached
@@ -247,14 +263,14 @@ class OpenAICompatibleClient:
             "temperature": temperature,
             "top_p": top_p,
         }
-        # Cap the completion length. A per-call max_tokens (answer synthesis / KG
-        # extraction pass a higher budget) overrides the global default; when both
-        # resolve to 0/None the param is omitted so the server default applies.
-        # Set here on the shared kwargs dict so it flows into all three
-        # create() calls (streaming + the two non-stream paths) uniformly.
-        _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
-        if _mt and _mt > 0:
-            kwargs["max_tokens"] = _mt
+        # Cap the completion length with the resolved budget (see above). A
+        # per-call max_tokens (answer synthesis / KG extraction pass a higher
+        # budget) overrides the global default; when it resolves to None the param
+        # is omitted so the server default applies. Set here on the shared kwargs
+        # dict so it flows into all three create() calls (streaming + the two
+        # non-stream paths) uniformly.
+        if effective_max_tokens is not None:
+            kwargs["max_tokens"] = effective_max_tokens
         logger = self.interaction_logger
         record: Dict[str, Any] = {
             "ts": datetime.now().isoformat(),
