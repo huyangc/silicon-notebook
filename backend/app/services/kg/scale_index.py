@@ -350,15 +350,28 @@ def _persist_ann(out_dir, bin_name, prebuilt, vectors, n_labels, dim, ef) -> Non
             if vectors is not None and len(vectors)
             else None
         )
-        use_dim = int(vecs.shape[1]) if (vecs is not None and vecs.shape[0] > 0) else dim
+        # A count-mismatched (or absent) prebuilt handle with NO matrix to
+        # rebuild from would silently write an EMPTY index alongside n_labels
+        # labels — itself a row-count mismatch that collapses recall. Fail loud
+        # rather than corrupt: build() always pre-builds from the same rows as
+        # the labels, so this only fires on a genuinely inconsistent caller.
+        if vecs is None and n_labels > 0:
+            raise ValueError(
+                f"_persist_ann({bin_name}): {n_labels} labels but no usable "
+                f"vectors and no size-matching prebuilt index — refusing to "
+                f"write a row-count-mismatched .bin"
+            )
+        n_rows = int(vecs.shape[0]) if vecs is not None else 0
+        use_dim = int(vecs.shape[1]) if n_rows > 0 else dim
         if use_dim < 1:
             use_dim = 1
         idx = hnswlib.Index(space="cosine", dim=use_dim)
         idx.init_index(
-            max_elements=max(1, n_labels), ef_construction=ef, M=16, random_seed=42
+            max_elements=max(1, n_rows or n_labels),
+            ef_construction=ef, M=16, random_seed=42,
         )
-        if vecs is not None and vecs.shape[0] > 0:
-            idx.add_items(vecs, np.arange(vecs.shape[0]))
+        if n_rows > 0:
+            idx.add_items(vecs, np.arange(n_rows))
     idx.save_index(os.path.join(out_dir, bin_name))
 
 

@@ -147,6 +147,30 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     assert (other, "concept") in snapshots.unified_cache
 
 
+def test_invalidate_unified_drops_only_this_notebooks_graph_dict(repo):
+    """invalidate_unified (used by the scale build to release full_viz_graph's
+    whole-object graph dict after viz_arrays) evicts ONLY this notebook's
+    (nb, level) unified-cache entries — NOT other notebooks' graphs, and NOT the
+    vector-cache families invalidate_kg sweeps. A no-op body or a broken key
+    predicate (k == nb instead of k[0] == nb) fails here."""
+    snapshots = repo._runtime.retrieval_snapshots
+    nb, other = "nb-u", "nb-v"
+    snapshots.unified_cache[(nb, "object")] = {"g": 1}
+    snapshots.unified_cache[(nb, "concept")] = {"g": 2}
+    snapshots.unified_cache[(other, "object")] = {"g": 3}
+    # vector-cache families must stay UNtouched (unlike invalidate_kg)
+    snapshots.get(f"{nb}:matrix:knowledge_embeddings", ("v", 1), lambda: {})
+    snapshots.get(f"{nb}:clustermap", ("v", 1), lambda: {})
+
+    snapshots.invalidate_unified(nb)
+
+    assert (nb, "object") not in snapshots.unified_cache
+    assert (nb, "concept") not in snapshots.unified_cache        # every level for nb
+    assert (other, "object") in snapshots.unified_cache          # other notebook untouched
+    assert snapshots.peek(f"{nb}:matrix:knowledge_embeddings", ("v", 1))  # vector cache intact
+    assert snapshots.peek(f"{nb}:clustermap", ("v", 1))
+
+
 def test_facade_invalidation_wrapper_reaches_the_snapshot_cache(repo):
     """The facade `_invalidate_unified_cache` wrapper keeps funnelling through
     the coordinator, which now delegates to the snapshot cache — one eviction

@@ -79,6 +79,19 @@ def test_build_frees_matrices_and_hands_persist_prebuilt_anns(repo, monkeypatch)
     assert nb.id in invalidated
 
 
+def test_persist_ann_fails_loud_on_labels_without_vectors_or_matching_index(tmp_path):
+    """_persist_ann must NOT write an EMPTY index next to N labels (row-count
+    mismatch → silent recall collapse). With no vectors and no size-matching
+    prebuilt it fails loud; n_labels==0 still writes a valid empty index."""
+    from app.services.kg.scale_index import _persist_ann
+
+    with pytest.raises(ValueError, match="row-count-mismatched"):
+        _persist_ann(str(tmp_path), "ann.bin", None, None, 3, 16, 200)
+    # a notebook with no KG vectors still writes a valid (empty) ann.bin
+    _persist_ann(str(tmp_path), "empty.bin", None, None, 0, 16, 200)
+    assert os.path.exists(os.path.join(str(tmp_path), "empty.bin"))
+
+
 def test_build_scale_index_adds_cluster_bridge(repo):
     """cluster_groups must produce hub nodes in node_ids so PPR can propagate
     across merged concept clusters (synonym bridges)."""
