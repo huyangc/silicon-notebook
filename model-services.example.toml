@@ -31,6 +31,7 @@ max_concurrency = 8
 [services.rerank]
 display_name = "重排模型"
 kind = "rerank"
+# Use "dashscope" for the native DashScope text-rerank API.
 protocol = "openai"
 base_url = "https://rerank.example.com/v1"
 model = "rerank-model"

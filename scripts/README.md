@@ -31,6 +31,15 @@ scripts/backend.sh restart
 
 `max_concurrency` 是每个物理模型服务唯一的并发容量；批处理 `--workers`、KG 来源任务数和本地 CPU/ANN 线程都不会覆盖它。普通用户的「模型服务」面板只读，页面加载不会自动探测；admin 可在面板显式测试单个或全部服务。用户遇到模型错误时应提交界面中的 support id，维护人员据此关联 `.local/logs/` 与只读服务状态，定位具体故障服务。修改 TOML 或密钥后必须重启后端；配置路径留空是明确离线模式，非空但无效会启动失败。
 
+旧部署仍使用逐角色模型变量时，先运行迁移助手：
+
+```bash
+python scripts/migrate_legacy_model_env.py --env .env          # 只预览
+python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后写入
+```
+
+脚本从旧值生成 `.local/model-services.toml`，把密钥迁移到新的 `.env` 槽位，并移除已废弃的模型/并发字段；不会在 TOML 或终端中泄露密钥。推算出的 `max_concurrency` 只是初始值，应按真实服务容量复核；可用可重复的 `--max-concurrency ROLE=N` 覆盖。安装流程生成且未改动的示例 TOML 可直接替换；其他已有配置只有显式 `--force` 才会替换，且都会先备份。
+
 环境变量:`PYTHON_BIN` `HOST`(默认 127.0.0.1) `PORT`(默认 8000) `LOG_FILE`。
 例:换端口 `PORT=8001 scripts/backend.sh start`。
 

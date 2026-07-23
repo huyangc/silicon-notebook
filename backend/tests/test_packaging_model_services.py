@@ -59,6 +59,13 @@ def test_packaged_model_service_guidance_uses_system_toml_only():
     assert "离线" in guidance
 
 
+def test_release_bundle_includes_legacy_model_env_migration_helper():
+    pack_script = _text(ROOT / "scripts" / "pack.sh")
+
+    assert "scripts/migrate_legacy_model_env.py" in pack_script
+    assert "chmod +x \"$STAGE/scripts/migrate_legacy_model_env.py\"" in pack_script
+
+
 def test_install_creates_model_service_config_once_and_preserves_it(tmp_path):
     bundle = tmp_path / "bundle"
     bundle.mkdir()
