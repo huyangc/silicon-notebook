@@ -119,7 +119,7 @@ import {
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
-import { isAskBlocked, mountedBaseCount } from "./ask-availability";
+import { isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { Pagination } from "./Pagination";
@@ -383,18 +383,18 @@ function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary
 
 function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[], total: number): WelcomeCopy {
   const notebookPurpose = notebook?.purpose?.trim();
+  // 对话被硬约束禁用时(无任何可检索证据,判据见 ask-availability):引导添加来源或
+  // 挂参考库,且不给可点的提问建议(点了也会被 runAsk 挡下)。用 total(未过滤总数)
+  // 判定,故来源搜索无匹配致 sources 为空但库里有来源时,不会误显示这条。
+  if (isAskBlocked(notebook, total)) {
+    return {
+      title: "先添加来源，再开始对话",
+      description: notebookPurpose
+        || "上传 PDF、Markdown、DOCX 或 PPTX，或在「设置 → 编辑当前笔记本」里挂载一个参考库，就能基于内容对话了。",
+      prompts: [],
+    };
+  }
   if (sources.length === 0) {
-    // 无自有来源:挂了参考库仍可对话(默认模式直接检索参考库来源),照旧给提问建议;
-    // 既无来源又无参考库时对话被硬约束禁用(见 ask-availability),引导添加来源或挂参考库,
-    // 且不给可点的提问建议(点了也会被 runAsk 挡下)。
-    if (mountedBaseCount(notebook) === 0) {
-      return {
-        title: "先添加来源，再开始对话",
-        description: notebookPurpose
-          || "上传 PDF、Markdown、DOCX 或 PPTX，或在「设置 → 编辑当前笔记本」里挂载一个参考库，就能基于内容对话了。",
-        prompts: [],
-      };
-    }
     return {
       title: "导入来源后开始提问",
       description: notebookPurpose || "添加 PDF、Markdown、DOCX 或 PPTX 后，这里会根据来源内容生成可追溯的问题建议。",
