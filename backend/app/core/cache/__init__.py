@@ -13,6 +13,7 @@ from typing import Any, Dict
 from app.core.cache.backend import CacheAdmin, CacheBackend, NoCacheBackend
 from app.core.cache.policy import (
     embed_key,
+    embedding_all_finite,
     embedding_batch_dim,
     is_cacheable_embedding,
     is_cacheable_llm_response,
@@ -26,7 +27,7 @@ from app.core.config import _ROOT_DIR
 __all__ = [
     "CacheBackend", "CacheAdmin", "NoCacheBackend",
     "make_cache_backend", "llm_key", "embed_key", "is_cacheable_llm_response",
-    "embedding_batch_dim", "is_cacheable_embedding",
+    "embedding_batch_dim", "is_cacheable_embedding", "embedding_all_finite",
 ]
 
 

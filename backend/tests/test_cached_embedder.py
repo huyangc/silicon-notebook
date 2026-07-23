@@ -227,6 +227,69 @@ def _decode_len(raw):
     return len(json.loads(raw))
 
 
+# ---------------------------------------- 非有限值(NaN/inf)不入缓存、命中也不回放
+
+def test_is_cacheable_embedding_rejects_nonfinite_and_never_raises():
+    """准入判定的直接契约:含 NaN/±inf 的向量不可缓存;非数值元素不抛异常(准入不在
+    try 里,异常会窜进主流程)→ 一律判不可缓存。"""
+    from app.core.cache import is_cacheable_embedding
+
+    assert is_cacheable_embedding([1.0, 2.0, 3.0], 3) is True
+    assert is_cacheable_embedding([1.0, float("nan"), 3.0], 3) is False
+    assert is_cacheable_embedding([float("inf"), 2.0, 3.0], 3) is False
+    assert is_cacheable_embedding([1.0, float("-inf"), 3.0], 3) is False
+    assert is_cacheable_embedding([1.0, "x", 3.0], 3) is False   # 非数值不得抛
+    assert is_cacheable_embedding([1.0, None, 3.0], 3) is False
+
+
+def test_nonfinite_vector_is_not_cached(tmp_path):
+    """尺寸正确却含 NaN/inf 的向量(provider 偶发)——长度、维度两道门都过得去,写进去
+    会被序列化、重放整个 TTL,把 NaN 灌进相似度计算(污染排序/阈值)。写入侧必须挡下。
+    变异验证:去掉 is_cacheable_embedding 里的 embedding_all_finite 门后转红(维度门
+    放它过——都是 4 维且批内一致,挡不住这个变异)。
+    """
+
+    class NaNEmbedder(RecordingEmbedder):
+        dim = 4
+
+        def embed_texts(self, texts):
+            self.calls.append(list(texts))
+            # 都是 4 维、批内一致,只有「含非有限值」这一条门能挡下。
+            return [[float("nan"), 2.0, 3.0, 4.0],
+                    [1.0, 2.0, float("inf"), 4.0]]
+
+    inner = NaNEmbedder()
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000,
+                            base_url="https://embed.test")
+
+    out = cached.embed_texts(["a", "b"])
+    assert len(out) == 2, "本次调用照常返回后端给的东西(主流程不受缓存准入影响)"
+    assert backend.get(cached._key("a")) is None, "含 NaN 的向量绝不入缓存"
+    assert backend.get(cached._key("b")) is None, "含 inf 的向量绝不入缓存"
+
+
+def test_nonfinite_cache_hit_is_treated_as_miss_and_refetched(tmp_path):
+    """本修复前固化的 NaN/inf 向量仍躺在缓存里——命中就不再打后端,把 NaN 一路喂进
+    相似度。命中侧必须当 miss 重取。NaN 放在向量**中段**,证明是全量扫描、不是只看
+    首元素。
+    变异验证:去掉命中侧的 embedding_all_finite 门后,预置的 NaN 毒被 serve、根本不
+    打后端 → inner.calls == [] → 转红。
+    """
+    import json
+
+    inner = RecordingEmbedder()  # dim=4, 返回有限的 4 维向量
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000,
+                            base_url="https://embed.test")
+    # 预置一条**中段**含 NaN 的 4 维毒(模拟历史抖动写入,早于写入门)。
+    backend.put(cached._key("a"), json.dumps([1.0, float("nan"), 3.0, 4.0]), tag="m1")
+
+    out = cached.embed_texts(["a"])
+    assert inner.calls == [["a"]], "命中 NaN 毒必须真打后端重取,而不是 serve 毒"
+    assert out == [inner._vec("a")], "返回后端重取的有限向量"
+
+
 def test_healthy_response_is_still_cached(tmp_path):
     """准入规则不能靠"一律不写"蒙混过关——正常响应必须照旧入缓存。"""
     inner, cached = _mk(tmp_path)

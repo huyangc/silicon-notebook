@@ -11,7 +11,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from app.core.cache import embed_key, embedding_batch_dim, is_cacheable_embedding
+from app.core.cache import (
+    embed_key,
+    embedding_all_finite,
+    embedding_batch_dim,
+    is_cacheable_embedding,
+)
 
 
 class CachedEmbedder:
@@ -86,6 +91,12 @@ class CachedEmbedder:
                 # 重取，绝不把错维向量喂给下游（截断/相似度会静默零召回）。native==0
                 # 时让开这道门（保持旧行为）。
                 if vec is not None and expected_dim and len(vec) != expected_dim:
+                    vec = None
+                # 命中侧有限性门：写入门（is_cacheable_embedding）现在挡住新的
+                # NaN/inf 写入，但**此前已固化**的坏向量仍在缓存里——命中就不再打
+                # 后端，会把 NaN 一路喂进相似度计算。历史毒值当 miss 重取。放在 try
+                # 内：任何异常都退化为 miss，绝不窜进主流程。
+                if vec is not None and not embedding_all_finite(vec):
                     vec = None
             except Exception:      # 缓存故障退化为 miss，绝不影响主流程
                 vec = None
