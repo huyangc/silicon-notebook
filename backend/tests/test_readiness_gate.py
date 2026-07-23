@@ -65,3 +65,56 @@ def test_run_startup_migrates_warms_and_flips_ready():
     assert snap["phase"] == "ready"
     assert readiness.is_ready() is True
     assert snap["error"] is None
+
+
+def test_startup_failure_stays_not_ready_and_redacts_connection(monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.core import config
+    from app.services import startup_warmup
+
+    secret = "postgresql://secret-user:secret-password@db.example:5432/notebook"
+
+    def fail_repository():
+        raise RuntimeError(f"driver leaked {secret}")
+
+    monkeypatch.setattr(deps, "repository", fail_repository)
+    monkeypatch.setattr(
+        config,
+        "get_settings",
+        lambda: SimpleNamespace(database_url=secret),
+    )
+    readiness.reset()
+    startup_warmup.run_startup()
+
+    snapshot = readiness.snapshot()
+    assert snapshot["ready"] is False
+    assert snapshot["phase"] == "error"
+    assert snapshot["error"] == (
+        "RuntimeError: database initialization failed "
+        "(database=postgresql host=db.example:5432 db=notebook)"
+    )
+    diagnostics = snapshot["error"] + "\n" + caplog.text
+    assert "secret-user" not in diagnostics
+    assert "secret-password" not in diagnostics
+
+
+def test_close_repository_closes_and_clears_the_cached_composition(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.services import startup_warmup
+
+    calls = []
+    fake = SimpleNamespace(close=lambda: calls.append("close"))
+
+    def repository():
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+
+    startup_warmup.close_repository()
+
+    assert calls == ["close", "clear"]

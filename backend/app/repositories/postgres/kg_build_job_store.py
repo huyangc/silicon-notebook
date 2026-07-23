@@ -10,10 +10,7 @@ from app.repositories.postgres._store_utils import (
     normalized_clock,
 )
 from app.repositories.postgres.database import PostgresDatabase
-
-
-class KgBuildAlreadyRunning(RuntimeError):
-    pass
+from app.repositories.ports import KgBuildAlreadyRunning
 
 
 class KgBuildJobStore:

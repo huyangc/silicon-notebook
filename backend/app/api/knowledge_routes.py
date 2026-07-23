@@ -25,7 +25,7 @@ from app.models.knowledge import (
     ObjectSchemaUpdate,
     PaginatedKnowledge,
 )
-from app.services.sqlite_repository import KnowledgeGraphTooLargeError
+from app.services.knowledge_contracts import KnowledgeGraphTooLargeError
 
 
 router = APIRouter()

@@ -354,9 +354,7 @@ class NotebookCatalogService:
         count) for every notebook so the first login after a restart is served
         warm instead of paying the cold recompute. Called by the startup-readiness
         warm-up; best-effort per notebook inside ``warm_all``. Returns the count."""
-        from app.repositories.sqlite import knowledge_counts_cache
-        with self._summaries.database.connect() as db:
-            return knowledge_counts_cache.warm_all(db, progress)
+        return self._queries.warm_open_path_caches(progress)
 
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         user_id = self._identity.current_user().id

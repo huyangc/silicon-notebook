@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from psycopg import sql
+from psycopg import Error, sql
 
 from app.models.notebooks import NotebookAnalytics
 from app.models.ask import (
@@ -54,6 +54,37 @@ def _snippet(text: str, needle: str) -> str:
 class QueryStore:
     def __init__(self, database: PostgresDatabase) -> None:
         self.database = database
+
+    def warm_open_path_caches(self, progress=None) -> int:
+        """Warm PostgreSQL shared buffers for the same notebook-open queries."""
+        with self.database.connect() as db:
+            ids = [
+                row["id"]
+                for row in db.execute(
+                    "SELECT id FROM notebooks WHERE status<>'copying' ORDER BY id"
+                ).fetchall()
+            ]
+            total = len(ids)
+            for index, notebook_id in enumerate(ids, start=1):
+                try:
+                    self.knowledge_type_count_rows(
+                        db,
+                        notebook_id,
+                        ("approved", "reviewed", "project_specific", "conflict"),
+                    )
+                    self.pending_kg_source_count(db, notebook_id)
+                    self.visible_pending_kg_source_count(db, notebook_id)
+                    db.execute(
+                        "SELECT COUNT(*) AS c FROM chunks WHERE notebook_id=%s",
+                        (notebook_id,),
+                    ).fetchone()
+                except Error:
+                    # A warm miss affects latency only; later reads remain exact.
+                    db.rollback()
+                finally:
+                    if progress is not None:
+                        progress(index, total)
+            return total
 
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.

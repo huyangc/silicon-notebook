@@ -6,12 +6,25 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.core.database_url import database_status
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 SECRET_URL = "mysql://redacted-user:redacted-password@db.example/notebook?access_token=redacted-token#fragment"
 REDACTED_IDENTITY = "postgresql://db.example:5432/notebook"
+
+
+def test_database_status_is_backend_neutral_and_credential_free(tmp_path):
+    sqlite = database_status(f"sqlite:///{tmp_path / 'db.sqlite'}")
+    postgres = database_status(
+        "postgresql://secret-user:secret-password@db.example:5432/notebook"
+        "?access_token=secret"
+    )
+
+    assert sqlite == f"database=sqlite path={tmp_path / 'db.sqlite'}"
+    assert postgres == "database=postgresql host=db.example:5432 db=notebook"
+    assert "secret" not in postgres
 
 
 def _load_script(module_name: str):

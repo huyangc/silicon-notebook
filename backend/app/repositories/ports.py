@@ -99,6 +99,10 @@ class ConversationBusyError(RuntimeError):
         super().__init__("conversation has a running Ask job")
 
 
+class KgBuildAlreadyRunning(RuntimeError):
+    """One notebook already has a durable running KG build job."""
+
+
 @dataclass(frozen=True)
 class ChunkWrite:
     id: str
@@ -143,6 +147,7 @@ class RepositoryDatabasePort(Protocol):
     def resolve_path(self, value: str) -> Path: ...
     def connect(self) -> object: ...
     def write(self) -> object: ...
+    def close(self) -> None: ...
 
 
 class RepositorySeams(Protocol):
@@ -1415,6 +1420,9 @@ class QueryStorePort(Protocol):
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics: ...
     def pending_actions_projection_rows(self, user_id: str) -> dict: ...
     def load_notebook_scale_facts(self, notebook_id: str) -> NotebookScaleFacts: ...
+    def warm_open_path_caches(
+        self, progress: Callable[[int, int], None] | None = None
+    ) -> int: ...
 
 
 @runtime_checkable

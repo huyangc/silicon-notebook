@@ -1739,12 +1739,9 @@ def test_create_repository_fails_closed_if_validated_identity_is_impossible(monk
         factory.create_repository(SimpleNamespace(database_url="ignored"))
 
 
-def test_real_postgresql_selection_fails_explicitly_without_sqlite_fallback(
+def test_real_postgresql_selection_uses_adapter_and_never_sqlite_fallback(
     monkeypatch, tmp_path
 ):
-    module_name = "app.repositories.postgres.repository"
-    sys.modules.pop(module_name, None)
-    sys.modules.pop("app.repositories.postgres", None)
     factory = _repository_factory_module()
     monkeypatch.setattr(
         factory,
@@ -1753,13 +1750,16 @@ def test_real_postgresql_selection_fails_explicitly_without_sqlite_fallback(
     )
     settings = _settings(
         tmp_path,
-        database_url="postgresql://secret-user:secret-password@db.example/notebook",
+        database_url="postgresql://secret-user:secret-password@127.0.0.1:1/notebook",
+        postgres_pool_acquire_timeout_seconds=1,
     )
 
-    with pytest.raises(factory.RepositoryBackendUnavailableError) as captured:
+    from app.repositories.postgres.database import PostgresDatabaseError
+
+    with pytest.raises(PostgresDatabaseError) as captured:
         factory.create_repository(settings)
 
-    assert str(captured.value) == "PostgreSQL repository backend is not available"
+    assert "PostgreSQL pool startup failed" in str(captured.value)
     assert "secret-user" not in str(captured.value)
     assert "secret-password" not in str(captured.value)
 
@@ -1785,3 +1785,60 @@ def test_postgresql_selection_does_not_mask_nested_import_failures(monkeypatch, 
 
     with pytest.raises(ModuleNotFoundError, match="missing nested driver"):
         factory.create_repository(settings)
+
+
+def test_backend_status_delegates_database_identity_to_python_helper():
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "backend.sh").read_text(encoding="utf-8")
+
+    assert "from app.core.database_url import database_status" in script
+    assert "print(database_status(Settings().database_url))" in script
+    assert "urlsplit" not in script
+    assert "DATABASE_URL#" not in script
+
+
+@pytest.mark.parametrize(
+    ("database_url", "expected"),
+    (
+        ("sqlite:////tmp/task9-status.sqlite", "database=sqlite path=/tmp/task9-status.sqlite"),
+        (
+            "postgresql://secret-user:secret-password@db.example:5432/notebook?token=secret",
+            "database=postgresql host=db.example:5432 db=notebook",
+        ),
+    ),
+)
+def test_backend_status_prints_safe_selected_database(database_url, expected):
+    import os
+    import subprocess
+
+    root = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env.update(
+        DATABASE_URL=database_url,
+        PYTHON_BIN=sys.executable,
+        PORT="59993",
+    )
+    completed = subprocess.run(
+        [str(root / "scripts" / "backend.sh"), "status"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert expected in completed.stdout
+    assert "secret-user" not in completed.stdout + completed.stderr
+    assert "secret-password" not in completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("relative", ("scripts/prod.sh", "packaging/start.sh"))
+def test_production_launchers_remain_single_worker(relative):
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    script = (root / relative).read_text(encoding="utf-8")
+
+    command_lines = [line for line in script.splitlines() if not line.lstrip().startswith("#")]
+    assert re.findall(r"--workers\s+(\S+)", "\n".join(command_lines)) == ["1"]

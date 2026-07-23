@@ -25,7 +25,7 @@ PORT="${PORT:-8000}"
 LOG_FILE="${LOG_FILE:-$ROOT_DIR/.local/logs/backend.log}"
 APP="app.main:app"
 
-port_pid() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1; }
+port_pid() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true; }
 
 # silicon-notebook 后端独有 /api/notebooks;EDA Agent 等其它服务没有→返回非 200。
 http_code() { curl -s -o /dev/null -w "%{http_code}" -m 3 "http://$HOST:$PORT/api/notebooks" 2>/dev/null || echo 000; }
@@ -35,8 +35,13 @@ svc_title() { curl -s -m 3 "http://$HOST:$PORT/openapi.json" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json;print(json.load(sys.stdin).get('info',{}).get('title','?'))" 2>/dev/null || echo "?"; }
 nb_count()  { curl -s -m 3 "http://$HOST:$PORT/api/notebooks" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?"; }
+database_status() {
+  ( cd "$ROOT_DIR/backend" && PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \
+      "from app.core.config import Settings; from app.core.database_url import database_status; print(database_status(Settings().database_url))" )
+}
 
 cmd_status() {
+  echo "● $(database_status)"
   local pid; pid="$(port_pid)"
   if [[ -z "$pid" ]]; then echo "● :$PORT 空闲 —— 没有服务在跑。"; return 0; fi
   if is_sn; then
@@ -68,7 +73,8 @@ cmd_start() {
   mkdir -p "$(dirname "$LOG_FILE")"
   echo "启动 silicon-notebook 后端…"
   echo "  python = $PYTHON_BIN"
-  echo "  cwd    = $ROOT_DIR/backend  (路径已锚定仓库根,与 cwd 无关;.env/DB=$ROOT_DIR/.local/silicon_notebook.db)"
+  echo "  cwd    = $ROOT_DIR/backend  (路径已锚定仓库根,与 cwd 无关)"
+  echo "  $(database_status)"
   echo "  listen = http://$HOST:$PORT   日志 = $LOG_FILE"
   ( cd "$ROOT_DIR/backend" && nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" >>"$LOG_FILE" 2>&1 & )
   echo -n "  等待就绪"

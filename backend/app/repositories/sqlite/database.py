@@ -101,6 +101,10 @@ class SqliteDatabase:
             except sqlite3.Error:
                 pass
 
+    def close(self) -> None:
+        """Backend-neutral lifecycle close for the current process thread."""
+        self.close_local()
+
     @contextmanager
     def write(self) -> Iterator[sqlite3.Connection]:
         """写事务:进程内写串行(write_lock)。每次用**独立新连接**(非线程复用读连接),

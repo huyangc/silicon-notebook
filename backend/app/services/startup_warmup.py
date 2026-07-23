@@ -46,8 +46,39 @@ def run_startup() -> None:
         logger.info("startup: READY — %d notebook(s) warmed", total)
         _reproject_legacy_knowhow_tables(repo)
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
-        readiness.mark_error(f"{type(exc).__name__}: {exc}")
-        logger.exception("startup FAILED — service stays not-ready")
+        from app.core.config import get_settings
+
+        safe_error = readiness.startup_error(exc, get_settings().database_url)
+        readiness.mark_error(safe_error)
+        # Never attach the original exception: a third-party driver may carry
+        # raw conninfo in its traceback even though our adapter errors do not.
+        logger.error("startup FAILED — service stays not-ready: %s", safe_error)
+
+
+def close_repository() -> None:
+    """Close the selected backend through the same cached composition root."""
+    from app.api.deps import repository
+
+    try:
+        repo = repository()
+    except Exception:  # startup construction already performed its own cleanup
+        cache_clear = getattr(repository, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
+        return
+    try:
+        close = getattr(repo, "close", None)
+        if close is not None:
+            close()
+        else:
+            database = getattr(getattr(repo, "_runtime", None), "database", None)
+            database_close = getattr(database, "close", None)
+            if database_close is not None:
+                database_close()
+    finally:
+        cache_clear = getattr(repository, "cache_clear", None)
+        if cache_clear is not None:
+            cache_clear()
 
 
 def _reproject_legacy_knowhow_tables(repo) -> None:

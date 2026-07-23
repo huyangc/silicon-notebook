@@ -32,6 +32,12 @@ class QueryStore:
     def __init__(self, database: SqliteDatabase) -> None:
         self.database = database
 
+    def warm_open_path_caches(self, progress=None) -> int:
+        from app.repositories.sqlite import knowledge_counts_cache
+
+        with self.database.connect() as db:
+            return knowledge_counts_cache.warm_all(db, progress)
+
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.
     @staticmethod

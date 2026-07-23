@@ -45,10 +45,24 @@ async def _lifespan(app: FastAPI):
     # Tests mark readiness ready up-front (conftest) and drive the app without a
     # real warm-up; skip spawning the thread there so it can't touch a torn-down
     # tmp DB. In production readiness starts not-ready, so the thread runs.
+    startup_thread = None
     if not readiness.is_ready():
         readiness.set_phase("starting", "后端启动中")
-        threading.Thread(target=run_startup, name="startup-warmup", daemon=True).start()
-    yield
+        startup_thread = threading.Thread(
+            target=run_startup, name="startup-warmup", daemon=True
+        )
+        startup_thread.start()
+    try:
+        yield
+    finally:
+        # Do not close a PostgreSQL pool while the migration/warmup thread may
+        # still be borrowing it. Production shutdown is rare and correctness
+        # is more important than a short shutdown timeout.
+        if startup_thread is not None:
+            startup_thread.join()
+        from app.services.startup_warmup import close_repository
+
+        close_repository()
 
 
 def _env_file_preflight() -> None:
@@ -119,13 +133,15 @@ def create_app() -> FastAPI:
     # 可见），根治「CLI 建索引 vs 服务启动」CWD 不一致导致数据分裂却无从察觉
     # 的问题。storage_dir/database_url 经 config.py 的 model_validator 锚定到
     # 仓库根后此处一定是绝对路径；event_log_dir 独立锚定（event_logging._ROOT_DIR）。
-    db_path = settings.sqlite_path
+    from app.core.database_url import database_status
+
+    database = database_status(settings.database_url)
     storage_dir = settings.storage_dir
     log_dir = settings.event_log_dir
     if not Path(log_dir).is_absolute():
         from app.core.event_logging import _ROOT_DIR as _LOG_ROOT_DIR
         log_dir = str(_LOG_ROOT_DIR / log_dir)
-    logger.info("paths: db=%s storage=%s log_dir=%s", db_path, storage_dir, log_dir)
+    logger.info("paths: %s storage=%s log_dir=%s", database, storage_dir, log_dir)
 
     # 启动 autotune 报告：一眼可查本次进程实际解析到的核绑定旋钮值（KG_CLUSTER_ANN_THREADS
     # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型端并发旋钮

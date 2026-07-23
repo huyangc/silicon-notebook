@@ -24,12 +24,6 @@
         "path": "app.services.sqlite_repository",
         "scope": "<module>",
         "target": "KnowledgeGraphTooLargeError"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/api/knowledge_routes.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:KnowledgeGraphTooLargeError"
       }
     ],
     "kind": "constant",

@@ -81,6 +81,19 @@ def redact_database_url(raw: str) -> str:
     return urlunsplit(("postgresql", netloc, parsed.path, "", ""))
 
 
+def database_status(raw: str) -> str:
+    """Render the backend identity for logs/scripts without exposing secrets."""
+    identity = database_identity(raw)
+    if identity.scheme == "sqlite":
+        return f"database=sqlite path={identity.database}"
+    host = identity.host or "<unknown>"
+    if ":" in host:
+        host = f"[{host}]"
+    if identity.port is not None:
+        host = f"{host}:{identity.port}"
+    return f"database=postgresql host={host} db={identity.database}"
+
+
 def sanitize_database_url_for_error(raw: object) -> str:
     """Return a fail-closed safe input value for validation error structures."""
     if not isinstance(raw, str):

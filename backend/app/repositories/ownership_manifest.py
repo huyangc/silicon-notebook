@@ -50,7 +50,6 @@ SURFACE_MEMBERS = (
         kind='constant',
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='KnowledgeGraphTooLargeError'),
-            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>', kind='import', target='app.services.sqlite_repository:KnowledgeGraphTooLargeError'),
         ),
         patches=(
         ),

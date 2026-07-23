@@ -20,6 +20,8 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
+from app.core.database_url import database_status
+
 _lock = threading.Lock()
 _state = {
     "ready": False,
@@ -53,6 +55,11 @@ def mark_ready() -> None:
         _state["phase"] = "ready"
         _state["detail"] = ""
         _state["error"] = None
+
+
+def startup_error(error: BaseException, database_url: str) -> str:
+    """Return a credential-free startup diagnostic and backend identity."""
+    return f"{type(error).__name__}: database initialization failed ({database_status(database_url)})"
 
 
 def mark_error(error: str) -> None:
