@@ -8123,6 +8123,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.complete_row",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.__init__",
         "target": "settings"

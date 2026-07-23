@@ -594,6 +594,9 @@ class CommunityQueryPort(Protocol):
 
 
 class EvidenceContextPort(Protocol):
+    def source_metadata(
+        self, source_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]: ...
     def chunk_context(
         self,
         chunks: Sequence[RetrievedChunk],

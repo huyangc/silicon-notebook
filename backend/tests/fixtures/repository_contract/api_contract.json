@@ -2108,6 +2108,63 @@
           "title": "KnowhowColumnPatch",
           "type": "object"
         },
+        "KnowhowCompletionEvidence": {
+          "properties": {
+            "excerpt_md": {
+              "title": "Excerpt Md",
+              "type": "string"
+            },
+            "key": {
+              "title": "Key",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "knowledge",
+                "chunk",
+                "element"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "location_label": {
+              "title": "Location Label",
+              "type": "string"
+            },
+            "object_type": {
+              "title": "Object Type",
+              "type": "string"
+            },
+            "source_title": {
+              "title": "Source Title",
+              "type": "string"
+            },
+            "tier": {
+              "default": "personal",
+              "enum": [
+                "base",
+                "personal"
+              ],
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "key",
+            "kind",
+            "object_type",
+            "label",
+            "excerpt_md",
+            "source_title",
+            "location_label"
+          ],
+          "title": "KnowhowCompletionEvidence",
+          "type": "object"
+        },
         "KnowhowDiscriminationMethod": {
           "properties": {
             "code_status": {
@@ -2538,6 +2595,40 @@
         },
         "KnowhowRowCompleteResult": {
           "properties": {
+            "evidence": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowCompletionEvidence"
+              },
+              "title": "Evidence",
+              "type": "array"
+            },
+            "reasoning_trace": {
+              "items": {
+                "$ref": "#/components/schemas/TraceStep"
+              },
+              "title": "Reasoning Trace",
+              "type": "array"
+            },
+            "retrieval_mode": {
+              "const": "reasoning",
+              "default": "reasoning",
+              "title": "Retrieval Mode",
+              "type": "string"
+            },
+            "retrieval_scope": {
+              "const": "active_and_mounted",
+              "default": "active_and_mounted",
+              "title": "Retrieval Scope",
+              "type": "string"
+            },
+            "retrieval_status": {
+              "enum": [
+                "succeeded",
+                "no_evidence"
+              ],
+              "title": "Retrieval Status",
+              "type": "string"
+            },
             "suggestions": {
               "items": {
                 "$ref": "#/components/schemas/KnowhowRowCompletionSuggestion"
@@ -2546,6 +2637,9 @@
               "type": "array"
             }
           },
+          "required": [
+            "retrieval_status"
+          ],
           "title": "KnowhowRowCompleteResult",
           "type": "object"
         },
@@ -2578,6 +2672,13 @@
               ],
               "title": "Confidence",
               "type": "string"
+            },
+            "evidence_keys": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Evidence Keys",
+              "type": "array"
             },
             "suggestion_md": {
               "anyOf": [

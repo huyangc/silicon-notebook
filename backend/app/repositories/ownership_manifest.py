@@ -2789,6 +2789,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_reparse', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='settings'),
+            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.complete_row', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__', kind='attribute', target='settings'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>._make_persist_image', kind='attribute', target='settings'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>._run_full', kind='attribute', target='settings'),

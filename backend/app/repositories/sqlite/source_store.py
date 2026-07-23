@@ -221,7 +221,7 @@ class SourceStore:
                 batch = ids[offset:offset + self.IN_CHUNK]
                 placeholders = ",".join("?" for _ in batch)
                 for row in db.execute(
-                    "SELECT id, notebook_id, title, file_name, summary, doc_type "
+                    "SELECT id, notebook_id, title, file_name, summary, doc_type, source_type "
                     f"FROM sources WHERE id IN ({placeholders})",
                     batch,
                 ).fetchall():

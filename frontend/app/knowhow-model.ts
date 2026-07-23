@@ -13,6 +13,7 @@
 
 import { API_BASE } from "./api-config.ts";
 import { performApiRequest, requestJson, requestVoid } from "./api-client.ts";
+import type { ReasoningTraceStep } from "./ask-stream.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
@@ -139,17 +140,36 @@ export type KnowhowCellPatchResult = {
 // 行级智能补全只生成待审阅建议，不直接写库。confidence 是后端稳定协议；
 // suggestionMd=null 表示证据不足，调用方必须按 abstainReason 展示且禁止接受。
 export type KnowhowCompletionConfidence = "high" | "medium" | "low";
+export type KnowhowCompletionRetrievalScope = "active_and_mounted";
+export type KnowhowCompletionRetrievalStatus = "succeeded" | "no_evidence";
+
+export type KnowhowCompletionEvidence = {
+  key: string;
+  kind: "knowledge" | "chunk" | "element";
+  objectType: string;
+  label: string;
+  excerptMd: string;
+  sourceTitle: string;
+  locationLabel: string;
+  tier: "base" | "personal";
+};
 
 export type KnowhowRowCompletionSuggestion = {
   columnId: string;
   suggestionMd: string | null;
   confidence: KnowhowCompletionConfidence;
   basedOnRowIds: string[];
+  evidenceKeys: string[];
   basis: string;
   abstainReason: string;
 };
 
 export type KnowhowRowCompletion = {
+  retrievalMode: "reasoning";
+  retrievalScope: KnowhowCompletionRetrievalScope;
+  retrievalStatus: KnowhowCompletionRetrievalStatus;
+  reasoningTrace: ReasoningTraceStep[];
+  evidence: KnowhowCompletionEvidence[];
   suggestions: KnowhowRowCompletionSuggestion[];
 };
 
@@ -233,11 +253,30 @@ type WireKnowhowRowCompletionSuggestion = {
   suggestion_md: string | null;
   confidence: KnowhowCompletionConfidence;
   based_on_row_ids: string[];
+  evidence_keys: string[];
   basis: string;
   abstain_reason: string;
 };
 
-type WireKnowhowRowCompletion = { suggestions: WireKnowhowRowCompletionSuggestion[] };
+type WireKnowhowCompletionEvidence = {
+  key: string;
+  kind: "knowledge" | "chunk" | "element";
+  object_type: string;
+  label: string;
+  excerpt_md: string;
+  source_title: string;
+  location_label: string;
+  tier: "base" | "personal";
+};
+
+type WireKnowhowRowCompletion = {
+  retrieval_mode: "reasoning";
+  retrieval_scope: KnowhowCompletionRetrievalScope;
+  retrieval_status: KnowhowCompletionRetrievalStatus;
+  reasoning_trace: ReasoningTraceStep[];
+  evidence: WireKnowhowCompletionEvidence[];
+  suggestions: WireKnowhowRowCompletionSuggestion[];
+};
 
 type WireKnowhowTableSummary = {
   id: string;
@@ -714,6 +753,7 @@ function mapKnowhowRowCompletionSuggestion(
     suggestionMd: wire.suggestion_md,
     confidence: wire.confidence,
     basedOnRowIds: wire.based_on_row_ids ?? [],
+    evidenceKeys: wire.evidence_keys ?? [],
     basis: wire.basis ?? "",
     abstainReason: wire.abstain_reason ?? "",
   };
@@ -734,7 +774,23 @@ export const completeKnowhowRow = (
       ),
       tag: "knowhow",
     },
-  ).then((wire) => ({ suggestions: (wire.suggestions ?? []).map(mapKnowhowRowCompletionSuggestion) }));
+  ).then((wire) => ({
+    retrievalMode: wire.retrieval_mode,
+    retrievalScope: wire.retrieval_scope,
+    retrievalStatus: wire.retrieval_status,
+    reasoningTrace: wire.reasoning_trace ?? [],
+    evidence: (wire.evidence ?? []).map((item) => ({
+      key: item.key,
+      kind: item.kind,
+      objectType: item.object_type,
+      label: item.label ?? "",
+      excerptMd: item.excerpt_md ?? "",
+      sourceTitle: item.source_title,
+      locationLabel: item.location_label,
+      tier: item.tier,
+    })),
+    suggestions: (wire.suggestions ?? []).map(mapKnowhowRowCompletionSuggestion),
+  }));
 
 // --- 排版重排（knowhow-md-normalize Task 4，同样显式触发、不写库）-----------
 // 与 optimizeKnowhowCell 的关键差异：后端 reformat_cell 对「未配置模型」等

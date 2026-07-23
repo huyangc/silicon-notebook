@@ -33,7 +33,7 @@
 - **`object_type` 标签**：后端 `OBJECT_TYPE_LABELS` 与前端 `KG_TYPE_LABELS` 必须逐字一致，改一侧就要改另一侧。
 - **架构守卫**是语义化的（`{path, scope, kind, target}`），**不含行号**——仓库里任何提到「行号钉死」的注释都是过时残留。重生成走 `--rebaseline-surface` / `--rebaseline-callers`；新端点必须跑默认模式刷 `api_contract`。
 - **knowhow 变更历史**（`knowhow_changes`/`knowhow_milestones`，schema v26）：knowhow 表的**每条写路径**必须在写事务**最后一步**经模块级 `record_change` 追加一条流水（存 before/after + 变更后整表指纹，复用传输守卫的 `_FINGERPRINT_SQL`）；`test_knowhow_history_coverage_guard.py` 是硬门，新增写方法漏挂就报红。回退是逆序 delta 重放 + 前后置指纹守卫（行/列复用原 id 保引用与代码附件）；里程碑创建与 `create_milestone` 的复检必须在 `BEGIN IMMEDIATE` 之内，清理只删最老连续前缀且永留 head。完整契约见 `AGENTS.md`「Architecture Baseline」的 knowhow 历史条目与 `architecture.md` § 3.7。
-- **Knowhow 智能补全空列**：记录型表从行详情、带行标题分组的表从概念矩阵的物理分支显式发起；只有缺失格或精确空串可补，已存纯空白文本不算空。最多选择同表 8 条参考行（同 anchor/行标题分组优先，再比较已知列相似度与覆盖度），只返回 suggestion/abstain、置信度、依据和参考行，绝不自动写库或走 KG；`knowhow_complete` 未配置/失败时不许离线伪补全。审阅弹窗必须可拖动且逐项人工确认；确认仍走普通 cell PATCH，固定携带 `expected_before=""` 和 `origin="llm_complete"`，并保留正常历史与同步语义。
+- **Knowhow 智能补全空列**：记录型表从行详情、带行标题分组的表从概念矩阵的物理分支显式发起；只有缺失格或精确空串可补，已存纯空白文本不算空。一轮请求把同表最多 8 条参考行（同 anchor/行标题分组优先，再比较已知列相似度与覆盖度）与一次有界 `ReasoningRetriever` 全库检索合并；全库只指当前 notebook + 当前有效显式挂载库。它复用 Ask `reasoning` 的规划/联邦检索/反思/扩展/查询期推导，但补全专用策略会在候选进入模型反思前排除私有 Memory 与当前表自身投影，并关闭来源归属不透明的 PPR/社区扩展；绝不能调用 `ask_reasoning`/`ask_answer`、创建对话/job 或保存 Ask 答案。响应必须带最终推理轨迹和服务端生成的库内证据 key；模型只能引用合法 evidence key 或同表行 id，无合法引用的建议强制 abstain。`reasoning_agent` 负责检索，`knowhow_complete` 负责结构化合成；两阶段都用 system 级不可信证据指令。推理响应畸形、任一 provider 未配置/执行失败，或合成响应不可解析/顶层结构不可用时显式失败；单条建议畸形则过滤、降级或转成 abstain，任何情况都不能静默退成同表补全或伪造离线结果。审阅弹窗分开显示同表参考与禁用链接/图片的库内 Markdown 证据，保持可拖动和逐项人工确认；确认仍走普通 cell PATCH，固定携带 `expected_before=""` 和 `origin="llm_complete"`，并保留正常历史与同步语义。
 
 ### 工程约束
 

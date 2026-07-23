@@ -1,6 +1,13 @@
-import { cellSummary, type KnowhowColumn, type KnowhowRow, type KnowhowRowCompletionSuggestion } from "./knowhow-model.ts";
+import {
+  cellSummary,
+  type KnowhowColumn,
+  type KnowhowCompletionEvidence,
+  type KnowhowRow,
+  type KnowhowRowCompletionSuggestion,
+} from "./knowhow-model.ts";
 import { groupRowsByAnchor, isSharedColumn } from "./knowhow-grouping-logic.ts";
 import { resolveRowTitleText, sortColumnsByPosition } from "./knowhow-panel-logic.ts";
+import { label, TIER } from "./vocabulary.ts";
 
 export const COMPLETION_CONFIDENCE_LABELS = {
   high: "高置信度",
@@ -76,4 +83,31 @@ export function completionReferenceLabel(
   const row = rows.find((candidate) => candidate.id === rowId);
   if (!row) return "表内相关记录";
   return cellSummary(resolveRowTitleText(row, columns), 80) || `第 ${row.position + 1} 行`;
+}
+
+/** 证据按建议给出的 key 顺序展示；未知 key 与重复 key 都忽略，避免把其它列的
+ * 检索材料误挂到当前建议，也避免服务端异常响应造成重复卡片。 */
+export function completionEvidenceForSuggestion(
+  suggestion: KnowhowRowCompletionSuggestion,
+  evidence: KnowhowCompletionEvidence[],
+): KnowhowCompletionEvidence[] {
+  const byKey = new Map(evidence.map((item) => [item.key, item]));
+  const seen = new Set<string>();
+  return suggestion.evidenceKeys.flatMap((key) => {
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const item = byKey.get(key);
+    return item ? [item] : [];
+  });
+}
+
+/** tier 是协议元数据，不把内部枚举或 notebook id 暴露到证据卡。 */
+export function completionEvidenceTierLabel(tier: string): string {
+  return label(TIER, tier, "知识库");
+}
+
+export function completionRetrievalStatusLabel(status: string): string {
+  if (status === "succeeded") return "检索完成";
+  if (status === "no_evidence") return "全库检索未找到可用证据";
+  return "检索状态未知";
 }

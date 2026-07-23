@@ -76,6 +76,12 @@ class EvidenceContextService:
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         return self.notebooks.tier_map(notebook_ids)
 
+    def source_metadata(
+        self, source_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return bounded source classification for retrieval-only consumers."""
+        return self.sources.source_metadata(source_ids)
+
     def chunk_context(
         self,
         chunks: Sequence[RetrievedChunk],
