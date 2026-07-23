@@ -383,10 +383,10 @@ function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary
 
 function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[], total: number): WelcomeCopy {
   const notebookPurpose = notebook?.purpose?.trim();
-  // 对话被硬约束禁用时(无任何可检索证据,判据见 ask-availability):引导添加来源或
-  // 挂参考库,且不给可点的提问建议(点了也会被 runAsk 挡下)。用 total(未过滤总数)
-  // 判定,故来源搜索无匹配致 sources 为空但库里有来源时,不会误显示这条。
-  if (isAskBlocked(notebook, total)) {
+  // 对话被硬约束禁用时(后端判定无任何可检索证据):引导添加来源或挂参考库,且不给
+  // 可点的提问建议(点了也会被 runAsk 挡下)。判据是后端 ask_available,与来源搜索是否
+  // 过滤、当前页 sources 是否为空无关。
+  if (isAskBlocked(notebook)) {
     return {
       title: "先添加来源，再开始对话",
       description: notebookPurpose
@@ -1777,10 +1777,31 @@ export default function Home() {
   // so a new notebook never shows demo examples.
   const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources, notebookSourceTotal), [currentNotebook, sources, notebookSourceTotal]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
-  // 硬约束:笔记本既无自有来源、也没挂载参考库时,没有可据以回答的内容——
-  // 锁死对话框(输入/发送/快捷提问),占位改为引导文案。判据单一真源见 ask-availability。
-  const askBlocked = isAskBlocked(currentNotebook, notebookSourceTotal);
+  // 硬约束:后端判定该库无任何可检索证据时,锁死对话框(输入/发送/快捷提问),占位改为
+  // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
+  const askBlocked = isAskBlocked(currentNotebook);
   const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
+  // P2(codex PR#334 第3轮):ask_available 是 get_notebook 的快照,在别处加了证据——
+  // 在 Memory 页签确认一条 memory、或创建/导入一张 knowhow 表——并不会刷新它。这里在
+  // "重新看到问答框"时重拉一次:仅当当前判为不可用(被禁)时才发请求,把额外开销压到最少;
+  // 有新证据则 ask_available 翻真、对话框自动解禁。来源上传→解析这条路已由处理轮询覆盖
+  // (reachedExtracted 分支),不在此列。
+  function refreshAskAvailabilityIfBlocked() {
+    const nb = activeNotebookIdRef.current;
+    if (!nb || currentNotebook?.ask_available !== false) return;
+    getNotebook(nb)
+      .then((refreshed) => {
+        if (activeNotebookIdRef.current === nb) {
+          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+        }
+      })
+      .catch(reportError);
+  }
+  // 进入(或切回)问答页签且当前被禁时重查——覆盖 Memory 页签确认后切回 Ask 的场景。
+  useEffect(() => {
+    if (chatMode === "ask") refreshAskAvailabilityIfBlocked();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatMode, currentNotebookId, currentNotebook?.ask_available]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentKgBuildView = kgBuildPresentation(
     currentNotebook?.kg_build,
@@ -2536,8 +2557,8 @@ export default function Home() {
     if (asking) return;
     const q = nextQuestion.trim();
     if (!q) return;
-    // 硬约束:无来源且无参考库时禁止提问(也挡住快捷提问 chip 这条旁路)。
-    if (isAskBlocked(currentNotebook, notebookSourceTotal)) {
+    // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
+    if (isAskBlocked(currentNotebook)) {
       setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
@@ -2877,6 +2898,9 @@ export default function Home() {
 
   function closeKnowhow() {
     setKnowhowNavigation((current) => closeKnowhowNavigation(current));
+    // P2:knowhow 抽屉是覆盖层、不改 chatMode,故上面的 chatMode effect 不会触发。关闭
+    // 回到问答框时若当前被禁,重拉一次——新建/导入的 knowhow 表已产出可检索 chunk 则解禁。
+    refreshAskAvailabilityIfBlocked();
   }
 
   async function openAnalytics() {
