@@ -13559,7 +13559,7 @@
       },
       "/api/notebooks/{notebook_id}/sources/reparse": {
         "post": {
-          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守\nnotebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。",
+          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守\nnotebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。\n⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发\n排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。",
           "operationId": "reparse_sources_api_notebooks__notebook_id__sources_reparse_post",
           "parameters": [
             {

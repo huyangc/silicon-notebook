@@ -35,6 +35,10 @@ from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 
 router = APIRouter()
 
+# 批量重解析一次最多受理的源数(去重后)。体检命中样本本就 ≤20;给宽松上限只为挡住
+# 「重复 id/超大列表灌满无界执行器队列」(codex),不是产品限制。
+_REPARSE_MAX = 200
+
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
 
@@ -219,10 +223,18 @@ def reparse_sources(
     """体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)
     ——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。
     ⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守
-    notebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。"""
+    notebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。
+    ⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发
+    排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。"""
+    unique_ids = list(dict.fromkeys(payload.source_ids))
+    if len(unique_ids) > _REPARSE_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many sources to reparse at once (max {_REPARSE_MAX})",
+        )
     repo = source_repository()
     scheduled: List[str] = []
-    for source_id in payload.source_ids:
+    for source_id in unique_ids:
         try:
             if repo.get_source(source_id).notebook_id != notebook_id:
                 continue

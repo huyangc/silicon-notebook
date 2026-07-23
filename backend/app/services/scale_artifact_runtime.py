@@ -404,7 +404,19 @@ class ScaleArtifactRuntime:
                 else "unindexed"
             )
         else:
-            manifest = self.artifacts.read_manifest(out_dir)
+            try:
+                manifest = self.artifacts.read_manifest(out_dir)
+            except Exception:  # noqa: BLE001 — 损坏 manifest:read_manifest 刻意 raise,这里兜住
+                manifest = None
+            if manifest is None:
+                # manifest 文件在、却读不出来(损坏)→ 索引不可用、须重建。**不把异常抛出
+                # status()**:否则前端 /index-status 拿不到、「索引与构建」块卡在「加载中」,而
+                # H8 重建 CTA 嵌在该块里就够不着——恰好在损坏(最需要重建)时修不了(codex P1)。
+                # H8 由 /checkup 独立报「已损坏」;这里只保证状态可达、重建动作可发起
+                # (承 P0:损坏返结构化结果、绝不 raise 进状态/热路径)。
+                result["state"] = "stale"
+                result.update({"stale": True, "stale_reason": "corrupt", "last_built_at": ""})
+                return result
             version_stale = manifest.get("version") != self.version(notebook_id)
             delta_over = (
                 delta["delta_chunks"] > self.settings.index_stale_delta_threshold

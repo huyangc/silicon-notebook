@@ -86,6 +86,36 @@ def test_reparse_schedules_only_in_notebook_sources(tmp_path, monkeypatch):
     assert getattr(fn, "__name__", "") == "process_source"
 
 
+def test_reparse_dedupes_and_bounds(tmp_path, monkeypatch):
+    """去重 + 限量(codex):重复 id 只排一次;超上限直接 400,一个都不排。"""
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "e00300305")
+    nb = _notebook(client, headers, "dedup")
+
+    from app.api.deps import repository
+    from app.api import source_routes
+
+    _seed_source(repository(), nb, "src-dup")
+
+    calls = _spy_submit_job(monkeypatch)
+    dup = client.post(
+        f"/api/notebooks/{nb}/sources/reparse",
+        headers=headers,
+        json={"source_ids": ["src-dup", "src-dup", "src-dup"]},
+    )
+    assert dup.status_code == 200, dup.text
+    assert dup.json()["scheduled"] == ["src-dup"]  # 去重:只排一次
+    assert len(calls) == 1
+
+    over = client.post(
+        f"/api/notebooks/{nb}/sources/reparse",
+        headers=headers,
+        json={"source_ids": [f"s{i}" for i in range(source_routes._REPARSE_MAX + 1)]},
+    )
+    assert over.status_code == 400  # 超上限拒绝
+    assert len(calls) == 1  # 一个都没多排
+
+
 def test_backfill_vectors_accepts_and_schedules(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     headers, _ = _register(client, "b00300302")

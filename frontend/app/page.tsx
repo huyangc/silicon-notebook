@@ -1176,11 +1176,17 @@ export default function Home() {
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, trackedKgJobId, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
-  // 切库即清空体检结果(与铃铛聚合提醒):体检是 per-notebook 的,旧库的结论不能
-  // 跨库显示。重开看板会重新拉取当前库的体检。
+  // 切库即清空旧库体检结果(per-notebook,旧库结论不能跨库显示)+ 对新库**立即拉一次**
+  // 体检——不等看板打开(codex P2:否则铃铛在用户打开看板前无从提醒,违背主动提醒初衷)。
+  // best-effort、只读、无模型;仅当仍是当前库时落状态。
   useEffect(() => {
     setCheckup(null);
     setCheckupRepairPollUntil(0);
+    const nb = currentNotebookId;
+    if (!nb) return;
+    void fetchCheckup(nb).then((c) => {
+      if (activeNotebookIdRef.current === nb) setCheckup(c);
+    }).catch(() => {});
   }, [currentNotebookId]);
   // 体检修复触发后的有界轮询:reparse/backfill(乃至 H6/H7/H8 的既有构建入口)都是
   // 后台 job,点完不会立即反映到 count。看板开着且 checkupRepairPollUntil 未到期时,
