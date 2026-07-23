@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1639,6 +1639,21 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_knowhow_milestones_table
                   ON knowhow_milestones(table_id, seq DESC);
                 """
+            )
+
+    def _migration_27(self) -> None:
+        """给 sources 补 chunked_at（本代 elements 已成功走完分块的时刻；NULL=未成功
+        分块）。存量回填见 spec E 节：凡老代码里跑到过分块步的源一律置 updated_at,
+        否则合法的纯标题/短文 md 会被 H3 集体误报缺分块。
+
+        撞号顺延:P1.5 原为 _migration_26,但 #327(knowhow 表版本管理)与 #328 先合入、
+        已占 _migration_26/SCHEMA 26,本迁移接在其后为 _migration_27、SCHEMA 27。"""
+        with self._connect() as db:
+            self.add_column_if_missing(db, "sources", "chunked_at", "TEXT")
+            db.execute(
+                "UPDATE sources SET chunked_at = updated_at "
+                "WHERE chunked_at IS NULL AND parse_status IN "
+                "('parsed','extracting','extracted')"
             )
 
     def _recover_interrupted_jobs(self) -> None:

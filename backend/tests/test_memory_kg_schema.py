@@ -50,7 +50,7 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_26():
+def test_schema_version_is_27():
     # paper-metadata Task 1's _migration_17 (source_paper_meta/source_authors
     # tables) bumped v16 → v17; knowhow-tables PR-2+3 Task 1's _migration_18
     # (knowhow_cell_code table + role vocabulary remap) bumped v17 → v18;
@@ -62,9 +62,11 @@ def test_schema_version_is_26():
     # service status persistence bumped v22 → v23; write-lock slimming
     # improvement point 2's kg_canonical_scratch table bumped v23 → v24;
     # system-owned model services and the irreversible credential/status scrub
-    # bumped v24 → v25; knowhow table version control's _migration_26
-    # (knowhow_changes/knowhow_milestones tables) bumped v25 → v26.
-    assert sr.SCHEMA_VERSION == 26
+    # bumped v24 → v25 (#328); knowhow table version control's _migration_26
+    # (knowhow_changes/knowhow_milestones tables) bumped v25 → v26 (#327);
+    # source-completion-marker P1.5's _migration_27 (sources.chunked_at column)
+    # bumped v26 → v27.
+    assert sr.SCHEMA_VERSION == 27
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

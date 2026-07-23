@@ -937,6 +937,7 @@
     ],
     "sources": [
       {
+        "chunked_at": "<timestamp>",
         "created_at": "<timestamp>",
         "doc_type": "textbook",
         "error_message": "",
@@ -1820,7 +1821,7 @@
       },
       {
         "name": "sources",
-        "sql_sha256": "3b8f75cf9e142ccdd166aceb99c71b99f8ec581434256352df4a96190a5aa628",
+        "sql_sha256": "e3253ece4636a176c066004397dd968ce1aff7b2939a8ccd552b34f5e15c590f",
         "type": "table"
       },
       {
@@ -1859,6 +1860,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 26
+    "user_version": 27
   }
 }
