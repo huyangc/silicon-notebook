@@ -38,6 +38,7 @@
 
 - **效率是一等约束**：新增 LLM / embedding / DB 调用前先问代价——能否合并、缓存、异步、按需 gate。强一致做成 opt-in，默认走低开销路径。
 - 不引入 Docker 作为一期默认工作流；装新包前先问。
+- **浮动弹窗**：新增的居中浮动弹窗要可拖标题栏移动——复用 `frontend/app/use-floating-window.ts`（`page.tsx` 内联弹窗走 `FloatingModalCard` 包装：只接管卡片、把 `dragHandleProps` 交给标题栏），不要另造一套拖动实现；侧边贴边抽屉、锚定 popover、全屏视图除外，窄屏（<720px）自动停用。真源见 `AGENTS.md` 前端章节。
 - **加了守卫 ≠ 有效**：必须做**变异验证**——把代码改回违规形态，确认它真的报红。只做「删除」变异不够，还要做「移动」变异。变异本身极易打空（替了字面量但代码用的是常量、按行号插入而行号已漂），先 `grep -c` 确认改到了再跑。
 - 收尾提 PR，不直接合 `master`。分支先 rebase 到基分支保持线性，再 push、`gh pr create --base <基分支>`（通常是 `master`，stacked PR 不是，见第三节）。提 PR 与合入都必须经过 codex 评审，见第三节。
 
