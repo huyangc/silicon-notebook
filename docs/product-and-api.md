@@ -303,6 +303,9 @@ Key local beta APIs:
 - `GET /api/notebooks`, `POST /api/notebooks`, `PATCH /api/notebooks/{id}`, `DELETE /api/notebooks/{id}`
 - `GET /api/notebooks/{id}/analytics`
 - `GET /api/notebooks/{id}/analytics/content-overview` — viewer-aware content assets: `memory` (`total`, `confirmed`, `candidate`, up to three recent `id`/`title`/`status`/`updated_at`) and `knowhow` (`table_count`, `row_count`, `projection_pending`, `projection_failed`, `stale_code_count`, up to three recent table summaries)
+- `GET /api/notebooks/{id}/checkup` — read-only pipeline health check (dashboard hot path): aggregates source/index damage-and-pending signals — empty source, missing retrieval segments, missing retrieval vectors, sources pending analysis, stale/corrupt retrieval index — each with a count, a bounded sample, and a suggested repair action; all zero when healthy. Consumed by the dashboard's source-status and index blocks plus the bell; a healthy notebook stays neutral and undisturbed.
+- `POST /api/notebooks/{id}/sources/reparse` — checkup repair: batch re-parse the given sources (empty/missing-segment damage), scheduled through the existing pipeline in the background, filtered to the notebook scope.
+- `POST /api/notebooks/{id}/backfill-vectors` — checkup repair: backfill the notebook's missing retrieval vectors in the background (missing-only, idempotent, embedding-only — never re-parses).
 - `POST /api/notebooks/{id}/sources` — multipart file upload (async parse/extract)
 - `GET /api/sources/{id}`, `DELETE /api/sources/{id}`, `POST /api/sources/{id}/parse`, `GET /api/sources/{id}/elements`
 - `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
