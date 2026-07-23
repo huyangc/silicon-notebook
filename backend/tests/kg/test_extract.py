@@ -1,6 +1,10 @@
 import json
 import pytest
-from app.services.kg.extract import extract_window, _prompt
+from app.services.kg.extract import (
+    extract_window,
+    _prompt,
+    _fragment_grounds_something,
+)
 from app.services.kg.parsing import SourceElementQ
 from app.services.kg.run_control import KgBuildAborted, KgBuildFailure
 
@@ -125,3 +129,59 @@ def test_prompt_forbids_symbol_and_label_concepts():
     assert "Do NOT emit Concepts" in p
     assert "symbol" in p.lower()
     assert "figure" in p.lower()
+
+
+# --- Cache-admission gate runs the REAL grounding logic (Codex round-8 P2-4) ----
+# The gate extract_window closes over its own `elements` and caches a fragment only
+# when that fragment grounds >=1 object THE SAME WAY the window consumes it. This
+# is the structural fix for the round-4..8 whack-a-mole: earlier shape checks kept
+# admitting replies that parsed but grounded to 0 (so re-parse replayed the 0).
+
+def test_cache_gate_grounds_with_real_elements_when_a_node_resolves():
+    # ev=0 binds to element 0; ev=99 falls back to a name-substring hit on element 2
+    # — the exact resolves extract_window performs. A real extraction -> cacheable.
+    assert _fragment_grounds_something(
+        json.dumps({"nodes": [
+            {"type": "Concept", "name": "analog signal", "ev": 0}], "edges": []}),
+        ELEMENTS,
+    ) is True
+    assert _fragment_grounds_something(
+        json.dumps({"nodes": [
+            {"type": "Concept", "name": "Engram", "ev": 99}]}),  # name-substring resolve
+        ELEMENTS,
+    ) is True
+
+
+def test_cache_gate_rejects_present_but_all_ungroundable_nodes():
+    """THE poison this closes: nodes are PRESENT (so not a legit empty window) but
+    NONE grounds against the real window elements -> extract_window drops them all
+    -> 0 objects. Must NOT be cached (else re-parse replays the 0 for the TTL).
+
+    This is the case every prior per-shape tightening missed — it is only visible
+    by running the actual _resolve gate, which needs the window's elements."""
+    # (a) typed node with no name/ev — parses, passes every shape check, drops.
+    assert _fragment_grounds_something(
+        json.dumps({"nodes": [{"type": "Concept"}]}), ELEMENTS
+    ) is False
+    # (b) name + out-of-range ev that ALSO name-substring-misses every element.
+    assert _fragment_grounds_something(
+        json.dumps({"nodes": [
+            {"type": "Concept", "name": "nonexistent-token-zzz", "ev": 999}]}),
+        ELEMENTS,
+    ) is False
+    # (c) empty window is NOT this case — nodes present-but-ungroundable != nodes:[].
+    assert _fragment_grounds_something(
+        json.dumps({"nodes": [], "edges": []}), ELEMENTS
+    ) is True
+
+
+def test_cache_gate_rejects_error_envelopes_even_with_elements():
+    assert _fragment_grounds_something('{"error": "quota"}', ELEMENTS) is False
+    assert _fragment_grounds_something('{"nodes": "invalid"}', ELEMENTS) is False
+    # A groundable node alongside a junk entry still grounds (junk is skipped, as
+    # downstream skips it) -> cacheable, mirroring what the window actually keeps.
+    assert _fragment_grounds_something(
+        json.dumps({"nodes": [
+            {"type": "Concept", "name": "analog signal", "ev": 0}, 5]}),
+        ELEMENTS,
+    ) is True
