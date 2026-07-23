@@ -254,23 +254,30 @@ def reparse_sources(
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
     """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。EMBED 未配则跳过。
 
-    ⚠ **逐源持 P1.5 的分块锁、锁内读→嵌**(codex P1):element/chunk id 在 reparse 时复用,
-    并发补齐若在锁外读到旧代行、embedding 后在替换之后才提交,会给新文本挂上**永久陈旧向量**
-    (后续缺向量检查也发现不了——向量「在」,只是内容旧)。持该源的分块锁 → 与 reparse 的
-    element 换血(process_source 同样持它)互斥;且在锁内才读缺失行,故读到的行在补齐提交前
-    不会被 reparse 换掉——彻底关掉「快照后才开始 reparse」的残留窗口(取代旧的快照-排除法)。
-    best-effort:一源失败不拦其余。"""
+    ⚠ **逐源经 hold_source_chunk_lock 持 P1.5 的分块锁、锁内读→嵌**(codex P1):element/chunk id
+    在 reparse 时复用,并发补齐若在锁外读到旧代行、embedding 后在替换之后才提交,会给新文本挂上
+    **永久陈旧向量**(后续缺向量检查也发现不了——向量「在」,只是内容旧)。守卫在持锁期间同时登记
+    活跃租约,使 process_source 不会在本方仍持锁时把锁 pop 掉(codex 第2轮 P1:否则后续 reparse 另建
+    新锁、互斥失效;backfill-only 源还会锁泄漏)。锁内才读缺失行,故读到的行在补齐提交前不会被
+    reparse 换掉——彻底关掉「快照后才开始 reparse」的残留窗口。best-effort:一源失败不拦其余。
+
+    源发现只用**轻量 DISTINCT source_id 查询**、且只查已配的 workload(codex 第2轮 P1:大库上
+    把每行全文物化进内存仅为收 source_id 会 GB 级/OOM,还会白扫未配的那侧)。"""
     mnt = repo.maintenance
     ingestion = repo._runtime.source_ingestion
     chunk_ok = repo.configured("chunk_embedding")
     elem_ok = repo.configured("source_element_embedding")
     if not (chunk_ok or elem_ok):
         return
-    # 先廉价定位「有缺失向量的源」(锁外读,仅用于挑要处理哪些源;真正补齐在锁内重读)。
-    sources = {r["source_id"] for r in mnt.missing_chunk_embedding_rows(notebook_id)}
-    sources |= {r["source_id"] for r in mnt.missing_element_embedding_rows(notebook_id)}
+    # 廉价定位「有缺失向量的源」:只取 DISTINCT source_id(不物化正文),且只查已配 workload。
+    # 真正补齐在锁内按 only_source_id 重读(读到的才是待嵌的行)。
+    sources: set[str] = set()
+    if chunk_ok:
+        sources |= set(mnt.missing_chunk_vector_source_ids(notebook_id))
+    if elem_ok:
+        sources |= set(mnt.missing_element_vector_source_ids(notebook_id))
     for source_id in sources:
-        with ingestion._source_chunk_lock(source_id):
+        with ingestion.hold_source_chunk_lock(source_id):
             try:
                 if chunk_ok:
                     rows = mnt.missing_chunk_embedding_rows(notebook_id, only_source_id=source_id)

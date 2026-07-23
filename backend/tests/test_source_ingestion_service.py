@@ -446,6 +446,33 @@ def test_concurrent_same_source_reparse_serializes_element_swap_and_chunk_build(
     assert sid not in repo._runtime.source_ingestion._source_chunk_locks
 
 
+def test_backfill_lock_guard_registers_lease_so_lock_survives_concurrent_release(repo):
+    """codex 第2轮 P1:hold_source_chunk_lock(体检 backfill 用)持锁期间**登记活跃租约**,使并发
+    process_source 的 finally(_release_source_lease)不会在本方仍持锁时把锁 pop 掉——否则后续
+    reparse 会另建一把**新锁**、与本方互斥失效,给复用的 element/chunk id 挂上永久陈旧向量;且
+    backfill-only 的源没有租约触发 pop→锁泄漏。本方作为最后持有者退出时连锁带租约一并清除。
+
+    **变异锚点**:把 hold_source_chunk_lock 里登记租约的那句 stamp 去掉(或改回直接
+    `with self._source_chunk_lock(...)`)→ 持锁期租约为 0,下面模拟的并发释放会把锁 pop 掉 →
+    `is held`(锁仍在且是同一把)断言变红。"""
+    si = repo._runtime.source_ingestion
+    sid = "src-backfill-hold"
+    assert sid not in si._active_sources and sid not in si._source_chunk_locks
+    with si.hold_source_chunk_lock(sid):
+        held = si._source_chunk_locks.get(sid)
+        assert held is not None and held.locked()       # 锁在注册表且被本方持有
+        assert si._active_sources.get(sid) == 1          # 持锁期登记了租约
+        # 模拟一个并发 process_source:先 stamp(1→2),干完 finally 减一(2→1)。
+        with si._active_sources_lock:
+            si._active_sources[sid] = si._active_sources.get(sid, 0) + 1
+        si._release_source_lease(sid)
+        assert si._source_chunk_locks.get(sid) is held   # 本方租约还在 → 锁没被 pop(同一把)
+        assert si._source_chunk_locks[sid].locked()      # 仍被本方持有
+    # 退出:本方是最后持有者 → 锁与租约都清除(有界化,不泄漏)。
+    assert sid not in si._active_sources
+    assert sid not in si._source_chunk_locks
+
+
 class _ElementBlockingEmbedder:
     """Blocks ONLY element-embedding worker threads (named 'emb-el*'), so KG
     object embedding inside extraction proceeds while element embedding is

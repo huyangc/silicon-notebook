@@ -478,6 +478,36 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             ]
 
+    def missing_chunk_vector_source_ids(self, notebook_id: str) -> list[str]:
+        """有缺 chunk 向量的 **DISTINCT source_id**(不取正文)——体检 backfill 的轻量源发现
+        (codex 第2轮 P1:大库上别把每行全文物化进内存仅为收 id,会 GB 级/OOM)。判据与
+        missing_chunk_embedding_rows 的 NOT EXISTS 逐字一致,只把投影换成 DISTINCT source_id。"""
+        with self._runtime.database.connect() as db:
+            return [
+                r["source_id"]
+                for r in db.execute(
+                    "SELECT DISTINCT c.source_id FROM chunks c WHERE c.notebook_id=? "
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+
+    def missing_element_vector_source_ids(self, notebook_id: str) -> list[str]:
+        """有缺 element 向量(且文本非空白)的 **DISTINCT source_id**——体检 backfill 的轻量源发现。
+        判据(TRIM 非空白 + NOT EXISTS)与 missing_element_embedding_rows 逐字一致,只投影 source_id,
+        不物化正文(codex 第2轮 P1)。"""
+        with self._runtime.database.connect() as db:
+            return [
+                r["source_id"]
+                for r in db.execute(
+                    "SELECT DISTINCT e.source_id FROM source_elements e "
+                    "JOIN sources s ON s.id = e.source_id "
+                    "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                    "AND NOT EXISTS (SELECT 1 FROM element_embeddings v WHERE v.element_id = e.id)",
+                    (notebook_id, PY_WHITESPACE),
+                ).fetchall()
+            ]
+
     def count_missing_element_vectors(
         self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
     ) -> int:
