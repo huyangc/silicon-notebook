@@ -628,11 +628,10 @@ def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeyp
         assert label in labels, (label, labels)
         return labels.index(label)
 
-    # Order: parsing → parse → parsed → extracting (parsed→extracting ownership
-    # guard) → embed start (background) → extract → extracted → embed joined →
-    # pipeline done last. Round-7 P2-1: the guard's status:extracting now precedes
-    # embed:start — the background embed thread is spawned only AFTER this pipeline
-    # wins ownership, so a yielded pipeline never races the reparse's clear.
+    # Order: parsing → parse → parsed → extracting → embed start (background) →
+    # extract → extracted → embed joined → pipeline done last. The parsed→extracting
+    # status flip is emitted before the background embed thread is spawned, so
+    # status:extracting precedes embed:start.
     assert index("status:parsing") < index("pipeline:parse:start")
     assert index("pipeline:parse:start") < index("pipeline:parse:done")
     assert index("pipeline:parse:done") < index("status:parsed")

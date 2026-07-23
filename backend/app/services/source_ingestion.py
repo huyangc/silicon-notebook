@@ -44,7 +44,7 @@ from app.services.paper_meta import (
     paper_meta_prompt,
     verify_paper_meta,
 )
-from app.services.parsers import mineru_content_list_to_elements, parser_class
+from app.services.parsers import mineru_content_list_to_elements
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
@@ -61,18 +61,6 @@ RETYPE_REEXTRACT_FAILED_MESSAGE = (
 #: → 补跑一次）；上限只为挡住病态循环——有人不停改类型时，这条源不能永远占着 KG
 #: job 池的一个槽位。
 _DOC_TYPE_RECONCILE_MAX_ROUNDS = 3
-
-#: 「在飞行中换了后缀（解析器）」跑完收口时最多连锁重解析几次。正常路径是 1 次
-#: （在飞改一次后缀 → 跑完补一次整条重解析）；上限只为挡病态循环——有人在每次
-#: 重解析的窗口里又换一次后缀时，这条源不能永远占着流水线自我重跑（且同步递归的
-#: process_source 栈深也不能无界增长）。同构于 _DOC_TYPE_RECONCILE_MAX_ROUNDS。
-_SUFFIX_RECONCILE_MAX_ROUNDS = 3
-
-#: 收口 repoint 落库那步的 CAS 最多重试几次（round-7 P2-2）。认领后重读的 file_name 与
-#: 条件 UPDATE 之间那道 sliver 里若有并发在飞改名，CAS 落空 → 重读最新名再试。正常路径
-#: 是 1 次（无并发即命中）；上限只挡病态改名循环（每次 CAS 前都恰好又改一次名），耗尽后
-#: 交由重跑那条流水线自己的 _reconcile（外层 _SUFFIX_RECONCILE_MAX_ROUNDS）继续收口。
-_SUFFIX_REPOINT_MAX_TRIES = 5
 
 
 @dataclass(frozen=True)
@@ -427,8 +415,6 @@ class SourceIngestionService:
         *,
         doc_type: str = "",
         doc_type_explicit: bool = False,
-        file_name: str = "",
-        content: "bytes | None" = None,
     ) -> UploadedSourceSummary:
         """同 notebook 内已有相同内容的源 → 复用那一行，绝不新建第二条。
 
@@ -471,32 +457,9 @@ class SourceIngestionService:
         另起一条任务——KG job 池不按 source 串行，两条任务并发抽同一条源会互相
         清掉对方的 KG 产物（见 _extract_reconciling_doc_type）。
 
-        ``file_name``（本次上传的文件名，含后缀）是复用路径上第三件不能撒手的事，
-        与 doc_type 同构但更狠：后缀决定**解析器**（parse_source_file 按 file_name
-        后缀分派——.csv 逐行、.md 结构块、.docx/.pdf 各不同），所以同一份字节先传
-        .csv 再传 .md，既有行的 elements 其实来自错的解析器。doc_type 只喂抽取、
-        重抽即可；解析器决定的是 parse 本身，必须**整条流水线重跑**（像失败源那样）。
-        判据是 parser_class（后缀→解析器类别，与 parse_source_file 同一真源），
-        .md/.markdown 同类、未知后缀都归 'text'，所以这些互相之间不算变化。
-
-        **已定型/搁浅**的行（extracted/failed，以及无 worker 在跑的 idle 'parsed'——KG
-        取消/失败、启动恢复把 'extracting' 退回 'parsed'）当场重跑：原子认领
-        claim_reparse_if_settled 赢家才 _repoint_reused_file（重写落盘文件）+ 调度。
-        **真正在飞**的行（queued/parsing/extracting，或正被某条流水线拥有的 'parsed'——
-        认领落空即证明有拥有者）不能当场重排——那条正在跑的流水线正按 file_path 读盘上
-        文件解析，重写文件会破坏在跑的 parse，另起第二条流水线又是同一行两条抽取互清产物。
-        这类行只把用户意图（新 file_name/解析器）持久化到行上、**绝不动盘上文件**，由那条
-        流水线跑完时在 process_source 的 _reconcile_pending_suffix 收口：一旦定型，行上
-        file_name 的 parser_class 与本次实际用的 parser 不一致就原子认领 + repoint + 整条
-        重跑一次（同构于 doc_type 在飞收口，但后缀更重、是整条重解析而非只重抽）。
-        ⚠ 'parsed' 既可能 idle（认领赢→当场重跑）也可能在飞（认领输→持久化意图交拥有者
-        收口），二者由 claim_reparse_if_settled 与 process_source 的 claim_extracting_if_parsed
-        原子二选一区分（round-7 P2-1）；此前 idle 'parsed' 被当在飞只持久化不收口、无人
-        回访 → 后缀纠正永久悬置。
-        ``content`` 供已定型路径重写落盘文件用（内容与既有指纹一致、字节不变，只是换个
-        带正确后缀的名字，并清掉旧后缀的孤儿文件）；缺省时退化为只改
-        file_name/source_type。在飞收口路径没有 content 入参，从旧落盘文件读回字节
-        （见 _reconcile_pending_suffix）。
+        换后缀（解析器）**不再**触发重解析：同一份内容以不同后缀重传（如先 .csv
+        后 .md）复用既有源、保留原解析（原 file_name/file_path/elements 不变），不
+        重跑整条流水线。要换解析器请删除该源再重传。
         """
         summary = self.sources.get_source(source_id)
         incoming_doc_type = self.normalize_doc_type(doc_type or "")
@@ -510,48 +473,7 @@ class SourceIngestionService:
         if retyped:
             self.sources.set_doc_type(source_id, incoming_doc_type)
 
-        # 后缀（→解析器）变化：内容相同 ≠ 意图相同（同构于 doc_type）。判据是
-        # parser_class（后缀→解析器类别，与 parse_source_file 同一真源）。见方法 docstring。
-        parser_changed = (
-            bool(file_name)
-            and parser_class(file_name) != parser_class(summary.file_name or "")
-        )
-        if parser_changed:
-            # 后缀（解析器）变了：内容相同 ≠ 意图相同，必须整条流水线重跑（解析产物来自
-            # 错的解析器）。已定型（failed/extracted）**或搁浅的 idle 'parsed'**（KG
-            # 取消/失败、启动恢复把 'extracting' 退回 'parsed' 且无 worker 在跑）都能当场
-            # 认领重跑；真正在飞（queued/parsing/extracting，或正被某条流水线拥有的 'parsed'）
-            # 只持久化意图、由那条流水线收口。
-            # ⚠ 认领必须原子，且**赢了才 repoint**：两个并发重传同一 settled/idle 源、后缀
-            # 不同，都会在任一方写 'queued' 之前读到旧状态。若各自无条件 _repoint_reused_file
-            # （重写盘上文件）+ set 'queued' + 调度，就给同一行起两条流水线（互清 elements/KG），
-            # 而且同一个盘上文件被重写两次。claim_reparse_if_settled 是「WHERE parse_status
-            # IN ('failed','extracted','parsed')」的守卫 UPDATE，进程全局写锁让并发者恰有
-            # 一个 rowcount==1：抢到（翻出→'queued'，兼作「已入队」标记与 error_message 清理）
-            # → 唯一赢家，**赢了再**重写文件、发状态、调度。
-            claimable = summary.parse_status in ("failed", "extracted", "parsed")
-            if claimable and self.sources.claim_reparse_if_settled(source_id):
-                self._repoint_reused_file(source_id, summary, file_name, content)
-                self._emit_status(source_id, "queued", "")
-                if scheduler is not None:
-                    scheduler(source_id)
-                else:
-                    self.process_source(source_id, hooks)
-            else:
-                # 行还**在飞行中**（queued/parsing/extracting），或本是 'parsed'/settled 但
-                # 认领落空——被某条流水线的 parsed→'extracting' 守卫、或另一次并发 reparse 抢先。
-                # 那个拥有者正按 file_path 读盘上文件（或即将整条重跑），绝不能在这里 repoint
-                # （重写那个文件会破坏在跑的 parse；另起第二条流水线又互清产物）。只把用户意图
-                # （新 file_name/解析器）持久化到行上、**不动盘上文件**（rename_source_file 不带
-                # file_path），也不调度。拥有者跑完时由 _reconcile_pending_suffix 收口：一旦定型，
-                # 行上 file_name 的 parser_class 与本次实际用的 parser 不一致就重解析一次。此前
-                # idle 'parsed' 走这条只持久化不收口 → 无人收口、永久悬置（round-7 P2-1 修）。
-                self.sources.rename_source_file(
-                    source_id,
-                    file_name=file_name,
-                    source_type=self.source_type_from_name(file_name),
-                )
-        elif summary.parse_status == "failed":
+        if summary.parse_status == "failed":
             # 失败源重试：解析产物本来就不可信（失败），重跑整条流水线。
             # ⚠ 认领必须原子：两个并发上传同一失败源都在任一方写 'queued' 之前读到
             # summary.parse_status=='failed'，若都无条件 set 'queued'+调度，就会给同一行
@@ -576,12 +498,10 @@ class SourceIngestionService:
             # UPDATE 原子表决：抢到（本就已定型）→ 本次拿到重抽权、翻 'extracting'；
             # 没抢到（还在 queued/parsing/extracting）→ 不调度，交给那条在跑的流水线
             # 的终态 doc_type 收口（mark_extracted_if_doc_type）按新类型补跑。
-            # ⚠ round-7 P2-1 刻意**不**把 'parsed' 纳入这条守卫（与 suffix reparse 不同）：
-            # 重抽走 _reextract_retyped（只重抽、不 parse/embed），对 idle 'parsed'（可能
-            # 由启动恢复而来、embedding 陈旧/缺失）会落个 extracted-but-unembedded 的源；
-            # 且它与 process_source 的 parsed→extracting 守卫争同一行——重抽抢到会让
-            # pipeline 让出而没人补 embed。idle 'parsed'+纯 retype 不是回归（doc_type 仍
-            # 落库，将来任何整条重跑都会用上），故留作已知边界，不在此引入新竞态。
+            # ⚠ 刻意**不**把 'parsed' 纳入这条守卫：重抽走 _reextract_retyped（只重抽、
+            # 不 parse/embed），对 idle 'parsed'（可能由启动恢复而来、embedding 陈旧/缺失）
+            # 会落个 extracted-but-unembedded 的源。idle 'parsed'+纯 retype 不是回归
+            # （doc_type 仍落库，将来任何整条重跑都会用上），故留作已知边界。
             if self.sources.claim_reextract_if_extracted(source_id):
                 self._emit_status(source_id, "extracting", "")
                 if scheduler is not None:
@@ -594,85 +514,12 @@ class SourceIngestionService:
                     )
                 else:
                     self._reextract_retyped(source_id, summary.notebook_id, hooks)
-        if retyped or parser_changed or summary.parse_status == "failed":
-            # parser_changed 涵盖已定型 reparse（认领赢/输都可能已翻动行）与在飞持久化
-            # （file_name 已改）两种情形——都要重读，返回值才如实反映现状。
+        if retyped or summary.parse_status == "failed":
+            # 失败重试认领会翻动行；重读让返回值如实反映现状。
             summary = self.sources.get_source(source_id)
         return UploadedSourceSummary.model_validate(
             {**summary.model_dump(), "reused": True}
         )
-
-    def _repoint_reused_file(
-        self, source_id: str, summary: SourceDetail, file_name: str,
-        content: "bytes | None", *, expected_file_name: "str | None" = None,
-    ) -> bool:
-        """后缀（解析器）变了的复用行：把落盘文件按新名重写，并同步更新行的
-        file_name/source_type/file_path，好让紧接着的整条流水线重跑用上新解析器。
-        返回 repoint 是否落地。
-
-        内容与既有指纹一致（这正是复用的前提），所以文件字节不变，只是换个带正确
-        后缀的名字——旧后缀的落盘文件随即成孤儿，清掉它（file_path 的后缀被
-        read_source_text 用来决定「读原文还是从 elements 重建」，与 file_name 同步
-        才不留脏状态）。``content`` 缺省时（防御性；仅上传路径会带内容）退化为只改
-        file_name/source_type、保留旧 file_path——重跑仍按 file_name 选对解析器、
-        读旧字节（内容相同），只是原文窗口读退化为 element 重建。
-
-        两个调用点：
-        - reuse_uploaded_source 的 settled/idle reparse 赢家传 ``expected_file_name``
-          =None：它已凭 claim_reparse_if_settled 拥有这一行，rename 无条件、必落地
-          （返回 True），行为与本轮之前逐字不变（先写盘、再改行）。
-        - _reconcile_pending_suffix 传 ``expected_file_name``=它刚重读到的 file_name，
-          让落库那步变**条件 UPDATE**（round-7 P2-2）：认领与重读之间那道 sliver 里若有
-          并发在飞改名，绝不能用陈旧名盖掉它。此路径**先做条件 UPDATE 再落盘**——路径由
-          planned_upload_path 无 I/O 算出，CAS 落空（返回 False）时盘上文件根本没写、不留
-          孤儿，调用方重读最新名再试。"""
-        new_source_type = self.source_type_from_name(file_name)
-        if content is None:
-            if expected_file_name is None:
-                self.sources.rename_source_file(
-                    source_id, file_name=file_name, source_type=new_source_type
-                )
-                return True
-            return self.sources.rename_source_file_if_name(
-                source_id, expected_file_name,
-                file_name=file_name, source_type=new_source_type,
-            )
-        old_path = summary.file_path or ""
-        if expected_file_name is None:
-            # 无条件路径（reparse 赢家已独占该行）：先写盘、再改行——与本轮之前一致。
-            new_path = str(
-                self.source_files.write_upload(
-                    summary.notebook_id, source_id, file_name, content
-                )
-            )
-            self.sources.rename_source_file(
-                source_id,
-                file_name=file_name,
-                source_type=new_source_type,
-                file_path=new_path,
-            )
-        else:
-            # CAS-first：目标路径无 I/O 算出，条件 UPDATE 落地后才把盘上文件按新名重写——
-            # CAS 落空则一个字节都不写（不留孤儿），交调用方重读最新名重试。
-            new_path = str(
-                self.source_files.planned_upload_path(
-                    summary.notebook_id, source_id, file_name
-                )
-            )
-            if not self.sources.rename_source_file_if_name(
-                source_id, expected_file_name,
-                file_name=file_name, source_type=new_source_type,
-                file_path=new_path,
-            ):
-                return False
-            self.source_files.write_upload(
-                summary.notebook_id, source_id, file_name, content
-            )
-        if old_path and old_path != new_path:
-            # 旧后缀的文件成了孤儿。delete 仅在目录空时才连删目录，新文件同目录、
-            # 目录非空，不会误删。
-            self.source_files.delete(old_path)
-        return True
 
     def _reextract_retyped(
         self, source_id: str, notebook_id: str, hooks: SourcePipelineHooks
@@ -802,9 +649,8 @@ class SourceIngestionService:
             digest = hashlib.sha256(file.content).hexdigest()
             # 同 notebook 内相同内容复用既有源，与 batch_ingest 的 already_ingested
             # 行为一致（此前 UI 路径会建出重复源）。跨 notebook 刻意不去重。
-            # doc_type 与 file_name 都必须一起递进去：内容判重不代表用户这次的类型
-            # 选择、乃至用的解析器（由后缀决定）也该丢（见 reuse_uploaded_source）。
-            # content 递进去，供后缀（解析器）变化时按新名重写落盘文件。
+            # doc_type 一并递进去：内容判重不代表用户这次的类型选择也该丢
+            # （见 reuse_uploaded_source）。
             #
             # 快路径：常见的重传命中既有行 → 直接复用，不落盘、不开写事务。
             existing_id = self.sources.source_id_by_hash(notebook_id, digest)
@@ -814,8 +660,6 @@ class SourceIngestionService:
                         existing_id, scheduler, hooks,
                         doc_type=file.doc_type,
                         doc_type_explicit=file.doc_type_explicit,
-                        file_name=file_name,
-                        content=file.content,
                     )
                 )
                 continue
@@ -851,8 +695,6 @@ class SourceIngestionService:
                         reused_id, scheduler, hooks,
                         doc_type=file.doc_type,
                         doc_type_explicit=file.doc_type_explicit,
-                        file_name=file_name,
-                        content=file.content,
                     )
                 )
                 continue
@@ -928,7 +770,7 @@ class SourceIngestionService:
                 pass
 
     def process_source(
-        self, source_id: str, hooks: SourcePipelineHooks, *, _reparse_round: int = 0
+        self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
         """Run the full parse -> embed -> extract pipeline with a status machine.
 
@@ -937,12 +779,6 @@ class SourceIngestionService:
         Each stage is timed and logged to the `events` channel so a "stuck"
         upload can be traced to the exact step (parse / embed / extract) and how
         long it has been running.
-
-        ``_reparse_round`` is internal bookkeeping for the in-flight suffix-
-        correction reconcile (_reconcile_pending_suffix): a settled pipeline whose
-        row's file_name now maps to a different parser than the one it just used
-        reparses by re-entering here with an incremented round, bounded by
-        _SUFFIX_RECONCILE_MAX_ROUNDS. Public callers never pass it.
         """
         source = self.sources.get_source(source_id)
         notebook_id = source.notebook_id
@@ -1157,29 +993,14 @@ class SourceIngestionService:
                     "notebook meta augmentation failed for %s", source_id
                 )
 
-            # Guarded parse->extract hand-off (round-7 P2-1). 'parsed' is NOT always
-            # in-flight: a concurrent suffix re-upload can claim THIS 'parsed' row
-            # (claim_reparse_if_settled now admits 'parsed') to own a full rerun.
-            # claim_extracting_if_parsed flips parsed->'extracting' only while the row
-            # is still 'parsed': rowcount 1 -> this pipeline keeps ownership; rowcount
-            # 0 -> a reparse already flipped it to 'queued', so gracefully YIELD —
-            # write no terminal state, clear nothing; the reparse's fresh pipeline
-            # reruns the whole thing (parse included). Doing this guard BEFORE the
-            # background embed thread starts is what keeps the yield clean: a lost
-            # claim never spawns an embed that would race the reparse's
-            # clear_source_extraction_state (the settling race the round-7 review
-            # flagged). When we WIN, any pending reparse lost its own claim and merely
-            # persisted intent, so its rerun is not scheduled until THIS pipeline
-            # settles and reconciles — the two embed passes never overlap.
-            if not self.sources.claim_extracting_if_parsed(source_id):
-                return self.sources.get_source(source_id)
-            self._emit_status(source_id, "extracting", "")
+            # parse -> extract hand-off: flip 'parsed' -> 'extracting'. Emitted before
+            # the background embed thread starts, so the event order stays
+            # status:extracting -> embed:start.
+            self.set_source_status(source_id, "extracting")
 
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks
-            # the KG result. Started only AFTER the ownership guard above, so a
-            # yielded pipeline never spawns it. 'extracted'/green below is gated on
-            # EXTRACTION only.
+            # the KG result. 'extracted'/green below is gated on EXTRACTION only.
             embed_started = time.perf_counter()
             stage("embed", "start", embed_started)
 
@@ -1204,7 +1025,7 @@ class SourceIngestionService:
             embed_thread.start()
 
             if hooks.should_extract_kg(notebook_id):
-                # Ownership already flipped to 'extracting' by the guard above.
+                # Status already flipped to 'extracting' above.
                 t = time.perf_counter()
                 stage("extract", "start", t)
                 # 同一条源第一次上传时也存在「抽取跑到一半用户改类型」的窗口（他嫌慢，
@@ -1267,115 +1088,7 @@ class SourceIngestionService:
         # process_source calls) into a single fold. Never builds a fresh index;
         # helper is fail-safe (never raises).
         hooks.maybe_enqueue_scale_fold(source.notebook_id)
-        # In-flight suffix (parser) correction reconcile (Codex round 5 P2-2): a
-        # re-upload with a different-parser suffix that arrived WHILE this pipeline
-        # was running only persisted its intent onto the row's file_name (it must
-        # not rewrite the file this pipeline was reading). Now that the row has
-        # settled — no pipeline reads its file — reparse if the correction is still
-        # pending. Runs after BOTH the success and failure terminal states.
-        reparsed = self._reconcile_pending_suffix(source_id, source, hooks, _reparse_round)
-        if reparsed is not None:
-            return reparsed
         return self.sources.get_source(source_id)
-
-    def _suffix_correction_pending(
-        self, fresh: SourceDetail, used_source: SourceDetail
-    ) -> bool:
-        """定型后这一行是否还有一个待收口的后缀（解析器）纠正。两道判据取并集——
-        必须同时看 file_name **和** file_path，否则 'queued' 未启动时换后缀会漏掉
-        （round-8 P2-3）：
-
-        (a) 行上当前 file_name 的 parser_class ≠ **本次流水线实际用的 parser**
-            （used_source.file_name，process_source 开头捕获、贯穿解析）。这抓的是
-            「parsing/extracting 在飞时到达的改名」——那时改名落在 process_source 读
-            行（line 883）之后，used 仍是旧后缀，与新 fresh 名不一致即触发。
-
-        (b) 行上当前 file_name 的 parser_class ≠ 行上当前 **file_path** 的后缀
-            （仅对有盘上文件的上传源；URL/Memory 源 file_path 为空、跳过）。这抓的是
-            「'queued' worker 未启动时换后缀」：reuse 的在飞分支只改 file_name 不改
-            file_path，且改名落在 process_source 读行**之前**，于是 used==fresh、(a)
-            看不见；但 file_path 的后缀已陈旧（云端 MinerU 按 Path(file_path).name、
-            raw-text 读按 path 后缀分派 → 按旧类型处理），行内部不自洽。收口按新
-            file_name 重写 file_path、整条重跑即修复。
-
-        正常态永不误报：上传源 file_path 恒与 file_name 同后缀（write_upload 按
-        file_name 落盘、settled reparse 的 repoint 两者一起改），唯一的不一致就是在飞
-        改名只动了 file_name 这一种——正是要收口的。收口 repoint 会把 file_path 改回
-        与 file_name 同后缀，下一轮 (a)(b) 皆一致 → 终止（叠加轮数上限双保险）。"""
-        want = parser_class(fresh.file_name or "")
-        if want != parser_class(used_source.file_name or ""):
-            return True  # (a) 在飞（parsing/extracting）改名，used 是旧后缀
-        fp = fresh.file_path or ""
-        if fp and want != parser_class(fp):
-            return True  # (b) 'queued' 未启动时改名只动 file_name，file_path 后缀陈旧
-        return False
-
-    def _reconcile_pending_suffix(
-        self,
-        source_id: str,
-        used_source: SourceDetail,
-        hooks: SourcePipelineHooks,
-        reparse_round: int,
-    ) -> Optional[SourceSummary]:
-        """完成时收口一次「在飞行中到达的后缀（解析器）纠正」。返回重解析后的终态
-        摘要（触发了重跑）或 None（无待收口的纠正 / 认领落空 / 轮数耗尽）。
-
-        换后缀重传撞上正在跑的流水线时，reuse_uploaded_source 只把新 file_name 记到
-        行上（持久化意图），绝不动这条流水线正按 file_path 读的盘上文件。流水线跑完
-        （已定型、没有任何流水线在读它的文件）后，若还有待收口的后缀纠正
-        （_suffix_correction_pending：file_name 与「实际用的 parser」或「file_path 后缀」
-        任一不一致），说明那次纠正还悬着——现在可以安全地 repoint（重写盘上文件）并
-        整条重跑一次。⚠ 判据必须同时看 file_path 后缀，否则 'queued' worker 未启动时
-        换后缀（reuse 只改 file_name、改名又落在 process_source 读行之前 → used==fresh）
-        会漏收口，行永久停在 file_name/file_path 后缀不一致（round-8 P2-3）。
-
-        原子认领 claim_reparse_if_settled（与 P2-1 settled reparse 同一守卫）防止与
-        并发的 settled 源重传打架：恰有一个把终态翻成 'queued' 并拥有重跑，另一方
-        （无论是这里还是并发上传）认领落空即退让。repoint 的字节从旧落盘文件读回
-        （内容与指纹一致、字节不变）；读不到就退化为只改名（content=None，见
-        _repoint_reused_file），重跑仍按新 file_name 选对解析器。
-
-        轮数上限（_SUFFIX_RECONCILE_MAX_ROUNDS）挡病态循环 + 同步递归栈深：耗尽后
-        保留当前终态 + 告警，不再重跑（同构于 _extract_reconciling_doc_type 的轮数
-        耗尽处理）。无纠正时零额外成本（一次主键读 + parser_class 比对，无模型/网络）。"""
-        fresh = self.sources.get_source(source_id)
-        if not self._suffix_correction_pending(fresh, used_source):
-            return None  # 没有在飞后缀纠正待收口（常路，含所有普通首传/重传）
-        if reparse_round >= _SUFFIX_RECONCILE_MAX_ROUNDS:
-            self.event_log.logger.warning(
-                "suffix kept changing during processing of %s; stopped after %s rounds",
-                source_id, _SUFFIX_RECONCILE_MAX_ROUNDS,
-            )
-            return None
-        if not self.sources.claim_reparse_if_settled(source_id):
-            return None  # 并发的 settled 源重传已认领这次重解析，退让
-        self._emit_status(source_id, "queued", "")
-        # repoint 用旧落盘文件的字节（内容不变），把文件按新名重写、file_path 同步、
-        # 清掉旧后缀孤儿；读不到就退化为只改名（content=None）。此刻行已定型，重写
-        # 这个文件不再破坏任何在跑的 parse（P2-2 的安全约束只针对在飞行中）。
-        content = self.source_files.read_bytes(
-            getattr(used_source, "file_path", "") or ""
-        )
-        # ⚠ file_name 必须**认领之后重读**，且 repoint 落库那步用**条件 UPDATE（CAS）**守卫在
-        # 重读到的名字上。认领把行翻成 'queued'（在飞）后、到 repoint 落库之间仍有一道 sliver，
-        # 并发换后缀重传走在飞分支（此刻行 'queued'）可能又记一个更新的 file_name。若无条件
-        # repoint，会用刚读到的（可能已陈旧的）名重写文件、并把更新的意图盖回旧值；紧接着重跑
-        # 那条流水线捕获被盖回的旧名，其完成 recheck（fresh vs used）随即看到一致 → 更新的纠正
-        # 被静默丢掉（Codex 第 7 轮 P2-2：第 6 轮补了「认领后重读」，仍留这道读→写 sliver）。
-        # CAS 把「读名 → repoint」锁成一步：读到的名仍是当前值才落地（rowcount 1）；被并发改了
-        # （rowcount 0）就重读最新名再试（次数上限，同构外层 reparse_round，挡病态改名循环）。
-        # _repoint_reused_file 走 CAS-first（先条件 UPDATE 再落盘），落空时盘上不留孤儿文件。
-        # 发生在本次 repoint **之后** 的改名仍留在行上、由重跑那条流水线自己的 _reconcile 收口。
-        for _ in range(_SUFFIX_REPOINT_MAX_TRIES):
-            latest = self.sources.get_source(source_id)
-            if self._repoint_reused_file(
-                source_id, used_source, latest.file_name, content,
-                expected_file_name=latest.file_name,
-            ):
-                break
-        return self.process_source(
-            source_id, hooks, _reparse_round=reparse_round + 1
-        )
 
     def parse_source(
         self, source_id: str, hooks: SourcePipelineHooks
