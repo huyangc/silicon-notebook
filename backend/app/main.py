@@ -49,6 +49,7 @@ async def _lifespan(app: FastAPI):
         LifecycleAlreadyActiveError,
         begin_lifecycle,
         close_repository,
+        is_lifecycle_active,
         run_startup,
     )
 
@@ -57,7 +58,12 @@ async def _lifespan(app: FastAPI):
     # unowned server context that outlives the actual repository owner.
     # Tests may mark readiness ready up-front and drive a preconstructed
     # repository; do not reset or replace that fixture-owned lifecycle.
-    if readiness.is_ready():
+    #
+    # Gate on "no active lifecycle" too: while a lifecycle IS owned (e.g. an
+    # overlapping lifespan after the winner flipped readiness ready), fall
+    # through so begin_lifecycle() returns None and we raise below — the
+    # pass-through short-circuit is only for the no-owner, pre-marked-ready case.
+    if readiness.is_ready() and not is_lifecycle_active():
         try:
             yield
         finally:

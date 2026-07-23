@@ -68,6 +68,15 @@ def begin_lifecycle() -> object | None:
         return lease
 
 
+def is_lifecycle_active() -> bool:
+    """Whether a process repository lifecycle is currently owned. Lets the ASGI
+    lifespan tell an *overlapping* entry (a lifecycle is active → must fail before
+    yield) apart from a pre-marked-ready test that owns no lifecycle (may pass
+    through without constructing/clobbering)."""
+    with _cleanup_lock:
+        return _active_lifecycle is not None
+
+
 def _start_lifecycle(lease: object) -> bool:
     with _cleanup_lock:
         state = _active_lifecycle
