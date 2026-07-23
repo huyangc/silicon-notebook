@@ -7,6 +7,7 @@ import {
   fillAutoDetectedTypes,
   markTouched,
   markAllTouched,
+  applyTouchedUpdate,
 } from "./source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
@@ -69,6 +70,46 @@ test("fillAutoDetectedTypes: 检测在飞时用户改回「自动检测」的项
 test("markTouched: 用户改某一项下拉框只置该项 touched；markAllTouched 置全部", () => {
   assert.deepEqual(markTouched([false, false, false], 1), [false, true, false]);
   assert.deepEqual(markAllTouched([false, false]), [true, true]);
+});
+
+// ------- applyTouchedUpdate：同步镜像 ref，检测同 tick resolve 时回填读到最新值
+
+test("applyTouchedUpdate: 同步更新 ref 与 state（函数式与直接传值两种形态）", () => {
+  const ref = { current: [false, false] };
+  const seen = [];
+  const setState = (v) => seen.push(v);
+  // 函数式更新：从 ref.current 的最新值算起。
+  const out = applyTouchedUpdate(ref, setState, (prev) => markTouched(prev, 0));
+  assert.deepEqual(out, [true, false]);
+  assert.deepEqual(ref.current, [true, false], "ref 立刻反映最新值，不等 useEffect");
+  assert.deepEqual(seen.at(-1), [true, false], "state 被推进同一个值");
+  // 直接传数组（重置 / 加文件路径）：ref 同样立刻同步。
+  applyTouchedUpdate(ref, setState, []);
+  assert.deepEqual(ref.current, []);
+  assert.deepEqual(seen.at(-1), []);
+});
+
+test("检测在飞时用户改回自动检测 → 检测同 tick resolve → 回填读最新 touched，不覆盖", () => {
+  // 复现竞态：ref 只靠 useEffect 异步更新时，检测恰在「置 touched」与「useEffect 写 ref」
+  // 之间 resolve，会读到旧 ref(touched=false)、把用户显式选的空自动检测覆盖成检测结果。
+  // 同步入 ref 后，回填读到的是最新 touched=true，跳过该项。
+  const ref = { current: [false, false] };
+  const seen = [];
+  const setState = (v) => seen.push(v);
+
+  // 用户把 file0 改回「自动检测」（值空 + touched），经 handler 同步入 ref。
+  applyTouchedUpdate(ref, setState, (prev) => markTouched(prev, 0));
+
+  // 此刻 detectStagedTypes 异步 resolve（useEffect 尚未提交）。回填读 ref.current 的最新值：
+  const types = fillAutoDetectedTypes(["", ""], ["textbook", "academic_paper"], ref.current);
+  assert.deepEqual(
+    types,
+    ["", "academic_paper"],
+    "file0 的显式自动检测不被检测结果覆盖；file1 未表态照常回填",
+  );
+  // 上传时 file0 发 explicit=1 + 空值（显式重置回自动），不是检测到的 textbook。
+  const fields = uploadDocTypeFields(types, ref.current);
+  assert.deepEqual(fields[0], { docType: "", explicit: "1" });
 });
 
 test("summarizeUpload: 全是新建 → 全部计入新增，文案就是老的那句", () => {

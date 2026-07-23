@@ -45,6 +45,29 @@ export function markTouched(touched: readonly boolean[], index: number): boolean
   return touched.map((t, i) => (i === index ? true : t));
 }
 
+/** 同步更新 touched 的 state **和**它的镜像 ref——一步到位,ref 立刻反映最新值。
+ *
+ *  为什么不能只靠 useEffect：`detectStagedTypes` 是异步的,它 resolve 时用 ref 的最新
+ *  值决定「哪些项还没被用户表态、可以回填」。若 ref 只在 `useEffect(...,[touched])` 里
+ *  更新,那么「用户选了自动检测(置 touched)」与「useEffect 把新 touched 写进 ref」之间
+ *  有一个 React 提交间隙;检测恰好在这个间隙里 resolve,就会读到**旧** ref(touched=false)
+ *  → 把用户显式选的空「自动检测」当没表态、覆盖成检测结果。所以改动 touched 的**每个**
+ *  handler 都调本函数:先算出新值,同步写 ref,再推进 state。useEffect 仍在,作兜底
+ *  (万一有路径没走本函数,提交后它会把 ref 拨回与 state 一致)。
+ *
+ *  `next` 可传新数组,或 `(prev)=>next` 的函数式更新(从 `ref.current` 这个最新值算起——
+ *  因为所有改动都经本函数同步入 ref,ref 就是当前最新 touched)。返回算出的新值。 */
+export function applyTouchedUpdate(
+  ref: { current: boolean[] },
+  setState: (value: boolean[]) => void,
+  next: boolean[] | ((prev: boolean[]) => boolean[]),
+): boolean[] {
+  const value = typeof next === "function" ? next(ref.current) : next;
+  ref.current = value;   // 同步镜像:不等 useEffect,消除检测同 tick resolve 的间隙
+  setState(value);
+  return value;
+}
+
 /** 用户「全部设为…」→ 所有项标记为显式设置。 */
 export function markAllTouched(touched: readonly boolean[]): boolean[] {
   return touched.map(() => true);

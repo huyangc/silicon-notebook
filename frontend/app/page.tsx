@@ -98,7 +98,7 @@ import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
-import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched } from "./source-upload.ts";
+import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -736,6 +736,9 @@ export default function Home() {
   const [stagedDocTypeTouched, setStagedDocTypeTouched] = useState<boolean[]>([]);
   // detectStagedTypes 是异步的：检测在飞时用户改了下拉框，回填必须看**最新**的 touched，
   // 而闭包捕获的 stagedDocTypeTouched 是发起那一刻的旧值。用 ref 镜像最新值，回填时读它。
+  // ref 由改动 touched 的每个 handler 经 applyTouchedUpdate **同步**更新（不等这个
+  // useEffect 提交），否则检测恰在「置 touched」与「useEffect 写 ref」的间隙里 resolve
+  // 就会读到旧 ref、覆盖用户显式选的自动检测。下面的 useEffect 只作兜底（提交后拨齐）。
   const stagedDocTypeTouchedRef = useRef<boolean[]>([]);
   useEffect(() => {
     stagedDocTypeTouchedRef.current = stagedDocTypeTouched;
@@ -2159,7 +2162,7 @@ export default function Home() {
     await openNotebook(notebook.id);
     setStagedFiles([]);
     setStagedDocTypes([]);
-    setStagedDocTypeTouched([]);
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(true);
   }
 
@@ -2170,7 +2173,7 @@ export default function Home() {
     await openNotebook(notebook.id);
     setStagedFiles([]);
     setStagedDocTypes([]);
-    setStagedDocTypeTouched([]);
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(true);
   }
 
@@ -2476,7 +2479,9 @@ export default function Home() {
     }
     setStagedFiles(merged);
     setStagedDocTypes(mergedTypes);
-    setStagedDocTypeTouched(mergedTouched);
+    // 同步入 ref：紧接着的 detectStagedTypes 是异步的，它 resolve 时读 ref 决定回填哪些项；
+    // ref 必须已反映这批新文件的 touched（全 false），不能等 useEffect。
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, mergedTouched);
     setSourceModalOpen(true);
     // 对新增的文本类文件做内容检测，预填类型下拉（异步，不阻塞 UI；用户仍可改）。
     void detectStagedTypes(added, merged);
@@ -2510,18 +2515,19 @@ export default function Home() {
   function setStagedDocType(index: number, value: string) {
     setStagedDocTypes((prev) => prev.map((dt, i) => (i === index ? value : dt)));
     // 用户手动改了这一项 → 标记为显式设置（哪怕选回「自动检测」也是一次显式表态）。
-    setStagedDocTypeTouched((prev) => markTouched(prev, index));
+    // 同步更新 ref（不等 useEffect）：否则检测同 tick resolve 会读到旧 touched、覆盖它。
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, (prev) => markTouched(prev, index));
   }
 
   function setAllStagedDocTypes(value: string) {
     setStagedDocTypes((prev) => prev.map(() => value));
-    setStagedDocTypeTouched((prev) => markAllTouched(prev));
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, (prev) => markAllTouched(prev));
   }
 
   function removeStagedFile(index: number) {
     setStagedFiles((prev) => prev.filter((_, i) => i !== index));
     setStagedDocTypes((prev) => prev.filter((_, i) => i !== index));
-    setStagedDocTypeTouched((prev) => prev.filter((_, i) => i !== index));
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, (prev) => prev.filter((_, i) => i !== index));
   }
 
   async function confirmUpload() {
@@ -2556,7 +2562,7 @@ export default function Home() {
     revalidateAskAvailability();
     setStagedFiles([]);
     setStagedDocTypes([]);
-    setStagedDocTypeTouched([]);
+    applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
     setSourceModalOpen(false);
     setToast(outcome.toast);
   }
@@ -4748,7 +4754,7 @@ export default function Home() {
                 <h2>添加来源</h2>
                 <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
-              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedDocTypeTouched([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
+              <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
             {docCapacity.show && (
               <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
@@ -4846,7 +4852,7 @@ export default function Home() {
                 </div>
                 <div className="tag-row">
                   <button className="new-pill" disabled={docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
-                  <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setStagedDocTypeTouched([]); }}>清空</button>
+                  <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
                 </div>
               </div>
             )}
