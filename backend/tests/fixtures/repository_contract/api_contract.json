@@ -5180,6 +5180,43 @@
           "title": "RejectedUrl",
           "type": "object"
         },
+        "RepairScheduledResult": {
+          "description": "一个后台修复动作的受理回执。``scheduled`` 是实际排入后台的 source_id(reparse 经\nnotebook 作用域过滤后的);notebook 级动作(补向量)用布尔 ``accepted``。",
+          "properties": {
+            "accepted": {
+              "default": false,
+              "title": "Accepted",
+              "type": "boolean"
+            },
+            "scheduled": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Scheduled",
+              "type": "array"
+            }
+          },
+          "title": "RepairScheduledResult",
+          "type": "object"
+        },
+        "ReparseSourcesRequest": {
+          "description": "体检修复(H2/H3):批量重新解析指定的源。source_ids 由前端从体检结果的 sample\n带来;后端按 notebook 作用域过滤后逐个后台重跑 process_source。",
+          "properties": {
+            "source_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Source Ids",
+              "type": "array"
+            }
+          },
+          "required": [
+            "source_ids"
+          ],
+          "title": "ReparseSourcesRequest",
+          "type": "object"
+        },
         "ReportCreate": {
           "properties": {
             "auto_generate": {
@@ -9254,6 +9291,46 @@
             }
           },
           "summary": "Get Notebook Asset File"
+        }
+      },
+      "/api/notebooks/{notebook_id}/backfill-vectors": {
+        "post": {
+          "description": "体检修复(H4 缺 chunk 向量 / H5 缺 element 向量):后台补齐该 notebook 的缺失向量\n(只补缺失、幂等,仅 embedding、不动解析/KG)。用户点触发、非自动(承 efficiency-first:\n凡调 embedding 的修复不自动)。补完后 H4/H5 计数下降,前端重拉 checkup 反映。\n用完整 facade(``repository()``)——backfill 需要 maintenance/configured(BatchIngestRepository)。",
+          "operationId": "backfill_vectors_api_notebooks__notebook_id__backfill_vectors_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/RepairScheduledResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Backfill Vectors"
         }
       },
       "/api/notebooks/{notebook_id}/bases": {
@@ -13478,6 +13555,56 @@
             }
           },
           "summary": "Import Sources"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/reparse": {
+        "post": {
+          "description": "体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)\n——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。\n⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守\nnotebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。",
+          "operationId": "reparse_sources_api_notebooks__notebook_id__sources_reparse_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReparseSourcesRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/RepairScheduledResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reparse Sources"
         }
       },
       "/api/notebooks/{notebook_id}/sources/url": {

@@ -5918,6 +5918,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.reparse_sources",
+        "target": "get_source"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>._source_evidence",
         "target": "get_source"
@@ -7030,6 +7036,12 @@
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>.add_url_sources.<lambda>",
+        "target": "process_source"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.reparse_sources",
         "target": "process_source"
       },
       {
