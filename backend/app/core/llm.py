@@ -273,7 +273,20 @@ class OpenAICompatibleClient:
                     max_tokens=effective_max_tokens,
                 )
                 cached = cache.get(ckey)
-                if cached is not None:
+                # A hit is only served if it still satisfies the caller's
+                # response_validator — the SAME fourth-door gate the write path
+                # applies below. A value written WITHOUT a validator (or before a
+                # validator was tightened) can otherwise be handed verbatim to a
+                # later validator-bearing caller, propagating a bad extraction for
+                # the whole TTL. A rejected hit is treated as a MISS: fall through
+                # to the real call, whose fresh response the write gate re-judges
+                # (overwrite or skip). _response_validator_allows keeps the None
+                # case open (existing callers hit exactly as before) and a raising
+                # validator conservatively rejects — a cache fault must never break
+                # the call (still inside the bypass_cache-guarded try).
+                if cached is not None and _response_validator_allows(
+                    response_validator, cached
+                ):
                     return cached
             except Exception:
                 cache, ckey = None, ""
