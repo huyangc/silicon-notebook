@@ -604,6 +604,38 @@ class SourceStore:
             )
         return cursor.rowcount == 1
 
+    def claim_reparse_if_settled(self, source_id: str) -> bool:
+        """Atomically flip a SETTLED source (failed OR extracted) to 'queued' to
+        claim a suffix (parser) re-parse, returning whether THIS caller won.
+
+        Backs reuse_uploaded_source's suffix-change re-parse (the third settled-row
+        claim path, a sibling of claim_failed_for_retry / claim_reextract_if_
+        extracted). A re-upload whose file_name maps to a DIFFERENT parser than the
+        stored row (e.g. the same bytes first sent as .csv, corrected to .md) must
+        re-run the WHOLE pipeline — the suffix decides the parser, so the stored
+        elements came from the wrong one. Two concurrent such re-uploads both read
+        the settled parse_status before either writes, and would BOTH _repoint_
+        reused_file (rewrite the on-disk file) and schedule — two pipelines on one
+        row clearing each other's elements/KG, and the file rewritten twice. The
+        guarded UPDATE closes it: one conditional statement is atomic under the
+        process-global write lock, so of two concurrent callers exactly one sees
+        rowcount==1 (it flipped settled->'queued' and is the ONLY one that then
+        repoints + schedules); the loser's WHERE no longer matches -> rowcount 0 ->
+        False (it repoints nothing and reschedules nothing; the winner owns the
+        rerun). The guard IN ('failed','extracted') mirrors the reparse branch's
+        parse_status condition exactly (in-flight rows are handled elsewhere: the
+        running pipeline owns their file). Clears error_message like
+        set_status('queued'). Single WHERE-guarded UPDATE; no BEGIN IMMEDIATE
+        needed."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE sources SET parse_status='queued', status='queued', "
+                "error_message='', updated_at=? "
+                "WHERE id=? AND parse_status IN ('failed','extracted')",
+                (self.now(), source_id),
+            )
+        return cursor.rowcount == 1
+
     def mark_extracted_if_doc_type(
         self, source_id: str, expected_doc_type: str, *, error_message: str = ""
     ) -> bool:
