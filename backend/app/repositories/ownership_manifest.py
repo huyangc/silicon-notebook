@@ -1831,6 +1831,7 @@ SURFACE_MEMBERS = (
         owner='NotebookCatalogService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='get_notebook'),

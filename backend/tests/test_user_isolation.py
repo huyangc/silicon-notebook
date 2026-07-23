@@ -1,6 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.ask_testkit import seed_ask_evidence
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
@@ -74,6 +76,8 @@ def test_global_config_write_admin_only(client):
 def test_streaming_ask_attributes_conversation_to_caller(client):
     a = _auth(client, "z00123456")
     nb = client.post("/api/notebooks", json={"name": "A"}, headers=a).json()["id"]
+    from app.api import deps
+    seed_ask_evidence(deps.repository(), nb)  # PR#334:空库 ask 会 409,先塞一条证据
     # stream an ask as user A; consume the response
     r = client.post(f"/api/notebooks/{nb}/ask/stream",
                     json={"question": "hello"}, headers=a)

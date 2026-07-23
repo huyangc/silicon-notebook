@@ -9,6 +9,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest, AskResponse
 from tests.model_testkit import bind_all_embedding_clients
+from tests.ask_testkit import seed_ask_evidence
 
 
 @pytest.fixture
@@ -161,7 +162,9 @@ def test_get_ask_job_endpoint_unknown_job_id_returns_404(tmp_path, monkeypatch):
 
 def test_get_ask_job_endpoint_existing_job_returns_200_with_status(tmp_path, monkeypatch):
     client = _api_client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repository(), nb)  # PR#334:空库 ask 会 409,先塞一条证据
     # chunk 模式走 /ask/stream 同步跑完;首个 NDJSON 事件是 started(带 job_id)——
     # 与 test_ask_jobs.py 的 test_cancel_endpoint_existing_job_returns_200_with_status
     # 同一手法拿到真实、属主的 job_id。
