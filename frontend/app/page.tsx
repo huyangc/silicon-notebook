@@ -372,7 +372,7 @@ function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary
   return GENERIC_PROMPTS;
 }
 
-function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[]): WelcomeCopy {
+function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[], total: number): WelcomeCopy {
   const notebookPurpose = notebook?.purpose?.trim();
   if (sources.length === 0) {
     return {
@@ -384,7 +384,7 @@ function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary
   const topic = sourceTopicLabel(notebook, sources);
   return {
     title: `围绕 ${topic} 提问`,
-    description: notebookPurpose || `已导入 ${sources.length} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
+    description: notebookPurpose || `已导入 ${total} 个来源。可以围绕 ${topic} 的概念、论断、公式和过程提问，回答会优先绑定出处。`,
     prompts: promptChipsFor(notebook, sources),
   };
 }
@@ -1748,7 +1748,7 @@ export default function Home() {
 
   // Example prompts / placeholders adapt to the open notebook's imported sources,
   // so a new notebook never shows demo examples.
-  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources), [currentNotebook, sources]);
+  const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources, sourcesTotal), [currentNotebook, sources, sourcesTotal]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentKgBuildView = kgBuildPresentation(
@@ -4209,7 +4209,7 @@ export default function Home() {
                   onAbort={abortAsk}
                   running={asking}
                 >
-                  <span>{sources.length} 个来源</span>
+                  <span>{sourcesTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
                       <button
