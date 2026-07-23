@@ -605,8 +605,9 @@ class SourceStore:
         return cursor.rowcount == 1
 
     def claim_reparse_if_settled(self, source_id: str) -> bool:
-        """Atomically flip a SETTLED source (failed OR extracted) to 'queued' to
-        claim a suffix (parser) re-parse, returning whether THIS caller won.
+        """Atomically flip a SETTLED-or-idle source (failed / extracted / parsed) to
+        'queued' to claim a suffix (parser) re-parse, returning whether THIS caller
+        won.
 
         Backs reuse_uploaded_source's suffix-change re-parse (the third settled-row
         claim path, a sibling of claim_failed_for_retry / claim_reextract_if_
@@ -622,16 +623,58 @@ class SourceStore:
         rowcount==1 (it flipped settled->'queued' and is the ONLY one that then
         repoints + schedules); the loser's WHERE no longer matches -> rowcount 0 ->
         False (it repoints nothing and reschedules nothing; the winner owns the
-        rerun). The guard IN ('failed','extracted') mirrors the reparse branch's
-        parse_status condition exactly (in-flight rows are handled elsewhere: the
-        running pipeline owns their file). Clears error_message like
+        rerun).
+
+        The guard also admits 'parsed' (round-7 P2-1). 'parsed' is NOT always
+        in-flight: a KG cancel/failure or a startup crash-recovery (which resets
+        'extracting' rows back to 'parsed', see _recover_interrupted_jobs) leaves
+        a row 'parsed' with NO worker running, so a suffix correction on it used to
+        be routed to the in-flight persist-only branch and hang forever (nothing
+        ever reconciled it). Admitting 'parsed' here lets the reparse claim it and
+        rerun. The other reader of the 'parsed' state — a pipeline sitting between
+        its parse and its OWN parsed->'extracting' transition — competes through
+        claim_extracting_if_parsed (also a 'WHERE parse_status=parsed' flip): of the
+        two, exactly one flips the row out of 'parsed'. If the reparse wins, the
+        pipeline's later guard finds not-'parsed' and yields; if the pipeline wins,
+        this claim finds 'extracting' -> rowcount 0 -> the reparse persists intent
+        for the pipeline's completion reconcile instead. Clears error_message like
         set_status('queued'). Single WHERE-guarded UPDATE; no BEGIN IMMEDIATE
         needed."""
         with self.database.write() as db:
             cursor = db.execute(
                 "UPDATE sources SET parse_status='queued', status='queued', "
                 "error_message='', updated_at=? "
-                "WHERE id=? AND parse_status IN ('failed','extracted')",
+                "WHERE id=? AND parse_status IN ('failed','extracted','parsed')",
+                (self.now(), source_id),
+            )
+        return cursor.rowcount == 1
+
+    def claim_extracting_if_parsed(self, source_id: str) -> bool:
+        """Atomically flip a 'parsed' source to 'extracting' to claim ownership of
+        the extraction phase, returning whether THIS pipeline still owns the source.
+
+        Backs process_source's parse->extract transition (round-7 P2-1). 'parsed'
+        is the pipeline's own hand-off point, but a concurrent suffix re-upload can
+        claim the SAME 'parsed' row via claim_reparse_if_settled (which now admits
+        'parsed'), flipping it to 'queued' to own a full rerun. Turning the
+        transition into a guarded claim makes the two mutually exclusive under the
+        process-global write lock:
+          · rowcount==1 -> the row was still 'parsed'; this pipeline owns extraction
+            and proceeds.
+          · rowcount==0 -> a concurrent reparse already flipped it out of 'parsed'
+            (to 'queued'); this pipeline gracefully YIELDS — it must write no
+            terminal state and clear nothing the winner is about to use, because the
+            reparse's fresh pipeline reruns the whole thing (parse included).
+        Unconditionally setting 'extracting' here (the pre-round-7 behavior) would
+        instead clobber the reparse's 'queued' claim and start a second, conflicting
+        pipeline on one row. Clears error_message like set_status('extracting') did
+        (a 'parsed' row carries no error, so this is a no-op in practice). Single
+        WHERE-guarded UPDATE; no BEGIN IMMEDIATE needed."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE sources SET parse_status='extracting', status='extracting', "
+                "error_message='', updated_at=? "
+                "WHERE id=? AND parse_status='parsed'",
                 (self.now(), source_id),
             )
         return cursor.rowcount == 1

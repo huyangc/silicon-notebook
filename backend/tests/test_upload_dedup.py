@@ -1177,3 +1177,196 @@ def test_retype_on_an_in_flight_source_never_starts_a_second_reextract(
     assert repo.get_source(sid).doc_type == "textbook", "新类型照记（存库）"
     assert submitted == [], "在跑的行绝不另起第二条重抽"
     assert repo.get_source(sid).parse_status == "extracting", "仍是在跑，未被认领翻动"
+
+
+# ------------------------------- idle 'parsed' 也要能认领换后缀重解析（P2-1，round-7）
+
+
+def test_reupload_with_a_different_suffix_reparses_an_idle_parsed_row(
+    repo, notebook_id
+):
+    """P2-1：搁浅在 idle 'parsed' 的源（KG 取消/失败、启动恢复把 'extracting' 退回
+    'parsed' 且无 worker 在跑）换后缀重传必须真的整条重跑。此前 'parsed' 一律当在飞——
+    只持久化意图、由「那条正在跑的流水线」收口，但 idle 时根本没有流水线，纠正永久悬置。
+
+    变异：把 claim_reparse_if_settled 的 WHERE 去掉 'parsed'（或 reuse 的 claimable 去掉
+    'parsed'），idle 'parsed' 走 else 只改名不调度 → process_calls==[] → 本测试转红。"""
+    body = b"col1,col2\n1,2\n3,4"
+    sid = _upload_named(repo, notebook_id, content=body, name="data.csv")[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "parsed")  # 搁浅 idle 'parsed'
+    repo.process_calls.clear()
+
+    second = _upload_named(repo, notebook_id, content=body, name="data.md")
+
+    assert second[0].id == sid, "仍复用同一行"
+    assert repo.get_source(sid).file_name == "data.md", "后缀纠正必须落库"
+    assert repo.get_source(sid).file_path.endswith("data.md"), "落盘文件按新名重写"
+    assert repo.process_calls == [sid], (
+        "idle 'parsed' 换后缀必须整条重跑；[] 说明又被当在飞、纠正永久悬置"
+    )
+    assert repo.get_source(sid).parse_status == "queued", "响应里就得是非终态"
+
+
+def test_reupload_same_suffix_on_an_idle_parsed_row_does_not_reparse(
+    repo, notebook_id
+):
+    """守卫的补集：idle 'parsed' + 相同解析器（.md/.markdown 同类）不触发重跑——
+    只有 parser_class 变了才认领，别把「'parsed' 也能认领」误扩成「'parsed' 总重跑」。"""
+    body = b"# h\n\nbody"
+    sid = _upload_named(repo, notebook_id, content=body, name="a.md")[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "parsed")
+    repo.process_calls.clear()
+
+    _upload_named(repo, notebook_id, content=body, name="a.markdown")
+
+    assert repo.process_calls == [], "同解析器不触发重解析"
+    assert repo.get_source(sid).file_name == "a.md", "解析器没变就不改名"
+    assert repo.get_source(sid).parse_status == "parsed", "状态未被翻动"
+
+
+def test_reparse_claim_loss_on_a_parsed_row_persists_intent_for_reconcile(
+    repo, notebook_id, monkeypatch
+):
+    """P2-1：'parsed' 行的 reparse 认领**落空**（并发的 pipeline 守卫、或另一次 reparse
+    抢先把行翻出 'parsed'）时绝不能什么都不做——必须把新 file_name 持久化到行上、不动盘上
+    文件，交给拥有者的 _reconcile 收口。此前 settled 认领落空是「什么都不做」，把 'parsed'
+    纳入认领后若不补这条，in-flight 'parsed'（pipeline 赢守卫）的后缀纠正会被静默丢。
+
+    变异：删掉 else 分支的 rename_source_file（认领落空什么都不做）→ file_name 停在旧后缀
+    → 转红。"""
+    body = b"a,b\n1,2"
+    sid = _upload_named(repo, notebook_id, content=body, name="d.csv")[0].id
+    ingestion = repo._runtime.source_ingestion
+    ingestion.set_source_status(sid, "parsed")
+    original_path = repo.get_source(sid).file_path
+    repo.process_calls.clear()
+    # 模拟认领落空：拥有者（pipeline 守卫或并发 reparse）已抢先翻出 'parsed'。
+    monkeypatch.setattr(
+        ingestion.sources, "claim_reparse_if_settled", lambda _sid: False
+    )
+
+    _upload_named(repo, notebook_id, content=body, name="d.md")
+
+    assert repo.process_calls == [], "认领落空绝不调度（拥有者会整条重跑）"
+    assert repo.get_source(sid).file_name == "d.md", (
+        "认领落空必须持久化意图（rename）交拥有者收口；停在 d.csv 说明纠正被静默丢"
+    )
+    assert repo.get_source(sid).file_path == original_path, (
+        "但绝不动拥有者正在读的盘上文件（file_path 不变）"
+    )
+
+
+def test_extract_guard_declines_a_row_a_reparse_already_claimed(repo, notebook_id):
+    """P2-1 守卫语义（确定性）：并发 reparse 已把行认领成 'queued' 后，pipeline 的
+    parsed→extracting 守卫必须落空（rowcount 0），使流水线优雅让出、不 clobber 认领。
+
+    变异：把 claim_extracting_if_parsed 的 `AND parse_status='parsed'` 去掉（无条件 set
+    'extracting'）→ 它会把 'queued' 翻成 'extracting' 并返回 True → 本测试转红。"""
+    sid = _upload_named(repo, notebook_id, content=b"x", name="d.csv")[0].id
+    store = repo._runtime.source_store
+    store.set_status(sid, "queued")  # 模拟并发 reparse 已认领
+
+    assert store.claim_extracting_if_parsed(sid) is False, (
+        "并发 reparse 已认领（'queued'）的行，守卫必须落空"
+    )
+    assert repo.get_source(sid).parse_status == "queued", "守卫落空绝不得翻动行"
+
+
+def test_extract_guard_claims_a_still_parsed_row(repo, notebook_id):
+    """守卫正例：无并发时行仍是 'parsed' → 认领成功、翻成 'extracting'、流水线照常继续。
+    钉住「正常首传流水线不被误让出」（rowcount==1 照常）。"""
+    sid = _upload_named(repo, notebook_id, content=b"x", name="d.csv")[0].id
+    store = repo._runtime.source_store
+    store.set_status(sid, "parsed")
+
+    assert store.claim_extracting_if_parsed(sid) is True
+    assert repo.get_source(sid).parse_status == "extracting"
+
+
+def test_idle_parsed_row_guard_and_reparse_claim_are_mutually_exclusive(
+    repo, notebook_id
+):
+    """P2-1 真线程 + Barrier：pipeline 的 parsed→extracting 守卫与 reparse 的
+    parsed→queued 认领并发争同一 'parsed' 行，进程全局写锁让恰好一个翻出 'parsed'
+    （XOR）——不是两条都赢去起两条互清产物的流水线。"""
+    sid = _upload_named(repo, notebook_id, content=b"x", name="d.csv")[0].id
+    store = repo._runtime.source_store
+    store.set_status(sid, "parsed")
+
+    barrier = threading.Barrier(2, timeout=5)
+    results: dict[str, bool] = {}
+    lock = threading.Lock()
+
+    def run_guard():
+        barrier.wait()
+        won = store.claim_extracting_if_parsed(sid)
+        with lock:
+            results["guard"] = won
+
+    def run_reparse():
+        barrier.wait()
+        won = store.claim_reparse_if_settled(sid)
+        with lock:
+            results["reparse"] = won
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(run_guard)
+        f2 = pool.submit(run_reparse)
+        f1.result(timeout=10)
+        f2.result(timeout=10)
+
+    assert results["guard"] ^ results["reparse"], (
+        f"恰好一个认领翻出 'parsed'（不得两条都赢），实际 {results}"
+    )
+    assert repo.get_source(sid).parse_status in ("extracting", "queued")
+
+
+def test_pipeline_yields_when_a_concurrent_reparse_claims_the_parsed_row(
+    live_repo, monkeypatch
+):
+    """P2-1 端到端让出：一条真实流水线跑到 parsed→extracting 守卫点时，一次并发换后缀
+    reparse 抢先认领了这个 'parsed' 行。守卫落空 → 本流水线优雅让出（不抽取、不落终态、
+    不清对方状态），reparse 的新流水线整条重跑并落终态。**只有一条**流水线做抽取。
+
+    并发用确定性注入（在守卫真正认领前塞进一次并发 reparse，与既有 doc_type/后缀窗口
+    用例同一手法），避免窄窗口真线程 flaky。变异（守卫改无条件 set 'extracting'）后本流水线
+    不再让出 → 它也抽一次（还会 clobber 对方终态、触发自己的收口再抽）→ extract 次数 > 1
+    → 转红。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    _patch_parse(monkeypatch, [_element("body")])
+
+    body = b"col1,col2\n1,2"
+    extract_calls: list[str] = []
+    monkeypatch.setattr(
+        ingestion, "run_extraction",
+        lambda source_id, **_kw: extract_calls.append(source_id),
+    )
+
+    real_guard = ingestion.sources.claim_extracting_if_parsed
+    injected = {"done": False}
+
+    def guard_with_concurrent_reparse(source_id):
+        # 本流水线到达守卫、真正认领之前：并发换后缀 reparse 抢先认领这个 'parsed' 行并
+        # 整条重跑（scheduler=None → 同步跑到底），把行推到 'extracted'。随后真守卫看到
+        # 行已非 'parsed' → 落空 → 本流水线让出。
+        if not injected["done"]:
+            injected["done"] = True
+            _upload_named(live_repo, nb, content=body, name="data.md")
+        return real_guard(source_id)
+
+    monkeypatch.setattr(
+        ingestion.sources, "claim_extracting_if_parsed", guard_with_concurrent_reparse
+    )
+
+    sid = _upload_named(live_repo, nb, content=body, name="data.csv")[0].id
+
+    assert injected["done"], "前提：本流水线必须真的到达守卫并触发并发 reparse 注入"
+    final = live_repo.get_source(sid)
+    assert final.file_name == "data.md", "reparse 的新流水线按新后缀整条重跑并落库"
+    assert final.parse_status == "extracted", "reparse 流水线跑完落终态"
+    assert extract_calls == [sid], (
+        f"只有 reparse 那条流水线抽了一次；本流水线让出不抽。实际 extract={extract_calls}"
+    )
+    assert len(live_repo.list_sources(nb)) == 1, "始终只有一行"

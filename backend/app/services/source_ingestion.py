@@ -465,16 +465,20 @@ class SourceIngestionService:
         判据是 parser_class（后缀→解析器类别，与 parse_source_file 同一真源），
         .md/.markdown 同类、未知后缀都归 'text'，所以这些互相之间不算变化。
 
-        **已定型**的行（extracted/failed）当场重跑：原子认领 claim_reparse_if_settled
-        赢家才 _repoint_reused_file（重写落盘文件）+ 调度。**在飞行中**的行
-        （queued/parsing/parsed/extracting）不能当场重排——那条正在跑的流水线正按
-        file_path 读盘上文件解析，重写文件会破坏在跑的 parse，另起第二条流水线又是
-        同一行两条抽取互清产物。这类行只把用户意图（新 file_name/解析器）持久化到行上、
-        **绝不动盘上文件**，由那条流水线跑完时在 process_source 的
-        _reconcile_pending_suffix 收口：一旦定型，行上 file_name 的 parser_class 与
-        本次实际用的 parser 不一致就原子认领 + repoint + 整条重跑一次（同构于 doc_type
-        在飞收口，但后缀更重、是整条重解析而非只重抽）。此前这类在飞后缀纠正被静默
-        丢掉（reparse 要求已定型，在飞行中既不更新 file_name 也不记重解析）。
+        **已定型/搁浅**的行（extracted/failed，以及无 worker 在跑的 idle 'parsed'——KG
+        取消/失败、启动恢复把 'extracting' 退回 'parsed'）当场重跑：原子认领
+        claim_reparse_if_settled 赢家才 _repoint_reused_file（重写落盘文件）+ 调度。
+        **真正在飞**的行（queued/parsing/extracting，或正被某条流水线拥有的 'parsed'——
+        认领落空即证明有拥有者）不能当场重排——那条正在跑的流水线正按 file_path 读盘上
+        文件解析，重写文件会破坏在跑的 parse，另起第二条流水线又是同一行两条抽取互清产物。
+        这类行只把用户意图（新 file_name/解析器）持久化到行上、**绝不动盘上文件**，由那条
+        流水线跑完时在 process_source 的 _reconcile_pending_suffix 收口：一旦定型，行上
+        file_name 的 parser_class 与本次实际用的 parser 不一致就原子认领 + repoint + 整条
+        重跑一次（同构于 doc_type 在飞收口，但后缀更重、是整条重解析而非只重抽）。
+        ⚠ 'parsed' 既可能 idle（认领赢→当场重跑）也可能在飞（认领输→持久化意图交拥有者
+        收口），二者由 claim_reparse_if_settled 与 process_source 的 claim_extracting_if_parsed
+        原子二选一区分（round-7 P2-1）；此前 idle 'parsed' 被当在飞只持久化不收口、无人
+        回访 → 后缀纠正永久悬置。
         ``content`` 供已定型路径重写落盘文件用（内容与既有指纹一致、字节不变，只是换个
         带正确后缀的名字，并清掉旧后缀的孤儿文件）；缺省时退化为只改
         file_name/source_type。在飞收口路径没有 content 入参，从旧落盘文件读回字节
@@ -495,42 +499,41 @@ class SourceIngestionService:
             bool(file_name)
             and parser_class(file_name) != parser_class(summary.file_name or "")
         )
-        reparse = parser_changed and summary.parse_status in ("failed", "extracted")
-
-        if reparse:
-            # 后缀（解析器）变了的**已定型**源整条流水线重跑：解析产物来自错的解析器。
-            # ⚠ 认领必须原子，且**赢了才 repoint**：两个并发重传同一 settled 源、后缀
-            # 不同，都会在任一方写 'queued' 之前读到旧终态。若各自无条件
-            # _repoint_reused_file（重写盘上文件）+ set 'queued' + 调度，就给同一行起两条
-            # 流水线（互清 elements/KG），而且**同一个盘上文件被重写两次**（比 KG 竞态
-            # 更糟）。claim_reparse_if_settled 是「WHERE parse_status IN ('failed',
-            # 'extracted')」的守卫 UPDATE，进程全局写锁让两个并发恰有一个 rowcount==1：
-            # 抢到（翻出终态→'queued'，兼作「已入队」标记与 error_message 清理）→ 本次是
-            # 唯一赢家，**赢了再**重写文件、发状态、调度；没抢到（另一次已认领）→ 什么都
-            # 不做（绝不 repoint、绝不调度），返回既有行。顺序刻意是「claim → 赢家 repoint
-            # → 赢家调度」，输家绝不先 repoint 破坏文件。翻出终态还让重试对前端可见（前端
-            # 只对非终态轮询）。
-            if self.sources.claim_reparse_if_settled(source_id):
+        if parser_changed:
+            # 后缀（解析器）变了：内容相同 ≠ 意图相同，必须整条流水线重跑（解析产物来自
+            # 错的解析器）。已定型（failed/extracted）**或搁浅的 idle 'parsed'**（KG
+            # 取消/失败、启动恢复把 'extracting' 退回 'parsed' 且无 worker 在跑）都能当场
+            # 认领重跑；真正在飞（queued/parsing/extracting，或正被某条流水线拥有的 'parsed'）
+            # 只持久化意图、由那条流水线收口。
+            # ⚠ 认领必须原子，且**赢了才 repoint**：两个并发重传同一 settled/idle 源、后缀
+            # 不同，都会在任一方写 'queued' 之前读到旧状态。若各自无条件 _repoint_reused_file
+            # （重写盘上文件）+ set 'queued' + 调度，就给同一行起两条流水线（互清 elements/KG），
+            # 而且同一个盘上文件被重写两次。claim_reparse_if_settled 是「WHERE parse_status
+            # IN ('failed','extracted','parsed')」的守卫 UPDATE，进程全局写锁让并发者恰有
+            # 一个 rowcount==1：抢到（翻出→'queued'，兼作「已入队」标记与 error_message 清理）
+            # → 唯一赢家，**赢了再**重写文件、发状态、调度。
+            claimable = summary.parse_status in ("failed", "extracted", "parsed")
+            if claimable and self.sources.claim_reparse_if_settled(source_id):
                 self._repoint_reused_file(source_id, summary, file_name, content)
                 self._emit_status(source_id, "queued", "")
                 if scheduler is not None:
                     scheduler(source_id)
                 else:
                     self.process_source(source_id, hooks)
-        elif parser_changed:
-            # 后缀（解析器）变了但行还**在飞行中**（queued/parsing/parsed/extracting）：
-            # 那条正在跑的流水线正按 file_path 读盘上文件解析，绝不能在这里 repoint
-            # （重写那个文件）——会破坏在跑的 parse；另起第二条流水线又是同一行两条抽取
-            # 互清产物（与在飞行中「不重入」既有语义一致）。只把用户意图（新 file_name/
-            # 解析器）持久化到行上，**不动盘上文件**（rename_source_file 不带 file_path），
-            # 也不调度。那条流水线跑完时由 _reconcile_pending_suffix 收口：一旦定型，行上
-            # file_name 的 parser_class 与本次实际用的 parser 不一致就重解析一次。此前
-            # 这类在飞后缀纠正被静默丢掉（reparse 要求已定型，在飞行中什么都不记）。
-            self.sources.rename_source_file(
-                source_id,
-                file_name=file_name,
-                source_type=self.source_type_from_name(file_name),
-            )
+            else:
+                # 行还**在飞行中**（queued/parsing/extracting），或本是 'parsed'/settled 但
+                # 认领落空——被某条流水线的 parsed→'extracting' 守卫、或另一次并发 reparse 抢先。
+                # 那个拥有者正按 file_path 读盘上文件（或即将整条重跑），绝不能在这里 repoint
+                # （重写那个文件会破坏在跑的 parse；另起第二条流水线又互清产物）。只把用户意图
+                # （新 file_name/解析器）持久化到行上、**不动盘上文件**（rename_source_file 不带
+                # file_path），也不调度。拥有者跑完时由 _reconcile_pending_suffix 收口：一旦定型，
+                # 行上 file_name 的 parser_class 与本次实际用的 parser 不一致就重解析一次。此前
+                # idle 'parsed' 走这条只持久化不收口 → 无人收口、永久悬置（round-7 P2-1 修）。
+                self.sources.rename_source_file(
+                    source_id,
+                    file_name=file_name,
+                    source_type=self.source_type_from_name(file_name),
+                )
         elif summary.parse_status == "failed":
             # 失败源重试：解析产物本来就不可信（失败），重跑整条流水线。
             # ⚠ 认领必须原子：两个并发上传同一失败源都在任一方写 'queued' 之前读到
@@ -556,6 +559,12 @@ class SourceIngestionService:
             # UPDATE 原子表决：抢到（本就已定型）→ 本次拿到重抽权、翻 'extracting'；
             # 没抢到（还在 queued/parsing/extracting）→ 不调度，交给那条在跑的流水线
             # 的终态 doc_type 收口（mark_extracted_if_doc_type）按新类型补跑。
+            # ⚠ round-7 P2-1 刻意**不**把 'parsed' 纳入这条守卫（与 suffix reparse 不同）：
+            # 重抽走 _reextract_retyped（只重抽、不 parse/embed），对 idle 'parsed'（可能
+            # 由启动恢复而来、embedding 陈旧/缺失）会落个 extracted-but-unembedded 的源；
+            # 且它与 process_source 的 parsed→extracting 守卫争同一行——重抽抢到会让
+            # pipeline 让出而没人补 embed。idle 'parsed'+纯 retype 不是回归（doc_type 仍
+            # 落库，将来任何整条重跑都会用上），故留作已知边界，不在此引入新竞态。
             if self.sources.claim_reextract_if_extracted(source_id):
                 self._emit_status(source_id, "extracting", "")
                 if scheduler is not None:
@@ -1048,32 +1057,6 @@ class SourceIngestionService:
                     # chunk/pending memos so the next open recomputes, not serves stale.
                     self.invalidate_knowledge_counts(notebook_id)
 
-            # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
-            # concurrent with KG extraction, so a large doc's slow embed never blocks
-            # the KG result. 'extracted'/green below is gated on EXTRACTION only.
-            embed_started = time.perf_counter()
-            stage("embed", "start", embed_started)
-
-            def _embed_bg() -> None:
-                try:
-                    self.embedding.embed_source(source_id)
-                    # chunk 向量后台补, 不阻塞流水线
-                    self.embedding.embed_chunks_for_source(source_id)
-                    stage("embed", "done", embed_started)
-                except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
-                    stage("embed", "error", embed_started,
-                          error=f"{type(exc).__name__}: {exc}")
-                    self.event_log.logger.exception(
-                        "background embed failed for %s", source_id
-                    )
-
-            embed_ctx = contextvars.copy_context()
-            embed_thread = threading.Thread(
-                target=lambda: embed_ctx.run(_embed_bg),
-                name=f"embed-{source_id}", daemon=True
-            )
-            embed_thread.start()
-
             # Hints + notebook-meta augmentation do NOT depend on KG extraction
             # output; compute/persist them up front so the terminal 'extracted'
             # mark can be the LAST write. For the KG path that terminal mark is now
@@ -1118,8 +1101,55 @@ class SourceIngestionService:
                 self.event_log.logger.exception(
                     "notebook meta augmentation failed for %s", source_id
                 )
+
+            # Guarded parse->extract hand-off (round-7 P2-1). 'parsed' is NOT always
+            # in-flight: a concurrent suffix re-upload can claim THIS 'parsed' row
+            # (claim_reparse_if_settled now admits 'parsed') to own a full rerun.
+            # claim_extracting_if_parsed flips parsed->'extracting' only while the row
+            # is still 'parsed': rowcount 1 -> this pipeline keeps ownership; rowcount
+            # 0 -> a reparse already flipped it to 'queued', so gracefully YIELD —
+            # write no terminal state, clear nothing; the reparse's fresh pipeline
+            # reruns the whole thing (parse included). Doing this guard BEFORE the
+            # background embed thread starts is what keeps the yield clean: a lost
+            # claim never spawns an embed that would race the reparse's
+            # clear_source_extraction_state (the settling race the round-7 review
+            # flagged). When we WIN, any pending reparse lost its own claim and merely
+            # persisted intent, so its rerun is not scheduled until THIS pipeline
+            # settles and reconciles — the two embed passes never overlap.
+            if not self.sources.claim_extracting_if_parsed(source_id):
+                return self.sources.get_source(source_id)
+            self._emit_status(source_id, "extracting", "")
+
+            # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
+            # concurrent with KG extraction, so a large doc's slow embed never blocks
+            # the KG result. Started only AFTER the ownership guard above, so a
+            # yielded pipeline never spawns it. 'extracted'/green below is gated on
+            # EXTRACTION only.
+            embed_started = time.perf_counter()
+            stage("embed", "start", embed_started)
+
+            def _embed_bg() -> None:
+                try:
+                    self.embedding.embed_source(source_id)
+                    # chunk 向量后台补, 不阻塞流水线
+                    self.embedding.embed_chunks_for_source(source_id)
+                    stage("embed", "done", embed_started)
+                except Exception as exc:  # noqa: BLE001 — best-effort; never fail the pipeline
+                    stage("embed", "error", embed_started,
+                          error=f"{type(exc).__name__}: {exc}")
+                    self.event_log.logger.exception(
+                        "background embed failed for %s", source_id
+                    )
+
+            embed_ctx = contextvars.copy_context()
+            embed_thread = threading.Thread(
+                target=lambda: embed_ctx.run(_embed_bg),
+                name=f"embed-{source_id}", daemon=True
+            )
+            embed_thread.start()
+
             if hooks.should_extract_kg(notebook_id):
-                self.set_source_status(source_id, "extracting")
+                # Ownership already flipped to 'extracting' by the guard above.
                 t = time.perf_counter()
                 stage("extract", "start", t)
                 # 同一条源第一次上传时也存在「抽取跑到一半用户改类型」的窗口（他嫌慢，
