@@ -20,6 +20,8 @@ rollback contract in `AGENTS.md` and the READMEs. The PostgreSQL integration lau
 a strict single-`sslmode` URL-query allowlist and gives pytest only a minimal environment
 with password-free URLs. Its parent process only parses; the password-free preflight helper
 and pytest reuse that exact environment and pgpass file. Exact per-target credentials
-precede inherited lines in a failure-cleaned, mode-0600 temporary `PGPASSFILE`. Scoped
-SIGINT/SIGTERM handlers terminate and boundedly reap the owned `Popen` child/session before
-credential cleanup and return 130/143; signal-terminated children map to `128+signum`.
+precede inherited lines in a failure-cleaned, mode-0600 temporary `PGPASSFILE`. A resource
+owner exists before scoped SIGINT/SIGTERM handlers; handlers record the first pending signal
+without raising in a factory-return window, and factories register pgpass/Popen resources
+before a checkpoint acts. Cleanup boundedly reaps the child, removes credentials, restores
+handlers, and returns 130/143; signal-terminated children map to `128+signum`.

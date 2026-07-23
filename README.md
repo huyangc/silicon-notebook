@@ -1384,7 +1384,12 @@ a password-free preflight helper and pytest run consecutively with the exact sam
 allowlisted environment, sanitized `TEST_POSTGRES_*` URLs, and pgpass file, so parent libpq
 variables cannot redirect only one phase. Exact per-target URL/`PGPASSWORD` credentials are
 written before any copied inherited pgpass lines in a mode-0600 temporary `PGPASSFILE`;
-write/close/test failures and interrupts remove it.
+write/close/test failures and interrupts remove it. A resource owner exists before scoped
+SIGINT/SIGTERM handlers are installed. The handlers record the first pending signal and
+only request non-blocking termination of an already registered child; pgpass/Popen factories
+register their returned resource before the next checkpoint. The checkpoint then boundedly
+reaps the child, removes pgpass, restores prior handlers, and returns 130/143 without a raw
+factory-return assignment window.
 
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`

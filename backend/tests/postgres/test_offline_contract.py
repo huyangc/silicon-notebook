@@ -400,7 +400,7 @@ def test_pytest_child_environment_drops_parent_database_and_libpq_secrets(
     assert "Traceback" not in complete_output
     captured: dict[str, object] = {}
 
-    def fake_child(command, child_env, *, capture_output=False):
+    def fake_child(command, child_env, *, capture_output=False, owner=None):
         captured["args"] = (command,)
         captured["env"] = child_env
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -466,7 +466,7 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
     assert target is not None
     calls: list[tuple[list[str], dict[str, str]]] = []
 
-    def fake_child(command, child_env, *, capture_output=False):
+    def fake_child(command, child_env, *, capture_output=False, owner=None):
         calls.append((command, child_env))
         return subprocess.CompletedProcess(command, 0)
 
@@ -496,7 +496,7 @@ def test_signalled_child_exit_is_mapped_to_conventional_shell_status(
         pid = 7654321
         returncode = -signal.SIGTERM
 
-        def communicate(self):
+        def communicate(self, timeout=None):
             return "", ""
 
     monkeypatch.setattr(
@@ -520,7 +520,7 @@ def test_main_maps_keyboard_interrupt_without_generic_launcher_error(
     monkeypatch.delenv("TEST_POSTGRES_NON_UTF_URL", raising=False)
     observed_path: Path | None = None
 
-    def interrupted(_command, child_env, *, capture_output=False):
+    def interrupted(_command, child_env, *, capture_output=False, owner=None):
         nonlocal observed_path
         observed_path = Path(child_env["PGPASSFILE"])
         assert observed_path.exists()
@@ -539,7 +539,8 @@ def test_launcher_restores_prior_signal_handlers():
         signum: signal.getsignal(signum)
         for signum in (signal.SIGINT, signal.SIGTERM)
     }
-    with postgres_lane._launcher_signal_handlers():
+    owner = postgres_lane._LauncherResources()
+    with postgres_lane._launcher_signal_handlers(owner):
         assert all(
             signal.getsignal(signum) is not handler
             for signum, handler in before.items()
@@ -548,6 +549,14 @@ def test_launcher_restores_prior_signal_handlers():
         signum: signal.getsignal(signum)
         for signum in (signal.SIGINT, signal.SIGTERM)
     } == before
+
+
+def test_multiple_launcher_signals_keep_the_first_status():
+    owner = postgres_lane._LauncherResources()
+    owner.request_signal(signal.SIGTERM)
+    owner.request_signal(signal.SIGINT)
+    assert owner.pending_signum == signal.SIGTERM
+    assert owner.exit_status(0) == 143
 
 
 def test_child_cleanup_uses_bounded_term_then_kill_and_reaps(monkeypatch):
@@ -578,6 +587,195 @@ def test_child_cleanup_uses_bounded_term_then_kill_and_reaps(monkeypatch):
         ("signal", signal.SIGKILL),
         ("wait", postgres_lane._CHILD_REAP_TIMEOUT_SECONDS),
     ]
+
+
+@pytest.mark.parametrize(
+    ("signum", "expected_status"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130)],
+)
+def test_signal_in_pgpass_factory_return_window_is_owned_and_cleaned(
+    monkeypatch,
+    capsys,
+    signum,
+    expected_status,
+):
+    monkeypatch.setenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://lane_user:sentinel-pgpass-window@db.example/"
+        "silicon_notebook_pgpass_window_test",
+    )
+    monkeypatch.delenv("TEST_POSTGRES_NON_C_URL", raising=False)
+    monkeypatch.delenv("TEST_POSTGRES_NON_UTF_URL", raising=False)
+    original_create = postgres_lane._create_pgpass_file
+    created: Path | None = None
+
+    def injecting_create(*args, **kwargs):
+        nonlocal created
+        created = original_create(*args, **kwargs)
+        handler = signal.getsignal(signum)
+        assert callable(handler)
+        handler(signum, None)
+        return created
+
+    monkeypatch.setattr(postgres_lane, "_create_pgpass_file", injecting_create)
+    try:
+        assert postgres_lane.main() == expected_status
+        assert created is not None and not created.exists()
+    finally:
+        if created is not None:
+            created.unlink(missing_ok=True)
+    captured = capsys.readouterr()
+    assert "sentinel-" not in (captured.out + captured.err)
+    assert "Traceback" not in (captured.out + captured.err)
+
+
+@pytest.mark.parametrize(
+    ("signum", "expected_status"),
+    [(signal.SIGTERM, 143), (signal.SIGINT, 130)],
+)
+def test_signal_in_popen_factory_return_window_owns_and_reaps_child(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    signum,
+    expected_status,
+):
+    if os.name != "posix":
+        return
+    monkeypatch.setenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://lane_user:sentinel-popen-window@db.example/"
+        "silicon_notebook_popen_window_test",
+    )
+    monkeypatch.delenv("TEST_POSTGRES_NON_C_URL", raising=False)
+    monkeypatch.delenv("TEST_POSTGRES_NON_UTF_URL", raising=False)
+    original_popen = postgres_lane.subprocess.Popen
+    child: subprocess.Popen[str] | None = None
+    pid_file = tmp_path / "factory-window-child.pid"
+
+    def injecting_popen(_command, **kwargs):
+        nonlocal child
+        child = original_popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os,time; from pathlib import Path; "
+                    f"Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+                    "time.sleep(60)"
+                ),
+            ],
+            **kwargs,
+        )
+        handler = signal.getsignal(signum)
+        assert callable(handler)
+        handler(signum, None)
+        return child
+
+    monkeypatch.setattr(postgres_lane.subprocess, "Popen", injecting_popen)
+    try:
+        assert postgres_lane.main() == expected_status
+        assert child is not None
+        child.wait(timeout=5)
+        assert not _process_exists(child.pid)
+    finally:
+        if child is not None and child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+    captured = capsys.readouterr()
+    assert "sentinel-" not in (captured.out + captured.err)
+    assert "Traceback" not in (captured.out + captured.err)
+    assert not list(tmp_path.glob("silicon-notebook-pgpass-*"))
+
+
+@pytest.mark.parametrize(
+    ("resource", "signum", "expected_status"),
+    [
+        ("pgpass", signal.SIGTERM, 143),
+        ("pgpass", signal.SIGINT, 130),
+        ("child", signal.SIGTERM, 143),
+        ("child", signal.SIGINT, 130),
+    ],
+)
+def test_signal_immediately_after_resource_registration_is_honored(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    resource,
+    signum,
+    expected_status,
+):
+    if os.name != "posix" and resource == "child":
+        return
+    monkeypatch.setenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://lane_user:sentinel-after-register@db.example/"
+        "silicon_notebook_after_register_test",
+    )
+    monkeypatch.delenv("TEST_POSTGRES_NON_C_URL", raising=False)
+    monkeypatch.delenv("TEST_POSTGRES_NON_UTF_URL", raising=False)
+    child_pid_file = tmp_path / "after-register-child.pid"
+    registered_pgpass: Path | None = None
+    registered_child: subprocess.Popen[str] | None = None
+
+    if resource == "pgpass":
+        original_register = postgres_lane._LauncherResources.register_pgpass
+
+        def injecting_register(owner, path):
+            nonlocal registered_pgpass
+            registered_pgpass = path
+            original_register(owner, path)
+            handler = signal.getsignal(signum)
+            assert callable(handler)
+            handler(signum, None)
+
+        monkeypatch.setattr(
+            postgres_lane._LauncherResources,
+            "register_pgpass",
+            injecting_register,
+        )
+    else:
+        blocker = [
+            sys.executable,
+            "-c",
+            (
+                "import os,time; from pathlib import Path; "
+                f"Path({str(child_pid_file)!r}).write_text(str(os.getpid())); "
+                "time.sleep(60)"
+            ),
+        ]
+        monkeypatch.setattr(postgres_lane, "_preflight_command", lambda: blocker)
+        original_register = postgres_lane._LauncherResources.register_child
+
+        def injecting_register(owner, process):
+            nonlocal registered_child
+            registered_child = process
+            original_register(owner, process)
+            handler = signal.getsignal(signum)
+            assert callable(handler)
+            handler(signum, None)
+
+        monkeypatch.setattr(
+            postgres_lane._LauncherResources,
+            "register_child",
+            injecting_register,
+        )
+
+    try:
+        assert postgres_lane.main() == expected_status
+        assert registered_pgpass is None or not registered_pgpass.exists()
+        if registered_child is not None:
+            registered_child.wait(timeout=5)
+            assert not _process_exists(registered_child.pid)
+    finally:
+        if registered_pgpass is not None:
+            registered_pgpass.unlink(missing_ok=True)
+        if registered_child is not None and registered_child.poll() is None:
+            os.killpg(registered_child.pid, signal.SIGKILL)
+            registered_child.wait(timeout=5)
+    captured = capsys.readouterr()
+    assert "sentinel-" not in (captured.out + captured.err)
+    assert "Traceback" not in (captured.out + captured.err)
 
 
 @pytest.mark.parametrize(

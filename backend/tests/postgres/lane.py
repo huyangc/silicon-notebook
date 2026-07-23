@@ -52,6 +52,7 @@ _CHILD_ENV_ALLOWLIST = {
     "TZ",
 }
 _CHILD_REAP_TIMEOUT_SECONDS = 5.0
+_CHILD_WAIT_POLL_SECONDS = 0.2
 
 
 class _LauncherSignal(BaseException):
@@ -60,6 +61,80 @@ class _LauncherSignal(BaseException):
     def __init__(self, signum: int) -> None:
         self.signum = signum
         super().__init__(signum)
+
+
+class _LauncherResources:
+    """Own launcher resources before scoped signal handlers become active."""
+
+    def __init__(self) -> None:
+        self._pending_signum: int | None = None
+        self._child: subprocess.Popen[str] | None = None
+        self._pgpass_paths: set[Path] = set()
+
+    @property
+    def pending_signum(self) -> int | None:
+        return self._pending_signum
+
+    def request_signal(self, signum: int) -> None:
+        if self._pending_signum is None:
+            self._pending_signum = signum
+        child = self._child
+        if child is not None:
+            try:
+                _signal_owned_child(child, signal.SIGTERM)
+            except Exception:
+                # A signal handler only records state and makes a best-effort,
+                # non-blocking termination request. Safe checkpoints reap.
+                pass
+
+    def register_pgpass(self, path: Path) -> None:
+        self._pgpass_paths.add(path)
+
+    def release_pgpass(self, path: Path) -> None:
+        self._pgpass_paths.discard(path)
+
+    def register_child(self, process: subprocess.Popen[str]) -> None:
+        if self._child is not None:
+            raise RuntimeError("PostgreSQL launcher already owns a child")
+        self._child = process
+        if self._pending_signum is not None:
+            self.request_signal(self._pending_signum)
+
+    def release_child(self, process: subprocess.Popen[str]) -> None:
+        if self._child is process:
+            self._child = None
+
+    def checkpoint(self) -> None:
+        if self._pending_signum is not None:
+            raise _LauncherSignal(self._pending_signum)
+
+    def exit_status(self, normal_status: int) -> int:
+        if self._pending_signum is not None:
+            return 128 + self._pending_signum
+        return normal_status
+
+    def cleanup(self) -> None:
+        failure: BaseException | None = None
+        child = self._child
+        if child is not None:
+            try:
+                _terminate_and_reap(child)
+            except BaseException as exc:
+                failure = exc
+            finally:
+                if child.returncode is not None:
+                    self.release_child(child)
+        for path in tuple(self._pgpass_paths):
+            try:
+                _unlink_pgpass_file(path, suppress_errors=True)
+            except BaseException as exc:
+                if failure is None or not isinstance(exc, Exception):
+                    failure = exc
+            finally:
+                if not path.exists():
+                    self.release_pgpass(path)
+        if failure is not None:
+            raise failure
 
 
 @dataclass(frozen=True)
@@ -302,7 +377,11 @@ def _inspect_target(target: _Target) -> bool:
 
 
 @contextmanager
-def _pytest_environment(targets: list[_Target]):
+def _pytest_environment(
+    targets: list[_Target],
+    *,
+    owner: _LauncherResources | None = None,
+):
     child_env = {
         key: value
         for key, value in os.environ.items()
@@ -345,23 +424,32 @@ def _pytest_environment(targets: list[_Target]):
     pgpass_path = _create_pgpass_file(payload)
     child_env["PGPASSFILE"] = str(pgpass_path)
     try:
+        if owner is not None:
+            owner.register_pgpass(pgpass_path)
+            owner.checkpoint()
         yield child_env
     finally:
-        _unlink_pgpass_file(
-            pgpass_path,
-            suppress_errors=sys.exc_info()[0] is not None,
-        )
+        try:
+            _unlink_pgpass_file(
+                pgpass_path,
+                suppress_errors=sys.exc_info()[0] is not None,
+            )
+        finally:
+            if owner is not None and not pgpass_path.exists():
+                owner.release_pgpass(pgpass_path)
 
 
 def _run_preflight(
     child_env: dict[str, str],
     *,
     capture_output: bool = False,
+    owner: _LauncherResources | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return _run_child(
         _preflight_command(),
         child_env,
         capture_output=capture_output,
+        owner=owner,
     )
 
 
@@ -426,9 +514,12 @@ def _run_child(
     child_env: dict[str, str],
     *,
     capture_output: bool = False,
+    owner: _LauncherResources | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process: subprocess.Popen[str] | None = None
     try:
+        if owner is not None:
+            owner.checkpoint()
         process = subprocess.Popen(
             command,
             cwd=BACKEND_ROOT,
@@ -438,16 +529,42 @@ def _run_child(
             stderr=subprocess.PIPE if capture_output else None,
             start_new_session=os.name == "posix",
         )
-        stdout, stderr = process.communicate()
+        if owner is not None:
+            owner.register_child(process)
+            owner.checkpoint()
+            while True:
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=_CHILD_WAIT_POLL_SECONDS
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    if owner.pending_signum is not None:
+                        _terminate_and_reap(process)
+                        stdout, stderr = process.communicate()
+                        break
+        else:
+            stdout, stderr = process.communicate()
     except BaseException:
         if process is not None:
             try:
                 _terminate_and_reap(process)
-            except Exception:
+            except BaseException:
                 # Preserve the signal/KeyboardInterrupt being unwound. The
                 # bounded TERM/KILL/reap sequence has already been attempted.
                 pass
+        if owner is not None and owner.pending_signum is not None:
+            owner.checkpoint()
         raise
+    finally:
+        if (
+            owner is not None
+            and process is not None
+            and process.returncode is not None
+        ):
+            owner.release_child(process)
+    if owner is not None:
+        owner.checkpoint()
     return subprocess.CompletedProcess(
         command,
         _conventional_child_status(process.returncode),
@@ -456,29 +573,28 @@ def _run_child(
     )
 
 
-def _run_pytest_in_environment(child_env: dict[str, str]) -> int:
-    completed = _run_child(_pytest_command(), child_env)
+def _run_pytest_in_environment(
+    child_env: dict[str, str],
+    *,
+    owner: _LauncherResources | None = None,
+) -> int:
+    completed = _run_child(_pytest_command(), child_env, owner=owner)
     return completed.returncode
 
 
 @contextmanager
-def _launcher_signal_handlers():
-    """Turn SIGINT/SIGTERM into scoped Python unwinding, then restore handlers."""
+def _launcher_signal_handlers(owner: _LauncherResources):
+    """Record SIGINT/SIGTERM without raising in a resource-return window."""
     previous = {
         signum: signal.getsignal(signum)
         for signum in (signal.SIGINT, signal.SIGTERM)
     }
-    interruption: _LauncherSignal | None = None
-
-    def unwind(signum, _frame):
-        nonlocal interruption
-        if interruption is None:
-            interruption = _LauncherSignal(signum)
-            raise interruption
+    def record(signum, _frame):
+        owner.request_signal(signum)
 
     try:
         for signum in previous:
-            signal.signal(signum, unwind)
+            signal.signal(signum, record)
         yield
     finally:
         for signum, handler in previous.items():
@@ -487,19 +603,55 @@ def _launcher_signal_handlers():
 
 def _run_pytest(targets: list[_Target]) -> int:
     """Unit-testable compatibility wrapper around the isolated pytest launch."""
-    with _launcher_signal_handlers():
-        with _pytest_environment(targets) as child_env:
-            return _run_pytest_in_environment(child_env)
+    owner = _LauncherResources()
+    status = 2
+    with _launcher_signal_handlers(owner):
+        try:
+            with _pytest_environment(targets, owner=owner) as child_env:
+                owner.checkpoint()
+                status = _run_pytest_in_environment(child_env, owner=owner)
+                owner.checkpoint()
+        except _LauncherSignal:
+            pass
+        except BaseException:
+            owner.checkpoint()
+            raise
+        finally:
+            try:
+                owner.cleanup()
+            except BaseException:
+                owner.checkpoint()
+                raise
+    return owner.exit_status(status)
 
 
 def _run_isolated_gate(targets: list[_Target]) -> int:
     """Run preflight and pytest inside one exact environment/pgpass lifetime."""
-    with _launcher_signal_handlers():
-        with _pytest_environment(targets) as child_env:
-            preflight = _run_preflight(child_env)
-            if preflight.returncode != 0:
-                return preflight.returncode
-            return _run_pytest_in_environment(child_env)
+    owner = _LauncherResources()
+    status = 2
+    with _launcher_signal_handlers(owner):
+        try:
+            with _pytest_environment(targets, owner=owner) as child_env:
+                owner.checkpoint()
+                preflight = _run_preflight(child_env, owner=owner)
+                owner.checkpoint()
+                if preflight.returncode != 0:
+                    status = preflight.returncode
+                else:
+                    status = _run_pytest_in_environment(child_env, owner=owner)
+                    owner.checkpoint()
+        except _LauncherSignal:
+            pass
+        except BaseException:
+            owner.checkpoint()
+            raise
+        finally:
+            try:
+                owner.cleanup()
+            except BaseException:
+                owner.checkpoint()
+                raise
+    return owner.exit_status(status)
 
 
 def _preflight_mode_main() -> int:

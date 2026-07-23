@@ -1217,7 +1217,11 @@ Python 预检会在 pytest 前验证全部已配置 URL。query 严格白名单�
 helper 与 pytest 先后使用完全相同的最小白名单环境、清洗后的 `TEST_POSTGRES_*` URL
 和同一个 pgpass 文件，父进程 libpq 变量不能只重定向其中一个阶段。各 target 精确匹配的
 URL/`PGPASSWORD` 凭据排在复制的继承 pgpass 行之前，写入权限为 0600 的临时
-`PGPASSFILE`，写入/关闭/测试失败或中断都会删除。
+`PGPASSFILE`，写入/关闭/测试失败或中断都会删除。resource owner 会先于 scoped
+SIGINT/SIGTERM handler 创建；handler 只记录第一个 pending signal，并只对已经注册的 child
+发非阻塞终止请求。pgpass/Popen factory 返回的资源会先注册，再进入下一个 checkpoint；
+checkpoint 随后有界 reap child、删除 pgpass、恢复原 handler，并返回 130/143，不留下
+factory-return 赋值窗口。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
