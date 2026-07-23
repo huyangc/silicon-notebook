@@ -122,17 +122,29 @@ export function usePendingActions(enabled: boolean) {
   return { snapshot, doneItems, toast, setToast, dismissDone };
 }
 
+// 流水线体检的聚合提醒:一条、点击直达看板。刻意不进 PendingItem 类型体系
+// (体检多是「系统能自修」,不是「待你确认」),也不复制体检详情——只提示「有可
+// 修复的问题」。sig 随命中集合变化,内容变时重新提醒;健康时传 null 即不显示。
+export type CheckupAlert = { sig: string; label: string; onOpen: () => void };
+
 export function PendingBell(props: {
   snapshot: { count: number; items: PendingItem[] };
   doneItems: DoneToast[];
   userId?: string;
+  checkup?: CheckupAlert | null;
   onOpenItem: (item: PendingItem) => void;
   onOpenDone: (d: DoneToast) => void;
   onDismissDone: (notebook_id: string, kind?: string) => void;
 }) {
-  const { snapshot, doneItems, userId, onOpenItem, onOpenDone, onDismissDone } = props;
+  const { snapshot, doneItems, userId, checkup, onOpenItem, onOpenDone, onDismissDone } = props;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
+  // 体检提醒的「已读」「关掉」——按 sig 记(纯内存,同 doneItems 不持久化)。sig 变
+  // (新问题出现/旧问题修好)则自动复活(seen/hidden 不再匹配)。
+  const [checkupSeenSig, setCheckupSeenSig] = useState<string | null>(null);
+  const [checkupHiddenSig, setCheckupHiddenSig] = useState<string | null>(null);
+  const checkupVisible = Boolean(checkup) && checkup!.sig !== checkupHiddenSig;
+  const checkupUnread = checkupVisible && checkup!.sig !== checkupSeenSig ? 1 : 0;
 
   // 已读(seen)/关掉(dismissed)按用户存 localStorage。
   const seenKey = `pending:seen:${userId || "anon"}`;
@@ -155,7 +167,12 @@ export function PendingBell(props: {
   }, [snapshot.items, doneItems, dismKey]);
 
   const view = pendingView(snapshot.items, doneItems, seen, dismissed);
-  const badge = view.unread;
+  const badge = view.unread + checkupUnread;
+
+  // 打开面板即把体检提醒标为已读(徽标归零),与下方 items 的已读逻辑并行、互不干扰。
+  useEffect(() => {
+    if (open && checkup) setCheckupSeenSig(checkup.sig);
+  }, [open, checkup?.sig]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 打开面板(或打开时来了新项)→ 把当前可见项全部标为已读 → 徽标归零。seen 不在依赖里,
   // 故 setSeen 不会自触发循环;dismissed/快照变化时若面板开着会重新标记。
@@ -192,6 +209,7 @@ export function PendingBell(props: {
       return n;
     });
     view.visibleDone.forEach((d) => onDismissDone(d.notebook_id));
+    if (checkup) setCheckupHiddenSig(checkup.sig);
   };
   // 小节标题「×」:关闭该小节全部(治理/报告/索引 走签名 dismissed;已完成走 onDismissDone)。
   const dismissGroup = (sigs: string[]) => {
@@ -225,7 +243,7 @@ export function PendingBell(props: {
     return `${it.notebook_name} · ${s}`;
   };
 
-  const hasAny = view.visibleItems.length + view.visibleDone.length > 0;
+  const hasAny = view.visibleItems.length + view.visibleDone.length > 0 || checkupVisible;
 
   return (
     <div className="pending-center" ref={ref}>
@@ -241,6 +259,23 @@ export function PendingBell(props: {
             </div>
           )}
           {!hasAny && <p className="pending-empty">暂无待确认</p>}
+          {checkupVisible && checkup && (
+            <div className="pending-group">
+              <div className="pending-group-title">
+                <span>内容体检</span>
+                <span className="pending-group-x" title="关闭「内容体检」"
+                      onClick={() => setCheckupHiddenSig(checkup.sig)}>×</span>
+              </div>
+              <button className="pending-row"
+                      onClick={() => { setOpen(false); setCheckupSeenSig(checkup.sig); checkup.onOpen(); }}>
+                <span className="pending-row-main">
+                  <span className="pending-row-label">{checkup.label}</span>
+                </span>
+                <span className="pending-row-x" title="关掉"
+                      onClick={(e) => { e.stopPropagation(); setCheckupHiddenSig(checkup.sig); }}>×</span>
+              </button>
+            </div>
+          )}
           {groups.map((g) => g.items.length > 0 && (
             <div className="pending-group" key={g.key}>
               <div className="pending-group-title">
