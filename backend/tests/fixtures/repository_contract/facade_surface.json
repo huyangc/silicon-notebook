@@ -3014,6 +3014,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.effective_document_limit",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.effective_schemas",
         "target": "_runtime"
       },
@@ -3141,6 +3147,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.get_source",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.global_document_limit_default",
         "target": "_runtime"
       },
       {
@@ -3447,6 +3459,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.notebook_copy_stats",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.notebook_owner",
         "target": "_runtime"
       },
       {
@@ -3968,7 +3986,19 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.user_document_limit_override",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.validate_cell_target",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.visible_document_count",
         "target": "_runtime"
       },
       {
@@ -4234,7 +4264,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'AddUrlSourcesResult'"
+    "signature": "(self, notebook_id: 'str', urls: 'Iterable[str]', scheduler: 'Optional[Callable[[str], None]]' = None, capacity: \"'int | None'\" = None) -> 'AddUrlSourcesResult'"
   },
   "agent_memory_hits": {
     "consumers": [
@@ -5235,6 +5265,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'None'"
+  },
+  "effective_document_limit": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._document_capacity",
+        "target": "effective_document_limit"
+      }
+    ],
+    "kind": "method",
+    "owner": "IdentityStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, user_id: \"'str | None'\") -> 'int'"
   },
   "effective_schemas": {
     "consumers": [
@@ -6647,6 +6692,21 @@
     ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
+  "notebook_owner": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._document_capacity",
+        "target": "notebook_owner"
+      }
+    ],
+    "kind": "method",
+    "owner": "IdentityStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> \"'tuple[str | None, str | None]'\""
   },
   "parallelism": {
     "consumers": [
@@ -8604,6 +8664,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, row_id: 'str', column_id: 'str') -> 'None'"
+  },
+  "visible_document_count": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._document_capacity",
+        "target": "visible_document_count"
+      }
+    ],
+    "kind": "method",
+    "owner": "SourceStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str') -> 'int'"
   },
   "warm_open_path_caches": {
     "consumers": [

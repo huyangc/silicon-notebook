@@ -85,6 +85,9 @@ SKIP_SECONDARY_TABLES = [
     # deployment. Importing either from a secondary DB would mix runtimes.
     "model_service_status",
     "system_model_service_status",
+    # 全局设置 KV(含每笔记本文档数量上限的全局默认)属于 primary 部署;导入副库的
+    # app_settings 会覆盖 primary 的部署级配置,故与部署健康表同款只保 primary。
+    "app_settings",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     auth_session_touch_interval_seconds: int = Field(
         300, validation_alias="AUTH_SESSION_TOUCH_INTERVAL_SECONDS"
     )
+    # 每个笔记本「用户可见文档」数量的全局默认上限。管理员可在 app_settings 里覆盖
+    # 全局默认、或给某用户单独设覆盖值(user_profiles.upload_document_limit);两者都
+    # 缺省时回退到此值。pydantic-settings v2 下 Field(env=) 失效,必须用 validation_alias。
+    user_upload_document_limit: int = Field(
+        20, validation_alias="USER_UPLOAD_DOCUMENT_LIMIT"
+    )
     # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
     # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
     # Deployment-owned system model-service registry. An empty path explicitly

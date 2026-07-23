@@ -7,12 +7,15 @@ import { toUserMessage } from "../../errors.ts";
 import {
   fetchAdminUsers,
   fetchOnlineIds,
+  fetchUploadLimitDefault,
   FORBIDDEN_SENTINEL,
   updateAdminUserRole,
+  updateAdminUserUploadLimit,
+  updateUploadLimitDefault,
   type AdminUserRole,
   type AdminUserUsage,
 } from "./api.ts";
-import { formatLastActive, logsDrillHref } from "./format.ts";
+import { formatLastActive, logsDrillHref, parseUploadLimit } from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
 import "./usage.css";
 
@@ -33,6 +36,13 @@ export default function AdminUsagePage() {
   const [confirmingRole, setConfirmingRole] = useState<{ userId: string; role: AdminUserRole } | null>(null);
   const [rolePendingId, setRolePendingId] = useState("");
   const [roleNotice, setRoleNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  const [uploadLimitDefault, setUploadLimitDefault] = useState<number | null>(null);
+  const [defaultInput, setDefaultInput] = useState("");
+  const [defaultSaving, setDefaultSaving] = useState(false);
+  const [editingLimitId, setEditingLimitId] = useState("");
+  const [limitInput, setLimitInput] = useState("");
+  const [limitPendingId, setLimitPendingId] = useState("");
+  const [limitNotice, setLimitNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -43,8 +53,10 @@ export default function AdminUsagePage() {
           return;
         }
         setCurrentUserId(me.id);
-        const rows = await fetchAdminUsers();
+        const [rows, limitDefault] = await Promise.all([fetchAdminUsers(), fetchUploadLimitDefault()]);
         setState({ kind: "ready", rows });
+        setUploadLimitDefault(limitDefault);
+        setDefaultInput(String(limitDefault));
         setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
       } catch (e) {
         // 哨兵先判(分流到专用无权限视图),其余一律过人话层——此前这里直出
@@ -117,6 +129,79 @@ export default function AdminUsagePage() {
     }
   }
 
+  async function saveDefault() {
+    const parsed = parseUploadLimit(defaultInput);
+    if (parsed === null) {
+      setLimitNotice({ kind: "error", message: "请输入 1 到 100000 之间的整数" });
+      return;
+    }
+    setDefaultSaving(true);
+    setLimitNotice(null);
+    try {
+      const saved = await updateUploadLimitDefault(parsed);
+      setUploadLimitDefault(saved);
+      setDefaultInput(String(saved));
+      // 没有单独设置的用户,有效上限跟随全局默认——就地刷新表格,免整表重取。
+      setState((previous) => previous.kind === "ready"
+        ? {
+            kind: "ready",
+            rows: previous.rows.map((row) => row.upload_limit_overridden ? row : { ...row, upload_limit: saved }),
+          }
+        : previous);
+      setLimitNotice({ kind: "ok", message: `已将默认文档上限设为 ${saved}` });
+    } catch (error) {
+      if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
+        setState({ kind: "forbidden" });
+        return;
+      }
+      setLimitNotice({ kind: "error", message: toUserMessage(error, "默认文档上限更新失败，请稍后重试") });
+    } finally {
+      setDefaultSaving(false);
+    }
+  }
+
+  // limit=null 清除覆盖(回落全局默认);其余是显式覆盖值。镜像 submitRoleChange 的
+  // 哨兵分流 + 就地更新对应行 + 人话层错误。
+  async function submitLimitChange(target: AdminUserUsage, limit: number | null) {
+    setLimitPendingId(target.id);
+    setLimitNotice(null);
+    try {
+      const updated = await updateAdminUserUploadLimit(target.id, limit);
+      setState((previous) => previous.kind === "ready"
+        ? {
+            kind: "ready",
+            rows: previous.rows.map((row) => row.id === updated.id
+              ? { ...row, upload_limit: updated.upload_limit, upload_limit_overridden: updated.upload_limit_overridden }
+              : row),
+          }
+        : previous);
+      setEditingLimitId("");
+      setLimitNotice({
+        kind: "ok",
+        message: updated.upload_limit_overridden
+          ? `已将 ${updated.username} 的文档上限设为 ${updated.upload_limit}`
+          : `已恢复 ${updated.username} 的文档上限为默认值（${updated.upload_limit}）`,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
+        setState({ kind: "forbidden" });
+        return;
+      }
+      setLimitNotice({ kind: "error", message: toUserMessage(error, "文档上限更新失败，请稍后重试") });
+    } finally {
+      setLimitPendingId("");
+    }
+  }
+
+  function saveLimit(target: AdminUserUsage) {
+    const parsed = parseUploadLimit(limitInput);
+    if (parsed === null) {
+      setLimitNotice({ kind: "error", message: "请输入 1 到 100000 之间的整数" });
+      return;
+    }
+    void submitLimitChange(target, parsed);
+  }
+
   if (state.kind === "loading") return <main className="usage-page">加载中…</main>;
   if (state.kind === "forbidden")
     return <main className="usage-page usage-empty">无权限:仅管理员可查看用户使用总览。</main>;
@@ -126,10 +211,37 @@ export default function AdminUsagePage() {
   return (
     <main className="usage-page">
       <PageHeader title="用户使用总览" />
-      <p className="usage-description">查看用户用量，并授予或撤销管理员权限。</p>
+      <p className="usage-description">查看用户用量，配置文档数量上限，并授予或撤销管理员权限。</p>
+      <div className="usage-settings-bar">
+        <label className="usage-settings-label" htmlFor="upload-limit-default">普通用户默认文档上限</label>
+        <input
+          id="upload-limit-default"
+          className="usage-limit-input"
+          type="number"
+          min={1}
+          max={100000}
+          value={defaultInput}
+          disabled={uploadLimitDefault === null || defaultSaving}
+          onChange={(event) => setDefaultInput(event.target.value)}
+        />
+        <button
+          type="button"
+          className="usage-role-button usage-role-button-confirm"
+          disabled={uploadLimitDefault === null || defaultSaving}
+          onClick={() => void saveDefault()}
+        >
+          {defaultSaving ? "保存中…" : "保存"}
+        </button>
+        <span className="usage-settings-hint">管理员的笔记本不受限；为某位用户单独设置后，以其设置为准。</span>
+      </div>
       {roleNotice && (
         <div className={`usage-role-notice usage-role-notice-${roleNotice.kind}`} role="status">
           {roleNotice.message}
+        </div>
+      )}
+      {limitNotice && (
+        <div className={`usage-role-notice usage-role-notice-${limitNotice.kind}`} role="status">
+          {limitNotice.message}
         </div>
       )}
       <table className="usage-table">
@@ -138,7 +250,7 @@ export default function AdminUsagePage() {
             <th className="usage-expand-col"></th>
             <th>用户名</th><th>角色</th><th>注册时间</th>
             <th>笔记本</th><th>来源</th><th>对话</th><th>报告</th>
-            <th>最近活跃</th><th>日志</th><th>权限管理</th>
+            <th>最近活跃</th><th>日志</th><th>文档上限</th><th>权限管理</th>
           </tr>
         </thead>
         <tbody>
@@ -177,6 +289,59 @@ export default function AdminUsagePage() {
                   <td>{u.reports}</td>
                   <td>{formatLastActive(u.last_active)}</td>
                   <td><a href={logsDrillHref(u.id)}>查看日志</a></td>
+                  <td className="usage-limit-cell">
+                    {u.role === "admin" ? (
+                      // 管理员的笔记本豁免(写路径 owner-only ⇒ owner 即当前 admin),显示「不限」不可编辑。
+                      <span className="usage-role-locked">不限</span>
+                    ) : editingLimitId === u.id ? (
+                      <span className="usage-limit-edit">
+                        <input
+                          className="usage-limit-input"
+                          type="number"
+                          min={1}
+                          max={100000}
+                          value={limitInput}
+                          disabled={limitPendingId === u.id}
+                          aria-label={`${u.username} 的文档上限`}
+                          onChange={(event) => setLimitInput(event.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="usage-role-button usage-role-button-confirm"
+                          disabled={limitPendingId === u.id}
+                          onClick={() => saveLimit(u)}
+                        >
+                          {limitPendingId === u.id ? "保存中…" : "保存"}
+                        </button>
+                        <button
+                          type="button"
+                          className="usage-role-button"
+                          disabled={limitPendingId === u.id}
+                          title="恢复为默认文档上限"
+                          onClick={() => void submitLimitChange(u, null)}
+                        >重置默认</button>
+                        <button
+                          type="button"
+                          className="usage-role-button"
+                          disabled={limitPendingId === u.id}
+                          onClick={() => setEditingLimitId("")}
+                        >取消</button>
+                      </span>
+                    ) : (
+                      <span className="usage-limit-view">
+                        <span className="usage-limit-value">{u.upload_limit}</span>
+                        <span className={`usage-limit-tag${u.upload_limit_overridden ? " usage-limit-tag-custom" : ""}`}>
+                          {u.upload_limit_overridden ? "自定义" : "默认"}
+                        </span>
+                        <button
+                          type="button"
+                          className="usage-role-button"
+                          disabled={Boolean(limitPendingId) || Boolean(editingLimitId)}
+                          onClick={() => { setEditingLimitId(u.id); setLimitInput(String(u.upload_limit)); setLimitNotice(null); }}
+                        >编辑</button>
+                      </span>
+                    )}
+                  </td>
                   <td>
                     {!u.role_mutable ? (
                       <span className="usage-role-locked">
@@ -216,7 +381,7 @@ export default function AdminUsagePage() {
                 </tr>
                 {isOpen && (
                   <tr className="usage-subrow">
-                    <td colSpan={11}>
+                    <td colSpan={12}>
                       {entry === "loading" && (
                         <div className="usage-subtable-status">加载中…</div>
                       )}

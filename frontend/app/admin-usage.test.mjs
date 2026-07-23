@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { canSeeAdminUsage, formatLastActive, logsDrillHref } from "./admin/usage/format.ts";
+import { canSeeAdminUsage, formatLastActive, logsDrillHref, parseUploadLimit } from "./admin/usage/format.ts";
 
 test("canSeeAdminUsage 仅 admin 为真", () => {
   assert.equal(canSeeAdminUsage("admin"), true);
@@ -17,4 +17,19 @@ test("formatLastActive 处理空值与格式", () => {
 
 test("logsDrillHref 编码 owner", () => {
   assert.equal(logsDrillHref("user-abc123"), "/dev/logs?owner=user-abc123");
+});
+
+test("parseUploadLimit 接受区间内整数、拒绝越界与非整数", () => {
+  assert.equal(parseUploadLimit("20"), 20);
+  assert.equal(parseUploadLimit(" 1 "), 1);
+  assert.equal(parseUploadLimit("100000"), 100000);
+  // 越界
+  assert.equal(parseUploadLimit("0"), null);
+  assert.equal(parseUploadLimit("100001"), null);
+  // 非整数 / 非法形态
+  assert.equal(parseUploadLimit(""), null);
+  assert.equal(parseUploadLimit("12.5"), null);
+  assert.equal(parseUploadLimit("-5"), null);
+  assert.equal(parseUploadLimit("1e3"), null);
+  assert.equal(parseUploadLimit("abc"), null);
 });

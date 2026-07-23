@@ -16,11 +16,15 @@ from app.models.admin import (
     AdminUserNotebook,
     AdminUserRoleResult,
     AdminUserRoleUpdate,
+    AdminUserUploadLimitResult,
     AdminUserUsage,
     PromoteRequest,
     PromotionApproveResult,
     PromotionCandidate,
     PromotionRejectRequest,
+    UploadLimitDefaultResult,
+    UploadLimitDefaultUpdate,
+    UploadLimitUpdate,
 )
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
@@ -172,6 +176,66 @@ def update_admin_user_role(
     except SelfDemotionError:
         raise user_error(409, "不能撤销当前账户的管理员权限")
     return AdminUserRoleResult(**result)
+
+
+@router.get(
+    "/admin/settings/upload-limit-default", response_model=UploadLimitDefaultResult
+)
+def get_upload_limit_default(
+    user: UserProfile = Depends(get_current_user),
+) -> UploadLimitDefaultResult:
+    """当前全局默认「每笔记本文档数量上限」。仅 admin。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看文档上限设置")
+    return UploadLimitDefaultResult(
+        limit=identity_repository().global_document_limit_default()
+    )
+
+
+@router.patch(
+    "/admin/settings/upload-limit-default", response_model=UploadLimitDefaultResult
+)
+def update_upload_limit_default(
+    payload: UploadLimitDefaultUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> UploadLimitDefaultResult:
+    """设置全局默认「每笔记本文档数量上限」。仅 admin。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可修改文档上限设置")
+    try:
+        result = identity_repository().set_global_document_limit_default(
+            user.id, payload.limit
+        )
+    except PermissionError:
+        raise user_error(403, "仅管理员可修改文档上限设置")
+    except ValueError:
+        raise user_error(400, "文档上限需在 1 到 100000 之间")
+    return UploadLimitDefaultResult(**result)
+
+
+@router.patch(
+    "/admin/users/{user_id}/upload-limit", response_model=AdminUserUploadLimitResult
+)
+def update_admin_user_upload_limit(
+    user_id: str,
+    payload: UploadLimitUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserUploadLimitResult:
+    """给某用户设/清「每笔记本文档数量上限」覆盖值(limit=null 清除、回落全局默认)。
+    仅 admin。返回改动后该用户的生效上限与是否仍为覆盖值。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户文档上限")
+    try:
+        result = identity_repository().set_user_document_limit_override(
+            user.id, user_id, payload.limit
+        )
+    except PermissionError:
+        raise user_error(403, "仅管理员可管理用户文档上限")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="User not found")
+    except ValueError:
+        raise user_error(400, "文档上限需在 1 到 100000 之间")
+    return AdminUserUploadLimitResult(**result)
 
 
 @router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])

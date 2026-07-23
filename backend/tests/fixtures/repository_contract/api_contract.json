@@ -166,6 +166,35 @@
           "title": "AdminUserRoleUpdate",
           "type": "object"
         },
+        "AdminUserUploadLimitResult": {
+          "description": "PATCH /admin/users/{id}/upload-limit 响应:改动后该用户的生效上限与是否覆盖。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "upload_limit": {
+              "title": "Upload Limit",
+              "type": "integer"
+            },
+            "upload_limit_overridden": {
+              "title": "Upload Limit Overridden",
+              "type": "boolean"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username",
+            "upload_limit",
+            "upload_limit_overridden"
+          ],
+          "title": "AdminUserUploadLimitResult",
+          "type": "object"
+        },
         "AdminUserUsage": {
           "properties": {
             "conversations": {
@@ -216,6 +245,16 @@
             "sources": {
               "title": "Sources",
               "type": "integer"
+            },
+            "upload_limit": {
+              "default": 0,
+              "title": "Upload Limit",
+              "type": "integer"
+            },
+            "upload_limit_overridden": {
+              "default": false,
+              "title": "Upload Limit Overridden",
+              "type": "boolean"
             },
             "username": {
               "title": "Username",
@@ -4005,6 +4044,11 @@
               "title": "Created Label",
               "type": "string"
             },
+            "document_limit": {
+              "default": 0,
+              "title": "Document Limit",
+              "type": "integer"
+            },
             "expected_questions": {
               "items": {
                 "type": "string"
@@ -5827,6 +5871,54 @@
           "title": "UnifiedKgStatus",
           "type": "object"
         },
+        "UploadLimitDefaultResult": {
+          "description": "GET/PATCH /admin/settings/upload-limit-default 响应:当前全局默认上限。",
+          "properties": {
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "limit"
+          ],
+          "title": "UploadLimitDefaultResult",
+          "type": "object"
+        },
+        "UploadLimitDefaultUpdate": {
+          "additionalProperties": false,
+          "description": "PATCH /admin/settings/upload-limit-default 请求体:设置全局默认上限。",
+          "properties": {
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "limit"
+          ],
+          "title": "UploadLimitDefaultUpdate",
+          "type": "object"
+        },
+        "UploadLimitUpdate": {
+          "additionalProperties": false,
+          "description": "PATCH /admin/users/{id}/upload-limit 请求体:给某用户设/清「每笔记本文档\n数量上限」覆盖值。limit=null 表示清除覆盖、回落全局默认。",
+          "properties": {
+            "limit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          "title": "UploadLimitUpdate",
+          "type": "object"
+        },
         "UserProfile": {
           "properties": {
             "display_name": {
@@ -6019,6 +6111,62 @@
           "summary": "List Online Users"
         }
       },
+      "/api/admin/settings/upload-limit-default": {
+        "get": {
+          "description": "当前全局默认「每笔记本文档数量上限」。仅 admin。",
+          "operationId": "get_upload_limit_default_api_admin_settings_upload_limit_default_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UploadLimitDefaultResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Get Upload Limit Default"
+        },
+        "patch": {
+          "description": "设置全局默认「每笔记本文档数量上限」。仅 admin。",
+          "operationId": "update_upload_limit_default_api_admin_settings_upload_limit_default_patch",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadLimitDefaultUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/UploadLimitDefaultResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Upload Limit Default"
+        }
+      },
       "/api/admin/users": {
         "get": {
           "description": "管理员用户使用总览:所有用户 + 用量统计 + 当前在线。仅 admin。\n重的用量聚合放线程池,回 loop 线程读 pending_bus(免锁快照)。",
@@ -6134,6 +6282,56 @@
             }
           },
           "summary": "Update Admin User Role"
+        }
+      },
+      "/api/admin/users/{user_id}/upload-limit": {
+        "patch": {
+          "description": "给某用户设/清「每笔记本文档数量上限」覆盖值(limit=null 清除、回落全局默认)。\n仅 admin。返回改动后该用户的生效上限与是否仍为覆盖值。",
+          "operationId": "update_admin_user_upload_limit_api_admin_users__user_id__upload_limit_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadLimitUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserUploadLimitResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin User Upload Limit"
         }
       },
       "/api/agent-profiles": {
@@ -14154,6 +14352,7 @@
         "sources": 1
       },
       "created_label": "fixture-date",
+      "document_limit": 20,
       "expected_questions": [],
       "id": "nb-api",
       "is_shared": true,

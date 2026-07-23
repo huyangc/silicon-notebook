@@ -92,6 +92,11 @@ class NotebookSummary(BaseModel):
     # 驱动前端卡片右下角的「已分享」小人徽标(仿 NotebookLM);reader 看到的原库 is_shared
     # 也为 True,但 reader 卡片本身已带「来自 X」不再重复标记。
     is_shared: bool = False
+    # owner 的「每笔记本文档数量上限」有效值(个人覆盖 ∪ 全局默认)。仅 get_notebook
+    # 详情路径回填真实值;列表投影(list_notebooks)保持 0(前端来源面板只读详情里的它,
+    # 配合来源列表 total_count 显示「文档 X / 上限」)。owner 为 admin 时前端另按角色显示
+    # 「不限」,不消费此数值。
+    document_limit: int = 0
 
 
 class ShareResponse(BaseModel):

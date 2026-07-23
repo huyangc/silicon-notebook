@@ -65,8 +65,10 @@ def test_schema_version_is_27():
     # bumped v24 → v25 (#328); knowhow table version control's _migration_26
     # (knowhow_changes/knowhow_milestones tables) bumped v25 → v26 (#327);
     # source-completion-marker P1.5's _migration_27 (sources.chunked_at column)
-    # bumped v26 → v27.
-    assert sr.SCHEMA_VERSION == 27
+    # bumped v26 → v27; the per-notebook document limit's _migration_28
+    # (app_settings table + user_profiles.upload_document_limit column) bumped
+    # v27 → v28.
+    assert sr.SCHEMA_VERSION == 28
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

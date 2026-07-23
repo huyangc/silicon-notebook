@@ -357,17 +357,31 @@ class NotebookCatalogService:
         with self._summaries.database.connect() as db:
             return knowledge_counts_cache.warm_all(db, progress)
 
+    def _fill_document_limit(
+        self, summary: NotebookSummary, notebook_id: str
+    ) -> NotebookSummary:
+        """回填 owner 的「每笔记本文档数量上限」有效值(前端来源面板据此 + 来源列表
+        total_count 显示「文档 X / 上限」)。仅详情/创建路径回填;列表投影保持默认。"""
+        owner_id, _owner_role = self._identity.notebook_owner(notebook_id)
+        summary.document_limit = self._identity.effective_document_limit(owner_id)
+        return summary
+
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         user_id = self._identity.current_user().id
         notebook_id = self._store.create_row(payload, user_id)
-        return self._summaries.get(notebook_id, user_id=user_id)
+        return self._fill_document_limit(
+            self._summaries.get(notebook_id, user_id=user_id), notebook_id
+        )
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary:
-        return self._summaries.get(
+        return self._fill_document_limit(
+            self._summaries.get(
+                notebook_id,
+                kg_building=notebook_id in self.kg_building,
+                paper_meta_backfilling=self._paper_meta_backfilling(notebook_id),
+                user_id=self._identity.current_user().id,
+            ),
             notebook_id,
-            kg_building=notebook_id in self.kg_building,
-            paper_meta_backfilling=self._paper_meta_backfilling(notebook_id),
-            user_id=self._identity.current_user().id,
         )
 
     def update_notebook(

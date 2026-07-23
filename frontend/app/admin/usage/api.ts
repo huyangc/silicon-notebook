@@ -24,6 +24,9 @@ export type AdminUserUsage = {
   last_active: string | null;
   is_online: boolean;
   role_mutable: boolean;
+  // 有效文档上限(有覆盖用覆盖、否则全局默认)与「是否为该用户单独设置过」标记。
+  upload_limit: number;
+  upload_limit_overridden: boolean;
 };
 
 export type AdminUserRole = "admin" | "user";
@@ -32,6 +35,13 @@ export type AdminUserRoleResult = {
   id: string;
   username: string;
   role: AdminUserRole;
+};
+
+export type AdminUserUploadLimit = {
+  id: string;
+  username: string;
+  upload_limit: number;
+  upload_limit_overridden: boolean;
 };
 
 export async function fetchAdminUsers(): Promise<AdminUserUsage[]> {
@@ -60,4 +70,38 @@ export async function updateAdminUserRole(
   if (res.status === 403) await throwForbiddenSentinel(res);
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   return res.json();
+}
+
+// 设/清某用户的文档上限覆盖。limit=null 清除覆盖(回落全局默认)。镜像
+// updateAdminUserRole 的 403 哨兵分流 + 人话层错误处理。
+export async function updateAdminUserUploadLimit(
+  userId: string,
+  limit: number | null,
+): Promise<AdminUserUploadLimit> {
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/upload-limit`,
+    { tag: "admin", method: "PATCH", body: JSON.stringify({ limit }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return res.json();
+}
+
+export async function fetchUploadLimitDefault(): Promise<number> {
+  const res = await performApiRequest("/admin/settings/upload-limit-default", { tag: "admin" });
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  const data = (await res.json()) as { limit: number };
+  return data.limit;
+}
+
+export async function updateUploadLimitDefault(limit: number): Promise<number> {
+  const res = await performApiRequest(
+    "/admin/settings/upload-limit-default",
+    { tag: "admin", method: "PATCH", body: JSON.stringify({ limit }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  const data = (await res.json()) as { limit: number };
+  return data.limit;
 }

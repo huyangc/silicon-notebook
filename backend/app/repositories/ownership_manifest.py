@@ -857,6 +857,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.delete_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.delete_source_asset_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.deprecate_memory', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.effective_document_limit', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.effective_schemas', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.execute_notebook_kg_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.export_reports', kind='attribute', target='_runtime'),
@@ -879,6 +880,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.get_paper_meta', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.get_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.get_source', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.global_document_limit_default', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.import_sources', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.incremental_fuse_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.index_status', kind='attribute', target='_runtime'),
@@ -930,6 +932,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.node_context', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.notebook_analytics', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.notebook_copy_stats', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.notebook_owner', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.paper_meta_backfill_progress', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.paper_meta_backfilling', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.parallelism', kind='attribute', target='_runtime'),
@@ -1016,7 +1019,9 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.user_can_read_answer', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.user_can_read_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.user_can_read_source', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.user_document_limit_override', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.validate_cell_target', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.visible_document_count', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.warm_open_path_caches', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.write_clusters', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.write_conflict_candidate', kind='attribute', target='_runtime'),
@@ -1640,6 +1645,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='effective_document_limit',
+        owner='IdentityStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._document_capacity', kind='attribute', target='effective_document_limit'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='effective_schemas',
         owner='SchemaRegistryService',
         kind='method',
@@ -2231,6 +2246,16 @@ SURFACE_MEMBERS = (
         patches=(
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_builds_with_igraph', kind='patch', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_refuses_without_igraph', kind='patch', target='notebook_copy_stats'),
+        ),
+    ),
+    SurfaceMember(
+        name='notebook_owner',
+        owner='IdentityStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._document_capacity', kind='attribute', target='notebook_owner'),
+        ),
+        patches=(
         ),
     ),
     SurfaceMember(
@@ -3018,6 +3043,16 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.delete_cell_code', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_cell_code', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.put_cell_code', kind='attribute', target='validate_cell_target'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='visible_document_count',
+        owner='SourceStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._document_capacity', kind='attribute', target='visible_document_count'),
         ),
         patches=(
         ),

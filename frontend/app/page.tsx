@@ -188,6 +188,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
+import { resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -664,6 +665,8 @@ export default function Home() {
   // while a source search is active, which pagination needs). The Ask composer / welcome
   // copy instead want the notebook's imported-source total regardless of that filter, so
   // track it separately: updated only on unfiltered loads and on source mutations.
+  // 文档上限门控也复用它：notebookSourceTotal 是不受来源搜索过滤影响的可见文档真实
+  // 总数（与后端 list_sources_page 无过滤时的 total_count 同口径，排除 memory/knowhow）。
   const [notebookSourceTotal, setNotebookSourceTotal] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
   const [sourcesCollapsed, setSourcesCollapsed] = useState(false);
@@ -2440,7 +2443,8 @@ export default function Home() {
         // applies only on Enter), not necessarily what produced the current page — so optimistically
         // bumping it risks either a stale count or a phantom filtered page. This matches the pre-#332
         // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
-        // bump is pre-existing and out of scope here.
+        // bump is pre-existing and out of scope here. 文档上限门控也读 notebookSourceTotal，
+        // 故链接导入 +N 后满额判定同步跟进。
         setNotebookSourceTotal((t) => t + result.created.length);
         await loadNotebookCollection();
       }
@@ -3464,6 +3468,16 @@ export default function Home() {
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
   // 只读共享库(Phase 2):无写权,门控写按钮 + 显示只读徽章/退出入口。
   const isReader = currentNotebook?.access === "reader";
+  // 文档数量上限:管理员豁免(写路径 owner-only ⇒ 当前用户即 owner);document_limit
+  // 只在 getNotebook 详情里是真值(列表投影是 0 哨兵),故 0/缺失当「未知」不门控。
+  // 计数用 notebookSourceTotal(不受来源搜索过滤影响的真实可见文档总数),不用 sourcesTotal
+  // ——后者在搜索态是匹配子集计数,会让满额笔记本在搜索时误判未满。
+  const docCapacity = resolveDocumentCapacity({
+    isAdmin: currentUser?.role === "admin",
+    documentLimit: currentNotebook?.document_limit,
+    documentCount: notebookSourceTotal,
+  });
+  const atDocCapacityHint = "已达该笔记本的文档数量上限，无法继续添加文档。";
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
     currentUser?.role ?? "",
@@ -4533,20 +4547,32 @@ export default function Home() {
               </div>
               <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
-            <label className="drop-zone">
-              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
+            {docCapacity.show && (
+              <div className={`source-doc-capacity${docCapacity.atCapacity ? " is-full" : ""}`}>
+                <span className="source-doc-capacity-count">文档 {docCapacity.count} / {docCapacity.limit}</span>
+                {docCapacity.atCapacity && (
+                  <span className="source-doc-capacity-hint">
+                    已达该笔记本的文档数量上限，如需继续添加，请先删除部分文档，或联系管理员调整上限。
+                  </span>
+                )}
+              </div>
+            )}
+            <label className={`drop-zone${docCapacity.atCapacity ? " is-disabled" : ""}`} title={docCapacity.atCapacity ? atDocCapacityHint : undefined}>
+              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={docCapacity.atCapacity} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
               <small>支持 {SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。</small>
             </label>
             <div className="source-action-row">
-              <label className="source-action-button">
+              <label className={`source-action-button${docCapacity.atCapacity ? " is-disabled" : ""}`} title={docCapacity.atCapacity ? atDocCapacityHint : undefined}>
                 <Upload size={18} strokeWidth={2.5} /> 上传文件
-                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} />
+                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={docCapacity.atCapacity} />
               </label>
               <button
                 type="button"
                 className={`source-action-button${linkSectionOpen ? " is-active" : ""}`}
+                disabled={docCapacity.atCapacity}
+                title={docCapacity.atCapacity ? atDocCapacityHint : undefined}
                 onClick={() => { setUrlRejected([]); setLinkSectionOpen((open) => !open); }}
               >
                 <ExternalLink size={18} strokeWidth={2.5} /> 添加链接
@@ -4573,7 +4599,7 @@ export default function Home() {
                   </div>
                 )}
                 <div className="tag-row">
-                  <button className="new-pill" disabled={urlBusy} onClick={() => submitUrlSources().catch(reportError)}>
+                  <button className="new-pill" disabled={urlBusy || docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => submitUrlSources().catch(reportError)}>
                     {urlBusy ? "添加中…" : "添加并解析"}
                   </button>
                   <button className="sort-button" onClick={() => { setUrlText(""); setUrlRejected([]); setLinkSectionOpen(false); }}>取消</button>
@@ -4616,7 +4642,7 @@ export default function Home() {
                   ))}
                 </div>
                 <div className="tag-row">
-                  <button className="new-pill" onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
+                  <button className="new-pill" disabled={docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
                   <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); }}>清空</button>
                 </div>
               </div>

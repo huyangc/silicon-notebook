@@ -424,6 +424,10 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_27(tmp_path):
         rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
         rollback.execute("DROP INDEX idx_sources_memory_id")             # _migration_14
         rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")    # _migration_14
+        rollback.execute("DROP TABLE app_settings")                      # _migration_27
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 13")
         rollback.commit()
     finally:
@@ -457,6 +461,10 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_27(tmp_path):
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
+        rollback.execute("DROP TABLE app_settings")                      # _migration_27
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 20")
         rollback.commit()
     finally:
@@ -504,6 +512,10 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_27(tmp_path):
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
+        rollback.execute("DROP TABLE app_settings")                      # _migration_27
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 21")
         rollback.commit()
     finally:
@@ -541,6 +553,10 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_27(tmp_path):
         rollback.execute("DROP TABLE knowhow_milestones")
         rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
+        rollback.execute("DROP TABLE app_settings")                      # _migration_27
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
     finally:
@@ -586,6 +602,10 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_27(tmp_path):
                 "2030-01-01T00:00:00+00:00",
             ),
         )
+        rollback.execute("DROP TABLE app_settings")                      # _migration_27
+        rollback.execute(
+            "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
+        )                                                                # _migration_27
         rollback.execute("PRAGMA user_version = 23")
 
     result = module.verify_snapshot(database, storage)

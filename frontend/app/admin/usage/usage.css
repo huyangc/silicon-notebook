@@ -68,6 +68,31 @@
 .usage-role-button:disabled { cursor: not-allowed; opacity: .55; }
 .usage-role-button-confirm { border-color: var(--accent, #2563eb); color: var(--accent, #2563eb); }
 
+.usage-settings-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 0 0 14px; padding: 12px 14px;
+  border: 1px solid var(--border, #e5e7eb); border-radius: 8px;
+  background: var(--hover, #f9fafb); font-size: 14px;
+}
+.usage-settings-label { font-weight: 600; }
+.usage-settings-hint { color: var(--muted, #666); font-size: 13px; }
+
+.usage-limit-input {
+  width: 84px; padding: 4px 8px; border: 1px solid var(--border, #d1d5db);
+  border-radius: 6px; background: var(--surface, #fff); color: inherit; font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.usage-limit-input:disabled { opacity: .55; cursor: not-allowed; }
+
+.usage-limit-cell { white-space: nowrap; }
+.usage-limit-view, .usage-limit-edit { display: inline-flex; align-items: center; gap: 6px; }
+.usage-limit-value { font-variant-numeric: tabular-nums; font-weight: 600; }
+.usage-limit-tag {
+  padding: 1px 8px; border-radius: 999px; font-size: 12px;
+  background: var(--border, #eef1f5); color: var(--muted, #666);
+}
+.usage-limit-tag-custom { background: #eff4ff; color: var(--accent, #2563eb); }
+
 @media (max-width: 900px) {
   .usage-page { overflow-x: auto; }
 }

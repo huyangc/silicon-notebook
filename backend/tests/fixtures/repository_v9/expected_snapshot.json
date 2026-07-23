@@ -347,6 +347,7 @@
         "sources": 1
       },
       "created_label": "2024年1月2日",
+      "document_limit": 20,
       "expected_questions": [
         "Why is gain stable?"
       ],
@@ -985,6 +986,7 @@
         "memory_mode": "manual",
         "model_settings": {},
         "updated_at": "<timestamp>",
+        "upload_document_limit": null,
         "user_id": "<user-id-1>"
       },
       {
@@ -998,6 +1000,7 @@
         "memory_mode": "manual",
         "model_settings": {},
         "updated_at": "<timestamp>",
+        "upload_document_limit": null,
         "user_id": "<user-id-2>"
       },
       {
@@ -1007,6 +1010,7 @@
         "memory_mode": "manual",
         "model_settings": {},
         "updated_at": "<timestamp>",
+        "upload_document_limit": null,
         "user_id": "<user-id-3>"
       }
     ],
@@ -1485,6 +1489,11 @@
         "type": "table"
       },
       {
+        "name": "app_settings",
+        "sql_sha256": "0e6bd5a69409bad3f0f5c16de07dec608f51e753a028395d4152d3ea31146b1a",
+        "type": "table"
+      },
+      {
         "name": "ask_jobs",
         "sql_sha256": "393b26cacbfa9da4d62c4f4c8bba973a33c561126c364993839c665d998047b9",
         "type": "table"
@@ -1836,7 +1845,7 @@
       },
       {
         "name": "user_profiles",
-        "sql_sha256": "c8f4b8d4f9072a816e10e2c0c5c332625a137aa659a0af9703ff36298b4a2cb8",
+        "sql_sha256": "f3c1e9abbbcdacde6818ca3e117f766ba5879392c4a54cf8e9afba4a6f726600",
         "type": "table"
       },
       {
@@ -1860,6 +1869,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 27
+    "user_version": 28
   }
 }

@@ -181,6 +181,12 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "「用户名不合法」），异常原文只用于分类、不外泄。真实响应由 "
         "test_duplicate_username_marked_even_though_detail_is_a_variable 覆盖。"
     ),
+    "app/api/source_routes.py::_enforce_document_capacity": (
+        "detail 是纯中文文档数量上限模板 f-string，只插入 limit/current/adding 三个"
+        "整数（「该笔记本最多可添加 N 篇文档，当前已有 X 篇，无法再添加 K 篇。」）——"
+        "无内部黑话，只说「文档」。真实响应由 tests/test_document_limit.py 的"
+        " import/upload/url 三端点 409 用例覆盖(断言 X-User-Message 头 + 「文档」文案)。"
+    ),
 }
 
 
