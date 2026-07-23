@@ -330,12 +330,17 @@ class SourceEmbeddingService:
             ):
                 rows.extend(part)
             if rows:
-                # Fresh timestamp PER PAGE (mirrors flush_object_vectors). A
-                # shared created_at across pages defeats retrieval's
-                # (count, max_created_at)-keyed _vector_matrix cache: re-embed
-                # upserts leave COUNT(*) unchanged, so only an advancing
-                # created_at bumps the version — a shared one lets a matrix built
-                # mid-pagination (a partial re-embed) stay cached indefinitely.
+                # Fresh timestamp PER PAGE — parity with the pre-existing objects
+                # path (flush_object_vectors also flushes per commit_every with a
+                # fresh now()). A shared created_at across pages defeats
+                # retrieval's (count, max_created_at)-keyed _vector_matrix cache:
+                # re-embed upserts leave COUNT(*) unchanged, so only an advancing
+                # created_at bumps the version. Residual (shared with the objects
+                # path, predates this change): the clock is second-resolution, so
+                # pages finishing within one second still collide — a limitation
+                # of the (count, second-created_at) cache key itself, whose proper
+                # fix is a monotonic version in the retrieval cache, out of scope
+                # for this memory-diet change.
                 self.vectors.replace_relation_vectors(
                     notebook_id, rows, created_at=self.now()
                 )
