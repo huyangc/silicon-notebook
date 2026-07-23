@@ -121,6 +121,26 @@ CJK_TERMS = {
 
 CJK = re.compile(r"[一-鿿]")
 INTERP = re.compile(r"\$\{[^{}]*\}")  # template ${...}
+
+# 放行的界面短语:图谱对象类型/字段管理功能的界面名,经产品决策(2026-07-23)定为
+# 「图谱 Schema」——EDA/芯片场景下用户反而熟悉 "Schema" 一词。这是本守卫对 schema
+# 唯一放行的**复合短语**,像剥 ${…} 插值一样在匹配前从单元里剥掉;裸 schema / 裸
+# Schema(不带「图谱」前缀)仍然照抓(见 ASCII_TERMS["schema"] 与其正例)。真源为
+# AGENTS.md「界面词汇表」schema 行的放行注记。改动此处必须同步那条注记与
+# backend/tests/test_ui_vocabulary_guard.py 的正反例。
+#
+# 前置断言 (?<![一-鿿]):放行短语的「图谱」前不能紧挨 CJK,否则会吃掉「知识图谱」的
+# 尾字「图谱」——「构建知识图谱 Schema」里的「构建知识图谱」违规会被一起剥掉而漏报
+# (code-quality 评审 P2)。所有合法用法(<Database/> 图谱 Schema、<h2>图谱 Schema</h2>)
+# 的「图谱」前都是空格 / `>` / 串首,非 CJK,不受影响。
+# 后置断言 (?![A-Za-z0-9_]):只放行完整单词 Schema,不放行它做**标识符前缀**的更长
+# 形态——否则「图谱 Schemas」「图谱 Schematics」「图谱 Schema2」「图谱 Schema_v2」会被
+# 当成放行短语剥掉而漏掉其中的 schema 黑话(codex 第 2/3 轮 P2)。这里刻意比
+# ASCII_TERMS["schema"] 的 (?![A-Za-z]) **更严**:数字/下划线也算词字符,`Schema2`、
+# `Schema_v2` 都不是那个被放行的单词,必须仍能被 ASCII 规则抓到。
+# 该剥离统一放在 terms_in() 里,故前端渲染文本与后端 user_error() 两条扫描路径**对称**
+# 生效(codex 第 2 轮 P2:界面词是全局契约,后端可展示文案里的「图谱 Schema」同样放行)。
+SANCTIONED_UI = re.compile(r"(?<![一-鿿])图谱\s*Schema(?![A-Za-z0-9_])")
 STRING = re.compile(r'"(?:[^"\\]|\\.)*"' r"|'(?:[^'\\]|\\.)*'" r"|`(?:[^`\\]|\\.)*`", re.S)
 JSXTEXT = re.compile(r"[^<>{}]+")     # bare JSX text: a run between tags/expressions
 
@@ -206,6 +226,9 @@ def blank_strings(text: str) -> str:
 
 
 def terms_in(unit: str) -> list[str]:
+    # 放行的界面短语(「图谱 Schema」)在匹配前剥掉,同 ${…} 插值。放在这里(而非各调用点)
+    # 让前端渲染文本 scan() 与后端 user_error() scan_user_error() 两条路径对称生效。
+    unit = SANCTIONED_UI.sub(" ", unit)
     found = [name for name, pat in CJK_TERMS.items() if pat.search(unit)]
     found += [name for name, pat in ASCII_TERMS.items() if pat.search(unit)]
     return found
@@ -224,6 +247,8 @@ def scan(path: Path) -> list[tuple[int, str, str]]:
         # would name the line above the copy. Skip the run's leading whitespace so
         # the reported line is the one the developer has to edit.
         off += len(unit) - len(unit.lstrip())
+        # 放行短语的剥离已下沉进 terms_in()(前后端两条扫描路径共用);报错时仍用原始
+        # unit,保证裸 schema/Schema 依旧被抓到。
         for term in terms_in(unit):
             hits.append((text.count("\n", 0, off) + 1, term, unit.strip()))
 

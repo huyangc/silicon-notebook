@@ -4600,6 +4600,77 @@ button.chat-session-card {
   min-height: 0; /* flex 子项默认 min-height:auto 会撑破限高,导致滚动条不生效 */
 }
 
+/* —— 笔记本设置表单:分组小节 + 两列网格 + 常驻底栏,只作用于这张卡(不碰共享 .edit-form) —— */
+.notebook-settings-form {
+  gap: 22px;          /* 小节之间比字段之间更疏 */
+  padding-bottom: 0;  /* 底部留给常驻底栏 */
+}
+
+.settings-section {
+  display: grid;
+  gap: 13px;
+}
+
+.settings-section-head {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-section-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.settings-section-head p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.settings-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+}
+
+@media (max-width: 560px) {
+  .settings-grid-2 { grid-template-columns: 1fr; }
+}
+
+/* 参考库单独成卡,与其它小节区分开 */
+.notebook-settings-form .base-picker {
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f7f9fc;
+}
+
+/* 输入聚焦态:细描边 + 柔和光环,替代浏览器默认 outline */
+.notebook-settings-form input:focus,
+.notebook-settings-form textarea:focus {
+  outline: none;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.13);
+}
+
+/* 常驻底栏:表单可滚动时「保存/取消」不随内容滚走;负边距顶到卡片左右边,分隔线通栏 */
+.notebook-settings-form .settings-footer {
+  position: sticky;
+  bottom: 0;
+  margin: 6px -24px 0;
+  padding: 14px 24px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
 .edit-form label {
   display: grid;
   gap: 7px;
@@ -5148,6 +5219,21 @@ button.chat-session-card {
   color: var(--muted);
   font-size: 13px;
   max-width: 82ch;
+}
+
+/* 头部右侧动作组:「图谱 Schema」(admin) + 关闭按钮同排右对齐,与标题顶端对齐。 */
+.kg-view-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.kg-schema-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 
 .kg-action-stack {
@@ -6138,8 +6224,8 @@ button.chat-session-card {
 /* 多领域基准库 —— 编辑弹窗里的参考库多选。列对齐 + 长名省略号截断,与 .tier-badge
    群落同风格。 */
 .base-picker { display: flex; flex-direction: column; gap: 6px; }
-.base-picker-title { font-weight: 600; }
-.base-picker-desc,
+/* .base-picker-title / .base-picker-desc 随笔记本设置表单重构下线(标题/说明改由
+   .settings-section-head 承载),此处不再保留其死规则。 */
 .base-picker-empty,
 .base-picker-hint { font-size: 12px; opacity: .7; margin: 0; }
 .base-picker-hint { color: var(--warning, #b8860b); }

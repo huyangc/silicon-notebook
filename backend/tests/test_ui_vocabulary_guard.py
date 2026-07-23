@@ -139,6 +139,35 @@ def test_正常词组不因子串被误报(tmp_path, code):
     assert not scan_src(tmp_path, code), f"这段正常文案被误报了:{code}"
 
 
+def test_图谱Schema放行但裸schema仍抓(tmp_path):
+    """产品决策(2026-07-23)放行「图谱 Schema」这一个界面短语;放行必须**收窄**——
+    只剥这个复合短语,裸 schema / 裸 Schema(不带「图谱」前缀)照抓,否则守卫被掏空。
+
+    没有这条,「放行了图谱 Schema」与「把整条 schema 规则删了」在绿灯下无法区分。
+    真源:AGENTS.md schema 行放行注记 + check_ui_vocabulary.SANCTIONED_UI。"""
+    # 1) 放行:界面名「图谱 Schema」及其常见后缀不报
+    assert scan_src(tmp_path, 'const a = "图谱 Schema";') == []
+    assert scan_src(tmp_path, 'const b = "图谱 Schema 已更新";') == []
+    assert scan_src(tmp_path, "export const c = <button>图谱 Schema</button>;") == []
+    # 2) 收窄:裸 schema / 裸 Schema(无「图谱」前缀)仍必被抓——这批若不报=规则被掏空
+    assert "schema" in scan_src(tmp_path, 'const d = "schema 版本回滚";')
+    assert "schema" in scan_src(tmp_path, 'const e = "Schema 已更新";')
+    # 3) 同一单元里放行短语旁边另有裸 schema:只剥放行的那个,另一个仍抓
+    assert "schema" in scan_src(tmp_path, 'const f = "图谱 Schema 用的 schema 版本";')
+    # 4) 收窄(评审 P2):放行短语的「图谱」前不能紧挨 CJK,否则会吃掉「知识图谱」尾字,
+    #    把「构建知识图谱 Schema」里的 构建知识图谱 违规一起剥掉而漏报。这批必须仍被抓。
+    assert "构建知识图谱" in scan_src(tmp_path, 'const g = "构建知识图谱 Schema";')
+    assert "构建知识图谱" in scan_src(tmp_path, 'const h = "重建知识图谱Schema入口";')
+    # 5) 多空格 / 跨行 JSX 文本仍放行——钉住 \s* 的宽度,防「收紧成单空格」的移动变异。
+    assert scan_src(tmp_path, 'const i = "图谱  Schema";') == []
+    assert scan_src(tmp_path, "export const j = <span>图谱\n  Schema</span>;") == []
+    # 6) 后置边界(codex 第 2/3 轮 P2):只放行完整单词 Schema,做**标识符前缀**的更长
+    #    形态一律不放行——字母/数字/下划线后缀都要让内部的 schema 黑话仍被抓到。
+    assert "schema" in scan_src(tmp_path, 'const k = "图谱 Schemas 已更新";')
+    assert "schema" in scan_src(tmp_path, 'const l = "图谱 Schema2 上线";')
+    assert "schema" in scan_src(tmp_path, 'const m = "图谱 Schema_v2 已更新";')
+
+
 def test_同一单元里多个黑话全部报出(tmp_path):
     hits = scan_src(tmp_path, 'const t = "从基准库抽取 chunk";')
     assert {"基准库", "抽取", "chunk"} <= set(hits)
@@ -294,6 +323,18 @@ def test_后端可展示文案里的黑话会被抓到(tmp_path, code):
 def test_f_string_插值不当渲染文本(tmp_path):
     """插值里的标识符是代码,不是文案——与前端 `${…}` 同一规则。"""
     assert scan_py(tmp_path, 'raise user_error(400, f"共 {chunk_count} 段")') == []
+
+
+def test_图谱Schema放行对后端user_error也生效(tmp_path):
+    """codex 第 2 轮 P2:「图谱 Schema」是全局界面词,守卫按信任边界(而非目录)划范围——
+    后端 user_error() 的可展示文案与前端渲染文本同受词表约束,故放行也必须对称:
+
+      * 后端 user_error 里的「图谱 Schema」放行(不因含 schema 被拦);
+      * 但后端裸 schema 仍照抓(放行是收窄的,不是把后端 schema 规则关掉)。
+
+    没有这条,前端放行、后端却拦「图谱 Schema」= 契约自相矛盾,合法后端文案过不了 CI。"""
+    assert scan_py(tmp_path, 'raise user_error(400, "图谱 Schema 已更新")') == []
+    assert "schema" in scan_py(tmp_path, 'raise user_error(400, "schema 版本回滚")')
 
 
 @pytest.mark.parametrize(

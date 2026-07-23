@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -2899,7 +2899,7 @@ export default function Home() {
     try {
       await updateObjectSchema(objectType, patch);
       await loadSchemas();
-      setToast("内容类型已更新");
+      setToast("类型已更新");
     } finally {
       setSchemaBusy(false);
     }
@@ -3731,12 +3731,8 @@ export default function Home() {
                   <LayoutDashboard size={17} />
                   <span>看板</span>
                 </button>
-                {capabilities.canManageSchemas && (
-                  <button className="workspace-nav-button" onClick={openSchemas}>
-                    <Database size={17} />
-                    <span>内容类型</span>
-                  </button>
-                )}
+                {/* 图谱 Schema(原「内容类型」)已并入知识图谱视图,入口挪到 kg-view 头部
+                    的「图谱 Schema」按钮(仍 admin 门控),此处不再单列顶层导航项。 */}
                 <button className="workspace-nav-button" onClick={() => openKgView()}>
                   <Network size={17} />
                   <span>知识图谱</span>
@@ -3752,17 +3748,23 @@ export default function Home() {
                   </button>
                 )}
                 <button className="workspace-nav-button" onClick={() => openModelPanel()}>
+                  <Cpu size={17} />
                   <span>模型服务</span>
                 </button>
-                <button className="workspace-nav-button" onClick={() => setInfoModal({
-                  title: "设置",
-                  message: capabilities.canWriteNotebook
-                    ? "可在这里编辑当前笔记本的信息与参考库。模型服务由系统统一管理。"
-                    : "当前笔记本为只读；模型服务由系统统一管理。",
-                  actions: capabilities.canWriteNotebook
-                    ? [{ label: "编辑当前笔记本", primary: true, action: () => openNotebookEditor(currentNotebook).catch(reportError) }]
-                    : []
-                })}>
+                {/* 设置直接进入笔记本编辑器(去掉原先「设置弹窗 → 编辑当前笔记本」的二级跳转);
+                    只读访客拿不到 editor 数据(listMountable/listBases 是 owner-only,访客 404),
+                    故只读时退回一句只读说明,不打开编辑器。 */}
+                <button className="workspace-nav-button" onClick={() => {
+                  if (capabilities.canWriteNotebook) {
+                    openNotebookEditor(currentNotebook).catch(reportError);
+                  } else {
+                    setInfoModal({
+                      title: "设置",
+                      message: "当前笔记本为只读；模型服务由系统统一管理。",
+                      actions: []
+                    });
+                  }
+                }}>
                   <Settings size={17} />
                   <span>设置</span>
                 </button>
@@ -4640,18 +4642,24 @@ export default function Home() {
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>编辑笔记本</h2>
-                <p>第一版先手动修改标题、描述和领域；后续会由大模型从来源中补全。</p>
+                <h2>笔记本设置</h2>
+                <p>编辑当前笔记本的信息与参考库。模型服务由系统统一管理。</p>
               </div>
               <button className="icon-button" onClick={() => setEditingNotebook(null)} title="Close">×</button>
             </div>
-            <form className="edit-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
-              <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
-              <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
-              <label>领域关键词<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
-              <div className="base-picker">
-                <span className="base-picker-title">参考库</span>
-                <p className="base-picker-desc">检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
+            <form className="edit-form notebook-settings-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
+              <section className="settings-section">
+                <div className="settings-section-head"><h3>基本信息</h3></div>
+                <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
+                <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
+                <label>领域关键词<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
+              </section>
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3>参考库</h3>
+                  <p>检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
+                </div>
+                <div className="base-picker">
                 {(() => {
                   // 最终整支审查 BLOCKER 1:必须渲染 mountable ∪ mountEdges 的并集,而不是
                   // 只渲染 mountable——失效边(active=false)按 MOUNT_VALID_EXPR 定义永远不在
@@ -4702,13 +4710,19 @@ export default function Home() {
                 {mountCostHint(mountedIds.length) && (
                   <p className="base-picker-hint">{mountCostHint(mountedIds.length)}</p>
                 )}
-              </div>
-              <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
-              <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
-              <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
-              <label>分类 taxonomy（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
-              <label>访问范围<input name="access_scope" defaultValue={editingNotebook.access_scope ?? ""} maxLength={80} /></label>
-              <div className="modal-actions">
+                </div>
+              </section>
+              <section className="settings-section">
+                <div className="settings-section-head"><h3>更多信息</h3></div>
+                <div className="settings-grid-2">
+                  <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
+                  <label>访问范围<input name="access_scope" defaultValue={editingNotebook.access_scope ?? ""} maxLength={80} /></label>
+                </div>
+                <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
+                <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
+                <label>分类（每行/逗号一条）<input name="taxonomy" defaultValue={(editingNotebook.taxonomy ?? []).join(", ")} /></label>
+              </section>
+              <div className="modal-actions settings-footer">
                 <button type="button" className="sort-button" onClick={() => setEditingNotebook(null)}>取消</button>
                 <button type="submit" className="new-pill">保存</button>
               </div>
@@ -5130,8 +5144,8 @@ export default function Home() {
             {(floating) => (<>
             <div className="source-modal-header" {...floating.dragHandleProps}>
               <div>
-                <h2>内容类型管理</h2>
-                <p>管理要分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
+                <h2>图谱 Schema</h2>
+                <p>管理要从来源中分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
               </div>
               <button className="icon-button" onClick={() => setSchemaModalOpen(false)} title="Close">×</button>
             </div>
@@ -5193,7 +5207,22 @@ export default function Home() {
         <section className="kg-view" role="dialog" aria-modal="true">
           <div className="kg-view-header">
             <div><h2>知识图谱</h2><p>Object 级知识图谱：Concept / Claim / Formula / Procedure 同屏展示。节点名称、类型形状和边标签直接画在主视图中。</p></div>
-            <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
+            <div className="kg-view-header-actions">
+              {/* 「图谱 Schema」= 原顶层导航「内容类型」,已并入本视图(仍 admin 门控):
+                  定义要从来源中分析出的知识对象类型与字段。打开的是既有 SchemaManager
+                  弹窗(utility-modal z:60 > kg-view z:50,正确叠在本视图之上)。 */}
+              {capabilities.canManageSchemas && (
+                <button
+                  type="button"
+                  className="sort-button kg-schema-button"
+                  onClick={openSchemas}
+                  title="定义要从来源中分析出的知识对象类型与字段"
+                >
+                  <Database size={16} /> 图谱 Schema
+                </button>
+              )}
+              <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
+            </div>
           </div>
           <div className="kg-view-body">
             <aside className="kg-rail">
@@ -5991,7 +6020,7 @@ const FIELD_LABELS: Record<string, string> = {
 
 /**
  * 知识对象字段名的界面名。未命中时**刻意**原样显示 key —— 与 relationLabel 的中性
- * 兜底相反,理由是 object schema 允许用户自建类型与字段(「内容类型管理」里的新增
+ * 兜底相反,理由是 object schema 允许用户自建类型与字段(「图谱 Schema」里的新增
  * 类型 / 归纳候选),此时 key 就是用户自己起的名字,原样显示才诚实;换成中性词反而
  * 把用户唯一能辨认这个字段的信息抹掉。故它不是「兜底即原值」那个 bug,而是一条经
  * 评审的透出路径,写法与 kg-type-mark.tsx 透出自定义 object_type 保持一致。
