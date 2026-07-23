@@ -91,6 +91,48 @@ def test_validator_that_raises_conservatively_skips_cache(tmp_path, monkeypatch)
     assert fake.calls == 2, "validator fault -> skip write, never cache, never crash"
 
 
+# ------------------------------------------------------- the cache-HIT gate (P2-3)
+
+def test_a_cache_hit_that_fails_the_validator_is_not_served(tmp_path, monkeypatch):
+    """A value written WITHOUT a validator (or before one was tightened) must not
+    be handed verbatim to a later validator-bearing caller. The hit is re-judged
+    by that caller's validator; a reject is treated as a MISS and the call falls
+    through to the endpoint (whose fresh reply the write gate then re-judges).
+    Without this, one poisoned entry propagates a bad extraction for the whole TTL."""
+    client, fake = _client(tmp_path, monkeypatch, '{"nodes": "invalid"}')
+    # 1st call, NO validator: the schema-invalid reply passes the empty/parse/
+    # length gates and IS cached — exactly the poison the hit gate must refuse.
+    client.chat_json(_MSGS, "{}")
+    assert fake.calls == 1, "前提：无 validator 时坏值确实被写进了缓存"
+    # 2nd call, same key, now WITH a validator that rejects that shape. The cached
+    # value must NOT be served — the call must re-hit the endpoint.
+    r = client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
+    assert r == '{"nodes": "invalid"}'
+    assert fake.calls == 2, (
+        "命中一个不过 validator 的坏值必须当 miss 处理、走真实调用，而不是原样返回"
+    )
+
+
+def test_a_cache_hit_that_satisfies_the_validator_is_still_served(tmp_path, monkeypatch):
+    """The hit gate must not block GOOD cached values: a well-shaped reply written
+    with a validator is served on the next validator-bearing call (no re-hit)."""
+    good = '{"nodes": [{"type": "Concept"}], "edges": []}'
+    client, fake = _client(tmp_path, monkeypatch, good)
+    client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
+    client.chat_json(_MSGS, "{}", response_validator=_kg_fragment_cacheable)
+    assert fake.calls == 1, "满足 validator 的好值仍必须命中（第二次是 hit）"
+
+
+def test_ask_path_hit_without_a_validator_is_unaffected(tmp_path, monkeypatch):
+    """ask/answer callers pass no validator: a hit is served exactly as before
+    (default None => the hit gate is open), even for a KG-shape-invalid value.
+    Guards the fix against over-reaching into the ask/answer path."""
+    client, fake = _client(tmp_path, monkeypatch, '{"nodes": "invalid"}')
+    client.chat_json(_MSGS, "{}")
+    client.chat_json(_MSGS, "{}")
+    assert fake.calls == 1, "不传 validator 的命中不受影响（行为一字不变）"
+
+
 # ------------------------------------------------------- the validators' shape
 
 def test_kg_fragment_validator_rejects_wrong_typed_containers():
