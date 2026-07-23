@@ -681,6 +681,8 @@ class SourceIngestionService:
             # doc_type 与 file_name 都必须一起递进去：内容判重不代表用户这次的类型
             # 选择、乃至用的解析器（由后缀决定）也该丢（见 reuse_uploaded_source）。
             # content 递进去，供后缀（解析器）变化时按新名重写落盘文件。
+            #
+            # 快路径：常见的重传命中既有行 → 直接复用，不落盘、不开写事务。
             existing_id = self.sources.source_id_by_hash(notebook_id, digest)
             if existing_id:
                 imported.append(
@@ -692,12 +694,20 @@ class SourceIngestionService:
                     )
                 )
                 continue
+            # 首见内容：落盘 + 插入必须原子。此前「source_id_by_hash(读) 再 insert(写)」
+            # 是两步，两个并发首次上传相同字节都查不到 → 各插一行（migration 24/25 的
+            # 索引非唯一，拦不住）。insert_source_if_absent 在一个写事务里 BEGIN
+            # IMMEDIATE + 重查 + 插入，全局写锁（同进程）与 RESERVED 锁（跨进程，
+            # batch_ingest 共库）让并发恰有一个真正插入。文件先落盘（I/O 不进写事务、
+            # 不占写锁），被复用时清掉这条刚落的孤儿文件——它按本次的新 source_id 命名，
+            # 与被复用行的文件不同名、同目录，delete 只删这一个文件（目录非空不连删）。
             stored_path = self.source_files.write_upload(
                 notebook_id, source_id, file_name, file.content
             )
-            self.sources.insert_source(
+            reused_id = self.sources.insert_source_if_absent(
                 source_id=source_id,
                 notebook_id=notebook_id,
+                digest=digest,
                 title=file_name,
                 source_type=self.source_type_from_name(file_name),
                 status="queued",
@@ -705,10 +715,21 @@ class SourceIngestionService:
                 file_name=file_name,
                 file_path=str(stored_path),
                 file_size=len(file.content),
-                file_hash=digest,
                 summary="Uploaded; parsing is queued.",
                 doc_type=self.normalize_doc_type(file.doc_type),
             )
+            if reused_id is not None:
+                # 输给了并发的另一次首传（它先插入并提交）→ 复用那一行，清掉孤儿文件。
+                self.source_files.delete(str(stored_path))
+                imported.append(
+                    self.reuse_uploaded_source(
+                        reused_id, scheduler, hooks,
+                        doc_type=file.doc_type,
+                        file_name=file_name,
+                        content=file.content,
+                    )
+                )
+                continue
             if scheduler is not None:
                 scheduler(source_id)
             else:

@@ -418,16 +418,92 @@ class SourceStore:
         an allow-list would silently stop deduping the next format added.
         ⚠ A NEW hidden/derived source_type must be added here too (grep
         ``NOT IN ('memory', 'knowhow')`` for the sibling sites)."""
+        with self.database.connect() as db:
+            return self._source_id_by_hash_on(db, notebook_id, digest)
+
+    @staticmethod
+    def _source_id_by_hash_on(
+        db: sqlite3.Connection, notebook_id: str, digest: str
+    ) -> Optional[str]:
+        """The dedup SELECT on a caller-provided connection — shared by the read
+        path (``source_id_by_hash``) and the atomic write path
+        (``insert_source_if_absent``) so the two can never dedup by different
+        rules. Empty ``digest`` never matches (URL / metadata-only rows store
+        ``file_hash=''``); the memory/knowhow exclusion and the ``ORDER BY
+        created_at, id`` are the load-bearing guards documented on
+        ``source_id_by_hash`` — kept here as the single implementation."""
         if not digest:
             return None
-        with self.database.connect() as db:
-            row = db.execute(
-                "SELECT id FROM sources WHERE notebook_id=? AND file_hash=? "
-                "AND source_type NOT IN ('memory', 'knowhow') "
-                "ORDER BY created_at, id",
-                (notebook_id, digest),
-            ).fetchone()
+        row = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? AND file_hash=? "
+            "AND source_type NOT IN ('memory', 'knowhow') "
+            "ORDER BY created_at, id",
+            (notebook_id, digest),
+        ).fetchone()
         return row["id"] if row else None
+
+    def insert_source_if_absent(
+        self,
+        *,
+        source_id: str,
+        notebook_id: str,
+        digest: str,
+        title: str,
+        source_type: str,
+        status: str,
+        parse_status: str,
+        file_name: str,
+        file_path: str,
+        file_size: int,
+        summary: str,
+        doc_type: str,
+    ) -> Optional[str]:
+        """Atomic content-dedup insert: if a same-content VISIBLE source already
+        exists in this notebook return its id (the caller reuses it, no row is
+        created); otherwise insert the new row (``file_hash=digest``) and return
+        None.
+
+        upload_sources' former "``source_id_by_hash`` (read) then
+        ``insert_source`` (write)" was two steps: two concurrent FIRST uploads of
+        identical bytes both saw "no match" and each inserted, and migration
+        24/25's ``(notebook_id, file_hash)`` index is NON-unique, so nothing
+        stopped the duplicate (Codex round 4 P2). Folding the re-check and the
+        insert into ONE write transaction closes it. ``BEGIN IMMEDIATE`` takes
+        SQLite's RESERVED lock as the first statement, making the
+        re-check-then-insert atomic even against a SECOND OS process — the
+        offline ``batch_ingest`` CLI shares this product DB in real deployments,
+        the identical cross-process reasoning as ``KnowhowTransferStore.
+        delete_table_if_unchanged`` / ``snapshot_table``; the process-global
+        write lock covers same-process concurrency. The re-check reuses the SAME
+        dedup SELECT as ``source_id_by_hash`` (``_source_id_by_hash_on``) and the
+        insert reuses ``insert_source`` (one row-shape owner).
+
+        A UNIQUE index is DELIBERATELY not used instead: already-deployed DBs can
+        ALREADY hold duplicate ``(notebook_id, file_hash)`` rows — the very mess
+        this feature exists to stop growing — so a UNIQUE migration would fail to
+        apply on exactly those DBs. The atomicity lives in the transaction, not a
+        constraint."""
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            existing = self._source_id_by_hash_on(db, notebook_id, digest)
+            if existing is not None:
+                return existing
+            self.insert_source(
+                source_id=source_id,
+                notebook_id=notebook_id,
+                title=title,
+                source_type=source_type,
+                status=status,
+                parse_status=parse_status,
+                file_name=file_name,
+                file_path=file_path,
+                file_size=file_size,
+                file_hash=digest,
+                summary=summary,
+                doc_type=doc_type,
+                connection=db,
+            )
+            return None
 
     def source_id_for_memory(self, memory_id: str) -> Optional[str]:
         """Id of the synthetic source derived from a Memory, if any (at most
