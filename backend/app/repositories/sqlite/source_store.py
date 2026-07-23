@@ -797,6 +797,45 @@ class SourceStore:
                 (*params, source_id),
             )
 
+    def rename_source_file_if_name(
+        self,
+        source_id: str,
+        expected_file_name: str,
+        *,
+        file_name: str,
+        source_type: str,
+        file_path: "str | None" = None,
+    ) -> bool:
+        """Compare-and-swap variant of rename_source_file, guarded on the row's
+        CURRENT file_name, returning whether the swap landed.
+
+        Backs the in-flight suffix-correction reconcile (SourceIngestionService.
+        _reconcile_pending_suffix, round-7 P2-2). That path reads the row's latest
+        file_name AFTER it claims the reparse, then repoints the on-disk file to it
+        — but a concurrent in-flight rename (another suffix re-upload landing on the
+        now-'queued' row via the persist-intent branch) can change file_name in the
+        sliver between the read and this write. An UNCONDITIONAL rename would then
+        overwrite the newer name with the stale one it read, and the completion
+        recheck (fresh vs used) would see them agree and silently drop the newer
+        correction. Guarding the UPDATE on ``file_name = expected_file_name`` closes
+        it: rowcount==1 iff the name is still what the caller read (repoint lands);
+        rowcount==0 means it changed under us -> the caller re-reads the newer name
+        and retries rather than clobbering it. Same field set as rename_source_file
+        (file_path optional). Single WHERE-guarded UPDATE, atomic under the write
+        lock."""
+        fields = ["file_name = ?", "source_type = ?", "updated_at = ?"]
+        params: List[object] = [file_name, source_type, self.now()]
+        if file_path is not None:
+            fields.insert(2, "file_path = ?")
+            params.insert(2, file_path)
+        with self.database.write() as db:
+            cursor = db.execute(
+                f"UPDATE sources SET {', '.join(fields)} "
+                "WHERE id = ? AND file_name = ?",
+                (*params, source_id, expected_file_name),
+            )
+        return cursor.rowcount == 1
+
     def replace_elements(
         self,
         connection: sqlite3.Connection,

@@ -68,6 +68,12 @@ _DOC_TYPE_RECONCILE_MAX_ROUNDS = 3
 #: process_source 栈深也不能无界增长）。同构于 _DOC_TYPE_RECONCILE_MAX_ROUNDS。
 _SUFFIX_RECONCILE_MAX_ROUNDS = 3
 
+#: 收口 repoint 落库那步的 CAS 最多重试几次（round-7 P2-2）。认领后重读的 file_name 与
+#: 条件 UPDATE 之间那道 sliver 里若有并发在飞改名，CAS 落空 → 重读最新名再试。正常路径
+#: 是 1 次（无并发即命中）；上限只挡病态改名循环（每次 CAS 前都恰好又改一次名），耗尽后
+#: 交由重跑那条流水线自己的 _reconcile（外层 _SUFFIX_RECONCILE_MAX_ROUNDS）继续收口。
+_SUFFIX_REPOINT_MAX_TRIES = 5
+
 
 @dataclass(frozen=True)
 class SourcePipelineHooks:
@@ -587,39 +593,75 @@ class SourceIngestionService:
 
     def _repoint_reused_file(
         self, source_id: str, summary: SourceDetail, file_name: str,
-        content: "bytes | None",
-    ) -> None:
+        content: "bytes | None", *, expected_file_name: "str | None" = None,
+    ) -> bool:
         """后缀（解析器）变了的复用行：把落盘文件按新名重写，并同步更新行的
         file_name/source_type/file_path，好让紧接着的整条流水线重跑用上新解析器。
+        返回 repoint 是否落地。
 
         内容与既有指纹一致（这正是复用的前提），所以文件字节不变，只是换个带正确
         后缀的名字——旧后缀的落盘文件随即成孤儿，清掉它（file_path 的后缀被
         read_source_text 用来决定「读原文还是从 elements 重建」，与 file_name 同步
         才不留脏状态）。``content`` 缺省时（防御性；仅上传路径会带内容）退化为只改
         file_name/source_type、保留旧 file_path——重跑仍按 file_name 选对解析器、
-        读旧字节（内容相同），只是原文窗口读退化为 element 重建。"""
+        读旧字节（内容相同），只是原文窗口读退化为 element 重建。
+
+        两个调用点：
+        - reuse_uploaded_source 的 settled/idle reparse 赢家传 ``expected_file_name``
+          =None：它已凭 claim_reparse_if_settled 拥有这一行，rename 无条件、必落地
+          （返回 True），行为与本轮之前逐字不变（先写盘、再改行）。
+        - _reconcile_pending_suffix 传 ``expected_file_name``=它刚重读到的 file_name，
+          让落库那步变**条件 UPDATE**（round-7 P2-2）：认领与重读之间那道 sliver 里若有
+          并发在飞改名，绝不能用陈旧名盖掉它。此路径**先做条件 UPDATE 再落盘**——路径由
+          planned_upload_path 无 I/O 算出，CAS 落空（返回 False）时盘上文件根本没写、不留
+          孤儿，调用方重读最新名再试。"""
         new_source_type = self.source_type_from_name(file_name)
         if content is None:
-            self.sources.rename_source_file(
-                source_id, file_name=file_name, source_type=new_source_type
+            if expected_file_name is None:
+                self.sources.rename_source_file(
+                    source_id, file_name=file_name, source_type=new_source_type
+                )
+                return True
+            return self.sources.rename_source_file_if_name(
+                source_id, expected_file_name,
+                file_name=file_name, source_type=new_source_type,
             )
-            return
         old_path = summary.file_path or ""
-        new_path = str(
+        if expected_file_name is None:
+            # 无条件路径（reparse 赢家已独占该行）：先写盘、再改行——与本轮之前一致。
+            new_path = str(
+                self.source_files.write_upload(
+                    summary.notebook_id, source_id, file_name, content
+                )
+            )
+            self.sources.rename_source_file(
+                source_id,
+                file_name=file_name,
+                source_type=new_source_type,
+                file_path=new_path,
+            )
+        else:
+            # CAS-first：目标路径无 I/O 算出，条件 UPDATE 落地后才把盘上文件按新名重写——
+            # CAS 落空则一个字节都不写（不留孤儿），交调用方重读最新名重试。
+            new_path = str(
+                self.source_files.planned_upload_path(
+                    summary.notebook_id, source_id, file_name
+                )
+            )
+            if not self.sources.rename_source_file_if_name(
+                source_id, expected_file_name,
+                file_name=file_name, source_type=new_source_type,
+                file_path=new_path,
+            ):
+                return False
             self.source_files.write_upload(
                 summary.notebook_id, source_id, file_name, content
             )
-        )
-        self.sources.rename_source_file(
-            source_id,
-            file_name=file_name,
-            source_type=new_source_type,
-            file_path=new_path,
-        )
         if old_path and old_path != new_path:
             # 旧后缀的文件成了孤儿。delete 仅在目录空时才连删目录，新文件同目录、
             # 目录非空，不会误删。
             self.source_files.delete(old_path)
+        return True
 
     def _reextract_retyped(
         self, source_id: str, notebook_id: str, hooks: SourcePipelineHooks
@@ -1269,16 +1311,23 @@ class SourceIngestionService:
         content = self.source_files.read_bytes(
             getattr(used_source, "file_path", "") or ""
         )
-        # ⚠ file_name 必须**认领之后重读**，不能用上面认领之前读到的 fresh：认领把行翻成
-        # 'queued'（在飞）后、到这次 repoint 之间，若并发的换后缀重传走了在飞分支（此刻行
-        # 是 'queued'）又把一个更新的 file_name 记到行上，拿陈旧的 fresh.file_name 去 repoint
-        # 会用旧后缀重写文件、并把行上更新的意图盖回旧值；紧接着重跑那条流水线捕获的是被
-        # 盖回的旧名，其完成时的 recheck（fresh vs used）随即看到二者一致 → 那次更新的纠正
-        # 被静默丢掉（Codex 第 6 轮 P2-2，本特性第 5 轮收口自己引入的竞态）。重读锁住
-        # 「认领 → 读名 → repoint」三步对 file_name 的一致性；发生在本次 repoint **之后** 的
-        # 改名仍留在行上、由重跑那条流水线自己的 _reconcile 收口（同一循环不变式）。
-        latest = self.sources.get_source(source_id)
-        self._repoint_reused_file(source_id, used_source, latest.file_name, content)
+        # ⚠ file_name 必须**认领之后重读**，且 repoint 落库那步用**条件 UPDATE（CAS）**守卫在
+        # 重读到的名字上。认领把行翻成 'queued'（在飞）后、到 repoint 落库之间仍有一道 sliver，
+        # 并发换后缀重传走在飞分支（此刻行 'queued'）可能又记一个更新的 file_name。若无条件
+        # repoint，会用刚读到的（可能已陈旧的）名重写文件、并把更新的意图盖回旧值；紧接着重跑
+        # 那条流水线捕获被盖回的旧名，其完成 recheck（fresh vs used）随即看到一致 → 更新的纠正
+        # 被静默丢掉（Codex 第 7 轮 P2-2：第 6 轮补了「认领后重读」，仍留这道读→写 sliver）。
+        # CAS 把「读名 → repoint」锁成一步：读到的名仍是当前值才落地（rowcount 1）；被并发改了
+        # （rowcount 0）就重读最新名再试（次数上限，同构外层 reparse_round，挡病态改名循环）。
+        # _repoint_reused_file 走 CAS-first（先条件 UPDATE 再落盘），落空时盘上不留孤儿文件。
+        # 发生在本次 repoint **之后** 的改名仍留在行上、由重跑那条流水线自己的 _reconcile 收口。
+        for _ in range(_SUFFIX_REPOINT_MAX_TRIES):
+            latest = self.sources.get_source(source_id)
+            if self._repoint_reused_file(
+                source_id, used_source, latest.file_name, content,
+                expected_file_name=latest.file_name,
+            ):
+                break
         return self.process_source(
             source_id, hooks, _reparse_round=reparse_round + 1
         )
