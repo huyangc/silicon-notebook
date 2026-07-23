@@ -461,8 +461,15 @@ class KnowhowHistoryStore:
 
         为什么按 seq 而不是直接 ``DELETE WHERE created_at < ?``：反向重放
         要求流水链从 head 起连续，中间挖洞会让重放走到缺口就断，而前置
-        指纹守卫看的是 head、**发现不了这个洞**。先用时间求出 cutoff_seq、
-        再按 seq 删，即便时钟回拨导致 created_at 局部乱序，删的也一定是前缀。
+        指纹守卫看的是 head、**发现不了这个洞**。所以只删「从最老一条起、
+        每条都早于 cutoff 的最长连续前缀」，遇到第一条不够老的就停。
+
+        ⚠️ cutoff_seq 不能取 ``MAX(seq WHERE created_at < before)``（codex 第 3
+        轮 P2）：时钟回拨让 created_at 非单调时，那个 MAX 会跳过夹在中间的
+        较新记录——例如 seq 10 是新的、seq 11 被回拨到 cutoff 之前、seq 12 是
+        head，``MAX(seq WHERE old)`` = 11 → 连带删掉本不该删的较新 seq 10。
+        改为按 seq 升序逐条扫、只要遇到 created_at ≥ cutoff 就停，才真正兑现
+        「删的一定是连续前缀、且前缀里每条都够老」。
 
         head 永远保留：前置指纹守卫拿它当参照，删了整表回退直接不可用。
         """
@@ -474,12 +481,19 @@ class KnowhowHistoryStore:
             head = int(head_row["head"])
             if head == 0:
                 return {"removed": 0}
-            cutoff_row = db.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS cutoff FROM knowhow_changes "
-                "WHERE table_id = ? AND created_at < ?",
-                (table_id, before_iso),
-            ).fetchone()
-            cutoff = min(int(cutoff_row["cutoff"]), head - 1)
+            # 按 seq 升序逐条推进：最长的「全部早于 cutoff」连续前缀，head 除外。
+            rows = db.execute(
+                "SELECT seq, created_at FROM knowhow_changes "
+                "WHERE table_id = ? ORDER BY seq ASC",
+                (table_id,),
+            ).fetchall()
+            cutoff = 0
+            for row in rows:
+                if int(row["seq"]) >= head:
+                    break  # head 永远保留
+                if row["created_at"] >= before_iso:
+                    break  # 遇到第一条不够老的，连续前缀到此为止
+                cutoff = int(row["seq"])
             if cutoff <= 0:
                 return {"removed": 0}
             cursor = db.execute(

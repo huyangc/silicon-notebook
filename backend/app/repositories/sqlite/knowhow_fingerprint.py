@@ -57,11 +57,20 @@ import sqlite3
 #:
 #: Each per-row tuple is joined with ``char(31)`` (ASCII unit
 #: separator) and rows within a group with ``char(30)`` (ASCII record
-#: separator) — control characters chosen (not e.g. ``:``/``|``, round
-#: 3's choice) specifically because real column names/cell content are
-#: free text that could plausibly contain punctuation but essentially
-#: never contains non-printable separator characters designed for
-#: exactly this purpose. Ordering is by each group's own natural stable
+#: separator). codex round-3 P2 (collision fix): every free-text field is
+#: ``hex()``-encoded BEFORE it is joined, so the separators can never
+#: appear inside a value. Without this, a value literally containing the
+#: separator byte made distinct table states hash identically — e.g.
+#: title ``a\x1db`` + description ``c`` serialized the same as title
+#: ``a`` + description ``b\x1dc``, and the same held for any cell/name
+#: text containing ``char(30)``/``char(31)``. ``hex(x)`` yields only
+#: ``[0-9A-F]``, an unambiguous length-determined encoding, so the join
+#: is now collision-free for arbitrary user text (the earlier "real text
+#: never contains these control chars" assumption was wrong — paste and
+#: adversarial input can). This changes every existing table's
+#: fingerprint VALUE once, harmlessly: all comparisons (move-guard
+#: recheck, revert pre/post checks) recompute with the same algorithm, so
+#: only the opaque hash string differs, never any decision. Ordering is by each group's own natural stable
 #: key (``id`` for columns/rows — unique, immutable once assigned; the
 #: UNIQUE(row_id, column_id) pair for cells/cell_code) via a subquery's
 #: ``ORDER BY`` — same idiom round 3 already established (and round 3's
@@ -74,24 +83,26 @@ import sqlite3
 #: hash change: the tuple at a given id's slot in the sequence differs,
 #: even though the multiset of column ids present is unchanged.
 FINGERPRINT_SQL = (
-    "SELECT t.title AS title, t.description AS description, "
+    "SELECT hex(t.title) AS title, hex(t.description) AS description, "
     "(SELECT group_concat(sig, char(30)) FROM ("
-    "  SELECT id || char(31) || name || char(31) || role || char(31) || position AS sig"
+    "  SELECT hex(id) || char(31) || hex(name) || char(31) || hex(role)"
+    "    || char(31) || hex(position) AS sig"
     "  FROM knowhow_columns WHERE table_id = t.id ORDER BY id"
     ")) AS columns_signal, "
     "(SELECT group_concat(sig, char(30)) FROM ("
-    "  SELECT id || char(31) || position AS sig"
+    "  SELECT hex(id) || char(31) || hex(position) AS sig"
     "  FROM knowhow_rows WHERE table_id = t.id ORDER BY id"
     ")) AS rows_signal, "
     "(SELECT group_concat(sig, char(30)) FROM ("
-    "  SELECT c.row_id || char(31) || c.column_id || char(31) || c.content_md AS sig"
+    "  SELECT hex(c.row_id) || char(31) || hex(c.column_id) || char(31)"
+    "    || hex(c.content_md) AS sig"
     "  FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id"
     "  WHERE r.table_id = t.id ORDER BY c.row_id, c.column_id"
     ")) AS cells_signal, "
     "(SELECT group_concat(sig, char(30)) FROM ("
-    "  SELECT cc.row_id || char(31) || cc.column_id || char(31) || cc.code_text"
-    "    || char(31) || cc.language || char(31) || cc.cell_content_hash"
-    "    || char(31) || cc.updated_by AS sig"
+    "  SELECT hex(cc.row_id) || char(31) || hex(cc.column_id) || char(31)"
+    "    || hex(cc.code_text) || char(31) || hex(cc.language) || char(31)"
+    "    || hex(cc.cell_content_hash) || char(31) || hex(cc.updated_by) AS sig"
     "  FROM knowhow_cell_code cc JOIN knowhow_rows r ON r.id = cc.row_id"
     "  WHERE r.table_id = t.id ORDER BY cc.row_id, cc.column_id"
     ")) AS cell_code_signal "
