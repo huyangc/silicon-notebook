@@ -1625,6 +1625,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_paper_metadata",
         "target": "_runtime"
       },

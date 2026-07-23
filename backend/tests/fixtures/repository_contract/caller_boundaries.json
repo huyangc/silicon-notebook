@@ -343,6 +343,14 @@
       "kind": "independent_private",
       "path": "backend/app/api/source_routes.py",
       "reason": "API readiness checks the process-owned model provider",
+      "scope": "<module>._backfill_vectors_job",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/source_routes.py",
+      "reason": "API readiness checks the process-owned model provider",
       "scope": "<module>.backfill_paper_metadata",
       "target": "_runtime"
     },

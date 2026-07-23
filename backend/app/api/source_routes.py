@@ -253,15 +253,26 @@ def reparse_sources(
 
 def _backfill_vectors_job(repo, notebook_id: str) -> None:
     """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。复用 batch_ingest
-    的既有 backfill,EMBED 未配则各自跳过。best-effort:一侧失败不拦另一侧。"""
+    的既有 backfill,EMBED 未配则各自跳过。best-effort:一侧失败不拦另一侧。
+
+    ⚠ 先**快照活跃租约**并把这些源排除出补齐(codex P1):正在 reparse 的源 element/chunk id
+    复用,给它算旧代文本的向量、在替换后才提交,会挂上永久陈旧向量(后续缺向量检查也发现不了,
+    因为向量「在」只是内容旧)。被排除的源反正会由它自己的 reparse 管线重嵌,不会漏补。
+    (残留:快照后、读取前才开始 reparse 的源覆盖不到,窗口极窄;要全覆盖须与替换串行化,
+    留作独立加固——本 PR 覆盖「backfill 启动时已在 reparse」这个 codex 报的主场景。)"""
     from app.services import batch_ingest
 
+    active = repo._runtime._active_source_ids_snapshot()
     try:
-        batch_ingest.backfill_chunk_embeddings(repo, notebook_id, missing_only=True)
+        batch_ingest.backfill_chunk_embeddings(
+            repo, notebook_id, missing_only=True, exclude_source_ids=active
+        )
     except Exception:  # noqa: BLE001 — 后台 job 自负错误,一侧失败不拦另一侧
         pass
     try:
-        batch_ingest.backfill_element_embeddings(repo, notebook_id)
+        batch_ingest.backfill_element_embeddings(
+            repo, notebook_id, exclude_source_ids=active
+        )
     except Exception:  # noqa: BLE001
         pass
 
