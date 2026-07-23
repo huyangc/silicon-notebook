@@ -96,6 +96,30 @@ export const MODEL_SERVICE_STATUS_ERROR: Record<string, string> = {
   model_not_configured: "系统未配置",
 };
 
+// 流水线体检(P2)的内部代号 → 界面词。/checkup 响应体是内部契约(code=H2..H8、
+// fix=reparse 等枚举),面向用户的标签只在这里映射,绝不能含黑话(见 AGENTS.md
+// 「界面词汇表」+ scripts/check_ui_vocabulary.py)。H4/H5 同为「检索向量缺失」是有意的
+// (对用户是同一件事、同一个修复动作),渲染时按 label 合并成一行。
+export const CHECKUP_ISSUE: Record<string, string> = {
+  H2: "未解析出内容",
+  H3: "检索片段缺失",
+  H4: "检索向量缺失",
+  H5: "检索向量缺失",
+  H6: "待分析来源",
+  H7: "检索索引过期",
+  H8: "检索索引损坏",
+};
+
+// 体检修复动作枚举(fix)→ 修复按钮文案。extract_kg 复用既有「分析新增」,
+// fold_index/rebuild_index 复用既有检索索引的更新/全量重建入口。
+export const CHECKUP_FIX: Record<string, string> = {
+  reparse: "重新解析",
+  backfill_vectors: "补齐向量",
+  extract_kg: "分析新增",
+  fold_index: "更新索引",
+  rebuild_index: "重建索引",
+};
+
 /**
  * 严格查表：命中返回映射值，未命中返回 `fallback`——永远不会是 `value` 本身。
  *

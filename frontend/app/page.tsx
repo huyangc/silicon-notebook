@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -97,8 +97,9 @@ import { clearToken, getToken } from "./auth-session";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
-import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
+import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -184,6 +185,7 @@ import {
   type MergeReviewSummary,
   type MemoryRecord,
   type NodeContext,
+  type CheckupResponse,
   type NotebookAnalytics,
   type NotebookContentOverview,
   type NotebookSummary,
@@ -200,7 +202,7 @@ import {
   type UnifiedKgStatus,
 } from "./workspace-model";
 import { resolveDocumentCapacity } from "./document-limit";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -838,6 +840,12 @@ export default function Home() {
   // 「索引与构建」面板(看板弹窗)的三系统聚合状态——openAnalytics 打开时经 fetchIndexStatus
   // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  // 流水线体检(P2):看板弹窗打开时随 indexStatus 一起拉取,驱动「来源状态」块的
+  // 源级问题(H2–H6)、「索引与构建」块的索引可信度(H7/H8),以及铃铛的一条聚合提醒。
+  const [checkup, setCheckup] = useState<CheckupResponse | null>(null);
+  // 修复触发后短暂轮询 checkup 到此刻(反映 count 下降):reparse/backfill 是后台 job、
+  // 无 build 忙碌位,不走三系统聚合 poll,故用这个有界窗口驱动一条专门的 checkup 轮询。
+  const [checkupRepairPollUntil, setCheckupRepairPollUntil] = useState(0);
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
@@ -1168,6 +1176,30 @@ export default function Home() {
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, trackedKgJobId, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
+  // 切库即清空体检结果(与铃铛聚合提醒):体检是 per-notebook 的,旧库的结论不能
+  // 跨库显示。重开看板会重新拉取当前库的体检。
+  useEffect(() => {
+    setCheckup(null);
+    setCheckupRepairPollUntil(0);
+  }, [currentNotebookId]);
+  // 体检修复触发后的有界轮询:reparse/backfill(乃至 H6/H7/H8 的既有构建入口)都是
+  // 后台 job,点完不会立即反映到 count。看板开着且 checkupRepairPollUntil 未到期时,
+  // 每 8s 重拉一次 checkup,直到健康(healthy)或到期即停——不做无界轮询(承效率约束:
+  // 体检含 H8 磁盘探针,只在用户显式修复的窗口内刷新)。
+  useEffect(() => {
+    if (!analytics || !currentNotebookId || checkupRepairPollUntil <= Date.now()) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(() => {
+      if (Date.now() > checkupRepairPollUntil) { setCheckupRepairPollUntil(0); return; }
+      fetchCheckup(nb).then((c) => {
+        if (cancelled) return;
+        setCheckup(c);
+        if (c.healthy) setCheckupRepairPollUntil(0);
+      }).catch(() => {});
+    }, 8000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [analytics, currentNotebookId, checkupRepairPollUntil]);
   // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
   // building for a large notebook, poll every 6s until it flips false, then swap in the
   // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
@@ -1210,11 +1242,16 @@ export default function Home() {
   // 「检索索引」三个精确动作 —— 各自弹确认(描述具体精确)后立即后台执行:
   //   build  未构建/建议 → 从零构建(full)    update 已过期 → 增量收录新增源(fold)
   //   rebuild 已建成     → 删除现有索引从头全量重建(full)。与 tier 解耦,大库亦可建。
-  const runScaleIndexOp = (op: ScaleIndexOp) => {
+  const runScaleIndexOp = (op: ScaleIndexOp, onStarted?: () => void) => {
     const s = scaleIndexStatus;
     if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
     const nb = currentNotebookId;
-    confirmIndexAction(scaleIndexOpConfirm(op, s), () => startScaleIndexRebuild(nb, "now", SCALE_OP_MODE[op]));
+    // onStarted 只在**确认弹窗点确定后**跑(放进 onConfirm 内)——H8 修复 CTA 用它 arm
+    // checkup 轮询;取消确认/早退守卫命中时都不 arm,免得空转 10min(评审)。
+    confirmIndexAction(scaleIndexOpConfirm(op, s), () => {
+      startScaleIndexRebuild(nb, "now", SCALE_OP_MODE[op]);
+      onStarted?.();
+    });
   };
   // 「空闲时建」—— 与上面三个精确动作同一确认机制,仅 when 改为 idle(排队等服务器空闲/
   // 低峰再建,mode 沿用 "auto" 交给后端按当时状态判断 fold/full)。原 admin 动作列表里的
@@ -1246,6 +1283,39 @@ export default function Home() {
       if (!shouldResumeScaleIndex(s.scale_index)) setBuildingScaleIndex(false);
     } catch (e) { reportError(e); }
     finally { setCancelingScaleIndex(false); }
+  };
+  // ---- 流水线体检修复(P2)----
+  // 重拉 checkup(修复后反映 count 下降);仅当仍是当前库时落状态。
+  const reloadCheckup = (nb: string) => {
+    fetchCheckup(nb)
+      .then((c) => { if (activeNotebookIdRef.current === nb) setCheckup(c); })
+      .catch(() => {});
+  };
+  // 修复是后台 job、count 不会立即下降,故点完开一段有界的 checkup 轮询窗口(见上方
+  // effect,健康即停,10 分钟封顶)。所有修复 CTA(重新解析/补齐向量,及复用的分析/
+  // 更新/重建索引)共用它。
+  const bumpCheckupRepairPoll = () => setCheckupRepairPollUntil(Date.now() + 10 * 60 * 1000);
+  // H2/H3 修复:批量重新解析命中项样本(source_ids 来自 checkup.sample,后端按 notebook
+  // 作用域过滤)。样本有上界(≤20),命中更多时逐轮修复、每轮 count 下降。
+  const runReparse = async (nb: string, sourceIds: string[]) => {
+    if (sourceIds.length === 0) return;
+    try {
+      const r = await reparseSources(nb, sourceIds);
+      setToast(`已开始重新解析 ${r.scheduled.length} 篇来源；完成后会自动更新`);
+      bumpCheckupRepairPoll();
+      reloadCheckup(nb);
+      // 让来源列表的状态标签也及时反映(分析中/已就绪)。
+      loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+    } catch (e) { reportError(e); }
+  };
+  // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
+  const runBackfillVectors = async (nb: string) => {
+    try {
+      await backfillVectors(nb);
+      setToast("已开始补齐检索向量；完成后会自动更新");
+      bumpCheckupRepairPoll();
+      reloadCheckup(nb);
+    } catch (e) { reportError(e); }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
@@ -3028,6 +3098,12 @@ export default function Home() {
       indexStatus: () => fetchIndexStatus(nb),
       contentOverview: () => fetchNotebookContentOverview(nb),
     });
+    // 体检:看板打开时随三系统状态一起拉一次(只读、无模型)。命中问题时驱动「来源
+    // 状态」块(H2–H6 源级)、「索引与构建」块(H7/H8 索引可信度)与铃铛的一条聚合
+    // 提醒。best-effort:失败不拦看板其余部分。
+    void fetchCheckup(nb).then((result) => {
+      if (isCurrent()) setCheckup(result);
+    }).catch(() => {});
     // 看板打开时经聚合端点一次拉齐三系统(kg/概念合并/检索索引)当前态(而非上次切库的
     // 快照),取代原先仅单独拉检索索引状态;顺带回填 scaleIndexStatus(供既有
     // runScaleIndexOp 等复用)与忙碌位(供既有轮询接回跨会话发起的构建)。
@@ -3726,6 +3802,19 @@ export default function Home() {
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
             userId={currentUser?.id}
+            checkup={(() => {
+              // 体检一条聚合提醒:命中问题即冒、点击直达看板。不复制体检详情、不新增
+              // 待办类型(见 pending-center.tsx CheckupAlert)。签名随命中集合变化。
+              // ⚠ 只读成员不冒此提醒:他们能看健康信息但所有修复 CTA 都 !isReader 隐藏了,
+              // 「发现可修复的问题」对他们是无可点动作的噪音(评审)。
+              const sig = checkupAlertSignature(checkup);
+              if (!sig || !currentNotebook || isReader) return null;
+              return {
+                sig,
+                label: `「${currentNotebook.name}」发现可修复的问题`,
+                onOpen: () => { void openAnalytics(); },
+              };
+            })()}
             onOpenItem={(it) => openPendingItem(it).catch(reportError)}
             onOpenDone={openDoneItem}
             onDismissDone={pending.dismissDone}
@@ -5177,6 +5266,52 @@ export default function Home() {
               <div className="tag-row">
                 {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{label(PARSE_STATUS, k, "其他")} {v}</span>)}
               </div>
+              {/* 体检:无异常时不打扰(上方中性 tag 行照旧);命中 H2–H6 源级问题时,列出
+                  问题(界面词标签 + 数量 + 命中样本标题)+ 对应一键修复 CTA。*/}
+              {(() => {
+                const groups = sourceHealthGroups(checkup);
+                if (groups.length === 0) return null;
+                const titleOf = (id: string) => {
+                  const s = sources.find((x) => x.id === id);
+                  return s ? (s.title || s.file_name || "") : "";
+                };
+                return (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    <p className="tool-hint">部分来源需要处理：</p>
+                    {groups.map((g) => {
+                      const titles = g.sample.map(titleOf).filter(Boolean).slice(0, 6);
+                      const runFix = () => {
+                        const nb = currentNotebookId;
+                        if (!nb) return;
+                        if (g.fix === "reparse") void runReparse(nb, g.sample);
+                        else if (g.fix === "backfill_vectors") void runBackfillVectors(nb);
+                        else if (g.fix === "extract_kg") { startKgBuild(nb); bumpCheckupRepairPoll(); }
+                      };
+                      return (
+                        <div className="index-card index-tone-warn" key={g.key}>
+                          <span className="index-ic" aria-hidden="true"><AlertTriangle size={19} /></span>
+                          <div className="index-main">
+                            <div className="tag-row" style={{ alignItems: "center" }}>
+                              <span className="index-state">{g.label}</span>
+                              <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }}>{g.count} {g.unit}</span>
+                            </div>
+                            {titles.length > 0 && (
+                              <div className="index-sub">{titles.join("、")}{g.count > titles.length ? " 等" : ""}</div>
+                            )}
+                          </div>
+                          {!isReader && (
+                            <div className="index-ctas">
+                              <button type="button" className="index-cta primary" onClick={runFix}>
+                                {label(CHECKUP_FIX, g.fix, "处理")}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
               {analytics.paper_meta_counts && (
                 <>
                   <p className="section-title">论文元数据</p>
@@ -5302,8 +5437,32 @@ export default function Home() {
                       </div>
                     );
                   })()}
-                  {/* 检索索引行:状态取 indexStatus.scale_index,忙碌(排队/构建中)时唯一动作变为「取消」。 */}
-                  {(() => {
+                  {/* 检索索引行:状态取 indexStatus.scale_index,忙碌(排队/构建中)时唯一动作变为「取消」。
+                      体检 H8(索引产物损坏)优先:这是「索引与构建」里唯一会静默出错的一格——索引存在
+                      且不过期、产物却坏了,普通状态卡会照常显示绿色「最新」。命中即整格换成红色「已损坏」
+                      告警 +「重建索引」(复用既有全量重建 runScaleIndexOp("rebuild")),避免与「最新」并列
+                      自相矛盾。H7 索引过期不另设:下方正常态本就按 scale_index.state 渲染「已过期 → 更新
+                      索引」(与 H7 同源),重复一遍反成冗余控件。*/}
+                  {checkupCount(checkup, "H8") > 0 ? (
+                    <div className="index-card index-tone-error">
+                      <span className="index-ic" aria-hidden="true"><AlertTriangle size={19} /></span>
+                      <div className="index-main">
+                        <div className="tag-row" style={{ alignItems: "center" }}>
+                          <span className="index-state">检索索引</span>
+                          <span className="tag" style={{ color: "var(--color-danger, #b42318)" }}>已损坏</span>
+                        </div>
+                        <div className="index-sub">检索索引已损坏，检索与{strictLabel}结果可能不完整，请重建索引。</div>
+                      </div>
+                      {!isReader && (
+                        <div className="index-ctas">
+                          <button type="button" className="index-cta primary"
+                                  onClick={() => runScaleIndexOp("rebuild", bumpCheckupRepairPoll)}>
+                            重建索引
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (() => {
                     const s = indexStatus.scale_index;
                     const v = describeScaleIndex(s);
                     // 本地忙碌位兜底(与知识图谱/概念合并两行一致):server-derived state 靠聚合轮询
