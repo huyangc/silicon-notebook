@@ -67,6 +67,21 @@ class ScaleArtifactStore:
         except (OSError, ValueError):
             return None
 
+    def scale_manifest_identity(self, notebook_id: str) -> "tuple[bool, object]":
+        """H8 体检缓存键:磁盘 scale 索引的**产物身份** `(manifest 是否存在, manifest.version)`。
+
+        为什么不是 version_signal:磁盘索引只在 rebuild/fold(`.tmp`+swap 原子换目录)时换新
+        `manifest.version`,**与 kg_mutation_seq / version_signal 解耦**(见上 read_manifest_version
+        与本类顶部说明)。version_signal 只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,
+        用它当 H8 缓存键会:损坏被缓存后、用户点重建(原子换成健康产物、seq 不变)仍报损坏清不掉。
+        改用磁盘 manifest 身份——rebuild/fold 换新 version 即让缓存失效,正是「产物变没变」的真信号。
+
+        `exists=False` → 未建索引(H8 直接判 0、不必 load)。`exists=True, version=None` → manifest 在
+        但损坏/无 version(探针会真 load 判损坏,且损坏结论不进缓存,故 None 键不会粘住)。sub-ms。"""
+        scale_dir = self.scale_dir(notebook_id)
+        manifest_path = os.path.join(str(scale_dir), "manifest.json")
+        return os.path.exists(manifest_path), self.read_manifest_version(scale_dir)
+
     # ──────────────────────────────────────────────────────── load/save ──
     def load_scale(self, notebook_id: str):
         return scale_index_module.load_scale_index(str(self.scale_dir(notebook_id)))
