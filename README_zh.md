@@ -1210,9 +1210,11 @@ PostgreSQL 17 的 non-C/non-UTF 辅助 target 以 CI 为权威；本地未提供
 Python 预检会在 pytest 前验证全部已配置 URL。query 严格白名单只接受一个经审查的
 `sslmode`；身份、凭据、service/file、`options`、未知、畸形与重复覆盖项都会在连接前
 失败。预检还会复核有效 host/port/user/database，只输出隐去凭据的 backend identity，
-并串行运行唯一 `postgres_integration` marker。pytest 只收到最小白名单环境和无密码的
-`TEST_POSTGRES_*` URL；各 target 精确匹配的 URL/`PGPASSWORD` 凭据排在复制的继承
-pgpass 行之前，写入权限为 0600 的临时 `PGPASSFILE`，写入/关闭/测试失败或中断都会删除。
+并串行运行唯一 `postgres_integration` marker。父进程不连接数据库：无密码 preflight
+helper 与 pytest 先后使用完全相同的最小白名单环境、清洗后的 `TEST_POSTGRES_*` URL
+和同一个 pgpass 文件，父进程 libpq 变量不能只重定向其中一个阶段。各 target 精确匹配的
+URL/`PGPASSWORD` 凭据排在复制的继承 pgpass 行之前，写入权限为 0600 的临时
+`PGPASSFILE`，写入/关闭/测试失败或中断都会删除。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic

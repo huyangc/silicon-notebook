@@ -15,5 +15,6 @@ does not copy, migrate, synchronize, or enable dual-write. Status/readiness diag
 redact credentials and options. Follow the stop/backup/change/start/`/api/ready` switch and
 rollback contract in `AGENTS.md` and the READMEs. The PostgreSQL integration launcher uses
 a strict single-`sslmode` URL-query allowlist and gives pytest only a minimal environment
-with password-free URLs; exact per-target credentials precede inherited lines in a
-failure-cleaned, mode-0600 temporary `PGPASSFILE`.
+with password-free URLs. Its parent process only parses; the password-free preflight helper
+and pytest reuse that exact environment and pgpass file. Exact per-target credentials
+precede inherited lines in a failure-cleaned, mode-0600 temporary `PGPASSFILE`.

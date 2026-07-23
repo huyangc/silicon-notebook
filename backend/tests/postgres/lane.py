@@ -244,13 +244,13 @@ def _prepare_target(label: str, env_name: str, expected: str) -> _Target | None:
 def _inspect_target(target: _Target) -> bool:
     try:
         identity = database_identity(target.raw_url)
-        connect_args: dict[str, object] = {
-            "row_factory": dict_row,
-            "connect_timeout": 5,
-        }
         if target.url_password is not None:
-            connect_args["password"] = target.url_password
-        with psycopg.connect(target.sanitized_url, **connect_args) as connection:
+            raise RuntimeError("isolated preflight URL must not contain a password")
+        with psycopg.connect(
+            target.sanitized_url,
+            row_factory=dict_row,
+            connect_timeout=5,
+        ) as connection:
             row = connection.execute(
                 "SELECT current_database() AS database, "
                 "current_setting('server_encoding') AS encoding, "
@@ -326,28 +326,104 @@ def _pytest_environment(targets: list[_Target]):
         )
 
 
-def _run_pytest(targets: list[_Target]) -> int:
-    with _pytest_environment(targets) as child_env:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-p",
-                "no:cacheprovider",
-                "-n",
-                "0",
-                "--tb=short",
-                "--maxfail=1",
-                "-m",
-                "postgres_integration",
-                "tests/postgres",
-            ],
-            cwd=BACKEND_ROOT,
-            env=child_env,
-            check=False,
-        )
+def _run_preflight(
+    child_env: dict[str, str],
+    *,
+    capture_output: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "tests.postgres.lane", "--preflight"],
+        cwd=BACKEND_ROOT,
+        env=child_env,
+        check=False,
+        text=True,
+        capture_output=capture_output,
+    )
+
+
+def _run_pytest_in_environment(child_env: dict[str, str]) -> int:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "0",
+            "--tb=short",
+            "--maxfail=1",
+            "-m",
+            "postgres_integration",
+            "tests/postgres",
+        ],
+        cwd=BACKEND_ROOT,
+        env=child_env,
+        check=False,
+    )
     return completed.returncode
+
+
+def _run_pytest(targets: list[_Target]) -> int:
+    """Unit-testable compatibility wrapper around the isolated pytest launch."""
+    with _pytest_environment(targets) as child_env:
+        return _run_pytest_in_environment(child_env)
+
+
+def _run_isolated_gate(targets: list[_Target]) -> int:
+    """Run preflight and pytest inside one exact environment/pgpass lifetime."""
+    with _pytest_environment(targets) as child_env:
+        preflight = _run_preflight(child_env)
+        if preflight.returncode != 0:
+            return preflight.returncode
+        return _run_pytest_in_environment(child_env)
+
+
+def _preflight_mode_main() -> int:
+    forbidden_environment = {
+        key
+        for key in os.environ
+        if (key.startswith("PG") and key != "PGPASSFILE")
+        or key
+        in {
+            "DATABASE_URL",
+            "SHADOW_DATABASE_URL",
+            "POSTGRES_DB",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_USER",
+        }
+    }
+    if forbidden_environment or not os.environ.get("PGPASSFILE"):
+        print(
+            "PostgreSQL preflight failed: isolated environment is invalid",
+            file=sys.stderr,
+        )
+        return 2
+
+    specs = (
+        ("primary", "TEST_POSTGRES_URL", "utf8"),
+        ("non-C UTF8", "TEST_POSTGRES_NON_C_URL", "non-c"),
+        ("non-UTF negative", "TEST_POSTGRES_NON_UTF_URL", "non-utf"),
+    )
+    targets: list[_Target] = []
+    for label, env_name, expected in specs:
+        try:
+            target = _prepare_target(label, env_name, expected)
+            if target is not None and target.url_password is not None:
+                raise RuntimeError("isolated preflight URL contains a password")
+        except BaseException:
+            print(
+                f"PostgreSQL {label} preflight failed: invalid database configuration",
+                file=sys.stderr,
+            )
+            return 2
+        if target is not None:
+            targets.append(target)
+
+    for target in targets:
+        if not _inspect_target(target):
+            return 2
+    return 0
 
 
 def main() -> int:
@@ -369,11 +445,8 @@ def main() -> int:
         if target is not None:
             targets.append(target)
 
-    for target in targets:
-        if not _inspect_target(target):
-            return 2
     try:
-        return _run_pytest(targets)
+        return _run_isolated_gate(targets)
     except BaseException:
         print(
             "PostgreSQL integration gate failed: credential transport or test "
@@ -384,4 +457,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--preflight"]:
+        raise SystemExit(_preflight_mode_main())
+    if sys.argv[1:]:
+        print("PostgreSQL integration gate failed: invalid invocation", file=sys.stderr)
+        raise SystemExit(2)
     raise SystemExit(main())

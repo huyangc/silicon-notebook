@@ -316,8 +316,10 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
 `scripts/check_postgres.sh` 的 Python launcher 先统一验证三个 URL；query 白名单只允许
 单个 `sslmode`，拒绝身份/凭据/service/file/`options`/未知/重复覆盖并复核有效
 host/port/user/database。pytest 只接收最小白名单环境与无密码 URL；各 target 的精确
-凭据排在继承 pgpass 行之前，通过权限 0600 的临时 `PGPASSFILE` 传入，任何写入、关闭、
-测试失败或中断都会清理，然后只运行 `-m postgres_integration`。CI 的独立 PostgreSQL 17 job 用非 superuser app role，
+凭据排在继承 pgpass 行之前。父进程只解析、不连接；无密码 preflight helper 与 pytest
+先后复用同一个最小白名单环境、清洗 URL 和 pgpass 文件，避免父进程 libpq 环境只重定向
+预检。凭据通过权限 0600 的临时 `PGPASSFILE` 传入，任何写入、关闭、测试失败或中断都会
+清理，然后只运行 `-m postgres_integration`。CI 的独立 PostgreSQL 17 job 用非 superuser app role，
 并额外在 UTF8/ICU/non-C-default 数据库跑完整 schema parity，在 SQL_ASCII 数据库
 验证 migration 0001 在 ledger/业务 DDL 前事务性失败。本地 PostgreSQL 16 可用于普通
 integration；PG17 的两个辅助目标以 CI 为权威。`scripts/check.sh` 始终离线，不启动也不连接 PostgreSQL。

@@ -164,6 +164,8 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
         "os.chmod(path, 0o600)",
         "_CHILD_ENV_ALLOWLIST",
         "conninfo_to_dict",
+        "_run_isolated_gate",
+        '"--preflight"',
         "target.sanitized_url",
         '"--tb=short"',
         '"--maxfail=1"',

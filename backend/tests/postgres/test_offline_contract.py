@@ -23,11 +23,56 @@ from tests.postgres.lane import (
     _pgpass_entry,
     _prepare_target,
     _pytest_environment,
+    _run_isolated_gate,
+    _run_preflight,
     _run_pytest,
 )
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _pgpass_fields(line: str) -> list[str]:
+    fields: list[str] = []
+    field: list[str] = []
+    escaped = False
+    for character in line.rstrip("\n"):
+        if escaped:
+            field.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == ":" and len(fields) < 4:
+            fields.append("".join(field))
+            field = []
+        else:
+            field.append(character)
+    if escaped:
+        raise RuntimeError("invalid pgpass escape")
+    fields.append("".join(field))
+    if len(fields) != 5:
+        raise RuntimeError("invalid pgpass field count")
+    return fields
+
+
+def _current_target_password(url: str) -> str:
+    parsed = urlsplit(url)
+    expected = (
+        parsed.hostname,
+        str(parsed.port or 5432),
+        parsed.path.removeprefix("/"),
+        parsed.username,
+    )
+    pgpass_path = os.environ.get("PGPASSFILE")
+    if not pgpass_path:
+        raise RuntimeError("isolated PostgreSQL lane did not provide PGPASSFILE")
+    for raw_line in Path(pgpass_path).read_text(encoding="utf-8").splitlines():
+        if not raw_line or raw_line.startswith("#"):
+            continue
+        fields = _pgpass_fields(raw_line)
+        if all(actual == "*" or actual == wanted for actual, wanted in zip(fields, expected)):
+            return fields[4]
+    raise RuntimeError("isolated PostgreSQL credential was not found")
 
 
 def _run_postgres_gate(url: str) -> subprocess.CompletedProcess[str]:
@@ -371,6 +416,131 @@ def test_pytest_child_environment_drops_parent_database_and_libpq_secrets(
     ):
         assert sentinel not in rendered
     assert not Path(child_env["PGPASSFILE"]).exists()
+
+
+def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
+    monkeypatch,
+):
+    poison = {
+        "PGHOSTADDR": "127.0.0.2",
+        "PGHOST": "poison-host",
+        "PGPORT": "6543",
+        "PGUSER": "poison-user",
+        "PGDATABASE": "poison-database",
+        "PGSERVICE": "poison-service",
+        "PGSERVICEFILE": "/tmp/poison-service-file",
+        "PGOPTIONS": "-csearch_path=poison",
+        "PGSSLMODE": "verify-full",
+        "PGTARGETSESSIONATTRS": "primary",
+        "PGSSLPASSWORD": "sentinel-ssl-password",
+        "DATABASE_URL": "postgresql://u:sentinel-parent-db@poison/db",
+        "SHADOW_DATABASE_URL": "postgresql://u:sentinel-parent-shadow@poison/db",
+    }
+    for key, value in poison.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv(
+        "TEST_POSTGRES_URL",
+        "postgresql://lane_user:sentinel-target-secret@db.example:55432/"
+        "silicon_notebook_lane_test?sslmode=require",
+    )
+    target = _prepare_target("primary", "TEST_POSTGRES_URL", "utf8")
+    assert target is not None
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs["env"]))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(postgres_lane.subprocess, "run", fake_run)
+    assert _run_isolated_gate([target]) == 0
+    assert len(calls) == 2
+    preflight_command, preflight_env = calls[0]
+    pytest_command, pytest_env = calls[1]
+    assert preflight_command[-1] == "--preflight"
+    assert "pytest" in pytest_command
+    assert preflight_env is pytest_env
+    assert set(poison).isdisjoint(preflight_env)
+    assert preflight_env["TEST_POSTGRES_URL"] == (
+        "postgresql://lane_user@db.example:55432/"
+        "silicon_notebook_lane_test?sslmode=require"
+    )
+    rendered = repr(calls)
+    assert "sentinel-" not in rendered
+    assert "poison-" not in rendered
+    assert not Path(preflight_env["PGPASSFILE"]).exists()
+
+
+@pytest.mark.postgres_integration
+def test_valid_preflight_ignores_poisoned_parent_libpq_environment(monkeypatch):
+    current_url = os.environ["TEST_POSTGRES_URL"]
+    target = _prepare_target("primary", "TEST_POSTGRES_URL", "utf8")
+    assert target is not None
+    poison = {
+        "PGHOSTADDR": "203.0.113.7",
+        "PGHOST": "definitely.invalid",
+        "PGPORT": "1",
+        "PGUSER": "poison-user",
+        "PGDATABASE": "poison-database",
+        "PGSERVICE": "poison-service",
+        "PGSERVICEFILE": "/does/not/exist",
+        "PGOPTIONS": "-csearch_path=poison",
+        "PGSSLMODE": "verify-full",
+        "PGTARGETSESSIONATTRS": "standby",
+        "PGSSLPASSWORD": "sentinel-parent-ssl-password",
+    }
+    for key, value in poison.items():
+        monkeypatch.setenv(key, value)
+    with _pytest_environment([target]) as child_env:
+        completed = _run_preflight(child_env, capture_output=True)
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    assert "preflight ok" in output
+    assert "sentinel-" not in output
+    assert current_url not in output
+    assert set(poison).isdisjoint(child_env)
+
+
+@pytest.mark.postgres_integration
+def test_invalid_url_cannot_be_redirected_by_parent_pghostaddr(
+    monkeypatch,
+    tmp_path,
+):
+    current_url = os.environ["TEST_POSTGRES_URL"]
+    parsed = urlsplit(current_url)
+    password = _current_target_password(current_url)
+    invalid_url = (
+        f"postgresql://{parsed.username}@definitely.invalid:{parsed.port or 5432}"
+        f"{parsed.path}"
+    )
+    inherited = tmp_path / "invalid-host.pgpass"
+    inherited.write_text(_pgpass_entry(invalid_url, password) + "\n", encoding="utf-8")
+    inherited.chmod(0o600)
+
+    env = os.environ.copy()
+    env["PYTHON_BIN"] = sys.executable
+    env["TEST_POSTGRES_URL"] = invalid_url
+    env.pop("TEST_POSTGRES_NON_C_URL", None)
+    env.pop("TEST_POSTGRES_NON_UTF_URL", None)
+    env["POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED"] = "0"
+    env["PGHOSTADDR"] = parsed.hostname or "127.0.0.1"
+    env["PGPASSFILE"] = str(inherited)
+    env["PGSSLPASSWORD"] = "sentinel-parent-ssl-password"
+    completed = subprocess.run(
+        ["bash", "scripts/check_postgres.sh"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    output = completed.stdout + completed.stderr
+    assert completed.returncode != 0
+    assert "preflight ok" not in output
+    assert "connection or identity check failed" in output
+    assert invalid_url not in output
+    assert password not in output
+    assert "sentinel-" not in output
+    assert "Traceback" not in output
 
 
 def test_generated_pgpass_exact_entries_precede_inherited_wildcards(

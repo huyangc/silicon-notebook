@@ -1375,10 +1375,12 @@ The Python preflight validates every configured URL before pytest. Its strict qu
 allowlist accepts only one reviewed `sslmode`; identity, credential, service/file,
 `options`, unknown, malformed, and repeated overrides fail before any connection. It
 rechecks effective host/port/user/database, prints only the redacted backend identity, and
-runs only the `postgres_integration` marker serially. Pytest receives a minimal allowlisted
-environment and password-free `TEST_POSTGRES_*` URLs. Exact per-target URL/`PGPASSWORD`
-credentials are written before any copied inherited pgpass lines in a mode-0600 temporary
-`PGPASSFILE`; write/close/test failures and interrupts remove it.
+runs only the `postgres_integration` marker serially. The parent process never connects:
+a password-free preflight helper and pytest run consecutively with the exact same minimal
+allowlisted environment, sanitized `TEST_POSTGRES_*` URLs, and pgpass file, so parent libpq
+variables cannot redirect only one phase. Exact per-target URL/`PGPASSWORD` credentials are
+written before any copied inherited pgpass lines in a mode-0600 temporary `PGPASSFILE`;
+write/close/test failures and interrupts remove it.
 
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
