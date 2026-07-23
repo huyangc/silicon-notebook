@@ -99,9 +99,10 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 表 + promotion_candidates.target_base_id 列，v21 normalized-anchor
     # expression index、v22 kg_build_jobs migration、v23 model_service_status
     # migration、v24 写锁瘦身改造点 2 的 kg_canonical_scratch 表 migration、
-    # v25 credential scrub + system status table，以及 v26 knowhow_changes/
-    # knowhow_milestones 表 migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 26
+    # v25 凭据清除 + 系统模型服务状态表(#328)、v26 knowhow_changes/
+    # knowhow_milestones 表 migration(#327)，以及 v27 P1.5 的 sources.chunked_at
+    # 完成标记列 migration 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 27
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

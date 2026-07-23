@@ -1972,6 +1972,47 @@ MIGRATION_MANIFEST[(25, 26)] = {
     "views": {},
 }
 
+# v27 (P1.5, source completion marker): sources.chunked_at — the persistent
+# "this generation of elements finished chunking" marker that makes an
+# extracted+0-chunk source's history decidable (legit 0-chunk vs interrupted
+# chunk build). Renumbered from v26 after a number collision: #328 took
+# _migration_25 (credential scrub) and #327 took _migration_26 (knowhow history),
+# so this segment MUST sit after BOTH — its broadcast lifts every (X, 26) key
+# (knowhow's v26 layer included) to (X, 27). Unlike the new-table bumps above,
+# this adds a COLUMN to an existing table — so the broadcast segment below merges
+# into each manifest's ``columns["sources"]`` nested dict (preserving the
+# memory_id column the pre-v14 hops already carry) rather than only unioning
+# ``tables``/``indexes``. Nested-merge, never overwrite.
+SOURCES_CHUNKED_AT_COLUMN = {
+    "chunked_at": ("chunked_at", "TEXT", 0, None, 0),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 27, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "sources": {
+                **manifest["columns"].get("sources", {}),
+                **SOURCES_CHUNKED_AT_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+# The single-hop (26, 27) entry. No fixture exercises a pure v26→v27 replay
+# today, so the broadcast segment above — which stamps chunked_at onto every
+# (X, 27) key — is what the live tests actually go through. This entry is kept
+# for structural completeness (a future v26 rollback fixture would key straight
+# into it) and to mirror the append convention; verified load-bearing by
+# mutating the broadcast segment (not this line) — see the P1.5 commit.
+MIGRATION_MANIFEST[(26, 27)] = {
+    "tables": {},
+    "columns": {"sources": SOURCES_CHUNKED_AT_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
