@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable
 
 
 def safe_filename(file_name: str) -> str:
@@ -41,21 +41,6 @@ class SourceFileStore:
         self.storage_dir = storage_dir
         self.resolve_path = resolve_path
 
-    def planned_upload_path(
-        self, notebook_id: str, source_id: str, file_name: str
-    ) -> Path:
-        """The deterministic on-disk path write_upload WOULD use for these inputs,
-        computed WITHOUT any I/O (no directory creation, no write).
-
-        Lets a caller do a compare-and-swap on the DB row's file_name/file_path
-        FIRST and only materialize the file once the swap wins, so a lost race
-        never leaves an orphan file for a name another upload superseded (see
-        SourceIngestionService._repoint_reused_file's CAS path, round-7 P2-2)."""
-        return (
-            self.storage_dir / "notebooks" / notebook_id
-            / f"{source_id}_{safe_filename(file_name)}"
-        )
-
     def write_upload(
         self,
         notebook_id: str,
@@ -63,8 +48,9 @@ class SourceFileStore:
         file_name: str,
         content: bytes,
     ) -> Path:
-        stored_path = self.planned_upload_path(notebook_id, source_id, file_name)
-        stored_path.parent.mkdir(parents=True, exist_ok=True)
+        source_dir = self.storage_dir / "notebooks" / notebook_id
+        source_dir.mkdir(parents=True, exist_ok=True)
+        stored_path = source_dir / f"{source_id}_{safe_filename(file_name)}"
         stored_path.write_bytes(content)
         return stored_path
 
@@ -91,20 +77,3 @@ class SourceFileStore:
         return self.read_source_text(
             getattr(source, "file_path", "") or "", fallback_elements
         )
-
-    def read_bytes(self, file_path: str) -> Optional[bytes]:
-        """Raw bytes of a stored source file, or None when the path is empty or
-        the file is gone. Used by the in-flight suffix-correction reconcile
-        (SourceIngestionService._reconcile_pending_suffix): once the pipeline that
-        was READING this file has settled, the file is repointed to the corrected
-        name — and since the content is byte-identical (that is what dedup keys
-        on), the corrected file is written from THESE bytes. A missing file
-        degrades to None so the caller falls back to a name-only repoint rather
-        than raising (same resolve_path boundary as read_source_text)."""
-        path = file_path or ""
-        if not path:
-            return None
-        try:
-            return Path(self.resolve_path(path)).read_bytes()
-        except OSError:
-            return None
