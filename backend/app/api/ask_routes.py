@@ -39,7 +39,13 @@ def _require_ask_available(notebook: NotebookSummary) -> None:
     """硬约束(PR#334):笔记本在任一模式下都取不到可检索证据(NotebookSummary
     .ask_available=False——无可见来源/knowhow chunk/可用 KG/带图参考库/confirmed memory)
     时,回答只会是凭空生成,拒绝提问。前端会据同一信号禁用对话框,但那只是 UX;这里是
-    **权威闸门**——挡住前端快照陈旧(跨标签/并发删证据)、直连 HTTP 等一切旁路。"""
+    路由层**权威预检**——挡住前端快照陈旧(跨标签/并发)、直连 HTTP 等一切旁路。
+
+    刻意留在路由层、不下沉到 ask 服务:后者是冻结的 facade 契约,且有约 16 个直调
+    repo.ask(空库)的测试。代价是一个**已知且被接受的极窄 TOCTOU 残留**(codex 第11轮
+    P2):预检通过后、检索真正取证据前的毫秒级窗口里删掉最后一份证据,本次 ask 仍会跑完、
+    可能存下一条空答案。窗口极小、后果良性(仅一条无据答案,非崩溃/越权),故不为它把
+    守卫下沉进服务层。"""
     if not notebook.ask_available:
         raise user_error(
             409,
