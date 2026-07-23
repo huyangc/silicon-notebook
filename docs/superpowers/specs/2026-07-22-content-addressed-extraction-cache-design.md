@@ -456,6 +456,53 @@ TTL 只为两件事存在：
   不一致。跨 notebook 不做整源去重——用户通常确实想在自己库里拥有这份文件，且跨用户
   共享 source 行会引爆权限、删除级联与归属问题。
 
+## 已知边界
+
+### 搁浅在 `parsed` 的源，换后缀重传收不到重解析（Codex 第 6 轮 P2-1，未修，待定夺）
+
+换后缀重传的重解析守卫是 `parse_status in ('failed','extracted')`（settled 集）。源
+可以停在 **`parsed`** 且**没有任何流水线在跑**，此时换后缀重传走在飞分支（只改名、不
+调度），而收口它的 `_reconcile_pending_suffix` 要靠一条正在跑的 `process_source` 完成来
+触发——根本没在跑，于是旧解析器的 elements 永远留着，后缀纠正悬空到下一次手动重解析
+或 notebook KG build（build 从 stale elements 抽取，不重解析）。
+
+制造「搁浅 `parsed`」的三个源头（均由设计有意为之，`parsed`＝解析已成、抽取待跑，是
+这些源**正确**的休止态）：
+
+1. 启动崩溃恢复把 `extracting` 回退成 `parsed`（`migrations.py::_recover_interrupted_jobs`）。
+2. notebook KG build 单源**失败**回 `parsed`（`knowledge_lifecycle.py::_extract_one` 的
+   通用 except）。
+3. notebook KG build **取消**回 `parsed`（同上，`KgBuildAborted` 分支）。
+
+**为什么不无脑把 `parsed` 加进 settled 集**：`parsed` 同时是**流水线中途的瞬态**——
+`process_source` 在 `set 'parsed'` 与随后**无条件** `set 'extracting'` 之间会短暂停在
+`parsed`。此时被并发 reparse 认领（`parsed→queued`），紧接着那条流水线的
+`set 'extracting'` 会把认领覆盖回去 → 同一源两条流水线互清 elements/KG。这正是本特性
+前几轮辛苦消除的 mid-pipeline 竞态，绝不能重新引入。
+
+**评估过的三条修法**：
+
+- **(a) 让三个源头落到明确 settled 的态（如 `failed`）**：语义上错。`parsed` 的源解析
+  **成功**（有 elements），只是抽取被打断；标 `failed` 是谎报解析失败，且会让它掉出
+  KG-build 的 `parse_status IN ('parsed','extracting','extracted')` 目标集（「继续分析
+  未完成内容」的恢复语义断掉），换后缀重传还会按失败源走**整条重解析**而非只重抽——
+  破坏面大，否决。
+- **(b) 把「流水线是否在跑」和 parse_status 解耦**：最干净是加一个 in-flight 标记（需
+  schema 迁移，用户此轮倾向不加）；轻量变体是把 `process_source` 的 `parsed→extracting`
+  也改成 WHERE 守卫的原子认领——输了（被 reparse 抢走）就中止本条流水线、让给
+  reparser。这**能**消除双流水线竞态（与现有四处 rowcount 认领同构、不需新列），但它
+  改的是**热路径**，且中止的那条流水线已经起了后台 embed 线程（在旧 elements 上跑），
+  与 reparser 的 clear_source_extraction_state 存在 embed-vs-clear 的收尾竞态（该暴露面
+  在现有 `failed` 重试路径上其实已存在、被容忍，但 `parsed` 更早、更易触发）。改热路径
+  + 收尾竞态判断，风险不小。
+- **(c) 如实标注为已知边界，交由用户定夺**（本轮采纳）。
+
+**当前影响面（窄）**：需要（崩溃重启 **或** KG build 失败/取消把源留在 `parsed`）**且**
+在任何 KG build 重新处理它之前，用户用**不同解析器后缀**重传同一内容。后果是旧解析器的
+elements 保留到一次手动重解析为止（`parse_source` 公有入口会按新 file_name 重解析）。
+正确性优先于覆盖：本轮**不引入新竞态**，把它留作已知边界。若要修，推荐 (b) 的守卫认领
+变体，但因触及热路径 + embed 收尾语义，需用户显式点头后单独一轮做。
+
 ## 测试
 
 - **key 稳定性**：同内容、不同 source_id / 文件名 → 同 key；不同 doc_type / tier → 不同 key。
