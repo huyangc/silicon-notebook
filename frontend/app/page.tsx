@@ -1820,14 +1820,25 @@ export default function Home() {
     };
     function tick() {
       if (!nb || activeNotebookIdRef.current !== nb) return; // 已切库,放弃(!nb 兼作收窄)
-      Promise.all([getNotebook(nb), fetchKnowhowTables(nb)])
-        .then(([refreshed, tables]) => {
+      // 先只查投影状态:仍有 pending → 继续轮询,此刻**不**拉/信任 notebook 快照。只有确认
+      // 无 pending(终态)后才拉权威快照——否则两个并发请求可能跨越投影完成点,getNotebook
+      // 返回投影前的 ask_available、tables 已报 pending=0,被当成一致快照而停在陈旧值
+      // (codex PR#334 第8轮 P2 的竞态)。knowhow 已关闭、无新编辑,故 no-pending 稳定,
+      // 随后的 getNotebook 必为 post-projection。
+      fetchKnowhowTables(nb)
+        .then((tables) => {
           if (activeNotebookIdRef.current !== nb) return;
-          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
-          // 还有投影在跑 → 继续轮询(两向都可能变);无 pending → 终态(此拍已刷新),停。
-          if (tables.some((table) => table.projectionPending > 0)) schedule();
+          if (tables.some((table) => table.projectionPending > 0)) {
+            schedule(); // 还有投影在跑 → 继续退避轮询
+            return;
+          }
+          return getNotebook(nb).then((refreshed) => {
+            if (activeNotebookIdRef.current === nb) {
+              setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+            }
+          });
         })
-        .catch(schedule); // 瞬时失败不终止 → 退避重试
+        .catch(schedule); // 任一请求瞬时失败不终止 → 退避重试
     }
     tick(); // 立即首拉:双向对齐 + 按投影状态决定是否继续轮询
   }
