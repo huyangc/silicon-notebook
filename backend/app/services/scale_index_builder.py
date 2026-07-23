@@ -254,44 +254,46 @@ class ScaleIndexBuilder:
         del edge_src, edge_tgt, edge_weight
         gc.collect()
 
-        chunk_ids_raw, chunk_matrix_raw = timed(
-            "chunk_matrix",
-            lambda: self.projections.embedding_matrix(
+        def _load_build_chunk_ann():
+            ids_raw, matrix_raw = self.projections.embedding_matrix(
                 notebook_id, "chunk_embeddings", "chunk_id"
-            ),
+            )
+            labels = list(ids_raw) if ids_raw else []
+            vecs = (
+                np.asarray(matrix_raw, dtype=np.float32)
+                if labels and matrix_raw is not None
+                else None
+            )
+            # Build the ANN and drop the matrix INSIDE the stage: persist never
+            # rebuilds it, and the matrix (~7GB chunks at 8M) must not survive
+            # past here. `vecs`/`matrix_raw` are locals, freed on return. The
+            # "chunk_matrix" stage now times load+build (still one stage), so
+            # build_ms keeps the ANN-build cost attributable.
+            return labels, self._build_ann(vecs)
+
+        chunk_ann_labels, chunk_ann_index = timed(
+            "chunk_matrix", _load_build_chunk_ann
         )
-        chunk_ann_labels = list(chunk_ids_raw) if chunk_ids_raw else []
-        chunk_ann_vectors = (
-            np.asarray(chunk_matrix_raw, dtype=np.float32)
-            if chunk_ann_labels and chunk_matrix_raw is not None
-            else None
-        )
-        del chunk_ids_raw, chunk_matrix_raw
-        gc.collect()
-        # Build the chunk ANN now, then free its matrix — persist no longer
-        # rebuilds it (it never held both matrix and index resident).
-        chunk_ann_index = self._build_ann(chunk_ann_vectors)
-        del chunk_ann_vectors
         gc.collect()
 
-        relation_ids_raw, relation_matrix_raw = timed(
-            "relation_matrix",
-            lambda: self.projections.embedding_matrix(
+        def _load_build_relation_ann():
+            ids_raw, matrix_raw = self.projections.embedding_matrix(
                 notebook_id, "relation_embeddings", "relation_id"
-            ),
+            )
+            labels = list(ids_raw) if ids_raw else []
+            vecs = (
+                np.asarray(matrix_raw, dtype=np.float32)
+                if labels and matrix_raw is not None
+                else None
+            )
+            # Same as chunk: build + drop the matrix inside the stage. The
+            # relation matrix (~33GB at 8M rows) is the single biggest slice the
+            # old persist held resident.
+            return labels, self._build_ann(vecs)
+
+        relation_ann_labels, relation_ann_index = timed(
+            "relation_matrix", _load_build_relation_ann
         )
-        relation_ann_labels = list(relation_ids_raw) if relation_ids_raw else []
-        relation_ann_vectors = (
-            np.asarray(relation_matrix_raw, dtype=np.float32)
-            if relation_ann_labels and relation_matrix_raw is not None
-            else None
-        )
-        del relation_ids_raw, relation_matrix_raw
-        gc.collect()
-        # Build the relation ANN now, then free its matrix (~33GB at 8M rows) —
-        # this is the single biggest slice the old persist held resident.
-        relation_ann_index = self._build_ann(relation_ann_vectors)
-        del relation_ann_vectors
         gc.collect()
 
         viz_artifacts = timed(
