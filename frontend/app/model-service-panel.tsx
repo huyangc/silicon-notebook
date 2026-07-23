@@ -160,6 +160,12 @@ export function ModelServicePanel({
   const floating = useFloatingWindow({ storageKey: "modelService.window", resizable: false });
   const anyTesting = Object.values(testingServiceIds).some(Boolean);
 
+  // Focus the highlighted card (or the close button) when the dialog opens, when
+  // the highlight target changes, or once status first loads (so the target card
+  // exists to receive focus). Gate on `statusLoaded` (a boolean), NOT the whole
+  // `status` object: while the panel is open it re-polls every 2s, and depending
+  // on `status` would re-steal keyboard focus / reset scroll on every poll.
+  const statusLoaded = status !== null;
   useEffect(() => {
     const highlighted = highlightedServiceId ? serviceRefs.current[highlightedServiceId] : null;
     if (highlighted) {
@@ -168,7 +174,7 @@ export function ModelServicePanel({
     } else {
       closeButtonRef.current?.focus();
     }
-  }, [highlightedServiceId, status]);
+  }, [highlightedServiceId, statusLoaded]);
 
   useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {

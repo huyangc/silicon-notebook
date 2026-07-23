@@ -1996,10 +1996,22 @@ export default function Home() {
   // re-reading the status snapshot every 2s. The GET is in-memory only (no model calls),
   // so it stays cheap; it is gated to panel-open and torn down on close. 延迟/上次检查
   // stay probe-driven by design — making those live would mean actively pinging models.
+  // Serialize: schedule the next poll only after the current one settles (not a fixed
+  // interval), so a request slower than 2s can't pile up overlapping in-flight polls —
+  // which, because refreshModelStatus bumps modelStatusRequestRef at request start, would
+  // otherwise keep discarding every response and never update under sustained latency.
   useEffect(() => {
     if (!modelPanelOpen) return;
-    const poll = window.setInterval(() => { void refreshModelStatus(); }, 2000);
-    return () => window.clearInterval(poll);
+    let cancelled = false;
+    let timer = 0;
+    const scheduleNext = () => {
+      timer = window.setTimeout(async () => {
+        await refreshModelStatus();
+        if (!cancelled) scheduleNext();
+      }, 2000);
+    };
+    scheduleNext();
+    return () => { cancelled = true; window.clearTimeout(timer); };
     // refreshModelStatus only touches refs + setState (stable); gate solely on open.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelPanelOpen]);
