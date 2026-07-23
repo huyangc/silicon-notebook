@@ -1,5 +1,9 @@
-import { type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from "react";
 import { Square } from "lucide-react";
+
+
+// 输入框自动增高的上限(px),与 globals.css .chat-input 的 max-height 一致;超过则内部滚动。
+const MAX_INPUT_HEIGHT = 160;
 
 
 type AskComposerProps = {
@@ -26,6 +30,36 @@ export function AskComposer({
   disabled = false,
   children,
 }: AskComposerProps) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // 随内容自动增高(封顶 MAX_INPUT_HEIGHT,超出内部滚动)。替代已移除的手动 resize 手柄:
+  // 长提问 / Shift+Enter 多行不再被压在一行里,又不暴露游离的拖拽把手。先置 auto 让
+  // scrollHeight 反映真实内容高度,再夹到上限。
+  // 依赖 [value] 覆盖输入变化;但**宽度**变化(窗口 resize、来源栏折叠/展开致主栏变宽窄)
+  // 不改 value 却会改变换行数——用 ResizeObserver 补上,且仅在宽度真变时重算,忽略自身
+  // 设高触发的高度变化,避免 RO 自激循环。
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const resize = () => {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, MAX_INPUT_HEIGHT)}px`;
+    };
+    resize();
+    // ResizeObserver 在浏览器才有(jsdom / SSR 无)——缺席时退化为「仅按 value 重算」,
+    // 初次 resize() 已跑,不影响正确性,只是宽度变化不再自动跟。
+    if (typeof ResizeObserver === "undefined") return;
+    let lastWidth = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth !== lastWidth) {
+        lastWidth = el.clientWidth;
+        resize();
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [value]);
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (
       event.key === "Enter"
@@ -41,27 +75,32 @@ export function AskComposer({
 
   return (
     <div className="chat-input-bar">
-      <textarea
-        aria-label="提问"
-        className="chat-input"
-        rows={1}
-        placeholder={placeholder}
-        value={value}
-        disabled={running || disabled}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={handleKeyDown}
-      />
-      {children}
-      <button
-        className={`send-button ${running ? "stop" : ""}`}
-        type="button"
-        aria-label={running ? "中断生成" : "发送"}
-        title={running ? "中断生成" : "发送"}
-        disabled={!running && (disabled || !value.trim())}
-        onClick={running ? onAbort : onSubmit}
-      >
-        {running ? <Square size={16} strokeWidth={2.5} /> : "→"}
-      </button>
+      {/* 上排:输入框独占宽度 + 发送按钮。下排(.chat-input-controls):来源数 / 模式标签 /
+          提示语,可换行。旧版把四者塞进同一行 grid,输入被挤窄、长 placeholder 折行被裁。 */}
+      <div className="chat-input-main">
+        <textarea
+          ref={textareaRef}
+          aria-label="提问"
+          className="chat-input"
+          rows={1}
+          placeholder={placeholder}
+          value={value}
+          disabled={running || disabled}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <button
+          className={`send-button ${running ? "stop" : ""}`}
+          type="button"
+          aria-label={running ? "中断生成" : "发送"}
+          title={running ? "中断生成" : "发送"}
+          disabled={!running && (disabled || !value.trim())}
+          onClick={running ? onAbort : onSubmit}
+        >
+          {running ? <Square size={16} strokeWidth={2.5} /> : "→"}
+        </button>
+      </div>
+      {children && <div className="chat-input-controls">{children}</div>}
     </div>
   );
 }
