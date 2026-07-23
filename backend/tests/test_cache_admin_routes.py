@@ -116,6 +116,28 @@ def test_clear_all_requires_an_explicit_flag(client):
     assert backend.get("k1") is None
 
 
+def test_tag_and_clear_all_together_is_rejected_and_clears_nothing(client):
+    """契约是二选一。两个都传是自相矛盾的请求——此前静默走 clear_all 把整库清光并
+    触发昂贵重填。现在先拒绝（400）、绝不执行任何清理。
+
+    变异验证：把 admin_routes.evict_cache 里 `if payload.clear_all and tag: raise`
+    那道门删掉后，本测试转红（请求被静默当成全清，k1 被清、状态码变 200）。
+    """
+    admin = _auth_admin(client)
+    backend = _backend()
+    backend.put("k1", "v1", tag="model-a")
+    backend.put("k2", "v2", tag="model-b")
+
+    resp = client.post(
+        "/api/admin/cache/evict",
+        json={"tag": "model-a", "clear_all": True},
+        headers=admin,
+    )
+    assert resp.status_code == 400, "tag 与 clear_all 同时传必须被拒绝，而不是静默全清"
+    assert backend.get("k1") == "v1", "被拒绝的歧义请求不该清掉任何东西"
+    assert backend.get("k2") == "v2", "被拒绝的歧义请求不该清掉任何东西"
+
+
 def test_endpoints_degrade_when_the_backend_has_no_admin_capability(client, monkeypatch):
     """只实现 get/put 的后端（Redis 把 TTL/LRU 交给服务端配置）是合法形态。
 

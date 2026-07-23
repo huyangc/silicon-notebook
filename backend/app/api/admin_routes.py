@@ -316,9 +316,14 @@ def evict_cache(
     tag 与 clear_all 必须显式二选一，避免一次手滑清空整库。
     """
     backend = _cache_admin(user)
+    tag = payload.tag.strip()
+    # tag 与 clear_all 契约上二选一。两个都给是自相矛盾的请求——一个本想按 model 清
+    # 单份、却带上了全清标志的格式错误请求，绝不能被静默解读成「走 clear_all 清空整库」
+    # 并触发一次昂贵的全量重填。先拒绝、不执行任何清理。
+    if payload.clear_all and tag:
+        raise user_error(400, "tag 与 clear_all 只能二选一：指定模型名清单份，或只传 clear_all 清空全部")
     if payload.clear_all:
         return CacheEvictResult(evicted=backend.clear(), scope="all")
-    tag = payload.tag.strip()
     if not tag:
         raise user_error(400, "请指定要清理的模型名，或明确选择清空全部缓存")
     return CacheEvictResult(evicted=backend.evict_tag(tag), scope=tag)
