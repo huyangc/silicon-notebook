@@ -51,6 +51,21 @@ test("fillAutoDetectedTypes: 已被用户选过的值绝不被自动检测覆盖
   ]);
 });
 
+test("fillAutoDetectedTypes: 检测在飞时用户改回「自动检测」的项（空但 touched）不被回填", () => {
+  // 场景：检测异步进行时，用户先选了具体类型、又改回「自动检测」——值空但 touched=true。
+  // 回填必须跳过它（只看「值空不空」会把这个显式的自动检测当没表态、填成检测结果，上传
+  // 就发成 explicit=1 + 检测类型，把复用源改成与用户显式选择相反的类型）。
+  const types = fillAutoDetectedTypes(["", ""], ["textbook", "academic_paper"], [true, false]);
+  assert.deepEqual(types, [
+    "",               // file0：touched 的空项 = 用户显式选回自动检测 → 绝不回填
+    "academic_paper", // file1：未 touched 的空项 → 正常回填检测结果
+  ]);
+  // 上传时 file0 发 explicit=1 + 空值（显式重置回自动），不是检测到的类型。
+  const fields = uploadDocTypeFields(types, [true, false]);
+  assert.deepEqual(fields[0], { docType: "", explicit: "1" });
+  assert.deepEqual(fields[1], { docType: "academic_paper", explicit: "0" });
+});
+
 test("markTouched: 用户改某一项下拉框只置该项 touched；markAllTouched 置全部", () => {
   assert.deepEqual(markTouched([false, false, false], 1), [false, true, false]);
   assert.deepEqual(markAllTouched([false, false]), [true, true]);
