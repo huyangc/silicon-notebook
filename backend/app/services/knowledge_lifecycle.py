@@ -145,6 +145,9 @@ class KnowledgeLifecycleService:
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],
         model_clients: Any,
+        reconcile_extracted_terminal: Callable[
+            [str, Callable[[str], None]], None
+        ],
         cluster_map: Callable[[str], Dict[str, str]],
         annotate_edge_support: Callable[[str, List[dict]], List[dict]],
         decided_seed_pairs: Callable[[str], Dict[frozenset, str]],
@@ -186,6 +189,12 @@ class KnowledgeLifecycleService:
         self._set_source_status = set_source_status
         self._run_extraction = run_extraction
         self.model_clients = model_clients
+        # doc_type 终态收口（与上传流水线 process_source 共用
+        # SourceIngestionService._extract_reconciling_doc_type）：跑 extract → 守卫落
+        # 'extracted'（WHERE doc_type=本轮值）→ 不一致带新类型重跑（轮数上限）→ 原子补发
+        # 'extracted' 事件。晚绑定到 source_ingestion（wire 顺序上它在本服务之后建，故
+        # 只能 call-time 解析），与 run_extraction 同款。
+        self._reconcile_extracted_terminal = reconcile_extracted_terminal
         self.cluster_map = cluster_map
         self._annotate_edge_support = annotate_edge_support
         self.decided_seed_pairs = decided_seed_pairs
@@ -853,10 +862,19 @@ class KnowledgeLifecycleService:
             self._set_source_status(source_id, "extracting")
             try:
                 control.raise_if_aborted()
-                self._run_extraction(
-                    source_id, kg_client=controlled_client
+                # doc_type 终态收口（与上传流水线 process_source 同一套）：run_extraction
+                # 开头就读走 doc_type 快照（它选 profile、进抽取 prompt，因而进 LLM 缓存
+                # 键）。抽取期间并发重传若改了 doc_type，无条件落 'extracted' 会把新类型
+                # 配上旧 profile 抽的 KG，且没有任何东西回来纠正。改为守卫落终态 + 不一致
+                # 带新类型重跑（轮数上限），并原子补发 'extracted' 事件——终态与事件都由
+                # 收口负责，这里不再单独 _set_source_status('extracted')（那次无条件 DB 写
+                # 会在守卫落终态后的窗口里把并发 retype 翻起的 'extracting' 冲回旧类型）。
+                self._reconcile_extracted_terminal(
+                    source_id,
+                    lambda sid: self._run_extraction(
+                        sid, kg_client=controlled_client
+                    ),
                 )
-                self._set_source_status(source_id, "extracted")
                 return True
             except KgBuildAborted:
                 self._set_source_status(

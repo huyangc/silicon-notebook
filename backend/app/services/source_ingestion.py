@@ -565,7 +565,7 @@ class SourceIngestionService:
 
     def _extract_reconciling_doc_type(
         self, source_id: str, extract: Callable[[str], None],
-        *, terminal_error_message: str = "",
+        *, terminal_error_message: str = "", emit_terminal_status: bool = False,
     ) -> None:
         """抽取，并把「标记 extracted」原子地与 doc_type 的最终比对合成一步。
 
@@ -595,9 +595,14 @@ class SourceIngestionService:
         error_message 由调用方给（process_source 传 empty_hint/fallback_hint；
         _reextract_retyped 不给）。
 
-        只落库、**不发** status 事件：调用方在自己的 stage 仪器之后统一发
-        _emit_status('extracted', ...)，好让事件顺序（extract:done 先于
-        status:extracted）与重构前一字不差——DB 落终态的原子性对可观测顺序不可见。"""
+        默认只落库、**不发** status 事件：process_source / _reextract_retyped 在自己的
+        stage 仪器之后统一发 _emit_status('extracted', ...)，好让事件顺序（extract:done
+        先于 status:extracted）与重构前一字不差——DB 落终态的原子性对可观测顺序不可见。
+        ``emit_terminal_status=True`` 时（notebook KG 构建路径 _extract_one 复用本收口，
+        那条路径没有 extract:done 这类前置 stage 事件、也就没有顺序约束）在守卫落终态
+        后**原子**补发 'extracted' 事件：调用方不能改用 set_source_status 自行补发——那是
+        一次无条件 DB 写，会在守卫落终态与补发之间的窗口里把并发 retype 刚翻成
+        'extracting' 的行又冲回 'extracted'（配旧 profile），正是本收口要堵的洞。"""
         for _ in range(_DOC_TYPE_RECONCILE_MAX_ROUNDS):
             used = self.normalize_doc_type(
                 getattr(self.sources.get_source(source_id), "doc_type", "") or ""
@@ -606,11 +611,15 @@ class SourceIngestionService:
             if self.sources.mark_extracted_if_doc_type(
                 source_id, used, error_message=terminal_error_message
             ):
+                if emit_terminal_status:
+                    self._emit_status(source_id, "extracted", terminal_error_message)
                 return
         # 轮数耗尽：无条件落终态 + 告警，别把源卡在 'extracting'。
         self.sources.set_status(
             source_id, "extracted", error_message=terminal_error_message
         )
+        if emit_terminal_status:
+            self._emit_status(source_id, "extracted", terminal_error_message)
         self.event_log.logger.warning(
             "doc_type kept changing during extraction of %s; stopped after %s rounds",
             source_id, _DOC_TYPE_RECONCILE_MAX_ROUNDS,
