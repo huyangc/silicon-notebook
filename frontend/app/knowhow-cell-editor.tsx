@@ -193,14 +193,28 @@ import {
 // 分支——没有 cite: 引用徽章分支，因为本组件压根不产生 cite: 链接），
 // 行为对齐、无引用负担。
 
-export function KnowhowMarkdown({ md, notebookId, apiBase }: { md: string; notebookId: string; apiBase: string }) {
-  const content = rewriteAssetUrls(md ?? "", notebookId, apiBase);
+export function KnowhowMarkdown({
+  md,
+  notebookId,
+  apiBase,
+  inert = false,
+}: {
+  md: string;
+  notebookId: string;
+  apiBase: string;
+  /** Cross-library evidence is untrusted display text: keep Markdown layout,
+   * but never create links, image requests, or active-notebook asset rewrites
+   * for content whose source notebook may differ. */
+  inert?: boolean;
+}) {
+  const content = inert ? (md ?? "") : rewriteAssetUrls(md ?? "", notebookId, apiBase);
 
   const components = useMemo<Components>(
     () => ({
       // 格子内容可能包含普通链接（如工具文档 URL）；不强制新标签打开的话
       // 点击会在同一个 SPA 标签页里跳走，丢失当前 notebook/knowhow 视图上下文。
       a({ href, children }) {
+        if (inert) return <span>{children}</span>;
         return (
           <a href={href} target="_blank" rel="noreferrer">
             {children}
@@ -218,10 +232,11 @@ export function KnowhowMarkdown({ md, notebookId, apiBase }: { md: string; noteb
         );
       },
       img({ src, alt }) {
+        if (inert) return <span>{alt ? `[图片：${alt}]` : "[图片]"}</span>;
         return <KnowhowImage src={typeof src === "string" ? src : undefined} alt={alt} apiBase={apiBase} />;
       },
     }),
-    [apiBase],
+    [apiBase, inert],
   );
 
   if (!content.trim()) {

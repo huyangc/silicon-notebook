@@ -42,7 +42,9 @@ def expand_query(client, question: str, history: str = "", *,
                  timeout: Optional[float] = None, max_retries: Optional[int] = None,
                  max_subqueries: int = 4, want_types: bool = False,
                  corpus_langs: Optional[List[str]] = None,
-                 cancel_event: CancelEvent = None) -> ExpandedQuery:
+                 cancel_event: CancelEvent = None,
+                 fail_closed: bool = False,
+                 system_instruction: str = "") -> ExpandedQuery:
     """一次 LLM 调用:问题(任意语言)→ 同语言规范改写 + 1..max_subqueries 个具体子查询
     (保持问题本身的语言)。keywords 按 corpus_langs 双语化(供纯词法 FTS/KG 名匹配),
     sub_queries 单语言(多语向量 embedder 一次即跨语,无需二次嵌入)。
@@ -52,21 +54,37 @@ def expand_query(client, question: str, history: str = "", *,
     fallback = ExpandedQuery(query=question,
                              sub_queries=[SubQuerySpec(query=normalize_terms(question))])
     if not getattr(client, "configured", False):
+        if fail_closed:
+            raise RuntimeError("query rewrite model is not configured")
         return fallback
     kw = {}
     if timeout is not None: kw["timeout"] = timeout
     if max_retries is not None: kw["max_retries"] = max_retries
     try:
+        messages = [{
+            "role": "user",
+            "content": expand_query_prompt(
+                question,
+                history,
+                want_types,
+                max_subqueries=max_subqueries,
+                corpus_langs=corpus_langs,
+            ),
+        }]
+        if system_instruction:
+            messages.insert(0, {"role": "system", "content": system_instruction})
         raw = client.chat_json(
-            [{"role": "user", "content": expand_query_prompt(question, history, want_types,
-                                                             max_subqueries=max_subqueries,
-                                                             corpus_langs=corpus_langs)}],
+            messages,
             EXPAND_SCHEMA_HINT, cancel_event=cancel_event, **kw)
         data = json.loads(raw)
         if not isinstance(data, dict):
+            if fail_closed:
+                raise ValueError("query rewrite model returned a non-object")
             return fallback
         subs_raw = data.get("sub_queries")
         if not isinstance(subs_raw, list) or not subs_raw:
+            if fail_closed:
+                raise ValueError("query rewrite model returned no sub-queries")
             return fallback
         out: List[SubQuerySpec] = []
         seen = set()
@@ -87,6 +105,8 @@ def expand_query(client, question: str, history: str = "", *,
             if len(out) >= max_subqueries:
                 break
         if not out:
+            if fail_closed:
+                raise ValueError("query rewrite model returned no valid sub-queries")
             return fallback
         def _kw_list(v):
             if isinstance(v, str):
@@ -107,4 +127,6 @@ def expand_query(client, question: str, history: str = "", *,
     except AskCancelled:
         raise
     except Exception:
+        if fail_closed:
+            raise
         return fallback

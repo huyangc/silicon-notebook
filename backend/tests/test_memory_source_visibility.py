@@ -167,6 +167,24 @@ def test_search_notebook_excludes_memory_source_and_its_elements(repo, store, no
     assert "src-normal-search" in hit_source_ids
 
 
+def test_source_metadata_exposes_hidden_source_classification(store, notebook_id):
+    _insert(store, notebook_id, "src-normal-meta", title="Normal")
+    _insert(
+        store,
+        notebook_id,
+        "src-memory-meta",
+        title="Memory",
+        source_type="memory",
+        doc_type="memory",
+        memory_id="mem-meta",
+    )
+
+    metadata = store.source_metadata(["src-normal-meta", "src-memory-meta"])
+
+    assert metadata["src-normal-meta"]["source_type"] == "markdown"
+    assert metadata["src-memory-meta"]["source_type"] == "memory"
+
+
 def test_shared_preview_titles_exclude_memory_source(repo, notebook_id, store):
     """GET /shared/{token} preview (the copy/join modal) lists source_titles
     to another user — memory-derived titles must not leak into it."""

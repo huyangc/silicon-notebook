@@ -116,6 +116,8 @@ checkpoint/vacuum/analyze/reindex/migration；只允许维护上述有界 `.loca
 可复制报告只挑选元数据：notebook/request/job 引用分配本报告内假名，其它原始不透明 id 省略；绝不包含原始 id/用户文件名、request body、
 来源/Ask/prompt/模型消息/Memory/Knowhow 正文、SQL 文本或参数、authorization/cookie/token/secret、
 原始命令行或局部变量。脱敏输出发给可信团队之外的人之前仍须人工复核。
+新增 notebook API 路径时必须同步登记运行时诊断的精确安全路径形状；未登记的深层路径只会降级为
+`/api/notebooks/{id}/{redacted}`，不得为了保留可读路径而放宽到回显原始不透明 id。
 
 ### `diag.py` 七命令矩阵
 

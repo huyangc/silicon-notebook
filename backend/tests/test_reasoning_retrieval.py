@@ -1035,6 +1035,38 @@ def test_plan_uses_expand_query(rrepo, monkeypatch):
     assert [s.query for s in subs] == ["sub A", "sub B"] and subs[0].types == ["concept"]
 
 
+def test_fail_closed_reasoning_rejects_provider_and_malformed_reflection(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    class Broken:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    bind_chat_client(rrepo, "reasoning_agent", Broken())
+    retriever = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True
+    )
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        retriever.plan("q")
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        retriever.reflect("q", "evidence")
+
+    class Invalid:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return '{"next_action":"bogus","sufficient":"false"}'
+
+    bind_chat_client(rrepo, "reasoning_agent", Invalid())
+    retriever = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True
+    )
+    with pytest.raises(ValueError, match="invalid action"):
+        retriever.reflect("q", "evidence")
+
+
 def test_run_expand_summary_uses_node_name_not_id(rrepo):
     """trace 可读性: expand step 的 summary 应显示节点名(人读), 而非裸 object_id。"""
     from app.services.reasoning_retrieval import ReasoningRetriever

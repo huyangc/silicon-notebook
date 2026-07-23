@@ -268,6 +268,14 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 格子净文本 hash 与当前内容对比在读取时推导。LLM 表达优化是显式按钮 + 对照预览 + 逐格确认回填，
 绝不自动触发。
 
+行详情或行标题分组矩阵物理分支的「智能补全空列」是另一个显式、建议式交互：`POST /api/notebooks/{id}/knowhow/{table_id}/rows/{row_id}/complete`
+接收可选的 `target_column_ids`，只返回结构化 `retrieval_mode`、`retrieval_scope`、`retrieval_status`、`reasoning_trace`、服务端签发的库内 `evidence` 与 `suggestions`，不写库。
+只有缺失格或精确空串可作为目标；纯空白存量文本不算空。服务先从当前位置附近至多 512 行构造候选池，只取至多 32 个已知列、
+每格至多 1000 字符参与评分，再以固定大小 heap 挑出至多 8 条参考行；同一 anchor/行标题分组优先，其次按当前行已知列的相似度和覆盖度排序。
+同一行的全部目标列只启动一次 `ReasoningRetriever`（`top_n=12`、`max_steps=6`），以当前行已知列与目标列构造最多 12000 字符的有效 JSON 不可信数据查询，对当前 notebook + 当前有效显式挂载库执行与 Ask `reasoning` 同源的 plan→federated retrieve→reflect/expand/follow-chain。补全专用 candidate policy 会在候选进入模型反思前过滤私有 Memory 派生证据和当前整张 table 的投影，并关闭无法在中间节点证明来源归属的 PPR/社区扩展；它只返回检索结果，绝不进入 Ask 的 answer synthesis、conversation/job 或 answer persistence。库内证据最多 24 张卡、合计最多 24000 字符，单卡摘录最多 900 字符；最终 prompt（含规则、schema、同表数据与库内证据）硬限 96000 字符，超限时先按证据预算截断并从最低优先参考行开始移除，绝不截掉规则或输出 schema。两个模型阶段都以 system 级指令把格子/检索文本视为不可信数据；模型只可回传服务端签发的 evidence key 或允许的同表 row id，未知引用被过滤，过滤后无引用的 suggestion 强制 abstain。base/personal 冲突时沿 Ask 合成规则以 base 为准并披露。检索使用 `reasoning_agent`，结构化合成使用 `knowhow_complete`；推理响应畸形、任一 provider 未配置/执行失败，或合成响应不可解析/顶层结构不可用时直接返回明确错误，单条 suggestion 畸形则过滤、降级或转成 abstain，禁止同表静默降级或离线伪补全。前端以可拖动审阅弹窗展示推理轨迹，并把同表参考与禁用链接/图片的库内 Markdown 证据分开供逐项人工接受；接受操作仍是
+既有 cell PATCH，传 `expected_before=""` 和 `origin="llm_complete"`，从而在生成期间目标格被其他操作填入时返回冲突而不覆盖，
+并保留正常的变更历史和投影调度。
+
 外部 Agent 面（REST `/api/agent/knowhow/*` 与四个 knowhow MCP 工具）与会话路由共用同一服务核心：
 双鉴权依赖同时接受登录会话与 `snm_` Agent token，读取需 `knowledge:read`、代码写入需
 `knowhow:code`，跨 owner 探测一律统一 404、不暴露存在性。判别集按列全量返回（刻意不做语义预筛），

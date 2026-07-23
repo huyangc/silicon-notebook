@@ -27,6 +27,7 @@ import {
   appendKnowhowPreview,
   appendKnowhowCommit,
   optimizeKnowhowCell,
+  completeKnowhowRow,
   getCellCode,
   putCellCode,
   deleteCellCode,
@@ -715,6 +716,62 @@ test("optimizeKnowhowCell: POST 到 .../optimize，响应 suggestion_md 映射�
     assert.deepStrictEqual(result, { suggestionMd: "优化后的正文" });
   });
 });
+
+test("completeKnowhowRow: POST 目标空列并把建议 wire 映射为 camelCase", () => {
+  const wire = {
+    retrieval_mode: "reasoning",
+    retrieval_scope: "active_and_mounted",
+    retrieval_status: "succeeded",
+    reasoning_trace: [{ step_type: "retrieve", summary: "检索资料", detail: { hits: 2 }, duration_ms: 12 }],
+    evidence: [{
+      key: "k1", kind: "knowledge", object_type: "Claim", label: "供电规则",
+      excerpt_md: "输入电压应稳定。", source_title: "设计规范", location_label: "第 4 节", tier: "base",
+    }],
+    suggestions: [{
+      column_id: "c-fix",
+      suggestion_md: "检查供电",
+      confidence: "high",
+      based_on_row_ids: ["r2"],
+      evidence_keys: ["k1"],
+      basis: "现象相近",
+      abstain_reason: "",
+    }],
+  };
+  return withFetchStub(wire, async (calls) => {
+    const result = await completeKnowhowRow("nb-1", "t1", "r1", ["c-fix", "c-tool"]);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/complete$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(bodyOf(calls[0]), { target_column_ids: ["c-fix", "c-tool"] });
+    assert.deepStrictEqual(result, {
+      retrievalMode: "reasoning",
+      retrievalScope: "active_and_mounted",
+      retrievalStatus: "succeeded",
+      reasoningTrace: [{ step_type: "retrieve", summary: "检索资料", detail: { hits: 2 }, duration_ms: 12 }],
+      evidence: [{
+        key: "k1", kind: "knowledge", objectType: "Claim", label: "供电规则",
+        excerptMd: "输入电压应稳定。", sourceTitle: "设计规范", locationLabel: "第 4 节", tier: "base",
+      }],
+      suggestions: [{
+        columnId: "c-fix",
+        suggestionMd: "检查供电",
+        confidence: "high",
+        basedOnRowIds: ["r2"],
+        evidenceKeys: ["k1"],
+        basis: "现象相近",
+        abstainReason: "",
+      }],
+    });
+  });
+});
+
+test("completeKnowhowRow: 未指定目标列时发送空对象，不伪造 null 字段", () =>
+  withFetchStub({
+    retrieval_mode: "reasoning", retrieval_scope: "active_and_mounted",
+    retrieval_status: "no_evidence", reasoning_trace: [], evidence: [], suggestions: [],
+  }, async (calls) => {
+    await completeKnowhowRow("nb-1", "t1", "r1");
+    assert.deepStrictEqual(bodyOf(calls[0]), {});
+  }));
 
 // --- getCellCode / putCellCode / deleteCellCode（三态覆盖）------------------------
 

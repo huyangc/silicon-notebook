@@ -258,10 +258,15 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 
 每个 `[services.<id>]` 表配置 `display_name`、`kind`、`protocol`、`base_url`、
 `model`、`api_key_env` 与 `max_concurrency`；`[bindings]` 把稳定的 workload id
-（如 `ask_answer`、`reasoning_agent`、`kg_extract`、
+（如 `ask_answer`、`reasoning_agent`、`knowhow_complete`、`kg_extract`、
 `retrieval_query_embedding`、`retrieval_rerank`）映射到物理服务。多个 workload
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
+
+Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_agent` 对当前 notebook 与当前有效
+挂载参考库的联邦证据做规划和反思检索，`knowhow_complete` 再把这些证据与同表参考合成为结构化建议。
+需要此功能时必须把两者都绑定到兼容的 chat 服务；任一未绑定或任一阶段 provider 失败时都不返回建议，
+应用不会静默退成同表补全，也绝不伪造离线结果。
 
 调度策略固定在代码中：
 

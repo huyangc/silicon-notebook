@@ -39,8 +39,9 @@
 "use client";
 
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
+import { Maximize2, Minimize2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { buildConceptMatrix, type AnchorGroup } from "./knowhow-grouping-logic.ts";
+import { completableKnowhowColumns } from "./knowhow-complete-logic.ts";
 import { FULLSCREEN_LABEL, KnowhowMarkdown, RESTORE_SIZE_LABEL, useFullscreenToggle } from "./knowhow-cell-editor.tsx";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import type { KnowhowColumn } from "./knowhow-model.ts";
@@ -59,6 +60,7 @@ export function KnowhowMatrixDrawer({
   canEdit,
   highlightRowId,
   onEditCell,
+  onCompleteRow,
   onClose,
   error,
   onAddBranch,
@@ -82,6 +84,8 @@ export function KnowhowMatrixDrawer({
    * （spec §4.5，Task 11 接线；未命中/非引用打开时为空）。 */
   highlightRowId?: string | null;
   onEditCell: (rowId: string, columnId: string) => void;
+  /** 每个物理分支的空列补全入口；调用方负责打开逐项审阅弹窗。 */
+  onCompleteRow?: (rowId: string, trigger: HTMLButtonElement) => void;
   onClose: () => void;
   /** 复审 Important 修复：加分支/删概念失败时的错误文案——这两个操作都从
    * 抽屉内部触发，但它们原本仅有的落地渠道（panel 级 actionError）只在主
@@ -318,6 +322,23 @@ export function KnowhowMatrixDrawer({
                     ) : (
                       <span className="kh-matrix-branch-head">
                         <span>分支 {i + 1}</span>
+                        {canEdit && onCompleteRow && (() => {
+                          const branchRow = group.rows.find((row) => row.id === rid);
+                          if (!branchRow || completableKnowhowColumns(branchRow, columns, anchorColumnId).length === 0) {
+                            return null;
+                          }
+                          return (
+                            <button
+                              type="button"
+                              className="kh-matrix-branch-complete"
+                              title={`智能补全分支 ${i + 1} 的空列`}
+                              aria-label={`智能补全分支 ${i + 1} 的空列`}
+                              onClick={(event) => onCompleteRow(rid, event.currentTarget)}
+                            >
+                              <Sparkles size={12} /> 补全
+                            </button>
+                          );
+                        })()}
                         {canEdit && onDeleteBranch && (
                           <button
                             type="button"

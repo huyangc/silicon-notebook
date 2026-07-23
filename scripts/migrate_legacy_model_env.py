@@ -67,6 +67,7 @@ REWRITE_WORKLOADS = frozenset({
     "report_sufficiency",
     "knowhow_optimize",
     "knowhow_reformat",
+    "knowhow_complete",
 })
 KG_WORKLOADS = frozenset({
     "kg_extract",

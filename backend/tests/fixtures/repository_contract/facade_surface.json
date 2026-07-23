@@ -1625,6 +1625,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.complete_row",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.optimize_cell",
         "target": "_runtime"
       },
@@ -8173,6 +8179,12 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.build_projector",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.complete_row",
         "target": "settings"
       },
       {

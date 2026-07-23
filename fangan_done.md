@@ -349,12 +349,20 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 29. 系统模型服务统一管理与全局调度（2026-07-22）
 
-- **部署统一配置**：chat、embedding、rerank 服务改由部署 TOML 集中声明，`.env` 只保存 TOML 通过 `api_key_env` 引用的密钥。31 个稳定 workload 显式绑定到同种类物理服务；用户不能再保存或覆盖 endpoint、凭据、模型名与容量。配置路径留空时明确走离线/确定性降级，非空无效配置启动失败。
+- **部署统一配置**：chat、embedding、rerank 服务改由部署 TOML 集中声明，`.env` 只保存 TOML 通过 `api_key_env` 引用的密钥。注册表共有 32 个稳定 workload；TOML 可按部署需要选择绑定，但每条已配置绑定都必须指向同种类物理服务。用户不能再保存或覆盖 endpoint、凭据、模型名与容量。配置路径留空时明确走离线/确定性降级，非空无效配置启动失败。
 - **按物理服务控制全局并发**：每个服务只认一个容量参数 `max_concurrency`，共用该服务的所有在线、报告、后台与批处理 workload 进入同一个进程级调度器；不同服务容量互相独立。队列总量封顶 `10N`、单 actor 封顶 `2N`，按 interactive:report:background = `8:2:1` 调度并在同优先级内按 actor 轮转，三类排队截止时间分别为 30/300/1800 秒。一次致命错误或连续三次瞬态错误会熔断 30 秒，half-open 只放行一个恢复调用。
 - **单进程容量语义**：生产脚本固定后端 `--workers 1`，避免多进程把 TOML 容量成倍放大或分裂队列、熔断和健康状态。`KG_JOB_CONCURRENCY`、批处理来源 worker、自适应窗口、embedding batch 与本地 CPU/ANN 线程都不能覆盖模型容量。
 - **只读状态与维护诊断**：普通用户的「模型服务」页面只展示脱敏服务身份、workload、容量、运行/排队、熔断及最近健康状态，页面读取不探测上游；只有 admin 可显式测试单服务或全部服务。模型故障向用户返回安全 service/model 标签与 `support_id`，用户把该 id 提交给维护人员，由维护人员结合服务端日志定位具体坏掉的服务；endpoint、凭据、provider body 与 raw exception 不进入状态/UI。
 - **个人配置彻底下线**：个人模型配置路由、草稿测试、保存控件与配置页面已删除。schema v24 在版本事务中不可逆地把历史 `user_profiles.model_settings` 清为 `{}`、删除旧的逐用户健康行，并按部署服务 ID 持久化当前健康状态。
 - **架构边界与验证**：业务代码只按 workload 从 `RuntimeModelProvider` 取得受调度 adapter，raw transport 被限制在审查过的底层边界；repository 不再暴露模型 client 或 embedder。系统模型 registry/scheduler/provider、状态/API/UI、迁移与架构守卫的定向后端和前端测试已通过；完整离线 `scripts/check.sh` 与 production build 在本次发布最终验收阶段统一记录。
+
+## 30. Knowhow 单行空列智能补全（2026-07-23）
+
+- **用户闭环**：记录行详情和以行标题组织的矩阵分支都提供“智能补全空列”；前端会提交该行全部可补空列，服务端只为本次请求中当前值严格为空字符串或尚无 cell 记录的非行标题列生成建议，不自动写入。响应除逐列 suggestion/abstain、置信度、依据与同表参考外，还带稳定的检索模式/范围/状态、最终推理轨迹、服务端签发的证据 key 与库内证据卡；审阅窗分开呈现两路证据，用户逐项确认后才复用既有单元格保存或合并单元格批量保存路径。
+- **双路有界取证**：`POST /api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete` 把同表 schema、当前行已知列和最多 8 条相似参考行，与一次对“当前 notebook + 当前有效显式挂载参考库”的 `ReasoningRetriever` 检索合并；整行所有目标列共用一次 `top_n=12`、`max_steps=6` 的 plan→联邦检索→反思/扩展/查询期推导。补全专用策略在候选进入模型反思前排除私有 Memory 和当前整表投影，并关闭来源归属不透明的 PPR/社区扩展；不调用 Ask 答案合成，不创建对话/job，也不保存 Ask 答案。候选扫描 512 行、已知列 32 个、评分文本每格 1000 字符、检索查询 12000 字符、库内证据 24 张/24000 字符（单摘录 900）、最终 prompt 96000 字符均有硬上限。
+- **接地与故障语义**：`reasoning_agent` 负责逐步检索，`knowhow_complete` 负责结构化合成；两阶段都以 system 级指令把格子和来源文本视为不可信证据。模型只能引用允许的同表 row id 或服务端 evidence key，伪造 key 被过滤，过滤后无引用的建议强制 abstain；单证据通道最高 medium，双路印证才允许 high，base/personal 冲突时以 base 为准并披露。两 workload 任一未配置返回可操作的 400；provider/检索失败、推理响应畸形，或合成响应不可解析/顶层结构不可用时会按实际 workload 记录脱敏错误并返回安全 502；单条 suggestion 畸形则过滤、降级或转成 abstain，绝不静默退成同表补全或伪造离线结果。跨库证据 Markdown 禁用链接、图片请求和 active-notebook 资产改写。
+- **并发与历史一致性**：打开复核窗时冻结目标列与原始空值；接受建议使用 `expected_before` 乐观并发保护并记录 `origin="llm_complete"`，历史界面显示“智能补全”。行标题分组中的共享目标格会冻结并校验所有物理成员行、目标空值与行标题值，任一成员已变化则拒绝写入，不允许覆盖用户或协作者的新内容。
+- **验证**：补全 API、双路证据映射、Memory/当前表前置过滤、严格模型故障、提示注入边界、预算、权限、并发保护、历史来源、前端纯逻辑和组件交互均有回归测试；专项后端 131 项、前端 Node 1416 项、组件 51 项通过，完整 `scripts/check.sh` 与前端 production build 已通过。
 
 ## 20. 当前边界（后续阶段，未计入已完成）
 

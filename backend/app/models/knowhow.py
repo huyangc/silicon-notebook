@@ -2,6 +2,8 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.ask import TraceStep
+
 
 # --- knowhow-tables PR-1 Task 6 + PR-2+3 Task 3: import/table + editing API
 # response models -------------------------------------------------------------
@@ -228,6 +230,49 @@ class KnowhowCellOptimizeResult(BaseModel):
     suggestion_md: str
 
 
+# --- knowhow row completion: suggestion-only inference from sibling rows ---
+
+
+class KnowhowRowCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Omitted means every currently blank, non-anchor column. Validation and
+    # de-duplication are intentionally performed by the service against the
+    # live table schema, where anchor/non-empty/unknown targets can be rejected
+    # together with a user-readable 400 instead of becoming a generic 422.
+    target_column_ids: Optional[List[str]] = None
+
+
+class KnowhowRowCompletionSuggestion(BaseModel):
+    column_id: str
+    suggestion_md: Optional[str]
+    confidence: Literal["high", "medium", "low"]
+    based_on_row_ids: List[str] = Field(default_factory=list)
+    evidence_keys: List[str] = Field(default_factory=list)
+    basis: str
+    abstain_reason: str
+
+
+class KnowhowCompletionEvidence(BaseModel):
+    key: str
+    kind: Literal["knowledge", "chunk", "element"]
+    object_type: str
+    label: str
+    excerpt_md: str
+    source_title: str
+    location_label: str
+    tier: Literal["base", "personal"] = "personal"
+
+
+class KnowhowRowCompleteResult(BaseModel):
+    suggestions: List[KnowhowRowCompletionSuggestion] = Field(default_factory=list)
+    retrieval_mode: Literal["reasoning"] = "reasoning"
+    retrieval_scope: Literal["active_and_mounted"] = "active_and_mounted"
+    retrieval_status: Literal["succeeded", "no_evidence"]
+    reasoning_trace: List[TraceStep] = Field(default_factory=list)
+    evidence: List[KnowhowCompletionEvidence] = Field(default_factory=list)
+
+
 # --- knowhow-md-normalize Task 4: /reformat HTTP endpoint result ------------
 # Same suggestion-only contract as KnowhowCellOptimizeResult above, but
 # reformat_cell (Task 3) is internally graceful about an unconfigured LLM
@@ -362,7 +407,8 @@ class KnowhowTransferRequest(BaseModel):
 # an honest "who/what changed this" badge; swallowing a bad value would make
 # that badge quietly lie instead of failing loudly.
 VALID_ORIGINS = frozenset({
-    "user", "llm_optimize", "llm_reformat", "import", "agent", "revert", "backfill",
+    "user", "llm_optimize", "llm_reformat", "llm_complete", "import", "agent",
+    "revert", "backfill",
 })
 
 
