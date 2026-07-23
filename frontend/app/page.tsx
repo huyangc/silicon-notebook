@@ -1799,11 +1799,12 @@ export default function Home() {
       .catch(reportError);
   }
   // 关闭 knowhow 抽屉:抽屉是覆盖层、不改 chatMode,故 chatMode effect 不会触发。knowhow
-  // 投影是防抖后台任务,新建/替换表的 chunk 可能还没落库。轮询判据取**投影状态**(终态),
-  // 而非快照启发式(codex PR#334 第6轮 P2:快照会漏"删表并替换唯一的表"这类时序):
-  //   仍被禁 且 还有 knowhow 表在投影(projectionPending>0)→ 退避轮询等落库;
-  //   否则(已可用 / 无表在投影)即终态,停——纯删表不空转,替换表能等到投影完成。
-  // 首拉即完成删表→重新禁用的双向对齐;封顶 ~3min(同来源处理轮询),瞬时失败退避重试。
+  // 投影是防抖后台任务,建/改/清/删格子都可能在落库后**双向**改变可检索证据。轮询判据取
+  // **投影状态**(终态)而非 ask_available 快照:只要还有表在投影(projectionPending>0)就
+  // 退避轮询,直到无 pending(终态)再停——每拍都先重拉,故停时快照即终态真值。这样既能等
+  // 到新建/替换表的 chunk 落库解禁,也能捕获"清掉最后一格→旧 chunk 被投影删除→重新禁用"
+  // (codex PR#334 第7轮 P1:旧条件只在被禁时轮询,漏了 true→false 这一向)。封顶 ~3min
+  // (同来源处理轮询),瞬时失败退避重试。
   function revalidateAskAvailabilityAfterKnowhow() {
     const nb = activeNotebookIdRef.current;
     if (!nb) return;
@@ -1823,12 +1824,8 @@ export default function Home() {
         .then(([refreshed, tables]) => {
           if (activeNotebookIdRef.current !== nb) return;
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
-          if (
-            refreshed.ask_available === false
-            && tables.some((table) => table.projectionPending > 0)
-          ) {
-            schedule(); // 仍被禁 且 有投影在跑 → 继续退避轮询
-          }
+          // 还有投影在跑 → 继续轮询(两向都可能变);无 pending → 终态(此拍已刷新),停。
+          if (tables.some((table) => table.projectionPending > 0)) schedule();
         })
         .catch(schedule); // 瞬时失败不终止 → 退避重试
     }
@@ -2556,10 +2553,18 @@ export default function Home() {
 
   async function reparseSource() {
     if (!sourceDetail) return;
+    const notebookId = currentNotebookId ?? sourceDetail.notebook_id;
     const updated = await parseSource(sourceDetail.id);
     setSources((previous) => previous.map((source) => source.id === updated.id ? updated : source));
     await openSourceDetail(updated);
     await loadNotebookCollection();
+    // 重新解析可能**改变可检索证据**:唯一来源重解析成 0 chunk(如扫描版 PDF 无文字)会把
+    // ask_available 由真转假。此路径是同步终态、不经处理轮询,故须显式重拉 notebook 快照,
+    // 否则对话框陈旧为可用、能向空库提问(codex PR#334 第7轮 P2)。
+    if (notebookId) {
+      const refreshed = await getNotebook(notebookId);
+      if (activeNotebookIdRef.current === notebookId) setCurrentNotebook(refreshed);
+    }
     setToast("Source 已重新解析");
   }
 
