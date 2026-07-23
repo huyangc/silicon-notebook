@@ -1026,6 +1026,18 @@ class SourceStore:
                     ),
                 )
 
+    def clear_paper_meta(self, source_id: str) -> None:
+        """删除某源的论文元数据:source_paper_meta 标记行 + source_authors 作者行,
+        单写事务。是 upsert_paper_meta 的反向(它写这两张表)。
+
+        用途:一条源被**显式**改成非论文类型(如 academic→textbook)后,元数据抽取
+        gate 会跳过它、不再刷新,但旧的论文标题/作者若不清,SourceStore 会继续把它
+        当论文展示/搜索/计数——所以 retype 到不合格类型时清掉(见
+        SourceIngestionService.reuse_uploaded_source)。幂等:无行时静默 no-op。"""
+        with self.database.write() as db:
+            db.execute("DELETE FROM source_paper_meta WHERE source_id = ?", (source_id,))
+            db.execute("DELETE FROM source_authors WHERE source_id = ?", (source_id,))
+
     @staticmethod
     def _paper_meta_dict(row: sqlite3.Row, authors: List[sqlite3.Row]) -> dict:
         return {

@@ -439,6 +439,81 @@ def test_explicit_paper_retypes_the_reused_source_to_paper(
     assert repo.extract_calls == [sid], "类型变了必须按新类型重抽"
 
 
+# ------------------------------------- retype 到非论文类型要清掉旧论文元数据
+
+def _seed_paper_meta(repo, notebook_id, sid):
+    """给一条源塞一份论文元数据(模拟它此前被当 academic 抽过标题/作者)。"""
+    repo._runtime.source_store.upsert_paper_meta(
+        sid, notebook_id,
+        {
+            "is_paper": True, "paper_title": "A Grand Unified Theory",
+            "venue": "Nature", "pub_year": 2024, "doi": "10.1000/xyz",
+            "keywords": ["superconductivity"],
+            "authors": [
+                {"position": 0, "name": "Ada Lovelace",
+                 "affiliation": "Analytical Engine Lab"},
+            ],
+            "model": "test-model", "raw_json": "{}",
+        },
+    )
+
+
+def _author_count(repo, sid):
+    with repo._write() as db:
+        return db.execute(
+            "SELECT COUNT(*) AS c FROM source_authors WHERE source_id = ?", (sid,)
+        ).fetchone()["c"]
+
+
+def test_explicit_retype_to_ineligible_type_clears_stale_paper_meta(
+    repo, notebook_id, settled
+):
+    """academic 源已抽过论文元数据,用户**显式**改成 textbook(非论文类型)→ 旧标题/
+    作者必须清空:元数据抽取 gate 从此跳过这条源、不再刷新它,不清就会永远把它当
+    论文展示/搜索/计数。
+
+    变异验证:去掉 reuse 里的 `self.sources.clear_paper_meta(...)` → 元数据残留、
+    仍计为论文 → 本测试转红。"""
+    sid = settled(doc_type="academic_paper")
+    _seed_paper_meta(repo, notebook_id, sid)
+    assert repo.get_paper_meta(sid)["is_paper"] is True, "前提:这条源此刻被当论文"
+    assert _author_count(repo, sid) == 1
+
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
+
+    assert repo.get_source(sid).doc_type == "textbook"
+    assert repo.get_paper_meta(sid) is None, "改成非论文类型后旧论文元数据必须清空"
+    assert _author_count(repo, sid) == 0, "作者行也要一并清掉"
+
+
+def test_retype_between_eligible_types_keeps_paper_meta(repo, notebook_id, settled):
+    """auto→academic 都是合格论文类型:类型变了要重抽,但论文元数据仍适用、不该清。
+
+    变异验证:把清理条件从「新类型不合格」放宽成「只要 retype 就清」→ 本测试转红。"""
+    sid = settled(doc_type="")  # 自动检测(合格)
+    _seed_paper_meta(repo, notebook_id, sid)
+
+    _upload(repo, notebook_id, doc_type="academic_paper", doc_type_explicit=True)
+
+    assert repo.get_source(sid).doc_type == "academic_paper"
+    meta = repo.get_paper_meta(sid)
+    assert meta is not None and meta["is_paper"] is True, "合格→合格不清元数据"
+    assert _author_count(repo, sid) == 1
+
+
+def test_non_explicit_reupload_never_clears_paper_meta(repo, notebook_id, settled):
+    """非显式重传(没动类型下拉框)绝不 retype,自然也不清元数据——哪怕发来的是非论文
+    类型。这条守住「重传同一文件」这个去重核心场景不误伤既有元数据。"""
+    sid = settled(doc_type="academic_paper")
+    _seed_paper_meta(repo, notebook_id, sid)
+
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=False)
+
+    assert repo.get_source(sid).doc_type == "academic_paper", "非显式不改类型"
+    assert repo.get_paper_meta(sid) is not None, "没 retype 就不该清元数据"
+    assert _author_count(repo, sid) == 1
+
+
 def test_a_brand_new_source_applies_its_doc_type_regardless_of_the_explicit_flag(
     repo, notebook_id
 ):
