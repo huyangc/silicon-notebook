@@ -1368,6 +1368,22 @@
           "descending": false
         },
         {
+          "column": "file_hash",
+          "descending": false
+        }
+      ],
+      "name": "idx_sources_notebook_file_hash",
+      "predicate": null,
+      "table": "sources",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
           "column": "status",
           "descending": false
         }
@@ -1412,7 +1428,7 @@
   ],
   "sqlite_internal_tables": [],
   "sqlite_table_count": 77,
-  "sqlite_version": 29,
+  "sqlite_version": 30,
   "tables": {
     "agent_access_tokens": {
       "classification": "replicated",

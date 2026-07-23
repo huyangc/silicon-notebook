@@ -523,7 +523,7 @@ def test_fresh_sqlite_v29_matches_reviewed_postgres_contract(tmp_path):
         for table, values in CHECK_CONSTRAINTS.items()
     }
     assert actual["sqlite_check_expressions"] == expected_check_expressions
-    assert len(actual["sqlite_explicit_indexes"]) == 83
+    assert len(actual["sqlite_explicit_indexes"]) == 84
     assert set(actual["ordinal_tables"]) == set(ROWID_ORDER_EVIDENCE)
     assert actual["sqlite_table_count"] == (
         actual["ordinary_table_count"]
@@ -826,7 +826,7 @@ def _assert_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_
     ):
         assert "USING gin" in index_definitions[name]
         assert "gin_trgm_ops" in index_definitions[name]
-    assert len(contract["sqlite_explicit_indexes"]) == 83
+    assert len(contract["sqlite_explicit_indexes"]) == 84
     for expected_index in contract["sqlite_explicit_indexes"]:
         actual_index = explicit_indexes[expected_index["name"]]
         assert actual_index["table"] == expected_index["table"]

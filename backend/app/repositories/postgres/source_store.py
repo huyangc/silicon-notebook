@@ -399,6 +399,136 @@ class SourceStore:
         with self.database.write() as owned:
             owned.execute(statement, values)
 
+    def source_id_by_hash(self, notebook_id: str, digest: str) -> str | None:
+        """Existing source in this notebook whose content hash matches ``digest``
+        (upload/batch dedup). Empty digest never matches (URL / metadata-only
+        rows store ``file_hash=''``); memory/knowhow hidden-synthetic rows are
+        excluded; oldest row wins (``ORDER BY created_at, id``). Mirrors the
+        SQLite ``SourceStore.source_id_by_hash`` rule so UI and CLI dedup alike."""
+        if not digest:
+            return None
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s AND file_hash=%s "
+                "AND source_type NOT IN ('memory', 'knowhow') "
+                "ORDER BY created_at, id",
+                (notebook_id, digest),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
+    def set_doc_type(self, source_id: str, doc_type: str) -> None:
+        """Persist a corrected extraction-profile id on ONE source row (the
+        upload path's 'same file, different doc_type' correction). Caller passes
+        an already-normalized value; storage only, no vocabulary re-judging."""
+        with self.database.write() as connection:
+            connection.execute(
+                "UPDATE sources SET doc_type=%s, updated_at=%s WHERE id=%s",
+                (doc_type, self.now(), source_id),
+            )
+
+    def clear_paper_meta(self, source_id: str) -> None:
+        """Reverse of upsert_paper_meta: drop this source's paper-meta marker row
+        and author rows (retype to a non-paper doc_type). Idempotent."""
+        with self.database.write() as connection:
+            connection.execute(
+                "DELETE FROM source_paper_meta WHERE source_id=%s", (source_id,)
+            )
+            connection.execute(
+                "DELETE FROM source_authors WHERE source_id=%s", (source_id,)
+            )
+
+    def claim_failed_for_retry(self, source_id: str) -> bool:
+        """Atomically flip a FAILED source to 'queued' to claim a retry; returns
+        whether THIS caller won (rowcount==1). One WHERE-guarded UPDATE — the
+        loser sees parse_status no longer 'failed' and must not reschedule."""
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE sources SET parse_status='queued', status='queued', "
+                "error_message='', updated_at=%s "
+                "WHERE id=%s AND parse_status='failed'",
+                (self.now(), source_id),
+            )
+        return cursor.rowcount == 1
+
+    def claim_reextract_if_extracted(self, source_id: str) -> bool:
+        """Atomically flip a settled 'extracted' source to 'extracting' to claim a
+        doc-type re-extraction; returns whether THIS caller won (rowcount==1)."""
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE sources SET parse_status='extracting', status='extracting', "
+                "error_message='', updated_at=%s "
+                "WHERE id=%s AND parse_status='extracted'",
+                (self.now(), source_id),
+            )
+        return cursor.rowcount == 1
+
+    def mark_extracted_if_doc_type(
+        self, source_id: str, expected_doc_type: str, *, error_message: str = ""
+    ) -> bool:
+        """Atomically mark a source 'extracted' IFF its stored doc_type still
+        equals ``expected_doc_type`` (what the just-finished extraction used);
+        returns whether the terminal transition landed (rowcount==1). rowcount 0
+        means a concurrent retype changed the type — the caller re-extracts."""
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE sources SET status='extracted', parse_status='extracted', "
+                "error_message=%s, updated_at=%s "
+                "WHERE id=%s AND doc_type=%s",
+                (error_message, self.now(), source_id, expected_doc_type),
+            )
+        return cursor.rowcount == 1
+
+    def insert_source_if_absent(
+        self,
+        *,
+        source_id: str,
+        notebook_id: str,
+        digest: str,
+        title: str,
+        source_type: str,
+        status: str,
+        parse_status: str,
+        file_name: str,
+        file_path: str,
+        file_size: int,
+        summary: str,
+        doc_type: str,
+    ) -> str | None:
+        """Atomic content-dedup insert (postgres): the whole ``write()`` block is
+        one transaction, so the dedup re-check and the insert commit together —
+        two concurrent identical first-uploads can't both create a row. Returns an
+        existing same-content visible source's id (caller reuses it, no row
+        created) or None (a new row was inserted with ``file_hash=digest``).
+        Mirrors the SQLite SourceStore rule (same dedup SELECT + insert_source
+        shape); the SQLite side takes RESERVED via BEGIN IMMEDIATE, here the
+        transaction boundary is the atomicity."""
+        with self.database.write() as connection:
+            if digest:
+                row = connection.execute(
+                    "SELECT id FROM sources WHERE notebook_id=%s AND file_hash=%s "
+                    "AND source_type NOT IN ('memory', 'knowhow') "
+                    "ORDER BY created_at, id",
+                    (notebook_id, digest),
+                ).fetchone()
+                if row is not None:
+                    return str(row["id"])
+            self.insert_source(
+                source_id=source_id,
+                notebook_id=notebook_id,
+                title=title,
+                source_type=source_type,
+                status=status,
+                parse_status=parse_status,
+                file_name=file_name,
+                file_path=file_path,
+                file_size=file_size,
+                file_hash=digest,
+                summary=summary,
+                doc_type=doc_type,
+                connection=connection,
+            )
+        return None
+
     def replace_elements(
         self,
         connection,
