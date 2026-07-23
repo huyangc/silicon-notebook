@@ -31,7 +31,18 @@ def _load_script(module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, SCRIPTS / f"{module_name}.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # diag scripts import their stdlib sibling ``diag_common`` (see scripts/diag.py),
+    # which resolves only with scripts/ on sys.path — as it is when run as a script,
+    # but not when this test loads the file by path. Add it just for exec_module.
+    scripts_dir = str(SCRIPTS)
+    added = scripts_dir not in sys.path
+    if added:
+        sys.path.insert(0, scripts_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if added:
+            sys.path.remove(scripts_dir)
     return module
 
 

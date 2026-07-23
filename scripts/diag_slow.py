@@ -938,7 +938,9 @@ def report_env(root):
         if any(m in k.upper() for m in SECRET_MARKERS):
             seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
         elif k == "DATABASE_URL":
-            seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
+            # 用 redact_database_url 露出去凭据后的库身份(host/db),而非整条隐藏——
+            # 身份对诊断有用且不含密码(#337 提供了该工具,报告里补上使用)。
+            seen[k] = _redact_database_url(v) if v.strip() else "<空>"
         elif k in interesting:
             stripped = v.strip()
             if k in _ENV_BOOL_KEYS:
