@@ -53,15 +53,15 @@ MODEL_SERVICES_CONFIG=
 从旧版 `.env` 升级时，可在启动前使用仓库内迁移助手：
 
 ```bash
-python scripts/migrate_legacy_model_env.py --env .env          # 默认只预览
-python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后应用
+.venv/bin/python scripts/migrate_legacy_model_env.py --env .env          # 默认只预览
+.venv/bin/python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后应用
 ```
 
 它会保留非模型环境变量，把旧的聊天、KG、embedding 和 rerank 配置转换为系统服务
 TOML 与新的密钥槽位。推算出的并发容量仅是迁移初值，应用前应复核；可用可重复的
 `--max-concurrency ROLE=N` 覆盖。目标 TOML 若只是安装器生成且未改动的模板，可直接
-替换；其他已存在配置需显式传入 `--force`。两种情况都会先备份旧文件。脚本不会把
-密钥写入 TOML 或输出到终端。
+替换；其他已存在配置需显式传入 `--force`。两种情况都会先备份旧文件，并把当前
+`.env` 与含密钥的备份权限收紧为 `0600`。脚本不会把密钥写入 TOML 或输出到终端。
 
 ### 模型服务 TOML 约定
 

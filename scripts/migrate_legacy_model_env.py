@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import stat
 import sys
 import tempfile
 from typing import Mapping, Sequence
@@ -60,11 +59,15 @@ REASONING_WORKLOADS = frozenset({
     "reasoning_agent",
     "graph_chain_verify",
     "report_outline",
-    "report_sufficiency",
     "report_section",
     "report_summary",
 })
-REWRITE_WORKLOADS = frozenset({"query_rewrite"})
+REWRITE_WORKLOADS = frozenset({
+    "query_rewrite",
+    "report_sufficiency",
+    "knowhow_optimize",
+    "knowhow_reformat",
+})
 KG_WORKLOADS = frozenset({
     "kg_extract",
     "kg_refine",
@@ -340,18 +343,21 @@ def build_migration_plan(
 
     rerank_model = _value(values, "RERANK_MODEL")
     rerank_key = _value(values, "RERANK_API_KEY")
-    rerank_base = _value(values, "RERANK_BASE_URL")
+    rerank_base = (
+        _value(values, "RERANK_BASE_URL")
+        or "https://dashscope.aliyuncs.com/api/v1"
+    )
     if rerank_model or rerank_key:
         raw_style = _value(values, "RERANK_API_STYLE").lower() or "dashscope"
         if raw_style in _OPENAI_RERANK_ALIASES:
             protocol = "openai"
-        elif raw_style == "dashscope":
-            protocol = "dashscope"
-            rerank_base = (
-                rerank_base or "https://dashscope.aliyuncs.com/api/v1"
-            )
         else:
-            raise MigrationError("RERANK_API_STYLE is unsupported")
+            protocol = "dashscope"
+            if raw_style != "dashscope":
+                warnings.append(
+                    f"unknown legacy RERANK_API_STYLE={raw_style!r} was treated "
+                    "as dashscope, matching the retired runtime"
+                )
         if rerank_model and rerank_key and rerank_base:
             candidates["rerank"] = _candidate(
                 "rerank",
@@ -558,6 +564,24 @@ def _atomic_write(path: Path, text: str, *, mode: int) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _secure_backup(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=str(destination.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as destination_handle:
+            with source.open("rb") as source_handle:
+                shutil.copyfileobj(source_handle, destination_handle)
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _is_unmodified_example(path: Path) -> bool:
     example = ROOT / "model-services.example.toml"
     return example.is_file() and path.read_bytes() == example.read_bytes()
@@ -588,14 +612,13 @@ def apply_migration(
         plan=plan,
     )
     env_backup = _next_backup_path(env_path)
-    shutil.copy2(env_path, env_backup)
+    _secure_backup(env_path, env_backup)
     output_backup: Path | None = None
     if output_path.exists():
         output_backup = _next_backup_path(output_path)
-        shutil.copy2(output_path, output_backup)
-    env_mode = stat.S_IMODE(env_path.stat().st_mode)
+        _secure_backup(output_path, output_backup)
     _atomic_write(output_path, plan.toml_text, mode=0o600)
-    _atomic_write(env_path, migrated, mode=env_mode)
+    _atomic_write(env_path, migrated, mode=0o600)
     return env_backup, output_backup
 
 

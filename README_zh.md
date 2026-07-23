@@ -118,8 +118,9 @@ python scripts/migrate_legacy_model_env.py --env .env
 python scripts/migrate_legacy_model_env.py --env .env --apply
 ```
 
-应用迁移前会备份 `.env`；密钥会保留在新命名的 `.env` 槽位中，不会写入 TOML，
-也不会打印到终端。脚本保留旧版角色回退关系，并把 endpoint/model/key 完全相同的角色
+应用迁移前会备份 `.env`，并把当前文件及所有含密钥的备份权限收紧为 `0600`；密钥会
+保留在新命名的 `.env` 槽位中，不会写入 TOML，也不会打印到终端。脚本保留旧版角色
+回退关系，并把 endpoint/model/key 完全相同的角色
 合并为同一个物理服务。初始容量由旧的 `KG_EXTRACT_WORKERS`、`KG_ASK_RESERVE` 和
 `EMBED_CONCURRENCY` 推算，仅作为迁移初值，必须按服务商的真实物理容量复核。可重复传入
 `--max-concurrency general=20 --max-concurrency embedding=4` 覆盖推算值。安装流程生成且

@@ -136,8 +136,9 @@ python scripts/migrate_legacy_model_env.py --env .env
 python scripts/migrate_legacy_model_env.py --env .env --apply
 ```
 
-The apply step backs up `.env`, keeps secrets in newly named `.env` slots, and writes
-no credentials to the TOML or terminal. It preserves legacy role fallbacks and folds
+The apply step backs up `.env`, tightens the active file and every backup containing
+secrets to mode `0600`, keeps secrets in newly named `.env` slots, and writes no
+credentials to the TOML or terminal. It preserves legacy role fallbacks and folds
 identical endpoints/models/keys into one physical service. Initial capacities are
 inferred from the retired `KG_EXTRACT_WORKERS`, `KG_ASK_RESERVE`, and
 `EMBED_CONCURRENCY` values; they are migration estimates, so verify them against each

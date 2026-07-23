@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import stat
 
 from dotenv import dotenv_values
 import pytest
@@ -60,6 +61,9 @@ def test_build_plan_preserves_roles_bindings_protocols_and_inferred_capacity(tmp
     assert services["rerank"].protocol == "dashscope"
     assert plan.bindings["ask_answer"] == "general"
     assert plan.bindings["query_rewrite"] == "rewrite"
+    assert plan.bindings["report_sufficiency"] == "rewrite"
+    assert plan.bindings["knowhow_optimize"] == "rewrite"
+    assert plan.bindings["knowhow_reformat"] == "rewrite"
     assert plan.bindings["reasoning_agent"] == "reasoning"
     assert plan.bindings["report_section"] == "reasoning"
     assert plan.bindings["kg_extract"] == "kg"
@@ -89,6 +93,9 @@ def test_cli_is_dry_run_by_default_and_apply_backs_up_then_validates(tmp_path, c
     backup = tmp_path / ".env.pre-system-models.bak"
     assert backup.read_text(encoding="utf-8") == original
     assert output_path.is_file()
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
     assert "general secret#1" not in output_path.read_text(encoding="utf-8")
     assert "general secret#1" not in applied_output.out + applied_output.err
 
@@ -140,6 +147,25 @@ def test_dashscope_rerank_keeps_the_legacy_default_base_url():
     assert plan.bindings == {"retrieval_rerank": "rerank"}
 
 
+@pytest.mark.parametrize(
+    ("style", "protocol"),
+    [("openai", "openai"), ("unexpected-old-value", "dashscope")],
+)
+def test_rerank_preserves_legacy_default_base_and_style_normalization(
+    style, protocol
+):
+    plan = migration.build_migration_plan({
+        "RERANK_API_KEY": "rerank-secret",
+        "RERANK_MODEL": "qwen3-rerank",
+        "RERANK_API_STYLE": style,
+    })
+
+    assert plan.services[0].protocol == protocol
+    assert plan.services[0].base_url == "https://dashscope.aliyuncs.com/api/v1"
+    if style == "unexpected-old-value":
+        assert any("matching the retired runtime" in item for item in plan.warnings)
+
+
 def test_same_physical_service_rejects_conflicting_explicit_capacity():
     values = {
         "OPENAI_COMPAT_BASE_URL": "https://shared.example/v1",
@@ -173,6 +199,7 @@ def test_force_replacement_backs_up_existing_toml(tmp_path):
     ]) == 0
     backup = tmp_path / "model-services.toml.pre-system-models.bak"
     assert backup.read_text(encoding="utf-8") == "old-config\n"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
 
 
 def test_apply_replaces_an_unmodified_packaged_example_without_force(tmp_path):
