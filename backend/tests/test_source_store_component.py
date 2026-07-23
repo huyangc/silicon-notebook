@@ -68,6 +68,8 @@ def test_source_store_owns_row_level_sql():
         "source_elements",
         "insert_source",
         "set_status",
+        "mark_chunked",
+        "clear_chunked_at",
         "replace_elements",
         "delete_source_row",
         "source_from_row",
@@ -208,6 +210,39 @@ def test_list_sources_page_filters_and_paginates(store, notebook_id):
     assert hit.total_count == 1 and hit.items[0].id == "src-pg-b"
     by_file = store.list_sources_page(notebook_id, q="beta.md")
     assert by_file.total_count == 1
+
+
+def _read_chunked_at(store, source_id):
+    with store.database.connect() as db:
+        return db.execute(
+            "SELECT chunked_at FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["chunked_at"]
+
+
+def test_mark_chunked_stamps_only_chunked_at(store, notebook_id):
+    _insert(store, notebook_id, "src-mk", status="extracted", parse_status="extracted")
+    assert _read_chunked_at(store, "src-mk") is None      # new row defaults NULL
+    store.mark_chunked("src-mk", NOW)
+    assert _read_chunked_at(store, "src-mk") == NOW
+    # Orthogonal to the status columns — set_status semantics untouched.
+    detail = store.get_source("src-mk")
+    assert detail.status == "extracted" and detail.parse_status == "extracted"
+
+
+def test_clear_chunked_at_zeroes_inside_caller_transaction(repo, store, notebook_id):
+    _insert(store, notebook_id, "src-clr", status="extracted", parse_status="extracted")
+    store.mark_chunked("src-clr", NOW)
+    with repo._write() as db:
+        store.clear_chunked_at(db, "src-clr")
+    assert _read_chunked_at(store, "src-clr") is None
+    # Rides the caller transaction: a rollback keeps the prior mark (the process
+    # pipeline zeroes it in the SAME write() as replace_elements — no crash window).
+    store.mark_chunked("src-clr", NOW)
+    with pytest.raises(RuntimeError, match="abort"):
+        with repo._write() as db:
+            store.clear_chunked_at(db, "src-clr")
+            raise RuntimeError("abort")
+    assert _read_chunked_at(store, "src-clr") == NOW
 
 
 def test_delete_source_row_removes_the_row(repo, store, notebook_id):

@@ -174,6 +174,15 @@ class SourceIngestionService:
         # 先来者的 finally 不能把后来者的 entry 弹掉；_one 里的 done 更新也
         # 只能改属于自己 gen 的 entry，避免"最新一次"语义下的 done 串扰。
         self._paper_meta_generation = 0
+        # 源级活跃租约(进程内;重启即空=没人在处理,恰是崩溃后的正确答案,故不参与
+        # 启动清算)。镜像 kg_building / _paper_meta_backfilling 的进程内单飞惯例:
+        # process_source 进入时 stamp、finally 释放。职责是「在途误报抑制」——体检
+        # endpoint 与 process_source 同进程可并发,在途源瞬时没 elements/没 chunks,
+        # 纯产物判据会误报损坏,租约声明「有活线程在弄,别报」。崩溃检测归 parse_status
+        # + 启动清算,不靠这个内存集。source_id → started_at(ISO 串);P2 体检把它当
+        # memo 之外的 Python 后置过滤(active 集减法)。
+        self._active_sources: dict[str, str] = {}
+        self._active_sources_lock = threading.Lock()
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -464,8 +473,18 @@ class SourceIngestionService:
                 }
             )
 
-        self.set_source_status(source_id, "parsing")
+        # 进入即取内存租约(在置 parsing 之前;started_at 复用上面算好的 now)。见
+        # __init__ 处说明:职责是在途误报抑制,不是崩溃检测。下面 try 的 finally
+        # 覆盖所有出口释放,否则该源会被体检永久误抑制直到进程重启。
+        with self._active_sources_lock:
+            self._active_sources[source_id] = now
         try:
+            # 置 'parsing' 放在 try 内首行(不在 try 外):否则这句 DB 写若因磁盘满/
+            # 写锁异常/库损坏抛出,会在进 try 前传出、绕过下面 finally 的租约释放,
+            # 令该源被体检永久误抑制(假阴性)直到重启。放进来后其失败由 except 兜住
+            # 落 'failed'、finally 照常 pop。stamp(上一行,锁内 dict 赋值)不抛,留在
+            # try 外无妨。
+            self.set_source_status(source_id, "parsing")
             t = time.perf_counter()
             stage("parse", "start", t)
             # Task 9: 清掉这个源之前遗留的 MinerU 图片资产(行+盘)——必须在下面
@@ -568,6 +587,11 @@ class SourceIngestionService:
                     ],
                     created_at=now,
                 )
+                # 新代 elements 落库即令旧分块完成标记失效——同一写事务内归零
+                # chunked_at,无崩溃窗口。分块会在下面(:585)成功后重新置位;若分块
+                # 失败则留 NULL,正是 H3 的损坏信号。刻意就地一条而非折进
+                # clear_source_extraction_state(后者也被 KG 抽取复用、发生在分块之后)。
+                self.sources.clear_chunked_at(db, source_id)
             # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/失败/
             # hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
             summary = self.summarize_source(source.title, elements)
@@ -677,6 +701,14 @@ class SourceIngestionService:
                 summary="Parsing failed; see source error.",
                 error_message=str(exc),
             )
+        finally:
+            # 覆盖 try 的所有出口——成功 return、上面的 except 落 'failed'(KgBuildAborted
+            # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的
+            # BaseException:一律释放内存租约。置 'parsing' 也在 try 内(见上),故进入
+            # try 后再无未覆盖的泄漏边。刻意早于下面的 maybe_enqueue_scale_fold,后者是
+            # 独立的空闲收尾、不需要持租约。
+            with self._active_sources_lock:
+                self._active_sources.pop(source_id, None)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
