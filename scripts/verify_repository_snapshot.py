@@ -1919,24 +1919,6 @@ MIGRATION_MANIFEST[(23, 24)] = {
     "triggers": {},
     "views": {},
 }
-# v25 层级联在 v24 之上：字典推导把上面每条 (X, 24) 条目再重基到 (X, 25) 并叠加
-# knowhow 历史两表，随后显式登记 (24, 25) hop —— 与 v24 对 v23 所做的一模一样。
-MIGRATION_MANIFEST = {
-    (key[0], 25, *key[2:]): {
-        **manifest,
-        "tables": {**manifest["tables"], **KNOWHOW_HISTORY_TABLES},
-        "indexes": {**manifest["indexes"], **KNOWHOW_HISTORY_INDEXES},
-    }
-    for key, manifest in MIGRATION_MANIFEST.items()
-}
-MIGRATION_MANIFEST[(24, 25)] = {
-    "tables": KNOWHOW_HISTORY_TABLES,
-    "columns": {},
-    "indexes": KNOWHOW_HISTORY_INDEXES,
-    "triggers": {},
-    "views": {},
-}
-
 # v25: deployment-wide model-service health plus an irreversible data-only
 # scrub of per-user settings and legacy status rows. The retained v23 table and
 # user_profiles column are unchanged structurally; compare_snapshots validates
@@ -1966,6 +1948,26 @@ MIGRATION_MANIFEST[(24, 25)] = {
     "tables": SYSTEM_MODEL_SERVICE_STATUS_TABLE,
     "columns": {},
     "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v26 层级联在 v25 之上：字典推导把上面每条 (X, 25) 条目再重基到 (X, 26) 并叠加
+# knowhow 历史两表，随后显式登记 (25, 26) hop —— 与 v25 对 v24 所做的一模一样。
+# ⚠️ 必须排在 v25 model-service 层之后（knowhow 迁移是 _migration_26，在 master
+# 的 _migration_25 之上），否则两个 (24,25) hop 会互相覆盖、丢掉到 v26 的登记。
+MIGRATION_MANIFEST = {
+    (key[0], 26, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KNOWHOW_HISTORY_TABLES},
+        "indexes": {**manifest["indexes"], **KNOWHOW_HISTORY_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(25, 26)] = {
+    "tables": KNOWHOW_HISTORY_TABLES,
+    "columns": {},
+    "indexes": KNOWHOW_HISTORY_INDEXES,
     "triggers": {},
     "views": {},
 }

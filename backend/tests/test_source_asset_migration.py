@@ -47,7 +47,7 @@ def test_fresh_db_has_notebook_assets_source_id(tmp_path):
     索引；user_version 已盖到
     SCHEMA_VERSION。"""
     repo = _repo(tmp_path)
-    assert SCHEMA_VERSION == 25
+    assert SCHEMA_VERSION == 26
     assert "source_id" in _cols(repo, "notebook_assets")
     assert "idx_notebook_assets_source" in _indexes(repo, "notebook_assets")
     with repo._connect() as db:

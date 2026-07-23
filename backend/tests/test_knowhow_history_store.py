@@ -250,3 +250,70 @@ def test_cell_history_column_delete_does_not_leak_into_a_different_column(repo, 
     })
     entries = store.cell_history(table_id, "r1", "c2")
     assert entries == []
+
+
+# --- history_page：head/changes/milestones 同一读快照（codex 第 4 轮 P1）-----
+
+
+def _trace_next_connection(store, monkeypatch) -> list[str]:
+    """给 SqliteDatabase 之后新建的连接挂语句 tracer，返回它 append 的共享列表。
+    调用方须先 ``close_local()`` 丢掉线程复用读连接，``history_page`` 的
+    ``connect()`` 才会新建一条被 trace 的连接。callback 在 ``_new_connection``
+    跑完 PRAGMA 之后才挂，列表从方法自身发出的第一条语句起。"""
+    statements: list[str] = []
+    original = store.database._new_connection
+
+    def traced():
+        conn = original()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(store.database, "_new_connection", traced)
+    return statements
+
+
+def test_history_page_reads_head_changes_and_milestones_in_one_snapshot(
+    repo, table_id, store, monkeypatch
+):
+    """结构证据：一条 ``BEGIN`` 先于全部三条 SELECT、其间不夹 COMMIT——head_seq、
+    changes、milestones 因此取自同一读快照。删掉 ``history_page`` 里那句
+    ``db.execute("BEGIN")``，三读退回各自 autocommit 快照，本测试立刻转红——
+    这正是 codex 第 4 轮 P1 修的 bug（head 领先于本页最新 change，用户没看见
+    的并发编辑被陈旧守卫放行、连带回退抹掉）。"""
+    _record(repo, table_id, kind="cell_update", payload={"cells": []})
+    _record(repo, table_id, kind="cell_update", payload={"cells": []})
+
+    store.database.close_local()  # 丢线程复用读连接，下次 connect() 才被 trace
+    statements = _trace_next_connection(store, monkeypatch)
+
+    page = store.history_page(table_id, limit=50)
+
+    upper = [s.strip().upper() for s in statements]
+    begins = [i for i, s in enumerate(upper) if s.startswith("BEGIN")]
+    selects = [i for i, s in enumerate(upper) if s.startswith("SELECT")]
+    assert len(begins) == 1, f"期望恰好一条 BEGIN 包住三读，trace={statements}"
+    assert len(selects) >= 3, f"head/changes/milestones 三条 SELECT 都应在，trace={statements}"
+    assert begins[0] < selects[0], f"BEGIN 必须先于首条 SELECT，trace={statements}"
+    commit_idx = next(
+        (i for i, s in enumerate(upper) if s.startswith("COMMIT")), len(upper)
+    )
+    assert selects[2] < commit_idx, f"三读必须在 COMMIT 之前全部完成，trace={statements}"
+
+
+def test_history_page_returns_consistent_head_page_and_milestones(repo, table_id, store):
+    """功能面：head_seq 就是本页最新一条 change 的 seq；changes 按 seq 倒序；
+    milestones 带 stale 标记；before_seq 严格小于翻页。"""
+    s1 = _record(repo, table_id, kind="cell_update", payload={"cells": []})
+    s2 = _record(repo, table_id, kind="cell_update", payload={"cells": []})
+    store.create_milestone(table_id, s1, "里程碑A", "", "user-1")
+
+    page = store.history_page(table_id, limit=50)
+    assert page["head_seq"] == s2
+    assert page["head_seq"] == page["changes"][0]["seq"]  # 自洽：head==最新change
+    assert [c["seq"] for c in page["changes"]][:2] == [s2, s1]  # 倒序
+    assert [m["seq"] for m in page["milestones"]] == [s1]
+    assert page["milestones"][0]["stale"] is False
+
+    older = store.history_page(table_id, limit=50, before_seq=s2)
+    seqs = [c["seq"] for c in older["changes"]]
+    assert s2 not in seqs and s1 in seqs  # before_seq 严格小于

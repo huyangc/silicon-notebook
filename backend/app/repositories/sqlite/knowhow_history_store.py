@@ -346,6 +346,52 @@ class KnowhowHistoryStore:
             rows = db.execute(sql, params).fetchall()
         return [_row_to_change(row) for row in rows]
 
+    def history_page(
+        self, table_id: str, limit: int = 50, before_seq: "int | None" = None
+    ) -> dict:
+        """时间线一页 + 当前 ``head_seq`` + 全部里程碑，三者取自**同一读快照**
+        （codex 第 4 轮 P1）。
+
+        为什么必须一个快照：``head_seq`` 是前端 revert 的 ``expected_head_seq``
+        回声。若它与 ``changes`` 各取一次连接、落在不同快照上，一条夹在两次读
+        之间提交的并发编辑，会让响应里的 ``head_seq`` 比 ``changes`` 里最新那条
+        还新——用户在**没看见**这条编辑的情况下确认回退，而陈旧守卫因为
+        ``head_seq`` 与库里 head 相符照样放行，把这条未见编辑一并抹掉。
+
+        延迟事务在 WAL 下于**首条 SELECT** 固定读快照并保持到 ``__exit__``
+        的 COMMIT，三读因此互相一致；走复用读连接、显式 ``BEGIN``（非
+        ``IMMEDIATE``）只求读一致、不碰写锁——写锁瘦身不欢迎读流量。本
+        ``with`` 块在路由层是该线程最外层，``_Conn.__exit__`` 到 depth 0 提交、
+        干净收掉这个只读事务（见 database.py 的 ``_Conn`` 说明）。
+        """
+        changes_sql = "SELECT * FROM knowhow_changes WHERE table_id = ?"
+        params: list[Any] = [table_id]
+        if before_seq is not None:
+            changes_sql += " AND seq < ?"
+            params.append(int(before_seq))
+        changes_sql += " ORDER BY seq DESC LIMIT ?"
+        params.append(int(limit))
+        with self.database.connect() as db:
+            db.execute("BEGIN")  # 读快照一致：head/changes/milestones 同一快照
+            head_row = db.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS head FROM knowhow_changes WHERE table_id = ?",
+                (table_id,),
+            ).fetchone()
+            change_rows = db.execute(changes_sql, params).fetchall()
+            milestone_rows = db.execute(
+                "SELECT m.*, (c.seq IS NULL) AS stale FROM knowhow_milestones m "
+                "LEFT JOIN knowhow_changes c ON c.table_id = m.table_id AND c.seq = m.seq "
+                "WHERE m.table_id = ? ORDER BY m.seq DESC",
+                (table_id,),
+            ).fetchall()
+        return {
+            "head_seq": int(head_row["head"]),
+            "changes": [_row_to_change(row) for row in change_rows],
+            "milestones": [
+                {**dict(r), "stale": bool(r["stale"])} for r in milestone_rows
+            ],
+        }
+
     def get_change(self, table_id: str, seq: int) -> "dict | None":
         with self.database.connect() as db:
             row = db.execute(
@@ -403,14 +449,22 @@ class KnowhowHistoryStore:
         预检通过和 INSERT 之间另一个写者抢先用了同一个名字）。
 
         ``seq`` 必须是这张表一条**真实存在**的流水，否则 ``raise KeyError(seq)``。
-        校验刻意放在**写事务内**（codex P2）：路由层事务外的预检和这次 INSERT
-        之间，若 prune 恰好删掉了这条 seq，里程碑就会从创建那一刻起指向空气、
-        立即 stale，违反 §4.2 的创建契约。事务内复检 + prune 走各自的
-        ``database.write()`` 写锁串行化，堵死这个 TOCTOU 窗口。
+        校验刻意放在**写事务内**（codex 第 2 轮 P2）：路由层事务外的预检和这次
+        INSERT 之间，若 prune 恰好删掉了这条 seq，里程碑就会从创建那一刻起指向
+        空气、立即 stale，违反 §4.2 的创建契约。
+
+        ⚠️ 光把 SELECT 挪进 ``database.write()`` 还不够（codex 第 4 轮 P2）：
+        ``write()`` 只给进程内写锁，连接是 ``isolation_level=""`` 的延迟事务，
+        SELECT 不会自己开事务、也就拿不到跨进程写锁——另一个进程（如离线 prune）
+        的 DELETE 仍能挤进 SELECT 与首个 INSERT 之间。必须像 ``revert_to`` 一样
+        在**读之前**显式 ``BEGIN IMMEDIATE`` 抢下 RESERVED 锁，才真正把复检与
+        INSERT 焊成跨进程原子，堵死这个 TOCTOU 窗口。
         """
         milestone_id = self.new_id("khms")
         created_at = self.now()
         with self.database.write() as db:
+            # 读前抢写锁：复检 seq 与 INSERT 之间不容任何进程删掉这条 seq。
+            db.execute("BEGIN IMMEDIATE")
             if db.execute(
                 "SELECT 1 FROM knowhow_changes WHERE table_id = ? AND seq = ?",
                 (table_id, int(seq)),

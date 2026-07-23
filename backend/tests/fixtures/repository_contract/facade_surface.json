@@ -176,6 +176,12 @@
         "target": "app.services.sqlite_repository:SQLiteRepository"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_replay_retrieval.py",
+        "scope": "<module>.test_record_run_requires_retrieval_query_embedding",
+        "target": "SQLiteRepository"
+      },
+      {
         "kind": "import",
         "path": "scripts/backfill_kg_embeddings.py",
         "scope": "<module>",
@@ -241,7 +247,16 @@
       "app.services.sqlite_repository"
     ],
     "owner": "RepositoryFacade",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repository_module",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_replay_retrieval.py",
+        "scope": "<module>.test_record_run_requires_retrieval_query_embedding",
+        "target": "SQLiteRepository"
+      }
+    ],
     "scope": "module",
     "signature": "type"
   },
@@ -1505,6 +1520,30 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
+        "scope": "<module>.memory_preview_client",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.model_provider_if_initialized",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.model_service_binding_summary",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.model_status_service",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_access_repository",
         "target": "_runtime"
       },
@@ -1518,6 +1557,42 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_sharing_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.build_kg",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.rebuild_kg",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.resolve_conflicts",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>._report_llm_ready",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.generate_report",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_paper_metadata",
         "target": "_runtime"
       },
       {
@@ -1913,12 +1988,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._kg_llm_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._kg_neighbors_db",
         "target": "_runtime"
       },
@@ -1950,12 +2019,6 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._knowledge_type_counts",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._llm_for_role",
         "target": "_runtime"
       },
       {
@@ -2099,12 +2162,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._reasoning_llm_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._rebuild_ckpt_clear",
         "target": "_runtime"
       },
@@ -2166,12 +2223,6 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._rewrite_followup_query",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._rewrite_llm_client",
         "target": "_runtime"
       },
       {
@@ -2363,24 +2414,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._system_llm_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._system_llm_for",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._system_rerank_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._test_insert_object",
         "target": "_runtime"
       },
@@ -2435,31 +2468,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._user_llm_cached",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._user_llm_clients",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._user_model_cfg_cache",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._user_profile",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository._user_rerank_clients",
         "target": "_runtime"
       },
       {
@@ -2747,6 +2756,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.chat",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.close",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.close_local",
         "target": "_runtime"
       },
@@ -2778,6 +2799,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.concept_whitelist_terms",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.configured",
         "target": "_runtime"
       },
       {
@@ -2993,12 +3020,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.embedder",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.execute_notebook_kg_job",
         "target": "_runtime"
       },
@@ -3125,12 +3146,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.get_user_model_settings",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.import_sources",
         "target": "_runtime"
       },
@@ -3173,12 +3188,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.kg_llm_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.kg_neighbors",
         "target": "_runtime"
       },
@@ -3210,6 +3219,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.knowhow_history_head_seq",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.knowhow_history_page",
         "target": "_runtime"
       },
       {
@@ -3359,12 +3374,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.llm_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.load_notebook_scale_facts",
         "target": "_runtime"
       },
@@ -3455,6 +3464,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.parallelism",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.parse_source",
         "target": "_runtime"
       },
@@ -3516,12 +3531,6 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.prune_knowhow_history",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.reasoning_llm_client",
         "target": "_runtime"
       },
       {
@@ -3641,19 +3650,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.rerank_client",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.resolve_agent_token",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.resolve_model_config",
         "target": "_runtime"
       },
       {
@@ -3696,12 +3693,6 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.revoke_agent_token",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.rewrite_llm_client",
         "target": "_runtime"
       },
       {
@@ -3768,12 +3759,6 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.set_notebook_personal",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.set_user_model_settings",
         "target": "_runtime"
       },
       {
@@ -4009,6 +3994,12 @@
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.write_merge_candidate",
         "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_kg_embeddings.py",
+        "scope": "<module>.main",
+        "target": "_runtime"
       }
     ],
     "kind": "instance_attribute",
@@ -4106,21 +4097,6 @@
     ],
     "scope": "facade",
     "signature": "(self, title: 'str', elements: 'List[SourceElement]') -> 'str'"
-  },
-  "_user_model_cfg_cache": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.__init__",
-        "target": "_user_model_cfg_cache"
-      }
-    ],
-    "kind": "mutable_property",
-    "owner": "IdentityStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self)"
   },
   "_write": {
     "consumers": [
@@ -4588,6 +4564,42 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
+  "chat": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/sa_calibration.py",
+        "scope": "<module>._run_arm",
+        "target": "chat"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/kg_product_smoke.py",
+        "scope": "<module>.main",
+        "target": "chat"
+      }
+    ],
+    "kind": "method",
+    "owner": "ModelProvider",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, workload_id: 'str')"
+  },
+  "close": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.shutdown_repository_if_initialized",
+        "target": "close"
+      }
+    ],
+    "kind": "method",
+    "owner": "RepositoryRuntime.close",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self) -> 'None'"
+  },
   "close_local": {
     "consumers": [
       {
@@ -4698,6 +4710,75 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self) -> 'set'"
+  },
+  "configured": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/speed.py",
+        "scope": "<module>.measure_speed",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/scripts/reembed_kg.py",
+        "scope": "<module>.main",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._dispatch_main",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_chunk_embeddings",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_element_embeddings",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_node_embeddings",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_kg",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_metadata",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_kg_embeddings.py",
+        "scope": "<module>.main",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/replay_retrieval.py",
+        "scope": "<module>.record_run",
+        "target": "configured"
+      }
+    ],
+    "kind": "method",
+    "owner": "ModelProvider",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, workload_id: 'str') -> 'bool'"
   },
   "confirm_conflict": {
     "consumers": [
@@ -5169,21 +5250,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self) -> 'Dict[str, ObjectSchema]'"
-  },
-  "embedder": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.__init__",
-        "target": "embedder"
-      }
-    ],
-    "kind": "mutable_property",
-    "owner": "RepositoryRuntime.embedder",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self)"
   },
   "event_log": {
     "consumers": [
@@ -5752,27 +5818,6 @@
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'SourceDetail'"
   },
-  "get_user_model_settings": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/system_routes.py",
-        "scope": "<module>.get_model_settings",
-        "target": "get_user_model_settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/system_routes.py",
-        "scope": "<module>.test_model_service",
-        "target": "get_user_model_settings"
-      }
-    ],
-    "kind": "method",
-    "owner": "IdentityStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, user_id: 'str') -> 'dict'"
-  },
   "index_status": {
     "consumers": [
       {
@@ -5787,45 +5832,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
-  },
-  "kg_llm_client": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/kg_routes.py",
-        "scope": "<module>.build_kg",
-        "target": "kg_llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/kg_routes.py",
-        "scope": "<module>.rebuild_kg",
-        "target": "kg_llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
-        "scope": "<module>.backfill_paper_metadata",
-        "target": "kg_llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_metadata",
-        "target": "kg_llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.__init__.<lambda>",
-        "target": "kg_llm_client"
-      }
-    ],
-    "kind": "property",
-    "owner": "ModelProvider",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self)"
   },
   "kg_neighbors": {
     "consumers": [
@@ -5887,20 +5893,20 @@
     "scope": "facade",
     "signature": "(self, table_id: 'str', from_seq: 'int', to_seq: 'int') -> 'list'"
   },
-  "knowhow_history_head_seq": {
+  "knowhow_history_page": {
     "consumers": [
       {
         "kind": "attribute",
         "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.get_knowhow_history",
-        "target": "knowhow_history_head_seq"
+        "target": "knowhow_history_page"
       }
     ],
     "kind": "method",
     "owner": "KnowhowHistoryStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, table_id: 'str') -> 'int'"
+    "signature": "(self, table_id: 'str', limit: 'int' = 50, before_seq: \"'int | None'\" = None) -> 'dict'"
   },
   "knowledge_graph": {
     "consumers": [
@@ -6018,36 +6024,6 @@
     ],
     "kind": "method",
     "owner": "KnowhowStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, table_id: 'str') -> 'list'"
-  },
-  "list_knowhow_changes": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/knowhow_routes.py",
-        "scope": "<module>.get_knowhow_history",
-        "target": "list_knowhow_changes"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowhowHistoryStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, table_id: 'str', limit: 'int' = 50, before_seq: \"'int | None'\" = None) -> 'list'"
-  },
-  "list_knowhow_milestones": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/knowhow_routes.py",
-        "scope": "<module>.get_knowhow_history",
-        "target": "list_knowhow_milestones"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowhowHistoryStore",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, table_id: 'str') -> 'list'"
@@ -6226,292 +6202,6 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'List[SourceSummary]'"
   },
-  "llm_client": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/deps.py",
-        "scope": "<module>.memory_preview_client",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/kg_routes.py",
-        "scope": "<module>.resolve_conflicts",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/source_routes.py",
-        "scope": "<module>.backfill_paper_metadata",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/eval/inference.py",
-        "scope": "<module>.run_inference",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/eval/sa_calibration.py",
-        "scope": "<module>._run_arm",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/eval/speed.py",
-        "scope": "<module>.measure_speed",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/scripts/gen_recall_gold.py",
-        "scope": "<module>.main",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_kg",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_metadata",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/sqlite_repository.py",
-        "scope": "<module>.SQLiteRepository.__init__.<lambda>",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_build_notebook_kg_concurrent_reports_progress",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_build_notebook_kg_isolates_source_failure",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_pipelines_new_sources",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_reparses_existing_source_missing_elements",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_resumes_existing_without_kg",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_kg_limit_parallelizes_sources_with_workers",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_reparse_disables_incremental_fusion_during_run",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_reparse_only_targets_sources_missing_elements",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_kg_relink_repository.py",
-        "scope": "<module>.test_build_notebook_kg_skips_relink_when_disabled",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_runtime_dim_bypasses.py",
-        "scope": "<module>.test_conflict_embeddings_gated_by_storage_dim_then_truncated",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_schema_registry_service.py",
-        "scope": "<module>.test_propose_schemas_fail_open_on_malformed_and_model_error",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_schema_registry_service.py",
-        "scope": "<module>.test_propose_schemas_persists_new_types_and_suppresses_existing",
-        "target": "llm_client"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_schema_registry_service.py",
-        "scope": "<module>.test_propose_schemas_without_elements_skips_llm",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/kg_product_smoke.py",
-        "scope": "<module>.main",
-        "target": "llm_client"
-      }
-    ],
-    "kind": "mutable_property",
-    "owner": "ModelProvider",
-    "patch_targets": [
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_build_notebook_kg_concurrent_reports_progress",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_build_notebook_kg_isolates_source_failure",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_pipelines_new_sources",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_reparses_existing_source_missing_elements",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_resumes_existing_without_kg",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_kg_limit_parallelizes_sources_with_workers",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_reparse_disables_incremental_fusion_during_run",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_reparse_only_targets_sources_missing_elements",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_kg_relink_repository.py",
-        "scope": "<module>.test_build_notebook_kg_skips_relink_when_disabled",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_runtime_dim_bypasses.py",
-        "scope": "<module>.test_conflict_embeddings_gated_by_storage_dim_then_truncated",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_schema_registry_service.py",
-        "scope": "<module>.test_propose_schemas_fail_open_on_malformed_and_model_error",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_schema_registry_service.py",
-        "scope": "<module>.test_propose_schemas_persists_new_types_and_suppresses_existing",
-        "target": "llm_client"
-      },
-      {
-        "base": "repo",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_schema_registry_service.py",
-        "scope": "<module>.test_propose_schemas_without_elements_skips_llm",
-        "target": "llm_client"
-      }
-    ],
-    "scope": "facade",
-    "signature": "(self)"
-  },
   "load_notebook_scale_facts": {
     "consumers": [
       {
@@ -6568,6 +6258,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._count_missing_element_vectors",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._count_missing_node_vectors",
         "target": "maintenance"
       },
@@ -6587,6 +6283,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_chunk_embeddings",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_element_embeddings",
         "target": "maintenance"
       },
       {
@@ -6659,12 +6361,6 @@
         "kind": "attribute",
         "path": "scripts/backfill_knowhow_md.py",
         "scope": "<module>._run_apply_from_plan",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/backfill_knowhow_md.py",
-        "scope": "<module>._run_dry_run",
         "target": "maintenance"
       },
       {
@@ -6951,6 +6647,21 @@
     ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
+  },
+  "parallelism": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/eval/speed.py",
+        "scope": "<module>.measure_speed",
+        "target": "parallelism"
+      }
+    ],
+    "kind": "method",
+    "owner": "ModelProvider",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, workload_id: 'str') -> 'int'"
   },
   "parse_source": {
     "consumers": [
@@ -7257,21 +6968,6 @@
     "scope": "facade",
     "signature": "(self, table_id: 'str', before_iso: 'str') -> 'dict'"
   },
-  "reasoning_llm_client": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/report_routes.py",
-        "scope": "<module>._report_llm_ready",
-        "target": "reasoning_llm_client"
-      }
-    ],
-    "kind": "property",
-    "owner": "ModelProvider",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self)"
-  },
   "rebuild_unified_kg": {
     "consumers": [
       {
@@ -7331,19 +7027,7 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_does_not_reconfigure_scheduler",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7374,6 +7058,12 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_limit_extracts_subset",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_and_run_all_do_not_reconfigure_scheduler",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7441,23 +7131,7 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_does_not_reconfigure_scheduler",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7498,6 +7172,14 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_limit_extracts_subset",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_reparse_and_run_all_do_not_reconfigure_scheduler",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7746,21 +7428,6 @@
     "patch_targets": [],
     "scope": "module",
     "signature": "(token: 'RequestUserToken') -> 'None'"
-  },
-  "resolve_model_config": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/system_routes.py",
-        "scope": "<module>.get_model_settings",
-        "target": "resolve_model_config"
-      }
-    ],
-    "kind": "method",
-    "owner": "IdentityStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, user, role: 'str') -> 'ResolvedModelConfig'"
   },
   "resolve_notebook_conflicts": {
     "consumers": [
@@ -8366,44 +8033,8 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/scripts/reembed_kg.py",
-        "scope": "<module>.main",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>._batch_concurrency_scope",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>._dispatch_main",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.backfill_chunk_embeddings",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.backfill_node_embeddings",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_all",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_ingest",
         "target": "settings"
       },
       {
@@ -8438,20 +8069,8 @@
       },
       {
         "kind": "attribute",
-        "path": "scripts/backfill_kg_embeddings.py",
-        "scope": "<module>.main",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
         "path": "scripts/replay_retrieval.py",
         "scope": "<module>._run_full",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/replay_retrieval.py",
-        "scope": "<module>.record_run",
         "target": "settings"
       }
     ],
@@ -8470,18 +8089,6 @@
         "target": "source_elements"
       },
       {
-        "kind": "patch",
-        "path": "backend/tests/test_kg_llm_client.py",
-        "scope": "<module>.test_extraction_accepts_explicit_task_scoped_kg_client",
-        "target": "source_elements"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_kg_llm_client.py",
-        "scope": "<module>.test_extraction_passes_kg_llm_client_to_extract_graph",
-        "target": "source_elements"
-      },
-      {
         "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>._source_evidence",
@@ -8496,24 +8103,7 @@
     ],
     "kind": "method",
     "owner": "SourceStore",
-    "patch_targets": [
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_kg_llm_client.py",
-        "scope": "<module>.test_extraction_accepts_explicit_task_scoped_kg_client",
-        "target": "source_elements"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_kg_llm_client.py",
-        "scope": "<module>.test_extraction_passes_kg_llm_client_to_extract_graph",
-        "target": "source_elements"
-      }
-    ],
+    "patch_targets": [],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'List[SourceElement]'"
   },

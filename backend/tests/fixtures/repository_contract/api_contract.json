@@ -10219,7 +10219,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/history": {
         "get": {
-          "description": "时间线分页（spec §8.1 行 1）。响应体固定 3 个键：``head_seq``（当前\n最新 seq——前端拿它做\"陈旧\"比对，revert 请求体里的 expected_head_seq 就是\n这个值的回声）、``changes``（seq 倒序，``before_seq`` 严格小于用于向更旧\n翻页）、``milestones``（本表全部命名里程碑，含 stale 标记，§4.2）。\n\n``milestones_only=true`` 时把本页 ``changes`` 按里程碑 seq 集合过滤——这是\n一次性的单页内过滤，不会为了凑够 ``limit`` 条而多轮翻页：里程碑本来就稀疏，\n这只是前端\"只看里程碑\"筛选的展示层需求，不值得为它引入内部多轮翻页的\n复杂度与延迟。",
+          "description": "时间线分页（spec §8.1 行 1）。响应体固定 3 个键：``head_seq``（当前\n最新 seq——前端拿它做\"陈旧\"比对，revert 请求体里的 expected_head_seq 就是\n这个值的回声）、``changes``（seq 倒序，``before_seq`` 严格小于用于向更旧\n翻页）、``milestones``（本表全部命名里程碑，含 stale 标记，§4.2）。\n\n``milestones_only=true`` 时把本页 ``changes`` 按里程碑 seq 集合过滤——这是\n一次性的单页内过滤，不会为了凑够 ``limit`` 条而多轮翻页：里程碑本来就稀疏，\n这只是前端\"只看里程碑\"筛选的展示层需求，不值得为它引入内部多轮翻页的\n复杂度与延迟。\n\n``head_seq``/``changes``/``milestones`` 三者由 ``knowhow_history_page`` 在\n**同一读快照**里一次取出（codex 第 4 轮 P1）：早前分三次 store 调用取，\n一条夹在中间提交的并发编辑会让 ``head_seq`` 领先于 ``changes`` 里最新一条，\n用户没看见它却能确认回退、陈旧守卫还照放，把这条未见编辑抹掉。\n``milestones_only`` 的过滤是纯展示层，落在快照之后、对一致性无影响。",
           "operationId": "get_knowhow_history_api_notebooks__notebook_id__knowhow__table_id__history_get",
           "parameters": [
             {
