@@ -18,7 +18,7 @@ from app.core.database_url import database_identity
 _DEDICATED_DATABASE = re.compile(
     r"^silicon_notebook_(?:test(?:_[a-z0-9_]+)?|[a-z0-9_]+_test)$"
 )
-_TEST_SCHEMA = re.compile(r"^sn_t4_[0-9a-f]{32}$")
+_TEST_SCHEMA = re.compile(r"^sn_test_[0-9a-f]{32}$")
 _MALFORMED_PERCENT_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
 _SAFE_CONNECTION_QUERY_KEYS = {"sslmode"}
 _SAFE_SSLMODES = {
@@ -212,7 +212,7 @@ def _isolated_postgres_scope(base_url: str):
     from psycopg import sql
     from psycopg.rows import dict_row
 
-    schema = f"sn_t4_{uuid.uuid4().hex}"
+    schema = f"sn_test_{uuid.uuid4().hex}"
     assert _TEST_SCHEMA.fullmatch(schema)
     scoped_url = _url_with_search_path(base_url, schema)
     with psycopg.connect(base_url, autocommit=True, row_factory=dict_row) as conn:

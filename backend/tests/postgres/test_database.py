@@ -472,7 +472,7 @@ def test_close_is_idempotent(postgres_database):
     [
         (
             "postgresql://secret-user:secret-password@127.0.0.1:1/"
-            "silicon_notebook_task4_test?sslmode=secret-token&"
+            "silicon_notebook_adapter_test?sslmode=secret-token&"
             "application_name=query-secret&target_session_attrs=prefer-standby",
             (
                 "secret-token",
@@ -485,7 +485,7 @@ def test_close_is_idempotent(postgres_database):
         ),
         (
             "postgresql://secret-user:secret-password%ZZ@127.0.0.1:1/"
-            "silicon_notebook_task4_test",
+            "silicon_notebook_adapter_test",
             ("secret-password%ZZ", "%ZZ"),
         ),
     ],
@@ -518,7 +518,7 @@ def test_connection_failure_and_repr_redact_credentials_and_query_options(
 
     for secret in ("secret-user", "secret-password", *specific_secrets):
         assert secret not in diagnostic
-    assert "postgresql://127.0.0.1:1/silicon_notebook_task4_test" in diagnostic
+    assert "postgresql://127.0.0.1:1/silicon_notebook_adapter_test" in diagnostic
 
 
 def test_resolve_path_preserves_repository_path_contract(postgres_database, tmp_path):

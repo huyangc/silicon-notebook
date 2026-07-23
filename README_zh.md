@@ -1214,7 +1214,7 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 `backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
 测试选择完整委托给 `scripts/check.sh`。
 
-另一个独立 `CI / postgres-integration` job 启动 PostgreSQL 17，且只调用
+另一个独立 `CI / postgres-integration` job 启动 PostgreSQL 16，且只调用
 `scripts/check_postgres.sh`；离线门禁绝不调它。job 创建专用
 `NOSUPERUSER NOCREATEDB NOCREATEROLE` application role、其 UTF8 主测试库、
 默认排序非 C 的 UTF8 ICU 库（跑完整 schema parity），以及只用于证明
@@ -1226,7 +1226,7 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
   PYTHON_BIN=.venv/bin/python bash scripts/check_postgres.sh
 ```
 
-PostgreSQL 17 的 non-C/non-UTF 辅助 target 以 CI 为权威；本地未提供
+PostgreSQL 16 的 non-C/non-UTF 辅助 target 以 CI 为权威；本地未提供
 `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` 时会跳过这两项。
 `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` 会让任一辅助库缺失在测试前硬失败。
 Python 预检会在 pytest 前验证全部已配置 URL。query 严格白名单只接受一个经审查的

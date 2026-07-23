@@ -142,7 +142,7 @@ def test_repository_backend_selection_documentation_matches_the_direct_runtime()
     assert "不会复制、迁移或同步既有数据" in _read("README_zh.md")
 
 
-def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritative():
+def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritative():
     offline = _read("scripts/check.sh")
     assert "check_postgres.sh" not in offline
     assert "TEST_POSTGRES_URL" not in offline
@@ -191,7 +191,7 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
     workflow = _read(".github/workflows/ci.yml")
     for phrase in (
         "postgres-integration:",
-        "postgres:17",
+        "postgres:16",
         "--health-cmd",
         "NOSUPERUSER",
         "NOCREATEDB",
@@ -199,6 +199,7 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg17_authoritativ
         "LOCALE_PROVIDER icu",
         "SQL_ASCII",
         "POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: \"1\"",
+        "TEST_POSTGRES_URL",
         "bash scripts/check_postgres.sh",
     ):
         assert phrase in workflow

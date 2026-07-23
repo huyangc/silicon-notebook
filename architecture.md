@@ -330,10 +330,10 @@ host/port/user/database。pytest 只接收最小白名单环境与无密码 URL�
 并仅向已注册 child 发非阻塞 TERM。pgpass/Popen factory 返回后先把资源登记给 owner，再由
 checkpoint 响应 pending 状态，以有界 TERM→KILL fallback reap child、删除 pgpass、恢复原
 handler，并返回 130/143；child 的负 signal returncode 也统一为 `128+signum`。然后只运行
-`-m postgres_integration`。CI 的独立 PostgreSQL 17 job 用非 superuser app role，
+`-m postgres_integration`。CI 的独立 PostgreSQL 16 job 用非 superuser app role，
 并额外在 UTF8/ICU/non-C-default 数据库跑完整 schema parity，在 SQL_ASCII 数据库
 验证 migration 0001 在 ledger/业务 DDL 前事务性失败。本地 PostgreSQL 16 可用于普通
-integration；PG17 的两个辅助目标以 CI 为权威。`scripts/check.sh` 始终离线，不启动也不连接 PostgreSQL。
+integration；PostgreSQL 16 的两个辅助目标以 CI 为权威。`scripts/check.sh` 始终离线，不启动也不连接 PostgreSQL。
 
 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；backend 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖；每个 lane
 拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js

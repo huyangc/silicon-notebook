@@ -124,7 +124,7 @@ def test_offline_ci_job_installs_declared_dependencies_and_runs_only_complete_ga
     }
 
 
-def test_postgres_ci_job_uses_pg17_least_privilege_targets_and_only_pg_gate() -> None:
+def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() -> None:
     workflow = _load_workflow()
     job = workflow["jobs"]["postgres-integration"]
     assert isinstance(job, dict)
@@ -136,7 +136,7 @@ def test_postgres_ci_job_uses_pg17_least_privilege_targets_and_only_pg_gate() ->
     assert isinstance(services, dict)
     assert set(services) == {"postgres"}
     service = services["postgres"]
-    assert service["image"] == "postgres:17"
+    assert service["image"] == "postgres:16"
     assert service["env"] == {
         "POSTGRES_USER": "postgres",
         "POSTGRES_PASSWORD": "ci-only-admin-password",

@@ -97,7 +97,7 @@ EMPTY_TIME_SENTINELS = {
 EXPECTED_FTS_ROOTS = {"chunks_fts", "kg_objects_fts", "memory_items_fts"}
 EXPECTED_ORDINARY_TABLE_COUNT = 55
 EXPECTED_REBUILT_TABLE_COUNT = 17
-TEST_SCHEMA_PATTERN = re.compile(r"^sn_t4_[0-9a-f]{32}$")
+TEST_SCHEMA_PATTERN = re.compile(r"^sn_test_[0-9a-f]{32}$")
 
 CHECK_CONSTRAINTS = {
     "agent_profiles": {
@@ -908,7 +908,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
     from app.repositories.postgres.database import PostgresDatabase
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    schemas = [f"sn_t4_{uuid.uuid4().hex}" for _ in range(2)]
+    schemas = [f"sn_test_{uuid.uuid4().hex}" for _ in range(2)]
     assert all(TEST_SCHEMA_PATTERN.fullmatch(schema) for schema in schemas)
     databases = []
     with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:

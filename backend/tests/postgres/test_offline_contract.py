@@ -132,8 +132,8 @@ def test_invalid_host_probe_uses_dummy_when_lane_pgpass_is_empty(
     empty_pgpass.chmod(0o600)
     monkeypatch.setenv("PGPASSFILE", str(empty_pgpass))
     password = _invalid_host_probe_password(
-        "postgresql://postgres@127.0.0.1:55432/"
-        "silicon_notebook_task4_test"
+        "postgresql://postgres@127.0.0.1:64321/"
+        "silicon_notebook_adapter_test"
     )
     assert password == _INVALID_HOST_PROBE_DUMMY_PASSWORD
     assert "sentinel" not in password
@@ -153,9 +153,9 @@ def test_psycopg_binary_and_pool_have_explicit_compatible_major_ranges():
 
 
 def test_scoped_url_adds_one_search_path_without_losing_other_options():
-    schema = f"sn_t4_{'a' * 32}"
+    schema = f"sn_test_{'a' * 32}"
     scoped = _url_with_search_path(
-        "postgresql://postgres@db.example/silicon_notebook_task4_test?sslmode=require",
+        "postgresql://postgres@db.example/silicon_notebook_adapter_test?sslmode=require",
         schema,
     )
     query = parse_qsl(urlsplit(scoped).query, keep_blank_values=True)
@@ -164,10 +164,10 @@ def test_scoped_url_adds_one_search_path_without_losing_other_options():
 
 @pytest.mark.parametrize("key", ["options", "OPTIONS", "Options"])
 def test_scoped_url_rejects_existing_libpq_options(key):
-    schema = f"sn_t4_{'b' * 32}"
+    schema = f"sn_test_{'b' * 32}"
     with pytest.raises(RuntimeError, match="options"):
         _url_with_search_path(
-            "postgresql://postgres@db.example/silicon_notebook_task4_test"
+            "postgresql://postgres@db.example/silicon_notebook_adapter_test"
             f"?{key}=-cstatement_timeout%3D0",
             schema,
         )
@@ -178,7 +178,7 @@ def test_scoped_url_rejects_existing_libpq_options(key):
     [
         "postgresql://postgres@db.example/postgres",
         "postgresql://postgres@db.example/silicon_notebook_production",
-        "postgresql://postgres@db.example/silicon_notebook_task4",
+        "postgresql://postgres@db.example/silicon_notebook_adapter",
     ],
 )
 def test_fixture_refuses_non_dedicated_database_names(url):
@@ -187,7 +187,7 @@ def test_fixture_refuses_non_dedicated_database_names(url):
 
 
 def test_fixture_refuses_server_database_identity_mismatch():
-    url = "postgresql://postgres@db.example/silicon_notebook_task4_test"
+    url = "postgresql://postgres@db.example/silicon_notebook_adapter_test"
     with pytest.raises(RuntimeError, match="does not match"):
         _require_dedicated_test_database(url, "silicon_notebook_other_test")
 
@@ -254,19 +254,19 @@ def test_database_catalog_rejects_c_icu_provider_locale_for_non_c_target():
 
 def test_password_free_url_and_pgpass_entry_support_distinct_url_credentials():
     url = (
-        "postgresql://lane_user:p%40ss%3Aword@[::1]:55432/"
+        "postgresql://lane_user:p%40ss%3Aword@[::1]:64321/"
         "silicon_notebook_lane_test?sslmode=require"
     )
     sanitized, password = _password_free_url(url)
     assert sanitized == (
-        "postgresql://lane_user@[::1]:55432/silicon_notebook_lane_test?sslmode=require"
+        "postgresql://lane_user@[::1]:64321/silicon_notebook_lane_test?sslmode=require"
     )
     assert password == "p@ss:word"
     assert _pgpass_entry(url, password) == (
-        "\\:\\:1:55432:silicon_notebook_lane_test:lane_user:p@ss\\:word"
+        "\\:\\:1:64321:silicon_notebook_lane_test:lane_user:p@ss\\:word"
     )
     assert _pgpass_entry(url, r"colon:and\backslash") == (
-        "\\:\\:1:55432:silicon_notebook_lane_test:lane_user:"
+        "\\:\\:1:64321:silicon_notebook_lane_test:lane_user:"
         "colon\\:and\\\\backslash"
     )
     with pytest.raises(RuntimeError, match="exact"):
@@ -487,7 +487,7 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
         monkeypatch.setenv(key, value)
     monkeypatch.setenv(
         "TEST_POSTGRES_URL",
-        "postgresql://lane_user:sentinel-target-secret@db.example:55432/"
+        "postgresql://lane_user:sentinel-target-secret@db.example:64321/"
         "silicon_notebook_lane_test?sslmode=require",
     )
     target = _prepare_target("primary", "TEST_POSTGRES_URL", "utf8")
@@ -508,7 +508,7 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
     assert preflight_env is pytest_env
     assert set(poison).isdisjoint(preflight_env)
     assert preflight_env["TEST_POSTGRES_URL"] == (
-        "postgresql://lane_user@db.example:55432/"
+        "postgresql://lane_user@db.example:64321/"
         "silicon_notebook_lane_test?sslmode=require"
     )
     rendered = repr(calls)
@@ -960,7 +960,7 @@ def test_generated_pgpass_exact_entries_precede_inherited_wildcards(
     monkeypatch.setenv("PGPASSFILE", str(inherited))
     monkeypatch.setenv(
         "TEST_POSTGRES_URL",
-        "postgresql://lane_user:correct-target-password@db.example:55432/"
+        "postgresql://lane_user:correct-target-password@db.example:64321/"
         "silicon_notebook_lane_test",
     )
     target = _prepare_target("primary", "TEST_POSTGRES_URL", "utf8")
@@ -968,7 +968,7 @@ def test_generated_pgpass_exact_entries_precede_inherited_wildcards(
     with _pytest_environment([target]) as env:
         lines = Path(env["PGPASSFILE"]).read_text(encoding="utf-8").splitlines()
         assert lines == [
-            "db.example:55432:silicon_notebook_lane_test:lane_user:correct-target-password",
+            "db.example:64321:silicon_notebook_lane_test:lane_user:correct-target-password",
             "*:*:*:*:wrong-wildcard-password",
         ]
 

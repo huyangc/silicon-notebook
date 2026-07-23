@@ -1381,7 +1381,7 @@ Node.js 22. The workflow installs from `backend/requirements.txt` and
 `frontend/package-lock.json`, then delegates test selection entirely to
 `scripts/check.sh`.
 
-A separate `CI / postgres-integration` job starts PostgreSQL 17 and invokes only
+A separate `CI / postgres-integration` job starts PostgreSQL 16 and invokes only
 `scripts/check_postgres.sh`; it is never called by the offline gate. The job provisions a
 dedicated `NOSUPERUSER NOCREATEDB NOCREATEROLE` application role, its UTF8 primary test
 database, a UTF8 ICU database whose default collation is non-C for full schema parity, and
@@ -1393,7 +1393,7 @@ TEST_POSTGRES_URL=postgresql://user:password@127.0.0.1:5432/silicon_notebook_loc
   PYTHON_BIN=.venv/bin/python bash scripts/check_postgres.sh
 ```
 
-The PostgreSQL 17 non-C/non-UTF auxiliary targets are authoritative in CI; local runs skip
+The PostgreSQL 16 non-C/non-UTF auxiliary targets are authoritative in CI; local runs skip
 those two tests unless `TEST_POSTGRES_NON_C_URL` / `TEST_POSTGRES_NON_UTF_URL` are supplied.
 Setting `POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED=1` makes their absence a hard pre-test error.
 The Python preflight validates every configured URL before pytest. Its strict query
