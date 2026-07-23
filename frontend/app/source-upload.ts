@@ -1,17 +1,46 @@
 import type { UploadedSource } from "./workspace-model.ts";
 
-/** 上传时把界面上的文档类型选择转成给后端的**线路值**。
+/** 上传时每个待上传文件发给后端的两个并列字段：
+ *  - ``docType``：界面上的原值（``""`` = 下拉框里的「自动检测」）。
+ *  - ``explicit``：用户是否**手动**动过这一项的类型下拉框（``"1"``）还是没动过（``"0"``）。
  *
- *  界面里空串是「自动检测」这个**显式选择**（下拉选项 value=""）。但后端在内容判重
- *  沿用既有来源时，把「空/没传」当作「没意见、保留原有类型」——于是对一条已按具体
- *  类型定型的来源，用户在 UI 里选「自动检测」再重传，会被当成没意见而无法真正改回
- *  自动。为把「显式选自动检测」与「没表态」区分开，这里把空串映射成约定哨兵
- *  ``"auto"``：后端 normalize 仍得到 ""（自动检测），但 reuse 路径能借哨兵识别这是
- *  一次显式的「重置回自动」。具体 profile id 原样透传。
+ *  为什么要这个 explicit 信号：后端在内容判重沿用既有来源时，只有用户**显式**表态才
+ *  改/重置那条来源的类型。前端不知道某个文件是不是重传（哈希匹配在后端），单看「值空
+ *  不空」区分不了「auto-detect 自动填的建议值」和「用户显式想改」——所以把「用户动没
+ *  动下拉框」这件事显式发给后端：
+ *  - 显式 + 具体类型 → 改成该类型；显式 + ``""`` → 把已定型来源重置回自动；
+ *  - 非显式（重传没动下拉框）→ 保留既有来源的类型，绝不静默重置重抽。 */
+export function uploadDocTypeFields(
+  types: readonly string[],
+  touched: readonly boolean[],
+): Array<{ docType: string; explicit: "0" | "1" }> {
+  return types.map((dt, i) => ({
+    docType: dt ?? "",
+    explicit: touched[i] ? "1" : "0",
+  }));
+}
+
+/** auto-detect 回填：只填仍为空（``""`` = 自动检测）的项，绝不覆盖用户已选的值。
  *
- *  对新建来源无副作用：后端 upload 侧对 ""/"auto" 一律 normalize 成 ""。 */
-export function docTypeForUpload(staged: string): string {
-  return (staged ?? "").trim() === "" ? "auto" : staged;
+ *  **只产出类型、不碰 touched**：auto-detect 是系统建议、不是用户表态。调用方回填后
+ *  touched 数组保持原样（仍未表态），这正是「重传没动下拉框 → 发 explicit=0 → 后端
+ *  保留既有类型」这条链路的起点。``detectedByIndex[i]`` 是第 i 个文件的检测结果
+ *  （``undefined`` = 没检测出/无建议）。 */
+export function fillAutoDetectedTypes(
+  types: readonly string[],
+  detectedByIndex: ReadonlyArray<string | undefined>,
+): string[] {
+  return types.map((dt, i) => (dt ? dt : (detectedByIndex[i] ?? dt)));
+}
+
+/** 用户手动改了第 ``index`` 项的类型下拉框 → 该项标记为「用户显式设置」。 */
+export function markTouched(touched: readonly boolean[], index: number): boolean[] {
+  return touched.map((t, i) => (i === index ? true : t));
+}
+
+/** 用户「全部设为…」→ 所有项标记为显式设置。 */
+export function markAllTouched(touched: readonly boolean[]): boolean[] {
+  return touched.map(() => true);
 }
 
 export type UploadOutcome = {

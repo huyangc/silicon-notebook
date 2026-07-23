@@ -979,6 +979,14 @@
         },
         "Body_upload_sources_api_notebooks__notebook_id__sources_post": {
           "properties": {
+            "doc_type_explicit": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Doc Type Explicit",
+              "type": "array"
+            },
             "doc_types": {
               "default": [],
               "items": {

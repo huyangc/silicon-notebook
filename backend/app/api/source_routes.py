@@ -86,6 +86,12 @@ def _enforce_document_capacity(notebook_id: str, adding: int) -> None:
         )
 
 
+def _truthy_form_flag(raw: str) -> bool:
+    """把上传表单里的 doc_type_explicit 项（前端发 "1"/"0"）解析成 bool。缺省/空/其它
+    值一律当 False——「没显式表态」是安全默认（reuse 路径据此保留既有源的类型）。"""
+    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @router.get("/notebooks/{notebook_id}/sources", response_model=PaginatedSources, dependencies=[Depends(require_notebook_read)])
 def list_sources(
     notebook_id: str,
@@ -142,6 +148,7 @@ async def upload_sources(
     notebook_id: str,
     files: List[UploadFile] = File(...),
     doc_types: List[str] = Form(default=[]),
+    doc_type_explicit: List[str] = Form(default=[]),
 ) -> List[UploadedSourceSummary]:
     try:
         repo = source_repository()
@@ -153,14 +160,21 @@ async def upload_sources(
             _validate_source_file(file_name)
             content = await file.read()
             _validate_source_file(file_name, len(content))
-            # doc_types is aligned with files by position; missing/extra are tolerated.
+            # doc_types / doc_type_explicit are aligned with files by position;
+            # missing/extra are tolerated (老前端不发 doc_type_explicit → 一律非显式)。
             doc_type = doc_types[index] if index < len(doc_types) else ""
+            explicit = (
+                _truthy_form_flag(doc_type_explicit[index])
+                if index < len(doc_type_explicit)
+                else False
+            )
             uploaded_files.append(
                 UploadedSourceFile(
                     file_name=file_name,
                     content_type=file.content_type or "",
                     content=content,
                     doc_type=doc_type,
+                    doc_type_explicit=explicit,
                 )
             )
         return repo.upload_sources(

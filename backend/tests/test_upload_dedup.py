@@ -62,12 +62,15 @@ def other_notebook_id(repo):
     return repo.create_notebook(NotebookCreate(name="nb2")).id
 
 
-def _upload(repo, notebook_id, content=b"hello world", name="a.txt", doc_type=""):
+def _upload(
+    repo, notebook_id, content=b"hello world", name="a.txt", doc_type="",
+    doc_type_explicit=False,
+):
     return repo.upload_sources(
         notebook_id,
         [UploadedSourceFile(
             file_name=name, content_type="text/plain", content=content,
-            doc_type=doc_type)],
+            doc_type=doc_type, doc_type_explicit=doc_type_explicit)],
     )
 
 
@@ -337,11 +340,11 @@ def test_reupload_with_a_corrected_doc_type_retypes_and_reextracts(
 ):
     """「类型判错了，我改成教材再传一遍」是最自然的纠正动作。内容判重不代表
     类型选择也该丢：doc_type 决定抽取 profile 并进抽取 prompt（因而进 LLM 缓存
-    键），静默丢掉 = 这条源永远按错的类型入图。"""
+    键），静默丢掉 = 这条源永远按错的类型入图。用户手动选了类型 = 显式表态。"""
     sid = settled()
     assert repo.get_source(sid).doc_type == ""
 
-    second = _upload(repo, notebook_id, doc_type="textbook")
+    second = _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert second[0].id == sid and second[0].reused is True, "仍然复用同一行"
     assert repo.get_source(sid).doc_type == "textbook", (
@@ -369,10 +372,12 @@ def test_reupload_without_a_doc_type_never_clobbers_the_stored_one(
 def test_reupload_with_the_same_doc_type_does_not_reextract(
     repo, notebook_id, settled
 ):
-    """类型没变就是纯复用：再抽一遍是白烧的模型开销。"""
+    """类型没变就是纯复用：再抽一遍是白烧的模型开销。哪怕用户显式又选了一遍同一个
+    类型（explicit=True 但新旧值相等），也不该重抽——判据的 `incoming != stored` 一半
+    挡住它。"""
     sid = settled(doc_type="textbook")
 
-    _upload(repo, notebook_id, doc_type="textbook")
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert repo.get_source(sid).doc_type == "textbook"
     assert repo.extract_calls == []
@@ -382,16 +387,15 @@ def test_reupload_with_the_same_doc_type_does_not_reextract(
 def test_explicit_auto_detect_resets_the_stored_doc_type_and_reextracts(
     repo, notebook_id, settled
 ):
-    """显式选「自动检测」（前端为该选项提交约定哨兵 "auto"）必须能把一条已按具体
-    类型定型的源重置回自动——否则 UI 上根本无法把类型改回自动。与「没表态」相反
-    （后者保留旧值，见下一条）。normalize 把 "auto"→""，区别只能在归一化前从原始
-    入参读（explicit_auto）。
+    """用户把类型下拉框**显式**选回「自动检测」（doc_type="" 且 doc_type_explicit=True）
+    必须能把一条已按具体类型定型的源重置回自动——否则 UI 上根本无法把类型改回自动。
+    与「没表态」相反（后者保留旧值，见下一条）。这修好了原 bug。
 
-    变异验证：把 reuse 里 retyped 的 `or explicit_auto` 去掉（只认 bool(incoming)）→
-    "auto" 归一成 "" 被当没意见 → doc_type 停在 textbook → 本测试转红。"""
+    变异验证：把 reuse 里 retyped 判据的 doc_type_explicit 去掉、退回 bool(incoming)
+    → 空值被当没意见 → doc_type 停在 textbook → 本测试转红。"""
     sid = settled(doc_type="textbook")
 
-    second = _upload(repo, notebook_id, doc_type="auto")
+    second = _upload(repo, notebook_id, doc_type="", doc_type_explicit=True)
 
     assert second[0].id == sid and second[0].reused is True, "仍复用同一行"
     assert repo.get_source(sid).doc_type == "", "显式自动检测必须把类型重置回自动（''）"
@@ -400,16 +404,73 @@ def test_explicit_auto_detect_resets_the_stored_doc_type_and_reextracts(
     assert repo.process_calls == [], "内容没变，绝不重新解析"
 
 
-def test_a_genuinely_unknown_doc_type_still_counts_as_no_opinion(
+def test_non_explicit_reupload_never_retypes_even_with_a_specific_type(
     repo, notebook_id, settled
 ):
-    """只有约定哨兵 "auto" 触发重置；其余未知串（非哨兵、非 profile）仍当「没表态」、
-    保留旧值，绝不误重置——否则任何脏输入都会静默把类型冲成自动。"""
+    """重传时没动类型下拉框（doc_type_explicit=False）绝不改既有源的类型——哪怕发来的
+    doc_type 是具体值（auto-detect 顺手填的建议）、甚至与旧值不同。这正是内容去重的
+    核心场景：重传同一文件不该因为没显式表态就把已定型的类型静默抹掉重抽。
+
+    变异验证：把 reuse 里 retyped 判据里的 doc_type_explicit 无视掉（退回只认
+    bool(incoming)）→ 非显式的 "academic_paper" 会把 textbook 冲掉重抽 → 本测试转红。"""
     sid = settled(doc_type="textbook")
 
-    _upload(repo, notebook_id, doc_type="zzz-not-a-profile")
+    # auto-detect 填了个具体（且不同的）值，但用户没动下拉框 → 非显式。
+    _upload(repo, notebook_id, doc_type="academic_paper", doc_type_explicit=False)
 
-    assert repo.get_source(sid).doc_type == "textbook", "未知串（非哨兵）不得覆盖已存类型"
+    assert repo.get_source(sid).doc_type == "textbook", (
+        "非显式重传不得覆盖已存类型（哪怕发来的是具体值/不同值）"
+    )
+    assert repo.extract_calls == [], "没有显式表态就没有重抽"
+    assert repo.process_calls == [], "内容没变，绝不重新解析"
+
+
+def test_explicit_paper_retypes_the_reused_source_to_paper(
+    repo, notebook_id, settled
+):
+    """显式 + 具体类型（paper）→ 改成该类型并按新 profile 重抽。"""
+    sid = settled(doc_type="textbook")
+
+    second = _upload(
+        repo, notebook_id, doc_type="academic_paper", doc_type_explicit=True
+    )
+
+    assert second[0].id == sid and second[0].reused is True
+    assert repo.get_source(sid).doc_type == "academic_paper", "显式改类型必须落库"
+    assert repo.extract_calls == [sid], "类型变了必须按新类型重抽"
+
+
+def test_a_brand_new_source_applies_its_doc_type_regardless_of_the_explicit_flag(
+    repo, notebook_id
+):
+    """新建源（内容首见）照常应用发来的 doc_type——显式 flag 只 gate「复用源的
+    retype」，不影响新源；auto-detect 的建议值对新源当然要生效（explicit=False 也是）。"""
+    first = _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=False)
+
+    assert first[0].reused is False, "内容首见 = 新建，不是复用"
+    assert repo.get_source(first[0].id).doc_type == "textbook", (
+        "新源必须按发来的 doc_type 定型，与 explicit flag 无关"
+    )
+
+
+def test_doc_type_explicit_defaults_to_false_for_callers_that_omit_it(
+    repo, notebook_id, settled
+):
+    """不发 doc_type_explicit 的调用方（老前端 / batch_ingest）：字段缺省 = False =
+    「没显式表态」= 保留旧类型，绝不 retype 既有源（它们本就不该动既有源的类型）。"""
+    sid = settled(doc_type="textbook")
+
+    # 构造时**不传** doc_type_explicit（模拟老调用方），却带了具体且不同的 doc_type。
+    repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(
+            file_name="a.txt", content_type="text/plain",
+            content=b"hello world", doc_type="academic_paper")],
+    )
+
+    assert repo.get_source(sid).doc_type == "textbook", (
+        "缺省 explicit 视为 False，绝不改既有源类型"
+    )
     assert repo.extract_calls == []
 
 
@@ -421,7 +482,7 @@ def test_retyping_an_in_flight_source_updates_the_type_but_starts_no_pipeline(
     assert repo.get_source(sid).parse_status == "queued"
     repo.process_calls.clear()
 
-    _upload(repo, notebook_id, doc_type="textbook")
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert repo.get_source(sid).doc_type == "textbook"
     assert repo.process_calls == []
@@ -443,7 +504,8 @@ def test_retype_with_a_scheduler_reextracts_out_of_band(
     row = repo.upload_sources(
         notebook_id,
         [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
-                            content=b"hello world", doc_type="textbook")],
+                            content=b"hello world", doc_type="textbook",
+                            doc_type_explicit=True)],
         scheduler=lambda _sid: None,
     )[0]
 
@@ -466,7 +528,7 @@ def test_failed_reextraction_lands_on_failed_with_a_user_readable_reason(
     sid = settled()
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _boom)
 
-    row = _upload(repo, notebook_id, doc_type="textbook")[0]
+    row = _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)[0]
 
     assert row.parse_status == "failed", "响应里就得是终态 failed，前端才会停轮询"
     detail = repo.get_source(sid)
@@ -488,11 +550,12 @@ def test_a_failed_reextraction_is_retryable_by_reuploading_the_same_file(
     再传多少次都没有任何反应。"""
     sid = settled()
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _boom)
-    _upload(repo, notebook_id, doc_type="textbook")
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
     assert repo.get_source(sid).parse_status == "failed"
     repo.process_calls.clear()
 
-    again = _upload(repo, notebook_id, doc_type="textbook")  # 同一文件 + 同一类型
+    # 同一文件 + 同一类型（此刻 stored 已是 textbook，故 retyped 为 false，靠失败源分支救）
+    again = _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert again[0].id == sid
     assert repo.process_calls == [sid], "重传必须重跑整条流水线，而不是静默 no-op"
@@ -515,13 +578,13 @@ def test_retype_during_an_in_flight_reextraction_is_applied_not_lost(
     def fake_extract(source_id, **_kw):
         seen_while_extracting.append(repo.get_source(source_id).doc_type)
         if len(seen_while_extracting) == 1:
-            # 抽取正在跑（这一行此刻就是 'extracting'），用户用另一个类型重传
+            # 抽取正在跑（这一行此刻就是 'extracting'），用户显式用另一个类型重传
             assert repo.get_source(source_id).parse_status == "extracting"
-            _upload(repo, notebook_id, doc_type="academic_paper")
+            _upload(repo, notebook_id, doc_type="academic_paper", doc_type_explicit=True)
 
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", fake_extract)
 
-    _upload(repo, notebook_id, doc_type="textbook")
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert seen_while_extracting == ["textbook", "academic_paper"], (
         "抽取期间改的类型必须被补跑一次；只有一次说明那次 retype 被丢了"
@@ -545,11 +608,11 @@ def test_retype_during_the_first_uploads_extraction_is_applied_not_lost(
         seen_while_extracting.append(live_repo.get_source(source_id).doc_type)
         if len(seen_while_extracting) == 1:
             assert live_repo.get_source(source_id).parse_status == "extracting"
-            _upload(live_repo, nb, doc_type="textbook")
+            _upload(live_repo, nb, doc_type="textbook", doc_type_explicit=True)
 
     monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
 
-    sid = _upload(live_repo, nb, doc_type="academic_paper")[0].id
+    sid = _upload(live_repo, nb, doc_type="academic_paper", doc_type_explicit=True)[0].id
 
     assert seen_while_extracting == ["academic_paper", "textbook"]
     assert live_repo.get_source(sid).doc_type == "textbook"
@@ -835,7 +898,7 @@ def test_queued_reupload_with_a_different_suffix_repoints_file_path_on_reconcile
 def test_an_unchanged_doc_type_costs_exactly_one_extraction(
     repo, notebook_id, settled, monkeypatch
 ):
-    """自校验是一次主键读，不是「总是抽两遍」——类型没动就只抽一次。"""
+    """自校验是一次主键读，不是「总是抽两遍」——抽取期间类型没再动就只抽一次。"""
     sid = settled(doc_type="academic_paper")
     calls = []
     monkeypatch.setattr(
@@ -843,7 +906,7 @@ def test_an_unchanged_doc_type_costs_exactly_one_extraction(
         lambda source_id, **_kw: calls.append(source_id),
     )
 
-    _upload(repo, notebook_id, doc_type="textbook")
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert calls == [sid]
 
@@ -1220,14 +1283,15 @@ def test_retype_landing_in_the_terminal_mark_window_forces_a_reextract(
     def racing_mark(source_id, expected_doc_type, **kw):
         if not injected:
             injected.append(1)
-            # 抽取刚跑完、终态未落的那一刻，行此刻是 'extracting'：模拟用户用又一个
+            # 抽取刚跑完、终态未落的那一刻，行此刻是 'extracting'：模拟用户显式用又一个
             # 类型重传（reuse 只记类型、claim 认领落空、不调度）。
-            _upload(repo, notebook_id, doc_type="academic_paper")
+            _upload(repo, notebook_id, doc_type="academic_paper", doc_type_explicit=True)
         return real_mark(source_id, expected_doc_type, **kw)
 
     monkeypatch.setattr(store, "mark_extracted_if_doc_type", racing_mark)
 
-    _upload(repo, notebook_id, doc_type="textbook")   # academic_paper→textbook 触发重抽
+    # academic_paper→textbook（用户显式选了 textbook）触发重抽
+    _upload(repo, notebook_id, doc_type="textbook", doc_type_explicit=True)
 
     assert repo.extract_calls == [sid, sid], (
         f"窗口里被 retype 必须按新类型补跑一轮；实际 extract={repo.extract_calls}"
@@ -1325,7 +1389,8 @@ def test_retype_on_an_in_flight_source_never_starts_a_second_reextract(
     repo.upload_sources(
         notebook_id,
         [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
-                            content=b"hello world", doc_type="textbook")],
+                            content=b"hello world", doc_type="textbook",
+                            doc_type_explicit=True)],
         scheduler=lambda _s: None,
     )
 
