@@ -622,6 +622,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.complete_row', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.optimize_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.reformat_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>._remap', kind='attribute', target='_runtime'),

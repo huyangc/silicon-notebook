@@ -33,6 +33,7 @@
 - **`object_type` 标签**：后端 `OBJECT_TYPE_LABELS` 与前端 `KG_TYPE_LABELS` 必须逐字一致，改一侧就要改另一侧。
 - **架构守卫**是语义化的（`{path, scope, kind, target}`），**不含行号**——仓库里任何提到「行号钉死」的注释都是过时残留。重生成走 `--rebaseline-surface` / `--rebaseline-callers`；新端点必须跑默认模式刷 `api_contract`。
 - **knowhow 变更历史**（`knowhow_changes`/`knowhow_milestones`，schema v26）：knowhow 表的**每条写路径**必须在写事务**最后一步**经模块级 `record_change` 追加一条流水（存 before/after + 变更后整表指纹，复用传输守卫的 `_FINGERPRINT_SQL`）；`test_knowhow_history_coverage_guard.py` 是硬门，新增写方法漏挂就报红。回退是逆序 delta 重放 + 前后置指纹守卫（行/列复用原 id 保引用与代码附件）；里程碑创建与 `create_milestone` 的复检必须在 `BEGIN IMMEDIATE` 之内，清理只删最老连续前缀且永留 head。完整契约见 `AGENTS.md`「Architecture Baseline」的 knowhow 历史条目与 `architecture.md` § 3.7。
+- **Knowhow 智能补全空列**：记录型表从行详情、带行标题分组的表从概念矩阵的物理分支显式发起；只有缺失格或精确空串可补，已存纯空白文本不算空。最多选择同表 8 条参考行（同 anchor/行标题分组优先，再比较已知列相似度与覆盖度），只返回 suggestion/abstain、置信度、依据和参考行，绝不自动写库或走 KG；`knowhow_complete` 未配置/失败时不许离线伪补全。审阅弹窗必须可拖动且逐项人工确认；确认仍走普通 cell PATCH，固定携带 `expected_before=""` 和 `origin="llm_complete"`，并保留正常历史与同步语义。
 
 ### 工程约束
 

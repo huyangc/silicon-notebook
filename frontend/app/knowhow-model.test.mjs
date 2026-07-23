@@ -27,6 +27,7 @@ import {
   appendKnowhowPreview,
   appendKnowhowCommit,
   optimizeKnowhowCell,
+  completeKnowhowRow,
   getCellCode,
   putCellCode,
   deleteCellCode,
@@ -715,6 +716,41 @@ test("optimizeKnowhowCell: POST 到 .../optimize，响应 suggestion_md 映射�
     assert.deepStrictEqual(result, { suggestionMd: "优化后的正文" });
   });
 });
+
+test("completeKnowhowRow: POST 目标空列并把建议 wire 映射为 camelCase", () => {
+  const wire = {
+    suggestions: [{
+      column_id: "c-fix",
+      suggestion_md: "检查供电",
+      confidence: "high",
+      based_on_row_ids: ["r2"],
+      basis: "现象相近",
+      abstain_reason: "",
+    }],
+  };
+  return withFetchStub(wire, async (calls) => {
+    const result = await completeKnowhowRow("nb-1", "t1", "r1", ["c-fix", "c-tool"]);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/complete$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(bodyOf(calls[0]), { target_column_ids: ["c-fix", "c-tool"] });
+    assert.deepStrictEqual(result, {
+      suggestions: [{
+        columnId: "c-fix",
+        suggestionMd: "检查供电",
+        confidence: "high",
+        basedOnRowIds: ["r2"],
+        basis: "现象相近",
+        abstainReason: "",
+      }],
+    });
+  });
+});
+
+test("completeKnowhowRow: 未指定目标列时发送空对象，不伪造 null 字段", () =>
+  withFetchStub({ suggestions: [] }, async (calls) => {
+    await completeKnowhowRow("nb-1", "t1", "r1");
+    assert.deepStrictEqual(bodyOf(calls[0]), {});
+  }));
 
 // --- getCellCode / putCellCode / deleteCellCode（三态覆盖）------------------------
 

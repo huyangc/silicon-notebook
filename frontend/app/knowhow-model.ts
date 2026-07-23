@@ -136,6 +136,23 @@ export type KnowhowCellPatchResult = {
   projectionStatus: ProjectionStatus;
 };
 
+// 行级智能补全只生成待审阅建议，不直接写库。confidence 是后端稳定协议；
+// suggestionMd=null 表示证据不足，调用方必须按 abstainReason 展示且禁止接受。
+export type KnowhowCompletionConfidence = "high" | "medium" | "low";
+
+export type KnowhowRowCompletionSuggestion = {
+  columnId: string;
+  suggestionMd: string | null;
+  confidence: KnowhowCompletionConfidence;
+  basedOnRowIds: string[];
+  basis: string;
+  abstainReason: string;
+};
+
+export type KnowhowRowCompletion = {
+  suggestions: KnowhowRowCompletionSuggestion[];
+};
+
 // followup A（anchor 分组 spec §6「整组批量写单事务，不半改」）：合并共享格批量
 // 写的输入——一列 + 一组 rowId + 同一份新内容，对应后端 KnowhowCellsBatchPatch。
 export type KnowhowCellsBatchPatchInput = {
@@ -210,6 +227,17 @@ type WireKnowhowRow = {
   projection_status: ProjectionStatus;
   cells: Record<string, string>;
 };
+
+type WireKnowhowRowCompletionSuggestion = {
+  column_id: string;
+  suggestion_md: string | null;
+  confidence: KnowhowCompletionConfidence;
+  based_on_row_ids: string[];
+  basis: string;
+  abstain_reason: string;
+};
+
+type WireKnowhowRowCompletion = { suggestions: WireKnowhowRowCompletionSuggestion[] };
 
 type WireKnowhowTableSummary = {
   id: string;
@@ -675,6 +703,38 @@ export const optimizeKnowhowCell = (
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/optimize`,
     { method: "POST", tag: "knowhow" },
   ).then((wire) => ({ suggestionMd: wire.suggestion_md }));
+
+// --- 单行空列智能补全（显式触发、只返回建议）----------------------------------
+
+function mapKnowhowRowCompletionSuggestion(
+  wire: WireKnowhowRowCompletionSuggestion,
+): KnowhowRowCompletionSuggestion {
+  return {
+    columnId: wire.column_id,
+    suggestionMd: wire.suggestion_md,
+    confidence: wire.confidence,
+    basedOnRowIds: wire.based_on_row_ids ?? [],
+    basis: wire.basis ?? "",
+    abstainReason: wire.abstain_reason ?? "",
+  };
+}
+
+export const completeKnowhowRow = (
+  notebookId: string,
+  tableId: string,
+  rowId: string,
+  targetColumnIds?: string[],
+): Promise<KnowhowRowCompletion> =>
+  requestJson<WireKnowhowRowCompletion>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/complete`,
+    {
+      method: "POST",
+      body: JSON.stringify(
+        targetColumnIds === undefined ? {} : { target_column_ids: targetColumnIds },
+      ),
+      tag: "knowhow",
+    },
+  ).then((wire) => ({ suggestions: (wire.suggestions ?? []).map(mapKnowhowRowCompletionSuggestion) }));
 
 // --- 排版重排（knowhow-md-normalize Task 4，同样显式触发、不写库）-----------
 // 与 optimizeKnowhowCell 的关键差异：后端 reformat_cell 对「未配置模型」等

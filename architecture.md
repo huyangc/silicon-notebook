@@ -260,6 +260,16 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 格子净文本 hash 与当前内容对比在读取时推导。LLM 表达优化是显式按钮 + 对照预览 + 逐格确认回填，
 绝不自动触发。
 
+行详情或行标题分组矩阵物理分支的「智能补全空列」是另一个显式、建议式交互：`POST /api/notebooks/{id}/knowhow/{table_id}/rows/{row_id}/complete`
+接收可选的 `target_column_ids`，只返回结构化 `suggestions`（建议或 `abstain`、置信度、依据、参考行），不写库。
+只有缺失格或精确空串可作为目标；纯空白存量文本不算空。服务先从当前位置附近至多 512 行构造候选池，只取至多 32 个已知列、
+每格至多 1000 字符参与评分，再以固定大小 heap 挑出至多 8 条参考行；同一 anchor/行标题分组优先，其次按当前行已知列的相似度和覆盖度排序。
+最终 prompt（含规则、schema 与数据）硬限 96000 字符，超限时从最低优先参考行开始移除，绝不截掉规则或输出 schema。它不走
+KG/投影检索，因为必须保留同一参考行各列之间的条件组合。它通过稳定的 interactive chat workload
+`knowhow_complete` 调用模型；未配置或失败时直接无建议，禁止离线伪补全。前端以可拖动审阅弹窗逐项人工接受；接受操作仍是
+既有 cell PATCH，传 `expected_before=""` 和 `origin="llm_complete"`，从而在生成期间目标格被其他操作填入时返回冲突而不覆盖，
+并保留正常的变更历史和投影调度。
+
 外部 Agent 面（REST `/api/agent/knowhow/*` 与四个 knowhow MCP 工具）与会话路由共用同一服务核心：
 双鉴权依赖同时接受登录会话与 `snm_` Agent token，读取需 `knowledge:read`、代码写入需
 `knowhow:code`，跨 owner 探测一律统一 404、不暴露存在性。判别集按列全量返回（刻意不做语义预筛），

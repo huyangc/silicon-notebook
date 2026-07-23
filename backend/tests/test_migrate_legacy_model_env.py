@@ -64,6 +64,7 @@ def test_build_plan_preserves_roles_bindings_protocols_and_inferred_capacity(tmp
     assert plan.bindings["report_sufficiency"] == "rewrite"
     assert plan.bindings["knowhow_optimize"] == "rewrite"
     assert plan.bindings["knowhow_reformat"] == "rewrite"
+    assert plan.bindings["knowhow_complete"] == "rewrite"
     assert plan.bindings["reasoning_agent"] == "reasoning"
     assert plan.bindings["report_section"] == "reasoning"
     assert plan.bindings["kg_extract"] == "kg"

@@ -2515,6 +2515,92 @@
           "title": "KnowhowRowCode",
           "type": "object"
         },
+        "KnowhowRowCompleteRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "target_column_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Column Ids"
+            }
+          },
+          "title": "KnowhowRowCompleteRequest",
+          "type": "object"
+        },
+        "KnowhowRowCompleteResult": {
+          "properties": {
+            "suggestions": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowRowCompletionSuggestion"
+              },
+              "title": "Suggestions",
+              "type": "array"
+            }
+          },
+          "title": "KnowhowRowCompleteResult",
+          "type": "object"
+        },
+        "KnowhowRowCompletionSuggestion": {
+          "properties": {
+            "abstain_reason": {
+              "title": "Abstain Reason",
+              "type": "string"
+            },
+            "based_on_row_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Based On Row Ids",
+              "type": "array"
+            },
+            "basis": {
+              "title": "Basis",
+              "type": "string"
+            },
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "confidence": {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ],
+              "title": "Confidence",
+              "type": "string"
+            },
+            "suggestion_md": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Suggestion Md"
+            }
+          },
+          "required": [
+            "column_id",
+            "suggestion_md",
+            "confidence",
+            "basis",
+            "abstain_reason"
+          ],
+          "title": "KnowhowRowCompletionSuggestion",
+          "type": "object"
+        },
         "KnowhowRowCreate": {
           "properties": {
             "cells": {
@@ -11314,6 +11400,73 @@
             }
           },
           "summary": "Reformat Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/complete": {
+        "post": {
+          "operationId": "complete_knowhow_row_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__complete_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowRowCompleteRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowRowCompleteResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Complete Knowhow Row"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/template": {

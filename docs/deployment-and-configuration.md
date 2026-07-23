@@ -264,12 +264,17 @@ offline/deterministic fallbacks.
 Each `[services.<id>]` table defines `display_name`, `kind`, `protocol`,
 `base_url`, `model`, `api_key_env`, and `max_concurrency`. The
 `[bindings]` table maps stable workload ids such as `ask_answer`,
-`reasoning_agent`, `kg_extract`, `retrieval_query_embedding`, and
+`reasoning_agent`, `knowhow_complete`, `kg_extract`, `retrieval_query_embedding`, and
 `retrieval_rerank` to those services. Several workloads may share a service;
 all of them share that service's one scheduler and one concurrency budget.
 `max_concurrency` is the only model-capacity setting. Source-job counts,
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
+
+`knowhow_complete` is an interactive chat workload for explicit, single-row
+Knowhow empty-cell suggestions. Bind it to a compatible chat service when this
+feature is wanted. Leaving it unbound, or a provider failure, yields no
+suggestion; the application never fabricates an offline completion.
 
 Scheduling policy is fixed in code:
 

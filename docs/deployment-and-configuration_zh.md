@@ -233,10 +233,13 @@ vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 
 每个 `[services.<id>]` 表配置 `display_name`、`kind`、`protocol`、`base_url`、
 `model`、`api_key_env` 与 `max_concurrency`；`[bindings]` 把稳定的 workload id
-（如 `ask_answer`、`reasoning_agent`、`kg_extract`、
+（如 `ask_answer`、`reasoning_agent`、`knowhow_complete`、`kg_extract`、
 `retrieval_query_embedding`、`retrieval_rerank`）映射到物理服务。多个 workload
 可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
 是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
+
+`knowhow_complete` 是供 Knowhow 单行空格显式生成建议的 interactive chat workload。需要此功能时，
+将它绑定到兼容的 chat 服务；未绑定或 provider 失败时不返回建议，应用绝不伪造离线补全结果。
 
 调度策略固定在代码中：
 

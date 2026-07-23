@@ -38,7 +38,15 @@
  */
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import {
   Check,
   ChevronLeft,
@@ -73,6 +81,7 @@ import {
   batchPatchKnowhowCells,
   knowhowTemplateUrl,
   optimizeKnowhowCell,
+  completeKnowhowRow,
   reformatKnowhowCell,
   fetchKnowhowRowCodeByColumn,
   filterKnowhowTables,
@@ -83,9 +92,17 @@ import {
   type KnowhowRow,
   type KnowhowColumn,
   type KnowhowCellCode,
+  type KnowhowRowCompletionSuggestion,
   type Role,
   type ProjectionStatus,
 } from "./knowhow-model.ts";
+import {
+  COMPLETION_CONFIDENCE_LABELS,
+  canAcceptCompletionSuggestion,
+  completableKnowhowColumns,
+  completionSavePlan,
+  completionReferenceLabel,
+} from "./knowhow-complete-logic.ts";
 import {
   filterRows,
   sortColumnsByPosition,
@@ -257,6 +274,11 @@ export function KnowhowPanel({
   // 优化的行 id（与 cellModal 平级的另一个顶层 modal 状态，堆叠在抽屉之上，
   // 镜像 cellModal 自己的挂载方式）。
   const [optimizeRowId, setOptimizeRowId] = useState<string | null>(null);
+  // 行详情「智能补全空列」审阅弹窗；只保存目标行 id，建议由弹窗按当前快照
+  // 显式请求，关闭/切行即卸载并用请求归属守卫丢弃晚到响应。
+  const [completeRowId, setCompleteRowId] = useState<string | null>(null);
+  const completionTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const completionFallbackFocusRef = useRef<HTMLElement | null>(null);
   // knowhow-md-normalize Task 9：「一键规整」批量弹窗——行作用域用 rowId 记
   // 正在批量规整哪一行（与 optimizeRowId 同一种"堆叠在抽屉之上"的顶层 modal
   // 状态）；表作用域只是个布尔开关（作用对象是 detail.rows 整体，不需要再
@@ -477,6 +499,7 @@ export function KnowhowPanel({
     setCreateOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setCompleteRowId(null);
     setReformatRowId(null);
     setReformatTableOpen(false);
     setCodeModal(null);
@@ -571,6 +594,7 @@ export function KnowhowPanel({
     setTransferOpen(false); // C3：与 manageOpen 同级的顶层 modal 状态，一并清空
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setCompleteRowId(null);
     setCodeModal(null);
     setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
   }
@@ -1109,6 +1133,20 @@ export function KnowhowPanel({
     ? cellSummary(resolveRowTitleText(optimizeRow, detail.columns), 60) || rowFallbackTitle(optimizeRow.position)
     : "";
 
+  const completeRow = detail?.rows.find((row) => row.id === completeRowId) ?? null;
+  const completeRowTitle = completeRow && detail
+    ? cellSummary(resolveRowTitleText(completeRow, detail.columns), 60) || rowFallbackTitle(completeRow.position)
+    : "";
+
+  function openRowCompletion(rowId: string, trigger: HTMLButtonElement) {
+    completionTriggerRef.current = trigger;
+    // 接受最后一个空列后，入口会按门控从底层抽屉卸载。打开时同时冻结所在
+    // 行详情/概念矩阵里稳定存在的关闭按钮，作为焦点恢复的第二落点。
+    const ownerDialog = trigger.closest<HTMLElement>('[role="dialog"]');
+    completionFallbackFocusRef.current = ownerDialog?.querySelector<HTMLElement>('button[title="关闭"]') ?? ownerDialog;
+    setCompleteRowId(rowId);
+  }
+
   // knowhow-md-normalize Task 9「一键规整整行」批量弹窗当前作用的行——同一套
   // 查找/标题合成方式。
   const reformatRow = detail?.rows.find((row) => row.id === reformatRowId) ?? null;
@@ -1244,9 +1282,11 @@ export function KnowhowPanel({
           onEditCell={openCellEdit}
           onClose={() => setOpenRowId(null)}
           cellModalOpen={
-            cellModal !== null || optimizeRowId !== null || reformatRowId !== null || codeModal !== null
+            cellModal !== null || optimizeRowId !== null || completeRowId !== null || reformatRowId !== null || codeModal !== null
           }
           onOptimizeRow={() => setOptimizeRowId(openRow.id)}
+          anchorColumnId={detail.anchorColumnId}
+          onCompleteRow={(trigger) => openRowCompletion(openRow.id, trigger)}
           onReformatRow={() => setReformatRowId(openRow.id)}
           codeByColumn={rowCodeByColumn}
           codeLoaded={rowCodeLoaded}
@@ -1277,6 +1317,7 @@ export function KnowhowPanel({
           canEdit={canEdit}
           highlightRowId={highlightRowId}
           onEditCell={(rowId, columnId) => openCellAuto(rowId, columnId)}
+          onCompleteRow={openRowCompletion}
           onClose={() => { setOpenConceptValue(null); setHighlightRowId(null); }}
           error={conceptDrawerError}
           onAddBranch={() => addBranch(openConceptGroup.anchorValue)}
@@ -1288,6 +1329,25 @@ export function KnowhowPanel({
           deletingConcept={deletingConcept}
           onDeleteBranch={deleteBranch}
           deletingBranchRowId={deletingBranchRowId}
+        />
+      )}
+
+      {/* 必须排在矩阵抽屉之后：两者同为 z-index 65，DOM 后项才会盖在矩阵之上。 */}
+      {completeRowId && completeRow && detail && selectedTableId && canEdit && (
+        <KnowhowRowCompletionModal
+          key={`${selectedTableId}:${completeRow.id}`}
+          notebookId={notebookId}
+          apiBase={apiBase}
+          tableId={selectedTableId}
+          row={completeRow}
+          rows={detail.rows}
+          columns={detail.columns}
+          anchorColumnId={detail.anchorColumnId}
+          rowTitle={completeRowTitle}
+          returnFocusTo={completionTriggerRef.current}
+          fallbackFocusTo={completionFallbackFocusRef.current}
+          onAcceptCell={handleCellSave}
+          onClose={() => setCompleteRowId(null)}
         />
       )}
 
@@ -2967,6 +3027,93 @@ export function KnowhowPanel({
           color: var(--muted);
         }
 
+        /* 行级智能补全：逐列审阅卡片。置信度只表达建议可靠程度，不以颜色
+           暗示会自动执行；所有写入仍需用户逐项点击接受。 */
+        .kh-completion-card {
+          width: min(820px, 100%);
+        }
+
+        .kh-completion-body {
+          display: grid;
+          gap: 14px;
+        }
+
+        .kh-completion-item {
+          border: 1px solid var(--line);
+          border-radius: 12px;
+          padding: 14px;
+          background: #fff;
+        }
+
+        .kh-completion-item-head,
+        .kh-completion-references,
+        .kh-completion-item-actions,
+        .kh-completion-load-error {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .kh-completion-item-head h4 {
+          margin: 0;
+          font-size: 14px;
+        }
+
+        .kh-completion-confidence,
+        .kh-completion-reference {
+          border-radius: 999px;
+          padding: 2px 8px;
+          font-size: 11px;
+          border: 1px solid var(--line);
+          background: var(--soft);
+          color: var(--muted);
+        }
+
+        .kh-completion-confidence--high {
+          color: var(--green);
+          border-color: color-mix(in srgb, var(--green) 35%, var(--line));
+        }
+
+        .kh-completion-confidence--medium {
+          color: #8a5a14;
+          border-color: #e7c987;
+        }
+
+        .kh-completion-confidence--low {
+          color: var(--muted);
+        }
+
+        .kh-completion-suggestion,
+        .kh-completion-abstain {
+          margin-top: 12px;
+          padding: 12px;
+          border-radius: 9px;
+          background: var(--soft);
+        }
+
+        .kh-completion-abstain {
+          color: var(--muted);
+          margin-bottom: 0;
+        }
+
+        .kh-completion-basis {
+          margin: 10px 0 0;
+          color: var(--muted);
+          font-size: 12px;
+        }
+
+        .kh-completion-references {
+          margin-top: 10px;
+          font-size: 12px;
+          color: var(--muted);
+        }
+
+        .kh-completion-item-actions {
+          justify-content: flex-end;
+          margin-top: 12px;
+        }
+
         /* knowhow-md-normalize Task 9：「一键规整」批量弹窗的各态复用同一套
            .kh-optimize-queue-status 外壳，只是状态词表不同（见
            knowhow-optimize-logic.ts ReformatBatchCellStatus），配色沿用上面
@@ -3295,6 +3442,25 @@ export function KnowhowPanel({
         .kh-matrix-branch-delete:hover {
           color: var(--red);
           background: #fef2f2;
+        }
+
+        .kh-matrix-branch-complete {
+          display: inline-flex;
+          align-items: center;
+          gap: 3px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 2px 6px;
+          color: var(--blue);
+          background: #fff;
+          font-size: 11px;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .kh-matrix-branch-complete:hover {
+          border-color: var(--blue);
+          background: #eef2ff;
         }
 
         /* 属性名列（行头）：灰底与表头呼应，纵向居中避免长文本内容把它挤到
@@ -4226,6 +4392,8 @@ function KnowhowRowDrawer({
   onEditCell,
   onClose,
   onOptimizeRow,
+  anchorColumnId,
+  onCompleteRow,
   onReformatRow,
   cellModalOpen,
   codeByColumn,
@@ -4246,6 +4414,9 @@ function KnowhowRowDrawer({
   onClose: () => void;
   /** 「优化整行」入口（Task 9，规格③）：打开批量优化弹窗，堆叠在本抽屉之上。 */
   onOptimizeRow: () => void;
+  /** 智能补全只面向空的非行标题列；只读成员无入口。 */
+  anchorColumnId: string | null;
+  onCompleteRow: (trigger: HTMLButtonElement) => void;
   /** 「一键规整整行」入口（knowhow-md-normalize Task 9）：打开批量规整弹窗，
    * 同样堆叠在本抽屉之上——与「优化整行」并列但语义不同（规整=只改格式，
    * 优化=改措辞，见 knowhow-cell-editor-logic.ts TOOLBAR_REFORMAT_LABEL
@@ -4285,6 +4456,7 @@ function KnowhowRowDrawer({
 
   const orderedColumns = useMemo(() => sortColumnsByPosition(columns), [columns]);
   const titleText = cellSummary(resolveRowTitleText(row, columns), 200) || "行详情";
+  const hasCompletableColumns = completableKnowhowColumns(row, columns, anchorColumnId).length > 0;
 
   return (
     <>
@@ -4297,6 +4469,15 @@ function KnowhowRowDrawer({
             {canEdit && (
               <button type="button" className="knowhow-drawer-edit-button" onClick={onOptimizeRow}>
                 <Sparkles size={13} /> {ROW_OPTIMIZE_BUTTON_LABEL}
+              </button>
+            )}
+            {canEdit && hasCompletableColumns && (
+              <button
+                type="button"
+                className="knowhow-drawer-edit-button"
+                onClick={(event) => onCompleteRow(event.currentTarget)}
+              >
+                <Sparkles size={13} /> 智能补全空列
               </button>
             )}
             {/* 「一键规整整行」批量入口（knowhow-md-normalize Task 9）——挨着
@@ -4350,6 +4531,284 @@ function KnowhowRowDrawer({
         </div>
       </section>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// KnowhowRowCompletionModal — 对当前行所有空的非行标题列生成建议，逐项审阅。
+// 生成本身不写库；每次接受都复用 handleCellSave，并以空串为并发基线。
+// ---------------------------------------------------------------------------
+
+type CompletionSave = (
+  rowId: string,
+  columnId: string,
+  contentMd: string,
+  expectedByRowId?: Map<string, string>,
+  targetRowIds?: string[],
+  anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
+  origin?: string,
+) => Promise<void>;
+
+export function KnowhowRowCompletionModal({
+  notebookId,
+  apiBase,
+  tableId,
+  row,
+  rows,
+  columns,
+  anchorColumnId,
+  rowTitle,
+  returnFocusTo,
+  fallbackFocusTo,
+  onAcceptCell,
+  onClose,
+}: {
+  notebookId: string;
+  apiBase: string;
+  tableId: string;
+  row: KnowhowRow;
+  rows: KnowhowRow[];
+  columns: KnowhowColumn[];
+  anchorColumnId: string | null;
+  rowTitle: string;
+  returnFocusTo: HTMLButtonElement | null;
+  fallbackFocusTo: HTMLElement | null;
+  onAcceptCell: CompletionSave;
+  onClose: () => void;
+}) {
+  // 弹窗打开时冻结目标列。接受一项后父 detail 会更新，但不能因此重新请求、
+  // 也不能让尚待审阅的其它建议突然从列表消失。
+  const [targetColumns] = useState(() => completableKnowhowColumns(row, columns, anchorColumnId));
+  const [savePlans] = useState(() => new Map(
+    completableKnowhowColumns(row, columns, anchorColumnId).map((column) => [
+      column.id,
+      completionSavePlan(row.id, column.id, rows, anchorColumnId),
+    ]),
+  ));
+  const [suggestions, setSuggestions] = useState<KnowhowRowCompletionSuggestion[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [savingColumnId, setSavingColumnId] = useState<string | null>(null);
+  const [acceptedColumnIds, setAcceptedColumnIds] = useState<Set<string>>(() => new Set());
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
+  const mountedRef = useRef(false);
+  const startedRef = useRef(false);
+  const requestRef = useRef(0);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const floating = useFloatingWindow({ storageKey: "knowhow.rowCompletion.window" });
+
+  function requestSuggestions() {
+    const requestId = ++requestRef.current;
+    setSuggestions(null);
+    setLoadError(null);
+    completeKnowhowRow(notebookId, tableId, row.id, targetColumns.map((column) => column.id))
+      .then((result) => {
+        if (!mountedRef.current || requestRef.current !== requestId) return;
+        const byColumnId = new Map(result.suggestions.map((suggestion) => [suggestion.columnId, suggestion]));
+        setSuggestions(
+          targetColumns.flatMap((column) => {
+            const suggestion = byColumnId.get(column.id);
+            return suggestion ? [suggestion] : [];
+          }),
+        );
+      })
+      .catch((error) => {
+        if (!mountedRef.current || requestRef.current !== requestId) return;
+        setLoadError(extractErrorMessage(error, "生成建议失败，请稍后重试"));
+      });
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    // React StrictMode 会做一次 effect setup→cleanup→setup 探测；startedRef 避免
+    // 因此把昂贵的建议请求发两遍。真实卸载后是新组件实例，ref 会自然重置。
+    if (!startedRef.current) {
+      startedRef.current = true;
+      requestSuggestions();
+    }
+    closeButtonRef.current?.focus();
+    return () => {
+      mountedRef.current = false;
+      const focusTarget = returnFocusTo?.isConnected ? returnFocusTo : fallbackFocusTo?.isConnected ? fallbackFocusTo : null;
+      focusTarget?.focus();
+    };
+    // 每次挂载只请求一次；retry 由按钮显式触发，目标列已冻结。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function requestClose() {
+    // 保存中不允许卸载；请求建议时可以关闭，requestRef 会拦截晚到响应。
+    if (savingColumnId) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      requestClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savingColumnId]);
+
+  async function acceptSuggestion(suggestion: KnowhowRowCompletionSuggestion) {
+    if (savingColumnId || acceptedColumnIds.has(suggestion.columnId) || !canAcceptCompletionSuggestion(suggestion)) {
+      return;
+    }
+    setSavingColumnId(suggestion.columnId);
+    setSaveErrors((current) => {
+      const next = { ...current };
+      delete next[suggestion.columnId];
+      return next;
+    });
+    try {
+      const savePlan = savePlans.get(suggestion.columnId);
+      if (!savePlan) throw new Error("completion save plan missing");
+      // 弹窗打开时已冻结完整写目标：共享格包含每个成员的空串基线与 anchor
+      // 原值；非共享列只有当前行。服务端据此以 409 阻止覆盖或成员漂移。
+      await onAcceptCell(
+        row.id,
+        suggestion.columnId,
+        suggestion.suggestionMd ?? "",
+        savePlan.expectedByRowId,
+        savePlan.targetRowIds,
+        savePlan.anchorGuard,
+        "llm_complete",
+      );
+      if (!mountedRef.current) return;
+      setAcceptedColumnIds((current) => new Set(current).add(suggestion.columnId));
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setSaveErrors((current) => ({
+        ...current,
+        [suggestion.columnId]: extractErrorMessage(error, "保存失败，请稍后重试"),
+      }));
+    } finally {
+      if (mountedRef.current) setSavingColumnId(null);
+    }
+  }
+
+  function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.currentTarget === event.target) requestClose();
+  }
+
+  function trapFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !event.currentTarget.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  return (
+    <div className="kh-modal-overlay" onClick={handleBackdropClick}>
+      <div
+        ref={floating.cardRef}
+        className="kh-modal-card kh-completion-card"
+        style={floating.style}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`智能补全空列 · ${rowTitle}`}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={trapFocus}
+      >
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
+          <div className="kh-modal-header-top">
+            <div className="kh-modal-breadcrumb">
+              <span className="kh-modal-row-title" title={rowTitle}>{rowTitle}</span>
+              <span className="kh-modal-sep">›</span>
+              <span className="kh-modal-col-name">智能补全空列</span>
+            </div>
+            <button ref={closeButtonRef} type="button" className="icon-button" title="关闭" onClick={requestClose} disabled={Boolean(savingColumnId)}>
+              <X size={18} />
+            </button>
+          </div>
+        </header>
+
+        <div className="kh-modal-body kh-completion-body">
+          {suggestions === null && !loadError && (
+            <p className="kh-row-context-empty" role="status" aria-live="polite"><Loader2 size={15} className="spin" /> 正在参考表内记录生成建议…</p>
+          )}
+          {loadError && (
+            <div className="kh-completion-load-error">
+              <p className="kh-inline-error" role="alert">{loadError}</p>
+              <button type="button" onClick={requestSuggestions}>重试</button>
+            </div>
+          )}
+          {suggestions && suggestions.length === 0 && (
+            <p className="kh-row-context-empty">暂时没有可用建议，你可以保留空白并稍后手动填写。</p>
+          )}
+          {suggestions?.map((suggestion) => {
+            const column = targetColumns.find((candidate) => candidate.id === suggestion.columnId);
+            if (!column) return null;
+            const accepted = acceptedColumnIds.has(suggestion.columnId);
+            const acceptable = canAcceptCompletionSuggestion(suggestion);
+            const saving = savingColumnId === suggestion.columnId;
+            return (
+              <section key={suggestion.columnId} className="kh-completion-item">
+                <div className="kh-completion-item-head">
+                  <h4>{column.name}</h4>
+                  <span className={`kh-completion-confidence kh-completion-confidence--${suggestion.confidence}`}>
+                    {COMPLETION_CONFIDENCE_LABELS[suggestion.confidence]}
+                  </span>
+                </div>
+                {acceptable ? (
+                  <div className="kh-completion-suggestion">
+                    <KnowhowMarkdown md={suggestion.suggestionMd ?? ""} notebookId={notebookId} apiBase={apiBase} />
+                  </div>
+                ) : (
+                  <p className="kh-completion-abstain">暂不建议填写：{suggestion.abstainReason.trim() || "现有记录不足以可靠判断"}</p>
+                )}
+                {suggestion.basis.trim() && <p className="kh-completion-basis">依据：{suggestion.basis}</p>}
+                {suggestion.basedOnRowIds.length > 0 && (
+                  <div className="kh-completion-references" aria-label="参考记录">
+                    <span>参考记录</span>
+                    {suggestion.basedOnRowIds.map((referenceRowId, index) => (
+                      <span key={`${referenceRowId}:${index}`} className="kh-completion-reference">
+                        {completionReferenceLabel(referenceRowId, rows, columns)}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {saveErrors[suggestion.columnId] && <p className="kh-inline-error" role="alert">{saveErrors[suggestion.columnId]}</p>}
+                <div className="kh-completion-item-actions">
+                  <button
+                    type="button"
+                    className="kh-primary-button"
+                    onClick={() => void acceptSuggestion(suggestion)}
+                    disabled={!acceptable || accepted || Boolean(savingColumnId)}
+                    aria-label={`接受 ${column.name} 建议`}
+                  >
+                    {accepted ? <><Check size={14} /> 已填入</> : saving ? <span role="status" aria-live="polite"><Loader2 size={14} className="spin" /> 保存中…</span> : "接受此项"}
+                  </button>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+        <footer className="kh-modal-footer">
+          <div className="kh-footer-actions">
+            <button type="button" onClick={requestClose} disabled={Boolean(savingColumnId)}>关闭</button>
+          </div>
+        </footer>
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
+      </div>
+    </div>
   );
 }
 

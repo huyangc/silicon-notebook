@@ -38,6 +38,7 @@ _MODEL_ERROR_STAGES = frozenset({
     "kg_obj_ann",
     "kg_obj_delta",
     "knowhow_embed",
+    "knowhow_complete",
     "knowhow_optimize",
     "ppr_fact_rerank",
     "relation_ann_delta",

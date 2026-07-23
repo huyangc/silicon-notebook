@@ -67,6 +67,7 @@ _WORKLOAD_LABELS = MappingProxyType({
     "memory_preview": "记忆预览",
     "knowhow_optimize": "经验表述优化",
     "knowhow_reformat": "经验格式整理",
+    "knowhow_complete": "经验空列补全",
     "retrieval_query_embedding": "检索查询向量",
     "source_element_embedding": "来源元素向量",
     "chunk_embedding": "来源分块向量",
@@ -114,7 +115,7 @@ WORKLOADS = workload_map(
         "kg_community_summary": "background",
         "kg_conflict_review": "background", "schema_induction": "interactive",
         "memory_preview": "interactive", "knowhow_optimize": "interactive",
-        "knowhow_reformat": "interactive",
+        "knowhow_reformat": "interactive", "knowhow_complete": "interactive",
     },
     embedding={
         "retrieval_query_embedding": "interactive",

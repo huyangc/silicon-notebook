@@ -36,6 +36,7 @@ _EXPECTED_WORKLOADS = {
     "memory_preview": ("chat", "interactive", "记忆预览"),
     "knowhow_optimize": ("chat", "interactive", "经验表述优化"),
     "knowhow_reformat": ("chat", "interactive", "经验格式整理"),
+    "knowhow_complete": ("chat", "interactive", "经验空列补全"),
     "retrieval_query_embedding": ("embedding", "interactive", "检索查询向量"),
     "source_element_embedding": ("embedding", "background", "来源元素向量"),
     "chunk_embedding": ("embedding", "background", "来源分块向量"),
