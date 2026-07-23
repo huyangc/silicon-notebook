@@ -19,6 +19,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
+from app.services.parsers import parser_class
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -769,6 +770,66 @@ def test_reconcile_repoint_cas_keeps_the_latest_suffix_across_the_read_write_sli
     assert stored == [f"{sid}_data.txt"], (
         f"CAS-first 不得留孤儿盘上文件（data.md/data.csv）；实际 {stored}"
     )
+
+
+def test_queued_reupload_with_a_different_suffix_repoints_file_path_on_reconcile(
+    live_repo, monkeypatch
+):
+    """'queued' worker 未启动时换后缀重传（round-8 P2-3）。
+
+    reuse 的在飞分支只改 file_name 不改 file_path，且此刻改名落在 process_source 读行
+    （line 883）**之前** → used==fresh，收口的 (a) 判据（file_name vs 本次实际用的
+    parser）看不见这次纠正。若判据只有 (a)，file_path 会永久停在旧后缀（.csv），而
+    云端 MinerU 按 Path(file_path).name、raw-text 读按 path 后缀分派 → 按旧类型处理，
+    行内部永久不自洽。收口判据必须同时看 file_path 后缀（(b)），跑完才按新 file_name
+    重写 file_path、整条重跑修复。
+
+    真实流水线（process_source 不打桩）、真实线程时序（先延后调度、后手动跑 worker）。
+    变异：删掉 _suffix_correction_pending 的 (b)（file_path 后缀判据）→ 收口漏掉、
+    file_path 停在 .csv → 本测试转红。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    monkeypatch.setattr(ingestion, "run_extraction", lambda _sid, **_kw: None)
+    _patch_parse(monkeypatch, [_element("body")])
+
+    body = b"col1,col2\n1,2"
+
+    # 上传 d.csv 但把调度**延后**（worker 未启动）：行停在 'queued'，file_path=.../d.csv。
+    deferred: list[str] = []
+    sid = _upload_named(
+        live_repo, nb, content=body, name="d.csv", scheduler=deferred.append
+    )[0].id
+    assert live_repo.get_source(sid).parse_status == "queued"
+    assert live_repo.get_source(sid).file_path.endswith("d.csv")
+
+    # 换后缀重传 d.md（worker 仍未启动）：reuse 走在飞分支只改 file_name，file_path 不动。
+    _upload_named(
+        live_repo, nb, content=body, name="d.md", scheduler=deferred.append
+    )
+    assert live_repo.get_source(sid).file_name == "d.md", "意图已持久化到 file_name"
+    assert live_repo.get_source(sid).file_path.endswith("d.csv"), (
+        "在飞分支绝不动 file_path（此刻仍是旧后缀，正是要收口的行内不一致）"
+    )
+    assert deferred == [sid], "reuse 的在飞分支不额外调度；仍只有首传那一次待跑"
+
+    # 现在 worker 才启动，跑这条被延后调度的 'queued' 行。
+    live_repo.process_source(sid)
+
+    final = live_repo.get_source(sid)
+    assert final.file_name == "d.md"
+    assert final.file_path.endswith("d.md"), (
+        "收口必须按新 file_name 重写 file_path；停在 .csv 说明 'queued' 换后缀漏收口"
+    )
+    assert parser_class(final.file_path) == parser_class(final.file_name), (
+        "file_path 与 file_name 后缀一致（行内部自洽）"
+    )
+    assert final.parse_status == "extracted", "补跑完照样落终态"
+    assert len(live_repo.list_sources(nb)) == 1, "始终只有一行"
+    # repoint 重写为新名 + 删旧后缀孤儿：盘上只剩新名文件。
+    nb_dir = Path(ingestion.source_files.storage_dir) / "notebooks" / nb
+    stored = sorted(p.name for p in nb_dir.glob(f"{sid}_*"))
+    assert stored == [f"{sid}_d.md"], f"repoint 后不留旧后缀孤儿；实际 {stored}"
 
 
 def test_an_unchanged_doc_type_costs_exactly_one_extraction(
