@@ -3,7 +3,7 @@ import random
 import re
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
@@ -77,6 +77,25 @@ def strip_json_fences(text: str) -> str:
     if i != -1 and j > i:
         cleaned = cleaned[i:j + 1]
     return cleaned
+
+
+def _response_validator_allows(
+    validator: Optional[Callable[[str], bool]], content: str
+) -> bool:
+    """Cache-admission gate for a caller-supplied response_validator.
+
+    None means "no schema opinion" -> allow (existing callers keep caching
+    exactly as before). Otherwise the validator judges the reply's shape; a
+    validator that raises is treated as "do not cache" — a cache fault (or a
+    buggy validator) must NEVER break the LLM call, and when in doubt about a
+    reply's usability the safe move is to skip the write, not freeze a possibly
+    bad value for the whole TTL."""
+    if validator is None:
+        return True
+    try:
+        return bool(validator(content))
+    except Exception:
+        return False
 
 
 def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
@@ -207,6 +226,7 @@ class OpenAICompatibleClient:
         max_tokens: Optional[int] = None,
         cancel_event: CancelEvent = None,
         bypass_cache: bool = False,
+        response_validator: Optional[Callable[[str], bool]] = None,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -374,9 +394,19 @@ class OpenAICompatibleClient:
             # permanently skip every write on a cold cache: it can never accumulate
             # its first entry, `len()` stays 0 forever, and the cache never turns
             # "truthy". Identity check sidesteps that trap entirely.
+            #
+            # The caller-supplied response_validator is the fourth door: policy's
+            # is_cacheable_llm_response is schema-agnostic (any parseable non-"{}"
+            # non-truncated reply passes), but a syntactically valid reply can
+            # still violate the CALLER's schema — e.g. KG extraction receiving
+            # {"nodes":"invalid"} (nodes must be a list). That parses, produces 0
+            # grounded objects, and — cached 90d — freezes that 0 while every
+            # re-parse keeps hitting it. Callers that know their shape pass a
+            # validator; it runs here (see _response_validator_allows: a validator
+            # fault conservatively skips the write rather than crashing the call).
             if cache is not None and ckey and is_cacheable_llm_response(
                 content, finish_reason
-            ):
+            ) and _response_validator_allows(response_validator, content):
                 try:
                     # tag=model: evict_tag(model) is how a model-service swap
                     # drops exactly this model's entries. An untagged write
