@@ -508,25 +508,28 @@ class SourceIngestionService:
                     scheduler(source_id)
                 else:
                     self.process_source(source_id, hooks)
-        elif (
-            retyped
-            and summary.parse_status == "extracted"
-            and hooks.should_extract_kg(summary.notebook_id)
-        ):
+        elif retyped and hooks.should_extract_kg(summary.notebook_id):
             # 内容没变、只有类型变了 → 只重抽 KG，不重解析（见 _reextract_retyped）。
-            # 状态先同步翻成 extracting：响应里立刻看得见，前端据此开始轮询，
-            # 否则「改类型」在界面上又是一次静默 no-op。
-            self.set_source_status(source_id, "extracting")
-            if scheduler is not None:
-                # 与 build_notebook_kg 同一个 job 池：文档级抽取的并发上限是
-                # 进程全局的，不能在这儿另起线程绕过它。
-                from app.services.kg import scheduler as kg_scheduler
+            # ⚠ 认领必须原子：「读 summary.parse_status 再决定调度」是 TOCTOU——
+            # 方法开头读到的 'extracting'/'extracted' 可能在这几行里已被在跑的流水线
+            # 落成 'extracted'。若据旧读到的 'extracting' 就不调度，而那条流水线又
+            # （开头就读走了旧 doc_type）落了 'extracted'，新类型就没人补跑。
+            # claim_reextract_if_extracted 用「WHERE parse_status='extracted'」的守卫
+            # UPDATE 原子表决：抢到（本就已定型）→ 本次拿到重抽权、翻 'extracting'；
+            # 没抢到（还在 queued/parsing/extracting）→ 不调度，交给那条在跑的流水线
+            # 的终态 doc_type 收口（mark_extracted_if_doc_type）按新类型补跑。
+            if self.sources.claim_reextract_if_extracted(source_id):
+                self._emit_status(source_id, "extracting", "")
+                if scheduler is not None:
+                    # 与 build_notebook_kg 同一个 job 池：文档级抽取的并发上限是
+                    # 进程全局的，不能在这儿另起线程绕过它。
+                    from app.services.kg import scheduler as kg_scheduler
 
-                kg_scheduler.submit_job(
-                    self._reextract_retyped, source_id, summary.notebook_id, hooks
-                )
-            else:
-                self._reextract_retyped(source_id, summary.notebook_id, hooks)
+                    kg_scheduler.submit_job(
+                        self._reextract_retyped, source_id, summary.notebook_id, hooks
+                    )
+                else:
+                    self._reextract_retyped(source_id, summary.notebook_id, hooks)
         if retyped or reparse or summary.parse_status == "failed":
             summary = self.sources.get_source(source_id)
         return UploadedSourceSummary.model_validate(
@@ -579,15 +582,16 @@ class SourceIngestionService:
         网络抖一下就能把一条本来好好的源打成 failed。doc_type 只喂抽取侧，所以
         只重跑抽取就够。
 
-        状态由调用方先翻成 'extracting'；这里必须落**终态**：成功 'extracted'，
-        失败 'failed' 且留下一句用户看得懂的原因。刻意不再退回 'parsed'：
-        'parsed' 在前端是非终态（轮询判据只认 extracted/failed 两个终态），
-        退回去会让界面一直转到超时、报一次假的「处理超时」；而且那之后重传同一个
-        文件也救不回来——doc_type 早已落库，retyped 为 false，整条路径变成静默
-        no-op。落 'failed' 则让前端立刻停轮询并显示失败，用户可以用既有的
-        「重新解析」入口，或者干脆重传（失败源走整条流水线重跑）来重试。
-        （build_notebook_kg 的单源失败确实退 'parsed'，但那是后台批量、没有人在
-        等这一条；这里有一个正在等结果的上传请求，语境不同。）
+        状态由调用方先翻成 'extracting'；成功的终态 'extracted' 现由
+        _extract_reconciling_doc_type 原子落下（与 doc_type 最终比对合一，见其
+        docstring），这里不再单独 set 'extracted'。失败仍在这里落 'failed' 且留一句
+        用户看得懂的原因。刻意不再退回 'parsed'：'parsed' 在前端是非终态（轮询判据
+        只认 extracted/failed 两个终态），退回去会让界面一直转到超时、报一次假的
+        「处理超时」；而且那之后重传同一个文件也救不回来——doc_type 早已落库，
+        retyped 为 false，整条路径变成静默 no-op。落 'failed' 则让前端立刻停轮询并
+        显示失败，用户可以用既有的「重新解析」入口，或者干脆重传（失败源走整条流水线
+        重跑）来重试。（build_notebook_kg 的单源失败确实退 'parsed'，但那是后台批量、
+        没有人在等这一条；这里有一个正在等结果的上传请求，语境不同。）
 
         绝不把异常抛回上传请求：用户的其它文件已经建好了。"""
         try:
@@ -600,7 +604,8 @@ class SourceIngestionService:
                 "doc-type re-extraction failed for %s", source_id
             )
             return
-        self.set_source_status(source_id, "extracted")
+        # reconcile 已原子落 'extracted'（DB）；补发 status 事件（与 process_source 同）。
+        self._emit_status(source_id, "extracted", "")
         try:
             hooks.mark_unified_dirty(notebook_id)
         except Exception:
@@ -610,39 +615,56 @@ class SourceIngestionService:
         hooks.maybe_enqueue_scale_fold(notebook_id)
 
     def _extract_reconciling_doc_type(
-        self, source_id: str, extract: Callable[[str], None]
+        self, source_id: str, extract: Callable[[str], None],
+        *, terminal_error_message: str = "",
     ) -> None:
-        """跑一次抽取；若抽取期间 doc_type 又被改了，按新类型再跑一次。
+        """抽取，并把「标记 extracted」原子地与 doc_type 的最终比对合成一步。
 
         doc_type 是在 run_extraction 的**开头**就读走的（它选抽取 profile、进抽取
-        prompt，因而也进 LLM 缓存键）。所以「抽取正在跑」这段窗口里改类型
+        prompt，因而也进 LLM 缓存键）。「抽取正在跑」这段窗口里改类型
         （reuse_uploaded_source 对 parse_status='extracting' 的行只记类型、不调度
-        任何东西），跑完落库的 doc_type 会与真正用来抽取的 profile 不一致，而且
-        没有任何东西会回来纠正——这条源就永远按错的类型入了图。
+        任何东西），若跑完无条件落 'extracted'，存库的 doc_type 会与真正用来抽取的
+        profile 不一致，而且没有任何东西回来纠正——这条源就永远按错的类型入了图。
+
+        每一轮：先读本轮抽取要用的 doc_type，抽取，再用
+        mark_extracted_if_doc_type 以「WHERE doc_type=本轮值」为守卫**原子**落终态：
+          · rowcount 1 → doc_type 没在窗口里被改，落 'extracted'，一致，返回；
+          · rowcount 0 → 窗口里被并发 retype 改了 → 不落终态，带新类型再跑一轮。
+        比对与终态是**同一条 UPDATE**，中间不再有任何窗口——这正是「读 doc_type →
+        抽取 → 落 extracted」三步一致性的最终收口（Codex 第 4 轮 P2）。此前的写法
+        「先读到 doc_type 旧值、再由调用方稍后无条件落 extracted」在这两步之间留有
+        窗口：并发 retype 在此改了类型且因行是 'extracting' 而不调度，就永久失配。
 
         这个窗口只能由正在跑的这一条自己收尾，不能由上传请求另起一条任务：
-        KG job 池（app/services/kg/scheduler.py）是一个普通的 ThreadPoolExecutor，
-        **不**按 source 串行；KG_JOB_CONCURRENCY>1 时两条任务会并发抽同一条源，
-        而 run_extraction 开头的 begin_extraction_run 会先删掉这条源已有的 KG
-        对象——两条任务互相清对方的产物，比丢一次 retype 坏得多。
+        KG job 池（app/services/kg/scheduler.py）不按 source 串行，两条任务并发抽
+        同一条源会互相清对方的 KG 产物（begin_extraction_run 先删既有对象），比丢
+        一次 retype 坏得多。
 
-        异常照旧向外抛（调用方各自决定落什么终态）；比对只多一次主键读，没有
-        任何模型/网络开销。"""
-        used = self.normalize_doc_type(
-            getattr(self.sources.get_source(source_id), "doc_type", "") or ""
-        )
+        轮数上限挡住病态循环（有人不停改类型）：耗尽后无条件落终态 + 告警，别让这
+        条源永远卡在 'extracting'。异常照旧向外抛（调用方各自决定落什么终态）；每轮
+        只多一次主键读 + 一条守卫 UPDATE，没有任何模型/网络开销。终态的
+        error_message 由调用方给（process_source 传 empty_hint/fallback_hint；
+        _reextract_retyped 不给）。
+
+        只落库、**不发** status 事件：调用方在自己的 stage 仪器之后统一发
+        _emit_status('extracted', ...)，好让事件顺序（extract:done 先于
+        status:extracted）与重构前一字不差——DB 落终态的原子性对可观测顺序不可见。"""
         for _ in range(_DOC_TYPE_RECONCILE_MAX_ROUNDS):
-            extract(source_id)
-            current = self.normalize_doc_type(
+            used = self.normalize_doc_type(
                 getattr(self.sources.get_source(source_id), "doc_type", "") or ""
             )
-            if current == used:
+            extract(source_id)
+            if self.sources.mark_extracted_if_doc_type(
+                source_id, used, error_message=terminal_error_message
+            ):
                 return
-            used = current
+        # 轮数耗尽：无条件落终态 + 告警，别把源卡在 'extracting'。
+        self.sources.set_status(
+            source_id, "extracted", error_message=terminal_error_message
+        )
         self.event_log.logger.warning(
-            "doc_type kept changing during extraction of %s; stopped after %s "
-            "rounds with doc_type=%r",
-            source_id, _DOC_TYPE_RECONCILE_MAX_ROUNDS, used,
+            "doc_type kept changing during extraction of %s; stopped after %s rounds",
+            source_id, _DOC_TYPE_RECONCILE_MAX_ROUNDS,
         )
 
     def upload_sources(
@@ -1006,22 +1028,14 @@ class SourceIngestionService:
             )
             embed_thread.start()
 
-            if hooks.should_extract_kg(notebook_id):
-                self.set_source_status(source_id, "extracting")
-                t = time.perf_counter()
-                stage("extract", "start", t)
-                # 同一条源第一次上传时也存在「抽取跑到一半用户改类型」的窗口
-                # （他嫌慢，用正确的类型把同一个文件又传了一次）：
-                # reuse_uploaded_source 对 'extracting' 的行只记类型不调度，
-                # 由这里跑完自校验一次并按新类型补跑。
-                self._extract_reconciling_doc_type(source_id, hooks.extract_source)
-                stage("extract", "done", t)
-                try:
-                    hooks.mark_unified_dirty(source.notebook_id)
-                except Exception:
-                    self.event_log.logger.exception(
-                        "unified-KG dirty mark failed for source %s", source_id
-                    )
+            # Hints + notebook-meta augmentation do NOT depend on KG extraction
+            # output; compute/persist them up front so the terminal 'extracted'
+            # mark can be the LAST write. For the KG path that terminal mark is now
+            # issued atomically-with-the-final-doc_type-recheck INSIDE
+            # _extract_reconciling_doc_type (closing the retype window); computing
+            # these after extraction would reopen a gap between "doc_type confirmed"
+            # and "extracted".
+            #
             # Surface "parsed to empty" (e.g. scanned/image PDF with no text layer)
             # instead of a silent success that looks like a real result.
             empty_hint = ""
@@ -1043,21 +1057,49 @@ class SourceIngestionService:
                 )
                 if mineru_error:
                     fallback_hint = f"{fallback_hint} Last MinerU error: {mineru_error[:500]}"
+            terminal_msg = empty_hint or fallback_hint
             # Auto-fill notebook name/description from sources (only while name is a
-            # default placeholder / purpose is still auto). Persist BEFORE marking the
-            # source 'extracted' so the frontend's extracted-triggered refetch shows
-            # the fresh name/description live. Best-effort: never fail the pipeline.
+            # default placeholder / purpose is still auto). Persist BEFORE the
+            # terminal 'extracted' mark so the frontend's extracted-triggered
+            # refetch shows the fresh name/description live. It reads source
+            # metadata (title/summary/doc_type), never KG objects, and this source
+            # is counted via pending_source_id whether it is 'parsed' or
+            # 'extracting' — so running it before extraction gives the same input.
+            # Best-effort: never fail the pipeline.
             try:
                 hooks.augment_notebook_metadata(source.notebook_id, source_id)
             except Exception:
                 self.event_log.logger.exception(
                     "notebook meta augmentation failed for %s", source_id
                 )
-            self.set_source_status(
-                source_id,
-                "extracted",
-                error_message=empty_hint or fallback_hint,
-            )
+            if hooks.should_extract_kg(notebook_id):
+                self.set_source_status(source_id, "extracting")
+                t = time.perf_counter()
+                stage("extract", "start", t)
+                # 同一条源第一次上传时也存在「抽取跑到一半用户改类型」的窗口（他嫌慢，
+                # 用正确的类型把同一个文件又传了一次）：reuse_uploaded_source 对
+                # 'extracting' 的行只记类型不调度，由这里跑完自校验并按新类型补跑；
+                # 成功的终态 'extracted' 由 _extract_reconciling_doc_type 与 doc_type
+                # 最终比对**原子**落下（收口 retype 窗口，见其 docstring）。
+                self._extract_reconciling_doc_type(
+                    source_id, hooks.extract_source,
+                    terminal_error_message=terminal_msg,
+                )
+                stage("extract", "done", t)
+                # reconcile 已原子落 'extracted'（DB）；这里补发 status 事件，放在
+                # stage extract:done 之后以保持既有事件顺序（见其 docstring）。
+                self._emit_status(source_id, "extracted", terminal_msg)
+                try:
+                    hooks.mark_unified_dirty(source.notebook_id)
+                except Exception:
+                    self.event_log.logger.exception(
+                        "unified-KG dirty mark failed for source %s", source_id
+                    )
+            else:
+                # 不抽 KG：没有 doc_type/profile 一致性可谈，直接落终态。
+                self.set_source_status(
+                    source_id, "extracted", error_message=terminal_msg
+                )
             # KG ('extracted'/green) set above; wait for the background element
             # embedding to finish before declaring the whole pipeline done.
             embed_thread.join()

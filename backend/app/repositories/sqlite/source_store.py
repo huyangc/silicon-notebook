@@ -578,6 +578,62 @@ class SourceStore:
             )
         return cursor.rowcount == 1
 
+    def claim_reextract_if_extracted(self, source_id: str) -> bool:
+        """Atomically flip a SETTLED 'extracted' source to 'extracting' to claim a
+        doc-type re-extraction, returning whether THIS caller won.
+
+        Backs reuse_uploaded_source's retype branch. Reading parse_status and THEN
+        deciding to schedule is a TOCTOU: an in-flight pipeline can finalize
+        'extracted' between reuse_uploaded_source's top-of-method read and the
+        branch, so a retype that saw 'extracting' would decline to schedule while
+        the pipeline (which already read the OLD doc_type) finalizes with it —
+        and nobody reconciles the new type. The conditional flip closes it: won
+        (row was 'extracted') -> this caller owns the re-extract with the new
+        type; lost (still queued/parsing/extracting, or failed) -> False, do NOT
+        schedule, because the running pipeline's terminal doc_type recheck
+        (mark_extracted_if_doc_type) re-extracts with the new type and a second
+        pipeline on one row clears the first's KG products. Single WHERE-guarded
+        UPDATE, atomic under the write lock; clears error_message like
+        set_status('extracting') did."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE sources SET parse_status='extracting', status='extracting', "
+                "error_message='', updated_at=? "
+                "WHERE id=? AND parse_status='extracted'",
+                (self.now(), source_id),
+            )
+        return cursor.rowcount == 1
+
+    def mark_extracted_if_doc_type(
+        self, source_id: str, expected_doc_type: str, *, error_message: str = ""
+    ) -> bool:
+        """Atomically mark a source 'extracted' IFF its stored doc_type still
+        equals ``expected_doc_type`` (what the just-finished extraction used),
+        returning whether the terminal transition landed.
+
+        Backs SourceIngestionService._extract_reconciling_doc_type. doc_type is
+        read at the START of run_extraction (it selects the extraction profile and
+        rides the prompt, hence the LLM cache key); a concurrent retype landing
+        between the reconcile loop's final doc_type read and the 'extracted' mark
+        used to leave the stored type disagreeing with the profile actually used,
+        with nothing to correct it (reuse_uploaded_source declines to schedule on
+        an 'extracting' row). Folding the recheck INTO the terminal write — one
+        WHERE-guarded UPDATE, atomic under the write lock — removes that window:
+        rowcount 1 -> finalized consistently; rowcount 0 -> the type changed under
+        us, the caller re-extracts with the new type (bounded rounds) instead of
+        finalizing an inconsistent source. ``expected_doc_type`` is already
+        normalized by the caller, and every writer stores a normalized doc_type,
+        so the raw column == expected comparison is exact. Does not touch summary
+        (set at 'parsed'); error_message mirrors set_status('extracted', ...)."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE sources SET status='extracted', parse_status='extracted', "
+                "error_message=?, updated_at=? "
+                "WHERE id=? AND doc_type=?",
+                (error_message, self.now(), source_id, expected_doc_type),
+            )
+        return cursor.rowcount == 1
+
     def update_file_hash(
         self,
         source_id: str,
