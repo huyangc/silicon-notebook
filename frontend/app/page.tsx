@@ -2408,13 +2408,15 @@ export default function Home() {
           ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
           ...result.created,
         ]);
-        // The Ask surfaces' count (notebookSourceTotal) always gains the imported sources.
-        // sourcesTotal instead drives pagination + the source list: bump it only when no
-        // search is active — during a search it holds the matched-count, and adding URLs that
-        // may not match the query would inflate it into a phantom page (it re-syncs on the
-        // next filtered fetch).
+        // Maintain only the Ask surfaces' count (notebookSourceTotal, unfiltered) optimistically.
+        // sourcesTotal (source-list pagination + Source Stack header) is deliberately left to
+        // re-sync on the next source-page fetch: it tracks the *applied* source-search filter, and
+        // there is no reliable applied-query signal here — sourceQuery is the editable draft (search
+        // applies only on Enter), not necessarily what produced the current page — so optimistically
+        // bumping it risks either a stale count or a phantom filtered page. This matches the pre-#332
+        // baseline (URL import never touched sourcesTotal); the file-upload path's own unconditional
+        // bump is pre-existing and out of scope here.
         setNotebookSourceTotal((t) => t + result.created.length);
-        if (!sourceQuery) setSourcesTotal((t) => t + result.created.length);
         await loadNotebookCollection();
       }
       setUrlRejected(result.rejected);
