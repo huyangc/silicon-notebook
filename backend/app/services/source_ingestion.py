@@ -452,9 +452,13 @@ class SourceIngestionService:
         归一化）是复用路径上第二件不能撒手的事：内容一样不代表用户的意图一样，
         「类型判错了，我改成教材再传一遍」是最自然的纠正动作，而 doc_type 决定
         抽取 profile 并进抽取 prompt（因而也进 LLM 缓存键），静默丢掉等于这条源
-        永远按错的类型入图。空的 doc_type 绝不覆盖已存的非空值——前端在用户没选
-        时就是不传，那是「没意见」而不是「改成自动检测」；比较在两侧都归一化之后
-        做，所以 'auto'/未知值与 '' 等价，不会被当成一次改动。
+        永远按错的类型入图。区分两种「空」：**没表态**（"" / 缺省 / 未知串——非 UI
+        调用方或前端未提交时）绝不覆盖已存的非空值；**显式选自动检测**（前端为
+        「自动检测」提交哨兵 ``"auto"``）则要能把一条已按具体类型定型的源重置回自动，
+        否则 UI 上根本无法把类型改回自动。normalize_doc_type 把 ``"auto"`` 与 ``""``
+        都归成 ""（自动），所以二者的区别只能在归一化**之前**、从原始入参里读
+        （``explicit_auto``）；只有 ``"auto"`` 这个约定哨兵触发重置，其余未知串仍当
+        没表态、保留旧值。
 
         还在跑的行（'queued'/'parsing'/'extracting'）只记类型、不调度任何东西，
         由那条正在跑的任务自己收尾：'queued'/'parsing' 的抽取还没开始，
@@ -495,7 +499,14 @@ class SourceIngestionService:
         stored_doc_type = self.normalize_doc_type(
             getattr(summary, "doc_type", "") or ""
         )
-        retyped = bool(incoming_doc_type) and incoming_doc_type != stored_doc_type
+        # 「显式选自动检测」的哨兵，必须在归一化之前读（normalize 把 "auto"→""，
+        # 归一化后就与「没表态」不可区分了）。只有它触发「重置回自动」；其余空/未知
+        # 串当没表态、保留旧值。见方法 docstring。
+        explicit_auto = (doc_type or "").strip().lower() == "auto"
+        retyped = (
+            (bool(incoming_doc_type) or explicit_auto)
+            and incoming_doc_type != stored_doc_type
+        )
         if retyped:
             self.sources.set_doc_type(source_id, incoming_doc_type)
 
