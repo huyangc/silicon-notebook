@@ -20,7 +20,7 @@ import {
   parseWorkspaceHash,
   type MemoryNavigationTarget,
 } from "./memory-model";
-import type { KnowhowHealthFilter } from "./knowhow-model";
+import { fetchKnowhowTables, type KnowhowHealthFilter } from "./knowhow-model";
 import {
   CLOSED_KNOWHOW_NAVIGATION,
   closeKnowhowNavigation,
@@ -1798,21 +1798,19 @@ export default function Home() {
       })
       .catch(reportError);
   }
-  // 关闭 knowhow 抽屉:先无条件重拉一次(捕获"删表→重新禁用",双向对齐)。knowhow 投影是
-  // 防抖后台任务,新建表的 chunk 可能还没落库——**仅当关闭前已被禁**(可能刚建了首张表)才
-  // 继续退避轮询等投影落库,直到 ask_available 翻真或封顶(~3min,与来源处理轮询同款);
-  // 删表场景(关闭前可用)一次重拉即回到禁用态,不轮询,免得对着不会翻真的态空转。
-  // **瞬时 getNotebook 失败不终止**,仍在窗口内就退避重试(codex PR#334 第5轮 P1+P2)。
+  // 关闭 knowhow 抽屉:抽屉是覆盖层、不改 chatMode,故 chatMode effect 不会触发。knowhow
+  // 投影是防抖后台任务,新建/替换表的 chunk 可能还没落库。轮询判据取**投影状态**(终态),
+  // 而非快照启发式(codex PR#334 第6轮 P2:快照会漏"删表并替换唯一的表"这类时序):
+  //   仍被禁 且 还有 knowhow 表在投影(projectionPending>0)→ 退避轮询等落库;
+  //   否则(已可用 / 无表在投影)即终态,停——纯删表不空转,替换表能等到投影完成。
+  // 首拉即完成删表→重新禁用的双向对齐;封顶 ~3min(同来源处理轮询),瞬时失败退避重试。
   function revalidateAskAvailabilityAfterKnowhow() {
     const nb = activeNotebookIdRef.current;
     if (!nb) return;
-    const wasBlocked = currentNotebook?.ask_available === false;
-    revalidateAskAvailability(); // 首拉:无条件,捕获删表→重新禁用
-    if (!wasBlocked) return;     // 关闭前可用→只可能是删证据,一次重拉已够,不轮询
     let delay = 1500;
     let elapsed = 0;
     const CAP = 180000; // ~3min
-    const retry = () => {
+    const schedule = () => {
       if (activeNotebookIdRef.current !== nb || elapsed >= CAP) return;
       elapsed += delay;
       const wait = delay;
@@ -1821,15 +1819,20 @@ export default function Home() {
     };
     function tick() {
       if (!nb || activeNotebookIdRef.current !== nb) return; // 已切库,放弃(!nb 兼作收窄)
-      getNotebook(nb)
-        .then((refreshed) => {
+      Promise.all([getNotebook(nb), fetchKnowhowTables(nb)])
+        .then(([refreshed, tables]) => {
           if (activeNotebookIdRef.current !== nb) return;
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
-          if (refreshed.ask_available === false) retry(); // 仍被禁 → 继续退避轮询等投影
+          if (
+            refreshed.ask_available === false
+            && tables.some((table) => table.projectionPending > 0)
+          ) {
+            schedule(); // 仍被禁 且 有投影在跑 → 继续退避轮询
+          }
         })
-        .catch(retry); // 瞬时失败不终止 → 退避重试
+        .catch(schedule); // 瞬时失败不终止 → 退避重试
     }
-    retry(); // 首拉已由 revalidateAskAvailability 完成,轮询从 delay 后开始
+    tick(); // 立即首拉:双向对齐 + 按投影状态决定是否继续轮询
   }
   // 从别的页签切回 Ask 时与后端对齐(捕获在 Memory 等页签的证据增删);初次进入不重复拉。
   const prevAskChatModeRef = useRef<ChatMode>(chatMode);
