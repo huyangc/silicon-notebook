@@ -119,6 +119,7 @@ import {
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
+import { isAskBlocked, mountedBaseCount } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { Pagination } from "./Pagination";
@@ -383,6 +384,17 @@ function promptChipsFor(notebook: NotebookSummary | null, sources: SourceSummary
 function welcomeCopyFor(notebook: NotebookSummary | null, sources: SourceSummary[], total: number): WelcomeCopy {
   const notebookPurpose = notebook?.purpose?.trim();
   if (sources.length === 0) {
+    // 无自有来源:挂了参考库仍可对话(默认模式直接检索参考库来源),照旧给提问建议;
+    // 既无来源又无参考库时对话被硬约束禁用(见 ask-availability),引导添加来源或挂参考库,
+    // 且不给可点的提问建议(点了也会被 runAsk 挡下)。
+    if (mountedBaseCount(notebook) === 0) {
+      return {
+        title: "先添加来源，再开始对话",
+        description: notebookPurpose
+          || "上传 PDF、Markdown、DOCX 或 PPTX，或在「设置 → 编辑当前笔记本」里挂载一个参考库，就能基于内容对话了。",
+        prompts: [],
+      };
+    }
     return {
       title: "导入来源后开始提问",
       description: notebookPurpose || "添加 PDF、Markdown、DOCX 或 PPTX 后，这里会根据来源内容生成可追溯的问题建议。",
@@ -1765,6 +1777,10 @@ export default function Home() {
   // so a new notebook never shows demo examples.
   const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources, notebookSourceTotal), [currentNotebook, sources, notebookSourceTotal]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
+  // 硬约束:笔记本既无自有来源、也没挂载参考库时,没有可据以回答的内容——
+  // 锁死对话框(输入/发送/快捷提问),占位改为引导文案。判据单一真源见 ask-availability。
+  const askBlocked = isAskBlocked(currentNotebook, notebookSourceTotal);
+  const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentKgBuildView = kgBuildPresentation(
     currentNotebook?.kg_build,
@@ -2520,6 +2536,11 @@ export default function Home() {
     if (asking) return;
     const q = nextQuestion.trim();
     if (!q) return;
+    // 硬约束:无来源且无参考库时禁止提问(也挡住快捷提问 chip 这条旁路)。
+    if (isAskBlocked(currentNotebook, notebookSourceTotal)) {
+      setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
+      return;
+    }
     if (requiresKg(askMode) && !kgAvailable) {
       setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
@@ -4178,11 +4199,13 @@ export default function Home() {
                     <div className="wave">👋</div>
                     <h2>{welcomeCopy.title}</h2>
                     <p>{welcomeCopy.description}</p>
-                    <div className="prompt-chips">
-                      {welcomeCopy.prompts.map(([label, prompt]) => (
-                        <button key={label} onClick={() => runAsk(prompt).catch(reportError)}>{label}</button>
-                      ))}
-                    </div>
+                    {welcomeCopy.prompts.length > 0 && (
+                      <div className="prompt-chips">
+                        {welcomeCopy.prompts.map(([label, prompt]) => (
+                          <button key={label} onClick={() => runAsk(prompt).catch(reportError)}>{label}</button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="chat-thread">
@@ -4276,11 +4299,12 @@ export default function Home() {
               {chatMode === "ask" && (
                 <AskComposer
                   value={question}
-                  placeholder={askHint}
+                  placeholder={askPlaceholderText}
                   onChange={setQuestion}
                   onSubmit={() => runAsk().catch(reportError)}
                   onAbort={abortAsk}
                   running={asking}
+                  disabled={askBlocked}
                 >
                   <span>{notebookSourceTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
