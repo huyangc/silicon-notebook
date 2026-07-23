@@ -20,10 +20,12 @@ import {
 export { activeTurnFromTops, chatTurnDomId } from "./chat-turn-nav-model";
 
 type ChatTurnNavProps = {
-  /** 当前会话里用户的每次提问，顺序与对话区一致（一轮一条）。 */
+  /** 当前会话里用户的每次提问，顺序与对话区一致（一轮一条，含进行中的那条）。 */
   questions: string[];
   /** 对话滚动容器（chat-body）的 ref。 */
   scrollRef: RefObject<HTMLDivElement | null>;
+  /** 当前会话标识；用于会话切换时强制重算高亮（比拼接问题文本更可靠）。 */
+  sessionId?: string | null;
 };
 
 /** 浮出的提问卡：定位到聚焦刻度的中心。 */
@@ -34,7 +36,7 @@ type Loupe = { i: number; top: number };
  * 越靠近指针的点越大（Dock 式鱼眼放大镜），正对指针的那条浮出提问卡；点击平滑滚动到
  * 对应轮次并高亮气泡；随阅读位置自动高亮当前轮。纯前端——数据取自内存里的对话轮次。
  */
-export function ChatTurnNav({ questions, scrollRef }: ChatTurnNavProps) {
+export function ChatTurnNav({ questions, scrollRef, sessionId = null }: ChatTurnNavProps) {
   const count = questions.length;
   const [active, setActive] = useState(0);
   const [loupe, setLoupe] = useState<Loupe | null>(null);
@@ -90,12 +92,12 @@ export function ChatTurnNav({ questions, scrollRef }: ChatTurnNavProps) {
     };
   }, [recompute, scrollRef]);
 
-  // 切换会话时轮数可能不变（count 不变 → 上面的 effect 不重跑），但每轮内容/高度已变，
-  // 又不会触发 scroll 事件；用内容签名驱动一次重算，避免高亮停留在上一个会话。
-  const signature = questions.join("\n");
+  // 切换会话时轮数可能不变（count 不变 → 上面的 effect 不重跑），且不会触发 scroll 事件；
+  // 以稳定的会话标识驱动一次重算，避免高亮停留在上一个会话——比拼接问题文本更可靠
+  // （规避「问法相同、答案不同」与「问题内含换行」两种签名碰撞）。
   useEffect(() => {
     recompute();
-  }, [signature, recompute]);
+  }, [sessionId, recompute]);
 
   // 长会话里导轨会内部滚动——让高亮的圆点始终留在导轨可视范围内（只滚导轨，不动页面）。
   useEffect(() => {
