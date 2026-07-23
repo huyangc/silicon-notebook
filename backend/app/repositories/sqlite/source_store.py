@@ -387,6 +387,31 @@ class SourceStore:
                 (*params, source_id),
             )
 
+    def mark_chunked(self, source_id: str, ts: str) -> None:
+        """置分块完成标记 ``chunked_at = ts``(本代 elements 已成功走完分块步骤
+        的时刻)。与 ``set_status`` 正交——**不碰** status/parse_status;唯一载体
+        是 ``chunked_at`` 的 NULL 性(NULL = 未成功分块)。由
+        ``build_chunks_for_source`` 正常返回前调用,覆盖所有分块路径(含产 0 chunk
+        的纯标题 md——也算分块成功、也置值)。自带写事务,镜像 ``set_status``。"""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE sources SET chunked_at = ? WHERE id = ?",
+                (ts, source_id),
+            )
+
+    def clear_chunked_at(
+        self, connection: sqlite3.Connection, source_id: str
+    ) -> None:
+        """把 ``chunked_at`` 归零(NULL),**在调用方的写事务内**(镜像
+        ``replace_elements`` 的 connection 约定)——写新代 elements 时调用,新代
+        elements 落库即令旧分块完成标记失效,无崩溃窗口。**刻意就地一条、不折进
+        ``clear_source_extraction_state``**:后者也被 KG 抽取的
+        ``begin_extraction_run`` 复用,而抽取发生在分块之后,折进去会把分块刚置好
+        的 ``chunked_at`` 又清掉。"""
+        connection.execute(
+            "UPDATE sources SET chunked_at = NULL WHERE id = ?", (source_id,)
+        )
+
     def update_file_hash(
         self,
         source_id: str,

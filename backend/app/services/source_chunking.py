@@ -63,6 +63,13 @@ class SourceChunkingService:
         # (no TTL, no other invalidation). Dirty=1 is also semantically right for
         # a pure chunk upload: a new source means the unified KG is stale anyway.
         self.mark_unified_dirty(notebook_id)
+        # 分块成功(build_chunks 正常返回,**含产 0 chunk 的纯标题 md**)才走到这里:
+        # 置完成标记 chunked_at。放在 build_chunks_for_source 末尾而非 process_source,
+        # 是为了让 chunk_and_embed_source / scripts/build_chunks.py 等所有分块路径统一
+        # 打标。本函数是直线代码、无 early-return——replace_source_chunks 对空 rows
+        # 也照常提交(0 行),故 0-chunk 路径同样走到这里置值。失败会在上面某步抛出、
+        # 到不了这里 → chunked_at 留 NULL,正是 H3 的损坏信号。
+        self.sources.mark_chunked(source_id, self.now())
 
     def chunk_and_embed_source(self, source_id: str) -> None:
         """build + embed(供回填脚本/测试同步调用)。"""

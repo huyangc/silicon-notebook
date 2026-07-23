@@ -175,6 +175,158 @@ def test_parsed_source_and_elements_commit_before_chunk_build(repo, monkeypatch)
     assert observed["at_chunk_time"] == (1, "parsed")
 
 
+def test_process_source_zeroes_chunked_at_when_writing_new_elements(
+    repo, tmp_path, monkeypatch
+):
+    """写新代 elements 的事务内把 chunked_at 归零(旧分块完成标记随新 elements
+    落库失效)。用一个真实 .md 走真实解析——**刻意不给 facade 的 parse_source_file
+    打桩**(那会把测试写进冻结的 facade_surface 契约);分块步只用 runtime 探针
+    (build_chunks_for_source 是运行时实例属性,打桩不进 facade 契约)在'分块时刻'
+    读 chunked_at: 它在进入前非 NULL(模拟上一代已成功分块),进到分块步时已被
+    写-elements 事务清成 NULL——证明归零发生在写 elements 处、早于(会重新打标的)
+    分块步。"""
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading\n\nSome body text for elements.\n", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    # 模拟上一代已成功分块: reprocess 之前 chunked_at 是非 NULL。
+    repo._runtime.source_store.mark_chunked(sid, "2020-01-01T00:00:00")
+
+    observed = {}
+
+    def probe(source_id):
+        with repo._connect() as db:
+            observed["chunked_at_at_chunk_time"] = db.execute(
+                "SELECT chunked_at FROM sources WHERE id=?", (source_id,)
+            ).fetchone()["chunked_at"]
+
+    monkeypatch.setattr(
+        repo._runtime.source_chunking, "build_chunks_for_source", probe
+    )
+    repo.process_source(sid)
+    # 写-elements 事务已把旧标记清零,早于(被 probe 替掉、本会重新打标的)分块步。
+    assert observed["chunked_at_at_chunk_time"] is None
+
+
+def test_active_lease_held_during_processing_and_released_after(
+    repo, tmp_path, monkeypatch
+):
+    """源级活跃租约(在途误报抑制,进程内 dict):process_source 进入即 stamp 该源、
+    退出(finally)即 pop。用真实 .md 走真实解析,分块步只用 **runtime 探针**
+    (build_chunks_for_source 是运行时实例属性,打桩不进冻结的 facade_surface 契约)
+    在'处理中'那一刻抓租约快照——该源必在;流水线跑完返回后,租约不再含它。"""
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading\n\nSome body text for elements.\n", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    service = repo._runtime.source_ingestion
+
+    seen = {}
+
+    def probe(source_id):
+        # 分块时刻(进入之后、返回之前):租约本体的浅拷贝定格这一刻。
+        seen["during"] = dict(service._active_sources)
+
+    monkeypatch.setattr(
+        repo._runtime.source_chunking, "build_chunks_for_source", probe
+    )
+    repo.process_source(sid)
+
+    assert sid in seen["during"], "处理中租约未含该源(进入未 stamp)"
+    assert sid not in service._active_sources, "退出后租约仍含该源(finally 未释放)"
+
+
+def test_active_lease_released_on_exception_exit(repo, tmp_path, monkeypatch):
+    """异常出口也释放:某阶段抛异常 → 外层 except 落 'failed' → finally 仍 pop 掉租约。
+
+    刻意让 ``ensure_paper_metadata`` 抛异常——它是 runtime 实例方法(打桩不进 facade
+    契约),在写完 elements 之后、无内层 try 兜底处调用,异常直传到外层 except。
+
+    **变异验证锚点**:把 process_source 里 finally 的 ``self._active_sources.pop(...)``
+    删掉,这条会红(异常出口后租约残留)。"""
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading\n\nSome body text for elements.\n", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    service = repo._runtime.source_ingestion
+
+    def boom(*a, **k):
+        raise RuntimeError("stage blew up mid-pipeline")
+
+    monkeypatch.setattr(service, "ensure_paper_metadata", boom)
+
+    repo.process_source(sid)  # 外层 except 吞掉异常、落 'failed' 后正常返回
+
+    # 确证真的走了异常出口(否则这条测试会因从未触发异常而假绿)。
+    assert repo.get_source(sid).parse_status == "failed"
+    assert sid not in service._active_sources, "异常出口后租约残留(finally 未释放)"
+
+
+def test_active_lease_released_when_setting_parsing_status_fails(
+    repo, tmp_path, monkeypatch
+):
+    """置 'parsing' 那句 DB 写失败也释放租约。它在 try 内首行(不在 try 外),故失败
+    由外层 except 兜住落 'failed'、finally 照常 pop——若把它挪回 try 外,这条会红
+    (进 try 前传出、绕过 finally,租约永久残留=体检假阴性)。
+
+    只让 'parsing' 那次 set_source_status 抛;其余状态(尤其 except 里落 'failed')
+    必须正常,否则 finally 之外的清理会被连累、测不到我们要测的那条边。"""
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading\n\nSome body text.\n", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    service = repo._runtime.source_ingestion
+
+    real_set = service.set_source_status
+
+    def fail_on_parsing(source_id, status, **kwargs):
+        if status == "parsing":
+            raise RuntimeError("status write hit a full disk")
+        return real_set(source_id, status, **kwargs)
+
+    monkeypatch.setattr(service, "set_source_status", fail_on_parsing)
+
+    repo.process_source(sid)  # 外层 except 吞掉、落 'failed' 后正常返回
+
+    assert repo.get_source(sid).parse_status == "failed"
+    assert sid not in service._active_sources, (
+        "置 parsing 失败后租约残留——该句仍在 try 外?"
+    )
+
+
+class _HardAbort(BaseException):
+    """不是 Exception 子类 → 不被 process_source 的 `except Exception` 兜住,会向上
+    传出。只有真正的 `finally`(而非 except 之后的正常流)能在这条出口释放租约。"""
+
+
+def test_active_lease_released_on_propagating_baseexception(
+    repo, tmp_path, monkeypatch
+):
+    """「移动」变异防线。把 pop 从 finally 挪到 except 之后的正常流,对**被捕获**的
+    异常照样会跑(except 不重抛)——那种搬移下 test_active_lease_released_on_exception_exit
+    仍会绿,漏掉这条搬移。这条用一个不是 Exception 子类的 BaseException:它绕过外层
+    `except Exception` 向上传出,只有 finally 能在传出出口释放租约。
+
+    双重变异锚点:(a) 删掉 finally 的 pop → 红;(b) 把 pop 挪出 finally 到 except
+    之后 → 传出出口跳过它 → 红。"""
+    md = tmp_path / "doc.md"
+    md.write_text("# Heading\n\nSome body text for elements.\n", encoding="utf-8")
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id, file_path=str(md))
+    service = repo._runtime.source_ingestion
+
+    def hard_abort(*a, **k):
+        raise _HardAbort("propagating past except Exception")
+
+    # ensure_paper_metadata 在 embed 线程启动之前调用,传出不会遗留后台线程。
+    monkeypatch.setattr(service, "ensure_paper_metadata", hard_abort)
+
+    with pytest.raises(_HardAbort):
+        repo.process_source(sid)
+
+    assert sid not in service._active_sources, "传出出口后租约残留(pop 不在 finally)"
+
+
 class _ElementBlockingEmbedder:
     """Blocks ONLY element-embedding worker threads (named 'emb-el*'), so KG
     object embedding inside extraction proceeds while element embedding is

@@ -38,7 +38,7 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _seed_source_with_elements(repo, texts):
+def _seed_source_with_elements(repo, texts, element_type="paragraph"):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     import uuid
 
@@ -54,7 +54,7 @@ def _seed_source_with_elements(repo, texts):
             db.execute(
                 "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (f"el-{sid}-{i:04d}", sid, "paragraph", f"p{i}", t, "{}", now))
+                (f"el-{sid}-{i:04d}", sid, element_type, f"p{i}", t, "{}", now))
     return nb, sid
 
 
@@ -153,3 +153,71 @@ def test_chunk_and_embed_composes_build_then_embed(repo):
         ).fetchone()["c"]
     assert nchunks >= 1
     assert nvec == nchunks
+
+
+# ----------------------------------------- chunked_at completion marker (H3)
+def _chunked_at(repo, sid):
+    with repo._connect() as db:
+        return db.execute(
+            "SELECT chunked_at FROM sources WHERE id=?", (sid,)
+        ).fetchone()["chunked_at"]
+
+
+def _counts(repo, sid):
+    with repo._connect() as db:
+        n_el = db.execute(
+            "SELECT COUNT(*) c FROM source_elements WHERE source_id=?", (sid,)
+        ).fetchone()["c"]
+        n_ck = db.execute(
+            "SELECT COUNT(*) c FROM chunks WHERE source_id=?", (sid,)
+        ).fetchone()["c"]
+    return n_el, n_ck
+
+
+def _h3_real_damage(repo, sid):
+    """P2 H3 的持久层真损坏判据: elements>0 AND chunks=0 AND chunked_at IS NULL.
+    (在途内存租约过滤是 P2 的 Python 后置步骤,不属于本层——这里只测持久层的
+    可判定性。)"""
+    n_el, n_ck = _counts(repo, sid)
+    return n_el > 0 and n_ck == 0 and _chunked_at(repo, sid) is None
+
+
+def test_zero_chunk_success_sets_chunked_at(repo):
+    # 纯标题 md: heading-only elements -> build_chunks 返回 [] -> 0 chunk, 但分块
+    # 本身成功 -> chunked_at 打上时刻。这是 build_chunks_for_source 直线代码、无
+    # early-return 的确证: 0-chunk 路径也走到末尾的 mark_chunked。
+    nb, sid = _seed_source_with_elements(repo, ["A Pure Title"], element_type="heading")
+    repo._build_chunks_for_source(sid)
+    assert _counts(repo, sid) == (1, 0)         # elements>0, 0 chunk
+    assert _chunked_at(repo, sid) is not None    # 分块成功 -> 标记置位
+
+
+def test_h3_chunked_at_decides_zero_chunk_success_vs_failure(repo, monkeypatch):
+    """全设计要证的核心: 两个 parse_status/elements/chunks 完全相同的源(都是
+    extracted + 1 element + 0 chunk),只有 chunked_at 相反; H3 真损坏判据只命中
+    '分块失败'那支、不命中'分块成功产 0 chunk'那支。"""
+    nb_ok, sid_ok = _seed_source_with_elements(repo, ["Title X"], element_type="heading")
+    nb_bad, sid_bad = _seed_source_with_elements(repo, ["Title X"], element_type="heading")
+
+    # #1 分块成功产 0 chunk (真实 build_chunks 于纯标题输入)。
+    repo._build_chunks_for_source(sid_ok)
+
+    # #2 分块失败: monkeypatch build_chunks 抛异常。process_source 用 best-effort
+    # except 吞掉它(:586),这里镜像那次吞咽。
+    from app.services import source_chunking as sc_mod
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("chunk boom")
+
+    monkeypatch.setattr(sc_mod, "build_chunks", _boom)
+    with pytest.raises(RuntimeError, match="chunk boom"):
+        repo._build_chunks_for_source(sid_bad)
+
+    # A4 能观测到的两个维度上两支完全相同:
+    assert _counts(repo, sid_ok) == _counts(repo, sid_bad) == (1, 0)
+    # chunked_at 是区分两支的那一维:
+    assert _chunked_at(repo, sid_ok) is not None
+    assert _chunked_at(repo, sid_bad) is None
+    # 判据只命中真失败:
+    assert _h3_real_damage(repo, sid_ok) is False
+    assert _h3_real_damage(repo, sid_bad) is True

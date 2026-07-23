@@ -225,3 +225,50 @@ def test_run_startup_settles_stranded_sources_before_marking_ready(monkeypatch):
     assert at_the_gate["sources"]["s-parsing"]["parse_status"] == "failed"
     assert at_the_gate["sources"]["s-queued"]["error_message"]
     assert at_the_gate["knowhow_rows"] == {"r-pend": "failed", "r-sync": "failed"}
+
+
+# ---------------------------------------------------------------------------
+# P1.5 Task 4:内存活跃租约不参与启动清算——就绪门开启那一刻它本就空
+# ---------------------------------------------------------------------------
+def test_active_lease_is_empty_when_mark_ready_fires(monkeypatch):
+    """源级活跃租约(``SourceIngestionService._active_sources``,在途误报抑制的进程内
+    dict)**不参与**启动清算,却仍满足「清算这一刻内存租约为空」的不变量——不是因为
+    清算清了它(清算压根不碰它),而是因为它重启后天然为空,且业务路由(唯一会跑
+    ``process_source`` 填租约的入口)要到 ``mark_ready()`` 之后才放行。单进程 + 清算
+    早于就绪门 ⇒ 就绪门开启那一刻不可能有源正被本进程处理 ⇒ 租约此刻本就空。
+
+    沿用上面同款的「mark_ready 探针抓快照」直接钉这条不变量:在放行业务路由的瞬间
+    读 runtime-owned 租约本体(**runtime 探针,非 facade 打桩**——租约在
+    ``SourceIngestionService`` 内部,读它不进冻结的 facade_surface 契约)。
+
+    变异验证的对偶:这条守的是「到达就绪门时租约本就空」。若未来有人往启动路径里
+    误插一步会跑 ``process_source``(或在 ``mark_ready`` 前 stamp 了租约),快照就非空
+    → 红,把回归挡在就绪门前。"""
+    from app.api.deps import repository
+    from app.core import readiness
+    from app.services import startup_warmup
+
+    repo = repository()  # 与 run_startup 里拿到的是同一个 lru_cache 实例
+    _seed_in_progress_rows(repo)
+
+    at_the_gate: dict[str, dict] = {}
+    real_mark_ready = readiness.mark_ready
+
+    def _snapshot_then_open_the_gate():
+        # 抓租约本体的浅拷贝(它是可变 dict,快照必须定格在这一刻)。
+        at_the_gate["active"] = dict(repo._runtime.source_ingestion._active_sources)
+        return real_mark_ready()
+
+    monkeypatch.setattr(
+        startup_warmup.readiness, "mark_ready", _snapshot_then_open_the_gate
+    )
+
+    readiness.reset()
+    try:
+        startup_warmup.run_startup()
+    finally:
+        real_mark_ready()  # 还原 conftest 的 autouse 前置条件
+
+    assert readiness.snapshot()["error"] is None  # 启动没有走进异常分支
+    assert "active" in at_the_gate, "mark_ready() 没被调用——run_startup 没走到就绪"
+    assert at_the_gate["active"] == {}
