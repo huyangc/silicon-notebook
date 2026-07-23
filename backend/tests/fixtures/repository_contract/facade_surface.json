@@ -1535,12 +1535,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
-        "scope": "<module>.checkup_service",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/deps.py",
         "scope": "<module>.content_overview_service",
         "target": "_runtime"
       },
@@ -4115,6 +4109,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.checkup",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.close_local",
         "target": "_runtime"
       },
@@ -4692,6 +4692,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, workload_id: 'str')"
+  },
+  "checkup": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.checkup_service",
+        "target": "checkup"
+      }
+    ],
+    "kind": "property",
+    "owner": "CheckupService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self) -> 'CheckupService'"
   },
   "close": {
     "consumers": [
@@ -6511,6 +6526,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._backfill_relation_embeddings",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.checkup.<lambda>",
         "target": "maintenance"
       },
       {

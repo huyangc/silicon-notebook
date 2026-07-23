@@ -58,9 +58,6 @@ from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoor
 from app.services.ask_service import AskService
 from app.services.notebook_scale import NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
-# P2·T2: pipeline checkup aggregation (read-only, appended block — same
-# parallel-track convention as the imports above).
-from app.services.checkup import CheckupService, probe_scale_index_integrity
 
 @dataclass(frozen=True)
 class RepositoryCompatibilitySeams:
@@ -305,54 +302,11 @@ class RepositoryRuntime:
         # id/时钟来源单一（record_change 本身是模块级函数，不在这里持有——
         # 由 Task 4-6 的写方法在各自事务内直接调用）。
         self.knowhow_history_store = bundle.knowhow_history
-        # P2·T2: read-only pipeline checkup aggregation (H2–H8).  Eager
-        # construction with late-bound resolver lambdas — every collaborator it
-        # reads is either eager (database / scale_artifact_store / event_log) or
-        # lazily wired (maintenance / scale_artifacts / index_projections /
-        # source_ingestion), and checkup.run() is only ever called from a request
-        # handler, well after the facade constructor finishes wiring them.  The
-        # resolvers read ``self.<collaborator>`` at CALL time, so they observe
-        # the wired instances (same convention as ask_service's
-        # ``lambda nb: tuple(self.scale_artifacts.version(nb))``).  The active
-        # lease snapshot is taken under the source-ingestion lock by
-        # ``_active_source_ids_snapshot`` (see its docstring): checkup itself
-        # never touches source_ingestion internals.
-        self.checkup = CheckupService(
-            database=self.database,
-            count_missing_chunk_vectors=(
-                lambda nb, exclude: self.maintenance_component.count_missing_chunk_vectors(
-                    nb, exclude
-                )
-            ),
-            count_missing_element_vectors=(
-                lambda nb, exclude: self.maintenance_component.count_missing_element_vectors(
-                    nb, exclude
-                )
-            ),
-            scale_index_state=(
-                lambda nb: str(self.scale_artifacts.status(nb).get("state", ""))
-            ),
-            # H7 memo 的廉价失效键:签名不变即复用 state 结论,不跑上面昂贵的 status()/_index_delta
-            # 全量扫(codex P2)。签名构成见 ScaleArtifactRuntime.state_signature。
-            index_state_signature=(
-                lambda nb: self.scale_artifacts.state_signature(nb)
-            ),
-            # H8 缓存键 = 磁盘 manifest 身份(rebuild/fold 换新 version 即失效),**不是**
-            # version_signal——后者与磁盘产物解耦,用它当键损坏清不掉(评审 B1)。同一个
-            # scale_artifact_store 也供下面的探针,来源一致。
-            index_manifest_identity=(
-                lambda nb: self.scale_artifact_store.scale_manifest_identity(nb)
-            ),
-            probe_index_integrity=(
-                lambda nb: probe_scale_index_integrity(
-                    self.scale_artifact_store.scale_dir(nb),
-                    logger=self.event_log.logger,
-                )
-            ),
-            active_source_ids=self._active_source_ids_snapshot,
-            now=self.seams.now,
-            event_log=self.event_log,
-        )
+        # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
+        # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
+        # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
+        # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
+        # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
 
     def _active_source_ids_snapshot(self) -> "set[str]":
         """内存活跃租约的快照(H2/H3 的 Python 后置减法用)。**必须在锁下取**:并发

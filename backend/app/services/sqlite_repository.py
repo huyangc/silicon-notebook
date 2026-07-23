@@ -24,6 +24,7 @@ from app.services.knowledge_contracts import (
     KnowledgeGraphTooLargeError,
     USABLE_STATUSES,
 )
+from app.services.checkup import CheckupService, probe_scale_index_integrity
 from app.services.knowledge_lifecycle import _concept_desc_sig, _fast_loads
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
@@ -180,6 +181,46 @@ class SQLiteRepository(RepositoryFacade):
             )
             self.__dict__["_maintenance"] = adapter
         return adapter
+
+    @property
+    def checkup(self) -> CheckupService:
+        """P2 体检聚合(H2–H8),**懒构造在后端相关的 facade 这一层**(而非中性 repository_runtime:
+        neutrality 守卫禁止它 import sqlite/postgres,而 checkup 依赖 maintenance 的 COUNT + sqlite
+        QueryStore)。复用本 facade 的 ``maintenance`` adapter 做 H4/H5 计数;其余 seam 从 runtime
+        取(database/scale/活跃租约快照/state_signature)。lru_cache 的 facade 单例 → 单个 checkup
+        实例 → H7/H8 进程内缓存跨请求存活。"""
+        c = self.__dict__.get("_checkup")
+        if c is None:
+            rt = self._runtime
+            c = CheckupService(
+                database=rt.database,
+                count_missing_chunk_vectors=(
+                    lambda nb, exclude: self.maintenance.count_missing_chunk_vectors(nb, exclude)
+                ),
+                count_missing_element_vectors=(
+                    lambda nb, exclude: self.maintenance.count_missing_element_vectors(nb, exclude)
+                ),
+                scale_index_state=(
+                    lambda nb: str(rt.scale_artifacts.status(nb).get("state", ""))
+                ),
+                # H7 memo 廉价失效键(签名不变即复用 state,不跑昂贵 status()/_index_delta 全量扫)。
+                index_state_signature=(lambda nb: rt.scale_artifacts.state_signature(nb)),
+                # H8 缓存键=磁盘 manifest 身份(rebuild/fold 换新 version 即失效),非 version_signal。
+                index_manifest_identity=(
+                    lambda nb: rt.scale_artifact_store.scale_manifest_identity(nb)
+                ),
+                probe_index_integrity=(
+                    lambda nb: probe_scale_index_integrity(
+                        rt.scale_artifact_store.scale_dir(nb),
+                        logger=rt.event_log.logger,
+                    )
+                ),
+                active_source_ids=rt._active_source_ids_snapshot,
+                now=rt.seams.now,
+                event_log=rt.event_log,
+            )
+            self.__dict__["_checkup"] = c
+        return c
 
     def eval_insert_source_for_test(
         self, nb_id: str, name: str, text: str, tmpdir: str

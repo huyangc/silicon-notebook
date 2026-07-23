@@ -121,12 +121,12 @@ def _service(repo, notebook_id="nb-x", **overrides):
 
 # ------------------------------------------------------------- composition
 def test_runtime_composes_checkup(repo):
-    assert isinstance(repo._runtime.checkup, CheckupService)
+    assert isinstance(repo.checkup, CheckupService)
 
 
 def test_healthy_fresh_notebook(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
-    result = repo._runtime.checkup.run(nb.id)
+    result = repo.checkup.run(nb.id)
     assert result.notebook_id == nb.id
     assert result.checked_at
     assert {c.code for c in result.checks} == {"H2", "H3", "H4", "H5", "H6", "H7", "H8"}
@@ -149,7 +149,7 @@ def test_healthy_fresh_notebook(repo):
 def test_h2_hit_empty_source(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=0)
-    result = repo._runtime.checkup.run(nb.id)
+    result = repo.checkup.run(nb.id)
     h2 = _check(result, "H2")
     assert h2.count == 1
     assert h2.sample == [sid]
@@ -160,7 +160,7 @@ def test_h2_hit_empty_source(repo):
 def test_h2_miss_has_elements(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="extracted", chunked_at=_NOW, n_elements=2)
-    assert _check(repo._runtime.checkup.run(nb.id), "H2").count == 0
+    assert _check(repo.checkup.run(nb.id), "H2").count == 0
 
 
 def test_h2_miss_still_parsing(repo):
@@ -168,7 +168,7 @@ def test_h2_miss_still_parsing(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="parsing", n_elements=0)
     _seed_source(repo, nb.id, parse_status="queued", n_elements=0)
-    assert _check(repo._runtime.checkup.run(nb.id), "H2").count == 0
+    assert _check(repo.checkup.run(nb.id), "H2").count == 0
 
 
 def test_h2_miss_metadata_only(repo):
@@ -177,7 +177,7 @@ def test_h2_miss_metadata_only(repo):
     (评审阻塞项:黑名单只排 queued/parsing 会把它误报成损坏+建议 reparse)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="metadata-only", n_elements=0)
-    assert _check(repo._runtime.checkup.run(nb.id), "H2").count == 0
+    assert _check(repo.checkup.run(nb.id), "H2").count == 0
 
 
 def test_h2_miss_failed_parse(repo):
@@ -185,7 +185,7 @@ def test_h2_miss_failed_parse(repo):
     给用户,不是「看着成功却静默没落 elements」的那种损坏,不该被体检当空源复报。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="failed", n_elements=0)
-    assert _check(repo._runtime.checkup.run(nb.id), "H2").count == 0
+    assert _check(repo.checkup.run(nb.id), "H2").count == 0
 
 
 def test_h2_miss_hidden_source(repo):
@@ -193,7 +193,7 @@ def test_h2_miss_hidden_source(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, source_type="memory", parse_status="extracted", n_elements=0)
     _seed_source(repo, nb.id, source_type="knowhow", parse_status="extracted", n_elements=0)
-    assert _check(repo._runtime.checkup.run(nb.id), "H2").count == 0
+    assert _check(repo.checkup.run(nb.id), "H2").count == 0
 
 
 def test_h2_miss_active_lease(repo):
@@ -201,14 +201,14 @@ def test_h2_miss_active_lease(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_source(repo, nb.id, parse_status="extracted", n_elements=0)
     _stamp_lease(repo, sid)
-    assert _check(repo._runtime.checkup.run(nb.id), "H2").count == 0
+    assert _check(repo.checkup.run(nb.id), "H2").count == 0
 
 
 # --------------------------------------------------------------------- H3
 def test_h3_hit_missing_chunks(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_source(repo, nb.id, parse_status="extracted", chunked_at=None, n_elements=2)
-    h3 = _check(repo._runtime.checkup.run(nb.id), "H3")
+    h3 = _check(repo.checkup.run(nb.id), "H3")
     assert h3.count == 1
     assert h3.sample == [sid]
     assert h3.fix == "reparse"
@@ -218,7 +218,7 @@ def test_h3_miss_chunked_marker_set(repo):
     """chunked_at 有值(分块成功,含纯标题 0-chunk)→ 不是缺分块。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="extracted", chunked_at=_NOW, n_elements=2)
-    assert _check(repo._runtime.checkup.run(nb.id), "H3").count == 0
+    assert _check(repo.checkup.run(nb.id), "H3").count == 0
 
 
 def test_h3_miss_active_lease(repo):
@@ -226,7 +226,7 @@ def test_h3_miss_active_lease(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_source(repo, nb.id, parse_status="extracted", chunked_at=None, n_elements=2)
     _stamp_lease(repo, sid)
-    assert _check(repo._runtime.checkup.run(nb.id), "H3").count == 0
+    assert _check(repo.checkup.run(nb.id), "H3").count == 0
 
 
 # --------------------------------------------------------------------- H6
@@ -242,7 +242,7 @@ def test_h6_hit_pending_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _seed_source(repo, nb.id, parse_status="extracted", chunked_at=_NOW, n_elements=1)
     _bump_kg_seq(repo, nb.id)
-    result = repo._runtime.checkup.run(nb.id)
+    result = repo.checkup.run(nb.id)
     h6 = _check(result, "H6")
     assert h6.count == 1
     assert h6.fix == "extract_kg"
@@ -254,7 +254,7 @@ def test_h6_miss_completed_kg(repo):
     sid = _seed_source(repo, nb.id, parse_status="extracted", chunked_at=_NOW, n_elements=1)
     _seed_completed_kg(repo, nb.id, sid)
     _bump_kg_seq(repo, nb.id)
-    assert _check(repo._runtime.checkup.run(nb.id), "H6").count == 0
+    assert _check(repo.checkup.run(nb.id), "H6").count == 0
 
 
 def test_h6_miss_hidden_synthetic_source(repo):
@@ -269,7 +269,7 @@ def test_h6_miss_hidden_synthetic_source(repo):
     _seed_source(repo, nb.id, source_type="memory", parse_status="extracted",
                  chunked_at=_NOW, n_elements=1)
     _bump_kg_seq(repo, nb.id)
-    assert _check(repo._runtime.checkup.run(nb.id), "H6").count == 0
+    assert _check(repo.checkup.run(nb.id), "H6").count == 0
 
 
 # ------------------------------------------------------------------ H4/H5
@@ -296,7 +296,7 @@ def test_count_missing_element_vectors_excludes_given_sources(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)  # 有 element、无向量
     b = _seed_source(repo, nb.id, parse_status="extracted", n_elements=3)
-    mnt = repo._runtime.maintenance_component
+    mnt = repo.maintenance
     assert mnt.count_missing_element_vectors(nb.id) == 5           # 全缺(2+3)
     assert mnt.count_missing_element_vectors(nb.id, {a}) == 3      # 排除 a → 只剩 b 的 3
     assert mnt.count_missing_element_vectors(nb.id, {a, b}) == 0   # 全排除
@@ -308,7 +308,7 @@ def test_missing_element_rows_only_source_id(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=2)
     b = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
-    mnt = repo._runtime.maintenance_component
+    mnt = repo.maintenance
     assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id)} == {a, b}
     assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=a)} == {a}
     assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=b)} == {b}
@@ -326,7 +326,7 @@ def test_missing_vector_source_ids_are_distinct_and_lightweight(repo):
             "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) VALUES (?,?,?,?,?)",
             (f"ch-{a}-1", nb.id, a, "chunk text", _NOW),
         )
-    mnt = repo._runtime.maintenance_component
+    mnt = repo.maintenance
     # element 侧:两个源各有缺向量 element,去重后是 {a, b}(不是 4 个行)。
     assert set(mnt.missing_element_vector_source_ids(nb.id)) == {a, b}
     # 与 rows 版的 source_id 集合逐一致(判据同款,只投影不同)。
@@ -348,7 +348,7 @@ def test_backfill_job_embeds_under_per_source_lock(repo, monkeypatch):
     from app.api import source_routes
 
     ingestion = repo._runtime.source_ingestion
-    mnt = repo._runtime.maintenance_component
+    mnt = repo.maintenance
     seen: dict = {}
 
     def _spy_elem(notebook_id, items):
@@ -636,7 +636,7 @@ def test_h2_sample_capped_at_20(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     for _ in range(25):
         _seed_source(repo, nb.id, parse_status="extracted", n_elements=0)
-    h2 = _check(repo._runtime.checkup.run(nb.id), "H2")
+    h2 = _check(repo.checkup.run(nb.id), "H2")
     assert h2.count == 25  # 计数是全量
     assert len(h2.sample) == 20  # 样本有界
     assert h2.sample == sorted(h2.sample)  # 稳定排序

@@ -618,7 +618,6 @@ SURFACE_MEMBERS = (
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.checkup_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='_runtime'),
@@ -1048,6 +1047,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._connect', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._write_lock', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.checkup', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.close_local', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.db_path', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance', kind='attribute', target='_runtime'),
@@ -1312,6 +1312,16 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/eval/sa_calibration.py', scope='<module>._run_arm', kind='attribute', target='chat'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.main', kind='attribute', target='chat'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='checkup',
+        owner='CheckupService',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.checkup_service', kind='attribute', target='checkup'),
         ),
         patches=(
         ),
@@ -2133,6 +2143,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.source_id_by_hash', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.maybe_sweep_orphan_assets._sweep', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._backfill_relation_embeddings', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.checkup.<lambda>', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.eval_insert_source_for_test', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>._counts', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
