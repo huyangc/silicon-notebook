@@ -37,6 +37,7 @@ class ScaleIndexBuilder:
         building_lock,
         notify_index_done: Callable[[str], None],
         now: Callable[[], str],
+        invalidate_unified_cache: "Callable[[str], None] | None" = None,
     ) -> None:
         self.settings = settings
         self.projections = projections
@@ -51,10 +52,37 @@ class ScaleIndexBuilder:
         self.incremental_fuse_source = incremental_fuse_source
         self.invalidate_scale_cache = invalidate_scale_cache
         self.cache_viz = cache_viz
+        # full_viz_graph('object') caches the whole 8M-object graph dict in the
+        # facade's unified_cache and never drops it during the build. Once
+        # viz_arrays has extracted the compact numpy arrays the dict is dead
+        # weight (~12-20GB at 8M objects), so build() invalidates it right after.
+        # None = unwired (older callers / tests that don't exercise the cache).
+        self.invalidate_unified_cache = invalidate_unified_cache
         self.building = building
         self.building_lock = building_lock
         self.notify_index_done = notify_index_done
         self.now = now
+
+    def _build_ann(self, vectors):
+        """Build an hnsw index from a (n, dim) float32 matrix — same frozen
+        params as the KG ANN (cosine / M=16 / ef=hnsw_ef_construction /
+        random_seed=42). build() pre-builds the chunk/relation ANN inline so
+        each matrix is freed BEFORE persist instead of riding resident for
+        save_scale_index to rebuild (relation matrix alone is ~33GB at 8M rows).
+        Returns None for an empty/absent matrix."""
+        if vectors is None or getattr(vectors, "shape", (0,))[0] == 0:
+            return None
+        import hnswlib
+
+        idx = hnswlib.Index(space="cosine", dim=int(vectors.shape[1]))
+        idx.init_index(
+            max_elements=vectors.shape[0],
+            ef_construction=self.settings.hnsw_ef_construction,
+            M=16,
+            random_seed=42,
+        )
+        idx.add_items(vectors, np.arange(vectors.shape[0]))
+        return idx
 
     def gather_graph(
         self,
@@ -156,6 +184,17 @@ class ScaleIndexBuilder:
             return index
 
         kg_ann_index = timed("ann_build", build_kg_ann)
+        # Capture the built dim NOW, before ann_vectors is freed post-synonym.
+        # ann_vectors is never persisted (it only fed the KG hnsw + the synonym
+        # KNN), so it must not ride ~33GB resident through chunk/relation load
+        # and persist — kg_ann_index already holds the vectors.
+        from app.services.vector_index import resolve_runtime_dim as _resolve_dim
+
+        built_dim = (
+            int(ann_vectors.shape[1])
+            if getattr(ann_vectors, "size", 0)
+            else (_resolve_dim(self.settings) or self.settings.embed_dim)
+        )
         gc.collect()
 
         def synonym_edges():
@@ -174,6 +213,8 @@ class ScaleIndexBuilder:
             )
 
         synonyms = timed("synonym", synonym_edges)
+        del ann_vectors  # not persisted; kg_ann_index holds the vectors now
+        gc.collect()
         (
             node_ids,
             (edge_src, edge_tgt, edge_weight),
@@ -202,7 +243,7 @@ class ScaleIndexBuilder:
                 idf.append(1.0 / count if count > 0 else 1.0)
             else:
                 idf.append(1.0)
-        del kg_id_set, membership_counts
+        del kg_id_set, membership_counts, id_to_idx  # id_to_idx dead after chunk_index
 
         transition, _ = timed(
             "transition",
@@ -227,6 +268,11 @@ class ScaleIndexBuilder:
         )
         del chunk_ids_raw, chunk_matrix_raw
         gc.collect()
+        # Build the chunk ANN now, then free its matrix — persist no longer
+        # rebuilds it (it never held both matrix and index resident).
+        chunk_ann_index = self._build_ann(chunk_ann_vectors)
+        del chunk_ann_vectors
+        gc.collect()
 
         relation_ids_raw, relation_matrix_raw = timed(
             "relation_matrix",
@@ -242,6 +288,11 @@ class ScaleIndexBuilder:
         )
         del relation_ids_raw, relation_matrix_raw
         gc.collect()
+        # Build the relation ANN now, then free its matrix (~33GB at 8M rows) —
+        # this is the single biggest slice the old persist held resident.
+        relation_ann_index = self._build_ann(relation_ann_vectors)
+        del relation_ann_vectors
+        gc.collect()
 
         viz_artifacts = timed(
             "viz_arrays",
@@ -252,15 +303,15 @@ class ScaleIndexBuilder:
         viz_ids, viz_adj, viz_deg, viz_types, viz_names, viz_payload = (
             viz_artifacts
         )
+        # The compact viz arrays above are independent numpy structures; the
+        # source graph dict full_viz_graph() left in unified_cache is now dead
+        # weight and must not ride resident through persist.
+        if self.invalidate_unified_cache is not None:
+            self.invalidate_unified_cache(notebook_id)
         gc.collect()
 
-        from app.services.vector_index import resolve_runtime_dim
-
-        built_dim = (
-            int(ann_vectors.shape[1])
-            if getattr(ann_vectors, "size", 0)
-            else (resolve_runtime_dim(self.settings) or self.settings.embed_dim)
-        )
+        # built_dim was captured right after ann_build, before ann_vectors was
+        # freed (see above).
         manifest = {
             "version": self.version(notebook_id),
             "dim": built_dim,
@@ -285,7 +336,8 @@ class ScaleIndexBuilder:
                 "transition": transition,
                 "idf": idf,
                 "chunk_index": chunk_index,
-                "ann_vectors": ann_vectors,
+                # ann_vectors intentionally omitted — freed post-synonym; the KG
+                # index is passed prebuilt below and save uses manifest["dim"].
                 "ann_labels": ann_labels,
                 "manifest": manifest,
                 "viz_ids": viz_ids,
@@ -294,11 +346,13 @@ class ScaleIndexBuilder:
                 "viz_types": viz_types,
                 "viz_names": viz_names,
                 "viz_payload": viz_payload,
-                "chunk_ann_vectors": chunk_ann_vectors,
+                # chunk/relation matrices freed after their ANN was built; pass
+                # the prebuilt indexes (save writes them straight to .bin).
                 "chunk_ann_labels": chunk_ann_labels,
-                "relation_ann_vectors": relation_ann_vectors,
                 "relation_ann_labels": relation_ann_labels,
                 "prebuilt_ann": kg_ann_index,
+                "prebuilt_chunk_ann": chunk_ann_index,
+                "prebuilt_relation_ann": relation_ann_index,
                 "ef_construction": self.settings.hnsw_ef_construction,
             },
         )

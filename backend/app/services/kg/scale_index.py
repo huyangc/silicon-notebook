@@ -327,6 +327,41 @@ def build_transition_arrays(
     return (M @ D).tocsr(), index
 
 
+def _persist_ann(out_dir, bin_name, prebuilt, vectors, n_labels, dim, ef) -> None:
+    """Save one hnsw index to out_dir/bin_name. Reuse ``prebuilt`` when its
+    element count matches ``n_labels`` (build() now pre-builds every ANN inline
+    and frees the matrix before persist — so at scale the matrices never coexist
+    with their indexes here); otherwise build from ``vectors`` (float32, may be
+    None → empty index). Mirrors the frozen hnsw params (cosine / M=16 /
+    random_seed=42). Never emits a row-count-mismatched .bin (defensive count
+    check before trusting a prebuilt handle)."""
+    import hnswlib
+
+    idx = None
+    if prebuilt is not None:
+        try:
+            if int(prebuilt.get_current_count()) == n_labels:
+                idx = prebuilt
+        except Exception:  # noqa: BLE001 — defensive: never trust a broken handle
+            idx = None
+    if idx is None:
+        vecs = (
+            np.asarray(vectors, dtype=np.float32)
+            if vectors is not None and len(vectors)
+            else None
+        )
+        use_dim = int(vecs.shape[1]) if (vecs is not None and vecs.shape[0] > 0) else dim
+        if use_dim < 1:
+            use_dim = 1
+        idx = hnswlib.Index(space="cosine", dim=use_dim)
+        idx.init_index(
+            max_elements=max(1, n_labels), ef_construction=ef, M=16, random_seed=42
+        )
+        if vecs is not None and vecs.shape[0] > 0:
+            idx.add_items(vecs, np.arange(vecs.shape[0]))
+    idx.save_index(os.path.join(out_dir, bin_name))
+
+
 def save_scale_index(
     out_dir: str,
     *,
@@ -334,9 +369,9 @@ def save_scale_index(
     transition: "sp.csr_matrix",
     idf: List[float],
     chunk_index: List[int],
-    ann_vectors,
     ann_labels: List[str],
     manifest: dict,
+    ann_vectors=None,
     viz_ids: List[str] = None,
     viz_adj: "sp.csr_matrix" = None,
     viz_deg=None,
@@ -348,6 +383,8 @@ def save_scale_index(
     relation_ann_vectors=None,
     relation_ann_labels: List[str] = None,
     prebuilt_ann=None,
+    prebuilt_chunk_ann=None,
+    prebuilt_relation_ann=None,
     ef_construction: int = 200,
 ) -> dict:
     """把构建好的数组落盘到 out_dir。
@@ -398,51 +435,33 @@ def save_scale_index(
         sp.save_npz(os.path.join(out_dir, "viz_adj.npz"), viz_adj.tocsr())
         manifest = {**manifest, "has_viz": True}
 
-    ann_vecs = np.asarray(ann_vectors, dtype=np.float32) if len(ann_vectors) else np.empty((0, 1), dtype=np.float32)
-    dim = int(ann_vecs.shape[1]) if ann_vecs.shape[0] > 0 else int(manifest.get("dim", 1))
+    # KG dim: prefer the actual matrix width when a matrix is still passed
+    # (fallback / older callers), else the manifest's built dim (build() frees
+    # ann_vectors before persist now, so it is normally None here).
+    dim = int(manifest.get("dim", 1))
+    if ann_vectors is not None and len(ann_vectors):
+        _av = np.asarray(ann_vectors, dtype=np.float32)
+        if _av.shape[0] > 0:
+            dim = int(_av.shape[1])
     if dim < 1:
         dim = 1
 
-    idx = None
-    if prebuilt_ann is not None:
-        try:
-            if int(prebuilt_ann.get_current_count()) == len(ann_labels):
-                idx = prebuilt_ann
-        except Exception:  # noqa: BLE001 — defensive: never trust a broken handle
-            idx = None
-    if idx is None:
-        idx = hnswlib.Index(space="cosine", dim=dim)
-        idx.init_index(max_elements=max(1, ann_vecs.shape[0]), ef_construction=ef_construction, M=16, random_seed=42)
-        if ann_vecs.shape[0] > 0:
-            idx.add_items(ann_vecs, np.arange(ann_vecs.shape[0]))
-    idx.save_index(os.path.join(out_dir, "ann.bin"))
+    _persist_ann(out_dir, "ann.bin", prebuilt_ann, ann_vectors,
+                 len(ann_labels), dim, ef_construction)
 
-    # Chunk-level ANN (Task 1). Same hnsw params as the KG ann above; persisted
-    # only when chunk vectors/labels are provided. manifest flag lets
-    # load_scale_index skip when absent (older indexes stay valid).
+    # Chunk-level ANN (Task 1): persisted only when chunk labels are provided;
+    # reuses build()'s pre-built index (matrix already freed) or rebuilds from a
+    # passed matrix. manifest flag lets load_scale_index skip when absent.
     if chunk_ann_labels:
-        c_vecs = np.asarray(chunk_ann_vectors, dtype=np.float32)
-        c_dim = int(c_vecs.shape[1]) if c_vecs.shape[0] > 0 else dim
-        c_idx = hnswlib.Index(space="cosine", dim=c_dim)
-        c_idx.init_index(max_elements=max(1, c_vecs.shape[0]), ef_construction=ef_construction, M=16, random_seed=42)
-        if c_vecs.shape[0] > 0:
-            c_idx.add_items(c_vecs, np.arange(c_vecs.shape[0]))
-        c_idx.save_index(os.path.join(out_dir, "chunk_ann.bin"))
+        _persist_ann(out_dir, "chunk_ann.bin", prebuilt_chunk_ann,
+                     chunk_ann_vectors, len(chunk_ann_labels), dim, ef_construction)
         np.save(os.path.join(out_dir, "chunk_ann_labels.npy"), np.asarray(chunk_ann_labels, dtype=object))
         manifest = {**manifest, "has_chunk_ann": True, "n_chunk_ann": len(chunk_ann_labels)}
 
-    # Relation-level ANN (relation-ann task). Same hnsw params/shape as the
-    # chunk ANN above; persisted only when relation vectors/labels are
-    # provided. manifest flag lets load_scale_index skip when absent (older
-    # indexes stay valid — mirrors has_chunk_ann).
+    # Relation-level ANN (mirrors chunk): pre-built index or rebuild from matrix.
     if relation_ann_labels:
-        r_vecs = np.asarray(relation_ann_vectors, dtype=np.float32)
-        r_dim = int(r_vecs.shape[1]) if r_vecs.shape[0] > 0 else dim
-        r_idx = hnswlib.Index(space="cosine", dim=r_dim)
-        r_idx.init_index(max_elements=max(1, r_vecs.shape[0]), ef_construction=ef_construction, M=16, random_seed=42)
-        if r_vecs.shape[0] > 0:
-            r_idx.add_items(r_vecs, np.arange(r_vecs.shape[0]))
-        r_idx.save_index(os.path.join(out_dir, "relation_ann.bin"))
+        _persist_ann(out_dir, "relation_ann.bin", prebuilt_relation_ann,
+                     relation_ann_vectors, len(relation_ann_labels), dim, ef_construction)
         np.save(os.path.join(out_dir, "relation_ann_labels.npy"), np.asarray(relation_ann_labels, dtype=object))
         manifest = {**manifest, "has_relation_ann": True, "n_relation_ann": len(relation_ann_labels)}
 
