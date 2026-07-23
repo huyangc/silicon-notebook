@@ -91,6 +91,19 @@ class AddUrlSourcesResult(BaseModel):
     rejected: List[RejectedUrl]
 
 
+class ReparseSourcesRequest(BaseModel):
+    """体检修复(H2/H3):批量重新解析指定的源。source_ids 由前端从体检结果的 sample
+    带来;后端按 notebook 作用域过滤后逐个后台重跑 process_source。"""
+    source_ids: List[str]
+
+
+class RepairScheduledResult(BaseModel):
+    """一个后台修复动作的受理回执。``scheduled`` 是实际排入后台的 source_id(reparse 经
+    notebook 作用域过滤后的);notebook 级动作(补向量)用布尔 ``accepted``。"""
+    scheduled: List[str] = []
+    accepted: bool = False
+
+
 class SourceDetail(SourceSummary):
     file_path: str = ""
     error_message: str = ""

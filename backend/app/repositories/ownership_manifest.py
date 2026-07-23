@@ -1884,6 +1884,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.reparse_sources', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._source_evidence', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_pipeline_event_logging', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='get_source'),
@@ -2366,6 +2367,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.add_url_sources.<lambda>', kind='attribute', target='process_source'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.reparse_sources', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.upload_sources.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all._sched', kind='attribute', target='process_source'),

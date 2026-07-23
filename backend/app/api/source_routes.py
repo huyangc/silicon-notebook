@@ -18,6 +18,8 @@ from app.models.sources import (
     AddUrlSourcesRequest,
     AddUrlSourcesResult,
     PaginatedSources,
+    ReparseSourcesRequest,
+    RepairScheduledResult,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
@@ -204,6 +206,60 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
         return source_repository().parse_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/sources/reparse",
+    response_model=RepairScheduledResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def reparse_sources(
+    notebook_id: str, payload: ReparseSourcesRequest
+) -> RepairScheduledResult:
+    """体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)
+    ——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。
+    ⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守
+    notebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。"""
+    repo = source_repository()
+    scheduled: List[str] = []
+    for source_id in payload.source_ids:
+        try:
+            if repo.get_source(source_id).notebook_id != notebook_id:
+                continue
+        except KeyError:
+            continue
+        kg_scheduler.submit_job(repo.process_source, source_id)
+        scheduled.append(source_id)
+    return RepairScheduledResult(scheduled=scheduled)
+
+
+def _backfill_vectors_job(repo, notebook_id: str) -> None:
+    """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。复用 batch_ingest
+    的既有 backfill,EMBED 未配则各自跳过。best-effort:一侧失败不拦另一侧。"""
+    from app.services import batch_ingest
+
+    try:
+        batch_ingest.backfill_chunk_embeddings(repo, notebook_id, missing_only=True)
+    except Exception:  # noqa: BLE001 — 后台 job 自负错误,一侧失败不拦另一侧
+        pass
+    try:
+        batch_ingest.backfill_element_embeddings(repo, notebook_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.post(
+    "/notebooks/{notebook_id}/backfill-vectors",
+    response_model=RepairScheduledResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
+    """体检修复(H4 缺 chunk 向量 / H5 缺 element 向量):后台补齐该 notebook 的缺失向量
+    (只补缺失、幂等,仅 embedding、不动解析/KG)。用户点触发、非自动(承 efficiency-first:
+    凡调 embedding 的修复不自动)。补完后 H4/H5 计数下降,前端重拉 checkup 反映。
+    用完整 facade(``repository()``)——backfill 需要 maintenance/configured(BatchIngestRepository)。"""
+    kg_scheduler.submit_job(_backfill_vectors_job, repository(), notebook_id)
+    return RepairScheduledResult(accepted=True)
 
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
