@@ -472,27 +472,34 @@ class SourceIngestionService:
         if retyped:
             self.sources.set_doc_type(source_id, incoming_doc_type)
 
-        # 后缀（→解析器）变化：内容相同 ≠ 意图相同（同构于 doc_type）。只对已定型
-        # 的行动手；在飞行中的行留给它自己的流水线，绝不并发重排。见方法 docstring。
-        reparse = (
+        # 后缀（→解析器）变化：内容相同 ≠ 意图相同（同构于 doc_type）。判据是
+        # parser_class（后缀→解析器类别，与 parse_source_file 同一真源）。见方法 docstring。
+        parser_changed = (
             bool(file_name)
             and parser_class(file_name) != parser_class(summary.file_name or "")
-            and summary.parse_status in ("failed", "extracted")
         )
-        if reparse:
-            self._repoint_reused_file(source_id, summary, file_name, content)
+        reparse = parser_changed and summary.parse_status in ("failed", "extracted")
 
         if reparse:
-            # 后缀（解析器）变了的源整条流水线重跑：解析产物来自错的解析器（换后缀），
-            # 重跑顺带用上新类型/新解析器（_repoint_reused_file 已把文件按新名重写）。
-            # 排队前先把状态翻出终态，这一步不是装饰：它让重试对前端可见（前端只对
-            # 非终态轮询，仍是终态的行会被判「已结束」而不再刷新），也是「已入队」标记
-            # （挡住这个窗口里的重复触发）。顺带清掉上一轮的 error_message。
-            self.set_source_status(source_id, "queued", error_message="")
-            if scheduler is not None:
-                scheduler(source_id)
-            else:
-                self.process_source(source_id, hooks)
+            # 后缀（解析器）变了的**已定型**源整条流水线重跑：解析产物来自错的解析器。
+            # ⚠ 认领必须原子，且**赢了才 repoint**：两个并发重传同一 settled 源、后缀
+            # 不同，都会在任一方写 'queued' 之前读到旧终态。若各自无条件
+            # _repoint_reused_file（重写盘上文件）+ set 'queued' + 调度，就给同一行起两条
+            # 流水线（互清 elements/KG），而且**同一个盘上文件被重写两次**（比 KG 竞态
+            # 更糟）。claim_reparse_if_settled 是「WHERE parse_status IN ('failed',
+            # 'extracted')」的守卫 UPDATE，进程全局写锁让两个并发恰有一个 rowcount==1：
+            # 抢到（翻出终态→'queued'，兼作「已入队」标记与 error_message 清理）→ 本次是
+            # 唯一赢家，**赢了再**重写文件、发状态、调度；没抢到（另一次已认领）→ 什么都
+            # 不做（绝不 repoint、绝不调度），返回既有行。顺序刻意是「claim → 赢家 repoint
+            # → 赢家调度」，输家绝不先 repoint 破坏文件。翻出终态还让重试对前端可见（前端
+            # 只对非终态轮询）。
+            if self.sources.claim_reparse_if_settled(source_id):
+                self._repoint_reused_file(source_id, summary, file_name, content)
+                self._emit_status(source_id, "queued", "")
+                if scheduler is not None:
+                    scheduler(source_id)
+                else:
+                    self.process_source(source_id, hooks)
         elif summary.parse_status == "failed":
             # 失败源重试：解析产物本来就不可信（失败），重跑整条流水线。
             # ⚠ 认领必须原子：两个并发上传同一失败源都在任一方写 'queued' 之前读到

@@ -928,6 +928,74 @@ def test_retype_landing_in_the_terminal_mark_window_forces_a_reextract(
     assert repo.get_source(sid).parse_status == "extracted", "补跑完照样落终态"
 
 
+def test_concurrent_reupload_with_a_different_suffix_reparses_exactly_once(
+    repo, notebook_id, monkeypatch
+):
+    """P2-1：两个并发上传同一 settled 源、后缀不同（.csv→.md）。两者都在任一方写
+    'queued' 之前读到旧终态；若各自无条件 _repoint_reused_file（重写盘上文件）+ 调度，
+    就给同一行起两条流水线（互清 elements/KG），而且**同一个盘上文件被重写两次**。
+    claim_reparse_if_settled 的守卫 UPDATE（WHERE parse_status IN ('failed','extracted')）
+    保证恰有一个 rowcount==1 去 repoint+调度；输家什么都不做。"""
+    body = b"col1,col2\n1,2\n3,4"
+    sid = _upload_named(repo, notebook_id, content=body, name="data.csv")[0].id
+    repo._runtime.source_ingestion.set_source_status(sid, "extracted")   # 定型
+    repo.process_calls.clear()
+
+    ingestion = repo._runtime.source_ingestion
+    store = repo._runtime.source_store
+
+    # 数盘上文件被重写几次——只有认领赢家该 repoint。
+    repoint_calls: list[int] = []
+    repoint_lock = threading.Lock()
+    real_repoint = ingestion._repoint_reused_file
+
+    def counting_repoint(*args, **kwargs):
+        with repoint_lock:
+            repoint_calls.append(1)
+        return real_repoint(*args, **kwargs)
+
+    monkeypatch.setattr(ingestion, "_repoint_reused_file", counting_repoint)
+
+    # Barrier 把两个线程钉在认领点上同时放行——都已读到 'extracted'，于是都进 reparse
+    # 分支、都调用 claim_reparse_if_settled。真正的串行由认领里的写锁决定。
+    real_claim = store.claim_reparse_if_settled
+    barrier = threading.Barrier(2, timeout=5)
+
+    def racing_claim(source_id):
+        barrier.wait()
+        return real_claim(source_id)
+
+    monkeypatch.setattr(store, "claim_reparse_if_settled", racing_claim)
+
+    scheduled: list[str] = []
+    sched_lock = threading.Lock()
+
+    def sched(source_id):
+        with sched_lock:
+            scheduled.append(source_id)
+
+    def do_upload():
+        return _upload_named(
+            repo, notebook_id, content=body, name="data.md", scheduler=sched
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(do_upload)
+        f2 = pool.submit(do_upload)
+        f1.result(timeout=10)
+        f2.result(timeout=10)
+
+    assert scheduled == [sid], (
+        f"并发换后缀重传同一 settled 源只能排队一条流水线，实际 {scheduled}"
+    )
+    assert len(repoint_calls) == 1, (
+        f"盘上文件只能被重写一次（只有认领赢家 repoint），实际 {len(repoint_calls)} 次"
+    )
+    assert repo.get_source(sid).file_name == "data.md"
+    assert repo.get_source(sid).parse_status == "queued"
+    assert len(repo.list_sources(notebook_id)) == 1
+
+
 def test_retype_on_an_in_flight_source_never_starts_a_second_reextract(
     repo, notebook_id, settled, monkeypatch
 ):
