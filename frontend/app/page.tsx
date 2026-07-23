@@ -2433,11 +2433,13 @@ export default function Home() {
           ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
           ...result.created,
         ]);
-        // Keep the total in step with the page (mirrors the file-upload path), so the
-        // Ask source count / welcome text — now driven by sourcesTotal — don't go stale
-        // after a URL import until the next source-page fetch.
-        setSourcesTotal((t) => t + result.created.length);
+        // The Ask surfaces' count (notebookSourceTotal) always gains the imported sources.
+        // sourcesTotal instead drives pagination + the source list: bump it only when no
+        // search is active — during a search it holds the matched-count, and adding URLs that
+        // may not match the query would inflate it into a phantom page (it re-syncs on the
+        // next filtered fetch).
         setNotebookSourceTotal((t) => t + result.created.length);
+        if (!sourceQuery) setSourcesTotal((t) => t + result.created.length);
         await loadNotebookCollection();
       }
       setUrlRejected(result.rejected);
