@@ -1781,14 +1781,15 @@ export default function Home() {
   // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
   const askBlocked = isAskBlocked(currentNotebook);
   const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
-  // P2(codex PR#334 第3轮):ask_available 是 get_notebook 的快照,在别处加了证据——
-  // 在 Memory 页签确认一条 memory、或创建/导入一张 knowhow 表——并不会刷新它。这里在
-  // "重新看到问答框"时重拉一次:仅当当前判为不可用(被禁)时才发请求,把额外开销压到最少;
-  // 有新证据则 ask_available 翻真、对话框自动解禁。来源上传→解析这条路已由处理轮询覆盖
-  // (reachedExtracted 分支),不在此列。
-  function refreshAskAvailabilityIfBlocked() {
+  // ask_available 是 get_notebook 的快照;在别的页签/覆盖层增删证据不会刷新它。以下把它
+  // 在"重新看到问答框"时与后端对齐,且**双向**——证据增则解禁、证据减则重新禁用(codex
+  // PR#334 第5轮 P1:此前只在被禁时重拉,漏了 true→false)。来源增删这条路已各自覆盖
+  // (处理轮询 reachedExtracted 分支 / deleteSource 末尾重拉),不在此列。
+  //
+  // 无条件重拉一次:既捕获 Memory 页签的证据增,也捕获其删除(true→false)。
+  function revalidateAskAvailability() {
     const nb = activeNotebookIdRef.current;
-    if (!nb || currentNotebook?.ask_available !== false) return;
+    if (!nb) return;
     getNotebook(nb)
       .then((refreshed) => {
         if (activeNotebookIdRef.current === nb) {
@@ -1797,32 +1798,47 @@ export default function Home() {
       })
       .catch(reportError);
   }
-  // P2-2(codex PR#334 第4轮):knowhow 投影是防抖后台任务,关闭抽屉时 chunk 可能还没落库,
-  // 一次性重拉会漏掉;若当前被禁,关闭后做一段有界轮询,直到 ask_available 翻真或超时
-  // (~最多 8×2s)。仅在被禁时轮询、翻真即停,故对已可用的库零开销。
-  function pollAskAvailabilityAfterKnowhow() {
+  // 关闭 knowhow 抽屉:先无条件重拉一次(捕获"删表→重新禁用",双向对齐)。knowhow 投影是
+  // 防抖后台任务,新建表的 chunk 可能还没落库——**仅当关闭前已被禁**(可能刚建了首张表)才
+  // 继续退避轮询等投影落库,直到 ask_available 翻真或封顶(~3min,与来源处理轮询同款);
+  // 删表场景(关闭前可用)一次重拉即回到禁用态,不轮询,免得对着不会翻真的态空转。
+  // **瞬时 getNotebook 失败不终止**,仍在窗口内就退避重试(codex PR#334 第5轮 P1+P2)。
+  function revalidateAskAvailabilityAfterKnowhow() {
     const nb = activeNotebookIdRef.current;
-    if (!nb || currentNotebook?.ask_available !== false) return;
-    let tries = 0;
-    const tick = () => {
-      if (activeNotebookIdRef.current !== nb) return; // 已切库,放弃
+    if (!nb) return;
+    const wasBlocked = currentNotebook?.ask_available === false;
+    revalidateAskAvailability(); // 首拉:无条件,捕获删表→重新禁用
+    if (!wasBlocked) return;     // 关闭前可用→只可能是删证据,一次重拉已够,不轮询
+    let delay = 1500;
+    let elapsed = 0;
+    const CAP = 180000; // ~3min
+    const retry = () => {
+      if (activeNotebookIdRef.current !== nb || elapsed >= CAP) return;
+      elapsed += delay;
+      const wait = delay;
+      delay = Math.min(Math.round(delay * 1.5), 15000);
+      window.setTimeout(tick, wait);
+    };
+    function tick() {
+      if (!nb || activeNotebookIdRef.current !== nb) return; // 已切库,放弃(!nb 兼作收窄)
       getNotebook(nb)
         .then((refreshed) => {
           if (activeNotebookIdRef.current !== nb) return;
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
-          if (refreshed.ask_available === false && ++tries < 8) {
-            window.setTimeout(tick, 2000);
-          }
+          if (refreshed.ask_available === false) retry(); // 仍被禁 → 继续退避轮询等投影
         })
-        .catch(reportError);
-    };
-    window.setTimeout(tick, 2000);
+        .catch(retry); // 瞬时失败不终止 → 退避重试
+    }
+    retry(); // 首拉已由 revalidateAskAvailability 完成,轮询从 delay 后开始
   }
-  // 进入(或切回)问答页签且当前被禁时重查——覆盖 Memory 页签确认后切回 Ask 的场景。
+  // 从别的页签切回 Ask 时与后端对齐(捕获在 Memory 等页签的证据增删);初次进入不重复拉。
+  const prevAskChatModeRef = useRef<ChatMode>(chatMode);
   useEffect(() => {
-    if (chatMode === "ask") refreshAskAvailabilityIfBlocked();
+    const wasAsk = prevAskChatModeRef.current === "ask";
+    prevAskChatModeRef.current = chatMode;
+    if (chatMode === "ask" && !wasAsk) revalidateAskAvailability();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatMode, currentNotebookId, currentNotebook?.ask_available]);
+  }, [chatMode]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
   const currentKgBuildView = kgBuildPresentation(
     currentNotebook?.kg_build,
@@ -2919,9 +2935,9 @@ export default function Home() {
 
   function closeKnowhow() {
     setKnowhowNavigation((current) => closeKnowhowNavigation(current));
-    // P2:knowhow 抽屉是覆盖层、不改 chatMode,故上面的 chatMode effect 不会触发。关闭
-    // 回到问答框时若当前被禁,轮询到投影产出 chunk 为止——新建/导入的 knowhow 表解禁对话。
-    pollAskAvailabilityAfterKnowhow();
+    // knowhow 抽屉是覆盖层、不改 chatMode,故上面的 chatMode effect 不会触发。关闭回到
+    // 问答框时与后端对齐:删表→重新禁用、建表(投影落库后)→解禁,长投影退避轮询到位。
+    revalidateAskAvailabilityAfterKnowhow();
   }
 
   async function openAnalytics() {
