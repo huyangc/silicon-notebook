@@ -314,6 +314,29 @@ def test_missing_element_rows_only_source_id(repo):
     assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=b)} == {b}
 
 
+def test_missing_vector_source_ids_are_distinct_and_lightweight(repo):
+    """codex 第2轮 P1:missing_*_vector_source_ids 只返 DISTINCT source_id(不物化正文),
+    判据与 missing_*_embedding_rows 一致——backfill 用它做廉价源发现,避免大库上把每行全文
+    读进内存(GB 级/OOM)。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    a = _seed_source(repo, nb.id, parse_status="extracted", n_elements=3)  # 一个源 3 个缺 element
+    b = _seed_source(repo, nb.id, parse_status="extracted", n_elements=1)
+    with repo._write() as db:  # 给 a 造一个缺向量的 chunk(chunk 侧正例)
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,created_at) VALUES (?,?,?,?,?)",
+            (f"ch-{a}-1", nb.id, a, "chunk text", _NOW),
+        )
+    mnt = repo._runtime.maintenance_component
+    # element 侧:两个源各有缺向量 element,去重后是 {a, b}(不是 4 个行)。
+    assert set(mnt.missing_element_vector_source_ids(nb.id)) == {a, b}
+    # 与 rows 版的 source_id 集合逐一致(判据同款,只投影不同)。
+    assert set(mnt.missing_element_vector_source_ids(nb.id)) == {
+        r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id)
+    }
+    # chunk 侧:只有 a 有 chunk 且缺向量 → {a}。
+    assert set(mnt.missing_chunk_vector_source_ids(nb.id)) == {a}
+
+
 def test_backfill_job_embeds_under_per_source_lock(repo, monkeypatch):
     """_backfill_vectors_job 逐源持 P1.5 分块锁、锁内读→嵌(codex P1:与 reparse 的 element 换血
     互斥——process_source 在同一把锁内先 clear_embeddings 再换 elements,复用 el-<sid>-<idx> id;
@@ -617,3 +640,36 @@ def test_h2_sample_capped_at_20(repo):
     assert h2.count == 25  # 计数是全量
     assert len(h2.sample) == 20  # 样本有界
     assert h2.sample == sorted(h2.sample)  # 稳定排序
+
+
+def test_probe_validates_ann_content_not_just_existence(tmp_path, monkeypatch):
+    """codex 第2轮 P2:ann.bin 存在但被**截断/损坏**时,probe 真 load 一次主 ANN 判损坏(返 1),
+    不再只看文件存在(load_scale_index 只校验 .npy、ANN 懒加载,截断照样报健康、检索侧才炸)。
+
+    **变异锚点**:把内容级 load 那段删掉(退回只判 os.path.exists)→ 截断分支返 0 → `== 1` 红。"""
+    import numpy as np
+    import hnswlib
+    from types import SimpleNamespace
+    from app.services.kg import scale_index as scale_index_mod
+
+    scale_dir = tmp_path / "scale"
+    scale_dir.mkdir()
+    (scale_dir / "manifest.json").write_text("{}", encoding="utf-8")  # 存在即可(probe 先判存在)
+    ann_path = str(scale_dir / "ann.bin")
+    dim, n = 4, 3
+    h = hnswlib.Index(space="cosine", dim=dim)
+    h.init_index(max_elements=n, ef_construction=16, M=8)
+    h.add_items(np.eye(n, dim, dtype="float32"), list(range(n)))
+    h.save_index(ann_path)
+
+    stub = SimpleNamespace(
+        ann_labels=["ko-0", "ko-1", "ko-2"], ann_path=ann_path, manifest={"dim": dim}
+    )
+    monkeypatch.setattr(scale_index_mod, "load_scale_index", lambda d: stub)
+
+    # 健康 ann.bin:内容校验通过 → 0。
+    assert probe_scale_index_integrity(str(scale_dir)) == 0
+    # 截断 ann.bin:load_index raise → 1(不再假报健康)。
+    with open(ann_path, "r+b") as f:
+        f.truncate(8)
+    assert probe_scale_index_integrity(str(scale_dir)) == 1

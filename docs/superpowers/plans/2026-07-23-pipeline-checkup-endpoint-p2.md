@@ -154,7 +154,7 @@ def h8_index_integrity(nb_id):
 
 ## 十、已知非阻塞项(codex 评审记录)
 
-codex 多轮评审的边角项。本 PR(官方 PR 第 1 轮反馈)已修其中三处,余两处仍非阻塞、留作独立加固。
+codex 多轮评审的边角项。本 PR(官方 PR 第 1、2 轮反馈)已修多处,仅余一处非阻塞、留作独立加固。
 
 **已修(本 PR,官方第 1 轮)**
 
@@ -174,11 +174,26 @@ codex 多轮评审的边角项。本 PR(官方 PR 第 1 轮反馈)已修其中�
   status() stale 判定输入的廉价超集,故缓存绝不比 status() 自身更陈旧;含 mtime 以捕获「rebuild 保持
   kg_mutation_seq 稳定却换 watermark」这类单靠 seq 会漏的场景,故 0/1 两向翻转都被捕获、可缓存无粘滞。
 
+**已修(本 PR,官方第 2 轮)**
+
+- **backfill 分块锁的引用计数生命周期**(官方第 2 轮 P1):上一轮的 per-source 锁有个残留竞态——backfill
+  在锁外**不登记租约**,而锁的清除只按 `_active_sources` 租约归零判定;于是 process_source 释放锁后、
+  finally 里 pop 掉锁时 backfill 还持着**旧锁对象**,随后的 reparse 会另建一把**新锁**、与 backfill 互斥
+  失效(陈旧向量竞态复现);且 backfill-only 的源永不触发 pop→**锁泄漏**。修法:backfill 经新的
+  `SourceIngestionService.hold_source_chunk_lock` 守卫持锁,守卫在持锁期间**登记租约**,使锁在本方持有期
+  不会被 pop;退出时经共享的 `_release_source_lease` 减租约(本方为最后持有者则连锁清除)。process_source
+  与守卫共用同一套 refcount 生命周期。
+- **backfill 源发现改轻量 DISTINCT 查询**(官方第 2 轮 P1):上一轮用 `missing_*_embedding_rows` 收
+  source_id,会把每行**全文**物化进内存(大库 GB 级/OOM),还白扫未配的那侧 workload。改为
+  `missing_*_vector_source_ids`(只 SELECT DISTINCT source_id、不取正文),且只查已配的 workload;真正
+  补齐仍在锁内按 `only_source_id` 重读。
+- **H8 ANN 内容级校验**(官方第 2 轮 P2;先前第 4 轮记录为「只到文件存在」的延后项,现已修):ann.bin 存在
+  但被**截断/非法 HNSW** 时,`load_scale_index` 只看 .npy、ANN 懒加载,照样报健康——检索侧真 `open_ann`
+  才炸、退化成无索引却不提示重建。探针改为在有 labels 时按 manifest 的 dim **真 load 一次主 ANN**,截断/
+  损坏会在 `load_index` raise→判 H8。成本由探针的 300s 健康缓存摊薄(每源每 5min 至多一次),临时 handle
+  探完即弃、不常驻。
+
 **仍非阻塞(留作独立加固)**
 
-- **H8 的 ANN 校验只到「文件存在」**(codex 第 4 轮 P2):主 ann.bin 存在但**内容**截断/非法
-  HNSW 时,探针判健康。要治须真 hnswlib 打开校验——但那正是懒加载想避开的开销,且高频探针里
-  每次真 load ANN 代价不小。当前已校验:manifest 计数/数组长度失配 + 主 ANN 文件存在性 + 健康
-  缓存 300s TTL(post-probe 损坏最终可见)。内容级 ANN 校验留作独立改动。
 - **铃铛签名只含 H 码集合**(codex 第 4 轮 P3):同一类型(如 H2)已有告警时,新增的同类型损坏
   源不会让已读/已关的铃铛复活。要治须把计数/有界样本身份纳入签名。

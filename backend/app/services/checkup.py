@@ -99,12 +99,26 @@ def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None) -> int:
             return 1  # manifest 计数/数组长度失配
         # ⚠ load_scale_index 只校验 .npy 数组、**不校验 ANN 二进制**——ANN 索引懒加载
         # (延迟由检索侧用 ann_path 打开),故 ann.bin 缺失/损坏它照样返 ScaleIndex(codex)。
-        # 主 ANN 有标签(n_ann>0)却没落盘文件 → 检索时开不了 → 判损坏。chunk/relation ANN
+        # 主 ANN 有标签(n_ann>0)时:先判文件存在,再做**内容级校验**。chunk/relation ANN
         # 是可选产物(load_scale_index 本就容忍缺失),不在此升级成整份损坏。
-        if getattr(index, "ann_labels", None) and not os.path.exists(
-            getattr(index, "ann_path", "") or ""
-        ):
-            return 1
+        labels = getattr(index, "ann_labels", None)
+        ann_path = getattr(index, "ann_path", "") or ""
+        if labels:
+            if not os.path.exists(ann_path):
+                return 1  # 有标签却没落盘文件 → 检索时开不了 → 损坏
+            # 内容级校验(codex 第2轮 P2):ann.bin 存在但被**截断/非法 HNSW** 时,上面的
+            # load_scale_index 只看 .npy、ANN 懒加载,照样报健康——检索侧真 open_ann 才炸、退化成
+            # 无索引却不提示重建。这里按 manifest 的 dim 真 load 一次主 ANN,截断/损坏会在 load_index
+            # raise。成本由本探针的 300s 健康缓存摊薄(每源每 5min 至多一次);handle 是本地临时对象、
+            # 探完即弃(不 memoize 到 index 上,避免额外常驻内存)。
+            dim = int(index.manifest.get("dim", 0) or 0)
+            if dim > 0:
+                import hnswlib  # 既有依赖;万一 import 失败落外层 except → 保守判未损坏(不误报)
+                try:
+                    probe = hnswlib.Index(space="cosine", dim=dim)
+                    probe.load_index(ann_path, max_elements=len(labels))
+                except Exception:  # noqa: BLE001 — load 失败=内容损坏 → 判 H8(不落外层保守 0)
+                    return 1
         return 0
     except Exception:  # noqa: BLE001 — 探针绝不 raise 进体检热路径,保守判「未损坏」
         if logger is not None:

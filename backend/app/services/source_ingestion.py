@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, List, Optional
@@ -229,6 +230,43 @@ class SourceIngestionService:
                 lock = threading.Lock()
                 self._source_chunk_locks[source_id] = lock
             return lock
+
+    def _release_source_lease(self, source_id: str) -> None:
+        """租约计数减一;归零(无活跃 invocation)时连该源的分块锁一并从注册表清除。
+        process_source 的 finally 与 ``hold_source_chunk_lock`` 守卫**共用**这一套 refcount
+        生命周期,保证「计数归零才 pop 锁」只有一处实现。调用方须已释放它持有的分块锁
+        (pop 假定此刻无人持该锁)。"""
+        with self._active_sources_lock:
+            remaining = self._active_sources.get(source_id, 0) - 1
+            if remaining > 0:
+                self._active_sources[source_id] = remaining
+            else:
+                self._active_sources.pop(source_id, None)
+                # 计数归零=无 invocation 持该源分块锁,顺手清锁(有界化)。见 __init__ 说明。
+                self._source_chunk_locks.pop(source_id, None)
+
+    @contextmanager
+    def hold_source_chunk_lock(self, source_id: str):
+        """给**非 process_source 的持锁方**(体检 backfill)用的守卫:持有该源分块锁的同时,
+        把它登记进活跃租约(``_active_sources``),使 process_source 的 finally **不会在本方仍
+        持锁时把锁从注册表 pop 掉**(codex 第2轮 P1:否则 process_source 释放锁→finally 见租约归零
+        →pop 锁,而本方仍持旧锁;随后新的 reparse 会另建一把**新锁**、与本方互斥失效→给复用的
+        element/chunk id 挂上永久陈旧向量,正是这把锁要防的;且 backfill-only 的源没有任何租约触发
+        pop→**锁泄漏**)。先登记租约(计数≥1 → 锁在本方持有期不会被 pop),再取锁 acquire;退出时
+        先释放锁、再经 ``_release_source_lease`` 减租约(归零则本方作为最后持有者连锁清除)。
+
+        与 process_source 的正确串行由**同一把锁 + 同一套租约**保证:本方登记租约后取到的锁,与
+        process_source 在 `_source_chunk_lock` 取到的是**同一对象**(租约≥1 保证注册表项不被中途 pop
+        重建);任一方持锁,另一方 acquire 阻塞。process_source 持锁时其租约必≥1(在管线入口登记、
+        finally 才减),故本方减租约到 0 时必无 process_source 持锁,pop 安全。"""
+        with self._active_sources_lock:
+            self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
+        try:
+            # 租约已≥1,注册表项在本方持有期不会被 pop,get-or-create 与 pop 无竞争。
+            with self._source_chunk_lock(source_id):
+                yield
+        finally:
+            self._release_source_lease(source_id)
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -1087,18 +1125,11 @@ class SourceIngestionService:
             # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的
             # BaseException:一律给租约计数减一。置 'parsing' 也在 try 内(见上),故进入
             # try 后再无未覆盖的泄漏边。计数归零才真正撤租(见 stamp 处:并发处理同一源
-            # 时先完成者不能撤掉仍在跑者的租约)。刻意早于下面的 maybe_enqueue_scale_fold,
-            # 后者是独立的空闲收尾、不需要持租约。
-            with self._active_sources_lock:
-                remaining = self._active_sources.get(source_id, 0) - 1
-                if remaining > 0:
-                    self._active_sources[source_id] = remaining
-                else:
-                    self._active_sources.pop(source_id, None)
-                    # refcount 归零=无活跃 invocation 持该源的分块锁,顺手清掉,免得
-                    # 每见一个源就永久留一把锁(有界化)。remaining>0 时不能清——还有
-                    # invocation 在跑、可能正持或将取这把锁。
-                    self._source_chunk_locks.pop(source_id, None)
+            # 时先完成者不能撤掉仍在跑者的租约),并连该源分块锁一并清除(有界化)。刻意早于
+            # 下面的 maybe_enqueue_scale_fold,后者是独立的空闲收尾、不需要持租约。此处的
+            # 分块锁在本方 with 块内已释放,减租约到 0 时可安全 pop(与 backfill 守卫共用
+            # _release_source_lease:backfill 也登记租约,故本方持锁的窗口里锁不会被它 pop)。
+            self._release_source_lease(source_id)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
