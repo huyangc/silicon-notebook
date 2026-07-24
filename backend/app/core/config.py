@@ -347,6 +347,16 @@ class Settings(BaseSettings):
     startup_preload_scale_indexes: bool = Field(
         True, validation_alias="STARTUP_PRELOAD_SCALE_INDEXES"
     )
+    # 大库 ScaleIndex 常驻上限(内存整改 PR-4):8 条上限对小/中库合适,但一个千万级
+    # 对象(或源密集、chunk/relation ANN 巨大)的基准库 ScaleIndex 的 ANN 矩阵可达数十
+    # GB。多领域 base 并发 warm 时,8 个这种大库 = 数百 GB → OOM。故对「大库」另设一个
+    # 更小的常驻上限 scale_idx_cache_max_large:大库条目只算进这个小上限,小库仍用
+    # scale_idx_cache_max;超限按 LRU 淘汰最久未用的大库(只丢引用,GC 收 numpy/hnsw,下次
+    # 访问冷加载=冷启动)。「大库」= 三类 ANN(kg n_ann + n_chunk_ann + n_relation_ann)
+    # 估算常驻字节(rows×runtime_dim×4,ANN 矩阵是常驻内存大头)> scale_idx_large_bytes。
+    # 只按 n_nodes 会漏掉 KG 节点少但 chunk/relation ANN 巨大的源密集库(codex PR#359 r1 P1)。
+    scale_idx_cache_max_large: int = Field(2, validation_alias="SCALE_IDX_CACHE_MAX_LARGE")
+    scale_idx_large_bytes: int = Field(8 * 1024 ** 3, validation_alias="SCALE_IDX_LARGE_BYTES")
     # review_queue 的边介数中心性(rustworkx Brandes O(V·E))超此节点数时,不再对
     # 全图跑,改对「度数 top-K 诱导子图」算(见 sqlite_repository._edge_centrality_map)。
     edge_centrality_max_nodes: int = Field(20000, validation_alias="EDGE_CENTRALITY_MAX_NODES")

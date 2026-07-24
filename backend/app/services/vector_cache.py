@@ -163,3 +163,52 @@ class LRUProcessCache:
     def pop(self, key: str, default=None):
         with self._lock:
             return self._store.pop(key, default)
+
+
+class LargeAwareLRUCache(LRUProcessCache):
+    """LRUProcessCache that additionally caps the number of resident LARGE
+    entries. A ScaleIndex for a multi-million-object base library holds ANN
+    matrices tens of GB in size; the plain count cap (max_entries=8) lets 8 of
+    them accumulate to hundreds of GB → OOM (memory-hardening PR-4, audit P1-4).
+
+    ``is_large(value) -> bool`` classifies an entry; a large entry counts against
+    ``max_large`` (a small number), a small entry only against ``max_entries``.
+    On insert of a large entry, once the resident large count exceeds
+    ``max_large`` the least-recently-used LARGE entry is evicted (the just-inserted
+    one is most-recently-used, so it is kept). Small entries evict by
+    ``max_entries`` exactly as before, so a burst of small libraries can never
+    push a still-hot large index out ahead of an idle small one and vice-versa.
+    Eviction just drops the reference (GC frees numpy/hnsw), so an evicted index
+    cold-loads from disk on next access — a cache miss like any cold start.
+
+    SCOPE (codex PR#359 P1-b, consciously deferred): this bounds the RESIDENT
+    (cached, idle) large indexes. It does NOT bound the transient peak when more
+    than max_large large notebooks are cold-loaded CONCURRENTLY — each in-flight
+    request still holds the ScaleIndex it just loaded even after this evicts the
+    cache's reference, so N simultaneous cold loads can momentarily hold N indexes.
+    Bounding that peak needs a pre-load cross-notebook admission gate + refcounting
+    over active index users, a separate concurrency change tracked as a follow-up.
+    This class still strictly improves on the plain max_entries=8 cap (fewer
+    resident large indexes, so a lower concurrent ceiling too)."""
+
+    def __init__(self, max_entries: int, *, max_large: int, is_large) -> None:
+        super().__init__(max_entries)
+        self._max_large = max_large
+        self._is_large = is_large
+
+    def __setitem__(self, key: str, value) -> None:
+        with self._lock:
+            self._store[key] = value
+            self._store.move_to_end(key)
+            # Large cap FIRST (codex PR#359 r1 P2): a large insert over the large
+            # cap must evict the oldest LARGE entry, not let the total cap below
+            # first drop a small LRU entry — that would leave the cache one under
+            # max_entries and cold-reload the small index for nothing. Only a
+            # newly-inserted large entry can breach the large cap, so skip the O(n)
+            # scan for small inserts.
+            if self._is_large(value):
+                large_keys = [k for k, v in self._store.items() if self._is_large(v)]
+                while len(large_keys) > self._max_large:
+                    del self._store[large_keys.pop(0)]  # LRU order → oldest large first
+            while len(self._store) > self._max_entries:
+                self._store.popitem(last=False)
