@@ -83,8 +83,8 @@ def test_reused_snapshot_is_bound_to_its_source(tmp_path: Path):
     snapshot, _digest = create_consistent_snapshot(
         source_path=source, work_dir=work, progress=lambda _message: None
     )
-    origin = snapshot.with_name(snapshot.name + ".origin")
-    assert origin.exists()
+    sidecar = migration_module._snapshot_origin_sidecar(snapshot, source.resolve())
+    assert sidecar.exists()
 
     # Reuse selecting the original source is accepted.
     reused, _ = validate_existing_snapshot(
@@ -92,21 +92,18 @@ def test_reused_snapshot_is_bound_to_its_source(tmp_path: Path):
     )
     assert reused == snapshot
 
-    # Reuse selecting a different source fails closed (the codex round-7 P2 gap).
+    # Reuse selecting a different source fails closed (the codex round-7 P2 gap):
+    # that source has no matching origin record for this snapshot.
     other = tmp_path / "other.db"
     other.touch()
-    with pytest.raises(
-        SqliteToPostgresMigrationError, match="different SQLite source"
-    ):
+    with pytest.raises(SqliteToPostgresMigrationError, match="no matching origin"):
         validate_existing_snapshot(
             snapshot_path=snapshot, work_dir=work, expected_source=other.resolve()
         )
 
-    # A snapshot missing its origin record cannot be reused for a named source.
-    origin.unlink()
-    with pytest.raises(
-        SqliteToPostgresMigrationError, match="no readable source origin"
-    ):
+    # Removing this source's origin record also blocks reuse for it.
+    sidecar.unlink()
+    with pytest.raises(SqliteToPostgresMigrationError, match="no matching origin"):
         validate_existing_snapshot(
             snapshot_path=snapshot, work_dir=work, expected_source=source.resolve()
         )
