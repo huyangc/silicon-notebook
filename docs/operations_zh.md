@@ -415,6 +415,12 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
+### 大库检索热路径
+
+索引 KG 检索在 ANN 生成候选后仍必须保持有界。孤立节点排序降权只对每个候选执行带索引的 `EXISTS`，并且只返回已有连接的候选 id，绝不能拉取 hub 的完整邻边；canonical fold 只能通过 `cluster_fold_rows` 读取 scored id 的映射。并发推理子查询按 scale-index 实例和工件类型共享一次惰性 ANN 加载。这些优化不改变检索 id、score、阈值、PPR 行为或召回。
+
+生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
+
 ### 检索回放对照(`scripts/replay_retrieval.py`)
 
 性能优化改动前后,证明"检索效果不变"的验收工具:拿一份固定问题集跑 reasoning 检索原语(`federated_retrieve` + `ppr_retrieve`),**不调用任何答案 LLM**,把命中的 id/分数序列存成 JSON;两次运行的输出可逐问题 diff。

@@ -470,6 +470,12 @@ Options: `--owner` (notebook owner username, case-insensitive; defaults to the a
 
 Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, and `paper_metadata`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
 
+### Large-library retrieval hot path
+
+Indexed KG retrieval must remain bounded after ANN candidate generation. The isolated-node rank penalty probes each candidate with indexed `EXISTS` checks and returns only connected candidate ids; it never fetches a hub's complete adjacency list. Canonical folding reads mappings only for the scored ids through `cluster_fold_rows`. Concurrent reasoning subqueries share one lazy ANN load per scale-index instance and artifact kind. These optimizations preserve the retrieved ids, scores, thresholds, PPR behavior, and recall.
+
+For a production regression, capture stacks and the slow-stage breakdown with `python3 scripts/diag.py incident` and `python3 scripts/diag.py slow --since 6 --deep`. In `_retrieve_scored` events, compare `ann_ms`, `hydrate_ms`, and `fold_ms`; a small candidate count must not cause hydration work proportional to total relation or cluster rows. Before/after acceptance should use the exact replay comparison below.
+
 ### Retrieval replay diff (`scripts/replay_retrieval.py`)
 
 The acceptance tool for proving "retrieval quality is unchanged" across a performance-optimization change: run a fixed question set through the reasoning retrieval primitives (`federated_retrieve` + `ppr_retrieve`), **without calling any answer LLM**, and record the hit id/score sequences as JSON. Two runs' outputs can then be diffed question-by-question.

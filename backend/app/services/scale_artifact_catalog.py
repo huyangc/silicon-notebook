@@ -42,6 +42,7 @@ class ScaleArtifactCatalog:
         self.load_lock = load_lock
         self.load_locks = load_locks
         self.note_model_error = note_model_error
+        self._ann_lock_guard = threading.Lock()
 
     def load(self, notebook_id: str, allow_stale: bool = False):
         """Return a valid ScaleIndex or None.
@@ -118,13 +119,30 @@ class ScaleArtifactCatalog:
         labels = getattr(index, _labels_by_kind[kind], None)
         if not path or not labels:
             return None
-        from app.services.vector_index import resolve_runtime_dim as _rrd
-        dim = int(index.manifest.get("dim", _rrd(self.settings) or self.settings.embed_dim))
-        try:
-            h = hnswlib.Index(space="cosine", dim=dim)
-            h.load_index(path, max_elements=len(labels))
-        except Exception as exc:  # noqa: BLE001 — fail-open
-            self.note_model_error(f"scale_ann_open_{kind}", "", exc)
-            return None
-        setattr(index, attr, h)
-        return h
+        # ScaleIndex is the cache identity.  Keep one lock per artifact kind on
+        # that instance so concurrent reasoning subqueries cannot each load the
+        # same multi-GB hnsw file before any of them publishes the memoized
+        # handle.  The second check is required after waiting for the winner.
+        with self._ann_lock_guard:
+            ann_locks = getattr(index, "_ann_load_locks", None)
+            if ann_locks is None:
+                ann_locks = {}
+                setattr(index, "_ann_load_locks", ann_locks)
+            kind_lock = ann_locks.get(kind)
+            if kind_lock is None:
+                kind_lock = threading.Lock()
+                ann_locks[kind] = kind_lock
+        with kind_lock:
+            cached = getattr(index, attr, None)
+            if cached is not None:
+                return cached
+            from app.services.vector_index import resolve_runtime_dim as _rrd
+            dim = int(index.manifest.get("dim", _rrd(self.settings) or self.settings.embed_dim))
+            try:
+                h = hnswlib.Index(space="cosine", dim=dim)
+                h.load_index(path, max_elements=len(labels))
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                self.note_model_error(f"scale_ann_open_{kind}", "", exc)
+                return None
+            setattr(index, attr, h)
+            return h

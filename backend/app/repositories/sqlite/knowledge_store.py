@@ -388,15 +388,31 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def relation_connected_rows(db: sqlite3.Connection, notebook_id: str, object_ids):
-        values = list(object_ids)
+    def relation_connected_object_ids(
+        db: sqlite3.Connection, notebook_id: str, object_ids
+    ):
+        """Return only candidates that have at least one incident relation.
+
+        The correlated EXISTS probes use the notebook/endpoint covering indexes
+        and short-circuit on the first edge.  Do not replace this with a query
+        that returns relation endpoints: a single hub can have millions of
+        incident rows while the caller only needs one boolean per candidate.
+        """
+        values = list(dict.fromkeys(object_ids))
         if not values:
             return []
-        ph = ",".join("?" for _ in values)
+        candidates = ",".join("(?)" for _ in values)
         return db.execute(
-            f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-            f"WHERE notebook_id=? AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
-            (notebook_id, *values, *values),
+            f"WITH candidates(object_id) AS (VALUES {candidates}) "
+            "SELECT object_id FROM candidates AS c "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM knowledge_relations AS r "
+            "WHERE r.notebook_id=? AND r.source_object_id=c.object_id LIMIT 1"
+            ") OR EXISTS ("
+            "SELECT 1 FROM knowledge_relations AS r "
+            "WHERE r.notebook_id=? AND r.target_object_id=c.object_id LIMIT 1"
+            ")",
+            (*values, notebook_id, notebook_id),
         ).fetchall()
 
     @staticmethod
