@@ -189,3 +189,106 @@ def test_unified_graph_no_limit_large_nb_uses_default_limit_when_index_ready(rep
     assert result["total_nodes"] >= 2  # star fixture has 3 concept nodes
     assert len(result["nodes"]) <= 1
     assert result["truncated"] is True
+
+
+def _seed_star_kg(repo, nb_id):
+    repo.store_kg(nb_id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "gain", "section_path": ""}, "evidence": []},
+        {"local_id": "c", "object_type": "concept", "payload": {"name": "bias", "section_path": ""}, "evidence": []},
+    ], [
+        {"source_local_id": "a", "target_local_id": "b", "edge_type": "relates", "evidence": []},
+        {"source_local_id": "a", "target_local_id": "c", "edge_type": "relates", "evidence": []},
+    ])
+
+
+def test_rebuild_skips_viz_build_for_large_notebook(repo, monkeypatch):
+    """OOM audit P0-2 / codex PR#356 r1+r2 P1: for a large notebook the rebuild tail
+    must NOT build viz at all — neither synchronously (build_viz materialises EVERY
+    object + all relations + the full cluster_map into one ~12-20GB graph, stacked on
+    the rebuild's peak) nor via _spawn_viz_build (a daemon that overlaps the still-live
+    rebuild frame — codex r2 P1b). Its viz is refreshed lazily OFF the rebuild thread:
+    the cluster rebuild bumped cluster_mutation_seq, build_viz stamps it, and
+    viz_index/viz_probe compare it, so the persisted viz reads stale and the next
+    KG-view open rebuilds it. Re-adding either build call for large fails here."""
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    _seed_star_kg(repo, nb.id)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)  # 3 objects → large
+    sync_calls, async_calls = [], []
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "build_viz",
+                        lambda nbid: sync_calls.append(nbid))
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "_spawn_viz_build",
+                        lambda nbid: async_calls.append(nbid))
+    repo.rebuild_unified_kg(nb.id)
+    assert sync_calls == []    # large: no synchronous build on the rebuild thread
+    assert async_calls == []   # ...and no daemon overlapping the rebuild frame either
+
+
+def test_rebuild_proactively_builds_viz_sync_for_small_notebook(repo, monkeypatch):
+    """Control: a small notebook (<= viz_sync_build_max_objects) still gets its
+    proactive viz refresh SYNCHRONOUSLY at the rebuild tail (legacy behavior — the
+    lazy KG-view open must not pay the build), never the async spawn path."""
+    nb = repo.create_notebook(NotebookCreate(name="small"))
+    _seed_star_kg(repo, nb.id)
+    # default viz_sync_build_max_objects (20000) → 3 objects is small
+    sync_calls, async_calls = [], []
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "build_viz",
+                        lambda nbid: sync_calls.append(nbid))
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "_spawn_viz_build",
+                        lambda nbid: async_calls.append(nbid))
+    repo.rebuild_unified_kg(nb.id)
+    assert sync_calls == [nb.id]    # small: sync proactive build
+    assert async_calls == []
+
+
+def test_rebuild_viz_refresh_fail_open_on_size_probe_error(repo, monkeypatch):
+    """codex PR#356 r1 P2: the size probe that decides whether to build viz is part
+    of the OPTIONAL post-rebuild viz step. If it raises (transient connection /
+    repository error), it must NOT escape and turn an already-committed KG rebuild
+    into a reported failure — the whole block is fail-open. (rebuild_unified_kg
+    calls active_object_count ONLY at this tail, so patching it isolates the probe.)"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _seed_star_kg(repo, nb.id)
+
+    def boom(db, notebook_id):
+        raise RuntimeError("transient size-probe failure")
+
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle.knowledge,
+                        "active_object_count", boom)
+    repo.rebuild_unified_kg(nb.id)   # must NOT raise — the failing probe is caught
+
+
+def test_build_viz_stamps_pre_derive_cluster_seq(repo, monkeypatch):
+    """codex PR#356 r2 P1a: build_viz captures version + cluster_seq BEFORE deriving
+    and stamps the artifact with them. A cluster write that commits DURING the derive
+    must therefore leave the artifact stamped with the PRE-derive cseq — so it reads
+    STALE, not mislabelled as current. Stamping AFTER the derive fails here."""
+    nb = _star(repo)                                   # small nb: viz built at rebuild tail
+    sa = repo._runtime.scale_artifacts
+    pre_cseq = int(sa.projections.version_signal(nb.id)[1])
+    real_derive = repo._runtime.scale_builder._derive_object_graph_lite
+
+    def derive_and_bump(nbid):
+        with repo._write() as db:                      # interleave a cluster write mid-build
+            repo._runtime.knowledge_lifecycle._bump_cluster_mutation_seq(db, nbid)
+        return real_derive(nbid)
+
+    monkeypatch.setattr(repo._runtime.scale_builder, "_derive_object_graph_lite", derive_and_bump)
+    _clear_viz(repo, nb.id)
+    manifest = repo.build_viz_index(nb.id)
+    assert manifest["cluster_seq"] == pre_cseq         # stamped with the PRE-derive cseq
+    assert sa.viz_probe(nb.id)["viz_stale"] is True    # cseq has since advanced → stale
+
+
+def test_viz_stale_detected_by_cluster_seq(repo):
+    """codex PR#356 r1 P1: a cluster-only rewrite bumps cluster_mutation_seq but need
+    not change version_facts (concept_clusters COUNT + second-granularity
+    MAX(created_at)), which is all version() sees. viz freshness must consult
+    cluster_seq so the persisted viz is detected STALE — not served as current
+    forever. Dropping the cseq comparison keeps it 'fresh' and fails here."""
+    nb = _star(repo)                                   # viz built fresh
+    sa = repo._runtime.scale_artifacts
+    assert sa.viz_probe(nb.id)["viz_stale"] is False   # fresh right after build
+    with repo._write() as db:                          # bump cseq only (no cluster COUNT/time change)
+        repo._runtime.knowledge_lifecycle._bump_cluster_mutation_seq(db, nb.id)
+    assert sa.viz_probe(nb.id)["viz_stale"] is True     # cseq advanced → stale, via cluster_seq

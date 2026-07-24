@@ -2149,13 +2149,36 @@ class KnowledgeLifecycleService:
             self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
         # Proactively refresh the viz-only index so the next KG-view open doesn't
-        # pay a lazy build (and to cover same-second in-place edits the version
-        # tuple can miss). Fail-open: a viz build error must never break rebuild.
+        # pay a lazy build. This bumped cluster_mutation_seq (in the cluster write
+        # above), and build_viz now stamps its artifact with that cseq while
+        # viz_index()/viz_probe() compare it — so a cluster-only rebuild reliably
+        # marks the persisted viz STALE and the lazy path refreshes it on the next
+        # open (serving the old folding meanwhile). That is why this proactive
+        # build is no longer needed for large notebooks and MUST NOT run for them:
+        #
+        # build_viz's _derive_object_graph_lite materialises EVERY object + all
+        # relations + the full cluster_map into one ~12-20GB graph dict. Doing that
+        # HERE — synchronously stacked on the memory the rebuild just used, or via a
+        # daemon that starts before this frame frees seed_to_canonical/sd/… — is a
+        # reliable OOM at multi-million-object scale that kills the whole rebuild
+        # (audit P0-2 / codex PR#356 r1 P1b). So large notebooks skip the tail build
+        # entirely; their viz is refreshed lazily off the rebuild thread (via the
+        # cseq-driven staleness above) and, off-peak, by the scale index build that
+        # maybe_auto_index queues below. Small notebooks build synchronously — cheap.
+        #
+        # The WHOLE block (size probe included) is fail-open (codex PR#356 r1 P2):
+        # an auxiliary viz decision must never turn an already-committed KG rebuild
+        # into a reported failure.
         try:
-            self.scale_artifacts.build_viz(notebook_id)
+            with self._connect() as db:
+                viz_obj_count = self.knowledge.active_object_count(db, notebook_id)
+            if int(viz_obj_count) <= self.settings.viz_sync_build_max_objects:
+                self.scale_artifacts.build_viz(notebook_id)          # small: sync, cheap
+            # large: skip — the cseq-marked stale viz is refreshed lazily/off-peak,
+            # never materialised on or alongside the rebuild frame.
         except Exception:
             self.event_log.logger.warning(
-                "build_viz_index failed after rebuild for %s", notebook_id, exc_info=True)
+                "viz refresh after rebuild failed for %s", notebook_id, exc_info=True)
         # rebuild 后检索索引必然 stale(clusters/objects 已变)—— 大库自动重建/入队。
         # maybe_auto_index 自身 fail-open,这里再包一层只是双保险。
         try:
