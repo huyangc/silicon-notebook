@@ -301,7 +301,7 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     assert integrity_indexes <= indexes
     assert "idx_chunks_nb" not in indexes
     assert "idx_chunks_text_trgm" not in indexes
-    for version in (3, 4, 5, 6, 7, 8):
+    for version in (3, 4, 5, 6, 7, 8, 9):
         assert migrator.migrate(target_version=version) == version
     assert migrator.migrate() == 9
     with postgres_database.connect() as conn:
@@ -321,7 +321,7 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     assert "idx_chunks_nb" in final_indexes
     assert "idx_chunks_text_trgm" in final_indexes
     assert "uq_clusters_notebook_type_member" in final_indexes
-    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_database):

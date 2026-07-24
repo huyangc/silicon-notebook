@@ -453,7 +453,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
         "sqlite_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
         "sqlite_table_count": len(table_rows),
         "sqlite_internal_tables": sorted(sqlite_internal_tables),
-        "postgres_version": 8,
+        "postgres_version": 9,
         "ordinary_table_count": len(ordinary_tables),
         "rebuilt_table_count": len(rebuilt_tables),
         "rebuilt": {
@@ -949,7 +949,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             worker.join(timeout=20)
         assert not any(worker.is_alive() for worker in workers)
         assert failures == []
-        assert sorted(versions) == [8, 8]
+        assert sorted(versions) == [9, 9]
 
         with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
             extension_schema = conn.execute(
