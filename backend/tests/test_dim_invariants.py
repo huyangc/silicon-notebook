@@ -84,15 +84,23 @@ def test_similarity_bypasses_also_truncate():
 
 def test_no_raw_frombuffer_similarity_outside_vector_index():
     """np.frombuffer 只应出现在 vector_index.decode_vector(唯一解码入口);
-    别处直接 frombuffer 绕过 decode_vector = 也绕过 truncate。"""
+    别处直接 frombuffer 绕过 decode_vector = 也绕过 truncate。
+
+    例外:``dtype=np.uint8`` 的字节反序列化不是**相似度向量**解码——向量以 float
+    落盘/读回、必须经 decode_vector 截断混维;而 uint8 只是把 bytes 读回一维字节
+    数组(如 ``scale_index.encode_viz_edges`` 绕开 npz 字符串标量 2^31 上限,与
+    truncate 语义无关)。守卫真正要挡的是绕过 decode_vector 的向量解码,故放行 uint8。"""
     hits = []
     for p in APP.rglob("*.py"):
         if p.name == "vector_index.py":
             continue
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
-            if "np.frombuffer(" in line or ".frombuffer(" in line and "np" in line:
+            if "np.frombuffer(" in line or (".frombuffer(" in line and "np" in line):
                 # 允许注释里提及
                 if line.lstrip().startswith("#"):
+                    continue
+                # uint8 字节反序列化 ≠ 相似度向量解码(向量走 float),放行。
+                if "dtype=np.uint8" in line or "dtype=numpy.uint8" in line:
                     continue
                 hits.append(f"{p.relative_to(APP)}:{i}")
     assert not hits, f"vector_index 外的裸 frombuffer: {hits}(应走 decode_vector)"

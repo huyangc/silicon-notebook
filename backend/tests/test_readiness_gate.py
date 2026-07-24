@@ -132,6 +132,12 @@ def test_two_lifespans_start_and_close_distinct_exact_repositories(monkeypatch):
     from app.main import _lifespan
     from app.services import startup_warmup
 
+    # The autouse _mark_service_ready fixture leaves readiness ready; a test that
+    # drives the FULL lifespan lifecycle (construct → warm → close) must start
+    # from not-ready so _lifespan takes the cold-start path instead of the
+    # already-ready short-circuit (#337 added that short-circuit).
+    readiness.reset()
+
     calls: list[str] = []
     instances = []
 
@@ -139,6 +145,7 @@ def test_two_lifespans_start_and_close_distinct_exact_repositories(monkeypatch):
         index = len(instances) + 1
         calls.append(f"start{index}")
         fake = SimpleNamespace(
+            _recover_interrupted_jobs=lambda: None,
             warm_open_path_caches=lambda **_kwargs: calls.append(f"warm{index}") or 0,
             close=lambda: calls.append(f"close{index}"),
         )
@@ -192,8 +199,11 @@ def test_overlapping_lifespan_fails_before_yield_and_cannot_outlive_owner(
     from app.main import _lifespan
     from app.services import startup_warmup
 
+    readiness.reset()  # drive the full cold-start lifecycle, not the ready short-circuit
+
     calls: list[str] = []
     fake = SimpleNamespace(
+        _recover_interrupted_jobs=lambda: None,
         warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 0,
         close=lambda: calls.append("close"),
     )
@@ -240,6 +250,8 @@ def test_failed_lifespan_retains_ownership_until_exit_then_next_cycle_starts(
     from app.main import _lifespan
     from app.services import startup_warmup
 
+    readiness.reset()  # drive the full cold-start lifecycle, not the ready short-circuit
+
     calls: list[str] = []
     instances = []
     error_published = threading.Event()
@@ -265,7 +277,7 @@ def test_failed_lifespan_retains_ownership_until_exit_then_next_cycle_starts(
                 raise RuntimeError("first lifecycle warm failure")
             return 0
 
-        fake = SimpleNamespace(
+        fake = SimpleNamespace(_recover_interrupted_jobs=lambda: None, 
             warm_open_path_caches=warm,
             close=lambda: calls.append(f"close{index}"),
         )
@@ -363,7 +375,7 @@ def test_close_failure_still_stops_clears_and_allows_a_fresh_next_cycle(
             if index == 1:
                 raise RuntimeError("close detail must not escape")
 
-        fake = SimpleNamespace(
+        fake = SimpleNamespace(_recover_interrupted_jobs=lambda: None, 
             warm_open_path_caches=lambda **_kwargs: calls.append(f"warm{index}") or 0,
             close=close,
         )
@@ -421,6 +433,7 @@ def test_warmup_failure_closes_exact_repository_and_clears_cache_even_if_close_f
         raise RuntimeError("close detail must not escape")
 
     fake = SimpleNamespace(
+        _recover_interrupted_jobs=lambda: None,
         warm_open_path_caches=lambda **_kwargs: (_ for _ in ()).throw(
             RuntimeError("warm detail must not escape")
         ),
@@ -469,6 +482,7 @@ def test_concurrent_cold_start_has_one_owner_and_loser_cannot_close_winner(
     results: list[object] = []
 
     fake = SimpleNamespace(
+        _recover_interrupted_jobs=lambda: None,
         warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 0,
         close=lambda: calls.append("close"),
     )
@@ -549,7 +563,7 @@ def test_overlap_after_warming_started_does_not_construct_or_mutate_readiness(
         assert release_warm.wait(timeout=2)
         return 0
 
-    fake = SimpleNamespace(warm_open_path_caches=warm, close=lambda: calls.append("close"))
+    fake = SimpleNamespace(_recover_interrupted_jobs=lambda: None, warm_open_path_caches=warm, close=lambda: calls.append("close"))
 
     def repository():
         calls.append("factory")
@@ -593,6 +607,7 @@ def test_stale_lease_wrong_repository_and_double_shutdown_are_noops(monkeypatch)
 
     calls: list[str] = []
     fake = SimpleNamespace(
+        _recover_interrupted_jobs=lambda: None,
         warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 0,
         close=lambda: calls.append("close"),
     )
@@ -643,7 +658,7 @@ def test_startup_failure_releases_lease_for_fresh_retry(monkeypatch):
                 raise RuntimeError("first warm fails")
             return 0
 
-        fake = SimpleNamespace(
+        fake = SimpleNamespace(_recover_interrupted_jobs=lambda: None, 
             warm_open_path_caches=warm,
             close=lambda: calls.append(f"close{index}"),
         )

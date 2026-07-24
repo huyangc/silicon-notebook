@@ -132,6 +132,42 @@ class UnifiedKgStore:
         )
 
     @staticmethod
+    def replace_cluster_rows_streamed(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        rows,
+    ) -> None:
+        # 直接整体替换某 notebook/object_type 的 concept_clusters(DELETE + 分批
+        # INSERT)。生产 rebuild 已改走 scratch + swap_cluster_map_from_scratch,#320
+        # 写锁瘦身时因「无调用者」删掉了它;但跨后端一致性用例(postgres/
+        # test_knowledge_store_conformance)在 sqlite 与 PostgreSQL 上都经这一个
+        # 方法直接铺 cluster 行,PostgreSQL adapter 也保留着它——故此处保留为两端
+        # 对等的测试用直写原语(写串行由 database.write() 保证,无需咨询锁)。
+        db.execute(
+            "DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
+            (notebook_id, object_type),
+        )
+        buf: list[tuple] = []
+        for row in rows:
+            buf.append(row)
+            if len(buf) >= 1000:
+                db.executemany(
+                    "INSERT INTO concept_clusters "
+                    "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+                    "canonical_description,canonical_desc_sig,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", buf,
+                )
+                buf.clear()
+        if buf:
+            db.executemany(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+                "canonical_description,canonical_desc_sig,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", buf,
+            )
+
+    @staticmethod
     def cluster_description_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig "

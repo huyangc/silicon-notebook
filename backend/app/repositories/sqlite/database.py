@@ -244,28 +244,28 @@ def _is_write_frame(frame) -> bool:
 
 
 def _is_facade_write_seam_frame(frame) -> bool:
-    """SQLiteRepository._write()(app/services/sqlite_repository.py)的生成器
+    """RepositoryFacade._write()(app/services/repository_facade.py)的生成器
     帧——facade 兼容层,几乎所有应用代码经它转发到 SqliteDatabase.write(),
     是调用者与这里之间插入的第二层 @contextmanager。不跳过它,记录到的调用点
-    会永远是它自己的那一行,所有真实调用者都会坍缩成同一个桶。
+    会永远是它自己的那一行(seam 的 yield),所有真实调用者都会坍缩成同一个桶。
 
-    只精确匹配这一个帧(文件名 + 限定名),不是整文件跳过:sqlite_repository.py
-    里除 _write 自身外没有第二个直接打开 database.write() 的调用点(已用 grep
-    核实——该文件唯一一处 `.write(` 就是 967 行 _write 自己),但万一以后出现,
-    它会有自己的函数名/行号,不会被这里误判、错记成它的调用者的行。
+    只精确匹配这一个帧(文件名 + 限定名),不是整文件跳过:repository_facade.py
+    里别的方法即便也开 database.write(),它们各有自己的函数名/行号,不会被这里
+    误判、错记成它们各自调用者的行——因为下面按 co_qualname 精确锁定
+    ``RepositoryFacade._write`` 这一个方法。
 
-    不对 sqlite_repository 模块做 import 来比较 code 对象:该模块(经
+    不对 repository_facade 模块做 import 来比较 code 对象:该模块(经
     repository_runtime)本就 import 这个模块,反向 import 会成环,也会倒转
     这个代码库别处强制的 repositories/services 分层。改用运行时直接从帧自身
     取 filename + co_qualname(3.11+;更老版本没有该属性时退化到 co_name),
     不需要跨模块引用。
     """
     code = frame.f_code
-    if Path(code.co_filename).name != "sqlite_repository.py":
+    if Path(code.co_filename).name != "repository_facade.py":
         return False
     qualname = getattr(code, "co_qualname", None)
     if qualname is not None:
-        return qualname == "SQLiteRepository._write"
+        return qualname == "RepositoryFacade._write"
     return code.co_name == "_write"
 
 

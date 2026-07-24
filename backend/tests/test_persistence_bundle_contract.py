@@ -33,12 +33,14 @@ BUNDLE_STORE_PORTS = {
     "index_projection": "IndexProjectionStorePort",
     "kg_build_jobs": "KgBuildJobStorePort",
     "knowhow": "KnowhowStorePort",
+    "knowhow_history": "KnowhowHistoryStorePort",
     "knowhow_transfer": "KnowhowTransferStorePort",
     "memory": "MemoryStorePort",
     "queries": "QueryStorePort",
     "reports": "ReportStorePort",
     "ask_state": "AskStateStorePort",
     "unified_kg": "UnifiedKgStorePort",
+    "model_status": "ModelStatusStorePort",
 }
 
 

@@ -81,7 +81,6 @@
   "deprecate_memory": "(self, memory_id: 'str', user_id: 'str') -> 'MemoryRecord'",
   "effective_document_limit": "(self, user_id: \"'str | None'\") -> 'int'",
   "effective_schemas": "(self) -> 'Dict[str, ObjectSchema]'",
-  "embedder": "(self)",
   "eval_insert_source_for_test": "(self, nb_id: 'str', name: 'str', text: 'str', tmpdir: 'str') -> 'str'",
   "execute_notebook_kg_job": "(self, notebook_id: 'str', job_id: 'str', mode: 'str', *, progress=None) -> 'dict'",
   "export_reports": "(self, notebook_id: 'str', report_ids: 'list') -> 'list'",

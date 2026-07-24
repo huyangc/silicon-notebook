@@ -76,37 +76,15 @@ def test_settings_validation_errors_keep_database_url_secrets_out_of_strings(set
         assert "#fragment" not in diagnostic
 
 
-def test_diag_base_report_redacts_settings_database_url(monkeypatch, capsys):
-    module = _load_script("diag_base_report")
-
-    class SettingsStub:
-        database_url = "postgresql://redacted-user:redacted-password@db.example:5432/notebook?access_token=redacted-token"
-        storage_dir = ".local/storage"
-
-    class MaintenanceStub:
-        def notebook_rows(self):
-            return []
-
-        def kg_object_counts_by_notebook(self):
-            return {}
-
-        def latest_done_report(self):
-            return None
-
-    class RepositoryStub:
-        maintenance = MaintenanceStub()
-
-    monkeypatch.setattr(module, "Settings", SettingsStub)
-    monkeypatch.setattr(module, "SQLiteRepository", lambda _settings: RepositoryStub())
-    monkeypatch.setattr(sys, "argv", ["diag_base_report.py"])
-
-    module.main()
-
-    diagnostic = capsys.readouterr().out
-    assert "redacted-user" not in diagnostic
-    assert "redacted-password" not in diagnostic
-    assert "access_token=redacted-token" not in diagnostic
-    assert REDACTED_IDENTITY in diagnostic
+# 说明(移除 test_diag_base_report_redacts_settings_database_url):该用例曾断言
+# diag_base_report 会加载 Settings/SQLiteRepository 并打印脱敏后的 DATABASE_URL。
+# 那是 #337 fork 时 diag_base_report 的旧形态;#319「加固生产 DFX 诊断」把它重构成了
+# 纯元数据模式——见 scripts/diag_base_report.py 的模块 docstring:「No application
+# module, repository, migration, model, or retrieval path is loaded」,且从不输出
+# database_url。合入后 #319 的实现胜出,该用例针对的代码路径(module.Settings /
+# module.SQLiteRepository / 打印 database_url)已不存在,它守护的凭据泄漏面亦随之消失,
+# 故移除。env 侧的 DATABASE_URL 脱敏仍由下方 test_diag_slow_redacts_database_url_from_env
+# 守着(diag_slow 确实读并回显 .env 的 DATABASE_URL)。
 
 
 def test_diag_slow_redacts_database_url_from_env(tmp_path, capsys):

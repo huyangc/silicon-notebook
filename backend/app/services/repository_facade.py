@@ -3195,14 +3195,9 @@ class RepositoryFacade:
     def storage_dir(self, value) -> None:
         self._runtime.storage_dir = value
 
-    @property
-    def embedder(self):
-        return self._runtime.embedder
-
-    @embedder.setter
-    def embedder(self, value) -> None:
-        self._runtime.embedder = value
-
+    # 查询侧 embedder 不在 facade 暴露:模型客户端一律经 self._runtime.models
+    # 访问,embedder 的替换走 self._runtime.set_embedder()(会连带重连下游)。
+    # 见 test_retired_model_client_facade_attributes_do_not_exist。
     @property
     def _notebook_langs_cache(self):
         return self._runtime.notebook_languages

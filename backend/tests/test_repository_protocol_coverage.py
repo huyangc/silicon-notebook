@@ -35,14 +35,26 @@ BUNDLE_STORE_SEATS = (
     ("index_projection", "index_projections", "IndexProjectionStorePort"),
     ("kg_build_jobs", "kg_build_jobs", "KgBuildJobStorePort"),
     ("knowhow", "knowhow_store", "KnowhowStorePort"),
+    ("knowhow_history", "knowhow_history_store", "KnowhowHistoryStorePort"),
     ("knowhow_transfer", "knowhow_transfer_store", "KnowhowTransferStorePort"),
     ("memory", "memory_store", "MemoryStorePort"),
     ("queries", "queries", "QueryStorePort"),
     ("reports", "report_store", "ReportStorePort"),
     ("ask_state", "ask_state", "AskStateStorePort"),
     ("unified_kg", "unified_kg", "UnifiedKgStorePort"),
+    ("model_status", "model_status_store", "ModelStatusStorePort"),
 )
 FACADE_PATH = ROOT / "backend" / "app" / "services" / "repository_facade.py"
+
+# `database.write` is an opaque backend boundary: RepositoryDatabasePort declares
+# a generic `write(self)` on purpose (see its docstring — it "intentionally does
+# not pretend that SQLite and PostgreSQL share a connection API") because the two
+# backends specialise it divergently — SQLite adds a keyword-only `operation=`
+# for write-lock instrumentation, PostgreSQL adds `isolation_level=`. Structural
+# Protocol conformance already permits an impl to carry extra optional kwargs, so
+# this seam is exempt from the exact port↔sqlite signature match rather than
+# forcing a fake shared parameter onto the neutral port.
+_BACKEND_DIVERGENT_SIGNATURES = frozenset({("database", "write")})
 
 
 @dataclass(frozen=True, order=True)
@@ -300,10 +312,12 @@ def test_sqlite_stores_structurally_satisfy_every_persistence_bundle_port():
     from app.repositories.sqlite.identity_store import IdentityStore
     from app.repositories.sqlite.index_projection_store import IndexProjectionStore
     from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_history_store import KnowhowHistoryStore
     from app.repositories.sqlite.knowhow_store import KnowhowStore
     from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
     from app.repositories.sqlite.knowledge_store import KnowledgeStore
     from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.model_status_store import ModelStatusStore
     from app.repositories.sqlite.notebook_store import NotebookStore
     from app.repositories.sqlite.query_store import QueryStore
     from app.repositories.sqlite.report_store import ReportStore
@@ -324,12 +338,14 @@ def test_sqlite_stores_structurally_satisfy_every_persistence_bundle_port():
         "index_projection": IndexProjectionStore,
         "kg_build_jobs": KgBuildJobStore,
         "knowhow": KnowhowStore,
+        "knowhow_history": KnowhowHistoryStore,
         "knowhow_transfer": KnowhowTransferStore,
         "memory": MemoryStore,
         "queries": QueryStore,
         "reports": ReportStore,
         "ask_state": AskStateStore,
         "unified_kg": UnifiedKgStore,
+        "model_status": ModelStatusStore,
     }
     stores = {name: object.__new__(store) for name, store in sqlite_stores.items()}
     bundle = SimpleNamespace(
@@ -357,10 +373,12 @@ def test_bundle_ports_cover_facade_store_calls_and_match_sqlite_signatures():
     from app.repositories.sqlite.identity_store import IdentityStore
     from app.repositories.sqlite.index_projection_store import IndexProjectionStore
     from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_history_store import KnowhowHistoryStore
     from app.repositories.sqlite.knowhow_store import KnowhowStore
     from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
     from app.repositories.sqlite.knowledge_store import KnowledgeStore
     from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.model_status_store import ModelStatusStore
     from app.repositories.sqlite.notebook_store import NotebookStore
     from app.repositories.sqlite.query_store import QueryStore
     from app.repositories.sqlite.report_store import ReportStore
@@ -381,12 +399,14 @@ def test_bundle_ports_cover_facade_store_calls_and_match_sqlite_signatures():
         "index_projections": IndexProjectionStore,
         "kg_build_jobs": KgBuildJobStore,
         "knowhow_store": KnowhowStore,
+        "knowhow_history_store": KnowhowHistoryStore,
         "knowhow_transfer_store": KnowhowTransferStore,
         "memory_store": MemoryStore,
         "queries": QueryStore,
         "report_store": ReportStore,
         "ask_state": AskStateStore,
         "unified_kg": UnifiedKgStore,
+        "model_status_store": ModelStatusStore,
     }
     calls = _bundle_facade_calls()
     missing: dict[str, set[str]] = {}
@@ -394,6 +414,8 @@ def test_bundle_ports_cover_facade_store_calls_and_match_sqlite_signatures():
         protocol_methods = _protocol_methods(getattr(ports, port_name))
         missing[runtime_name] = calls[runtime_name] - set(protocol_methods)
         for name, protocol_method in protocol_methods.items():
+            if (runtime_name, name) in _BACKEND_DIVERGENT_SIGNATURES:
+                continue
             store_method = getattr(sqlite_stores[runtime_name], name)
             assert _parameter_contract(protocol_method) == _parameter_contract(
                 store_method
@@ -411,10 +433,12 @@ def test_static_store_helpers_remain_static_and_keep_their_first_real_argument()
     from app.repositories.sqlite.identity_store import IdentityStore
     from app.repositories.sqlite.index_projection_store import IndexProjectionStore
     from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_history_store import KnowhowHistoryStore
     from app.repositories.sqlite.knowhow_store import KnowhowStore
     from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
     from app.repositories.sqlite.knowledge_store import KnowledgeStore
     from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.model_status_store import ModelStatusStore
     from app.repositories.sqlite.notebook_store import NotebookStore
     from app.repositories.sqlite.query_store import QueryStore
     from app.repositories.sqlite.report_store import ReportStore
@@ -435,12 +459,14 @@ def test_static_store_helpers_remain_static_and_keep_their_first_real_argument()
         "index_projections": IndexProjectionStore,
         "kg_build_jobs": KgBuildJobStore,
         "knowhow_store": KnowhowStore,
+        "knowhow_history_store": KnowhowHistoryStore,
         "knowhow_transfer_store": KnowhowTransferStore,
         "memory_store": MemoryStore,
         "queries": QueryStore,
         "report_store": ReportStore,
         "ask_state": AskStateStore,
         "unified_kg": UnifiedKgStore,
+        "model_status_store": ModelStatusStore,
     }
 
     def descriptor(cls, name):
@@ -458,6 +484,8 @@ def test_static_store_helpers_remain_static_and_keep_their_first_real_argument()
         protocol = getattr(ports, port_name)
         concrete = sqlite_stores[runtime_name]
         for name in _protocol_methods(protocol):
+            if (runtime_name, name) in _BACKEND_DIVERGENT_SIGNATURES:
+                continue
             concrete_descriptor = descriptor(concrete, name)
             protocol_descriptor = descriptor(protocol, name)
             kind = descriptor_kind(concrete_descriptor)

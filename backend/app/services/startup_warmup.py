@@ -68,6 +68,48 @@ def begin_lifecycle() -> object | None:
         return lease
 
 
+# Sentinel: an entering lifespan may pass THROUGH without owning any lifecycle —
+# a test that pre-marked readiness ready and drives a preconstructed repository.
+LIFESPAN_PASSTHROUGH = object()
+
+
+def begin_lifecycle_or_passthrough() -> object | None:
+    """Atomically classify an entering ASGI lifespan under the single lifecycle
+    lock, so the ready/owner decision cannot observe two different moments.
+
+    Replaces the raced ``readiness.is_ready() and not is_lifecycle_active()``
+    composition (two separate locks): between the two reads a lifespan could pass
+    through after readiness was stopped, or reserve while another owner already
+    existed — and a pass-through's shutdown could then close the winner's cached
+    repository. Deciding everything in one critical section removes that window.
+
+    Returns exactly one of:
+
+    - ``None`` — a lifecycle is already owned; the caller must fail before yield.
+    - :data:`LIFESPAN_PASSTHROUGH` — already ready with no active lifecycle: a
+      pre-marked-ready context that owns nothing and must not construct, reset
+      readiness, or close anyone's repository; it just yields. (No reservation
+      happens here, so readiness stays ready for the pass-through's lifetime —
+      no concurrent entry can reserve and become a repository the pass-through's
+      shutdown would wrongly close.)
+    - a fresh lease — not ready and unowned: reserve the process lifecycle here
+      (identical effect to :func:`begin_lifecycle`) and return the lease so the
+      caller can drive ``run_startup`` and later ``close_repository``.
+    """
+    global _active_lifecycle
+    with _cleanup_lock:
+        if _active_lifecycle is not None:
+            return None
+        if readiness.is_ready():
+            return LIFESPAN_PASSTHROUGH
+        lease = object()
+        _active_lifecycle = _LifecycleState(lease=lease)
+        # Ownership is established before process-global readiness changes.
+        readiness.reset()
+        readiness.set_phase("starting", "后端启动中")
+        return lease
+
+
 def _start_lifecycle(lease: object) -> bool:
     with _cleanup_lock:
         state = _active_lifecycle

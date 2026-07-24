@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Callable
 
 from psycopg import sql
 
@@ -12,6 +13,7 @@ from app.repositories.postgres._store_utils import (
     sqlite_compatible_row,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.knowhow_history_store import record_change
 
 # 插入 FK 顺序：表→列/行→资产→格/代码→隐藏源→元素→chunk→向量
 _BUSINESS_ORDER = ("columns", "rows", "assets", "cells", "cell_code")
@@ -178,7 +180,34 @@ class KnowhowTransferStore:
             "chunk_embeddings": chunk_embeddings,
         }
 
-    def insert_transfer(self, payload: dict, expected_counts: dict) -> None:
+    def insert_transfer(
+        self,
+        payload: dict,
+        expected_counts: dict,
+        *,
+        new_id: "Callable[[str], str] | None" = None,
+        now: "Callable[[], str] | None" = None,
+        actor: str = "",
+        note: str = "",
+    ) -> None:
+        """PostgreSQL mirror of the SQLite ``insert_transfer`` (knowhow 表版本
+        管理 Task 13, spec §7.3): when BOTH ``new_id`` and ``now`` are supplied,
+        records ONE ``table_create`` genesis flow entry for the freshly-inserted
+        target table as the LAST step of this same write transaction —
+        ``record_change`` requires this ordering (its fingerprint must reflect
+        the state AFTER every business/derived row has landed AND the count
+        check below has passed; a failed check raises and rolls the whole
+        transaction back, so a rejected transfer records nothing).
+
+        ``actor``/``note`` are the caller's (``copy_table``/``move_table``)
+        resolved values — this store carries no seams of its own, so id/clock
+        generation is always supplied at call time, never read from ``self``.
+        Both ``new_id``/``now`` default to ``None`` so plain calls that never
+        reach the success path keep working unchanged — recording is simply
+        skipped when either is omitted (with no ``new_id``, ``record_change``
+        could not even mint the change row's own id). History itself does NOT
+        travel with the transfer (spec §7.3); this is the target's OWN,
+        brand-new first flow entry."""
         table = payload["table"]
         new_table_id = table["id"]
         with self.database.write() as db:
@@ -212,6 +241,32 @@ class KnowhowTransferStore:
             expected = {k: int(expected_counts.get(k, 0)) for k in checks}
             if checks != expected:
                 raise RuntimeError(f"knowhow transfer 校验失败：{checks} != {expected}")
+
+            # 版本管理创世流水（spec §7.3）：本事务的最后一步。payload 形状与
+            # ``create_knowhow_table``/SQLite ``insert_transfer`` 产出的创世流水
+            # 完全一致（"table"/"columns"/"rows"，``rows`` 恒为 ``[]``）；
+            # ``origin='import'`` 同 ``copy_table``——复制/移动语义由 ``note``
+            # 如实区分。``record_change`` 自行把 ``db`` 包成兼容连接（见
+            # postgres/knowhow_history_store.py），与本 adapter 其它写路径一致。
+            if new_id is not None and now is not None:
+                record_change(
+                    db, new_id=new_id, now=now, table_id=new_table_id,
+                    kind="table_create",
+                    payload={
+                        "table": {
+                            "title": table["title"], "description": table["description"],
+                        },
+                        "columns": [
+                            {
+                                "id": column["id"], "name": column["name"],
+                                "role": column["role"], "position": column["position"],
+                            }
+                            for column in payload.get("columns") or []
+                        ],
+                        "rows": [],
+                    },
+                    actor=actor, origin="import", note=note,
+                )
 
     # Shared by the version probe and conditional delete. The canonical
     # string covers every business field copied by the transfer service and

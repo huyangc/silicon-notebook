@@ -189,18 +189,21 @@ def test_lifespan_waits_off_loop_for_startup_before_shutdown_check(monkeypatch):
     finished = threading.Event()
     order = []
 
-    def fake_startup() -> None:
+    def fake_startup(lease) -> None:  # lifespan 现在把 begin_lifecycle 的租约传进来
         started.set()
         assert release.wait(2)
         order.append("startup-finished")
         finished.set()
 
+    def fake_close(lease, repository_instance) -> None:
+        # #337 起,租约路径的关停动作是 close_repository(lease, repo),不再是
+        # shutdown_repository_if_initialized(后者只在「已就绪且无活跃 lifecycle」
+        # 的短路分支里)。本用例只验证「关停发生在 startup 线程 join 之后」,故把
+        # close_repository 作为被观测的关停动作。
+        order.append("shutdown-checked")
+
     monkeypatch.setattr(startup_warmup, "run_startup", fake_startup)
-    monkeypatch.setattr(
-        main,
-        "shutdown_repository_if_initialized",
-        lambda: order.append("shutdown-checked"),
-    )
+    monkeypatch.setattr(startup_warmup, "close_repository", fake_close)
 
     async def exercise() -> None:
         manager = main._lifespan(object())
@@ -219,3 +222,7 @@ def test_lifespan_waits_off_loop_for_startup_before_shutdown_check(monkeypatch):
         assert order == ["startup-finished", "shutdown-checked"]
     finally:
         release.set()
+        # fake_close 是桩,不会像真 close_repository 那样归还 begin_lifecycle 占用的
+        # 进程级 lifecycle;手动清一次,否则残留的 _active_lifecycle 会让后续
+        # lifecycle 用例的 begin_lifecycle() 拿不到租约而串味失败。
+        startup_warmup._active_lifecycle = None

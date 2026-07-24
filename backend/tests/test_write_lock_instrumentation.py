@@ -25,7 +25,14 @@ def _repo(tmp_path, **over):
           "event_log_enabled": False,
           "llm_log_enabled": False}
     kw.update(over)
-    return SQLiteRepository(Settings(**kw))
+    repo = SQLiteRepository(Settings(**kw))
+    # 构造期的迁移会经 database.write() 记一次真实写(如 _migration_25 的凭据清退,
+    # migrations.py 里 `with self.database.write()`),污染这些用例只想测的「facade
+    # seam 调用点归属」。清一次,让 snapshot 只含用例自己那一次(或多次)写。
+    stats = repo._runtime.database.stats
+    if stats is not None:
+        stats.reset()
+    return repo
 
 
 def test_records_call_site_of_the_caller_not_contextlib(tmp_path):

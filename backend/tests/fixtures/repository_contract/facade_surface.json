@@ -297,6 +297,12 @@
         "path": "scripts/smoke_backend.py",
         "scope": "<module>",
         "target": "app.services.repository:UploadedSourceFile"
+      },
+      {
+        "kind": "import",
+        "path": "scripts/smoke_backend.py",
+        "scope": "<module>.check_api_layer",
+        "target": "app.services.repository:UploadedSourceFile"
       }
     ],
     "kind": "constant",
@@ -3078,12 +3084,6 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.effective_schemas",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.embedder",
         "target": "_runtime"
       },
       {
