@@ -175,6 +175,10 @@ def test_get_ask_job_endpoint_existing_job_returns_200_with_status(tmp_path, mon
     job_id = events[0]["job_id"]
     assert events[0]["event"] == "started" and job_id
 
+    other_nb = client.post("/api/notebooks", json={"name": "other"}).json()["id"]
+    cross = client.get(f"/api/notebooks/{other_nb}/ask/jobs/{job_id}")
+    assert cross.status_code == 404
+
     r = client.get(f"/api/notebooks/{nb}/ask/jobs/{job_id}")
     assert r.status_code == 200
     body = r.json()

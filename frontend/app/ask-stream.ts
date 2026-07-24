@@ -8,7 +8,7 @@ export type ReasoningTraceStep = {
 };
 
 export type AskStreamEvent<TResponse> =
-  | { event: "started"; job_id: string }
+  | { event: "started"; job_id: string; conversation_id: string }
   | { event: "progress"; step: ReasoningTraceStep }
   | { event: "final"; response: TResponse }
   | { event: "cancelled" }

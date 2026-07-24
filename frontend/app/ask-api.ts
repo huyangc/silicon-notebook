@@ -34,7 +34,7 @@ export async function runAskStream<TResponse = AskResponse>(
   payload: unknown,
   onProgress: (step: ReasoningTraceStep) => void | Promise<void>,
   signal?: AbortSignal,
-  onStart?: (jobId: string) => void,
+  onStart?: (jobId: string, conversationId: string) => void | Promise<void>,
 ): Promise<TResponse> {
   const response = await performApiRequest(`/notebooks/${notebookId}/ask/stream`, {
     ...options,
@@ -60,7 +60,9 @@ export async function runAskStream<TResponse = AskResponse>(
 
   const consumeLine = async (line: string) => {
     const event = JSON.parse(line) as AskStreamEvent<TResponse>;
-    if (event.event === "started") onStart?.(event.job_id);
+    if (event.event === "started") {
+      await onStart?.(event.job_id, event.conversation_id);
+    }
     else if (event.event === "progress") {
       await onProgress(event.step);
       await yieldToPaint();

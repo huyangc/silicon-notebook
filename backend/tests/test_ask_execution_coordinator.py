@@ -169,7 +169,11 @@ def test_started_is_emitted_before_progress_and_final_closes_the_stream():
         user_id="user-t23")
     delivered = _drain(events)
     kinds = [e["event"] for e in delivered]
-    assert kinds[0] == "started" and delivered[0]["job_id"] == "askjob-t23"
+    assert delivered[0] == {
+        "event": "started",
+        "job_id": "askjob-t23",
+        "conversation_id": "conv-t23",
+    }
     assert kinds[1] == "progress"
     assert delivered[1]["step"]["step_type"] == "start"
     assert delivered[1]["step"]["detail"] == {"mode": "chunk"}

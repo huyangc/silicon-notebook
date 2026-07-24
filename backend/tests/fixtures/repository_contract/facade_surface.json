@@ -4469,6 +4469,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.cancel_ask_job",
+        "target": "ask_job_detail"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_ask_job",
         "target": "ask_job_detail"
       },

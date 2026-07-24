@@ -3563,7 +3563,10 @@ class RepositoryFacade:
 
 
 def _now() -> str:
-    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+    # Ask history is ordered by conversation.updated_at.  Preserve sub-second
+    # precision so two conversations touched inside one wall-clock second still
+    # have a meaningful recency order (UUID/id tie-breakers are not activity).
+    return datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def _citation(label: str, evidence: Evidence, tier: str = "personal") -> Citation:

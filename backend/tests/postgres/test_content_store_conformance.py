@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -666,7 +667,11 @@ def test_cancel_before_job_bound_prepare_never_creates_a_replacement_conversatio
                     break
                 delivered.append(event)
             future.result(timeout=5)
-            assert delivered[0] == {"event": "started", "job_id": job_id}
+            assert delivered[0] == {
+                "event": "started",
+                "job_id": job_id,
+                "conversation_id": request.conversation_id,
+            }
             assert any(event["event"] == "cancelled" for event in delivered)
             assert not any(event["event"] == "final" for event in delivered)
 
@@ -680,6 +685,63 @@ def test_cancel_before_job_bound_prepare_never_creates_a_replacement_conversatio
             "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=" + mark,
             ("nb-content",),
         ).fetchone()["n"] == 0
+
+
+def test_conversation_activity_order_preserves_subsecond_recency(
+    content_harness, monkeypatch,
+):
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "NOW", "2026-07-24T10:05:00.100001+00:00")
+    job_a, conversation_a = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="conversation A"), "chunk", "user-content"
+    )
+    monkeypatch.setattr(module, "NOW", "2026-07-24T10:05:00.100002+00:00")
+    job_b, conversation_b = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="conversation B"), "chunk", "user-content"
+    )
+    assert [item.id for item in content_harness.ask.list_conversations(
+        "nb-content", "user-content"
+    )[:2]] == [conversation_b, conversation_a]
+
+    monkeypatch.setattr(module, "NOW", "2026-07-24T10:05:00.100003+00:00")
+    job_a2, continued = content_harness.ask.begin_durable_job(
+        "nb-content",
+        AskRequest(question="follow up A", conversation_id=conversation_a),
+        "chunk",
+        "user-content",
+    )
+    assert continued == conversation_a
+    assert [item.id for item in content_harness.ask.list_conversations(
+        "nb-content", "user-content"
+    )[:2]] == [conversation_a, conversation_b]
+    assert content_harness.ask.get_conversation(
+        conversation_a
+    ).active_job.job_id == job_a2
+
+    for job_id in (job_a, job_b, job_a2):
+        content_harness.ask.finish_job(job_id, "done")
+
+
+def test_conversation_activity_order_compares_absolute_instants_across_offsets(
+    content_harness, monkeypatch,
+):
+    module = sys.modules[__name__]
+    # The second wall-clock label is lexically smaller, but it is 200 ms later
+    # in UTC across a daylight-saving fallback boundary.
+    monkeypatch.setattr(module, "NOW", "2026-11-01T01:59:59.900000-04:00")
+    job_a, conversation_a = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="before fallback"), "chunk", "user-content"
+    )
+    monkeypatch.setattr(module, "NOW", "2026-11-01T01:00:00.100000-05:00")
+    job_b, conversation_b = content_harness.ask.begin_durable_job(
+        "nb-content", AskRequest(question="after fallback"), "chunk", "user-content"
+    )
+
+    assert [item.id for item in content_harness.ask.list_conversations(
+        "nb-content", "user-content"
+    )[:2]] == [conversation_b, conversation_a]
+    for job_id in (job_a, job_b):
+        content_harness.ask.finish_job(job_id, "done")
 
 
 def test_bulk_delete_skips_an_old_conversation_with_a_running_job(content_harness):
