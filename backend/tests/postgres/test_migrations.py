@@ -256,8 +256,8 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 8
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 29
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 9
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 30
     assert len(PostgresMigrator(postgres_database).migrations) == 8
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
