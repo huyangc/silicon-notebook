@@ -175,6 +175,51 @@ def test_open_ann_singleflights_concurrent_cold_load(repo, monkeypatch):
     assert all(handle is handles[0] for handle in handles)
 
 
+def test_open_ann_shares_concurrent_failure_but_later_request_retries(
+    repo, monkeypatch
+):
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(6)
+
+    class FailingIndex:
+        def __init__(self, *, space, dim):
+            assert (space, dim) == ("cosine", 16)
+
+        def load_index(self, path, *, max_elements):
+            nonlocal calls
+            assert (path, max_elements) == ("kg-ann.bin", 3)
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            raise OSError("corrupt ANN fixture")
+
+    monkeypatch.setitem(sys.modules, "hnswlib", SimpleNamespace(Index=FailingIndex))
+    index = SimpleNamespace(
+        manifest={"dim": 16},
+        ann_path="kg-ann.bin",
+        ann_labels=["a", "b", "c"],
+        ann_handle=None,
+    )
+    catalog = repo._runtime.scale_catalog
+
+    def open_concurrently():
+        start.wait()
+        return catalog.open_ann(index, "kg")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(open_concurrently) for _ in range(5)]
+        start.wait()
+        handles = [future.result() for future in futures]
+
+    assert calls == 1
+    assert handles == [None] * 5
+    # A new request after the failed wave is allowed to retry rather than
+    # turning a transient I/O/OOM failure into a permanent negative cache.
+    assert catalog.open_ann(index, "kg") is None
+    assert calls == 2
+
+
 def test_graph_rows_matches_the_facade_gather(repo):
     nb = _seeded_notebook(repo)
     projections = repo._runtime.index_projections

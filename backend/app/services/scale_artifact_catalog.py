@@ -23,6 +23,15 @@ import threading
 from typing import Callable
 
 
+class _AnnLoadState:
+    """One in-flight generation and its shared outcome for an ANN artifact."""
+
+    def __init__(self) -> None:
+        self.condition = threading.Condition()
+        self.loading = False
+        self.generation = 0
+
+
 class ScaleArtifactCatalog:
     def __init__(
         self,
@@ -119,30 +128,50 @@ class ScaleArtifactCatalog:
         labels = getattr(index, _labels_by_kind[kind], None)
         if not path or not labels:
             return None
-        # ScaleIndex is the cache identity.  Keep one lock per artifact kind on
-        # that instance so concurrent reasoning subqueries cannot each load the
-        # same multi-GB hnsw file before any of them publishes the memoized
-        # handle.  The second check is required after waiting for the winner.
+        # ScaleIndex is the cache identity. Keep one state per artifact kind on
+        # that instance so concurrent reasoning subqueries share both a loaded
+        # handle and a failed in-flight generation. A request arriving after a
+        # failed generation may retry; its already-waiting followers reuse its
+        # None outcome instead of serially reopening the same multi-GB file.
         with self._ann_lock_guard:
-            ann_locks = getattr(index, "_ann_load_locks", None)
-            if ann_locks is None:
-                ann_locks = {}
-                setattr(index, "_ann_load_locks", ann_locks)
-            kind_lock = ann_locks.get(kind)
-            if kind_lock is None:
-                kind_lock = threading.Lock()
-                ann_locks[kind] = kind_lock
-        with kind_lock:
+            ann_states = getattr(index, "_ann_load_states", None)
+            if ann_states is None:
+                ann_states = {}
+                setattr(index, "_ann_load_states", ann_states)
+            state = ann_states.get(kind)
+            if state is None:
+                state = _AnnLoadState()
+                ann_states[kind] = state
+        with state.condition:
             cached = getattr(index, attr, None)
             if cached is not None:
                 return cached
+            if state.loading:
+                followed_generation = state.generation
+                while state.loading and state.generation == followed_generation:
+                    state.condition.wait()
+                cached = getattr(index, attr, None)
+                if cached is not None:
+                    return cached
+                # This caller joined an already-running generation. If that
+                # generation (or a newer retry that overtook our wake-up) did
+                # not publish a handle, share its fail-open None outcome.
+                return None
+            state.generation += 1
+            state.loading = True
+        try:
             from app.services.vector_index import resolve_runtime_dim as _rrd
             dim = int(index.manifest.get("dim", _rrd(self.settings) or self.settings.embed_dim))
-            try:
-                h = hnswlib.Index(space="cosine", dim=dim)
-                h.load_index(path, max_elements=len(labels))
-            except Exception as exc:  # noqa: BLE001 — fail-open
-                self.note_model_error(f"scale_ann_open_{kind}", "", exc)
-                return None
+            h = hnswlib.Index(space="cosine", dim=dim)
+            h.load_index(path, max_elements=len(labels))
+        except Exception as exc:  # noqa: BLE001 — fail-open
+            with state.condition:
+                state.loading = False
+                state.condition.notify_all()
+            self.note_model_error(f"scale_ann_open_{kind}", "", exc)
+            return None
+        with state.condition:
             setattr(index, attr, h)
-            return h
+            state.loading = False
+            state.condition.notify_all()
+        return h
