@@ -1026,6 +1026,7 @@ def test_packaged_index_migration_phases_are_exact():
         (6, "search_gin"),
         (7, "cluster_membership_unique"),
         (8, "master_v28_features"),
+        (9, "sources_file_hash_index"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -1092,6 +1093,13 @@ def test_packaged_index_migration_phases_are_exact():
         (False, "idx_knowhow_milestones_table"),
     ]
 
+    # 0009_sources_file_hash_index mirrors SQLite v30's sources(notebook_id,
+    # file_hash) dedup lookup index — the first SQLite index added after the
+    # PostgreSQL adapter landed, so it establishes the "one SQLite index ->
+    # one packaged PostgreSQL migration" pattern rather than SQLite-only drift.
+    v30_index = index_declarations(9)
+    assert v30_index == [(False, "idx_sources_notebook_file_hash")]
+
     contract_names = {item["name"] for item in _reviewed_contract()["sqlite_explicit_indexes"]}
     packaged_names = (
         integrity_names
@@ -1099,6 +1107,7 @@ def test_packaged_index_migration_phases_are_exact():
         | gin_names
         | {name for _unique, name in cluster_unique}
         | {name for _unique, name in v28_feature_indexes}
+        | {name for _unique, name in v30_index}
     )
     assert packaged_names == contract_names | gin_names
 
