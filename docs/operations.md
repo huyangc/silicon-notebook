@@ -167,7 +167,8 @@ python scripts/migrate_sqlite_to_postgres.py \
 The tool uses SQLite's backup API, so committed WAL state is included without copying a live
 `.db` file incorrectly. It upgrades only a private snapshot copy, streams bounded COPY in FK
 order, preserves historical ordinals, converts legacy JSON vectors to float32 `bytea`, escapes
-PostgreSQL-unrepresentable NUL codepoints as the reversible literal `\\u0000`, verifies every
+PostgreSQL-unrepresentable NUL codepoints to the literal text `\\u0000` (a one-way
+normalization — PostgreSQL text/JSON cannot store a NUL), verifies every
 table with a content checksum, and commits each verified table together with a per-table
 checkpoint. A run header keyed to the sealed snapshot hash lets a stopped import resume from the
 last completed table instead of restarting the whole copy; finalize (ordinal reseed, index

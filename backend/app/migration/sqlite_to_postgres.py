@@ -664,6 +664,13 @@ def _parse_timestamp(value: Any, *, qualified: str) -> datetime | None:
 
 
 def _escape_postgres_nul(value: Any) -> tuple[Any, int]:
+    # A NUL codepoint cannot be stored in PostgreSQL text/JSON, so it is mapped
+    # to the six literal characters \u0000. This is a deliberate one-way
+    # normalization, not an injective/reversible encoding — a source that
+    # already held those six literal characters becomes indistinguishable —
+    # which is acceptable for this one-way importer (a NUL inside text is itself
+    # pathological). The checksums verify the normalized representation
+    # consistently on both sides.
     if isinstance(value, str):
         count = value.count("\x00")
         return value.replace("\x00", "\\u0000"), count
