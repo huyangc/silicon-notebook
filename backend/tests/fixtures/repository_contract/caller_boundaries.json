@@ -637,6 +637,94 @@
       "target": "db.execute"
     },
     {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._catalog_rows",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._create_if_absent",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._execute_install_statement",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._scan_replication_keys",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>.disable_sqlite_capture",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>.install_sqlite_capture",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>.validate_sqlite_capture",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>._assert_key_rows",
+      "target": "execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>._sqlite_schema_sets",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>.validate_postgres_connection",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>.validate_sqlite_schema",
+      "target": "conn.execute"
+    },
+    {
       "count": 4,
       "kind": "independent_sql",
       "path": "scripts/backfill_knowhow_md.py",

@@ -65,8 +65,9 @@ def test_migration_25_irreversibly_scrubs_user_model_credentials_and_old_status(
     # 哈希去重索引);本用例只断言 v25 的数据副作用,v26 两表结构由
     # test_knowhow_history_schema 单独钉、v27 的列由 test_legacy_db_compat 单独钉、
     # v28 的表/列由 test_document_limit 单独钉、v30 索引由 test_source_asset_migration /
-    # snapshot verifier 单独钉。
-    assert repo._migrate() == [25, 26, 27, 28, 29, 30]
+    # snapshot verifier 单独钉；v31 两张惰性 shadow capture 内部表由 Task 2
+    # capture/schema tests 单独钉。
+    assert repo._migrate() == [25, 26, 27, 28, 29, 30, 31]
 
     with repo._connect() as db:
         settings = db.execute(

@@ -2181,6 +2181,44 @@ MIGRATION_MANIFEST[(29, 30)] = {
     "views": {},
 }
 
+# v31: inert SQLite-side metadata for run-scoped forward-shadow capture.
+# The versioned migration creates only these two payload-free internal tables;
+# logical-key guards and capture/freeze triggers are installed later by the
+# shadow run installer in one BEGIN IMMEDIATE transaction.
+SHADOW_CAPTURE_TABLES = {
+    "shadow_change_log": """CREATE TABLE shadow_change_log (
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id TEXT NOT NULL,
+                  table_name TEXT NOT NULL,
+                  key_json TEXT NOT NULL,
+                  operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+                  schema_epoch INTEGER NOT NULL,
+                  captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )""",
+    "shadow_capture_control": """CREATE TABLE shadow_capture_control (
+                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                  write_frozen INTEGER NOT NULL CHECK (write_frozen IN (0, 1)),
+                  apply_active INTEGER NOT NULL DEFAULT 0 CHECK (apply_active IN (0, 1)),
+                  run_id TEXT NOT NULL,
+                  schema_epoch INTEGER NOT NULL
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 31, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SHADOW_CAPTURE_TABLES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(30, 31)] = {
+    "tables": SHADOW_CAPTURE_TABLES,
+    "columns": {},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

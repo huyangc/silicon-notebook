@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v30 / PostgreSQL v9
+# Every ordinary application table in the current SQLite v31 / PostgreSQL v9
 # compatibility pair.  SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal.  Keeping the
 # reverse-totality set beside the version pair prevents either the adapter or
@@ -97,10 +97,10 @@ POSTGRES_BUSINESS_TABLES = (
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v30. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v31. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=30,
+    sqlite_version=31,
     postgres_version=9,
 )

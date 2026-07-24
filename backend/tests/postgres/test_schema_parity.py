@@ -27,6 +27,10 @@ CONTRACT_PATH = REPO_ROOT / "backend" / "tests" / "fixtures" / "postgres_schema_
 MIGRATIONS_PATH = (
     REPO_ROOT / "backend" / "app" / "repositories" / "postgres" / "migrations"
 )
+SQLITE_SHADOW_INTERNAL_TABLES = {
+    "shadow_change_log",
+    "shadow_capture_control",
+}
 
 # These are reviewed application-owned JSON values. Keeping the classification
 # explicit prevents a new TEXT column from silently becoming jsonb merely
@@ -352,6 +356,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
         str(row["name"])
         for row in table_rows
         if str(row["name"]).startswith("sqlite_")
+        or str(row["name"]) in SQLITE_SHADOW_INTERNAL_TABLES
     }
     ordinary_tables = [
         str(row["name"])
@@ -490,7 +495,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
 
 
 def _fresh_sqlite_contract(tmp_path: Path) -> dict[str, Any]:
-    db_path = tmp_path / "fresh-v29.db"
+    db_path = tmp_path / "fresh-v31.db"
     settings = Settings(database_url=f"sqlite:///{db_path}")
     database = SqliteDatabase(settings, REPO_ROOT)
     try:
@@ -506,7 +511,7 @@ def _reviewed_contract() -> dict[str, Any]:
     return json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
-def test_fresh_sqlite_v29_matches_reviewed_postgres_contract(tmp_path):
+def test_fresh_sqlite_v31_matches_reviewed_postgres_contract(tmp_path):
     actual = _fresh_sqlite_contract(tmp_path)
     if os.environ.get("UPDATE_POSTGRES_SCHEMA_CONTRACT") == "1":
         CONTRACT_PATH.write_text(
@@ -886,7 +891,7 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
     assert migrator.migrate() == 9
     assert migrator.migrate() == 9
     assert migrator.current_version() == 9
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 30
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 31
     assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 9
 
 

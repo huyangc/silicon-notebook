@@ -49,7 +49,7 @@ EXPECTED_SHADOW_KEYS = {
 
 @pytest.fixture
 def fresh_sqlite(tmp_path: Path):
-    path = tmp_path / "fresh-v30.db"
+    path = tmp_path / "fresh-v31.db"
     settings = Settings(database_url=f"sqlite:///{path}")
     database = SqliteDatabase(settings, REPO_ROOT)
     try:
@@ -70,7 +70,7 @@ def test_manifest_matches_reviewed_fixture_and_current_running_pair():
     expected = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     assert manifest_contract(MANIFEST) == expected
     assert RUNNING_SCHEMA_PAIR == SchemaPair(
-        sqlite_version=30, postgres_version=9, epoch=1
+        sqlite_version=31, postgres_version=9, epoch=1
     )
     # The plan's old (24, 2) COPY staging pair predates five current tables and
     # is deliberately not advertised as compatible. Task 2 will move SQLite to
@@ -80,7 +80,7 @@ def test_manifest_matches_reviewed_fixture_and_current_running_pair():
     )
 
 
-def test_manifest_is_total_for_fresh_sqlite_v30(fresh_sqlite):
+def test_manifest_is_total_for_fresh_sqlite_v31(fresh_sqlite):
     report = validate_sqlite_schema(
         fresh_sqlite,
         MANIFEST,
@@ -88,7 +88,7 @@ def test_manifest_is_total_for_fresh_sqlite_v30(fresh_sqlite):
     )
     assert report.ordinary_tables == frozenset(MANIFEST.replicated_names)
     assert report.rebuilt_roots == frozenset(EXPECTED_FTS_ROOTS)
-    assert report.schema_version == 30
+    assert report.schema_version == 31
 
 
 def test_manifest_keys_ranks_transforms_blobs_and_paths_are_reviewed(fresh_sqlite):
@@ -234,7 +234,7 @@ def test_sqlite_shadow_internal_tables_require_explicit_manifest_classification(
         table_class=TableClass.SHADOW_INTERNAL,
         replication_key=(),
         key_kind=ReplicationKeyKind.DECLARED_PK,
-        copy_rank=64,
+        copy_rank=66,
     )
     manifest = Manifest(RUNNING_SCHEMA_PAIR, (*MANIFEST.tables, internal))
     report = validate_sqlite_schema(
@@ -246,8 +246,8 @@ def test_sqlite_shadow_internal_tables_require_explicit_manifest_classification(
 @pytest.mark.parametrize(
     "expected_pair",
     [
-        SchemaPair(sqlite_version=30, postgres_version=9, epoch=2),
-        SchemaPair(sqlite_version=30, postgres_version=8, epoch=1),
+        SchemaPair(sqlite_version=31, postgres_version=9, epoch=2),
+        SchemaPair(sqlite_version=31, postgres_version=8, epoch=1),
         SchemaPair(sqlite_version=29, postgres_version=9, epoch=1),
     ],
 )
@@ -263,8 +263,8 @@ def test_sqlite_requires_the_complete_manifest_schema_pair(
 @pytest.mark.parametrize(
     "expected_pair",
     [
-        SchemaPair(sqlite_version=30, postgres_version=9, epoch=2),
-        SchemaPair(sqlite_version=30, postgres_version=8, epoch=1),
+        SchemaPair(sqlite_version=31, postgres_version=9, epoch=2),
+        SchemaPair(sqlite_version=31, postgres_version=8, epoch=1),
         SchemaPair(sqlite_version=29, postgres_version=9, epoch=1),
     ],
 )
@@ -497,7 +497,7 @@ def test_sqlite_validator_supports_default_tuple_row_factory(tmp_path):
         report = validate_sqlite_schema(
             conn, MANIFEST, expected_pair=RUNNING_SCHEMA_PAIR
         )
-    assert report.schema_version == 30
+    assert report.schema_version == 31
     assert report.ordinary_tables == frozenset(MANIFEST.replicated_names)
 
 

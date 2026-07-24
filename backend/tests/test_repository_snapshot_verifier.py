@@ -339,7 +339,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_29(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_31(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -396,6 +396,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE shadow_capture_control")            # _migration_31
+        rollback.execute("DROP TABLE shadow_change_log")                 # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -445,7 +447,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_29(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_to_29(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_31(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -455,6 +457,8 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE shadow_capture_control")            # _migration_31
+        rollback.execute("DROP TABLE shadow_change_log")                 # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -499,7 +503,7 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
-def test_deployed_v21_database_verifies_through_migrations_22_to_29(tmp_path):
+def test_deployed_v21_database_verifies_through_migrations_22_to_31(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -509,6 +513,8 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE shadow_capture_control")            # _migration_31
+        rollback.execute("DROP TABLE shadow_change_log")                 # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -536,7 +542,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_29(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v22_database_verifies_through_migrations_23_to_29(tmp_path):
+def test_deployed_v22_database_verifies_through_migrations_23_to_31(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -546,16 +552,19 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE shadow_capture_control")            # _migration_31
+        rollback.execute("DROP TABLE shadow_change_log")                 # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
         rollback.execute(
             "ALTER TABLE user_profiles DROP COLUMN upload_document_limit"
         )                                                                # _migration_28
-        # current is now seven hops past v22 (v23 model_service_status, v24
+        # current is now nine hops past v22 (v23 model_service_status, v24
         # kg_canonical_scratch, v25 system_model_service_status + credential
         # scrub, v26 knowhow_changes/knowhow_milestones, v27 sources.chunked_at,
-        # v28 document limits, v29 cluster membership uniqueness);
+        # v28 document limits, v29 cluster membership uniqueness, v30 source
+        # hash lookup, v31 shadow capture metadata);
         # all must roll back so this forged source truly has nothing beyond v22,
         # or those additions would already be present pre-migration and
         # manifest-addition-missing would fire (they'd never appear in the
@@ -580,11 +589,11 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_29(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_through_migrations_24_to_29(tmp_path):
+def test_deployed_v23_database_verifies_through_migrations_24_to_31(tmp_path):
     """A v23 database (has model_service_status + populated model_settings,
     missing _migration_24's kg_canonical_scratch, _migration_25's system
     model-service scrub, and _migration_26's knowhow-history tables) must
-    verify clean through all three hops to the current version, and the v25
+    verify clean through every remaining hop to the current version, and the v25
     scrub must fire on the restored credential/status rows."""
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -594,6 +603,8 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_29(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE shadow_capture_control")            # _migration_31
+        rollback.execute("DROP TABLE shadow_change_log")                 # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -685,6 +696,8 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
     upgraded.close_local()
     db = sqlite3.connect(database)
     try:
+        db.execute("DROP TABLE shadow_capture_control")          # _migration_31
+        db.execute("DROP TABLE shadow_change_log")               # _migration_31
         db.execute("DROP INDEX idx_sources_notebook_file_hash")  # _migration_30
         db.execute("DROP INDEX uq_clusters_notebook_type_member")
         db.executemany(

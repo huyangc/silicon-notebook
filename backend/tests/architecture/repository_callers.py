@@ -25,6 +25,12 @@ SQLITE_REPOSITORY_PREFIX = "backend/app/repositories/sqlite/"
 REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
 
 SQL_REASON_BY_PATH = {
+    "backend/app/migration/shadow/capture.py": (
+        "temporary migration boundary owns run-scoped SQLite capture DDL"
+    ),
+    "backend/app/migration/shadow/manifest.py": (
+        "temporary migration boundary validates source and target schema keys"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),

@@ -104,8 +104,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 完成标记列 migration，以及 v28 app_settings 表 + user_profiles.
     # upload_document_limit 列 migration，v29 cluster membership 唯一
     # 索引与确定性存量去重 migration，以及 v30 sources(notebook_id, file_hash)
-    # 内容哈希去重索引 migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 30
+    # 内容哈希去重索引 migration，以及 v31 两张 inert shadow capture 内部表，
+    # 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 31
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

@@ -126,6 +126,8 @@ Optional external services
 
 The application never dual-writes. `SHADOW_DATABASE_URL` is reserved for future migration tooling and cannot select or synchronize the active backend. Changing `DATABASE_URL` does not copy, migrate, or synchronize existing data.
 
+SQLite schema v31 contains only the inert, payload-free internal tables needed by run-scoped forward-shadow capture. Capture/freeze triggers and logical-key guards are absent by default and are installed disabled by the migration tool; setting `SHADOW_DATABASE_URL` alone still enables nothing. PostgreSQL schema v9 is the paired business schema.
+
 - On the shipped SQLite default, search uses SQLite FTS/vector storage. The PostgreSQL backend uses `pg_trgm`/`ILIKE`; float32 vectors remain `bytea`, so pgvector is not installed or required.
 - `pg_trgm` must be installed in the `public` schema. Check it without exposing credentials:
 

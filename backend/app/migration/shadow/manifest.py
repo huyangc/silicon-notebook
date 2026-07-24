@@ -25,7 +25,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=30, postgres_version=9, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=31, postgres_version=9, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -207,6 +207,8 @@ _TABLES = (
     TableSpec("chunks_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 61),
     TableSpec("kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 62),
     TableSpec("memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 63),
+    TableSpec("shadow_change_log", TableClass.SHADOW_INTERNAL, (), ReplicationKeyKind.DECLARED_PK, 64),
+    TableSpec("shadow_capture_control", TableClass.SHADOW_INTERNAL, (), ReplicationKeyKind.DECLARED_PK, 65),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)

@@ -2,7 +2,7 @@
   "schema_pair": {
     "epoch": 1,
     "postgres_version": 9,
-    "sqlite_version": 30
+    "sqlite_version": 31
   },
   "tables": [
     {
@@ -713,6 +713,24 @@
       "replication_key": [],
       "sqlite_to_postgres": "identity",
       "table_class": "rebuilt"
+    },
+    {
+      "copy_rank": 64,
+      "key_kind": "declared_pk",
+      "name": "shadow_change_log",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "shadow-internal"
+    },
+    {
+      "copy_rank": 65,
+      "key_kind": "declared_pk",
+      "name": "shadow_capture_control",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "shadow-internal"
     }
   ]
 }
