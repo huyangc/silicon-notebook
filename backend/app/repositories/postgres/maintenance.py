@@ -258,7 +258,9 @@ class PostgresMaintenanceAdapter:
             return int(db.execute(
                 "SELECT COUNT(*) c FROM source_elements e "
                 "JOIN sources s ON s.id = e.source_id "
-                "WHERE s.notebook_id=%s AND btrim(e.text, %s) != '' "
+                "WHERE s.notebook_id=%s "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND btrim(e.text, %s) != '' "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                 "WHERE v.element_id = e.id)" + clause,
                 (notebook_id, PY_WHITESPACE, *exclude),
@@ -295,7 +297,9 @@ class PostgresMaintenanceAdapter:
                 dict(r) for r in db.execute(
                     "SELECT e.id, e.source_id, e.text FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
-                    "WHERE s.notebook_id=%s AND btrim(e.text, %s) != '' "
+                    "WHERE s.notebook_id=%s "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND btrim(e.text, %s) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)" + clause,
                     tuple(params),
@@ -318,7 +322,9 @@ class PostgresMaintenanceAdapter:
                 r["source_id"] for r in db.execute(
                     "SELECT DISTINCT e.source_id FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
-                    "WHERE s.notebook_id=%s AND btrim(e.text, %s) != '' "
+                    "WHERE s.notebook_id=%s "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND btrim(e.text, %s) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)",
                     (notebook_id, PY_WHITESPACE),

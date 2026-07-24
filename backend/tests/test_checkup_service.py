@@ -315,6 +315,24 @@ def test_missing_element_rows_only_source_id(repo):
     assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id, only_source_id=b)} == {b}
 
 
+def test_missing_element_queries_exclude_memory_and_knowhow(repo):
+    """codex 第6轮 P2:knowhow/memory 的 source_elements **设计上**不走通用 element 嵌入(knowhow 只嵌
+    生成的 chunk、memory 走独立 memory_embedding)→ H5 的 count/rows/source_ids 三查询都排除它们,否则
+    成功投影后仍报 H5 损坏 + backfill 白嵌派生格(触效率红线)。document 源的缺向量 element 仍照常计入。
+
+    **变异锚点**:去掉某个 element 查询的 ``AND s.source_type NOT IN ('memory','knowhow')`` → knowhow/
+    memory 的 element 被算进 → 对应断言红。"""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    doc = _seed_source(repo, nb.id, source_type="document", parse_status="extracted", n_elements=2)
+    _seed_source(repo, nb.id, source_type="knowhow", parse_status="extracted", n_elements=3)
+    _seed_source(repo, nb.id, source_type="memory", parse_status="extracted", n_elements=4)
+    mnt = repo.maintenance
+    # 只 document 的 2 个 element 算缺向量;knowhow(3)+ memory(4)被排除。
+    assert mnt.count_missing_element_vectors(nb.id) == 2
+    assert {r["source_id"] for r in mnt.missing_element_embedding_rows(nb.id)} == {doc}
+    assert set(mnt.missing_element_vector_source_ids(nb.id)) == {doc}
+
+
 def test_missing_vector_source_ids_are_distinct_and_lightweight(repo):
     """codex 第2轮 P1:missing_*_vector_source_ids 只返 DISTINCT source_id(不物化正文),
     判据与 missing_*_embedding_rows 一致——backfill 用它做廉价源发现,避免大库上把每行全文
