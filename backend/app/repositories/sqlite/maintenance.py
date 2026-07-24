@@ -462,7 +462,9 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT e.id, e.source_id, e.text FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
-                    "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                    "WHERE s.notebook_id=? "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                     "WHERE v.element_id = e.id)" + clause,
                     tuple(params),
@@ -493,7 +495,9 @@ class SQLiteMaintenanceAdapter:
                 for r in db.execute(
                     "SELECT DISTINCT e.source_id FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
-                    "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                    "WHERE s.notebook_id=? "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v WHERE v.element_id = e.id)",
                     (notebook_id, PY_WHITESPACE),
                 ).fetchall()
@@ -504,7 +508,13 @@ class SQLiteMaintenanceAdapter:
     ) -> int:
         """missing_element_embedding_rows 的计数版(盘点用)。判据必须与它逐字一致,
         否则「盘点数」和「实际可补数」会对不上。``exclude_source_ids`` 排除指定源的 element——
-        体检 H5 传活跃租约快照,免得把**正在嵌入**的源误报缺向量(codex);CLI 盘点不传、逐字一致。"""
+        体检 H5 传活跃租约快照,免得把**正在嵌入**的源误报缺向量(codex);CLI 盘点不传、逐字一致。
+
+        **排除 memory/knowhow 隐藏合成源**(codex 第6轮 P2,element/rows/source_ids 三处同款,两后端
+        对齐):它们**设计上就没有** element 向量——knowhow 投影只嵌生成的 chunk(embed_chunk_ids,
+        workload=knowhow_embedding)、memory 走独立 memory_embedding,两者的 source_elements 都不走通用
+        embed_source。含进来会:①H5 在成功投影后仍报损坏;②backfill 白嵌派生格(触效率红线)。与
+        H2/H3/H6 的 memory/knowhow 排除口径一致。"""
         exclude = tuple(exclude_source_ids or ())
         clause = (
             f" AND e.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
@@ -513,7 +523,9 @@ class SQLiteMaintenanceAdapter:
             return db.execute(
                 "SELECT COUNT(*) c FROM source_elements e "
                 "JOIN sources s ON s.id = e.source_id "
-                "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                "WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND TRIM(e.text, ?) != '' "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
                 "WHERE v.element_id = e.id)" + clause,
                 (notebook_id, PY_WHITESPACE, *exclude),
