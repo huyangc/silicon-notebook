@@ -1217,6 +1217,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='ask_job_detail'),
         ),

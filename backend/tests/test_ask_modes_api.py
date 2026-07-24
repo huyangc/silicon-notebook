@@ -76,6 +76,7 @@ def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
     # WS2a: 首事件现为 started(带 job_id,供前端「停止」调 cancel 端点),
     # 随后才是 progress/start。
     assert kinds[0] == "started" and events[0]["job_id"]
+    assert events[0]["conversation_id"] == events[-1]["response"]["conversation_id"]
     assert kinds[1] == "progress" and events[1]["step"]["step_type"] == "start"
     assert events[1]["step"]["detail"]["mode"] == "chunk"
     assert kinds[-1] == "final"

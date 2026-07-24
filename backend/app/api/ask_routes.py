@@ -162,6 +162,12 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
 def cancel_ask_job(notebook_id: str, job_id: str) -> dict:
     repo = repository()
     try:
+        detail = repo.ask_job_detail(job_id)
+        if (
+            detail["notebook_id"] != notebook_id
+            or detail["created_by"] != repo.current_user().id
+        ):
+            raise KeyError(job_id)
         return repo.cancel_ask_job(job_id, repo.current_user().id)
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
@@ -175,7 +181,10 @@ def get_ask_job(notebook_id: str, job_id: str) -> dict:
         detail = repo.ask_job_detail(job_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="ask job not found")
-    if detail["created_by"] != repo.current_user().id:
+    if (
+        detail["notebook_id"] != notebook_id
+        or detail["created_by"] != repo.current_user().id
+    ):
         raise HTTPException(status_code=404, detail="ask job not found")
     return detail
 

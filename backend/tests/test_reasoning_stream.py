@@ -68,4 +68,5 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     assert events[1]["step"]["step_type"] == "start"
     assert any(event.get("step", {}).get("step_type") == "plan" for event in events)
     assert events[-1]["response"]["conversation_id"]
+    assert events[0]["conversation_id"] == events[-1]["response"]["conversation_id"]
     assert events[-1]["response"]["reasoning_trace"]

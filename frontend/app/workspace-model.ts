@@ -354,6 +354,7 @@ export type ConversationDetail = {
   title: string;
   updated_at: string;
   turn_count: number;
+  used_reasoning?: boolean;
   turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
   active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
 };

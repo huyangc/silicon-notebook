@@ -125,6 +125,7 @@ import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
 import { isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
+import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
@@ -144,11 +145,14 @@ import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import {
   doneItemDestination,
+  followLatestNotebookRequest,
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
+  notebookIsActive,
   openMemoryDeepLink,
   ownsWorkspaceRun,
   restoreLatestConversation,
+  sessionListRequestIsCurrent,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
 } from "./workspace-transitions";
@@ -705,6 +709,7 @@ export default function Home() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [asking, setAsking] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
   const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
@@ -1415,8 +1420,17 @@ export default function Home() {
   const workspaceEpochRef = useRef(0);
   const kgBuildRequestEpochRef = useRef(0);
   const askRunEpochRef = useRef(0);
-  // started 事件落地前(jobId 尚未知晓)点了「停止」:先记下意图,onStart 拿到 jobId 后立即补打 cancel。
-  const cancelRequestedRef = useRef(false);
+  const sessionListRequestRef = useRef(0);
+  const latestSessionListRef = useRef<{
+    notebookId: string;
+    requestId: number;
+    promise: Promise<ConversationSummary[]>;
+  } | null>(null);
+  const optimisticConversationIdsRef = useRef<Set<string>>(new Set());
+  // started 事件落地前(jobId 尚未知晓)点了「停止」:保留该 run 的 controller，
+  // 继续读到 started 拿到 jobId 后补打 cancel，再中止本地流。Set 而非单一
+  // boolean：切会话后可能又启动新 run，取消意图不能串台。
+  const cancelRequestedControllersRef = useRef<Set<AbortController>>(new Set());
   // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
   // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
@@ -1477,6 +1491,7 @@ export default function Home() {
           askJobIdRef.current = null;
           if (d.status === "done") {
             await openSession(reconnectConvIdRef.current ?? "");   // 见注: 重载拿最终答案
+            await loadSessions(nb);                                // 同步终态轮数/reasoning 摘要
           } else if (d.status === "cancelled") {
             setToast("该问答已被取消");
             await loadSessions(nb);   // 后端对取消的首轮会话做了空会话清理,刷新列表去掉幽灵项
@@ -2294,10 +2309,16 @@ export default function Home() {
     closeAnalytics();
     closeKnowhow();
     const workspaceEpoch = ++workspaceEpochRef.current;
-    askRunEpochRef.current += 1;
+    setSessionLoading(true);
+    try {
+      askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
+    optimisticConversationIdsRef.current.clear();
+    askAbortRef.current = null;
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
     setAsking(false);
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
@@ -2344,7 +2365,7 @@ export default function Home() {
     setCurrentNotebookBases([]);
     setSessions([]);
     pollCountRef.current = 0;
-    const sessionList = await loadSessions(notebookId, workspaceEpoch);
+    const sessionList = await loadSessions(notebookId);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
     // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
     // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
@@ -2361,8 +2382,11 @@ export default function Home() {
     } else if (historyMode === "replace") {
       window.history.replaceState(null, "", notebookHash(notebookId));
     }
-    window.scrollTo(0, 0);
-    return true;
+      window.scrollTo(0, 0);
+      return true;
+    } finally {
+      if (workspaceEpochRef.current === workspaceEpoch) setSessionLoading(false);
+    }
   }
 
   async function openNotebookMemory(notebookId: string) {
@@ -2414,6 +2438,10 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
+    optimisticConversationIdsRef.current.clear();
+    askAbortRef.current = null;
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
     setSources([]);
@@ -2422,6 +2450,7 @@ export default function Home() {
     setConversationId(null);
     setSessions([]);
     setAsking(false);
+    setSessionLoading(false);
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
@@ -2759,7 +2788,7 @@ export default function Home() {
 
   async function runAsk(nextQuestion = question) {
     if (!currentNotebookId) return;
-    if (asking) return;
+    if (asking || sessionLoading) return;
     const q = nextQuestion.trim();
     if (!q) return;
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
@@ -2772,6 +2801,8 @@ export default function Home() {
       return;
     }
     const notebookId = currentNotebookId;
+    const conversationIdAtStart = conversationId;
+    let startedConversationId = conversationIdAtStart;
     const workspaceEpoch = workspaceEpochRef.current;
     const runEpoch = ++askRunEpochRef.current;
     const ownsRun = () => ownsWorkspaceRun(
@@ -2788,8 +2819,10 @@ export default function Home() {
     setPendingMode(askMode);
     setPendingTrace([]);
     setAsking(true);
-    cancelRequestedRef.current = false;   // 每次新 ask 复位「停止」意图
     const controller = new AbortController();
+    // Bind this controller to a not-yet-started run. A job id from a detached
+    // previous notebook/session must never be paired with the new transport.
+    askJobIdRef.current = null;
     askAbortRef.current = controller;
     askNotebookIdRef.current = notebookId;
     try {
@@ -2801,22 +2834,54 @@ export default function Home() {
           if (ownsRun()) setPendingTrace((previous) => [...previous, step]);
         },
         controller.signal,
-        (jobId) => {
-          if (!ownsRun()) return;
-          askJobIdRef.current = jobId;
-          if (cancelRequestedRef.current) {
-            // started 落地前已点过「停止」:jobId 当时还不存在,补打 cancel 端点真取消 worker。
-            cancelRequestedRef.current = false;
-            cancelAskJob(notebookId, jobId).catch(() => {});
+        async (jobId, durableConversationId) => {
+          startedConversationId = durableConversationId;
+          if (cancelRequestedControllersRef.current.delete(controller)) {
+            // 不能在 jobId 出现前 abort，否则 started 永远无法被读取，后端 detached
+            // worker 也就无法被显式取消。runAskStream 会 await 此回调，所以取消完成前
+            // 不会继续消费 progress/final。
+            await cancelAskJob(notebookId, jobId).catch(() => {});
+            controller.abort();
+            await refreshActiveSessions(notebookId).catch(() => {});
+            return;
           }
+
+          const ownsVisibleRun = ownsRun();
+          if (ownsVisibleRun) {
+            askJobIdRef.current = jobId;
+            setConversationId(durableConversationId);
+          }
+          if (notebookIsActive(notebookId, activeNotebookIdRef.current)) {
+            optimisticConversationIdsRef.current.add(durableConversationId);
+            setSessions((current) => recordStartedConversation(current, {
+              conversationId: durableConversationId,
+              question: q,
+              startedAt: new Date().toISOString(),
+            }));
+            // 历史归属于 notebook，不归属于当前展示的 run。即使 started 前已切到
+            // 同库旧会话，也必须发布这条可重开的 durable conversation。
+            loadSessions(notebookId).catch(() => {
+              // 乐观历史项已可用，短暂列表失败不终止 Ask stream。
+            });
+          }
+          if (!ownsVisibleRun) return;
         },
       );
-      if (!ownsRun()) return;
+      if (!ownsRun()) {
+        await refreshActiveSessions(notebookId).catch(() => {});
+        return;
+      }
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
-      if (!ownsRun()) return;
+      if (!ownsRun()) {
+        await refreshActiveSessions(notebookId).catch(() => {});
+        return;
+      }
       setQuestion(q);
+      if (startedConversationId !== conversationIdAtStart) {
+        setConversationId(conversationIdAtStart);
+      }
       if (isAbortError(error)) {
         setToast("已中断回答");
         return;
@@ -2827,42 +2892,93 @@ export default function Home() {
         if (askAbortRef.current === controller) askAbortRef.current = null;
         askJobIdRef.current = null;
         askNotebookIdRef.current = null;
-        cancelRequestedRef.current = false;
         setPendingQuestion("");
         setPendingMode(DEFAULT_ASK_MODE);
         setPendingTrace([]);
         setAsking(false);
       }
+      cancelRequestedControllersRef.current.delete(controller);
     }
-    if (ownsRun()) await loadSessions(notebookId, workspaceEpoch);
+    if (ownsRun()) await loadSessions(notebookId);
   }
 
   function abortAsk() {
     const jobId = askJobIdRef.current;
     const nb = askNotebookIdRef.current;
+    const controller = askAbortRef.current;
     // 显式取消 = 打 cancel 端点(真取消后端 worker),再 abort 本地流(立即停读)。
     // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
     if (jobId && nb) {
-      cancelAskJob(nb, jobId).catch(() => {});
-    } else {
-      // started 事件还没落地,jobId 未知:记下意图,onStart 拿到 jobId 后补打 cancel(见 runAsk)。
-      cancelRequestedRef.current = true;
+      cancelAskJob(nb, jobId)
+        .then(() => refreshActiveSessions(nb))
+        .catch(() => {});
+      controller?.abort();
+    } else if (controller) {
+      // 先不 abort：继续读取第一条 started，回调中补打后端 cancel 后再 abort。
+      // 否则请求已到后端但首 chunk 未达时，worker 会脱离客户端继续执行。
+      cancelRequestedControllersRef.current.add(controller);
+      // UI 立即退出占用态并恢复草稿；后台 stream 仍由该 controller 的闭包继续
+      // 读到 started 完成取消握手。递增 run epoch 防止旧 final 回写回答区。
+      askRunEpochRef.current += 1;
+      if (askAbortRef.current === controller) askAbortRef.current = null;
+      askJobIdRef.current = null;
+      askNotebookIdRef.current = null;
+      setQuestion(pendingQuestion);
+      setPendingQuestion("");
+      setPendingMode(DEFAULT_ASK_MODE);
+      setPendingTrace([]);
+      setAsking(false);
+      setToast("正在中断回答");
     }
-    askAbortRef.current?.abort();
+  }
+
+  function refreshActiveSessions(notebookId: string): Promise<ConversationSummary[] | null> {
+    if (!notebookIsActive(notebookId, activeNotebookIdRef.current)) {
+      return Promise.resolve(null);
+    }
+    return loadSessions(notebookId);
   }
 
   async function loadSessions(
     notebookId: string | null = currentNotebookId,
-    expectedWorkspaceEpoch = workspaceEpochRef.current,
   ): Promise<ConversationSummary[] | null> {
     if (!notebookId) return null;
-    const list = await listConversations(notebookId);
-    if (
-      activeNotebookIdRef.current !== notebookId
-      || workspaceEpochRef.current !== expectedWorkspaceEpoch
-    ) return null;
-    setSessions(list);
-    return list;
+    // 历史列表是 notebook 级状态，同库切会话不应使有效响应过期；旧 notebook
+    // 的延迟刷新则不应发请求，也不能递增 generation。
+    if (!notebookIsActive(notebookId, activeNotebookIdRef.current)) return null;
+    const requestId = ++sessionListRequestRef.current;
+    const request = {
+      notebookId,
+      requestId,
+      promise: listConversations(notebookId),
+    };
+    latestSessionListRef.current = request;
+    const resolved = await followLatestNotebookRequest(
+      request,
+      () => latestSessionListRef.current,
+      () => notebookIsActive(notebookId, activeNotebookIdRef.current),
+    );
+    if (!resolved) return null;
+    if (sessionListRequestIsCurrent(
+      resolved.generationId,
+      sessionListRequestRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
+    )) {
+      if (resolved.requestId === resolved.generationId) {
+        optimisticConversationIdsRef.current.clear();
+        setSessions(resolved.value);
+      } else {
+        setSessions((current) => mergeSessionListFallback(
+          current,
+          resolved.value,
+          optimisticConversationIdsRef.current,
+        ));
+      }
+    }
+    // Even when a superseding request failed, orchestration callers can use
+    // this valid same-notebook fallback; stale data is never published here.
+    return resolved.value;
   }
 
   // 会话详情 → state 的灌入内核。刻意不碰 workspaceEpochRef:调用方各自持有
@@ -2871,6 +2987,18 @@ export default function Home() {
   async function applySessionDetail(id: string, expectedWorkspaceEpoch: number) {
     const detail = await getConversation(id);
     if (workspaceEpochRef.current !== expectedWorkspaceEpoch) return;
+    const summary: ConversationSummary = {
+      id: detail.id,
+      title: detail.title,
+      updated_at: detail.updated_at,
+      turn_count: detail.turn_count,
+      used_reasoning: detail.used_reasoning ?? Boolean(
+        detail.turns[detail.turns.length - 1]?.response.reasoning_trace?.length,
+      ),
+    };
+    setSessions((current) => current.some((session) => session.id === detail.id)
+      ? current.map((session) => session.id === detail.id ? summary : session)
+      : [summary, ...current]);
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
@@ -2880,6 +3008,10 @@ export default function Home() {
     setChatMode("ask");
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
+    // Reconnected jobs do not own a local fetch controller. Drop any detached
+    // stream controller from a previously viewed run so cancel cannot pair B's
+    // job id with A's transport; A's closure/Set still owns its own controller.
+    askAbortRef.current = null;
     const active = detail.active_job;
     if (active) {
       // 把在途 turn 渲染成「生成中」并接回实时轨迹(仿正在 ask 的 UI)。
@@ -2902,12 +3034,20 @@ export default function Home() {
   async function openSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
+    setSessionLoading(true);
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setAsking(false);
     setReconnectJob(null);
     setMemoryAnswerId(null);
-    await applySessionDetail(id, workspaceEpoch);
+    askAbortRef.current = null;
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
+    try {
+      await applySessionDetail(id, workspaceEpoch);
+    } finally {
+      if (workspaceEpochRef.current === workspaceEpoch) setSessionLoading(false);
+    }
   }
 
   function startNewSession() {
@@ -2916,8 +3056,10 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setAsking(false);
+    setSessionLoading(false);
     setReconnectJob(null);
     setMemoryAnswerId(null);
+    askAbortRef.current = null;
     askJobIdRef.current = null;
     askNotebookIdRef.current = null;
     setTurns([]);
@@ -3004,7 +3146,7 @@ export default function Home() {
         }
       },
       async () => {
-        await loadSessions(notebookId, workspaceEpoch);
+        await loadSessions(notebookId);
       },
       ({ deleted }) => {
         setToast(conversationCleanupToast(deleted));
@@ -4553,7 +4695,7 @@ export default function Home() {
                   onSubmit={() => runAsk().catch(reportError)}
                   onAbort={abortAsk}
                   running={asking}
-                  disabled={askBlocked}
+                  disabled={askBlocked || sessionLoading}
                 >
                   <span>{notebookSourceTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
@@ -4562,7 +4704,7 @@ export default function Home() {
                         key={g.id}
                         type="button"
                         className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
-                        disabled={asking}
+                        disabled={asking || sessionLoading}
                         onClick={() => setAskMode(defaultModeForGroup(g.id))}
                       >
                         {g.label}
@@ -4576,7 +4718,7 @@ export default function Home() {
                             type="button"
                             className={`mode-engine${askMode === m.id ? " active" : ""}`}
                             title={m.desc}
-                            disabled={asking}
+                            disabled={asking || sessionLoading}
                             onClick={() => setAskMode(m.id)}
                           >
                             {m.label}
@@ -4591,7 +4733,7 @@ export default function Home() {
                           type="button"
                           className="mode-engine"
                           style={{ marginLeft: 6 }}
-                          disabled={buildingKg || asking}
+                          disabled={buildingKg || asking || sessionLoading}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
                           {buildingKg ? "整理中…" : "整理知识图谱"}

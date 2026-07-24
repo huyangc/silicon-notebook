@@ -1,5 +1,7 @@
+import datetime as dt
 import json, threading, pytest
 from app.core.config import Settings
+from app.services import repository_facade
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
@@ -11,6 +13,17 @@ class FakeLLM:
     configured = True
     def chat_json(self, messages, schema_hint, **kwargs):
         return json.dumps({"answer": "ok.", "grounded": False})
+
+
+def test_repository_clock_preserves_subsecond_activity_order(monkeypatch):
+    class FixedDatetime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2026, 7, 24, 10, 5, 0, 123456, tzinfo=dt.timezone.utc)
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(repository_facade, "datetime", FixedDatetime)
+    assert dt.datetime.fromisoformat(_now()).microsecond == 123456
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
@@ -70,6 +83,48 @@ def test_list_conversations(repo):
     r = repo.ask(nb.id, AskRequest(question="q1"))
     convs = repo.list_conversations(nb.id)
     assert len(convs) == 1 and convs[0].id == r.conversation_id and convs[0].turn_count == 1
+
+
+def test_starting_follow_up_refreshes_last_activity_and_history_order(repo, monkeypatch):
+    """A submitted user turn is history activity before its answer exists."""
+    nb = _seed(repo)
+    user_id = repo.current_user().id
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("conv-follow-up", nb.id, "older conversation", user_id,
+             "2020-01-01T00:00:00", "2026-07-01T00:00:00"),
+        )
+        db.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("conv-was-latest", nb.id, "newer conversation", user_id,
+             "2026-07-20T00:00:00", "2026-07-20T00:00:00"),
+        )
+
+    latest_activity = "2026-07-24T10:05:00"
+    monkeypatch.setattr("app.services.sqlite_repository._now", lambda: latest_activity)
+    job_id, conversation_id = repo.begin_ask_job(
+        nb.id,
+        AskRequest(
+            question="new user turn",
+            conversation_id="conv-follow-up",
+            mode="chunk",
+        ),
+        "chunk",
+        threading.Event(),
+    )
+
+    sessions = repo.list_conversations(nb.id)
+    assert conversation_id == "conv-follow-up"
+    assert [session.id for session in sessions[:2]] == [
+        "conv-follow-up",
+        "conv-was-latest",
+    ]
+    assert sessions[0].updated_at == latest_activity
+    assert sessions[0].turn_count == 0
+    repo.finish_ask_job(job_id, "cancelled")
 
 
 def test_conversations_scoped_by_current_user(repo):

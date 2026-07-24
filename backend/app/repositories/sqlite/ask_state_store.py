@@ -101,7 +101,7 @@ class AskStateStore:
         (provenance markers already stripped). Returns "" when no prior turns."""
         rows = db.execute(
             "SELECT question, payload FROM answers WHERE conversation_id = ? "
-            "ORDER BY created_at ASC",
+            "ORDER BY julianday(created_at) ASC, created_at ASC, rowid ASC",
             (conversation_id,),
         ).fetchall()
         rows = rows[-limit:]
@@ -507,13 +507,16 @@ class AskStateStore:
                 raise KeyError(conversation_id)
             rows = db.execute(
                 "SELECT id, question, payload, created_at FROM answers "
-                "WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+                "WHERE conversation_id = ? "
+                "ORDER BY julianday(created_at) ASC, created_at ASC, rowid ASC",
                 (conversation_id,),
             ).fetchall()
             job = db.execute(
                 "SELECT id, question, mode FROM ask_jobs "
                 "WHERE conversation_id=? AND status='running' "
-                "ORDER BY created_at DESC LIMIT 1", (conversation_id,)).fetchone()
+                "ORDER BY julianday(created_at) DESC, created_at DESC, rowid DESC LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
             job_trace = self.read_trace(db, job["id"]) if job is not None else []
         turns = []
         for row in rows:
@@ -559,7 +562,10 @@ class AskStateStore:
                 "   FROM answers a WHERE a.conversation_id = c.id "
                 "  ORDER BY a.rowid DESC LIMIT 1) AS used_reasoning "
                 "FROM conversations c WHERE c.notebook_id = ? AND c.created_by = ? "
-                "ORDER BY c.updated_at DESC",
+                # julianday compares the absolute instant across legacy/local
+                # UTC offsets; the raw ISO value preserves microsecond order
+                # when SQLite's date function rounds two values to one tick.
+                "ORDER BY julianday(c.updated_at) DESC, c.updated_at DESC, c.id DESC",
                 (notebook_id, user_id),
             ).fetchall()
         return [
@@ -666,7 +672,8 @@ class AskStateStore:
                 row["id"]
                 for row in db.execute(
                     "SELECT id FROM conversations "
-                    "WHERE notebook_id=? AND created_by=? AND updated_at<? "
+                    "WHERE notebook_id=? AND created_by=? "
+                    "AND julianday(updated_at)<julianday(?) "
                     "ORDER BY id",
                     (notebook_id, user_id, cutoff),
                 ).fetchall()
@@ -675,7 +682,8 @@ class AskStateStore:
             for conversation_id in candidates:
                 eligible = db.execute(
                     "SELECT 1 FROM conversations c WHERE c.id=? "
-                    "AND c.notebook_id=? AND c.created_by=? AND c.updated_at<? "
+                    "AND c.notebook_id=? AND c.created_by=? "
+                    "AND julianday(c.updated_at)<julianday(?) "
                     "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
                     "WHERE j.conversation_id=c.id AND j.status='running')",
                     (conversation_id, notebook_id, user_id, cutoff),
