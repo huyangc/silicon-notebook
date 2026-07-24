@@ -24,6 +24,12 @@ class NotebookScaleProfile:
     def facts(self, notebook_id: str) -> NotebookScaleFacts:
         return self.facts_repo.load_notebook_scale_facts(notebook_id)
     def copy_stats(self, notebook_id: str) -> dict:
+        # bytes + chunks+nodes only — the cheap, KG-version-cached copyability
+        # verdict retrieval reads on the hot path. The deep-copy total-
+        # materialisation bound (which also depends on assets/sources that do NOT
+        # bump this cache's version) is enforced FRESH one layer up, in the
+        # share-routing service (NotebookSharingService.notebook_copy_stats), so it
+        # can never go stale here (codex PR#354 r2 P2).
         version = (self.version_for(notebook_id), self.settings.notebook_copy_max_bytes, self.settings.notebook_copy_max_rows)
         def load():
             f = self.facts(notebook_id)

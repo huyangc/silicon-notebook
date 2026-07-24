@@ -342,6 +342,19 @@ SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 t
 SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
 ```
 
+**Notebook 拷贝 vs 只读分享——规模闸：** 分享一个 notebook 时,库足够小就给「深拷贝」,
+否则给只读「加入」。「足够小」(以及上面那条不可拷贝阈值)是同一组界限——必须**同时**低于
+全部三条才算可拷贝。深拷贝会把该 notebook 的**每一张表**读进内存做 id 重映射,所以最后一条
+对这个总量单独封顶,与 chunk+node 数无关:
+
+```text
+NOTEBOOK_COPY_MAX_BYTES          # 源文件总字节上限（默认 50MB）
+NOTEBOOK_COPY_MAX_ROWS           # chunks + 知识对象 行数上限（默认 5000）
+NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # 深拷贝将物化的「所有表」总行数上限(含 relations/embeddings/
+                                 # elements/knowhow)——纵深护栏:图/向量扇出远超 chunk+node 数时
+                                 # 不至于把拷贝 OOM;超过即改为只读分享（默认 200000）
+```
+
 **内容寻址缓存（LLM + 向量化调用）：**
 
 内容完全相同的重复调用——同一模型、同一 prompt 或文本——直接复用上次结果，

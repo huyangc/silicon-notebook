@@ -72,7 +72,7 @@ def _seed_nodes(repo, nb, n):
                 "INSERT INTO knowledge_objects "
                 "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (f"ko-{i}", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
+                (f"ko-{nb}-{i}", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
 
 
 def test_snapshot_copy_rows_enforces_row_bound_in_its_own_transaction(tmp_path, monkeypatch):
@@ -116,7 +116,7 @@ def _seed_relations(repo, nb, n):
                 "INSERT INTO knowledge_relations "
                 "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
                 "VALUES (?,?,?,?,?,?,?,?)",
-                (f"rel-{i}", nb, None, "ko-a", "ko-b", "rel", "[]", _now()))
+                (f"rel-{nb}-{i}", nb, None, "ko-a", "ko-b", "rel", "[]", _now()))
 
 
 def test_snapshot_copy_rows_bounds_every_table_not_just_chunks_nodes(tmp_path, monkeypatch):
@@ -140,6 +140,58 @@ def test_snapshot_copy_rows_bounds_every_table_not_just_chunks_nodes(tmp_path, m
     # rows now exceed 10 → the SECOND bound must refuse it before any fetchall.
     with pytest.raises(ValueError, match="crossed the copy-materialisation limit"):
         store.snapshot_copy_rows(nb)
+
+
+def test_copy_stats_reports_snapshot_exceeding_notebook_non_copyable(tmp_path, monkeypatch):
+    """codex PR#354 r1 P2: a notebook under the byte + chunk+node limits but over
+    the total-materialisation limit must read NON-copyable (share-routing), so the
+    UI routes it to read-only join instead of a copy that dead-ends at the guard's
+    409 (recipient could then neither copy nor join-as-large — stuck). The share
+    service's notebook_copy_stats (what notebook_sharing_repository() returns, and
+    the copy/join routes call) applies the SAME snapshot-row criterion the guard
+    does. Dropping its recheck lets B read copyable (the stuck-recipient bug)."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1000")        # chunks+nodes gate: generous
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS", "10")  # total gate: tight
+    repo = SQLiteRepository(Settings())
+    # A: 2 nodes + 3 relations → 1 nb + 2 + 3 = 6 rows ≤ 10 → copyable
+    a = _mk_nb(repo); _seed_nodes(repo, a, 2); _seed_relations(repo, a, 3)
+    assert repo._runtime.sharing.notebook_copy_stats(a)["copyable"] is True
+    # B: same 2 nodes (passes chunks+nodes gate) but 20 relations → total 23 > 10.
+    # Relations aren't counted by chunks+nodes, so ONLY the snapshot term rejects it.
+    b = _mk_nb(repo); _seed_nodes(repo, b, 2); _seed_relations(repo, b, 20)
+    assert repo._runtime.sharing.notebook_copy_stats(b)["copyable"] is False
+
+
+def _seed_assets(repo, nb, n):
+    with repo._write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO notebook_assets "
+                "(id, notebook_id, filename, mime, size, created_by, created_at, source_id) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"asset-{nb}-{i}", nb, f"f{i}.png", "image/png", 1, "user-local", _now(), None))
+
+
+def test_notebook_copy_stats_rechecks_snapshot_bound_fresh_not_stale(tmp_path, monkeypatch):
+    """codex PR#354 r2 P2: notebook_assets (and sources/paper_meta) grow WITHOUT
+    bumping the KG-version key that scale_artifacts' copy_stats caches on. The
+    share-routing copyability must re-check the total-materialisation bound FRESH
+    (at the facade), so a notebook that crosses the bound via such an untracked
+    table stops reading copyable even with NO intervening KG mutation — otherwise a
+    stale cached 'copyable' offers a copy that 409s while join rejects it as small
+    (the dead end). Dropping the fresh facade recheck keeps the stale True here."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1000")
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS", "5")
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    _seed_nodes(repo, nb, 2)                                    # 1 nb + 2 nodes = 3 ≤ 5 → copyable
+    assert repo._runtime.sharing.notebook_copy_stats(nb)["copyable"] is True   # warms the cached copy_stats
+    _seed_assets(repo, nb, 10)                                  # assets DON'T bump kg_mutation_seq…
+    # …so the cached verdict is unchanged, but the FRESH facade recheck counts
+    # 1 nb + 2 nodes + 10 assets = 13 > 5 → non-copyable.
+    assert repo._runtime.sharing.notebook_copy_stats(nb)["copyable"] is False
 
 
 def test_share_sets_token_idempotent_then_unshare_clears(repo):

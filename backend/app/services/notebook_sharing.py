@@ -605,7 +605,20 @@ class NotebookSharingService:
         return self._store.find_by_token(token)
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
-        return self._copy_stats(notebook_id)
+        # Share-routing copyability (copy vs read-only join — read by the
+        # copy/join/preview routes and every share path below). ``self._copy_stats``
+        # is the KG-version-cached bytes+chunks+nodes verdict; re-check the deep-copy
+        # total-materialisation bound FRESH, because assets / sources / paper_meta
+        # grow WITHOUT bumping that cache's version key. Otherwise a stale-copyable
+        # notebook offers a copy that 409s at the guard while join rejects it as
+        # small — a dead end (codex PR#354 r2 P2). Short-circuited to notebooks
+        # already copyable by bytes+chunks+nodes (large libraries never pay the
+        # count); retrieval reads scale_artifacts' cached stats directly and never
+        # enters this path.
+        stats = self._copy_stats(notebook_id)
+        if stats.get("copyable") and not self._store.snapshot_copy_within_limits(notebook_id):
+            stats = {**stats, "copyable": False}
+        return stats
 
     def shared_preview(self, notebook_id: str) -> dict:
         notebook = self._catalog.get_notebook(notebook_id)
