@@ -18,6 +18,33 @@ import scipy.sparse as sp
 _logger = logging.getLogger(__name__)
 
 
+def encode_viz_edges(edges) -> "np.ndarray":
+    """把 viz 边列表序列化成 uint8 一维字节数组,供 np.savez 落进 viz.npz。
+
+    历史写法是把 ``json.dumps(edges)`` 当作**单个 unicode 标量**塞给 np.savez。
+    numpy 字符串数组的单元素 itemsize 用 C ``int`` 存(unicode 每字符 4 字节),
+    上限约 512Mi 字符(``(2**31-1)//4``);超大 base 图的边 JSON 会溢出并触发
+    ``TypeError: string too large to store inside array``。改存 uint8 一维数组:
+    元素数走 ``npy_intp``(64 位),且 numpy 以 ``force_zip64`` 写 npz 条目,
+    彻底绕开这个 2^31 上限。与 decode_viz_edges 成对使用。"""
+    payload = json.dumps(edges or []).encode("utf-8")
+    return np.frombuffer(payload, dtype=np.uint8)
+
+
+def decode_viz_edges(raw) -> list:
+    """从 viz.npz 读回边列表,兼容两种落盘格式。
+
+    新格式:encode_viz_edges 写的 uint8 一维字节数组 → 解码 UTF-8 再 json。
+    旧格式:历史 ``json.dumps(...)`` 存成的 0-d unicode 标量 → 直接 ``str()``。
+    老索引不重建也能继续加载(与 has_chunk_ann 的 older-index-stays-valid 同性质)。"""
+    arr = np.asarray(raw)
+    if arr.dtype == np.uint8:
+        text = arr.tobytes().decode("utf-8")
+    else:
+        text = str(raw)
+    return json.loads(text)
+
+
 @dataclass
 class ScaleIndex:
     node_ids: list
@@ -139,7 +166,7 @@ def load_scale_index(out_dir: str):
                     viz_deg = z["viz_deg"]
                     viz_types = list(z["viz_types"])
                     viz_names = list(z["viz_names"])
-                    viz_edges = json.loads(str(z["viz_edges"]))
+                    viz_edges = decode_viz_edges(z["viz_edges"])
                 viz_adj = sp.load_npz(viz_adj_path)
 
         if manifest.get("has_chunk_ann"):
@@ -366,7 +393,7 @@ def save_scale_index(
             viz_deg=np.asarray(viz_deg, dtype=np.int32),
             viz_types=np.asarray(viz_types, dtype=object),
             viz_names=np.asarray(viz_names, dtype=object),
-            viz_edges=json.dumps((viz_payload or {}).get("edges", [])),
+            viz_edges=encode_viz_edges((viz_payload or {}).get("edges", [])),
         )
         sp.save_npz(os.path.join(out_dir, "viz_adj.npz"), viz_adj.tocsr())
         manifest = {**manifest, "has_viz": True}

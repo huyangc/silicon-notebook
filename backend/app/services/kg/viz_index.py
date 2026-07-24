@@ -14,6 +14,8 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
+from app.services.kg.scale_index import decode_viz_edges, encode_viz_edges
+
 
 @dataclass
 class VizIndex:
@@ -92,7 +94,7 @@ def save_viz_index(out_dir: str, *, viz_ids, viz_adj, viz_deg, viz_types,
         viz_deg=np.asarray(viz_deg, dtype=np.int32),
         viz_types=np.asarray(viz_types, dtype=object),
         viz_names=np.asarray(viz_names, dtype=object),
-        viz_edges=json.dumps((viz_payload or {}).get("edges", [])),
+        viz_edges=encode_viz_edges((viz_payload or {}).get("edges", [])),
     )
     sp.save_npz(os.path.join(out_dir, "viz_adj.npz"), viz_adj.tocsr())
     with open(os.path.join(out_dir, "manifest.json"), "w") as fh:
@@ -114,7 +116,7 @@ def load_viz_index(out_dir: str) -> Optional[VizIndex]:
         viz_deg = z["viz_deg"]
         viz_types = list(z["viz_types"])
         viz_names = list(z["viz_names"])
-        viz_edges = json.loads(str(z["viz_edges"]))
+        viz_edges = decode_viz_edges(z["viz_edges"])
     viz_adj = sp.load_npz(viz_adj_path)
     return VizIndex(viz_ids=viz_ids, viz_adj=viz_adj, viz_deg=viz_deg,
                     viz_types=viz_types, viz_names=viz_names,
