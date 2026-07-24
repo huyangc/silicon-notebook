@@ -192,7 +192,14 @@ def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user))
         raise HTTPException(status_code=404, detail="Shared notebook not found")
     if not sharing.notebook_copy_stats(nb_id)["copyable"]:
         raise HTTPException(status_code=409, detail="notebook too large to copy")
-    return sharing.copy_notebook(nb_id, new_owner_id=user.id)
+    from app.services.notebook_sharing import NotebookTooLargeToCopyError
+    try:
+        return sharing.copy_notebook(nb_id, new_owner_id=user.id)
+    except NotebookTooLargeToCopyError:
+        # Concurrent ingestion can cross the copy-size threshold between the
+        # check above and copy_notebook's defense-in-depth recheck — keep the
+        # documented 409, don't let the guard turn it into a 500.
+        raise HTTPException(status_code=409, detail="notebook too large to copy")
 
 
 @router.post("/shared/{token}/join", response_model=NotebookSummary)

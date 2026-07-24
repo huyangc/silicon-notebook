@@ -261,6 +261,28 @@ def test_share_preview_copy_end_to_end(repo, client):
     assert client.post(f"/api/shared/{token}/copy").status_code == 404
 
 
+def test_copy_route_maps_race_size_guard_to_409_not_500(repo, client, monkeypatch):
+    """OOM audit P2-7 (codex PR#353): if a notebook crosses the copy-size
+    threshold between the route's pre-check and copy_notebook's defense-in-depth
+    recheck (concurrent ingestion), the route must keep its documented 409 — not
+    surface the guard's exception as a 500. Reverting the route's catch → 500."""
+    from app.services import notebook_sharing as ns
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+    # simulate the race: the route's pre-check sees copyable, the deep-copy
+    # defense-in-depth recheck rejects.
+    monkeypatch.setattr(
+        ns.NotebookSharingService, "notebook_copy_stats",
+        lambda self, nb: {"copyable": True},
+    )
+
+    def _raise(self, source_notebook_id, *, new_owner_id, new_name=None):
+        raise ns.NotebookTooLargeToCopyError("raced past the threshold")
+
+    monkeypatch.setattr(ns.NotebookSharingService, "copy_notebook", _raise)
+    assert client.post(f"/api/shared/{token}/copy").status_code == 409
+
+
 def test_share_preview_count_is_visible_while_copy_size_stays_physical(repo):
     nb = _mk_nb(repo, "Mixed")
     now = _now()

@@ -45,6 +45,14 @@ def _rewrite_asset_refs(text: str, asset_map: dict) -> str:
     )
 
 
+class NotebookTooLargeToCopyError(ValueError):
+    """copy_notebook's defense-in-depth copyable recheck failed. Subclasses
+    ValueError so non-route callers that catch ValueError keep working, while the
+    copy route can catch THIS type specifically and preserve its documented 409
+    (a concurrent-ingestion race can cross the size threshold between the route's
+    pre-check and the service recheck — that must stay a 409, not become a 500)."""
+
+
 class NotebookCopyService:
     """Deep-copy orchestration: ID remapping, chunked transactions through the
     store, filesystem copy and compensation ordering.
@@ -644,7 +652,7 @@ class NotebookSharingService:
         # be able to trigger that OOM, so re-check the same copyable gate here
         # before delegating to the deep copy (OOM audit P2-7).
         if not self.notebook_copy_stats(source_notebook_id)["copyable"]:
-            raise ValueError(
+            raise NotebookTooLargeToCopyError(
                 f"notebook {source_notebook_id} is too large to deep-copy "
                 f"(exceeds notebook_copy_max_bytes/rows); share read-only instead"
             )
