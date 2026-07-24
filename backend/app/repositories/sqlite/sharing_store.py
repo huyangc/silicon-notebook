@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Sequence
 
 from app.core.config import Settings
+from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
 
@@ -365,10 +366,33 @@ class SharingStore:
 
     # ------------------------------------------------------- copy primitives
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
-        """Read every copyable table's rows for the source notebook (the exact
-        SELECTs the former mixin issued, one read connection)."""
+        """Read every copyable table's rows in ONE stable-snapshot read
+        transaction, with the copyable-row bound enforced atomically inside it.
+
+        `BEGIN` (deferred) pins the WAL read snapshot at the first read, so the
+        row-count check and every table fetchall below observe the SAME data — a
+        concurrent ingestion commit cannot slip an over-limit notebook between
+        the check and the materialisation (codex PR#353 r3: the former
+        separate-connection recheck couldn't guarantee this). Over the copyable
+        row limit → raise BEFORE any fetchall, so the oversized rows are never
+        materialised (the 300GB+ OOM this guards). f.chunks + f.nodes = all
+        chunks + all knowledge_objects (mirrors load_notebook_scale_facts /
+        copy_stats). The enclosing ``with`` commits (read-only no-op) or, on the
+        raise, rolls back the read transaction."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as db:
+            db.execute("BEGIN")
+            total = int(db.execute(
+                "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=?) + "
+                "(SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?) AS n",
+                (notebook_id, notebook_id),
+            ).fetchone()["n"])
+            if total > self.settings.notebook_copy_max_rows:
+                raise NotebookTooLargeToCopyError(
+                    f"notebook {notebook_id} crossed the copy-size limit "
+                    f"({total} rows > {self.settings.notebook_copy_max_rows}); "
+                    f"share read-only instead"
+                )
             for table, sql in _COPY_SNAPSHOT_QUERIES:
                 snapshot[table] = [
                     dict(row) for row in db.execute(sql, (notebook_id,)).fetchall()
