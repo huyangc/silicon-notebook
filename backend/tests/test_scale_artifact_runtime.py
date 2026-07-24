@@ -225,6 +225,66 @@ def test_exact_and_stale_loads_preserve_disk_identity(repo):
     assert stale_b is exact
 
 
+def test_startup_preload_loads_ann_and_safe_ppr_core_before_progress(repo):
+    notebook = _seed(repo)
+    repo.build_scale_index(notebook.id)
+    scale = repo._runtime.scale_artifacts
+    scale.scale_cache.pop(notebook.id, None)
+    scale.snapshots.vector_cache.invalidate(f"{notebook.id}:scale_combined")
+    progress = []
+
+    result = repo._preload_scale_retrieval_artifacts(
+        progress=lambda done, total: progress.append((done, total))
+    )
+
+    loaded = scale.scale_cache.get(notebook.id)
+    assert loaded is not None
+    assert loaded.ann_handle is not None
+    assert loaded._ppr_transition.dtype.name == "float32"
+    assert loaded._ppr_chunk_ids == {
+        loaded.node_ids[int(position)] for position in loaded.chunk_index
+    }
+    # Combined graphs share the general VectorCache and are intentionally not
+    # claimed as startup-resident: mounted multi-index composition can require
+    # multi-GB copies.  The reusable self-only core lives on ScaleIndex instead.
+    assert f"{notebook.id}:scale_combined" not in scale.snapshots.vector_cache.keys()
+    assert result == {"indexes": 1, "ann_handles": 1, "ppr_cores": 1}
+    assert progress == [(0, 1), (1, 1)]
+
+
+def test_startup_preload_rejects_declared_enabled_ann_with_missing_labels(
+    repo, monkeypatch
+):
+    notebook = _seed(repo)
+    repo.build_scale_index(notebook.id)
+    scale = repo._runtime.scale_artifacts
+    index = scale.load(notebook.id, allow_stale=True)
+    index.manifest["has_chunk_ann"] = True
+    index.chunk_ann_labels = None
+    monkeypatch.setattr(scale.settings, "chunk_ann_enabled", True)
+    monkeypatch.setattr(scale, "load", lambda *_args, **_kwargs: index)
+
+    with pytest.raises(RuntimeError, match="declared scale ANN"):
+        scale._preload_one_retrieval_index(notebook.id)
+
+
+def test_startup_preload_refuses_to_evict_earlier_indexes(repo, monkeypatch):
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale.artifacts, "indexed_notebook_ids", lambda: ["a", "b"])
+    monkeypatch.setattr(scale.projections, "notebook_tier", lambda _id: "personal")
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max", 1)
+    monkeypatch.setattr(
+        scale,
+        "load",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("capacity must fail before loading")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="SCALE_IDX_CACHE_MAX"):
+        scale.preload_retrieval_artifacts()
+
+
 def test_viz_probe_is_read_only_and_never_invokes_builder(repo, monkeypatch):
     notebook = _seed(repo)
     scale = repo._runtime.scale_artifacts

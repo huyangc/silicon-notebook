@@ -136,3 +136,12 @@ def test_scale_idx_cache_max_setting_default_and_env(monkeypatch):
     monkeypatch.setenv("SCALE_IDX_CACHE_MAX", "3")
     s2 = Settings(_env_file=None)
     assert s2.scale_idx_cache_max == 3
+
+
+def test_startup_scale_preload_setting_defaults_on_and_can_be_disabled(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.delenv("STARTUP_PRELOAD_SCALE_INDEXES", raising=False)
+    assert Settings(_env_file=None).startup_preload_scale_indexes is True
+    monkeypatch.setenv("STARTUP_PRELOAD_SCALE_INDEXES", "false")
+    assert Settings(_env_file=None).startup_preload_scale_indexes is False

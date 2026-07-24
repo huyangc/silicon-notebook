@@ -258,6 +258,144 @@ class ScaleArtifactRuntime:
     def open_ann(self, index, kind: str):
         return self.catalog.open_ann(index, kind)
 
+    def _prepare_ppr_core(self, index) -> bool:
+        """Prepare only the reusable, single-index PPR substrate.
+
+        Cross-notebook combined graphs are deliberately *not* materialized here:
+        the legacy composition path copies multi-million-entry Python maps and
+        can transiently reconstruct every edge.  Eagerly doing that for every
+        mount would turn readiness into an OOM hazard.  The safe reusable pieces
+        are attached to the ScaleIndex itself, whose dedicated LRU is capacity-
+        checked by startup: a configured float32 CSR and the chunk-id set.  The
+        self-only fast path can then rebuild its tiny wrapper in O(1), even if a
+        shared VectorCache entry is later evicted.
+        """
+        if not self.settings.graph_ppr_enabled:
+            return False
+        prepare_key = "f32" if self.settings.ppr_float32 else "native"
+        if getattr(index, "_ppr_prepare_key", None) == prepare_key:
+            return True
+        transition = index.transition
+        if self.settings.ppr_float32:
+            import numpy as np
+
+            transition = transition.astype(np.float32, copy=False)
+        setattr(index, "_ppr_transition", transition)
+        setattr(
+            index,
+            "_ppr_chunk_ids",
+            {
+                index.node_ids[int(position)]
+                for position in index.chunk_index
+                if 0 <= int(position) < len(index.node_ids)
+            },
+        )
+        # Publish the idempotence marker last so a concurrent reader never
+        # treats a partially prepared core as complete.
+        setattr(index, "_ppr_prepare_key", prepare_key)
+        return True
+
+    def _preload_one_retrieval_index(self, notebook_id: str) -> dict[str, int]:
+        index = self.load(notebook_id, allow_stale=True)
+        if index is None:
+            raise RuntimeError("published scale index is not loadable")
+
+        ann_handles = 0
+        ann_specs = [
+            ("kg", None, index.ann_labels, True),
+            (
+                "chunk",
+                "has_chunk_ann",
+                index.chunk_ann_labels,
+                self.settings.chunk_ann_enabled,
+            ),
+            (
+                "relation",
+                "has_relation_ann",
+                index.relation_ann_labels,
+                self.settings.relation_retrieval_enabled,
+            ),
+        ]
+        for kind, manifest_flag, labels, enabled in ann_specs:
+            if not enabled:
+                continue
+            if manifest_flag and index.manifest.get(manifest_flag) and labels is None:
+                raise RuntimeError("declared scale ANN artifact is not loadable")
+            if not labels:
+                continue
+            if self.open_ann(index, kind) is None:
+                raise RuntimeError("required scale ANN artifact is not loadable")
+            ann_handles += 1
+
+        return {
+            "ann_handles": ann_handles,
+            "ppr_cores": int(self._prepare_ppr_core(index)),
+        }
+
+    def preload_retrieval_artifacts(
+        self,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        """Strictly preload every live notebook's published retrieval index.
+
+        The scale-index LRU is a memory safety boundary.  "Preload all" would be
+        dishonest if earlier entries were evicted while later ones loaded, so an
+        undersized ``SCALE_IDX_CACHE_MAX`` fails startup before allocating the
+        first large artifact.  Corrupt/missing required files likewise fail: the
+        readiness gate must not claim the cold path is warm when it is not.
+
+        Optional ANN families are opened only when their online retrieval feature
+        is enabled.  KG ANN is always relevant to indexed KG/PPR retrieval.  The
+        reusable single-index PPR substrate is prepared on the ScaleIndex itself;
+        cross-notebook graph combinations stay lazy because eager full copies are
+        not a memory-safe form of preload.
+        """
+        started = time.perf_counter()
+        candidates = self.artifacts.indexed_notebook_ids()
+        notebook_ids = [
+            notebook_id
+            for notebook_id in candidates
+            if self.projections.notebook_tier(notebook_id) is not None
+        ]
+        total = len(notebook_ids)
+        capacity = int(self.settings.scale_idx_cache_max)
+        if total > capacity:
+            self.event_log.logger.error(
+                "startup scale preload refused: indexes=%d exceeds "
+                "SCALE_IDX_CACHE_MAX=%d",
+                total,
+                capacity,
+            )
+            raise RuntimeError(
+                "published scale-index count exceeds SCALE_IDX_CACHE_MAX"
+            )
+
+        ann_handles = 0
+        ppr_cores = 0
+        if progress is not None:
+            progress(0, total)
+        for done, notebook_id in enumerate(notebook_ids, start=1):
+            item = self._preload_one_retrieval_index(notebook_id)
+            ann_handles += item["ann_handles"]
+            ppr_cores += item["ppr_cores"]
+            if progress is not None:
+                progress(done, total)
+
+        self.event_log.emit({
+            "kind": "startup_scale_preload",
+            "status": "done",
+            "indexes": total,
+            "ann_handles": ann_handles,
+            "ppr_cores": ppr_cores,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        })
+        return {
+            "indexes": total,
+            "ann_handles": ann_handles,
+            "ppr_cores": ppr_cores,
+        }
+
     # ------------------------------ viz read/build
 
     def _start_daemon(self, name: str, target: Callable[[], None]) -> None:

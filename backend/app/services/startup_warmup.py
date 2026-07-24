@@ -1,11 +1,14 @@
-"""Background startup: migrate + recover + warm open-path caches, then flip readiness.
+"""Background startup: migrate, recover and warm online caches before readiness.
 
 Kicked off in a daemon thread by the FastAPI lifespan so uvicorn serves
 ``/api/ready`` immediately while every app route stays 503 until warm-up
 completes. The first login after a restart therefore never pays migration + the
 cold per-notebook count recompute (``knowledge_counts_cache`` starts empty each
-process) — that cost moves here, behind the readiness gate, so users only ever
-see a "服务启动中" screen instead of a multi-second hang.
+process). It then strictly preloads every published scale index, enabled ANN
+handle, and safely reusable single-index PPR core. Those costs move behind the
+readiness gate so users see a startup screen instead of a first-query stall;
+cross-notebook combined graphs stay lazy because eagerly copying every mounted
+10M-node combination is not memory-safe.
 
 Crash recovery lives here, not in ``SQLiteRepository.__init__``: this module is
 the ONLY place that owns the "this process is the server, everything still
@@ -14,9 +17,10 @@ own repository and must not make that claim (they would flip rows the running
 server is still working on). It runs BEFORE ``mark_ready()`` so no route can
 accept new work while the wreckage is still standing.
 
-Robustness: migration failure keeps the service not-ready (an un-migrated schema
-is unusable); per-notebook warm failures are best-effort inside
-``warm_open_path_caches`` and never abort readiness. The one-shot knowhow
+Robustness: migration or scale preload failure keeps the service not-ready;
+per-notebook count warm failures remain best-effort inside
+``warm_open_path_caches``. Set ``STARTUP_PRELOAD_SCALE_INDEXES=false`` only as
+an explicit recovery escape hatch. The one-shot knowhow
 legacy-model reprojection sweep below runs strictly AFTER ``mark_ready()`` (it
 is a background catch-up, not a readiness precondition) and is itself
 exception-safe, so it can never flip a successful startup back to "error".
@@ -146,6 +150,31 @@ def _set_warmup_progress(lease: object, done: int, total: int) -> None:
             readiness.set_detail(f"{done}/{total} 笔记本", warmed=done, total=total)
 
 
+def _begin_index_preload(lease: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease or state.status != "warming":
+            return False
+        state.status = "preloading_indexes"
+        readiness.set_phase("preloading_indexes", "预加载大库检索索引")
+        return True
+
+
+def _set_index_preload_progress(lease: object, done: int, total: int) -> None:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if (
+            state is not None
+            and state.lease is lease
+            and state.status == "preloading_indexes"
+        ):
+            readiness.set_detail(
+                f"{done}/{total} 个索引",
+                preloaded=done,
+                total_indexes=total,
+            )
+
+
 def _mark_lifecycle_ready(lease: object, repo: object) -> bool:
     with _cleanup_lock:
         state = _active_lifecycle
@@ -153,7 +182,7 @@ def _mark_lifecycle_ready(lease: object, repo: object) -> bool:
             state is None
             or state.lease is not lease
             or state.repository is not repo
-            or state.status != "warming"
+            or state.status not in {"warming", "preloading_indexes"}
         ):
             return False
         state.status = "ready"
@@ -269,9 +298,36 @@ def run_startup(lease: object | None) -> object | None:
             _set_warmup_progress(lease, done, total)
 
         total = repo.warm_open_path_caches(progress=_progress)
+        preload_summary = {"indexes": 0, "ann_handles": 0, "ppr_cores": 0}
+        preload = getattr(repo, "_preload_scale_retrieval_artifacts", None)
+        preload_enabled = bool(
+            getattr(
+                getattr(repo, "settings", None),
+                "startup_preload_scale_indexes",
+                False,
+            )
+        )
+        if preload_enabled and callable(preload):
+            if not _begin_index_preload(lease):
+                return None
+
+            def _index_progress(done: int, count: int) -> None:
+                _set_index_preload_progress(lease, done, count)
+
+            logger.info(
+                "startup: notebook caches warm; preloading scale retrieval artifacts…"
+            )
+            preload_summary = preload(progress=_index_progress)
         if not _mark_lifecycle_ready(lease, repo):
             return None
-        logger.info("startup: READY — %d notebook(s) warmed", total)
+        logger.info(
+            "startup: READY — %d notebook(s) warmed; %d scale index(es), "
+            "%d ANN handle(s), %d PPR core(s) preloaded",
+            total,
+            preload_summary["indexes"],
+            preload_summary["ann_handles"],
+            preload_summary["ppr_cores"],
+        )
         _reproject_legacy_knowhow_tables(repo)
         return repo
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash

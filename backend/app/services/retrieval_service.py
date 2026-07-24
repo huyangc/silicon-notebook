@@ -25,6 +25,12 @@ class RetrievalService:
         self.candidates._notebook_langs_cache = notebook_languages
         self.graph._notebook_langs_cache = notebook_languages
 
+    def preload_scale_artifacts(self, progress=None) -> dict[str, int]:
+        """Strict startup preload for scale indexes and reusable hot artifacts."""
+        return self.candidates.scale_runtime.preload_retrieval_artifacts(
+            progress=progress,
+        )
+
     def retrieve_scored(self, *args, **kwargs):
         """按关键词 + 语义混合打分检索知识对象 → List[RetrievedKnowledge]。"""
         return self.candidates.retrieve_scored(*args, **kwargs)

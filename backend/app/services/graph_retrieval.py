@@ -541,6 +541,39 @@ class GraphRetrievalService(_RetrievalState):
             # 2. Combined graph: start from the first base index, splice remaining
             #    base indexes' nodes/edges, then splice the active delta.
             first_id, first = base_indexes[0]
+            # Direct query of one indexed notebook with delta search disabled is
+            # the dominant large-library shape.  The combined graph is exactly
+            # that ScaleIndex: reuse its multi-million-entry id list/map/idf by
+            # identity instead of duplicating them during startup/first query.
+            # Only the PPR float32 transition needs a conversion copy.
+            if (
+                len(base_indexes) == 1
+                and first_id == notebook_id
+                and active_indexed
+                and not self.settings.scale_search_include_delta
+            ):
+                combined_A = getattr(first, "_ppr_transition", first.transition)
+                if self.settings.ppr_float32 and not hasattr(
+                    first, "_ppr_transition"
+                ):
+                    combined_A = combined_A.astype(np.float32, copy=False)
+                combined_chunk_ids = getattr(first, "_ppr_chunk_ids", None)
+                if combined_chunk_ids is None:
+                    combined_chunk_ids = {
+                        first.node_ids[int(i)]
+                        for i in first.chunk_index
+                        if 0 <= int(i) < len(first.node_ids)
+                    }
+                return {
+                    "combined_ids": first.node_ids,
+                    "combined_A": combined_A,
+                    "combined_index": first.node_index,
+                    # Keep the historical set iteration/tie behavior exactly;
+                    # the memory win comes from reusing the much larger node
+                    # list/map/idf, not from changing ranking order here.
+                    "combined_chunk_ids": combined_chunk_ids,
+                    "combined_idf": first.idf,
+                }
             combined_ids = list(first.node_ids)
             combined_A = first.transition
             # combined_idf aligned to combined node order: base.idf for base nodes,
@@ -590,7 +623,7 @@ class GraphRetrievalService(_RetrievalState):
             # P0-B: PPR 迭代全程 float32(SpMV 带宽减半≈2x;top-k 稳定,长尾分数
             # 波动已获用户接受)。flag 已掺进上面的 version key,翻转即失效缓存。
             if self.settings.ppr_float32:
-                combined_A = combined_A.astype(np.float32)
+                combined_A = combined_A.astype(np.float32, copy=False)
 
             return {
                 "combined_ids": combined_ids,
@@ -602,6 +635,7 @@ class GraphRetrievalService(_RetrievalState):
 
         return self._vector_cache.get(
             f"{notebook_id}:scale_combined", version, _load)
+
     def _scale_ppr_impl(self, notebook_id: str, question: str) -> List[Tuple[str, float]]:
         """规模化 PPR:base 有持久化 scale 索引时,用 ANN 取 base KG 种子(避免
         4GB 暴力 matmul)+ 把 active 增量 splice 进 base CSR 图 → personalized_ppr
@@ -692,7 +726,12 @@ class GraphRetrievalService(_RetrievalState):
                         continue
                     sim = max(0.0, 1.0 - float(dist))  # cosine distance → similarity
                     if sim > 0:
-                        reset[ci] += sim * combined_idf[ci]
+                        # Keep the historical generic-composition arithmetic:
+                        # it materialized IDF through ``float(...)`` before the
+                        # float64 reset accumulation.  The self-only fast path
+                        # reuses the persisted float32 IDF array by identity, so
+                        # an explicit cast prevents a 1-ULP seed/ranking drift.
+                        reset[ci] += sim * float(combined_idf[ci])
                         ann_seeds += 1
 
         # 3b. Active KG seeds — 仅当 self 没有 scale 索引(self_idx is None,即
@@ -715,7 +754,7 @@ class GraphRetrievalService(_RetrievalState):
                 for oid, sim in top:
                     ci = combined_index.get(oid)
                     if ci is not None and sim > 0:
-                        reset[ci] += float(sim) * combined_idf[ci]
+                        reset[ci] += float(sim) * float(combined_idf[ci])
                         active_seeds += 1
 
         # 3c. Chunk seeds: ACTIVE notebook dense chunk seeds (raw chunk_id key —

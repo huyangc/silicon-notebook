@@ -45,6 +45,26 @@ class ScaleArtifactStore:
     def viz_dir(self, notebook_id: str) -> Path:
         return Path(os.path.join(str(self.settings.storage_dir), "kg_viz", notebook_id))
 
+    def indexed_notebook_ids(self) -> list[str]:
+        """Return published scale-index directory names in stable order.
+
+        Only a direct child carrying ``manifest.json`` is a published artifact.
+        Atomic-build scratch/rollback directories (``*.tmp`` / ``*.old``) are
+        deliberately excluded even if an interrupted operator copied a manifest
+        into them.  This is a filesystem inventory only; the runtime separately
+        drops orphan artifacts whose notebook row no longer exists.
+        """
+        root = Path(os.path.join(self.settings.storage_dir, "kg_index"))
+        if not root.is_dir():
+            return []
+        return sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and not entry.name.endswith((".tmp", ".old"))
+            and (entry / "manifest.json").is_file()
+        )
+
     # ─────────────────────────────────────────────────── manifest reads ──
     def read_manifest(self, directory) -> Optional[dict]:
         """Full manifest read: missing file → None; a corrupt manifest keeps

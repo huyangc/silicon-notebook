@@ -338,6 +338,15 @@ class Settings(BaseSettings):
     # 无界 plain dict,每个访问过的 notebook 常驻一条目直到进程重启。8 = 典型部署
     # 同时活跃的库数量级(远小于 VectorCache 的 32,因单条目体量大得多)。
     scale_idx_cache_max: int = Field(8, validation_alias="SCALE_IDX_CACHE_MAX")
+    # 启动就绪前把所有已发布 scale 索引的 CSR/节点映射、在线会用到的 ANN handle
+    # 与可安全复用的单索引 PPR core 全部载入进程缓存。跨 notebook combined graph
+    # 不在这里全量物化：每种挂载组合复制千万节点图会把 readiness 变成 OOM 风险。
+    # 默认开：大库把冷加载成本前置到 readiness gate，首位用户不再承担。若索引数
+    # 超过 SCALE_IDX_CACHE_MAX 或任一所需工件无法加载，启动 fail-closed；紧急进入
+    # UI 修复旧/坏索引时可临时设 false，正常部署应保持 true 并配足 RAM/cache cap。
+    startup_preload_scale_indexes: bool = Field(
+        True, validation_alias="STARTUP_PRELOAD_SCALE_INDEXES"
+    )
     # review_queue 的边介数中心性(rustworkx Brandes O(V·E))超此节点数时,不再对
     # 全图跑,改对「度数 top-K 诱导子图」算(见 sqlite_repository._edge_centrality_map)。
     edge_centrality_max_nodes: int = Field(20000, validation_alias="EDGE_CENTRALITY_MAX_NODES")
