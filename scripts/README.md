@@ -68,7 +68,7 @@ python scripts/migrate_sqlite_to_postgres.py \
   --source /absolute/path/.local/silicon_notebook.db --apply
 ```
 
-失败发生在目标数据提交前时，目标业务表保持空；可显式用 `--snapshot` 复用本工具生成的 sealed snapshot。脚本会重新检查目录、文件名/hash、`quick_check`、schema 版本和 WAL/SHM sidecar，不接受任意 SQLite 文件。在线运行只得到某一时刻的一致演练快照，不会同步后续写入；正式切换的停写、URL 修改和回滚步骤见 `docs/operations_zh.md`。脚本只迁 DB 行，不复制 `.local/storage`，也不支持 MySQL。
+导入按表提交并记录 checkpoint(run 头绑定 sealed snapshot hash):中途失败(崩溃/远程连接断开/重启)后重跑同一条命令即从最后完成的表**续跑**,不必整体重来;显式传 `--snapshot` 复用本工具生成的 sealed snapshot 可省去重新快照数 GB 源库(重新检查目录、文件名/hash、`quick_check`、schema 版本和 WAL/SHM sidecar,且 hash 必须匹配该 run,不接受任意 SQLite 文件或异源 checkpoint)。大库可传会话级批量装载调优:`--maintenance-work-mem 2GB`、`--max-parallel-index-workers N`(加速建索引)、`--batch-rows`(默认 1000);详见 `docs/operations_zh.md`「大库的调优与前置条件」。在线运行只得到某一时刻的一致演练快照,不会同步后续写入;正式切换的停写、URL 修改和回滚步骤见 `docs/operations_zh.md`。脚本只迁 DB 行,不复制 `.local/storage`,也不支持 MySQL。
 
 停掉全部 writer 和后端后，可让同一个 CLI 在重新核对 SQLite 快照和 PostgreSQL 全表 checksum
 后原子激活本地 `.env`：
@@ -83,7 +83,9 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 未来的最终迁移也可把 `--apply`、`--activate-env`、`--confirm-service-stopped` 放在同一条命令。
-CLI 原子替换配置并保存权限受限的回退副本，但不会自行停止或重启服务。
+大目标上可加 `--fast-activation`：只跳过激活阶段第二遍 PostgreSQL 全表 checksum(导入已逐表校验并落
+checkpoint),源库重新快照锚点与 schema/清单校验仍执行。CLI 原子替换配置并保存权限受限的回退副本,
+但不会自行停止或重启服务。
 
 ---
 

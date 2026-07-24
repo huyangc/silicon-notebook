@@ -140,12 +140,16 @@ python scripts/migrate_sqlite_to_postgres.py \
 工具使用 SQLite backup API，能包含已提交 WAL，不会错误地裸复制 live `.db`。它只升级私有
 快照副本，按 FK 顺序和有界 batch 流式 COPY，保留历史 ordinal，把旧 JSON 向量转换为
 float32 `bytea`；PostgreSQL 无法表示的 NUL codepoint 会以可逆字面量 `\\u0000` 保存。随后
-逐表做内容 checksum、重建索引、执行 `ANALYZE`，并在一个目标事务中提交全部数据。无凭据
-receipt 记录每表数量/checksum 与全部 NUL normalization。退役 SQLite 表为空时只记录不复制；
-只要其中一张非空就拒绝迁移，绝不静默丢历史数据。
+逐表做内容 checksum，并把每张已校验的表连同一条 per-table checkpoint 一起提交。run 头绑定
+sealed snapshot hash，使中断的导入能从最后完成的表续跑，而不是整体重来；finalize（ordinal
+reseed、重建索引、`ANALYZE`）是幂等的。这里**刻意用整体单事务原子性换取可续跑**——最终激活阶段
+会在任何切换前重算每张表的 checksum。无凭据 receipt 记录每表数量/checksum、全部 NUL
+normalization 与所用调优。退役 SQLite 表为空时只记录不复制；只要其中一张非空就拒绝迁移，
+绝不静默丢历史数据。
 
-若目标在提交前失败，业务表仍为空。要重试同一个时间点而不再复制数 GB 源库，只能显式传入
-本工具生成的 sealed snapshot：
+若导入中途停止（崩溃、远程连接断开、机器重启），重跑同一条命令即可:copier 会复用绑定到同一停写
+源的 checkpoint，跳过已提交的表继续。要避免每次重试都重新快照数 GB 源库，显式传入本工具生成的
+sealed snapshot：
 
 ```bash
 python scripts/migrate_sqlite_to_postgres.py \
@@ -155,8 +159,28 @@ python scripts/migrate_sqlite_to_postgres.py \
   --apply
 ```
 
-工具会重新验证目录、文件名、SHA-256 前缀、`quick_check`、schema 版本以及不存在 WAL/SHM。
-不要因为旧演练成功就拿其 `--snapshot` 做正式切换：快照之后的 SQLite commit 不在里面。
+工具会重新验证目录、文件名、SHA-256 前缀、`quick_check`、schema 版本以及不存在 WAL/SHM；
+快照 hash 必须与已记录的 run 一致——另一个源留下的 checkpoint 会 fail closed 而不会把两份数据
+混在一起。不要因为旧演练成功就拿其 `--snapshot` 做正式切换：快照之后的 SQLite commit 不在里面。
+
+### 2a. 大库的调优与前置条件
+
+源库很大时，吞吐与可靠性由几个杠杆主导：
+
+- **把 CLI 跑在 PostgreSQL 本机（或同一高速网络内）。** 每次 COPY 与读回校验都过连接；远程链路
+  会把整份数据来回搬两遍。
+- **抬高建索引预算。** 在已装满的大表上重建索引是 finalize 最慢的一步。传
+  `--maintenance-work-mem 2GB`（或在主机内存允许下更大）和 `--max-parallel-index-workers N`；
+  二者都是会话级、只影响本次导入。
+- **会话级批量装载设置。** 导入用一条独占连接跑，带 `synchronous_commit=off`、
+  `statement_timeout=0`、`idle_in_transaction_session_timeout=0`（可用 `--keep-synchronous-commit`
+  关掉第一项）。确认服务端没有会掐断数小时长拷贝的全局 `statement_timeout`/
+  `idle_in_transaction_session_timeout`，长连接有 TCP keepalive，`pg_wal` 有空间——大库装载在
+  checkpoint 回收 WAL 前会累积大量 WAL。
+- **先量后切。** 正式切换前，在目标主机上用生产数据的副本实跑一次 `--apply` 量真实吞吐。逐表进度
+  行（`COPY i/N`、`VERIFY i/N`、`INDEX i/N`）能看出时间花在哪，续跑对复用的表会打
+  `SKIP i/N ...（checkpointed）`。
+- **`--batch-rows`** 界定 SQLite 取数 / COPY 的批大小（默认 1000）；窄表可调大，超宽行压内存则调小。
 
 ### 3. 正式从 SQLite 切到 PostgreSQL
 
@@ -177,7 +201,9 @@ python scripts/migrate_sqlite_to_postgres.py \
    ```
 
    激活阶段会再次生成 SQLite 快照并重算 PostgreSQL 每张表的 checksum，全部匹配 receipt 后才
-   原子替换 `.env`；不匹配时 `.env` 保持不变。保留最终 sealed snapshot、receipt 和权限受限的
+   原子替换 `.env`；不匹配时 `.env` 保持不变。大目标上可加 `--fast-activation` 只跳过这第二遍
+   PostgreSQL 全表 checksum（导入时已逐表校验并落 checkpoint），而 SQLite 源重新快照（证明没有
+   写入偷偷混入的切换锚点）与 schema/清单校验仍会执行。保留最终 sealed snapshot、receipt 和权限受限的
    `.env.pre-postgres-*.bak`。确认新部署仍能访问同一个 `SILICON_NOTEBOOK_STORAGE_DIR`；若换主机，
    单独复制并校验这个目录，因为 DB importer 不复制文件。已经完成迁移且 SQLite 此后一直停写时，
    可用 `--activation-receipt /absolute/path/migration-*.receipt.json` 代替 `--apply`，仍会执行相同

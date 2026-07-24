@@ -168,14 +168,19 @@ The tool uses SQLite's backup API, so committed WAL state is included without co
 `.db` file incorrectly. It upgrades only a private snapshot copy, streams bounded COPY in FK
 order, preserves historical ordinals, converts legacy JSON vectors to float32 `bytea`, escapes
 PostgreSQL-unrepresentable NUL codepoints as the reversible literal `\\u0000`, verifies every
-table with a content checksum, rebuilds indexes, runs `ANALYZE`, and commits all target data in
-one transaction. Its credential-free receipt records table counts/checksums and every NUL
-normalization. Empty retired SQLite tables are recorded but not copied; a non-empty retired
-table fails closed.
+table with a content checksum, and commits each verified table together with a per-table
+checkpoint. A run header keyed to the sealed snapshot hash lets a stopped import resume from the
+last completed table instead of restarting the whole copy; finalize (ordinal reseed, index
+rebuild, `ANALYZE`) is idempotent. Full single-transaction atomicity is deliberately traded for
+restartability — the final activation pass re-verifies every table's checksum before any cutover.
+Its credential-free receipt records table counts/checksums, every NUL normalization, and the
+tuning used. Empty retired SQLite tables are recorded but not copied; a non-empty retired table
+fails closed.
 
-If a target attempt fails before commit, its business tables remain empty. Retry the exact
-same point-in-time snapshot without another multi-gigabyte backup only by explicitly naming
-the importer-owned file:
+If an import stops partway (crash, dropped remote connection, machine reboot), re-run the same
+command: the copier reuses the checkpoint keyed to the identical stopped source, skips the
+already-committed tables, and continues. Avoid re-snapshotting the multi-gigabyte source on each
+retry by naming the importer-owned sealed snapshot:
 
 ```bash
 python scripts/migrate_sqlite_to_postgres.py \
@@ -186,8 +191,32 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 Name, directory, SHA-256 prefix, `quick_check`, schema version, and WAL/SHM absence are all
-revalidated. Never use `--snapshot` for the final cutover merely because an older rehearsal
-succeeded: SQLite commits after that snapshot are absent.
+revalidated, and the snapshot hash must match the recorded run — a checkpoint left by a different
+source fails closed rather than mixing data. Never use `--snapshot` for the final cutover merely
+because an older rehearsal succeeded: SQLite commits after that snapshot are absent.
+
+### 2a. Tuning and prerequisites for a large database
+
+For a large source, throughput and reliability are dominated by a few levers:
+
+- **Run the CLI on (or on the same fast network as) the PostgreSQL host.** Every COPY and the
+  read-back verification cross the connection; a remote link moves the whole dataset out and
+  back twice.
+- **Raise the index-rebuild budget.** Rebuilding indexes on fully loaded large tables is the
+  slowest finalize step. Pass `--maintenance-work-mem 2GB` (or larger, within host memory) and
+  `--max-parallel-index-workers N`; both are session-scoped and only affect this import.
+- **Session bulk-load settings.** The import holds one connection with `synchronous_commit=off`,
+  `statement_timeout=0`, and `idle_in_transaction_session_timeout=0` (pass
+  `--keep-synchronous-commit` to opt out of the first). Confirm the server imposes no global
+  `statement_timeout`/`idle_in_transaction_session_timeout` that would abort a multi-hour copy,
+  that TCP keepalives keep a long remote connection alive, and that `pg_wal` has room — a large
+  load produces a large volume of WAL before checkpoints recycle it.
+- **Measure first.** Rehearse `--apply` against a copy of production data on the target host to
+  measure real throughput before committing to a maintenance window. Per-table progress lines
+  (`COPY i/N`, `VERIFY i/N`, `INDEX i/N`) show where time is spent, and a resumed run reports
+  `SKIP i/N ... (checkpointed)` for tables it reuses.
+- **`--batch-rows`** bounds the SQLite fetch / COPY batch (default 1000); raise it for narrow
+  tables, lower it if very wide rows pressure memory.
 
 ### 3. Perform the final SQLite→PostgreSQL cutover
 
@@ -209,7 +238,11 @@ succeeded: SQLite commits after that snapshot are absent.
    ```
 
    The activation pass repeats the SQLite snapshot and every PostgreSQL table checksum before
-   it atomically replaces `.env`; a mismatch leaves `.env` unchanged. Retain the final sealed
+   it atomically replaces `.env`; a mismatch leaves `.env` unchanged. On a large target you may
+   add `--fast-activation` to skip only that second full-table PostgreSQL checksum read — the
+   import already checksum-verified and checkpointed every table — while the SQLite source
+   re-snapshot (the cutover anchor proving no write slipped in) and the schema/manifest checks
+   still run. Retain the final sealed
    snapshot, receipt, and restricted `.env.pre-postgres-*.bak` file. Verify that
    `SILICON_NOTEBOOK_STORAGE_DIR` points to the same files on the new deployment host, or copy
    that directory separately and verify it; database migration never copies those files.
