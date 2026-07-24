@@ -105,17 +105,19 @@ def _load_env(path: Path) -> tuple[Path, bytes, str, dict[str, str], os.stat_res
 def _env_quote(value: str) -> str:
     """Quote a value for an env file read by both python-dotenv and shell ``source``.
 
-    Single quotes make the value literal in both loaders (no interpolation and no
-    escape processing), which is correct for URLs containing ``$``, ``"`` or
-    ``\\``. A literal single quote cannot be represented safely for both loaders
-    at once — ``shlex.quote`` emits shell concatenation (``'...'"'"'...'``) that
-    python-dotenv misparses — so fail closed rather than write a value that would
-    make ``DATABASE_URL`` silently unreadable on the next start.
+    Single quotes make the value literal for a shell ``source`` and for ``"`` or
+    ``\\``. Two characters still cannot be written safely: a literal single quote
+    (``shlex.quote`` would emit shell concatenation that python-dotenv misparses),
+    and ``$`` (the runtime pydantic-settings/dotenv loader interpolates ``$NAME``
+    and ``${NAME}`` *even inside single quotes*, so the restarted backend would
+    receive a different URL). Fail closed on either rather than write a value that
+    would be silently altered or unreadable on the next start.
     """
-    if "'" in value:
+    if "'" in value or "$" in value:
         raise SqliteToPostgresMigrationError(
-            "database URL contains a single quote that cannot be written safely to "
-            "the activation env file; set DATABASE_URL manually after activation"
+            "database URL contains a single quote or '$' that cannot be written "
+            "safely to the activation env file; set DATABASE_URL manually after "
+            "activation"
         )
     return f"'{value}'"
 

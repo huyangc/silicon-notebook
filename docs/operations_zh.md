@@ -139,7 +139,7 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 工具使用 SQLite backup API，能包含已提交 WAL，不会错误地裸复制 live `.db`。它只升级私有
 快照副本，按 FK 顺序和有界 batch 流式 COPY，保留历史 ordinal，把旧 JSON 向量转换为
-float32 `bytea`；PostgreSQL 无法表示的 NUL codepoint 会以可逆字面量 `\\u0000` 保存。随后
+float32 `bytea`；PostgreSQL 无法表示的 NUL codepoint 会规整为字面文本 `\\u0000`(单向规整——PostgreSQL 文本/JSON 无法存 NUL)。随后
 逐表做内容 checksum，并把每张已校验的表连同一条 per-table checkpoint 一起提交。run 头绑定
 sealed snapshot hash，使中断的导入能从最后完成的表续跑，而不是整体重来；finalize（ordinal
 reseed、重建索引、`ANALYZE`）是幂等的。这里**刻意用整体单事务原子性换取可续跑**——最终激活阶段

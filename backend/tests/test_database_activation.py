@@ -323,13 +323,18 @@ def test_activation_restricts_credential_env_to_owner_only(
     assert Path(result.backup_path).stat().st_mode & 0o777 == 0o600
 
 
-def test_env_quote_is_dotenv_and_shell_safe_and_fails_closed_on_apostrophe():
-    # Single-quote wrapping is literal for both python-dotenv and shell `source`;
-    # an apostrophe cannot be represented safely for both, so fail closed rather
-    # than emit shell concatenation that python-dotenv would misparse.
+def test_env_quote_is_safe_and_fails_closed_on_apostrophe_or_interpolation():
+    # A safe value is single-quote wrapped (literal for shell `source`).
     assert _env_quote("postgresql://u:p@h:5432/db?sslmode=disable") == (
         "'postgresql://u:p@h:5432/db?sslmode=disable'"
     )
-    assert _env_quote("sqlite:///.local/x$y.db") == "'sqlite:///.local/x$y.db'"
-    with pytest.raises(SqliteToPostgresMigrationError, match="single quote"):
-        _env_quote("postgresql://u:pa'ss@h:5432/db")
+    # An apostrophe (unquotable for both loaders) and a `$` (interpolated by the
+    # runtime dotenv loader even inside single quotes) both fail closed rather
+    # than be silently altered on restart.
+    for unsafe in (
+        "postgresql://u:pa'ss@h:5432/db",
+        "postgresql://u:pa${X}ss@h:5432/db",
+        "postgresql://u:pa$X@h:5432/db",
+    ):
+        with pytest.raises(SqliteToPostgresMigrationError):
+            _env_quote(unsafe)
