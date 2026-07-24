@@ -156,6 +156,32 @@ def test_cluster_map_equals_oracle_empty_notebook(repo):
     assert repo.cluster_map(nb.id) == _oracle_cluster_map(repo, nb.id) == {}
 
 
+def test_candidate_cluster_map_reads_only_requested_ids(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _seed_cluster_row(repo, nb.id, cc_id="cc-1", canonical_id="K-a", member_id="o1",
+                      canonical_name="A")
+    _seed_cluster_row(repo, nb.id, cc_id="cc-2", canonical_id="K-b", member_id="o2",
+                      canonical_name="B")
+    service = repo.retrieval.candidates
+    batches = []
+    real_fold = service.unified_kg.cluster_fold_rows
+
+    def bounded_fold(database, notebook_id, ids):
+        batches.append(list(ids))
+        return real_fold(database, notebook_id, ids)
+
+    def reject_full_scan(*_args, **_kwargs):
+        raise AssertionError("candidate canonical fold must not load the full cluster map")
+
+    monkeypatch.setattr(service.unified_kg, "cluster_fold_rows", bounded_fold)
+    monkeypatch.setattr(service.unified_kg, "cluster_map_rows", reject_full_scan)
+
+    requested = ["o1", *(f"missing-{index}" for index in range(900))]
+    assert service._candidate_cluster_map(nb.id, requested) == {"o1": "K-a"}
+    assert [len(batch) for batch in batches] == [900, 1]
+    assert {item for batch in batches for item in batch} == set(requested)
+
+
 # ── caching behavior: loader-count memoization ──────────────────────────────
 
 def test_cluster_map_second_call_no_sql_scan(repo, monkeypatch):

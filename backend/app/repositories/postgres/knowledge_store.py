@@ -497,15 +497,28 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def relation_connected_rows(db: Any, notebook_id: str, object_ids):
-        values = list(object_ids)
+    def relation_connected_object_ids(db: Any, notebook_id: str, object_ids):
+        """Return only candidates that have at least one incident relation.
+
+        Each correlated EXISTS can stop at the first indexed edge, keeping the
+        result and database work bounded by the candidate window rather than a
+        high-degree node's complete adjacency list.
+        """
+        values = list(dict.fromkeys(object_ids))
         if not values:
             return []
-        ph = ",".join("%s" for _ in values)
+        candidates = ",".join("(%s)" for _ in values)
         return db.execute(
-            f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-            f"WHERE notebook_id=%s AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
-            (notebook_id, *values, *values),
+            f"WITH candidates(object_id) AS (VALUES {candidates}) "
+            "SELECT object_id FROM candidates AS c "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM knowledge_relations AS r "
+            "WHERE r.notebook_id=%s AND r.source_object_id=c.object_id LIMIT 1"
+            ") OR EXISTS ("
+            "SELECT 1 FROM knowledge_relations AS r "
+            "WHERE r.notebook_id=%s AND r.target_object_id=c.object_id LIMIT 1"
+            ")",
+            (*values, notebook_id, notebook_id),
         ).fetchall()
 
     @staticmethod

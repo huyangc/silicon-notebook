@@ -119,6 +119,7 @@ bash scripts/check.sh
 - SQLite 默认位于 `.local/silicon_notebook.db`；PostgreSQL 是可直接选择的替代后端。两者的上传文件和生成工件仍位于 `.local/`。
 - 生产后端刻意保持单 worker，因为模型队列、熔断、健康和取消状态都在进程内。
 - 默认 `chunk` 检索只读取当前笔记本；图谱增强和推理路径可通过显式挂载的公共库联合检索。
+- 大库的索引检索会把 ANN 后的数据库 hydration 限制在候选窗口内，并让并发推理子查询单飞加载惰性 ANN handle。
 - 候选 Review Queue 已退出当前流程；知识治理直接作用于已存知识对象。
 - DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。
 
