@@ -1489,6 +1489,22 @@ def copy_snapshot_to_postgres(
     return stats, normalizations
 
 
+def _receipt_path(work_dir: Path, finished_at: datetime) -> Path:
+    """Collision-resistant receipt path.
+
+    A second-resolution timestamp alone lets two migrations sharing one work
+    directory that finish in the same second select the same path; ``_write_receipt``
+    would then ``os.replace`` over the first receipt, discarding the verification
+    record needed to activate its target. A short random suffix keeps each
+    migration's receipt distinct.
+    """
+    timestamp = finished_at.strftime("%Y%m%dT%H%M%SZ")
+    return (
+        Path(work_dir).resolve()
+        / f"migration-{timestamp}-{uuid.uuid4().hex[:8]}.receipt.json"
+    )
+
+
 def _write_receipt(path: Path, payload: Mapping[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -1784,8 +1800,7 @@ def migrate(
             upgraded.with_name(upgraded.name + "-shm").unlink(missing_ok=True)
 
     finished_at = datetime.now(timezone.utc)
-    timestamp = finished_at.strftime("%Y%m%dT%H%M%SZ")
-    receipt = Path(work_dir).resolve() / f"migration-{timestamp}.receipt.json"
+    receipt = _receipt_path(work_dir, finished_at)
     payload = {
         "format": "silicon-notebook-sqlite-to-postgres-v1",
         "started_at": started_at.isoformat(),
