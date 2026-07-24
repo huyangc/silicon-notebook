@@ -648,9 +648,14 @@ class NotebookSharingService:
         # Defense-in-depth: the deep copy materialises every table (objects /
         # relations / chunks / all vector tables) into one in-memory snapshot —
         # 300GB+ at 8M-object scale. The API route already refuses non-copyable
-        # notebooks (409), but any OTHER caller of this service method must not
-        # be able to trigger that OOM, so re-check the same copyable gate here
-        # before delegating to the deep copy (OOM audit P2-7).
+        # notebooks (409); this recheck additionally covers non-route callers and
+        # a source that already grew large before this call. It NARROWS but does
+        # NOT fully close a concurrent-ingestion race: the snapshot materialises
+        # later in NotebookCopyService on a SEPARATE connection, so a commit
+        # landing between here and snapshot_copy_rows() can still cross the limit
+        # (codex PR#353 round 2). The complete fix is a bounded/streaming snapshot
+        # (the audit's deep-copy streaming item) — a larger change tracked
+        # separately; the copy stays router-gated meanwhile (OOM audit P2-7).
         if not self.notebook_copy_stats(source_notebook_id)["copyable"]:
             raise NotebookTooLargeToCopyError(
                 f"notebook {source_notebook_id} is too large to deep-copy "
