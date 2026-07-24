@@ -1836,6 +1836,9 @@ export default function Home() {
           await loadNotebookCollection();
           const refreshed = await getNotebook(currentNotebookId);
           if (!cancelled) setCurrentNotebook(refreshed);
+          // 源达终态(extracted/failed)可能新增 H2–H6:刷新体检,新损坏才会冒进铃铛而非等用户手动
+          // 打开看板(codex 第5轮 P2:proactive fetch 只在 notebook ID 变时跑,漏了上传后 parse 完成)。
+          if (!cancelled) reloadCheckup(currentNotebookId);
         }
       } catch (error) {
         reportError(error);
@@ -2642,6 +2645,7 @@ export default function Home() {
     // false → 处理轮询的 reachedExtracted 分支不触发 → ask_available 陈旧为假、对话框空锁。显式
     // 重拉解禁;仍在解析中的慢路径由处理轮询覆盖。
     revalidateAskAvailability();
+    reloadCheckup(currentNotebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
     setStagedFiles([]);
     setStagedDocTypes([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
@@ -2677,6 +2681,7 @@ export default function Home() {
         setNotebookSourceTotal((t) => t + result.created.length);
         await loadNotebookCollection();
         revalidateAskAvailability(); // P1:导入即产出可检索证据时解禁对话框(同 confirmUpload)
+        reloadCheckup(currentNotebookId);  // 同理刷新体检铃铛(codex 第5轮 P2)
       }
       setUrlRejected(result.rejected);
       setToast(`已添加 ${result.created.length} 个，被拒 ${result.rejected.length} 个`);
@@ -2743,6 +2748,7 @@ export default function Home() {
     setCurrentNotebook(refreshed);
     setKnowledge(EMPTY_KNOWLEDGE);
     setDuplicates(null);
+    reloadCheckup(notebookId);  // 删掉损坏源后旧告警须消:刷新体检铃铛(codex 第5轮 P2)
     setToast("来源已删除");
   }
 

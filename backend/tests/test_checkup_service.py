@@ -674,3 +674,30 @@ def test_probe_validates_ann_content_not_just_existence(tmp_path, monkeypatch):
     with open(ann_path, "r+b") as f:
         f.truncate(8)
     assert probe_scale_index_integrity(str(scale_dir)) == 1
+
+
+def test_probe_detects_ann_entry_count_below_labels(tmp_path, monkeypatch):
+    """codex 第5轮 P2:结构合法但**条目数 < labels** 的 ann.bin(如从早期/半截 build 拷来)load 也
+    成功,但检索会静默漏掉没进 ANN 的 labeled 节点 → 应判损坏(返 1)。**变异锚点**:删掉
+    ``get_current_count() != len(labels)`` 比较 → 本用例红(条目少也报健康)。"""
+    import numpy as np
+    import hnswlib
+    from types import SimpleNamespace
+    from app.services.kg import scale_index as scale_index_mod
+
+    scale_dir = tmp_path / "scale"
+    scale_dir.mkdir()
+    (scale_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    ann_path = str(scale_dir / "ann.bin")
+    dim, n = 4, 2
+    h = hnswlib.Index(space="cosine", dim=dim)
+    h.init_index(max_elements=n, ef_construction=16, M=8)
+    h.add_items(np.eye(n, dim, dtype="float32"), list(range(n)))
+    h.save_index(ann_path)  # ann.bin 只有 2 个条目
+
+    # labels 声称 3 个(比 ann.bin 多)→ 检索漏第 3 个 → 损坏。
+    stub = SimpleNamespace(
+        ann_labels=["a", "b", "c"], ann_path=ann_path, manifest={"dim": dim}
+    )
+    monkeypatch.setattr(scale_index_mod, "load_scale_index", lambda d: stub)
+    assert probe_scale_index_integrity(str(scale_dir)) == 1

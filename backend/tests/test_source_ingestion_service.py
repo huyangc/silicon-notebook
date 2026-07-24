@@ -240,6 +240,33 @@ def test_active_lease_held_during_processing_and_released_after(
     assert sid not in service._active_sources, "退出后租约仍含该源(finally 未释放)"
 
 
+def test_embedding_sources_join_active_snapshot_independently(repo):
+    """codex 第5轮 P2:后台嵌入在途源(``_embedding_sources``)并入 H4/H5 用的活跃集
+    (``_active_source_ids_snapshot``),但与 ``_active_sources``(process_source 生命周期 + 分块锁的
+    引用计数)**独立**——process_source 可能先返回、撤自己的租约,而嵌入 worker 还在写向量;不并入
+    的话在途向量被误报缺失 + 诱发重复(可能昂贵)backfill。这里直接测机制(stamp→并入快照→release
+    →移出 + 与 _active_sources 隔离);process_source 在 spawn 前 stamp、_embed_bg 的 finally release
+    的 wiring 见 source_ingestion。
+
+    **变异锚点**:把 _active_source_ids_snapshot 的 ``| set(ingestion._embedding_sources)`` 去掉 →
+    「snapshot 含 sid」断言红。"""
+    si = repo._runtime.source_ingestion
+    sid = "src-embedding-inflight"
+    assert sid not in repo._runtime._active_source_ids_snapshot()
+
+    # 模拟嵌入 worker spawn 前的 stamp(process_source 的真实做法)。
+    with si._active_sources_lock:
+        si._embedding_sources[sid] = si._embedding_sources.get(sid, 0) + 1
+    # 并入 H4/H5 的活跃集,但不进 _active_sources(与 process_source 租约/分块锁隔离)。
+    assert sid in repo._runtime._active_source_ids_snapshot(), "嵌入在途源没并进活跃集(H4/H5 会误报)"
+    assert sid not in si._active_sources, "嵌入 worker 不该动 _active_sources"
+
+    # 嵌入完成 → release → 移出快照。
+    si._release_embedding_source(sid)
+    assert sid not in si._embedding_sources
+    assert sid not in repo._runtime._active_source_ids_snapshot()
+
+
 def test_active_lease_released_on_exception_exit(repo, tmp_path, monkeypatch):
     """异常出口也释放:某阶段抛异常 → 外层 except 落 'failed' → finally 仍 pop 掉租约。
 

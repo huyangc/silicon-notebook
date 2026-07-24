@@ -208,6 +208,12 @@ class SourceIngestionService:
         # source_id → 活跃 invocation 数;P2 体检把 keys() 当 active 集做减法。
         self._active_sources: dict[str, int] = {}
         self._active_sources_lock = threading.Lock()
+        # source_id → 「后台嵌入进行中」的 worker 数(codex 第5轮 P2)。process_source 可能在其后台
+        # 嵌入 worker 写完向量**之前**就返回、撤掉自己那份活跃租约;体检 H4/H5 用活跃集排除在途源,
+        # 若不单独记这段「在嵌入」,in-flight 向量会被误报缺失+诱发重复 backfill。刻意与 _active_sources
+        # 分开(那是 process_source 生命周期 + 分块锁的引用计数,嵌入 worker 晚于它结束);两者的并集
+        # 由 _active_source_ids_snapshot 出给体检。同一 _active_sources_lock 守护(都是小 dict)。
+        self._embedding_sources: dict[str, int] = {}
         # 源级分块串行锁(per-source):同一源的并发 reparse 必须在「换 elements →
         # 建 chunks + 置 marker」这段串行,否则一次 invocation 可能读到 A 代 elements、
         # 另一次把它换成 B 代、第一次再把基于 A 代的 chunks 连同 marker 写回,留下
@@ -244,6 +250,16 @@ class SourceIngestionService:
                 self._active_sources.pop(source_id, None)
                 # 计数归零=无 invocation 持该源分块锁,顺手清锁(有界化)。见 __init__ 说明。
                 self._source_chunk_locks.pop(source_id, None)
+
+    def _release_embedding_source(self, source_id: str) -> None:
+        """「后台嵌入进行中」计数减一,归零即从 _embedding_sources 移除(codex 第5轮 P2)。与
+        _release_source_lease 分开:嵌入 worker 不碰 _active_sources / 分块锁,只标记「在嵌入」。"""
+        with self._active_sources_lock:
+            remaining = self._embedding_sources.get(source_id, 0) - 1
+            if remaining > 0:
+                self._embedding_sources[source_id] = remaining
+            else:
+                self._embedding_sources.pop(source_id, None)
 
     @contextmanager
     def hold_source_chunk_lock(self, source_id: str):
@@ -1071,13 +1087,31 @@ class SourceIngestionService:
                     self.event_log.logger.exception(
                         "background embed failed for %s", source_id
                     )
+                finally:
+                    # 嵌入 worker 完成才撤它这份「在嵌入」标记(见下面 spawn 前的 stamp)。
+                    self._release_embedding_source(source_id)
 
+            # 嵌入 worker 单独记「在嵌入」(codex 第5轮 P2):process_source 的活跃租约在它自己 finally
+            # 里就撤了,而**后台嵌入可能还没写完向量**——H4/H5 用活跃集(见 _active_source_ids_snapshot,
+            # 并入 _embedding_sources)排除在途源,不给这个 worker 单记一份的话,这段 in-flight 会被误报
+            # 缺 chunk/element 向量(假告警)+诱发重复的、可能昂贵的 backfill。刻意用**独立的**
+            # _embedding_sources 而非 _active_sources:后者是 process_source 生命周期 + 分块锁的引用计数,
+            # 嵌入 worker 会**晚于** process_source 结束,混进去会打乱那套租约/锁语义。stamp 必须在 start
+            # 之前(否则线程先跑到 embed、标记还没记上有窗口)。
+            with self._active_sources_lock:
+                self._embedding_sources[source_id] = (
+                    self._embedding_sources.get(source_id, 0) + 1
+                )
             embed_ctx = contextvars.copy_context()
             embed_thread = threading.Thread(
                 target=lambda: embed_ctx.run(_embed_bg),
                 name=f"embed-{source_id}", daemon=True
             )
-            embed_thread.start()
+            try:
+                embed_thread.start()
+            except BaseException:  # 起线程失败:_embed_bg 不会跑、其 finally 撤不了 → 这里补撤,免泄漏
+                self._release_embedding_source(source_id)
+                raise
 
             if hooks.should_extract_kg(notebook_id):
                 # Status already flipped to 'extracting' above.
