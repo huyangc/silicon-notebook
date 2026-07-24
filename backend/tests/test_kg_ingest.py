@@ -175,6 +175,27 @@ def test_extract_graph_counts_failed_windows():
     assert any(n.name == "Engram" for n in g.nodes)
 
 
+def test_extract_graph_counts_programming_errors_as_failed_windows():
+    """A client/adapter error is not a legitimate empty extraction result."""
+    from app.services.kg.windowing import windows_with_elements
+
+    text = "# Section A\n\nA technical fact.\n\n# Section B\n\nAnother fact.\n"
+    n_windows = len(windows_with_elements(text, "doc.md", None, 40, 5))
+    assert n_windows >= 1
+
+    class BrokenClient:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint):
+            raise TypeError("adapter rejected a supported keyword")
+
+    graph = kg_ingest.extract_graph(
+        BrokenClient(), text, "doc.md", "academic", n=40, m=5
+    )
+    assert graph.failed_windows == n_windows
+    assert graph.nodes == []
+
+
 def test_extract_graph_no_failures_zero_count():
     import json
     payload = json.dumps({
