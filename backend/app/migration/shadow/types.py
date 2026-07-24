@@ -31,6 +31,13 @@ class TableSpec:
 
 
 @dataclass(frozen=True)
+class ReplicationGuardSpec:
+    name: str
+    table: str
+    columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class SchemaPair:
     sqlite_version: int
     postgres_version: int

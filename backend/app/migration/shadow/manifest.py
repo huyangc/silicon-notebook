@@ -13,6 +13,7 @@ from typing import Any
 
 from app.migration.shadow.types import (
     Manifest,
+    ReplicationGuardSpec,
     ReplicationKeyKind,
     SchemaPair,
     SchemaValidationReport,
@@ -216,6 +217,32 @@ MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
 
 def _pipeline_names(value: str) -> tuple[str, ...]:
     return tuple(value.split("+"))
+
+
+def replication_guard_specs(manifest: Manifest) -> tuple[ReplicationGuardSpec, ...]:
+    """Return the reviewed physical definitions of all shadow-owned guards.
+
+    The physical community-members permutation avoids stealing an existing hot
+    access path.  Protocol key serialization continues to use the logical
+    ``TableSpec.replication_key`` order.
+    """
+    guards: list[ReplicationGuardSpec] = []
+    for spec in manifest.replicated:
+        if spec.key_kind is not ReplicationKeyKind.SHADOW_UNIQUE:
+            continue
+        columns = (
+            ("level", "canonical_id", "notebook_id")
+            if spec.name == "community_members"
+            else spec.replication_key
+        )
+        guards.append(
+            ReplicationGuardSpec(
+                name=f"shadow_uq_{spec.name}_replication_key",
+                table=spec.name,
+                columns=columns,
+            )
+        )
+    return tuple(guards)
 
 
 def validate_manifest(manifest: Manifest) -> None:

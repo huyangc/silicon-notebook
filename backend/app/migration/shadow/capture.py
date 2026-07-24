@@ -10,7 +10,7 @@ import re
 import sqlite3
 from collections.abc import Iterable
 
-from app.migration.shadow.manifest import validate_manifest
+from app.migration.shadow.manifest import replication_guard_specs, validate_manifest
 from app.migration.shadow.types import Manifest, ReplicationKeyKind, TableSpec
 
 
@@ -136,29 +136,11 @@ def _expected_triggers(manifest: Manifest) -> dict[str, tuple[str, str]]:
     return expected
 
 
-def _guard_name(spec: TableSpec) -> str:
-    return f"shadow_uq_{spec.name}_replication_key"
-
-
-def _guard_columns(spec: TableSpec) -> tuple[str, ...]:
-    """Return a physical index order without changing the key protocol order.
-
-    ``key_json``/hydration/hash use ``TableSpec.replication_key`` verbatim.  A
-    UNIQUE index may permute that tuple because uniqueness is order-insensitive.
-    community_members' logical order begins with ``notebook_id`` and otherwise
-    competes with its hot ``(notebook_id, canonical_id)`` lookup index; putting
-    level first keeps the observation-only guard out of that access path.
-    """
-    if spec.name == "community_members":
-        return ("level", "canonical_id", "notebook_id")
-    return spec.replication_key
-
-
-def _guard_sql(spec: TableSpec) -> str:
-    columns = ", ".join(_quote(column) for column in _guard_columns(spec))
+def _guard_sql(name: str, table: str, columns: tuple[str, ...]) -> str:
+    columns_sql = ", ".join(_quote(column) for column in columns)
     return (
-        f"CREATE UNIQUE INDEX {_quote(_guard_name(spec))} "
-        f"ON {_quote(spec.name)} ({columns})"
+        f"CREATE UNIQUE INDEX {_quote(name)} "
+        f"ON {_quote(table)} ({columns_sql})"
     )
 
 
@@ -243,12 +225,14 @@ def validate_sqlite_capture(conn: sqlite3.Connection, manifest: Manifest) -> Non
         if actual_table != table or _normalize_sql(actual_sql) != _normalize_sql(sql):
             raise ValueError(f"shadow capture trigger definition mismatch: {name}")
 
-    guard_specs = tuple(
-        spec
-        for spec in manifest.replicated
-        if spec.key_kind is ReplicationKeyKind.SHADOW_UNIQUE
-    )
-    expected_guards = {_guard_name(spec): (spec.name, _guard_sql(spec)) for spec in guard_specs}
+    guard_specs = replication_guard_specs(manifest)
+    expected_guards = {
+        guard.name: (
+            guard.table,
+            _guard_sql(guard.name, guard.table, guard.columns),
+        )
+        for guard in guard_specs
+    }
     all_shadow_guard_names = {
         str(row[0])
         for row in conn.execute(
@@ -316,14 +300,13 @@ def install_sqlite_capture(
             )
 
         _scan_replication_keys(conn, manifest)
-        for spec in manifest.replicated:
-            if spec.key_kind is ReplicationKeyKind.SHADOW_UNIQUE:
-                _create_if_absent(
-                    conn,
-                    object_type="index",
-                    name=_guard_name(spec),
-                    sql=_guard_sql(spec),
-                )
+        for guard in replication_guard_specs(manifest):
+            _create_if_absent(
+                conn,
+                object_type="index",
+                name=guard.name,
+                sql=_guard_sql(guard.name, guard.table, guard.columns),
+            )
         for name, (_table, sql) in _expected_triggers(manifest).items():
             _create_if_absent(
                 conn, object_type="trigger", name=name, sql=sql

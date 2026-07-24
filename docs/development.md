@@ -32,8 +32,20 @@ unique membership index; v30 adds the sources(notebook_id, file_hash) index
 backing content-hash upload dedup and batch_ingest resume. PostgreSQL's
 checksummed schema manifest targets migration v9. SQLite v31 adds only the
 inert, payload-free shadow_change_log and shadow_capture_control internal
-tables; run-scoped guard/capture/freeze DDL is installed separately and starts
-disabled, so PostgreSQL v9 remains the paired business schema.
+tables; run-scoped guard/capture/freeze DDL is installed separately. Guards
+enforce uniqueness immediately after installation, while capture/freeze
+behavior stays disabled until the run control state enables it. PostgreSQL v9
+remains the paired business schema. The temporary
+shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
+identity-bound confirmation, an owned/checksummed removable PostgreSQL control
+schema, revision CAS, and two independently committed reports for the four
+logical-key guards across the exact 60-table epoch-1 manifest. It does not yet
+include snapshot/COPY, a replicator, an operator CLI, or an end-to-end worker;
+`SHADOW_DATABASE_URL` therefore remains inert by itself. Safety-critical PG
+control mutations always take the migration lock, then the control lock, then
+validate the exact live control catalog. A live SQLite transition acquires the
+PG pool, both locks, and the run row before its short `BEGIN IMMEDIATE`, so it
+never waits for a PG pool or advisory lock while holding SQLite.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.

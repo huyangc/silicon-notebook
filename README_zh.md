@@ -126,7 +126,7 @@ bash scripts/check.sh
 
 应用不会双写。`SHADOW_DATABASE_URL` 只为未来迁移工具保留，不能选择 active backend，也不会同步数据。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。
 
-SQLite schema v31 目前只加入 run-scoped forward-shadow capture 所需的两张惰性、无 payload 内部表。capture/freeze trigger 与逻辑键 guard 默认不存在，由迁移工具以 disabled 状态原子安装；仅设置 `SHADOW_DATABASE_URL` 仍不会启用任何同步。配对的 PostgreSQL 业务 schema 为 v9。
+SQLite schema v31 目前只加入 run-scoped forward-shadow capture 所需的两张惰性、无 payload 内部表。capture/freeze trigger 与四个逻辑键 guard 默认不存在，只能由显式迁移控制原语安装；guard 一经安装就立即强制唯一性，capture/freeze 行为则在 run control 状态启用前保持禁用。仅设置 `SHADOW_DATABASE_URL` 仍不会启用任何同步。配对的 PostgreSQL 业务 schema 为 v9。临时 shadow 模块目前已有严格只读、以 UTF-8 为首项检查的 preflight，以及身份绑定的控制/guard 原语；控制转换固定先取得 PostgreSQL pool、migration/control 双锁、精确 catalog 校验和 run row，之后才允许短暂持有 SQLite `BEGIN IMMEDIATE`。但尚无 snapshot、COPY、replicator、运维 CLI 或端到端迁移 worker；不得把这些原语当成可用迁移命令，也不得因此修改 `DATABASE_URL`。
 
 - 在发行默认的 SQLite 后端上，搜索使用 SQLite FTS/向量存储；PostgreSQL 后端改用 `pg_trgm`/`ILIKE`。float32 向量仍存为 `bytea`，不安装也不需要 pgvector。
 - PostgreSQL 要求 `pg_trgm` 必须安装在 `public` schema。可用不回显凭据的查询检查：

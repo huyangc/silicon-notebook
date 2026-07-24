@@ -81,19 +81,30 @@ class UnifiedKgStore:
 
     @staticmethod
     def scratch_vector_rows(db: Any, notebook_id: str, run_id: str):
+        # Pass A inserts scratch rows from stream_seed_rows(), whose historical
+        # contract is knowledge_objects.ordinal order. PostgreSQL has no rowid
+        # on this scratch table, so recover that preserved order via the source
+        # object instead of inventing object-id lexical order. Float32 mean
+        # accumulation in Pass B is order-sensitive.
         return db.execute(
             "SELECT s.seed AS seed, e.vector AS vector "
             "FROM knowledge_embeddings e "
             "JOIN kg_cluster_scratch s ON s.object_id=e.object_id "
             "  AND s.notebook_id=e.notebook_id AND s.run_id=%s "
-            "WHERE e.notebook_id=%s", (run_id, notebook_id),
+            "JOIN knowledge_objects k ON k.id=s.object_id "
+            "  AND k.notebook_id=s.notebook_id "
+            "WHERE e.notebook_id=%s ORDER BY k.ordinal", (run_id, notebook_id),
         )
 
     @staticmethod
     def stream_scratch_rows(db: Any, notebook_id: str, run_id: str):
+        # Keep the same upstream insertion/ordinal contract as the vector reader.
         return db.execute(
-            "SELECT object_id, seed FROM kg_cluster_scratch "
-            "WHERE notebook_id=%s AND run_id=%s", (notebook_id, run_id),
+            "SELECT s.object_id,s.seed FROM kg_cluster_scratch s "
+            "JOIN knowledge_objects k ON k.id=s.object_id "
+            "  AND k.notebook_id=s.notebook_id "
+            "WHERE s.notebook_id=%s AND s.run_id=%s ORDER BY k.ordinal",
+            (notebook_id, run_id),
         )
 
     @staticmethod

@@ -57,7 +57,8 @@ user_profiles.upload_document_limit 列（每笔记本文档数量上限），v2
 cluster membership 并增加唯一索引，v30 增加 sources(notebook_id, file_hash) 去重查找索引
 （内容哈希上传去重 / batch_ingest 续跑，此前是全表扫），v31 增加 inert、无 payload 的
 shadow_change_log 与 shadow_capture_control 内部表；run-scoped guard/capture/freeze DDL
-由迁移工具另行安装且初始 disabled，配对 PostgreSQL 业务 schema 为 v9。SQLite store
+由迁移工具另行安装，guard 安装后立即强制唯一性，capture/freeze 行为在 run control
+状态启用前保持禁用；配对 PostgreSQL 业务 schema 为 v9。SQLite store
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
@@ -66,7 +67,7 @@ shadow_change_log 与 shadow_capture_control 内部表；run-scoped guard/captur
 
 - `backend/app/repositories/factory.py` 是唯一 backend choice；PostgreSQL bundle 组合与 SQLite 对等的领域 store，共享一个有界 `PostgresDatabase` pool。启动 lease 覆盖 checksummed migration、恢复、warmup 与 readiness 发布，失败或被替换的实例只关闭自己的 pool。
 - 跨进程访问由 PostgreSQL 自身的 MVCC、row/advisory lock 与 transaction isolation 处理，可消除 SQLite 的单 writer 文件锁争用；它不能消除业务层锁序错误或长事务，因此 pool acquire、statement、lock timeout 仍保持有界。
-- 切换只允许“停写 → 停服务 → 一致备份 → 修改唯一 `DATABASE_URL` → 启动并自动 migration → status/`/api/ready`/认证/数量/代表性读取验证 → 放流量”。只改 URL 不复制数据。`SHADOW_DATABASE_URL` 不启用 dual-write；切回 SQLite 也不会回放 PG-only 写入。
+- 切换只允许“停写 → 停服务 → 一致备份 → 修改唯一 `DATABASE_URL` → 启动并自动 migration → status/`/api/ready`/认证/数量/代表性读取验证 → 放流量”。只改 URL 不复制数据。`SHADOW_DATABASE_URL` 不启用 dual-write；切回 SQLite 也不会回放 PG-only 写入。临时 `migration/shadow` 边界目前仅实现 SQLite31/PostgreSQL9/epoch1（60 张 replicated 表、四个逻辑键 guard）的严格只读 UTF8-first preflight、脱敏身份绑定确认、可删除且 checksummed 的 PG control schema、revision CAS，以及两侧独立 guard 报告后才可确认 capture 的控制原语。PG control mutation 统一取 migration→control 双锁并复核精确 catalog；需要 SQLite live gate 时先取得 PG pool/双锁/run row，之后才短暂 `BEGIN IMMEDIATE`，避免跨库逆序等待。snapshot/COPY、replicator、CLI 与端到端 worker 尚未实现，因此当前仍不存在可执行的在线 shadow 迁移流程。
 - PostgreSQL 依赖 `public.pg_trgm`，向量为 float32 `bytea`，不依赖 pgvector。生产仍用 `--workers 1`，因为模型 scheduler、breaker 与 cancellation registry 是进程内状态。
 - `batch_ingest` 的 mutation phase 仅支持 SQLite；PostgreSQL 使用正常 application/API 摄取与 KG/index 流程。离线 `scripts/check.sh` 不连接 PostgreSQL；`scripts/check_postgres.sh` 和 CI 的独立 PostgreSQL 16 lane 验证 adapter、migration 与跨进程语义。
 

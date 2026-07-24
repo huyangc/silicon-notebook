@@ -693,6 +693,182 @@
       "target": "conn.execute"
     },
     {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._execute_guard_statement",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._lock_schema_and_control",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._postgres_schema_version",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._storage_evidence",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 10,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._validate_control_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._validate_live_sqlite_capture",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._validate_postgres_guard_set",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._verify_postgres_guard",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.commit_guard_report",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.committed_sqlite_guard_report",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.create_or_reuse_run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.enable_sqlite_capture_after_guard_reports",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.enable_sqlite_capture_after_guard_reports",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.get_run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.install_postgres_control_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 9,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.preflight",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.preflight",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.prepare_postgres_replication_key_guards",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.update_forward_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.update_forward_state",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/identity.py",
+      "reason": "temporary migration boundary binds redacted SQLite and PostgreSQL identities",
+      "scope": "<module>.fingerprint_postgres",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/identity.py",
+      "reason": "temporary migration boundary binds redacted SQLite and PostgreSQL identities",
+      "scope": "<module>.fingerprint_sqlite",
+      "target": "conn.execute"
+    },
+    {
       "count": 2,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/manifest.py",

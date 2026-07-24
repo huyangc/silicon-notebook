@@ -28,6 +28,12 @@ SQL_REASON_BY_PATH = {
     "backend/app/migration/shadow/capture.py": (
         "temporary migration boundary owns run-scoped SQLite capture DDL"
     ),
+    "backend/app/migration/shadow/control.py": (
+        "temporary migration boundary owns shadow preflight and control SQL"
+    ),
+    "backend/app/migration/shadow/identity.py": (
+        "temporary migration boundary binds redacted SQLite and PostgreSQL identities"
+    ),
     "backend/app/migration/shadow/manifest.py": (
         "temporary migration boundary validates source and target schema keys"
     ),

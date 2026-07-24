@@ -81,6 +81,10 @@ EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 # 副库不导入(临时登录会话, 用户重登即可; primary 的随整库复制保留)
 SKIP_SECONDARY_TABLES = [
     "auth_sessions",
+    # Forward-shadow capture state and event history belong to the primary
+    # deployment/run. Importing a secondary ledger would mix run identities.
+    "shadow_capture_control",
+    "shadow_change_log",
     # Deployment health and the scrubbed legacy table belong to the primary
     # deployment. Importing either from a secondary DB would mix runtimes.
     "model_service_status",
