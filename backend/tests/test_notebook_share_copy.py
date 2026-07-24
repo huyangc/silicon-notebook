@@ -44,6 +44,27 @@ def _rows(repo, table, nb):
         return db.execute(f"SELECT * FROM {table} WHERE notebook_id=?", (nb,)).fetchall()
 
 
+def test_copy_notebook_service_refuses_non_copyable_defense_in_depth(tmp_path, monkeypatch):
+    """OOM audit P2-7: the deep copy materialises every table into ONE in-memory
+    snapshot (300GB+ at 8M objects). The API route already 409s a non-copyable
+    notebook, but the service-layer copy_notebook must ALSO refuse it — a
+    non-router caller must never be able to trigger that OOM. Removing the guard
+    lets the copy proceed (no raise) and fails here."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "0")   # any node/chunk → not copyable
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ko-x", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
+    assert repo.notebook_copy_stats(nb)["copyable"] is False
+    with pytest.raises(ValueError, match="too large to deep-copy"):
+        repo.copy_notebook(nb, new_owner_id="user-local")
+
+
 def test_share_sets_token_idempotent_then_unshare_clears(repo):
     nb = _mk_nb(repo, "L")
     out = repo.share_notebook(nb)

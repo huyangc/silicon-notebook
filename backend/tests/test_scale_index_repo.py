@@ -167,6 +167,30 @@ def test_rebuild_releases_concept_reps_before_derivation_tail(repo, monkeypatch)
     assert tail.get("reps_alive") is False       # ...and released before build_viz
 
 
+def test_build_warns_on_large_embed_dim_without_runtime_truncation(tmp_path, monkeypatch):
+    """OOM audit P2-6: a large native EMBED_DIM with EMBED_RUNTIME_DIM unset
+    builds every matrix/ANN at full width (~4x memory). build() must warn (NOT
+    fail — a natively small-dim model needs no truncation) so the misconfig is
+    visible before the hours-long build. Removing the warn fails here."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "4096")            # EMBED_RUNTIME_DIM left unset (0)
+    r = SQLiteRepository(Settings())
+    bind_all_embedding_clients(r, FakeEmbedder(dim=4096))
+    nb = r.create_notebook(NotebookCreate(name="base"))
+    r.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+    ], [])
+    warned: list = []
+    monkeypatch.setattr(
+        r._runtime.scale_builder.event_log.logger, "warning",
+        lambda msg, *a, **k: warned.append(str(msg)),
+    )
+    r._runtime.scale_builder.build(nb.id)
+    assert any("EMBED_RUNTIME_DIM" in w for w in warned)
+
+
 def test_persist_ann_fails_loud_on_labels_without_vectors_or_matching_index(tmp_path):
     """_persist_ann must NOT write an EMPTY index next to N labels (row-count
     mismatch → silent recall collapse). With no vectors and no size-matching

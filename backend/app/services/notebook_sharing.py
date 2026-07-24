@@ -637,6 +637,17 @@ class NotebookSharingService:
         new_owner_id: str,
         new_name: "str | None" = None,
     ) -> NotebookSummary:
+        # Defense-in-depth: the deep copy materialises every table (objects /
+        # relations / chunks / all vector tables) into one in-memory snapshot —
+        # 300GB+ at 8M-object scale. The API route already refuses non-copyable
+        # notebooks (409), but any OTHER caller of this service method must not
+        # be able to trigger that OOM, so re-check the same copyable gate here
+        # before delegating to the deep copy (OOM audit P2-7).
+        if not self.notebook_copy_stats(source_notebook_id)["copyable"]:
+            raise ValueError(
+                f"notebook {source_notebook_id} is too large to deep-copy "
+                f"(exceeds notebook_copy_max_bytes/rows); share read-only instead"
+            )
         return self._copies.copy_notebook(
             source_notebook_id, new_owner_id=new_owner_id, new_name=new_name
         )
