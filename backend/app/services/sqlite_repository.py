@@ -194,6 +194,7 @@ class SQLiteRepository(RepositoryFacade):
             rt = self._runtime
             c = CheckupService(
                 database=rt.database,
+                queries=rt.queries,
                 count_missing_chunk_vectors=(
                     lambda nb, exclude: self.maintenance.count_missing_chunk_vectors(nb, exclude)
                 ),

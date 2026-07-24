@@ -37,9 +37,12 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.query_store import QueryStore
 from app.services.kg import scale_index as _scale_index_module
+
+# ⚠ 本 service 刻意**不 import** app.repositories.sqlite/postgres 的任何东西——它由**两个后端**的
+# facade 各自懒构造(SQLiteRepository / PostgresRepository 的 checkup 属性),H2/H3/H6 的 QueryStore
+# 从构造方注入(``queries`` seam,后端相关的实例),故 checkup 本身是后端中性的:同一套聚合逻辑
+# 在 sqlite 与 postgres 上都跑,只是注入的 database/queries/count seam 落到各自后端的实现。
 
 # 给前端展示够用即可,不返回全量避免大 payload(承计划「开放实现细节」:sample 上界 20)。
 _SAMPLE_CAP = 20
@@ -137,7 +140,11 @@ class CheckupService:
     collaborators 全部由 RepositoryRuntime 注入为窄 callable seam,便于单测直接构造
     (无需给 facade 打桩):
 
-    - ``database``:H2/H3/H6 的一个读快照(三条 QueryStore 静态查询共用同一 connection)。
+    - ``database``:H2/H3/H6 的一个读快照(三条 QueryStore 查询共用同一 connection)。后端相关
+      (sqlite/postgres 各自的 database),由构造方(facade)注入,本 service 只当它是「能 connect()
+      出读快照的东西」,不依赖具体后端。
+    - ``queries``:后端相关的 **QueryStore 实例**(H2/H3/H6 的 SQL 在它上面,sqlite 与 postgres
+      各有一份判据逐字一致的实现)。注入而非 import,故 checkup 后端中性、两后端都能跑。
     - ``count_missing_chunk_vectors`` / ``count_missing_element_vectors``:H4/H5,resolve 到
       maintenance 的直连 COUNT(判据与「实际可补数」逐字一致)。
     - ``scale_index_state``:H7,返回索引状态的 `state` 字符串('stale' 即过期/维度失配)——昂贵
@@ -154,7 +161,8 @@ class CheckupService:
     def __init__(
         self,
         *,
-        database: SqliteDatabase,
+        database: Any,
+        queries: Any,
         count_missing_chunk_vectors: Callable[[str, "set[str]"], int],
         count_missing_element_vectors: Callable[[str, "set[str]"], int],
         scale_index_state: Callable[[str], str],
@@ -166,6 +174,7 @@ class CheckupService:
         event_log: Any = None,
     ) -> None:
         self._database = database
+        self._queries = queries
         self._count_missing_chunk_vectors = count_missing_chunk_vectors
         self._count_missing_element_vectors = count_missing_element_vectors
         self._scale_index_state = scale_index_state
@@ -192,15 +201,16 @@ class CheckupService:
         # 活跃租约快照取一次,H2/H3 共用(active 集通常个位数,一次集合减法)。租约的读法
         # 由注入方在锁下取快照,这里拿到的已是不可变副本。
         active = set(self._active_source_ids() or ())
-        # H2/H3/H6 共用一个读快照:三条 QueryStore 静态查询都取 db 连接,合到一个
-        # connection 里一次性算完(一个读快照,少开两次连接)。
+        # H2/H3/H6 共用一个读快照:三条 QueryStore 查询都取 db 连接,合到一个 connection 里
+        # 一次性算完(一个读快照,少开两次连接)。QueryStore 由构造方注入(后端相关实例),
+        # 静态方法经实例调用会派发到对应后端的实现——故同一套聚合在 sqlite/postgres 都成立。
         with self._database.connect() as db:
-            h2_hits = QueryStore.sources_without_elements(db, notebook_id) - active
-            h3_hits = QueryStore.sources_missing_chunks(db, notebook_id) - active
+            h2_hits = self._queries.sources_without_elements(db, notebook_id) - active
+            h3_hits = self._queries.sources_missing_chunks(db, notebook_id) - active
             # ⚠ 用 visible_ 口径(排除 memory/knowhow 合成源),与 H2/H3 及看板「知识图谱」行
             # 对齐(评审:全集口径会把有 elements、却不走文档 KG 抽取的 knowhow 合成源算进
             # H6→与 KG 行「0 待分析」自相矛盾、healthy 恒 false 且点「分析新增」修不掉)。
-            h6_count = int(QueryStore.visible_pending_kg_source_count(db, notebook_id))
+            h6_count = int(self._queries.visible_pending_kg_source_count(db, notebook_id))
         checks = [
             CheckupItem("H2", len(h2_hits), _sample(h2_hits), "reparse"),
             CheckupItem("H3", len(h3_hits), _sample(h3_hits), "reparse"),

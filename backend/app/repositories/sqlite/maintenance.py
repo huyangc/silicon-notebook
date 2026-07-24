@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.repositories.ports import VectorBatchEncoder
 from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
+from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
 from app.services.vector_index import decode_vector
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
@@ -38,19 +39,9 @@ VECTOR_TABLES = (
 )
 _VECTOR_TABLE_IDS = dict(VECTOR_TABLES)
 
-# Every character Python's ``str.strip()`` removes (i.e. ``str.isspace()`` is
-# True) - pinned by tests/test_batch_ingest.py against the live Unicode
-# tables. The element-vector missing queries must use EXACTLY this set
-# as the TRIM charset: SourceEmbeddingService.embed_source skips elements whose
-# ``text.strip()`` is empty, so an element these queries call "missing" but the
-# embed path refuses to embed would be reported missing forever - the backfill
-# command would never converge. SQLite's bare TRIM(X) strips U+0020 only, a
-# strictly weaker filter that a tab/newline-only element slips right through.
-PY_WHITESPACE = (
-    "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0"
-    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-    "\u2028\u2029\u202f\u205f\u3000"
-)
+# PY_WHITESPACE(= Python str.strip() \u7684\u5168\u96c6)\u73b0\u79fb\u5230\u540e\u7aef\u4e2d\u6027\u7684
+# app.repositories.text_whitespace,\u4f9b sqlite/postgres maintenance \u5171\u7528\u540c\u4e00\u4efd TRIM charset
+# (\u89c1\u8be5\u6a21\u5757 docstring)\u3002\u8fd9\u91cc\u4ece\u9876\u90e8 import \u518d\u5bfc\u51fa,test_batch_ingest \u4ecd\u53ef\u4ece\u672c\u6a21\u5757\u53d6\u3002
 
 
 def _now() -> str:

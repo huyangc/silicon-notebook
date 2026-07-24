@@ -103,6 +103,7 @@ def _service(repo, notebook_id="nb-x", **overrides):
     逻辑而不碰真索引/真 maintenance。"""
     defaults = dict(
         database=repo._runtime.database,
+        queries=repo._runtime.queries,  # 真 QueryStore 实例(H2/H3/H6 走真 SQL)
         count_missing_chunk_vectors=lambda nb, exclude: 0,
         count_missing_element_vectors=lambda nb, exclude: 0,
         scale_index_state=lambda nb: "indexed",
