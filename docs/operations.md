@@ -192,9 +192,11 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 Name, directory, SHA-256 prefix, `quick_check`, schema version, and WAL/SHM absence are all
-revalidated, and the snapshot hash must match the recorded run — a checkpoint left by a different
-source fails closed rather than mixing data. Never use `--snapshot` for the final cutover merely
-because an older rehearsal succeeded: SQLite commits after that snapshot are absent.
+revalidated; the snapshot hash must match the recorded run; and the snapshot's recorded source
+origin must match the selected `--source` — reusing a snapshot sealed from a different database (or
+one missing its origin record) fails closed rather than importing the wrong data. Never use
+`--snapshot` for the final cutover merely because an older rehearsal succeeded: SQLite commits
+after that snapshot are absent.
 
 ### 2a. Tuning and prerequisites for a large database
 
