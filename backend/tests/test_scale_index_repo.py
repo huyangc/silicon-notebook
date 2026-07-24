@@ -124,6 +124,49 @@ def test_kg_matrix_is_released_before_persist(repo, monkeypatch):
     assert persist_state.get("alive") is False     # ...and released before persist
 
 
+def test_rebuild_releases_concept_reps_before_derivation_tail(repo, monkeypatch):
+    """OOM audit P0-2: concept mean-vectors `reps` (~18GB at 4.4M seeds) is dead
+    after clustering — rebuild must drop it BEFORE the derivation tail (canonical
+    relations / mention bridge / build_viz / communities), not hold it stacked on
+    those stages. Weakref a rep array; by build_viz (the tail) it must be gone.
+    Reverting the `del reps` fails here."""
+    import weakref
+    import gc as _gc
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    holder: dict = {}
+    real_reps = lifecycle._stream_seed_reps
+
+    def spy_reps(notebook_id, object_type, seed_fn, **kw):
+        reps, mc, sfn = real_reps(notebook_id, object_type, seed_fn, **kw)
+        if object_type == "concept" and reps:
+            holder["ref"] = weakref.ref(next(iter(reps.values())))
+        return reps, mc, sfn
+
+    monkeypatch.setattr(lifecycle, "_stream_seed_reps", spy_reps)
+
+    tail: dict = {}
+    real_viz = repo._runtime.scale_artifacts.build_viz
+
+    def spy_viz(notebook_id):
+        _gc.collect()
+        ref = holder.get("ref")
+        tail["reps_alive"] = ref is not None and ref() is not None
+        return real_viz(notebook_id)
+
+    monkeypatch.setattr(repo._runtime.scale_artifacts, "build_viz", spy_viz)
+
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+
+    assert holder.get("ref") is not None        # reps captured (concepts have embeddings)
+    assert tail.get("reps_alive") is False       # ...and released before build_viz
+
+
 def test_persist_ann_fails_loud_on_labels_without_vectors_or_matching_index(tmp_path):
     """_persist_ann must NOT write an EMPTY index next to N labels (row-count
     mismatch → silent recall collapse). With no vectors and no size-matching

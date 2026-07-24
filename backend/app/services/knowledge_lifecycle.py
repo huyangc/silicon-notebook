@@ -1890,6 +1890,13 @@ class KnowledgeLifecycleService:
                    f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
                    f"{len(sd.get('auto_candidates', []))} auto-cand "
                    f"({_time.perf_counter() - _t_cluster:.1f}s)")
+            # reps (concept mean-vectors, ~18GB at 4.4M seeds) is dead after
+            # clustering — its only consumers are the cluster_seeds calls above.
+            # Drop it BEFORE the derivation tail (canonical relations / mention
+            # bridge / build_viz / communities) so its ~18GB doesn't ride
+            # resident and stack on top of those stages (OOM audit P0-2). dict of
+            # numpy arrays → freed immediately by refcount, no gc needed.
+            del reps
             seed_to_canonical = sd["seed_to_canonical"]
             desc_by_cid: Dict[str, str] = {}
             desc_sig_by_cid: Dict[str, str] = {}
