@@ -182,7 +182,15 @@ def _atomic_activate_env(
 
     source = Path(source_path).resolve()
     if active_identity.scheme == "postgresql":
-        if active_identity != target_identity or shadow_identity is None:
+        # Idempotence requires the FULL normalized URL to match, not just the
+        # host/port/database that DatabaseIdentity compares: an active URL with a
+        # different password or search_path must fail closed rather than report
+        # "already active, unchanged" and let the backend start on the wrong
+        # credentials or schema.
+        if (
+            normalize_database_url(active_url) != normalized_target
+            or shadow_identity is None
+        ):
             raise SqliteToPostgresMigrationError(
                 "DATABASE_URL is already PostgreSQL but does not match this migration"
             )
