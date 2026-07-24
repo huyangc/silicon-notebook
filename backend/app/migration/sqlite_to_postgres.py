@@ -45,7 +45,21 @@ from app.services.vector_index import decode_vector, encode_vector
 
 MIGRATION_ADVISORY_LOCK_NAME = "silicon-notebook:sqlite-to-postgres-import"
 MIGRATION_LEDGER_TABLE = "silicon_schema_migrations"
-DEFAULT_BATCH_ROWS = 500
+# Importer-owned checkpoint tables. They are ad-hoc infrastructure (like the
+# schema-migration ledger), never business schema, so the copier can commit each
+# table independently and resume a stopped run instead of restarting the whole
+# multi-hour import from an all-or-nothing single transaction.
+MIGRATION_RUN_TABLE = "silicon_migration_progress"
+MIGRATION_TABLE_PROGRESS_TABLE = "silicon_migration_table_progress"
+_MIGRATION_INTERNAL_TABLES = frozenset(
+    {MIGRATION_LEDGER_TABLE, MIGRATION_RUN_TABLE, MIGRATION_TABLE_PROGRESS_TABLE}
+)
+DEFAULT_BATCH_ROWS = 1000
+# A CREATE INDEX on a fully loaded large table is the slowest finalize step; the
+# defaults let a big import use real maintenance memory and parallel workers
+# instead of the tiny per-connection defaults. ``None`` leaves the server value.
+_MEM_UNIT = re.compile(r"^[0-9]+(?:kB|MB|GB|TB)?$")
+_MAX_INDEX_WORKERS = 32
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SNAPSHOT_NAME = re.compile(
     r"^sqlite-v(?P<version>[0-9]+)-(?P<digest>[0-9a-f]{16})\.snapshot\.db$"
@@ -55,6 +69,36 @@ _DIGEST_MODULUS = 1 << 256
 
 class SqliteToPostgresMigrationError(RuntimeError):
     """A credential- and row-value-safe migration failure."""
+
+
+@dataclass(frozen=True)
+class MigrationTuning:
+    """Bounded, operator-supplied PostgreSQL bulk-load session settings.
+
+    All values are session-scoped and only lift throughput for a large offline
+    import; ``None`` keeps the server default. Values are validated here so an
+    operator string never reaches ``SET`` as an unchecked literal.
+    """
+
+    maintenance_work_mem: str | None = None
+    max_parallel_index_workers: int | None = None
+    synchronous_commit_off: bool = True
+
+    def __post_init__(self) -> None:
+        mem = self.maintenance_work_mem
+        if mem is not None and not _MEM_UNIT.fullmatch(mem):
+            raise SqliteToPostgresMigrationError(
+                "maintenance_work_mem must be a plain size such as 512MB or 2GB"
+            )
+        workers = self.max_parallel_index_workers
+        if workers is not None and (
+            isinstance(workers, bool)
+            or not isinstance(workers, int)
+            or not 0 <= workers <= _MAX_INDEX_WORKERS
+        ):
+            raise SqliteToPostgresMigrationError(
+                f"max_parallel_index_workers must be an integer in 0..{_MAX_INDEX_WORKERS}"
+            )
 
 
 @dataclass(frozen=True)
@@ -257,7 +301,9 @@ def _assert_target_empty(connection, tables: Iterable[str]) -> None:
             )
 
 
-def inspect_target(database: PostgresDatabase) -> TargetPreflight:
+def inspect_target(
+    database: PostgresDatabase, *, require_empty: bool = True
+) -> TargetPreflight:
     try:
         with database.connect() as connection:
             identity = connection.execute(
@@ -275,7 +321,7 @@ def inspect_target(database: PostgresDatabase) -> TargetPreflight:
                     "PostgreSQL target server_encoding must be UTF8"
                 )
             tables = _target_tables(connection)
-            allowed = set(POSTGRES_BUSINESS_TABLES) | {MIGRATION_LEDGER_TABLE}
+            allowed = set(POSTGRES_BUSINESS_TABLES) | _MIGRATION_INTERNAL_TABLES
             unknown = sorted(tables - allowed)
             if unknown:
                 raise SqliteToPostgresMigrationError(
@@ -283,7 +329,11 @@ def inspect_target(database: PostgresDatabase) -> TargetPreflight:
                     + ", ".join(unknown)
                 )
             business = tables & set(POSTGRES_BUSINESS_TABLES)
-            _assert_target_empty(connection, business)
+            # A resumable import re-inspects a partially loaded target, so the
+            # caller (never the standalone dry-run/preflight) opts out of the
+            # empty assertion; the copier validates the partial state instead.
+            if require_empty:
+                _assert_target_empty(connection, business)
         prepared_version = PostgresMigrator(database).current_version()
     except SqliteToPostgresMigrationError:
         raise
@@ -535,7 +585,7 @@ def _postgres_columns(connection) -> dict[str, tuple[_PostgresColumn, ...]]:
     result: dict[str, list[_PostgresColumn]] = {}
     for row in rows:
         table = str(row["table_name"])
-        if table == MIGRATION_LEDGER_TABLE:
+        if table in _MIGRATION_INTERNAL_TABLES:
             continue
         result.setdefault(table, []).append(
             _PostgresColumn(
@@ -754,7 +804,7 @@ def _validate_schema_pair(
             "upgraded SQLite table manifest mismatch "
             f"(missing={missing}, extra={extra})"
         )
-    target_tables = _target_tables(postgres_connection) - {MIGRATION_LEDGER_TABLE}
+    target_tables = _target_tables(postgres_connection) - _MIGRATION_INTERNAL_TABLES
     if target_tables != expected:
         missing = sorted(expected - target_tables)
         extra = sorted(target_tables - expected)
@@ -894,7 +944,7 @@ def _reseed_ordinal(connection, *, schema: str, table: str) -> None:
     )
 
 
-def _drop_rebuildable_indexes(connection) -> tuple[str, ...]:
+def _drop_rebuildable_indexes(connection) -> tuple[dict[str, str], ...]:
     rows = connection.execute(
         "SELECT ci.relname AS index_name,pg_get_indexdef(i.indexrelid) AS definition "
         "FROM pg_index i "
@@ -913,7 +963,12 @@ def _drop_rebuildable_indexes(connection) -> tuple[str, ...]:
                 sql.Identifier(schema, str(row["index_name"]))
             )
         )
-    return tuple(str(row["definition"]) for row in rows)
+    # The name is retained next to the definition so the finalize phase can skip
+    # an index that a resumed run already rebuilt without parsing the DDL string.
+    return tuple(
+        {"name": str(row["index_name"]), "definition": str(row["definition"])}
+        for row in rows
+    )
 
 
 def _lock_business_tables(connection, order: Sequence[str]) -> None:
@@ -924,15 +979,237 @@ def _lock_business_tables(connection, order: Sequence[str]) -> None:
     )
 
 
+_MIGRATION_RUN_DDL = f"""
+CREATE TABLE IF NOT EXISTS {MIGRATION_RUN_TABLE} (
+    run_id            text        PRIMARY KEY,
+    snapshot_sha256   text        NOT NULL,
+    target_schema     text        NOT NULL,
+    postgres_version  integer     NOT NULL,
+    index_definitions jsonb       NOT NULL,
+    finalized         boolean     NOT NULL DEFAULT false,
+    started_at        timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finalized_at      timestamptz
+)
+"""
+
+_MIGRATION_TABLE_PROGRESS_DDL = f"""
+CREATE TABLE IF NOT EXISTS {MIGRATION_TABLE_PROGRESS_TABLE} (
+    run_id         text        NOT NULL REFERENCES {MIGRATION_RUN_TABLE}(run_id),
+    table_name     text        NOT NULL,
+    rows           bigint      NOT NULL,
+    checksum       text        NOT NULL,
+    normalizations jsonb       NOT NULL,
+    copied_at      timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, table_name)
+)
+"""
+
+
+def _apply_session_tuning(connection, tuning: MigrationTuning) -> None:
+    """Set session-scoped bulk-load GUCs that outlive the per-table commits.
+
+    ``set_config(..., is_local=false)`` is session-scoped, so a value set once
+    on the held connection persists across every checkpoint commit. A multi-hour
+    remote import must also disable the statement and idle-in-transaction
+    timeouts a pooled borrower would otherwise inherit, or the server could abort
+    the copy while Python is checksumming a batch.
+    """
+    connection.execute("SELECT set_config('statement_timeout','0',false)")
+    connection.execute(
+        "SELECT set_config('idle_in_transaction_session_timeout','0',false)"
+    )
+    connection.execute("SELECT set_config('TimeZone','UTC',false)")
+    if tuning.synchronous_commit_off:
+        connection.execute("SELECT set_config('synchronous_commit','off',false)")
+    if tuning.maintenance_work_mem is not None:
+        connection.execute(
+            "SELECT set_config('maintenance_work_mem',%s,false)",
+            (tuning.maintenance_work_mem,),
+        )
+    if tuning.max_parallel_index_workers is not None:
+        connection.execute(
+            "SELECT set_config('max_parallel_maintenance_workers',%s,false)",
+            (str(tuning.max_parallel_index_workers),),
+        )
+
+
+def _acquire_import_lock(connection) -> None:
+    # Session-scoped (not xact) so mutual exclusion spans every checkpoint
+    # commit for the life of the held connection; try-lock fails closed instead
+    # of blocking a second operator forever behind the disabled timeouts.
+    acquired = connection.execute(
+        "SELECT pg_try_advisory_lock(%s) AS acquired", (_migration_lock_key(),)
+    ).fetchone()["acquired"]
+    if not bool(acquired):
+        raise SqliteToPostgresMigrationError(
+            "another SQLite-to-PostgreSQL import already holds the migration lock"
+        )
+
+
+def _release_import_lock(connection) -> None:
+    try:
+        connection.execute("SELECT pg_advisory_unlock(%s)", (_migration_lock_key(),))
+    except Exception:
+        # Closing the pool on the migrate() finally path is the authoritative
+        # release; a failed explicit unlock must not mask the real error.
+        pass
+
+
+def _ensure_progress_tables(connection) -> None:
+    connection.execute(_MIGRATION_RUN_DDL)
+    connection.execute(_MIGRATION_TABLE_PROGRESS_DDL)
+
+
+def _load_migration_run(
+    connection, *, snapshot_sha256: str, schema: str, postgres_version: int
+) -> Mapping[str, Any] | None:
+    rows = connection.execute(
+        sql.SQL("SELECT * FROM {} ORDER BY started_at").format(
+            sql.Identifier(MIGRATION_RUN_TABLE)
+        )
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        raise SqliteToPostgresMigrationError(
+            "PostgreSQL target records more than one migration run"
+        )
+    run = rows[0]
+    if str(run["snapshot_sha256"]) != snapshot_sha256:
+        raise SqliteToPostgresMigrationError(
+            "PostgreSQL target holds a migration run from a different SQLite "
+            "snapshot; use a fresh empty database, or drop the importer progress "
+            f"tables ({MIGRATION_RUN_TABLE}, {MIGRATION_TABLE_PROGRESS_TABLE}) and "
+            "the loaded rows to restart"
+        )
+    if (
+        str(run["target_schema"]) != schema
+        or int(run["postgres_version"]) != postgres_version
+    ):
+        raise SqliteToPostgresMigrationError(
+            "recorded migration run does not match the current target schema"
+        )
+    return run
+
+
+def _record_migration_run(
+    connection,
+    *,
+    run_id: str,
+    snapshot_sha256: str,
+    schema: str,
+    postgres_version: int,
+    index_definitions: Sequence[Mapping[str, str]],
+) -> None:
+    connection.execute(
+        sql.SQL(
+            "INSERT INTO {} "
+            "(run_id,snapshot_sha256,target_schema,postgres_version,index_definitions) "
+            "VALUES (%s,%s,%s,%s,%s)"
+        ).format(sql.Identifier(MIGRATION_RUN_TABLE)),
+        (
+            run_id,
+            snapshot_sha256,
+            schema,
+            postgres_version,
+            Jsonb([dict(entry) for entry in index_definitions]),
+        ),
+    )
+
+
+def _load_completed_tables(connection, run_id: str) -> dict[str, dict[str, Any]]:
+    rows = connection.execute(
+        sql.SQL(
+            "SELECT table_name,rows,checksum,normalizations FROM {} WHERE run_id=%s"
+        ).format(sql.Identifier(MIGRATION_TABLE_PROGRESS_TABLE)),
+        (run_id,),
+    ).fetchall()
+    return {
+        str(row["table_name"]): {
+            "rows": int(row["rows"]),
+            "checksum": str(row["checksum"]),
+            "normalizations": {
+                str(column): int(count)
+                for column, count in dict(row["normalizations"] or {}).items()
+            },
+        }
+        for row in rows
+    }
+
+
+def _record_completed_table(
+    connection,
+    *,
+    run_id: str,
+    table: str,
+    rows: int,
+    checksum: str,
+    normalizations: Mapping[str, int],
+) -> None:
+    connection.execute(
+        sql.SQL(
+            "INSERT INTO {} (run_id,table_name,rows,checksum,normalizations) "
+            "VALUES (%s,%s,%s,%s,%s)"
+        ).format(sql.Identifier(MIGRATION_TABLE_PROGRESS_TABLE)),
+        (run_id, table, int(rows), checksum, Jsonb(dict(normalizations))),
+    )
+
+
+def _mark_run_finalized(connection, run_id: str) -> None:
+    connection.execute(
+        sql.SQL(
+            "UPDATE {} SET finalized=true, finalized_at=CURRENT_TIMESTAMP WHERE run_id=%s"
+        ).format(sql.Identifier(MIGRATION_RUN_TABLE)),
+        (run_id,),
+    )
+
+
+def _rebuild_indexes(
+    connection,
+    *,
+    schema: str,
+    index_definitions: Sequence[Mapping[str, str]],
+    progress: Callable[[str], None],
+) -> None:
+    total = len(index_definitions)
+    for position, entry in enumerate(index_definitions, start=1):
+        name = str(entry["name"])
+        existing = connection.execute(
+            "SELECT to_regclass(quote_ident(%s) || '.' || quote_ident(%s)) AS relation",
+            (schema, name),
+        ).fetchone()["relation"]
+        if existing is not None:
+            progress(f"INDEX {position}/{total} {name} already present")
+            continue
+        progress(f"INDEX {position}/{total} rebuilding")
+        connection.execute(str(entry["definition"]), prepare=False)
+        # Commit each rebuilt index so a crash resumes at the next one instead
+        # of rebuilding every large index from the start.
+        connection.commit()
+
+
 def copy_snapshot_to_postgres(
     *,
     snapshot_path: Path,
     database: PostgresDatabase,
+    snapshot_sha256: str,
     batch_rows: int = DEFAULT_BATCH_ROWS,
     progress: Callable[[str], None],
+    tuning: MigrationTuning | None = None,
 ) -> tuple[tuple[TableMigrationStat, ...], tuple[DataNormalizationStat, ...]]:
+    """Copy one upgraded snapshot into PostgreSQL, resumable per business table.
+
+    The whole import is driven on one held write connection, but each table's
+    COPY, read-back checksum, and checkpoint row commit independently. A stopped
+    run (crash, dropped remote connection, machine reboot) resumes from the run
+    header keyed by ``snapshot_sha256``: already-checkpointed tables are skipped,
+    and finalize (ordinal reseed, index rebuild, ANALYZE) is idempotent. Full
+    atomicity is deliberately traded for restartability; the final activation
+    pass re-verifies every table's checksum before any cutover.
+    """
     if batch_rows <= 0:
         raise SqliteToPostgresMigrationError("batch_rows must be positive")
+    tuning = tuning or MigrationTuning()
     try:
         version = PostgresMigrator(database).migrate(
             target_version=POSTGRES_SCHEMA_MANIFEST.postgres_version,
@@ -947,6 +1224,9 @@ def copy_snapshot_to_postgres(
             "PostgreSQL schema migration stopped at an unexpected version"
         )
 
+    completed: dict[str, dict[str, Any]] = {}
+    audit_totals: dict[str, int] = {}
+    order: tuple[str, ...] = ()
     try:
         with _sqlite_read_only(snapshot_path) as source:
             source_version = int(source.execute("PRAGMA user_version").fetchone()[0])
@@ -955,35 +1235,62 @@ def copy_snapshot_to_postgres(
                     "COPY source must be upgraded to the paired SQLite schema"
                 )
             with database.write() as target:
-                target.execute("SELECT pg_advisory_xact_lock(%s)", (_migration_lock_key(),))
-                target.execute("SELECT set_config('statement_timeout','0',true)")
-                target.execute("SELECT set_config('TimeZone','UTC',true)")
-                columns, order = _validate_schema_pair(source, target)
-                _lock_business_tables(target, order)
-                _assert_target_empty(target, order)
-                index_definitions = _drop_rebuildable_indexes(target)
+                _apply_session_tuning(target, tuning)
+                _acquire_import_lock(target)
+                _ensure_progress_tables(target)
+                target.commit()
 
-                source_digests: dict[str, _CommutativeRowDigest] = {}
-                audit = _TransformAudit()
+                columns, order = _validate_schema_pair(source, target)
+                schema = str(
+                    target.execute("SELECT current_schema() AS name").fetchone()["name"]
+                )
+                run = _load_migration_run(
+                    target,
+                    snapshot_sha256=snapshot_sha256,
+                    schema=schema,
+                    postgres_version=POSTGRES_SCHEMA_MANIFEST.postgres_version,
+                )
+                if run is None:
+                    run_id = uuid.uuid4().hex
+                    _assert_target_empty(target, order)
+                    index_definitions: tuple[Mapping[str, str], ...] = (
+                        _drop_rebuildable_indexes(target)
+                    )
+                    _record_migration_run(
+                        target,
+                        run_id=run_id,
+                        snapshot_sha256=snapshot_sha256,
+                        schema=schema,
+                        postgres_version=POSTGRES_SCHEMA_MANIFEST.postgres_version,
+                        index_definitions=index_definitions,
+                    )
+                    target.commit()
+                    already_finalized = False
+                else:
+                    run_id = str(run["run_id"])
+                    index_definitions = tuple(run["index_definitions"])
+                    completed = _load_completed_tables(target, run_id)
+                    already_finalized = bool(run["finalized"])
+                    for record in completed.values():
+                        for column, count in record["normalizations"].items():
+                            audit_totals[column] = audit_totals.get(column, 0) + int(count)
+
                 for position, table in enumerate(order, start=1):
+                    if table in completed:
+                        progress(f"SKIP {position}/{len(order)} {table} (checkpointed)")
+                        continue
                     progress(f"COPY {position}/{len(order)} {table}")
-                    source_digests[table] = _copy_table(
+                    _lock_business_tables(target, (table,))
+                    _assert_target_empty(target, (table,))
+                    table_audit = _TransformAudit()
+                    source_digest = _copy_table(
                         sqlite_connection=source,
                         postgres_connection=target,
                         table=table,
                         columns=columns[table],
                         batch_rows=batch_rows,
-                        audit=audit,
+                        audit=table_audit,
                     )
-
-                schema = str(
-                    target.execute("SELECT current_schema() AS name").fetchone()["name"]
-                )
-                for table in POSTGRES_ROWID_ORDINAL_TABLES:
-                    _reseed_ordinal(target, schema=schema, table=table)
-
-                stats: list[TableMigrationStat] = []
-                for position, table in enumerate(order, start=1):
                     progress(f"VERIFY {position}/{len(order)} {table}")
                     actual = _target_digest(
                         target,
@@ -991,44 +1298,85 @@ def copy_snapshot_to_postgres(
                         columns=columns[table],
                         batch_rows=batch_rows,
                     )
-                    expected = source_digests[table]
                     if (
-                        actual.count != expected.count
-                        or actual.hexdigest() != expected.hexdigest()
+                        actual.count != source_digest.count
+                        or actual.hexdigest() != source_digest.hexdigest()
                     ):
                         raise SqliteToPostgresMigrationError(
                             f"row checksum mismatch for table {table}"
                         )
-                    stats.append(
-                        TableMigrationStat(
-                            table=table,
-                            rows=actual.count,
-                            checksum=actual.hexdigest(),
+                    _record_completed_table(
+                        target,
+                        run_id=run_id,
+                        table=table,
+                        rows=actual.count,
+                        checksum=actual.hexdigest(),
+                        normalizations=table_audit.nul_escapes,
+                    )
+                    target.commit()
+                    completed[table] = {
+                        "rows": actual.count,
+                        "checksum": actual.hexdigest(),
+                        "normalizations": dict(table_audit.nul_escapes),
+                    }
+                    for column, count in table_audit.nul_escapes.items():
+                        audit_totals[column] = audit_totals.get(column, 0) + int(count)
+
+                if not already_finalized:
+                    for ordinal_table in POSTGRES_ROWID_ORDINAL_TABLES:
+                        _reseed_ordinal(target, schema=schema, table=ordinal_table)
+                    target.commit()
+                    _rebuild_indexes(
+                        target,
+                        schema=schema,
+                        index_definitions=index_definitions,
+                        progress=progress,
+                    )
+                    progress(f"ANALYZE {len(order)} tables")
+                    target.execute(
+                        sql.SQL("ANALYZE {}").format(
+                            sql.SQL(",").join(sql.Identifier(table) for table in order)
                         )
                     )
-
-                for position, definition in enumerate(index_definitions, start=1):
-                    progress(
-                        f"INDEX {position}/{len(index_definitions)} rebuilding"
-                    )
-                    target.execute(definition, prepare=False)
-                progress(f"ANALYZE {len(order)} tables")
-                target.execute(
-                    sql.SQL("ANALYZE {}").format(
-                        sql.SQL(",").join(sql.Identifier(table) for table in order)
-                    )
-                )
+                    _mark_run_finalized(target, run_id)
+                    # Make the finalizing commit durable even when the bulk load
+                    # ran with synchronous_commit=off: flushing this commit's WAL
+                    # flushes every prior async table/index commit too (WAL is
+                    # ordered), so a completed — and fast-activatable — migration
+                    # is on disk before this returns, closing the window where a
+                    # server crash could otherwise drop the last async commits.
+                    target.execute("SET LOCAL synchronous_commit = on")
+                    target.commit()
+                _release_import_lock(target)
     except SqliteToPostgresMigrationError:
         raise
     except Exception as exc:
         raise SqliteToPostgresMigrationError(
             "PostgreSQL import transaction failed"
         ) from exc
+
+    missing = [table for table in order if table not in completed]
+    if missing:
+        # Unreachable on the normal/async-loss paths (WAL ordering makes a
+        # finalized run imply all earlier checkpoints are durable); fail closed
+        # through the credential-safe error type rather than a bare KeyError if a
+        # checkpoint row was tampered with or manually deleted.
+        raise SqliteToPostgresMigrationError(
+            "migration checkpoint is missing tables after finalize"
+        )
+    stats = tuple(
+        TableMigrationStat(
+            table=table,
+            rows=completed[table]["rows"],
+            checksum=completed[table]["checksum"],
+        )
+        for table in order
+    )
     normalizations = tuple(
         DataNormalizationStat(column=column, nul_codepoints_escaped=count)
-        for column, count in sorted(audit.nul_escapes.items())
+        for column, count in sorted(audit_totals.items())
     )
-    return tuple(stats), normalizations
+    return stats, normalizations
 
 
 def _write_receipt(path: Path, payload: Mapping[str, Any]) -> Path:
@@ -1138,12 +1486,17 @@ def verify_migration_receipt(
     root_dir: Path,
     batch_rows: int = DEFAULT_BATCH_ROWS,
     progress: Callable[[str], None] = print,
+    skip_target_reverify: bool = False,
 ) -> MigrationVerification:
     """Revalidate a completed import before atomically activating PostgreSQL.
 
-    This deliberately repeats the expensive source snapshot and target checksum
-    passes.  A receipt proves what was imported, not that the stopped SQLite
-    source and PostgreSQL target are still at that exact state at cutover time.
+    The source is always re-snapshotted and hash-compared: that is the cutover
+    anchor proving no write slipped into the stopped SQLite source since the
+    migration. ``skip_target_reverify`` (operator ``--fast-activation``) drops
+    only the *second* full-table PostgreSQL checksum read — the copier already
+    checksum-verified every table at COPY time and committed the proof to the
+    run checkpoint, and the target has not been written since — while still
+    revalidating the target schema version and table manifest.
     """
     if batch_rows <= 0:
         raise SqliteToPostgresMigrationError("batch_rows must be positive")
@@ -1198,7 +1551,13 @@ def verify_migration_receipt(
             "SQLite source changed after the migration snapshot; run a new final migration"
         )
 
-    progress("正在按 receipt 重新校验 PostgreSQL 全表 checksum…")
+    if skip_target_reverify:
+        progress(
+            "跳过 PostgreSQL 全表 checksum 重校验(--fast-activation);"
+            "仅复核 schema 版本与表清单…"
+        )
+    else:
+        progress("正在按 receipt 重新校验 PostgreSQL 全表 checksum…")
     database = _postgres_database(target_url, root_dir)
     try:
         if PostgresMigrator(database).current_version() != (
@@ -1221,23 +1580,24 @@ def verify_migration_receipt(
                 raise SqliteToPostgresMigrationError(
                     "PostgreSQL target table manifest changed after migration"
                 )
-            for position, expected in enumerate(expected_stats, start=1):
-                progress(
-                    f"ACTIVATION VERIFY {position}/{len(expected_stats)} {expected.table}"
-                )
-                actual = _target_digest(
-                    connection,
-                    table=expected.table,
-                    columns=columns[expected.table],
-                    batch_rows=batch_rows,
-                )
-                if (
-                    actual.count != expected.rows
-                    or actual.hexdigest() != expected.checksum
-                ):
-                    raise SqliteToPostgresMigrationError(
-                        f"PostgreSQL target no longer matches receipt table {expected.table}"
+            if not skip_target_reverify:
+                for position, expected in enumerate(expected_stats, start=1):
+                    progress(
+                        f"ACTIVATION VERIFY {position}/{len(expected_stats)} {expected.table}"
                     )
+                    actual = _target_digest(
+                        connection,
+                        table=expected.table,
+                        columns=columns[expected.table],
+                        batch_rows=batch_rows,
+                    )
+                    if (
+                        actual.count != expected.rows
+                        or actual.hexdigest() != expected.checksum
+                    ):
+                        raise SqliteToPostgresMigrationError(
+                            f"PostgreSQL target no longer matches receipt table {expected.table}"
+                        )
     except SqliteToPostgresMigrationError:
         raise
     except Exception as exc:
@@ -1266,13 +1626,11 @@ def migrate(
     batch_rows: int = DEFAULT_BATCH_ROWS,
     progress: Callable[[str], None] = print,
     existing_snapshot: Path | None = None,
+    tuning: MigrationTuning | None = None,
 ) -> MigrationResult:
     started_at = datetime.now(timezone.utc)
-    source, target = preflight(
-        source_path=source_path,
-        target_url=target_url,
-        root_dir=root_dir,
-    )
+    tuning = tuning or MigrationTuning()
+    source = inspect_source(source_path)
     if existing_snapshot is None:
         snapshot, snapshot_hash = create_consistent_snapshot(
             source_path=source_path,
@@ -1292,11 +1650,17 @@ def migrate(
     )
     database = _postgres_database(target_url, root_dir)
     try:
+        # A resumable import re-enters a partially loaded target, so emptiness is
+        # enforced by the copier's fresh-run branch (keyed to the sealed snapshot
+        # hash), not by a standalone empty assertion here.
+        target = inspect_target(database, require_empty=False)
         stats, normalizations = copy_snapshot_to_postgres(
             snapshot_path=upgraded,
             database=database,
+            snapshot_sha256=snapshot_hash,
             batch_rows=batch_rows,
             progress=progress,
+            tuning=tuning,
         )
     finally:
         database.close()
@@ -1328,6 +1692,11 @@ def migrate(
         "storage": {
             "copied": False,
             "note": "database rows only; keep SILICON_NOTEBOOK_STORAGE_DIR available",
+        },
+        "tuning": {
+            "maintenance_work_mem": tuning.maintenance_work_mem,
+            "max_parallel_index_workers": tuning.max_parallel_index_workers,
+            "synchronous_commit_off": tuning.synchronous_commit_off,
         },
     }
     _write_receipt(receipt, payload)

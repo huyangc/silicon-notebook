@@ -14,6 +14,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.migration.sqlite_to_postgres import (  # noqa: E402
     DEFAULT_BATCH_ROWS,
+    MigrationTuning,
     SqliteToPostgresMigrationError,
     migrate,
     preflight,
@@ -53,6 +54,38 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_BATCH_ROWS,
         help=f"bounded SQLite/COPY batch size (default: {DEFAULT_BATCH_ROWS})",
+    )
+    parser.add_argument(
+        "--maintenance-work-mem",
+        help=(
+            "session maintenance_work_mem for the index rebuild, e.g. 2GB; larger "
+            "values rebuild large-table indexes far faster (default: server value)"
+        ),
+    )
+    parser.add_argument(
+        "--max-parallel-index-workers",
+        type=int,
+        help=(
+            "session max_parallel_maintenance_workers for the index rebuild "
+            "(default: server value)"
+        ),
+    )
+    parser.add_argument(
+        "--keep-synchronous-commit",
+        action="store_true",
+        help=(
+            "keep synchronous_commit on during the import; by default it is turned "
+            "off for the offline bulk load (a crash simply resumes from checkpoint)"
+        ),
+    )
+    parser.add_argument(
+        "--fast-activation",
+        action="store_true",
+        help=(
+            "at cutover, skip the redundant second full-table PostgreSQL checksum "
+            "read (the copier already verified and checkpointed every table); the "
+            "SQLite source re-snapshot and schema/manifest checks still run"
+        ),
     )
     parser.add_argument(
         "--snapshot",
@@ -95,6 +128,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         target_url = target_url_from_environment(args.target_env)
+        tuning = MigrationTuning(
+            maintenance_work_mem=args.maintenance_work_mem,
+            max_parallel_index_workers=args.max_parallel_index_workers,
+            synchronous_commit_off=not args.keep_synchronous_commit,
+        )
         if args.activation_receipt is not None:
             if args.apply or args.snapshot is not None:
                 raise SqliteToPostgresMigrationError(
@@ -113,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
                 env_path=args.activate_env,
                 root_dir=REPO_ROOT,
                 batch_rows=args.batch_rows,
+                skip_target_reverify=args.fast_activation,
             )
             action = "already active" if not activation.changed else "activated"
             print(
@@ -152,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             root_dir=REPO_ROOT,
             batch_rows=args.batch_rows,
             existing_snapshot=args.snapshot,
+            tuning=tuning,
         )
         print(
             "MIGRATION OK: "
@@ -174,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             env_path=args.activate_env,
             root_dir=REPO_ROOT,
             batch_rows=args.batch_rows,
+            skip_target_reverify=args.fast_activation,
         )
         print(
             "ACTIVATION OK: PostgreSQL activated after final checksum verification; "

@@ -244,8 +244,15 @@ def activate_postgres_from_receipt(
     root_dir: Path,
     batch_rows: int = DEFAULT_BATCH_ROWS,
     progress: Callable[[str], None] = print,
+    skip_target_reverify: bool = False,
 ) -> DatabaseActivationResult:
-    """Verify both databases, then atomically switch a stopped local deployment."""
+    """Verify both databases, then atomically switch a stopped local deployment.
+
+    ``skip_target_reverify`` (operator ``--fast-activation``) forwards to
+    :func:`verify_migration_receipt`; it keeps the SQLite source re-snapshot
+    cutover anchor and the target schema/manifest checks, dropping only the
+    redundant second full-table PostgreSQL checksum read on a large target.
+    """
     verification = verify_migration_receipt(
         source_path=source_path,
         target_url=target_url,
@@ -254,6 +261,7 @@ def activate_postgres_from_receipt(
         root_dir=root_dir,
         batch_rows=batch_rows,
         progress=progress,
+        skip_target_reverify=skip_target_reverify,
     )
     backup, previous, active, before_hash, after_hash, changed = _atomic_activate_env(
         env_path=env_path,
