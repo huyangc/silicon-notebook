@@ -675,7 +675,7 @@ class SourceStore:
             if fw <= 0:
                 return None
             tw = int(m.group(2))
-            return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
+            return f"部分内容因网络问题未完成分析（{fw}/{tw} 段失败），建议重新上传或重试。"
 
         out: List[SourceSummary] = []
         for row in rows:
@@ -722,7 +722,7 @@ class SourceStore:
         if fw <= 0:
             return None
         tw = int(m.group(2))
-        return f"部分内容因网络问题未抽取（{fw}/{tw} 段失败），建议重新上传或重试抽取。"
+        return f"部分内容因网络问题未完成分析（{fw}/{tw} 段失败），建议重新上传或重试。"
 
     @staticmethod
     def meta_source_rows(

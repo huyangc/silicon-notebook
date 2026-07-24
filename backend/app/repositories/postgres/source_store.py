@@ -565,8 +565,8 @@ class SourceStore:
             if not match or int(match.group(1)) <= 0:
                 return None
             return (
-                f"部分内容因网络问题未抽取（{int(match.group(1))}/"
-                f"{int(match.group(2))} 段失败），建议重新上传或重试抽取。"
+                f"部分内容因网络问题未完成分析（{int(match.group(1))}/"
+                f"{int(match.group(2))} 段失败），建议重新上传或重试。"
             )
 
         output: list[SourceSummary] = []
@@ -610,8 +610,8 @@ class SourceStore:
         if not match or int(match.group(1)) <= 0:
             return None
         return (
-            f"部分内容因网络问题未抽取（{int(match.group(1))}/"
-            f"{int(match.group(2))} 段失败），建议重新上传或重试抽取。"
+            f"部分内容因网络问题未完成分析（{int(match.group(1))}/"
+            f"{int(match.group(2))} 段失败），建议重新上传或重试。"
         )
 
     @staticmethod
