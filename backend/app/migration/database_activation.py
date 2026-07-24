@@ -117,7 +117,11 @@ def _render_env(text: str, *, active_url: str, shadow_url: str) -> bytes:
             rendered.append(line)
             continue
         newline = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
-        rendered.append(replacements[key] + newline)
+        # Preserve the matched prefix (leading whitespace and an optional
+        # ``export``) so a sourced env file keeps exporting DATABASE_URL after
+        # cutover instead of demoting it to a plain, unexported shell variable
+        # that child processes would not inherit.
+        rendered.append(match.group("prefix") + replacements[key] + newline)
         replaced.add(key)
     if "SHADOW_DATABASE_URL" not in replaced:
         if rendered and not rendered[-1].endswith(("\n", "\r")):
@@ -139,10 +143,9 @@ def _write_exclusive(path: Path, data: bytes, *, mode: int) -> None:
 
 
 def _atomic_activate_env(
-    *, env_path: Path, source_path: Path, target_url: str
+    *, env_path: Path, source_path: Path, target_url: str, root_dir: Path
 ) -> tuple[str | None, str, str, str, str, bool]:
     resolved, original, text, values, metadata = _load_env(env_path)
-    deployment_root = resolved.parent
     active_url = values.get("DATABASE_URL")
     assert active_url is not None
     try:
@@ -166,14 +169,14 @@ def _atomic_activate_env(
             raise SqliteToPostgresMigrationError(
                 "DATABASE_URL is already PostgreSQL but does not match this migration"
             )
-        if _sqlite_path(shadow_identity, root_dir=deployment_root) != source:
+        if _sqlite_path(shadow_identity, root_dir=root_dir) != source:
             raise SqliteToPostgresMigrationError(
                 "SHADOW_DATABASE_URL does not preserve the migrated SQLite source"
             )
         digest = hashlib.sha256(original).hexdigest()
         return None, database_status(shadow_url), database_status(active_url), digest, digest, False
 
-    if _sqlite_path(active_identity, root_dir=deployment_root) != source:
+    if _sqlite_path(active_identity, root_dir=root_dir) != source:
         raise SqliteToPostgresMigrationError(
             "active DATABASE_URL does not point to the migrated SQLite source"
         )
@@ -267,6 +270,7 @@ def activate_postgres_from_receipt(
         env_path=env_path,
         source_path=source_path,
         target_url=target_url,
+        root_dir=root_dir,
     )
     return DatabaseActivationResult(
         env_path=str(Path(env_path).expanduser().resolve()),
