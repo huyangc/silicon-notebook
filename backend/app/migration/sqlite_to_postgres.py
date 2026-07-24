@@ -387,18 +387,41 @@ def _sha256_file(path: Path, *, chunk_bytes: int = 8 * 1024 * 1024) -> str:
 _SNAPSHOT_ORIGIN_SUFFIX = ".origin"
 
 
+def _read_snapshot_origins(sidecar: Path) -> set[str]:
+    """Return the recorded source paths, or an empty set if there are none/unreadable."""
+    if sidecar.is_symlink() or not sidecar.exists():
+        return set()
+    try:
+        if sidecar.stat().st_size > 64 * 1024:
+            return set()
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set()
+    recorded = payload.get("source_paths") if isinstance(payload, Mapping) else None
+    if not isinstance(recorded, list):
+        return set()
+    return {str(Path(item)) for item in recorded if isinstance(item, str) and item}
+
+
 def _write_snapshot_origin(snapshot: Path, source: Path) -> None:
-    """Record which SQLite source a sealed snapshot was created from.
+    """Record which SQLite source(s) a sealed snapshot was created from.
 
     Reuse via ``--snapshot`` otherwise validates only the snapshot itself, so an
     operator could point a fresh target at a valid importer-owned snapshot sealed
     from a *different* database; binding the resolved source path lets reuse fail
     closed on a mismatch instead of importing the wrong data under a receipt that
     names the selected source.
+
+    Snapshot names are content-addressed, so two byte-identical databases at
+    different paths seal to the same file. Origins are therefore a *set* that this
+    accumulates rather than overwrites, so binding one identical source does not
+    invalidate the receipt/reuse of another that produced the same snapshot.
     """
     sidecar = snapshot.with_name(snapshot.name + _SNAPSHOT_ORIGIN_SUFFIX)
+    sources = _read_snapshot_origins(sidecar)
+    sources.add(str(Path(source)))
     payload = (
-        json.dumps({"source_path": str(source)}, ensure_ascii=False).encode("utf-8")
+        json.dumps({"source_paths": sorted(sources)}, ensure_ascii=False).encode("utf-8")
         + b"\n"
     )
     temporary = sidecar.with_name(f".{sidecar.name}.{uuid.uuid4().hex}.tmp")
@@ -433,10 +456,15 @@ def _verify_snapshot_origin(snapshot: Path, expected_source: Path) -> None:
             "existing snapshot has no readable source origin; re-create it for this "
             "source"
         ) from exc
-    recorded = payload.get("source_path") if isinstance(payload, Mapping) else None
-    if not isinstance(recorded, str) or not recorded:
+    recorded = payload.get("source_paths") if isinstance(payload, Mapping) else None
+    sources = (
+        {str(Path(item)) for item in recorded if isinstance(item, str) and item}
+        if isinstance(recorded, list)
+        else set()
+    )
+    if not sources:
         raise SqliteToPostgresMigrationError("snapshot origin sidecar is malformed")
-    if Path(recorded) != Path(expected_source):
+    if str(Path(expected_source)) not in sources:
         raise SqliteToPostgresMigrationError(
             "existing snapshot was sealed from a different SQLite source"
         )
@@ -485,9 +513,10 @@ def create_consistent_snapshot(
             _fsync_directory(destination_dir)
         temporary.with_name(temporary.name + "-wal").unlink(missing_ok=True)
         temporary.with_name(temporary.name + "-shm").unlink(missing_ok=True)
-        # Bind the sealed snapshot to its source (also refreshes the record when a
-        # byte-identical snapshot from another path already existed) so a later
-        # --snapshot reuse can reject a mismatched --source.
+        # Bind the sealed snapshot to its source so a later --snapshot reuse can
+        # reject a mismatched --source. Origins accumulate: a byte-identical
+        # snapshot from another path adds its source without dropping the earlier
+        # binding.
         _write_snapshot_origin(final, source)
         return final, digest
     except SqliteToPostgresMigrationError:

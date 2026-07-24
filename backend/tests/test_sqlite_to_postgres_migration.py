@@ -112,6 +112,32 @@ def test_reused_snapshot_is_bound_to_its_source(tmp_path: Path):
         )
 
 
+def test_snapshot_origin_retains_all_identical_source_bindings(tmp_path: Path):
+    # Snapshot names are content-addressed, so a byte-identical database at
+    # another path seals to the same file. Binding the second source must not
+    # invalidate the first source's receipt/reuse (codex PR#355 round-1 P2).
+    import shutil
+
+    source_a = tmp_path / "a.db"
+    _source(source_a)
+    work = tmp_path / "work"
+    snapshot, _digest = create_consistent_snapshot(
+        source_path=source_a, work_dir=work, progress=lambda _message: None
+    )
+
+    source_b = tmp_path / "b.db"
+    shutil.copy(source_a, source_b)
+    # Simulate the collision-reuse path: create_consistent_snapshot would seal to
+    # the same content-addressed file and record the second source's origin.
+    migration_module._write_snapshot_origin(snapshot, source_b.resolve())
+
+    for source in (source_a, source_b):
+        reused, _ = validate_existing_snapshot(
+            snapshot_path=snapshot, work_dir=work, expected_source=source.resolve()
+        )
+        assert reused == snapshot
+
+
 def test_inspect_source_rejects_symlink(tmp_path: Path):
     source = tmp_path / "source.db"
     _source(source)
