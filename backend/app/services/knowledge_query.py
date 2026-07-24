@@ -311,7 +311,27 @@ class KnowledgeQueryService:
         support = retrieval.edge_support_map(notebook_id)
         if not support:
             return edges
-        clusters = retrieval.cluster_map(notebook_id)
+        # Bound the canonical-fold lookup to just THESE edges' endpoints
+        # (≤2·len(edges)) instead of loading the full cluster_map: at 8M
+        # concept_clusters that dict is ~1.2GB+ and this runs on every KG-view /
+        # kanban open only to fold ≤300 edges (OOM audit P1-5). cluster_fold_rows
+        # is the SAME bounded query the KG view already uses (works on SQLite and
+        # Postgres); ids not in a cluster fall back to the raw id — exactly what
+        # clusters.get(id, id) did over the full map. Batched under the SQLite
+        # IN-variable limit.
+        ids = sorted({
+            oid
+            for edge in edges
+            for oid in (edge["source_object_id"], edge["target_object_id"])
+        })
+        clusters: dict = {}
+        if ids:
+            with self.database.connect() as db:
+                for start in range(0, len(ids), 900):
+                    for row in self.unified_kg.cluster_fold_rows(
+                        db, notebook_id, ids[start:start + 900]
+                    ):
+                        clusters[row["member_object_id"]] = row["canonical_id"]
         result = []
         for edge in edges:
             key = (

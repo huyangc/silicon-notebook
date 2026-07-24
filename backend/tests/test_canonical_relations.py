@@ -179,3 +179,27 @@ def test_annotation_does_not_stick_to_unified_cache(repo):
     cached = repo._unified_cache.get((nb.id, "object"))
     assert cached is not None
     assert all("support_count" not in e for e in cached["edges"])
+
+
+def test_annotate_edge_support_folds_only_edge_endpoints(repo, monkeypatch):
+    """OOM audit P1-5: annotating edges must fold endpoints via the BOUNDED
+    cluster_fold_rows (≤2·#edges ids), never the full 8M-entry cluster_map (which
+    this ran on every KG-view / kanban open). Reverting to the full map (no
+    cluster_fold_rows call) fails here."""
+    nb = _mk_nb_with_relations(repo)   # populates canonical_relations → support non-empty
+    kq = repo._runtime.knowledge_query
+    fold_ids: list = []
+    real_fold = kq.unified_kg.cluster_fold_rows
+
+    def spy_fold(db, notebook_id, ids):
+        fold_ids.extend(ids)
+        return real_fold(db, notebook_id, ids)
+
+    monkeypatch.setattr(kq.unified_kg, "cluster_fold_rows", spy_fold)
+
+    edges = [{"source_object_id": "o-src", "edge_type": "supports",
+              "target_object_id": "o-tgt"}]
+    kq.annotate_edge_support(nb.id, edges)
+
+    # bounded fold over EXACTLY the edges' endpoints — not the whole cluster_map
+    assert set(fold_ids) == {"o-src", "o-tgt"}
