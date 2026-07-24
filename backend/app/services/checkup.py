@@ -120,6 +120,10 @@ def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None) -> int:
                 try:
                     probe = hnswlib.Index(space="cosine", dim=dim)
                     probe.load_index(ann_path, max_elements=len(labels))
+                    # 结构合法但**条目数 < labels**(如从早期/半截 build 拷来的 ann.bin)load 也成功,
+                    # 但检索会静默漏掉没进 ANN 的 labeled 节点(codex 第5轮 P2)→ 判损坏走重建。
+                    if probe.get_current_count() != len(labels):
+                        return 1
                 except Exception:  # noqa: BLE001 — load 失败=内容损坏 → 判 H8(不落外层保守 0)
                     return 1
         return 0

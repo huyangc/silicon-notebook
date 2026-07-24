@@ -979,6 +979,14 @@
         },
         "Body_upload_sources_api_notebooks__notebook_id__sources_post": {
           "properties": {
+            "doc_type_explicit": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Doc Type Explicit",
+              "type": "array"
+            },
             "doc_types": {
               "default": [],
               "items": {
@@ -1000,6 +1008,93 @@
             "files"
           ],
           "title": "Body_upload_sources_api_notebooks__notebook_id__sources_post",
+          "type": "object"
+        },
+        "CacheEvictRequest": {
+          "description": "按 tag（模型名）清理，或整库清空。\n\n两者必须显式二选一：不给默认的\"留空即全清\"，避免一次手滑把整个缓存清掉。",
+          "properties": {
+            "clear_all": {
+              "default": false,
+              "title": "Clear All",
+              "type": "boolean"
+            },
+            "tag": {
+              "default": "",
+              "title": "Tag",
+              "type": "string"
+            }
+          },
+          "title": "CacheEvictRequest",
+          "type": "object"
+        },
+        "CacheEvictResult": {
+          "properties": {
+            "evicted": {
+              "title": "Evicted",
+              "type": "integer"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          "required": [
+            "evicted",
+            "scope"
+          ],
+          "title": "CacheEvictResult",
+          "type": "object"
+        },
+        "CacheStats": {
+          "description": "内容寻址缓存的当前状况（admin 只读）。\n\n`by_tag` 的键是模型名——写入时以 model 作 tag，正是为了让\"换了模型服务\"这件事\n能按模型精确清理，而不是等 90 天 TTL 自己到期。",
+          "properties": {
+            "admin_supported": {
+              "title": "Admin Supported",
+              "type": "boolean"
+            },
+            "by_tag": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "default": {},
+              "title": "By Tag",
+              "type": "object"
+            },
+            "bytes": {
+              "default": 0,
+              "title": "Bytes",
+              "type": "integer"
+            },
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "entries": {
+              "default": 0,
+              "title": "Entries",
+              "type": "integer"
+            },
+            "hit_rate": {
+              "default": 0.0,
+              "title": "Hit Rate",
+              "type": "number"
+            },
+            "hits": {
+              "default": 0,
+              "title": "Hits",
+              "type": "integer"
+            },
+            "misses": {
+              "default": 0,
+              "title": "Misses",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "enabled",
+            "admin_supported"
+          ],
+          "title": "CacheStats",
           "type": "object"
         },
         "CheckupItem": {
@@ -6231,6 +6326,146 @@
           "title": "UploadLimitUpdate",
           "type": "object"
         },
+        "UploadedSourceSummary": {
+          "description": "One row of an upload response: a plain ``SourceSummary`` plus whether it\nis a brand-new source or an existing same-content one that was reused.\n\nPurely additive — every field the pre-dedup upload contract returned is\nstill here, so any client that ignores ``reused`` behaves exactly as\nbefore. Clients that count \"how many sources did this upload add\" MUST\nread it: same-notebook content dedup means an upload can return sources it\ndid not create, and counting those inflates the notebook's source total\nuntil the page is reloaded.",
+          "properties": {
+            "authors": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Authors",
+              "type": "array"
+            },
+            "created_label": {
+              "default": "",
+              "title": "Created Label",
+              "type": "string"
+            },
+            "doc_type": {
+              "default": "",
+              "title": "Doc Type",
+              "type": "string"
+            },
+            "element_count": {
+              "title": "Element Count",
+              "type": "integer"
+            },
+            "extraction_warning": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Extraction Warning"
+            },
+            "file_hash": {
+              "default": "",
+              "title": "File Hash",
+              "type": "string"
+            },
+            "file_name": {
+              "default": "",
+              "title": "File Name",
+              "type": "string"
+            },
+            "file_size": {
+              "default": 0,
+              "title": "File Size",
+              "type": "integer"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kg_extracted": {
+              "default": false,
+              "title": "Kg Extracted",
+              "type": "boolean"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "paper_meta_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Paper Meta Status"
+            },
+            "parse_status": {
+              "default": "",
+              "title": "Parse Status",
+              "type": "string"
+            },
+            "pub_year": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pub Year"
+            },
+            "reused": {
+              "default": false,
+              "title": "Reused",
+              "type": "boolean"
+            },
+            "source_url": {
+              "default": "",
+              "title": "Source Url",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "type": {
+              "title": "Type",
+              "type": "string"
+            },
+            "venue": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Venue"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "title",
+            "type",
+            "status",
+            "summary",
+            "element_count"
+          ],
+          "title": "UploadedSourceSummary",
+          "type": "object"
+        },
         "UserProfile": {
           "properties": {
             "display_name": {
@@ -6343,6 +6578,64 @@
             }
           },
           "summary": "Root"
+        }
+      },
+      "/api/admin/cache": {
+        "get": {
+          "description": "响应缓存现状：总量、命中率、按模型分布。仅 admin，纯读。\n\nby_tag 按模型名分组——决定「换了哪个模型服务、该清哪一份」时看的就是它。\n命中/未命中是**进程内**计数（重启归零）：缓存实例按路径记忆化，所以这是全进程\n的口径，而不是某一个 LLM client 自己的那一份。",
+          "operationId": "get_cache_stats_api_admin_cache_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CacheStats"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Get Cache Stats"
+        }
+      },
+      "/api/admin/cache/evict": {
+        "post": {
+          "description": "按模型名清理缓存，或整库清空。仅 admin。\n\n换模型服务（尤其是同名模型换了权重）后应当按 tag 清掉那一份：模型名没变，\n缓存键就没变，旧答案会一直被回放到 TTL 到期为止。\ntag 与 clear_all 必须显式二选一，避免一次手滑清空整库。",
+          "operationId": "evict_cache_api_admin_cache_evict_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheEvictRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/CacheEvictResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Evict Cache"
         }
       },
       "/api/admin/model-services/test-all": {
@@ -13481,7 +13774,7 @@
                 "application/json": {
                   "schema": {
                     "items": {
-                      "$ref": "#/components/schemas/SourceSummary"
+                      "$ref": "#/components/schemas/UploadedSourceSummary"
                     },
                     "title": "Response Upload Sources Api Notebooks  Notebook Id  Sources Post",
                     "type": "array"

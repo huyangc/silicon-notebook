@@ -309,16 +309,17 @@ class RepositoryRuntime:
         # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
 
     def _active_source_ids_snapshot(self) -> "set[str]":
-        """内存活跃租约的快照(H2/H3 的 Python 后置减法用)。**必须在锁下取**:并发
-        process_source 的 stamp/pop 会改 dict 大小,不加锁的 ``set(...)`` 迭代会触发
-        ``dict changed size during iteration``(承 source-completion-marker 设计)。
-        source_ingestion 未 wire 时(纯读的最小 runtime)天然返回空集。租约的私有字段
-        读取收拢在这个组合根方法里,CheckupService 只见到窄接口 ``Callable[[], set]``。"""
+        """内存活跃源快照(H2/H3/H4/H5 的 Python 后置减法用)= 活跃租约(process_source 在途)
+        **并上**后台嵌入进行中的源(codex 第5轮 P2:process_source 可能先返回、撤自己的租约,而
+        嵌入 worker 还在写向量——不并入 H4/H5 会把在途向量误报缺失+诱发重复 backfill)。**必须
+        在锁下取**:并发 stamp/pop 改 dict 大小,不加锁的 ``set(...)`` 迭代会触发 ``dict changed
+        size during iteration``。source_ingestion 未 wire 时(纯读最小 runtime)天然返回空集。两个
+        私有 dict 的读取收拢在这个组合根方法里,CheckupService 只见到窄接口 ``Callable[[], set]``。"""
         ingestion = self.source_ingestion
         if ingestion is None:
             return set()
         with ingestion._active_sources_lock:
-            return set(ingestion._active_sources)
+            return set(ingestion._active_sources) | set(ingestion._embedding_sources)
 
     @property
     def storage_dir(self) -> Path:
