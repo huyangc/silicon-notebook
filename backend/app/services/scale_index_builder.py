@@ -130,20 +130,26 @@ class ScaleIndexBuilder:
     ) -> dict:
         """Build the complete persisted scale index for one notebook."""
         self.get_notebook(notebook_id)
-        # OOM guard (audit P2-6): a large native EMBED_DIM with runtime
-        # truncation OFF builds every vector matrix / hnsw at full width — ~4x
-        # the truncated path's memory, the difference between fitting and OOM on
-        # a multi-million-vector base library. Warn loudly (NOT fatal — a
-        # natively small-dim model legitimately needs no truncation) so a
-        # misconfig surfaces BEFORE the hours-long build, not after it OOMs.
+        # OOM guard (audit P2-6): building every vector matrix / hnsw at full
+        # native width costs ~4x the truncated path's memory — the difference
+        # between fitting and OOM on a multi-million-vector base library. The
+        # EFFECTIVE build width is EMBED_RUNTIME_DIM only when it actually
+        # truncates (0 < runtime < EMBED_DIM); otherwise it is EMBED_DIM. So warn
+        # whenever that effective width is large — runtime unset (0) OR runtime
+        # >= EMBED_DIM (a no-op truncation, e.g. EMBED_RUNTIME_DIM == EMBED_DIM,
+        # which the validator permits — codex PR#353 r4) both build full width.
+        # Loud, NOT fatal: a natively small-dim model legitimately needs none.
         from app.services.vector_index import resolve_runtime_dim as _runtime_dim
-        if int(self.settings.embed_dim) >= 4096 and not _runtime_dim(self.settings):
+        _embed_dim = int(self.settings.embed_dim)
+        _runtime = _runtime_dim(self.settings)
+        _effective_dim = _runtime if 0 < _runtime < _embed_dim else _embed_dim
+        if _effective_dim >= 4096:
             self.event_log.logger.warning(
-                "scale-index build for %s: EMBED_DIM=%s with EMBED_RUNTIME_DIM "
-                "unset — vectors/ANN build at full native width (~4x memory). "
-                "Set EMBED_RUNTIME_DIM (e.g. 1024) if the similarity space is "
-                "meant to be truncated.",
-                notebook_id, self.settings.embed_dim,
+                "scale-index build for %s: vectors/ANN build at full width "
+                "%s (EMBED_DIM=%s, EMBED_RUNTIME_DIM=%s does not truncate) — "
+                "~4x memory. Set EMBED_RUNTIME_DIM below EMBED_DIM (e.g. 1024) if "
+                "the similarity space is meant to be truncated.",
+                notebook_id, _effective_dim, self.settings.embed_dim, _runtime,
             )
         build_started = time.perf_counter()
         timings: dict[str, int] = {}
