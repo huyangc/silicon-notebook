@@ -190,7 +190,7 @@ def _build_dim_warnings(tmp_path, monkeypatch, embed_dim, runtime_dim):
         lambda msg, *a, **k: warned.append(str(msg)),
     )
     r._runtime.scale_builder.build(nb.id)
-    return [w for w in warned if "full width" in w]
+    return [w for w in warned if "effective width" in w]
 
 
 def test_build_warns_when_effective_width_is_full_native(tmp_path, monkeypatch):

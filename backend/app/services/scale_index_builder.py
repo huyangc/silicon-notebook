@@ -145,11 +145,12 @@ class ScaleIndexBuilder:
         _effective_dim = _runtime if 0 < _runtime < _embed_dim else _embed_dim
         if _effective_dim >= 4096:
             self.event_log.logger.warning(
-                "scale-index build for %s: vectors/ANN build at full width "
-                "%s (EMBED_DIM=%s, EMBED_RUNTIME_DIM=%s does not truncate) — "
-                "~4x memory. Set EMBED_RUNTIME_DIM below EMBED_DIM (e.g. 1024) if "
-                "the similarity space is meant to be truncated.",
+                "scale-index build for %s: vectors/ANN build at effective width %s "
+                "(EMBED_DIM=%s, EMBED_RUNTIME_DIM=%s) — a large index, ~%sx the "
+                "memory of a 1024-dim one. Lower EMBED_RUNTIME_DIM below EMBED_DIM "
+                "(e.g. 1024) to shrink it if the similarity space allows.",
                 notebook_id, _effective_dim, self.settings.embed_dim, _runtime,
+                _effective_dim // 1024,
             )
         build_started = time.perf_counter()
         timings: dict[str, int] = {}
