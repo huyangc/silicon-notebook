@@ -48,12 +48,17 @@ class ScaleArtifactStore:
     # ─────────────────────────────────────────────────── manifest reads ──
     def read_manifest(self, directory) -> Optional[dict]:
         """Full manifest read: missing file → None; a corrupt manifest keeps
-        raising (frozen watermark/status semantics)."""
+        raising (frozen watermark/status semantics). **Valid-but-non-object JSON
+        (e.g. ``[]`` / ``"x"`` / ``123``)→ None**:codex 第4轮 P1——那是结构性损坏,
+        与「读不出」同款返 None,让 status() 的 ``manifest is None`` 分支把它归为
+        stale/corrupt;否则下游 ``manifest.get(...)`` 抛 AttributeError→/index-status 500、
+        H8 也漏报,恰好在损坏(最需重建)时够不着重建 CTA。"""
         path = os.path.join(str(directory), "manifest.json")
         if not os.path.exists(path):
             return None
         with open(path) as fh:
-            return json.load(fh)
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
 
     def read_manifest_version(self, directory):
         """廉价读 directory/manifest.json 的 version 字段(几 KB,sub-ms)。用于
@@ -63,9 +68,14 @@ class ScaleArtifactStore:
         mpath = os.path.join(str(directory), "manifest.json")
         try:
             with open(mpath) as fh:
-                return json.load(fh).get("version")
+                data = json.load(fh)
         except (OSError, ValueError):
             return None
+        # 非对象 JSON(如 [])也算无有效 version:isinstance 守卫,否则 [].get 抛
+        # AttributeError→H8 身份路径(scale_manifest_identity)被 checkup 当「探测不确定」
+        # 吞掉→漏报损坏、重建 CTA 够不着(codex 第4轮 P1)。fail-soft:返 None,让 H8
+        # 继续走磁盘探针(load_scale_index 已有 isinstance 守卫、能正确判 [] 为损坏)。
+        return data.get("version") if isinstance(data, dict) else None
 
     def scale_manifest_identity(self, notebook_id: str) -> "tuple[bool, object]":
         """H8 体检缓存键:磁盘 scale 索引的**产物身份** `(manifest 是否存在, manifest.version)`。
