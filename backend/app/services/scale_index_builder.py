@@ -663,6 +663,16 @@ class ScaleIndexBuilder:
 
     def build_viz(self, notebook_id: str) -> Optional[dict]:
         self.get_notebook(notebook_id)
+        # Capture the freshness stamps BEFORE deriving the graph. If a cluster
+        # write commits between here and the fetch below, the artifact is stamped
+        # with the PRE-derive version/cseq — so viz_index()/viz_probe() see it as
+        # stale and re-run, instead of mislabelling a pre-rebuild graph as current
+        # (codex PR#356 r2 P1a — the derive-then-stamp race). cluster_seq is the
+        # cluster_mutation_seq the rebuild bumps but version() (a version_facts memo
+        # key) doesn't expose, so viz freshness would otherwise miss a same-second
+        # cluster-only rewrite (codex PR#356 r1 P1).
+        ver = self.version(notebook_id)
+        cseq = int(self.projections.version_signal(notebook_id)[1])
         full = self._derive_object_graph_lite(notebook_id)
         if not full["nodes"]:
             return None
@@ -670,7 +680,8 @@ class ScaleIndexBuilder:
             viz_index_module.arrays_from_graph(full)
         )
         manifest = {
-            "version": self.version(notebook_id),
+            "version": ver,
+            "cluster_seq": cseq,
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
         }

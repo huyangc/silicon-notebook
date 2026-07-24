@@ -293,14 +293,26 @@ class ScaleArtifactRuntime:
     def viz_index(self, notebook_id: str):
         scale = self.load(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
+            # Scale-embedded viz: freshness rides on the scale index's own version
+            # (load() returns it only when version-fresh). Intentionally NOT
+            # cluster_seq-checked — the scale manifest carries no cluster_seq, and
+            # for the large notebooks that hold a scale index a cluster rebuild
+            # spans minutes so version_facts' MAX(created_at) advances and load()
+            # already sees it stale (the same-second blind spot cluster_seq closes
+            # is unreachable here — codex PR#356 r2 finding 2). The cluster_seq
+            # check below governs the STANDALONE viz artifact, which is what a
+            # notebook without a fresh scale index serves. cur_cseq is computed
+            # only past this early return, so a scale-embedded serve pays no extra
+            # version_signal read (finding 3).
             return scale
         cur = self.version(notebook_id)
+        cur_cseq = int(self.projections.version_signal(notebook_id)[1])
         cached = self.viz_cache.get(notebook_id)
-        if cached is not None and cached.manifest.get("version") == cur:
+        if cached is not None and self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
             return cached
         index = self.artifacts.load_viz(notebook_id)
         if index is not None:
-            if index.manifest.get("version") == cur:
+            if self._viz_manifest_fresh(index.manifest, cur, cur_cseq):
                 self.viz_cache[notebook_id] = index
                 return index
             self._spawn_viz_build(notebook_id)
@@ -312,11 +324,29 @@ class ScaleArtifactRuntime:
         self._spawn_viz_build(notebook_id)
         return None
 
+    @staticmethod
+    def _viz_manifest_fresh(manifest: dict, cur, cur_cseq: int) -> bool:
+        """A persisted STANDALONE-viz manifest is fresh iff its coarse version
+        matches AND its cluster_mutation_seq matches. cluster_seq guards a
+        same-second, same-count cluster-only rewrite that version() (a version_facts
+        memo with no cseq) cannot see, which would otherwise leave the standalone
+        viz served as current forever (codex PR#356 r1 P1). Scale-EMBEDDED viz does
+        not go through here — it inherits the scale index's version-only freshness
+        by design (see viz_index). Manifests written before cluster_seq existed
+        default to cur_cseq → version-only check, so a deploy never force-rebuilds
+        every existing viz (no thundering herd; a bounded accepted staleness for a
+        pre-cseq manifest whose version still matches after a same-second edit)."""
+        return (
+            manifest.get("version") == cur
+            and int(manifest.get("cluster_seq", cur_cseq)) == cur_cseq
+        )
+
     def viz_probe(self, notebook_id: str) -> dict:
         """Read persisted state only; this method never schedules a build."""
-        cur = self.version(notebook_id)
         scale = self.load(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
+            # Scale-embedded viz: version-fresh by construction (load() gates on
+            # version); cluster_seq is not consulted — see viz_index (finding 2).
             manifest = scale.manifest
             return {
                 "viz_indexed": True,
@@ -336,8 +366,12 @@ class ScaleArtifactRuntime:
                 "viz_edges": 0,
                 "viz_stale": False,
             }
+        # Standalone viz artifact: the cluster_seq check (and its version_signal
+        # read) is paid ONLY here, not on every scale-embedded status poll (finding 3).
+        cur = self.version(notebook_id)
+        cur_cseq = int(self.projections.version_signal(notebook_id)[1])
         manifest = index.manifest
-        fresh = manifest.get("version") == cur
+        fresh = self._viz_manifest_fresh(manifest, cur, cur_cseq)
         return {
             "viz_indexed": fresh,
             "viz_nodes": int(manifest.get("n_viz_nodes", 0)),
