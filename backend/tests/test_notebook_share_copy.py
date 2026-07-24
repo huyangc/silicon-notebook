@@ -65,6 +65,43 @@ def test_copy_notebook_service_refuses_non_copyable_defense_in_depth(tmp_path, m
         repo.copy_notebook(nb, new_owner_id="user-local")
 
 
+def test_within_copy_row_limit_counts_chunks_plus_nodes(tmp_path, monkeypatch):
+    """The atomic bound counts f.chunks + f.nodes (all chunks + all
+    knowledge_objects), matching copy_stats' row metric."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    assert store.within_copy_row_limit(nb) is True          # 0 rows <= 1
+    with repo._write() as db:
+        for i in (1, 2):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"ko-{i}", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
+    assert store.within_copy_row_limit(nb) is False         # 2 nodes > 1
+
+
+def test_copy_notebook_atomic_row_bound_refuses_grown_source(tmp_path, monkeypatch):
+    """OOM audit P2-7 (codex PR#353 round 2): even if the cached copy_stats
+    pre-check passes, the deep copy's FRESH within_copy_row_limit bound — checked
+    on the snapshot's own connection right before the fetchall — must refuse a
+    notebook that grew past the limit (the race the pre-check can't close).
+    Removing that bound lets the (grown) snapshot materialize (no raise)."""
+    _env(monkeypatch, tmp_path)
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    # early cached recheck PASSES (copyable), but the fresh atomic bound FAILS
+    monkeypatch.setattr(repo._runtime.sharing, "notebook_copy_stats",
+                        lambda n: {"copyable": True})
+    monkeypatch.setattr(repo._runtime.sharing_store, "within_copy_row_limit",
+                        lambda n: False)
+    with pytest.raises(ValueError, match="crossed the copy-size limit"):
+        repo.copy_notebook(nb, new_owner_id="user-local")
+
+
 def test_share_sets_token_idempotent_then_unshare_clears(repo):
     nb = _mk_nb(repo, "L")
     out = repo.share_notebook(nb)

@@ -130,6 +130,19 @@ class NotebookCopyService:
                 shutil.copytree(source_dir, destination_dir)
                 copied_files = True
 
+            # ATOMIC size guard (codex PR#353 round 2): a FRESH row-count bound on
+            # the SAME thread-local connection snapshot_copy_rows uses, checked
+            # immediately before the fetchall. The service/route pre-checks read
+            # the version-cached copy_stats on other connections, so a concurrent
+            # ingestion committing after them could still push a grown notebook
+            # into the snapshot and OOM. This check can't be interleaved by such a
+            # commit — it and the fetchall share the connection. (copytree above
+            # is disk, not memory; the except below rmtree's it on this raise.)
+            if not self._store.within_copy_row_limit(source_notebook_id):
+                raise NotebookTooLargeToCopyError(
+                    f"notebook {source_notebook_id} crossed the copy-size limit "
+                    f"before snapshot; share read-only instead"
+                )
             snapshot = self._store.snapshot_copy_rows(source_notebook_id)
 
             notebook_row = snapshot["notebooks"][0]
@@ -645,17 +658,14 @@ class NotebookSharingService:
         new_owner_id: str,
         new_name: "str | None" = None,
     ) -> NotebookSummary:
-        # Defense-in-depth: the deep copy materialises every table (objects /
-        # relations / chunks / all vector tables) into one in-memory snapshot —
-        # 300GB+ at 8M-object scale. The API route already refuses non-copyable
-        # notebooks (409); this recheck additionally covers non-route callers and
-        # a source that already grew large before this call. It NARROWS but does
-        # NOT fully close a concurrent-ingestion race: the snapshot materialises
-        # later in NotebookCopyService on a SEPARATE connection, so a commit
-        # landing between here and snapshot_copy_rows() can still cross the limit
-        # (codex PR#353 round 2). The complete fix is a bounded/streaming snapshot
-        # (the audit's deep-copy streaming item) — a larger change tracked
-        # separately; the copy stays router-gated meanwhile (OOM audit P2-7).
+        # Fast early reject (defense-in-depth): the deep copy materialises every
+        # table (objects / relations / chunks / all vector tables) into one
+        # in-memory snapshot — 300GB+ at 8M-object scale. This cached copy_stats
+        # check rejects an already-large source cheaply (before copytree) and
+        # covers non-route callers. It does NOT need to be race-free: the
+        # authoritative, race-proof bound is NotebookCopyService.copy_notebook's
+        # within_copy_row_limit(), checked FRESH on the snapshot's own connection
+        # immediately before the fetchall (OOM audit P2-7).
         if not self.notebook_copy_stats(source_notebook_id)["copyable"]:
             raise NotebookTooLargeToCopyError(
                 f"notebook {source_notebook_id} is too large to deep-copy "

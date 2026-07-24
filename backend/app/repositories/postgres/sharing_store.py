@@ -321,6 +321,20 @@ class SharingStore:
             ).fetchone()
         return row["notebook_id"] if row else None
 
+    def within_copy_row_limit(self, notebook_id: str) -> bool:
+        """FRESH copyable-row bound on the same connection as snapshot_copy_rows,
+        called immediately before it so the deep copy's size check is atomic with
+        its fetchall (see the SQLite store's docstring). Counts f.chunks +
+        f.nodes (all chunks + all knowledge_objects)."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=%s) + "
+                "(SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=%s) AS n",
+                (notebook_id, notebook_id),
+            ).fetchone()
+        total = int(row["n"] if hasattr(row, "keys") else row[0])
+        return total <= self.settings.notebook_copy_max_rows
+
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as connection:

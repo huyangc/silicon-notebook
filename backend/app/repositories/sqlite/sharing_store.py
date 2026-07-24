@@ -364,6 +364,24 @@ class SharingStore:
         return row["notebook_id"] if row else None
 
     # ------------------------------------------------------- copy primitives
+    def within_copy_row_limit(self, notebook_id: str) -> bool:
+        """FRESH (uncached) copyable-row bound, called on the SAME thread-local
+        connection snapshot_copy_rows uses, immediately before it — so the deep
+        copy's size check is ATOMIC with its fetchall. The version-cached
+        notebook_copy_stats governs the normal path, but a stale cache or a
+        commit landing after a separate-connection check could otherwise let a
+        notebook that grew to millions of rows through into the snapshot's
+        fetchall (OOM). Counts exactly f.chunks + f.nodes (all chunks + all
+        knowledge_objects, mirroring load_notebook_scale_facts) so it agrees with
+        copy_stats' row metric."""
+        with self.database.connect() as db:
+            total = int(db.execute(
+                "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=?) + "
+                "(SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?) AS n",
+                (notebook_id, notebook_id),
+            ).fetchone()["n"])
+        return total <= self.settings.notebook_copy_max_rows
+
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
         """Read every copyable table's rows for the source notebook (the exact
         SELECTs the former mixin issued, one read connection)."""

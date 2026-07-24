@@ -196,9 +196,10 @@ def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user))
     try:
         return sharing.copy_notebook(nb_id, new_owner_id=user.id)
     except NotebookTooLargeToCopyError:
-        # Concurrent ingestion can cross the copy-size threshold between the
-        # check above and copy_notebook's defense-in-depth recheck — keep the
-        # documented 409, don't let the guard turn it into a 500.
+        # If ingestion pushed the notebook past the limit after the pre-check
+        # above, copy_notebook's atomic within_copy_row_limit() bound (checked on
+        # the snapshot's own connection) refuses the copy — map that to the
+        # documented 409, not a 500.
         raise HTTPException(status_code=409, detail="notebook too large to copy")
 
 
