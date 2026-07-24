@@ -332,7 +332,14 @@ class SharingStore:
         notebook between the check and the materialisation. Over the copyable row
         limit → raise BEFORE any fetchall (never materialises the oversized rows,
         the 300GB+ OOM). f.chunks + f.nodes = all chunks + all knowledge_objects.
-        `SET TRANSACTION` is the first statement so it governs this transaction."""
+        `SET TRANSACTION` is the first statement so it governs this transaction.
+
+        The chunks+nodes gate does NOT bound the other materialised tables
+        (relations / embeddings / elements / knowhow); a source whose graph or
+        embedding fan-out dwarfs its chunk+node count passes it yet would
+        materialise gigabytes here. The second bound caps the SUM of every
+        snapshot table's rows — counted, not fetched, in the SAME REPEATABLE READ
+        snapshot — and raises before any fetchall (codex PR#353 r5 P2)."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -347,6 +354,18 @@ class SharingStore:
                     f"notebook {notebook_id} crossed the copy-size limit "
                     f"({total} rows > {self.settings.notebook_copy_max_rows}); "
                     f"share read-only instead"
+                )
+            materialised = 0
+            for _table, query in _COPY_SNAPSHOT_QUERIES:
+                crow = connection.execute(
+                    f"SELECT COUNT(*) AS n FROM ({query}) AS _c", (notebook_id,)
+                ).fetchone()
+                materialised += int(crow["n"] if hasattr(crow, "keys") else crow[0])
+            if materialised > self.settings.notebook_copy_max_snapshot_rows:
+                raise NotebookTooLargeToCopyError(
+                    f"notebook {notebook_id} crossed the copy-materialisation limit "
+                    f"({materialised} rows across all tables > "
+                    f"{self.settings.notebook_copy_max_snapshot_rows}); share read-only instead"
                 )
             for table, query in _COPY_SNAPSHOT_QUERIES:
                 snapshot[table] = [

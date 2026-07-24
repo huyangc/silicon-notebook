@@ -109,6 +109,39 @@ def test_copy_notebook_atomic_bound_refuses_grown_source(tmp_path, monkeypatch):
         repo.copy_notebook(nb, new_owner_id="user-local")
 
 
+def _seed_relations(repo, nb, n):
+    with repo._write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO knowledge_relations "
+                "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"rel-{i}", nb, None, "ko-a", "ko-b", "rel", "[]", _now()))
+
+
+def test_snapshot_copy_rows_bounds_every_table_not_just_chunks_nodes(tmp_path, monkeypatch):
+    """codex PR#353 r5 P2: the chunks+nodes gate does NOT bound relations /
+    embeddings / elements / knowhow, whose combined rows are what the copy holds
+    in memory. A notebook with few nodes but many relations passes the chunks+nodes
+    gate yet must be refused by the second, total-materialisation bound — so peak
+    copy memory is decoupled from a pathological graph/embedding fan-out. Removing
+    that second bound lets the (unbounded) snapshot materialise (no raise) and
+    fails here."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1000")         # chunks+nodes gate: generous
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS", "10")  # total-materialisation gate: tight
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    _seed_nodes(repo, nb, 2)                                     # 2 nodes ≤ 1000, few total rows
+    assert store.snapshot_copy_rows(nb)["notebooks"]            # under both bounds → snapshot returned
+    _seed_relations(repo, nb, 20)                               # relations aren't counted by chunks+nodes…
+    # chunks+nodes is still 2 ≤ 1000 (passes the FIRST gate), but total materialised
+    # rows now exceed 10 → the SECOND bound must refuse it before any fetchall.
+    with pytest.raises(ValueError, match="crossed the copy-materialisation limit"):
+        store.snapshot_copy_rows(nb)
+
+
 def test_share_sets_token_idempotent_then_unshare_clears(repo):
     nb = _mk_nb(repo, "L")
     out = repo.share_notebook(nb)

@@ -377,8 +377,17 @@ class SharingStore:
         row limit → raise BEFORE any fetchall, so the oversized rows are never
         materialised (the 300GB+ OOM this guards). f.chunks + f.nodes = all
         chunks + all knowledge_objects (mirrors load_notebook_scale_facts /
-        copy_stats). The enclosing ``with`` commits (read-only no-op) or, on the
-        raise, rolls back the read transaction."""
+        copy_stats).
+
+        The chunks+nodes gate above does NOT bound the other materialised tables
+        (relations / embeddings / elements / knowhow), whose combined row payload
+        is what the copy actually holds in memory. A source whose graph/embedding
+        fan-out dwarfs its chunk+node count (few nodes, millions of relations)
+        passes that gate yet would materialise gigabytes here. The second bound
+        caps the SUM of every snapshot table's rows — counted, not fetched, in the
+        SAME snapshot transaction — and raises before any fetchall, so peak copy
+        memory is decoupled from pathological fan-out (codex PR#353 r5 P2). The
+        enclosing ``with`` commits (read-only no-op) or, on a raise, rolls back."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as db:
             db.execute("BEGIN")
@@ -392,6 +401,16 @@ class SharingStore:
                     f"notebook {notebook_id} crossed the copy-size limit "
                     f"({total} rows > {self.settings.notebook_copy_max_rows}); "
                     f"share read-only instead"
+                )
+            materialised = sum(
+                int(db.execute(f"SELECT COUNT(*) FROM ({sql}) AS _c", (notebook_id,)).fetchone()[0])
+                for _table, sql in _COPY_SNAPSHOT_QUERIES
+            )
+            if materialised > self.settings.notebook_copy_max_snapshot_rows:
+                raise NotebookTooLargeToCopyError(
+                    f"notebook {notebook_id} crossed the copy-materialisation limit "
+                    f"({materialised} rows across all tables > "
+                    f"{self.settings.notebook_copy_max_snapshot_rows}); share read-only instead"
                 )
             for table, sql in _COPY_SNAPSHOT_QUERIES:
                 snapshot[table] = [
