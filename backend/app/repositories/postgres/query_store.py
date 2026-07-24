@@ -92,8 +92,10 @@ class QueryStore:
             return total
 
     def invalidate_knowledge_counts(self, notebook_id: str) -> None:
-        # PostgreSQL reads counts directly; it has no process-local count memo.
-        del notebook_id
+        # pending-source 计数现有 seq-gated 进程缓存(codex 第4轮 P2)——安全阀:写已落但其
+        # seq bump 尚未提交时清掉,与 sqlite invalidate 同款语义(非正确性必需,seq gate 自失效)。
+        from app.repositories.postgres import knowledge_counts_cache
+        knowledge_counts_cache.invalidate(notebook_id)
 
     # NotebookSummary projection primitives.  The caller deliberately retains
     # the connection so one summary is hydrated from one read snapshot.
@@ -180,32 +182,15 @@ class QueryStore:
 
     @staticmethod
     def pending_kg_source_count(db: Any, notebook_id: str) -> int:
-        return QueryStore._pending_source_count(db, notebook_id, visible=False)
+        # seq-gated 进程缓存(kg_mutation_seq),对齐 sqlite;查询判据见 cache 模块 _pending_query。
+        from app.repositories.postgres import knowledge_counts_cache
+        return knowledge_counts_cache.pending_source_count(db, notebook_id)
 
     @staticmethod
-    def visible_pending_kg_source_count(
-        db: Any, notebook_id: str
-    ) -> int:
-        return QueryStore._pending_source_count(db, notebook_id, visible=True)
-
-    @staticmethod
-    def _pending_source_count(db: Any, notebook_id: str, *, visible: bool) -> int:
-        visible_clause = (
-            "AND s.source_type NOT IN ('memory','knowhow') " if visible else ""
-        )
-        row = db.execute(
-            "SELECT COUNT(*) AS c FROM sources s WHERE s.notebook_id=%s "
-            + visible_clause
-            + "AND EXISTS(SELECT 1 FROM source_elements e WHERE e.source_id=s.id) "
-            "AND NOT EXISTS(SELECT 1 FROM knowledge_objects k "
-            "WHERE k.source_id=s.id AND k.source_id!='' AND COALESCE(("
-            "SELECT er.status FROM extraction_runs er "
-            "WHERE er.source_id=s.id AND er.run_type='kg' "
-            "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1"
-            "),'completed')='completed')",
-            (notebook_id,),
-        ).fetchone()
-        return int(row["c"])
+    def visible_pending_kg_source_count(db: Any, notebook_id: str) -> int:
+        # checkup H6:seq-gated 缓存,前端自动拉 checkup 时大库不再每次全扫(codex 第4轮 P2)。
+        from app.repositories.postgres import knowledge_counts_cache
+        return knowledge_counts_cache.visible_pending_source_count(db, notebook_id)
 
     @staticmethod
     def sources_missing_chunks(db: Any, notebook_id: str) -> set:

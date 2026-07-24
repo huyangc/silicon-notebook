@@ -42,6 +42,32 @@ def test_scale_index_status_fail_soft_on_corrupt_manifest(repo):
     assert repo.index_status(nb.id)["scale_index"]["state"] == "stale"
 
 
+def test_scale_index_status_fail_soft_on_non_object_manifest(repo):
+    """**合法但非对象**的 JSON manifest(如 ``[]``)也是结构性损坏(codex 第4轮 P1):read_manifest /
+    read_manifest_version 须返 None(而非把 list 传给下游 ``.get``→AttributeError→/index-status 500、
+    H8 身份路径被 checkup 当「探测不确定」漏报、重建 CTA 够不着)。
+
+    **变异锚点**:去掉 read_manifest 的 ``isinstance(data, dict)`` 守卫(直接 return data)→ status()
+    的 ``manifest.get`` 对 list 抛 AttributeError → scale_index_status raise、本用例红。"""
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    store = repo._runtime.scale_artifact_store
+    scale_dir = store.scale_dir(nb.id)
+    os.makedirs(str(scale_dir), exist_ok=True)
+    with open(os.path.join(str(scale_dir), "manifest.json"), "w") as fh:
+        fh.write("[]")  # 合法 JSON、但不是对象 → 结构性损坏
+
+    # store 层:非对象 → None(与「读不出」同款),不抛。
+    assert store.read_manifest(scale_dir) is None
+    assert store.read_manifest_version(scale_dir) is None
+    # H8 身份路径不抛(存在=True、version=None):否则 checkup 把 AttributeError 当探测不确定→漏报。
+    assert store.scale_manifest_identity(nb.id) == (True, None)
+
+    # status() fail-soft:stale/corrupt、不 raise、重建 CTA 可达。
+    st = repo.scale_index_status(nb.id)
+    assert st["state"] == "stale" and st.get("stale_reason") == "corrupt"
+    assert st["exists"] is True and st["stale"] is True
+
+
 def test_index_status_aggregates_three_systems(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="n"))
     # 纯读、不得触发 viz build
