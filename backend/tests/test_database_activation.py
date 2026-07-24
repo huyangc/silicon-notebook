@@ -291,6 +291,47 @@ def test_reactivation_with_a_different_active_url_fails_closed(
     assert env_path.read_text(encoding="utf-8") == original
 
 
+def test_activation_fails_closed_when_it_cannot_preserve_env_owner(
+    tmp_path: Path, monkeypatch
+):
+    # An operator whose uid differs from the env file owner (e.g. a root-managed
+    # deployment env, backend as a non-root service account) must not hand the
+    # 0600 credential file to the wrong owner; if the uid cannot be restored,
+    # fail closed instead of locking the service account out after cutover.
+    source = tmp_path / "silicon_notebook.db"
+    source.touch()
+    env_path = tmp_path / ".env"
+    original = "DATABASE_URL=sqlite:///silicon_notebook.db\n"
+    env_path.write_text(original, encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(
+        database_activation,
+        "verify_migration_receipt",
+        lambda **_kwargs: _verification(source),
+    )
+    real_uid = os.stat(env_path).st_uid
+    monkeypatch.setattr(os, "geteuid", lambda: real_uid + 1)
+
+    def _denied(*_args, **_kwargs):
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "chown", _denied)
+
+    with pytest.raises(
+        SqliteToPostgresMigrationError, match="preserve the env file owner"
+    ):
+        activate_postgres_from_receipt(
+            source_path=source,
+            target_url="postgresql://127.0.0.1:5432/notebook",
+            receipt_path=tmp_path / "receipt.json",
+            work_dir=tmp_path / "work",
+            env_path=env_path,
+            root_dir=tmp_path,
+        )
+    assert env_path.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob(".env.pre-postgres-*.bak"))
+
+
 def test_activation_restricts_credential_env_to_owner_only(
     tmp_path: Path, monkeypatch
 ):

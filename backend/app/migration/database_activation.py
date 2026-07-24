@@ -231,6 +231,22 @@ def _atomic_activate_env(
     try:
         _write_exclusive(backup, original, mode=mode)
         _write_exclusive(temporary, replacement, mode=mode)
+        # os.replace hands the operator-created temp file's ownership to the active
+        # env file. When activation runs as a different user than the env file
+        # owner (e.g. a root-managed deployment env whose backend runs as a
+        # non-root service account), the 0600 credential file would then be owned
+        # by the operator and unreadable by the service account. Restore the
+        # original owner so the service can read it after cutover; fail closed if
+        # we lack the privilege rather than silently locking the service out.
+        if metadata.st_uid != os.geteuid():
+            try:
+                os.chown(temporary, metadata.st_uid, metadata.st_gid)
+                os.chown(backup, metadata.st_uid, metadata.st_gid)
+            except OSError as exc:
+                raise SqliteToPostgresMigrationError(
+                    "activation cannot preserve the env file owner; run activation "
+                    "as the env file owner or as root"
+                ) from exc
         current_metadata = resolved.lstat()
         if (
             not stat.S_ISREG(current_metadata.st_mode)

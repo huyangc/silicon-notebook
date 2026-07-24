@@ -181,6 +181,13 @@ python scripts/migrate_sqlite_to_postgres.py \
   行（`COPY i/N`、`VERIFY i/N`、`INDEX i/N`）能看出时间花在哪，续跑对复用的表会打
   `SKIP i/N ...（checkpointed）`。
 - **`--batch-rows`** 界定 SQLite 取数 / COPY 的批大小（默认 1000）；窄表可调大，超宽行压内存则调小。
+- **`--source-timezone`** 指定把旧的 *naive* SQLite 时间戳按哪个时区解读再转 UTC。默认取导入
+  主机的本地时区——只有当导入运行在与 SQLite 部署同时区的主机上才正确。若把导入跑在不同时区
+  的 PostgreSQL 主机上,必须显式给出 SQLite 主机的 IANA 时区(如 `--source-timezone
+  Asia/Shanghai`),否则每个 naive 时间都会平移一个偏移量。所用时区会记入 receipt。
+- **正式激活要以部署 env 文件的属主(或 root)身份运行。** 激活把凭据 `.env` 写成 `0600`;当它以
+  与后端服务账号**不同**的用户运行时,会把文件属主恢复为原属主以保证服务仍能读取,若没有权限则
+  fail-closed,而不是切换后把服务锁在门外。
 
 ### 3. 正式从 SQLite 切到 PostgreSQL
 

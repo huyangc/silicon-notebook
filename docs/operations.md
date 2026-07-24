@@ -218,6 +218,16 @@ For a large source, throughput and reliability are dominated by a few levers:
   `SKIP i/N ... (checkpointed)` for tables it reuses.
 - **`--batch-rows`** bounds the SQLite fetch / COPY batch (default 1000); raise it for narrow
   tables, lower it if very wide rows pressure memory.
+- **`--source-timezone`** sets the timezone in which legacy *naive* SQLite timestamps are
+  interpreted before conversion to UTC. It defaults to the importer host's local zone, which is
+  correct only when the importer runs on a host in the same timezone as the SQLite deployment.
+  If you run the importer on a PostgreSQL host in a different timezone, set the SQLite host's
+  IANA zone explicitly (e.g. `--source-timezone Asia/Shanghai`) or every naive instant shifts by
+  the offset. The zone used is recorded in the receipt.
+- **Run the final activation as the deployment env file's owner** (or as root). Activation writes
+  the credential `.env` `0600`; when it runs as a *different* user than the backend service
+  account, it restores the original owner so the service can still read the file, and fails
+  closed if it lacks the privilege to do so rather than locking the service out after cutover.
 
 ### 3. Perform the final SQLite→PostgreSQL cutover
 

@@ -147,6 +147,29 @@ def test_naive_timestamps_are_interpreted_as_local_wall_time():
         time.tzset()
 
 
+def test_explicit_source_timezone_interprets_naive_timestamps():
+    # An operator running the importer on a different-timezone host than the
+    # SQLite source passes --source-timezone; naive timestamps are then read in
+    # that explicit zone, deterministically, regardless of the importer host.
+    from zoneinfo import ZoneInfo
+
+    time_column = _PostgresColumn(
+        "finished_at", "timestamp with time zone", "timestamptz", True, False
+    )
+    assert _transform_sqlite_value(
+        table="kg_build_jobs",
+        column=time_column,
+        value="2026-07-23 10:11:12",
+        source_timezone=ZoneInfo("Asia/Shanghai"),
+    ) == datetime(2026, 7, 23, 2, 11, 12, tzinfo=timezone.utc)
+    assert _transform_sqlite_value(
+        table="kg_build_jobs",
+        column=time_column,
+        value="2026-07-23 10:11:12",
+        source_timezone=ZoneInfo("UTC"),
+    ) == datetime(2026, 7, 23, 10, 11, 12, tzinfo=timezone.utc)
+
+
 def test_failed_snapshot_upgrade_deletes_the_working_copy(
     tmp_path: Path, monkeypatch
 ):
