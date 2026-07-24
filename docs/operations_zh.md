@@ -160,8 +160,9 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 工具会重新验证目录、文件名、SHA-256 前缀、`quick_check`、schema 版本以及不存在 WAL/SHM；
-快照 hash 必须与已记录的 run 一致——另一个源留下的 checkpoint 会 fail closed 而不会把两份数据
-混在一起。不要因为旧演练成功就拿其 `--snapshot` 做正式切换：快照之后的 SQLite commit 不在里面。
+快照 hash 必须与已记录的 run 一致;快照记录的**源身份**也必须与所选 `--source` 一致——复用一个
+从**别的库**封出的快照(或缺少源身份记录的快照)会 fail closed,而不会把错的数据导进去。不要
+因为旧演练成功就拿其 `--snapshot` 做正式切换:快照之后的 SQLite commit 不在里面。
 
 ### 2a. 大库的调优与前置条件
 

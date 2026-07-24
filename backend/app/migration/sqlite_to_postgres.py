@@ -384,6 +384,64 @@ def _sha256_file(path: Path, *, chunk_bytes: int = 8 * 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+_SNAPSHOT_ORIGIN_SUFFIX = ".origin"
+
+
+def _write_snapshot_origin(snapshot: Path, source: Path) -> None:
+    """Record which SQLite source a sealed snapshot was created from.
+
+    Reuse via ``--snapshot`` otherwise validates only the snapshot itself, so an
+    operator could point a fresh target at a valid importer-owned snapshot sealed
+    from a *different* database; binding the resolved source path lets reuse fail
+    closed on a mismatch instead of importing the wrong data under a receipt that
+    names the selected source.
+    """
+    sidecar = snapshot.with_name(snapshot.name + _SNAPSHOT_ORIGIN_SUFFIX)
+    payload = (
+        json.dumps({"source_path": str(source)}, ensure_ascii=False).encode("utf-8")
+        + b"\n"
+    )
+    temporary = sidecar.with_name(f".{sidecar.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, sidecar)
+        _fsync_directory(sidecar.parent)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _verify_snapshot_origin(snapshot: Path, expected_source: Path) -> None:
+    sidecar = snapshot.with_name(snapshot.name + _SNAPSHOT_ORIGIN_SUFFIX)
+    if sidecar.is_symlink():
+        raise SqliteToPostgresMigrationError(
+            "snapshot origin sidecar must not be a symlink"
+        )
+    try:
+        resolved = sidecar.resolve(strict=True)
+        if not resolved.is_file() or resolved.stat().st_size > 64 * 1024:
+            raise SqliteToPostgresMigrationError("snapshot origin sidecar is invalid")
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except SqliteToPostgresMigrationError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SqliteToPostgresMigrationError(
+            "existing snapshot has no readable source origin; re-create it for this "
+            "source"
+        ) from exc
+    recorded = payload.get("source_path") if isinstance(payload, Mapping) else None
+    if not isinstance(recorded, str) or not recorded:
+        raise SqliteToPostgresMigrationError("snapshot origin sidecar is malformed")
+    if Path(recorded) != Path(expected_source):
+        raise SqliteToPostgresMigrationError(
+            "existing snapshot was sealed from a different SQLite source"
+        )
+
+
 def create_consistent_snapshot(
     *, source_path: Path, work_dir: Path, progress: Callable[[str], None]
 ) -> tuple[Path, str]:
@@ -427,6 +485,10 @@ def create_consistent_snapshot(
             _fsync_directory(destination_dir)
         temporary.with_name(temporary.name + "-wal").unlink(missing_ok=True)
         temporary.with_name(temporary.name + "-shm").unlink(missing_ok=True)
+        # Bind the sealed snapshot to its source (also refreshes the record when a
+        # byte-identical snapshot from another path already existed) so a later
+        # --snapshot reuse can reject a mismatched --source.
+        _write_snapshot_origin(final, source)
         return final, digest
     except SqliteToPostgresMigrationError:
         temporary.unlink(missing_ok=True)
@@ -443,7 +505,7 @@ def create_consistent_snapshot(
 
 
 def validate_existing_snapshot(
-    *, snapshot_path: Path, work_dir: Path
+    *, snapshot_path: Path, work_dir: Path, expected_source: Path | None = None
 ) -> tuple[Path, str]:
     snapshot = _validate_source_path(snapshot_path)
     directory = Path(work_dir).resolve()
@@ -478,6 +540,8 @@ def validate_existing_snapshot(
         raise SqliteToPostgresMigrationError(
             "existing snapshot hash does not match its sealed name"
         )
+    if expected_source is not None:
+        _verify_snapshot_origin(snapshot, expected_source)
     return snapshot, digest
 
 
@@ -1543,6 +1607,7 @@ def verify_migration_receipt(
     sealed_snapshot, sealed_hash = validate_existing_snapshot(
         snapshot_path=expected_snapshot,
         work_dir=work_dir,
+        expected_source=actual_source,
     )
     if sealed_hash != _receipt_text(snapshot_receipt, "sha256"):
         raise SqliteToPostgresMigrationError(
@@ -1671,6 +1736,7 @@ def migrate(
         snapshot, snapshot_hash = validate_existing_snapshot(
             snapshot_path=existing_snapshot,
             work_dir=work_dir,
+            expected_source=Path(source.path),
         )
     upgraded, applied = prepare_upgraded_snapshot(
         snapshot_path=snapshot,

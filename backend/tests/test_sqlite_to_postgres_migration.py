@@ -75,6 +75,43 @@ def test_consistent_snapshot_is_read_only_and_published_atomically(tmp_path: Pat
         )
 
 
+def test_reused_snapshot_is_bound_to_its_source(tmp_path: Path):
+    source = tmp_path / "source.db"
+    _source(source)
+    work = tmp_path / "work"
+
+    snapshot, _digest = create_consistent_snapshot(
+        source_path=source, work_dir=work, progress=lambda _message: None
+    )
+    origin = snapshot.with_name(snapshot.name + ".origin")
+    assert origin.exists()
+
+    # Reuse selecting the original source is accepted.
+    reused, _ = validate_existing_snapshot(
+        snapshot_path=snapshot, work_dir=work, expected_source=source.resolve()
+    )
+    assert reused == snapshot
+
+    # Reuse selecting a different source fails closed (the codex round-7 P2 gap).
+    other = tmp_path / "other.db"
+    other.touch()
+    with pytest.raises(
+        SqliteToPostgresMigrationError, match="different SQLite source"
+    ):
+        validate_existing_snapshot(
+            snapshot_path=snapshot, work_dir=work, expected_source=other.resolve()
+        )
+
+    # A snapshot missing its origin record cannot be reused for a named source.
+    origin.unlink()
+    with pytest.raises(
+        SqliteToPostgresMigrationError, match="no readable source origin"
+    ):
+        validate_existing_snapshot(
+            snapshot_path=snapshot, work_dir=work, expected_source=source.resolve()
+        )
+
+
 def test_inspect_source_rejects_symlink(tmp_path: Path):
     source = tmp_path / "source.db"
     _source(source)
