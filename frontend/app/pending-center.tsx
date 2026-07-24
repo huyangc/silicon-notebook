@@ -139,12 +139,19 @@ export function PendingBell(props: {
   const { snapshot, doneItems, userId, checkup, onOpenItem, onOpenDone, onDismissDone } = props;
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
-  // 体检提醒的「已读」「关掉」——按 sig 记(纯内存,同 doneItems 不持久化)。sig 变
-  // (新问题出现/旧问题修好)则自动复活(seen/hidden 不再匹配)。
+  // 体检提醒的「已读」「关掉」——按 sig 记(纯内存,同 doneItems 不持久化)。**仍有问题时**
+  // sig 变化(问题种类增减)由下面的 !== 比较自动复活;**恢复健康**(checkup=null)则由紧随的
+  // effect 清空 sig——否则同一类损坏(sig 相同,如 nb:H2)修好后日后复发会被旧的 hidden/seen
+  // 永久压掉(codex 第3轮 P2:签名只含 H 码集合、无「本轮/episode」区分度)。
   const [checkupSeenSig, setCheckupSeenSig] = useState<string | null>(null);
   const [checkupHiddenSig, setCheckupHiddenSig] = useState<string | null>(null);
   const checkupVisible = Boolean(checkup) && checkup!.sig !== checkupHiddenSig;
   const checkupUnread = checkupVisible && checkup!.sig !== checkupSeenSig ? 1 : 0;
+  // 恢复健康是「本轮问题已了结」的明确信号:清掉 seen/hidden,下一轮(即便 sig 相同)重新提醒。
+  const checkupPresent = Boolean(checkup);
+  useEffect(() => {
+    if (!checkupPresent) { setCheckupSeenSig(null); setCheckupHiddenSig(null); }
+  }, [checkupPresent]);
 
   // 已读(seen)/关掉(dismissed)按用户存 localStorage。
   const seenKey = `pending:seen:${userId || "anon"}`;
