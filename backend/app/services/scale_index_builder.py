@@ -213,7 +213,13 @@ class ScaleIndexBuilder:
             )
 
         synonyms = timed("synonym", synonym_edges)
-        del ann_vectors  # not persisted; kg_ann_index holds the vectors now
+        # Free the KG matrix for real: ann_vectors is np.asarray(ann_matrix_raw,
+        # float32) which ALIASES the (already-float32) matrix, so dropping only
+        # ann_vectors leaves ~33GB pinned via ann_matrix_raw through
+        # chunk/relation load + persist. Drop the load-side aliases too; the
+        # build_kg_ann/synonym_edges closure cells for ann_vectors are cleared
+        # by this `del` (shared cell), and kg_ann_index keeps its own hnsw copy.
+        del ann_vectors, ann_matrix_raw, ann_ids_raw
         gc.collect()
         (
             node_ids,
