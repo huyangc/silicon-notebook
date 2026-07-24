@@ -223,13 +223,21 @@ class KnowledgeLifecycleService:
         self._invalidate_knowledge_counts(notebook_id)
         return counts
 
-    def store_kg(self, notebook_id: str, source_id: Optional[str],
-                 objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
+    def store_kg(
+        self,
+        notebook_id: str,
+        source_id: Optional[str],
+        objects: List[dict],
+        relations: List[dict],
+        *,
+        replace_source: bool = False,
+    ) -> Tuple[int, int]:
         """Insert KG nodes/edges (remapping local ids to DB ids), embeds payload.
 
         分块执行批量 INSERT，但所有 object/relation 块共享一个事务：source 是
         KG 的持久化边界，任一后续块失败都回滚整源。本地 id->DB id 在分块前一次性
-        预分配，跨块关系仍能正确 remap。Relations 引用不到的 local id 静默跳过。"""
+        预分配，跨块关系仍能正确 remap。Relations 引用不到的 local id 静默跳过。
+        ``replace_source`` 把旧图清理并入同一事务；新图写入失败时旧图保持不变。"""
         CHUNK = 1000
         now = self._now()
         local_to_id: Dict[str, str] = {}
@@ -265,6 +273,12 @@ class KnowledgeLifecycleService:
         auto_status = 'reviewed' if (nb_row and nb_row["tier"] == 'base') else 'approved'
 
         with self._write() as db:
+            if replace_source:
+                if not source_id:
+                    raise ValueError("replace_source requires source_id")
+                self.knowledge.clear_source_graph_state(
+                    db, source_id, notebook_id
+                )
             for i in range(0, len(objects), CHUNK):
                 chunk = objects[i:i + CHUNK]
                 self.knowledge.insert_object_chunk(
@@ -300,8 +314,26 @@ class KnowledgeLifecycleService:
                       r["source_object_id"], r["target_object_id"], r["edge_type"],
                       json.dumps(r["evidence"], ensure_ascii=False), now) for r in chunk],
                 )
-        self._embed_objects_batch(notebook_id, objects)
-        self._embed_relations_batch(notebook_id, db_relations)
+        try:
+            self._embed_objects_batch(notebook_id, objects)
+        except Exception:
+            if not replace_source:
+                raise
+            self.event_log.logger.exception(
+                "replacement KG object embedding failed for %s; "
+                "the complete graph is retained for backfill",
+                source_id,
+            )
+        try:
+            self._embed_relations_batch(notebook_id, db_relations)
+        except Exception:
+            if not replace_source:
+                raise
+            self.event_log.logger.exception(
+                "replacement KG relation embedding failed for %s; "
+                "the complete graph is retained for backfill",
+                source_id,
+            )
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)

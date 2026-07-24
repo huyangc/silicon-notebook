@@ -332,6 +332,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --lim
 # 3) 整批抽 KG(幂等,跳过已抽;失败可重跑续抽)
 PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 
+# 修复最近一次抽取留下部分 KG 的来源（有失败窗口且已有对象）
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --retry-partial
+
 # 或一条命令跑完(ingest 然后 kg)
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "我的库"
 
@@ -366,6 +369,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 `metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按源逐行打印（`[meta <done>/<total>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
 `reparse` 子命令修复一类历史存量:某些源已建、`parse_status` 看似前进,却没有 `source_elements`(上次 parse 中断或未落地)。KG 抽取有一道零-LLM 接地校验——每个 LLM 抽出的节点必须把引文匹配回该源的某个 element,否则丢弃;一个源若没有任何 element,抽出的节点会被**整源丢光**,导致 `knowledge_objects` 一行不增(抽了等于白抽),且直接重抽永远补不出。旧版 `all` 的续跑分流曾用「有没有 KG」当「是否已 parse」,把这类无-elements 源当成「已 parse、缺 KG」直接送去抽取,正是踩中此坑(该分流已修正,新导入不再遇到)。本命令对该 notebook 内所有缺 `source_elements` 的源重新跑 `process_source`(parse → 生成 elements),收尾一次 KG rebuild;有 elements 的源自动跳过(幂等、可中断重跑)。`--limit N` 只处理前 N 个;`--no-rebuild` 跳过收尾聚类(分批场景)。必须给 `--notebook-id`。
+
+`kg --retry-partial` 修复的是另一种状态：来源仍有 KG 对象，但最近一次 KG 抽取记录为 `windows_failed>0`。普通增量 `kg` 会把“已完成且已有对象”的来源视为已覆盖，不会自动重跑；显式加此参数后，它们会与正常缺 KG 来源一起进入目标集合。部分来源重试期间，旧对象和关系仍保持可读；若任一窗口再次失败或新结果为空，批处理会把本次尝试计为失败/未完整且旧图不变，只有“零失败窗口且非空”的新结果才会在一个事务内替换该来源的图。`--limit N` 限制“缺失 + 部分”合并后的目标数，`--no-rebuild` 可用于分批，末尾 rebuild/index 行为不变。它不是解析修复；没有 `source_elements` 的来源仍应使用 `reparse`。
 
 **MRL 截断质量 spike(`app.eval.mrl_truncation`)。** 回答「把存量向量截断到前 1024/2048 维(+ re-normalize),检索质量掉多少」——这既是进程内向量内存瘦身(4096→1024 约 ÷4)的前置,也是 pgvector HNSW 建索引(维度上限 2000/4000)的 gate。只读、流式分块(百万行表内存有界),并总是先打印该 notebook 四张 embeddings 表的行数。
 
@@ -411,7 +416,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
