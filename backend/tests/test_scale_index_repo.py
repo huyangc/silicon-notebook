@@ -79,6 +79,51 @@ def test_build_frees_matrices_and_hands_persist_prebuilt_anns(repo, monkeypatch)
     assert nb.id in invalidated
 
 
+def test_kg_matrix_is_released_before_persist(repo, monkeypatch):
+    """OOM (codex PR#347 round 1): ann_vectors = np.asarray(ann_matrix_raw,
+    float32) ALIASES the already-float32 matrix, so freeing only ann_vectors
+    leaves the ~33GB KG matrix pinned via ann_matrix_raw (and the
+    build_kg_ann/synonym_edges closure cells) through chunk/relation load and
+    persist — defeating the headline win. Weakref the KG matrix; at persist it
+    MUST be dead. Reverting to `del ann_vectors` alone fails here."""
+    import weakref
+    import gc as _gc
+
+    builder = repo._runtime.scale_builder
+    ref_holder: dict = {}
+    real_em = builder.projections.embedding_matrix
+
+    def spy_em(notebook_id, table, id_column, **kw):
+        ids, mat = real_em(notebook_id, table, id_column, **kw)
+        if table == "knowledge_embeddings" and getattr(mat, "size", 0):
+            ref_holder["kg"] = weakref.ref(mat)
+        return ids, mat
+
+    monkeypatch.setattr(builder.projections, "embedding_matrix", spy_em)
+
+    persist_state: dict = {}
+    real_save = builder.artifacts.save_full
+
+    def spy_save(notebook_id, artifacts):
+        _gc.collect()
+        ref = ref_holder.get("kg")
+        persist_state["alive"] = ref is not None and ref() is not None
+        return real_save(notebook_id, artifacts)
+
+    monkeypatch.setattr(builder.artifacts, "save_full", spy_save)
+
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+    builder.build(nb.id)
+
+    assert ref_holder.get("kg") is not None       # KG matrix was captured (has embeddings)
+    assert persist_state.get("alive") is False     # ...and released before persist
+
+
 def test_persist_ann_fails_loud_on_labels_without_vectors_or_matching_index(tmp_path):
     """_persist_ann must NOT write an EMPTY index next to N labels (row-count
     mismatch → silent recall collapse). With no vectors and no size-matching
