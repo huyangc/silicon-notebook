@@ -46,36 +46,39 @@ async def _lifespan(app: FastAPI):
     # binds and serves /api/ready immediately; the readiness gate keeps app routes
     # at 503 until run_startup() flips readiness. See app/services/startup_warmup.
     from app.services.startup_warmup import (
+        LIFESPAN_PASSTHROUGH,
         LifecycleAlreadyActiveError,
-        begin_lifecycle,
+        begin_lifecycle_or_passthrough,
         close_repository,
-        is_lifecycle_active,
         run_startup,
     )
 
-    # Reserve ownership before resetting readiness or touching the composition
-    # factory. An overlapping lifespan fails before yield: it cannot become an
-    # unowned server context that outlives the actual repository owner.
-    # Tests may mark readiness ready up-front and drive a preconstructed
-    # repository; do not reset or replace that fixture-owned lifecycle.
+    # Classify this lifespan atomically under the ONE lifecycle lock (see
+    # begin_lifecycle_or_passthrough). Reserve ownership before resetting
+    # readiness or touching the composition factory; an overlapping lifespan
+    # fails before yield so it cannot become an unowned server context that
+    # outlives the actual repository owner. Tests may mark readiness ready
+    # up-front and drive a preconstructed repository — that context passes
+    # through and must not reset/replace the fixture-owned state.
     #
-    # Gate on "no active lifecycle" too: while a lifecycle IS owned (e.g. an
-    # overlapping lifespan after the winner flipped readiness ready), fall
-    # through so begin_lifecycle() returns None and we raise below — the
-    # pass-through short-circuit is only for the no-owner, pre-marked-ready case.
-    if readiness.is_ready() and not is_lifecycle_active():
+    # This MUST be one decision, not readiness.is_ready() composed with
+    # is_lifecycle_active(): those took two separate locks, so the ready/owner
+    # verdict could straddle two moments (TOCTOU) — a pass-through entered after
+    # readiness stopped, or another lifecycle reserved before the yield and this
+    # branch's shutdown then closed the winner's cached repository.
+    decision = begin_lifecycle_or_passthrough()
+    if decision is None:
+        raise LifecycleAlreadyActiveError(
+            "cannot enter ASGI lifespan while the repository lifecycle is active"
+        )
+    if decision is LIFESPAN_PASSTHROUGH:
         try:
             yield
         finally:
             shutdown_repository_if_initialized()
         return
 
-    lease = begin_lifecycle()
-    if lease is None:
-        raise LifecycleAlreadyActiveError(
-            "cannot enter ASGI lifespan while the repository lifecycle is active"
-        )
-
+    lease = decision
     started = {"repository": None}
 
     def _start() -> None:

@@ -1452,8 +1452,12 @@ class KnowhowStore:
                     else:
                         skipped.append((row_id, column_id))
                     continue
+                # 保留 current 的原值(未写过的格子是 None):历史流水的 before
+                # 必须是 None 而非 ""——共享回退回放把 None 解读为「删除该格」、把 ""
+                # 解读为「留一个空格」,前置指纹因此对不上而回退失败。与 sqlite 侧
+                # 同名方法一致;资产 diff 处再各自兜底成 ""。
                 to_write.append(
-                    (table_id, row_id, column_id, current or "", content_md)
+                    (table_id, row_id, column_id, current, content_md)
                 )
 
             # The reviewed-plan path used to write inline during classification,
@@ -1466,7 +1470,7 @@ class KnowhowStore:
                 required_asset_ids(
                     (),
                     (
-                        (old_content, content)
+                        (old_content or "", content)
                         for _table, _row, _column, old_content, content in to_write
                     ),
                 ),
