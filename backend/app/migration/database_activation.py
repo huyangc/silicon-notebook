@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shlex
 import stat
 import uuid
 from dataclasses import dataclass
@@ -103,10 +102,28 @@ def _load_env(path: Path) -> tuple[Path, bytes, str, dict[str, str], os.stat_res
     return resolved, data, text, values, metadata
 
 
+def _env_quote(value: str) -> str:
+    """Quote a value for an env file read by both python-dotenv and shell ``source``.
+
+    Single quotes make the value literal in both loaders (no interpolation and no
+    escape processing), which is correct for URLs containing ``$``, ``"`` or
+    ``\\``. A literal single quote cannot be represented safely for both loaders
+    at once — ``shlex.quote`` emits shell concatenation (``'...'"'"'...'``) that
+    python-dotenv misparses — so fail closed rather than write a value that would
+    make ``DATABASE_URL`` silently unreadable on the next start.
+    """
+    if "'" in value:
+        raise SqliteToPostgresMigrationError(
+            "database URL contains a single quote that cannot be written safely to "
+            "the activation env file; set DATABASE_URL manually after activation"
+        )
+    return f"'{value}'"
+
+
 def _render_env(text: str, *, active_url: str, shadow_url: str) -> bytes:
     replacements = {
-        "DATABASE_URL": f"DATABASE_URL={shlex.quote(active_url)}",
-        "SHADOW_DATABASE_URL": f"SHADOW_DATABASE_URL={shlex.quote(shadow_url)}",
+        "DATABASE_URL": f"DATABASE_URL={_env_quote(active_url)}",
+        "SHADOW_DATABASE_URL": f"SHADOW_DATABASE_URL={_env_quote(shadow_url)}",
     }
     rendered: list[str] = []
     replaced: set[str] = set()
@@ -196,7 +213,10 @@ def _atomic_activate_env(
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = parent / f"{resolved.name}.pre-postgres-{timestamp}-{uuid.uuid4().hex[:8]}.bak"
     temporary = parent / f"{resolved.name}.postgres-{uuid.uuid4().hex}.tmp"
-    mode = stat.S_IMODE(metadata.st_mode)
+    # The replacement and backup hold database credentials; mask off any
+    # group/world bits a permissive source env file (e.g. 0644) would otherwise
+    # propagate, so the file with the PostgreSQL password stays owner-only.
+    mode = stat.S_IMODE(metadata.st_mode) & 0o600
     replaced = False
     try:
         _write_exclusive(backup, original, mode=mode)

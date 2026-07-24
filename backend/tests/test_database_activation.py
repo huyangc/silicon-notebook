@@ -7,7 +7,10 @@ import pytest
 from dotenv import dotenv_values
 
 from app.migration import database_activation
-from app.migration.database_activation import activate_postgres_from_receipt
+from app.migration.database_activation import (
+    _env_quote,
+    activate_postgres_from_receipt,
+)
 from app.migration.sqlite_to_postgres import (
     MigrationVerification,
     SqliteToPostgresMigrationError,
@@ -208,7 +211,7 @@ def test_activation_preserves_export_prefix_on_database_url(
 
     assert result.changed is True
     text = env_path.read_text(encoding="utf-8")
-    assert "export DATABASE_URL=postgresql://" in text
+    assert any(line.startswith("export DATABASE_URL=") for line in text.splitlines())
     values = dotenv_values(env_path, interpolate=False)
     assert values["DATABASE_URL"] == target
     assert values["SHADOW_DATABASE_URL"] == "sqlite:///silicon_notebook.db"
@@ -250,3 +253,47 @@ def test_activation_resolves_relative_sqlite_url_against_app_root(
     values = dotenv_values(env_path, interpolate=False)
     assert values["DATABASE_URL"] == "postgresql://127.0.0.1:5432/notebook"
     assert values["SHADOW_DATABASE_URL"] == "sqlite:///.local/silicon_notebook.db"
+
+
+def test_activation_restricts_credential_env_to_owner_only(
+    tmp_path: Path, monkeypatch
+):
+    # A permissive (0644) source env file must not propagate its group/world
+    # read bits to the replacement that now holds the PostgreSQL password.
+    source = tmp_path / "silicon_notebook.db"
+    source.touch()
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "DATABASE_URL=sqlite:///silicon_notebook.db\n", encoding="utf-8"
+    )
+    env_path.chmod(0o644)
+    monkeypatch.setattr(
+        database_activation,
+        "verify_migration_receipt",
+        lambda **_kwargs: _verification(source),
+    )
+
+    result = activate_postgres_from_receipt(
+        source_path=source,
+        target_url="postgresql://user:secret@127.0.0.1:5432/notebook",
+        receipt_path=tmp_path / "receipt.json",
+        work_dir=tmp_path / "work",
+        env_path=env_path,
+        root_dir=tmp_path,
+    )
+
+    assert result.changed is True
+    assert os.stat(env_path).st_mode & 0o777 == 0o600
+    assert Path(result.backup_path).stat().st_mode & 0o777 == 0o600
+
+
+def test_env_quote_is_dotenv_and_shell_safe_and_fails_closed_on_apostrophe():
+    # Single-quote wrapping is literal for both python-dotenv and shell `source`;
+    # an apostrophe cannot be represented safely for both, so fail closed rather
+    # than emit shell concatenation that python-dotenv would misparse.
+    assert _env_quote("postgresql://u:p@h:5432/db?sslmode=disable") == (
+        "'postgresql://u:p@h:5432/db?sslmode=disable'"
+    )
+    assert _env_quote("sqlite:///.local/x$y.db") == "'sqlite:///.local/x$y.db'"
+    with pytest.raises(SqliteToPostgresMigrationError, match="single quote"):
+        _env_quote("postgresql://u:pa'ss@h:5432/db")
