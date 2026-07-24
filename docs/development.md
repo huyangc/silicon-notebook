@@ -39,9 +39,30 @@ remains the paired business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 60-table epoch-1 manifest. It does not yet
-include snapshot/COPY, a replicator, an operator CLI, or an end-to-end worker;
-`SHADOW_DATABASE_URL` therefore remains inert by itself. Safety-critical PG
+logical-key guards across the exact 60-table epoch-1 manifest. It also includes
+run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
+batch commits with its prefix checkpoint, resume proves that exact target
+prefix without truncating or deleting business rows, seven historical rowids
+copy as explicit ordinals and their catalog-resolved identity sequences reseed,
+and the final forward checkpoint advances atomically to snapshot H0 after the
+v9 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+owner-only real directory and exclusive 0600 temporary creation. COPY fully
+qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
+capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
+dedicated connection to the currently named SQLite file rather than the
+repository thread cache, and binds/rechecks its resolved path and device/inode
+across open and immediately before publication/PG commit. JSONB prefix proof
+normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
+SQL numeric columns remain type-distinct. It uses bounded
+named server cursors plus statement timeouts/cancellation polls, and performs
+full initial/final migration-derived validation of v9 tables, columns,
+constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
+is intentionally lightweight. The final SQLite fence is acquired only after
+the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
+run-progress transaction has actually committed; PG failure publishes no H0
+and releases SQLite. It does not yet include an incremental
+replicator, an operator CLI, or an end-to-end worker; `SHADOW_DATABASE_URL`
+therefore remains inert by itself. Safety-critical PG
 control mutations always take the migration lock, then the control lock, then
 validate the exact live control catalog. A live SQLite transition acquires the
 PG pool, both locks, and the run row before its short `BEGIN IMMEDIATE`, so it

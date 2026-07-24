@@ -246,6 +246,26 @@ class _Rows:
         return self.rows
 
 
+@pytest.mark.parametrize("business_schema", [None, "MixedCase-Team-DB"])
+def test_missing_postgres_migration_ledger_returns_zero(business_schema):
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class MissingLedger:
+        def execute(self, statement, parameters=()):
+            calls.append((str(statement), tuple(parameters)))
+            return _Rows()
+
+    assert control._postgres_schema_version(MissingLedger(), business_schema) == 0
+    assert calls
+    if business_schema is None:
+        assert calls[0][1] == ("silicon_schema_migrations",)
+    else:
+        assert calls[0][1] == (
+            "MixedCase-Team-DB",
+            "silicon_schema_migrations",
+        )
+
+
 def _run_row(*, source_hash="a" * 64, target_hash="b" * 64):
     return {
         "run_id": "run-1",
@@ -272,6 +292,8 @@ class _ScriptedConnection:
         self.target = target
 
     def execute(self, statement: str, parameters=()):
+        if not isinstance(statement, str):
+            statement = statement.as_string()
         sql = " ".join(statement.split())
         self.target.statements.append(sql)
         self.target.events.append(f"pg:{sql}")
@@ -376,11 +398,20 @@ class _ScriptedConnection:
             return _Rows([{}] if self.target.extra_control_object else [])
         if "current_database() AS database" in sql:
             return _Rows(
-                [{"database": "test", "schema": "business", "database_oid": "7"}]
+                [
+                    {
+                        "database": "test",
+                        "schema": self.target.current_schema,
+                        "database_oid": "7",
+                    }
+                ]
             )
-        if "to_regclass('silicon_schema_migrations')" in sql:
+        if "SELECT c.oid AS relation FROM pg_class c" in sql and "c.relname=%s" in sql:
             return _Rows([{"relation": "silicon_schema_migrations"}])
-        if "SELECT version,checksum FROM silicon_schema_migrations" in sql:
+        if (
+            sql.startswith("SELECT version,checksum FROM")
+            and "silicon_schema_migrations" in sql
+        ):
             return _Rows(
                 [
                     {"version": migration.version, "checksum": migration.checksum}
@@ -467,15 +498,15 @@ class _ScriptedConnection:
             self.target.run["progress"] = json.loads(progress)
             self.target.run["revision"] += 1
             return _Rows([{"run_id": "run-1"}])
-        if "x.relname LIKE 'shadow_uq_%'" in sql:
+        if "x.relname LIKE %s" in sql and parameters[-1] == "shadow_uq_%":
             return _Rows([{"index_name": name} for name in sorted(self.target.indexes)])
         if "x.relname=%s AND x.relkind='i'" in sql:
-            return _Rows([{}] if parameters[0] in self.target.indexes else [])
+            return _Rows([{}] if parameters[-1] in self.target.indexes else [])
         if "i.indisunique" in sql:
             guard = next(
                 item
                 for item in replication_guard_specs(MANIFEST)
-                if item.name == parameters[0]
+                if item.name == parameters[-1]
             )
             columns = guard.columns
             if self.target.malformed_guard == guard.name:
@@ -486,6 +517,9 @@ class _ScriptedConnection:
                         "table_name": guard.table,
                         "indisunique": True,
                         "indisvalid": True,
+                        "indisready": True,
+                        "indislive": True,
+                        "nulls_distinct": True,
                         "no_predicate": True,
                         "no_expression": True,
                         "columns": columns,
@@ -529,6 +563,7 @@ class _ScriptedTarget:
         self.fail_guard_after = None
         self.created_guard_count = 0
         self.fail_capture_ack_once = False
+        self.current_schema = "business"
         self.statements: list[str] = []
         self.events: list[str] = []
 
@@ -732,6 +767,24 @@ def test_offline_run_identity_reuse_and_mismatch(monkeypatch):
             confirmation_secret=SECRET,
             now=1_001,
         )
+
+
+def test_run_schema_binding_uses_structured_current_schema(monkeypatch):
+    target = _ScriptedTarget()
+    target.current_schema = "Team?schema=DB"
+    install_postgres_control_schema(target)
+    monkeypatch.setattr(
+        control, "fingerprint_postgres", lambda *_a, **_k: TARGET_FINGERPRINT
+    )
+    report = _report()
+    state = create_or_reuse_run(
+        target,
+        report,
+        confirmation_token=report.confirmation_token,
+        confirmation_secret=SECRET,
+        now=1_001,
+    )
+    assert state.target_business_schema == "Team?schema=DB"
 
 
 def test_offline_guard_atomic_rollback_exact_set_and_malformed_refusal(monkeypatch):

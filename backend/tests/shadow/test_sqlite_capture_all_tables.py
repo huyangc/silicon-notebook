@@ -16,11 +16,7 @@ from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CASCADE_CONTRACT_PATH = (
-    REPO_ROOT
-    / "backend"
-    / "tests"
-    / "fixtures"
-    / "shadow_sqlite_cascade_contract.json"
+    REPO_ROOT / "backend" / "tests" / "fixtures" / "shadow_sqlite_cascade_contract.json"
 )
 EXPECTED_CASCADE_IDENTITIES = tuple(
     json.loads(CASCADE_CONTRACT_PATH.read_text(encoding="utf-8"))
@@ -146,10 +142,7 @@ def _cascade_constraints(conn) -> dict[str, CascadeConstraint]:
         grouped: dict[tuple[int, str], list[tuple[int, str, str]]] = {}
         for row in conn.execute(f'PRAGMA foreign_key_list("{child_table}")'):
             parent_table = str(row[2])
-            if (
-                parent_table not in replicated
-                or str(row[6]).upper() != "CASCADE"
-            ):
+            if parent_table not in replicated or str(row[6]).upper() != "CASCADE":
                 continue
             grouped.setdefault((int(row[0]), parent_table), []).append(
                 (int(row[1]), str(row[3]), str(row[4]))
@@ -190,9 +183,7 @@ def _canonical_key_json(key: dict[str, object]) -> str:
     return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
 
 
-@pytest.mark.parametrize(
-    ("ordinal", "spec"), enumerate(MANIFEST.replicated, start=1)
-)
+@pytest.mark.parametrize(("ordinal", "spec"), enumerate(MANIFEST.replicated, start=1))
 def test_every_replicated_table_exercises_all_capture_mutations(
     installed, ordinal, spec
 ):
@@ -216,7 +207,7 @@ def test_every_replicated_table_exercises_all_capture_mutations(
     quoted_columns = ", ".join(f'"{column}"' for column in columns)
     installed.execute(
         f'INSERT INTO "{table}" ({quoted_columns}) '
-        f'VALUES ({", ".join("?" for _ in columns)})',
+        f"VALUES ({', '.join('?' for _ in columns)})",
         tuple(values[column] for column in columns),
     )
     installed.commit()
@@ -324,9 +315,7 @@ def test_every_replicated_fk_cascade_captures_child_before_parent(
     parent_key = {
         column: parent_values[column] for column in parent_spec.replication_key
     }
-    child_key = {
-        column: child_values[column] for column in child_spec.replication_key
-    }
+    child_key = {column: child_values[column] for column in child_spec.replication_key}
     parent_where, parent_parameters = _where_key(parent_spec, parent_key)
     installed.execute(
         f'DELETE FROM "{constraint.parent_table}" WHERE {parent_where}',
@@ -464,11 +453,16 @@ def test_production_scratch_vector_stream_keeps_rowid_order_after_analyze(instal
 
 def test_rebuilt_and_shadow_internal_tables_have_no_capture_triggers(installed):
     excluded = set(MANIFEST.rebuilt_names) | {
-        spec.name for spec in MANIFEST.tables if spec.table_class.value == "shadow-internal"
+        spec.name
+        for spec in MANIFEST.tables
+        if spec.table_class.value == "shadow-internal"
     }
     for table in excluded:
-        assert installed.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
-            "AND tbl_name=? AND name LIKE 'shadow_%'",
-            (table,),
-        ).fetchone() is None
+        assert (
+            installed.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                "AND tbl_name=? AND name LIKE 'shadow_%'",
+                (table,),
+            ).fetchone()
+            is None
+        )

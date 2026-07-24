@@ -62,10 +62,16 @@ def test_v31_adds_only_inert_shadow_internal_tables(database):
         )
     }
     assert tables == {"shadow_change_log", "shadow_capture_control"}
-    assert database.execute("SELECT COUNT(*) FROM shadow_capture_control").fetchone()[0] == 0
-    assert database.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'shadow_%'"
-    ).fetchone()[0] == 0
+    assert (
+        database.execute("SELECT COUNT(*) FROM shadow_capture_control").fetchone()[0]
+        == 0
+    )
+    assert (
+        database.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'shadow_%'"
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_capture_is_transactional_key_only_and_orders_key_updates(database):
@@ -107,9 +113,10 @@ def test_business_rollback_also_rolls_back_capture(database):
         "INSERT INTO app_settings(key,value,updated_at) VALUES ('rolled','x','t')"
     )
     database.rollback()
-    assert database.execute(
-        "SELECT 1 FROM app_settings WHERE key='rolled'"
-    ).fetchone() is None
+    assert (
+        database.execute("SELECT 1 FROM app_settings WHERE key='rolled'").fetchone()
+        is None
+    )
     assert _events(database) == []
 
 
@@ -148,9 +155,7 @@ def test_frozen_writes_fail_closed_but_in_transaction_lease_is_allowed(database)
         "UPDATE shadow_capture_control SET apply_active=0 WHERE singleton=1"
     )
     database.commit()
-    assert database.execute(
-        "SELECT 1 FROM app_settings WHERE key='leased'"
-    ).fetchone()
+    assert database.execute("SELECT 1 FROM app_settings WHERE key='leased'").fetchone()
 
 
 def test_task1_nullable_key_declaration_is_a_runtime_insert_and_update_guard(database):
@@ -214,10 +219,14 @@ def test_schema_derived_fk_cascades_have_exact_child_before_parent_events(databa
     _enable(database)
     database.execute("PRAGMA foreign_keys=ON")
     cascade_edges = _replicated_cascade_edges(database)
-    assert {("users", "auth_sessions"), ("notebooks", "sources"), (
-        "sources",
-        "source_elements",
-    )} <= cascade_edges
+    assert {
+        ("users", "auth_sessions"),
+        ("notebooks", "sources"),
+        (
+            "sources",
+            "source_elements",
+        ),
+    } <= cascade_edges
 
     database.execute(
         "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
@@ -300,13 +309,22 @@ def test_duplicate_guard_failure_rolls_back_control_indexes_and_triggers(
         install_sqlite_capture(
             database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST
         )
-    assert database.execute("SELECT COUNT(*) FROM shadow_capture_control").fetchone()[0] == 0
-    assert database.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'shadow_uq_%'"
-    ).fetchone()[0] == 0
-    assert database.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'shadow_%'"
-    ).fetchone()[0] == 0
+    assert (
+        database.execute("SELECT COUNT(*) FROM shadow_capture_control").fetchone()[0]
+        == 0
+    )
+    assert (
+        database.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'shadow_uq_%'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert (
+        database.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'shadow_%'"
+        ).fetchone()[0]
+        == 0
+    )
 
 
 def test_install_failure_after_guard_creation_is_atomic_and_retryable(
@@ -327,10 +345,16 @@ def test_install_failure_after_guard_creation_is_atomic_and_retryable(
         install_sqlite_capture(
             database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST
         )
-    assert database.execute("SELECT COUNT(*) FROM shadow_capture_control").fetchone()[0] == 0
-    assert database.execute(
-        "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'shadow_uq_%'"
-    ).fetchone()[0] == 0
+    assert (
+        database.execute("SELECT COUNT(*) FROM shadow_capture_control").fetchone()[0]
+        == 0
+    )
+    assert (
+        database.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'shadow_uq_%'"
+        ).fetchone()[0]
+        == 0
+    )
     monkeypatch.setattr(capture, "_execute_install_statement", original)
     install_sqlite_capture(database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST)
     install_sqlite_capture(database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST)
@@ -352,13 +376,9 @@ def test_same_run_crash_resume_preserves_enabled_and_frozen_state(
     repaired_trigger = "shadow_capture_e1_app_settings_insert"
     database.execute(f'DROP TRIGGER "{repaired_trigger}"')
     database.commit()
-    before = tuple(
-        database.execute("SELECT * FROM shadow_capture_control").fetchone()
-    )
+    before = tuple(database.execute("SELECT * FROM shadow_capture_control").fetchone())
 
-    install_sqlite_capture(
-        database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST
-    )
+    install_sqlite_capture(database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST)
     validate_sqlite_capture(database, MANIFEST)
 
     after = tuple(database.execute("SELECT * FROM shadow_capture_control").fetchone())
@@ -376,9 +396,7 @@ def test_same_run_crash_resume_fails_closed_on_persisted_apply_lease(database):
         "SET enabled=1,write_frozen=1,apply_active=1 WHERE singleton=1"
     )
     database.commit()
-    before = tuple(
-        database.execute("SELECT * FROM shadow_capture_control").fetchone()
-    )
+    before = tuple(database.execute("SELECT * FROM shadow_capture_control").fetchone())
 
     with pytest.raises(ValueError, match="persisted apply-active lease"):
         install_sqlite_capture(
@@ -395,9 +413,7 @@ def test_reinstall_rejects_a_different_run_without_mutating_control(database):
         "UPDATE shadow_capture_control SET enabled=1,write_frozen=1 WHERE singleton=1"
     )
     database.commit()
-    before = tuple(
-        database.execute("SELECT * FROM shadow_capture_control").fetchone()
-    )
+    before = tuple(database.execute("SELECT * FROM shadow_capture_control").fetchone())
 
     with pytest.raises(ValueError, match="different run identity"):
         install_sqlite_capture(
@@ -444,8 +460,7 @@ def test_structural_validator_preserves_capture_table_literal_case(database):
 def test_structural_validator_rejects_an_unknown_shadow_guard(database):
     install_sqlite_capture(database, run_id=RUN_ID, schema_epoch=1, manifest=MANIFEST)
     database.execute(
-        "CREATE UNIQUE INDEX shadow_uq_unknown_replication_key "
-        "ON app_settings(value)"
+        "CREATE UNIQUE INDEX shadow_uq_unknown_replication_key ON app_settings(value)"
     )
     database.commit()
     with pytest.raises(ValueError, match="guard set mismatch.*extra"):

@@ -329,8 +329,9 @@ def test_guard_rollout_preserves_ordered_query_results_and_explain_analyze(
             ("nb", "canonical"),
         ),
         (
-            "SELECT DISTINCT object_id FROM knowledge_object_sources "
-            'WHERE source_id=%s AND notebook_id=%s ORDER BY object_id COLLATE "C"',
+            'SELECT DISTINCT object_id COLLATE "C" AS object_id '
+            "FROM knowledge_object_sources "
+            "WHERE source_id=%s AND notebook_id=%s ORDER BY object_id",
             ("source", "nb"),
         ),
     )
@@ -378,6 +379,10 @@ def test_postgres_scratch_streams_preserve_knowledge_ordinal_not_object_id(
 ):
     PostgresMigrator(postgres_database).migrate()
     with postgres_database.write() as conn:
+        conn.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES "
+            "('nb-order','ordering',clock_timestamp(),clock_timestamp())"
+        )
         conn.execute(
             "INSERT INTO knowledge_objects"
             "(id,notebook_id,object_type,created_at,updated_at) VALUES "

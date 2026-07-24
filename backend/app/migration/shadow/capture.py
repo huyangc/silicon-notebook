@@ -4,6 +4,7 @@ Only stable replication keys are logged.  Business rows and their log events
 therefore share the caller's SQLite transaction without duplicating payloads or
 embedding BLOBs in the shadow metadata.
 """
+
 from __future__ import annotations
 
 import re
@@ -65,8 +66,7 @@ def _gate_trigger_sql(spec: TableSpec, operation: str, epoch: int) -> tuple[str,
     ]
     if operation in {"insert", "update"} and spec.sqlite_null_guard_columns:
         nulls = " OR ".join(
-            f"NEW.{_quote(column)} IS NULL"
-            for column in spec.sqlite_null_guard_columns
+            f"NEW.{_quote(column)} IS NULL" for column in spec.sqlite_null_guard_columns
         )
         statements.append(
             f"SELECT CASE WHEN {nulls} THEN "
@@ -138,10 +138,7 @@ def _expected_triggers(manifest: Manifest) -> dict[str, tuple[str, str]]:
 
 def _guard_sql(name: str, table: str, columns: tuple[str, ...]) -> str:
     columns_sql = ", ".join(_quote(column) for column in columns)
-    return (
-        f"CREATE UNIQUE INDEX {_quote(name)} "
-        f"ON {_quote(table)} ({columns_sql})"
-    )
+    return f"CREATE UNIQUE INDEX {_quote(name)} ON {_quote(table)} ({columns_sql})"
 
 
 def _scan_replication_keys(conn: sqlite3.Connection, manifest: Manifest) -> None:
@@ -250,7 +247,9 @@ def validate_sqlite_capture(conn: sqlite3.Connection, manifest: Manifest) -> Non
     for name, (table, sql) in expected_guards.items():
         actual_table, actual_sql = actual_guards[name]
         if actual_table != table or _normalize_sql(actual_sql) != _normalize_sql(sql):
-            raise ValueError(f"shadow replication-key guard definition mismatch: {name}")
+            raise ValueError(
+                f"shadow replication-key guard definition mismatch: {name}"
+            )
 
 
 def install_sqlite_capture(
@@ -308,9 +307,7 @@ def install_sqlite_capture(
                 sql=_guard_sql(guard.name, guard.table, guard.columns),
             )
         for name, (_table, sql) in _expected_triggers(manifest).items():
-            _create_if_absent(
-                conn, object_type="trigger", name=name, sql=sql
-            )
+            _create_if_absent(conn, object_type="trigger", name=name, sql=sql)
         validate_sqlite_capture(conn, manifest)
         conn.commit()
     except BaseException:

@@ -17,6 +17,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
 
+from psycopg import sql
+
 from app.migration.shadow.capture import validate_sqlite_capture
 from app.migration.shadow.identity import (
     ConfirmationBinding,
@@ -1108,12 +1110,23 @@ def create_or_reuse_run(
     with target.write() as conn:
         _lock_schema_and_control(conn)
         _validate_control_schema(conn)
-        live_target = fingerprint_postgres(_target_url(target), conn)
+        identity_row = conn.execute(
+            "SELECT current_database() AS database,current_schema() AS schema,"
+            "(SELECT oid::text FROM pg_database "
+            "WHERE datname=current_database()) AS database_oid"
+        ).fetchone()
+        if identity_row is None:
+            raise ValueError("live PostgreSQL target identity is unavailable")
+        live_target = fingerprint_postgres(
+            _target_url(target), conn, identity_row=identity_row
+        )
         if live_target.identity_hash != report.target.identity_hash:
             raise ValueError(
                 "confirmation target identity no longer matches the live target"
             )
-        schema = live_target.redacted_identity.rsplit("?schema=", 1)[-1]
+        schema = _row_value(identity_row, "schema", 1)
+        if not isinstance(schema, str) or not schema:
+            raise ValueError("live PostgreSQL target schema is unavailable")
         if _postgres_schema_version(conn) != report.schema_pair.postgres_version:
             raise ValueError("live target schema pair changed after preflight")
         existing = conn.execute(
@@ -1250,22 +1263,26 @@ def _guard_definitions(manifest: Manifest) -> tuple[ReplicationGuardSpec, ...]:
     return replication_guard_specs(manifest)
 
 
-def _guard_sql(definition: ReplicationGuardSpec) -> str:
-    columns = ", ".join(_quote(column) for column in definition.columns)
-    return (
-        f"CREATE UNIQUE INDEX {_quote(definition.name)} "
-        f"ON {_quote(definition.table)} ({columns})"
+def _guard_sql(definition: ReplicationGuardSpec, business_schema: str) -> Any:
+    return sql.SQL("CREATE UNIQUE INDEX {} ON {}.{} ({})").format(
+        sql.Identifier(definition.name),
+        sql.Identifier(business_schema),
+        sql.Identifier(definition.table),
+        sql.SQL(", ").join(sql.Identifier(column) for column in definition.columns),
     )
 
 
-def _execute_guard_statement(conn: Any, statement: str) -> None:
+def _execute_guard_statement(conn: Any, statement: Any) -> None:
     """Atomic-failure injection seam for guard installation tests."""
     conn.execute(statement)
 
 
-def _verify_postgres_guard(conn: Any, definition: ReplicationGuardSpec) -> None:
+def _verify_postgres_guard(
+    conn: Any, definition: ReplicationGuardSpec, *, business_schema: str
+) -> None:
     row = conn.execute(
         "SELECT t.relname AS table_name, i.indisunique, i.indisvalid, "
+        "i.indisready,i.indislive,NOT i.indnullsnotdistinct AS nulls_distinct, "
         "i.indpred IS NULL AS no_predicate, i.indexprs IS NULL AS no_expression, "
         "ARRAY(SELECT a.attname FROM unnest(i.indkey) WITH ORDINALITY k(attnum,ord) "
         "JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum "
@@ -1280,29 +1297,34 @@ def _verify_postgres_guard(conn: Any, definition: ReplicationGuardSpec) -> None:
         "JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum "
         "JOIN pg_type ty ON ty.oid=a.atttypid "
         "LEFT JOIN pg_collation co ON co.oid=a.attcollation "
+        "LEFT JOIN pg_namespace cn ON cn.oid=co.collnamespace "
         "WHERE k.ord <= i.indnkeyatts AND ty.typcollation <> 0 "
-        "AND co.collname IS DISTINCT FROM 'C') AS reviewed_collation "
+        "AND (co.collname IS DISTINCT FROM 'C' "
+        "OR cn.nspname IS DISTINCT FROM 'pg_catalog')) AS reviewed_collation "
         "FROM pg_class x JOIN pg_namespace n ON n.oid=x.relnamespace "
         "JOIN pg_index i ON i.indexrelid=x.oid JOIN pg_class t ON t.oid=i.indrelid "
         "JOIN pg_am am ON am.oid=x.relam "
-        "WHERE n.nspname=current_schema() AND x.relname=%s",
-        (definition.name,),
+        "WHERE n.nspname=%s AND x.relname=%s",
+        (business_schema, definition.name),
     ).fetchone()
     if row is None:
         raise ValueError(f"PostgreSQL shadow guard is missing: {definition.name}")
-    columns = tuple(str(value) for value in _row_value(row, "columns", 5))
+    columns = tuple(str(value) for value in _row_value(row, "columns", 8))
     if (
         str(_row_value(row, "table_name", 0)) != definition.table
         or not bool(_row_value(row, "indisunique", 1))
         or not bool(_row_value(row, "indisvalid", 2))
-        or not bool(_row_value(row, "no_predicate", 3))
-        or not bool(_row_value(row, "no_expression", 4))
+        or not bool(_row_value(row, "indisready", 3))
+        or not bool(_row_value(row, "indislive", 4))
+        or not bool(_row_value(row, "nulls_distinct", 5))
+        or not bool(_row_value(row, "no_predicate", 6))
+        or not bool(_row_value(row, "no_expression", 7))
         or columns != definition.columns
-        or not bool(_row_value(row, "no_include", 6))
-        or str(_row_value(row, "access_method", 7)) != "btree"
-        or not bool(_row_value(row, "default_opclasses", 8))
-        or not bool(_row_value(row, "default_order", 9))
-        or not bool(_row_value(row, "reviewed_collation", 10))
+        or not bool(_row_value(row, "no_include", 9))
+        or str(_row_value(row, "access_method", 10)) != "btree"
+        or not bool(_row_value(row, "default_opclasses", 11))
+        or not bool(_row_value(row, "default_order", 12))
+        or not bool(_row_value(row, "reviewed_collation", 13))
     ):
         raise ValueError(
             f"PostgreSQL shadow guard definition mismatch: {definition.name}"
@@ -1314,14 +1336,16 @@ def _validate_postgres_guard_set(
     definitions: tuple[ReplicationGuardSpec, ...],
     *,
     allow_missing: bool,
+    business_schema: str,
 ) -> None:
     actual = {
         str(_row_value(row, "index_name", 0))
         for row in conn.execute(
             "SELECT x.relname AS index_name FROM pg_class x "
             "JOIN pg_namespace n ON n.oid=x.relnamespace "
-            "WHERE n.nspname=current_schema() AND x.relkind='i' "
-            "AND x.relname LIKE 'shadow_uq_%' ORDER BY x.relname"
+            "WHERE n.nspname=%s AND x.relkind='i' "
+            "AND x.relname LIKE %s ORDER BY x.relname",
+            (business_schema, "shadow_uq_%"),
         ).fetchall()
     }
     expected = {definition.name for definition in definitions}
@@ -1329,15 +1353,36 @@ def _validate_postgres_guard_set(
         raise ValueError("PostgreSQL shadow replication-key guard set is unrecognized")
 
 
-def _postgres_schema_version(conn: Any) -> int:
-    relation = conn.execute(
-        "SELECT to_regclass('silicon_schema_migrations') AS relation"
-    ).fetchone()
-    if _row_value(relation, "relation", 0) is None:
+def _postgres_schema_version(conn: Any, business_schema: str | None = None) -> int:
+    if business_schema is None:
+        relation = conn.execute(
+            "SELECT c.oid AS relation FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=current_schema() AND c.relname=%s AND c.relkind='r'",
+            ("silicon_schema_migrations",),
+        ).fetchone()
+        ledger: Any = sql.Identifier("silicon_schema_migrations")
+    else:
+        relation = conn.execute(
+            "SELECT c.oid AS relation FROM pg_class c "
+            "JOIN pg_namespace n ON n.oid=c.relnamespace "
+            "WHERE n.nspname=%s AND c.relname=%s AND c.relkind='r'",
+            (business_schema, "silicon_schema_migrations"),
+        ).fetchone()
+        ledger = sql.SQL("{}.{}").format(
+            sql.Identifier(business_schema), sql.Identifier("silicon_schema_migrations")
+        )
+    if relation is None or _row_value(relation, "relation", 0) is None:
         return 0
-    rows = conn.execute(
-        "SELECT version,checksum FROM silicon_schema_migrations ORDER BY version"
-    ).fetchall()
+    rows = (
+        conn.execute(
+            "SELECT version,checksum FROM silicon_schema_migrations ORDER BY version"
+        ).fetchall()
+        if business_schema is None
+        else conn.execute(
+            sql.SQL("SELECT version,checksum FROM {} ORDER BY version").format(ledger)
+        ).fetchall()
+    )
     versions = [int(_row_value(row, "version", 0)) for row in rows]
     if versions != list(range(1, len(versions) + 1)):
         raise ValueError("PostgreSQL migration ledger is not contiguous")
@@ -1368,7 +1413,16 @@ def prepare_postgres_replication_key_guards(
     with target.write() as conn:
         _lock_schema_and_control(conn)
         _validate_control_schema(conn)
-        version = _postgres_schema_version(conn)
+        run_row = conn.execute(
+            f"{_RUN_SELECT} WHERE run_id=%s FOR UPDATE", (run_id,)
+        ).fetchone()
+        if run_row is None:
+            raise ValueError(
+                "shadow run must exist before PostgreSQL guard installation"
+            )
+        run_state = _state_from_row(run_row)
+        business_schema = run_state.target_business_schema
+        version = _postgres_schema_version(conn, business_schema)
         if version != manifest.schema_pair.postgres_version:
             raise ValueError(
                 "PostgreSQL target must be formally migrated to the exact running schema pair before guards"
@@ -1378,53 +1432,64 @@ def prepare_postgres_replication_key_guards(
             manifest,
             schema_version=version,
             expected_pair=manifest.schema_pair,
+            business_schema=business_schema,
         )
         identity = fingerprint_postgres(_target_url(target), conn)
-        run_row = conn.execute(
-            f"{_RUN_SELECT} WHERE run_id=%s FOR UPDATE", (run_id,)
-        ).fetchone()
-        if run_row is None:
-            raise ValueError(
-                "shadow run must exist before PostgreSQL guard installation"
-            )
-        run_state = _state_from_row(run_row)
         if (
             run_state.phase is not ShadowPhase.OFF
             or run_state.schema_pair != manifest.schema_pair
             or run_state.target_identity_hash != identity.identity_hash
         ):
             raise ValueError("PostgreSQL guard target identity or run state changed")
-        _validate_postgres_guard_set(conn, definitions, allow_missing=True)
+        _validate_postgres_guard_set(
+            conn,
+            definitions,
+            allow_missing=True,
+            business_schema=business_schema,
+        )
         for definition in definitions:
-            table = _quote(definition.table)
-            columns = tuple(_quote(column) for column in definition.columns)
-            nulls = " OR ".join(f"{column} IS NULL" for column in columns)
-            if conn.execute(f"SELECT 1 FROM {table} WHERE {nulls} LIMIT 1").fetchone():
+            table = sql.SQL("{}.{}").format(
+                sql.Identifier(business_schema), sql.Identifier(definition.table)
+            )
+            columns = tuple(sql.Identifier(column) for column in definition.columns)
+            nulls = sql.SQL(" OR ").join(
+                sql.SQL("{} IS NULL").format(column) for column in columns
+            )
+            if conn.execute(
+                sql.SQL("SELECT 1 FROM {} WHERE {} LIMIT 1").format(table, nulls)
+            ).fetchone():
                 raise ValueError(
                     f"nullable PostgreSQL replication key in {definition.table}"
                 )
-            key_sql = ", ".join(columns)
+            key_sql = sql.SQL(", ").join(columns)
             if conn.execute(
-                f"SELECT 1 FROM {table} GROUP BY {key_sql} HAVING COUNT(*) > 1 LIMIT 1"
+                sql.SQL(
+                    "SELECT 1 FROM {} GROUP BY {} HAVING COUNT(*) > 1 LIMIT 1"
+                ).format(table, key_sql)
             ).fetchone():
                 raise ValueError(
                     f"duplicate PostgreSQL replication key in {definition.table}"
                 )
             count_row = conn.execute(
-                f"SELECT COUNT(*)::bigint AS count FROM {table}"
+                sql.SQL("SELECT COUNT(*)::bigint AS count FROM {}").format(table)
             ).fetchone()
             row_counts.append(
                 (definition.table, int(_row_value(count_row, "count", 0)))
             )
             existing = conn.execute(
                 "SELECT 1 FROM pg_class x JOIN pg_namespace n ON n.oid=x.relnamespace "
-                "WHERE n.nspname=current_schema() AND x.relname=%s AND x.relkind='i'",
-                (definition.name,),
+                "WHERE n.nspname=%s AND x.relname=%s AND x.relkind='i'",
+                (business_schema, definition.name),
             ).fetchone()
             if existing is None:
-                _execute_guard_statement(conn, _guard_sql(definition))
-            _verify_postgres_guard(conn, definition)
-        _validate_postgres_guard_set(conn, definitions, allow_missing=False)
+                _execute_guard_statement(conn, _guard_sql(definition, business_schema))
+            _verify_postgres_guard(conn, definition, business_schema=business_schema)
+        _validate_postgres_guard_set(
+            conn,
+            definitions,
+            allow_missing=False,
+            business_schema=business_schema,
+        )
         report = GuardReport(
             side="postgres",
             run_id=run_id,
@@ -1542,7 +1607,7 @@ def _validate_live_postgres_forward_target(
     postgres_report: GuardReport,
     manifest: Manifest,
 ) -> DatabaseFingerprint:
-    version = _postgres_schema_version(conn)
+    version = _postgres_schema_version(conn, state.target_business_schema)
     if version != manifest.schema_pair.postgres_version:
         raise ValueError("live PostgreSQL schema pair changed before capture enable")
     validate_postgres_connection(
@@ -1550,6 +1615,7 @@ def _validate_live_postgres_forward_target(
         manifest,
         schema_version=version,
         expected_pair=manifest.schema_pair,
+        business_schema=state.target_business_schema,
     )
     live_target = fingerprint_postgres(_target_url(target), conn)
     if (
@@ -1558,10 +1624,15 @@ def _validate_live_postgres_forward_target(
     ):
         raise ValueError("live PostgreSQL target identity changed")
     _validate_postgres_guard_set(
-        conn, _guard_definitions(manifest), allow_missing=False
+        conn,
+        _guard_definitions(manifest),
+        allow_missing=False,
+        business_schema=state.target_business_schema,
     )
     for definition in _guard_definitions(manifest):
-        _verify_postgres_guard(conn, definition)
+        _verify_postgres_guard(
+            conn, definition, business_schema=state.target_business_schema
+        )
     return live_target
 
 

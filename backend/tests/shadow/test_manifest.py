@@ -107,9 +107,7 @@ def test_manifest_keys_ranks_transforms_blobs_and_paths_are_reviewed(fresh_sqlit
     )
     assert specs["sources"].path_columns == ("file_path",)
     assert {
-        (spec.name, column)
-        for spec in specs.values()
-        for column in spec.blob_columns
+        (spec.name, column) for spec in specs.values() for column in spec.blob_columns
     } == {
         ("chunk_embeddings", "vector"),
         ("element_embeddings", "vector"),
@@ -180,9 +178,7 @@ def test_postgres_contract_rejects_missing_or_nullable_replication_key(failure):
         ]
         message = "missing PostgreSQL replication key"
     else:
-        next(column for column in columns if column["name"] == "id")[
-            "nullable"
-        ] = True
+        next(column for column in columns if column["name"] == "id")["nullable"] = True
         message = "nullable PostgreSQL replication key"
     with pytest.raises(ValueError, match=message):
         validate_postgres_schema(
@@ -205,18 +201,14 @@ def test_sqlite_fts_prefix_does_not_hide_an_unknown_ordinary_table(fresh_sqlite)
     fresh_sqlite.execute(
         "CREATE TABLE chunks_fts_unreviewed_business(id TEXT PRIMARY KEY)"
     )
-    with pytest.raises(
-        ValueError, match="unknown=.*chunks_fts_unreviewed_business"
-    ):
+    with pytest.raises(ValueError, match="unknown=.*chunks_fts_unreviewed_business"):
         validate_sqlite_schema(
             fresh_sqlite, MANIFEST, expected_pair=RUNNING_SCHEMA_PAIR
         )
 
 
 def test_sqlite_shadow_prefix_does_not_hide_an_unknown_ordinary_table(fresh_sqlite):
-    fresh_sqlite.execute(
-        "CREATE TABLE shadow_unreviewed_business(id TEXT PRIMARY KEY)"
-    )
+    fresh_sqlite.execute("CREATE TABLE shadow_unreviewed_business(id TEXT PRIMARY KEY)")
     with pytest.raises(ValueError, match="unknown=.*shadow_unreviewed_business"):
         validate_sqlite_schema(
             fresh_sqlite, MANIFEST, expected_pair=RUNNING_SCHEMA_PAIR
@@ -251,13 +243,9 @@ def test_sqlite_shadow_internal_tables_require_explicit_manifest_classification(
         SchemaPair(sqlite_version=29, postgres_version=9, epoch=1),
     ],
 )
-def test_sqlite_requires_the_complete_manifest_schema_pair(
-    fresh_sqlite, expected_pair
-):
+def test_sqlite_requires_the_complete_manifest_schema_pair(fresh_sqlite, expected_pair):
     with pytest.raises(ValueError, match="does not match manifest"):
-        validate_sqlite_schema(
-            fresh_sqlite, MANIFEST, expected_pair=expected_pair
-        )
+        validate_sqlite_schema(fresh_sqlite, MANIFEST, expected_pair=expected_pair)
 
 
 @pytest.mark.parametrize(
@@ -349,9 +337,7 @@ def test_postgres_contract_rejects_unreviewed_topology_and_storage(mutation, mes
 def test_postgres_contract_rejects_unclassified_bytea_column():
     specs = list(MANIFEST.tables)
     index = next(
-        index
-        for index, spec in enumerate(specs)
-        if spec.name == "chunk_embeddings"
+        index for index, spec in enumerate(specs) if spec.name == "chunk_embeddings"
     )
     specs[index] = replace(specs[index], blob_columns=())
     unclassified = Manifest(RUNNING_SCHEMA_PAIR, tuple(specs))
@@ -452,12 +438,8 @@ def test_manifest_rejects_duplicate_rank_unknown_transform_and_fk_inversion(
 
     specs = list(MANIFEST.tables)
     by_name = {spec.name: index for index, spec in enumerate(specs)}
-    specs[by_name["notebooks"]] = replace(
-        specs[by_name["notebooks"]], copy_rank=1000
-    )
-    specs[by_name["chunks_fts"]] = replace(
-        specs[by_name["chunks_fts"]], copy_rank=15
-    )
+    specs[by_name["notebooks"]] = replace(specs[by_name["notebooks"]], copy_rank=1000)
+    specs[by_name["chunks_fts"]] = replace(specs[by_name["chunks_fts"]], copy_rank=15)
     inverted = Manifest(RUNNING_SCHEMA_PAIR, tuple(specs))
     with pytest.raises(ValueError, match="copy-rank inversion"):
         validate_sqlite_schema(

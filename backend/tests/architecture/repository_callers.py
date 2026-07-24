@@ -25,6 +25,9 @@ SQLITE_REPOSITORY_PREFIX = "backend/app/repositories/sqlite/"
 REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
 
 SQL_REASON_BY_PATH = {
+    "backend/app/migration/shadow/postgres_catalog.py": (
+        "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v9 business catalog before copying and checkpoint publication"
+    ),
     "backend/app/migration/shadow/capture.py": (
         "temporary migration boundary owns run-scoped SQLite capture DDL"
     ),
@@ -36,6 +39,12 @@ SQL_REASON_BY_PATH = {
     ),
     "backend/app/migration/shadow/manifest.py": (
         "temporary migration boundary validates source and target schema keys"
+    ),
+    "backend/app/migration/shadow/snapshot.py": (
+        "temporary migration boundary validates and publishes a SQLite backup"
+    ),
+    "backend/app/migration/shadow/bulk_copy.py": (
+        "temporary migration boundary owns resumable baseline COPY and checkpoints"
     ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
@@ -101,6 +110,12 @@ PRIVATE_REASON_BY_PATH = {
 }
 
 SQLITE_CONNECT_REASON_BY_PATH = {
+    "backend/app/migration/shadow/snapshot.py": (
+        "temporary migration boundary opens its private validated backup"
+    ),
+    "backend/app/migration/shadow/bulk_copy.py": (
+        "temporary migration boundary streams its immutable private snapshot"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),
@@ -220,9 +235,7 @@ def _repo_like_names(tree: ast.AST) -> set[str]:
                 function = dotted_name(value.func).rsplit(".", 1)[-1]
                 if function in {"SQLiteRepository", "repository"}:
                     names.update(
-                        target.id
-                        for target in targets
-                        if isinstance(target, ast.Name)
+                        target.id for target in targets if isinstance(target, ast.Name)
                     )
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for argument in (*node.args.args, *node.args.kwonlyargs):

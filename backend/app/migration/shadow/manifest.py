@@ -4,12 +4,15 @@ The manifest is intentionally data-only.  Later capture/copy/apply tasks consume
 the names declared here; they must not infer scope from a live database and
 silently accept a newly added table.
 """
+
 from __future__ import annotations
 
 import re
 import sqlite3
 from collections.abc import Mapping
 from typing import Any
+
+from psycopg import sql
 
 from app.migration.shadow.types import (
     Manifest,
@@ -144,72 +147,328 @@ def _table(
 
 _TABLES = (
     _table("app_settings", ("key",), ReplicationKeyKind.DECLARED_PK, 1, "timestamptz"),
-    _table("community_members", ("notebook_id", "level", "canonical_id"), ReplicationKeyKind.SHADOW_UNIQUE, 2, "identity"),
-    _table("concept_whitelist", ("term",), ReplicationKeyKind.DECLARED_PK, 3, "timestamptz"),
+    _table(
+        "community_members",
+        ("notebook_id", "level", "canonical_id"),
+        ReplicationKeyKind.SHADOW_UNIQUE,
+        2,
+        "identity",
+    ),
+    _table(
+        "concept_whitelist", ("term",), ReplicationKeyKind.DECLARED_PK, 3, "timestamptz"
+    ),
     _table("conversations", ("id",), ReplicationKeyKind.DECLARED_PK, 4, "timestamptz"),
     # seed-first keeps the shadow unique guard from replacing the existing
     # (notebook_id, run_id, seed) operational access path.
-    _table("kg_canonical_scratch", ("seed", "notebook_id", "run_id"), ReplicationKeyKind.SHADOW_UNIQUE, 5, "identity"),
-    _table("kg_cluster_scratch", ("object_id", "notebook_id", "run_id"), ReplicationKeyKind.SHADOW_UNIQUE, 6, "identity"),
-    _table("knowledge_embeddings", ("object_id",), ReplicationKeyKind.DECLARED_PK, 7, "bytea+timestamptz", blob_columns=("vector",)),
-    _table("knowledge_object_sources", ("object_id", "source_id"), ReplicationKeyKind.SHADOW_UNIQUE, 8, "identity"),
-    _table("object_schemas", ("object_type",), ReplicationKeyKind.DECLARED_PK, 9, "jsonb+timestamptz"),
-    _table("system_model_service_status", ("service_id",), ReplicationKeyKind.DECLARED_PK, 10, "timestamptz"),
+    _table(
+        "kg_canonical_scratch",
+        ("seed", "notebook_id", "run_id"),
+        ReplicationKeyKind.SHADOW_UNIQUE,
+        5,
+        "identity",
+    ),
+    _table(
+        "kg_cluster_scratch",
+        ("object_id", "notebook_id", "run_id"),
+        ReplicationKeyKind.SHADOW_UNIQUE,
+        6,
+        "identity",
+    ),
+    _table(
+        "knowledge_embeddings",
+        ("object_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        7,
+        "bytea+timestamptz",
+        blob_columns=("vector",),
+    ),
+    _table(
+        "knowledge_object_sources",
+        ("object_id", "source_id"),
+        ReplicationKeyKind.SHADOW_UNIQUE,
+        8,
+        "identity",
+    ),
+    _table(
+        "object_schemas",
+        ("object_type",),
+        ReplicationKeyKind.DECLARED_PK,
+        9,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "system_model_service_status",
+        ("service_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        10,
+        "timestamptz",
+    ),
     _table("users", ("id",), ReplicationKeyKind.DECLARED_PK, 11, "timestamptz"),
-    _table("agent_profiles", ("id",), ReplicationKeyKind.DECLARED_PK, 12, "timestamptz"),
-    _table("auth_sessions", ("token",), ReplicationKeyKind.DECLARED_PK, 13, "timestamptz"),
-    _table("model_service_status", ("user_id", "service"), ReplicationKeyKind.DECLARED_PK, 14, "timestamptz"),
-    _table("notebooks", ("id",), ReplicationKeyKind.DECLARED_PK, 15, "jsonb+timestamptz"),
-    _table("agent_access_tokens", ("id",), ReplicationKeyKind.DECLARED_PK, 16, "jsonb+timestamptz"),
-    _table("agent_token_notebooks", ("token_id", "notebook_id"), ReplicationKeyKind.DECLARED_PK, 17, "identity"),
+    _table(
+        "agent_profiles", ("id",), ReplicationKeyKind.DECLARED_PK, 12, "timestamptz"
+    ),
+    _table(
+        "auth_sessions", ("token",), ReplicationKeyKind.DECLARED_PK, 13, "timestamptz"
+    ),
+    _table(
+        "model_service_status",
+        ("user_id", "service"),
+        ReplicationKeyKind.DECLARED_PK,
+        14,
+        "timestamptz",
+    ),
+    _table(
+        "notebooks", ("id",), ReplicationKeyKind.DECLARED_PK, 15, "jsonb+timestamptz"
+    ),
+    _table(
+        "agent_access_tokens",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        16,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "agent_token_notebooks",
+        ("token_id", "notebook_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        17,
+        "identity",
+    ),
     _table("answers", ("id",), ReplicationKeyKind.DECLARED_PK, 18, "jsonb+timestamptz"),
-    _table("ask_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 19, "jsonb+timestamptz"),
-    _table("ask_trace_steps", ("job_id", "seq"), ReplicationKeyKind.DECLARED_PK, 20, "jsonb+timestamptz"),
-    _table("canonical_relations", ("notebook_id", "canonical_src", "edge_type", "canonical_tgt"), ReplicationKeyKind.DECLARED_PK, 21, "jsonb+timestamptz"),
-    _table("communities", ("id",), ReplicationKeyKind.DECLARED_PK, 22, "jsonb+timestamptz"),
-    _table("concept_clusters", ("id",), ReplicationKeyKind.DECLARED_PK, 23, "timestamptz"),
-    _table("concept_comentions", ("notebook_id", "canonical_a", "canonical_b"), ReplicationKeyKind.DECLARED_PK, 24, "identity"),
-    _table("concept_merge_candidates", ("id",), ReplicationKeyKind.DECLARED_PK, 25, "timestamptz"),
+    _table(
+        "ask_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 19, "jsonb+timestamptz"
+    ),
+    _table(
+        "ask_trace_steps",
+        ("job_id", "seq"),
+        ReplicationKeyKind.DECLARED_PK,
+        20,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "canonical_relations",
+        ("notebook_id", "canonical_src", "edge_type", "canonical_tgt"),
+        ReplicationKeyKind.DECLARED_PK,
+        21,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "communities", ("id",), ReplicationKeyKind.DECLARED_PK, 22, "jsonb+timestamptz"
+    ),
+    _table(
+        "concept_clusters", ("id",), ReplicationKeyKind.DECLARED_PK, 23, "timestamptz"
+    ),
+    _table(
+        "concept_comentions",
+        ("notebook_id", "canonical_a", "canonical_b"),
+        ReplicationKeyKind.DECLARED_PK,
+        24,
+        "identity",
+    ),
+    _table(
+        "concept_merge_candidates",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        25,
+        "timestamptz",
+    ),
     _table("feedback", ("id",), ReplicationKeyKind.DECLARED_PK, 26, "timestamptz"),
     _table("kg_build_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 27, "timestamptz"),
-    _table("kg_conflict_candidates", ("id",), ReplicationKeyKind.DECLARED_PK, 28, "jsonb+timestamptz"),
-    _table("kg_rebuild_checkpoint", ("notebook_id", "input_version", "stage", "item_key"), ReplicationKeyKind.DECLARED_PK, 29, "jsonb+timestamptz"),
-    _table("knowhow_tables", ("id",), ReplicationKeyKind.DECLARED_PK, 30, "timestamptz"),
-    _table("knowhow_changes", ("id",), ReplicationKeyKind.DECLARED_PK, 31, "timestamptz"),
+    _table(
+        "kg_conflict_candidates",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        28,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "kg_rebuild_checkpoint",
+        ("notebook_id", "input_version", "stage", "item_key"),
+        ReplicationKeyKind.DECLARED_PK,
+        29,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "knowhow_tables", ("id",), ReplicationKeyKind.DECLARED_PK, 30, "timestamptz"
+    ),
+    _table(
+        "knowhow_changes", ("id",), ReplicationKeyKind.DECLARED_PK, 31, "timestamptz"
+    ),
     _table("knowhow_columns", ("id",), ReplicationKeyKind.DECLARED_PK, 32, "identity"),
-    _table("knowhow_milestones", ("id",), ReplicationKeyKind.DECLARED_PK, 33, "timestamptz"),
+    _table(
+        "knowhow_milestones", ("id",), ReplicationKeyKind.DECLARED_PK, 33, "timestamptz"
+    ),
     _table("knowhow_rows", ("id",), ReplicationKeyKind.DECLARED_PK, 34, "timestamptz"),
-    _table("knowhow_cell_code", ("id",), ReplicationKeyKind.DECLARED_PK, 35, "timestamptz"),
+    _table(
+        "knowhow_cell_code", ("id",), ReplicationKeyKind.DECLARED_PK, 35, "timestamptz"
+    ),
     _table("knowhow_cells", ("id",), ReplicationKeyKind.DECLARED_PK, 36, "timestamptz"),
-    _table("knowledge_objects", ("id",), ReplicationKeyKind.DECLARED_PK, 37, "jsonb+timestamptz"),
-    _table("memory_items", ("id",), ReplicationKeyKind.DECLARED_PK, 38, "jsonb+timestamptz"),
-    _table("memory_embeddings", ("memory_id",), ReplicationKeyKind.DECLARED_PK, 39, "bytea+timestamptz", blob_columns=("vector",)),
-    _table("memory_provenance", ("id",), ReplicationKeyKind.DECLARED_PK, 40, "jsonb+timestamptz"),
-    _table("memory_revisions", ("id",), ReplicationKeyKind.DECLARED_PK, 41, "jsonb+timestamptz"),
-    _table("mention_edges", ("notebook_id", "claim_object_id", "concept_canonical_id"), ReplicationKeyKind.DECLARED_PK, 42, "identity"),
-    _table("merge_review_jobs", ("notebook_id",), ReplicationKeyKind.DECLARED_PK, 43, "timestamptz"),
-    _table("notebook_assets", ("id",), ReplicationKeyKind.DECLARED_PK, 44, "timestamptz"),
-    _table("notebook_bases", ("notebook_id", "base_notebook_id"), ReplicationKeyKind.DECLARED_PK, 45, "timestamptz"),
-    _table("notebook_members", ("notebook_id", "user_id"), ReplicationKeyKind.DECLARED_PK, 46, "timestamptz"),
-    _table("promotion_candidates", ("id",), ReplicationKeyKind.DECLARED_PK, 47, "timestamptz"),
+    _table(
+        "knowledge_objects",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        37,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "memory_items", ("id",), ReplicationKeyKind.DECLARED_PK, 38, "jsonb+timestamptz"
+    ),
+    _table(
+        "memory_embeddings",
+        ("memory_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        39,
+        "bytea+timestamptz",
+        blob_columns=("vector",),
+    ),
+    _table(
+        "memory_provenance",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        40,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "memory_revisions",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        41,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "mention_edges",
+        ("notebook_id", "claim_object_id", "concept_canonical_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        42,
+        "identity",
+    ),
+    _table(
+        "merge_review_jobs",
+        ("notebook_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        43,
+        "timestamptz",
+    ),
+    _table(
+        "notebook_assets", ("id",), ReplicationKeyKind.DECLARED_PK, 44, "timestamptz"
+    ),
+    _table(
+        "notebook_bases",
+        ("notebook_id", "base_notebook_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        45,
+        "timestamptz",
+    ),
+    _table(
+        "notebook_members",
+        ("notebook_id", "user_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        46,
+        "timestamptz",
+    ),
+    _table(
+        "promotion_candidates",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        47,
+        "timestamptz",
+    ),
     _table("reports", ("id",), ReplicationKeyKind.DECLARED_PK, 48, "jsonb+timestamptz"),
-    _table("sources", ("id",), ReplicationKeyKind.DECLARED_PK, 49, "timestamptz", path_columns=("file_path",)),
+    _table(
+        "sources",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        49,
+        "timestamptz",
+        path_columns=("file_path",),
+    ),
     _table("chunks", ("id",), ReplicationKeyKind.DECLARED_PK, 50, "jsonb+timestamptz"),
-    _table("chunk_embeddings", ("chunk_id",), ReplicationKeyKind.DECLARED_PK, 51, "bytea+timestamptz", blob_columns=("vector",)),
-    _table("extraction_runs", ("id",), ReplicationKeyKind.DECLARED_PK, 52, "timestamptz"),
-    _table("knowledge_relations", ("id",), ReplicationKeyKind.DECLARED_PK, 53, "jsonb+timestamptz"),
-    _table("relation_embeddings", ("relation_id",), ReplicationKeyKind.DECLARED_PK, 54, "bytea+timestamptz", blob_columns=("vector",)),
-    _table("source_authors", ("id",), ReplicationKeyKind.DECLARED_PK, 55, "timestamptz"),
-    _table("source_elements", ("id",), ReplicationKeyKind.DECLARED_PK, 56, "jsonb+timestamptz"),
-    _table("element_embeddings", ("element_id",), ReplicationKeyKind.DECLARED_PK, 57, "bytea+timestamptz", blob_columns=("vector",)),
-    _table("source_paper_meta", ("source_id",), ReplicationKeyKind.DECLARED_PK, 58, "jsonb+timestamptz"),
-    _table("unified_kg_state", ("notebook_id",), ReplicationKeyKind.DECLARED_PK, 59, "timestamptz"),
-    _table("user_profiles", ("id",), ReplicationKeyKind.DECLARED_PK, 60, "jsonb+timestamptz"),
+    _table(
+        "chunk_embeddings",
+        ("chunk_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        51,
+        "bytea+timestamptz",
+        blob_columns=("vector",),
+    ),
+    _table(
+        "extraction_runs", ("id",), ReplicationKeyKind.DECLARED_PK, 52, "timestamptz"
+    ),
+    _table(
+        "knowledge_relations",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        53,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "relation_embeddings",
+        ("relation_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        54,
+        "bytea+timestamptz",
+        blob_columns=("vector",),
+    ),
+    _table(
+        "source_authors", ("id",), ReplicationKeyKind.DECLARED_PK, 55, "timestamptz"
+    ),
+    _table(
+        "source_elements",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        56,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "element_embeddings",
+        ("element_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        57,
+        "bytea+timestamptz",
+        blob_columns=("vector",),
+    ),
+    _table(
+        "source_paper_meta",
+        ("source_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        58,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "unified_kg_state",
+        ("notebook_id",),
+        ReplicationKeyKind.DECLARED_PK,
+        59,
+        "timestamptz",
+    ),
+    _table(
+        "user_profiles",
+        ("id",),
+        ReplicationKeyKind.DECLARED_PK,
+        60,
+        "jsonb+timestamptz",
+    ),
     TableSpec("chunks_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 61),
-    TableSpec("kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 62),
-    TableSpec("memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 63),
-    TableSpec("shadow_change_log", TableClass.SHADOW_INTERNAL, (), ReplicationKeyKind.DECLARED_PK, 64),
-    TableSpec("shadow_capture_control", TableClass.SHADOW_INTERNAL, (), ReplicationKeyKind.DECLARED_PK, 65),
+    TableSpec(
+        "kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 62
+    ),
+    TableSpec(
+        "memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 63
+    ),
+    TableSpec(
+        "shadow_change_log",
+        TableClass.SHADOW_INTERNAL,
+        (),
+        ReplicationKeyKind.DECLARED_PK,
+        64,
+    ),
+    TableSpec(
+        "shadow_capture_control",
+        TableClass.SHADOW_INTERNAL,
+        (),
+        ReplicationKeyKind.DECLARED_PK,
+        65,
+    ),
 )
 
 MANIFEST = Manifest(schema_pair=RUNNING_SCHEMA_PAIR, tables=_TABLES)
@@ -265,7 +524,9 @@ def validate_manifest(manifest: Manifest) -> None:
         if spec.table_class is TableClass.REPLICATED and not spec.replication_key:
             raise ValueError(f"replicated table has no stable key: {spec.name}")
         if spec.table_class is not TableClass.REPLICATED and spec.replication_key:
-            raise ValueError(f"non-replicated table declares a replication key: {spec.name}")
+            raise ValueError(
+                f"non-replicated table declares a replication key: {spec.name}"
+            )
         for pipeline in (spec.sqlite_to_postgres, spec.postgres_to_sqlite):
             names_in_pipeline = _pipeline_names(pipeline)
             if not names_in_pipeline or any(
@@ -273,7 +534,9 @@ def validate_manifest(manifest: Manifest) -> None:
             ):
                 raise ValueError(f"unknown transform pipeline: {pipeline!r}")
     if frozenset(manifest.replicated_names) != frozenset(POSTGRES_BUSINESS_TABLES):
-        raise ValueError("manifest does not match the paired PostgreSQL business tables")
+        raise ValueError(
+            "manifest does not match the paired PostgreSQL business tables"
+        )
     if manifest.schema_pair != RUNNING_SCHEMA_PAIR:
         raise ValueError("manifest uses an unsupported schema pair")
     if (
@@ -304,8 +567,7 @@ def _assert_key_rows(
         raise ValueError(f"nullable replication key in {spec.name}")
     column_sql = ", ".join(columns)
     if execute(
-        f"SELECT 1 FROM {table} GROUP BY {column_sql} "
-        "HAVING COUNT(*) > 1 LIMIT 1"
+        f"SELECT 1 FROM {table} GROUP BY {column_sql} HAVING COUNT(*) > 1 LIMIT 1"
     ).fetchone():
         raise ValueError(f"duplicate replication key in {spec.name}")
 
@@ -397,7 +659,15 @@ def validate_sqlite_schema(
     manifest: Manifest,
     *,
     expected_pair: SchemaPair,
+    validate_rows: bool = True,
 ) -> SchemaValidationReport:
+    """Validate the frozen SQLite v31 schema and, by default, its key rows.
+
+    ``validate_rows=False`` is reserved for short live-source fences that must
+    validate catalog/control identity without scanning every business table
+    while holding ``BEGIN IMMEDIATE``.  Snapshot and preflight callers retain
+    the fail-closed row validation default.
+    """
     validate_manifest(manifest)
     _validate_expected_pair(manifest, expected_pair)
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
@@ -449,9 +719,7 @@ def validate_sqlite_schema(
         ):
             raise ValueError(f"declared primary key drift in {spec.name}")
         schema_nullable_keys = {
-            column
-            for column in spec.replication_key
-            if not columns[column]["notnull"]
+            column for column in spec.replication_key if not columns[column]["notnull"]
         }
         if schema_nullable_keys != set(spec.sqlite_null_guard_columns):
             raise ValueError(
@@ -459,13 +727,16 @@ def validate_sqlite_schema(
                 f"schema_nullable={sorted(schema_nullable_keys)}, "
                 f"declared={sorted(spec.sqlite_null_guard_columns)}"
             )
-        _assert_key_rows(conn.execute, spec)
+        if validate_rows:
+            _assert_key_rows(conn.execute, spec)
         for foreign_key in conn.execute(
             f"PRAGMA foreign_key_list({_quote_sqlite(spec.name)})"
         ).fetchall():
             parent = str(_row_value(foreign_key, "table", 2))
             if parent in ranks and ranks[parent] >= spec.copy_rank:
-                raise ValueError(f"foreign-key copy-rank inversion: {parent}->{spec.name}")
+                raise ValueError(
+                    f"foreign-key copy-rank inversion: {parent}->{spec.name}"
+                )
 
         declared_blobs = {f"{spec.name}.{column}" for column in spec.blob_columns}
         actual_blobs = {
@@ -491,9 +762,7 @@ def validate_sqlite_schema(
         }
     }
     path_like = {
-        name
-        for name in qualified_columns
-        if name.rsplit(".", 1)[1].endswith("_path")
+        name for name in qualified_columns if name.rsplit(".", 1)[1].endswith("_path")
     }
     if path_like - _FILESYSTEM_PATH_COLUMNS - _NON_FILESYSTEM_PATH_COLUMNS:
         raise ValueError("unclassified filesystem-like path column")
@@ -545,7 +814,9 @@ def validate_postgres_schema(
             columns = {str(column["name"]): column for column in facts["columns"]}
             if not set(spec.replication_key) <= set(columns):
                 raise ValueError(f"missing PostgreSQL replication key in {spec.name}")
-            if any(bool(columns[column]["nullable"]) for column in spec.replication_key):
+            if any(
+                bool(columns[column]["nullable"]) for column in spec.replication_key
+            ):
                 raise ValueError(f"nullable PostgreSQL replication key in {spec.name}")
             if (
                 spec.key_kind is ReplicationKeyKind.DECLARED_PK
@@ -565,21 +836,26 @@ def validate_postgres_schema(
                 for column in facts["columns"]
                 if (column_type := _column_type(column)) in _POSTGRES_SPECIAL_TYPES
             }
-            expected_transform = "+".join(
-                name for name in _TRANSFORM_ORDER if name in selected
-            ) or "identity"
+            expected_transform = (
+                "+".join(name for name in _TRANSFORM_ORDER if name in selected)
+                or "identity"
+            )
             if (
                 spec.sqlite_to_postgres != expected_transform
                 or spec.postgres_to_sqlite != expected_transform
             ):
-                raise ValueError(f"PostgreSQL transform classification drift in {spec.name}")
+                raise ValueError(
+                    f"PostgreSQL transform classification drift in {spec.name}"
+                )
             actual_bytea = {
                 str(column["name"])
                 for column in facts["columns"]
                 if _column_type(column) == "bytea"
             }
             if actual_bytea != set(spec.blob_columns):
-                raise ValueError(f"PostgreSQL BLOB/bytea classification drift in {spec.name}")
+                raise ValueError(
+                    f"PostgreSQL BLOB/bytea classification drift in {spec.name}"
+                )
             if not set(spec.path_columns) <= set(columns):
                 raise ValueError(
                     f"unknown PostgreSQL filesystem path column in {spec.name}"
@@ -616,6 +892,7 @@ def validate_postgres_connection(
     *,
     schema_version: int,
     expected_pair: SchemaPair,
+    business_schema: str | None = None,
 ) -> SchemaValidationReport:
     """Validate live PG reverse totality and scan every stable key.
 
@@ -624,12 +901,20 @@ def validate_postgres_connection(
     """
     validate_manifest(manifest)
     _validate_expected_pair(manifest, expected_pair)
+    table_query = (
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema=current_schema() AND table_type='BASE TABLE' "
+        "AND table_name <> 'silicon_schema_migrations' ORDER BY table_name"
+        if business_schema is None
+        else "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema=%s AND table_type='BASE TABLE' "
+        "AND table_name <> 'silicon_schema_migrations' ORDER BY table_name"
+    )
     table_names = [
         str(row["table_name"])
         for row in conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema=current_schema() AND table_type='BASE TABLE' "
-            "AND table_name <> 'silicon_schema_migrations' ORDER BY table_name"
+            table_query,
+            () if business_schema is None else (business_schema,),
         ).fetchall()
     ]
     tables: dict[str, dict[str, Any]] = {}
@@ -643,9 +928,13 @@ def validate_postgres_connection(
             for row in conn.execute(
                 "SELECT column_name, is_nullable, data_type "
                 "FROM information_schema.columns "
-                "WHERE table_schema=current_schema() AND table_name=%s "
-                "ORDER BY ordinal_position",
-                (table,),
+                + (
+                    "WHERE table_schema=current_schema() AND table_name=%s "
+                    if business_schema is None
+                    else "WHERE table_schema=%s AND table_name=%s "
+                )
+                + "ORDER BY ordinal_position",
+                (table,) if business_schema is None else (business_schema, table),
             ).fetchall()
             if str(row["column_name"]) != "ordinal"
         ]
@@ -656,8 +945,12 @@ def validate_postgres_connection(
             " ORDER BY k.ord) AS columns "
             "FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid "
             "JOIN pg_namespace n ON n.oid=t.relnamespace "
-            "WHERE n.nspname=current_schema() AND t.relname=%s AND c.contype='p'",
-            (table,),
+            + (
+                "WHERE n.nspname=current_schema() AND t.relname=%s AND c.contype='p'"
+                if business_schema is None
+                else "WHERE n.nspname=%s AND t.relname=%s AND c.contype='p'"
+            ),
+            (table,) if business_schema is None else (business_schema, table),
         ).fetchone()
         foreign_keys = [
             {"references_table": str(row["references_table"])}
@@ -666,9 +959,13 @@ def validate_postgres_connection(
                 "FROM pg_constraint c JOIN pg_class child ON child.oid=c.conrelid "
                 "JOIN pg_namespace n ON n.oid=child.relnamespace "
                 "JOIN pg_class parent ON parent.oid=c.confrelid "
-                "WHERE n.nspname=current_schema() AND child.relname=%s "
-                "AND c.contype='f' ORDER BY c.conname",
-                (table,),
+                + (
+                    "WHERE n.nspname=current_schema() AND child.relname=%s "
+                    if business_schema is None
+                    else "WHERE n.nspname=%s AND child.relname=%s "
+                )
+                + "AND c.contype='f' ORDER BY c.conname",
+                (table,) if business_schema is None else (business_schema, table),
             ).fetchall()
         ]
         tables[table] = {
@@ -686,7 +983,26 @@ def validate_postgres_connection(
         expected_pair=expected_pair,
     )
     for spec in manifest.replicated:
-        _assert_key_rows(conn.execute, spec, placeholder="%s")
+        if business_schema is None:
+            _assert_key_rows(conn.execute, spec, placeholder="%s")
+            continue
+        table = sql.SQL("{}.{}").format(
+            sql.Identifier(business_schema), sql.Identifier(spec.name)
+        )
+        columns = tuple(sql.Identifier(column) for column in spec.replication_key)
+        nulls = sql.SQL(" OR ").join(
+            sql.SQL("{} IS NULL").format(column) for column in columns
+        )
+        if conn.execute(
+            sql.SQL("SELECT 1 FROM {} WHERE {} LIMIT 1").format(table, nulls)
+        ).fetchone():
+            raise ValueError(f"nullable replication key in {spec.name}")
+        if conn.execute(
+            sql.SQL("SELECT 1 FROM {} GROUP BY {} HAVING COUNT(*) > 1 LIMIT 1").format(
+                table, sql.SQL(", ").join(columns)
+            )
+        ).fetchone():
+            raise ValueError(f"duplicate replication key in {spec.name}")
     return report
 
 

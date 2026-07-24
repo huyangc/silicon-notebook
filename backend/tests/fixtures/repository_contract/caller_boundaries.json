@@ -637,6 +637,166 @@
       "target": "db.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._begin_live_source_fence",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._bind_snapshot",
+      "target": "conn.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._finalize_copy",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._finish_table",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._integrity_check",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._lock_copy_catalog_tables",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._lock_identity_sequences",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._postgres_columns",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._progress_row",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._reseed_and_verify_identity_sequences",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._reseed_ordinal",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._set_statement_timeout",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._snapshot_batch",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._snapshot_columns",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._sqlite_schema_contract",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._target_cursor",
+      "target": "cursor.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._validate_copy_target",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._validate_target_prefix",
+      "target": "pg_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>.copy_snapshot",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>.copy_snapshot",
+      "target": "sqlite_conn.execute"
+    },
+    {
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/capture.py",
@@ -709,7 +869,7 @@
       "target": "conn.execute"
     },
     {
-      "count": 2,
+      "count": 4,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/control.py",
       "reason": "temporary migration boundary owns shadow preflight and control SQL",
@@ -773,7 +933,7 @@
       "target": "conn.execute"
     },
     {
-      "count": 3,
+      "count": 4,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/control.py",
       "reason": "temporary migration boundary owns shadow preflight and control SQL",
@@ -885,7 +1045,7 @@
       "target": "conn.execute"
     },
     {
-      "count": 4,
+      "count": 6,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/manifest.py",
       "reason": "temporary migration boundary validates source and target schema keys",
@@ -899,6 +1059,78 @@
       "reason": "temporary migration boundary validates source and target schema keys",
       "scope": "<module>.validate_sqlite_schema",
       "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v9 business catalog before copying and checkpoint publication",
+      "scope": "<module>._index_key_tokens",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v9 business catalog before copying and checkpoint publication",
+      "scope": "<module>._validate_fk_constraint_triggers",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v9 business catalog before copying and checkpoint publication",
+      "scope": "<module>._validate_identity_sequences",
+      "target": "conn.execute"
+    },
+    {
+      "count": 9,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v9 business catalog before copying and checkpoint publication",
+      "scope": "<module>.validate_postgres_v9_catalog",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>._change_log_high_water",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>._integrity_check",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>._validate_snapshot_file",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>.create_snapshot",
+      "target": "live_conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>.open_fresh_live_sqlite",
+      "target": "connection.execute"
     },
     {
       "count": 4,
@@ -1324,6 +1556,38 @@
       "path": "backend/app/eval/db.py",
       "reason": "independent evaluation-results database",
       "scope": "<module>.EvalDB._connect",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary streams its immutable private snapshot",
+      "scope": "<module>._open_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary opens its private validated backup",
+      "scope": "<module>._validate_snapshot_file",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary opens its private validated backup",
+      "scope": "<module>.create_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary opens its private validated backup",
+      "scope": "<module>.open_fresh_live_sqlite",
       "target": "sqlite3.connect"
     },
     {
