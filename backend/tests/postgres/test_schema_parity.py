@@ -1015,7 +1015,7 @@ def test_packaged_index_migration_phases_are_exact():
         for version in (3, 4, 5, 8)
         for declaration in index_declarations(version)
     ]
-    assert len(operational) == 73
+    assert len(operational) == 76
     assert not any(unique for unique, _name in operational)
     gin_names = {
         "idx_chunks_text_trgm",
