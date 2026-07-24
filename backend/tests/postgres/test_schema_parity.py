@@ -1010,7 +1010,7 @@ def test_reviewed_json_and_binary_mappings_cover_only_real_columns(tmp_path):
     fingerprint = hashlib.sha256(
         "\n".join(sorted(contract["tables"])).encode("utf-8")
     ).hexdigest()
-    assert fingerprint == "73cc0da6ca61043d17e5aca51d083fc558b04368500939765908cee3745814da"
+    assert fingerprint == "87b641597f5fd2d5fab4b235f9c0d1c00a203d4ba1063a96b8943813967d35fc"
 
 
 def test_packaged_index_migration_phases_are_exact():
@@ -1025,6 +1025,7 @@ def test_packaged_index_migration_phases_are_exact():
         (5, "memory_knowhow_governance_indexes"),
         (6, "search_gin"),
         (7, "cluster_membership_unique"),
+        (8, "master_v28_features"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -1061,7 +1062,7 @@ def test_packaged_index_migration_phases_are_exact():
         for version in (3, 4, 5)
         for declaration in index_declarations(version)
     ]
-    assert len(operational) == 76
+    assert len(operational) == 73
     assert not any(unique for unique, _name in operational)
     gin_names = {
         "idx_chunks_text_trgm",
@@ -1080,12 +1081,24 @@ def test_packaged_index_migration_phases_are_exact():
     cluster_unique = index_declarations(7)
     assert cluster_unique == [(True, "uq_clusters_notebook_type_member")]
 
+    # 0008_master_v28_features packs the SQLite v24–v28 reconciliation indexes
+    # (canonical scratch + knowhow change/milestone history). They mirror the
+    # SQLite contract one-for-one, so they must be counted toward the parity
+    # assertion below or `packaged_names` would fall short by exactly these three.
+    v28_feature_indexes = index_declarations(8)
+    assert v28_feature_indexes == [
+        (False, "idx_kg_canonical_scratch_nb_run_seed"),
+        (False, "idx_knowhow_changes_table"),
+        (False, "idx_knowhow_milestones_table"),
+    ]
+
     contract_names = {item["name"] for item in _reviewed_contract()["sqlite_explicit_indexes"]}
     packaged_names = (
         integrity_names
         | {name for _unique, name in operational}
         | gin_names
         | {name for _unique, name in cluster_unique}
+        | {name for _unique, name in v28_feature_indexes}
     )
     assert packaged_names == contract_names | gin_names
 

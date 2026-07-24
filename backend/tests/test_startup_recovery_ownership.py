@@ -213,10 +213,14 @@ def test_run_startup_settles_stranded_sources_before_marking_ready(monkeypatch):
         startup_warmup.readiness, "mark_ready", _snapshot_then_open_the_gate
     )
 
-    readiness.reset()
+    # begin_lifecycle 里已含 readiness.reset();run_startup 现在必须拿着它发的租约,
+    # 收尾用 close_repository 归还,免得 _active_lifecycle 残留卡住后一个用例的 begin。
+    lease = startup_warmup.begin_lifecycle()
+    repo_ready = None
     try:
-        startup_warmup.run_startup()
+        repo_ready = startup_warmup.run_startup(lease)
     finally:
+        startup_warmup.close_repository(lease, repo_ready)
         real_mark_ready()  # 还原 conftest 的 autouse 前置条件
 
     assert readiness.snapshot()["error"] is None  # 启动没有走进异常分支
@@ -263,10 +267,14 @@ def test_active_lease_is_empty_when_mark_ready_fires(monkeypatch):
         startup_warmup.readiness, "mark_ready", _snapshot_then_open_the_gate
     )
 
-    readiness.reset()
+    # begin_lifecycle 里已含 readiness.reset();run_startup 现在必须拿着它发的租约,
+    # 收尾用 close_repository 归还,免得 _active_lifecycle 残留卡住后一个用例的 begin。
+    lease = startup_warmup.begin_lifecycle()
+    repo_ready = None
     try:
-        startup_warmup.run_startup()
+        repo_ready = startup_warmup.run_startup(lease)
     finally:
+        startup_warmup.close_repository(lease, repo_ready)
         real_mark_ready()  # 还原 conftest 的 autouse 前置条件
 
     assert readiness.snapshot()["error"] is None  # 启动没有走进异常分支

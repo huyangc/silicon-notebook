@@ -137,6 +137,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>', kind='import', target='app.services.repository:UploadedSourceFile'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>', kind='import', target='app.services.repository:UploadedSourceFile'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>', kind='import', target='app.services.repository:UploadedSourceFile'),
+            ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_api_layer', kind='import', target='app.services.repository:UploadedSourceFile'),
         ),
         patches=(
         ),
@@ -876,7 +877,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.deprecate_memory', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.effective_document_limit', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.effective_schemas', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.embedder', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.execute_notebook_kg_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.export_reports', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.extract_source', kind='attribute', target='_runtime'),

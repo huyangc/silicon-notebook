@@ -652,7 +652,14 @@ class AskStateStore:
         """
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
-        cutoff = (datetime.now() - timedelta(days=older_than_days)).replace(microsecond=0).isoformat()
+        # 用注入的仓库时钟(self.seams.now())而非真实 datetime.now():本 store 其余
+        # 每处时间都走 seams.now(),唯独这里曾漏用真实钟。这会让「固定注入时钟」的
+        # 用例在真实日期越过基准日后,把本应「新鲜」的会话也算成过期(见
+        # test_content_store_conformance 里固定的 NOW)。生产里 seams.now() 即真实
+        # 时间,行为不变;测试里则恢复确定性。
+        cutoff = (
+            datetime.fromisoformat(self.seams.now()) - timedelta(days=older_than_days)
+        ).replace(microsecond=0).isoformat()
         with self.database.write() as db:
             self.database.begin_guarded_write(db)
             candidates = [

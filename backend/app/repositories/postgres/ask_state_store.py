@@ -619,8 +619,12 @@ class AskStateStore:
         """
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
+        # 用注入的仓库时钟(self.seams.now())而非真实 datetime.now(),与本 store 其余
+        # 时间点一致(见 sqlite 侧同名方法的说明:固定注入时钟的用例才能确定性)。
         cutoff = normalize_timestamp(
-            (datetime.now() - timedelta(days=older_than_days)).replace(microsecond=0)
+            (
+                datetime.fromisoformat(self.seams.now()) - timedelta(days=older_than_days)
+            ).replace(microsecond=0)
         )
         with self.database.write() as db:
             candidates = [

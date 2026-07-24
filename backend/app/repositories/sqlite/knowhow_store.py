@@ -1568,8 +1568,11 @@ class KnowhowStore:
                     else:
                         skipped.append((row_id, column_id))
                     continue
+                # 保留 current 的原值(未写过的格子是 None):历史流水的 before
+                # 必须是 None 而非 ""(与 guarded_atomic 一致、见 update_knowhow_cells_
+                # guarded_atomic 的 ``before`` 语义)。资产 diff 处再各自兜底成 ""。
                 to_write.append(
-                    (table_id, row_id, column_id, current or "", content_md)
+                    (table_id, row_id, column_id, current, content_md)
                 )
 
             self._require_assets_for_notebook(
@@ -1578,7 +1581,7 @@ class KnowhowStore:
                 required_asset_ids(
                     (),
                     (
-                        (old_content, content)
+                        (old_content or "", content)
                         for _table, _row, _column, old_content, content in to_write
                     ),
                 ),

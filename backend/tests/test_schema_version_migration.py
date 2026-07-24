@@ -60,10 +60,11 @@ def test_migration_25_irreversibly_scrubs_user_model_credentials_and_old_status(
     # 从 v24 起 _migrate 依次应用 _migration_25(凭据清除+系统状态表)、
     # _migration_26(knowhow_changes/knowhow_milestones)与 _migration_27
     # (P1.5 的 sources.chunked_at 完成标记列)与 _migration_28(每笔记本文档数量上限的
-    # app_settings 表 + user_profiles.upload_document_limit 列);本用例只断言 v25 的
+    # app_settings 表 + user_profiles.upload_document_limit 列)与 _migration_29
+    # (PostgreSQL 合并后两条 migration-24 血脉的和解);本用例只断言 v25 的
     # 数据副作用,v26 两表结构由 test_knowhow_history_schema 单独钉、v27 的列由
     # test_legacy_db_compat 单独钉、v28 的表/列由 test_document_limit 单独钉。
-    assert repo._migrate() == [25, 26, 27, 28]
+    assert repo._migrate() == [25, 26, 27, 28, 29]
 
     with repo._connect() as db:
         settings = db.execute(

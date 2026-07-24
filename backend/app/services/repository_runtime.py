@@ -316,11 +316,10 @@ class RepositoryRuntime:
 
     @property
     def embedder(self) -> Any:
+        # 只读:查询侧 embedder 的替换必须显式走 set_embedder()(它会连带重连
+        # retrieval / memory_retriever)。刻意不提供 setter——`runtime.embedder = x`
+        # 会绕过那次重连,留下不一致的组合。见 test_runtime_query_embedder_is_read_only。
         return self._embedder
-
-    @embedder.setter
-    def embedder(self, value: Any) -> None:
-        self.set_embedder(value)
 
     def set_embedder(self, value: Any) -> None:
         self._embedder = value

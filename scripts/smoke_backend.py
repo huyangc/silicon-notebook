@@ -589,6 +589,27 @@ def check_api_layer() -> None:
         assert client.delete("/api/object-schemas/api_test_type").status_code == 200
         ok("POST", f"/api/notebooks/{nid}/schema-proposals")
 
+        # PR#334:空库(无来源/无库内知识/无挂载参考库)对 /ask 会被后端以 409 硬拒
+        # (ask_available=False 的权威闸门)。本 smoke 只为走通 API 层的问答链路,先经
+        # 客户端共享的路由仓库单例、走**公有** upload_sources 传一条最小来源(离线可
+        # 同步完成解析/切块,与 check_kg_layer 同法),使该笔记本有可检索来源 →
+        # ask_available=True。刻意不直插行/不碰私有 _write seam,免踩仓库边界守卫。
+        from app.services.repository import UploadedSourceFile
+
+        route_repository().upload_sources(
+            nid,
+            [
+                UploadedSourceFile(
+                    file_name="seed.md",
+                    content_type="text/markdown",
+                    content=(
+                        "# Seed\n\nMinimal retrievable evidence so the API-layer "
+                        "ask clears the empty-notebook gate.\n"
+                    ).encode("utf-8"),
+                )
+            ],
+        )
+
         answer = ok(
             "POST",
             f"/api/notebooks/{nid}/ask",
