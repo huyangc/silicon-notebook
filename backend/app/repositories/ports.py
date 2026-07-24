@@ -1334,6 +1334,13 @@ class ContentOverviewKnowhowStorePort(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+class NotebookTooLargeToCopyError(ValueError):
+    """A notebook's copyable-row bound was exceeded at snapshot time. Lives here
+    (neutral contract layer) so snapshot_copy_rows can raise it from the store
+    without importing a service, while the service/route catch it (route → 409).
+    Subclasses ValueError so callers catching ValueError keep working."""
+
+
 @runtime_checkable
 class SharingStorePort(Protocol):
     def bind_insert_row(self, insert_row: Callable) -> None: ...

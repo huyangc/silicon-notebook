@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
-from app.repositories.ports import RepositoryDatabasePort, SharingStorePort
+from app.repositories.ports import (
+    NotebookTooLargeToCopyError,
+    RepositoryDatabasePort,
+    SharingStorePort,
+)
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.knowhow.ids import cell_chunk_id, element_id
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
@@ -43,14 +47,6 @@ def _rewrite_asset_refs(text: str, asset_map: dict) -> str:
     return _ASSET_REF_RE.sub(
         lambda m: f"asset://{asset_map.get(m.group(1), m.group(1))}", text
     )
-
-
-class NotebookTooLargeToCopyError(ValueError):
-    """copy_notebook's defense-in-depth copyable recheck failed. Subclasses
-    ValueError so non-route callers that catch ValueError keep working, while the
-    copy route can catch THIS type specifically and preserve its documented 409
-    (a concurrent-ingestion race can cross the size threshold between the route's
-    pre-check and the service recheck — that must stay a 409, not become a 500)."""
 
 
 class NotebookCopyService:
@@ -130,19 +126,12 @@ class NotebookCopyService:
                 shutil.copytree(source_dir, destination_dir)
                 copied_files = True
 
-            # ATOMIC size guard (codex PR#353 round 2): a FRESH row-count bound on
-            # the SAME thread-local connection snapshot_copy_rows uses, checked
-            # immediately before the fetchall. The service/route pre-checks read
-            # the version-cached copy_stats on other connections, so a concurrent
-            # ingestion committing after them could still push a grown notebook
-            # into the snapshot and OOM. This check can't be interleaved by such a
-            # commit — it and the fetchall share the connection. (copytree above
-            # is disk, not memory; the except below rmtree's it on this raise.)
-            if not self._store.within_copy_row_limit(source_notebook_id):
-                raise NotebookTooLargeToCopyError(
-                    f"notebook {source_notebook_id} crossed the copy-size limit "
-                    f"before snapshot; share read-only instead"
-                )
+            # snapshot_copy_rows enforces the copyable-row bound ATOMICALLY inside
+            # its own stable-snapshot read transaction (raises
+            # NotebookTooLargeToCopyError before materialising any rows), so a
+            # concurrent ingestion cannot slip an over-limit notebook past the
+            # cached pre-checks into the fetchall (codex PR#353 r3). copytree
+            # above is disk, not memory; the except below rmtree's it on a raise.
             snapshot = self._store.snapshot_copy_rows(source_notebook_id)
 
             notebook_row = snapshot["notebooks"][0]

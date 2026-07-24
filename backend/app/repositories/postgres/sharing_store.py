@@ -8,6 +8,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
+from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
@@ -321,23 +322,32 @@ class SharingStore:
             ).fetchone()
         return row["notebook_id"] if row else None
 
-    def within_copy_row_limit(self, notebook_id: str) -> bool:
-        """FRESH copyable-row bound on the same connection as snapshot_copy_rows,
-        called immediately before it so the deep copy's size check is atomic with
-        its fetchall (see the SQLite store's docstring). Counts f.chunks +
-        f.nodes (all chunks + all knowledge_objects)."""
+    def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
+        """Read every copyable table's rows in ONE REPEATABLE READ transaction,
+        with the copyable-row bound enforced atomically inside it (codex PR#353
+        r3). READ COMMITTED (the default) would let each statement see newer
+        commits, so the count and the per-table fetchalls could disagree; under
+        REPEATABLE READ every read observes the snapshot fixed at the first
+        statement, so a concurrent ingestion commit cannot slip an over-limit
+        notebook between the check and the materialisation. Over the copyable row
+        limit → raise BEFORE any fetchall (never materialises the oversized rows,
+        the 300GB+ OOM). f.chunks + f.nodes = all chunks + all knowledge_objects.
+        `SET TRANSACTION` is the first statement so it governs this transaction."""
+        snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as connection:
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             row = connection.execute(
                 "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=%s) + "
                 "(SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=%s) AS n",
                 (notebook_id, notebook_id),
             ).fetchone()
-        total = int(row["n"] if hasattr(row, "keys") else row[0])
-        return total <= self.settings.notebook_copy_max_rows
-
-    def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
-        snapshot: dict[str, list[dict]] = {}
-        with self.database.connect() as connection:
+            total = int(row["n"] if hasattr(row, "keys") else row[0])
+            if total > self.settings.notebook_copy_max_rows:
+                raise NotebookTooLargeToCopyError(
+                    f"notebook {notebook_id} crossed the copy-size limit "
+                    f"({total} rows > {self.settings.notebook_copy_max_rows}); "
+                    f"share read-only instead"
+                )
             for table, query in _COPY_SNAPSHOT_QUERIES:
                 snapshot[table] = [
                     _snapshot_compat_row(table, row)
