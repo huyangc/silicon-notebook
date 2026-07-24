@@ -396,7 +396,28 @@ window rather than run immediately.
 ```text
 SCALE_INDEX_AUTO_ENABLED   # auto-build/refresh the scale index for large notebooks (default true)
 SCALE_INDEX_AUTO_WHEN      # "idle"=queue for the off-peak window (default) | "now"=build immediately
+STARTUP_PRELOAD_SCALE_INDEXES # load every published scale index + enabled ANN + safe single-index PPR core before readiness (default true)
+SCALE_IDX_CACHE_MAX        # max resident scale indexes; must be >= the published live-index count when preload is enabled (default 8)
 ```
+
+With startup preload enabled, `/api/ready` remains false during the
+`preloading_indexes` phase. A corrupt required artifact, or more live published indexes
+than `SCALE_IDX_CACHE_MAX`, keeps startup not-ready instead of passing the cold load to
+the first user. Size the cache and RAM for all resident indexes. Temporarily set
+`STARTUP_PRELOAD_SCALE_INDEXES=false` only to enter the UI/maintenance flow and rebuild
+a damaged index; restore it afterward. `scripts/backend.sh start` waits up to 1,800
+seconds by default and prints readiness phase changes; override
+`START_TIMEOUT_SECONDS` for unusually slow storage.
+
+The preload boundary covers reusable on-disk artifacts, ANN handles, and each
+ScaleIndex's self-only PPR transition/chunk-id core. It deliberately does not eagerly
+materialize every cross-notebook mounted combined graph: the current multi-participant
+composition copies full node maps and may reconstruct all CSR edges, so doing that for
+all mount combinations can multiply a 10M-node graph until startup OOMs. Those combined
+graphs remain lazy until they have a bounded/shared representation. The strict guarantee
+covers the artifact set published at startup. Runtime build/fold and a newly added
+`SCALE_IDX_CACHE_MAX+1` index still use the existing online publication path; size the
+cache before that change and restart to re-establish the readiness guarantee.
 
 **Notebook copy vs read-only share — size gate:** sharing a notebook offers a deep
 *copy* when it is small enough, otherwise a read-only *join*. "Small enough" (and the

@@ -134,6 +134,8 @@ test("ready probe is unauthenticated no-store and fails open", async () => {
     detail: "loading",
     warmed_notebooks: undefined,
     total_notebooks: undefined,
+    preloaded_indexes: undefined,
+    total_indexes: undefined,
     error: null,
   });
   assert.equal(captured.cache, "no-store");

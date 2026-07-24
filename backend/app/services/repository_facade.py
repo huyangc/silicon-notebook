@@ -3169,6 +3169,12 @@ class RepositoryFacade:
     ) -> int:
         return self._runtime.catalog.warm_open_path_caches(progress)
 
+    def _preload_scale_retrieval_artifacts(
+        self, progress: Optional[Callable[[int, int], None]] = None
+    ) -> dict[str, int]:
+        """Startup-only strict preload behind the process readiness gate."""
+        return self.retrieval.preload_scale_artifacts(progress)
+
     # object_type -> counts-dict key mapping (C5 batched GROUP BY projection).
     # Canonical map lives on NotebookSummaryQuery; the facade keeps the frozen
     # compatibility name pointing at the same object.

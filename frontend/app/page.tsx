@@ -439,6 +439,11 @@ function startupPhaseText(snap: ReadySnapshot | null): string {
     const total = snap?.total_notebooks ?? 0;
     return `正在预热 (${warmed}/${total} 笔记本)…`;
   }
+  if (phase === "preloading_indexes") {
+    const loaded = snap?.preloaded_indexes ?? 0;
+    const total = snap?.total_indexes ?? 0;
+    return `正在加载大库检索索引 (${loaded}/${total})…`;
+  }
   // ⚠别把 snap.error 直出:它是后端的原始异常串。原文已在 probeReady() 里进
   // console,这里只给稳定文案。
   if (phase === "error") return "启动时遇到问题，正在重试…";
@@ -460,7 +465,7 @@ function StartingScreen({ snapshot, onRetry }: { snapshot: ReadySnapshot | null;
             <button type="button" className="auth-submit startup-retry" onClick={onRetry}>重试</button>
           </>
         ) : (
-          <div className="startup-sub">首次启动需迁移与预热，请稍候…</div>
+          <div className="startup-sub">首次启动需迁移、预热并加载检索索引，请稍候…</div>
         )}
       </div>
     </div>

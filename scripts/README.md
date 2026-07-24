@@ -20,6 +20,8 @@ scripts/backend.sh restart    # 停当前 + 启 silicon-notebook
 
 **关键:** DB / storage / `.env` 的相对路径已在代码层锚定到**仓库根**(见 `backend/app/core/config.py` 的 `_ROOT_DIR`),从哪个目录启动 uvicorn 都指向同一套 `仓库根/.local` 与根 `.env`——后端启动日志首行会打印解析后的绝对路径,可一眼核对。脚本仍从 `backend/` 目录启动只是为了模块导入(`app.main`)。注意:多 worktree 时各 worktree 锚各自的根(`.local` 互相独立)。生产启动用仓库根的 `npm run start`（`scripts/prod.sh`：前端 build+start + 后端固定 `--workers 1`）；模型调度容量位于单个后端进程内，禁止以多 worker 乘大 TOML 声明的容量。
 
+大库默认在 `/api/ready` 前加载全部已发布 scale 索引、启用的 ANN handle 与可安全复用的单索引 PPR core；不会启动时全量复制跨库 mounted 组合图，以免千万节点图成倍常驻导致 OOM。`backend.sh start` 会打印 `warming` / `preloading_indexes` 的进度，默认最多等 1,800 秒，避免原 40 秒窗口误杀正常的大索引加载；极慢磁盘用 `START_TIMEOUT_SECONDS=3600 scripts/backend.sh start` 覆盖。若显示 `error`，脚本会立即清理本次进程并提示看日志。索引数不得超过 `SCALE_IDX_CACHE_MAX`，否则无法保证“全部加载后仍常驻”。
+
 系统模型服务由维护人员统一配置：
 
 ```bash
@@ -40,7 +42,7 @@ python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后写入
 
 脚本从旧值生成 `.local/model-services.toml`，把密钥迁移到新的 `.env` 槽位，并移除已废弃的模型/并发字段；不会在 TOML 或终端中泄露密钥，当前 `.env` 与含密钥备份都会收紧为 `0600`。推算出的 `max_concurrency` 只是初始值，应按真实服务容量复核；可用可重复的 `--max-concurrency ROLE=N` 覆盖。安装流程生成且未改动的示例 TOML 可直接替换；其他已有配置只有显式 `--force` 才会替换，且都会先备份。
 
-环境变量:`PYTHON_BIN` `HOST`(默认 127.0.0.1) `PORT`(默认 8000) `LOG_FILE`。
+环境变量:`PYTHON_BIN` `HOST`(默认 127.0.0.1) `PORT`(默认 8000) `LOG_FILE` `START_TIMEOUT_SECONDS`(默认 1800)。
 例:换端口 `PORT=8001 scripts/backend.sh start`。
 
 ### `dev.sh` —— 前后端一起跑(前台开发)

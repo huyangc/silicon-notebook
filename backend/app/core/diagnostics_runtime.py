@@ -696,7 +696,12 @@ class DiagnosticsRuntime:
                 readiness["ready"] = raw_readiness["ready"]
             if isinstance(raw_readiness.get("phase"), str):
                 readiness["phase"] = raw_readiness["phase"][:80]
-            for key in ("warmed_notebooks", "total_notebooks"):
+            for key in (
+                "warmed_notebooks",
+                "total_notebooks",
+                "preloaded_indexes",
+                "total_indexes",
+            ):
                 value = raw_readiness.get(key)
                 if (
                     isinstance(value, int)

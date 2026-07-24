@@ -90,6 +90,16 @@ def test_v9_scale_artifact_loads_and_probes(store):
     assert idx.transition.shape[0] == len(idx.node_ids)
 
 
+def test_indexed_notebook_ids_lists_only_published_live_directories(store):
+    _write_manifest(store.scale_dir("nb-b"), {"version": ["v", 1]})
+    _write_manifest(store.scale_dir("nb-a"), {"version": ["v", 1]})
+    _write_manifest(Path(str(store.scale_dir("nb-a")) + ".tmp"), {"version": []})
+    _write_manifest(Path(str(store.scale_dir("nb-b")) + ".old"), {"version": []})
+    (store.scale_dir("no-manifest") / "graph.npz").parent.mkdir(parents=True)
+
+    assert store.indexed_notebook_ids() == ["nb-a", "nb-b"]
+
+
 def test_v9_viz_artifact_loads(store):
     dst = _copy_fixture(store, "kg_viz", "nb-old")
     expected = json.loads((dst / "manifest.json").read_text())

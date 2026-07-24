@@ -23,7 +23,62 @@ def test_ready_probe_is_anonymous_and_reports_snapshot():
     r = client.get("/api/ready")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) >= {"ready", "phase", "warmed_notebooks", "total_notebooks"}
+    assert set(body) >= {
+        "ready",
+        "phase",
+        "warmed_notebooks",
+        "total_notebooks",
+        "preloaded_indexes",
+        "total_indexes",
+    }
+
+
+def test_startup_preloads_scale_artifacts_before_marking_ready(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.api import deps
+    from app.services import startup_warmup
+
+    readiness.reset()
+    calls = []
+
+    def preload(*, progress):
+        calls.append(("preload", readiness.snapshot()["phase"]))
+        progress(1, 1)
+        assert readiness.is_ready() is False
+        return {"indexes": 1, "ann_handles": 2, "ppr_cores": 1}
+
+    fake = SimpleNamespace(
+        settings=SimpleNamespace(startup_preload_scale_indexes=True),
+        _recover_interrupted_jobs=lambda: calls.append("recover"),
+        warm_open_path_caches=lambda **_kwargs: calls.append("warm") or 3,
+        _preload_scale_retrieval_artifacts=preload,
+        close=lambda: calls.append("close"),
+    )
+
+    def repository():
+        calls.append("factory")
+        return fake
+
+    repository.cache_clear = lambda: calls.append("clear")
+    monkeypatch.setattr(deps, "repository", repository)
+    monkeypatch.setattr(
+        startup_warmup, "_reproject_legacy_knowhow_tables", lambda _repo: None
+    )
+
+    lease = startup_warmup.begin_lifecycle()
+    assert startup_warmup.run_startup(lease) is fake
+    snapshot = readiness.snapshot()
+    assert snapshot["ready"] is True
+    assert snapshot["preloaded_indexes"] == 1
+    assert snapshot["total_indexes"] == 1
+    assert calls == [
+        "factory",
+        "recover",
+        "warm",
+        ("preload", "preloading_indexes"),
+    ]
+    startup_warmup.close_repository(lease, fake)
 
 
 def test_gate_503s_app_routes_until_ready():

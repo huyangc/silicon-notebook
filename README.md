@@ -119,7 +119,7 @@ Optional external services
 - SQLite defaults to `.local/silicon_notebook.db`; PostgreSQL is a direct alternative. Uploaded files and generated artifacts stay under `.local/` for either database.
 - The production backend is deliberately single-worker because model queues, breakers, health, and cancellation state are process-local.
 - Baseline `chunk` retrieval is active-notebook-only. KG-assisted and reasoning paths may federate through explicitly mounted base notebooks.
-- Indexed large-library retrieval keeps post-ANN database hydration bounded by the candidate window and single-flights lazy ANN handle loading across concurrent reasoning subqueries.
+- Indexed large-library retrieval keeps post-ANN database hydration bounded by the candidate window and single-flights ANN handle loading across concurrent reasoning subqueries. By default, every published scale index, enabled ANN handle, and safely reusable single-index PPR core is loaded behind `/api/ready` before user traffic is admitted; cross-notebook combined graphs remain lazy to avoid multiplying 10M-node graph copies.
 - The candidate review queue has been retired; current knowledge governance operates on stored knowledge objects.
 - DATABASE_URL selects the formal repository backend through one repository factory. Exactly one active repository backend is selected centrally from `DATABASE_URL`. SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.
 

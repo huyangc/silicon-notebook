@@ -41,6 +41,7 @@
 
 - **效率是一等约束**：新增 LLM / embedding / DB 调用前先问代价——能否合并、缓存、异步、按需 gate。强一致做成 opt-in，默认走低开销路径。
 - **大库检索 hydration 必须按候选有界**：ANN 后的孤立节点判断只能对当前候选做带索引的逐候选 `EXISTS`，返回候选 id，不得物化高出度节点的完整邻边；canonical fold 只能经 `cluster_fold_rows` 查询本轮 scored id，不能加载全 notebook cluster map；同一 scale-index 实例同一工件类型的惰性 ANN open 必须单飞。这三项只优化执行成本，不得顺手改 score、阈值、PPR 或召回。
+- **大库冷加载前置 readiness**：默认 `STARTUP_PRELOAD_SCALE_INDEXES=true`，服务必须在 `/api/ready` 前加载全部已发布 scale 索引、启用的 ANN handle 与可安全复用的单索引 PPR core；加载失败或索引数超过 `SCALE_IDX_CACHE_MAX` 必须 not-ready，不能把工件冷成本留给首位用户。单一 self-index 组合图复用原 node list/map/idf/PPR core，且 core 随专用 ScaleIndex LRU 常驻；不得在启动时全量物化跨库 mounted 组合图（现有拼接会成倍复制千万节点图并 OOM）。严格保证只覆盖启动时已经发布的工件集合；运行中 build/fold 或新增第 `SCALE_IDX_CACHE_MAX+1` 个索引仍走既有在线路径，稳定部署应提前扩容并重启以重新建立 readiness 保证。关闭 preload 只用于修复坏索引的临时恢复。
 - **LLM 响应缓存是 opt-in**：`chat_json` 的内容寻址缓存默认开，但**只有传 `response_validator` 的调用方才读写它**——不传就既不读也不写（对调用方透明、正确性保留、只失去性能）。占成本大头的 KG 抽取三处传 validator 保持缓存；Ask、paper_meta、summary 等不传的调用方刻意不缓存，一次关掉「偶发坏值被固化整个 TTL」的投毒类。健康探针走 `bypass_cache`；admin 清缓存 `tag` 与 `clear_all` 二选一（同时传即 400，绝不静默全清）。UI 上传按内容哈希做**同 notebook 内**去重（对齐 `batch_ingest`）；同内容不同后缀重传复用既有源、保留原解析（要换解析器请删除该源再重传）。本特性追加迁移 v30（`sources(notebook_id, file_hash)` 去重索引）。
 - 不引入 Docker 作为一期默认工作流；装新包前先问。
 - **浮动弹窗**：新增的居中浮动弹窗要可拖标题栏移动——复用 `frontend/app/use-floating-window.ts`（`page.tsx` 内联弹窗走 `FloatingModalCard` 包装：只接管卡片、把 `dragHandleProps` 交给标题栏），不要另造一套拖动实现；侧边贴边抽屉、锚定 popover、全屏视图除外，窄屏（<720px）自动停用。真源见 `AGENTS.md` 前端章节。

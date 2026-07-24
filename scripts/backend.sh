@@ -23,7 +23,9 @@ PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 LOG_FILE="${LOG_FILE:-$ROOT_DIR/.local/logs/backend.log}"
-START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-40}"
+# 大库启动会在 readiness gate 内加载多 GB scale/ANN/PPR 工件；默认允许 30 分钟。
+# 小库仍会立即就绪。可按磁盘/RAM 实测覆盖，脚本会持续打印 phase/detail。
+START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-1800}"
 APP="app.main:app"
 
 if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
@@ -40,6 +42,8 @@ svc_title() { curl -s -m 3 "http://$HOST:$PORT/openapi.json" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json;print(json.load(sys.stdin).get('info',{}).get('title','?'))" 2>/dev/null || echo "?"; }
 ready_state() { curl -s -m 3 "http://$HOST:$PORT/api/ready" 2>/dev/null \
                 | "$PYTHON_BIN" -c "import sys,json; v=json.load(sys.stdin); print('true' if v.get('ready') is True else 'false')" 2>/dev/null || echo "missing"; }
+ready_summary() { curl -s -m 3 "http://$HOST:$PORT/api/ready" 2>/dev/null \
+                | "$PYTHON_BIN" -c "import sys,json; v=json.load(sys.stdin); print(str(v.get('phase','starting'))+':'+str(v.get('detail','')))" 2>/dev/null || echo "starting:"; }
 is_sn()       { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" != "missing" ]]; }
 is_sn_ready() { [[ "$(svc_title)" == "silicon-notebook API" && "$(ready_state)" == "true" ]]; }
 database_status() {
@@ -119,7 +123,8 @@ cmd_start() {
   local launched_pid
   ( cd "$ROOT_DIR/backend" && exec nohup "$PYTHON_BIN" -m uvicorn "$APP" --host "$HOST" --port "$PORT" ) >>"$LOG_FILE" 2>&1 &
   launched_pid="$!"
-  echo -n "  等待就绪"
+  echo "  等待就绪（最长 ${START_TIMEOUT_SECONDS}s）"
+  local last_summary=""
   for _ in $(seq 1 "$START_TIMEOUT_SECONDS"); do
     if is_sn_ready; then echo " ok"; echo "✅ 启动成功(PID $(port_pid)):ready=true。"; return 0; fi
     if ! kill -0 "$launched_pid" 2>/dev/null; then
@@ -127,7 +132,17 @@ cmd_start() {
       terminate_launched_pid "$launched_pid" || true
       return 1
     fi
-    echo -n "."; sleep 1
+    local summary; summary="$(ready_summary)"
+    if [[ "$summary" != "$last_summary" ]]; then
+      echo "  $summary"
+      last_summary="$summary"
+    fi
+    if [[ "$summary" == error:* ]]; then
+      echo "✗ 后端启动进入 error；已清理本次启动进程。看日志:tail -50 $LOG_FILE"
+      terminate_launched_pid "$launched_pid" || true
+      return 1
+    fi
+    sleep 1
   done
   echo " 超时"
   terminate_launched_pid "$launched_pid" || true

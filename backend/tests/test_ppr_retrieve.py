@@ -1,4 +1,5 @@
 import json
+import numpy as np
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -517,6 +518,78 @@ def test_scale_ppr_caches_combined_graph(repo, monkeypatch):
     r2 = repo.scale_ppr(active.id, "Mixture of Experts")
     assert calls["n"] == n_after_first          # 第二次命中缓存、不再 splice
     assert isinstance(r1, list) and isinstance(r2, list)
+
+
+def test_self_only_combined_graph_reuses_scale_index_identity(repo):
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    repo._preload_scale_retrieval_artifacts()
+    index = repo._scale_index(base.id, allow_stale=True)
+
+    graph = repo.retrieval.graph._scale_combined_graph(base.id, [(base.id, index)])
+
+    assert graph["combined_ids"] is index.node_ids
+    assert graph["combined_index"] is index.node_index
+    assert graph["combined_idf"] is index.idf
+    assert graph["combined_A"] is index._ppr_transition
+    assert graph["combined_chunk_ids"] is index._ppr_chunk_ids
+    assert set(graph["combined_chunk_ids"]) == {
+        index.node_ids[int(i)] for i in index.chunk_index
+    }
+
+    # The shared VectorCache may evict the wrapper during a long-lived process;
+    # a miss must still be O(1) over the ScaleIndex-owned prepared core.
+    repo._vector_cache.invalidate(f"{base.id}:scale_combined")
+    rebuilt = repo.retrieval.graph._scale_combined_graph(
+        base.id, [(base.id, index)]
+    )
+    assert rebuilt["combined_A"] is index._ppr_transition
+    assert rebuilt["combined_chunk_ids"] is index._ppr_chunk_ids
+
+
+def test_self_only_scale_ppr_preserves_float64_idf_seed_arithmetic(
+    repo, monkeypatch
+):
+    base = _seed_two_doc_moe(repo)
+    repo.rebuild_unified_kg(base.id)
+    repo.build_scale_index(base.id)
+    repo._preload_scale_retrieval_artifacts()
+    index = repo._scale_index(base.id, allow_stale=True)
+    target_id = index.node_ids[0]
+    index.ann_labels = [target_id]
+    target_position = index.node_index[target_id]
+    index.idf[target_position] = np.float32(1.0 / 3.0)
+    similarity = 0.4465957211525855
+
+    class Ann:
+        def set_ef(self, _value):
+            pass
+
+        def knn_query(self, _query, k):
+            assert k >= 1
+            return [[0]], [[1.0 - similarity]]
+
+    captured = {}
+
+    def capture_ppr(_transition, reset, **_kwargs):
+        captured["reset"] = reset.copy()
+        return np.zeros_like(reset)
+
+    service = repo.retrieval.graph
+    dimension = int(index.manifest["dim"])
+    monkeypatch.setattr(
+        service, "_embed_query", lambda _question: [1.0] * dimension
+    )
+    monkeypatch.setattr(service, "_open_scale_ann", lambda *_args: Ann())
+    monkeypatch.setattr(service, "_retrieve_chunks", lambda *_args: ([], [], None))
+    import app.services.kg.scale_index as scale_index
+
+    monkeypatch.setattr(scale_index, "personalized_ppr", capture_ppr)
+
+    assert service._scale_ppr_impl(base.id, "q") == []
+    expected = similarity * float(np.float32(1.0 / 3.0))
+    assert captured["reset"][target_position] == expected
 
 
 def test_gather_kg_graph_source_scoping(repo):

@@ -2653,6 +2653,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._ppr_graph', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._ppr_reset_vector', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._ppr_retrieve', kind='attribute', target='retrieval'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._preload_scale_retrieval_artifacts', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._relation_ann_candidates', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._relations_with_names', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._retrieve_chunks', kind='attribute', target='retrieval'),

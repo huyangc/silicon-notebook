@@ -7892,6 +7892,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._preload_scale_retrieval_artifacts",
+        "target": "retrieval"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._relation_ann_candidates",
         "target": "retrieval"
       },
