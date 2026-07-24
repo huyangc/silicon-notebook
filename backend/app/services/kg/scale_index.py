@@ -92,6 +92,21 @@ def _manifest_count(manifest: dict, key: str):
     return value
 
 
+def estimated_ann_bytes(manifest: dict, runtime_dim: int) -> int:
+    """Estimated resident bytes of a ScaleIndex's ANN matrices — its kg (n_ann),
+    chunk (n_chunk_ann) and relation (n_relation_ann) hnsw handles, each
+    rows×runtime_dim×4 (float32). This is the dominant term of a large index's
+    footprint and drives the LargeAwareLRUCache 'is large' classification
+    (PR-4 / codex PR#359 r1 P1 — n_nodes alone misses a chunk/relation-ANN-heavy
+    source base). A missing count contributes 0 (older indexes stay classified
+    small rather than being over-evicted on an absent key)."""
+    rows = sum(
+        (_manifest_count(manifest, key) or 0)
+        for key in ("n_ann", "n_chunk_ann", "n_relation_ann")
+    )
+    return rows * int(runtime_dim) * 4
+
+
 def _first_mismatch(checks) -> str | None:
     """checks: [(名称, 期望, 实际)]。期望为 None 表示该项不参与校验(缺键)。
     返回第一条失配的人可读描述;全部通过返回 None。"""

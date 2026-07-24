@@ -84,7 +84,7 @@ from app.models.knowledge import (
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.vector_cache import LRUProcessCache
+from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -392,7 +392,36 @@ class RepositoryFacade:
         # numpy arrays + a memoized hnsw handle, tens-of-MB to GB). Eviction
         # just drops the reference — GC frees the arrays, and hnswlib.Index
         # has no explicit close() to call (see LRUProcessCache docstring).
-        scale_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
+        # PR-4: a large-library ScaleIndex is tens of GB; cap how many of those
+        # stay resident (scale_idx_cache_max_large) so multi-domain base warm-up
+        # can't accumulate hundreds of GB → OOM. "Large" = the estimated resident
+        # bytes of its ANN matrices — the kg (n_ann), chunk (n_chunk_ann) and
+        # relation (n_relation_ann) hnsw handles, each rows×runtime_dim×4 bytes, the
+        # dominant footprint — over scale_idx_large_bytes. Summing all three (not
+        # just n_nodes) catches a KG-node-light but chunk/relation-ANN-heavy source
+        # base (codex PR#359 r1 P1). A missing count contributes 0 → an old index
+        # that never wrote these keys classifies as small (never over-evicts real
+        # large indexes on a missing count). Only the scale-index cache needs this —
+        # viz arrays (viz_idx_cache) are far smaller than the ANN matrices.
+        from app.services.kg.scale_index import estimated_ann_bytes
+        from app.services.vector_index import resolve_runtime_dim
+
+        # Capture the Settings object (already held by the runtime), NOT ``self`` —
+        # this closure lives inside scale_idx_cache, so closing over the facade
+        # would make the cache transitively retain the whole repository (see
+        # test_retained_scale_runtime_does_not_transitively_retain_repository).
+        _settings = self.settings
+
+        def _scale_idx_is_large(idx) -> bool:
+            m = getattr(idx, "manifest", None) or {}
+            dim = resolve_runtime_dim(_settings) or _settings.embed_dim
+            return estimated_ann_bytes(m, dim) > _settings.scale_idx_large_bytes
+
+        scale_idx_cache = LargeAwareLRUCache(
+            max_entries=self.settings.scale_idx_cache_max,
+            max_large=self.settings.scale_idx_cache_max_large,
+            is_large=_scale_idx_is_large,
+        )
         # P1-8: memoize _scale_index_version keyed on kg_mutation_seq. Maps
         # notebook_id -> (last_seq, version_list). When seq is unchanged we skip
         # the 5 COUNT/MAX aggregates and return the cached list (same format —
