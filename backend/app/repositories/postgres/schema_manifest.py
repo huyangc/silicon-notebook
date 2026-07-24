@@ -32,6 +32,6 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=29,
-    postgres_version=8,
+    sqlite_version=30,
+    postgres_version=9,
 )

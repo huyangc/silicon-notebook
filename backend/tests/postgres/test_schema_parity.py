@@ -883,11 +883,11 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 8
-    assert migrator.migrate() == 8
-    assert migrator.current_version() == 8
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 29
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 8
+    assert migrator.migrate() == 9
+    assert migrator.migrate() == 9
+    assert migrator.current_version() == 9
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 30
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 9
 
 
 @pytest.mark.postgres_integration
