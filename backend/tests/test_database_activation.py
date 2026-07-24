@@ -255,6 +255,42 @@ def test_activation_resolves_relative_sqlite_url_against_app_root(
     assert values["SHADOW_DATABASE_URL"] == "sqlite:///.local/silicon_notebook.db"
 
 
+def test_reactivation_with_a_different_active_url_fails_closed(
+    tmp_path: Path, monkeypatch
+):
+    # DATABASE_URL is already PostgreSQL with the same host/port/db but a
+    # different password; DatabaseIdentity alone would treat this as "already
+    # active, unchanged", so a full-URL mismatch must fail closed instead of
+    # letting the backend restart on stale credentials.
+    source = tmp_path / "silicon_notebook.db"
+    source.touch()
+    env_path = tmp_path / ".env"
+    original = (
+        "DATABASE_URL=postgresql://user:OLDPASS@127.0.0.1:5432/notebook\n"
+        "SHADOW_DATABASE_URL=sqlite:///silicon_notebook.db\n"
+    )
+    env_path.write_text(original, encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(
+        database_activation,
+        "verify_migration_receipt",
+        lambda **_kwargs: _verification(source),
+    )
+
+    with pytest.raises(
+        SqliteToPostgresMigrationError, match="does not match this migration"
+    ):
+        activate_postgres_from_receipt(
+            source_path=source,
+            target_url="postgresql://user:NEWPASS@127.0.0.1:5432/notebook",
+            receipt_path=tmp_path / "receipt.json",
+            work_dir=tmp_path / "work",
+            env_path=env_path,
+            root_dir=tmp_path,
+        )
+    assert env_path.read_text(encoding="utf-8") == original
+
+
 def test_activation_restricts_credential_env_to_owner_only(
     tmp_path: Path, monkeypatch
 ):

@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from app.migration import sqlite_to_postgres as migration_module
 from app.migration.sqlite_to_postgres import (
     SqliteToPostgresMigrationError,
     _CommutativeRowDigest,
@@ -17,9 +19,14 @@ from app.migration.sqlite_to_postgres import (
     _transform_sqlite_value,
     create_consistent_snapshot,
     inspect_source,
+    prepare_upgraded_snapshot,
     target_url_from_environment,
     validate_existing_snapshot,
 )
+from app.repositories.postgres._store_utils import normalize_timestamp
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sha256(path: Path) -> str:
@@ -93,7 +100,7 @@ def test_transform_typed_values_and_normalize_legacy_sentinels():
     ) is None
     assert _transform_sqlite_value(
         table="kg_build_jobs", column=time_column, value="2026-07-23 10:11:12"
-    ) == datetime(2026, 7, 23, 10, 11, 12, tzinfo=timezone.utc)
+    ) == normalize_timestamp("2026-07-23 10:11:12")
     assert _transform_sqlite_value(
         table="chunk_embeddings",
         column=bytea_column,
@@ -111,6 +118,58 @@ def test_transform_typed_values_and_normalize_legacy_sentinels():
         audit=audit,
     ) == {"text": "before\\u0000after"}
     assert audit.nul_escapes == {"knowledge_objects.payload": 1}
+
+
+def test_naive_timestamps_are_interpreted_as_local_wall_time():
+    # On a non-UTC host, a naive SQLite timestamp is local wall time; migrating
+    # it must shift to UTC by the host offset, not relabel it as UTC.
+    time_column = _PostgresColumn(
+        "finished_at", "timestamp with time zone", "timestamptz", True, False
+    )
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Shanghai"  # UTC+8, no DST
+    time.tzset()
+    try:
+        assert _transform_sqlite_value(
+            table="kg_build_jobs", column=time_column, value="2026-07-23 10:11:12"
+        ) == datetime(2026, 7, 23, 2, 11, 12, tzinfo=timezone.utc)
+        # An aware value keeps its instant regardless of host zone.
+        assert _transform_sqlite_value(
+            table="kg_build_jobs",
+            column=time_column,
+            value="2026-07-23T10:11:12+00:00",
+        ) == datetime(2026, 7, 23, 10, 11, 12, tzinfo=timezone.utc)
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+def test_failed_snapshot_upgrade_deletes_the_working_copy(
+    tmp_path: Path, monkeypatch
+):
+    # A pre-v29 source is copied to a private working DB before upgrade; if the
+    # upgrade fails, that (potentially multi-GB) copy and its sidecars must be
+    # removed so retries cannot exhaust the migration volume.
+    source = tmp_path / "old.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE users(id TEXT PRIMARY KEY)")
+        connection.execute("PRAGMA user_version=1")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("simulated upgrade failure")
+
+    monkeypatch.setattr(migration_module.SqliteMigrator, "migrate", boom)
+
+    with pytest.raises(SqliteToPostgresMigrationError):
+        prepare_upgraded_snapshot(
+            snapshot_path=source, work_dir=work_dir, root_dir=REPO_ROOT
+        )
+    assert list(work_dir.glob(".sqlite-upgrade-*")) == []
 
 
 def test_row_digest_is_order_independent_but_duplicate_sensitive():

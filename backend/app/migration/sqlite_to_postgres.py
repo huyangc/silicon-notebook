@@ -28,6 +28,7 @@ from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
 from app.core.database_url import database_identity, redact_database_url
+from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.schema_manifest import (
@@ -495,34 +496,39 @@ def prepare_upgraded_snapshot(
     working = Path(work_dir).resolve() / f".sqlite-upgrade-{uuid.uuid4().hex}.db"
     shutil.copy2(snapshot_path, working)
     os.chmod(working, 0o600)
-    settings = Settings(database_url=_sqlite_url(working))
-    bundle = SqlitePersistenceBundleFactory().create(
-        settings=settings,
-        root_dir=root_dir,
-        seams=SimpleNamespace(
-            new_id=lambda prefix: f"{prefix}-{uuid.uuid4().hex}",
-            now=lambda: datetime.now(timezone.utc).isoformat(),
-            copy_chunk_size=lambda: 500,
-            remap_json_ids=lambda value, _maps: value,
-            in_chunk_size=lambda: 500,
-        ),
-    )
-    database = bundle.database
     try:
-        applied = tuple(SqliteMigrator(database, settings).migrate())
-    except Exception as exc:
-        raise SqliteToPostgresMigrationError(
-            "SQLite snapshot schema upgrade failed"
-        ) from exc
-    finally:
-        database.close()
+        settings = Settings(database_url=_sqlite_url(working))
+        bundle = SqlitePersistenceBundleFactory().create(
+            settings=settings,
+            root_dir=root_dir,
+            seams=SimpleNamespace(
+                new_id=lambda prefix: f"{prefix}-{uuid.uuid4().hex}",
+                now=lambda: datetime.now(timezone.utc).isoformat(),
+                copy_chunk_size=lambda: 500,
+                remap_json_ids=lambda value, _maps: value,
+                in_chunk_size=lambda: 500,
+            ),
+        )
+        database = bundle.database
+        try:
+            applied = tuple(SqliteMigrator(database, settings).migrate())
+        except Exception as exc:
+            raise SqliteToPostgresMigrationError(
+                "SQLite snapshot schema upgrade failed"
+            ) from exc
+        finally:
+            database.close()
 
-    try:
-        with sqlite3.connect(working) as connection:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            connection.execute("PRAGMA journal_mode=DELETE")
-            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-            integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+        try:
+            with sqlite3.connect(working) as connection:
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                connection.execute("PRAGMA journal_mode=DELETE")
+                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
+        except Exception as exc:
+            raise SqliteToPostgresMigrationError(
+                "upgraded SQLite snapshot validation failed"
+            ) from exc
         if version != POSTGRES_SCHEMA_MANIFEST.sqlite_version:
             raise SqliteToPostgresMigrationError(
                 "upgraded SQLite snapshot has the wrong schema version"
@@ -532,12 +538,14 @@ def prepare_upgraded_snapshot(
                 "upgraded SQLite snapshot quick_check failed"
             )
         return working, applied
-    except SqliteToPostgresMigrationError:
+    except BaseException:
+        # A failure abandons this working copy; delete it and its sidecars so a
+        # retried large migration cannot accumulate multi-gigabyte private copies
+        # and exhaust the migration volume.
+        working.unlink(missing_ok=True)
+        working.with_name(working.name + "-wal").unlink(missing_ok=True)
+        working.with_name(working.name + "-shm").unlink(missing_ok=True)
         raise
-    except Exception as exc:
-        raise SqliteToPostgresMigrationError(
-            "upgraded SQLite snapshot validation failed"
-        ) from exc
 
 
 def _sqlite_business_tables(connection: sqlite3.Connection) -> set[str]:
@@ -648,9 +656,11 @@ def _parse_timestamp(value: Any, *, qualified: str) -> datetime | None:
         raise SqliteToPostgresMigrationError(
             f"invalid timestamp type in {qualified}"
         )
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    # A naive value is historical system-local wall time, not UTC (see the
+    # PostgreSQL repositories' normalize_timestamp). Delegate to that exact rule
+    # so migrated instants match the running backend on non-UTC hosts instead of
+    # shifting every naive timestamp by the host offset.
+    return normalize_timestamp(parsed)
 
 
 def _escape_postgres_nul(value: Any) -> tuple[Any, int]:
