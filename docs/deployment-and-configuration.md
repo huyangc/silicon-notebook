@@ -398,6 +398,22 @@ SCALE_INDEX_AUTO_ENABLED   # auto-build/refresh the scale index for large notebo
 SCALE_INDEX_AUTO_WHEN      # "idle"=queue for the off-peak window (default) | "now"=build immediately
 ```
 
+**Notebook copy vs read-only share — size gate:** sharing a notebook offers a deep
+*copy* when it is small enough, otherwise a read-only *join*. "Small enough" (and the
+non-copyable threshold above) is the same set of bounds — a notebook must be under ALL
+of them to be copyable. A deep copy reads every one of the notebook's tables into memory
+to remap ids, so the last bound caps that total independently of the chunk+node count:
+
+```text
+NOTEBOOK_COPY_MAX_BYTES          # max total source-file bytes (default 50MB)
+NOTEBOOK_COPY_MAX_ROWS           # max chunks + knowledge objects (default 5000)
+NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # max TOTAL rows a deep copy would materialise across every
+                                 # table (relations / embeddings / elements / knowhow included) —
+                                 # a defense-in-depth cap so a graph/embedding fan-out far
+                                 # exceeding the chunk+node count cannot OOM the copy; over it,
+                                 # the notebook is offered as a read-only share (default 200000)
+```
+
 **Content-addressed cache (LLM + embedding calls):**
 
 Repeat calls with identical content — same model, same prompt or text — reuse the

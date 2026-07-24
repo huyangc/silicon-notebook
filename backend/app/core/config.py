@@ -490,6 +490,12 @@ class Settings(BaseSettings):
     # Notebook 分享拷贝阈值:超过任一阈值的库仅可只读共享(Phase 2),不可深拷贝。
     notebook_copy_max_bytes: int = Field(50 * 1024 * 1024, validation_alias="NOTEBOOK_COPY_MAX_BYTES")
     notebook_copy_max_rows: int = Field(5000, validation_alias="NOTEBOOK_COPY_MAX_ROWS")
+    # 深拷贝纵深护栏:整本拷贝会把「所有」参与表(relations/embeddings/elements/knowhow…)
+    # 的行一并读进内存做 id 重映射,而上面的 copyable 闸只界定 chunks+nodes——一个
+    # 图/向量扇出远超其 chunk+node 数的源(极少节点、百万关系)会通过 copyable 闸却在
+    # 此物化出数 GB。本上限对「快照全部表的总行数」封顶,超了在任何 fetchall 之前拒绝
+    # (改只读共享),使深拷贝的峰值内存与病态扇出解耦(codex PR#353 r5 P2)。
+    notebook_copy_max_snapshot_rows: int = Field(200_000, validation_alias="NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS")
     notebook_copy_stale_seconds: int = Field(3600, validation_alias="NOTEBOOK_COPY_STALE_SECONDS")
     # NoDecode 让 pydantic-settings 不把环境变量当 JSON 解析（否则逗号串会崩），
     # 改由下面的 split_cors_origins(mode="before") 处理逗号分隔；validation_alias
