@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,15 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_BATCH_ROWS,
         help=f"bounded SQLite/COPY batch size (default: {DEFAULT_BATCH_ROWS})",
+    )
+    parser.add_argument(
+        "--source-timezone",
+        help=(
+            "IANA timezone of the SQLite deployment host used to interpret legacy "
+            "naive timestamps (e.g. Asia/Shanghai). Required when the importer runs "
+            "on a host whose timezone differs from the SQLite source; default: the "
+            "importer host's local timezone"
+        ),
     )
     parser.add_argument(
         "--maintenance-work-mem",
@@ -133,6 +143,14 @@ def main(argv: list[str] | None = None) -> int:
             max_parallel_index_workers=args.max_parallel_index_workers,
             synchronous_commit_off=not args.keep_synchronous_commit,
         )
+        source_timezone = None
+        if args.source_timezone is not None:
+            try:
+                source_timezone = ZoneInfo(args.source_timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise SqliteToPostgresMigrationError(
+                    "--source-timezone must be a valid IANA timezone name"
+                ) from exc
         if args.activation_receipt is not None:
             if args.apply or args.snapshot is not None:
                 raise SqliteToPostgresMigrationError(
@@ -192,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_rows=args.batch_rows,
             existing_snapshot=args.snapshot,
             tuning=tuning,
+            source_timezone=source_timezone,
         )
         print(
             "MIGRATION OK: "

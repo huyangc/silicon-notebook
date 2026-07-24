@@ -17,7 +17,7 @@ import sqlite3
 import struct
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -637,7 +637,9 @@ def _copy_order(connection, tables: set[str]) -> tuple[str, ...]:
     return tuple(ordered)
 
 
-def _parse_timestamp(value: Any, *, qualified: str) -> datetime | None:
+def _parse_timestamp(
+    value: Any, *, qualified: str, source_timezone: tzinfo | None = None
+) -> datetime | None:
     if value == "":
         return None
     if isinstance(value, datetime):
@@ -656,11 +658,13 @@ def _parse_timestamp(value: Any, *, qualified: str) -> datetime | None:
         raise SqliteToPostgresMigrationError(
             f"invalid timestamp type in {qualified}"
         )
-    # A naive value is historical system-local wall time, not UTC (see the
-    # PostgreSQL repositories' normalize_timestamp). Delegate to that exact rule
-    # so migrated instants match the running backend on non-UTC hosts instead of
-    # shifting every naive timestamp by the host offset.
-    return normalize_timestamp(parsed)
+    # A naive value is historical wall time at the SOURCE host, not UTC (see the
+    # PostgreSQL repositories' normalize_timestamp). Interpret it in the source
+    # host's timezone so migrated instants match the running backend instead of
+    # shifting by the host offset; ``source_timezone`` is required when the
+    # importer runs on a host whose zone differs from the SQLite deployment
+    # (default: the importer host's local zone).
+    return normalize_timestamp(parsed, local_timezone=source_timezone)
 
 
 def _escape_postgres_nul(value: Any) -> tuple[Any, int]:
@@ -704,6 +708,7 @@ def _transform_sqlite_value(
     column: _PostgresColumn,
     value: Any,
     audit: _TransformAudit | None = None,
+    source_timezone: tzinfo | None = None,
 ) -> Any:
     qualified = f"{table}.{column.name}"
     if value is None:
@@ -725,7 +730,9 @@ def _transform_sqlite_value(
             audit.record_nul(qualified, nul_count)
         return value
     if column.udt_name == "timestamptz":
-        return _parse_timestamp(value, qualified=qualified)
+        return _parse_timestamp(
+            value, qualified=qualified, source_timezone=source_timezone
+        )
     if column.udt_name == "bytea":
         if qualified not in POSTGRES_BYTEA_COLUMNS:
             raise SqliteToPostgresMigrationError(
@@ -870,6 +877,7 @@ def _copy_table(
     columns: tuple[_PostgresColumn, ...],
     batch_rows: int,
     audit: _TransformAudit | None = None,
+    source_timezone: tzinfo | None = None,
 ) -> _CommutativeRowDigest:
     source_columns = _sqlite_columns(sqlite_connection, table)
     has_ordinal = table in set(POSTGRES_ROWID_ORDINAL_TABLES)
@@ -901,6 +909,7 @@ def _copy_table(
                             column=column,
                             value=value,
                             audit=audit,
+                            source_timezone=source_timezone,
                         )
                         for column, value in zip(columns, raw_values, strict=True)
                     )
@@ -1213,6 +1222,7 @@ def copy_snapshot_to_postgres(
     batch_rows: int = DEFAULT_BATCH_ROWS,
     progress: Callable[[str], None],
     tuning: MigrationTuning | None = None,
+    source_timezone: tzinfo | None = None,
 ) -> tuple[tuple[TableMigrationStat, ...], tuple[DataNormalizationStat, ...]]:
     """Copy one upgraded snapshot into PostgreSQL, resumable per business table.
 
@@ -1307,6 +1317,7 @@ def copy_snapshot_to_postgres(
                         columns=columns[table],
                         batch_rows=batch_rows,
                         audit=table_audit,
+                        source_timezone=source_timezone,
                     )
                     progress(f"VERIFY {position}/{len(order)} {table}")
                     actual = _target_digest(
@@ -1644,6 +1655,7 @@ def migrate(
     progress: Callable[[str], None] = print,
     existing_snapshot: Path | None = None,
     tuning: MigrationTuning | None = None,
+    source_timezone: tzinfo | None = None,
 ) -> MigrationResult:
     started_at = datetime.now(timezone.utc)
     tuning = tuning or MigrationTuning()
@@ -1678,6 +1690,7 @@ def migrate(
             batch_rows=batch_rows,
             progress=progress,
             tuning=tuning,
+            source_timezone=source_timezone,
         )
     finally:
         database.close()
@@ -1715,6 +1728,9 @@ def migrate(
             "max_parallel_index_workers": tuning.max_parallel_index_workers,
             "synchronous_commit_off": tuning.synchronous_commit_off,
         },
+        "source_timezone": (
+            str(source_timezone) if source_timezone is not None else "host-local"
+        ),
     }
     _write_receipt(receipt, payload)
     return MigrationResult(
