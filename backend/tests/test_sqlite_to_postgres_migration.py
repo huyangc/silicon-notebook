@@ -271,6 +271,20 @@ def test_row_digest_is_order_independent_but_duplicate_sensitive():
     assert first.hexdigest() != duplicate.hexdigest()
 
 
+def test_receipt_paths_are_unique_within_the_same_second(tmp_path: Path):
+    # Two migrations sharing a work directory that finish in the same second must
+    # not select the same receipt path (which os.replace would overwrite,
+    # discarding the first target's verification record).
+    when = datetime(2026, 7, 24, 10, 0, 0, tzinfo=timezone.utc)
+    paths = {
+        str(migration_module._receipt_path(tmp_path, when)) for _ in range(50)
+    }
+    assert len(paths) == 50
+    for path in paths:
+        assert "migration-20260724T100000Z-" in path
+        assert path.endswith(".receipt.json")
+
+
 def test_target_url_is_read_from_a_valid_named_environment(monkeypatch):
     monkeypatch.setenv("POSTGRES_MIGRATION_URL", "postgresql://hidden@example/db")
     assert target_url_from_environment("POSTGRES_MIGRATION_URL").startswith(
