@@ -613,8 +613,14 @@ def sqlite_capture(tmp_path: Path):
 
 def _report() -> PreflightReport:
     source = DatabaseFingerprint("sqlite", "sqlite:///<redacted>", "a" * 64)
+    pair = MANIFEST.schema_pair
     binding = ConfirmationBinding(
-        "run-1", source.identity_hash, TARGET_FINGERPRINT.identity_hash, 32, 10, 1
+        "run-1",
+        source.identity_hash,
+        TARGET_FINGERPRINT.identity_hash,
+        pair.sqlite_version,
+        pair.postgres_version,
+        pair.epoch,
     )
     return PreflightReport(
         "run-1",

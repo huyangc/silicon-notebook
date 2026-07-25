@@ -1448,8 +1448,10 @@ def test_packaged_index_migration_phases_are_exact():
     v30_index = index_declarations(9)
     assert v30_index == [(False, "idx_sources_notebook_file_hash")]
 
-    v31_indexes = index_declarations(10)
-    assert v31_indexes == [
+    # PostgreSQL v10 is reserved for SQLite v32's report-understanding column;
+    # the relation endpoint indexes pair with SQLite v33 in PostgreSQL v11.
+    v33_indexes = index_declarations(11)
+    assert v33_indexes == [
         (False, "idx_knowledge_relations_nb_source_id"),
         (False, "idx_knowledge_relations_nb_target_id"),
     ]
@@ -1462,7 +1464,7 @@ def test_packaged_index_migration_phases_are_exact():
         | {name for _unique, name in cluster_unique}
         | {name for _unique, name in v28_feature_indexes}
         | {name for _unique, name in v30_index}
-        | {name for _unique, name in v31_indexes}
+        | {name for _unique, name in v33_indexes}
     )
     assert packaged_names == contract_names | gin_names
 
