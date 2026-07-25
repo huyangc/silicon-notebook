@@ -1,5 +1,7 @@
 # Plan: knowhow KG-node retrieval (default-off, real-machine-eval gated)
 
+> Historical implementation plan. The runtime-default decision below was superseded on 2026-07-25: the completed path now defaults on, remains env-reversible, scopes types through `knowhow_tables.hidden_source_id`, and caches the chunk-vector bridge across subqueries. See the canonical product/configuration references for current behavior.
+
 **Branch:** `claude/knowhow-kg-node-retrieval` (stacked on the #272 branch tip `4395933`; rebase onto master once #272 merges).
 **Goal:** let knowhow cell KOs (`object_type = 列名`, ids `ko-kh-{sha1(table_id|column_name|value_key)[:32]}`) surface in the `reasoning`/`graph` **KG-node** retrieval path, so ask citations land on KG-node anchors that jump to the row drawer. Chunk mode already works (#272). **Everything behind one default-off flag**; turning it on / final tuning waits for real-machine recall+latency eval per the efficiency-first mandate.
 

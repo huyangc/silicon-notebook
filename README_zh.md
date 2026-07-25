@@ -12,7 +12,7 @@
 - 带紧凑引用的多轮问答，会话历史按最近活动排序（首轮生成中会话即使立即切走也可重新打开），支持 `chunk`、`reasoning` 和实验性的 `graph` 检索模式。逐步推理会在检索前做不受语料影响的问题理解：意图清晰时自动继续，存在会改变检索方向的歧义时先请用户确认，确认后的合同支配所有检索阶段。
 - Concept / Claim / Formula / Procedure 知识抽取、治理、统一图谱可视化和个人知识向公共库提交。
 - 与笔记本绑定、仅创建者可见的 Memory，并通过受限 MCP 向外部 Agent 提供访问。
-- 自由列 knowhow 表、Markdown 格子、支持属性按列/按行并提供可操作校验提示的表格导入、全库推理检索驱动的显式空列补全建议、确定性图谱映射、历史/里程碑和隔离的代码附件。
+- 自由列 knowhow 表、Markdown 格子、支持属性按列/按行并提供可操作校验提示的表格导入、全库推理检索驱动的显式空列补全建议、格子知识对象默认进入图谱/推理检索的确定性图谱映射、历史/里程碑和隔离的代码附件。
 - 意图优先的两阶段深度报告：检索前先做不接触语料的问题澄清，并通过原子确认冻结用户已审阅的合同；大库也从有界 chunk 候选恢复精确元素，再提供可编辑的覆盖大纲、优先显示解析论文名的引用、真实 grounded 校验、分节推理、实时进度、取消，以及 Markdown/ZIP 导出。
 - 多账号所有权、公共参考库、分享链接、复制/只读成员和管理员控制。
 - 结构化 JSONL 日志、有界生产诊断、离线批量摄取、检索回放、迁移和回填工具。
@@ -168,6 +168,8 @@ Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有�
 preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；按步骤执行的清单见[迁移 runbook](./docs/postgres-migration-runbook.md)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
+
+贡献者安全约束：凡任务会写入仓库代码、测试、文档或配置，都必须先新建隔离的 linked git worktree 和分支；该任务期间主 checkout 只读。纯调研、状态汇报和只读审查除外。
 
 ## 文档导航
 

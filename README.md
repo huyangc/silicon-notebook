@@ -12,7 +12,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 - Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes. Reasoning questions are understood without corpus influence before retrieval; clear intent auto-continues, while direction-changing ambiguity pauses for confirmation and then governs every retrieval stage.
 - Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, and personal-to-base promotion.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
-- Free-form knowhow tables with Markdown cells, column- or row-oriented spreadsheet import with actionable validation guidance, reasoning-backed library-wide empty-cell completion suggestions, deterministic graph projection, history, milestones, and isolated code attachments.
+- Free-form knowhow tables with Markdown cells, column- or row-oriented spreadsheet import with actionable validation guidance, reasoning-backed library-wide empty-cell completion suggestions, deterministic graph projection whose cell knowledge objects enter graph/reasoning retrieval by default, history, milestones, and isolated code attachments.
 - Intent-first two-stage deep reports with corpus-blind question clarification, an atomically frozen confirmation contract before retrieval, bounded exact-element recovery for large libraries, editable coverage-aware outlines, paper-title-aware citations, verified grounding, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
@@ -172,6 +172,8 @@ Baseline snapshot/COPY additionally requires an owner-only real snapshot directo
 Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback); the step-by-step execution checklist is the [migration runbook](./docs/postgres-migration-runbook.md) (Chinese, like the other runbooks in `docs/`; this English section remains the complete reference). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
+
+Contributor safety: any task that will write repository code, tests, documentation, or configuration starts in an isolated linked git worktree and branch; the main checkout remains read-only for that task. Read-only research, status, and review are exempt.
 
 ## Documentation
 

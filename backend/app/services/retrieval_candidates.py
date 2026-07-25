@@ -809,22 +809,47 @@ class CandidateRetrievalService(_RetrievalState):
                 )
         return sims
     def _knowhow_object_types(self, notebook_id: str) -> tuple:
-        """Distinct knowhow cell-KO object_types (each a table COLUMN NAME — a
+        """Distinct Knowhow cell-KO object types (each a table COLUMN NAME — a
         dynamic type projected by ``KnowhowProjector``) currently usable in the
-        notebook: ``type_counts`` (seq-memoized on ``kg_mutation_seq``, which the
-        knowhow projection bumps via ``mark_unified_dirty``, so this self-
-        invalidates) minus the four fixed ``_KG_TYPES``. Empty tuple ⇒ the
-        notebook has no knowhow graph content ⇒ every caller no-ops. Only ever
-        reached on the flag-on branch (see ``_scored_types``)."""
+        notebook. The store scopes these rows through
+        ``knowhow_tables.hidden_source_id``, rather than treating every custom
+        schema type as a Knowhow column. Empty tuple ⇒ the notebook has
+        no Knowhow graph content ⇒ every caller no-ops. Only ever reached on the
+        flag-on branch (see ``_scored_type_scope``).
+
+        The result is version-cached because one reasoning request calls this
+        path for several subqueries. Fixed names are intentionally retained:
+        free-form table columns can legally be named ``claim``/``formula`` etc.,
+        and those structural-only KOs still need the chunk-vector bridge.
+        """
         with self._connect() as db:
-            rows = self.queries.knowledge_type_count_rows(
-                db, notebook_id, USABLE_STATUSES
+            version = (
+                "knowhow_types",
+                *self.unified_kg.graph_seq_row(db, notebook_id),
             )
-        return tuple(
-            row["object_type"]
-            for row in rows
-            if row["object_type"] not in _KG_TYPES
-        )
+
+            def _load():
+                rows = self.queries.knowhow_knowledge_type_rows(
+                    db, notebook_id, USABLE_STATUSES
+                )
+                return tuple(row["object_type"] for row in rows)
+
+            return self._vector_cache.get(
+                f"{notebook_id}:knowhow_types", version, _load)
+
+    def _scored_type_scope(self, notebook_id: str, types) -> tuple[List[str], tuple]:
+        """Return ``(scored types, Knowhow-owned types)`` from one scoped read."""
+        base = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
+        if not self.settings.knowhow_kg_node_retrieval_enabled:
+            return base, ()
+        knowhow_types = self._knowhow_object_types(notebook_id)
+        if not knowhow_types:
+            return base, ()
+        allowed = set(_KG_TYPES) | set(knowhow_types)
+        source = list(types) if types else [*_KG_TYPES, *(
+            t for t in knowhow_types if t not in _KG_TYPES
+        )]
+        return [t for t in source if t in allowed], knowhow_types
 
     def _scored_types(self, notebook_id: str, types) -> List[str]:
         """The object_types ``_retrieve_scored`` will fetch+score. FLAG OFF (or a
@@ -835,53 +860,64 @@ class CandidateRetrievalService(_RetrievalState):
         unions the knowhow types in too; a caller-supplied list is still just
         filtered against the (now wider) allowed set. ``_knowhow_object_types``
         is only touched on the flag-on branch, so flag-off issues no new query."""
-        base = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
-        if not self.settings.knowhow_kg_node_retrieval_enabled:
-            return base
-        knowhow_types = self._knowhow_object_types(notebook_id)
-        if not knowhow_types:
-            return base
-        allowed = set(_KG_TYPES) | set(knowhow_types)
-        source = list(types) if types else [*_KG_TYPES, *knowhow_types]
-        return [t for t in source if t in allowed]
+        return self._scored_type_scope(notebook_id, types)[0]
 
     def _knowhow_ko_candidates(self, db, notebook_id: str, query: str,
                                query_vector) -> dict:
-        """Gate 0 (default-off): ``{ko_id: sim}`` for knowhow cell KOs whose
+        """Gate 0: ``{ko_id: sim}`` for knowhow cell KOs whose
         hidden-source chunk vectors match the query — the semantic signal a
         structural-only KO (no ``knowledge_embeddings`` row) otherwise lacks.
 
-        Fetches the scoped inputs through this service's stores (the hidden
-        knowhow source's chunk rows → their vectors → the cell elements — a
-        bounded brute-force over the tiny knowhow chunk set, NOT a notebook-wide
-        retrieval) and hands them to the pure ``kg_node_bridge`` reduction.
-        ``query`` is accepted for signature stability / future lexical use;
-        gate 0 is purely semantic today."""
-        from app.services.knowhow.kg_node_bridge import knowhow_ko_candidates
+        The normalized chunk matrix and chunk→KO reverse map are cached by the
+        notebook's monotonic KG sequence, scoped chunk-vector generation, and
+        runtime embedding dimension. The vector generation matters because a
+        vector-only repair intentionally does not mutate KG state. A
+        reasoning request may issue several subqueries, but it reads/builds the
+        scoped Knowhow corpus once. KG mutations also explicitly evict the key,
+        covering same-version delete/reingest collisions. ``query`` is accepted
+        for signature stability / future lexical use; gate 0 is semantic today.
+        """
+        from app.services.knowhow.kg_node_bridge import (
+            build_knowhow_bridge_index,
+            query_knowhow_bridge_index,
+        )
+        from app.services.vector_index import resolve_runtime_dim
         if query_vector is None:
             return {}
-        chunk_rows = self.chunks.knowhow_chunk_rows(db, notebook_id)
-        if not chunk_rows:
-            return {}
-        chunk_to_element = {}
-        for row in chunk_rows:
-            element_ids = json.loads(row["element_ids"] or "[]")
-            if element_ids:
-                chunk_to_element[row["id"]] = element_ids[0]
-        if not chunk_to_element:
-            return {}
-        # Batch the IN-clause like every other candidate fetch here: knowhow is
-        # <100 rows/table by design, but a notebook accumulating many tables can
-        # still push the chunk-id list past SQLite's variable limit.
-        vector_rows: list = []
-        for batch in self._in_batches(list(chunk_to_element)):
-            vector_rows.extend(self.embeddings.vector_rows_for_ids(
-                db, notebook_id, "chunk_embeddings", "chunk_id", batch))
-        elements = self.sources.evidence_elements(
-            list(dict.fromkeys(chunk_to_element.values())))
-        return knowhow_ko_candidates(
-            chunk_to_element, vector_rows, elements, query_vector,
-            recall=self.settings.chunk_recall)
+        runtime_dim = resolve_runtime_dim(self.settings)
+        vector_version = self.chunks.knowhow_bridge_version_row(db, notebook_id)
+        version = (
+            "knowhow_bridge",
+            *self.unified_kg.graph_seq_row(db, notebook_id),
+            vector_version["c"],
+            vector_version["ts"],
+            runtime_dim,
+        )
+
+        def _load():
+            chunk_rows = self.chunks.knowhow_chunk_rows(db, notebook_id)
+            chunk_to_element = {}
+            for row in chunk_rows:
+                element_ids = json.loads(row["element_ids"] or "[]")
+                if element_ids:
+                    chunk_to_element[row["id"]] = element_ids[0]
+            vector_rows: list = []
+            for batch in self._in_batches(list(chunk_to_element)):
+                vector_rows.extend(self.embeddings.vector_rows_for_ids(
+                    db, notebook_id, "chunk_embeddings", "chunk_id", batch))
+            elements = self.sources.evidence_elements(
+                list(dict.fromkeys(chunk_to_element.values())))
+            return build_knowhow_bridge_index(
+                chunk_to_element,
+                vector_rows,
+                elements,
+                runtime_dim=runtime_dim,
+            )
+
+        index = self._vector_cache.get(
+            f"{notebook_id}:knowhow_bridge", version, _load)
+        return query_knowhow_bridge_index(
+            index, query_vector, recall=self.settings.chunk_recall)
 
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
@@ -896,12 +932,12 @@ class CandidateRetrievalService(_RetrievalState):
         # gate i (type widening): flag-off / non-knowhow ⇒ historical filter,
         # byte-identical. flag-on + knowhow present ⇒ column-name types join
         # the fetch set (see _scored_types).
-        type_list = self._scored_types(notebook_id, types)
+        type_list, knowhow_types = self._scored_type_scope(notebook_id, types)
         # gate 0/i are live only when the widening actually surfaced a knowhow
         # (column-name) type — exactly "flag on AND this notebook has knowhow
         # graph content" (or a caller explicitly asked for one). Flag off /
         # non-knowhow ⇒ empty ⇒ pure no-op, no bridge query, no injection.
-        knowhow_on = bool(set(type_list) - set(_KG_TYPES))
+        knowhow_on = bool(set(type_list) & set(knowhow_types))
         query_vector = self._embed_query(query)
         t_embed = time.perf_counter()
         # indexed 时用 (ANN 核 ⊕ delta)∪FTS 取有界候选。candidate_filter 与
@@ -961,7 +997,7 @@ class CandidateRetrievalService(_RetrievalState):
         t_ann = time.perf_counter()
         from app.services.vector_index import query_sims, build_matrix
         with self._connect() as db:
-            # ── gate 0 (default-off): knowhow cell-KO semantic sidecar ───────
+            # ── gate 0: knowhow cell-KO semantic sidecar ─────────────────────
             # Reverse-lookup the query against ONLY the hidden knowhow source's
             # chunk vectors → {ko_id: sim}. Computed once, folded into whichever
             # scoring path this retrieval is on. Empty (no cost) unless knowhow_on.

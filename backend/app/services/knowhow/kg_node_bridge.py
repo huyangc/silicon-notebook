@@ -1,4 +1,4 @@
-"""Gate-0 sidecar for knowhow KG-node retrieval (default-off feature —
+"""Gate-0 sidecar for default-on knowhow KG-node retrieval —
 ``Settings.knowhow_kg_node_retrieval_enabled``): the PURE reduction that turns
 a *chunk-reverse-lookup* into ``{ko_id: sim}`` so a knowhow cell KO
 (``object_type = 列名``, id ``ko-kh-{sha1(table_id|column_name|value_key)[:32]}``)
@@ -36,11 +36,87 @@ pure no-op.
 from __future__ import annotations
 
 import json
-from typing import Dict, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Sequence
 
 from app.services.knowhow import textops
 from app.services.knowhow.ids import _cell_ko_id
 from app.services.vector_index import build_matrix, query_sims
+
+
+@dataclass(frozen=True)
+class KnowhowBridgeIndex:
+    """Compact, query-independent sidecar for one notebook's Knowhow cells.
+
+    ``ids`` and ``matrix`` are the normalized chunk-vector corpus; the reverse
+    map is precomputed once from element metadata. Keeping this object in the
+    shared versioned retrieval cache avoids re-reading rows and rebuilding the
+    same matrix for every reasoning subquery.
+    """
+
+    ids: Sequence[str]
+    matrix: Any
+    ko_ids_by_chunk: Mapping[str, Sequence[str]]
+
+
+def build_knowhow_bridge_index(
+    chunk_to_element: Mapping[str, str],
+    chunk_vector_rows: Sequence,
+    elements: Mapping[str, Mapping],
+    *,
+    runtime_dim: int | None = None,
+) -> KnowhowBridgeIndex:
+    """Build the query-independent chunk-vector → cell-KO sidecar."""
+    ids, matrix = build_matrix(
+        ((r["vid"], r["vector"]) for r in chunk_vector_rows),
+        runtime_dim=runtime_dim,
+    )
+    ko_ids_by_chunk: Dict[str, tuple[str, ...]] = {}
+    for chunk_id in ids:
+        element_id = chunk_to_element.get(chunk_id)
+        element = elements.get(element_id) if element_id else None
+        if element is None:
+            continue
+        try:
+            meta = json.loads(element.get("metadata") or "{}") or {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        knowhow = meta.get("knowhow") or {}
+        table_id = knowhow.get("table_id")
+        column_name = knowhow.get("column_name")
+        if not table_id or not column_name:
+            continue
+        text = element.get("text") or ""
+        values = textops.split_tools(text) if knowhow.get("role") == "entity" else [text]
+        ko_ids = []
+        for value in values:
+            value_key = textops.value_key(value)
+            if value_key:
+                ko_ids.append(_cell_ko_id(table_id, column_name, value_key))
+        if ko_ids:
+            ko_ids_by_chunk[chunk_id] = tuple(dict.fromkeys(ko_ids))
+    return KnowhowBridgeIndex(ids=ids, matrix=matrix, ko_ids_by_chunk=ko_ids_by_chunk)
+
+
+def query_knowhow_bridge_index(
+    index: KnowhowBridgeIndex,
+    query_vector,
+    *,
+    recall: int,
+) -> Dict[str, float]:
+    """Query a prebuilt bridge and fold chunk similarities onto cell KO ids."""
+    if query_vector is None or not index.ids:
+        return {}
+    sims = query_sims(query_vector, index.ids, index.matrix)
+    if not sims:
+        return {}
+    ranked = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)[: max(recall, 1)]
+    out: Dict[str, float] = {}
+    for chunk_id, sim in ranked:
+        for ko_id in index.ko_ids_by_chunk.get(chunk_id, ()):
+            if sim > out.get(ko_id, -1.0):
+                out[ko_id] = sim
+    return out
 
 
 def knowhow_ko_candidates(
@@ -66,42 +142,14 @@ def knowhow_ko_candidates(
     L2-normalized by ``build_matrix``/``query_sims``, same runtime-truncation
     reconciliation as every other chunk path). Empty dict when there is nothing
     to contribute."""
-    if query_vector is None:
-        return {}
-    ids, matrix = build_matrix((r["vid"], r["vector"]) for r in chunk_vector_rows)
-    if not ids:
-        return {}
-    sims = query_sims(query_vector, ids, matrix)  # {chunk_id: cosine}
-    if not sims:
-        return {}
-    # Bound to the top-``recall`` chunks by similarity (knowhow is tiny, so this
-    # is usually all of them — the cap only bites if a future table grows large).
-    ranked = sorted(sims.items(), key=lambda kv: kv[1], reverse=True)[: max(recall, 1)]
-
-    out: Dict[str, float] = {}
-    for chunk_id, sim in ranked:
-        element_id = chunk_to_element.get(chunk_id)
-        element = elements.get(element_id) if element_id else None
-        if element is None:
-            continue
-        meta = json.loads(element.get("metadata") or "{}") or {}
-        knowhow = meta.get("knowhow") or {}
-        table_id = knowhow.get("table_id")
-        column_name = knowhow.get("column_name")
-        if not table_id or not column_name:
-            continue
-        text = element.get("text") or ""
-        # Mirror the projector's per-cell KO split: entity cells fan out into one
-        # KO per list item, every other role is one KO for the whole cell.
-        values = textops.split_tools(text) if knowhow.get("role") == "entity" else [text]
-        for value in values:
-            value_key = textops.value_key(value)
-            if not value_key:
-                continue
-            ko_id = _cell_ko_id(table_id, column_name, value_key)
-            if sim > out.get(ko_id, -1.0):
-                out[ko_id] = sim
-    return out
+    index = build_knowhow_bridge_index(
+        chunk_to_element, chunk_vector_rows, elements)
+    return query_knowhow_bridge_index(index, query_vector, recall=recall)
 
 
-__all__ = ["knowhow_ko_candidates"]
+__all__ = [
+    "KnowhowBridgeIndex",
+    "build_knowhow_bridge_index",
+    "knowhow_ko_candidates",
+    "query_knowhow_bridge_index",
+]

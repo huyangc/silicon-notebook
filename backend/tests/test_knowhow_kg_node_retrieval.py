@@ -1,6 +1,6 @@
 # backend/tests/test_knowhow_kg_node_retrieval.py
-"""T1+T2 of the knowhow KG-node retrieval feature (default-off,
-``KNOWHOW_KG_NODE_RETRIEVAL_ENABLED`` / real-machine-eval gated).
+"""Knowhow KG-node retrieval (default-on, env-reversible through
+``KNOWHOW_KG_NODE_RETRIEVAL_ENABLED``).
 
 Proves the two retrieval seams that let a knowhow cell KO (``object_type =
 列名``) surface in the KG-node scoring path (``_retrieve_scored``):
@@ -106,8 +106,15 @@ def _fix_ko_id(cand, notebook_id: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def test_flag_defaults_off(client):
-    assert client._repo.settings.knowhow_kg_node_retrieval_enabled is False
+def test_flag_defaults_on(client):
+    assert client._repo.settings.knowhow_kg_node_retrieval_enabled is True
+
+
+def test_flag_env_override_can_disable(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.setenv("KNOWHOW_KG_NODE_RETRIEVAL_ENABLED", "false")
+    assert Settings().knowhow_kg_node_retrieval_enabled is False
 
 
 def test_knowhow_object_types_lists_column_names(client, imported):
@@ -123,16 +130,21 @@ def test_scored_types_byte_identical_when_flag_off(client, imported):
     even on a knowhow notebook, column-name types are dropped."""
     cand = _candidates(client)
     nb = imported["nb"]
-    assert cand.settings.knowhow_kg_node_retrieval_enabled is False
-    assert cand._scored_types(nb, None) == list(_KG_TYPES)
-    assert cand._scored_types(nb, ["procedure", FIX_COLUMN]) == ["procedure"]
-    assert cand._scored_types(nb, [FIX_COLUMN]) == []
+    previous = cand.settings.knowhow_kg_node_retrieval_enabled
+    cand.settings.knowhow_kg_node_retrieval_enabled = False
+    try:
+        assert cand._scored_types(nb, None) == list(_KG_TYPES)
+        assert cand._scored_types(nb, ["procedure", FIX_COLUMN]) == ["procedure"]
+        assert cand._scored_types(nb, [FIX_COLUMN]) == []
+    finally:
+        cand.settings.knowhow_kg_node_retrieval_enabled = previous
 
 
 def test_scored_types_widens_when_flag_on(client, imported):
     cand = _candidates(client)
     nb = imported["nb"]
     _await_projection(cand, nb)
+    previous = cand.settings.knowhow_kg_node_retrieval_enabled
     cand.settings.knowhow_kg_node_retrieval_enabled = True
     try:
         types = cand._scored_types(nb, None)
@@ -141,7 +153,7 @@ def test_scored_types_widens_when_flag_on(client, imported):
         # a caller can now explicitly reach a column-name type
         assert cand._scored_types(nb, [FIX_COLUMN]) == [FIX_COLUMN]
     finally:
-        cand.settings.knowhow_kg_node_retrieval_enabled = False
+        cand.settings.knowhow_kg_node_retrieval_enabled = previous
 
 
 def test_non_knowhow_notebook_unaffected_when_flag_on(client):
@@ -150,13 +162,33 @@ def test_non_knowhow_notebook_unaffected_when_flag_on(client):
     headers = _login(client, "a00000602")
     nb = _mk_notebook(client, headers)
     cand = _candidates(client)
+    previous = cand.settings.knowhow_kg_node_retrieval_enabled
     cand.settings.knowhow_kg_node_retrieval_enabled = True
     try:
         assert cand._knowhow_object_types(nb) == ()
         assert cand._scored_types(nb, None) == list(_KG_TYPES)
         assert cand._scored_types(nb, ["claim"]) == ["claim"]
     finally:
-        cand.settings.knowhow_kg_node_retrieval_enabled = False
+        cand.settings.knowhow_kg_node_retrieval_enabled = previous
+
+
+def test_unrelated_custom_schema_type_is_not_treated_as_knowhow(client):
+    """Default-on widening is source-scoped, not "every non-built-in type"."""
+    from app.models.schemas import NotebookCreate
+
+    cand = _candidates(client)
+    nb = client._repo.create_notebook(NotebookCreate(name="custom-schema"))
+    client._repo.store_kg(nb.id, None, [{
+        "local_id": "X1",
+        "object_type": "custom_metric",
+        "payload": {"name": "custom only"},
+        "evidence": [],
+    }], [])
+
+    assert cand.settings.knowhow_kg_node_retrieval_enabled is True
+    assert cand._knowhow_object_types(nb.id) == ()
+    assert cand._scored_types(nb.id, None) == list(_KG_TYPES)
+    assert cand._scored_types(nb.id, ["custom_metric"]) == []
 
 
 # --------------------------------------------------------------------------
@@ -189,6 +221,85 @@ def test_bridge_empty_without_query_vector(client, imported):
         assert cand._knowhow_ko_candidates(db, imported["nb"], UNIQUE_TERM, None) == {}
 
 
+def test_bridge_caches_scoped_corpus_and_reloads_after_kg_invalidation(
+    client, imported, monkeypatch,
+):
+    """Many reasoning subqueries reuse one matrix; a KG mutation evicts it."""
+    cand = _candidates(client)
+    nb = imported["nb"]
+    _await_projection(cand, nb)
+    cand._vector_cache.invalidate(f"{nb}:knowhow_bridge")
+    calls = 0
+    original = cand.chunks.knowhow_chunk_rows
+
+    def counted(db, notebook_id):
+        nonlocal calls
+        calls += 1
+        return original(db, notebook_id)
+
+    monkeypatch.setattr(cand.chunks, "knowhow_chunk_rows", counted)
+    query_vector = cand._embed_query(UNIQUE_TERM)
+    with cand._connect() as db:
+        first = cand._knowhow_ko_candidates(db, nb, UNIQUE_TERM, query_vector)
+        second = cand._knowhow_ko_candidates(db, nb, UNIQUE_TERM, query_vector)
+    assert first == second
+    assert calls == 1
+
+    cand.snapshots.invalidate_kg(nb)
+    with cand._connect() as db:
+        third = cand._knowhow_ko_candidates(db, nb, UNIQUE_TERM, query_vector)
+    assert third == first
+    assert calls == 2
+
+
+def test_bridge_reloads_after_vector_only_backfill(client, imported, monkeypatch):
+    """H4 repair changes embeddings without a KG-sequence bump."""
+    cand = _candidates(client)
+    nb = imported["nb"]
+    _await_projection(cand, nb)
+    cand._vector_cache.invalidate(f"{nb}:knowhow_bridge")
+    with cand._connect() as db:
+        vector_row = db.execute(
+            "SELECT ce.chunk_id,ce.vector,ce.created_at FROM chunk_embeddings ce "
+            "JOIN chunks c ON c.id=ce.chunk_id "
+            "JOIN knowhow_tables kt ON kt.hidden_source_id=c.source_id "
+            "WHERE kt.notebook_id=? LIMIT 1",
+            (nb,),
+        ).fetchone()
+    assert vector_row is not None
+    with cand.database.write() as db:
+        db.execute(
+            "DELETE FROM chunk_embeddings WHERE chunk_id=?",
+            (vector_row["chunk_id"],),
+        )
+
+    calls = 0
+    original = cand.chunks.knowhow_chunk_rows
+
+    def counted(db, notebook_id):
+        nonlocal calls
+        calls += 1
+        return original(db, notebook_id)
+
+    monkeypatch.setattr(cand.chunks, "knowhow_chunk_rows", counted)
+    query_vector = cand._embed_query(UNIQUE_TERM)
+    with cand._connect() as db:
+        cand._knowhow_ko_candidates(db, nb, UNIQUE_TERM, query_vector)
+    assert calls == 1
+
+    # Mirror vector-only backfill: insert the missing vector without touching
+    # unified_kg_state or calling invalidate_kg.
+    with cand.database.write() as db:
+        db.execute(
+            "INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) "
+            "VALUES (?,?,?,?)",
+            (vector_row["chunk_id"], nb, vector_row["vector"], vector_row["created_at"]),
+        )
+    with cand._connect() as db:
+        cand._knowhow_ko_candidates(db, nb, UNIQUE_TERM, query_vector)
+    assert calls == 2
+
+
 # --------------------------------------------------------------------------
 # gate 0 + gate i together, in _retrieve_scored
 # --------------------------------------------------------------------------
@@ -201,19 +312,19 @@ def test_retrieve_scored_surfaces_knowhow_ko_full_scan(client, imported):
     nb = imported["nb"]
     expected = _fix_ko_id(cand, nb)
 
-    off = cand._retrieve_scored(nb, UNIQUE_TERM)
-    assert not any(h.object_type in set(HEADER) for h in off)
-    assert expected not in {h.object_id for h in off}
-
-    cand.settings.knowhow_kg_node_retrieval_enabled = True
+    on = cand._retrieve_scored(nb, UNIQUE_TERM)
+    previous = cand.settings.knowhow_kg_node_retrieval_enabled
+    cand.settings.knowhow_kg_node_retrieval_enabled = False
     try:
-        on = cand._retrieve_scored(nb, UNIQUE_TERM)
+        off = cand._retrieve_scored(nb, UNIQUE_TERM)
     finally:
-        cand.settings.knowhow_kg_node_retrieval_enabled = False
+        cand.settings.knowhow_kg_node_retrieval_enabled = previous
     hit = next((h for h in on if h.object_id == expected), None)
     assert hit is not None, [(h.object_type, h.object_id) for h in on]
     assert hit.object_type == FIX_COLUMN
     assert UNIQUE_TERM in _payload_text(hit.payload)
+    assert not any(h.object_type in set(HEADER) for h in off)
+    assert expected not in {h.object_id for h in off}
 
 
 def test_retrieve_scored_surfaces_knowhow_ko_bounded_fts_fallback(client, imported, monkeypatch):
@@ -245,16 +356,17 @@ def test_retrieve_scored_surfaces_knowhow_ko_bounded_fts_fallback(client, import
     monkeypatch.setattr(cand, "notebook_copy_stats",
                         lambda notebook_id: {"copyable": False})
 
-    cand.settings.knowhow_kg_node_retrieval_enabled = True
-    try:
-        on = cand._retrieve_scored(nb, UNIQUE_TERM)
-    finally:
-        cand.settings.knowhow_kg_node_retrieval_enabled = False
+    on = cand._retrieve_scored(nb, UNIQUE_TERM)
     ids_on = {h.object_id for h in on}
     assert base_oid in ids_on, "sanity: the bounded FTS-fallback path must have fired"
     assert expected in ids_on, [(h.object_type, h.object_id) for h in on]
 
-    off = cand._retrieve_scored(nb, UNIQUE_TERM)   # monkeypatch still active
+    previous = cand.settings.knowhow_kg_node_retrieval_enabled
+    cand.settings.knowhow_kg_node_retrieval_enabled = False
+    try:
+        off = cand._retrieve_scored(nb, UNIQUE_TERM)  # monkeypatch still active
+    finally:
+        cand.settings.knowhow_kg_node_retrieval_enabled = previous
     ids_off = {h.object_id for h in off}
     assert base_oid in ids_off                     # base still there (same bounded path)
     assert expected not in ids_off                 # knowhow KO gone with flag off
@@ -275,14 +387,15 @@ def test_rrf_tie_break_ordering_follows_kg_types_not_caller_order(client):
     from app.models.schemas import NotebookCreate
 
     cand = _candidates(client)
-    assert cand.settings.knowhow_kg_node_retrieval_enabled is False  # off: pure pre-feature path
     nb = client._repo.create_notebook(NotebookCreate(name="rrf-tie-order"))
     payload = {"name": "时序收敛要点", "section_path": "1"}  # identical ⇒ identical score
     client._repo.store_kg(nb.id, None, [
         {"local_id": "C1", "object_type": "claim", "payload": dict(payload), "evidence": []},
         {"local_id": "K1", "object_type": "concept", "payload": dict(payload), "evidence": []},
     ], [])
+    previous_flag = cand.settings.knowhow_kg_node_retrieval_enabled
     prev = cand.settings.retrieval_rrf_enabled
+    cand.settings.knowhow_kg_node_retrieval_enabled = False
     cand.settings.retrieval_rrf_enabled = True
     try:
         fwd = [h.object_type for h in cand._retrieve_scored(
@@ -291,6 +404,7 @@ def test_rrf_tie_break_ordering_follows_kg_types_not_caller_order(client):
             nb.id, "时序收敛要点", types=["concept", "claim"])]
     finally:
         cand.settings.retrieval_rrf_enabled = prev
+        cand.settings.knowhow_kg_node_retrieval_enabled = previous_flag
     # Pre-fix (`for t in kg_objs`) leaked caller order → fwd=[claim,concept],
     # rev=[concept,claim]. Post-fix both are _KG_TYPES-ordered (claim<concept).
     assert fwd == rev, f"tie-break order leaked caller `types` order: {fwd} vs {rev}"

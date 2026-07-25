@@ -127,6 +127,24 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
+    def knowhow_knowledge_type_rows(
+        db: Any, notebook_id: str, statuses: tuple[str, ...]
+    ) -> "list[dict]":
+        """Return only KO types owned by a table's hidden Knowhow source."""
+        values = list(statuses)
+        if not values:
+            return []
+        return db.execute(
+            "SELECT ko.object_type,COUNT(*) AS c "
+            "FROM knowhow_tables kt JOIN knowledge_objects ko "
+            "ON ko.source_id=kt.hidden_source_id "
+            "WHERE kt.notebook_id=%s "
+            "AND ko.notebook_id=%s AND ko.status=ANY(%s) "
+            "GROUP BY ko.object_type ORDER BY ko.object_type",
+            (notebook_id, notebook_id, values),
+        ).fetchall()
+
+    @staticmethod
     def notebook_has_kg(db: Any, notebook_id: str) -> bool:
         row = db.execute(
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
