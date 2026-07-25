@@ -870,12 +870,29 @@ class KnowledgeLifecycleService:
         targets, _skipped, _skipped_no_elements = self._kg_target_state(
             notebook_id, mode
         )
-        job = self.kg_build_jobs.create_job(
-            notebook_id,
-            self._current_user_id(),
-            mode,
-            len(targets),
-        )
+        # create_job 先 INSERT 再 get(job_id) 返回。信号落在「已提交、尚未返回」之间时
+        # job 根本没被赋值,连下面那层守卫都进不去,行就永久留在 running。这里按
+        # notebook 找回它——但只在**新出现**且仍 running 的行上动手:调用前后比对最新行
+        # id,变了才说明这次的 INSERT 已提交。若没变(中断落在 INSERT 之前),那行属于
+        # 别人,离线进程无权裁决,绝不能碰。
+        previous = self.kg_build_jobs.latest(notebook_id)
+        previous_id = previous["id"] if previous is not None else ""
+        try:
+            job = self.kg_build_jobs.create_job(
+                notebook_id,
+                self._current_user_id(),
+                mode,
+                len(targets),
+            )
+        except (KeyboardInterrupt, SystemExit):
+            stranded = self.kg_build_jobs.latest(notebook_id)
+            if (
+                stranded is not None
+                and stranded["id"] != previous_id
+                and stranded["status"] == "running"
+            ):
+                self._settle_unentered_job(stranded["id"], notebook_id)
+            raise
         # create_job 已经提交了持久 running 行,而下面还有三步(登记进程内标志、写事件
         # 文件、推送待办)。信号落在这里会直接逃出本方法,连调用方的兜底都进不去,行就
         # 永久留在 running。守卫必须从「行已存在」这一刻起生效。
