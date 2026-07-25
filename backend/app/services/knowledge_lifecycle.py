@@ -937,10 +937,10 @@ class KnowledgeLifecycleService:
                 )
                 return False
 
-        futures = {
-            _kg_scheduler.submit_job(_extract_one, source_id): source_id
-            for source_id in targets
-        }
+        # 提交本身也在中断保护范围内(见下面的 try):大库要提交几十万个 job,这段窗口
+        # 不短,中断落在这里时已提交的 worker 同样必须被取消并排空。故用增量填充的
+        # dict 而非推导式——清理路径要能看到「提交到一半」的那部分。
+        futures: dict = {}
         processed = set()
         progress_index = 0
 
@@ -976,6 +976,10 @@ class KnowledgeLifecycleService:
             return None
 
         try:
+            for source_id in targets:
+                futures[
+                    _kg_scheduler.submit_job(_extract_one, source_id)
+                ] = source_id
             for future in _cf.as_completed(futures):
                 abort = _record_result(future)
                 if abort is None:
@@ -1006,7 +1010,24 @@ class KnowledgeLifecycleService:
             )
             for pending in futures:
                 pending.cancel()
-            _cf.wait(futures)
+            # 排空必须顶住**重复**中断。这次等待按设计可能长到一次模型超时,而运维最
+            # 自然的动作就是「没反应,再按一次 Ctrl-C」——若让第二个信号从这里逃出去,
+            # 外层就会在 future 尚未排空时落终态、放开跨进程守卫,旧 worker 于是与新
+            # 构建并发写入,等于这段修复白做。所以这里吞掉后续中断直到真正排空,并把
+            # 每次吞掉的都记下来(等待是有界的:worker 已被 abort,在飞调用受
+            # KG_LLM_TIMEOUT_SECONDS 约束)。真要立刻结束仍可 kill -9,那属于不可捕获
+            # 的终止,残留行由服务端启动兜底清理。
+            while True:
+                try:
+                    _cf.wait(futures)
+                    break
+                except (KeyboardInterrupt, SystemExit):
+                    self.event_log.logger.warning(
+                        "KG job %s: ignoring repeated termination signal while "
+                        "draining in-flight sources; the notebook guard is only "
+                        "released after they stop",
+                        job_id,
+                    )
             # 刻意不像熔断分支那样 _record_result(排空结果):中断是不可恢复的收尾,
             # 正在展开的栈上应尽量少写库。排空期间跑完的来源其图行本身已提交,下一次
             # 增量运行按覆盖度重算目标,不依赖这里的计数。
@@ -1183,7 +1204,12 @@ class KnowledgeLifecycleService:
                     "worker_interrupted", INTERRUPTED_KG_BUILD_ERROR_MESSAGE
                 )
                 _mark_stopping(KgBuildAborted(failure), circuit=False)
-                control.abort(failure)
+                # notify=False:状态已由上一行按人工中断的口径公布过了。若那次写库
+                # 撞上瞬时错误,stopping_marked 仍是 False,默认的 notify=True 会经
+                # on_abort 再试一次——而那条回调是 circuit=True 的,重试一旦成功就会
+                # 给一次人工中断记上 kg_build_circuit_opened,自相矛盾。宁可不重试那条
+                # 瞬时的中间态(终态由下面的 finish 负责),也不能记错熔断。
+                control.abort(failure, notify=False)
                 # 信号可能落在成功路径 finish(succeeded) 之后、本函数返回之前:那时
                 # 三次写都带 WHERE status='running',全部命中 0 行,任务其实已经成功
                 # 提交。此时**不能**再拿那行已成功的记录发 kg_build_failed——事件里会
