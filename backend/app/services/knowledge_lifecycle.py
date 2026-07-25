@@ -876,10 +876,17 @@ class KnowledgeLifecycleService:
             mode,
             len(targets),
         )
-        with self.kg_building_lock:
-            self.kg_building.add(notebook_id)
-        self._emit_kg_build_event("kg_build_started", job)
-        self._publish_pending_started()
+        # create_job 已经提交了持久 running 行,而下面还有三步(登记进程内标志、写事件
+        # 文件、推送待办)。信号落在这里会直接逃出本方法,连调用方的兜底都进不去,行就
+        # 永久留在 running。守卫必须从「行已存在」这一刻起生效。
+        try:
+            with self.kg_building_lock:
+                self.kg_building.add(notebook_id)
+            self._emit_kg_build_event("kg_build_started", job)
+            self._publish_pending_started()
+        except (KeyboardInterrupt, SystemExit):
+            self._settle_unentered_job(job["id"], notebook_id)
+            raise
         return job
 
     def fail_notebook_kg_job_submission(self, job_id: str) -> bool:
@@ -1285,13 +1292,18 @@ class KnowledgeLifecycleService:
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
 
-    def _settle_unentered_job(self, job_id: str) -> None:
-        """兜住「行已建、但 _run_notebook_kg_job 还没进到自己的保护区」这个窗口。
+    def _settle_unentered_job(self, job_id: str, notebook_id: str) -> None:
+        """兜住「行已建、但 _run_notebook_kg_job 还没进到自己的 try/finally」这个窗口。
 
-        prepare 提交 running 行之后到那个 try 之间还有几步(事件落盘、待办推送、一次
-        DB 读),信号落在这里时没有任何人收尾,行就永久留在 running——正是本改动要消灭
-        的状态。这里的收尾是幂等的:finish 带 ``WHERE status='running'``,若 _run 内部
-        已经落过终态,这次就是 0 行、什么也不做。"""
+        create_job 提交 running 行之后,到那个 try 之间还有几步(登记进程内标志、事件
+        落盘、待办推送、一次 DB 读),信号落在这里时没有任何人收尾,行就永久留在
+        running——正是本改动要消灭的状态。这里的收尾是幂等的:finish 带
+        ``WHERE status='running'``,若 _run 内部已经落过终态,这次就是 0 行、什么也不做。
+
+        进程内的 kg_building 标志也必须一并清掉:它由 prepare 登记、正常由
+        _run_notebook_kg_job 的 finally 移除。走不到那个 finally 时若不在这里清,
+        get_notebook()/索引状态会在**该进程余生**都报「构建中」,界面上的分析入口一直
+        禁用,尽管数据库层面已经允许新任务。"""
 
         def _settle() -> None:
             try:
@@ -1308,6 +1320,9 @@ class KnowledgeLifecycleService:
                 self.event_log.logger.exception(
                     "failed to settle interrupted KG job %s", job_id
                 )
+            finally:
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
 
         self._absorbing_repeated_termination(job_id, _settle)
 
@@ -1323,7 +1338,7 @@ class KnowledgeLifecycleService:
                     notebook_id, job_id, "incremental", progress
                 )
             except (KeyboardInterrupt, SystemExit):
-                self._settle_unentered_job(job_id)
+                self._settle_unentered_job(job_id, notebook_id)
                 raise
         return self._run_notebook_kg_job(
             notebook_id, job_id, "incremental", progress
@@ -1359,7 +1374,7 @@ class KnowledgeLifecycleService:
                     notebook_id, job_id, "rebuild"
                 )
             except (KeyboardInterrupt, SystemExit):
-                self._settle_unentered_job(job_id)
+                self._settle_unentered_job(job_id, notebook_id)
                 raise
         return self._run_notebook_kg_job(
             notebook_id, job_id, "rebuild"
