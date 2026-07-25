@@ -169,10 +169,10 @@ class GraphRetrievalService(_RetrievalState):
                 # flag is process-constant (pydantic-settings loaded at startup),
                 # so the version-cached graph never goes stale against it; a
                 # restart that flips it clears the in-memory _vector_cache.
-                # getattr fallback: config.py's flag lands via T1 (other agent);
-                # until then this reads False so nothing crashes pre-merge.
+                # getattr fallback matches the Settings default so lightweight
+                # settings doubles that omit the field retain production behavior.
                 knowhow_on = getattr(
-                    self.settings, "knowhow_kg_node_retrieval_enabled", False)
+                    self.settings, "knowhow_kg_node_retrieval_enabled", True)
                 for nb_id, _ in participants:
                     obj_rows = self.knowledge.graph_object_rows(
                         db, nb_id, USABLE_STATUSES,

@@ -18,12 +18,10 @@ Design under test:
     multi-row KOs stay None). `knowhow_enabled=False` forces None even for a
     single-row node (render-level off-switch, exercised below).
 
-Production code reads the flag via
-`getattr(settings, "knowhow_kg_node_retrieval_enabled", False)` (T1, other
-agent, lands it in config.py). These tests toggle it with `object.__setattr__`,
-which lands in the instance __dict__ (winning over pydantic's __getattr__)
-whether or not the field is declared — robust on a bare checkout of this branch.
-Settings is fresh per fixture, so no teardown is needed.
+Production code reads the default-on flag via
+`getattr(settings, "knowhow_kg_node_retrieval_enabled", True)`. These tests
+toggle it with `object.__setattr__`; each repository owns a fresh Settings
+instance, so no teardown is needed.
 """
 import json
 

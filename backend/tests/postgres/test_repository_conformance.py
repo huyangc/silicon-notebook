@@ -289,7 +289,7 @@ def _project_dynamic_knowhow(repository, notebook_id: str, owner_id: str) -> str
     return table_id
 
 
-def test_postgres_knowhow_node_retrieval_uses_backend_neutral_type_counts(
+def test_postgres_knowhow_node_retrieval_uses_source_scoped_type_query(
     postgres_settings,
 ):
     """The flag-on production retrieval path must never execute SQLite `?` SQL."""
