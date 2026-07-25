@@ -194,9 +194,43 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 | `kg_product_smoke.py` | 用真实产品抽取链路对样例 source 冒烟 |
 | `kg_strip_attrs.py` | 一次性迁移:从 gold 草稿去掉 `attrs` |
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
+| `kg_quality_audit.py` | 审计现有库的 KG 抽取质量:类型构成 / 重名率 / 文档频次长尾 / 噪声探针 / 连通性(只读、零 LLM),见下 |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
 | `git-cleanup.sh` | 清理「PR 已合并」的本地分支 + worktree:默认 dry-run 预演,`--apply` 执行,`--remote` 连带删远程(保护 master / 当前分支 / `eval` / `backup/*`) |
+
+### `kg_quality_audit.py` —— 「库里的节点都是些什么」
+
+回答「这个库为什么有这么多节点、其中有多少是噪声」。只读、零 LLM、零写库,可以对
+生产库直接跑(服务在跑也没关系)。
+
+```bash
+# 不指定 notebook 时先列候选,并选来源最多的那个
+PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db .local/silicon_notebook.db
+
+# 指定库 + 加大抽样
+PYTHONPATH=backend python3 scripts/kg_quality_audit.py \
+  --db .local/silicon_notebook.db --notebook nb-xxxxxxxx --sources 200
+
+# 全量(千万级库很慢)
+PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb-xxxx --sources 0
+```
+
+报告分三节:①对象类型构成(全量,走索引);②内容分析(默认随机抽 `--sources` 个来源,
+报告里会写明是抽样还是全量);③连通性与边来源(对节点子样本,含 relink 补边占比)。
+`--no-samples` 只出数字不打印名称。
+
+要点:
+
+- **判据直接 import 产品代码**(`app.services.kg.filters` / `app.eval.probes`),不重实现
+  —— 否则「现有过滤器拦下多少」会因口径漂移失真。所以必须带 `PYTHONPATH=backend`
+  并用后端解释器;缺了会直接报错退出,不会静默降级。
+- **只读的准确边界**:产品数据一个字节不动(`mode=ro` + `PRAGMA query_only`)。但 WAL 库
+  上 SQLite 仍可能创建/触碰 `-wal`/`-shm`(读最新快照的必需品);服务在跑时这两个文件
+  本就存在。它不是「一个文件都不碰」。
+- **抽样绝不静默**:每一节都标注口径;DF(文档频次)在抽样下被系统性低估,报告里有明说。
+- 两条已知的判据局限会被自动提示:`is_noise_concept` 的 `len(raw) <= 2` 会丢中文双字
+  术语;`probes.claim_degraded` 的动词表只覆盖英文,中文库上该数字无效。
 
 ---
 

@@ -1151,6 +1151,70 @@
     {
       "count": 1,
       "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.degree_and_basis",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.list_notebooks",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.load_objects",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.main",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.open_readonly",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.require_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.sample_source_ids",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.type_composition",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
       "path": "scripts/merge_dbs.py",
       "reason": "temporary copies used by the offline two-database merge tool",
       "scope": "<module>._sole_base_id",
@@ -1412,6 +1476,14 @@
       "path": "scripts/generate_repository_contract_fixtures.py",
       "reason": "disposable contract fixture databases",
       "scope": "<module>.generate_v9_fixture",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.open_readonly",
       "target": "sqlite3.connect"
     },
     {
