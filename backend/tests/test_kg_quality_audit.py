@@ -35,7 +35,8 @@ def load_audit():
 
 
 def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name,
-              sourceless: int = 0, untagged_edges: int = 0) -> None:
+              sourceless: int = 0, untagged_edges: int = 0,
+              notebook_name: str = "测试库") -> None:
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -50,7 +51,8 @@ def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name,
         CREATE TABLE concept_whitelist (term TEXT PRIMARY KEY);
         """
     )
-    conn.execute("INSERT INTO notebooks VALUES ('nb-1','测试库','personal')")
+    conn.execute("INSERT INTO notebooks VALUES ('nb-1',?,'personal')",
+                 (notebook_name,))
     for s in range(sources):
         sid = f"src-{s}"
         conn.execute("INSERT INTO sources VALUES (?,'nb-1')", (sid,))
@@ -253,6 +255,53 @@ def test_cjk_warning_is_phrased_as_risk_not_as_established_loss(tmp_path, capsys
     assert "风险提示" in out
     assert "直方图不构成证据" in out
     assert "正在丢弃" not in out, "不得把形状相符说成已确认的丢弃"
+
+
+def test_promotion_only_library_still_gets_full_concept_analysis(tmp_path, capsys):
+    """DF 算不出来不是跳过整节的理由 —— 只有 DF 那一小节依赖 source_id。
+
+    第 2 轮 codex 评审(P2)抓到的回归:上一轮修「不挂来源的对象」时加的早退，会把
+    一个全部来自晋升的 base 库的噪声过滤器、probes、词数分布、CJK 诊断全部跳掉，
+    而那批对象恰恰是 full 模式声称已纳入的。
+    """
+    audit = load_audit()
+    db = tmp_path / "promo_only.db"
+    # 零来源、只有晋升对象:df 必然为空
+    _build_db(
+        db, sources=0, sourceless=12,
+        concepts_per_source=lambda s: [],
+        claim_name=lambda s: "",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "0", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "DF 无从统计" in out
+    assert "以下其余分析照常" in out
+    # DF 之后的分析必须仍然跑过
+    assert "is_noise_concept 命中" in out, "早退把噪声过滤器整节跳了"
+    assert "classify_concept" in out, "早退把质量探针整节跳了"
+    assert "按词数" in out, "早退把词数分布跳了"
+
+
+def test_no_samples_also_redacts_notebook_titles(tmp_path, capsys):
+    """笔记本名也是用户内容,且候选表会带出与本次目标无关的其它库。"""
+    audit = load_audit()
+    db = tmp_path / "titles.db"
+    title = "TOPSECRETNOTEBOOKTITLE"
+    _build_db(
+        db, sources=3, notebook_name=title,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "0", "--no-samples"]) == 0
+    quiet = capsys.readouterr().out
+    assert title not in quiet, "--no-samples 下仍打印了笔记本名称"
+    assert "也不打印笔记本名称" in quiet
+    assert "nb-1" in quiet, "选库必需的 id 不能一起隐掉"
+    # 反向:默认口径下名称照常出现,免得断言因「压根没渲染」而假绿
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0"]) == 0
+    assert title in capsys.readouterr().out
 
 
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):

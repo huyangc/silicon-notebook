@@ -310,20 +310,24 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
         key = _norm(it["name"])
         df[key].add(it["source_id"])
         mention[key] += max(1, it["n_evidence"])
+    # 只有 DF 这一小节依赖 source_id。一个全部来自晋升的 base 库 DF 无从谈起,但
+    # 噪声过滤器、probes、词数分布、CJK 诊断、样本对它一概不依赖 —— 不能因为 DF
+    # 算不出来就把整节 return 掉(那正是 full 模式声称已纳入的那批对象)。
     if not df:
-        print("  文档频次(DF):本批全部对象都不挂来源,无法统计。")
-        return
-    buckets = Counter(min(len(s), 5) for s in df.values())
-    if n_no_source:
-        print(f"  文档频次(DF)分桶 [按唯一名;已排除 {n_no_source} 个不挂来源的对象]:")
+        print(f"  文档频次(DF):本批 {n_no_source} 个对象全部不挂来源,DF 无从统计;"
+              "以下其余分析照常。")
     else:
-        print("  文档频次(DF)分桶 [按唯一名]:")
-    for k in sorted(buckets):
-        label = f"{k} 篇" if k < 5 else "≥5 篇"
-        print(f"    DF = {label:<6} {buckets[k]:7d}  {_pct(buckets[k], len(df))}")
-    singleton = [n for n, s in df.items() if len(s) == 1 and mention[n] <= 1]
-    print(f"  只在 1 篇出现且只有 1 处证据: {len(singleton)} 个唯一名"
-          f" ({_pct(len(singleton), len(df))}) —— 语料统计意义上的长尾")
+        buckets = Counter(min(len(s), 5) for s in df.values())
+        if n_no_source:
+            print(f"  文档频次(DF)分桶 [按唯一名;已排除 {n_no_source} 个不挂来源的对象]:")
+        else:
+            print("  文档频次(DF)分桶 [按唯一名]:")
+        for k in sorted(buckets):
+            label = f"{k} 篇" if k < 5 else "≥5 篇"
+            print(f"    DF = {label:<6} {buckets[k]:7d}  {_pct(buckets[k], len(df))}")
+        singleton = [n for n, s in df.items() if len(s) == 1 and mention[n] <= 1]
+        print(f"  只在 1 篇出现且只有 1 处证据: {len(singleton)} 个唯一名"
+              f" ({_pct(len(singleton), len(df))}) —— 语料统计意义上的长尾")
 
     # 现有产品过滤器 + 质量探针
     filt = Counter()
@@ -487,15 +491,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("=" * 78)
         print("KG 抽取质量审计 —— 只读、零 LLM、零写库")
         print(f"库: {args.db}")
-        if args.no_samples:
-            print("口径:--no-samples,只出统计数字,不打印任何概念名/命题/公式原文。")
-        else:
+        show_samples = not args.no_samples
+        if show_samples:
             print("⚠ 本报告含知识库内容样本(概念名/命题原文),按内部资料对待,不要外发。")
+        else:
+            print("口径:--no-samples,只出统计数字,不打印任何概念名/命题/公式原文,"
+                  "也不打印笔记本名称。")
         print("=" * 78)
 
+        # 笔记本名是用户起的标题,同样是内容 —— 而且这张表还会带出与本次审计目标
+        # 无关的其它笔记本。--no-samples 下只留选库必需的 id/tier/来源数。
         _bar("候选 notebook(按来源数排序)")
         for nb in notebooks[:20]:
-            print(f"  {nb['id']:<36} {nb['tier']:<9} {nb['n_sources']:>7} 来源  {nb['name']}")
+            title = f"  {nb['name']}" if show_samples else ""
+            print(f"  {nb['id']:<36} {nb['tier']:<9} {nb['n_sources']:>7} 来源{title}")
         if len(notebooks) > 20:
             print(f"  ...(共 {len(notebooks)} 个,只列前 20)")
 
@@ -503,7 +512,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         chosen = next((nb for nb in notebooks if str(nb["id"]) == target), None)
         if chosen is None:
             raise SystemExit(f"找不到 notebook: {target}")
-        print(f"\n审计目标: {chosen['id']}  ({chosen['name']}, tier={chosen['tier']})")
+        label = f"({chosen['name']}, tier={chosen['tier']})" if show_samples \
+            else f"(tier={chosen['tier']})"
+        print(f"\n审计目标: {chosen['id']}  {label}")
 
         _bar("一、对象类型构成(全量,不抽样)")
         sys.stderr.write("  正在统计类型构成(大库可能要几十秒)...\n")
