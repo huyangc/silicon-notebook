@@ -138,6 +138,12 @@ one-way SQLite→PostgreSQL snapshot migration; changing `DATABASE_URL` alone on
 different datastore. It does not import MySQL, continuously capture later writes, replay
 PostgreSQL→SQLite, or copy source/upload/asset files.
 
+This section is the authority on *why* the migration behaves as it does and what it refuses to
+do. For a step-by-step execution checklist — phases, per-step success criteria, the points that
+require a human decision, and the failures that are meant to stay failures — follow
+[docs/postgres-migration-runbook.md](postgres-migration-runbook.md), which defers to this
+section wherever the two disagree.
+
 ### 1. Prepare an empty target and preview
 
 Create a dedicated UTF-8 PostgreSQL database. Do not point the importer at an existing app

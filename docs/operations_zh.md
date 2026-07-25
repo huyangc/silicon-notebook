@@ -112,6 +112,10 @@ SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「
 SQLite→PostgreSQL 快照迁移；只改 `DATABASE_URL` 只会打开另一份数据存储。它不迁 MySQL、
 不持续捕获后续写入、不回放 PostgreSQL→SQLite，也不复制 source/upload/asset 文件。
 
+本节是「为什么这么设计、拒绝做什么」的真源。要按步骤执行（分阶段、每步判据、必须由人
+拍板的节点、以及那些本就应该失败的失败），走
+[docs/postgres-migration-runbook.md](postgres-migration-runbook.md)；两者冲突时以本节为准。
+
 ### 1. 准备空目标并预检
 
 创建专用的 UTF-8 PostgreSQL 数据库。不要指向已有应用库：任一业务表有行都会 fail closed。
