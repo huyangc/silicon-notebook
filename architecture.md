@@ -27,7 +27,7 @@
 
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由；生产拓扑固定单 Uvicorn worker，不允许用多进程复制模型容量。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
-- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。`SHADOW_DATABASE_URL` 只保留/校验，不选择 active backend，也不启用同步。
+- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。`SHADOW_DATABASE_URL` 不选择 active backend，单独设置也不启动同步；只有临时 `migration/shadow` 运维组合根会把它作为 PostgreSQL target 读取。
 - SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`，模型向量存 float32 BLOB。PostgreSQL 使用有界 Psycopg pool、数据库事务/row/advisory lock 支持跨进程访问，向量存 float32 `bytea`；不安装也不需要 pgvector。
 
 ### 2.2 Repository 组合与兼容 facade
@@ -43,7 +43,7 @@
 
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
-当前 schema 版本为 31。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v31 migration
+当前 schema 版本为 32。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v32 migration
 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
 v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 为交互式规整的
@@ -55,8 +55,11 @@ anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化�
 （合法零分块解析 vs 中途失败的分块），v28 新增 app_settings 全局设置表与可空的
 user_profiles.upload_document_limit 列（每笔记本文档数量上限），v29 确定性清理旧的重复
 cluster membership 并增加唯一索引，v30 增加 sources(notebook_id, file_hash) 去重查找索引
-（内容哈希上传去重 / batch_ingest 续跑，此前是全表扫），v31 增加 reports.understanding_json，
-持久化深度报告确认门之前的问题理解契约；SQLite store
+（内容哈希上传去重 / batch_ingest 续跑，此前是全表扫），v31 增加 inert、无 payload 的
+shadow_change_log 与 shadow_capture_control 内部表；run-scoped guard/capture/freeze DDL
+由迁移工具另行安装，guard 安装后立即强制唯一性，capture/freeze 行为在 run control
+状态启用前保持禁用；v32 增加 reports.understanding_json，持久化深度报告确认门之前的
+问题理解契约；配对 PostgreSQL 业务 schema 为 v10。SQLite store
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
@@ -65,7 +68,11 @@ cluster membership 并增加唯一索引，v30 增加 sources(notebook_id, file_
 
 - `backend/app/repositories/factory.py` 是唯一 backend choice；PostgreSQL bundle 组合与 SQLite 对等的领域 store，共享一个有界 `PostgresDatabase` pool。启动 lease 覆盖 checksummed migration、恢复、warmup 与 readiness 发布，失败或被替换的实例只关闭自己的 pool。
 - 跨进程访问由 PostgreSQL 自身的 MVCC、row/advisory lock 与 transaction isolation 处理，可消除 SQLite 的单 writer 文件锁争用；它不能消除业务层锁序错误或长事务，因此 pool acquire、statement、lock timeout 仍保持有界。
-- `scripts/migrate_sqlite_to_postgres.py` 是唯一 SQLite→PostgreSQL 存量导入与本地激活边界：默认 dry-run，SQLite 只读 backup-API 快照与工作副本升级，目标空库/manifest 守卫，按 FK 排序的有界 COPY，JSON/时间/旧 JSON 向量/NUL 的显式兼容转换，rowid→ordinal 保留与 reseed，全表内容 checksum，逐表 checkpoint 提交（run 头绑定 sealed snapshot hash + 每张已校验表一条已提交流水）使中断可从最后完成的表续跑而非整体重来、finalize（ordinal reseed/索引重建/ANALYZE）幂等，会话级批量装载调优（`maintenance_work_mem`/并行建索引/为离线装载设定的 `synchronous_commit`/`idle_in_transaction_session_timeout`/`statement_timeout`），无凭据 receipt。默认 preview/apply 不进入应用 runtime、不修改 `DATABASE_URL`；显式 `--activate-env ... --confirm-service-stopped` 会重新快照停写 SQLite（切换锚点），默认按 receipt 重算 PG 全表 checksum（`--fast-activation` 只跳过这第二遍目标全表校验，保留源快照锚点与 schema/清单校验），再通过同目录临时文件/fsync/`os.replace` 原子切换 `.env` 并保存权限受限回退副本。它不复制 storage、不读取 MySQL，也不提供持续同步或反向回放。
+- 切换只允许“停写 → 停服务 → 一致备份 → 修改唯一 `DATABASE_URL` → 启动并自动 migration → status/`/api/ready`/认证/数量/代表性读取验证 → 放流量”。只改 URL 不复制数据。`SHADOW_DATABASE_URL` 不启用 dual-write；切回 SQLite 也不会回放 PG-only 写入。临时 `migration/shadow` 边界目前实现 SQLite32/PostgreSQL10/epoch1（60 张 replicated 表、四个逻辑键 guard）的 preflight/control/guard、原子 snapshot、可续跑 baseline COPY/H0，以及 fail-stop 单消费者正向 replicator 原语。replicator 先在 PG 侧按 migration→control→run→worker→checkpoint 锁序取得 run/lease/checkpoint并释放，再以短 SQLite 只读 snapshot 连读全局 seq，仅为 upsert hydration 当前行，delete 保持 key-only 且 hydrated bytes 为零；同一 stable key 在 accepted prefix 内保留最后 event 并按全局最后 seq 排序，raw seq/checkpoint 连续性不变，每个 identity 的最终 actual apply 覆盖 synthetic dependency contribution，只有 dependency-only identity 才引用计数一次 synthetic 行及其 bytes；短读窗口若在 allocated high-water 前结束，会在 hydration/apply 前立即判为 suffix gap；满窗口低于 high-water 时在同一 snapshot 探测相邻 seq，缺失即失败；批次硬上限 4096 events/64 MiB；仅一个 final bundle 可独占超限，同 key replacement 若在已有其他 actual bundle 时使 bytes 超限则回滚并延后。FK 父闭包只读该验证 snapshot，每事件最多 64 行；固定 v10 图按 FK constraint branch 计数的上界为 9 个 row slots，依赖行计入 bytes并跨事件去重，不查询 suffix log。最终 PG apply 事务重新取得同一控制锁序，对 migration ledger 和全部业务表取 `SHARE ROW EXCLUSIVE`，在锁内复核 snapshot source/target、live target identity 和完整 v10 catalog/guard。逐语句 savepoint 只延后 FK/UNIQUE ordering SQLSTATE，CHECK/NOT NULL 立即 poison；精确 catalog 派生的 82 个 unique surface 通过 NULL、按其他唯一列的非 NULL 等值/NULL `IS NULL` 与固定 predicate 定域的确定性 text/bigint 候选（`C` collation 文本 max 拼 `chr(1)`，或先走可索引 bigint MIN/MAX 快速路径选择 min−1/max+1，仅在两个 int64 边界都已占用时扫描首个 gap），或仅限无入向 FK 且有 accepted current-final 恢复行的叶表同事务 delete/reinsert 来打破 cycle。停车状态按 `(unique surface, row identity)` 跟踪；每个 stagnant pass 会停车所有可独立停车的冲突，final apply 成功会清除该 identity 的所有停车面。延后处理限制为 8 passes、32 actual statements/apply、16384 actual statements 总量；每次候选查询都计入预算，ordering、statement、pass、`ProgramLimitExceeded`/`DataError` 候选搜索与候选 UPDATE 容量耗尽保持 non-poison，`QueryCanceled` 保持瞬态并重试整事务，最终窗口内不可停车的 UNIQUE 漂移则在最早实际 seq poison。`run_forever` 从 256 events/8 MiB 倍增至硬上限，仍 ordering-blocked 时 non-poison；apply 事务 claim worker 后、业务 DML 前复查既有 run/direction poison；poison 发布在 binding/checkpoint 校验后锁定检查该方向任意既有记录，完全相同视为 ACK-loss 成功，不同则 stale 且绝不新增第二条；apply、ack-loss 与 poison publication 使用同一 identity 绑定，snapshot 与业务 apply 前都要求 `progress.applied_seq == checkpoint.last_seq`。业务收敛、脱敏 progress 与连续 checkpoint 一起提交；每个有效 batch 结局恰好记录一条脱敏 metric，batch events 使用实际 accepted/observed raw-event 数并尽可能保留 retries。这样不在等待 PG 时持有 SQLite transaction，也不留下 catalog proof→apply 的 DDL/DML TOCTOU。暂态错误整事务有界重试；SQLite path/file binding 失败使用专用 identity 异常而不依赖文本分类；已证明的 gap、错误 run/epoch/table/op/key、转换、schema、identity 或约束错误写一条脱敏 poison 并永久阻断该方向。显式运维 CLI 现在负责 preflight/start-forward/status/verify，前台 worker 使用数据库时钟的排他 lease、SIGTERM 批次边界和保守 retention（至少 7 天/100,000 events，并受 FULL 校验/barrier/replay/poison 约束）。这只建立 SQLite-active 的正向 shadow；cutover、反向复制和自动 URL 交换仍未实现。
+- Verifier 在 SQLite snapshot 记录 `Hv` 并把规范化事实流式写入私有临时 spool，释放 SQLite 后等待 PG checkpoint，再固定 `REPEATABLE READ, READ ONLY` 的 `Ht`；第二个 SQLite snapshot 扫描 `(Hv,Hseen]` retained dirty key，仅把这些 key 标记为 concurrent，PG verifier barrier 保留到脱敏报告提交。Structural 层校验精确 catalog/guard、stable key/hash、FK/unique/cascade 与 storage-root 文件引用；Full 层增加领域投影、float32 bytes/dimension/norm/抽样 cosine 与固定中英检索门禁；Cutover 层再次复核 source write-frozen，并要求 `Hv=Ht=MAX(seq)`、零 concurrent、100% coverage 和前一轮完整 full/cutover。Clean report 只能按同级或更强等级 supersede drift。
+- Baseline snapshot 目录必须 owner-only 且不可为 symlink；snapshot/live fence fresh 打开 `SqliteDatabase.db_path` 当前文件而不复用线程缓存连接，跨 open/transaction 及发布/PG commit 前复核 resolved path + device/inode。COPY 将全部业务 SQL 全限定到 run 绑定 schema，使用 named server cursor 有界复核 prefix，并用 statement timeout/阶段间取消轮询约束长操作。起始绑定、逐批提交/完成点和最终 H0 前均短暂取得 live SQLite `BEGIN IMMEDIATE` 来复核 capture 仍启用，但最终 60 表 proof/`ANALYZE` 期间不持有 SQLite；JSONB prefix proof 仅在 JSON 子树内统一有限 int/float/Decimal 的精确十进制语义（bool 排除、负零归零），普通 SQL 数值列仍保持类型差异；起始和最终另以 checksummed migration 派生契约验证精确 v9 table/column/PK/FK/unique/check、operational+GIN index 与 `public.pg_trgm`，逐批只走轻量 run/control/identity gate。
+- 最终 live SQLite fence 是跨 commit 的 lease：只在 PG 双锁/run/table lock 与 60 表 proof/`ANALYZE` 完成后取得，持有期间写入并实际提交 PG H0 checkpoint + run progress，成功后才释放；PG 事务/commit 失败则不落 H0 并释放 SQLite。该 fence 期间不得再等 PG pool/advisory lock 或执行长 proof。
+- 停写 importer 与连续 shadow 是两个独立运维边界，必须使用不同 PostgreSQL 目标：`scripts/migrate_sqlite_to_postgres.py` 负责 SQLite→PostgreSQL 存量导入与本地激活；`scripts/shadow_sqlite_to_postgres.py` 负责 SQLite-active 的连续正向影子同步。前者默认 dry-run，SQLite 只读 backup-API 快照与工作副本升级，目标空库/manifest 守卫，按 FK 排序的有界 COPY，JSON/时间/旧 JSON 向量/NUL 的显式兼容转换，rowid→ordinal 保留与 reseed，全表内容 checksum，逐表 checkpoint 提交（run 头绑定 sealed snapshot hash + 每张已校验表一条已提交流水）使中断可从最后完成的表续跑而非整体重来、finalize（ordinal reseed/索引重建/ANALYZE）幂等，会话级批量装载调优（`maintenance_work_mem`/并行建索引/为离线装载设定的 `synchronous_commit`/`idle_in_transaction_session_timeout`/`statement_timeout`），无凭据 receipt。它只排除 SQLite-only 的 `shadow_capture_control` / `shadow_change_log` 运维表并把排除写入 receipt，退役用户数据表仍要求为空。默认 preview/apply 不进入应用 runtime、不修改 `DATABASE_URL`；显式 `--activate-env ... --confirm-service-stopped` 会重新快照停写 SQLite（切换锚点），默认按 receipt 重算 PG 全表 checksum（`--fast-activation` 只跳过这第二遍目标全表校验，保留源快照锚点与 schema/清单校验），再通过同目录临时文件/fsync/`os.replace` 原子切换 `.env` 并保存权限受限回退副本。它不复制 storage、不读取 MySQL，也不提供持续同步或反向回放。
 - 在线导入仅用于演练，因为快照后的 SQLite 写入不会被捕获。正式切换只允许“停全部 writer → 停服务 → 向新空目标做最终迁移 → 验证共享/已复制 storage → CLI 原子修改唯一 `DATABASE_URL` → 启动并自动 migration → `/api/ready`/认证/数量/搜索/代表性读取/canary 写验证 → 放流量”。CLI 不负责启停服务；旧 SQLite URL 只保存在惰性的 `SHADOW_DATABASE_URL`，不启用 dual-write。PG 接受业务写后，未经外部 PG→SQLite 对账不得切回。
 - PostgreSQL 依赖 `public.pg_trgm`，向量为 float32 `bytea`，不依赖 pgvector。生产仍用 `--workers 1`，因为模型 scheduler、breaker 与 cancellation registry 是进程内状态。
 - `batch_ingest` 的 mutation phase 仅支持 SQLite；PostgreSQL 使用正常 application/API 摄取与 KG/index 流程。离线 `scripts/check.sh` 不连接 PostgreSQL；`scripts/check_postgres.sh` 和 CI 的独立 PostgreSQL 16 lane 验证 adapter、migration 与跨进程语义。
@@ -382,3 +389,5 @@ npm run build
 Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块。pytest controller
 在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个图谱 worker
 重复执行 macOS 字体枚举。Apple Silicon warm gate 硬目标是不超过 60 秒；CI 各 lane 时长仅作观察，不把该本机目标变成 hosted runner 的 timeout 断言。
+
+SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 binding identity；locked、busy、interrupted open 仍瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。

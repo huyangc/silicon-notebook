@@ -47,6 +47,7 @@ _CHILD_ENV_ALLOWLIST = {
     "SYSTEM_VERSION_COMPAT",
     "TEMP",
     "TERM",
+    "TEST_POSTGRES_DECOY_OWNER_ROLE",
     "TMP",
     "TMPDIR",
     "TZ",
@@ -470,7 +471,27 @@ def _pytest_command() -> list[str]:
         "--maxfail=1",
         "-m",
         "postgres_integration",
+        "--ignore=tests/postgres/shadow/test_forward_e2e.py",
         "tests/postgres",
+    ]
+
+
+def _shadow_e2e_command() -> list[str]:
+    """Run the cross-database proof alone after adapter conformance passes."""
+
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        "-n",
+        "0",
+        "--tb=short",
+        "--maxfail=1",
+        "-m",
+        "postgres_integration",
+        "tests/postgres/shadow/test_forward_e2e.py",
     ]
 
 
@@ -579,7 +600,10 @@ def _run_pytest_in_environment(
     owner: _LauncherResources | None = None,
 ) -> int:
     completed = _run_child(_pytest_command(), child_env, owner=owner)
-    return completed.returncode
+    if completed.returncode != 0:
+        return completed.returncode
+    shadow = _run_child(_shadow_e2e_command(), child_env, owner=owner)
+    return shadow.returncode
 
 
 @contextmanager

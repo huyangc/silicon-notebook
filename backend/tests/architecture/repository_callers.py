@@ -25,6 +25,42 @@ SQLITE_REPOSITORY_PREFIX = "backend/app/repositories/sqlite/"
 REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
 
 SQL_REASON_BY_PATH = {
+    "backend/app/migration/shadow/postgres_catalog.py": (
+        "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v10 business catalog before copying and checkpoint publication"
+    ),
+    "backend/app/migration/shadow/capture.py": (
+        "temporary migration boundary owns run-scoped SQLite capture DDL"
+    ),
+    "backend/app/migration/shadow/control.py": (
+        "temporary migration boundary owns shadow preflight and control SQL"
+    ),
+    "backend/app/migration/shadow/identity.py": (
+        "temporary migration boundary binds redacted SQLite and PostgreSQL identities"
+    ),
+    "backend/app/migration/shadow/manifest.py": (
+        "temporary migration boundary validates source and target schema keys"
+    ),
+    "backend/app/migration/shadow/snapshot.py": (
+        "temporary migration boundary validates and publishes a SQLite backup"
+    ),
+    "backend/app/migration/shadow/bulk_copy.py": (
+        "temporary migration boundary owns resumable baseline COPY and checkpoints"
+    ),
+    "backend/app/migration/shadow/replicator.py": (
+        "temporary migration boundary owns fail-stop forward apply and checkpoints"
+    ),
+    "backend/app/migration/shadow/verifier.py": (
+        "temporary migration boundary owns barrier-aware cross-database verification and redacted reports"
+    ),
+    "backend/app/migration/shadow/cli.py": (
+        "explicit shadow operator composition root reads redacted control status and resumable baseline state"
+    ),
+    "backend/app/migration/shadow/worker.py": (
+        "temporary migration worker owns its database-clock lease lifecycle"
+    ),
+    "backend/app/migration/shadow/retention.py": (
+        "temporary migration worker owns conservative verified change-log retention"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),
@@ -39,6 +75,7 @@ SQL_REASON_BY_PATH = {
     "scripts/diag_db.py": "read-only host database diagnostic",
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
+    "scripts/kg_quality_audit.py": "read-only host database diagnostic",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
     "scripts/verify_repository_snapshot.py": "read-only backup and probe databases",
 }
@@ -92,6 +129,18 @@ PRIVATE_REASON_BY_PATH = {
 }
 
 SQLITE_CONNECT_REASON_BY_PATH = {
+    "backend/app/migration/shadow/cli.py": (
+        "explicit shadow operator preflight opens the active SQLite source read-only"
+    ),
+    "backend/app/migration/shadow/snapshot.py": (
+        "temporary migration boundary opens its private validated backup"
+    ),
+    "backend/app/migration/shadow/bulk_copy.py": (
+        "temporary migration boundary streams its immutable private snapshot"
+    ),
+    "backend/app/migration/shadow/verifier.py": (
+        "temporary migration boundary streams facts through its private disposable SQLite spool"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),
@@ -106,6 +155,7 @@ SQLITE_CONNECT_REASON_BY_PATH = {
     "scripts/diag_db.py": "read-only host database diagnostic",
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
+    "scripts/kg_quality_audit.py": "read-only host database diagnostic",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
     "scripts/verify_repository_snapshot.py": "read-only backup and probe databases",
 }
@@ -214,9 +264,7 @@ def _repo_like_names(tree: ast.AST) -> set[str]:
                 function = dotted_name(value.func).rsplit(".", 1)[-1]
                 if function in {"SQLiteRepository", "repository"}:
                     names.update(
-                        target.id
-                        for target in targets
-                        if isinstance(target, ast.Name)
+                        target.id for target in targets if isinstance(target, ast.Name)
                     )
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for argument in (*node.args.args, *node.args.kwonlyargs):

@@ -123,7 +123,7 @@
   "postgres_internal_tables": [
     "silicon_schema_migrations"
   ],
-  "postgres_version": 9,
+  "postgres_version": 10,
   "rebuilt": {
     "fts_internal_tables": [
       "chunks_fts_config",
@@ -1426,9 +1426,13 @@
       "unique": true
     }
   ],
-  "sqlite_internal_tables": [],
-  "sqlite_table_count": 77,
-  "sqlite_version": 31,
+  "sqlite_internal_tables": [
+    "shadow_capture_control",
+    "shadow_change_log",
+    "sqlite_sequence"
+  ],
+  "sqlite_table_count": 80,
+  "sqlite_version": 32,
   "tables": {
     "agent_access_tokens": {
       "classification": "replicated",

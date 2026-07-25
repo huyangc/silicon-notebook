@@ -30,7 +30,7 @@
 - Create package `backend/app/migration/shadow/` with `types.py`, `manifest.py`, `identity.py`, `control.py`, `capture.py`, `snapshot.py`, `bulk_copy.py`, `transform.py`, `replicator.py`, `verifier.py`, `retention.py`, `metrics.py`, `cli.py`, `worker.py`.
 - Create `backend/app/migration/shadow/sql/postgres_control.sql`.
 - Modify SQLite migration files to add schema version 24 shadow control/log tables; trigger installation remains run-scoped in `capture.py`.
-- Create thin entry `scripts/migrate_sqlite_to_postgres.py`.
+- Create thin entry `scripts/shadow_sqlite_to_postgres.py`.
 - Create local process wrapper `scripts/shadow.sh`.
 - Create unit tests under `backend/tests/shadow/` and PostgreSQL E2E tests under `backend/tests/postgres/shadow/`.
 
@@ -543,7 +543,7 @@ git commit -m "feat: verify PostgreSQL shadow consistency"
 - Create: `backend/app/migration/shadow/retention.py`
 - Create: `backend/app/migration/shadow/cli.py`
 - Create: `backend/app/migration/shadow/worker.py`
-- Create: `scripts/migrate_sqlite_to_postgres.py`
+- Create: `scripts/shadow_sqlite_to_postgres.py`
 - Create: `scripts/shadow.sh`
 - Create: `backend/tests/shadow/test_cli.py`
 - Create: `backend/tests/shadow/test_retention.py`
@@ -583,14 +583,14 @@ Default 7 days and at least 100,000 newest events. Delete only rows satisfying a
 
 ```bash
 PYTHONPATH=backend ${PYTHON_BIN:-python3} -m pytest -q -n0 backend/tests/shadow
-${PYTHON_BIN:-python3} scripts/migrate_sqlite_to_postgres.py --help
+${PYTHON_BIN:-python3} scripts/shadow_sqlite_to_postgres.py --help
 ```
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add backend/app/migration/shadow/{retention,cli,worker}.py \
-  scripts/migrate_sqlite_to_postgres.py scripts/shadow.sh backend/tests/shadow
+  scripts/shadow_sqlite_to_postgres.py scripts/shadow.sh backend/tests/shadow
 git commit -m "feat: operate forward PostgreSQL shadow sync"
 ```
 

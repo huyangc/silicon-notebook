@@ -125,7 +125,32 @@ Optional external services
 
 ### SQLite / PostgreSQL switching
 
-The application never dual-writes. `SHADOW_DATABASE_URL` is reserved and cannot select or synchronize the active backend. Changing `DATABASE_URL` alone does not copy, migrate, or synchronize existing data. Existing silicon-notebook SQLite data is migrated with the offline, dry-run-first `scripts/migrate_sqlite_to_postgres.py` tool; it is not a MySQL importer.
+Shadow SQLite source-open classification is intentionally narrow: only a non-transient `sqlite3.OperationalError` raised by `open_fresh_live_sqlite` is a source-binding identity failure. Locked, busy, and interrupted opens remain transient whole-batch retries; later SQLite operational errors retain their schema/query classifications.
+
+The application never dual-writes through its normal repository path. `SHADOW_DATABASE_URL`
+names only the PostgreSQL target used by the explicit forward-shadow migration CLI; setting it
+alone starts nothing and never changes the active backend. Changing `DATABASE_URL` does not copy, migrate, or synchronize existing data.
+
+While `DATABASE_URL` remains SQLite, the operator can run a guarded, one-way
+SQLite→PostgreSQL shadow: preflight binds and confirms both database identities, `start-forward`
+installs run-scoped capture/guards and copies a consistent 60-table baseline, and one supervised
+foreground worker continuously applies the retained SQLite change log. `status` exposes redacted
+lag/lease/poison state and `verify --level full` performs a barrier-aware consistency check. The
+worker uses an exclusive database-clock lease, retries transient PostgreSQL failures, stops on a
+deterministic poison event, and conservatively retains at least seven days and 100,000 events
+behind verified progress.
+
+This phase does **not** implement cutover, reverse replication, or automatic `DATABASE_URL`
+changes. Keep SQLite active, keep both backups current, and treat PostgreSQL as a read-disabled
+shadow until the separately reviewed cutover phase. The complete command sequence and failure
+rules are in [Operations](./docs/operations.md).
+
+The separate, dry-run-first `scripts/migrate_sqlite_to_postgres.py` remains the owned
+stopped-snapshot importer and local-activation tool. It is not continuous replication; use
+`scripts/shadow_sqlite_to_postgres.py` only for the SQLite-active forward shadow described
+above, and never run the two workflows against the same target.
+
+Baseline snapshot/COPY additionally requires an owner-only real snapshot directory, qualifies every business statement to the run-bound schema, revalidates enabled live SQLite capture under a short write fence at critical bindings, uses bounded named server cursors and statement timeouts, and validates the complete migration-derived v9 table/column/constraint/operational+GIN-index/extension catalog at start and finalization. Snapshot/fence reads use a dedicated fresh connection to the current SQLite path—not the repository's thread-cached connection—and bind the resolved path plus device/inode before/after open and again before publication/PG commit. The final SQLite fence is acquired only after long PG proof/ANALYZE work and remains held until the PG H0 transaction commits.
 
 - On the shipped SQLite default, search uses SQLite FTS/vector storage. The PostgreSQL backend uses `pg_trgm`/`ILIKE`; float32 vectors remain `bytea`, so pgvector is not installed or required.
 - `pg_trgm` must be installed in the `public` schema. Check it without exposing credentials:
@@ -138,12 +163,12 @@ The application never dual-writes. `SHADOW_DATABASE_URL` is reserved and cannot 
   ```
 
   `pg_trgm | public` means the prerequisite is ready. If the query returns no row, the first migration automatically attempts `CREATE EXTENSION pg_trgm`; an existing `pg_trgm` in any other schema fails closed.
-- The importer requires an empty UTF-8 PostgreSQL target, reads its URL from `POSTGRES_MIGRATION_URL` (never a URL CLI argument), takes an online SQLite backup-API snapshot including committed WAL state, upgrades only a working copy to the paired schema, streams bounded `COPY`, preserves ordinal values, converts legacy JSON vectors to float32 `bytea`, verifies every table with content checksums, and commits each verified table with a per-table checkpoint so a stopped import (crash, dropped remote connection, reboot) resumes from the last completed table instead of restarting; finalize (ordinal reseed, index rebuild, `ANALYZE`) is idempotent. It accepts bounded session bulk-load tuning (`--maintenance-work-mem`, `--max-parallel-index-workers`) for large targets. Its default preview/apply modes do not change `DATABASE_URL` and it never copies `.local/storage`.
+- The importer requires an empty UTF-8 PostgreSQL target, reads its URL from `POSTGRES_MIGRATION_URL` (never a URL CLI argument), takes an online SQLite backup-API snapshot including committed WAL state, upgrades only a working copy to the paired schema, streams bounded `COPY`, preserves ordinal values, converts legacy JSON vectors to float32 `bytea`, verifies every table with content checksums, and commits each verified table with a per-table checkpoint so a stopped import (crash, dropped remote connection, reboot) resumes from the last completed table instead of restarting; finalize (ordinal reseed, index rebuild, `ANALYZE`) is idempotent. It explicitly excludes the SQLite-only shadow control/change-log tables and records that exclusion in its receipt. It accepts bounded session bulk-load tuning (`--maintenance-work-mem`, `--max-parallel-index-workers`) for large targets. Its default preview/apply modes do not change `DATABASE_URL` and it never copies `.local/storage`.
 - An online import is a rehearsal snapshot only: SQLite writes committed after its snapshot are not synchronized. For a stopped local deployment, the explicit `--activate-env ... --confirm-service-stopped` mode re-snapshots SQLite and rechecks every PostgreSQL table against the credential-free receipt before atomically replacing `.env`; it preserves the former SQLite URL as inert `SHADOW_DATABASE_URL` and writes a restricted rollback copy. The CLI does not stop or restart services. Start with `--workers 1`, then verify `/api/ready`, login, counts, search, representative reads, and one canary write before sending traffic.
 - Returning to SQLite cannot replay PostgreSQL-only writes. Lossless rollback therefore requires no post-cutover writes or an externally reconciled and verified migration in both directions.
 - `scripts/batch_ingest.py` mutation phases are SQLite-only; on PostgreSQL use the normal application/API ingestion and KG/index flows. For SQLite libraries with historical partial KG runs, `kg --retry-partial` retains each source's current graph until a non-empty, zero-failed-window replacement commits.
 
-Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
+Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback); the step-by-step execution checklist is the [migration runbook](./docs/postgres-migration-runbook.md) (Chinese, like the other runbooks in `docs/`; this English section remains the complete reference). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
 

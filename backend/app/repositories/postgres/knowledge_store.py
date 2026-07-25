@@ -1288,7 +1288,8 @@ class KnowledgeStore:
         if self.source_index_backfilled(db, notebook_id):
             rows = db.execute(
                 "SELECT DISTINCT object_id FROM knowledge_object_sources "
-                "WHERE source_id = %s AND notebook_id = %s",
+                "WHERE source_id = %s AND notebook_id = %s "
+                "ORDER BY object_id COLLATE \"C\"",
                 (source_id, notebook_id),
             ).fetchall()
             return [r["object_id"] for r in rows]

@@ -58,12 +58,16 @@ class UnifiedKgStore:
 
     @staticmethod
     def scratch_vector_rows(db: sqlite3.Connection, notebook_id: str, run_id: str):
+        # The representative mean is accumulated in float32 insertion order.
+        # Preserve the pre-shadow-guard scratch rowid stream explicitly: after
+        # ANALYZE SQLite may otherwise choose the observation-only logical-key
+        # guard and reorder additions, changing rounding and cluster outcomes.
         return db.execute(
             "SELECT s.seed AS seed, e.vector AS vector "
             "FROM knowledge_embeddings e "
             "JOIN kg_cluster_scratch s ON s.object_id=e.object_id "
             "  AND s.notebook_id=e.notebook_id AND s.run_id=? "
-            "WHERE e.notebook_id=?", (run_id, notebook_id),
+            "WHERE e.notebook_id=? ORDER BY s.rowid", (run_id, notebook_id),
         )
 
     @staticmethod

@@ -20,7 +20,7 @@ def test_initialize_orders_migrate_then_seed_and_never_recovers():
     assert calls == ["migrate", "seed"]
 
 
-def test_schema_version_constant_is_v31():
+def test_schema_version_constant_is_v32():
     # master v11/v12 hot-path indexes、Memory / Agent v13 migration、Task 1 的
     # sources.memory_id v14 migration、Task 5 的 parse_status/source_type 覆盖
     # 索引 v15 migration、knowhow-tables PR-1 Task 1 的五张新表 v16 migration、
@@ -34,8 +34,9 @@ def test_schema_version_constant_is_v31():
     # 服务状态、knowhow 表版本管理的 knowhow_changes/knowhow_milestones 两表 v26、
     # v27 加源完成标记 sources.chunked_at 列、v28 每笔记本文档数量上限，
     # v29 收敛合并前两条 v24 迁移线、v30 加 sources(notebook_id, file_hash)
-    # 内容哈希去重索引、v31 持久化深度报告问题理解契约。
-    assert SCHEMA_VERSION == 31
+    # 内容哈希去重索引、v31 加 shadow capture 两张内部表、v32 持久化深度报告
+    # 问题理解契约。
+    assert SCHEMA_VERSION == 32
 
 
 def test_v29_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
@@ -82,7 +83,7 @@ def test_v29_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
                 ],
             )
 
-        assert migrator.migrate() == [29, 30, 31]
+            assert migrator.migrate() == [29, 30, 31, 32]
         with database.connect() as db:
             rows = db.execute(
                 "SELECT id,canonical_id FROM concept_clusters "

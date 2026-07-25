@@ -2181,14 +2181,52 @@ MIGRATION_MANIFEST[(29, 30)] = {
     "views": {},
 }
 
-# v31: persist the corpus-blind Deep Report question-understanding contract and
+# v31: inert SQLite-side metadata for run-scoped forward-shadow capture.
+# The versioned migration creates only these two payload-free internal tables;
+# logical-key guards and capture/freeze triggers are installed later by the
+# shadow run installer in one BEGIN IMMEDIATE transaction.
+SHADOW_CAPTURE_TABLES = {
+    "shadow_change_log": """CREATE TABLE shadow_change_log (
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id TEXT NOT NULL,
+                  table_name TEXT NOT NULL,
+                  key_json TEXT NOT NULL,
+                  operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+                  schema_epoch INTEGER NOT NULL,
+                  captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )""",
+    "shadow_capture_control": """CREATE TABLE shadow_capture_control (
+                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                  write_frozen INTEGER NOT NULL CHECK (write_frozen IN (0, 1)),
+                  apply_active INTEGER NOT NULL DEFAULT 0 CHECK (apply_active IN (0, 1)),
+                  run_id TEXT NOT NULL,
+                  schema_epoch INTEGER NOT NULL
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 31, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SHADOW_CAPTURE_TABLES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(30, 31)] = {
+    "tables": SHADOW_CAPTURE_TABLES,
+    "columns": {},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v32: persist the corpus-blind Deep Report question-understanding contract and
 # its owner-reviewed clarification state. Broadcast the new reports column over
-# every cumulative hop, then retain the explicit v30→v31 single-hop contract.
+# every cumulative hop, then retain the explicit v31→v32 single-hop contract.
 REPORTS_UNDERSTANDING_COLUMN = {
     "understanding_json": ("understanding_json", "TEXT", 1, "'{}'", 0),
 }
 MIGRATION_MANIFEST = {
-    (key[0], 31, *key[2:]): {
+    (key[0], 32, *key[2:]): {
         **manifest,
         "columns": {
             **manifest["columns"],
@@ -2200,7 +2238,7 @@ MIGRATION_MANIFEST = {
     }
     for key, manifest in MIGRATION_MANIFEST.items()
 }
-MIGRATION_MANIFEST[(30, 31)] = {
+MIGRATION_MANIFEST[(31, 32)] = {
     "tables": {},
     "columns": {"reports": REPORTS_UNDERSTANDING_COLUMN},
     "indexes": {},

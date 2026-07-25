@@ -50,7 +50,7 @@ formal database durable gate, and worker lease/heartbeat.
 - Extend shadow package with `admission.py`, `activation.py`, `backup.py`, `smoke.py`, `reverse_capture.py`, and rollback/control commands.
 - Add SQLite v25 shadow operation/actor/reverse-event-receipt tables; keep these migration-only internals removable later.
 - Modify readiness/system API and frontend system API/banner/mutation transport behavior.
-- Extend `scripts/migrate_sqlite_to_postgres.py` and `scripts/shadow.sh` for freeze, backup, cutover, activation confirmation, reverse, resume, smoke, and rollback.
+- Extend `scripts/shadow_sqlite_to_postgres.py` and `scripts/shadow.sh` for freeze, backup, cutover, activation confirmation, reverse, resume, smoke, and rollback.
 
 ---
 
@@ -559,42 +559,42 @@ export SN_RUN_ID=pg-cutover-20260722-01
 export SN_ENV_FILE=/Users/hzf/workspace/silicon_notebook/.env
 export SN_WORK_DIR=/Users/hzf/workspace/silicon_notebook/.local/shadow/$SN_RUN_ID
 
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-phase sqlite_to_postgres
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py verify \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$SN_RUN_ID" --level full
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py verify \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$SN_RUN_ID" --level full
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py freeze --run-id "$SN_RUN_ID"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py freeze --run-id "$SN_RUN_ID"
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-phase cutover_readonly --require-caught-up
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py backup \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py backup \
   --run-id "$SN_RUN_ID" --side sqlite --output "$SN_WORK_DIR/pre-cutover.sqlite3"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py backup \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py backup \
   --run-id "$SN_RUN_ID" --side postgres --output "$SN_WORK_DIR/pre-cutover.pgdump"
 
 bash scripts/backend.sh stop
 bash scripts/shadow.sh stop forward --run-id "$SN_RUN_ID"
 
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py cutover \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py cutover \
   --run-id "$SN_RUN_ID" --env-file "$SN_ENV_FILE"
 
 bash scripts/backend.sh start
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py confirm-activation \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py confirm-activation \
   --run-id "$SN_RUN_ID"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py smoke \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py smoke \
   --run-id "$SN_RUN_ID" --mode read-only
 
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py start-reverse \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py start-reverse \
   --run-id "$SN_RUN_ID"
 bash scripts/shadow.sh start reverse --run-id "$SN_RUN_ID"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-reverse-healthy --wait-seconds 120
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py resume-writes \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py resume-writes \
   --run-id "$SN_RUN_ID"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py smoke \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py smoke \
   --run-id "$SN_RUN_ID" --mode post-open-canary
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-phase postgres_to_sqlite --require-caught-up
 ```
 
@@ -603,32 +603,32 @@ The runbook must state after each command: expected phase, formal backend, writa
 - [ ] **Step 3: Put the following post-write rollback sequence verbatim in the runbook**
 
 ```bash
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-phase postgres_to_sqlite
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py freeze --run-id "$SN_RUN_ID"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py freeze --run-id "$SN_RUN_ID"
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-reverse-caught-up --wait-seconds 120
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py verify \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$SN_RUN_ID" --level cutover
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py backup \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py backup \
   --run-id "$SN_RUN_ID" --side postgres --output "$SN_WORK_DIR/pre-rollback.pgdump"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py backup \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py backup \
   --run-id "$SN_RUN_ID" --side sqlite --output "$SN_WORK_DIR/pre-rollback.sqlite3"
 
 bash scripts/backend.sh stop
 bash scripts/shadow.sh stop reverse --run-id "$SN_RUN_ID"
 
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py rollback \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py rollback \
   --run-id "$SN_RUN_ID" --env-file "$SN_ENV_FILE"
 
 bash scripts/backend.sh start
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py confirm-activation \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py confirm-activation \
   --run-id "$SN_RUN_ID"
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py smoke \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py smoke \
   --run-id "$SN_RUN_ID" --mode read-only
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py resume-writes \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py resume-writes \
   --run-id "$SN_RUN_ID" --rollback
-$PYTHON_BIN scripts/migrate_sqlite_to_postgres.py status \
+$PYTHON_BIN scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$SN_RUN_ID" --require-active-backend sqlite --require-write-open
 ```
 

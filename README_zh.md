@@ -125,7 +125,28 @@ bash scripts/check.sh
 
 ### SQLite / PostgreSQL 切换
 
-应用不会双写。`SHADOW_DATABASE_URL` 是保留配置，不能选择 active backend，也不会同步数据。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。silicon-notebook 的既有 SQLite 数据使用默认 dry-run 的离线工具 `scripts/migrate_sqlite_to_postgres.py` 迁移；它不是 MySQL importer。
+Shadow SQLite source open 的分类边界刻意收窄：只有 `open_fresh_live_sqlite` 抛出的非瞬态 `sqlite3.OperationalError` 才归为 source-binding identity 失败。locked、busy、interrupted open 仍按瞬态整批重试；后续 SQLite operational error 保持原有 schema/query 分类。
+
+应用的正常 repository 路径不会双写。`SHADOW_DATABASE_URL` 只标识显式正向影子迁移
+CLI 使用的 PostgreSQL 目标；单独设置它不会启动任何任务，也不会改变 active backend。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。
+
+在 `DATABASE_URL` 仍指向 SQLite 时，运维人员可以运行受保护的单向
+SQLite→PostgreSQL 影子同步：preflight 绑定并确认两端数据库身份，`start-forward` 安装
+run-scoped capture/guard 并复制一致的 60 表 baseline，随后由一个受监督的前台 worker
+持续应用 SQLite change log。`status` 提供脱敏的 lag/lease/poison 状态，
+`verify --level full` 执行 barrier-aware 一致性校验。worker 使用数据库时钟的排他 lease，
+对 PostgreSQL 瞬态失败重试，确定性 poison 会 fail-stop；清理策略至少保留已验证进度之后
+的 7 天和 100,000 条事件。
+
+本阶段**不包含** cutover、反向复制或自动修改 `DATABASE_URL`。必须保持 SQLite 为 active，
+持续维护两端备份，并在另行评审的切换阶段之前把 PostgreSQL 视为禁止业务读取的影子库。
+完整命令顺序与故障规则见[运维文档](./docs/operations_zh.md)。
+
+独立的、默认 dry-run 的 `scripts/migrate_sqlite_to_postgres.py` 继续作为受控的停机快照
+importer 与本地激活工具；它不是持续复制。SQLite-active 正向 shadow 只使用
+`scripts/shadow_sqlite_to_postgres.py`，且两种流程绝不能指向同一个 target。
+
+Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有业务 SQL 全限定到 run 绑定 schema，在关键绑定处以短写栅栏复核 live SQLite capture 仍启用，采用有界 named server cursor/statement timeout，并在起始和最终验证由正式 migration 派生的完整 v9 表/列/约束/operational+GIN-index/extension catalog。Snapshot/fence 必须用指向当前 SQLite 路径的 fresh 专用连接，不得复用 repository 的线程缓存连接；open 前后以及发布/PG commit 前都要复核 resolved path 与 device/inode。最终 SQLite 栅栏只在 PG 长 proof/ANALYZE 完成后取得，并保持到 PG H0 事务提交成功。
 
 - 在发行默认的 SQLite 后端上，搜索使用 SQLite FTS/向量存储；PostgreSQL 后端改用 `pg_trgm`/`ILIKE`。float32 向量仍存为 `bytea`，不安装也不需要 pgvector。
 - PostgreSQL 要求 `pg_trgm` 必须安装在 `public` schema。可用不回显凭据的查询检查：
@@ -138,12 +159,12 @@ bash scripts/check.sh
   ```
 
   `pg_trgm | public` 表示前置条件已就绪。若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`；既有 `pg_trgm` 位于其他 schema 时会 fail closed。
-- importer 要求目标 PostgreSQL 是空的且使用 UTF-8；目标 URL 只从 `POSTGRES_MIGRATION_URL` 读取，不放在 CLI 参数中。它用 SQLite backup API 获取包含已提交 WAL 的在线一致快照，只在工作副本上升级到配对 schema，按有界 batch 流式 `COPY`，保留 ordinal，把旧 JSON 向量转换成 float32 `bytea`，逐表做内容 checksum，并逐表提交 + 记录 checkpoint，中断（崩溃、远程连接断开、重启）后从最后完成的表续跑而非整体重来；finalize（ordinal reseed、重建索引、`ANALYZE`）是幂等的。可为大目标传入会话级批量装载调优（`--maintenance-work-mem`、`--max-parallel-index-workers`）。默认 preview/apply 不会修改 `DATABASE_URL`，也不会复制 `.local/storage`。
+- importer 要求目标 PostgreSQL 是空的且使用 UTF-8；目标 URL 只从 `POSTGRES_MIGRATION_URL` 读取，不放在 CLI 参数中。它用 SQLite backup API 获取包含已提交 WAL 的在线一致快照，只在工作副本上升级到配对 schema，按有界 batch 流式 `COPY`，保留 ordinal，把旧 JSON 向量转换成 float32 `bytea`，逐表做内容 checksum，并逐表提交 + 记录 checkpoint，中断（崩溃、远程连接断开、重启）后从最后完成的表续跑而非整体重来；finalize（ordinal reseed、重建索引、`ANALYZE`）是幂等的。SQLite-only 的 shadow control/change-log 表会被明确排除并记录在 receipt 中。可为大目标传入会话级批量装载调优（`--maintenance-work-mem`、`--max-parallel-index-workers`）。默认 preview/apply 不会修改 `DATABASE_URL`，也不会复制 `.local/storage`。
 - 在线迁移只能算演练快照：快照之后继续写入 SQLite 的数据不会被同步。对已经停服的本地部署，显式 `--activate-env ... --confirm-service-stopped` 会重新生成 SQLite 一致快照，并按无凭据 receipt 重算 PostgreSQL 全表 checksum；全部一致后才原子替换 `.env`，把旧 SQLite URL 保存在惰性的 `SHADOW_DATABASE_URL`，并创建权限受限的回退副本。CLI 不会自行停止或重启服务。随后以 `--workers 1` 启动，并在放流量前检查 `/api/ready`、登录、数量、搜索、代表性读取和一次 canary 写入。
 - 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
 - `scripts/batch_ingest.py` 的变更阶段仅支持 SQLite；PostgreSQL 请使用正常应用/API 摄取和 KG/索引流程。SQLite 存量库若有部分成功的 KG 抽取，可用 `kg --retry-partial`；每个来源会保留旧图，直到“零失败窗口且非空”的新图成功提交。
 
-preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
+preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；按步骤执行的清单见[迁移 runbook](./docs/postgres-migration-runbook.md)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 

@@ -173,7 +173,7 @@ Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行�
 `DATABASE_URL` 是唯一 active backend 选择器，接受 `sqlite:///...`、
 `postgresql://...` 和会被规范化的旧别名 `postgres://...`。不支持的 scheme、建连、
 migration 或 warmup 失败都 fail closed，不会回落到另一数据库。`SHADOW_DATABASE_URL`
-只保留，不能启用 dual-write。
+不会选择 active backend，单独设置也不会启动同步；只有显式 forward-shadow CLI 会读取它。
 
 ```dotenv
 # 发行默认
@@ -181,6 +181,9 @@ DATABASE_URL=sqlite:///.local/silicon_notebook.db
 
 # 直接使用 PostgreSQL 16
 DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+
+# DATABASE_URL 仍为 SQLite 时可选的单向影子目标
+# SHADOW_DATABASE_URL=postgresql://silicon_shadow:change-me@127.0.0.1:5432/silicon_notebook_shadow
 ```
 
 PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 owner 可让 migration
@@ -188,9 +191,12 @@ PostgreSQL 必须使用 UTF-8，并把 `pg_trgm` 安装在 `public`。数据库 
 `bytea`，不需要 pgvector。生产仍保持单 backend worker（`--workers 1`）。
 
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
-存量 SQLite→PostgreSQL 必须先停写、停服务、验证两端备份，执行外部受控全量迁移，
-核对表数量和代表性领域读取，再修改唯一 URL。完整切换/回滚步骤见[运维文档](./operations_zh.md)，
-离线包决策表也见 [packaging/DEPLOY.md](../packaging/DEPLOY.md)。
+对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
+PostgreSQL 影子库。它要求 PostgreSQL 16、专用且可恢复的目标库、已验证的源/目标备份、
+容量凭据、owner-private 工作目录和一个受监督 worker；它不会修改 `DATABASE_URL`、不会把
+流量导向 PostgreSQL，也不会把 PostgreSQL 写入反向复制到 SQLite。完整命令、监控和故障处理
+见[运维文档](./operations_zh.md)，离线包 checklist 也见
+[packaging/DEPLOY.md](../packaging/DEPLOY.md)。
 
 ### 4 · 验证
 
