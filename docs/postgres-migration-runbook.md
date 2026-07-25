@@ -44,10 +44,16 @@ df -h <WORK_DIR>
 判据:
 
 - `quick_check` 为 `ok`。不是就先修源库,不要迁一个已损坏的库。
-- **`<WORK_DIR>` 所在盘剩余 ≥ 2 × 源库大小。** 不是 1×:
+- **`<WORK_DIR>` 所在盘剩余 ≥ 2 × 源库大小,彩排与正式共用同一目录时要 3 ×。** 不是 1×:
   - 导入阶段密封快照常驻,源库 schema 落后于当前代码时还会再拷一份完整升级工作副本;
-  - **激活阶段无条件重新生成一份完整快照**(停写后的一致性锚点),而密封快照此时必须仍在。
-  500GB 的源库就是 1TB。按 1× 备的话,前面几小时都正常,会在激活那一步爆盘。
+  - **激活阶段无条件重新生成一份完整快照**(停写后的一致性锚点)。它先写成完整的临时文件,
+    **写完之后**才按 hash 判重,所以哪怕内容与密封快照完全相同,峰值也实打实是 2 份;
+  - 彩排是在 SQLite 仍在线时做的,正式窗口前源库通常已经变了 → 两次的快照 hash 不同 →
+    **文件名不同,彩排那份不会被复用,会一直留着**。共用目录就变成 3 份。
+
+  500GB 的源库:独立目录 1TB,共用目录 1.5TB。
+  **建议彩排用单独的 `<REHEARSAL_WORK_DIR>`**,正式窗口开始前确认它已归档或删除;
+  否则按 3× 备。按 1× 备的话前面几小时都正常,会在激活那一步爆盘。
 - **目标库所在盘不能用源库大小估。** PostgreSQL 的数据 + 索引通常大于 SQLite 文件,
   重建索引期间还要额外临时空间。**用 P2 彩排实测出来的实际占用来定**,这也是彩排的
   产出之一;没有实测值就不要进正式窗口。
@@ -80,12 +86,14 @@ python scripts/migrate_sqlite_to_postgres.py --source <SQLITE_DB>
 ```bash
 python scripts/migrate_sqlite_to_postgres.py \
   --source <SQLITE_DB> \
-  --work-dir <WORK_DIR> \
+  --work-dir <REHEARSAL_WORK_DIR> \
   --source-timezone <TZ> \
   --maintenance-work-mem 2GB \
   --max-parallel-index-workers 4 \
   --apply
 ```
+
+(彩排用**独立的**工作目录。与正式窗口共用会让两次的密封快照同时留在盘上——见 P0 的容量说明。)
 
 - 进度行:`COPY i/N` → `VERIFY i/N` → `INDEX i/N`;续跑时已完成的表报 `SKIP i/N ... (checkpointed)`。
 - **成功**:`MIGRATION OK: <行数> rows across <表数> tables; SQLite v<a>-><b>; snapshot=...; receipt=...`。
@@ -149,6 +157,23 @@ python scripts/migrate_sqlite_to_postgres.py \
 
    成功打印 `ACTIVATION OK: ...`。CLI 只改 `DATABASE_URL`,把原 SQLite URL 存为惰性的
    `SHADOW_DATABASE_URL`(不参与选择、不同步),**不启停任何进程**。
+   > ⚠️ **「PostgreSQL 上一个字都没写过」的窗口到这一步为止。** 后端启动会在
+   > readiness **之前**无条件跑一次中断恢复(`_recover_interrupted_jobs`,
+   > `startup_warmup.py`):把上次遗留的 `ask_jobs`/`merge_review_jobs` running 行、
+   > `knowhow_rows` 的 syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态。
+   > 库里只要有这类中间态行,**一启动就写 PostgreSQL**。要停在可证明零写入的状态,
+   > 必须在启动之前决定。想确认自己库里有没有,停写后在源库上查:
+   >
+   > ```bash
+   > sqlite3 <SQLITE_DB> "SELECT (SELECT COUNT(*) FROM ask_jobs WHERE status='running')
+   >   + (SELECT COUNT(*) FROM merge_review_jobs WHERE status='running')
+   >   + (SELECT COUNT(*) FROM knowhow_rows WHERE projection_status IN ('syncing','pending'))
+   >   + (SELECT COUNT(*) FROM sources WHERE parse_status IN ('extracting','queued','parsing'));"
+   > ```
+   >
+   > 结果为 0 就没有启动写入;非 0 则启动即写。这类写入是恢复性的(把中间态收敛到终态),
+   > 回滚到 SQLite 没有实质损失——SQLite 端启动时会做同样的事——但"零写入"的说法不再成立。
+
 5. **重启后端**(人执行),保持 `--workers 1`。
 
 ## P4 验收(放流量前必须全过)
@@ -158,12 +183,8 @@ curl -fsS http://127.0.0.1:8000/api/ready
 ```
 
 1. `/api/ready` 返回 `"ready": true`(大库首启要等索引预载,不要提前放行)。
-
-> ⚠️ **无损回滚的最后时刻就在这里。** 下一步的登录会写 PostgreSQL
-> (`/auth/login` → `create_session()` → `auth_sessions` 插入)。要在"PostgreSQL 上
-> 一个字都没写过"的状态下退回 SQLite,必须在登录之前决定。
-
-2. admin 与普通用户各登录一次。**这已经是 PostgreSQL 写入**;此后回滚会丢掉这些会话
+2. admin 与普通用户各登录一次。**登录也是 PostgreSQL 写入**
+   (`/auth/login` → `create_session()` → 插入 `auth_sessions`);此后回滚会丢掉这些会话
    (代价只是重新登录,不涉及业务数据)。
 3. 笔记本/来源数量与 receipt 对得上。
 4. 抽查检索、Ask、知识、Memory、Knowhow、报告的代表性读取。
@@ -180,8 +201,9 @@ curl -fsS http://127.0.0.1:8000/api/ready
 
 | 时点 | 回滚代价 |
 | --- | --- |
-| P4 第 1 步之后、**登录之前** | 无损。PostgreSQL 上没有任何写入 |
-| 登录之后、金丝雀写入之前 | 丢掉 `auth_sessions` 里的会话,用户重新登录即可。业务数据无损 |
+| 激活之后、**启动 PostgreSQL 后端之前** | 真正的零写入。要「可证明没动过 PostgreSQL」只有这一段 |
+| 启动之后、登录之前 | 库里有中间态行的话,启动已跑过中断恢复。无实质损失(SQLite 端启动会做同样的收敛),但不再是零写入 |
+| 登录之后、金丝雀写入之前 | 再丢掉 `auth_sessions` 里的会话,用户重新登录即可。业务数据仍无损 |
 | **金丝雀写入或放流量之后** | 丢掉那些业务写入。本仓库**没有**反向导入器,也没有双写日志。此时 PostgreSQL 就是回滚边界 |
 
 ## 迁移不覆盖什么

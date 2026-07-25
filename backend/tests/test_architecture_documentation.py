@@ -377,9 +377,18 @@ def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own
     ):
         text = _read_file(name)
         assert sizing in text, f"{name} must state the 2x work-directory rule"
+        # The write-free window closes at the first PostgreSQL start, not at
+        # login: startup settles leftover in-progress rows before readiness
+        # (codex review round 9 P1). Both writers must stay documented, because
+        # naming only the later one overstates how long rollback is provably
+        # lossless.
+        assert "_recover_interrupted_jobs" in text, (
+            f"{name} must say starting the backend already writes PostgreSQL "
+            "when the data contains in-progress rows"
+        )
         assert "auth_sessions" in text, (
-            f"{name} must say login already writes PostgreSQL, so the lossless "
-            "rollback window closes there rather than at the canary write"
+            f"{name} must say login writes PostgreSQL too, so rolling back "
+            "after it costs the sessions"
         )
 
 

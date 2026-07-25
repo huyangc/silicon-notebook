@@ -162,11 +162,17 @@ The default is a read-only preflight. It validates the SQLite identity/schema an
 UTF-8/current-schema/emptiness/migration-ledger state, then exits without creating a snapshot
 or writing the target. `pg_trgm` must be creatable in `public`.
 
-Size the work directory for **at least twice the source file**, not once. The sealed snapshot
-stays for the whole import; a source whose schema lags the code is additionally copied into a
-full upgrade working copy; and activation unconditionally takes another complete snapshot as
-the write-freeze anchor while the sealed one must still be present. A 500 GB source therefore
-needs 1 TB, and a 1× allocation fails at activation after hours of successful copying. Size the
+Size the work directory for **at least twice the source file**, not once — three times if the
+rehearsal and the cutover share one directory. The sealed snapshot stays for the whole import;
+a source whose schema lags the code is additionally copied into a full upgrade working copy;
+and activation unconditionally takes another complete snapshot as the write-freeze anchor,
+written in full as a temporary file and only deduplicated against the sealed one afterwards, so
+the peak is two copies even when their contents are identical. A rehearsal runs while SQLite is
+still online, so by the cutover the source has usually changed and the two sealed snapshots hash
+differently, get different filenames, and both remain. A 500 GB source therefore needs 1 TB with
+a dedicated cutover directory and 1.5 TB with a shared one; prefer a separate rehearsal
+directory and confirm it is archived or removed before the window opens. A 1× allocation fails
+at activation after hours of successful copying. Size the
 target separately: PostgreSQL data plus indexes normally exceed the SQLite file and the index
 rebuild needs additional scratch, so take the measured figure from a rehearsal
 (`SELECT pg_size_pretty(pg_database_size(current_database()));`) rather than the SQLite size.
@@ -291,11 +297,16 @@ For a large source, throughput and reliability are dominated by a few levers:
 
 - Before PostgreSQL accepts any business write, rollback is safe: stop the backend, restore
   the SQLite `DATABASE_URL`, start one worker, and repeat the readiness/auth/count/read smoke.
-- Note where that boundary actually falls during verification: a successful `/auth/login`
-  already writes PostgreSQL (`create_session()` inserts into `auth_sessions`). Losslessness
-  therefore ends at the first login, not at the canary write. Rolling back between the two
-  costs only the sessions — users log in again — while rolling back after the canary loses
-  business data. Decide before logging in if the run must stay provably write-free.
+- Note where that boundary actually falls. **Starting the backend is already a write** when the
+  migrated data contains in-progress rows: startup runs `_recover_interrupted_jobs()` before
+  readiness (`startup_warmup.py`), settling leftover `ask_jobs`/`merge_review_jobs` running rows,
+  `knowhow_rows` in `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing`. A
+  provably write-free rollback therefore has to be decided *before* the first PostgreSQL start;
+  count those rows in the frozen source if you need to know whether your database has any. Those
+  recovery updates cost nothing to roll back — a SQLite start performs the same settling — but
+  the "untouched" claim no longer holds. Next, a successful `/auth/login` writes `auth_sessions`
+  via `create_session()`, so rolling back after login costs the sessions and users log in again.
+  Only the canary write and real traffic put business data at risk.
 - After the first PostgreSQL business write, editing the URL back loses that write. This
   repository has no reverse importer or dual-write log. Freeze again, externally reconcile
   PostgreSQL→SQLite (including storage effects), verify both sides, and only then reopen
