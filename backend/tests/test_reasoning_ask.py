@@ -53,7 +53,8 @@ def test_reasoning_ask_returns_trace_and_evidence_level(arepo):
         reflects=[{"next_action": "answer", "sufficient": True}],
         answer={"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True}))
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
-    assert resp.reasoning_trace and resp.reasoning_trace[0].step_type == "plan"
+    assert resp.reasoning_trace and resp.reasoning_trace[0].step_type == "intent"
+    assert resp.reasoning_trace[1].step_type == "plan"
     assert ("chat", "reasoning_agent") in arepo._runtime.models.calls
     assert ("chat", "evidence_refine") in arepo._runtime.models.calls
     assert ("chat", "ask_answer") in arepo._runtime.models.calls
@@ -216,6 +217,7 @@ def test_reasoning_service_streams_trace_with_explicit_user_id(arepo):
     resp = service.ask_reasoning(
         nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"),
         user_id=arepo.current_user().id, on_trace=steps.append)
-    assert steps and steps[0].step_type == "plan"       # on_trace 逐步可见
+    assert steps and steps[0].step_type == "intent"     # 意图确认先于任何检索
+    assert steps[1].step_type == "plan"                 # on_trace 逐步可见
     assert resp.mode == "reasoning" and resp.answer_id  # 引擎收口照存答案
     assert arepo.get_conversation(resp.conversation_id).turn_count == 1

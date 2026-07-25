@@ -15,8 +15,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # batch_ingest resume (previously a full-table scan). v31 adds the two
 # shadow-internal tables used by transactional forward capture. Capture
 # triggers remain run-scoped and are installed by migration.shadow.capture.
-# v32 adds stable relation endpoint keyset indexes for bounded lexical recall.
-SCHEMA_VERSION = 32
+# v32 persists the Deep Report question-understanding review contract.
+# v33 adds stable relation endpoint keyset indexes for bounded lexical recall.
+SCHEMA_VERSION = 33
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1765,6 +1766,16 @@ class SqliteMigrator:
             )
 
     def _migration_32(self) -> None:
+        """Persist report question-understanding and clarification review state."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db,
+                "reports",
+                "understanding_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+
+    def _migration_33(self) -> None:
         """Stable keyset order for bounded source/target relation probes."""
         with self._connect() as db:
             db.executescript(

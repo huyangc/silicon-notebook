@@ -44,11 +44,13 @@ class _Engine:
         self.generate_calls = []
 
     def run(self, notebook_id, rid, question, history="", depth=2,
-            auto_generate=False):
+            auto_generate=False, require_intent_review=False,
+            intent_contract=None):
         if self.boom:
             raise RuntimeError("engine down")
         self.run_calls.append((notebook_id, rid, question, history, depth,
-                               auto_generate))
+                               auto_generate, require_intent_review,
+                               intent_contract))
 
     def generate(self, notebook_id, rid, question, depth=2):
         if self.boom:
@@ -64,10 +66,11 @@ class _CapturingSubmitter:
         self.calls = []
 
     def __call__(self, fn, *args, name=None, notify_pending=False, **kwargs):
+        with self.registry._lock:
+            registered = self.probe_key in self.registry._events
         self.calls.append({
             "fn": fn, "name": name, "notify_pending": notify_pending,
-            # cancel() 命中即证明 submit 时已注册(顺带 set 事件,假引擎不受影响)
-            "registered_at_submit": self.registry.cancel(self.probe_key),
+            "registered_at_submit": registered,
         })
         return None
 
@@ -99,11 +102,26 @@ def _coordinator(reports=None, engine=None, registry=None, submitter=None):
 def test_registry_register_cancel_unregister_roundtrip():
     registry = ReportCancellationRegistry()
     event = threading.Event()
-    registry.register("r1", event)
+    assert registry.register("r1", event) is True
     assert registry.cancel("r1") is True and event.is_set()
     registry.unregister("r1")
     assert registry.cancel("r1") is False              # 注销后不再命中
     registry.unregister("r1")                          # 幂等
+
+
+def test_registry_refuses_overwrite_and_unregisters_by_event_identity():
+    registry = ReportCancellationRegistry()
+    first = threading.Event()
+    second = threading.Event()
+
+    assert registry.register("same", first) is True
+    assert registry.register("same", second) is False
+    registry.unregister("same", second)
+
+    assert registry.cancel("same") is True
+    assert first.is_set() and not second.is_set()
+    registry.unregister("same", first)
+    assert registry.cancel("same") is False
 
 
 def test_module_cancel_functions_share_the_process_global_registry():
@@ -112,14 +130,27 @@ def test_module_cancel_functions_share_the_process_global_registry():
     try:
         assert REPORT_CANCELLATIONS.cancel("rep-shared") is True and event.is_set()
     finally:
-        report_engine.unregister_cancel("rep-shared")
+        report_engine.unregister_cancel("rep-shared", event)
     assert report_engine.cancel_report("rep-shared") is False
 
     other = threading.Event()
     REPORT_CANCELLATIONS.register("rep-shared2", other)
     assert report_engine.cancel_report("rep-shared2") is True and other.is_set()
-    report_engine.unregister_cancel("rep-shared2")
+    report_engine.unregister_cancel("rep-shared2", other)
     assert REPORT_CANCELLATIONS.cancel("rep-shared2") is False
+
+
+def test_module_cancel_registration_fails_closed_on_duplicate():
+    from app.services import report_engine
+
+    first = report_engine.register_cancel("rep-duplicate")
+    try:
+        with pytest.raises(RuntimeError, match="already has an active job"):
+            report_engine.register_cancel("rep-duplicate")
+        report_engine.unregister_cancel("rep-duplicate", threading.Event())
+        assert report_engine.cancel_report("rep-duplicate") is True
+    finally:
+        report_engine.unregister_cancel("rep-duplicate", first)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +167,9 @@ def test_start_plan_registers_before_submit_and_unregisters_on_success():
     assert call["registered_at_submit"] is True        # 注册先于 submit
     assert call["name"] == "report-plan-rid-1" and call["notify_pending"] is True
     call["fn"]()                                       # 跑 worker
-    assert engine.run_calls == [("nb", "rid-1", "q", "h", 7, True)]  # depth 从行读
+    assert engine.run_calls == [
+        ("nb", "rid-1", "q", "h", 7, True, True, None)
+    ]  # depth 从行读;首次只做问题理解
     assert captured["user_id"] == "u1"
     assert captured["cancel_event"] is not None
     assert registry.cancel("rid-1") is False           # 成功后注销
@@ -156,7 +189,76 @@ def test_start_plan_unregisters_when_engine_fails():
 def test_start_plan_depth_read_failure_falls_back_to_2():
     coord, engine, _reg, _cap = _coordinator(reports=_Reports(boom=True))
     coord.start_plan("nb", "rid-3", "q", user_id="u1")
-    assert engine.run_calls == [("nb", "rid-3", "q", "", 2, False)]
+    assert engine.run_calls == [
+        ("nb", "rid-3", "q", "", 2, False, True, None)
+    ]
+
+
+def test_start_plan_with_confirmed_intent_resumes_without_review_gate():
+    coord, engine, _reg, _cap = _coordinator()
+    contract = {"objective": "q", "confirmed": True}
+    coord.start_plan(
+        "nb", "rid-confirmed", "q", user_id="u1", intent_contract=contract
+    )
+    assert engine.run_calls == [
+        ("nb", "rid-confirmed", "q", "", 7, False, False, contract)
+    ]
+
+
+def test_worker_observes_durable_cancel_that_preceded_event_registration():
+    reports = _Reports()
+    reports.get_report = lambda *_args: {
+        "id": "rid-cancel-gap", "depth": 7, "status": "cancelled"
+    }
+    registry = ReportCancellationRegistry()
+    submitted = []
+
+    def submitter(fn, *args, name=None, notify_pending=False, **kwargs):
+        submitted.append(fn)
+
+    coord, engine, _reg, _captured = _coordinator(
+        reports=reports, registry=registry, submitter=submitter
+    )
+
+    assert coord.start_plan(
+        "nb", "rid-cancel-gap", "q", user_id="u1",
+        intent_contract={"confirmed": True},
+    ) is True
+    submitted[0]()
+
+    assert engine.run_calls == []
+    assert registry.cancel("rid-cancel-gap") is False
+
+
+@pytest.mark.parametrize("kind", ("plan", "generate"))
+def test_ready_phase_handoff_replaces_old_event_without_losing_new_job(kind):
+    registry = ReportCancellationRegistry()
+    old = threading.Event()
+    assert registry.register("rid-handoff", old) is True
+    submitted = []
+
+    def submitter(fn, *args, name=None, notify_pending=False, **kwargs):
+        submitted.append(fn)
+
+    coord, engine, _reg, _captured = _coordinator(
+        registry=registry, submitter=submitter
+    )
+    if kind == "plan":
+        assert coord.start_plan(
+            "nb", "rid-handoff", "q", user_id="u",
+            intent_contract={"confirmed": True},
+        ) is True
+    else:
+        assert coord.start_generate(
+            "nb", "rid-handoff", "q", user_id="u"
+        ) is True
+
+    registry.unregister("rid-handoff", old)
+    assert registry.cancel("rid-handoff") is True
+    assert old.is_set() is False
+    submitted[0]()
+    assert engine.run_calls == [] and engine.generate_calls == []
+    assert registry.cancel("rid-handoff") is False
 
 
 def test_start_generate_names_job_and_unregisters():

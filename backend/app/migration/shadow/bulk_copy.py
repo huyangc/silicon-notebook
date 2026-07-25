@@ -46,7 +46,7 @@ from app.migration.shadow.snapshot import (
     assert_live_sqlite_path,
     open_fresh_live_sqlite,
 )
-from app.migration.shadow.postgres_catalog import validate_postgres_v10_catalog
+from app.migration.shadow.postgres_catalog import validate_postgres_v11_catalog
 from app.migration.shadow.transform import (
     PostgresColumn,
     canonical_json_value,
@@ -813,7 +813,7 @@ def _validate_full_copy_target_catalog(
             definition,
             business_schema=state.target_business_schema,
         )
-    validate_postgres_v10_catalog(
+    validate_postgres_v11_catalog(
         conn,
         business_schema=state.target_business_schema,
         manifest=manifest,
@@ -1125,7 +1125,7 @@ def _finalize_copy(
     cancel_requested: Callable[[], bool] | None,
     statement_timeout_seconds: float,
 ) -> None:
-    # The current compatibility target is already schema-complete v10. Calling
+    # The current compatibility target is already schema-complete v11. Calling
     # the formal migrator still validates every checksummed ledger entry; no
     # stale v2->v6 shadow-only migration path is used.
     _poll_cancel(cancel_requested)

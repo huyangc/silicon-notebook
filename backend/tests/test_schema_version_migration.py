@@ -61,14 +61,16 @@ def test_migration_25_irreversibly_scrubs_user_model_credentials_and_old_status(
     # _migration_26(knowhow_changes/knowhow_milestones)与 _migration_27
     # (P1.5 的 sources.chunked_at 完成标记列)与 _migration_28(每笔记本文档数量上限的
     # app_settings 表 + user_profiles.upload_document_limit 列)与 _migration_29
-    # (PostgreSQL 合并后两条 migration-24 血脉的和解)、_migration_30(sources 内容
-    # 哈希去重索引)、_migration_31(shadow capture 内部表)与
-    # _migration_32(关系端点稳定 keyset 索引);本用例只断言 v25 的数据副作用,v26 两表结构由
+    # (PostgreSQL 合并后两条 migration-24 血脉的和解)与 _migration_30(sources 内容
+    # 哈希去重索引)、_migration_31(shadow capture 两张内部表)与
+    # _migration_32(深度报告问题理解契约)、_migration_33(关系端点稳定 keyset
+    # 索引);本用例只断言 v25 的数据副作用,v26 两表结构由
     # test_knowhow_history_schema 单独钉、v27 的列由 test_legacy_db_compat 单独钉、
     # v28 的表/列由 test_document_limit 单独钉、v30 索引由 test_source_asset_migration /
     # snapshot verifier 单独钉；v31 两张惰性 shadow capture 内部表由 Task 2
-    # capture/schema tests 单独钉，v32 索引由迁移与 snapshot verifier 契约单独钉。
-    assert repo._migrate() == [25, 26, 27, 28, 29, 30, 31, 32]
+    # capture/schema tests 单独钉，v32 列由 test_report_store / schema golden
+    # 单独钉，v33 索引由迁移与 snapshot verifier 契约单独钉。
+    assert repo._migrate() == [25, 26, 27, 28, 29, 30, 31, 32, 33]
 
     with repo._connect() as db:
         settings = db.execute(

@@ -220,6 +220,12 @@ class _MinimalEvidence:
     def tier_map(self, notebook_ids):
         return {}
 
+    def source_metadata(self, source_ids):
+        return {}
+
+    def citation_titles(self, source_ids):
+        return {}
+
     def truncate_kg_block(self, block, max_tokens):
         return block
 

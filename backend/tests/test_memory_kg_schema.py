@@ -50,7 +50,7 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_32():
+def test_schema_version_is_33():
     # paper-metadata Task 1's _migration_17 (source_paper_meta/source_authors
     # tables) bumped v16 → v17; knowhow-tables PR-2+3 Task 1's _migration_18
     # (knowhow_cell_code table + role vocabulary remap) bumped v17 → v18;
@@ -70,9 +70,10 @@ def test_schema_version_is_32():
     # v27 → v28; v29 reconciles the two independently allocated v24
     # lineages (canonical scratch + cluster membership uniqueness); v30 adds the
     # sources(notebook_id, file_hash) content-hash dedup index; v31 adds the
-    # two inert shadow-capture internal tables; v32 adds the two bounded
-    # relation-endpoint keyset indexes.
-    assert sr.SCHEMA_VERSION == 32
+    # two inert shadow-capture internal tables; v32 persists the Deep Report
+    # question-understanding contract; v33 adds the two bounded relation-endpoint
+    # keyset indexes.
+    assert sr.SCHEMA_VERSION == 33
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

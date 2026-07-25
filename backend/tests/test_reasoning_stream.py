@@ -7,7 +7,28 @@ from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 class _ReasoningLLM:
     configured = True
 
+    def __init__(self):
+        self.intent_prompts = []
+
     def chat_json(self, messages, schema, **kwargs):
+        if "mandatory_topics" in schema:
+            self.intent_prompts.append(messages[-1]["content"])
+            return json.dumps({
+                "normalized_question": "RTL 到 GDSII 的完整实现流程是什么？",
+                "intent_type": "explain",
+                "entities": ["RTL", "GDSII"],
+                "mandatory_topics": [{
+                    "title": "实现流程",
+                    "question": "RTL 到 GDSII 包含哪些阶段？",
+                    "retrieval_queries": [
+                        "RTL 到 GDSII 实现流程",
+                        "RTL 到 GDSII 签核阶段",
+                    ],
+                }],
+                "ambiguities": [],
+                "confidence": 0.95,
+                "needs_clarification": False,
+            })
         if "sub_queries" in schema:
             return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
         if "next_action" in schema:
@@ -47,9 +68,63 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
          "payload": {"name": "RTL到GDSII流程概述"}, "evidence": []}
     ], [])
 
+    preview = client.post(
+        f"/api/notebooks/{notebook_id}/ask/intent",
+        json={"question": "RTL到GDSII流程"},
+    )
+    assert preview.status_code == 200
+    contract = preview.json()
+    assert contract["resolved_question"].startswith("RTL 到 GDSII")
+    # 意图预检不能提前创建会话或 Ask job。
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/conversations"
+    ).json() == []
+
+    bypassed_preview = {
+        "question": "帮我分析一下这个问题",
+        "mode": "reasoning",
+    }
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/ask/stream", json=bypassed_preview
+    ).status_code == 422
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/ask", json=bypassed_preview
+    ).status_code == 422
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/conversations"
+    ).json() == []
+
+    invalid_payload = {
+        "question": "RTL到GDSII流程",
+        "mode": "reasoning",
+        "intent": {
+            "contract": {**contract, "objective": "另一个问题"},
+            "resolved_question": contract["resolved_question"],
+            "answers": [],
+        },
+    }
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/ask/stream", json=invalid_payload
+    ).status_code == 422
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/ask", json=invalid_payload
+    ).status_code == 422
+    # Semantic confirmation failures happen before either durable entry exists.
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/conversations"
+    ).json() == []
+
     response = client.post(
         f"/api/notebooks/{notebook_id}/ask/stream",
-        json={"question": "RTL到GDSII流程", "mode": "reasoning"},
+        json={
+            "question": "RTL到GDSII流程",
+            "mode": "reasoning",
+            "intent": {
+                "contract": contract,
+                "resolved_question": contract["resolved_question"],
+                "answers": [],
+            },
+        },
     )
 
     assert response.status_code == 200
@@ -66,7 +141,37 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     assert kinds[-1] == "final"
     assert kinds.index("progress") < kinds.index("final")
     assert events[1]["step"]["step_type"] == "start"
+    assert any(event.get("step", {}).get("step_type") == "intent" for event in events)
     assert any(event.get("step", {}).get("step_type") == "plan" for event in events)
     assert events[-1]["response"]["conversation_id"]
     assert events[0]["conversation_id"] == events[-1]["response"]["conversation_id"]
     assert events[-1]["response"]["reasoning_trace"]
+    assert events[-1]["response"]["intent"]["confirmed"] is True
+    assert events[-1]["response"]["retrieval_query"].startswith("RTL到GDSII流程")
+    assert "RTL 到 GDSII 的完整实现流程是什么？" in (
+        events[-1]["response"]["retrieval_query"]
+    )
+    plan = next(
+        event["step"] for event in events
+        if event.get("step", {}).get("step_type") == "plan"
+    )
+    assert plan["detail"]["source"] == "confirmed_intent"
+    planned_queries = [row["query"] for row in plan["detail"]["sub_queries"]]
+    assert len(planned_queries) == 3
+    assert planned_queries[0].startswith("RTL到GDSII流程")
+    assert planned_queries[1].startswith("RTL 到 GDSII 实现流程")
+    assert planned_queries[2].startswith("RTL 到 GDSII 签核阶段")
+    assert all("RTL 到 GDSII 的完整实现流程是什么？" in row for row in planned_queries)
+
+    # Conversation context for the next corpus-blind preview includes only
+    # prior user wording, never the corpus-derived assistant answer.
+    second_preview = client.post(
+        f"/api/notebooks/{notebook_id}/ask/intent",
+        json={
+            "question": "这个流程有哪些签核点？",
+            "conversation_id": events[0]["conversation_id"],
+        },
+    )
+    assert second_preview.status_code == 200
+    assert "User: RTL到GDSII流程" in llm.intent_prompts[-1]
+    assert "RTL到GDSII流程 [k1]" not in llm.intent_prompts[-1]

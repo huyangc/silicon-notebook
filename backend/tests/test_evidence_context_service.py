@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.core.config import Settings
 from app.models.schemas import Evidence
 from app.services.evidence_context import EvidenceContextService
-from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
+from app.services.retrieval import RetrievedChunk, RetrievedElement, RetrievedKnowledge
 
 
 class _Notebooks:
@@ -16,11 +16,15 @@ class _Notebooks:
 
 
 class _Sources:
+    def __init__(self, metadata=None):
+        self.metadata = metadata or {}
+
     def evidence_elements(self, element_ids):
         return {}
 
     def source_metadata(self, source_ids):
-        return {}
+        return {source_id: self.metadata[source_id]
+                for source_id in source_ids if source_id in self.metadata}
 
 
 class _Knowledge:
@@ -45,13 +49,81 @@ class _Knowledge:
         return 1
 
 
-def _service():
+def _service(*, source_metadata=None):
     return EvidenceContextService(
         notebooks=_Notebooks(),
-        sources=_Sources(),
+        sources=_Sources(source_metadata),
         knowledge=_Knowledge(),
         settings=Settings(),
     )
+
+
+def test_citation_titles_prefer_grounded_paper_title_and_keep_other_sources():
+    service = _service(source_metadata={
+        "paper": {
+            "title": "2401.01234.pdf", "file_name": "2401.01234.pdf",
+            "is_paper": True, "paper_title": "A Useful Article Title",
+        },
+        "ordinary": {
+            "title": "design-notes.md", "file_name": "design-notes.md",
+            "is_paper": False, "paper_title": "Ignored stale title",
+        },
+        "untitled-paper": {
+            "title": "scan.pdf", "file_name": "scan.pdf",
+            "is_paper": True, "paper_title": "   ",
+        },
+    })
+
+    assert service.citation_titles(["paper", "ordinary", "untitled-paper"]) == {
+        "paper": "A Useful Article Title",
+        "ordinary": "design-notes.md",
+        "untitled-paper": "scan.pdf",
+    }
+
+
+def test_element_context_and_anchor_expose_parsed_paper_title():
+    service = _service(source_metadata={
+        "s-paper": {
+            "title": "opaque-file-name.pdf", "is_paper": True,
+            "paper_title": "Meaningful Paper Name",
+        },
+    })
+    element = RetrievedElement(
+        element_id="e-paper", source_id="s-paper",
+        source_title="opaque-file-name.pdf", element_type="paragraph",
+        location_label="p. 2", text="quoted evidence", score=0.9,
+    )
+
+    block, evidence = service.element_context([element], notebook_id="active")
+    anchors = service.parse_anchors("claim [k4001]", evidence)
+
+    assert "Meaningful Paper Name" in block
+    assert "opaque-file-name.pdf" not in block
+    assert evidence["k4001"]["source_title"] == "Meaningful Paper Name"
+    assert anchors[0].source_title == "Meaningful Paper Name"
+
+
+def test_fallback_citation_label_uses_parsed_paper_title():
+    service = _service(source_metadata={
+        "s-paper": {
+            "title": "opaque-file-name.pdf", "is_paper": True,
+            "paper_title": "Meaningful Paper Name",
+        },
+    })
+    hit = RetrievedKnowledge(
+        object_id="o-paper", object_type="claim", payload={"name": "Claim"},
+        evidence=[Evidence(
+            source_id="s-paper", source_title="opaque-file-name.pdf",
+            element_id="e-paper", element_type="paragraph",
+            location_label="p. 2", quoted_span="quoted evidence", confidence=1.0,
+        )],
+    )
+
+    citations = service.citations_from(
+        [hit], {"e-paper"}, "KG evidence", notebook_id="active",
+    )
+
+    assert citations[0].label == "Meaningful Paper Name · p. 2"
 
 
 def test_evidence_context_chunk_golden_matches_master():
@@ -82,6 +154,7 @@ def test_evidence_context_chunk_golden_matches_master():
         "object_id": "c-active", "object_type": "chunk", "name": "1.1",
         "definition": None, "snippet": "active text", "source_title": "Paper A",
         "location_label": "1.1", "tier": "personal", "notebook_id": "",
+        "source_id": "s1", "element_id": "", "relevance": 0.9,
         "knowhow": None,
     }
     # k2(c-base)真正跨库:tier 解析为 base 且 notebook_id 原样带出,供 Task 14
@@ -104,8 +177,32 @@ def test_evidence_context_knowledge_golden_matches_master():
         "object_id": "o1", "object_type": "concept", "name": "Cascode",
         "definition": "stable definition", "snippet": "source excerpt",
         "source_title": "Source A", "location_label": "§1", "tier": "base",
-        "notebook_id": "base", "knowhow": None,
+        "notebook_id": "base", "source_id": "", "element_id": "",
+        "relevance": 0.0, "knowhow": None,
     }
+
+
+def test_evidence_context_elements_are_precise_citable_anchors():
+    element = RetrievedElement(
+        element_id="el-7", source_id="src-2", source_title="Device paper",
+        location_label="p. 7", element_type="paragraph",
+        text="Body effect changes the threshold voltage.", score=0.91,
+    )
+    block, evidence = _service().element_context(
+        [element], notebook_id="active", id_offset=4000,
+    )
+    assert block.startswith("k4001: [source-element][personal]")
+    assert evidence["k4001"] == {
+        "object_id": "el-7", "object_type": "element", "name": "p. 7",
+        "definition": element.text, "snippet": element.text,
+        "source_id": "src-2", "element_id": "el-7",
+        "source_title": "Device paper", "location_label": "p. 7",
+        "tier": "personal", "notebook_id": "", "relevance": 0.91,
+        "knowhow": None,
+    }
+    anchors = _service().parse_anchors("supported [k4001]", evidence)
+    assert [(item.object_type, item.object_id, item.source_title)
+            for item in anchors] == [("element", "el-7", "Device paper")]
 
 
 def test_evidence_context_knowledge_context_blanks_self_notebook_id():

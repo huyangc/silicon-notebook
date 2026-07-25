@@ -479,7 +479,7 @@ def check_kg_store_ask_and_conversations() -> None:
         second = repo.ask(
             nb.id,
             AskRequest(
-                question="Does it separate storage and computation?",
+                question="Does the Engram conditional memory module separate storage and computation?",
                 conversation_id=answer.conversation_id,
                 mode="reasoning",
             ),

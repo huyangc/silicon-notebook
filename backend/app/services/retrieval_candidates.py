@@ -1178,18 +1178,122 @@ class CandidateRetrievalService(_RetrievalState):
                            limit: int = 8) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
         if not self.notebook_copy_stats(notebook_id)["copyable"]:
-            # source_elements 没有索引模态,本方法=全表扫+逐行向量解码(生产
-            # 17 万元素×4096 维=数 GB/次)。大库跳过并发事件,返回 [] ——
-            # 调用方(reasoning search_elements、chunk 兜底层)均容错空结果。
+            # source_elements 没有独立 ANN；绝不恢复 17 万元素×4096 维的
+            # 全表扫描。先走已有 chunk ANN/FTS 召回，再只按这些 chunk 的
+            # element_ids 做有界 PK hydration，仍能返回精确 element_id。
+            chunks, _ids, _matrix = self._retrieve_chunks(
+                notebook_id, query, recall=max(limit * 4, limit)
+            )
+            elements = self._retrieve_elements_from_chunks(
+                query, chunks, limit=limit
+            )
             self.event_log.emit({
-                "kind": "element_scoring_skipped", "notebook_id": notebook_id,
+                "kind": "element_scoring_bounded", "notebook_id": notebook_id,
                 "site": "_retrieve_elements", "reason": "large_notebook",
+                "chunk_candidates": len(chunks),
+                "element_hits": len(elements),
             })
-            return []
+            return elements
         query_vector = self._embed_query(query)
         with self._connect() as db:
             elements = self._gather_elements(db, notebook_id, with_vectors=True)
         return score_elements(query, elements, query_vector, limit=limit)
+
+    def _retrieve_elements_from_chunks(
+        self, query: str, chunks, *, limit: int
+    ) -> List[RetrievedElement]:
+        """Hydrate and rank a bounded set of exact elements from chunk hits.
+
+        Candidate ids are collected round-robin from relevance-ordered chunks so
+        one large chunk cannot consume the whole budget.  At most ``limit * 8``
+        (capped at 64) primary-key rows are read; there is no notebook-wide text
+        or vector materialisation.
+        """
+        if limit <= 0 or not chunks:
+            return []
+        ordered = sorted(
+            chunks,
+            key=lambda chunk: (
+                -float(getattr(chunk, "relevance", 0.0)
+                       or getattr(chunk, "score", 0.0) or 0.0),
+                str(getattr(chunk, "chunk_id", "")),
+            ),
+        )
+        cap = min(64, max(limit, limit * 8))
+        selected: list[str] = []
+        coarse_scores: dict[str, float] = {}
+        position = 0
+        while len(selected) < cap:
+            added = False
+            for chunk in ordered:
+                element_ids = list(getattr(chunk, "element_ids", None) or [])
+                if position >= len(element_ids):
+                    continue
+                element_id = str(element_ids[position] or "")
+                if not element_id or element_id in coarse_scores:
+                    continue
+                coarse_scores[element_id] = float(
+                    getattr(chunk, "relevance", 0.0)
+                    or getattr(chunk, "score", 0.0) or 0.0
+                )
+                selected.append(element_id)
+                added = True
+                if len(selected) >= cap:
+                    break
+            if not added:
+                break
+            position += 1
+        if not selected:
+            return []
+
+        hydrated = self.sources.evidence_elements(selected)
+        source_ids = [
+            str(row.get("source_id") or "") for row in hydrated.values()
+            if row.get("source_id")
+        ]
+        metadata = self.sources.source_metadata(source_ids)
+        candidates = []
+        for element_id in selected:
+            row = hydrated.get(element_id)
+            if not row:
+                continue
+            source_id = str(row.get("source_id") or "")
+            source = metadata.get(source_id) or {}
+            paper_title = str(source.get("paper_title") or "").strip()
+            ordinary_title = str(
+                source.get("title") or source.get("file_name") or ""
+            ).strip()
+            candidates.append({
+                "element_id": element_id,
+                "source_id": source_id,
+                "source_title": (
+                    paper_title
+                    if source.get("is_paper") and paper_title
+                    else ordinary_title
+                ),
+                "location_label": str(row.get("location_label") or ""),
+                "element_type": str(row.get("element_type") or ""),
+                "text": str(row.get("text") or ""),
+            })
+        lexical = score_elements(query, candidates, limit=limit)
+        seen = {item.element_id for item in lexical}
+        by_id = {row["element_id"]: row for row in candidates}
+        for element_id in selected:
+            if len(lexical) >= limit:
+                break
+            if element_id in seen or element_id not in by_id:
+                continue
+            row = by_id[element_id]
+            lexical.append(RetrievedElement(
+                element_id=element_id,
+                source_id=row["source_id"],
+                source_title=row["source_title"],
+                location_label=row["location_label"],
+                element_type=row["element_type"],
+                text=row["text"],
+                score=coarse_scores.get(element_id, 0.0),
+            ))
+        return lexical
     def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
         (matrix 行已 L2 归一化, 点积即余弦)。"""

@@ -2837,6 +2837,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.claim_report_generation",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.claim_report_intent",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.close",
         "target": "_runtime"
       },
@@ -3582,6 +3594,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.prepare_notebook_kg_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.preview_reasoning_intent",
         "target": "_runtime"
       },
       {
@@ -4742,6 +4760,36 @@
     "scope": "facade",
     "signature": "(self) -> 'CheckupService'"
   },
+  "claim_report_generation": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.generate_report",
+        "target": "claim_report_generation"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', report_id: 'str') -> 'bool'"
+  },
+  "claim_report_intent": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.confirm_report_intent",
+        "target": "claim_report_intent"
+      }
+    ],
+    "kind": "method",
+    "owner": "ReportStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', report_id: 'str', understanding: 'dict') -> 'bool'"
+  },
   "close": {
     "consumers": [
       {
@@ -5584,6 +5632,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._intent_history",
+        "target": "get_conversation"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_conversation",
         "target": "get_conversation"
       },
@@ -5835,6 +5889,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.preview_ask_intent.run_preview",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
         "target": "get_notebook"
@@ -5969,6 +6029,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.cancel_report_endpoint",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.confirm_report_intent",
         "target": "get_report"
       },
       {
@@ -7135,6 +7201,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', mode: 'str') -> 'dict'"
+  },
+  "preview_reasoning_intent": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.preview_ask_intent.run_preview",
+        "target": "preview_reasoning_intent"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'"
   },
   "process_source": {
     "consumers": [
@@ -8329,6 +8410,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.update_report_outline",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_all",
         "target": "settings"
@@ -8773,7 +8860,7 @@
     "owner": "ReportStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', report_id: 'str', *, status=None, progress=None, error=None, outline=None, sections=None, gaps=None, references=None, content_md=None, section_status=None) -> 'None'"
+    "signature": "(self, notebook_id: 'str', report_id: 'str', *, status=None, progress=None, error=None, outline=None, sections=None, gaps=None, references=None, content_md=None, section_status=None, understanding=None) -> 'None'"
   },
   "upload_sources": {
     "consumers": [

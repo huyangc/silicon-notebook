@@ -9,11 +9,11 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 ## Highlights
 
 - Structured source ingestion with element-level evidence, formulas, tables, and retained document images when MinerU is configured.
-- Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes.
+- Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes. Reasoning questions are understood without corpus influence before retrieval; clear intent auto-continues, while direction-changing ambiguity pauses for confirmation and then governs every retrieval stage.
 - Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, and personal-to-base promotion.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
 - Free-form knowhow tables with Markdown cells, reasoning-backed library-wide empty-cell completion suggestions, deterministic graph projection, history, milestones, and isolated code attachments.
-- Two-stage deep reports with editable outlines, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
+- Intent-first two-stage deep reports with corpus-blind question clarification, an atomically frozen confirmation contract before retrieval, bounded exact-element recovery for large libraries, editable coverage-aware outlines, paper-title-aware citations, verified grounding, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
 

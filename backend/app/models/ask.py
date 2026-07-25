@@ -65,10 +65,62 @@ class Citation(BaseModel):
 
 class TraceStep(BaseModel):
     """推理模式 agent 的一步轨迹(供前端折叠展示)。"""
-    step_type: str            # plan | retrieve | reflect | expand | follow_chain | fallback | answer | skip
+    step_type: str            # intent | plan | retrieve | reflect | expand | follow_chain | fallback | answer | skip
     summary: str              # 人话摘要
     detail: Dict[str, Any] = Field(default_factory=dict)
     duration_ms: Optional[int] = None  # 该步墙钟耗时(相邻两步 record 之差),供前端展示
+
+
+class QueryIntentTopic(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=200)
+    question: str = Field(min_length=1, max_length=1000)
+    retrieval_queries: List[str] = Field(default_factory=list, max_length=4)
+
+
+class QueryIntentAmbiguity(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    question: str = Field(min_length=1, max_length=500)
+    reason: str = Field(default="", max_length=300)
+    required: bool = True
+    options: List[str] = Field(default_factory=list, max_length=4)
+
+
+class QueryIntentAnswer(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    answer: str = Field(min_length=1, max_length=2000)
+
+
+class QueryIntentContract(BaseModel):
+    """Corpus-blind understanding shared by report and reasoning retrieval."""
+    objective: str = Field(min_length=1, max_length=4000)
+    resolved_question: str = Field(min_length=1, max_length=4000)
+    intent_type: str = "other"
+    entities: List[str] = Field(default_factory=list, max_length=8)
+    mandatory_topics: List[QueryIntentTopic] = Field(default_factory=list, max_length=16)
+    comparison_axes: List[str] = Field(default_factory=list, max_length=8)
+    constraints: List[str] = Field(default_factory=list, max_length=8)
+    excluded_topics: List[str] = Field(default_factory=list, max_length=8)
+    expected_output: str = Field(default="", max_length=1000)
+    assumptions: List[str] = Field(default_factory=list, max_length=8)
+    ambiguities: List[QueryIntentAmbiguity] = Field(default_factory=list, max_length=8)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    needs_clarification: bool = False
+    confirmed: bool = False
+    clarification_answers: List[Dict[str, str]] = Field(
+        default_factory=list, max_length=8
+    )
+
+
+class AskIntentPreviewRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=4000)
+    conversation_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class AskIntentConfirmation(BaseModel):
+    contract: QueryIntentContract
+    resolved_question: str = Field(min_length=1, max_length=4000)
+    answers: List[QueryIntentAnswer] = Field(default_factory=list, max_length=8)
 
 
 class AskRequest(BaseModel):
@@ -76,6 +128,9 @@ class AskRequest(BaseModel):
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
     mode: str = "chunk"       # "chunk"(默认,通用问答) | "fast"(旧KG) | "reasoning" | "graph" | "global"
+    # reasoning only: returned by /ask/intent and confirmed by the user (or
+    # auto-confirmed by the UI when no blocking ambiguity exists).
+    intent: Optional[AskIntentConfirmation] = None
 
 
 class AnswerAnchor(BaseModel):
@@ -184,6 +239,9 @@ class AskResponse(BaseModel):
     top_relevance: float = 0.0
     # 推理模式 agent 轨迹;fast 模式恒为 None。
     reasoning_trace: Optional[List["TraceStep"]] = None
+    # Persist the exact confirmed understanding used by reasoning so reopened
+    # turns can explain what the system actually searched for.
+    intent: Optional[QueryIntentContract] = None
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False
     # 大库(not copyable)且完全无 scale 索引(从未建过)时 True:检索能力受限,

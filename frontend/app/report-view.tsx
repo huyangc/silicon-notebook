@@ -22,6 +22,7 @@ import "katex/dist/katex.min.css";
 import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
+import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
 import { label } from "./vocabulary";
 
 // ---------------------------------------------------------------------------
@@ -51,11 +52,46 @@ export type ReportOutlineSectionT = {
   sufficiency?: ReportSufficiency; // 语料充分性:充足/薄弱/缺失
   gap_note?: string; // 缺口一句话说明
   action?: string; // keep | supplement | external
+  intent_ids?: string[];
+  intent_questions?: string[];
+  intent_catalog?: { id: string; title: string; question: string; retrieval_queries: string[] }[];
+  intent_contract?: {
+    objective: string;
+    mandatory_topics: { id: string; title: string; question: string; retrieval_queries: string[] }[];
+    comparison_axes?: string[];
+    constraints?: string[];
+    excluded_topics?: string[];
+    expected_output?: string;
+  };
+  coverage?: ReportCoverage;
+};
+
+export type ReportUnderstandingT = {
+  objective?: string;
+  resolved_question?: string;
+  intent_type?: string;
+  entities?: string[];
+  mandatory_topics?: { id: string; title: string; question: string; retrieval_queries: string[] }[];
+  comparison_axes?: string[];
+  constraints?: string[];
+  excluded_topics?: string[];
+  expected_output?: string;
+  assumptions?: string[];
+  ambiguities?: {
+    id: string;
+    question: string;
+    reason?: string;
+    required?: boolean;
+    options?: string[];
+  }[];
+  confidence?: number;
+  needs_clarification?: boolean;
+  confirmed?: boolean;
 };
 
 export type ReportDetailT = ReportSummaryT & {
   outline: ReportOutlineSectionT[];
-  sections: { title: string; markdown: string; grounded: boolean; failed?: boolean }[];
+  sections: { title: string; markdown: string; grounded: boolean; evidence_level?: string; failed?: boolean }[];
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
   content_md: string;
@@ -67,8 +103,12 @@ export type ReportDetailT = ReportSummaryT & {
     location_label?: string;
     object_id?: string;
     object_type?: string;
+    source_id?: string;
+    element_id?: string;
+    snippet?: string;
     tier?: string;
   }[];
+  understanding: ReportUnderstandingT;
   error: string;
 };
 
@@ -98,6 +138,7 @@ const sectionPhaseIcon = (phase: string): SectionPhaseIcon =>
 const STATUS_LABELS: Record<string, string> = {
   pending: "排队中",
   planning: "规划中",
+  intent_ready: "待确认问题",
   outline_ready: "待确认",
   running: "生成中",
   generating: "生成中",
@@ -172,10 +213,12 @@ export function ReportMarkdown({
       name: r.name,
       source_title: r.source_title,
       location_label: r.location_label,
+      snippet: r.snippet,
       tier: r.tier,
     },
   }));
   const refsByKey = referenceByAnchorKey(refObjs);
+  const selectedReference = selectedRefKey ? refsByKey[selectedRefKey]?.anchor : undefined;
   const components = {
     a({ href, children }: { href?: string; children?: React.ReactNode }) {
       if (href?.startsWith("cite:")) {
@@ -236,6 +279,13 @@ export function ReportMarkdown({
       >
         {markdown}
       </ReactMarkdown>
+      {selectedReference && (
+        <aside className="report-reference-detail" aria-label="引用原文">
+          <strong>{selectedReference.source_title || selectedReference.label}</strong>
+          {selectedReference.location_label && <span>{selectedReference.location_label}</span>}
+          {selectedReference.snippet && <blockquote>{selectedReference.snippet}</blockquote>}
+        </aside>
+      )}
     </div>
   );
 }
@@ -256,9 +306,207 @@ function ReportStatusBadge({ status, progress }: { status: string; progress: str
 }
 
 // ---------------------------------------------------------------------------
+// 问题理解确认(status==='intent_ready'):未确认前不接触语料或规划大纲。
+// ---------------------------------------------------------------------------
+
+const INTENT_TYPE_LABELS: Record<string, string> = {
+  explain: "解释机理",
+  compare: "比较分析",
+  diagnose: "诊断问题",
+  design: "设计方案",
+  review: "综述评估",
+  other: "综合研究",
+};
+
+export function IntentReview({
+  report,
+  notebookId,
+  confirmReportIntent,
+  onPlanning,
+  setToast,
+  readOnly,
+}: {
+  report: ReportDetailT;
+  notebookId: string;
+  confirmReportIntent: (
+    nb: string,
+    rid: string,
+    payload: { resolved_question: string; answers: { id: string; answer: string }[] },
+  ) => Promise<{ status: string }>;
+  onPlanning: (detail: ReportDetailT) => void;
+  setToast: (message: string) => void;
+  readOnly: boolean;
+}) {
+  const understanding = report.understanding || {};
+  const ambiguities = understanding.ambiguities || [];
+  const [resolvedQuestion, setResolvedQuestion] = useState(
+    understanding.resolved_question || report.question,
+  );
+  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setResolvedQuestion(understanding.resolved_question || report.question);
+    setAnswers({});
+  }, [report.id, report.question, understanding.resolved_question]);
+
+  const missingRequired = ambiguities.some(
+    (item) => item.required !== false && !(answers[item.id] || "").trim(),
+  );
+  const confidence = typeof understanding.confidence === "number"
+    ? Math.round(Math.max(0, Math.min(1, understanding.confidence)) * 100)
+    : null;
+
+  async function confirm() {
+    if (busy || readOnly) return;
+    if (!resolvedQuestion.trim()) {
+      setToast("请先填写确认后的研究问题");
+      return;
+    }
+    if (missingRequired) {
+      setToast("请先回答所有必填澄清问题");
+      return;
+    }
+    setBusy(true);
+    try {
+      await confirmReportIntent(notebookId, report.id, {
+        resolved_question: resolvedQuestion.trim(),
+        answers: ambiguities
+          .map((item) => ({ id: item.id, answer: (answers[item.id] || "").trim() }))
+          .filter((item) => item.answer),
+      });
+      setToast("问题理解已确认，开始检查语料并规划大纲");
+      onPlanning({ ...report, status: "planning", progress: "按已确认问题规划中" });
+    } catch (error) {
+      setToast(toUserMessage(error, "问题确认没能提交，请稍后重试"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const detailGroups = [
+    ["研究对象", understanding.entities || []],
+    ["比较维度", understanding.comparison_axes || []],
+    ["约束条件", understanding.constraints || []],
+    ["不纳入范围", understanding.excluded_topics || []],
+  ] as const;
+
+  return (
+    <div className="report-intent-review">
+      <div className="report-intent-review-head">
+        <div>
+          <h3>{understanding.needs_clarification ? "补充问题信息" : "确认问题理解"}</h3>
+          <p>这一步只理解你的问题，不读取语料。确认后才会检索并规划大纲。</p>
+        </div>
+        <div className="report-intent-meta">
+          <span>{INTENT_TYPE_LABELS[understanding.intent_type || ""] || "综合研究"}</span>
+          {confidence !== null && <span>理解置信度 {confidence}%</span>}
+        </div>
+      </div>
+
+      <label className="report-intent-question">
+        <span>确认后的研究问题</span>
+        <textarea
+          rows={3}
+          value={resolvedQuestion}
+          disabled={busy || readOnly}
+          onChange={(event) => setResolvedQuestion(event.target.value)}
+        />
+      </label>
+
+      {ambiguities.length > 0 && (
+        <div className="report-clarification-list">
+          {ambiguities.map((item, index) => (
+            <div className="report-clarification-card" key={item.id}>
+              <span className="report-clarification-title">
+                {index + 1}. {item.question}
+                {item.required !== false && <em>必填</em>}
+              </span>
+              {item.reason && <small>{item.reason}</small>}
+              {item.options && item.options.length > 0 && (
+                <span className="report-clarification-options">
+                  {item.options.map((option) => (
+                    <button
+                      type="button"
+                      key={option}
+                      disabled={busy || readOnly}
+                      aria-pressed={(answers[item.id] || "") === option}
+                      className={(answers[item.id] || "") === option ? "selected" : ""}
+                      onClick={() => setAnswers((current) => ({ ...current, [item.id]: option }))}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </span>
+              )}
+              <textarea
+                aria-label={`${item.question}的补充答案`}
+                rows={2}
+                value={answers[item.id] || ""}
+                disabled={busy || readOnly}
+                placeholder="补充你的答案"
+                onChange={(event) => setAnswers((current) => ({
+                  ...current,
+                  [item.id]: event.target.value,
+                }))}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {understanding.mandatory_topics && understanding.mandatory_topics.length > 0 && (
+        <div className="report-intent-block">
+          <strong>报告必须回答</strong>
+          <ul>{understanding.mandatory_topics.map((item) => <li key={item.id}>{item.question}</li>)}</ul>
+        </div>
+      )}
+
+      <div className="report-intent-details">
+        {detailGroups.map(([title, values]) => values.length > 0 && (
+          <div key={title}>
+            <strong>{title}</strong>
+            <ul>{values.map((value) => <li key={value}>{value}</li>)}</ul>
+          </div>
+        ))}
+        {understanding.expected_output && (
+          <div><strong>期望输出</strong><p>{understanding.expected_output}</p></div>
+        )}
+      </div>
+
+      {understanding.assumptions && understanding.assumptions.length > 0 && (
+        <div className="report-intent-assumptions">
+          <strong>系统暂定假设</strong>
+          <ul>{understanding.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>
+          <small>如果假设不合适，请直接修改上面的研究问题或在澄清答案中说明。</small>
+        </div>
+      )}
+
+      {readOnly ? (
+        <p className="tool-hint">该报告正在等待所有者确认问题理解。</p>
+      ) : (
+        <div className="report-intent-actions">
+          <span>{missingRequired ? "请补齐必填问题后继续" : "确认后才会读取知识库和来源"}</span>
+          <button className="button" type="button" disabled={busy || missingRequired} onClick={() => void confirm()}>
+            <Check size={15} />
+            {busy ? (
+              <span>提交中…</span>
+            ) : ambiguities.length > 0 ? (
+              <span>提交补充并开始规划</span>
+            ) : (
+              <span>确认理解并开始规划</span>
+            )}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 大纲编辑器(status==='outline_ready'):STORM 富大纲 → 用户可编辑 → 确认后生成。
 // 每节一张卡片:title/scope 受控输入、上移/下移/删节、顶部新增;徽章行展示
-// perspectives / sufficiency / gap_note / tensions(v1 纯文字,不做连线)。
+// 用户必答问题 / 检索方向 / coverage / perspectives / sufficiency / tensions。
 // ---------------------------------------------------------------------------
 
 const SUFFICIENCY_META: Record<ReportSufficiency, { label: string; cls: string }> = {
@@ -267,8 +515,7 @@ const SUFFICIENCY_META: Record<ReportSufficiency, { label: string; cls: string }
   缺失: { label: "证据缺失", cls: "missing" },
 };
 
-// 后端富字段(perspectives/tensions/sufficiency/gap_note/action)编辑期原样透传,
-// 只让 title/scope 可改、可增删排序;生成时连同富字段一起 PATCH 回后端。
+// 后端富字段编辑期原样透传;title/scope/sub_queries 可改,也可增删排序。
 type EditSection = ReportOutlineSectionT & { _key: string };
 let _outlineKeySeq = 0;
 const freshOutlineKey = () => `sec-${Date.now().toString(36)}-${(_outlineKeySeq++).toString(36)}`;
@@ -323,6 +570,12 @@ function OutlineEditor({
   // 有效节 = 标题非空;后端要求 ≥1 有效节且每节带 sub_queries。新增的空节会带上占位
   // sub_query(用标题),保证 PATCH 校验通过并让生成阶段有检索种子。
   const validCount = sections.filter((s) => s.title.trim()).length;
+  const intentBindingCounts = new Map<string, number>();
+  for (const section of sections) {
+    for (const intentId of section.intent_ids || []) {
+      intentBindingCounts.set(intentId, (intentBindingCounts.get(intentId) || 0) + 1);
+    }
+  }
 
   async function confirmGenerate() {
     if (busy) return;
@@ -360,7 +613,7 @@ function OutlineEditor({
       <div className="report-outline-editor-head">
         <div>
           <h3>确认研究大纲</h3>
-          <p>已按多视角预写作规划出 {sections.length} 个章节。可修改标题/范围、增删或调序,满意后生成完整报告。</p>
+          <p>已先锁定用户问题，再按语料覆盖规划出 {sections.length} 个章节。可核对每节必答问题，修改标题、范围与检索方向后生成。</p>
         </div>
         <button className="report-action" type="button" onClick={addSection} disabled={busy}>
           <Plus size={14} /> 新增章节
@@ -373,6 +626,9 @@ function OutlineEditor({
         <ol className="report-outline-cards">
           {sections.map((s, index) => {
             const suf = s.sufficiency ? SUFFICIENCY_META[s.sufficiency] : null;
+            const protectsOnlyIntentBinding = (s.intent_ids || []).some(
+              (intentId) => intentBindingCounts.get(intentId) === 1,
+            );
             return (
               <li className="report-outline-card" key={s._key}>
                 <div className="report-outline-card-top">
@@ -409,9 +665,9 @@ function OutlineEditor({
                     <button
                       type="button"
                       className="report-outline-op danger"
-                      title="删除本节"
-                      aria-label="删除本节"
-                      disabled={busy}
+                      title={protectsOnlyIntentBinding ? "必答主题至少需要保留一节" : "删除本节"}
+                      aria-label={protectsOnlyIntentBinding ? "本节含唯一必答主题，不能删除" : "删除本节"}
+                      disabled={busy || protectsOnlyIntentBinding}
                       onClick={() => removeSection(s._key)}
                     >
                       <X size={14} />
@@ -426,12 +682,37 @@ function OutlineEditor({
                   disabled={busy}
                   onChange={(e) => patchSection(s._key, { scope: e.target.value })}
                 />
-                {(suf || (s.perspectives && s.perspectives.length > 0)) && (
+                {s.intent_questions && s.intent_questions.length > 0 && (
+                  <div className="report-intent-binding">
+                    <span>本节必须回答</span>
+                    <ul>
+                      {s.intent_questions.map((item, i) => (
+                        <li key={`${s._key}-intent-${i}`}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <label className="report-outline-query-field">
+                  <span>检索方向（每行一条）</span>
+                  <textarea
+                    value={(s.sub_queries || []).join("\n")}
+                    rows={Math.max(2, Math.min(4, (s.sub_queries || []).length || 2))}
+                    placeholder="输入本节需要执行的检索方向"
+                    disabled={busy}
+                    onChange={(e) => patchSection(s._key, { sub_queries: parseReportSubQueries(e.target.value) })}
+                  />
+                </label>
+                {(suf || s.coverage || (s.perspectives && s.perspectives.length > 0)) && (
                   <div className="report-outline-badges">
                     {suf && (
                       <span className={`report-suf ${suf.cls}`}>
                         {suf.label}
                         {s.gap_note ? ` · ${s.gap_note}` : ""}
+                      </span>
+                    )}
+                    {s.coverage && (
+                      <span className="report-coverage" title="当前检索方向的客观命中数">
+                        {formatReportCoverage(s.coverage)}
                       </span>
                     )}
                     {(s.perspectives || []).map((p, i) => (
@@ -478,6 +759,11 @@ export interface ReportsPanelProps {
   listReports: (nb: string) => Promise<ReportSummaryT[]>;
   getReport: (nb: string, rid: string) => Promise<ReportDetailT>;
   createReport: (nb: string, question: string, depth: number) => Promise<{ report_id: string }>;
+  confirmReportIntent: (
+    nb: string,
+    rid: string,
+    payload: { resolved_question: string; answers: { id: string; answer: string }[] },
+  ) => Promise<{ status: string }>;
   updateReportOutline: (nb: string, rid: string, sections: unknown[]) => Promise<{ status: string; sections: number }>;
   generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
@@ -495,6 +781,7 @@ export function ReportsPanel({
   listReports,
   getReport,
   createReport,
+  confirmReportIntent,
   updateReportOutline,
   generateReport,
   cancelReport,
@@ -650,7 +937,7 @@ export function ReportsPanel({
     try {
       await createReport(notebookId, q, DEPTHS[depthIdx]);
       setQuestion("");
-      setToast("正在规划研究大纲（约几十秒），完成后可确认再生成全文");
+      setToast("正在理解研究问题，完成后请先确认或补充关键信息");
       setReports(await listReports(notebookId));
     } catch (error) {
       surfaceError(error);
@@ -776,6 +1063,9 @@ export function ReportsPanel({
 
   // ---- 详情视图 ----
   if (active) {
+    const displayQuestion = active.understanding?.confirmed
+      ? active.understanding.resolved_question || active.question
+      : active.question;
     return (
       <div className="report-panel report-detail">
         <div className="report-detail-head">
@@ -824,7 +1114,7 @@ export function ReportsPanel({
           </div>
         </div>
         <div className="report-detail-title">
-          <h2 title={active.question}>{active.question}</h2>
+          <h2 title={displayQuestion}>{displayQuestion}</h2>
           <div className="report-detail-meta">
             <ReportStatusBadge status={active.status} progress={active.progress} />
             <small>
@@ -839,8 +1129,26 @@ export function ReportsPanel({
         {active.status === "planning" && (
           <div className="report-running-hint report-planning-hint">
             <span className="report-status-dot" aria-hidden />
-            <p>正在侦察语料并多视角规划大纲（通常几十秒）…{active.progress ? ` ${active.progress}` : ""}</p>
+            <p>
+              {active.progress.includes("理解研究问题")
+                ? "正在理解研究问题，尚未读取语料"
+                : "正在按已确认的问题检查语料并规划大纲"}
+              {active.progress ? ` · ${active.progress}` : ""}
+            </p>
           </div>
+        )}
+        {active.status === "intent_ready" && (
+          <IntentReview
+            report={active}
+            notebookId={notebookId}
+            confirmReportIntent={confirmReportIntent}
+            readOnly={readOnly}
+            onPlanning={(detail) => {
+              setActive((current) => current?.id === detail.id ? detail : current);
+              listReports(notebookId).then(setReports).catch(() => {});
+            }}
+            setToast={setToast}
+          />
         )}
         {active.status === "outline_ready" && !readOnly && (
           <OutlineEditor
@@ -913,7 +1221,8 @@ export function ReportsPanel({
         {active.content_md ? (
           <ReportMarkdown markdown={active.content_md} references={active.references} />
         ) : (
-          !isReportActive(active.status) && active.status !== "failed" && (
+          !isReportActive(active.status)
+          && !["failed", "intent_ready", "outline_ready"].includes(active.status) && (
             <p className="tool-hint">该报告没有正文内容（可能在完成前被取消）。</p>
           )
         )}

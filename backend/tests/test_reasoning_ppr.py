@@ -220,6 +220,38 @@ def test_answer_reasoning_empty_chunks_unchanged(repo):
     assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
 
 
+def test_answer_reasoning_makes_direct_source_element_citable(repo):
+    from app.services.retrieval import RetrievedElement
+
+    nb = _seed_two_doc_moe(repo)
+    element = RetrievedElement(
+        element_id="el-direct", source_id="src-A", source_title="DeepSeek paper",
+        location_label="Arch / p. 2", element_type="paragraph",
+        text="The routed experts are selected per token.", score=0.92,
+    )
+
+    class _Echo:
+        configured = True
+        prompt = ""
+
+        def chat_json(self, messages, schema_hint, **kw):
+            self.prompt = messages[-1]["content"]
+            return json.dumps({"answer": "逐 token 路由专家。[k4001]", "grounded": True})
+
+    llm = _Echo()
+    bind_chat_client(repo, "ask_answer", llm)
+    repo.settings.kg_query_refine_enabled = False
+    answer, grounded, anchors = repo._answer_reasoning(
+        nb.id, "如何路由", [], [element], chunks=None,
+    )
+    assert "[Direct source elements]" in llm.prompt
+    assert "k4001:" in llm.prompt and element.text in llm.prompt
+    assert grounded is True
+    assert [(item.object_type, item.object_id) for item in anchors] == [
+        ("element", "el-direct")
+    ]
+
+
 def test_reasoning_ask_seed_grounds_in_cross_doc_chunk_end_to_end(repo):
     """端到端:flag 开 + reflect 只 answer(纯靠 seed pass)→ 跨文档 chunk 被升为可引用证据
     ([k1] 落在 chunk 段 → resp.anchors 含 chunk 锚),且 seed pass 在轨迹里。"""

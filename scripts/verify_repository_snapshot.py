@@ -2219,7 +2219,34 @@ MIGRATION_MANIFEST[(30, 31)] = {
     "views": {},
 }
 
-# v32: relation endpoint probes page by stable relation id within each
+# v32: persist the corpus-blind Deep Report question-understanding contract and
+# its owner-reviewed clarification state. Broadcast the new reports column over
+# every cumulative hop, then retain the explicit v31→v32 single-hop contract.
+REPORTS_UNDERSTANDING_COLUMN = {
+    "understanding_json": ("understanding_json", "TEXT", 1, "'{}'", 0),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 32, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "reports": {
+                **manifest["columns"].get("reports", {}),
+                **REPORTS_UNDERSTANDING_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(31, 32)] = {
+    "tables": {},
+    "columns": {"reports": REPORTS_UNDERSTANDING_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v33: relation endpoint probes page by stable relation id within each
 # notebook/source or notebook/target stream. These covering indexes keep that
 # keyset walk bounded without changing tables, columns, triggers, or views.
 RELATION_ENDPOINT_KEYSET_INDEXES = {
@@ -2231,13 +2258,13 @@ RELATION_ENDPOINT_KEYSET_INDEXES = {
                   ON knowledge_relations(notebook_id, target_object_id, id)""",
 }
 MIGRATION_MANIFEST = {
-    (key[0], 32, *key[2:]): {
+    (key[0], 33, *key[2:]): {
         **manifest,
         "indexes": {**manifest["indexes"], **RELATION_ENDPOINT_KEYSET_INDEXES},
     }
     for key, manifest in MIGRATION_MANIFEST.items()
 }
-MIGRATION_MANIFEST[(31, 32)] = {
+MIGRATION_MANIFEST[(32, 33)] = {
     "tables": {},
     "columns": {},
     "indexes": RELATION_ENDPOINT_KEYSET_INDEXES,

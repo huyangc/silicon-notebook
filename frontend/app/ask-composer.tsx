@@ -13,6 +13,7 @@ type AskComposerProps = {
   onSubmit: () => void;
   onAbort: () => void;
   running: boolean;
+  abortLabel?: string;
   // 硬约束:笔记本无来源且无挂载参考库时为 true —— 锁死输入框与发送键
   // (判据见 ask-availability.isAskBlocked)。与 running 互斥:被锁时不可能在生成中。
   disabled?: boolean;
@@ -27,6 +28,7 @@ export function AskComposer({
   onSubmit,
   onAbort,
   running,
+  abortLabel = "中断生成",
   disabled = false,
   children,
 }: AskComposerProps) {
@@ -92,8 +94,8 @@ export function AskComposer({
         <button
           className={`send-button ${running ? "stop" : ""}`}
           type="button"
-          aria-label={running ? "中断生成" : "发送"}
-          title={running ? "中断生成" : "发送"}
+          aria-label={running ? abortLabel : "发送"}
+          title={running ? abortLabel : "发送"}
           disabled={!running && (disabled || !value.trim())}
           onClick={running ? onAbort : onSubmit}
         >

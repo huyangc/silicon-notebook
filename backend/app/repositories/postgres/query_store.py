@@ -543,7 +543,8 @@ class QueryStore:
                 is_admin = bool(role_row) and role_row["role"] == "admin"
                 reports = db.execute(
                     "SELECT id, question, notebook_id, created_at FROM reports "
-                    "WHERE status = 'outline_ready' AND created_by = %s ORDER BY updated_at DESC",
+                    "WHERE status IN ('intent_ready','outline_ready') "
+                    "AND created_by = %s ORDER BY updated_at DESC",
                     (user_id,),
                 ).fetchall()
                 for row in reports:

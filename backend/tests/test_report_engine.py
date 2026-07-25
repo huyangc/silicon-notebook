@@ -85,7 +85,8 @@ def test_report_crud_roundtrip(repo):
 
 def test_report_prompts_contract():
     from app.services.prompts import (
-        report_outline_prompt, report_section_prompt, report_summary_prompt,
+        report_intent_prompt, report_outline_prompt, report_section_prompt,
+        report_summary_prompt, REPORT_INTENT_SCHEMA_HINT,
         REPORT_OUTLINE_SCHEMA_HINT, REPORT_SECTION_SCHEMA_HINT)
     op = report_outline_prompt("q", max_sections=5, history_block="h")
     assert "3-5" in op and "sub_queries" in op and "Prior conversation" in op
@@ -103,6 +104,14 @@ def test_report_prompts_contract():
     assert "【通识】" not in sp2
     su = report_summary_prompt("总问题", "## 节1\nmd")
     assert "executive summary" in su.lower()
+    intent = report_intent_prompt("原始问题", max_topics=4)
+    assert "before seeing any corpus" in intent and "原始问题" in intent
+    assert "mandatory_topics" in REPORT_INTENT_SCHEMA_HINT
+    assert "ambiguities" in REPORT_INTENT_SCHEMA_HINT and "needs_clarification" in intent
+    confirmed = report_intent_prompt(
+        "已确认的问题", history_block="对象：PLL", confirmation_mode=True
+    )
+    assert "authoritative" in confirmed and "needs_clarification=false" in confirmed
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +363,7 @@ def test_assemble_all_grounded_has_no_limitation_note(repo):
 
 
 def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
-    """跨节 [k] 全局按来源去重重编号:同一来源在不同节共享同一全局 [k];未知
+    """跨节 [k] 按具体证据锚点全局重编号:同源不同 chunk 仍是两条引用;未知
     marker 被剥除;references 结构化有序;content_md 内联与参考文献段一致。"""
     nb = _mk_nb(repo)
     eng = _mk_engine(repo, _OutlineLLM())
@@ -380,19 +389,62 @@ def test_assemble_global_citation_renumber_and_references(repo, monkeypatch):
     rid = repo.create_report(nb.id, "q")
     md, gaps, references = eng._assemble(nb.id, rid, "q", outline, sections)
 
-    # 全局去重:Razavi=k1(A、B 共享)、Gray=k2 → 2 条 references
-    assert [r["key"] for r in references] == ["k1", "k2"]
+    # 精确锚点去重:同一来源的 c1/c9 不折叠,避免把曲率补偿错绑到 §11。
+    assert [r["key"] for r in references] == ["k1", "k2", "k3"]
     assert references[0]["label"] == "Razavi Analog CMOS"
     assert references[1]["label"] == "Gray & Meyer"
+    assert references[2]["location_label"] == "§11.4"
     # A 段:k1/k2 保留、幻觉 k9 被剥除
     assert "[k1]" in md and "[k2]" in md and "[k9]" not in md and "幻觉 。" in md
-    # B 段:节内 k1(Razavi)→ 全局仍 k1(与 A 的 Razavi 同号)。仅取 B 正文
+    # B 段:节内 k1(Razavi c9)→ 全局 k3。仅取 B 正文
     # (到下一个 ## 标题止,避免命中「参考文献」段里罗列的 [k2]）。
     b_seg = md.split("## B")[1].split("\n## ")[0]
-    assert "[k1]" in b_seg and "[k2]" not in b_seg
-    # 参考文献段列出 [k1]/[k2] + 标题
+    assert "[k3]" in b_seg and "[k1]" not in b_seg and "[k2]" not in b_seg
+    # 参考文献段列出三个精确锚点
     assert "## 参考文献" in md
-    assert "[k1]" in md.split("## 参考文献")[1] and "Razavi Analog CMOS" in md.split("## 参考文献")[1]
+    bibliography = md.split("## 参考文献")[1]
+    assert "[k1]" in bibliography and "[k3]" in bibliography
+    assert "Razavi Analog CMOS" in bibliography
+
+
+def test_assemble_prefers_parsed_paper_title_over_upload_name(repo):
+    nb = _mk_nb(repo)
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id="src-paper", notebook_id=nb.id, title="2407.00123v2.pdf",
+        source_type="document", status="extracted", parse_status="extracted",
+        file_name="2407.00123v2.pdf", file_path="/tmp/2407.00123v2.pdf",
+        file_size=0, file_hash="paper-hash", summary="", doc_type="academic_paper",
+    )
+    store.upsert_paper_meta(
+        "src-paper", nb.id,
+        {
+            "is_paper": True, "paper_title": "Reliable Analog Design Methods",
+            "venue": None, "pub_year": None, "doi": None, "keywords": [],
+            "authors": [], "model": "test", "raw_json": "{}",
+        },
+    )
+    eng = _mk_engine(repo, _OutlineLLM())
+    sections = [{
+        "title": "A", "scope": "sa", "markdown": "## A\nbody [k1]",
+        "grounded": True, "attempted": [],
+        "id_map": {"k1": {
+            "object_id": "e-paper", "object_type": "element",
+            "name": "p. 2", "source_id": "src-paper",
+            "source_title": "2407.00123v2.pdf", "location_label": "p. 2",
+            "tier": "personal", "snippet": "evidence",
+        }},
+    }]
+
+    md, _gaps, references = eng._assemble(
+        nb.id, repo.create_report(nb.id, "q"), "q",
+        [{"title": "A", "scope": "sa", "sub_queries": ["qa"]}], sections,
+    )
+
+    assert references[0]["source_title"] == "Reliable Analog Design Methods"
+    assert references[0]["label"] == "Reliable Analog Design Methods"
+    assert "Reliable Analog Design Methods" in md
+    assert "2407.00123v2.pdf" not in md
 
 
 def test_assemble_keeps_same_source_relation_anchors_distinct(repo):
@@ -586,11 +638,17 @@ def test_build_corpus_map_grounds_on_corpus(repo, monkeypatch):
 
 def test_storm_outline_prompt_contract():
     from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
-    p = report_storm_outline_prompt("Q问题", "CORPUSMAP内容", max_sections=5, history_block="H历史")
+    p = report_storm_outline_prompt(
+        "Q问题", "CORPUSMAP内容", max_sections=5, history_block="H历史",
+        intent_block="INTENT-CONTRACT", coverage_block="COVERAGE-PROBE",
+    )
     for kw in ("expert perspectives", "raise", "cluster", "tension", "MECE",
                "vocabulary", "CORPUSMAP内容", "Q问题", "H历史", "3-5"):
         assert kw in p
     assert "perspectives" in REPORT_STORM_SCHEMA_HINT and "tensions" in REPORT_STORM_SCHEMA_HINT
+    assert "intent_ids" in REPORT_STORM_SCHEMA_HINT
+    assert "higher priority than the corpus" in p
+    assert "INTENT-CONTRACT" in p and "COVERAGE-PROBE" in p
 
 
 # ---------------------------------------------------------------------------
@@ -606,10 +664,48 @@ def test_probe_sufficiency_counts_hits(repo, monkeypatch):
         h.notebook_id = "nb-base" if "base" in q else "nb-x"; h.tier="base" if "base" in q else "personal"
         return [h]
     monkeypatch.setattr(repo.retrieval, "federated_retrieve", _fed)
+    from app.services.retrieval import RetrievedElement
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements",
+        lambda active, q, limit=8: [RetrievedElement(
+            element_id="el-" + q, source_id="src-" + q,
+            source_title="S", location_label="p1", element_type="text", text=q,
+        )],
+    )
     out = eng._probe_sufficiency("nb", [{"title":"A","sub_queries":["base-x","y"]},
                                         {"title":"B","sub_queries":[]}])
     assert out[0]["title"]=="A" and out[0]["hits"]==2 and out[0]["base_hits"]==1
+    assert out[0]["element_hits"] == 2 and out[0]["source_hits"] == 2
     assert out[1]["hits"]==0
+
+
+def test_outline_binding_cannot_drop_mandatory_user_topic(repo):
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    contract = {
+        "mandatory_topics": [
+            {"id": "intent-1", "title": "机理", "question": "解释工作机理",
+             "retrieval_queries": ["mechanism"]},
+            {"id": "intent-2", "title": "失效", "question": "列出失效边界",
+             "retrieval_queries": ["failure boundary"]},
+        ]
+    }
+    # 模型被语料带偏，只产出一个无 intent 绑定的“历史综述”。
+    sections = [{"title": "历史综述", "scope": "沿革", "sub_queries": ["history"],
+                 "intent_ids": [], "perspectives": [], "tensions": []}]
+    probe = [
+        {"intent_id": "intent-1", "title": "机理", "hits": 2, "base_hits": 1,
+         "element_hits": 3, "source_hits": 2},
+        {"intent_id": "intent-2", "title": "失效", "hits": 0, "base_hits": 0,
+         "element_hits": 0, "source_hits": 0},
+    ]
+    bound = eng._bind_outline_to_intent(sections, contract, probe)
+    assert {item for section in bound for item in section["intent_ids"]} == {
+        "intent-1", "intent-2"
+    }
+    assert any(section["scope"] == "列出失效边界" for section in bound)
+    assert all(section["intent_catalog"] == contract["mandatory_topics"] for section in bound)
 
 def test_sufficiency_prompt_contract():
     from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
@@ -621,6 +717,202 @@ def test_sufficiency_prompt_contract():
 # ---------------------------------------------------------------------------
 # Task 4(STORM): plan_outline 编排(map→STORM→探针→Judge→富大纲→outline_ready)
 # ---------------------------------------------------------------------------
+
+def test_run_stops_at_intent_review_before_any_corpus_access(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    class _IntentLLM:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({
+                "normalized_question": "PLL 环路稳定性的机理与设计约束是什么？",
+                "intent_type": "explain",
+                "entities": ["PLL"],
+                "mandatory_topics": [{
+                    "title": "环路稳定性",
+                    "question": "PLL 环路稳定性的机理与设计约束是什么？",
+                    "retrieval_queries": ["PLL loop stability"],
+                }],
+                "constraints": ["面向电路设计"],
+                "assumptions": ["讨论线性锁定附近"],
+                "confidence": 0.92,
+                "needs_clarification": False,
+                "ambiguities": [],
+            })
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _IntentLLM())
+    for name in ("federated_retrieve", "retrieve_elements", "ppr_retrieve"):
+        monkeypatch.setattr(
+            repo.retrieval,
+            name,
+            lambda *args, _name=name, **kwargs: pytest.fail(
+                f"{_name} must not run before intent confirmation"
+            ),
+        )
+    rid = repo.create_report(nb.id, "分析 PLL 稳定性")
+    eng.run(
+        nb.id, rid, "分析 PLL 稳定性", require_intent_review=True
+    )
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "intent_ready"
+    assert detail["understanding"]["resolved_question"].startswith("PLL")
+    assert detail["understanding"]["confirmed"] is False
+    assert detail["understanding"]["needs_clarification"] is False
+
+
+def test_prepare_intent_rechecks_cancellation_after_model_returns(repo):
+    import threading
+    from app.services.report_engine import ReportEngine
+
+    cancel = threading.Event()
+
+    class _LateCancelIntentLLM:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            cancel.set()
+            return json.dumps({
+                "normalized_question": "不应发布的问题理解",
+                "mandatory_topics": [{
+                    "title": "主题", "question": "问题",
+                    "retrieval_queries": ["query"],
+                }],
+                "ambiguities": [],
+            })
+
+    nb = _mk_nb(repo)
+    _bind_report_llm(repo, _LateCancelIntentLLM())
+    eng = ReportEngine.from_repository(
+        repo, repo.settings, cancel_event=cancel
+    )
+    rid = repo.create_report(nb.id, "q")
+
+    eng.prepare_intent(nb.id, rid, "q")
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "cancelled"
+    assert detail["understanding"] == {}
+
+
+def test_vague_or_unresolved_report_question_requires_clarification(repo):
+    class _IntentLLM:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "分析这个问题",
+                "intent_type": "other",
+                "mandatory_topics": [],
+                "ambiguities": [],
+                "confidence": 0.8,
+                "needs_clarification": False,
+            })
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _IntentLLM())
+    rid = repo.create_report(nb.id, "分析一下这个问题")
+    eng.run(
+        nb.id, rid, "分析一下这个问题", require_intent_review=True
+    )
+
+    understanding = repo.get_report(nb.id, rid)["understanding"]
+    assert understanding["needs_clarification"] is True
+    assert understanding["ambiguities"][0]["id"] == "ambiguity-input"
+    assert "对象" in understanding["ambiguities"][0]["question"]
+
+
+def test_confirmed_clarification_answers_are_part_of_the_research_question():
+    from app.services.report_engine import ReportEngine
+
+    effective = ReportEngine._confirmed_research_question({
+        "resolved_question": "分析这个问题",
+        "clarification_answers": [{
+            "id": "ambiguity-input",
+            "question": "具体研究对象是什么？",
+            "answer": "对象是电荷泵 PLL",
+        }],
+    }, "fallback")
+
+    assert effective.startswith("分析这个问题")
+    assert "具体研究对象是什么" in effective
+    assert "电荷泵 PLL" in effective
+
+
+def test_confirming_intent_freezes_every_reviewed_contract_field(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    reviewed = {
+        "objective": "比较 A 和 B",
+        "resolved_question": "比较 A 和 B 的性能",
+        "mandatory_topics": [{
+            "id": "intent-1", "title": "延迟", "question": "延迟如何？",
+            "retrieval_queries": ["A B latency"],
+        }],
+        "comparison_axes": ["延迟"],
+        "constraints": ["同工艺"],
+        "excluded_topics": ["成本"],
+        "ambiguities": [{"id": "ambiguity-1", "question": "哪种负载？"}],
+        "confirmed_input": {
+            "resolved_question": "比较 A 和 B 的性能与功耗",
+            "answers": [{
+                "id": "ambiguity-1", "question": "哪种负载？",
+                "answer": "10 pF",
+            }],
+        },
+    }
+    monkeypatch.setattr(
+        eng, "_plan_intent_contract",
+        lambda *args, **kwargs: pytest.fail("confirmation must not reinterpret"),
+    )
+
+    frozen = eng._finalize_confirmed_intent(reviewed)
+
+    for field in (
+        "mandatory_topics", "comparison_axes", "constraints", "excluded_topics"
+    ):
+        assert frozen[field] == reviewed[field]
+    assert frozen["resolved_question"] == "比较 A 和 B 的性能与功耗"
+    assert frozen["clarification_answers"][0]["answer"] == "10 pF"
+    assert frozen["confirmed"] is True
+    assert "confirmed_input" not in frozen
+
+
+def test_intent_coverage_probe_includes_confirmed_question_and_answers(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    observed = []
+    monkeypatch.setattr(
+        eng,
+        "_probe_queries",
+        lambda notebook_id, queries: observed.append(list(queries)) or {
+            "hits": 0, "base_hits": 0, "element_hits": 0, "source_hits": 0,
+        },
+    )
+    contract = {
+        "objective": "分析这个问题",
+        "resolved_question": "分析 PLL 稳定性",
+        "clarification_answers": [{
+            "id": "ambiguity-input",
+            "question": "具体研究对象是什么？",
+            "answer": "电荷泵 PLL",
+        }],
+        "mandatory_topics": [{
+            "id": "intent-1", "title": "旧主题", "question": "分析什么？",
+            "retrieval_queries": ["分析这个问题"],
+        }],
+    }
+
+    eng._probe_intent_coverage("nb", contract)
+
+    assert len(observed) == 1
+    assert "分析 PLL 稳定性" in observed[0][0]
+    assert "电荷泵 PLL" in observed[0][0]
+    assert "分析这个问题" in observed[0]
 
 def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
@@ -647,6 +939,51 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
     sec = d["outline"][0]
     assert sec["title"]=="机理" and sec["perspectives"]==["领域专家"]
     assert sec["sufficiency"]=="薄弱" and sec["action"]=="supplement"
+
+
+def test_plan_outline_freezes_intent_before_corpus_scout(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "用户原问题")
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    calls = []
+    contract = {
+        "objective": "用户原问题",
+        "mandatory_topics": [{
+            "id": "intent-1", "title": "原问题", "question": "用户原问题",
+            "retrieval_queries": ["original query"],
+        }],
+    }
+    monkeypatch.setattr(
+        eng, "_plan_intent_contract",
+        lambda question, history: calls.append("intent") or contract,
+    )
+    monkeypatch.setattr(
+        eng, "_probe_intent_coverage",
+        lambda notebook_id, value: calls.append("intent_probe") or [{
+            "intent_id": "intent-1", "title": "原问题", "hits": 0,
+            "base_hits": 0, "element_hits": 1, "source_hits": 1,
+        }],
+    )
+    monkeypatch.setattr(
+        eng, "_build_corpus_map",
+        lambda notebook_id, question: calls.append("corpus") or "CORPUS",
+    )
+    monkeypatch.setattr(
+        eng, "_storm_outline",
+        lambda *args, **kwargs: calls.append("storm") or [{
+            "title": "附近但不同的话题", "scope": "drift", "sub_queries": ["drift"],
+            "intent_ids": [],
+        }],
+    )
+    monkeypatch.setattr(eng, "_probe_sufficiency", lambda *args: [])
+    monkeypatch.setattr(eng, "_judge_sufficiency", lambda question, sections, probe: sections)
+    eng.plan_outline(nb.id, rid, "用户原问题")
+    assert calls == ["intent", "intent_probe", "corpus", "storm"]
+    outline = repo.get_report(nb.id, rid)["outline"]
+    assert outline[0]["intent_ids"] == ["intent-1"]
+    assert outline[0]["intent_contract"]["objective"] == "用户原问题"
 
 def test_plan_outline_falls_back_on_bad_storm_json(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
@@ -684,6 +1021,51 @@ def test_generate_runs_sections_on_stored_outline(repo, monkeypatch):
     eng.generate(nb.id, rid, "q", depth=2)
     d=repo.get_report(nb.id, rid)
     assert d["status"]=="done" and d["content_md"].startswith("#")
+
+
+def test_generate_keeps_clarifications_out_of_visible_report_title(repo, monkeypatch):
+    from app.services.report_engine import ReportEngine
+
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "分析这个问题")
+    repo.update_report(
+        nb.id,
+        rid,
+        status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["q"]}],
+        understanding={
+            "resolved_question": "分析 PLL 稳定性",
+            "clarification_answers": [{
+                "id": "ambiguity-input",
+                "question": "具体研究对象是什么？",
+                "answer": "电荷泵 PLL",
+            }],
+            "confirmed": True,
+        },
+    )
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    seen = {}
+
+    def _sections(_notebook_id, _rid, _outline, research_question, _depth):
+        seen["research_question"] = research_question
+        return [{
+            "title": "A", "scope": "s", "markdown": "## A\n正文",
+            "grounded": True, "failed": False, "id_map": {},
+        }]
+
+    monkeypatch.setattr(eng, "_run_sections", _sections)
+    class _Summary:
+        configured = True
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({"summary": "总结"})
+    _bind_report_llm(repo, _Summary())
+
+    eng.generate(nb.id, rid, "分析这个问题")
+
+    detail = repo.get_report(nb.id, rid)
+    assert detail["content_md"].splitlines()[0] == "# 深度报告:分析 PLL 稳定性"
+    assert "用户确认的补充信息" in seen["research_question"]
+    assert "电荷泵 PLL" in seen["research_question"]
 
 def test_run_backcompat_plans_then_generates(repo, monkeypatch):
     from app.services.report_engine import ReportEngine
@@ -726,6 +1108,101 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     assert out["markdown"] == ""
     assert out.get("failed") is True and out.get("error")   # 不再静默:标 failed→渲染 note
     assert ("report_section", "report_section") in notes   # 精确工作负载可观测
+
+
+def test_report_section_uses_direct_element_and_recomputes_grounding(repo):
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.retrieval import RetrievedElement
+
+    class _ElementLLM:
+        configured = True
+        model = "element-model"
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            prompt = messages[-1]["content"]
+            assert "[Direct source elements]" in prompt
+            assert "k4001:" in prompt
+            return json.dumps({"markdown": "## 机理\n阈值会变化。[k4001]",
+                               "grounded": True})
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _ElementLLM())
+    result = ReasoningResult(elements=[RetrievedElement(
+        element_id="el-1", source_id="src-1", source_title="Device notes",
+        location_label="p. 4", element_type="paragraph",
+        text="Body effect changes the threshold voltage.", score=0.9,
+    )])
+    out = eng._draft_section(
+        nb.id,
+        {"title": "机理", "scope": "解释阈值变化", "sub_queries": ["body effect"],
+         "intent_ids": ["intent-1"]},
+        "为什么阈值变化", result,
+    )
+    assert out["grounded"] is True and out["evidence_level"] == "grounded"
+    assert out["id_map"]["k4001"]["element_id"] == "el-1"
+    assert out["intent_ids"] == ["intent-1"]
+
+
+def test_report_section_model_grounded_flag_cannot_validate_fake_marker(repo):
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    class _FakeCitationLLM:
+        configured = True
+        model = "fake-citation"
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({"markdown": "## T\n未经支持。[k999]", "grounded": True})
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _FakeCitationLLM())
+    out = eng._draft_section(
+        nb.id, {"title": "T", "scope": "S", "sub_queries": ["q"]},
+        "q", ReasoningResult(),
+    )
+    assert out["grounded"] is False and out["evidence_level"] == "inferred"
+
+
+def test_final_editor_reports_uncovered_intent_without_rewriting_sections(repo):
+    class _EditorLLM:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert "no new facts" in messages[-1]["content"]
+            return json.dumps({
+                "summary": "只概括已有正文。",
+                "coverage": [
+                    {"intent_id": "intent-1", "covered": True, "note": ""},
+                    {"intent_id": "intent-2", "covered": False, "note": "缺少边界条件"},
+                ],
+                "contradictions": [],
+            })
+
+    nb = _mk_nb(repo)
+    eng = _mk_engine(repo, _EditorLLM())
+    catalog = [
+        {"id": "intent-1", "title": "机理", "question": "解释机理",
+         "retrieval_queries": ["mechanism"]},
+        {"id": "intent-2", "title": "边界", "question": "说明边界",
+         "retrieval_queries": ["boundary"]},
+    ]
+    outline = [
+        {"title": "机理", "scope": "s1", "sub_queries": ["q1"],
+         "intent_ids": ["intent-1"], "intent_catalog": catalog},
+        {"title": "边界", "scope": "s2", "sub_queries": ["q2"],
+         "intent_ids": ["intent-2"], "intent_catalog": catalog},
+    ]
+    sections = [
+        {"title": "机理", "markdown": "## 机理\n正文", "grounded": True,
+         "intent_ids": ["intent-1"], "id_map": {}},
+        {"title": "边界", "markdown": "## 边界\n内容不完整", "grounded": True,
+         "intent_ids": ["intent-2"], "id_map": {}},
+    ]
+    rid = repo.create_report(nb.id, "q")
+    md, gaps, _ = eng._assemble(nb.id, rid, "q", outline, sections)
+    assert "内容不完整" in md                         # editor 不重写正文
+    assert "只概括已有正文" in md
+    assert "必答主题「边界」回答不完整:缺少边界条件" in gaps
+    assert "范围与证据局限" in md
 
 
 def test_report_section_queue_failure_stays_a_failed_section(repo):

@@ -437,6 +437,7 @@ reports.error|TEXT|1|''|0
 reports.created_by|TEXT|1|''|0
 reports.created_at|TEXT|1|None|0
 reports.updated_at|TEXT|1|None|0
+reports.understanding_json|TEXT|1|'{}'|0
 shadow_capture_control.singleton|INTEGER|0|None|1
 shadow_capture_control.enabled|INTEGER|1|None|0
 shadow_capture_control.write_frozen|INTEGER|1|None|0
