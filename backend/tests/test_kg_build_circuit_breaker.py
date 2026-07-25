@@ -490,6 +490,7 @@ class _InterruptOneDrainOther:
     def __init__(self):
         self.lock = threading.Lock()
         self.calls = 0
+        self.blocked_started = threading.Event()
         self.blocked_returned = threading.Event()
         self.control = None
 
@@ -501,8 +502,13 @@ class _InterruptOneDrainOther:
             self.calls += 1
             first = self.calls == 1
         if first:
+            # 先等另一个 worker 真的进到模型调用里再抛中断。否则(尤其在机器繁忙、
+            # 线程启动被拖慢时)它可能还没启动就被 cancel() 正确地取消掉,于是「有没有
+            # 排空」根本无从判定——那测的是取消而不是排空。
+            self.blocked_started.wait(10)
             raise KeyboardInterrupt("ctrl-c during extraction")
-        deadline = time.monotonic() + 5
+        self.blocked_started.set()
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if self.control is not None and self.control.aborted:
                 break
@@ -545,6 +551,9 @@ def test_interrupt_drains_in_flight_sources_before_releasing_the_guard(
     with pytest.raises(KeyboardInterrupt):
         repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
 
+    assert client.blocked_started.is_set(), (
+        "前提未成立:没有第二个来源真的进到模型调用里,本例无法判定排空"
+    )
     assert client.blocked_returned.is_set(), (
         "在飞来源尚未排空就放开了单飞守卫"
     )
