@@ -51,6 +51,9 @@ except ImportError as exc:  # pragma: no cover - 环境问题,不是逻辑分支
 DEFAULT_DB = str(_REPO_ROOT / ".local" / "silicon_notebook.db")
 DEFAULT_SOURCE_SAMPLE = 60
 DEFAULT_DEGREE_SAMPLE = 4000
+# 内容分析读进内存的对象行数上限。来源抽样本身**不**约束内存(来源数少于
+# --sources 时一个都不会被抽掉,单个来源也可能自己就有几百万对象),这才是那道闸。
+DEFAULT_MAX_OBJECTS = 300_000
 SAMPLE_PRINT = 40
 KG_TYPES = ("concept", "claim", "formula", "procedure")
 
@@ -229,13 +232,25 @@ def load_sourceless_objects(
 
 
 def load_objects(
-    conn: sqlite3.Connection, notebook_id: str, source_ids: Sequence[str]
-) -> List[dict]:
-    """读抽中来源下的全部 KG 对象。按 source_id 逐个查,走 idx_knowledge_objects_source
-    —— 不做一条巨型 IN(百万级 id 会撞 SQLite 变量上限,见部署机冻结那次教训)。
+    conn: sqlite3.Connection, notebook_id: str, source_ids: Sequence[str],
+    max_objects: int,
+) -> Tuple[List[dict], int, bool]:
+    """读抽中来源下的 KG 对象,**按对象行数封顶**。
+
+    按 source_id 逐个查,走 idx_knowledge_objects_source —— 不做一条巨型 IN
+    (百万级 id 会撞 SQLite 变量上限,见部署机冻结那次教训)。
+
+    为什么还需要行数上限:按来源抽样对内存**不构成任何约束**。来源数本来就少于
+    --sources 时一个都不会被抽掉;单个来源(一整本手册)也可能自己就有几百万对象。
+    这个工具的目标场景恰恰是千万级库,没有这道闸就会在读 payload/evidence 时把
+    宿主机内存吃光。上限 0 = 不封顶(明确要全量时才用)。
+
+    返回 (对象, 实际覆盖的来源数, 是否被上限截断)。截断必须由调用方显式报出 ——
+    静默截断会让读者以为覆盖了全部抽样来源。
 
     只覆盖挂了来源的对象;不挂来源的那部分见 load_sourceless_objects。"""
     out: List[dict] = []
+    covered = 0
     for i, sid in enumerate(source_ids, 1):
         for row in conn.execute(
             "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
@@ -243,10 +258,14 @@ def load_objects(
             (sid, notebook_id, *USABLE_STATUSES),
         ):
             out.append(_as_item(row))
+            if max_objects and len(out) >= max_objects:
+                # 读完当前这一行就停:半个来源也算覆盖到了,但不谎报为完整来源。
+                return out, covered, True
+        covered = i
         if i % 200 == 0:
             sys.stderr.write(f"  ... 已读 {i}/{len(source_ids)} 个来源\n")
             sys.stderr.flush()
-    return out
+    return out, covered, False
 
 
 def degree_and_basis(
@@ -259,16 +278,27 @@ def degree_and_basis(
     """
     # 两条字面量 SQL 而不是把列名插进 f-string:列名虽来自本地常量元组、没有注入
     # 面,但动态拼 SQL 在这个仓库里是需要理由的形态,写死更省事也更好读。
-    outgoing = ("SELECT evidence FROM knowledge_relations "
-                f"WHERE notebook_id = ? AND source_object_id = ? AND {_NOT_REJECTED}")
-    incoming = ("SELECT evidence FROM knowledge_relations "
-                f"WHERE notebook_id = ? AND target_object_id = ? AND {_NOT_REJECTED}")
+    #
+    # JOIN 是为了检查**对端**节点是否可用:对象合并后源对象被标 deprecated,而它的
+    # 关系仍留在表里;产品的图构建按可用节点集建图,那些边根本进不去。只过滤
+    # review_status 的话,一个只连着 deprecated 节点的节点会被报成「非孤立」,它的
+    # 边也会进标注统计 —— 而产品眼里它就是孤立的。被查节点自身已从可用集合里抽出,
+    # 故只需约束对端。
+    outgoing = ("SELECT r.evidence FROM knowledge_relations r "
+                "JOIN knowledge_objects o ON o.id = r.target_object_id "
+                f"WHERE r.notebook_id = ? AND r.source_object_id = ? AND r.{_NOT_REJECTED} "
+                f"AND o.status IN ({_USABLE_PLACEHOLDERS})")
+    incoming = ("SELECT r.evidence FROM knowledge_relations r "
+                "JOIN knowledge_objects o ON o.id = r.source_object_id "
+                f"WHERE r.notebook_id = ? AND r.target_object_id = ? AND r.{_NOT_REJECTED} "
+                f"AND o.status IN ({_USABLE_PLACEHOLDERS})")
     deg: Dict[str, int] = {}
     basis = Counter()
     for i, oid in enumerate(object_ids, 1):
         n = 0
         for statement in (outgoing, incoming):
-            for row in conn.execute(statement, (notebook_id, oid)):
+            for row in conn.execute(statement,
+                                    (notebook_id, oid, *USABLE_STATUSES)):
                 n += 1
                 try:
                     ev = json.loads(row["evidence"] or "[]")
@@ -519,6 +549,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     default=DEFAULT_DEGREE_SAMPLE, metavar="N",
                     help=f"对其中 N 个节点查度数与边标注(默认 {DEFAULT_DEGREE_SAMPLE};"
                          "0 = 全部抽样节点;不接受负数)")
+    ap.add_argument("--max-objects", type=_non_negative,
+                    default=DEFAULT_MAX_OBJECTS, metavar="N",
+                    help=f"内容分析最多读入 N 个对象(默认 {DEFAULT_MAX_OBJECTS};"
+                         "0 = 不封顶。这是唯一的内存闸 —— 来源抽样不约束内存)")
     ap.add_argument("--seed", type=int, default=20260725, help="抽样随机种子(可复现)")
     ap.add_argument("--no-samples", action="store_true",
                     help="不打印具体名称样本(只出统计数字)")
@@ -614,14 +648,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         sys.stderr.write(f"  正在读取 {len(source_ids)} 个来源的对象...\n")
         sys.stderr.flush()
-        items = load_objects(conn, target, source_ids)
+        items, covered, capped = load_objects(
+            conn, target, source_ids, args.max_objects)
         n_sourced = len(items)
-        if full and n_sourceless:
+        if full and n_sourceless and not capped:
             items += load_sourceless_objects(conn, target)
             print(f"  读到 {n_sourced:,} 个挂来源的对象 + "
                   f"{len(items) - n_sourced:,} 个不挂来源的对象 = {len(items):,}")
         else:
             print(f"  读到 {len(items):,} 个对象")
+        if capped:
+            # 绝不静默截断:上限一旦生效,「全量」就不再是全量,必须当场说清楚。
+            print(f"  ⚠ 已达 --max-objects={args.max_objects:,} 上限,读取在此停止:")
+            print(f"    只覆盖了 {covered}/{len(source_ids)} 个来源"
+                  f"{'(且不挂来源的对象一个都没读)' if n_sourceless else ''},"
+                  "下面的比例只代表这一部分。")
+            print("    要读更多:调大 --max-objects(注意内存),或用 --sources 缩小范围"
+                  "后分批看。")
         by_type: Dict[str, List[dict]] = defaultdict(list)
         for it in items:
             by_type[it["object_type"]].append(it)

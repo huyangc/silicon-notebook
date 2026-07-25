@@ -359,6 +359,68 @@ def test_negative_sampling_arguments_fail_before_touching_the_db(tmp_path, capsy
         assert "不能为负数" in capsys.readouterr().err
 
 
+def test_object_loading_is_bounded_independently_of_source_count(tmp_path, capsys):
+    """来源抽样对内存不构成约束 —— 上限必须按对象行数,且截断绝不静默。
+
+    第 4 轮 codex 评审(P1)：来源数少于 --sources 时一个都不会被抽掉，单个来源也
+    可能自己就有几百万对象；这个工具的目标恰恰是千万级库。
+    """
+    audit = load_audit()
+    db = tmp_path / "huge.db"
+    # 只有 2 个来源（远少于默认抽样值），但每个塞 60 个对象 —— 来源抽样拦不住
+    _build_db(
+        db, sources=2,
+        concepts_per_source=lambda s: [f"concept {s}-{i}" for i in range(60)],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--max-objects", "10", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "读到 10 个对象" in out, "对象上限没有生效"
+    assert "已达 --max-objects=10 上限" in out, "截断必须显式报出,不能静默"
+    assert "只覆盖了 0/2 个来源" in out, "必须说清截断时实际覆盖了多少来源"
+
+    # 上限足够大时不应报截断，免得断言因「永远截断」而假绿
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--max-objects", "0", "--no-samples"]) == 0
+    uncapped = capsys.readouterr().out
+    assert "已达 --max-objects" not in uncapped
+    assert "读到 122 个对象" in uncapped
+
+
+def test_edges_to_unusable_endpoints_do_not_count_as_connectivity(tmp_path, capsys):
+    """对象合并后源对象被标 deprecated,其边仍在表里,但产品图里根本进不去。"""
+    audit = load_audit()
+    db = tmp_path / "endpoint.db"
+    _build_db(
+        db, sources=1,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    conn = sqlite3.connect(db)
+    # 一个已弃用的对端 + 一条指向它的正常边:该边不属于有效图
+    conn.execute(
+        "INSERT INTO knowledge_objects "
+        "(id,notebook_id,object_type,source_id,payload,evidence,status) "
+        "VALUES ('gone','nb-1','concept','src-0',?,'[]','deprecated')",
+        (json.dumps({"name": "MERGEDAWAY"}),),
+    )
+    conn.execute(
+        "INSERT INTO knowledge_relations "
+        "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence) "
+        "VALUES ('e1','nb-1','o-0-0','gone','about',"
+        "'[{\"basis\":\"relink:shared-element\"}]')",
+    )
+    conn.commit()
+    conn.close()
+
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "relink:shared-element" not in out, "指向 deprecated 对端的边不得计入连通性"
+    assert "concept         1 / 1" in out, "只连着 deprecated 节点的节点应报为零度"
+
+
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):
     audit = load_audit()
     db = tmp_path / "bad.db"
