@@ -116,7 +116,7 @@ class EvidenceContextService:
         budget = (
             self.settings.chunk_answer_budget_chars
             if budget_chars is None
-            else budget_chars
+            else max(0, int(budget_chars))
         )
         tiers = self.tier_map(
             list({getattr(chunk, "notebook_id", "") or notebook_id for chunk in chunks})
@@ -138,13 +138,21 @@ class EvidenceContextService:
         single_element_keys: dict[str, str] = {}
         used = 0
         for index, chunk in enumerate(chunks, 1):
-            if used >= budget and lines:
+            separator = 1 if lines else 0
+            remaining = budget - used - separator
+            if remaining <= 0:
                 break
             key = f"k{index}"
             source_title = citation_titles.get(chunk.source_id, chunk.source_title)
-            line = f"{key}: {chunk.text}"
+            prefix = f"{key}: "
+            if remaining <= len(prefix):
+                break
+            text = chunk.text[:remaining - len(prefix)]
+            if len(text) < len(chunk.text) and len(text) > 1:
+                text = text[:-1] + "…"
+            line = prefix + text
             lines.append(line)
-            used += len(line)
+            used += separator + len(line)
             # raw_origin: chunk.notebook_id 的原始值;origin 另外回退本次 ask 的
             # notebook_id 供 tier 查表用(同库 chunk 也要查得到 tier)。徽章库名
             # 映射(Task 14)要的是"真正跨库才非空"的 raw_origin——但联邦/PPR 检索
@@ -212,7 +220,8 @@ class EvidenceContextService:
                 f"{key}: [source-element][{tier}] {source_title} · "
                 f"{location} — "
             )
-            remaining = budget - used - len(prefix)
+            separator = 1 if lines else 0
+            remaining = budget - used - separator - len(prefix)
             if remaining <= 0:
                 break
             text = element.text[:remaining]
@@ -220,7 +229,7 @@ class EvidenceContextService:
                 text = text[:-1] + "…"
             line = prefix + text
             lines.append(line)
-            used += len(line)
+            used += separator + len(line)
             evidence_by_id[key] = {
                 "object_id": element.element_id,
                 "object_type": "element",
@@ -256,7 +265,6 @@ class EvidenceContextService:
             self.settings.answer_context_budget_chars
             if budget_chars is None else max(0, int(budget_chars))
         )
-        min_items = self.settings.answer_context_min_items
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         seen_clusters: set[str] = set()
@@ -287,7 +295,9 @@ class EvidenceContextService:
                 context = self.knowledge.node_context(origin, hit.object_id)
             except KeyError:
                 continue
-            if used >= budget and len(lines) >= min_items:
+            separator = 1 if lines else 0
+            remaining_total = budget - used - separator
+            if remaining_total <= 0:
                 break
             next_id += 1
             key = f"k{next_id + id_offset}"
@@ -295,8 +305,11 @@ class EvidenceContextService:
             occurrences = context.get("occurrences") or []
             snippet = occurrences[0].get("element_text") if occurrences else ""
             definition = context.get("definition") or snippet
-            remaining = max(0, budget - used)
-            definition_cap = max(0, min(300, remaining))
+            tier = getattr(hit, "tier", "personal")
+            prefix = f"{key}: [{hit.object_type}][{tier}] {name}"
+            if remaining_total <= len(prefix):
+                break
+            definition_cap = max(0, min(300, remaining_total - len(prefix)))
             extra = (
                 f" — def: {definition[:definition_cap]}"
                 if definition and definition_cap
@@ -306,10 +319,9 @@ class EvidenceContextService:
                 extra += "; steps: " + " -> ".join(
                     step.get("name", "") for step in context["steps"][:8]
                 )
-            tier = getattr(hit, "tier", "personal")
-            line = f"{key}: [{hit.object_type}][{tier}] {name}{extra}"
+            line = (prefix + extra)[:remaining_total]
             lines.append(line)
-            used += len(line)
+            used += separator + len(line)
             evidence_by_id[key] = {
                 "object_id": hit.object_id,
                 "object_type": hit.object_type,
@@ -359,11 +371,20 @@ class EvidenceContextService:
                                row["target_object_id"], support))
             ranked.sort(key=lambda row: row[-1], reverse=True)
             if ranked:
-                rendered = []
+                relation_prefix = "\nrelations: " if lines else "relations: "
+                remaining = budget - used
+                rendered: list[str] = []
+                relation_used = len(relation_prefix)
                 for source_key, edge_type, target_key, _nb, _source, _target, support in ranked[:30]:
                     suffix = f" (×{support}源)" if support >= 2 else ""
-                    rendered.append(f"{source_key} -[{edge_type}]-> {target_key}{suffix}")
-                lines.append("relations: " + "; ".join(rendered))
+                    item = f"{source_key} -[{edge_type}]-> {target_key}{suffix}"
+                    separator = 2 if rendered else 0
+                    if relation_used + separator + len(item) > remaining:
+                        break
+                    rendered.append(item)
+                    relation_used += separator + len(item)
+                if rendered:
+                    lines.append("relations: " + "; ".join(rendered))
         return ("\n".join(lines) if lines else "(none)"), evidence_by_id
 
     def parse_anchors(

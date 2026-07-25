@@ -53,13 +53,16 @@ class AskRetrievalLimits:
 
     Structured enumeration uses stable cursor pages.  ``structured_page_size``
     is a transport/hydration batch size, *not* a final answer top-N.  A complete,
-    aggregate, or hybrid request continues until cursor exhaustion or until the
-    exact ``structured_max_pages``/``structured_max_rows`` safety ceiling.  A
+    aggregate, or hybrid request that the physical-row executor can prove
+    (direct whole-table list/count) continues until cursor exhaustion or until
+    the exact ``structured_max_pages``/``structured_max_rows`` safety ceiling. A
     request may touch at most ``structured_max_tables`` tables and that many
     columns per table; these are request-wide safety limits, not model choices.
 
-    ``kg_context_chars`` and ``chunk_context_chars`` independently limit ranked
-    evidence injected into an LLM prompt.  Structured rows stay pageable outside
+    ``kg_context_chars`` limits KG objects/relations, confirmed Memory, and
+    query-time chains. ``chunk_context_chars`` limits structured preview, chunks,
+    and direct source elements; their combined prompt evidence cannot exceed the
+    sum. Structured rows stay pageable outside
     that prompt; ``structured_payload_chars`` bounds their transport payload and
     ``inline_answer_rows`` bounds only the inline prose/list preview.  Neither
     limit may silently reduce collection completeness.  A single structured cell

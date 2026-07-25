@@ -252,6 +252,45 @@ def test_answer_reasoning_makes_direct_source_element_citable(repo):
     ]
 
 
+def test_answer_reasoning_final_evidence_respects_combined_hard_budget(
+    repo, monkeypatch
+):
+    from app.services.retrieval import RetrievedElement
+
+    nb = _seed_two_doc_moe(repo)
+    hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:2]
+    chunks = repo._ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts")
+    element = RetrievedElement(
+        element_id="el-budget", source_id="src-A", source_title="DeepSeek paper",
+        location_label="Arch", element_type="paragraph", text="E" * 500, score=0.9,
+    )
+
+    class _Capture:
+        configured = True
+        prompt = ""
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.prompt = messages[-1]["content"]
+            return json.dumps({"answer": "bounded", "grounded": False})
+
+    llm = _Capture()
+    bind_chat_client(repo, "ask_answer", llm)
+    repo.settings.kg_query_refine_enabled = False
+    monkeypatch.setattr(
+        "app.services.ask_service.answer_prompt",
+        lambda _question, context, _history: context,
+    )
+
+    repo._runtime.ask_service()._answer_reasoning(
+        nb.id, "budget", hits, [element], chunks=chunks,
+        structured_block="S" * 100,
+        chunk_context_chars=120,
+        kg_context_chars=100,
+    )
+
+    assert len(llm.prompt) <= 220
+
+
 def test_reasoning_ask_seed_grounds_in_cross_doc_chunk_end_to_end(repo):
     """端到端:flag 开 + reflect 只 answer(纯靠 seed pass)→ 跨文档 chunk 被升为可引用证据
     ([k1] 落在 chunk 段 → resp.anchors 含 chunk 锚),且 seed pass 在轨迹里。"""

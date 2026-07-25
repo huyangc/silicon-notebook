@@ -476,6 +476,32 @@ class AskService:
         return context_block, {**id_map, **memory_map}
 
     @staticmethod
+    def _bounded_context_append(
+        context_block: str,
+        id_map: dict,
+        block: str,
+        block_map: dict,
+        *,
+        budget_chars: int,
+        heading: str = "",
+    ) -> tuple[str, dict]:
+        """Append one evidence block without crossing a partition hard limit."""
+        if not block or block == "(none)":
+            return context_block, id_map
+        prefix = ("\n\n" if context_block else "")
+        if heading:
+            prefix += f"[{heading}]\n"
+        remaining = max(0, int(budget_chars) - len(context_block))
+        if remaining <= len(prefix):
+            return context_block, id_map
+        rendered = (prefix + block)[:remaining]
+        merged = dict(id_map)
+        for key, value in block_map.items():
+            if re.search(rf"(?m)^{re.escape(str(key))}:", rendered):
+                merged[key] = value
+        return context_block + rendered, merged
+
+    @staticmethod
     def _memory_citations(anchors, hits) -> list[Citation]:
         by_id = {hit.memory_id: hit for hit in hits}
         out: list[Citation] = []
@@ -691,6 +717,7 @@ class AskService:
         context_block: str,
         client,
         cancel_event: CancelEvent = None,
+        budget_chars: int | None = None,
     ) -> str:
         """问题感知证据精炼:把 context_block 喂给 evidence_refine LLM,抽"相关要点"
         前置成聚焦上下文(参考性,不产生 [k] 锚点)。默认开(kg_query_refine_enabled);
@@ -719,9 +746,14 @@ class AskService:
         except Exception:
             rel = []
         if rel:
-            context_block = ("Focused relevant evidence (for this question):\n"
-                             + "\n".join(f"- {x}" for x in rel[:12])
-                             + "\n\n" + context_block)
+            focused = ("Focused relevant evidence (for this question):\n"
+                       + "\n".join(f"- {x}" for x in rel[:12])
+                       + "\n\n")
+            candidate = focused + context_block
+            # Refinement is optional metadata.  Never evict already-budgeted,
+            # citable evidence merely to prepend a model-generated summary.
+            if budget_chars is None or len(candidate) <= budget_chars:
+                context_block = candidate
         return context_block
 
     def _answer_with_retry(
@@ -783,6 +815,21 @@ class AskService:
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
+        chunk_budget = max(0, int(
+            self.settings.chunk_answer_budget_chars
+            if chunk_context_chars is None else chunk_context_chars
+        ))
+        kg_budget = max(0, int(
+            self.settings.answer_context_budget_chars
+            if kg_context_chars is None else kg_context_chars
+        ))
+        source_context = ""
+        source_map: dict = {}
+        if structured_block:
+            source_context, source_map = self._bounded_context_append(
+                source_context, source_map, structured_block, {},
+                budget_chars=chunk_budget,
+            )
         if chunks:
             # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关;跨 PPR run
             # 的归一分仅大致可比,只影响预算边缘取舍,不破坏 [0,1]);chunk 段 k1..N + KG 段
@@ -791,42 +838,65 @@ class AskService:
             ordered = sorted(chunks, key=lambda c: (-c.relevance, c.chunk_id))
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 ordered, notebook_id=notebook_id,
-                budget_chars=chunk_context_chars)
-            kg_block, kg_id_map = self._answer_context(
-                notebook_id, top_hits, id_offset=self._MIX_KG_KEY_BASE,
-                budget_chars=kg_context_chars)
-            if kg_block and kg_block != "(none)":
-                context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
-            else:
-                context_block = chunk_block
-            id_map = {**chunk_id_map, **kg_id_map}
-        else:
-            context_block, id_map = self._answer_context(
-                notebook_id, top_hits, budget_chars=kg_context_chars)
-        context_block, id_map = self._append_memory_context(
-            context_block, id_map, memory_hits or []
+                budget_chars=max(0, chunk_budget - len(source_context)))
+            source_context, source_map = self._bounded_context_append(
+                source_context, source_map, chunk_block, chunk_id_map,
+                budget_chars=chunk_budget, heading="Retrieved chunks",
+            )
+
+        # Direct source elements share the Chunk/source partition instead of
+        # bypassing its advertised hard ceiling.
+        if elements and len(source_context) < chunk_budget:
+            element_block, element_id_map = self.evidence_context.element_context(
+                elements[:6], notebook_id=notebook_id,
+                id_offset=self._ELEMENT_KEY_BASE,
+                budget_chars=max(0, chunk_budget - len(source_context)),
+            )
+            source_context, source_map = self._bounded_context_append(
+                source_context, source_map, element_block, element_id_map,
+                budget_chars=chunk_budget, heading="Direct source elements",
+            )
+
+        # Reserve the inter-partition separator inside the KG budget so the
+        # final evidence block never exceeds kg_context_chars+chunk_context_chars.
+        effective_kg_budget = max(0, kg_budget - (2 if source_context else 0))
+        kg_context, kg_map = self._answer_context(
+            notebook_id, top_hits,
+            id_offset=(self._MIX_KG_KEY_BASE if chunks else 0),
+            budget_chars=effective_kg_budget,
         )
+        if kg_context == "(none)":
+            kg_context, kg_map = "", {}
+        if memory_hits and len(kg_context) < effective_kg_budget:
+            memory_block, memory_map = self.memory_retriever.context(
+                memory_hits, id_offset=self._MEMORY_KEY_BASE
+            )
+            kg_context, kg_map = self._bounded_context_append(
+                kg_context, kg_map, memory_block, memory_map,
+                budget_chars=effective_kg_budget, heading="Confirmed Memory",
+            )
         if chains:
             from app.services.kg.follow_chain import render_follow_chain_context
             chain_block, chain_id_map = render_follow_chain_context(
                 chains, id_offset=2000, active_notebook_id=notebook_id)
-            if chain_block and chain_block != "(none)":
-                context_block = f"{context_block}\n\n{chain_block}"
-                id_map = {**id_map, **chain_id_map}
-        if elements:
-            element_block, element_id_map = self.evidence_context.element_context(
-                elements[:6], notebook_id=notebook_id,
-                id_offset=self._ELEMENT_KEY_BASE,
+            kg_context, kg_map = self._bounded_context_append(
+                kg_context, kg_map, chain_block, chain_id_map,
+                budget_chars=effective_kg_budget, heading="Derived chains",
             )
-            if element_block and element_block != "(none)":
-                context_block = f"{context_block}\n\n[Direct source elements]\n{element_block}"
-                id_map = {**id_map, **element_id_map}
-        if structured_block:
-            context_block = f"{context_block}\n\n{structured_block}"
+        context_block = source_context
+        if kg_context:
+            context_block = (
+                f"{context_block}\n\n{kg_context}" if context_block else kg_context
+            )
+        id_map = {**source_map, **kg_map}
+        total_context_budget = chunk_budget + kg_budget
         answer_client = answer_client or self.model_clients.chat("ask_answer")
         refine_client = self.model_clients.chat("evidence_refine")
         context_block = self._refine_context(
-            question, context_block, refine_client, cancel_event)
+            question, context_block, refine_client, cancel_event,
+            budget_chars=total_context_budget,
+        )
+        context_block = context_block[:total_context_budget]
         raw = answer_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -855,7 +925,8 @@ class AskService:
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         if completeness_unavailable:
             msg = (
-                "当前完整枚举仅支持 Knowhow 表；本次不能提供完整结果。\n\n"
+                "当前精确完整枚举仅支持 Knowhow 整表物理行清单与直接行计数；"
+                "本次请求不能视为全部结果。\n\n"
                 + msg
             )
         response = AskResponse(
@@ -1240,15 +1311,44 @@ class AskService:
                 enumerate_knowhow,
                 is_knowhow_enumeration_query,
                 render_structured_answer,
+                supports_structured_knowhow_query,
             )
-            knowhow_tables = self.knowhow_store.list_knowhow_tables(notebook_id)
-            if is_knowhow_enumeration_query(knowhow_tables, research_question):
+            scope_question = intent_contract.resolved_question
+            catalog_loader = getattr(
+                self.knowhow_store, "knowhow_enumeration_catalog", None
+            )
+            if callable(catalog_loader):
+                knowhow_catalog = catalog_loader(
+                    notebook_id,
+                    limit=limits.structured_max_tables,
+                    query=scope_question,
+                )
+            else:  # narrow compatibility doubles; production ports implement it
+                legacy_tables = list(
+                    self.knowhow_store.list_knowhow_tables(notebook_id) or []
+                )[:limits.structured_max_tables]
+                knowhow_catalog = {
+                    "tables": legacy_tables,
+                    "known_tables": len(legacy_tables),
+                    "known_total_rows": sum(
+                        int(row.get("row_count") or 0) for row in legacy_tables
+                    ),
+                    "fingerprint": [],
+                }
+            knowhow_tables = list(knowhow_catalog.get("tables") or [])
+            if (
+                is_knowhow_enumeration_query(knowhow_tables, scope_question)
+                and supports_structured_knowhow_query(
+                    scope_question, intent_contract.result_scope, knowhow_tables
+                )
+            ):
                 stream_intent()
                 structured_batch = enumerate_knowhow(
                     self.knowhow_store,
                     notebook_id,
-                    research_question,
+                    scope_question,
                     limits,
+                    catalog_snapshot=knowhow_catalog,
                     cancel_event=cancel_event,
                     on_step=checked_pre_trace,
                 )
@@ -1296,6 +1396,7 @@ class AskService:
                 intent=intent_contract,
                 retrieval_effort=payload.retrieval_effort,
                 result_sets=structured_batch.result_sets,
+                result_coverage=structured_batch.coverage(),
             )
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
@@ -1335,6 +1436,7 @@ class AskService:
                     intent=intent_contract,
                     retrieval_effort=payload.retrieval_effort,
                     result_sets=structured_batch.result_sets,
+                    result_coverage=structured_batch.coverage(),
                     model_errors=[ModelError(
                         stage="answer", model="", message="missing_config"
                     )],
@@ -1370,7 +1472,8 @@ class AskService:
                 conclusion=(
                     (f"{coverage_prefix}\n\n" if coverage_prefix else "")
                     + (
-                        "当前完整枚举仅支持 Knowhow 表；本次不能提供完整结果。\n\n"
+                        "当前精确完整枚举仅支持 Knowhow 整表物理行清单与直接行计数；"
+                        "本次请求不能视为全部结果。\n\n"
                         if completeness_unavailable else ""
                     )
                     + "本笔记本尚未构建知识图谱,也没有已建图的参考库;"
@@ -1388,6 +1491,9 @@ class AskService:
                 intent=intent_contract,
                 retrieval_effort=payload.retrieval_effort,
                 result_sets=(structured_batch.result_sets if structured_batch else []),
+                result_coverage=(
+                    structured_batch.coverage() if structured_batch else None
+                ),
                 reasoning_trace=(pre_trace if structured_batch is not None else None))
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
@@ -1463,7 +1569,7 @@ class AskService:
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
             structured_block = ""
-            if structured_batch is not None:
+            if structured_batch is not None and answer_client.configured:
                 from app.services.structured_retrieval import structured_prompt_block
                 structured_block = structured_prompt_block(
                     structured_batch,
@@ -1556,17 +1662,26 @@ class AskService:
 
             if completeness_unavailable:
                 warning = (
-                    "当前完整枚举仅支持 Knowhow 表；本次结果来自相关性检索，"
+                    "当前精确完整枚举仅支持 Knowhow 整表物理行清单与直接行计数；"
+                    "条件筛选、去重、分组或其他集合请求本次仍来自相关性检索，"
                     "不能视为全部结果。"
                 )
                 conclusion = f"{warning}\n\n{conclusion}"
                 answer = f"> {warning}\n\n{answer}" if answer else warning
             elif structured_batch is not None:
-                coverage_line = (
-                    f"Knowhow 覆盖：{structured_batch.returned_rows}/"
+                enumeration_line = (
+                    f"Knowhow 枚举：{structured_batch.returned_rows}/"
                     f"{structured_batch.known_total_rows} 行，"
                     f"{'完整' if structured_batch.complete else '部分'}。"
                 )
+                analysis_line = (
+                    "分析未运行。"
+                    if structured_batch.synthesis_complete is None else
+                    f"分析覆盖：{structured_batch.synthesis_rows}/"
+                    f"{structured_batch.known_total_rows} 行，"
+                    f"{'完整' if structured_batch.synthesis_complete else '部分'}。"
+                )
+                coverage_line = f"{enumeration_line} {analysis_line}"
                 conclusion = f"{coverage_line}\n\n{conclusion}"
                 answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
 
@@ -1580,6 +1695,9 @@ class AskService:
                 intent=intent_contract,
                 retrieval_effort=payload.retrieval_effort,
                 result_sets=(structured_batch.result_sets if structured_batch else []),
+                result_coverage=(
+                    structured_batch.coverage() if structured_batch else None
+                ),
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)

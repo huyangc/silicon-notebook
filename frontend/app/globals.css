@@ -3193,6 +3193,18 @@ button.chat-session-card {
   margin: 14px 0;
 }
 
+.answer-knowhow-batch-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+  font-size: 12px;
+}
+
 .answer-knowhow-result {
   border: 1px solid #d8dee8;
   border-radius: 10px;

@@ -335,6 +335,19 @@ export type KnowhowResultSet = {
   };
 };
 
+export type KnowhowBatchCoverage = {
+  known_tables: number;
+  selected_tables: number;
+  known_total_rows: number;
+  scanned_rows: number;
+  returned_rows: number;
+  complete: boolean;
+  truncated_reason?: string | null;
+  overflow_semantics?: "explicit_partial" | "";
+  synthesis_rows: number;
+  synthesis_complete?: boolean | null;
+};
+
 export type AskResponse = {
   answer_id: string;
   conversation_id: string;
@@ -355,6 +368,8 @@ export type AskResponse = {
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
   /** complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。 */
   result_sets?: KnowhowResultSet[];
+  /** 整个请求范围的覆盖率；与每张已选表自身的 coverage 分开。 */
+  result_coverage?: KnowhowBatchCoverage;
   model_errors?: {
     service_id: string;
     service_name: string;

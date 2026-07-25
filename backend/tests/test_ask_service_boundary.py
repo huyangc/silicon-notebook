@@ -274,8 +274,20 @@ def test_chunk_and_graph_ask_execute_on_declared_ports_only():
 
 
 class _EnumerableKnowhow:
+    def __init__(self):
+        self.catalog_calls = 0
+
     def list_knowhow_tables(self, notebook_id):
-        return [{"id": "table-1", "title": "方法表", "row_count": 100}]
+        raise AssertionError("structured Ask must use the lightweight catalog")
+
+    def knowhow_enumeration_catalog(self, notebook_id, *, limit=8, query=""):
+        self.catalog_calls += 1
+        return {
+            "tables": [{"id": "table-1", "title": "方法表", "row_count": 100}],
+            "known_tables": 1,
+            "known_total_rows": 100,
+            "fingerprint": [1, 100, 1, 0],
+        }
 
     def enumerate_knowhow_rows(
         self, notebook_id, *, table_ids, cursor=None, page_size=25, column_ids=None
@@ -343,6 +355,51 @@ def test_reasoning_complete_knowhow_bypasses_ranked_top_n_and_model():
     assert response.result_sets[0].coverage.returned_rows == 100
     assert len(response.result_sets[0].rows) == 100
     assert "100/100" in response.conclusion
+    assert response.result_coverage is not None
+    assert response.result_coverage.complete is True
+    assert service.knowhow_store.catalog_calls == 2
+
+
+def test_reasoning_hybrid_without_kg_keeps_batch_coverage_metadata():
+    service = _minimal_ask_service()
+    service.knowhow_store = _EnumerableKnowhow()
+    service.candidates.has_kg = lambda notebook_id: False
+    service.candidates.any_base_has_kg = lambda notebook_id: False
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(
+            question="列出所有方法并比较优缺点",
+            mode="reasoning",
+        ),
+        user_id="user",
+    )
+
+    assert response.result_sets[0].coverage.complete is True
+    assert response.result_coverage is not None
+    assert response.result_coverage.complete is True
+    assert response.result_coverage.returned_rows == 100
+    assert "尚未构建知识图谱" in response.conclusion
+
+
+def test_reasoning_conditional_complete_query_does_not_claim_full_table():
+    service = _minimal_ask_service()
+    service.knowhow_store = _EnumerableKnowhow()
+    service.model_clients.primary_unconfigured = lambda: True
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(
+            question="列出所有低功耗方法",
+            mode="reasoning",
+        ),
+        user_id="user",
+    )
+
+    assert response.result_sets == []
+    assert response.result_coverage is None
+    assert "不能视为全部结果" in response.conclusion
+    assert service.knowhow_store.catalog_calls == 1
 
 
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():

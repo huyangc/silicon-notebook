@@ -18,6 +18,18 @@ function answerWithRows(totalRows: number, complete = true): AskResponse {
     related_knowledge: [],
     citations: [],
     llm_mode: "structured",
+    result_coverage: {
+      known_tables: 1,
+      selected_tables: 1,
+      known_total_rows: totalRows,
+      scanned_rows: complete ? totalRows : 25,
+      returned_rows: complete ? totalRows : 25,
+      complete,
+      truncated_reason: complete ? null : "row_limit",
+      overflow_semantics: complete ? "" : "explicit_partial",
+      synthesis_rows: 0,
+      synthesis_complete: null,
+    },
     result_sets: [{
       kind: "knowhow",
       table_id: "table-1",
@@ -94,4 +106,28 @@ test("payload-limited badge reports returned rows separately from scanned rows",
   renderAnswer(answer);
   expect(screen.getByText("部分 5/100")).toBeInTheDocument();
   expect(screen.getAllByText(/已扫描 25 行/)).toHaveLength(2);
+});
+
+
+test("batch coverage distinguishes omitted tables from complete selected tables", () => {
+  const answer = answerWithRows(10, true);
+  answer.result_coverage = {
+    known_tables: 10,
+    selected_tables: 8,
+    known_total_rows: 10,
+    scanned_rows: 8,
+    returned_rows: 8,
+    complete: false,
+    truncated_reason: "table_limit",
+    overflow_semantics: "explicit_partial",
+    synthesis_rows: 8,
+    synthesis_complete: false,
+  };
+
+  renderAnswer(answer);
+  expect(screen.getByText("总体部分")).toBeInTheDocument();
+  expect(screen.getByText("表 8/10；行 8/10")).toBeInTheDocument();
+  expect(screen.getByText("分析覆盖 8/10（部分）")).toBeInTheDocument();
+  expect(screen.getByText("截断原因：table_limit")).toBeInTheDocument();
+  expect(screen.getByText("完整 10/10")).toBeInTheDocument();
 });

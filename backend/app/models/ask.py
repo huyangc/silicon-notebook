@@ -282,6 +282,23 @@ class StructuredKnowhowResult(BaseModel):
     coverage: StructuredResultCoverage
 
 
+class StructuredBatchCoverage(BaseModel):
+    """Collection-level coverage, distinct from each selected table's status."""
+
+    known_tables: int = Field(default=0, ge=0)
+    selected_tables: int = Field(default=0, ge=0)
+    known_total_rows: int = Field(default=0, ge=0)
+    scanned_rows: int = Field(default=0, ge=0)
+    returned_rows: int = Field(default=0, ge=0)
+    complete: bool = False
+    truncated_reason: str = Field(default="", max_length=80)
+    overflow_semantics: str = Field(default="", max_length=40)
+    # Hybrid synthesis may see only a bounded preview even when enumeration is
+    # complete.  ``None`` means no model synthesis was attempted.
+    synthesis_rows: int = Field(default=0, ge=0)
+    synthesis_complete: Optional[bool] = None
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     conclusion: str
@@ -311,6 +328,9 @@ class AskResponse(BaseModel):
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
     result_sets: List[StructuredKnowhowResult] = Field(
         default_factory=list, exclude_if=lambda value: not value
+    )
+    result_coverage: Optional[StructuredBatchCoverage] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False

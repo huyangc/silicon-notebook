@@ -17,6 +17,7 @@ from app.core.ask_retrieval_policy import (
     EXPLICIT_PARTIAL_OVERFLOW,
 )
 from app.models.ask import (
+    StructuredBatchCoverage,
     StructuredKnowhowResult,
     StructuredResultColumn,
     StructuredResultCoverage,
@@ -36,6 +37,43 @@ _TABLE_WORDS = re.compile(
     r"tables?|rows?|columns?",
     re.IGNORECASE,
 )
+_UNSUPPORTED_SET_OPERATION = re.compile(
+    r"(?:分组|分类汇总|去重|不同(?:的)?|满足|符合|限定|仅限|只(?:要|列出)|筛选|过滤|"
+    r"大于|小于|不少于|不超过|至少|至多|其中(?:的)?|多少(?:种|类)|"
+    r"适用(?:于)?|适合|用于|可用于|针对|面向|"
+    r"group\s+by|distinct|where|filter(?:ed)?|matching|only)",
+    re.IGNORECASE,
+)
+_SAFE_COMPLETE_COLLECTION = re.compile(
+    r"^\s*(?:请(?:帮我)?|麻烦(?:帮我)?)?\s*"
+    r"(?:(?:列出|罗列|枚举|读取|展示|给出)\s*)?"
+    r"(?:(?:全部|所有|全量|每(?:一)?种|逐一|逐项)\s*(?:的\s*)?"
+    r"(?:方法|方案|做法|流程|步骤|技巧|技术|行|记录)"
+    r"|(?:方法|方案|做法|流程|步骤|技巧|技术|行|记录)\s*"
+    r"(?:有哪些|清单|列表|全部|所有))"
+    r"\s*(?:有哪些|是什么|分别是什么|清单|列表)?"
+    r"\s*(?:[，,]\s*)?(?:(?:并|以及|同时)\s*"
+    r"(?:分析|比较|对比)\s*(?:各自|它们|这些方法)?\s*(?:的\s*)?"
+    r"(?:优缺点|差异|特点|性能|趋势)?)?\s*[？?。.!！]?\s*$"
+    r"|^\s*(?:please\s+)?(?:list|show|enumerate)\s+"
+    r"(?:all|every|each)\s+"
+    r"(?:methods?|procedures?|techniques?|approaches?|rows?|records?)"
+    r"(?:\s+and\s+(?:compare|analy[sz]e)\s+(?:their\s+)?"
+    r"(?:trade-?offs?|differences?|properties|performance))?\s*[?.!]?\s*$",
+    re.IGNORECASE,
+)
+_SAFE_PHYSICAL_COUNT = re.compile(
+    r"^\s*(?:请问|请统计|统计)?\s*(?:"
+    r"(?:这些?|上述)?(?:方法|方案|做法|流程|步骤|技巧|技术|记录|行)"
+    r"\s*(?:一共|总共|合计)?(?:有)?多少(?:个|项|条|行)?"
+    r"|(?:一共|总共|合计)?(?:有)?多少(?:个|项|条|行)\s*"
+    r"(?:方法|方案|做法|流程|步骤|技巧|技术|记录|行)?"
+    r"|(?:物理)?(?:总行数|行数|记录数)(?:是|为)?多少)\s*[？?。.!！]?\s*$"
+    r"|^\s*(?:please\s+)?(?:how\s+many|count(?:\s+all)?|"
+    r"total\s+(?:number|count)\s+of)\s+"
+    r"(?:methods?|procedures?|techniques?|approaches?|rows?|records?)\s*[?.!]?\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -48,6 +86,24 @@ class StructuredEnumeration:
     known_tables: int = 0
     complete: bool = True
     truncated_reason: str = ""
+    synthesis_rows: int = 0
+    synthesis_complete: bool | None = None
+
+    def coverage(self) -> StructuredBatchCoverage:
+        return StructuredBatchCoverage(
+            known_tables=self.known_tables,
+            selected_tables=self.selected_tables,
+            known_total_rows=self.known_total_rows,
+            scanned_rows=self.scanned_rows,
+            returned_rows=self.returned_rows,
+            complete=self.complete,
+            truncated_reason=self.truncated_reason,
+            overflow_semantics=(
+                "" if self.complete else EXPLICIT_PARTIAL_OVERFLOW
+            ),
+            synthesis_rows=self.synthesis_rows,
+            synthesis_complete=self.synthesis_complete,
+        )
 
 
 def render_structured_answer(
@@ -101,32 +157,60 @@ def structured_prompt_block(
     budget_chars: int,
 ) -> str:
     """Bound the structured preview injected into hybrid answer synthesis."""
-    header = (
-        f"[Structured Knowhow coverage: complete={str(batch.complete).lower()}, "
-        f"scanned={batch.scanned_rows}, total={batch.known_total_rows}. "
-        "The structured row set and exact coverage are returned separately; "
-        "do not claim coverage beyond these numbers.]"
-    )
-    lines = [header]
+    # Reserve enough room for the authoritative coverage header, then include
+    # only complete row lines that fit.  The batch records exactly what the
+    # synthesis model saw; enumeration completeness remains a separate fact.
+    lines: list[str] = []
     remaining_rows = max(0, int(inline_rows))
-    used = len(header)
+    used = 0
+    header_reserve = min(max(0, int(budget_chars)), 480)
+    row_budget = max(0, int(budget_chars) - header_reserve)
     for result in batch.result_sets:
         names = {column.id: column.name for column in result.columns}
         for row in result.rows:
-            if remaining_rows <= 0 or used >= budget_chars:
-                return "\n".join(lines)
+            if remaining_rows <= 0 or used >= row_budget:
+                break
             values = " | ".join(
                 f"{names.get(column_id, column_id)}={content[:cell_excerpt_chars]}"
                 for column_id, content in row.cells.items()
                 if content
             )
             line = f"{result.title} row={row.row_id}: {values or '(empty)'}"
-            if used + len(line) > budget_chars:
-                return "\n".join(lines)
+            if used + len(line) + (1 if lines else 0) > row_budget:
+                break
             lines.append(line)
-            used += len(line)
+            used += len(line) + (1 if len(lines) > 1 else 0)
             remaining_rows -= 1
-    return "\n".join(lines)
+        if remaining_rows <= 0 or used >= row_budget:
+            break
+    batch.synthesis_rows = len(lines)
+    batch.synthesis_complete = bool(
+        batch.complete and batch.synthesis_rows == batch.known_total_rows
+    )
+    header = (
+        "[Structured Knowhow coverage: "
+        f"enumeration_complete={str(batch.complete).lower()}, "
+        f"enumerated={batch.returned_rows}/{batch.known_total_rows}, "
+        f"synthesis_complete={str(batch.synthesis_complete).lower()}, "
+        f"synthesis_rows={batch.synthesis_rows}/{batch.known_total_rows}. "
+        "The result cards carry the authoritative enumerated rows. Base every "
+        "analysis only on synthesis_rows and explicitly disclose partial analysis.]"
+    )
+    rendered = "\n".join([header, *lines])
+    while len(rendered) > budget_chars and lines:
+        lines.pop()
+        batch.synthesis_rows = len(lines)
+        batch.synthesis_complete = bool(
+            batch.complete and batch.synthesis_rows == batch.known_total_rows
+        )
+        header = re.sub(
+            r"synthesis_complete=(?:true|false), synthesis_rows=\d+",
+            f"synthesis_complete={str(batch.synthesis_complete).lower()}, "
+            f"synthesis_rows={batch.synthesis_rows}",
+            header,
+        )
+        rendered = "\n".join([header, *lines])
+    return rendered[:max(0, int(budget_chars))]
 
 
 def _text(value: object) -> str:
@@ -144,6 +228,55 @@ def is_knowhow_enumeration_query(tables: Sequence[dict], question: str) -> bool:
         len(_text(row.get("title"))) >= 2 and _text(row.get("title")) in normalized
         for row in tables
     )
+
+
+def _without_explicit_table_scope(
+    question: str, tables: Sequence[dict]
+) -> str:
+    """Remove only a proven table locator before applying the sentence grammar."""
+    text = question
+    for row in sorted(
+        tables,
+        key=lambda item: len(str(item.get("title") or "")),
+        reverse=True,
+    ):
+        title = str(row.get("title") or "").strip()
+        if len(_text(title)) < 2:
+            continue
+        escaped = re.escape(title)
+        text = re.sub(
+            rf"(?:[《「『\"']\s*{escaped}\s*[》」』\"']|{escaped}(?:表|表格)?)"
+            rf"\s*(?:中|内|里)(?:的)?",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+    # Generic, non-title locators are safe to remove.  Arbitrary phrases such
+    # as “低功耗设计中” are deliberately not accepted as table scope.
+    text = re.sub(
+        r"(?:这个|该|当前)?\s*(?:knowhow\s*)?(?:数据表|表格|表)"
+        r"\s*(?:(?:中|内|里)(?:的)?)?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
+
+
+def supports_structured_knowhow_query(
+    question: str,
+    result_scope: str,
+    tables: Sequence[dict] = (),
+) -> bool:
+    """Admit only whole sentences the physical-row executor can prove exactly."""
+    if _UNSUPPORTED_SET_OPERATION.search(question):
+        return False
+    scoped_question = _without_explicit_table_scope(question, tables)
+    if result_scope == "aggregate":
+        return bool(_SAFE_PHYSICAL_COUNT.fullmatch(scoped_question))
+    if result_scope in {"complete", "hybrid"}:
+        return bool(_SAFE_COMPLETE_COLLECTION.fullmatch(scoped_question))
+    return False
 
 
 def _select_tables(
@@ -225,12 +358,28 @@ def _table_scope_fingerprint(tables: Sequence[dict]) -> tuple:
     ))
 
 
+def _load_catalog(store, notebook_id: str, limit: int, *, query: str = "") -> dict:
+    loader = getattr(store, "knowhow_enumeration_catalog", None)
+    if callable(loader):
+        return dict(loader(notebook_id, limit=limit, query=query) or {})
+    # Compatibility fallback for narrow test doubles and older repository
+    # implementations; production adapters implement the bounded metadata port.
+    tables = list(store.list_knowhow_tables(notebook_id) or [])[:limit]
+    return {
+        "tables": tables,
+        "known_tables": len(tables),
+        "known_total_rows": sum(int(row.get("row_count") or 0) for row in tables),
+        "fingerprint": list(_table_scope_fingerprint(tables)),
+    }
+
+
 def enumerate_knowhow(
     store,
     notebook_id: str,
     question: str,
     limits: AskRetrievalLimits,
     *,
+    catalog_snapshot: dict | None = None,
     cancel_event: CancelEvent = None,
     on_step: Callable[[TraceStep], None] | None = None,
 ) -> StructuredEnumeration:
@@ -242,15 +391,32 @@ def enumerate_knowhow(
     being reported as a stable complete snapshot.
     """
     raise_if_cancelled(cancel_event)
-    all_tables = list(store.list_knowhow_tables(notebook_id) or [])
-    selected, scope_tables, table_limited = _select_tables(
+    initial_catalog = dict(catalog_snapshot or _load_catalog(
+        store, notebook_id, limits.structured_max_tables, query=question
+    ))
+    all_tables = list(initial_catalog.get("tables") or [])
+    selected, scope_tables, listed_table_limited = _select_tables(
         all_tables, question, limits.structured_max_tables
     )
+    explicit_scope = len(scope_tables) < len(all_tables)
+    known_tables = (
+        len(scope_tables) if explicit_scope
+        else int(initial_catalog.get("known_tables") or len(scope_tables))
+    )
+    known_total_rows = (
+        sum(int(row.get("row_count") or 0) for row in scope_tables)
+        if explicit_scope else
+        int(initial_catalog.get("known_total_rows") or 0)
+    )
+    table_limited = listed_table_limited or (
+        not explicit_scope and known_tables > len(selected)
+    )
     initial_scope_fingerprint = _table_scope_fingerprint(scope_tables)
+    initial_global_fingerprint = tuple(initial_catalog.get("fingerprint") or ())
     batch = StructuredEnumeration(
-        known_total_rows=sum(int(row.get("row_count") or 0) for row in scope_tables),
+        known_total_rows=known_total_rows,
         selected_tables=len(selected),
-        known_tables=len(scope_tables),
+        known_tables=known_tables,
         complete=not table_limited,
         truncated_reason="table_limit" if table_limited else "",
     )
@@ -276,7 +442,6 @@ def enumerate_knowhow(
             continue
         catalog = probe["tables"][0]
         initial_catalog_fingerprint = _catalog_fingerprint(catalog)
-        initial_mutation = initial_catalog_fingerprint[0]
         columns, column_limited = _select_columns(
             catalog, question, limits.structured_max_columns
         )
@@ -288,9 +453,9 @@ def enumerate_knowhow(
         table_scanned = 0
         cursor = None
         table_total = int(catalog.get("row_count") or 0)
-        table_complete = not table_limited and not column_limited
+        table_complete = not column_limited
         table_reason = (
-            "table_limit" if table_limited else "column_limit" if column_limited else ""
+            "column_limit" if column_limited else ""
         )
 
         while True:
@@ -317,7 +482,7 @@ def enumerate_knowhow(
             table_scanned += scanned_now
             batch.scanned_rows += scanned_now
             current_catalog = (page.get("tables") or [{}])[0]
-            if int(current_catalog.get("mutation_seq") or 0) != initial_mutation:
+            if _catalog_fingerprint(current_catalog) != initial_catalog_fingerprint:
                 batch.complete = table_complete = False
                 batch.truncated_reason = batch.truncated_reason or "concurrent_change"
                 table_reason = table_reason or "concurrent_change"
@@ -414,11 +579,21 @@ def enumerate_knowhow(
 
     # Known totals include omitted tables, which is what lets the answer say
     # "partial" honestly when the eight-table request-wide ceiling fires.
-    final_tables = list(store.list_knowhow_tables(notebook_id) or [])
-    _, final_scope_tables, _ = _select_tables(
-        final_tables, question, limits.structured_max_tables
+    final_catalog = _load_catalog(
+        store, notebook_id, limits.structured_max_tables, query=question
     )
-    if _table_scope_fingerprint(final_scope_tables) != initial_scope_fingerprint:
+    final_tables = list(final_catalog.get("tables") or [])
+    _, final_scope_tables, _ = _select_tables(final_tables, question, limits.structured_max_tables)
+    scope_changed = (
+        _table_scope_fingerprint(final_scope_tables) != initial_scope_fingerprint
+    )
+    if not explicit_scope:
+        final_global_fingerprint = tuple(final_catalog.get("fingerprint") or ())
+        scope_changed = scope_changed or bool(
+            initial_global_fingerprint
+            and final_global_fingerprint != initial_global_fingerprint
+        )
+    if scope_changed:
         batch.complete = False
         batch.truncated_reason = batch.truncated_reason or "concurrent_change"
         for result in batch.result_sets:

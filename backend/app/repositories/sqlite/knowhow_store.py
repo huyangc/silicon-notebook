@@ -759,6 +759,48 @@ class KnowhowStore:
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
         return self.knowhow_table_health_inputs(notebook_id)
 
+    def knowhow_enumeration_catalog(
+        self, notebook_id: str, *, limit: int = 8, query: str = ""
+    ) -> dict:
+        """Read bounded enumeration metadata without health/code hydration."""
+        effective_limit = max(1, min(int(limit), 8))
+        query_key = str(query or "").casefold()
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT t.id,t.title,t.mutation_seq,"
+                "(SELECT COUNT(*) FROM knowhow_rows r WHERE r.table_id=t.id) AS row_count,"
+                "(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch "
+                "WHERE ch.table_id=t.id) AS enumeration_seq "
+                "FROM knowhow_tables t WHERE t.notebook_id=? "
+                "ORDER BY CASE WHEN ?<>'' AND instr(?,lower(t.title))>0 "
+                "THEN 0 ELSE 1 END,lower(t.title),t.id COLLATE BINARY LIMIT ?",
+                (notebook_id, query_key, query_key, effective_limit),
+            ).fetchall()
+            aggregate = db.execute(
+                "WITH catalog AS ("
+                "SELECT t.id,t.mutation_seq,"
+                "(SELECT COUNT(*) FROM knowhow_rows r WHERE r.table_id=t.id) AS row_count,"
+                "(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch "
+                "WHERE ch.table_id=t.id) AS enumeration_seq "
+                "FROM knowhow_tables t WHERE t.notebook_id=?"
+                ") SELECT COUNT(*) AS known_tables,"
+                "COALESCE(SUM(row_count),0) AS known_total_rows,"
+                "COALESCE(SUM(mutation_seq),0) AS mutation_sum,"
+                "COALESCE(SUM(enumeration_seq),0) AS enumeration_sum FROM catalog",
+                (notebook_id,),
+            ).fetchone()
+        return {
+            "tables": [dict(row) for row in rows],
+            "known_tables": int(aggregate["known_tables"] or 0),
+            "known_total_rows": int(aggregate["known_total_rows"] or 0),
+            "fingerprint": [
+                int(aggregate["known_tables"] or 0),
+                int(aggregate["known_total_rows"] or 0),
+                int(aggregate["mutation_sum"] or 0),
+                int(aggregate["enumeration_sum"] or 0),
+            ],
+        }
+
     def enumerate_knowhow_rows(
         self,
         notebook_id: str,

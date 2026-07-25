@@ -1470,6 +1470,19 @@ class IndexProjectionStorePort(Protocol):
 @runtime_checkable
 class KnowhowStorePort(Protocol):
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]: ...
+    def knowhow_enumeration_catalog(
+        self, notebook_id: str, *, limit: int = 8, query: str = ""
+    ) -> dict:
+        """Return bounded table metadata plus aggregate collection coverage.
+
+        The table list is capped by ``limit`` and never hydrates cells, code
+        attachments, projection health, or source payloads.  Aggregate counts
+        and sequence sums cover the whole notebook so callers can distinguish a
+        complete selected table from a partial multi-table batch.  When
+        ``query`` names a table, matching titles are placed first so an explicit
+        target remains reachable even beyond the bounded catalog window.
+        """
+        ...
     def enumerate_knowhow_rows(
         self,
         notebook_id: str,

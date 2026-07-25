@@ -44,7 +44,7 @@ import {
 import {
   STRUCTURED_ENUMERATION_LIMITS,
 } from "./ask-retrieval-effort";
-import type { AskResponse, KnowhowResultSet } from "./workspace-model";
+import type { AskResponse, KnowhowBatchCoverage, KnowhowResultSet } from "./workspace-model";
 import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
 
@@ -141,14 +141,37 @@ function KnowhowResultSetCard({
 
 function KnowhowResultSets({
   resultSets,
+  batchCoverage,
   onOpenKnowhowRow,
 }: {
   resultSets: KnowhowResultSet[] | undefined;
+  batchCoverage: KnowhowBatchCoverage | undefined;
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
 }) {
   if (!resultSets?.length) return null;
   return (
     <div className="answer-knowhow-results">
+      {batchCoverage && (
+        <section className="answer-knowhow-batch-coverage" aria-label="Knowhow 总体覆盖">
+          <span className={`tag ${batchCoverage.complete ? "answer-grounded" : "answer-overview"}`}>
+            总体{batchCoverage.complete ? "完整" : "部分"}
+          </span>
+          <span>
+            表 {batchCoverage.selected_tables}/{batchCoverage.known_tables}；行 {batchCoverage.returned_rows}/{batchCoverage.known_total_rows}
+          </span>
+          {batchCoverage.synthesis_complete != null && (
+            <span>
+              分析覆盖 {batchCoverage.synthesis_rows}/{batchCoverage.known_total_rows}
+              （{batchCoverage.synthesis_complete ? "完整" : "部分"}）
+            </span>
+          )}
+          {!batchCoverage.complete && batchCoverage.truncated_reason && (
+            <span className="answer-knowhow-partial-reason">
+              截断原因：{batchCoverage.truncated_reason}
+            </span>
+          )}
+        </section>
+      )}
       {resultSets.map((resultSet) => (
         <KnowhowResultSetCard
           key={`${resultSet.table_id}-${resultSet.title}`}
@@ -642,6 +665,7 @@ export function AnswerView({
       />
       <KnowhowResultSets
         resultSets={answer.result_sets}
+        batchCoverage={answer.result_coverage}
         onOpenKnowhowRow={onOpenKnowhowRow}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (

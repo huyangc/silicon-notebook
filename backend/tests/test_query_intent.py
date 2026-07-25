@@ -103,6 +103,10 @@ def test_explicit_non_complete_wording_does_not_force_collection_scan():
     assert contract["result_scope"] == "ranked"
     assert contract["completeness_required"] is False
 
+    ranked = plan_query_intent(None, "并非必须列出所有方法，只给最相关的")
+    assert ranked["result_scope"] == "ranked"
+    assert ranked["completeness_required"] is False
+
     ownership = plan_query_intent(None, "解释所有权问题")
     assert ownership["result_scope"] == "ranked"
 
@@ -117,6 +121,21 @@ def test_explicit_non_complete_wording_does_not_force_collection_scan():
         contract = plan_query_intent(None, question)
         assert contract["result_scope"] == "ranked", question
         assert contract["completeness_required"] is False, question
+
+
+@pytest.mark.parametrize(
+    ("question", "scope"),
+    [
+        ("介绍数量控制方法的适用范围", "ranked"),
+        ("不是所有方法都适用，请列出所有方法", "complete"),
+        ("列出每种方法", "complete"),
+        ("统计各方法的数量并比较优缺点", "hybrid"),
+    ],
+)
+def test_collection_scope_is_classified_per_instruction_clause(question, scope):
+    contract = plan_query_intent(None, question)
+    assert contract["result_scope"] == scope
+    assert contract["completeness_required"] is (scope != "ranked")
 
 
 def test_model_cannot_upgrade_ambiguous_nouns_to_collection_enumeration():
@@ -256,6 +275,78 @@ def test_confirmed_answers_are_frozen_into_authoritative_research_question():
         ),
     )
     assert payload.intent is not None
+
+
+def test_confirmation_reclassifies_scope_from_final_authoritative_wording():
+    ranked_seed = plan_query_intent(None, "介绍常见方法")
+    complete = finalize_query_intent(
+        ranked_seed, resolved_question="列出所有方法"
+    )
+    assert complete["result_scope"] == "complete"
+    assert complete["completeness_required"] is True
+
+    complete_seed = plan_query_intent(None, "列出所有方法")
+    ranked = finalize_query_intent(
+        complete_seed, resolved_question="只介绍最相关的三个方法"
+    )
+    assert ranked["result_scope"] == "ranked"
+    assert ranked["completeness_required"] is False
+
+
+def test_clarification_answer_is_authoritative_for_collection_scope():
+    ranked_seed = plan_query_intent(None, "列出方法")
+    ranked_seed["ambiguities"] = [{
+        "id": "scope", "question": "全部还是最相关？", "required": True,
+    }]
+    complete = finalize_query_intent(
+        ranked_seed,
+        answers=[{"id": "scope", "answer": "全部"}],
+    )
+    assert complete["result_scope"] == "complete"
+    assert complete["completeness_required"] is True
+
+    complete_seed = plan_query_intent(None, "列出所有方法")
+    complete_seed["ambiguities"] = [{
+        "id": "scope", "question": "全部还是最相关？", "required": True,
+    }]
+    ranked = finalize_query_intent(
+        complete_seed,
+        answers=[{"id": "scope", "answer": "只给最相关的 10 个"}],
+    )
+    assert ranked["result_scope"] == "ranked"
+    assert ranked["completeness_required"] is False
+
+    for answer in ("不要最相关的，要全部", "不是前 10 个，要全部"):
+        complete_after_negated_rank = finalize_query_intent(
+            ranked_seed,
+            answers=[{"id": "scope", "answer": answer}],
+        )
+        assert complete_after_negated_rank["result_scope"] == "complete"
+        assert complete_after_negated_rank["completeness_required"] is True
+
+    for answer in (
+        "不要统计数量，要全部",
+        "全部，不要统计数量",
+        "不需要总数，只要全部方法",
+        "总数不用，给全部方法",
+        "多少个不重要，把所有方法列出来",
+    ):
+        complete_after_negated_count = finalize_query_intent(
+            ranked_seed,
+            answers=[{"id": "scope", "answer": answer}],
+        )
+        assert complete_after_negated_count["result_scope"] == "complete"
+        assert complete_after_negated_count["completeness_required"] is True
+
+
+def test_clear_auto_confirmation_preserves_original_collection_scope():
+    seed = plan_query_intent(None, "列出所有方法")
+    seed["resolved_question"] = "介绍方法"
+
+    final = finalize_query_intent(seed, resolved_question="介绍方法")
+
+    assert final["result_scope"] == "complete"
+    assert final["completeness_required"] is True
 
 
 def test_confirmed_directions_keep_primary_question_then_round_robin_topics():

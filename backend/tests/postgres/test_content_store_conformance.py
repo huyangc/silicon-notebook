@@ -467,6 +467,20 @@ def test_knowhow_complete_enumeration_matches_sqlite_contract(content_harness):
             },
         )
 
+    catalog = store.knowhow_enumeration_catalog(
+        "nb-content", limit=8, query="Enumeration"
+    )
+    assert catalog["known_tables"] == 1
+    assert catalog["known_total_rows"] == 100
+    assert catalog["tables"] == [{
+        "id": table_id,
+        "title": "Enumeration",
+        "mutation_seq": 0,
+        "row_count": 100,
+        "enumeration_seq": 101,
+    }]
+    assert len(catalog["fingerprint"]) == 4
+
     cursor = None
     seen: list[dict] = []
     while True:

@@ -233,6 +233,37 @@ def test_get_table_orders_columns_and_rows_by_position(store, notebook_id):
 # ---------------------------------------------------------------------------
 
 
+def test_enumeration_catalog_is_lightweight_bounded_and_notebook_scoped(
+    store, repo, notebook_id
+):
+    own_ids = []
+    for index in range(10):
+        table_id = store.create_knowhow_table(
+            notebook_id, f"Catalog {index:02d}", "", BASE_COLUMNS
+        )
+        store.add_knowhow_row(table_id, {})
+        own_ids.append(table_id)
+    other_notebook = repo.create_notebook(NotebookCreate(name="catalog-other")).id
+    store.create_knowhow_table(other_notebook, "Foreign", "", BASE_COLUMNS)
+
+    catalog = store.knowhow_enumeration_catalog(notebook_id, limit=8)
+
+    assert catalog["known_tables"] == 10
+    assert catalog["known_total_rows"] == 10
+    assert len(catalog["tables"]) == 8
+    assert {row["id"] for row in catalog["tables"]}.issubset(set(own_ids))
+    assert all(set(row) == {
+        "id", "title", "mutation_seq", "row_count", "enumeration_seq"
+    } for row in catalog["tables"])
+    assert len(catalog["fingerprint"]) == 4
+
+    named = store.knowhow_enumeration_catalog(
+        notebook_id, limit=8, query="列出 Catalog 09 中的所有方法"
+    )
+    assert named["tables"][0]["id"] == own_ids[9]
+    assert len(named["tables"]) == 8
+
+
 def test_enumerate_rows_pages_100_physical_rows_without_gaps_or_duplicates(
     store, notebook_id
 ):

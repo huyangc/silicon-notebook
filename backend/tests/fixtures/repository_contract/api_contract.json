@@ -908,6 +908,16 @@
               "title": "Related Knowledge",
               "type": "array"
             },
+            "result_coverage": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/StructuredBatchCoverage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "result_sets": {
               "items": {
                 "$ref": "#/components/schemas/StructuredKnowhowResult"
@@ -6572,6 +6582,77 @@
             "element_count"
           ],
           "title": "SourceSummary",
+          "type": "object"
+        },
+        "StructuredBatchCoverage": {
+          "description": "Collection-level coverage, distinct from each selected table's status.",
+          "properties": {
+            "complete": {
+              "default": false,
+              "title": "Complete",
+              "type": "boolean"
+            },
+            "known_tables": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Known Tables",
+              "type": "integer"
+            },
+            "known_total_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Known Total Rows",
+              "type": "integer"
+            },
+            "overflow_semantics": {
+              "default": "",
+              "maxLength": 40,
+              "title": "Overflow Semantics",
+              "type": "string"
+            },
+            "returned_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Returned Rows",
+              "type": "integer"
+            },
+            "scanned_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Scanned Rows",
+              "type": "integer"
+            },
+            "selected_tables": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Selected Tables",
+              "type": "integer"
+            },
+            "synthesis_complete": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Synthesis Complete"
+            },
+            "synthesis_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Synthesis Rows",
+              "type": "integer"
+            },
+            "truncated_reason": {
+              "default": "",
+              "maxLength": 80,
+              "title": "Truncated Reason",
+              "type": "string"
+            }
+          },
+          "title": "StructuredBatchCoverage",
           "type": "object"
         },
         "StructuredKnowhowResult": {

@@ -30,23 +30,45 @@ _INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
 _COMPLETE_REQUEST = re.compile(
     r"(?:全部|所有(?!权|制)|全量|全套|"
     r"完整(?:地)?(?:列出|罗列|枚举|读取|覆盖)|完整(?:的)?(?:清单|列表|集合)|逐一|逐项|"
-    r"每一种|每一项|每一个|列全|无遗漏|穷举)"
+    r"每(?:一)?种|每一项|每一个|列全|无遗漏|穷举)"
     r"|\b(?:all|every|each|entire|exhaustive(?:ly)?|complete\s+list|"
     r"without\s+omission)\b",
     re.IGNORECASE,
 )
 _COMPLETE_NEGATION = re.compile(
-    r"(?:不(?:用|必|需要|要求|是)?|无需|非)"
+    r"(?:不(?:用|必|需要|要求|是)?|无需|并非(?:必须|需要)?|非)"
     r"(?:列出|包含|覆盖|枚举)?(?:全部|所有|完整|逐一|逐项)"
     r"|\b(?:not|do\s+not|don't|no\s+need\s+to)\s+"
     r"(?:need(?:\s+to)?\s+|list\s+)?(?:all|every|each)\b",
     re.IGNORECASE,
 )
+_RANKED_SCOPE_ANSWER = re.compile(
+    r"(?:最相关|最重要|优先级最高|"
+    r"(?:只|仅)(?:要|需|给|列出|返回)?[^，。；?!！？]{0,16}(?:相关|前\s*\d+)|"
+    r"前\s*\d+\s*(?:个|项|条|种)?|\btop\s*[-:]?\s*\d+\b|"
+    r"(?:不(?:用|需要|必)|无需|并非(?:必须|需要)?)[^，。；?!！？]{0,12}(?:全部|所有))",
+    re.IGNORECASE,
+)
+_RANKED_POSITIVE_NEGATION = re.compile(
+    r"(?:不要|不是|并非|不(?:取|选|看)|别)\s*$",
+    re.IGNORECASE,
+)
 _AGGREGATE_REQUEST = re.compile(
     r"(?:一共(?:有)?多少(?:种|个|项|条|行|类|张)|有多少(?:种|个|项|条|行|类|张)|"
-    r"多少(?:种|个|项|条|行|类|张)|总数|数量|"
-    r"统计(?:一下|下)?(?:总数|数量|有多少|多少)|(?:按[^，。；?!！？]{1,40})?分组(?:统计|汇总)|分类汇总)"
+    r"多少(?:种|个|项|条|行|类|张)|总数|"
+    r"数量(?:是|为|有)?多少|"
+    r"统计(?:一下|下)?[^，。；?!！？]{0,40}(?:总数|数量|有多少|多少)|"
+    r"(?:按[^，。；?!！？]{1,40})?分组(?:统计|汇总)|分类汇总)"
     r"|\b(?:how\s+many|count|aggregate|group\s+by|in\s+total|total\s+(?:number|count))\b",
+    re.IGNORECASE,
+)
+_AGGREGATE_PREFIX_NEGATION = re.compile(
+    r"(?:不要|无需|并非|不是|不(?:需要|用|必|要))\s*$",
+    re.IGNORECASE,
+)
+_AGGREGATE_SUFFIX_NEGATION = re.compile(
+    r"^\s*(?:不要|无需|不(?:用|需要|重要|必|要|统计)|"
+    r"并非(?:重点|所需)|不是(?:重点|所需))",
     re.IGNORECASE,
 )
 _ANALYSIS_REQUEST = re.compile(
@@ -56,6 +78,63 @@ _ANALYSIS_REQUEST = re.compile(
     r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
     re.IGNORECASE,
 )
+
+
+def _complete_match_is_negated(question: str, match: re.Match) -> bool:
+    prefix = question[max(0, match.start() - 24):match.start()]
+    prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]
+    return bool(_COMPLETE_NEGATION.search(prefix + match.group(0)))
+
+
+def _has_unnegated_complete_request(question: str) -> bool:
+    """Return true when at least one completeness instruction is not negated.
+
+    Negation is deliberately local to each lexical match.  A sentence may state
+    that not every item is applicable and then independently ask to list every
+    item; a negation in the first clause must not cancel the later instruction.
+    """
+    for match in _COMPLETE_REQUEST.finditer(question):
+        if not _complete_match_is_negated(question, match):
+            return True
+    return False
+
+
+def _aggregate_match_is_negated(question: str, match: re.Match) -> bool:
+    prefix = question[max(0, match.start() - 16):match.start()]
+    prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]
+    suffix = question[match.end():match.end() + 16]
+    suffix = re.split(r"[，,。；;!?！？]", suffix)[0]
+    return bool(
+        _AGGREGATE_PREFIX_NEGATION.search(prefix)
+        or _AGGREGATE_SUFFIX_NEGATION.search(suffix)
+    )
+
+
+def _has_unnegated_aggregate_request(question: str) -> bool:
+    return any(
+        not _aggregate_match_is_negated(question, match)
+        for match in _AGGREGATE_REQUEST.finditer(question)
+    )
+
+
+def _clarification_scope_signal(answer: str) -> str:
+    """Return the last non-negated explicit scope choice in an answer."""
+    signals: list[tuple[int, str]] = []
+    for match in _COMPLETE_REQUEST.finditer(answer):
+        if not _complete_match_is_negated(answer, match):
+            signals.append((match.start(), "complete"))
+    for match in _AGGREGATE_REQUEST.finditer(answer):
+        if not _aggregate_match_is_negated(answer, match):
+            signals.append((match.start(), "aggregate"))
+    for match in _RANKED_SCOPE_ANSWER.finditer(answer):
+        matched = match.group(0)
+        is_negative_complete = bool(_COMPLETE_NEGATION.search(matched))
+        prefix = answer[max(0, match.start() - 12):match.start()]
+        prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]
+        if not is_negative_complete and _RANKED_POSITIVE_NEGATION.search(prefix):
+            continue
+        signals.append((match.start(), "ranked"))
+    return max(signals, default=(-1, ""), key=lambda row: row[0])[1]
 
 
 def _result_scope(data: dict, question: str) -> tuple[str, bool]:
@@ -73,16 +152,13 @@ def _result_scope(data: dict, question: str) -> tuple[str, bool]:
     # instruction to scan an entire table.
     raw_scope = str(data.get("result_scope") or "ranked").strip().lower()
     scope = raw_scope if raw_scope in RESULT_SCOPES else "ranked"
-    wants_complete = bool(
-        _COMPLETE_REQUEST.search(question)
-        and not _COMPLETE_NEGATION.search(question)
-    )
-    wants_aggregate = bool(_AGGREGATE_REQUEST.search(question))
+    wants_complete = _has_unnegated_complete_request(question)
+    wants_aggregate = _has_unnegated_aggregate_request(question)
     wants_analysis = bool(_ANALYSIS_REQUEST.search(question))
     if wants_aggregate:
         # "列出所有方法并比较优缺点" remains hybrid; a plain exact count/group
         # is aggregate.  Both still require complete collection coverage.
-        scope = "hybrid" if wants_complete and wants_analysis else "aggregate"
+        scope = "hybrid" if wants_analysis else "aggregate"
     elif wants_complete:
         scope = "hybrid" if wants_analysis else "complete"
     else:
@@ -289,8 +365,38 @@ def finalize_query_intent(
         "answer": answer,
     } for ambiguity_id, answer in submitted.items()]
     final = dict(seed)
+    # The user-visible confirmation field is authoritative when it was edited
+    # (or clarification answers changed the reviewed direction).  A clear
+    # auto-confirmed preview is different: product policy keeps the original
+    # wording authoritative, so a model normalization that drops "all" must not
+    # silently downgrade the deterministic scope.
+    seed_resolved = str(seed.get("resolved_question") or "").strip()
+    wording_changed = bool(
+        str(resolved_question or "").strip()
+        and str(resolved_question or "").strip() != seed_resolved
+    )
+    if answer_rows:
+        answer_text = "\n".join(row["answer"] for row in answer_rows)
+        answer_scope = _clarification_scope_signal(answer_text)
+        if answer_scope == "ranked":
+            result_scope, completeness_required = "ranked", False
+        elif answer_scope in {"complete", "aggregate"}:
+            # Answers are authoritative for collection scope, while the
+            # confirmed wording still supplies analysis/aggregation context.
+            result_scope, completeness_required = _result_scope(
+                {}, f"{resolved}\n{answer_text}"
+            )
+        else:
+            result_scope, completeness_required = _result_scope({}, resolved)
+    elif wording_changed:
+        result_scope, completeness_required = _result_scope({}, resolved)
+    else:
+        result_scope = str(seed.get("result_scope") or "ranked")
+        completeness_required = bool(seed.get("completeness_required"))
     final.update(
         resolved_question=resolved,
+        result_scope=result_scope,
+        completeness_required=completeness_required,
         ambiguities=[],
         needs_clarification=False,
         confirmed=True,

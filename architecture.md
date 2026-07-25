@@ -244,6 +244,8 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 `QueryIntentContract.result_scope` 用 `ranked` / `complete` / `aggregate` / `hybrid` 分开相关性检索与集合问题。`structured_retrieval.py` 仅对可识别的 Knowhow 集合请求启用，调用 repository port 的稳定 `(table_id, position, row_id)` 游标逐页枚举，持久化回答则携带结构化 result set 与 coverage；普通 KG/element/Memory 集合尚无完整枚举器，仍只返回相关性命中并披露边界。五档共享同一安全线：25 行/页、50 页、1,250 物理行/请求、8 表、每表 8 列、单元格模型摘录 1,000 字符、结构化载荷 256,000 字符、正文内联 100 行、结果卡初始显示 20 行。正文与初始显示阈值不删除已经回传的结构化行。只有游标耗尽，且枚举前后 `mutation_seq`、history-backed `enumeration_seq`、行数、列元数据和所选表范围全部稳定，才发布 `complete=true`；`enumeration_seq` 会随行增删历史原子推进，因此等量删一增一也会被判为并发变化。任一行/页/表/列/载荷上限触顶或并发改表都发布 `complete=false` + `explicit_partial`。因此一张 100 行表可证明并显示 `100/100`，而低档位也不能缩小显式“全部”的枚举上限。
 
+执行边界是可证明的物理行语义，而不是所有被分类为集合的问题：确认后按最终措辞与权威澄清答案重算 scope；只有整表清单、直接物理行/记录计数及其 hybrid 可执行，“多少种”等 distinct/type count、条件筛选、group-by 必须回退并披露不支持完整。选择范围使用最多 8 个描述的轻量 catalog，不读取格、代码附件或健康 payload；截窗前按查询优先纳入显式点名表，全库聚合计数/序列用于 batch 稳定性。响应分开 per-table、batch 与 synthesis coverage，所以 200/200 枚举配 100/200 模型预览是“枚举完整、分析部分”，8 表截断仅使 batch partial。KG/Memory/chain 共享 KG 字符硬预算，结构化预览/chunk/direct element 共享原文字符硬预算，最终证据块不超过两者之和。
+
 ### 3.4 Memory 与 Agent MCP
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时

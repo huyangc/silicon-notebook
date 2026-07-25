@@ -84,8 +84,8 @@ export function retrievalEffortThresholdText(id: AskRetrievalEffortId): string {
   const ranked = effort.ranked;
   const enumeration = STRUCTURED_ENUMERATION_LIMITS;
   return [
-    `${effort.label}：每条查询取 ${ranked.perQuery} 条；最终证据至少 ${ranked.finalFloor} 条、每个问题方面增加 ${ranked.finalAspect} 条、最多 ${ranked.finalCap} 条；最多 ${ranked.maxSteps} 个推理步骤、${ranked.maxSubqueries} 条首轮子查询；知识图谱/原文上下文最多 ${ranked.kgContextChars}/${ranked.chunkContextChars} 字符。`,
+    `${effort.label}：每条查询取 ${ranked.perQuery} 条；最终证据至少 ${ranked.finalFloor} 条、每个问题方面增加 ${ranked.finalAspect} 条、最多 ${ranked.finalCap} 条；最多 ${ranked.maxSteps} 个推理步骤、${ranked.maxSubqueries} 条首轮子查询；知识图谱（含记忆/推导链）/原文（含结构化预览/来源元素）上下文最多 ${ranked.kgContextChars}/${ranked.chunkContextChars} 字符。`,
     "模型可在上述上限内提前停止，但不能突破上限；显式“全部”不会因档位较低而缩小枚举范围。",
-    `完整枚举：每页 ${enumeration.pageRows} 行、最多 ${enumeration.maxPages} 页/${enumeration.maxRows} 行、${enumeration.maxTables} 表/每表 ${enumeration.maxColumns} 列、模型单元格摘录 ${enumeration.cellExcerptChars} 字符、结构化载荷 ${enumeration.payloadChars} 字符；正文内嵌 ${enumeration.inlineAnswerRows} 行，结果卡初始显示 ${enumeration.initialVisibleRows} 行。超过上限明确标记 ${enumeration.overflowReason}（非“完整”）。`,
+    `整表物理行清单/直接计数：每页 ${enumeration.pageRows} 行、最多 ${enumeration.maxPages} 页/${enumeration.maxRows} 行、${enumeration.maxTables} 表/每表 ${enumeration.maxColumns} 列、模型单元格摘录 ${enumeration.cellExcerptChars} 字符、结构化载荷 ${enumeration.payloadChars} 字符；正文及混合分析最多看到 ${enumeration.inlineAnswerRows} 行，结果卡初始显示 ${enumeration.initialVisibleRows} 行。条件筛选、排除重复项、分组目前不声称完整；超过上限明确标记 ${enumeration.overflowReason}。`,
   ].join(" ");
 }

@@ -4,6 +4,8 @@ from app.core.ask_retrieval_policy import ASK_RETRIEVAL_LIMITS
 from app.services.structured_retrieval import (
     enumerate_knowhow,
     is_knowhow_enumeration_query,
+    structured_prompt_block,
+    supports_structured_knowhow_query,
 )
 
 
@@ -21,6 +23,26 @@ class FakeKnowhowStore:
             }
             for table in self.tables
         ]
+
+    def knowhow_enumeration_catalog(self, notebook_id, *, limit=8, query=""):
+        tables = self.list_knowhow_tables(notebook_id)
+        normalized = query.casefold()
+        tables.sort(key=lambda row: (
+            0 if row["title"].casefold() in normalized else 1,
+            row["title"].casefold(),
+            row["id"],
+        ))
+        return {
+            "tables": tables[:limit],
+            "known_tables": len(tables),
+            "known_total_rows": sum(row["row_count"] for row in tables),
+            "fingerprint": [
+                len(tables),
+                sum(row["row_count"] for row in tables),
+                sum(int(table.get("mutation_seq", 1)) for table in self.tables),
+                sum(int(table.get("enumeration_seq", 1)) for table in self.tables),
+            ],
+        }
 
     def enumerate_knowhow_rows(
         self, notebook_id, *, table_ids, cursor=None, page_size=25, column_ids=None
@@ -230,3 +252,89 @@ def test_complete_kg_question_is_not_misrouted_to_knowhow():
     assert is_knowhow_enumeration_query(tables, "所有方法有哪些？") is True
     assert is_knowhow_enumeration_query(tables, "所有概念有哪些？") is False
     assert is_knowhow_enumeration_query(tables, "所有执行条件有哪些？") is False
+
+
+def test_structured_executor_accepts_only_semantics_it_can_prove():
+    assert supports_structured_knowhow_query("所有方法有哪些？", "complete") is True
+    assert supports_structured_knowhow_query("这个表一共有多少行记录？", "aggregate") is True
+    assert supports_structured_knowhow_query("列出所有方法并比较优缺点", "hybrid") is True
+    assert supports_structured_knowhow_query("列出所有低功耗方法", "complete") is False
+    assert supports_structured_knowhow_query("列出所有方法用于低功耗设计", "complete") is False
+    assert supports_structured_knowhow_query(
+        "列出所有方法中适用于低功耗设计的项目", "complete"
+    ) is False
+    assert supports_structured_knowhow_query("这些方法一共有多少种？", "aggregate") is False
+    assert supports_structured_knowhow_query("有多少种低功耗方法", "aggregate") is False
+    assert supports_structured_knowhow_query("按方法类型分组统计", "aggregate") is False
+    assert supports_structured_knowhow_query(
+        "列出所有方法里功耗低于 1mW 的项目", "complete"
+    ) is False
+    assert supports_structured_knowhow_query(
+        "列出所有方法，要求功耗低", "complete"
+    ) is False
+    assert supports_structured_knowhow_query(
+        "列出测试方法中的所有方法",
+        "complete",
+        [{"id": "b", "title": "测试方法"}],
+    ) is True
+
+
+def test_hybrid_preview_separates_enumeration_from_synthesis_coverage():
+    batch = enumerate_knowhow(
+        FakeKnowhowStore([_table(count=200)]),
+        "nb",
+        "列出所有方法并比较优缺点",
+        ASK_RETRIEVAL_LIMITS["standard"],
+    )
+    block = structured_prompt_block(
+        batch,
+        inline_rows=100,
+        cell_excerpt_chars=1_000,
+        budget_chars=30_000,
+    )
+    assert batch.complete is True
+    assert batch.synthesis_rows == 100
+    assert batch.synthesis_complete is False
+    assert "enumeration_complete=true" in block
+    assert "synthesis_complete=false" in block
+    assert "synthesis_rows=100/200" in block
+
+
+def test_table_limit_is_batch_partial_but_selected_tables_remain_complete():
+    batch = enumerate_knowhow(
+        FakeKnowhowStore([
+            _table(f"table-{index}", f"方法表 {index}", 1)
+            for index in range(10)
+        ]),
+        "nb",
+        "所有方法有哪些？",
+        ASK_RETRIEVAL_LIMITS["standard"],
+    )
+    assert batch.complete is False
+    assert batch.truncated_reason == "table_limit"
+    assert batch.known_tables == 10
+    assert batch.selected_tables == 8
+    assert batch.known_total_rows == 10
+    assert batch.returned_rows == 8
+    assert all(result.coverage.complete for result in batch.result_sets)
+    coverage = batch.coverage()
+    assert coverage.complete is False
+    assert coverage.selected_tables == 8
+    assert coverage.known_tables == 10
+
+
+def test_named_table_beyond_global_catalog_window_is_selected_first():
+    batch = enumerate_knowhow(
+        FakeKnowhowStore([
+            _table(f"table-{letter}", f"{letter}表", 1)
+            for letter in "ABCDEFGHIJ"
+        ]),
+        "nb",
+        "列出「I表」中的所有方法",
+        ASK_RETRIEVAL_LIMITS["standard"],
+    )
+
+    assert batch.complete is True
+    assert batch.known_tables == 1
+    assert batch.known_total_rows == batch.returned_rows == 1
+    assert [result.table_id for result in batch.result_sets] == ["table-I"]
