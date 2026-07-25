@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Callable, Sequence
 
 from app.repositories.knowhow_asset_refs import required_asset_ids
@@ -51,6 +52,69 @@ VALID_KINDS = KNOWHOW_COLUMN_KINDS
 #: one exception — its initial column list may name the anchor inline (it
 #: validates the at-most-one rule itself).
 _NON_ANCHOR_KINDS = frozenset({"procedure", "entity", "attribute"})
+
+# Complete-set Ask retrieval advances through physical Knowhow rows instead
+# of reusing the unbounded editor detail read.  These limits are deliberately
+# store-owned protocol constants: callers may request a smaller page, never a
+# larger one, and must first select a small table/column scope.
+KNOWHOW_ENUMERATION_PAGE_SIZE_DEFAULT = 25
+KNOWHOW_ENUMERATION_PAGE_SIZE_MAX = 50
+KNOWHOW_ENUMERATION_MAX_TABLE_IDS = 8
+KNOWHOW_ENUMERATION_MAX_COLUMN_IDS = 8
+
+
+def _enumeration_ids(
+    values: Sequence[str] | None,
+    *,
+    label: str,
+    maximum: int,
+    required: bool = False,
+) -> tuple[str, ...] | None:
+    """Normalize a bounded ID filter without silently widening its scope."""
+    if values is None:
+        if required:
+            raise ValueError(f"{label} is required")
+        return None
+    if isinstance(values, str):
+        values = (values,)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        value = str(raw)
+        if not value:
+            raise ValueError(f"{label} must not contain an empty id")
+        if value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    if required and not normalized:
+        raise ValueError(f"{label} is required")
+    if len(normalized) > maximum:
+        raise ValueError(f"{label} exceeds the maximum of {maximum}")
+    return tuple(normalized)
+
+
+def _enumeration_cursor(cursor: Mapping[str, object] | None) -> tuple[str, int, str] | None:
+    """Validate the complete-set cursor's total ordering key.
+
+    A row ``position`` is only stable within one table, so the table id is a
+    required part of the cursor even though the row-local portion is the
+    familiar ``(position, id)`` pair.
+    """
+    if cursor is None:
+        return None
+    table_id = cursor.get("table_id")
+    position = cursor.get("position")
+    row_id = cursor.get("id")
+    if (
+        not isinstance(table_id, str)
+        or not table_id
+        or isinstance(position, bool)
+        or not isinstance(position, int)
+        or not isinstance(row_id, str)
+        or not row_id
+    ):
+        raise ValueError("cursor must contain table_id, integer position, and id")
+    return table_id, position, row_id
 
 
 class KnowhowStore:
@@ -689,6 +753,275 @@ class KnowhowStore:
 
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
         return self.knowhow_table_health_inputs(notebook_id)
+
+    def knowhow_enumeration_catalog(
+        self, notebook_id: str, *, limit: int = 8, query: str = ""
+    ) -> dict:
+        """Read bounded enumeration metadata without health/code hydration."""
+        effective_limit = max(1, min(int(limit), 8))
+        query_text = str(query or "")
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT t.id,t.title,t.mutation_seq,"
+                "(SELECT COUNT(*) FROM knowhow_rows r WHERE r.table_id=t.id) AS row_count,"
+                "(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch "
+                "WHERE ch.table_id=t.id) AS enumeration_seq "
+                "FROM knowhow_tables t WHERE t.notebook_id=%s "
+                "ORDER BY CASE WHEN %s<>'' AND position(lower(t.title) in lower(%s))>0 "
+                "THEN 0 ELSE 1 END,lower(t.title) COLLATE \"C\","
+                "t.id COLLATE \"C\" LIMIT %s",
+                (notebook_id, query_text, query_text, effective_limit),
+            ).fetchall()
+            aggregate = db.execute(
+                "WITH catalog AS ("
+                "SELECT t.id,t.mutation_seq,"
+                "(SELECT COUNT(*) FROM knowhow_rows r WHERE r.table_id=t.id) AS row_count,"
+                "(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch "
+                "WHERE ch.table_id=t.id) AS enumeration_seq "
+                "FROM knowhow_tables t WHERE t.notebook_id=%s"
+                ") SELECT COUNT(*) AS known_tables,"
+                "COALESCE(SUM(row_count),0) AS known_total_rows,"
+                "COALESCE(SUM(mutation_seq),0) AS mutation_sum,"
+                "COALESCE(SUM(enumeration_seq),0) AS enumeration_sum FROM catalog",
+                (notebook_id,),
+            ).fetchone()
+        return {
+            "tables": [_compat_row(row) for row in rows],
+            "known_tables": int(aggregate["known_tables"] or 0),
+            "known_total_rows": int(aggregate["known_total_rows"] or 0),
+            "fingerprint": [
+                int(aggregate["known_tables"] or 0),
+                int(aggregate["known_total_rows"] or 0),
+                int(aggregate["mutation_sum"] or 0),
+                int(aggregate["enumeration_sum"] or 0),
+            ],
+        }
+
+    def enumerate_knowhow_rows(
+        self,
+        notebook_id: str,
+        *,
+        table_ids: Sequence[str],
+        cursor: Mapping[str, object] | None = None,
+        page_size: int = KNOWHOW_ENUMERATION_PAGE_SIZE_DEFAULT,
+        column_ids: Sequence[str] | None = None,
+    ) -> dict:
+        """Read one bounded, stable page for complete-set Knowhow retrieval.
+
+        ``table_ids`` is deliberately required and capped at
+        :data:`KNOWHOW_ENUMERATION_MAX_TABLE_IDS`; the caller must select the
+        relevant tables from the cheap summary list before it can enumerate
+        rows.  The returned catalog includes those selected tables only when
+        they belong to ``notebook_id`` (foreign ids are indistinguishable from
+        missing ids).  ``column_ids=None`` means every column in that catalog;
+        a supplied list is deduplicated and capped at
+        :data:`KNOWHOW_ENUMERATION_MAX_COLUMN_IDS`.
+
+        Pagination orders physical rows by ``table_id, position, id``.  A
+        page always advances through physical rows, including rows with no
+        selected non-empty cells, so callers can prove coverage rather than
+        mistaking a relevance-style result window for an exhaustive scan.
+        ``page_size`` is clamped to ``1..50`` (default 25).  No transaction is
+        held across pages: callers that need a retry on concurrent edits can
+        compare the catalog's per-table ``mutation_seq`` values.
+        """
+        selected_tables = _enumeration_ids(
+            table_ids,
+            label="table_ids",
+            maximum=KNOWHOW_ENUMERATION_MAX_TABLE_IDS,
+            required=True,
+        )
+        selected_columns = _enumeration_ids(
+            column_ids,
+            label="column_ids",
+            maximum=KNOWHOW_ENUMERATION_MAX_COLUMN_IDS,
+        )
+        stable_cursor = _enumeration_cursor(cursor)
+        effective_page_size = max(
+            1, min(int(page_size), KNOWHOW_ENUMERATION_PAGE_SIZE_MAX)
+        )
+        table_placeholders = ",".join("%s" for _ in selected_tables)
+        table_scope = (
+            f"t.notebook_id = %s AND t.id IN ({table_placeholders})"
+        )
+        table_scope_params: list[object] = [notebook_id, *selected_tables]
+
+        with self.database.connect() as db:
+            catalog_rows = db.execute(
+                "SELECT t.id,t.notebook_id,t.title,t.description,t.mutation_seq,"
+                "(SELECT COUNT(*) FROM knowhow_rows rr WHERE rr.table_id=t.id) "
+                "AS row_count,"
+                "(SELECT COALESCE(MAX(ch.seq),0) FROM knowhow_changes ch "
+                "WHERE ch.table_id=t.id) AS enumeration_seq "
+                "FROM knowhow_tables t "
+                f"WHERE {table_scope} ORDER BY t.id COLLATE \"C\"",
+                table_scope_params,
+            ).fetchall()
+            visible_table_ids = [str(row["id"]) for row in catalog_rows]
+            if not visible_table_ids:
+                return {
+                    "tables": [],
+                    "rows": [],
+                    "next_cursor": None,
+                    "has_more": False,
+                    "page_size": effective_page_size,
+                    "counts": {
+                        "scope_total_rows": 0,
+                        "scope_nonempty_rows": 0,
+                        "page_rows": 0,
+                    },
+                }
+
+            visible_placeholders = ",".join("%s" for _ in visible_table_ids)
+            column_rows = db.execute(
+                "SELECT id,table_id,name,role,position FROM knowhow_columns "
+                f"WHERE table_id IN ({visible_placeholders}) "
+                "ORDER BY table_id COLLATE \"C\",position,id COLLATE \"C\"",
+                visible_table_ids,
+            ).fetchall()
+            columns_by_table: dict[str, list[dict]] = {
+                table_id: [] for table_id in visible_table_ids
+            }
+            for column in column_rows:
+                columns_by_table[str(column["table_id"])].append(
+                    {
+                        "id": column["id"],
+                        "name": column["name"],
+                        "role": column["role"],
+                        "position": column["position"],
+                    }
+                )
+
+            visible_scope = (
+                f"t.notebook_id = %s AND t.id IN ({visible_placeholders})"
+            )
+            visible_scope_params: list[object] = [notebook_id, *visible_table_ids]
+            selected_cell_clause = ""
+            selected_cell_params: list[object] = []
+            if selected_columns is not None:
+                if not selected_columns:
+                    selected_cell_clause = " AND 1=0"
+                else:
+                    selected_cell_clause = (
+                        " AND c.column_id IN ("
+                        + ",".join("%s" for _ in selected_columns)
+                        + ")"
+                    )
+                    selected_cell_params.extend(selected_columns)
+
+            counts = db.execute(
+                "SELECT COUNT(*) AS scope_total_rows,COALESCE(SUM(CASE WHEN EXISTS ("
+                "SELECT 1 FROM knowhow_cells c "
+                "JOIN knowhow_columns kc "
+                "ON kc.id=c.column_id AND kc.table_id=r.table_id "
+                "WHERE c.row_id=r.id AND c.content_md<>''"
+                f"{selected_cell_clause}"
+                ") THEN 1 ELSE 0 END),0) AS scope_nonempty_rows "
+                "FROM knowhow_rows r JOIN knowhow_tables t ON t.id=r.table_id "
+                f"WHERE {visible_scope}",
+                [*selected_cell_params, *visible_scope_params],
+            ).fetchone()
+
+            cursor_clause = ""
+            cursor_params: list[object] = []
+            if stable_cursor is not None:
+                cursor_table_id, cursor_position, cursor_row_id = stable_cursor
+                cursor_clause = (
+                    " AND (t.id COLLATE \"C\" > %s OR "
+                    "(t.id = %s AND (r.position > %s OR "
+                    "(r.position = %s AND r.id COLLATE \"C\" > %s))))"
+                )
+                cursor_params.extend(
+                    [
+                        cursor_table_id,
+                        cursor_table_id,
+                        cursor_position,
+                        cursor_position,
+                        cursor_row_id,
+                    ]
+                )
+            row_rows = db.execute(
+                "SELECT r.id,r.table_id,r.position FROM knowhow_rows r "
+                "JOIN knowhow_tables t ON t.id=r.table_id "
+                f"WHERE {visible_scope}{cursor_clause} "
+                "ORDER BY t.id COLLATE \"C\",r.position,r.id COLLATE \"C\" LIMIT %s",
+                [*visible_scope_params, *cursor_params, effective_page_size + 1],
+            ).fetchall()
+            has_more = len(row_rows) > effective_page_size
+            page_row_rows = row_rows[:effective_page_size]
+            page_row_ids = [str(row["id"]) for row in page_row_rows]
+            cells_by_row: dict[str, dict[str, str]] = {
+                row_id: {} for row_id in page_row_ids
+            }
+            if page_row_ids:
+                row_placeholders = ",".join("%s" for _ in page_row_ids)
+                page_cell_clause = ""
+                page_cell_params: list[object] = []
+                if selected_columns is not None:
+                    if not selected_columns:
+                        page_cell_clause = " AND 1=0"
+                    else:
+                        page_cell_clause = (
+                            " AND c.column_id IN ("
+                            + ",".join("%s" for _ in selected_columns)
+                            + ")"
+                        )
+                        page_cell_params.extend(selected_columns)
+                cell_rows = db.execute(
+                    "SELECT c.row_id,c.column_id,c.content_md FROM knowhow_cells c "
+                    "JOIN knowhow_rows r ON r.id=c.row_id "
+                    "JOIN knowhow_columns kc "
+                    "ON kc.id=c.column_id AND kc.table_id=r.table_id "
+                    f"WHERE c.row_id IN ({row_placeholders}) AND c.content_md<>''"
+                    f"{page_cell_clause} "
+                    "ORDER BY r.table_id COLLATE \"C\",r.position,"
+                    "r.id COLLATE \"C\",kc.position,kc.id COLLATE \"C\"",
+                    [*page_row_ids, *page_cell_params],
+                ).fetchall()
+                for cell in cell_rows:
+                    cells_by_row[str(cell["row_id"])][str(cell["column_id"])] = (
+                        str(cell["content_md"])
+                    )
+
+        next_cursor = None
+        if has_more and page_row_rows:
+            last_row = page_row_rows[-1]
+            next_cursor = {
+                "table_id": last_row["table_id"],
+                "position": int(last_row["position"]),
+                "id": last_row["id"],
+            }
+        return {
+            "tables": [
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "mutation_seq": int(row["mutation_seq"]),
+                    "enumeration_seq": int(row["enumeration_seq"]),
+                    "row_count": int(row["row_count"]),
+                    "columns": columns_by_table[str(row["id"])],
+                }
+                for row in catalog_rows
+            ],
+            "rows": [
+                {
+                    "id": row["id"],
+                    "table_id": row["table_id"],
+                    "position": int(row["position"]),
+                    "cells": cells_by_row[str(row["id"])],
+                }
+                for row in page_row_rows
+            ],
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "page_size": effective_page_size,
+            "counts": {
+                "scope_total_rows": int(counts["scope_total_rows"]),
+                "scope_nonempty_rows": int(counts["scope_nonempty_rows"]),
+                "page_rows": len(page_row_rows),
+            },
+        }
 
     def get_knowhow_table(self, table_id: str) -> dict:
         """Full table detail: columns ordered by position, rows ordered by

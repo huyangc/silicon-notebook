@@ -14,6 +14,8 @@ const contract: QueryIntentContract = {
   objective: "分析一下这个问题",
   resolved_question: "分析电荷泵 PLL",
   intent_type: "diagnose",
+  result_scope: "ranked",
+  completeness_required: false,
   entities: ["电荷泵 PLL"],
   mandatory_topics: [{
     id: "intent-1",

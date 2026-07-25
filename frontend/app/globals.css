@@ -3187,6 +3187,88 @@ button.chat-session-card {
   color: #263241;
 }
 
+.answer-knowhow-results {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.answer-knowhow-batch-coverage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+  font-size: 12px;
+}
+
+.answer-knowhow-result {
+  border: 1px solid #d8dee8;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fbfcff;
+}
+
+.answer-knowhow-result-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 9px;
+  color: #263241;
+  font-size: 13px;
+}
+
+.answer-knowhow-result-heading strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.answer-knowhow-partial-reason,
+.answer-knowhow-coverage-note {
+  color: #8a5a10;
+  font-size: 12px;
+}
+
+.answer-knowhow-coverage-note {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+.answer-knowhow-table th:first-child {
+  width: 48px;
+}
+
+.answer-knowhow-open,
+.answer-knowhow-expand {
+  border: 1px solid #c9d6f7;
+  border-radius: 7px;
+  background: #f2f6ff;
+  color: #1b4fcb;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.answer-knowhow-open {
+  padding: 4px 7px;
+}
+
+.answer-knowhow-expand {
+  margin-top: 9px;
+  padding: 5px 9px;
+}
+
+.answer-knowhow-open:hover,
+.answer-knowhow-expand:hover {
+  border-color: var(--blue);
+  background: #e9f0ff;
+}
+
 .answer-feedback {
   display: flex;
   align-items: center;
@@ -3332,6 +3414,61 @@ button.chat-session-card {
   background: #344054;
   color: #fff;
   border-color: #344054;
+}
+
+.ask-retrieval-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding-left: 7px;
+  margin-left: 3px;
+  border-left: 1px solid #d9dfeb;
+}
+
+.ask-retrieval-effort-label {
+  color: #667085;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ask-retrieval-effort .mode-engine {
+  padding: 4px 7px;
+}
+
+.ask-retrieval-thresholds {
+  position: relative;
+  color: #667085;
+  font-size: 11px;
+}
+
+.ask-retrieval-thresholds summary {
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.ask-retrieval-thresholds summary::-webkit-details-marker {
+  display: none;
+}
+
+.ask-retrieval-thresholds summary::after {
+  content: "⌄";
+  margin-left: 3px;
+}
+
+.ask-retrieval-thresholds[open] > div {
+  position: absolute;
+  z-index: 20;
+  top: 21px;
+  right: 0;
+  width: min(520px, calc(100vw - 48px));
+  padding: 9px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(16, 24, 40, 0.14);
+  color: #475569;
+  line-height: 1.5;
 }
 
 .mode-hint {

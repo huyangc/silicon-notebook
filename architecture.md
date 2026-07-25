@@ -85,7 +85,7 @@ knowledge_relations(notebook_id, source_object_id/target_object_id, id) 覆盖�
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
-- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、mode 注册和 reasoning 迭代。
+- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、Knowhow 稳定游标枚举、mode 注册和 reasoning 迭代；`core/ask_retrieval_policy.py` 集中声明五档预算与完整枚举安全线。
 - `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
 - `memory_service.py` 与 `memory_retrieval.py` 负责 owner/notebook 隔离的生命周期、revision/provenance、两个检索平面、Agent token policy 与 confirmed-only 正式投影；Memory 不写入 source/chunk/KG 表。
 - `parsers.py`、`structural_markdown.py` 与 `mineru_client.py` 负责 PDF、Markdown、DOCX、PPTX、CSV、XLSX 等来源的结构化解析；FastAPI 进程不直接加载 torch 或 MinerU 模型。
@@ -228,6 +228,24 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 当前 Ask mode registry 的默认路径是 `chunk`；`graph` 为严格 KG 路径，`reasoning` 迭代执行计划、检索、反思并流式产出 trace。退役 mode id 只保留兼容映射，不能改回默认模式。
 
+### 3.3.1 逐步推理预算与结构化完整枚举
+
+`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
+
+| id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 |
+|---|---:|---:|---:|---:|
+| `overview` | 4 | 8/2/12 | 4/2 | 4,000/12,000 |
+| `standard` | 8 | 20/3/36 | 8/5 | 6,000/30,000 |
+| `deep` | 8 | 24/4/48 | 16/6 | 8,000/50,000 |
+| `thorough` | 12 | 32/5/64 | 32/8 | 12,000/80,000 |
+| `exhaustive` | 16 | 40/6/96 | 50/10 | 16,000/120,000 |
+
+候选召回不随档位变化，而由部署参数独立控制：`CHUNK_RECALL` 默认 200，分别约束 Chunk/KG 的 ANN 与词法候选窗（默认去重前最多 400）；`RELATION_RECALL` 默认 200，分别约束 Relation ANN 和词法端点扩出的关系总窗（默认去重前最多 400，词法总窗内仍为 source/target 两个方向预留份额）。调整这两个部署值会改变候选窗，界面不把默认值伪装成请求级硬上限。档位只表达“允许多少轮判断与最终证据”。
+
+`QueryIntentContract.result_scope` 用 `ranked` / `complete` / `aggregate` / `hybrid` 分开相关性检索与集合问题。`structured_retrieval.py` 仅对可识别的 Knowhow 集合请求启用，调用 repository port 的稳定 `(table_id, position, row_id)` 游标逐页枚举，持久化回答则携带结构化 result set 与 coverage；普通 KG/element/Memory 集合尚无完整枚举器，仍只返回相关性命中并披露边界。五档共享同一安全线：25 行/页、50 页、1,250 物理行/请求、8 表、每表 8 列、单元格模型摘录 1,000 字符、结构化载荷 256,000 字符、正文内联 100 行、结果卡初始显示 20 行。正文与初始显示阈值不删除已经回传的结构化行。只有游标耗尽，且枚举前后 `mutation_seq`、history-backed `enumeration_seq`、行数、列元数据和所选表范围全部稳定，才发布 `complete=true`；`enumeration_seq` 会随行增删历史原子推进，因此等量删一增一也会被判为并发变化。任一行/页/表/列/载荷上限触顶或并发改表都发布 `complete=false` + `explicit_partial`。因此一张 100 行表可证明并显示 `100/100`，而低档位也不能缩小显式“全部”的枚举上限。
+
+执行边界是可证明的物理行语义，而不是所有被分类为集合的问题：确认后按最终措辞与权威澄清答案重算 scope；只有整表清单、直接物理行/记录计数及其 hybrid 可执行，“多少种”等 distinct/type count、条件筛选、group-by 必须回退并披露不支持完整。选择范围使用最多 8 个描述的轻量 catalog，不读取格、代码附件或健康 payload；截窗前按查询优先纳入显式点名表，全库聚合计数/序列用于 batch 稳定性。响应分开 per-table、batch 与 synthesis coverage，所以 200/200 枚举配 100/200 模型预览是“枚举完整、分析部分”，8 表截断仅使 batch partial。KG/Memory/chain 共享 KG 字符硬预算，结构化预览/chunk/direct element 共享原文字符硬预算，最终证据块不超过两者之和。
+
 ### 3.4 Memory 与 Agent MCP
 
 Ask 回答先生成不落库的 preview，用户编辑确认后写入 owner-private confirmed Memory；LLM 不可用时
@@ -335,7 +353,7 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 | 系统模型服务 | `backend/app/services/model_registry.py`、`model_provider.py`、`model_scheduler.py`、`model_circuit_breaker.py` + model-service status/admin routes | 部署 TOML 绑定 workload；provider 独占 adapter 解析，scheduler 按物理服务独占容量/队列/熔断；状态只读脱敏，admin 探测显式执行，support id 关联维护日志。 |
 | Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。 |
 | KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；所有消费者共享 usable relation 规则。 |
-| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding 与 tier 次序保持分离；mode registry 是 mode 真源。 |
+| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py`、`core/ask_retrieval_policy.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding、tier 次序与集合完整性保持分离；mode registry 是 mode 真源，effort policy 是档位与枚举阈值真源。 |
 | Reports | `backend/app/services/report_engine.py` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义。 |
 | Memory / MCP | `memory_service.py`、`memory_retrieval.py`、`memory_store.py`、`memory_routes.py`、`mcp_server.py` | owner+notebook 隔离；Agent candidate 与 confirmed-only 正式投影分离；token/scope/allowlist 每次调用重校验。 |
 | Knowhow 表 | `backend/app/services/knowhow/`（`projection.py`、`api.py`、`grid_parser.py`、`textops.py`、`assets.py`）+ `repositories/sqlite/knowhow_store.py` + `api/knowhow_agent_routes.py` | 5+1 表 schema 域；唯一零 LLM KG 写入方；变更统一走 `ProjectionScheduler`；代码附件与检索/KG 严格隔离；会话与 Agent 面共享服务核心。 |

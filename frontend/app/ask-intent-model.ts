@@ -17,6 +17,8 @@ export type QueryIntentContract = {
   objective: string;
   resolved_question: string;
   intent_type: string;
+  result_scope: "ranked" | "complete" | "aggregate" | "hybrid";
+  completeness_required: boolean;
   entities: string[];
   mandatory_topics: QueryIntentTopic[];
   comparison_axes: string[];

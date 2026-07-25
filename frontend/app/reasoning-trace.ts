@@ -6,6 +6,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   intent: "理解",
   plan: "规划",
   retrieve: "检索",
+  enumerate: "枚举",
   reflect: "反思",
   expand: "扩展",
   ppr: "漫游",
@@ -74,6 +75,9 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   }
   if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
     return `${detail.sub_queries.length} 个子查询`;
+  }
+  if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {
+    return `${detail.scanned_rows}/${Number(detail.known_total_rows ?? 0)} 行`;
   }
   if (typeof detail.count === "number") return `${detail.count} 个候选`;
   if (typeof detail.found === "number") return `新增 ${detail.found}`;

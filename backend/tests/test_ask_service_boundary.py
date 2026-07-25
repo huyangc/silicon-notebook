@@ -273,6 +273,135 @@ def test_chunk_and_graph_ask_execute_on_declared_ports_only():
     assert not hasattr(service.model_clients, "identity")
 
 
+class _EnumerableKnowhow:
+    def __init__(self):
+        self.catalog_calls = 0
+
+    def list_knowhow_tables(self, notebook_id):
+        raise AssertionError("structured Ask must use the lightweight catalog")
+
+    def knowhow_enumeration_catalog(self, notebook_id, *, limit=8, query=""):
+        self.catalog_calls += 1
+        return {
+            "tables": [{"id": "table-1", "title": "方法表", "row_count": 100}],
+            "known_tables": 1,
+            "known_total_rows": 100,
+            "fingerprint": [1, 100, 1, 0],
+        }
+
+    def enumerate_knowhow_rows(
+        self, notebook_id, *, table_ids, cursor=None, page_size=25, column_ids=None
+    ):
+        start = int((cursor or {}).get("position", -1)) + 1
+        raw_rows = [
+            {
+                "id": f"row-{index}",
+                "table_id": "table-1",
+                "position": index,
+                "cells": (
+                    {"method": f"方法 {index}"}
+                    if column_ids != [] else {}
+                ),
+            }
+            for index in range(start, min(start + page_size, 100))
+        ]
+        has_more = start + len(raw_rows) < 100
+        return {
+            "tables": [{
+                "id": "table-1",
+                "title": "方法表",
+                "description": "",
+                "mutation_seq": 1,
+                "row_count": 100,
+                "columns": [{
+                    "id": "method", "name": "方法", "role": "anchor", "position": 0,
+                }],
+            }],
+            "rows": raw_rows,
+            "next_cursor": (
+                {
+                    "table_id": "table-1",
+                    "position": raw_rows[-1]["position"],
+                    "id": raw_rows[-1]["id"],
+                }
+                if has_more else None
+            ),
+            "has_more": has_more,
+            "counts": {
+                "scope_total_rows": 100,
+                "scope_nonempty_rows": 100,
+                "page_rows": len(raw_rows),
+            },
+        }
+
+
+def test_reasoning_complete_knowhow_bypasses_ranked_top_n_and_model():
+    service = _minimal_ask_service()
+    service.knowhow_store = _EnumerableKnowhow()
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(
+            question="所有方法有哪些？",
+            mode="reasoning",
+            retrieval_effort="overview",
+        ),
+        user_id="user",
+    )
+
+    assert response.llm_mode == "structured"
+    assert response.retrieval_effort == "overview"
+    assert response.result_sets[0].coverage.complete is True
+    assert response.result_sets[0].coverage.returned_rows == 100
+    assert len(response.result_sets[0].rows) == 100
+    assert "100/100" in response.conclusion
+    assert response.result_coverage is not None
+    assert response.result_coverage.complete is True
+    assert service.knowhow_store.catalog_calls == 2
+
+
+def test_reasoning_hybrid_without_kg_keeps_batch_coverage_metadata():
+    service = _minimal_ask_service()
+    service.knowhow_store = _EnumerableKnowhow()
+    service.candidates.has_kg = lambda notebook_id: False
+    service.candidates.any_base_has_kg = lambda notebook_id: False
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(
+            question="列出所有方法并比较优缺点",
+            mode="reasoning",
+        ),
+        user_id="user",
+    )
+
+    assert response.result_sets[0].coverage.complete is True
+    assert response.result_coverage is not None
+    assert response.result_coverage.complete is True
+    assert response.result_coverage.returned_rows == 100
+    assert "尚未构建知识图谱" in response.conclusion
+
+
+def test_reasoning_conditional_complete_query_does_not_claim_full_table():
+    service = _minimal_ask_service()
+    service.knowhow_store = _EnumerableKnowhow()
+    service.model_clients.primary_unconfigured = lambda: True
+
+    response = service.ask_reasoning(
+        "nb",
+        AskRequest(
+            question="列出所有低功耗方法",
+            mode="reasoning",
+        ),
+        user_id="user",
+    )
+
+    assert response.result_sets == []
+    assert response.result_coverage is None
+    assert "不能视为全部结果" in response.conclusion
+    assert service.knowhow_store.catalog_calls == 1
+
+
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():
     from app.api.ask_routes import _stream_ask_events
     from app.services.ask_modes import resolve_mode

@@ -450,6 +450,83 @@ def content_harness(request, tmp_path) -> ContentHarness:
     )
 
 
+def test_knowhow_complete_enumeration_matches_sqlite_contract(content_harness):
+    """Both adapters retain physical rows across bounded complete-set pages."""
+    store = content_harness.knowhow
+    table_id = store.create_knowhow_table(
+        "nb-content", "Enumeration", "", _knowhow_columns(), "user-content"
+    )
+    table = store.get_knowhow_table(table_id)
+    topic_id, procedure_id = [column["id"] for column in table["columns"]]
+    for index in range(100):
+        store.add_knowhow_row(
+            table_id,
+            {
+                topic_id: f"topic-{index}",
+                procedure_id: f"method-{index}" if index != 50 else "  ",
+            },
+        )
+
+    catalog = store.knowhow_enumeration_catalog(
+        "nb-content", limit=8, query="Enumeration"
+    )
+    assert catalog["known_tables"] == 1
+    assert catalog["known_total_rows"] == 100
+    assert catalog["tables"] == [{
+        "id": table_id,
+        "title": "Enumeration",
+        "mutation_seq": 0,
+        "row_count": 100,
+        "enumeration_seq": 101,
+    }]
+    assert len(catalog["fingerprint"]) == 4
+
+    cursor = None
+    seen: list[dict] = []
+    while True:
+        page = store.enumerate_knowhow_rows(
+            "nb-content",
+            table_ids=[table_id],
+            column_ids=[procedure_id],
+            cursor=cursor,
+        )
+        assert page["page_size"] == 25
+        assert page["counts"] == {
+            "scope_total_rows": 100,
+            "scope_nonempty_rows": 100,
+            "page_rows": len(page["rows"]),
+        }
+        assert page["tables"] == [
+            {
+                "id": table_id,
+                "title": "Enumeration",
+                "description": "",
+                "mutation_seq": 0,
+                "enumeration_seq": 101,
+                "row_count": 100,
+                "columns": [
+                    {"id": topic_id, "name": "Topic", "role": "anchor", "position": 0},
+                    {
+                        "id": procedure_id,
+                        "name": "Procedure",
+                        "role": "procedure",
+                        "position": 1,
+                    },
+                ],
+            }
+        ]
+        seen.extend(page["rows"])
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+
+    assert len(seen) == len({row["id"] for row in seen}) == 100
+    assert [row["cells"][procedure_id] for row in seen] == [
+        f"method-{index}" if index != 50 else "  " for index in range(100)
+    ]
+
+
 def test_ask_and_report_state_shapes_match_sqlite_golden(content_harness):
     request = AskRequest(question="What is deterministic state?")
     job_id, conversation_id = content_harness.ask.begin_durable_job(

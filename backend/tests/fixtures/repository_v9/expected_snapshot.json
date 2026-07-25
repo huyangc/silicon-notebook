@@ -312,6 +312,7 @@
               }
             ],
             "related_knowledge": [],
+            "retrieval_effort": "standard",
             "retrieval_query": "Why is fixture gain stable?",
             "top_relevance": 0.91
           }
