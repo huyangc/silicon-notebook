@@ -131,7 +131,150 @@ in the second table. Tune the capture threshold with `DB_WRITE_LOCK_WARN_MS` (de
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 
-## SQLite / PostgreSQL cutover and rollback
+## SQLite → PostgreSQL forward shadow
+
+The delivered shadow path continuously copies SQLite into PostgreSQL without changing the
+active application backend. It is one-way replication, not application dual-write and not
+cutover: keep `DATABASE_URL` on SQLite for the entire procedure. `SHADOW_DATABASE_URL` only
+names the PostgreSQL target; setting it alone starts nothing. Changing `DATABASE_URL` does
+not copy, migrate, or synchronize existing data.
+
+### Prepare and start
+
+Before starting, restore-test current backups of the SQLite database **and storage tree** and
+of the PostgreSQL target, record their evidence IDs, and confirm target free space. Use a
+dedicated PostgreSQL 16 database with UTF-8 and `public.pg_trgm`; do not let applications or
+other migration runs write to it. Run commands from the repository root with an owner-only
+shell and keep their JSON/token output private.
+
+```bash
+export DATABASE_URL=sqlite:////srv/silicon-notebook/silicon_notebook.db
+export SHADOW_DATABASE_URL=postgresql://shadow_user:secret@pg:5432/silicon_notebook_shadow
+export SILICON_NOTEBOOK_STORAGE_DIR=/srv/silicon-notebook/storage
+export RUN_ID=shadow-20260725
+export WORK_DIR=/srv/silicon-notebook/shadow/$RUN_ID
+
+umask 077
+mkdir -p "$WORK_DIR"
+chmod 700 "$WORK_DIR"
+
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py preflight \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json \
+  --disk-evidence-id capacity-20260725 --available-target-bytes 500000000000 \
+  --backup-evidence-id restore-test-20260725 \
+  --confirm-source-backup --confirm-target-restore >"$WORK_DIR/preflight-output.json"
+
+CONFIRMATION_TOKEN="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["confirmation_token"])' \
+  "$WORK_DIR/preflight-output.json")"
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py start-forward \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" \
+  --confirmation-token "$CONFIRMATION_TOKEN"
+
+scripts/shadow.sh start "$RUN_ID" "$WORK_DIR"
+```
+
+`preflight` is read-only and binds the run to the exact live source and target identities,
+schema pair, capacity evidence, and backup/restore confirmations. Re-running it for the same
+private work directory revalidates those bindings and issues a fresh confirmation token.
+`start-forward` is resumable: it installs run-scoped SQLite capture and logical-key guards,
+runs formal PostgreSQL migrations/control setup, creates an atomic SQLite snapshot, copies
+the 60-table baseline, publishes H0, and writes a one-hour worker-start token. If a worker
+restart happens after that token expires, rerun `preflight` and the idempotent `start-forward`
+before starting the supervisor again.
+
+### Monitor and verify
+
+```bash
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py status \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json
+
+# Reissue a fresh confirmation token with preflight before a later verification.
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py verify \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level structural \
+  --confirmation-token "$CONFIRMATION_TOKEN" --json
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py verify \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level full \
+  --confirmation-token "$CONFIRMATION_TOKEN" --json
+```
+
+Healthy operation requires `worker_live=true`, `poison_count=0`, and a checkpoint that
+continues to catch `source_high_water`. Before accepting the shadow as ready for a later,
+separately reviewed cutover phase, observe zero lag for at least 60 seconds and retain two
+consecutive `full/complete` verifier reports at 100% coverage. These results are evidence
+only; this release provides no cutover command and does not authorize changing
+`DATABASE_URL`.
+
+The worker is single-consumer and foreground-only. `scripts/shadow.sh` provides a local
+PID-identity-checked supervisor; production may use systemd or container lifecycle supervision,
+but must still run exactly one worker for the run/direction and send SIGTERM for shutdown.
+SIGTERM/SIGINT finish the current atomic batch, release the exact database-clock lease when
+possible, and otherwise leave only a short expiring lease. Use:
+
+```bash
+scripts/shadow.sh status "$RUN_ID" "$WORK_DIR"
+scripts/shadow.sh stop "$RUN_ID" "$WORK_DIR"
+scripts/shadow.sh restart "$RUN_ID" "$WORK_DIR"
+```
+
+A minimal systemd unit runs that same foreground command. Keep the environment file and
+work directory owned by `silicon-notebook` at `0600`/`0700`, respectively. Because the
+worker-start token expires, use `Restart=no`: after any exit, inspect `status`, rerun
+`preflight` plus idempotent `start-forward` to reissue the token, then start the unit again.
+
+```ini
+[Unit]
+Description=silicon-notebook SQLite to PostgreSQL shadow worker
+After=network-online.target
+
+[Service]
+Type=simple
+User=silicon-notebook
+WorkingDirectory=/opt/silicon-notebook
+EnvironmentFile=/etc/silicon-notebook/shadow.env
+UMask=0077
+ExecStart=/opt/silicon-notebook/.venv/bin/python scripts/shadow_sqlite_to_postgres.py worker --run-id shadow-20260725 --direction forward --work-dir /srv/silicon-notebook/shadow/shadow-20260725 --confirmation-token-file /srv/silicon-notebook/shadow/shadow-20260725/worker.confirmation
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=no
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Failures, retention, and rollback boundary
+
+- Transient connection, serialization, deadlock, lock, and statement-timeout failures retry
+  the whole target transaction with bounded backoff; the checkpoint advances only with the
+  corresponding business rows.
+- A deterministic identity/schema/continuity/conversion/constraint failure creates one
+  redacted poison record and stops progress. Do not delete or skip the event. Stop the
+  worker, preserve both databases and `$WORK_DIR`, diagnose the source/target drift, and use
+  a new reviewed recovery procedure/run rather than mutating control tables by hand.
+- Retention runs best-effort in the worker. It deletes only old, FULL-verified prefixes while
+  respecting active verifier barriers, replay checkpoints, poison positions, and a minimum
+  seven-day/100,000-event tail. Before a first successful FULL verification it retains the
+  log. Retention failure is safe (extra rows remain) and does not stop replication.
+- Keep SQLite and its storage tree backed up throughout shadowing. PostgreSQL contains
+  database rows, not a second copy of uploaded/index files; a future cutover host must have
+  the verified storage tree at the configured path.
+- Stopping the shadow worker does not affect the active SQLite application. There is no
+  PostgreSQL→SQLite replication. Never point application traffic at the shadow or switch
+  `DATABASE_URL` as a recovery shortcut; discard/restore the PostgreSQL shadow or start a new
+  run only after preserving evidence and reviewing the failure.
+
+`scripts/batch_ingest.py` mutation phases remain SQLite-only; keep them pointed at the active
+SQLite source during shadowing.
+
+The authority swap and PostgreSQL→SQLite rollback mechanics belong to the separate
+[formal cutover and rollback plan](./superpowers/plans/2026-07-22-postgresql-cutover-and-rollback.md);
+do not execute that future plan as part of forward shadowing.
+
+## SQLite → PostgreSQL stopped snapshot migration and cutover
+
+This stopped-writer importer is separate from forward shadowing. It uses
+`scripts/migrate_sqlite_to_postgres.py`, must target a different PostgreSQL database, and must
+never run against a database owned by a shadow run.
 
 There is exactly one active database and no application dual-write. The included importer is
 one-way SQLite→PostgreSQL snapshot migration; changing `DATABASE_URL` alone only opens a
@@ -199,6 +342,11 @@ restartability — the final activation pass re-verifies every table's checksum 
 Its credential-free receipt records table counts/checksums, every NUL normalization, and the
 tuning used. Empty retired SQLite tables are recorded but not copied; a non-empty retired table
 fails closed.
+
+The SQLite-only `shadow_capture_control` and `shadow_change_log` tables are operational state,
+not business data: the stopped importer excludes them even when a prior shadow run left rows,
+and records that reviewed exclusion in the receipt. This does not relax the empty-only rule for
+retired user-data tables.
 
 If an import stops partway (crash, dropped remote connection, machine reboot), re-run the same
 command: the copier reuses the checkpoint keyed to the identical stopped source, skips the

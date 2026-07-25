@@ -24,6 +24,7 @@ from app.repositories.postgres.schema_manifest import (
     POSTGRES_JSON_COLUMNS,
     POSTGRES_ROWID_ORDINAL_TABLES,
     POSTGRES_SCHEMA_MANIFEST,
+    SQLITE_MIGRATION_INTERNAL_TABLES,
     SQLITE_RETIRED_TABLES,
 )
 from tests.postgres.conftest import (
@@ -38,6 +39,10 @@ CONTRACT_PATH = REPO_ROOT / "backend" / "tests" / "fixtures" / "postgres_schema_
 MIGRATIONS_PATH = (
     REPO_ROOT / "backend" / "app" / "repositories" / "postgres" / "migrations"
 )
+SQLITE_SHADOW_INTERNAL_TABLES = {
+    "shadow_change_log",
+    "shadow_capture_control",
+}
 
 # These are reviewed application-owned JSON values. Keeping the classification
 # explicit prevents a new TEXT column from silently becoming jsonb merely
@@ -191,6 +196,8 @@ ROWID_TOKEN_SITES: dict[str, tuple[str, ...]] = {
     "app.repositories.sqlite.unified_kg_store:"
     "UnifiedKgStore.mention_scan_matches": ("temp-fts",),
     "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.scratch_vector_rows": ("kg_cluster_scratch",),
+    "app.repositories.sqlite.unified_kg_store:"
     "UnifiedKgStore.seed_payload_rows": ("knowledge_objects",),
     "app.repositories.sqlite.unified_kg_store:"
     "UnifiedKgStore.stream_seed_rows": ("knowledge_objects",),
@@ -248,6 +255,15 @@ ROWID_REVIEWED_NON_ORDINAL: dict[tuple[str, str], str] = {
     ): (
         "FTS docid join (`memory_items_fts f ON f.rowid=m.rowid`), not an "
         "ordering contract — same as list_memories above."
+    ),
+    (
+        "app.repositories.sqlite.unified_kg_store:"
+        "UnifiedKgStore.scratch_vector_rows",
+        "kg_cluster_scratch",
+    ): (
+        "Rebuild scratch rows are transient and never copied as historical "
+        "business state. PostgreSQL reproduces their SQLite insertion order "
+        "by joining knowledge_objects and ordering by its preserved ordinal."
     ),
     (
         "app.repositories.sqlite.unified_kg_store:"
@@ -657,6 +673,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
         str(row["name"])
         for row in table_rows
         if str(row["name"]).startswith("sqlite_")
+        or str(row["name"]) in SQLITE_SHADOW_INTERNAL_TABLES
     }
     ordinary_tables = [
         str(row["name"])
@@ -795,7 +812,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
 
 
 def _fresh_sqlite_contract(tmp_path: Path) -> dict[str, Any]:
-    db_path = tmp_path / "fresh-v29.db"
+    db_path = tmp_path / "fresh-v31.db"
     settings = Settings(database_url=f"sqlite:///{db_path}")
     database = SqliteDatabase(settings, REPO_ROOT)
     try:
@@ -811,7 +828,7 @@ def _reviewed_contract() -> dict[str, Any]:
     return json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
-def test_fresh_sqlite_v29_matches_reviewed_postgres_contract(tmp_path):
+def test_fresh_sqlite_v31_matches_reviewed_postgres_contract(tmp_path):
     actual = _fresh_sqlite_contract(tmp_path)
     if os.environ.get("UPDATE_POSTGRES_SCHEMA_CONTRACT") == "1":
         CONTRACT_PATH.write_text(
@@ -1191,7 +1208,7 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
     assert migrator.migrate() == 9
     assert migrator.migrate() == 9
     assert migrator.current_version() == 9
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 30
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 31
     assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 9
 
 
@@ -1313,6 +1330,7 @@ def test_reviewed_json_and_binary_mappings_cover_only_real_columns(tmp_path):
     assert set(POSTGRES_ROWID_ORDINAL_TABLES) == set(ROWID_ORDER_EVIDENCE)
     assert set(POSTGRES_BUSINESS_TABLES) == set(contract["tables"])
     assert set(SQLITE_RETIRED_TABLES).isdisjoint(POSTGRES_BUSINESS_TABLES)
+    assert set(SQLITE_MIGRATION_INTERNAL_TABLES).isdisjoint(POSTGRES_BUSINESS_TABLES)
     assert contract["ordinal_evidence"] == ROWID_ORDER_EVIDENCE
     fingerprint = hashlib.sha256(
         "\n".join(sorted(contract["tables"])).encode("utf-8")

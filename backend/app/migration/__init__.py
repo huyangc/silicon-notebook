@@ -1,2 +1,1 @@
-"""Offline, operator-owned data migration tools."""
-
+"""Offline, operator-owned snapshot and forward-shadow migration tools."""

@@ -37,6 +37,7 @@ from app.repositories.postgres.schema_manifest import (
     POSTGRES_EMPTY_JSON_LIST_SENTINELS,
     POSTGRES_ROWID_ORDINAL_TABLES,
     POSTGRES_SCHEMA_MANIFEST,
+    SQLITE_MIGRATION_INTERNAL_TABLES,
     SQLITE_RETIRED_TABLES,
 )
 from app.repositories.sqlite.bundle import SqlitePersistenceBundleFactory
@@ -663,7 +664,7 @@ def _sqlite_business_tables(connection: sqlite3.Connection) -> set[str]:
                 f"retired SQLite table {table} contains {count} rows; "
                 "refusing to discard legacy data"
             )
-    return ordinary - retired
+    return ordinary - retired - set(SQLITE_MIGRATION_INTERNAL_TABLES)
 
 
 def _postgres_columns(connection) -> dict[str, tuple[_PostgresColumn, ...]]:
@@ -1812,6 +1813,9 @@ def migrate(
             "after": POSTGRES_SCHEMA_MANIFEST.sqlite_version,
             "applied": list(applied),
             "retired_empty_tables_not_imported": list(SQLITE_RETIRED_TABLES),
+            "migration_internal_tables_not_imported": list(
+                SQLITE_MIGRATION_INTERNAL_TABLES
+            ),
         },
         "target": asdict(target),
         "postgres_schema_version": POSTGRES_SCHEMA_MANIFEST.postgres_version,

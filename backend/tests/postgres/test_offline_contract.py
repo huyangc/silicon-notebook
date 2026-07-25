@@ -367,6 +367,9 @@ def test_pytest_environment_contains_only_password_free_urls_and_mode_0600_pgpas
         f"postgresql://other_user:{auxiliary_secret}@db.example/"
         "silicon_notebook_non_c_test",
     )
+    monkeypatch.setenv(
+        "TEST_POSTGRES_DECOY_OWNER_ROLE", "silicon_notebook_ci_owner_decoy"
+    )
     targets = [
         _prepare_target("primary", "TEST_POSTGRES_URL", "utf8"),
         _prepare_target("non-C", "TEST_POSTGRES_NON_C_URL", "non-c"),
@@ -377,6 +380,9 @@ def test_pytest_environment_contains_only_password_free_urls_and_mode_0600_pgpas
         assert primary_secret not in joined_urls
         assert auxiliary_secret not in joined_urls
         assert "PGPASSWORD" not in env
+        assert env["TEST_POSTGRES_DECOY_OWNER_ROLE"] == (
+            "silicon_notebook_ci_owner_decoy"
+        )
         pgpass_path = Path(env["PGPASSFILE"])
         assert pgpass_path.stat().st_mode & 0o777 == 0o600
         pgpass = pgpass_path.read_text(encoding="utf-8")
@@ -500,12 +506,14 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
 
     monkeypatch.setattr(postgres_lane, "_run_child", fake_child)
     assert _run_isolated_gate([target]) == 0
-    assert len(calls) == 2
+    assert len(calls) == 3
     preflight_command, preflight_env = calls[0]
     pytest_command, pytest_env = calls[1]
+    shadow_command, shadow_env = calls[2]
     assert preflight_command[-1] == "--preflight"
     assert "pytest" in pytest_command
-    assert preflight_env is pytest_env
+    assert "tests/postgres/shadow/test_forward_e2e.py" in shadow_command
+    assert preflight_env is pytest_env is shadow_env
     assert set(poison).isdisjoint(preflight_env)
     assert preflight_env["TEST_POSTGRES_URL"] == (
         "postgresql://lane_user@db.example:64321/"

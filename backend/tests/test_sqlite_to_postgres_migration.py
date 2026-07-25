@@ -307,3 +307,19 @@ def test_retired_sqlite_tables_must_be_empty(tmp_path: Path):
         connection.execute("INSERT INTO articles VALUES ('legacy')")
         with pytest.raises(SqliteToPostgresMigrationError, match="refusing to discard"):
             _sqlite_business_tables(connection)
+
+
+def test_shadow_control_tables_are_operational_not_business_data(tmp_path: Path):
+    source = tmp_path / "shadow-controls.db"
+    with sqlite3.connect(source) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE users(id TEXT PRIMARY KEY)")
+        connection.execute(
+            "CREATE TABLE shadow_capture_control(singleton INTEGER PRIMARY KEY)"
+        )
+        connection.execute(
+            "CREATE TABLE shadow_change_log(seq INTEGER PRIMARY KEY, stable_key TEXT)"
+        )
+        connection.execute("INSERT INTO shadow_capture_control VALUES (1)")
+        connection.execute("INSERT INTO shadow_change_log VALUES (7, 'redacted')")
+        assert _sqlite_business_tables(connection) == {"users"}

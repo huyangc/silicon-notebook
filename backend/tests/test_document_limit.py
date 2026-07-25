@@ -57,9 +57,9 @@ def _insert(repo: SQLiteRepository, notebook_id: str, sid: str, source_type: str
 
 def test_fresh_db_has_app_settings_table_and_upload_limit_column(tmp_path):
     repo = _repo(tmp_path)
-    assert SCHEMA_VERSION == 30
+    assert SCHEMA_VERSION == 31
     with repo._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 30
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 31
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'"
         ).fetchone() is not None
@@ -91,7 +91,7 @@ def test_deployed_v26_db_backfills_app_settings_and_upload_limit(tmp_path):
 
     repo1 = SQLiteRepository(settings)
     with repo1._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 30
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 31
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'"
         ).fetchone() is not None

@@ -1,0 +1,736 @@
+{
+  "schema_pair": {
+    "epoch": 1,
+    "postgres_version": 9,
+    "sqlite_version": 31
+  },
+  "tables": [
+    {
+      "copy_rank": 1,
+      "key_kind": "declared_pk",
+      "name": "app_settings",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "key"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 2,
+      "key_kind": "shadow_unique",
+      "name": "community_members",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "notebook_id",
+        "level",
+        "canonical_id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 3,
+      "key_kind": "declared_pk",
+      "name": "concept_whitelist",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "term"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 4,
+      "key_kind": "declared_pk",
+      "name": "conversations",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 5,
+      "key_kind": "shadow_unique",
+      "name": "kg_canonical_scratch",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "seed",
+        "notebook_id",
+        "run_id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 6,
+      "key_kind": "shadow_unique",
+      "name": "kg_cluster_scratch",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "object_id",
+        "notebook_id",
+        "run_id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 7,
+      "key_kind": "declared_pk",
+      "name": "knowledge_embeddings",
+      "postgres_to_sqlite": "bytea+timestamptz",
+      "replication_key": [
+        "object_id"
+      ],
+      "sqlite_to_postgres": "bytea+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 8,
+      "key_kind": "shadow_unique",
+      "name": "knowledge_object_sources",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "object_id",
+        "source_id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 9,
+      "key_kind": "declared_pk",
+      "name": "object_schemas",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "object_type"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 10,
+      "key_kind": "declared_pk",
+      "name": "system_model_service_status",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "service_id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 11,
+      "key_kind": "declared_pk",
+      "name": "users",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 12,
+      "key_kind": "declared_pk",
+      "name": "agent_profiles",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 13,
+      "key_kind": "declared_pk",
+      "name": "auth_sessions",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "token"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 14,
+      "key_kind": "declared_pk",
+      "name": "model_service_status",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "user_id",
+        "service"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 15,
+      "key_kind": "declared_pk",
+      "name": "notebooks",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 16,
+      "key_kind": "declared_pk",
+      "name": "agent_access_tokens",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 17,
+      "key_kind": "declared_pk",
+      "name": "agent_token_notebooks",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "token_id",
+        "notebook_id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 18,
+      "key_kind": "declared_pk",
+      "name": "answers",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 19,
+      "key_kind": "declared_pk",
+      "name": "ask_jobs",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 20,
+      "key_kind": "declared_pk",
+      "name": "ask_trace_steps",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "job_id",
+        "seq"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 21,
+      "key_kind": "declared_pk",
+      "name": "canonical_relations",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "notebook_id",
+        "canonical_src",
+        "edge_type",
+        "canonical_tgt"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 22,
+      "key_kind": "declared_pk",
+      "name": "communities",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 23,
+      "key_kind": "declared_pk",
+      "name": "concept_clusters",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 24,
+      "key_kind": "declared_pk",
+      "name": "concept_comentions",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "notebook_id",
+        "canonical_a",
+        "canonical_b"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 25,
+      "key_kind": "declared_pk",
+      "name": "concept_merge_candidates",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 26,
+      "key_kind": "declared_pk",
+      "name": "feedback",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 27,
+      "key_kind": "declared_pk",
+      "name": "kg_build_jobs",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 28,
+      "key_kind": "declared_pk",
+      "name": "kg_conflict_candidates",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 29,
+      "key_kind": "declared_pk",
+      "name": "kg_rebuild_checkpoint",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "notebook_id",
+        "input_version",
+        "stage",
+        "item_key"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 30,
+      "key_kind": "declared_pk",
+      "name": "knowhow_tables",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 31,
+      "key_kind": "declared_pk",
+      "name": "knowhow_changes",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 32,
+      "key_kind": "declared_pk",
+      "name": "knowhow_columns",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 33,
+      "key_kind": "declared_pk",
+      "name": "knowhow_milestones",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 34,
+      "key_kind": "declared_pk",
+      "name": "knowhow_rows",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 35,
+      "key_kind": "declared_pk",
+      "name": "knowhow_cell_code",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 36,
+      "key_kind": "declared_pk",
+      "name": "knowhow_cells",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 37,
+      "key_kind": "declared_pk",
+      "name": "knowledge_objects",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 38,
+      "key_kind": "declared_pk",
+      "name": "memory_items",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 39,
+      "key_kind": "declared_pk",
+      "name": "memory_embeddings",
+      "postgres_to_sqlite": "bytea+timestamptz",
+      "replication_key": [
+        "memory_id"
+      ],
+      "sqlite_to_postgres": "bytea+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 40,
+      "key_kind": "declared_pk",
+      "name": "memory_provenance",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 41,
+      "key_kind": "declared_pk",
+      "name": "memory_revisions",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 42,
+      "key_kind": "declared_pk",
+      "name": "mention_edges",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [
+        "notebook_id",
+        "claim_object_id",
+        "concept_canonical_id"
+      ],
+      "sqlite_to_postgres": "identity",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 43,
+      "key_kind": "declared_pk",
+      "name": "merge_review_jobs",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "notebook_id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 44,
+      "key_kind": "declared_pk",
+      "name": "notebook_assets",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 45,
+      "key_kind": "declared_pk",
+      "name": "notebook_bases",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "notebook_id",
+        "base_notebook_id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 46,
+      "key_kind": "declared_pk",
+      "name": "notebook_members",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "notebook_id",
+        "user_id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 47,
+      "key_kind": "declared_pk",
+      "name": "promotion_candidates",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 48,
+      "key_kind": "declared_pk",
+      "name": "reports",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 49,
+      "key_kind": "declared_pk",
+      "name": "sources",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 50,
+      "key_kind": "declared_pk",
+      "name": "chunks",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 51,
+      "key_kind": "declared_pk",
+      "name": "chunk_embeddings",
+      "postgres_to_sqlite": "bytea+timestamptz",
+      "replication_key": [
+        "chunk_id"
+      ],
+      "sqlite_to_postgres": "bytea+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 52,
+      "key_kind": "declared_pk",
+      "name": "extraction_runs",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 53,
+      "key_kind": "declared_pk",
+      "name": "knowledge_relations",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 54,
+      "key_kind": "declared_pk",
+      "name": "relation_embeddings",
+      "postgres_to_sqlite": "bytea+timestamptz",
+      "replication_key": [
+        "relation_id"
+      ],
+      "sqlite_to_postgres": "bytea+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 55,
+      "key_kind": "declared_pk",
+      "name": "source_authors",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 56,
+      "key_kind": "declared_pk",
+      "name": "source_elements",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 57,
+      "key_kind": "declared_pk",
+      "name": "element_embeddings",
+      "postgres_to_sqlite": "bytea+timestamptz",
+      "replication_key": [
+        "element_id"
+      ],
+      "sqlite_to_postgres": "bytea+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 58,
+      "key_kind": "declared_pk",
+      "name": "source_paper_meta",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "source_id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 59,
+      "key_kind": "declared_pk",
+      "name": "unified_kg_state",
+      "postgres_to_sqlite": "timestamptz",
+      "replication_key": [
+        "notebook_id"
+      ],
+      "sqlite_to_postgres": "timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 60,
+      "key_kind": "declared_pk",
+      "name": "user_profiles",
+      "postgres_to_sqlite": "jsonb+timestamptz",
+      "replication_key": [
+        "id"
+      ],
+      "sqlite_to_postgres": "jsonb+timestamptz",
+      "table_class": "replicated"
+    },
+    {
+      "copy_rank": 61,
+      "key_kind": "declared_pk",
+      "name": "chunks_fts",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "rebuilt"
+    },
+    {
+      "copy_rank": 62,
+      "key_kind": "declared_pk",
+      "name": "kg_objects_fts",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "rebuilt"
+    },
+    {
+      "copy_rank": 63,
+      "key_kind": "declared_pk",
+      "name": "memory_items_fts",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "rebuilt"
+    },
+    {
+      "copy_rank": 64,
+      "key_kind": "declared_pk",
+      "name": "shadow_change_log",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "shadow-internal"
+    },
+    {
+      "copy_rank": 65,
+      "key_kind": "declared_pk",
+      "name": "shadow_capture_control",
+      "postgres_to_sqlite": "identity",
+      "replication_key": [],
+      "sqlite_to_postgres": "identity",
+      "table_class": "shadow-internal"
+    }
+  ]
+}

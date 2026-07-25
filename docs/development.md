@@ -11,8 +11,8 @@ This document preserves the contributor-facing architecture summary, verificatio
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 30. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v30 and remains readable. Those migrations
+The current schema version is 31. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v31 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -30,9 +30,121 @@ user_profiles.upload_document_limit column backing the per-notebook document
 limit; v29 deterministically deduplicates cluster memberships and installs the
 unique membership index; v30 adds the sources(notebook_id, file_hash) index
 backing content-hash upload dedup and batch_ingest resume. PostgreSQL's
-checksummed schema manifest currently targets migration v8 and declares
-compatibility with SQLite v29 (the v30 lookup index is a SQLite-only
-performance addition).
+checksummed schema manifest targets migration v9. SQLite v31 adds only the
+inert, payload-free shadow_change_log and shadow_capture_control internal
+tables; run-scoped guard/capture/freeze DDL is installed separately. Guards
+enforce uniqueness immediately after installation, while capture/freeze
+behavior stays disabled until the run control state enables it. PostgreSQL v9
+remains the paired business schema. The temporary
+shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
+identity-bound confirmation, an owned/checksummed removable PostgreSQL control
+schema, revision CAS, and two independently committed reports for the four
+logical-key guards across the exact 60-table epoch-1 manifest. It also includes
+run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
+batch commits with its prefix checkpoint, resume proves that exact target
+prefix without truncating or deleting business rows, seven historical rowids
+copy as explicit ordinals and their catalog-resolved identity sequences reseed,
+and the final forward checkpoint advances atomically to snapshot H0 after the
+v9 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+owner-only real directory and exclusive 0600 temporary creation. COPY fully
+qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
+capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
+dedicated connection to the currently named SQLite file rather than the
+repository thread cache, and binds/rechecks its resolved path and device/inode
+across open and immediately before publication/PG commit. JSONB prefix proof
+normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
+SQL numeric columns remain type-distinct. It uses bounded
+named server cursors plus statement timeouts/cancellation polls, and performs
+full initial/final migration-derived validation of v9 tables, columns,
+constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
+is intentionally lightweight. The final SQLite fence is acquired only after
+the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
+run-progress transaction has actually committed; PG failure publishes no H0
+and releases SQLite. A fail-stop forward replicator primitive now consumes the
+global SQLite sequence contiguously, hydrates current rows only for upserts
+under a short read snapshot, keeps deletes key-only with zero hydrated bytes,
+and commits ordered target rows with its checkpoint after re-locking the
+ledger/all business tables and revalidating the exact catalog. Repeated
+stable keys in the accepted prefix coalesce to the last event and are emitted
+in global last-seq order; raw seq/checkpoint continuity remains unchanged. For
+each identity, the final actual apply overrides any synthetic dependency
+contribution; only dependency-only identities contribute one reference-counted
+synthetic row and its bytes. A short read window ending below the allocated
+high-water is an immediate suffix gap before hydration/apply; a full window
+below high-water probes the adjacent sequence in the same snapshot and fails
+if it is absent. Snapshot and pre-apply gates both require
+`progress.applied_seq` to equal the checkpoint. It uses a
+single lease, capped whole-transaction retries, actual-seq poison records, and
+redacted metrics. Batches are hard-capped at 4,096 events/64 MiB: only one final
+bundle may exceed the byte cap, and a same-key replacement that grows past the
+cap rolls back and defers when another actual bundle is already accepted. FK
+parents come only from the verified current source snapshot through a
+64-row-per-event, byte-counted, batch-deduplicated closure;
+the fixed v9 graph has a branch-counted bound of exactly 9 row slots and no
+suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG9 catalog plans cover all
+82 unique surfaces using NULL; deterministic candidates scoped by indexable
+equality for non-NULL values and `IS NULL` for NULL values on the other unique
+columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
+indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first
+gap only when both int64 bounds are occupied); or same-transaction
+delete/reinsert only for no-incoming-FK leaves with an accepted current-final
+restore row. Parked state is tracked per unique surface and row identity; each
+stagnant pass parks every independently parkable conflict, and a successful
+final apply clears all surfaces parked for that identity. Deferred work is
+capped at 8 passes, 32 actual statements per apply, and 16,384 actual
+statements total. Every SAVEPOINT/ROLLBACK/RELEASE, DML, and candidate query
+counts toward that budget. Ordering, statement, pass, and
+`ProgramLimitExceeded`/`DataError` candidate-search or candidate-update
+capacity exhaustion stays non-poison; `QueryCanceled` remains transient and
+retries the whole transaction. An unparkable UNIQUE at the final source window
+poisons its earliest actual event seq. The worker
+doubles its 256-event/8-MiB window through the hard caps after ordering-blocked; hard-cap
+exhaustion remains non-poison. After claiming the worker, the apply transaction
+rechecks existing poison for that run/direction before any business DML. Poison
+publication also locks and inspects every existing run/direction poison after
+binding/checkpoint validation: an exact replay is ACK-loss success, while a
+differing record is stale and never creates a second poison. SQLite path/file
+binding failures use a dedicated identity error instead of message-based
+conversion classification. At the `open_fresh_live_sqlite` call boundary,
+non-transient `sqlite3.OperationalError` is also a binding failure; locked,
+busy, and interrupted opens remain transient whole-batch retries, and later
+SQLite operational errors keep their existing schema/query classifications.
+Apply, ambiguous commit recognition, and poison
+publication bind snapshot source/target plus the live target identity.
+
+The verifier opens a SQLite read snapshot at `Hv`, streams normalized facts to
+an owner-private disposable spool, releases SQLite before waiting for the PG
+checkpoint, then pins a PostgreSQL `REPEATABLE READ, READ ONLY` snapshot at
+`Ht`. A second SQLite transaction scans every retained dirty key in
+`(Hv, Hseen]`; only those keys are excluded from strict comparison, and the PG
+retention barrier remains live until the report commits. Structural checks
+cover the exact catalog, stable key sets and normalized hashes, source/target
+foreign keys, cascade/unique semantics, and storage-root-confined file
+references. Full checks add selected domain projections, float32
+byte/dimension/norm and sampled-cosine invariants, plus the fixed mixed
+Chinese/English retrieval set with recall@12 loss at most one percentage
+point, top-10 overlap at least 0.90, and exact citation/source-id sets. Cutover
+additionally rechecks that SQLite is still write-frozen, requires
+`Hv=Ht=MAX(seq)`, zero concurrent keys, 100% coverage, and a preceding complete
+full/cutover report. Persistent reports contain only safe table names, hashed
+stable keys, categories, counts, and fixed summaries; a clean report
+supersedes drift only at the same or a stronger verification level.
+
+The explicit operator CLI now owns preflight/start-forward/status/verify and
+the foreground worker lifecycle. The worker holds one database-clock lease,
+finishes its current atomic batch on SIGTERM/INT, and performs conservative
+retention only behind FULL verification, verifier/replay/poison barriers, seven
+days, and 100,000 tail events. Every valid batch outcome emits exactly one
+redacted metric; batch events use the actual accepted/observed raw-event count
+rather than lag, and retries are retained whenever observable.
+`SHADOW_DATABASE_URL` remains inert by itself and is read only by that CLI.
+Cutover, reverse replication, and automatic active-URL changes are not part of
+this phase. Safety-critical PG
+control mutations always take the migration lock, then the control lock, then
+validate the exact live control catalog. A live SQLite transition acquires the
+PG pool, both locks, and the run row before its short `BEGIN IMMEDIATE`, so it
+never waits for a PG pool or advisory lock while holding SQLite.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
