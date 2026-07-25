@@ -779,6 +779,18 @@
               "title": "Question",
               "type": "string"
             },
+            "retrieval_effort": {
+              "default": "standard",
+              "enum": [
+                "overview",
+                "standard",
+                "deep",
+                "thorough",
+                "exhaustive"
+              ],
+              "title": "Retrieval Effort",
+              "type": "string"
+            },
             "scenario": {
               "additionalProperties": {
                 "type": "string"
@@ -895,6 +907,25 @@
               },
               "title": "Related Knowledge",
               "type": "array"
+            },
+            "result_sets": {
+              "items": {
+                "$ref": "#/components/schemas/StructuredKnowhowResult"
+              },
+              "title": "Result Sets",
+              "type": "array"
+            },
+            "retrieval_effort": {
+              "default": "standard",
+              "enum": [
+                "overview",
+                "standard",
+                "deep",
+                "thorough",
+                "exhaustive"
+              ],
+              "title": "Retrieval Effort",
+              "type": "string"
             },
             "retrieval_query": {
               "default": "",
@@ -5416,6 +5447,11 @@
               "title": "Comparison Axes",
               "type": "array"
             },
+            "completeness_required": {
+              "default": false,
+              "title": "Completeness Required",
+              "type": "boolean"
+            },
             "confidence": {
               "default": 0.0,
               "maximum": 1.0,
@@ -5486,6 +5522,17 @@
               "maxLength": 4000,
               "minLength": 1,
               "title": "Resolved Question",
+              "type": "string"
+            },
+            "result_scope": {
+              "default": "ranked",
+              "enum": [
+                "ranked",
+                "complete",
+                "aggregate",
+                "hybrid"
+              ],
+              "title": "Result Scope",
               "type": "string"
             }
           },
@@ -6525,6 +6572,141 @@
             "element_count"
           ],
           "title": "SourceSummary",
+          "type": "object"
+        },
+        "StructuredKnowhowResult": {
+          "description": "Bounded, pageable collection result kept outside ranked evidence top-N.",
+          "properties": {
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/StructuredResultColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "coverage": {
+              "$ref": "#/components/schemas/StructuredResultCoverage"
+            },
+            "kind": {
+              "const": "knowhow",
+              "default": "knowhow",
+              "title": "Kind",
+              "type": "string"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/StructuredResultRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            },
+            "table_id": {
+              "title": "Table Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table_id",
+            "title",
+            "coverage"
+          ],
+          "title": "StructuredKnowhowResult",
+          "type": "object"
+        },
+        "StructuredResultColumn": {
+          "description": "A stable Knowhow column descriptor carried with exhaustive results.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "role": {
+              "default": "attribute",
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "StructuredResultColumn",
+          "type": "object"
+        },
+        "StructuredResultCoverage": {
+          "description": "Proof of what an enumeration did and did not cover.",
+          "properties": {
+            "complete": {
+              "default": false,
+              "title": "Complete",
+              "type": "boolean"
+            },
+            "overflow_semantics": {
+              "default": "",
+              "maxLength": 40,
+              "title": "Overflow Semantics",
+              "type": "string"
+            },
+            "returned_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Returned Rows",
+              "type": "integer"
+            },
+            "scanned_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Scanned Rows",
+              "type": "integer"
+            },
+            "total_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Total Rows",
+              "type": "integer"
+            },
+            "truncated_reason": {
+              "default": "",
+              "maxLength": 80,
+              "title": "Truncated Reason",
+              "type": "string"
+            }
+          },
+          "title": "StructuredResultCoverage",
+          "type": "object"
+        },
+        "StructuredResultRow": {
+          "description": "One directly addressable row; cells are keyed by column id.",
+          "properties": {
+            "cells": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Cells",
+              "type": "object"
+            },
+            "position": {
+              "title": "Position",
+              "type": "integer"
+            },
+            "row_id": {
+              "title": "Row Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "row_id",
+            "position"
+          ],
+          "title": "StructuredResultRow",
           "type": "object"
         },
         "TraceStep": {
@@ -15484,6 +15666,7 @@
       "model_errors": [],
       "reasoning_trace": null,
       "related_knowledge": [],
+      "retrieval_effort": "standard",
       "retrieval_query": "fixture gain",
       "top_relevance": 1.0
     },
@@ -15524,6 +15707,7 @@
             "model_errors": [],
             "reasoning_trace": null,
             "related_knowledge": [],
+            "retrieval_effort": "standard",
             "retrieval_query": "fixture gain",
             "top_relevance": 1.0
           }

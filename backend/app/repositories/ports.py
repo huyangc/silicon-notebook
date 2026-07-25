@@ -951,6 +951,7 @@ class EvidenceContextPort(Protocol):
         hits: Sequence[RetrievedKnowledge],
         *,
         id_offset: int = 0,
+        budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]: ...
     def parse_anchors(
         self,
@@ -1469,6 +1470,26 @@ class IndexProjectionStorePort(Protocol):
 @runtime_checkable
 class KnowhowStorePort(Protocol):
     def list_knowhow_tables(self, notebook_id: str) -> list[dict]: ...
+    def enumerate_knowhow_rows(
+        self,
+        notebook_id: str,
+        *,
+        table_ids: Sequence[str],
+        cursor: Mapping[str, object] | None = None,
+        page_size: int = 25,
+        column_ids: Sequence[str] | None = None,
+    ) -> dict:
+        """Return one complete-set retrieval page without editor hydration.
+
+        ``table_ids`` is required, deduplicated by the adapter, and hard
+        capped at 8; ``column_ids`` is optional and capped at 8.  The default
+        physical-row page is 25 and requests clamp to 50.  Results advance by
+        the stable ``table_id, position, id`` cursor and expose per-table
+        ``mutation_seq`` plus history-backed ``enumeration_seq`` catalog values
+        so a service can reject concurrent content/row-identity edits without
+        changing the projector's existing mutation-sequence semantics.
+        """
+        ...
     def get_knowhow_table(self, table_id: str) -> dict: ...
     def create_knowhow_table(
         self, notebook_id: str, title: str, description: str, columns: list[dict],

@@ -229,6 +229,171 @@ def test_get_table_orders_columns_and_rows_by_position(store, notebook_id):
 
 
 # ---------------------------------------------------------------------------
+# enumerate_knowhow_rows (complete-set retrieval primitive)
+# ---------------------------------------------------------------------------
+
+
+def test_enumerate_rows_pages_100_physical_rows_without_gaps_or_duplicates(
+    store, notebook_id
+):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    columns = _columns_by_name(store, table_id)
+    for index in range(100):
+        store.add_knowhow_row(
+            table_id,
+            {
+                columns["违例类型"]: f"topic-{index}",
+                columns["修复方法"]: f"method-{index}",
+            },
+        )
+
+    cursor = None
+    seen: list[dict] = []
+    while True:
+        page = store.enumerate_knowhow_rows(
+            notebook_id,
+            table_ids=[table_id],
+            column_ids=[columns["修复方法"]],
+            page_size=17,
+            cursor=cursor,
+        )
+        assert page["page_size"] == 17
+        assert page["counts"] == {
+            "scope_total_rows": 100,
+            "scope_nonempty_rows": 100,
+            "page_rows": len(page["rows"]),
+        }
+        assert [table["id"] for table in page["tables"]] == [table_id]
+        assert [column["id"] for column in page["tables"][0]["columns"]] == [
+            columns["违例类型"],
+            columns["现象识别"],
+            columns["修复方法"],
+        ]
+        seen.extend(page["rows"])
+        if not page["has_more"]:
+            assert page["next_cursor"] is None
+            break
+        cursor = page["next_cursor"]
+        assert cursor is not None
+
+    assert len(seen) == 100
+    assert len({row["id"] for row in seen}) == 100
+    assert [row["cells"][columns["修复方法"]] for row in seen] == [
+        f"method-{index}" for index in range(100)
+    ]
+    assert all(set(row["cells"]) == {columns["修复方法"]} for row in seen)
+
+
+def test_enumerate_rows_preserves_empty_physical_rows_and_whitespace_cells(
+    store, notebook_id
+):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    columns = _columns_by_name(store, table_id)
+    populated = store.add_knowhow_row(table_id, {columns["修复方法"]: "method"})
+    empty = store.add_knowhow_row(table_id, {columns["修复方法"]: ""})
+    whitespace = store.add_knowhow_row(table_id, {columns["修复方法"]: "  "})
+
+    page = store.enumerate_knowhow_rows(
+        notebook_id,
+        table_ids=[table_id],
+        column_ids=[columns["修复方法"]],
+    )
+
+    assert page["counts"] == {
+        "scope_total_rows": 3,
+        "scope_nonempty_rows": 2,
+        "page_rows": 3,
+    }
+    assert [row["id"] for row in page["rows"]] == [populated, empty, whitespace]
+    assert page["rows"][1]["cells"] == {}
+    assert page["rows"][2]["cells"] == {columns["修复方法"]: "  "}
+
+
+def test_enumerate_rows_uses_id_tiebreaker_for_equal_positions(store, notebook_id):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    column_id = _columns_by_name(store, table_id)["修复方法"]
+    row_ids = [
+        store.add_knowhow_row(table_id, {column_id: name}, position=7)
+        for name in ("first", "second", "third")
+    ]
+
+    first = store.enumerate_knowhow_rows(
+        notebook_id, table_ids=[table_id], page_size=2
+    )
+    second = store.enumerate_knowhow_rows(
+        notebook_id,
+        table_ids=[table_id],
+        page_size=2,
+        cursor=first["next_cursor"],
+    )
+
+    assert [row["id"] for row in first["rows"]] == sorted(row_ids)[:2]
+    assert [row["id"] for row in second["rows"]] == sorted(row_ids)[2:]
+    assert first["next_cursor"] == {
+        "table_id": table_id,
+        "position": 7,
+        "id": sorted(row_ids)[1],
+    }
+
+
+def test_enumerate_rows_scopes_catalog_and_rows_to_notebook_and_clamps_page(
+    store, repo, notebook_id
+):
+    first = store.create_knowhow_table(notebook_id, "first", "", BASE_COLUMNS)
+    other_notebook = repo.create_notebook(NotebookCreate(name="other")).id
+    foreign = store.create_knowhow_table(other_notebook, "foreign", "", BASE_COLUMNS)
+    column_id = _columns_by_name(store, first)["修复方法"]
+    row_id = store.add_knowhow_row(first, {column_id: "only visible"})
+    store.add_knowhow_row(foreign, {_columns_by_name(store, foreign)["修复方法"]: "hidden"})
+
+    page = store.enumerate_knowhow_rows(
+        notebook_id, table_ids=[foreign, first, first], page_size=1000
+    )
+
+    assert page["page_size"] == 50
+    assert [table["id"] for table in page["tables"]] == [first]
+    assert [row["id"] for row in page["rows"]] == [row_id]
+    assert page["counts"]["scope_total_rows"] == 1
+
+
+def test_enumeration_sequence_detects_equal_count_row_replacement(
+    store, notebook_id
+):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    column_id = _columns_by_name(store, table_id)["修复方法"]
+    old_row = store.add_knowhow_row(table_id, {column_id: "old"})
+    before = store.enumerate_knowhow_rows(
+        notebook_id, table_ids=[table_id], column_ids=[]
+    )["tables"][0]
+
+    store.delete_knowhow_row(old_row)
+    new_row = store.add_knowhow_row(table_id, {column_id: "new"})
+    after_page = store.enumerate_knowhow_rows(
+        notebook_id, table_ids=[table_id], column_ids=[]
+    )
+    after = after_page["tables"][0]
+
+    assert before["row_count"] == after["row_count"] == 1
+    assert before["mutation_seq"] == after["mutation_seq"]
+    assert after["enumeration_seq"] == before["enumeration_seq"] + 2
+    assert [row["id"] for row in after_page["rows"]] == [new_row]
+
+
+def test_enumerate_rows_rejects_unbounded_table_or_column_input(store, notebook_id):
+    table_ids = [f"table-{index}" for index in range(9)]
+    with pytest.raises(ValueError, match="table_ids"):
+        store.enumerate_knowhow_rows(notebook_id, table_ids=table_ids)
+    with pytest.raises(ValueError, match="column_ids"):
+        store.enumerate_knowhow_rows(
+            notebook_id,
+            table_ids=["table-1"],
+            column_ids=[f"column-{index}" for index in range(9)],
+        )
+    with pytest.raises(ValueError, match="table_ids"):
+        store.enumerate_knowhow_rows(notebook_id, table_ids=[])
+
+
+# ---------------------------------------------------------------------------
 # add_knowhow_row
 # ---------------------------------------------------------------------------
 

@@ -10,6 +10,7 @@ import json
 import re
 from typing import Any, Iterable
 
+from app.core.ask_retrieval_policy import RESULT_SCOPES
 from app.services.cancellation import AskCancelled, CancelEvent
 
 
@@ -26,6 +27,68 @@ _GENERIC_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
+_COMPLETE_REQUEST = re.compile(
+    r"(?:全部|所有(?!权|制)|全量|全套|"
+    r"完整(?:地)?(?:列出|罗列|枚举|读取|覆盖)|完整(?:的)?(?:清单|列表|集合)|逐一|逐项|"
+    r"每一种|每一项|每一个|列全|无遗漏|穷举)"
+    r"|\b(?:all|every|each|entire|exhaustive(?:ly)?|complete\s+list|"
+    r"without\s+omission)\b",
+    re.IGNORECASE,
+)
+_COMPLETE_NEGATION = re.compile(
+    r"(?:不(?:用|必|需要|要求|是)?|无需|非)"
+    r"(?:列出|包含|覆盖|枚举)?(?:全部|所有|完整|逐一|逐项)"
+    r"|\b(?:not|do\s+not|don't|no\s+need\s+to)\s+"
+    r"(?:need(?:\s+to)?\s+|list\s+)?(?:all|every|each)\b",
+    re.IGNORECASE,
+)
+_AGGREGATE_REQUEST = re.compile(
+    r"(?:一共(?:有)?多少(?:种|个|项|条|行|类|张)|有多少(?:种|个|项|条|行|类|张)|"
+    r"多少(?:种|个|项|条|行|类|张)|总数|数量|"
+    r"统计(?:一下|下)?(?:总数|数量|有多少|多少)|(?:按[^，。；?!！？]{1,40})?分组(?:统计|汇总)|分类汇总)"
+    r"|\b(?:how\s+many|count|aggregate|group\s+by|in\s+total|total\s+(?:number|count))\b",
+    re.IGNORECASE,
+)
+_ANALYSIS_REQUEST = re.compile(
+    r"(?:并|以及|同时).*(?:分析|比较|对比|优缺点|差异|趋势|原因|建议)"
+    r"|(?:分析|比较|对比|优缺点|差异|趋势|原因|建议).*"
+    r"(?:全部|所有|完整|逐项)"
+    r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
+    re.IGNORECASE,
+)
+
+
+def _result_scope(data: dict, question: str) -> tuple[str, bool]:
+    """Normalize model scope and deterministically protect full-set wording.
+
+    The lexical fallback only upgrades completeness; it never lets a model turn
+    an explicit "all/every" request into ranked top-N.  Explicit negation (for
+    example "不需要所有") prevents a false upgrade.  Exact aggregate requests
+    also require full collection coverage even when they do not list every row.
+    """
+    # Completeness changes the executor from relevance ranking to bounded
+    # collection enumeration, so the model may not upgrade it on its own.
+    # Only deterministic, reviewable request wording below can do that.  This
+    # avoids treating domain nouns such as “统计方法” or “数据完整性” as an
+    # instruction to scan an entire table.
+    raw_scope = str(data.get("result_scope") or "ranked").strip().lower()
+    scope = raw_scope if raw_scope in RESULT_SCOPES else "ranked"
+    wants_complete = bool(
+        _COMPLETE_REQUEST.search(question)
+        and not _COMPLETE_NEGATION.search(question)
+    )
+    wants_aggregate = bool(_AGGREGATE_REQUEST.search(question))
+    wants_analysis = bool(_ANALYSIS_REQUEST.search(question))
+    if wants_aggregate:
+        # "列出所有方法并比较优缺点" remains hybrid; a plain exact count/group
+        # is aggregate.  Both still require complete collection coverage.
+        scope = "hybrid" if wants_complete and wants_analysis else "aggregate"
+    elif wants_complete:
+        scope = "hybrid" if wants_analysis else "complete"
+    else:
+        scope = "ranked"
+    completeness_required = scope != "ranked"
+    return scope, completeness_required
 
 
 def _bounded_strings(value: object, limit: int = 8, item_chars: int = 500) -> list[str]:
@@ -165,10 +228,13 @@ def plan_query_intent(
     normalized_question = (
         str(data.get("normalized_question") or "").strip()[:4000] or question
     )
+    result_scope, completeness_required = _result_scope(data, question)
     return {
         "objective": question,
         "resolved_question": normalized_question,
         "intent_type": intent_type,
+        "result_scope": result_scope,
+        "completeness_required": completeness_required,
         "entities": entities,
         "mandatory_topics": topics,
         "comparison_axes": _bounded_strings(data.get("comparison_axes")),

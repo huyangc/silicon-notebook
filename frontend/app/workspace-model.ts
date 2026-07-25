@@ -312,6 +312,29 @@ export type Citation = {
   tier?: string;
 };
 
+/** 可验证的 Knowhow 行枚举。`cells` 的键是 column id；点击行可打开权威完整单元格。 */
+export type KnowhowResultRow = {
+  row_id: string;
+  position: number;
+  cells: Record<string, string>;
+};
+
+export type KnowhowResultSet = {
+  kind: "knowhow";
+  table_id: string;
+  title: string;
+  columns: { id: string; name: string; role?: string }[];
+  rows: KnowhowResultRow[];
+  coverage: {
+    total_rows: number;
+    scanned_rows: number;
+    returned_rows: number;
+    complete: boolean;
+    truncated_reason?: string | null;
+    overflow_semantics?: "explicit_partial" | "";
+  };
+};
+
 export type AskResponse = {
   answer_id: string;
   conversation_id: string;
@@ -328,6 +351,10 @@ export type AskResponse = {
   reasoning_trace?: ReasoningTraceStep[];
   intent?: import("./ask-intent-model").QueryIntentContract;
   mode?: AskModeId;
+  /** 提交本轮时选的 reasoning 检索档位；历史打开时据此恢复。 */
+  retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
+  /** complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。 */
+  result_sets?: KnowhowResultSet[];
   model_errors?: {
     service_id: string;
     service_name: string;

@@ -77,6 +77,37 @@ def test_effective_top_n_scales_with_aspects():
     assert effective_top_n(s, None, 0) == 20    # 防御:0 方面按 1 算 → floor
 
 
+@pytest.mark.parametrize(
+    ("effort", "n_queries", "expected"),
+    [
+        ("overview", 1, 8),
+        ("overview", 10, 12),
+        ("standard", 1, 20),
+        ("standard", 7, 21),
+        ("standard", 20, 36),
+        ("deep", 10, 40),
+        ("thorough", 20, 64),
+        ("exhaustive", 20, 96),
+    ],
+)
+def test_effective_top_n_uses_retrieval_effort_thresholds(
+    effort, n_queries, expected
+):
+    """档位预算使用集中阈值表；settings 值不应混入已选档位。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import effective_top_n
+
+    class _PoisonSettings:
+        retrieval_top_n = 999
+        reasoning_top_n_per_query = 999
+        reasoning_top_n_cap = 999
+
+    limits = ask_retrieval_limits(effort)
+    assert effective_top_n(_PoisonSettings(), None, n_queries, limits) == expected
+    # 报告/调用方显式 top_n 始终直通，档位不能改写它。
+    assert effective_top_n(_PoisonSettings(), 7, n_queries, limits) == 7
+
+
 def test_reasoning_quota_enabled_default():
     from app.core.config import Settings
     assert Settings().reasoning_quota_enabled is True
@@ -348,6 +379,15 @@ def test_plan_truncates_to_max_subqueries(rrepo):
     rr = _rr_with_llm(rrepo, plan={"sub_queries": [
         {"query": "a"}, {"query": "b"}, {"query": "c"}]})
     assert len(rr.plan("q", "")) == 2
+
+
+def test_plan_accepts_effort_specific_initial_query_cap(rrepo):
+    """run 选档后可覆盖 planner 上限；未传时仍由 settings 管理。"""
+    rrepo.settings.reasoning_max_subqueries = 5
+    rr = _rr_with_llm(rrepo, plan={"sub_queries": [
+        {"query": "a"}, {"query": "b"}, {"query": "c"}]})
+    assert len(rr.plan("q", "", max_subqueries=2)) == 2
+    assert len(rr.plan("q", "")) == 3
 
 
 def test_plan_falls_back_on_bad_json(rrepo):
@@ -1251,6 +1291,69 @@ def test_run_max_steps_override_caps_reflect_loop(rrepo):
     bind_chat_client(rrepo, "reasoning_agent", _LoopLLM())
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
     assert calls["reflect"] <= 2      # 被 max_steps=2 封顶(而非 settings 的 50)
+
+
+def test_run_overview_limits_reviewed_seeds_and_per_query_take(rrepo, monkeypatch):
+    """首位完整问题保护种子必须保留；总种子数和每查询纳入数由档位封顶。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+    ))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    def fake_search(notebook_id, query, types=None, prefer="balanced"):
+        return [_mk_rk(f"{query}-{i}", f"{query}-{i}") for i in range(10)]
+
+    monkeypatch.setattr(retriever, "search", fake_search)
+    result = retriever.run(
+        nb.id,
+        "完整问题",
+        intent_queries=["完整问题", "方向一", "方向二"],
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    # overview:初始查询最多 2 个，每查询纳入 4 条，所以初检索最多 8 条。
+    assert [row["query"] for row in result.attempted] == ["完整问题", "方向一"]
+    retrieve = next(step for step in result.trace if step.step_type == "retrieve")
+    assert retrieve.detail["count"] == 8
+    answer = result.trace[-1]
+    assert answer.detail["top_n"] == 8
+
+
+def test_run_effort_caps_reasoning_steps_even_with_larger_explicit_override(
+    rrepo, monkeypatch
+):
+    """调用方显式 max_steps 可继续收紧档位，但不能把档位硬上限抬高。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    reflects = [{
+        "next_action": "add_subquery",
+        "new_sub_query": {"query": f"补充-{i}"},
+    } for i in range(10)]
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "种子"}]},
+        reflects=reflects,
+    )
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    def fake_search(notebook_id, query, types=None, prefer="balanced"):
+        return [_mk_rk(f"{query}-id", query)]
+
+    monkeypatch.setattr(retriever, "search", fake_search)
+    result = retriever.run(
+        nb.id,
+        "问题",
+        max_steps=40,
+        limits=ask_retrieval_limits("overview"),
+    )
+    assert len([step for step in result.trace if step.step_type == "reflect"]) == 4
 
 
 def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):

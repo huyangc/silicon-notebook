@@ -434,6 +434,8 @@ REPORT_OUTLINE_SCHEMA_HINT = (
 
 QUERY_INTENT_SCHEMA_HINT = (
     '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
+    '"result_scope":"ranked|complete|aggregate|hybrid",'
+    '"completeness_required":false,'
     '"entities":[""],"mandatory_topics":[{"id":"","title":"",'
     '"question":"","retrieval_queries":[""]}],"comparison_axes":[""],'
     '"constraints":[""],"excluded_topics":[""],"expected_output":"",'
@@ -478,7 +480,11 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "normalized_question is a standalone, precise formulation in the user's "
         "language. intent_type classifies the requested operation. entities lists "
         "the concrete research objects. confidence is 0..1 confidence that the "
-        "request is sufficiently specified.\n"
+        "request is sufficiently specified. Classify result_scope as ranked for "
+        "best/most-relevant evidence, complete for an explicit full list, aggregate "
+        "for an exact count/grouping over the whole collection, or hybrid for a "
+        "full list plus analysis. Set completeness_required=true for complete, "
+        "aggregate, and hybrid; a relevance top-N can never satisfy those scopes.\n"
         f"{confirmation_rule}\n"
         f"{history_section}User request: {question}\n\n"
         f"Return JSON only: {QUERY_INTENT_SCHEMA_HINT}"

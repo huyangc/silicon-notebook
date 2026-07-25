@@ -267,6 +267,36 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 
 **`reasoning` —— 意图优先的 agentic 深挖检索。** 正式界面先调用 `/ask/intent`；这一步最多使用当前会话最近五个用户问题，不使用语料派生的助手回答，也不读取语料或创建持久 conversation/job。清晰请求自动确认，阻断性歧义以内联审阅等待补充。`/ask` 与 `/ask/stream` 在原始 `question` 之外接收已审阅的 `intent`；后端确定性冻结合同，形成唯一内部研究问题，供 Memory 检索、PPR、证据检索与答案合成共用。确认后的检索方向直接成为首轮子查询，不再执行旧的第二次问题规划；反思阶段可以按证据增加查询，但不能替换合同。响应持久化确认后的 `intent`、暴露内部 `retrieval_query`，并在正式检索前以 `intent` 作为首个引擎轨迹步骤；会话里保存/显示的仍是原始问题。未携带 `intent` 的直接兼容调用保留清晰问题的旧路径，但遇到确定性无法解析的指代或纯泛化请求会 fail closed。随后委托 `ReasoningRetriever` 检索（与 `graph` 同样走 PPR 传播）、反思是否充分，按需扩图/加子查询直到能回答，并经 NDJSON stream（`/ask/stream`）输出 `reasoning_trace`。遇到显式推导问题时可调用 `follow_chain`：通过两轮有界邻接抽样复用既有 source/target 索引，再确定性检查类型、状态、审核、evidence 与 `validity_scope`；两条存储关系作为可引用前提，`A→C` 只作为带「推断」标记的查询期结论。高度节点抽样被截断且无法证明不存在直接边时，宁可不推。严格 / KG 接地。
 
+### 逐步推理档位与完整集合请求
+
+逐步推理接受下表五个稳定的 `retrieval_effort` 协议 id，默认 `standard`。证据充分时模型可以提前停止，但不能突破任一上限。“最终 floor / aspect / cap”的计算是 `min(cap, max(floor, aspect × 实际执行查询数))`；KG / 原文上下文是注入答案合成 prompt 的字符上限。
+
+| 档位 id | 界面名 | 每查询相关性结果 | 最终 floor / aspect / cap | 最大推理步骤 / 首轮子查询 | KG / 原文上下文字符 |
+|---|---|---:|---:|---:|---:|
+| `overview` | 概览 | 4 | 8 / 2 / 12 | 4 / 2 | 4,000 / 12,000 |
+| `standard` | 标准 | 8 | 20 / 3 / 36 | 8 / 5 | 6,000 / 30,000 |
+| `deep` | 深入 | 8 | 24 / 4 / 48 | 16 / 6 | 8,000 / 50,000 |
+| `thorough` | 详尽 | 12 | 32 / 5 / 64 | 32 / 8 | 12,000 / 80,000 |
+| `exhaustive` | 穷尽 | 16 | 40 / 6 / 96 | 50 / 10 | 16,000 / 120,000 |
+
+候选生成不随档位放大，而由部署参数独立控制。`CHUNK_RECALL` 默认 **200**，分别约束带索引的 Chunk/KG ANN 与词法候选窗（默认去重前最多 400）；`RELATION_RECALL` 默认 **200**，分别约束 Relation ANN 与词法端点扩出的关系 ID 总窗（默认去重前最多 400），词法总窗内部仍为 source/target 两个方向预留份额。修改任一部署值都会改变实际候选窗，因此界面不会把默认值展示成请求级硬上限。
+
+意图预检把结果范围分为 `ranked`、`complete`、`aggregate`、`hybrid`，并带显式完整性标记。像“列出这个 Knowhow 表的所有方法”这样的请求不会变成更大的相关性 Top-N：Knowhow 的 `complete` / `aggregate` / `hybrid` 请求使用稳定行游标直到耗尽，并返回结构化覆盖率，因此 100 行表可以返回 `100/100`。五档共用完全相同的完整枚举安全契约：
+
+| 完整枚举阈值 | 精确上限 |
+|---|---:|
+| 每个游标页的行数 | 25 |
+| 每次请求页数 | 50 |
+| 每次请求扫描/返回的物理行数 | 1,250 |
+| 每次请求的表数 | 8 |
+| 每表选择的列数 | 8 |
+| 交给模型的单元格摘录 | 1,000 字符 |
+| 结构化结果载荷 | 256,000 字符 |
+| 答案正文内联行数 | 100 |
+| 每个结果卡初始显示行数 | 20 |
+
+正文 100 行与界面初始 20 行只控制展示；已经回传到结构化结果中的其余行仍可展开，并能跳回对应 Knowhow 行。只有游标确实耗尽，且枚举前后的投影 `mutation_seq`、基于变更历史的 `enumeration_seq`、行数、列元数据和所选表范围全部稳定，覆盖率才可标成完整。每次行增删都会在同一事务中记录历史，因此即使删一行再加一行、最终行数相同，`enumeration_seq` 也会变化并触发部分结果。触及行、页、表、列、载荷任一安全线，或枚举期间发生并发改表时，必须返回 `complete=false` 与 `explicit_partial` 覆盖语义，绝不能写成“全部”。选择较低档位不会缩小显式“全部”请求的这些枚举上限，只会减少围绕枚举集合的相关性分析和合成工作。当前完整枚举执行器只覆盖 Knowhow 表；若请求完整列举 KG 对象、来源元素、Memory 或其他集合，系统仍只能给相关性排序结果，并必须披露尚不支持完整枚举，不得暗示已穷尽。
+
 退役 id `fast`、`global` 透明映射到 `chunk`（旧会话/书签不会 422）；其余未知 mode 返回 HTTP 422。
 
 ## API
@@ -286,7 +316,7 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 - Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`）、显式的建议式表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`），以及带全库推理取证的单行空列补全建议（`POST .../knowhow/{table_id}/rows/{row_id}/complete`，可选 `target_column_ids`，返回 `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`）
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask/intent` —— `reasoning` 的无语料意图预检；接收 `{question, conversation_id?}`，最多读取当前会话最近五个用户问题，不创建 conversation/job，返回可编辑的问题合同和阻断性歧义；客户端断开时向模型调用传递取消事件
-- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；联合范围遵循上文各 mode 的边界）
+- `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；`reasoning` 可传 `retrieval_effort`，默认 `standard`；集合型回答可带结构化 `result_sets` 与精确覆盖率；联合范围遵循上文各 mode 的边界）
 - `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（先发带持久化 `job_id` 和 `conversation_id` 的 `started` 事件，再发进度/最终事件）；前端用该会话 id 在答案生成前立即入历史并支持重新打开。transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；job 必须属于路径中的 notebook 和当前用户；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；job 必须属于路径中的 notebook 和当前用户；设置取消事件并在保存被取消的最终回答前停止 worker

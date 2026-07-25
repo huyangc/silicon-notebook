@@ -40,6 +40,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 1.0
       },
@@ -82,6 +83,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 1.0
       }
@@ -136,6 +138,7 @@
           }
         ],
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.3
       },
@@ -188,6 +191,7 @@
           }
         ],
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.3
       }
@@ -210,6 +214,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.0
       },
@@ -230,6 +235,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.0
       }
@@ -252,6 +258,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "unrelated-zqxj",
         "top_relevance": 0.0
       },
@@ -272,6 +279,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "unrelated-zqxj",
         "top_relevance": 0.0
       }
@@ -292,6 +300,7 @@
           "assumptions": [],
           "clarification_answers": [],
           "comparison_axes": [],
+          "completeness_required": false,
           "confidence": 0.0,
           "confirmed": true,
           "constraints": [],
@@ -302,7 +311,8 @@
           "mandatory_topics": [],
           "needs_clarification": false,
           "objective": "fixture gain",
-          "resolved_question": "fixture gain"
+          "resolved_question": "fixture gain",
+          "result_scope": "ranked"
         },
         "kg_required": true,
         "llm_mode": "deterministic",
@@ -310,6 +320,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.0
       },
@@ -328,6 +339,7 @@
           "assumptions": [],
           "clarification_answers": [],
           "comparison_axes": [],
+          "completeness_required": false,
           "confidence": 0.0,
           "confirmed": true,
           "constraints": [],
@@ -338,7 +350,8 @@
           "mandatory_topics": [],
           "needs_clarification": false,
           "objective": "fixture gain",
-          "resolved_question": "fixture gain"
+          "resolved_question": "fixture gain",
+          "result_scope": "ranked"
         },
         "kg_required": true,
         "llm_mode": "deterministic",
@@ -346,6 +359,7 @@
         "model_errors": [],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.0
       }
@@ -388,6 +402,7 @@
           "assumptions": [],
           "clarification_answers": [],
           "comparison_axes": [],
+          "completeness_required": false,
           "confidence": 0.0,
           "confirmed": true,
           "constraints": [],
@@ -398,7 +413,8 @@
           "mandatory_topics": [],
           "needs_clarification": false,
           "objective": "fixture gain",
-          "resolved_question": "fixture gain"
+          "resolved_question": "fixture gain",
+          "result_scope": "ranked"
         },
         "kg_required": false,
         "llm_mode": "grounded",
@@ -408,12 +424,15 @@
           {
             "detail": {
               "assumptions": [],
+              "completeness_required": false,
               "constraints": [],
               "entities": [],
               "excluded_topics": [],
               "expected_output": "",
               "mandatory_topics": [],
-              "resolved_question": "fixture gain"
+              "resolved_question": "fixture gain",
+              "result_scope": "ranked",
+              "retrieval_effort": "standard"
             },
             "duration_ms": null,
             "step_type": "intent",
@@ -495,6 +514,7 @@
             "status": "approved"
           }
         ],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 1.0
       },
@@ -535,6 +555,7 @@
           "assumptions": [],
           "clarification_answers": [],
           "comparison_axes": [],
+          "completeness_required": false,
           "confidence": 0.0,
           "confirmed": true,
           "constraints": [],
@@ -545,7 +566,8 @@
           "mandatory_topics": [],
           "needs_clarification": false,
           "objective": "fixture gain",
-          "resolved_question": "fixture gain"
+          "resolved_question": "fixture gain",
+          "result_scope": "ranked"
         },
         "kg_required": false,
         "llm_mode": "grounded",
@@ -555,12 +577,15 @@
           {
             "detail": {
               "assumptions": [],
+              "completeness_required": false,
               "constraints": [],
               "entities": [],
               "excluded_topics": [],
               "expected_output": "",
               "mandatory_topics": [],
-              "resolved_question": "fixture gain"
+              "resolved_question": "fixture gain",
+              "result_scope": "ranked",
+              "retrieval_effort": "standard"
             },
             "duration_ms": null,
             "step_type": "intent",
@@ -642,6 +667,7 @@
             "status": "approved"
           }
         ],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 1.0
       }
@@ -662,6 +688,7 @@
           "assumptions": [],
           "clarification_answers": [],
           "comparison_axes": [],
+          "completeness_required": false,
           "confidence": 0.0,
           "confirmed": true,
           "constraints": [],
@@ -672,7 +699,8 @@
           "mandatory_topics": [],
           "needs_clarification": false,
           "objective": "fixture gain",
-          "resolved_question": "fixture gain"
+          "resolved_question": "fixture gain",
+          "result_scope": "ranked"
         },
         "kg_required": false,
         "llm_mode": "deterministic",
@@ -691,6 +719,7 @@
         ],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.0
       },
@@ -709,6 +738,7 @@
           "assumptions": [],
           "clarification_answers": [],
           "comparison_axes": [],
+          "completeness_required": false,
           "confidence": 0.0,
           "confirmed": true,
           "constraints": [],
@@ -719,7 +749,8 @@
           "mandatory_topics": [],
           "needs_clarification": false,
           "objective": "fixture gain",
-          "resolved_question": "fixture gain"
+          "resolved_question": "fixture gain",
+          "result_scope": "ranked"
         },
         "kg_required": false,
         "llm_mode": "deterministic",
@@ -738,6 +769,7 @@
         ],
         "reasoning_trace": null,
         "related_knowledge": [],
+        "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
         "top_relevance": 0.0
       }

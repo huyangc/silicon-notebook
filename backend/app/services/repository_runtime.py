@@ -1143,6 +1143,7 @@ class RepositoryRuntime:
                     lambda nb: self.knowledge_lifecycle.get_community_reports(nb)
                 ),
                 source_titles=self.source_store.source_titles,
+                knowhow_store=self.knowhow_store,
                 memory_retriever=self.memory_retriever,
                 current_user_id=lambda: self.identity.current_user().id,
                 cancellations=self.ask_cancellations,

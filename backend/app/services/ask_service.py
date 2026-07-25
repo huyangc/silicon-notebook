@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     )
 
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
+from app.core.ask_retrieval_policy import RetrievalEffort, ask_retrieval_limits
 from app.core.config import Settings
 from app.core.llm import cap_kwargs
 from app.models.ask import (
@@ -181,6 +182,7 @@ class AskService:
         schemas,
         community_reports: Callable[[str], list],
         source_titles: Callable[[List[str]], Dict[str, str]],
+        knowhow_store=None,
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
         cancellations=None,
@@ -201,6 +203,7 @@ class AskService:
         self.schemas = schemas
         self.community_reports = community_reports
         self.source_titles = source_titles
+        self.knowhow_store = knowhow_store
         self.memory_retriever = memory_retriever
         self.current_user_id = current_user_id
         self.cancellations = cancellations
@@ -392,9 +395,10 @@ class AskService:
             chunks, notebook_id=notebook_id, budget_chars=budget_chars)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
-                        id_offset: int = 0) -> tuple:
+                        id_offset: int = 0, budget_chars: int | None = None) -> tuple:
         return self.evidence_context.knowledge_context(
-            notebook_id, top_hits, id_offset=id_offset)
+            notebook_id, top_hits, id_offset=id_offset,
+            budget_chars=budget_chars)
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         return self.evidence_context.parse_anchors(answer, id_map)
@@ -764,6 +768,9 @@ class AskService:
         chains=None,
         memory_hits=None,
         answer_client=None,
+        kg_context_chars: int | None = None,
+        chunk_context_chars: int | None = None,
+        structured_block: str = "",
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -783,16 +790,19 @@ class AskService:
             # 数 ≤ ppr_top_chunks×(1 seed + _MAX_PPR_RETRIEVES) ≪ _MIX_KG_KEY_BASE(1000)。
             ordered = sorted(chunks, key=lambda c: (-c.relevance, c.chunk_id))
             chunk_block, chunk_id_map = self._chunk_answer_context(
-                ordered, notebook_id=notebook_id)
+                ordered, notebook_id=notebook_id,
+                budget_chars=chunk_context_chars)
             kg_block, kg_id_map = self._answer_context(
-                notebook_id, top_hits, id_offset=self._MIX_KG_KEY_BASE)
+                notebook_id, top_hits, id_offset=self._MIX_KG_KEY_BASE,
+                budget_chars=kg_context_chars)
             if kg_block and kg_block != "(none)":
                 context_block = f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
             else:
                 context_block = chunk_block
             id_map = {**chunk_id_map, **kg_id_map}
         else:
-            context_block, id_map = self._answer_context(notebook_id, top_hits)
+            context_block, id_map = self._answer_context(
+                notebook_id, top_hits, budget_chars=kg_context_chars)
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
@@ -811,6 +821,8 @@ class AskService:
             if element_block and element_block != "(none)":
                 context_block = f"{context_block}\n\n[Direct source elements]\n{element_block}"
                 id_map = {**id_map, **element_id_map}
+        if structured_block:
+            context_block = f"{context_block}\n\n{structured_block}"
         answer_client = answer_client or self.model_clients.chat("ask_answer")
         refine_client = self.model_clients.chat("evidence_refine")
         context_block = self._refine_context(
@@ -836,13 +848,20 @@ class AskService:
                                      conversation_id: str, mode: str,
                                      *, user_id: str, job_id: str = "",
                                      intent: QueryIntentContract | None = None,
-                                     retrieval_query: str = "") -> AskResponse:
+                                     retrieval_query: str = "",
+                                     retrieval_effort: RetrievalEffort = "standard",
+                                     completeness_unavailable: bool = False) -> AskResponse:
         """系统模型已启用但漏绑问答工作负载时的统一短路响应。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
+        if completeness_unavailable:
+            msg = (
+                "当前完整枚举仅支持 Knowhow 表；本次不能提供完整结果。\n\n"
+                + msg
+            )
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=retrieval_query or question, llm_mode="deterministic",
-            intent=intent)
+            intent=intent, retrieval_effort=retrieval_effort)
         response.mode = mode
         response.model_errors = [
             ModelError(stage="answer", model="", message="missing_config")
@@ -1155,6 +1174,7 @@ class AskService:
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         intent_contract = self._confirmed_reasoning_intent(payload, history)
+        limits = ask_retrieval_limits(payload.retrieval_effort)
         from app.services.query_intent import (
             confirmed_intent_queries,
             confirmed_research_question,
@@ -1173,34 +1193,202 @@ class AskService:
             confirmed_intent_queries(
                 intent_contract.model_dump(),
                 question,
-                # Preserve the normal topic budget and add one whole-question
-                # guard seed so decomposition cannot crowd out the user topic.
-                max_queries=self.settings.reasoning_max_subqueries + 1,
+                # The first slot is always the whole confirmed question; the
+                # remaining slots are reviewed directions within this effort.
+                max_queries=limits.max_initial_subqueries,
                 objective_is_authoritative=auto_confirmed_clear_intent,
             )
             if payload.intent is not None else []
         )
+        intent_step = TraceStep(
+            step_type="intent",
+            summary="已按确认后的问题理解开始检索",
+            detail={
+                "resolved_question": intent_contract.resolved_question,
+                "result_scope": intent_contract.result_scope,
+                "completeness_required": intent_contract.completeness_required,
+                "retrieval_effort": payload.retrieval_effort,
+                "entities": intent_contract.entities,
+                "constraints": intent_contract.constraints,
+                "excluded_topics": intent_contract.excluded_topics,
+                "assumptions": intent_contract.assumptions,
+                "expected_output": intent_contract.expected_output,
+                "mandatory_topics": [
+                    topic.question for topic in intent_contract.mandatory_topics
+                ],
+            },
+        )
+        pre_trace: list[TraceStep] = [intent_step]
+        intent_streamed = False
+
+        def stream_intent() -> None:
+            nonlocal intent_streamed
+            if not intent_streamed and on_trace:
+                on_trace(intent_step)
+            intent_streamed = True
+
+        def checked_pre_trace(step: TraceStep) -> None:
+            raise_if_cancelled(cancel_event)
+            pre_trace.append(step)
+            if on_trace:
+                on_trace(step)
+
+        structured_batch = None
+        completeness_unavailable = False
+        if intent_contract.completeness_required and self.knowhow_store is not None:
+            from app.services.structured_retrieval import (
+                enumerate_knowhow,
+                is_knowhow_enumeration_query,
+                render_structured_answer,
+            )
+            knowhow_tables = self.knowhow_store.list_knowhow_tables(notebook_id)
+            if is_knowhow_enumeration_query(knowhow_tables, research_question):
+                stream_intent()
+                structured_batch = enumerate_knowhow(
+                    self.knowhow_store,
+                    notebook_id,
+                    research_question,
+                    limits,
+                    cancel_event=cancel_event,
+                    on_step=checked_pre_trace,
+                )
+            else:
+                completeness_unavailable = True
+        elif intent_contract.completeness_required:
+            completeness_unavailable = True
+
+        if structured_batch is not None and intent_contract.result_scope in {
+            "complete", "aggregate"
+        }:
+            conclusion, answer = render_structured_answer(
+                structured_batch,
+                aggregate=intent_contract.result_scope == "aggregate",
+                inline_rows=limits.inline_answer_rows,
+                cell_excerpt_chars=limits.cell_excerpt_chars,
+            )
+            answer_step = TraceStep(
+                step_type="answer",
+                summary=(
+                    f"完整枚举 {structured_batch.returned_rows} 行"
+                    if structured_batch.complete else
+                    f"部分枚举 {structured_batch.returned_rows}/"
+                    f"{structured_batch.known_total_rows} 行"
+                ),
+                detail={
+                    "complete": structured_batch.complete,
+                    "scanned_rows": structured_batch.scanned_rows,
+                    "returned_rows": structured_batch.returned_rows,
+                    "known_total_rows": structured_batch.known_total_rows,
+                    "truncated_reason": structured_batch.truncated_reason,
+                },
+            )
+            checked_pre_trace(answer_step)
+            response = AskResponse(
+                answer_id="",
+                conclusion=conclusion,
+                answer=answer,
+                grounded=structured_batch.complete,
+                evidence_level="grounded" if structured_batch.complete else "overview",
+                llm_mode="structured",
+                conversation_id=conversation_id,
+                retrieval_query=research_question,
+                reasoning_trace=pre_trace,
+                intent=intent_contract,
+                retrieval_effort=payload.retrieval_effort,
+                result_sets=structured_batch.result_sets,
+            )
+            response.mode = "reasoning"
+            raise_if_cancelled(cancel_event)
+            response.answer_id = self._save_answer(
+                notebook_id, question, response, conversation_id,
+                user_id=user_id, job_id=job_id,
+            )
+            return response
+
         memory_hits = self._memory_hits(
             user_id, notebook_id, research_question
         )
 
         if self._primary_llm_unconfigured():
+            if structured_batch is not None:
+                from app.services.structured_retrieval import render_structured_answer
+                coverage_conclusion, coverage_answer = render_structured_answer(
+                    structured_batch,
+                    aggregate=False,
+                    inline_rows=limits.inline_answer_rows,
+                    cell_excerpt_chars=limits.cell_excerpt_chars,
+                )
+                response = AskResponse(
+                    conclusion=(
+                        f"{coverage_conclusion}\n\n分析阶段未运行：系统未配置当前"
+                        "问答所需的模型服务。"
+                    ),
+                    answer=coverage_answer,
+                    grounded=structured_batch.complete,
+                    evidence_level=(
+                        "grounded" if structured_batch.complete else "overview"
+                    ),
+                    llm_mode="structured",
+                    conversation_id=conversation_id,
+                    retrieval_query=research_question,
+                    reasoning_trace=pre_trace,
+                    intent=intent_contract,
+                    retrieval_effort=payload.retrieval_effort,
+                    result_sets=structured_batch.result_sets,
+                    model_errors=[ModelError(
+                        stage="answer", model="", message="missing_config"
+                    )],
+                )
+                response.mode = "reasoning"
+                response.answer_id = self._save_answer(
+                    notebook_id, question, response, conversation_id,
+                    user_id=user_id, job_id=job_id,
+                )
+                return response
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning",
                 user_id=user_id, job_id=job_id, intent=intent_contract,
-                retrieval_query=research_question)
+                retrieval_query=research_question,
+                retrieval_effort=payload.retrieval_effort,
+                completeness_unavailable=completeness_unavailable)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
                 or self.candidates.any_base_has_kg(notebook_id)):
+            coverage_prefix = ""
+            coverage_answer = ""
+            if structured_batch is not None:
+                from app.services.structured_retrieval import render_structured_answer
+                coverage_prefix, coverage_answer = render_structured_answer(
+                    structured_batch,
+                    aggregate=False,
+                    inline_rows=limits.inline_answer_rows,
+                    cell_excerpt_chars=limits.cell_excerpt_chars,
+                )
             response = AskResponse(
                 answer_id="",
-                conclusion="本笔记本尚未构建知识图谱,也没有已建图的参考库;"
-                           "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
-                           "公共知识库。",
+                conclusion=(
+                    (f"{coverage_prefix}\n\n" if coverage_prefix else "")
+                    + (
+                        "当前完整枚举仅支持 Knowhow 表；本次不能提供完整结果。\n\n"
+                        if completeness_unavailable else ""
+                    )
+                    + "本笔记本尚未构建知识图谱,也没有已建图的参考库;"
+                    "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
+                    "公共知识库。"
+                ),
+                answer=coverage_answer,
+                grounded=bool(structured_batch and structured_batch.complete),
+                evidence_level=(
+                    "grounded"
+                    if structured_batch and structured_batch.complete else "inferred"
+                ),
                 conversation_id=conversation_id, retrieval_query=research_question,
                 llm_mode="deterministic", kg_required=True,
-                intent=intent_contract)
+                intent=intent_contract,
+                retrieval_effort=payload.retrieval_effort,
+                result_sets=(structured_batch.result_sets if structured_batch else []),
+                reasoning_trace=(pre_trace if structured_batch is not None else None))
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
@@ -1214,29 +1402,13 @@ class AskService:
         # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
         _emb_token = _ASK_EMBED_CACHE.set({})
         try:
-            intent_step = TraceStep(
-                step_type="intent",
-                summary="已按确认后的问题理解开始检索",
-                detail={
-                    "resolved_question": intent_contract.resolved_question,
-                    "entities": intent_contract.entities,
-                    "constraints": intent_contract.constraints,
-                    "excluded_topics": intent_contract.excluded_topics,
-                    "assumptions": intent_contract.assumptions,
-                    "expected_output": intent_contract.expected_output,
-                    "mandatory_topics": [
-                        topic.question for topic in intent_contract.mandatory_topics
-                    ],
-                },
-            )
-
+            stream_intent()
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
                 if on_trace:
                     on_trace(step)
 
             try:
-                checked_trace(intent_step)
                 # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
                 # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
                 result = ReasoningRetriever(
@@ -1251,16 +1423,17 @@ class AskService:
                     history,
                     on_step=checked_trace,
                     intent_queries=intent_queries,
+                    limits=limits,
                 )
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
                     result.chains)
-                trace = [intent_step, *trace]
+                trace = [*pre_trace, *trace]
             except AskCancelled:
                 raise
             except Exception:
                 top_hits, elements, trace, chunks, chains = (
-                    [], [], [intent_step], [], []
+                    [], [], list(pre_trace), [], []
                 )
 
             registry = self.schemas.effective_schemas()
@@ -1289,14 +1462,27 @@ class AskService:
             synth_failed = False
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
+            structured_block = ""
+            if structured_batch is not None:
+                from app.services.structured_retrieval import structured_prompt_block
+                structured_block = structured_prompt_block(
+                    structured_batch,
+                    inline_rows=limits.inline_answer_rows,
+                    cell_excerpt_chars=limits.cell_excerpt_chars,
+                    budget_chars=limits.chunk_context_chars,
+                )
             if answer_client.configured and (
-                    top_hits or elements or chunks or chains or memory_hits):
+                    top_hits or elements or chunks or chains or memory_hits
+                    or structured_batch is not None):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: self._answer_reasoning(
                         notebook_id, research_question, top_hits, elements, history,
                         cancel_event=cancel_event, chunks=chunks, chains=chains,
-                        memory_hits=memory_hits, answer_client=answer_client),
+                        memory_hits=memory_hits, answer_client=answer_client,
+                        kg_context_chars=limits.kg_context_chars,
+                        chunk_context_chars=limits.chunk_context_chars,
+                        structured_block=structured_block),
                     getattr(answer_client, "model", ""),
                     service="ask_answer",
                 )
@@ -1368,6 +1554,22 @@ class AskService:
                     "The notebook does not yet contain approved knowledge that matches "
                     "this question. Upload and review sources to build coverage.")
 
+            if completeness_unavailable:
+                warning = (
+                    "当前完整枚举仅支持 Knowhow 表；本次结果来自相关性检索，"
+                    "不能视为全部结果。"
+                )
+                conclusion = f"{warning}\n\n{conclusion}"
+                answer = f"> {warning}\n\n{answer}" if answer else warning
+            elif structured_batch is not None:
+                coverage_line = (
+                    f"Knowhow 覆盖：{structured_batch.returned_rows}/"
+                    f"{structured_batch.known_total_rows} 行，"
+                    f"{'完整' if structured_batch.complete else '部分'}。"
+                )
+                conclusion = f"{coverage_line}\n\n{conclusion}"
+                answer = f"> {coverage_line}\n\n{answer}" if answer else coverage_line
+
             response = AskResponse(
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                 evidence_level=evidence_level, anchors=anchors,
@@ -1376,6 +1578,8 @@ class AskService:
                 retrieval_query=research_question, top_relevance=top_relevance,
                 reasoning_trace=trace or None,
                 intent=intent_contract,
+                retrieval_effort=payload.retrieval_effort,
+                result_sets=(structured_batch.result_sets if structured_batch else []),
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)

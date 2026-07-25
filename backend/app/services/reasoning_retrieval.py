@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol, TYPE_CHECKING
 
+from app.core.ask_retrieval_policy import AskRetrievalLimits
 from app.core.config import Settings
 
 if TYPE_CHECKING:
@@ -104,13 +105,26 @@ def _norm_query(q: str) -> str:
     return " ".join(str(q).split()).casefold()
 
 
-def effective_top_n(settings, explicit: "Optional[int]", n_queries: int) -> int:
+def effective_top_n(
+    settings,
+    explicit: "Optional[int]",
+    n_queries: int,
+    limits: "Optional[AskRetrievalLimits]" = None,
+) -> int:
     """合成阶段的证据预算。显式传入(报告逐节独立预算)直通;否则自适应——
     单位是「每个方面(子查询,含 expand_community 兄弟)几席」而非写死总数:
     per_query × 方面数,floor=retrieval_top_n(简单题与旧默认 12 逐字一致),
     cap 封顶(对比题 3 原始+8 兄弟=11 方面 → 33,配额轮转不再被总数 12 摊薄)。"""
     if explicit:
         return explicit
+    if limits is not None:
+        return min(
+            max(
+                limits.ranked_final_floor,
+                limits.ranked_per_aspect * max(n_queries, 1),
+            ),
+            limits.ranked_final_cap,
+        )
     return min(max(settings.retrieval_top_n,
                    settings.reasoning_top_n_per_query * max(n_queries, 1)),
                settings.reasoning_top_n_cap)
@@ -272,7 +286,7 @@ class ReasoningRetriever:
         return result
 
     # --- LLM 决策点 ---
-    def plan(self, question, history=""):
+    def plan(self, question, history="", max_subqueries=None):
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
@@ -280,7 +294,11 @@ class ReasoningRetriever:
         ex = expand_query(client, question, history,
                           timeout=self.settings.reasoning_timeout_seconds,
                           max_retries=self.settings.reasoning_max_retries,
-                          max_subqueries=self.settings.reasoning_max_subqueries,
+                          max_subqueries=(
+                              max_subqueries
+                              if max_subqueries is not None
+                              else self.settings.reasoning_max_subqueries
+                          ),
                           want_types=True,
                           cancel_event=self.cancel_event,
                           fail_closed=self.fail_closed,
@@ -462,12 +480,23 @@ class ReasoningRetriever:
         return "\n".join(lines) if lines else "(no candidates yet)"
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
-            max_steps=None, intent_queries=None):
+            max_steps=None, intent_queries=None,
+            limits: Optional[AskRetrievalLimits] = None):
         raise_if_cancelled(self.cancel_event)
         # top_n:显式传入(报告管线每节独立预算)直通;None=合成时按最终方面数
         # (used_queries,含 expand_community 兄弟)自适应解析 —— 见 effective_top_n。
         # max_steps 覆盖 settings.reasoning_max_steps(报告滑块封顶 reflect 轮数);None=沿用全局。
         max_steps = max_steps or self.settings.reasoning_max_steps
+        if limits is not None:
+            max_steps = min(max_steps, limits.max_reasoning_steps)
+        initial_query_limit = (
+            limits.max_initial_subqueries
+            if limits is not None else self.settings.reasoning_max_subqueries + 1
+        )
+        per_query_take = (
+            limits.ranked_per_query_take
+            if limits is not None else _PER_QUERY_LIMIT
+        )
         trace: List[TraceStep] = []
         collected: Dict[str, RetrievedKnowledge] = {}
         elements: List[RetrievedElement] = []
@@ -514,13 +543,20 @@ class ReasoningRetriever:
             reviewed_queries = list(dict.fromkeys(
                 str(query).strip() for query in (intent_queries or [])
                 if str(query).strip()
-            ))[: self.settings.reasoning_max_subqueries + 1]
+            ))[:initial_query_limit]
             # A reviewed intent contract is authoritative. Do not ask a second
             # model to reinterpret it before retrieval; the reflect loop may
             # still add evidence-driven subqueries after the frozen seed pass.
             subqueries = (
                 [SubQuery(query=query) for query in reviewed_queries]
-                if reviewed_queries else self.plan(question, history)
+                if reviewed_queries else (
+                    self.plan(
+                        question,
+                        history,
+                        max_subqueries=limits.max_initial_subqueries,
+                    )
+                    if limits is not None else self.plan(question, history)
+                )
             )
             raise_if_cancelled(self.cancel_event)
             record(TraceStep(
@@ -541,7 +577,9 @@ class ReasoningRetriever:
             def _run_search(sq: SubQuery) -> List[RetrievedKnowledge]:
                 raise_if_cancelled(self.cancel_event)
                 try:
-                    hits = self.search(notebook_id, sq.query, sq.types, sq.prefer)[:_PER_QUERY_LIMIT]
+                    hits = self.search(
+                        notebook_id, sq.query, sq.types, sq.prefer
+                    )[:per_query_take]
                     raise_if_cancelled(self.cancel_event)
                     return hits
                 except AskCancelled:
@@ -709,7 +747,7 @@ class ReasoningRetriever:
                     else:
                         added = 0
                         for h in self.search(notebook_id, sq.query,
-                                             sq.types, sq.prefer)[:_PER_QUERY_LIMIT]:
+                                             sq.types, sq.prefer)[:per_query_take]:
                             raise_if_cancelled(self.cancel_event)
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
@@ -912,7 +950,7 @@ class ReasoningRetriever:
                         if key in attempted:
                             continue
                         got = 0
-                        for h in self.search(notebook_id, pname)[:_PER_QUERY_LIMIT]:
+                        for h in self.search(notebook_id, pname)[:per_query_take]:
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
                                 added += 1
@@ -945,7 +983,9 @@ class ReasoningRetriever:
 
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
-        top_n = effective_top_n(self.settings, top_n, len(used_queries))
+        top_n = effective_top_n(
+            self.settings, top_n, len(used_queries), limits=limits
+        )
         answer_detail = {"elements": len(elements), "top_n": top_n,
                          "chains": len(chains)}
         raise_if_cancelled(self.cancel_event)

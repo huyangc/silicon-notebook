@@ -302,6 +302,36 @@ What the Ask panel *shows* is a separate, UI-only layer owned by the front-end r
 
 **`reasoning` — intent-first agentic deep retrieval.** The official UI first calls `/ask/intent`. This corpus-blind preflight may use up to the latest five user questions, never corpus-derived assistant answers, but it does not create a durable conversation/job. Clear requests auto-confirm; blocking ambiguity opens an inline review. `/ask` and `/ask/stream` accept the reviewed `intent` alongside the original `question`; the backend deterministically freezes it and builds one authoritative internal research question used by Memory retrieval, PPR, evidence retrieval, and answer synthesis. Its approved retrieval directions directly seed the initial subqueries, bypassing the old second planning pass; reflection can add evidence-driven queries but cannot replace the contract. The response persists the confirmed `intent`, exposes the internal `retrieval_query`, and starts the engine trace with `intent` before retrieval while the saved user turn remains the original wording. Direct compatibility callers that omit `intent` retain the old clear-question path, but deterministic unresolved/generic ambiguity fails closed. The remaining loop delegates to `ReasoningRetriever`: retrieve (using the same PPR propagation as `graph`), reflect on sufficiency, and expand the graph or add subqueries until answerable, with live `reasoning_trace` over the NDJSON stream (`/ask/stream`). For explicit derivation questions it may call `follow_chain`: two bounded adjacency samples reuse the existing source/target indexes, then deterministically check types, status, review, evidence, and `validity_scope`. The two stored relations remain citable premises; `A→C` is only a query-time conclusion marked as an inference. If a high-degree sample is truncated and cannot prove the absence of a direct edge, it abstains. Strict / KG-grounded.
 
+### Reasoning effort and complete collection requests
+
+Reasoning Ask accepts the stable `retrieval_effort` ids below; the default is `standard`. The model may stop before a ceiling when evidence is sufficient, but it may not raise a ceiling. “Final floor/aspect/cap” means `min(cap, max(floor, aspect × executed query count))`. Context values are character ceilings for KG and source-chunk evidence injected into answer synthesis.
+
+| Effort id | UI label | Per-query ranked take | Final floor / aspect / cap | Max reasoning steps / initial subqueries | KG / chunk context characters |
+|---|---|---:|---:|---:|---:|
+| `overview` | 概览 | 4 | 8 / 2 / 12 | 4 / 2 | 4,000 / 12,000 |
+| `standard` | 标准 | 8 | 20 / 3 / 36 | 8 / 5 | 6,000 / 30,000 |
+| `deep` | 深入 | 8 | 24 / 4 / 48 | 16 / 6 | 8,000 / 50,000 |
+| `thorough` | 详尽 | 12 | 32 / 5 / 64 | 32 / 8 | 12,000 / 80,000 |
+| `exhaustive` | 穷尽 | 16 | 40 / 6 / 96 | 50 / 10 | 16,000 / 120,000 |
+
+Candidate generation does not grow with effort; deployment settings control it independently. `CHUNK_RECALL` defaults to **200** and separately bounds each indexed Chunk/KG ANN and lexical window (at most 400 identities before deduplication at the default). `RELATION_RECALL` defaults to **200** and separately bounds Relation ANN and the total lexically expanded relation-id window (at most 400 before deduplication at the default); source and target directions still receive reserved shares inside that lexical total. Changing either deployment setting changes the effective candidate window, so the UI does not present those defaults as request-level hard ceilings.
+
+Intent preflight classifies result scope as `ranked`, `complete`, `aggregate`, or `hybrid`, with an explicit completeness flag. A request such as “list all methods in this Knowhow table” does not turn into a larger relevance Top-N: `complete`, `aggregate`, and `hybrid` Knowhow requests use a stable row cursor until exhaustion and return structured coverage. A 100-row table can therefore return `100/100`. The shared enumeration safety contract is identical at every effort level:
+
+| Complete-enumeration threshold | Exact limit |
+|---|---:|
+| Rows per cursor page | 25 |
+| Pages per request | 50 |
+| Physical rows scanned/returned per request | 1,250 |
+| Tables per request | 8 |
+| Selected columns per table | 8 |
+| Cell excerpt available to the model | 1,000 characters |
+| Structured result payload | 256,000 characters |
+| Rows rendered inline in answer prose | 100 |
+| Rows initially visible in each UI result card | 20 |
+
+The 100-row inline ceiling and 20-row initial UI view only control presentation; rows already returned in the structured result remain expandable and link back to their Knowhow row. Coverage says complete only after cursor exhaustion and stable before/after table catalog values: projection `mutation_seq`, history-backed `enumeration_seq`, row count, column metadata, and selected table scope. Every row add/delete records history in the same transaction, so an equal-count delete-then-add still changes `enumeration_seq`. Reaching the row/page/table/column/payload safety rail, or detecting a concurrent table change, produces `complete=false` with `explicit_partial` coverage and must never be worded as “all”. Selecting a lower effort level does not reduce these explicit-completeness limits; it only reduces ranked analysis and synthesis work around the enumerated set. This complete-enumeration executor currently applies to Knowhow tables. Requests for complete sets of KG objects, source elements, Memory, or other collections still receive relevance-ranked results and must disclose that complete enumeration is not supported rather than imply exhaustive coverage.
+
 Retired ids `fast` and `global` are transparently remapped to `chunk` (old sessions/bookmarks never 422); any other unknown mode is rejected with HTTP 422.
 
 ## APIs
@@ -321,7 +351,7 @@ Key local beta APIs:
 - Knowhow tables: `GET|POST /api/notebooks/{id}/knowhow`, `GET|PATCH|DELETE .../knowhow/{table_id}`, `POST .../knowhow/{table_id}/reproject` — plus import (`POST .../knowhow/import/preview`, `POST .../knowhow/import`), column/row/cell editing (`POST .../knowhow/{table_id}/columns`, `PATCH|DELETE .../columns/{column_id}`, `POST .../knowhow/{table_id}/rows`, `DELETE .../rows/{row_id}`, `PATCH .../rows/{row_id}/cells/{column_id}`), the Excel template round-trip (`GET .../knowhow/{table_id}/template`, `POST .../knowhow/{table_id}/append` with `mode=preview|commit`), an explicit suggestion-only wording rewrite (`POST .../rows/{row_id}/cells/{column_id}/optimize`), and reasoning-backed row completion suggestions (`POST .../knowhow/{table_id}/rows/{row_id}/complete`, optional `target_column_ids`, response `retrieval_mode` + `retrieval_scope` + `retrieval_status` + `reasoning_trace` + `evidence` + `suggestions`)
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask/intent` — corpus-blind `reasoning` intent preview; accepts `{question, conversation_id?}`, reads at most the latest five user questions, creates no conversation/job, returns the editable intent contract plus any blocking ambiguity, and signals the model cancellation event when its client disconnects
-- `POST /api/notebooks/{id}/ask` — grounded Q&A with `[k_i]` citations (`mode`: `chunk` default | `graph` | `reasoning`; federation follows the mode-specific boundaries above)
+- `POST /api/notebooks/{id}/ask` — grounded Q&A with `[k_i]` citations (`mode`: `chunk` default | `graph` | `reasoning`; `reasoning` accepts `retrieval_effort`, default `standard`; collection-aware responses may include structured `result_sets` plus exact coverage; federation follows the mode-specific boundaries above)
 - `POST /api/notebooks/{id}/ask/stream` — NDJSON Ask progress stream (first a `started` event with the durable `job_id` and `conversation_id`, then progress/final events). The frontend uses that conversation id to publish/reopen the in-flight session before an answer exists. A transport disconnect stops delivery to that client only; the detached job keeps running and can persist its answer
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — read detached Ask job `status`, `trace`, and `answer_id`; the job must belong to the path notebook and current user; on `done`, the frontend reloads the conversation to obtain the final `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — explicit interrupt endpoint; the job must belong to the path notebook and current user; sets the cancellation event and stops the worker before a cancelled final answer is saved

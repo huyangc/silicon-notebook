@@ -41,7 +41,10 @@ import {
   getTraceStepDetail,
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
-import type { AskResponse } from "./workspace-model";
+import {
+  STRUCTURED_ENUMERATION_LIMITS,
+} from "./ask-retrieval-effort";
+import type { AskResponse, KnowhowResultSet } from "./workspace-model";
 import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
 
@@ -55,6 +58,106 @@ function InlineFormula({ latex }: { latex: string }) {
   }
   if (!html) return <code className="answer-inline-code">{latex}</code>;
   return <span className="answer-inline-formula" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+
+function KnowhowResultSetCard({
+  resultSet,
+  onOpenKnowhowRow,
+}: {
+  resultSet: KnowhowResultSet;
+  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleLimit = STRUCTURED_ENUMERATION_LIMITS.initialVisibleRows;
+  const rows = expanded ? resultSet.rows : resultSet.rows.slice(0, visibleLimit);
+  const coverage = resultSet.coverage;
+  const coverageCount = Math.min(coverage.returned_rows, coverage.total_rows);
+  const status = coverage.complete ? "完整" : "部分";
+  const hasMoreLoadedRows = resultSet.rows.length > visibleLimit;
+
+  return (
+    <section className="answer-knowhow-result" aria-label={`表格结果：${resultSet.title}`}>
+      <div className="answer-knowhow-result-heading">
+        <span className={`tag ${coverage.complete ? "answer-grounded" : "answer-overview"}`}>
+          {status} {coverageCount}/{coverage.total_rows}
+        </span>
+        <strong><Table2 size={14} aria-hidden="true" /> {resultSet.title}</strong>
+        {!coverage.complete && coverage.truncated_reason && (
+          <span className="answer-knowhow-partial-reason" title={coverage.overflow_semantics || "explicit_partial"}>
+            已明确标注为部分结果（{coverage.truncated_reason}）
+            {coverage.scanned_rows !== coverage.returned_rows
+              ? `；已扫描 ${coverage.scanned_rows} 行`
+              : ""}
+          </span>
+        )}
+      </div>
+      <div className="answer-table-wrap">
+        <table className="answer-table answer-knowhow-table">
+          <thead>
+            <tr>
+              <th scope="col">行</th>
+              {resultSet.columns.map((column) => <th key={column.id} scope="col">{column.name}</th>)}
+              <th scope="col" aria-label="操作" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.row_id}>
+                <th scope="row">{row.position + 1}</th>
+                {resultSet.columns.map((column) => <td key={column.id}>{row.cells[column.id] || "—"}</td>)}
+                <td>
+                  <button
+                    className="answer-knowhow-open"
+                    type="button"
+                    onClick={() => onOpenKnowhowRow(resultSet.table_id, row.row_id)}
+                  >
+                    在表格中查看
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {hasMoreLoadedRows && (
+        <button
+          type="button"
+          className="answer-knowhow-expand"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起已加载行" : `展开全部已加载的 ${resultSet.rows.length} 行`}
+        </button>
+      )}
+      {!coverage.complete && (
+        <p className="answer-knowhow-coverage-note">
+          已扫描 {coverage.scanned_rows} 行、返回 {coverage.returned_rows} 行；未扫描部分不会被表述为“全部”。
+        </p>
+      )}
+    </section>
+  );
+}
+
+
+function KnowhowResultSets({
+  resultSets,
+  onOpenKnowhowRow,
+}: {
+  resultSets: KnowhowResultSet[] | undefined;
+  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+}) {
+  if (!resultSets?.length) return null;
+  return (
+    <div className="answer-knowhow-results">
+      {resultSets.map((resultSet) => (
+        <KnowhowResultSetCard
+          key={`${resultSet.table_id}-${resultSet.title}`}
+          resultSet={resultSet}
+          onOpenKnowhowRow={onOpenKnowhowRow}
+        />
+      ))}
+    </div>
+  );
 }
 
 
@@ -536,6 +639,10 @@ export function AnswerView({
           reference,
           rect: event.currentTarget.getBoundingClientRect(),
         })}
+      />
+      <KnowhowResultSets
+        resultSets={answer.result_sets}
+        onOpenKnowhowRow={onOpenKnowhowRow}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />

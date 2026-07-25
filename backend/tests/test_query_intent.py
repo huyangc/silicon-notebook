@@ -1,7 +1,13 @@
 import json
 
 import pytest
+from pydantic import ValidationError
 
+from app.core.ask_retrieval_policy import (
+    ASK_RETRIEVAL_LIMITS,
+    RETRIEVAL_EFFORTS,
+    ask_retrieval_limits,
+)
 from app.models.ask import (
     AskIntentConfirmation,
     AskRequest,
@@ -22,9 +28,13 @@ class _IntentClient:
     def chat_json(self, messages, schema_hint, **kwargs):
         assert "before seeing any corpus" in messages[-1]["content"]
         assert "mandatory_topics" in schema_hint
+        assert '"result_scope"' in schema_hint
+        assert '"completeness_required"' in schema_hint
         return json.dumps({
             "normalized_question": "比较 PLL A 与 PLL B 的锁定时间和抖动",
             "intent_type": "compare",
+            "result_scope": "ranked",
+            "completeness_required": False,
             "entities": ["PLL A", "PLL B"],
             "mandatory_topics": [{
                 "title": "锁定时间",
@@ -65,6 +75,131 @@ def test_query_intent_is_corpus_blind_and_bounded():
     assert contract["mandatory_topics"][0]["id"] == "intent-1"
     assert contract["needs_clarification"] is False
     assert contract["confirmed"] is False
+    assert contract["result_scope"] == "ranked"
+    assert contract["completeness_required"] is False
+
+
+@pytest.mark.parametrize(
+    ("question", "scope"),
+    [
+        ("这个 knowhow 表格里所有方法有哪些？", "complete"),
+        ("List every method in the table.", "complete"),
+        ("这些方法一共有多少种？", "aggregate"),
+        ("列出所有方法，并比较各自优缺点", "hybrid"),
+    ],
+)
+def test_explicit_full_collection_wording_cannot_fall_back_to_ranked_top_n(
+    question, scope
+):
+    contract = plan_query_intent(None, question)
+
+    assert contract["result_scope"] == scope
+    assert contract["completeness_required"] is True
+
+
+def test_explicit_non_complete_wording_does_not_force_collection_scan():
+    contract = plan_query_intent(None, "不需要所有方法，只给最相关的几个")
+
+    assert contract["result_scope"] == "ranked"
+    assert contract["completeness_required"] is False
+
+    ownership = plan_query_intent(None, "解释所有权问题")
+    assert ownership["result_scope"] == "ranked"
+
+    scalar = plan_query_intent(None, "电源电压是多少？")
+    assert scalar["result_scope"] == "ranked"
+
+    for question in (
+        "有哪些统计方法适合小样本？",
+        "请解释统计方法的适用范围",
+        "评估数据完整性的方法有哪些？",
+    ):
+        contract = plan_query_intent(None, question)
+        assert contract["result_scope"] == "ranked", question
+        assert contract["completeness_required"] is False, question
+
+
+def test_model_cannot_upgrade_ambiguous_nouns_to_collection_enumeration():
+    class _OvereagerScopeClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "result_scope": "aggregate",
+                "completeness_required": True,
+                "normalized_question": "解释统计方法的适用范围",
+            })
+
+    contract = plan_query_intent(
+        _OvereagerScopeClient(), "解释统计方法的适用范围"
+    )
+    assert contract["result_scope"] == "ranked"
+    assert contract["completeness_required"] is False
+
+
+def test_model_scope_is_bounded_and_non_ranked_scope_requires_completeness():
+    seed = plan_query_intent(_IntentClient(), "比较两个 PLL")
+    seed["result_scope"] = "aggregate"
+    seed["completeness_required"] = False
+
+    contract = QueryIntentContract(**seed)
+
+    assert contract.result_scope == "aggregate"
+    assert contract.completeness_required is True
+
+    model_requests_completeness = QueryIntentContract(
+        **{**seed, "result_scope": "ranked", "completeness_required": True}
+    )
+    assert model_requests_completeness.result_scope == "complete"
+
+
+def test_ask_retrieval_effort_protocol_defaults_and_rejects_unknown_ids():
+    assert AskRequest(question="q").retrieval_effort == "standard"
+    assert AskRequest(question="q", retrieval_effort="exhaustive").retrieval_effort == "exhaustive"
+    with pytest.raises(ValidationError):
+        AskRequest(question="q", retrieval_effort="maximum")
+
+
+def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
+    assert tuple(ASK_RETRIEVAL_LIMITS) == RETRIEVAL_EFFORTS
+    limits = [ask_retrieval_limits(effort) for effort in RETRIEVAL_EFFORTS]
+    increasing_fields = (
+        "ranked_final_floor",
+        "ranked_per_aspect",
+        "ranked_final_cap",
+        "max_reasoning_steps",
+        "max_initial_subqueries",
+        "kg_context_chars",
+        "chunk_context_chars",
+    )
+    for field in increasing_fields:
+        values = [getattr(row, field) for row in limits]
+        assert values == sorted(values), field
+        assert len(set(values)) == len(values), field
+    nondecreasing_fields = ("ranked_per_query_take",)
+    for field in nondecreasing_fields:
+        values = [getattr(row, field) for row in limits]
+        assert values == sorted(values), field
+    for row in limits:
+        assert row.structured_page_size * row.structured_max_pages == row.structured_max_rows
+        assert row.structured_page_size == 25
+        assert row.structured_max_pages == 50
+        assert row.structured_max_rows == 1_250
+        assert row.structured_max_tables == 8
+        assert row.structured_max_columns == 8
+        assert row.cell_excerpt_chars == 1_000
+        assert row.structured_payload_chars == 256_000
+        assert row.inline_answer_rows == 100
+        assert row.overflow_semantics == "explicit_partial"
+    assert limits[0].structured_max_rows >= 100
+    assert [row.ranked_per_query_take for row in limits] == [4, 8, 8, 12, 16]
+    assert [row.ranked_final_floor for row in limits] == [8, 20, 24, 32, 40]
+    assert [row.ranked_per_aspect for row in limits] == [2, 3, 4, 5, 6]
+    assert [row.ranked_final_cap for row in limits] == [12, 36, 48, 64, 96]
+    assert [row.max_reasoning_steps for row in limits] == [4, 8, 16, 32, 50]
+    assert [row.max_initial_subqueries for row in limits] == [2, 5, 6, 8, 10]
+    assert [row.kg_context_chars for row in limits] == [4_000, 6_000, 8_000, 12_000, 16_000]
+    assert [row.chunk_context_chars for row in limits] == [12_000, 30_000, 50_000, 80_000, 120_000]
 
 
 def test_generic_reasoning_question_requires_clarification_before_retrieval():

@@ -19,6 +19,13 @@ const INTENT_TYPE_LABELS: Record<string, string> = {
   other: "综合分析",
 };
 
+const RESULT_SCOPE_LABELS: Record<QueryIntentContract["result_scope"], string> = {
+  ranked: "相关性结果",
+  complete: "完整清单",
+  aggregate: "完整统计",
+  hybrid: "完整清单 + 分析",
+};
+
 
 export function AskIntentReview({
   contract,
@@ -60,6 +67,7 @@ export function AskIntentReview({
         </div>
         <div className="report-intent-meta">
           <span>{INTENT_TYPE_LABELS[contract.intent_type] || "综合分析"}</span>
+          <span>{RESULT_SCOPE_LABELS[contract.result_scope]}</span>
           <span>理解置信度 {confidence}%</span>
         </div>
       </div>

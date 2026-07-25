@@ -1,6 +1,12 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.core.ask_retrieval_policy import (
+    DEFAULT_RETRIEVAL_EFFORT,
+    ResultScope,
+    RetrievalEffort,
+)
 
 from app.core.model_safety import (
     safe_model_display_name,
@@ -65,7 +71,7 @@ class Citation(BaseModel):
 
 class TraceStep(BaseModel):
     """推理模式 agent 的一步轨迹(供前端折叠展示)。"""
-    step_type: str            # intent | plan | retrieve | reflect | expand | follow_chain | fallback | answer | skip
+    step_type: str            # intent | plan | retrieve | enumerate | reflect | expand | follow_chain | fallback | answer | skip
     summary: str              # 人话摘要
     detail: Dict[str, Any] = Field(default_factory=dict)
     duration_ms: Optional[int] = None  # 该步墙钟耗时(相邻两步 record 之差),供前端展示
@@ -96,6 +102,11 @@ class QueryIntentContract(BaseModel):
     objective: str = Field(min_length=1, max_length=4000)
     resolved_question: str = Field(min_length=1, max_length=4000)
     intent_type: str = "other"
+    # ``ranked`` may stop after the best evidence.  The other scopes require a
+    # collection-aware executor and must never use a relevance top-N as proof
+    # of completeness.
+    result_scope: ResultScope = "ranked"
+    completeness_required: bool = False
     entities: List[str] = Field(default_factory=list, max_length=8)
     mandatory_topics: List[QueryIntentTopic] = Field(default_factory=list, max_length=16)
     comparison_axes: List[str] = Field(default_factory=list, max_length=8)
@@ -110,6 +121,17 @@ class QueryIntentContract(BaseModel):
     clarification_answers: List[Dict[str, str]] = Field(
         default_factory=list, max_length=8
     )
+
+    @model_validator(mode="after")
+    def enforce_scope_completeness(self) -> "QueryIntentContract":
+        # Exact aggregate counts and hybrid/complete collections all depend on
+        # exhaustive collection coverage even when an older client omitted the
+        # explicit boolean.
+        if self.completeness_required and self.result_scope == "ranked":
+            self.result_scope = "complete"
+        elif self.result_scope != "ranked":
+            self.completeness_required = True
+        return self
 
 
 class AskIntentPreviewRequest(BaseModel):
@@ -128,6 +150,9 @@ class AskRequest(BaseModel):
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
     mode: str = "chunk"       # "chunk"(默认,通用问答) | "fast"(旧KG) | "reasoning" | "graph" | "global"
+    # User-controlled resource level.  It selects immutable hard ceilings from
+    # ask_retrieval_policy; the model may stop early but cannot increase them.
+    retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
     # reasoning only: returned by /ask/intent and confirmed by the user (or
     # auto-confirmed by the UI when no blocking ambiguity exists).
     intent: Optional[AskIntentConfirmation] = None
@@ -219,6 +244,44 @@ class ModelError(BaseModel):
         return safe_model_support_id(value)
 
 
+class StructuredResultColumn(BaseModel):
+    """A stable Knowhow column descriptor carried with exhaustive results."""
+
+    id: str
+    name: str
+    role: str = "attribute"
+
+
+class StructuredResultRow(BaseModel):
+    """One directly addressable row; cells are keyed by column id."""
+
+    row_id: str
+    position: int
+    cells: Dict[str, str] = Field(default_factory=dict)
+
+
+class StructuredResultCoverage(BaseModel):
+    """Proof of what an enumeration did and did not cover."""
+
+    total_rows: int = Field(default=0, ge=0)
+    scanned_rows: int = Field(default=0, ge=0)
+    returned_rows: int = Field(default=0, ge=0)
+    complete: bool = False
+    truncated_reason: str = Field(default="", max_length=80)
+    overflow_semantics: str = Field(default="", max_length=40)
+
+
+class StructuredKnowhowResult(BaseModel):
+    """Bounded, pageable collection result kept outside ranked evidence top-N."""
+
+    kind: Literal["knowhow"] = "knowhow"
+    table_id: str
+    title: str
+    columns: List[StructuredResultColumn] = Field(default_factory=list)
+    rows: List[StructuredResultRow] = Field(default_factory=list)
+    coverage: StructuredResultCoverage
+
+
 class AskResponse(BaseModel):
     answer_id: str = ""
     conclusion: str
@@ -242,6 +305,13 @@ class AskResponse(BaseModel):
     # Persist the exact confirmed understanding used by reasoning so reopened
     # turns can explain what the system actually searched for.
     intent: Optional[QueryIntentContract] = None
+    # The stable user-selected resource profile and any collection-aware result
+    # sets are persisted with the turn.  ``result_sets`` are not relevance
+    # evidence: their coverage object is the authority for complete/partial.
+    retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
+    result_sets: List[StructuredKnowhowResult] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     # 严格推理(reasoning/graph)无可用 KG(本 notebook 无图且无可用 base)时 True。
     kg_required: bool = False
     # 大库(not copyable)且完全无 scale 索引(从未建过)时 True:检索能力受限,

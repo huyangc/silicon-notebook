@@ -36,6 +36,13 @@ import {
   groupOf, groupLabel, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
 } from "./ask-modes";
 import {
+  ASK_RETRIEVAL_EFFORTS,
+  DEFAULT_ASK_RETRIEVAL_EFFORT,
+  retrievalEffortFromTurn,
+  retrievalEffortThresholdText,
+  type AskRetrievalEffortId,
+} from "./ask-retrieval-effort";
+import {
   approvePromotion,
   fetchPromotionQueue,
   proposePromotion,
@@ -794,6 +801,9 @@ export default function Home() {
   const [sessionTitleDraft, setSessionTitleDraft] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
   const [askMode, setAskMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
+  const [askRetrievalEffort, setAskRetrievalEffort] = useState<AskRetrievalEffortId>(
+    DEFAULT_ASK_RETRIEVAL_EFFORT,
+  );
   const [knowledgeKind, setKnowledgeKind] = useState<KnowledgeKind>("concept");
   const [knowledge, setKnowledge] = useState<Record<string, KnowledgeItem[] | null>>(EMPTY_KNOWLEDGE);
   const [knowledgeTypes, setKnowledgeTypes] = useState<KnowledgeTypeCount[]>([]);
@@ -2936,6 +2946,7 @@ export default function Home() {
         question: q,
         conversation_id: conversationId ?? undefined,
         mode: selectedMode,
+        retrieval_effort: askRetrievalEffort,
         ...(intent ? { intent } : {}),
       };
       const response = await runAskStream<AskResponse>(
@@ -3147,6 +3158,7 @@ export default function Home() {
       : [summary, ...current]);
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
+    setAskRetrievalEffort(retrievalEffortFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
@@ -3218,6 +3230,7 @@ export default function Home() {
     setMemorySavedAnswers({});
     setConversationId(null);
     setAskMode(DEFAULT_ASK_MODE);
+    setAskRetrievalEffort(DEFAULT_ASK_RETRIEVAL_EFFORT);
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
@@ -4894,6 +4907,28 @@ export default function Home() {
                             {m.label}
                           </button>
                         ))}
+                      </span>
+                    )}
+                    {askMode === "reasoning" && (
+                      <span className="ask-retrieval-effort" role="group" aria-label="推理检索档位">
+                        <span className="ask-retrieval-effort-label">检索档位</span>
+                        {ASK_RETRIEVAL_EFFORTS.map((effort) => (
+                          <button
+                            key={effort.id}
+                            type="button"
+                            className={`mode-engine${askRetrievalEffort === effort.id ? " active" : ""}`}
+                            title={retrievalEffortThresholdText(effort.id)}
+                            aria-label={`${effort.label}：${retrievalEffortThresholdText(effort.id)}`}
+                            disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
+                            onClick={() => setAskRetrievalEffort(effort.id)}
+                          >
+                            {effort.label}
+                          </button>
+                        ))}
+                        <details className="ask-retrieval-thresholds">
+                          <summary>阈值</summary>
+                          <div>{retrievalEffortThresholdText(askRetrievalEffort)}</div>
+                        </details>
                       </span>
                     )}
                     {groupOf(askMode) === "strict" && !kgAvailable && (

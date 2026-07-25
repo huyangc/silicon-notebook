@@ -250,8 +250,12 @@ class EvidenceContextService:
         hits: Sequence[RetrievedKnowledge],
         *,
         id_offset: int = 0,
+        budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
-        budget = self.settings.answer_context_budget_chars
+        budget = (
+            self.settings.answer_context_budget_chars
+            if budget_chars is None else max(0, int(budget_chars))
+        )
         min_items = self.settings.answer_context_min_items
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
