@@ -853,6 +853,30 @@
       "target": "conn.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator composition root reads redacted control status and resumable baseline state",
+      "scope": "<module>._baseline_is_published",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator composition root reads redacted control status and resumable baseline state",
+      "scope": "<module>._readonly_source",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator composition root reads redacted control status and resumable baseline state",
+      "scope": "<module>._status",
+      "target": "conn.execute"
+    },
+    {
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/control.py",
@@ -1229,6 +1253,22 @@
       "target": "conn.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/retention.py",
+      "reason": "temporary migration worker owns conservative verified change-log retention",
+      "scope": "<module>.read_retention_bounds",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/retention.py",
+      "reason": "temporary migration worker owns conservative verified change-log retention",
+      "scope": "<module>.retain_change_log",
+      "target": "conn.execute"
+    },
+    {
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/snapshot.py",
@@ -1435,6 +1475,30 @@
       "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
       "scope": "<module>._Spool.__init__",
       "target": "self.conn.executescript"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/worker.py",
+      "reason": "temporary migration worker owns its database-clock lease lifecycle",
+      "scope": "<module>.acquire_worker_lease",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/worker.py",
+      "reason": "temporary migration worker owns its database-clock lease lifecycle",
+      "scope": "<module>.heartbeat_worker_lease",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/worker.py",
+      "reason": "temporary migration worker owns its database-clock lease lifecycle",
+      "scope": "<module>.release_worker_lease",
+      "target": "conn.execute"
     },
     {
       "count": 4,
@@ -1868,6 +1932,14 @@
       "path": "backend/app/migration/shadow/bulk_copy.py",
       "reason": "temporary migration boundary streams its immutable private snapshot",
       "scope": "<module>._open_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator preflight opens the active SQLite source read-only",
+      "scope": "<module>._readonly_source",
       "target": "sqlite3.connect"
     },
     {

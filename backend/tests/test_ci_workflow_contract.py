@@ -130,7 +130,7 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     assert isinstance(job, dict)
     assert job["name"] == "postgres-integration"
     assert job["runs-on"] == "ubuntu-24.04"
-    assert job["timeout-minutes"] == "25"
+    assert job["timeout-minutes"] == "35"
 
     services = job["services"]
     assert isinstance(services, dict)
@@ -169,7 +169,7 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
         assert phrase in command
     assert "print(" not in command
 
-    gate = _named_step(job, "Run isolated PostgreSQL integration gate")
+    gate = _named_step(job, "Run PostgreSQL adapter and forward-shadow E2E gate")
     assert gate["run"] == "bash scripts/check_postgres.sh"
     env = gate["env"]
     assert env["PYTHON_BIN"] == "python"

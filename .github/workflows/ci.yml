@@ -54,7 +54,7 @@ jobs:
   postgres-integration:
     name: postgres-integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:16
@@ -131,7 +131,7 @@ jobs:
               )
           PY
 
-      - name: Run isolated PostgreSQL integration gate
+      - name: Run PostgreSQL adapter and forward-shadow E2E gate
         env:
           PYTHON_BIN: python
           POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"

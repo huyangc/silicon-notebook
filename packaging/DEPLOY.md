@@ -169,12 +169,24 @@ SQLite。只有 PG 切换后无新写入，或所有 PG-only 写入已经外部�
 
 ### D. 存量 SQLite → PostgreSQL 的明确边界
 
-只改 `DATABASE_URL` **不会**复制、迁移或同步存量数据。本 adapter 阶段
-没有 dual-write、shadow replication 或 cutover。`SHADOW_DATABASE_URL` 只会被保留/
-校验，它不启用同步。在
-`docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md` 被实现并受保护之前，
-只支持全新 target，或由外部工具在完全停机状态下迁移、对账并演练回滚。
-本包没有可以虚构使用的存量迁移命令。
+只改 `DATABASE_URL` **不会**复制、迁移或同步存量数据。当前包提供显式、单向的
+SQLite→PostgreSQL forward-shadow CLI，但没有 cutover、反向复制或应用 dual-write。
+`SHADOW_DATABASE_URL` 只标识 shadow target，单独设置不启动同步，也不改变 active backend。
+
+从包根目录运行，且让 `DATABASE_URL` 始终指向 active SQLite：
+
+1. 恢复演练 SQLite DB + storage 和 PostgreSQL 目标备份，记录 evidence ID 与 target capacity。
+2. 设置 `SHADOW_DATABASE_URL` 为专用 PostgreSQL 16 UTF-8 target；`public.pg_trgm` 必须可用。
+3. 执行 `PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight ... --json`，
+   私密保存 confirmation token。
+4. 用 token 执行 `... start-forward ...`；命令可续跑，并生成 owner-only worker token。
+5. 用 `scripts/shadow.sh start RUN_ID WORK_DIR` 启动恰好一个受监督 worker。
+6. 用 `... status --json` 监视 live worker、checkpoint/high-water、lag 与 poison；用 fresh
+   preflight token 运行两次 `... verify --level full --json`。
+
+要求零 poison、lag 追平并稳定至少 60 秒、两次连续 FULL complete/100% coverage。该结果只说明
+shadow 健康，**不授权**修改 `DATABASE_URL`。完整参数、token 续签、SIGTERM、retention 与 poison
+处理见 `docs/operations_zh.md`。
 
 ### E. 切换决策表 / checklist
 
@@ -183,15 +195,19 @@ SQLite。只有 PG 切换后无新写入，或所有 PG-only 写入已经外部�
 | 默认 SQLite | `sqlite:///.local/silicon_notebook.db` | 该 SQLite 文件 | 存在一致 SQLite 备份 |
 | 全新 PostgreSQL | `postgresql://user:password@host:5432/new_db` | 新库，初始仅 bootstrap 行 | PG 新写入前回原 SQLite，或已对账 |
 | 切回原 SQLite | `sqlite:////absolute/path/original.db` | SQLite 最后存下的状态 | 放弃或已对账 PG-only 写入 |
-| 存量 SQLite 迁 PG | **外部停机迁移后**的 PG URL | 只有外部复制且验证的数据 | 两端备份与回滚演练都完成 |
+| 正向 shadow | SQLite URL（不变） | 应用仍读写 SQLite；PG 是禁止业务访问的 shadow | 停 worker 即可，不影响 SQLite |
+| 存量 SQLite 迁 PG cutover | **本阶段不支持** | 不得把流量导向 shadow | 等待另行实现并评审 cutover |
 
-实际操作顺序不可缩减：隐去凭据核对 identity → 停写/停 backend → 两端备份
+若使用全新 PostgreSQL 或已由其他流程完成的 direct-backend 切换，操作顺序不可缩减：
+隐去凭据核对 identity → 停写/停 backend → 两端备份
 → 验证 target UTF8/owner/capacity → 改唯一 URL → 以 `--workers 1` 启动/自动 migration
 → status/`/api/ready`/认证/数量/抽样 smoke → 放流量。
+该顺序不适用于上面的 forward shadow；shadow 全程不改 URL、不停 active SQLite。
 
 设计边界见
-`docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md`，已交付 adapter 见
-`docs/superpowers/plans/2026-07-22-postgresql-repository-adapter.md`；forward-shadow 文档是未实现的下一阶段。
+`docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md`；已交付 adapter 与
+forward-shadow 实现分别对应 `docs/superpowers/plans/2026-07-22-postgresql-repository-adapter.md`
+和 `docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md`。Cutover 仍是后续阶段。
 
 ### F. 离线 batch ingest 边界
 

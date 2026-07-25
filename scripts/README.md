@@ -163,6 +163,8 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
+| `migrate_sqlite_to_postgres.py` | 显式 SQLite→PostgreSQL 正向 shadow CLI：`preflight` / `start-forward` / `status` / `verify` / 前台 `worker`；单独设置 `SHADOW_DATABASE_URL` 不会启动同步，完整 runbook 见 `docs/operations_zh.md` |
+| `shadow.sh` | 本机 shadow worker supervisor：按 run/work-dir 做 PID identity 校验并提供 `start/status/stop/restart`；生产也必须保持单 worker |
 | `git-cleanup.sh` | 清理「PR 已合并」的本地分支 + worktree:默认 dry-run 预演,`--apply` 执行,`--remote` 连带删远程(保护 master / 当前分支 / `eval` / `backup/*`) |
 
 ---

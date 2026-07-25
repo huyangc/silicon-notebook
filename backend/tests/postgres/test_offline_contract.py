@@ -500,12 +500,14 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
 
     monkeypatch.setattr(postgres_lane, "_run_child", fake_child)
     assert _run_isolated_gate([target]) == 0
-    assert len(calls) == 2
+    assert len(calls) == 3
     preflight_command, preflight_env = calls[0]
     pytest_command, pytest_env = calls[1]
+    shadow_command, shadow_env = calls[2]
     assert preflight_command[-1] == "--preflight"
     assert "pytest" in pytest_command
-    assert preflight_env is pytest_env
+    assert "tests/postgres/shadow/test_forward_e2e.py" in shadow_command
+    assert preflight_env is pytest_env is shadow_env
     assert set(poison).isdisjoint(preflight_env)
     assert preflight_env["TEST_POSTGRES_URL"] == (
         "postgresql://lane_user@db.example:64321/"

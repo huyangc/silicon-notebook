@@ -1,3 +1,4 @@
+import ast
 import inspect
 import re
 from pathlib import Path
@@ -201,6 +202,8 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
         "target.sanitized_url",
         '"--tb=short"',
         '"--maxfail=1"',
+        "_shadow_e2e_command",
+        '"tests/postgres/shadow/test_forward_e2e.py"',
     ):
         assert phrase in launcher
     assert "datlocale" in catalog_helpers
@@ -229,6 +232,80 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
     assert "scripts/check_postgres.sh" not in _between(
         ".github/workflows/ci.yml", "full-gate:", "postgres-integration:"
     )
+
+
+def _module_imports(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+    return imports
+
+
+def test_shadow_database_pairing_is_confined_to_the_migration_composition_root():
+    offenders: list[str] = []
+    for path in sorted((ROOT / "backend/app").rglob("*.py")):
+        relative = path.relative_to(ROOT).as_posix()
+        imports = _module_imports(path)
+        imports_sqlite_database = any(
+            module == "app.repositories.sqlite.database" for module in imports
+        )
+        imports_postgres_database = any(
+            module == "app.repositories.postgres.database" for module in imports
+        )
+        if imports_sqlite_database and imports_postgres_database and not relative.startswith(
+            "backend/app/migration/shadow/"
+        ):
+            offenders.append(relative)
+    assert offenders == []
+
+
+def test_shadow_configuration_and_calls_cannot_escape_operator_boundaries():
+    allowed_config = {
+        "backend/app/core/config.py",
+        "backend/app/migration/shadow/cli.py",
+    }
+    config_offenders: list[str] = []
+    call_offenders: list[str] = []
+    for path in sorted((ROOT / "backend/app").rglob("*.py")):
+        relative = path.relative_to(ROOT).as_posix()
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=relative)
+        if relative not in allowed_config:
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "shadow_database_url"
+                ) or (
+                    isinstance(node, ast.Constant)
+                    and node.value == "SHADOW_DATABASE_URL"
+                ):
+                    config_offenders.append(f"{relative}:{node.lineno}")
+        if relative.startswith(
+            ("backend/app/services/", "backend/app/repositories/", "backend/app/api/")
+        ) and any(module.startswith("app.migration.shadow") for module in _module_imports(path)):
+            call_offenders.append(relative)
+    assert config_offenders == []
+    assert call_offenders == []
+
+
+def test_shadow_cli_entry_is_thin_and_manifest_validation_remains_total():
+    entry = ROOT / "scripts/migrate_sqlite_to_postgres.py"
+    tree = ast.parse(entry.read_text(encoding="utf-8"), filename=str(entry))
+    imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    assert len(imports) == 1
+    assert imports[0].module == "app.migration.shadow.cli"
+    assert [alias.name for alias in imports[0].names] == ["main"]
+    assert functions == []
+
+    from app.migration.shadow.manifest import MANIFEST, validate_manifest
+
+    validate_manifest(MANIFEST)
+    assert len(MANIFEST.replicated_names) == 60
 
 
 def test_quick_start_describes_sqlite_as_the_default_not_the_only_backend():

@@ -738,13 +738,14 @@ def test_portable_late_binding_signatures_match_sqlite_stores(
     assert inspect.signature(port_method) == inspect.signature(store_method)
 
 
-def test_sqlite_bundle_factory_is_the_only_persistence_construction_root():
+def test_sqlite_construction_is_confined_to_bundle_and_shadow_operator_roots():
     app_root = Path(__file__).resolve().parents[1] / "app"
     bundle_path = app_root / "repositories" / "sqlite" / "bundle.py"
+    shadow_cli_path = app_root / "migration" / "shadow" / "cli.py"
     sources = {
         path.relative_to(app_root.parent).as_posix(): path.read_text(encoding="utf-8")
         for path in app_root.rglob("*.py")
-        if path != bundle_path
+        if path not in {bundle_path, shadow_cli_path}
     }
     offenders = _sqlite_persistence_construction_sites_from_sources(sources)
 

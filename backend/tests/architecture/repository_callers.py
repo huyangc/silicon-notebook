@@ -52,6 +52,15 @@ SQL_REASON_BY_PATH = {
     "backend/app/migration/shadow/verifier.py": (
         "temporary migration boundary owns barrier-aware cross-database verification and redacted reports"
     ),
+    "backend/app/migration/shadow/cli.py": (
+        "explicit shadow operator composition root reads redacted control status and resumable baseline state"
+    ),
+    "backend/app/migration/shadow/worker.py": (
+        "temporary migration worker owns its database-clock lease lifecycle"
+    ),
+    "backend/app/migration/shadow/retention.py": (
+        "temporary migration worker owns conservative verified change-log retention"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),
@@ -116,6 +125,9 @@ PRIVATE_REASON_BY_PATH = {
 }
 
 SQLITE_CONNECT_REASON_BY_PATH = {
+    "backend/app/migration/shadow/cli.py": (
+        "explicit shadow operator preflight opens the active SQLite source read-only"
+    ),
     "backend/app/migration/shadow/snapshot.py": (
         "temporary migration boundary opens its private validated backup"
     ),

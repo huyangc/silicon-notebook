@@ -106,26 +106,131 @@ SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 
-## SQLite / PostgreSQL 切换与回滚
+## SQLite → PostgreSQL 正向影子同步
 
-运行时只有一个 active database，应用不做 dual-write。只有外部迁移工具/流程已经复制并验证
-存量数据后，才能按此 runbook 切换；只改 `DATABASE_URL` 只会打开另一份数据存储。
+已交付的影子链路可以在不改变 active application backend 的情况下持续把 SQLite 复制到
+PostgreSQL。它是单向复制，不是应用 dual-write，也不是 cutover：整个过程必须让
+`DATABASE_URL` 保持指向 SQLite。`SHADOW_DATABASE_URL` 只标识 PostgreSQL 目标，单独设置
+不会启动任何任务。只改 `DATABASE_URL` 不会复制、迁移或同步既有数据。
 
-1. 宣布停写，并停止所有 API、后台任务、MCP、batch 与 maintenance writer；等待进行中事务
-   结束后停止后端。
-2. SQLite 使用 backup API（或完全停机并正确处理 WAL）备份；PostgreSQL 使用已演练的
-   `pg_dump --format=custom`/`pg_restore` 或组织标准物理备份。记录 checksum 与恢复演练回执。
-3. 外部复制必须保留主键、ordinal 顺序值、JSON null、UTF-8、时间戳和 float32 向量字节。
-   切换前比较 schema 版本、表数量、稳定键集合、内容哈希、存储引用，以及认证/问答/知识/
-   Memory/Knowhow/报告的代表性读取。
-4. 只修改 `DATABASE_URL`，以单 worker 启动；放流量前必须通过脱敏 database status、
-   `/api/ready`、管理员与普通用户登录、notebook/source 数量、搜索、一次写事务和后台任务恢复。
-5. 观察期内保持源备份不可变。PostgreSQL 尚无业务写入时，可停机改回 URL 并重复 smoke；一旦
-   已有 PG 写入，直接改回会丢数据，必须再次停写，外部对账 PostgreSQL→SQLite，验证两端后
-   才能恢复 SQLite。
+### 准备与启动
 
-若故障发生在放流量前或 PostgreSQL 尚无业务写入，可保持目标停止并恢复原 SQLite URL。
-不得把 SQLite maintenance 命令指向 PostgreSQL；`scripts/batch_ingest.py` 的变更阶段仍只支持 SQLite。
+启动前必须对 SQLite 数据库**及 storage 目录**和 PostgreSQL 目标做当前备份与恢复演练，记录
+证据 ID，并确认目标可用空间。目标应为专用的 PostgreSQL 16 UTF-8 数据库，且
+`pg_trgm` 位于 `public`；禁止应用或其他迁移 run 写入。请在仓库根目录、owner-only shell
+中执行，并把 JSON/token 输出视为私密数据。
+
+```bash
+export DATABASE_URL=sqlite:////srv/silicon-notebook/silicon_notebook.db
+export SHADOW_DATABASE_URL=postgresql://shadow_user:secret@pg:5432/silicon_notebook_shadow
+export SILICON_NOTEBOOK_STORAGE_DIR=/srv/silicon-notebook/storage
+export RUN_ID=shadow-20260725
+export WORK_DIR=/srv/silicon-notebook/shadow/$RUN_ID
+
+umask 077
+mkdir -p "$WORK_DIR"
+chmod 700 "$WORK_DIR"
+
+PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json \
+  --disk-evidence-id capacity-20260725 --available-target-bytes 500000000000 \
+  --backup-evidence-id restore-test-20260725 \
+  --confirm-source-backup --confirm-target-restore >"$WORK_DIR/preflight-output.json"
+
+CONFIRMATION_TOKEN="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["confirmation_token"])' \
+  "$WORK_DIR/preflight-output.json")"
+PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py start-forward \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" \
+  --confirmation-token "$CONFIRMATION_TOKEN"
+
+scripts/shadow.sh start "$RUN_ID" "$WORK_DIR"
+```
+
+`preflight` 为只读操作，把 run 绑定到两端 live database identity、schema pair、容量证据和
+备份/恢复确认；在同一私有工作目录重跑时会重新验证绑定并签发新 confirmation token。
+`start-forward` 可续跑：它安装 run-scoped SQLite capture 与逻辑键 guard，执行正式
+PostgreSQL migration/control 初始化，创建原子 SQLite snapshot，复制 60 表 baseline、发布
+H0，并写入有效期一小时的 worker 启动 token。若一小时后需要重启 worker，先重跑
+`preflight`，再幂等重跑 `start-forward` 以刷新 token。
+
+### 监控与校验
+
+```bash
+PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py status \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json
+
+# 较晚执行校验前，先用 preflight 重新签发 confirmation token。
+PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py verify \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level structural \
+  --confirmation-token "$CONFIRMATION_TOKEN" --json
+PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py verify \
+  --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level full \
+  --confirmation-token "$CONFIRMATION_TOKEN" --json
+```
+
+健康状态要求 `worker_live=true`、`poison_count=0`，且 checkpoint 持续追上
+`source_high_water`。在把影子库认定为可供后续、另行评审的切换阶段使用前，应观察零 lag
+至少 60 秒，并保留两次连续 `full/complete`、coverage 100% 的校验报告。这些只是证据；
+当前版本没有 cutover 命令，也不授权修改 `DATABASE_URL`。
+
+worker 是单消费者、前台进程。`scripts/shadow.sh` 提供本机 PID identity 校验的 supervisor；
+生产环境也可交给 systemd 或容器生命周期管理，但同一 run/direction 必须恰好一个 worker，
+停止时发送 SIGTERM。SIGTERM/SIGINT 会完成当前原子批次，并尽量释放精确的数据库时钟 lease；
+目标不可用时只留下短时自动过期 lease。
+
+```bash
+scripts/shadow.sh status "$RUN_ID" "$WORK_DIR"
+scripts/shadow.sh stop "$RUN_ID" "$WORK_DIR"
+scripts/shadow.sh restart "$RUN_ID" "$WORK_DIR"
+```
+
+最小 systemd unit 仍运行同一个前台命令。environment file 与工作目录应由
+`silicon-notebook` 用户拥有，权限分别为 `0600`/`0700`。由于 worker 启动 token 会过期，
+请使用 `Restart=no`：进程退出后先检查 `status`，重跑 `preflight` 与幂等的
+`start-forward` 刷新 token，再启动 unit。
+
+```ini
+[Unit]
+Description=silicon-notebook SQLite to PostgreSQL shadow worker
+After=network-online.target
+
+[Service]
+Type=simple
+User=silicon-notebook
+WorkingDirectory=/opt/silicon-notebook
+EnvironmentFile=/etc/silicon-notebook/shadow.env
+UMask=0077
+ExecStart=/opt/silicon-notebook/.venv/bin/python scripts/migrate_sqlite_to_postgres.py worker --run-id shadow-20260725 --direction forward --work-dir /srv/silicon-notebook/shadow/shadow-20260725 --confirmation-token-file /srv/silicon-notebook/shadow/shadow-20260725/worker.confirmation
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=no
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 故障、保留与回退边界
+
+- 连接、serialization、deadlock、lock、statement-timeout 等瞬态失败会对整个目标事务做有界
+  重试；checkpoint 只与对应业务行同事务推进。
+- 确定性的 identity/schema/continuity/conversion/constraint 失败会写入一条脱敏 poison 并停止
+  推进。不得删除或跳过事件。停止 worker，保留两端数据库和 `$WORK_DIR`，诊断漂移，并以新
+  的受评审恢复流程/run 处理，不得手改 control 表。
+- retention 由 worker 尽力执行：只删除已经 FULL 验证的旧前缀，同时保护 active verifier
+  barrier、replay checkpoint、poison 位置，以及至少 7 天/100,000 条 tail。首次 FULL 成功前
+  不清 change log。retention 失败只会多保留数据，不会停止复制。
+- 影子期间持续备份 SQLite 与 storage。PostgreSQL 只有数据库行，不包含上传/索引文件的第二份
+  副本；未来 cutover 主机必须能在配置路径访问经过验证的 storage tree。
+- 停止影子 worker 不影响 active SQLite 应用。系统没有 PostgreSQL→SQLite 复制。不得把业务
+  流量指向影子库，也不得通过切换 `DATABASE_URL` 走捷径恢复；保留证据并评审故障后，才能
+  丢弃/恢复 PostgreSQL 影子或开启新 run。
+
+`scripts/batch_ingest.py` 的变更阶段仍只支持 SQLite；影子期间必须继续指向 active SQLite。
+
+Authority 交换和 PostgreSQL→SQLite 回滚机制属于单独的
+[正式 cutover/rollback 计划](./superpowers/plans/2026-07-22-postgresql-cutover-and-rollback.md)；
+正向 shadow 阶段不得执行该未来计划。
 
 ## 用 MinerU 解析 PDF
 

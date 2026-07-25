@@ -131,11 +131,16 @@ full/cutover report. Persistent reports contain only safe table names, hashed
 stable keys, categories, counts, and fixed summaries; a clean report
 supersedes drift only at the same or a stronger verification level.
 
-It does not yet include an operator CLI or end-to-end worker. Every valid batch
-outcome emits exactly one redacted metric; batch events use the actual
-accepted/observed raw-event count rather than lag, and retries are retained
-whenever observable.
-`SHADOW_DATABASE_URL` remains inert by itself. Safety-critical PG
+The explicit operator CLI now owns preflight/start-forward/status/verify and
+the foreground worker lifecycle. The worker holds one database-clock lease,
+finishes its current atomic batch on SIGTERM/INT, and performs conservative
+retention only behind FULL verification, verifier/replay/poison barriers, seven
+days, and 100,000 tail events. Every valid batch outcome emits exactly one
+redacted metric; batch events use the actual accepted/observed raw-event count
+rather than lag, and retries are retained whenever observable.
+`SHADOW_DATABASE_URL` remains inert by itself and is read only by that CLI.
+Cutover, reverse replication, and automatic active-URL changes are not part of
+this phase. Safety-critical PG
 control mutations always take the migration lock, then the control lock, then
 validate the exact live control catalog. A live SQLite transition acquires the
 PG pool, both locks, and the run row before its short `BEGIN IMMEDIATE`, so it
