@@ -46,6 +46,9 @@ SQL_REASON_BY_PATH = {
     "backend/app/migration/shadow/bulk_copy.py": (
         "temporary migration boundary owns resumable baseline COPY and checkpoints"
     ),
+    "backend/app/migration/shadow/replicator.py": (
+        "temporary migration boundary owns fail-stop forward apply and checkpoints"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),

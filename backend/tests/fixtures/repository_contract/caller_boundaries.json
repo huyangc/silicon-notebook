@@ -1093,6 +1093,142 @@
       "target": "conn.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch",
+      "target": "execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch.attempt",
+      "target": "execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch.execute",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_statement",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._claim_worker",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._lock_business_catalog",
+      "target": "conn.execute"
+    },
+    {
+      "count": 10,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._park_unique_cycles",
+      "target": "execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._park_unique_cycles.execute",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._parking_candidate.query",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source.dependency_bundle.visit",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source.fk_groups",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source.hydrate",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._record_poison.write",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._target_snapshot",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._validate_target_state",
+      "target": "conn.execute"
+    },
+    {
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/snapshot.py",

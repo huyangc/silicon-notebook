@@ -60,9 +60,62 @@ constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
 run-progress transaction has actually committed; PG failure publishes no H0
-and releases SQLite. It does not yet include an incremental
-replicator, an operator CLI, or an end-to-end worker; `SHADOW_DATABASE_URL`
-therefore remains inert by itself. Safety-critical PG
+and releases SQLite. A fail-stop forward replicator primitive now consumes the
+global SQLite sequence contiguously, hydrates current rows only for upserts
+under a short read snapshot, keeps deletes key-only with zero hydrated bytes,
+and commits ordered target rows with its checkpoint after re-locking the
+ledger/all business tables and revalidating the exact catalog. Repeated
+stable keys in the accepted prefix coalesce to the last event and are emitted
+in global last-seq order; raw seq/checkpoint continuity remains unchanged. For
+each identity, the final actual apply overrides any synthetic dependency
+contribution; only dependency-only identities contribute one reference-counted
+synthetic row and its bytes. A short read window ending below the allocated
+high-water is an immediate suffix gap before hydration/apply; a full window
+below high-water probes the adjacent sequence in the same snapshot and fails
+if it is absent. Snapshot and pre-apply gates both require
+`progress.applied_seq` to equal the checkpoint. It uses a
+single lease, capped whole-transaction retries, actual-seq poison records, and
+redacted metrics. Batches are hard-capped at 4,096 events/64 MiB: only one final
+bundle may exceed the byte cap, and a same-key replacement that grows past the
+cap rolls back and defers when another actual bundle is already accepted. FK
+parents come only from the verified current source snapshot through a
+64-row-per-event, byte-counted, batch-deduplicated closure;
+the fixed v9 graph has a branch-counted bound of exactly 9 row slots and no
+suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG9 catalog plans cover all
+82 unique surfaces using NULL; deterministic candidates scoped by indexable
+equality for non-NULL values and `IS NULL` for NULL values on the other unique
+columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
+indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first
+gap only when both int64 bounds are occupied); or same-transaction
+delete/reinsert only for no-incoming-FK leaves with an accepted current-final
+restore row. Parked state is tracked per unique surface and row identity; each
+stagnant pass parks every independently parkable conflict, and a successful
+final apply clears all surfaces parked for that identity. Deferred work is
+capped at 8 passes, 32 actual statements per apply, and 16,384 actual
+statements total. Every SAVEPOINT/ROLLBACK/RELEASE, DML, and candidate query
+counts toward that budget. Ordering, statement, pass, and
+`ProgramLimitExceeded`/`DataError` candidate-search or candidate-update
+capacity exhaustion stays non-poison; `QueryCanceled` remains transient and
+retries the whole transaction. An unparkable UNIQUE at the final source window
+poisons its earliest actual event seq. The worker
+doubles its 256-event/8-MiB window through the hard caps after ordering-blocked; hard-cap
+exhaustion remains non-poison. After claiming the worker, the apply transaction
+rechecks existing poison for that run/direction before any business DML. Poison
+publication also locks and inspects every existing run/direction poison after
+binding/checkpoint validation: an exact replay is ACK-loss success, while a
+differing record is stale and never creates a second poison. SQLite path/file
+binding failures use a dedicated identity error instead of message-based
+conversion classification. At the `open_fresh_live_sqlite` call boundary,
+non-transient `sqlite3.OperationalError` is also a binding failure; locked,
+busy, and interrupted opens remain transient whole-batch retries, and later
+SQLite operational errors keep their existing schema/query classifications.
+Apply, ambiguous commit recognition, and poison
+publication bind snapshot source/target plus the live target identity. It does
+not yet include an operator CLI or end-to-end worker. Every valid batch outcome
+emits exactly one redacted metric; batch events use the actual accepted/observed
+raw-event count rather than lag, and retries are retained whenever observable.
+`SHADOW_DATABASE_URL` remains inert by itself. Safety-critical PG
 control mutations always take the migration lock, then the control lock, then
 validate the exact live control catalog. A live SQLite transition acquires the
 PG pool, both locks, and the run row before its short `BEGIN IMMEDIATE`, so it
