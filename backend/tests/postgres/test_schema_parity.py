@@ -218,7 +218,15 @@ ROWID_REVIEWED_NON_ORDINAL: dict[tuple[str, str], str] = {
         "microsecond precision (repository_facade._now), so the two backends "
         "can only diverge on a sub-microsecond double submit. Giving ask_jobs "
         "an ordinal column would cost a PostgreSQL migration plus a manifest "
-        "bump for an unreachable tie; revisit if the tie ever becomes real."
+        "bump for an unreachable tie; revisit if the tie ever becomes real. "
+        "codex review round 2 argued the collision does not require "
+        "sub-microsecond calls because `now` is read before the write "
+        "transaction is acquired — rejected: the transaction boundary decides "
+        "which row lands first, not whether the two `datetime.now()` reads "
+        "return the same microsecond, and equal timestamps is the only way to "
+        "reach the tie-break at all. What WOULD make it reachable is the "
+        "timestamp losing resolution, so "
+        "test_ask_job_tie_waiver_rests_on_microsecond_timestamps pins that."
     ),
     (
         "app.repositories.sqlite.memory_store:MemoryStore.list_memories",
@@ -405,9 +413,37 @@ def test_schema_manifest_pairing_is_pinned_without_a_live_database():
     """
     from app.repositories.postgres.migrator import load_migrations
 
+    migrations = load_migrations(MIGRATIONS_PATH)
     assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == SCHEMA_VERSION
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == len(
-        load_migrations(MIGRATIONS_PATH)
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == len(migrations)
+    # Counting files is not enough: a duplicated or misnumbered migration keeps
+    # the count intact and only fails later, inside _validate_manifest, against
+    # a live database (codex review round 2 P2).
+    assert [migration.version for migration in migrations] == list(
+        range(1, len(migrations) + 1)
+    )
+
+
+def test_ask_job_tie_waiver_rests_on_microsecond_timestamps():
+    """Reverse guardrail for the ask_jobs entry in ROWID_REVIEWED_NON_ORDINAL.
+
+    That waiver is only sound while two Ask submissions practically cannot
+    share a ``created_at``.  Concurrency does not threaten it — two writers
+    still have to read the same microsecond — but a coarser timestamp would:
+    at second resolution an ordinary double submit ties, and the two backends
+    would then surface different running jobs.  So pin the resolution itself,
+    both the rendered format and the clock behind it.
+    """
+    from app.services.repository_facade import _now
+
+    fraction = re.search(r"\.(\d+)", _now())
+    assert fraction is not None and len(fraction.group(1)) == 6, (
+        "ask_jobs tie waiver assumes microsecond-precision created_at"
+    )
+    samples = {_now() for _ in range(1000)}
+    assert len(samples) > 1, (
+        "created_at renders microseconds but the clock behind it does not "
+        "advance within 1000 calls; the ask_jobs tie is now reachable"
     )
 
 
