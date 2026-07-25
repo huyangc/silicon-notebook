@@ -47,6 +47,7 @@ _CHILD_ENV_ALLOWLIST = {
     "SYSTEM_VERSION_COMPAT",
     "TEMP",
     "TERM",
+    "TEST_POSTGRES_DECOY_OWNER_ROLE",
     "TMP",
     "TMPDIR",
     "TZ",

@@ -367,6 +367,9 @@ def test_pytest_environment_contains_only_password_free_urls_and_mode_0600_pgpas
         f"postgresql://other_user:{auxiliary_secret}@db.example/"
         "silicon_notebook_non_c_test",
     )
+    monkeypatch.setenv(
+        "TEST_POSTGRES_DECOY_OWNER_ROLE", "silicon_notebook_ci_owner_decoy"
+    )
     targets = [
         _prepare_target("primary", "TEST_POSTGRES_URL", "utf8"),
         _prepare_target("non-C", "TEST_POSTGRES_NON_C_URL", "non-c"),
@@ -377,6 +380,9 @@ def test_pytest_environment_contains_only_password_free_urls_and_mode_0600_pgpas
         assert primary_secret not in joined_urls
         assert auxiliary_secret not in joined_urls
         assert "PGPASSWORD" not in env
+        assert env["TEST_POSTGRES_DECOY_OWNER_ROLE"] == (
+            "silicon_notebook_ci_owner_decoy"
+        )
         pgpass_path = Path(env["PGPASSFILE"])
         assert pgpass_path.stat().st_mode & 0o777 == 0o600
         pgpass = pgpass_path.read_text(encoding="utf-8")

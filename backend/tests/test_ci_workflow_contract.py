@@ -160,6 +160,9 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     command = provision["run"]
     for phrase in (
         "NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION",
+        "silicon_notebook_ci_owner_decoy",
+        "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB",
+        "GRANT {} TO {}",
         "silicon_notebook_ci_test",
         "silicon_notebook_non_c_test",
         "LOCALE_PROVIDER icu ICU_LOCALE 'en-US'",
@@ -174,6 +177,9 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     env = gate["env"]
     assert env["PYTHON_BIN"] == "python"
     assert env["POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED"] == "1"
+    assert env["TEST_POSTGRES_DECOY_OWNER_ROLE"] == (
+        "silicon_notebook_ci_owner_decoy"
+    )
     for key in (
         "TEST_POSTGRES_URL",
         "TEST_POSTGRES_NON_C_URL",

@@ -100,6 +100,7 @@ jobs:
           from psycopg import sql
 
           role = "silicon_notebook_app"
+          decoy_owner_role = "silicon_notebook_ci_owner_decoy"
           password = os.environ["POSTGRES_APP_PASSWORD"]
           with psycopg.connect(
               host=os.environ["PGHOST"],
@@ -112,6 +113,17 @@ jobs:
               connection.execute(
                   sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION").format(
                       sql.Identifier(role), sql.Literal(password)
+                  )
+              )
+              connection.execute(
+                  sql.SQL(
+                      "CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB "
+                      "NOCREATEROLE NOREPLICATION"
+                  ).format(sql.Identifier(decoy_owner_role))
+              )
+              connection.execute(
+                  sql.SQL("GRANT {} TO {}").format(
+                      sql.Identifier(decoy_owner_role), sql.Identifier(role)
                   )
               )
               connection.execute(
@@ -135,6 +147,7 @@ jobs:
         env:
           PYTHON_BIN: python
           POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"
+          TEST_POSTGRES_DECOY_OWNER_ROLE: silicon_notebook_ci_owner_decoy
           TEST_POSTGRES_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_ci_test
           TEST_POSTGRES_NON_C_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_non_c_test
           TEST_POSTGRES_NON_UTF_URL: postgresql://silicon_notebook_app:ci-only-app-password@127.0.0.1:5432/silicon_notebook_non_utf_test

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import shutil
 import sqlite3
 from contextlib import contextmanager
@@ -47,6 +48,7 @@ from app.repositories.sqlite.migrations import SqliteMigrator
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RUN_ID = "bulk-copy-integration-1"
 SECRET = b"bulk-copy-confirmation-secret-32bytes"
+_POSTGRES_ROLE_NAME = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 
 
 def test_copy_contract_is_bounded_non_destructive_and_uses_postgres_copy():
@@ -88,6 +90,48 @@ def test_sequence_reseed_uses_catalog_dependency_and_bound_oid_not_identifier():
     assert "%s::oid::regclass" in source
     assert "setval" in source
     assert "nextval" not in source
+
+
+def test_fk_trigger_validator_rejects_a_disabled_internal_trigger():
+    rows: list[dict[str, object]] = []
+    expected = {
+        name: contract
+        for name, contract in postgres_catalog.EXPECTED_CONSTRAINTS.items()
+        if contract.kind == "f"
+    }
+    for constraint_oid, (name, contract) in enumerate(expected.items(), start=1):
+        assert contract.referenced_table is not None
+        for trigger_table in (
+            contract.table,
+            contract.table,
+            contract.referenced_table,
+            contract.referenced_table,
+        ):
+            rows.append(
+                {
+                    "trigger_oid": len(rows) + 1,
+                    "tgenabled": "O",
+                    "tgisinternal": True,
+                    "constraint_oid": constraint_oid,
+                    "conname": name,
+                    "constraint_table": contract.table,
+                    "constraint_schema": "business",
+                    "referenced_table": contract.referenced_table,
+                    "referenced_schema": "business",
+                    "trigger_table": trigger_table,
+                }
+            )
+    rows[0]["tgenabled"] = "D"
+    conn = SimpleNamespace(
+        execute=lambda *_args, **_kwargs: SimpleNamespace(fetchall=lambda: rows)
+    )
+
+    with pytest.raises(ValueError, match="foreign-key trigger contract drifted"):
+        postgres_catalog._validate_fk_constraint_triggers(
+            conn,
+            business_schema="business",
+            business_tables=MANIFEST.replicated_names,
+        )
 
 
 def test_qualified_accepts_run_bound_quoted_schema_but_not_untrusted_table():
@@ -1884,6 +1928,8 @@ def test_exact_v9_catalog_rejects_same_name_semantic_drift(
     )
     decoy_schema: str | None = None
     decoy_role: str | None = None
+    decoy_role_schema: str | None = None
+    decoy_role_is_preprovisioned = False
     with postgres_database.write() as conn:
         if drift == "foreign_key":
             conn.execute(
@@ -1912,6 +1958,18 @@ def test_exact_v9_catalog_rejects_same_name_semantic_drift(
         elif drift == "policy":
             conn.execute("CREATE POLICY shadow_drift ON answers USING (true)")
         elif drift == "trigger_disabled":
+            # PostgreSQL reserves internal constraint-trigger state changes for
+            # superusers. The pure validator test above preserves CI coverage;
+            # privileged local lanes still exercise the catalog end to end.
+            is_superuser = bool(
+                conn.execute(
+                    "SELECT rolsuper FROM pg_roles WHERE rolname=current_user"
+                ).fetchone()["rolsuper"]
+            )
+            if not is_superuser:
+                pytest.skip(
+                    "disabling PostgreSQL internal constraint triggers requires superuser"
+                )
             conn.execute("ALTER TABLE answers DISABLE TRIGGER ALL")
         elif drift == "sequence_acl":
             conn.execute("GRANT SELECT ON SEQUENCE answers_ordinal_seq TO PUBLIC")
@@ -1921,10 +1979,24 @@ def test_exact_v9_catalog_rejects_same_name_semantic_drift(
             schema = str(
                 conn.execute("SELECT current_schema() AS name").fetchone()["name"]
             )
-            decoy_role = f"seq_owner_{schema.rsplit('_', 1)[-1]}"
-            conn.execute(
-                pg_sql.SQL("CREATE ROLE {}").format(pg_sql.Identifier(decoy_role))
-            )
+            decoy_role = os.environ.get("TEST_POSTGRES_DECOY_OWNER_ROLE")
+            if decoy_role is not None:
+                if _POSTGRES_ROLE_NAME.fullmatch(decoy_role) is None:
+                    raise RuntimeError(
+                        "TEST_POSTGRES_DECOY_OWNER_ROLE must be a simple PostgreSQL role name"
+                    )
+                decoy_role_is_preprovisioned = True
+                decoy_role_schema = schema
+                conn.execute(
+                    pg_sql.SQL("GRANT CREATE ON SCHEMA {} TO {}").format(
+                        pg_sql.Identifier(schema), pg_sql.Identifier(decoy_role)
+                    )
+                )
+            else:
+                decoy_role = f"seq_owner_{schema.rsplit('_', 1)[-1]}"
+                conn.execute(
+                    pg_sql.SQL("CREATE ROLE {}").format(pg_sql.Identifier(decoy_role))
+                )
             conn.execute(
                 pg_sql.SQL("ALTER TABLE answers OWNER TO {}").format(
                     pg_sql.Identifier(decoy_role)
@@ -2081,17 +2153,29 @@ def test_exact_v9_catalog_rejects_same_name_semantic_drift(
                 )
         if decoy_role is not None:
             with postgres_database.write() as conn:
-                conn.execute(
-                    pg_sql.SQL("REASSIGN OWNED BY {} TO CURRENT_USER").format(
-                        pg_sql.Identifier(decoy_role)
+                if decoy_role_is_preprovisioned:
+                    conn.execute("ALTER TABLE answers OWNER TO CURRENT_USER")
+                    assert decoy_role_schema is not None
+                    conn.execute(
+                        pg_sql.SQL("REVOKE CREATE ON SCHEMA {} FROM {}").format(
+                            pg_sql.Identifier(decoy_role_schema),
+                            pg_sql.Identifier(decoy_role),
+                        )
                     )
-                )
-                conn.execute(
-                    pg_sql.SQL("DROP OWNED BY {}").format(pg_sql.Identifier(decoy_role))
-                )
-                conn.execute(
-                    pg_sql.SQL("DROP ROLE {}").format(pg_sql.Identifier(decoy_role))
-                )
+                else:
+                    conn.execute(
+                        pg_sql.SQL("REASSIGN OWNED BY {} TO CURRENT_USER").format(
+                            pg_sql.Identifier(decoy_role)
+                        )
+                    )
+                    conn.execute(
+                        pg_sql.SQL("DROP OWNED BY {}").format(
+                            pg_sql.Identifier(decoy_role)
+                        )
+                    )
+                    conn.execute(
+                        pg_sql.SQL("DROP ROLE {}").format(pg_sql.Identifier(decoy_role))
+                    )
 
 
 @pytest.mark.postgres_integration
