@@ -24,7 +24,7 @@
 | 占位符 | 含义 |
 | --- | --- |
 | `<SQLITE_DB>` | 源 SQLite 文件绝对路径(部署机上的 `.local/silicon_notebook.db`) |
-| `<WORK_DIR>` | 迁移私有工作目录绝对路径(放快照与 receipt,需与源库同量级空闲空间) |
+| `<WORK_DIR>` | 迁移私有工作目录绝对路径(放快照与 receipt;容量要求见 P0) |
 | `<ENV_FILE>` | 部署 `.env` 绝对路径 |
 | `<TZ>` | SQLite **部署机**的 IANA 时区,如 `Asia/Shanghai` |
 | `<RECEIPT>` | `--apply` 成功后打印的 receipt 路径 |
@@ -32,12 +32,25 @@
 ## P0 前置采集(只读,可随时做)
 
 ```bash
-sqlite3 <SQLITE_DB> "PRAGMA user_version; PRAGMA quick_check;" \
-  && ls -l <SQLITE_DB> && df -h <WORK_DIR>
+mkdir -p -m 700 <WORK_DIR>
+sqlite3 <SQLITE_DB> "PRAGMA user_version; PRAGMA quick_check;"
+ls -l <SQLITE_DB>
+df -h <WORK_DIR>
 ```
 
-判据:`quick_check` 为 `ok`;`<WORK_DIR>` 与目标库所在盘各自剩余空间 ≥ 源库大小(快照 + 升级
-工作副本 + PostgreSQL 数据与索引)。任一不满足就停,先扩容。
+(先建目录再 `df`:首次迁移时 `<WORK_DIR>` 通常还不存在,`df` 会直接失败。`0700` 是因为
+里面的快照是完整的库副本。)
+
+判据:
+
+- `quick_check` 为 `ok`。不是就先修源库,不要迁一个已损坏的库。
+- **`<WORK_DIR>` 所在盘剩余 ≥ 2 × 源库大小。** 不是 1×:
+  - 导入阶段密封快照常驻,源库 schema 落后于当前代码时还会再拷一份完整升级工作副本;
+  - **激活阶段无条件重新生成一份完整快照**(停写后的一致性锚点),而密封快照此时必须仍在。
+  500GB 的源库就是 1TB。按 1× 备的话,前面几小时都正常,会在激活那一步爆盘。
+- **目标库所在盘不能用源库大小估。** PostgreSQL 的数据 + 索引通常大于 SQLite 文件,
+  重建索引期间还要额外临时空间。**用 P2 彩排实测出来的实际占用来定**,这也是彩排的
+  产出之一;没有实测值就不要进正式窗口。
 
 留档以便事后核对:各主表行数(至少 `notebooks`/`sources`/`chunks`/`knowledge_objects`)、
 当前 `SILICON_NOTEBOOK_STORAGE_DIR` 的值。
@@ -79,8 +92,11 @@ python scripts/migrate_sqlite_to_postgres.py \
 - **中断**(崩溃、断连、重启):**原样重跑同一条命令**即可续跑。为避免重新快照多 GB 源库,
   加上上一次打印的快照路径:`--snapshot <WORK_DIR>/sqlite-vNN-HASH.snapshot.db`。
 
-记录耗时,用于估算正式窗口。`--source-timezone` 未显式传时默认取**执行机**本地时区——
-执行机与 SQLite 部署机时区不同的话,所有 naive 历史时间戳会整体偏移,且不报错。
+彩排要产出两个数,正式窗口都要用:**耗时**,以及**目标库实际占用**
+(`SELECT pg_size_pretty(pg_database_size(current_database()));` 在导入结束后执行)。
+
+`--source-timezone` 未显式传时默认取**执行机**本地时区——执行机与 SQLite 部署机时区
+不同的话,所有 naive 历史时间戳会整体偏移,且不报错。
 
 彩排结束后,彩排用的目标库**不能**用作正式目标(里面是旧快照,正式流程会拒)。
 
@@ -163,3 +179,4 @@ curl -fsS http://127.0.0.1:8000/api/ready
 | `--activate-env requires --apply and --confirm-service-stopped` | 少了确认参数;先真正停写再补上 |
 | 校验和不一致 | 激活会中止且不动 `.env`。不要重试激活,先查源库在导入期间是否仍在写 |
 | 退出码 130 | 被 Ctrl-C/信号取消。原样重跑即可续跑 |
+| 磁盘写满(尤其发生在激活步) | `<WORK_DIR>` 按 1× 备的典型症状——激活会在密封快照仍在的前提下再生成一份完整快照。扩到 ≥ 2× 后重跑激活 |
