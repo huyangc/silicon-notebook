@@ -1023,6 +1023,16 @@ def test_progress_payload_is_a_closed_non_secret_contract(progress):
         control._validated_progress(progress)
 
 
+def test_progress_accepts_the_running_migration_but_rejects_a_future_version():
+    control._validated_progress(
+        {"migration_version": MANIFEST.schema_pair.postgres_version}
+    )
+    with pytest.raises(ValueError, match="migration_version"):
+        control._validated_progress(
+            {"migration_version": MANIFEST.schema_pair.postgres_version + 1}
+        )
+
+
 def test_sqlite_report_from_source_a_cannot_enable_prepared_source_b(
     sqlite_capture, monkeypatch, tmp_path
 ):
