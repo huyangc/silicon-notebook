@@ -2181,8 +2181,46 @@ MIGRATION_MANIFEST[(29, 30)] = {
     "views": {},
 }
 
-# v31: relation endpoint probes page by the stable relation id within each
-# notebook/source or notebook/target stream.  These covering indexes keep that
+# v31: inert SQLite-side metadata for run-scoped forward-shadow capture.
+# The versioned migration creates only these two payload-free internal tables;
+# logical-key guards and capture/freeze triggers are installed later by the
+# shadow run installer in one BEGIN IMMEDIATE transaction.
+SHADOW_CAPTURE_TABLES = {
+    "shadow_change_log": """CREATE TABLE shadow_change_log (
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id TEXT NOT NULL,
+                  table_name TEXT NOT NULL,
+                  key_json TEXT NOT NULL,
+                  operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+                  schema_epoch INTEGER NOT NULL,
+                  captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )""",
+    "shadow_capture_control": """CREATE TABLE shadow_capture_control (
+                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                  write_frozen INTEGER NOT NULL CHECK (write_frozen IN (0, 1)),
+                  apply_active INTEGER NOT NULL DEFAULT 0 CHECK (apply_active IN (0, 1)),
+                  run_id TEXT NOT NULL,
+                  schema_epoch INTEGER NOT NULL
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 31, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SHADOW_CAPTURE_TABLES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(30, 31)] = {
+    "tables": SHADOW_CAPTURE_TABLES,
+    "columns": {},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+# v32: relation endpoint probes page by stable relation id within each
+# notebook/source or notebook/target stream. These covering indexes keep that
 # keyset walk bounded without changing tables, columns, triggers, or views.
 RELATION_ENDPOINT_KEYSET_INDEXES = {
     "idx_knowledge_relations_nb_source_id":
@@ -2193,13 +2231,13 @@ RELATION_ENDPOINT_KEYSET_INDEXES = {
                   ON knowledge_relations(notebook_id, target_object_id, id)""",
 }
 MIGRATION_MANIFEST = {
-    (key[0], 31, *key[2:]): {
+    (key[0], 32, *key[2:]): {
         **manifest,
         "indexes": {**manifest["indexes"], **RELATION_ENDPOINT_KEYSET_INDEXES},
     }
     for key, manifest in MIGRATION_MANIFEST.items()
 }
-MIGRATION_MANIFEST[(30, 31)] = {
+MIGRATION_MANIFEST[(31, 32)] = {
     "tables": {},
     "columns": {},
     "indexes": RELATION_ENDPOINT_KEYSET_INDEXES,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -21,6 +22,9 @@ from app.repositories.postgres.schema_manifest import (
     POSTGRES_EMPTY_JSON_LIST_SENTINELS,
     POSTGRES_EMPTY_TIME_SENTINELS,
     POSTGRES_JSON_COLUMNS,
+    POSTGRES_ROWID_ORDINAL_TABLES,
+    POSTGRES_SCHEMA_MANIFEST,
+    SQLITE_MIGRATION_INTERNAL_TABLES,
     SQLITE_RETIRED_TABLES,
 )
 from tests.postgres.conftest import (
@@ -35,6 +39,10 @@ CONTRACT_PATH = REPO_ROOT / "backend" / "tests" / "fixtures" / "postgres_schema_
 MIGRATIONS_PATH = (
     REPO_ROOT / "backend" / "app" / "repositories" / "postgres" / "migrations"
 )
+SQLITE_SHADOW_INTERNAL_TABLES = {
+    "shadow_change_log",
+    "shadow_capture_control",
+}
 
 # These are reviewed application-owned JSON values. Keeping the classification
 # explicit prevents a new TEXT column from silently becoming jsonb merely
@@ -121,6 +129,369 @@ ROWID_ORDER_EVIDENCE = {
         "app.repositories.sqlite.source_store:SourceStore.notebook_element_sample",
     ],
 }
+
+# ROWID_ORDER_EVIDENCE above is the curated per-table narrative ("why is this
+# table ordinal"), and comparing it against itself proves nothing.  The map
+# below is the machine-checkable counterpart: EVERY site in the SQLite
+# repository package whose SQL mentions ``rowid``, classified by hand.
+#
+# A site maps to the FULL tuple of what its rowid SQL touches — one entry per
+# site is not enough, because a single method can order two different tables by
+# rowid (``get_conversation`` orders both ``answers`` and ``ask_jobs``), and a
+# scalar classification silently hides the second one.  The scanner resolves
+# each SQL literal's tables independently and the test requires every table it
+# can resolve to appear here, so an omission cannot pass.
+#
+# A business table listed here declares "this table's rowid order is
+# observable", which is exactly the property PostgreSQL can only reproduce
+# through the ``ordinal`` identity column — so it must be in
+# POSTGRES_ROWID_ORDINAL_TABLES or carry a reviewed exception below.  The
+# sentinels cover the non-business objects:
+#
+#   fts-ddl              FTS trigger/DDL text inside a SQLite migration
+#   temp-fts             a per-query ``temp.`` FTS scratch table
+#   sqlite-keyset-paging SQLite-only keyset pagination over a full scan whose
+#                        output is de-duplicated and order-independent (the
+#                        PostgreSQL adapter streams a server-side cursor)
+ROWID_TOKEN_SITES: dict[str, tuple[str, ...]] = {
+    "app.repositories.sqlite.ask_state_store:"
+    "AskStateStore.conversation_history": ("answers",),
+    "app.repositories.sqlite.ask_state_store:"
+    "AskStateStore.get_conversation": ("answers", "ask_jobs"),
+    "app.repositories.sqlite.ask_state_store:"
+    "AskStateStore.list_conversations": ("answers",),
+    "app.repositories.sqlite.chunk_store:ChunkStore.language_probe_rows": ("chunks",),
+    "app.repositories.sqlite.index_projection_store:"
+    "IndexProjectionStore.embedding_matrix._stream_rows": ("sqlite-keyset-paging",),
+    "app.repositories.sqlite.index_projection_store:"
+    "IndexProjectionStore.graph_rows": ("chunks", "knowledge_objects"),
+    "app.repositories.sqlite.kg_build_job_store:"
+    "KgBuildJobStore.latest_on": ("kg_build_jobs",),
+    "app.repositories.sqlite.knowledge_counts_cache:"
+    "_pending_source_count_query": ("extraction_runs",),
+    "app.repositories.sqlite.knowledge_store:"
+    "KnowledgeStore.graph_object_rows": ("knowledge_objects",),
+    "app.repositories.sqlite.knowledge_store:"
+    "KnowledgeStore.source_build_rows": ("extraction_runs",),
+    "app.repositories.sqlite.knowledge_store:"
+    "KnowledgeStore.source_has_kg": ("extraction_runs",),
+    "app.repositories.sqlite.maintenance:"
+    "SQLiteMaintenanceAdapter.count_sources_missing_kg": ("extraction_runs",),
+    "app.repositories.sqlite.maintenance:"
+    "SQLiteMaintenanceAdapter.partial_kg_source_ids": ("extraction_runs",),
+    "app.repositories.sqlite.memory_store:MemoryStore.list_memories": ("memory_items",),
+    "app.repositories.sqlite.memory_store:"
+    "MemoryStore.memory_retrieval_rows": ("memory_items",),
+    "app.repositories.sqlite.migrations:SqliteMigrator._migration_13": ("fts-ddl",),
+    "app.repositories.sqlite.source_store:"
+    "SourceStore.notebook_element_sample": ("source_elements",),
+    "app.repositories.sqlite.source_store:"
+    "SourceStore.source_from_row": ("extraction_runs",),
+    "app.repositories.sqlite.source_store:"
+    "SourceStore.sources_from_rows": ("extraction_runs",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.claim_name_rows": ("temp-fts",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.mention_alias_candidate_batches.batches": ("temp-fts",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.mention_scan_matches": ("temp-fts",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.scratch_vector_rows": ("kg_cluster_scratch",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.seed_payload_rows": ("knowledge_objects",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.stream_seed_rows": ("knowledge_objects",),
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.swap_cluster_map_from_scratch": ("kg_cluster_scratch",),
+}
+
+ROWID_NON_CONTRACT_SENTINELS = frozenset(
+    {"fts-ddl", "temp-fts", "sqlite-keyset-paging"}
+)
+
+# Business tables whose rowid a site touches WITHOUT the value being a
+# cross-backend ordering contract.  Every entry is a reviewed judgement with
+# its reason, not a way to silence the scan: dropping one turns the test red.
+ROWID_REVIEWED_NON_ORDINAL: dict[tuple[str, str], str] = {
+    (
+        "app.repositories.sqlite.ask_state_store:AskStateStore.get_conversation",
+        "ask_jobs",
+    ): (
+        "Defensive tie-break only. SQLite picks the newest running job with "
+        "`ORDER BY created_at DESC, rowid DESC LIMIT 1`; PostgreSQL breaks the "
+        "same tie with `id COLLATE \"C\" DESC`, which is a random surrogate "
+        "key and NOT insertion order. Reaching the tie needs two running jobs "
+        "in one conversation whose created_at values are equal at microsecond "
+        "precision (repository_facade._now) — rare, not impossible: two "
+        "submissions less than a microsecond apart do tie, and then the two "
+        "backends can surface different active jobs. This entry records that "
+        "as a KNOWN, BOUNDED divergence rather than a proof of impossibility. "
+        "Bounded because both rows are legitimate running jobs of the same "
+        "conversation, so the only user-visible effect is which one's trace is "
+        "restored; no answer, ownership, or durability is affected. Closing it "
+        "properly means giving ask_jobs an ordinal column — a PostgreSQL "
+        "migration plus a manifest bump, i.e. a schema change that belongs in "
+        "its own reviewed PR, not in a test-only guard. Raised by codex review "
+        "rounds 2 and 3; round 2's specific argument (that reading `now` "
+        "before the write transaction removes the sub-microsecond requirement) "
+        "is wrong — the transaction boundary decides which row lands first, "
+        "not whether two `datetime.now()` reads return the same microsecond. "
+        "The waiver's real dependency is timestamp resolution, which "
+        "test_ask_job_tie_waiver_rests_on_microsecond_timestamps pins: at "
+        "second resolution an ordinary double submit would tie and this "
+        "bounded divergence would stop being rare."
+    ),
+    (
+        "app.repositories.sqlite.memory_store:MemoryStore.list_memories",
+        "memory_items",
+    ): (
+        "FTS docid join (`memory_items_fts f ON f.rowid=m.rowid`), not an "
+        "ordering contract. PostgreSQL indexes the base row with GIN and has "
+        "no shadow table to join, so there is nothing to reproduce."
+    ),
+    (
+        "app.repositories.sqlite.memory_store:MemoryStore.memory_retrieval_rows",
+        "memory_items",
+    ): (
+        "FTS docid join (`memory_items_fts f ON f.rowid=m.rowid`), not an "
+        "ordering contract — same as list_memories above."
+    ),
+    (
+        "app.repositories.sqlite.unified_kg_store:"
+        "UnifiedKgStore.scratch_vector_rows",
+        "kg_cluster_scratch",
+    ): (
+        "Rebuild scratch rows are transient and never copied as historical "
+        "business state. PostgreSQL reproduces their SQLite insertion order "
+        "by joining knowledge_objects and ordering by its preserved ordinal."
+    ),
+    (
+        "app.repositories.sqlite.unified_kg_store:"
+        "UnifiedKgStore.swap_cluster_map_from_scratch",
+        "kg_cluster_scratch",
+    ): (
+        "Rebuild scratch rows, repopulated from knowledge_objects every run "
+        "and never read across a migration. The PostgreSQL adapter reproduces "
+        "the same canonical order by joining knowledge_objects and ordering on "
+        "its ordinal instead (postgres/unified_kg_store.py)."
+    ),
+}
+
+# The one ordering contract carried by SQLite's *implicit* rowid order — the
+# query deliberately omits ORDER BY (see the method's docstring), so no scan
+# can find it from the SQL text.  Pinned here so the evidence list and the
+# scanned sites can be compared without hiding it.
+ROWID_IMPLICIT_ORDER_SITES = frozenset(
+    {"app.repositories.sqlite.governance_store:GovernanceStore.pending_merges_batch"}
+)
+
+SQLITE_REPOSITORY_PACKAGE = (
+    REPO_ROOT / "backend" / "app" / "repositories" / "sqlite"
+)
+_ROWID_TOKEN = re.compile(r"\browid\b", re.I)
+_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
+_SQL_TABLE_REF = re.compile(
+    r"\b(?:from|join|update|into)\s+(?:temp\.)?(\{\}|[a-z_][a-z0-9_]*)"
+    r"(?:\s+(?:as\s+)?([a-z_][a-z0-9_]*))?",
+    re.I,
+)
+_QUALIFIED_ROWID = re.compile(r"\b([a-z_][a-z0-9_]*)\.rowid\b", re.I)
+_BARE_ROWID = re.compile(r"(?<![.\w])rowid\b", re.I)
+_SQL_ALIAS_STOPWORDS = frozenset(
+    {
+        "and", "as", "by", "cross", "from", "group", "having", "inner", "into",
+        "join", "left", "limit", "natural", "on", "or", "order", "outer",
+        "select", "set", "union", "using", "values", "where",
+    }
+)
+
+
+def _string_values(node: ast.AST) -> list[str]:
+    """The literal text a node contributes, f-strings included (holes elided)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.JoinedStr):
+        return [
+            "".join(
+                part.value
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                else "{}"
+                for part in node.values
+            )
+        ]
+    return []
+
+
+def _docstring_nodes(tree: ast.Module) -> set[int]:
+    """Docstrings discuss rowid in prose; they are not SQL."""
+    nodes: set[int] = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ) or not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and _string_values(first.value):
+            nodes.add(id(first.value))
+    return nodes
+
+
+def _business_tables_touching_rowid(sql: str) -> set[str]:
+    """Business tables this SQL literal uses rowid on.
+
+    Deliberately conservative: a qualified ``alias.rowid`` resolves through the
+    literal's own FROM/JOIN aliases, and a bare ``rowid`` is attributed only
+    when the literal names exactly one table.  Anything it cannot resolve —
+    an alias bound in another literal, an f-string table hole, a temp/FTS
+    object — simply drops out instead of being guessed, so the scan never
+    invents a table.  Its job is to catch omissions, not to be exhaustive.
+    """
+    base: list[str] = []
+    aliases: dict[str, str] = {}
+    for match in _SQL_TABLE_REF.finditer(sql):
+        table, alias = match.group(1), match.group(2)
+        base.append(table)
+        if alias and alias.lower() not in _SQL_ALIAS_STOPWORDS:
+            aliases[alias.lower()] = table
+    touched = {
+        aliases.get(match.group(1).lower(), match.group(1).lower())
+        for match in _QUALIFIED_ROWID.finditer(sql)
+    }
+    if _BARE_ROWID.search(sql) and len(set(base)) == 1:
+        touched.add(base[0])
+    return {table for table in touched if table in set(POSTGRES_BUSINESS_TABLES)}
+
+
+def _scan_rowid_sites() -> dict[str, set[str]]:
+    sites: dict[str, set[str]] = {}
+    for path in sorted(SQLITE_REPOSITORY_PACKAGE.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        skip = _docstring_nodes(tree)
+        module = f"app.repositories.sqlite.{path.stem}"
+
+        def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    visit(child, scope + (child.name,))
+                    continue
+                if id(child) not in skip:
+                    for text in _string_values(child):
+                        sql = _SQL_LINE_COMMENT.sub("", text)
+                        if not _ROWID_TOKEN.search(sql):
+                            continue
+                        site = f"{module}:{'.'.join(scope) or '<module>'}"
+                        sites.setdefault(site, set()).update(
+                            _business_tables_touching_rowid(sql)
+                        )
+                visit(child, scope)
+
+        visit(tree, ())
+    return sites
+
+
+def test_every_rowid_site_is_classified_and_ordinal_backed():
+    scanned = _scan_rowid_sites()
+    assert set(scanned) == set(ROWID_TOKEN_SITES), (
+        "unclassified rowid SQL "
+        f"(new={sorted(set(scanned) - set(ROWID_TOKEN_SITES))}, "
+        f"stale={sorted(set(ROWID_TOKEN_SITES) - set(scanned))})"
+    )
+    for site, resolved in sorted(scanned.items()):
+        classified_tables = set(ROWID_TOKEN_SITES[site]) - ROWID_NON_CONTRACT_SENTINELS
+        if not resolved:
+            # Nothing resolvable here (cross-literal alias, f-string table
+            # hole, temp/FTS object). The hand classification stands alone.
+            continue
+        # Equality, not subset: a subset check would let a STALE classification
+        # survive after its SQL is deleted, keeping a waiver alive for an
+        # ordering the code no longer has (codex review round 4 P2). A site
+        # that legitimately mixes a resolvable and an unresolvable business
+        # table would fail here — that is intentional, it needs a human.
+        assert resolved == classified_tables, (
+            f"{site} rowid tables disagree with the classification "
+            f"(missing={sorted(resolved - classified_tables)}, "
+            f"stale={sorted(classified_tables - resolved)})"
+        )
+    unbacked = {
+        (site, table)
+        for site, tables in ROWID_TOKEN_SITES.items()
+        for table in tables
+        if table not in ROWID_NON_CONTRACT_SENTINELS
+        and table not in set(POSTGRES_ROWID_ORDINAL_TABLES)
+    }
+    assert unbacked == set(ROWID_REVIEWED_NON_ORDINAL), (
+        "rowid on a table PostgreSQL cannot order the same way "
+        f"(unreviewed={sorted(unbacked - set(ROWID_REVIEWED_NON_ORDINAL))}, "
+        f"stale={sorted(set(ROWID_REVIEWED_NON_ORDINAL) - unbacked)})"
+    )
+    classified = {
+        table for tables in ROWID_TOKEN_SITES.values() for table in tables
+    } - ROWID_NON_CONTRACT_SENTINELS
+    assert classified <= set(POSTGRES_BUSINESS_TABLES)
+    evidence = {site for sites in ROWID_ORDER_EVIDENCE.values() for site in sites}
+    assert evidence - set(scanned) == ROWID_IMPLICIT_ORDER_SITES
+    for table, sites in ROWID_ORDER_EVIDENCE.items():
+        for site in sites:
+            if site in ROWID_TOKEN_SITES:
+                assert table in ROWID_TOKEN_SITES[site]
+
+
+def test_schema_manifest_pairing_is_pinned_without_a_live_database():
+    """The paired versions used to be asserted only inside the PostgreSQL lane,
+    so a `check.sh`-green change could ship a manifest that refuses to import
+    (the importer and PostgresMigrator both fail closed, but only at runtime).
+    """
+    from app.repositories.postgres.migrator import load_migrations
+
+    migrations = load_migrations(MIGRATIONS_PATH)
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == SCHEMA_VERSION
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == len(migrations)
+    # Counting files is not enough: a duplicated or misnumbered migration keeps
+    # the count intact and only fails later, inside _validate_manifest, against
+    # a live database (codex review round 2 P2).
+    assert [migration.version for migration in migrations] == list(
+        range(1, len(migrations) + 1)
+    )
+
+
+def test_ask_job_tie_waiver_rests_on_microsecond_timestamps():
+    """Reverse guardrail for the ask_jobs entry in ROWID_REVIEWED_NON_ORDINAL.
+
+    The waiver does not claim the tie is impossible — two submissions inside
+    one microsecond do tie.  It claims the tie stays rare and its effect stays
+    bounded.  Rarity rests entirely on timestamp resolution: at second
+    resolution an ordinary double submit ties and the divergence becomes
+    routine.  So pin the resolution itself, both the rendered format and the
+    clock behind it.  This is a guardrail on the waiver's premise, not a proof
+    that equal timestamps cannot occur.
+    """
+    from app.services.repository_facade import _now
+
+    samples = [_now() for _ in range(2000)]
+    fractions = []
+    for stamp in samples:
+        rendered = re.search(r"\.(\d+)", stamp)
+        assert rendered is not None and len(rendered.group(1)) == 6, (
+            "ask_jobs tie waiver assumes microsecond-precision created_at"
+        )
+        fractions.append(int(rendered.group(1)))
+    assert len(set(samples)) > 1, (
+        "created_at renders microseconds but the clock behind it never "
+        "advances; the ask_jobs tie is now routine"
+    )
+    # Rendering six digits proves nothing about the clock: a millisecond-
+    # quantized source renders .123000 and still ties every sub-millisecond
+    # double submit (codex review round 4 P2). Every fraction being a multiple
+    # of 1000 is exactly that signature, so require at least one sample to
+    # carry a sub-millisecond remainder.
+    assert any(value % 1000 for value in fractions), (
+        "created_at is quantized to milliseconds or coarser across 2000 "
+        "samples; the ask_jobs tie stops being rare and the waiver in "
+        "ROWID_REVIEWED_NON_ORDINAL no longer holds"
+    )
 
 
 def _is_time_column(table: str, column: str) -> bool:
@@ -302,6 +673,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
         str(row["name"])
         for row in table_rows
         if str(row["name"]).startswith("sqlite_")
+        or str(row["name"]) in SQLITE_SHADOW_INTERNAL_TABLES
     }
     ordinary_tables = [
         str(row["name"])
@@ -836,7 +1208,7 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
     assert migrator.migrate() == 10
     assert migrator.migrate() == 10
     assert migrator.current_version() == 10
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 31
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 32
     assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 10
 
 
@@ -958,6 +1330,7 @@ def test_reviewed_json_and_binary_mappings_cover_only_real_columns(tmp_path):
     assert set(POSTGRES_ROWID_ORDINAL_TABLES) == set(ROWID_ORDER_EVIDENCE)
     assert set(POSTGRES_BUSINESS_TABLES) == set(contract["tables"])
     assert set(SQLITE_RETIRED_TABLES).isdisjoint(POSTGRES_BUSINESS_TABLES)
+    assert set(SQLITE_MIGRATION_INTERNAL_TABLES).isdisjoint(POSTGRES_BUSINESS_TABLES)
     assert contract["ordinal_evidence"] == ROWID_ORDER_EVIDENCE
     fingerprint = hashlib.sha256(
         "\n".join(sorted(contract["tables"])).encode("utf-8")

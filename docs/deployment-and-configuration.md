@@ -197,7 +197,8 @@ and then `fuser` — at least one must be available.
 `DATABASE_URL` is the only active-backend selector. It accepts `sqlite:///...`,
 `postgresql://...`, and the normalized legacy alias `postgres://...`; unsupported schemes,
 connection failures, migration failures, and warmup failures fail closed without falling
-back to another database. `SHADOW_DATABASE_URL` is reserved and cannot enable dual-write.
+back to another database. `SHADOW_DATABASE_URL` never selects the active backend and setting
+it alone starts no synchronization; it is consumed only by the explicit forward-shadow CLI.
 
 ```dotenv
 # Shipped default
@@ -205,6 +206,9 @@ DATABASE_URL=sqlite:///.local/silicon_notebook.db
 
 # Direct PostgreSQL 16 backend
 DATABASE_URL=postgresql://silicon_app:change-me@127.0.0.1:5432/silicon_notebook
+
+# Optional one-way shadow target while DATABASE_URL remains SQLite
+# SHADOW_DATABASE_URL=postgresql://silicon_shadow:change-me@127.0.0.1:5432/silicon_notebook_shadow
 ```
 
 PostgreSQL must use UTF-8 and have `pg_trgm` installed in `public`. The database owner may
@@ -213,11 +217,13 @@ another schema is rejected. PostgreSQL stores vectors as float32 `bytea`; pgvect
 required. Keep production at one backend worker (`--workers 1`).
 
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
-the URL, start, and verify the empty/bootstrap state. For an existing SQLite→PostgreSQL
-move, first quiesce all writers, stop the service, make verified backups of both sides,
-perform an externally controlled full migration, compare table counts and representative
-domain reads, then change the one URL. Detailed cutover and rollback steps are in
-[Operations](./operations.md); the packaged decision table is also in
+the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the
+delivered forward-shadow CLI can build and continuously maintain a PostgreSQL shadow while
+SQLite remains active. It requires PostgreSQL 16, a dedicated empty/restorable target,
+verified source and target backups, capacity evidence, an owner-private work directory, and
+one supervised worker. It never changes `DATABASE_URL`, sends traffic to PostgreSQL, or
+replicates PostgreSQL writes back to SQLite. Detailed commands, monitoring, and failure
+handling are in [Operations](./operations.md); the packaged checklist is also in
 [packaging/DEPLOY.md](../packaging/DEPLOY.md).
 
 ### 4 · Verify

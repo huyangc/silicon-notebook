@@ -38,7 +38,7 @@ def _indexes(repo, table):
 
 
 def test_fresh_db_has_notebook_assets_source_id(tmp_path):
-    """全新库:SCHEMA_VERSION 已到 30（notebook_assets.source_id 列在 v19 落地，
+    """全新库:SCHEMA_VERSION 已到 31（notebook_assets.source_id 列在 v19 落地，
     此后 v20 加了 notebook_bases + promotion_candidates.target_base_id、v21 加了
     normalized-anchor expression index、v22 加了 kg_build_jobs、v23 加了模型服务
     最新状态表、v24 加了写锁瘦身改造点 2 的 kg_canonical_scratch 表、v25 清除用户
@@ -49,7 +49,7 @@ def test_fresh_db_has_notebook_assets_source_id(tmp_path):
     source_id 列 + idx_notebook_assets_source 索引；user_version 已盖到
     SCHEMA_VERSION。"""
     repo = _repo(tmp_path)
-    assert SCHEMA_VERSION == 31
+    assert SCHEMA_VERSION == 32
     assert "source_id" in _cols(repo, "notebook_assets")
     assert "idx_notebook_assets_source" in _indexes(repo, "notebook_assets")
     with repo._connect() as db:

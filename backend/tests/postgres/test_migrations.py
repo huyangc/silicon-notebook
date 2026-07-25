@@ -14,7 +14,9 @@ pytestmark = pytest.mark.postgres_integration
 def _migration(version: int, sql: str, name: str | None = None):
     from app.repositories.postgres.migrator import PostgresMigration
 
-    return PostgresMigration(version=version, name=name or f"migration_{version}", sql=sql)
+    return PostgresMigration(
+        version=version, name=name or f"migration_{version}", sql=sql
+    )
 
 
 def _migrator(database, migrations):
@@ -118,7 +120,9 @@ def test_migration_timeout_override_is_local_and_bounded(postgres_database):
             [
                 _migration(
                     1,
-                    "SELECT pg_sleep(1.1); "
+                    # Leave headroom for platforms whose timeout interrupt
+                    # delivery can lag the configured boundary by ~150ms.
+                    "SELECT pg_sleep(1.5); "
                     "CREATE TABLE migration_timeout_probe (id integer)",
                 )
             ],
@@ -139,10 +143,13 @@ def test_migration_timeout_override_is_local_and_bounded(postgres_database):
 
 
 def test_changed_checksum_fails_closed(postgres_database):
-    assert _migrator(
-        postgres_database,
-        [_migration(1, "CREATE TABLE checksum_probe (id integer)")],
-    ).migrate() == 1
+    assert (
+        _migrator(
+            postgres_database,
+            [_migration(1, "CREATE TABLE checksum_probe (id integer)")],
+        ).migrate()
+        == 1
+    )
 
     changed = _migrator(
         postgres_database,
@@ -237,7 +244,9 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    with pytest.raises(psycopg.errors.RaiseException, match="server_encoding must be UTF8"):
+    with pytest.raises(
+        psycopg.errors.RaiseException, match="server_encoding must be UTF8"
+    ):
         PostgresMigrator(postgres_non_utf_database).migrate()
 
     with postgres_non_utf_database.connect() as conn:
@@ -257,7 +266,7 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
     assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 10
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 31
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 32
     assert len(PostgresMigrator(postgres_database).migrations) == 10
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
@@ -269,8 +278,7 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
         indexes = {
             row["indexname"]
             for row in conn.execute(
-                "SELECT indexname FROM pg_indexes "
-                "WHERE schemaname=current_schema()"
+                "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema()"
             ).fetchall()
         }
         non_constraint_indexes = {
@@ -308,8 +316,7 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
         final_indexes = {
             row["indexname"]
             for row in conn.execute(
-                "SELECT indexname FROM pg_indexes "
-                "WHERE schemaname=current_schema()"
+                "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema()"
             ).fetchall()
         }
         ledger_versions = [
@@ -335,8 +342,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
     assert migrator.migrate(target_version=6) == 6
     with postgres_database.write() as connection:
         connection.execute(
-            "INSERT INTO notebooks(id,name,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s)",
+            "INSERT INTO notebooks(id,name,created_at,updated_at) VALUES (%s,%s,%s,%s)",
             ("nb-cluster-migration", "clusters", "2026-01-01", "2026-01-01"),
         )
         with connection.cursor() as cursor:
@@ -404,10 +410,13 @@ def test_migrations_take_the_fixed_transaction_advisory_lock(postgres_database):
     assert isinstance(key, int)
     assert -(2**63) <= key < 2**63
 
-    assert _migrator(
-        postgres_database,
-        [_migration(1, "CREATE TABLE advisory_probe (id integer)")],
-    ).migrate() == 1
+    assert (
+        _migrator(
+            postgres_database,
+            [_migration(1, "CREATE TABLE advisory_probe (id integer)")],
+        ).migrate()
+        == 1
+    )
 
 
 def test_concurrent_migrators_serialize_before_check_and_ddl(postgres_database):

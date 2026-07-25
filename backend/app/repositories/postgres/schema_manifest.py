@@ -28,10 +28,11 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the paired schema. SQLite FTS virtual
-# tables are intentionally absent because PostgreSQL rebuilds search indexes.
-# Import preflight uses this allow-list to reject an unrelated or live target
-# before it writes schema or data.
+# Every ordinary application table in the current SQLite v32 / PostgreSQL v10
+# compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
+# the migration ledger/shadow control tables are adapter-internal. Import and
+# shadow preflight use this reverse-totality list to reject unrelated/live
+# targets and any newly added business table that lacks a reviewed mapping.
 POSTGRES_BUSINESS_TABLES = (
     "agent_access_tokens",
     "agent_profiles",
@@ -106,6 +107,16 @@ SQLITE_RETIRED_TABLES = (
     "articles",
     "derived_rule_candidates",
     "extraction_candidates",
+)
+
+
+# Current SQLite databases carry these operational tables for the independent
+# forward-shadow path. They are not business data and PostgreSQL intentionally
+# owns its migration controls in a separate schema, so the stopped-snapshot
+# importer excludes them even when an earlier shadow run left audit rows.
+SQLITE_MIGRATION_INTERNAL_TABLES = (
+    "shadow_capture_control",
+    "shadow_change_log",
 )
 
 
@@ -185,10 +196,10 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v31. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v32. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=31,
+    sqlite_version=32,
     postgres_version=10,
 )

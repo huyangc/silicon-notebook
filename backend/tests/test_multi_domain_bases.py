@@ -22,8 +22,8 @@ def repo(tmp_path, monkeypatch):
 
 
 class TestSchema:
-    def test_schema_version_is_30(self):
-        assert SCHEMA_VERSION == 31
+    def test_schema_version_is_32(self):
+        assert SCHEMA_VERSION == 32
 
     def test_fresh_db_has_notebook_bases(self, repo):
         with repo._connect() as db:
@@ -87,7 +87,7 @@ class TestSchema:
             version = raw.execute("PRAGMA user_version").fetchone()[0]
         assert "notebook_bases" in names
         assert "target_base_id" in cols
-        assert version == 31
+        assert version == 32
 
 
 def _mount(repo, notebook_id, base_ids):

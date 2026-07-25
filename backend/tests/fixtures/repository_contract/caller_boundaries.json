@@ -645,6 +645,870 @@
       "target": "db.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._begin_live_source_fence",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._bind_snapshot",
+      "target": "conn.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._finalize_copy",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._finish_table",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._integrity_check",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._lock_copy_catalog_tables",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._lock_identity_sequences",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._postgres_columns",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._progress_row",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._reseed_and_verify_identity_sequences",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._reseed_ordinal",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._set_statement_timeout",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._snapshot_batch",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._snapshot_columns",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._sqlite_schema_contract",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._target_cursor",
+      "target": "cursor.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._validate_copy_target",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>._validate_target_prefix",
+      "target": "pg_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>.copy_snapshot",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary owns resumable baseline COPY and checkpoints",
+      "scope": "<module>.copy_snapshot",
+      "target": "sqlite_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._catalog_rows",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._create_if_absent",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._execute_install_statement",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>._scan_replication_keys",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>.disable_sqlite_capture",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>.install_sqlite_capture",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/capture.py",
+      "reason": "temporary migration boundary owns run-scoped SQLite capture DDL",
+      "scope": "<module>.validate_sqlite_capture",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator composition root reads redacted control status and resumable baseline state",
+      "scope": "<module>._baseline_is_published",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator composition root reads redacted control status and resumable baseline state",
+      "scope": "<module>._readonly_source",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator composition root reads redacted control status and resumable baseline state",
+      "scope": "<module>._status",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._execute_guard_statement",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._lock_schema_and_control",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._postgres_schema_version",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._storage_evidence",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 10,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._validate_control_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._validate_live_sqlite_capture",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._validate_postgres_guard_set",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>._verify_postgres_guard",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.commit_guard_report",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.committed_sqlite_guard_report",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.create_or_reuse_run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.enable_sqlite_capture_after_guard_reports",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.enable_sqlite_capture_after_guard_reports",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.get_run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.install_postgres_control_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 9,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.preflight",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.preflight",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.prepare_postgres_replication_key_guards",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.update_forward_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/control.py",
+      "reason": "temporary migration boundary owns shadow preflight and control SQL",
+      "scope": "<module>.update_forward_state",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/identity.py",
+      "reason": "temporary migration boundary binds redacted SQLite and PostgreSQL identities",
+      "scope": "<module>.fingerprint_postgres",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/identity.py",
+      "reason": "temporary migration boundary binds redacted SQLite and PostgreSQL identities",
+      "scope": "<module>.fingerprint_sqlite",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>._assert_key_rows",
+      "target": "execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>._sqlite_schema_sets",
+      "target": "conn.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>.validate_postgres_connection",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/manifest.py",
+      "reason": "temporary migration boundary validates source and target schema keys",
+      "scope": "<module>.validate_sqlite_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v10 business catalog before copying and checkpoint publication",
+      "scope": "<module>._index_key_tokens",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v10 business catalog before copying and checkpoint publication",
+      "scope": "<module>._validate_fk_constraint_triggers",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v10 business catalog before copying and checkpoint publication",
+      "scope": "<module>._validate_identity_sequences",
+      "target": "conn.execute"
+    },
+    {
+      "count": 9,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/postgres_catalog.py",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v10 business catalog before copying and checkpoint publication",
+      "scope": "<module>.validate_postgres_v10_catalog",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch",
+      "target": "execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch.attempt",
+      "target": "execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_batch.execute",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._apply_statement",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._claim_worker",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._lock_business_catalog",
+      "target": "conn.execute"
+    },
+    {
+      "count": 10,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._park_unique_cycles",
+      "target": "execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._park_unique_cycles.execute",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._parking_candidate.query",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source.dependency_bundle.visit",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source.fk_groups",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._read_source.hydrate",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._record_poison.write",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._target_snapshot",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/replicator.py",
+      "reason": "temporary migration boundary owns fail-stop forward apply and checkpoints",
+      "scope": "<module>.ShadowReplicator._validate_target_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/retention.py",
+      "reason": "temporary migration worker owns conservative verified change-log retention",
+      "scope": "<module>.read_retention_bounds",
+      "target": "conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/retention.py",
+      "reason": "temporary migration worker owns conservative verified change-log retention",
+      "scope": "<module>.retain_change_log",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>._change_log_high_water",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>._integrity_check",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>._validate_snapshot_file",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>.create_snapshot",
+      "target": "live_conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary validates and publishes a SQLite backup",
+      "scope": "<module>.open_fresh_live_sqlite",
+      "target": "connection.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._cutover_source_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._finish",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._finish_failed",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._insert_fact",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._pin_target",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._refresh_barrier",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._scan_concurrent",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._scan_concurrent",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._start",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._stream_source",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._stream_source",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._stream_target",
+      "target": "cursor.execute"
+    },
+    {
+      "count": 12,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._table_reports",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._top_retrieval",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._validate_target_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._verify_constraints",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._verify_vectors",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._wait_checkpoint",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier.verify",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier.verify",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>._Spool.__init__",
+      "target": "self.conn.executescript"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/worker.py",
+      "reason": "temporary migration worker owns its database-clock lease lifecycle",
+      "scope": "<module>.acquire_worker_lease",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/worker.py",
+      "reason": "temporary migration worker owns its database-clock lease lifecycle",
+      "scope": "<module>.heartbeat_worker_lease",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/worker.py",
+      "reason": "temporary migration worker owns its database-clock lease lifecycle",
+      "scope": "<module>.release_worker_lease",
+      "target": "conn.execute"
+    },
+    {
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/sqlite_to_postgres.py",
@@ -1151,6 +2015,102 @@
     {
       "count": 1,
       "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.count_orphan_source_refs",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.count_sourceless",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.degree_and_basis",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.list_notebooks",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.load_all_usable_objects",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.load_objects",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.load_sourceless_objects",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.main",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.open_readonly",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.require_schema",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.sample_source_ids",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.type_composition",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
       "path": "scripts/merge_dbs.py",
       "reason": "temporary copies used by the offline two-database merge tool",
       "scope": "<module>._sole_base_id",
@@ -1321,6 +2281,54 @@
     {
       "count": 1,
       "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/bulk_copy.py",
+      "reason": "temporary migration boundary streams its immutable private snapshot",
+      "scope": "<module>._open_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/cli.py",
+      "reason": "explicit shadow operator preflight opens the active SQLite source read-only",
+      "scope": "<module>._readonly_source",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary opens its private validated backup",
+      "scope": "<module>._validate_snapshot_file",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary opens its private validated backup",
+      "scope": "<module>.create_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/snapshot.py",
+      "reason": "temporary migration boundary opens its private validated backup",
+      "scope": "<module>.open_fresh_live_sqlite",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary streams facts through its private disposable SQLite spool",
+      "scope": "<module>._Spool.__init__",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
       "path": "backend/app/migration/sqlite_to_postgres.py",
       "reason": "owned offline cross-backend snapshot-import boundary",
       "scope": "<module>._sqlite_read_only",
@@ -1412,6 +2420,14 @@
       "path": "scripts/generate_repository_contract_fixtures.py",
       "reason": "disposable contract fixture databases",
       "scope": "<module>.generate_v9_fixture",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.open_readonly",
       "target": "sqlite3.connect"
     },
     {

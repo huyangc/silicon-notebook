@@ -1835,6 +1835,16 @@
         "type": "table"
       },
       {
+        "name": "shadow_capture_control",
+        "sql_sha256": "99c3afc2dbc3c197bd5546a80124627b8e5ecf36ca16881fd1a653fbb42eaa9f",
+        "type": "table"
+      },
+      {
+        "name": "shadow_change_log",
+        "sql_sha256": "80cdeacf53bdf9b77ce26f4bfba5aae7d402d0c4e72848ba1dd29533776ef651",
+        "type": "table"
+      },
+      {
         "name": "source_authors",
         "sql_sha256": "099bc6d4b257a6c6e60016a4b408efd86b342776db78cf16a91d83cdf2d7bb5f",
         "type": "table"
@@ -1890,6 +1900,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 31
+    "user_version": 32
   }
 }

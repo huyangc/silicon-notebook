@@ -2,22 +2,21 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
 
 from app.core.config import Settings
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 
 from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_TYPE_LABELS
-from app.services.auth_utils import hash_password
-from app.services.kg.filters import _norm as _wl_norm
 
 # Both sides originally allocated migration 24 independently.  Version 29 is
 # the merge migration that makes either already-deployed lineage converge.
 # v30 adds idx_sources_notebook_file_hash for content-hash upload dedup /
-# batch_ingest resume (previously a full-table scan). v31 adds stable relation
-# endpoint keyset indexes for bounded lexical relation recall.
-SCHEMA_VERSION = 31
+# batch_ingest resume (previously a full-table scan). v31 adds the two
+# shadow-internal tables used by transactional forward capture. Capture
+# triggers remain run-scoped and are installed by migration.shadow.capture.
+# v32 adds stable relation endpoint keyset indexes for bounded lexical recall.
+SCHEMA_VERSION = 32
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1734,6 +1733,38 @@ class SqliteMigrator:
             )
 
     def _migration_31(self) -> None:
+        """Add inert, payload-free metadata for transactional shadow capture.
+
+        The migration deliberately creates no control row and no business-table
+        trigger.  A run identity is required for both, so the shadow capture
+        installer creates them later in one ``BEGIN IMMEDIATE`` transaction
+        after its logical-key scans have passed.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS shadow_change_log (
+                  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id TEXT NOT NULL,
+                  table_name TEXT NOT NULL,
+                  key_json TEXT NOT NULL,
+                  operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+                  schema_epoch INTEGER NOT NULL,
+                  captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS shadow_capture_control (
+                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                  write_frozen INTEGER NOT NULL CHECK (write_frozen IN (0, 1)),
+                  apply_active INTEGER NOT NULL DEFAULT 0 CHECK (apply_active IN (0, 1)),
+                  run_id TEXT NOT NULL,
+                  schema_epoch INTEGER NOT NULL
+                );
+                """
+            )
+
+    def _migration_32(self) -> None:
         """Stable keyset order for bounded source/target relation probes."""
         with self._connect() as db:
             db.executescript(
