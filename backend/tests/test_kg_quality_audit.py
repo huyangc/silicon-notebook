@@ -384,7 +384,7 @@ def test_object_loading_is_bounded_independently_of_source_count(tmp_path, capsy
     # （无偏抽样要全表扫 payload，在千万级目标库上会让这个工具不可用），但必须明说。
     assert "不是随机样本" in out, "全量截断必须声明这不是随机样本"
     assert "可能有偏" in out, "必须说明比例可能有偏"
-    assert "--sources K" in out, "必须指出拿无偏样本的正确入口"
+    assert "--max-objects" in out, "必须指出怎么避免触顶"
 
     # 上限足够大时不应报截断，免得断言因「永远截断」而假绿
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
@@ -592,6 +592,60 @@ def test_redundancy_counts_only_the_excess_rows(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "唯一名 1 / 行数 4  → 冗余 3 行" in out, "concept 冗余必须是 c-1 的和"
     assert "唯一命题 2 / 行数 4  → 冗余 2 行" in out, "claim 冗余必须是 c-1 的和"
+
+
+def test_sampled_mode_also_discloses_prefix_bias_when_capped(tmp_path, capsys):
+    """抽样模式触顶同样有偏:截断必然落在某来源中途,留下的是那个来源的库内前缀。
+
+    第 9 轮 codex 评审(P2)。上一版只给全量模式发警告，还向抽样模式保证「不会系统性
+    聚集」—— 那是个过强且错误的保证。
+    """
+    audit = load_audit()
+    db = tmp_path / "capped_sample.db"
+    _build_db(
+        db, sources=10,
+        concepts_per_source=lambda s: [f"concept {s}-{i}" for i in range(20)],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "4",
+                       "--max-objects", "30", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "已达 --max-objects=30 上限" in out
+    assert "不是随机样本" in out, "抽样模式触顶也必须声明偏差"
+    assert "可能有偏" in out
+    assert "系统性聚集" not in out, "不得再向抽样模式做「不会聚集」这种过强保证"
+
+
+def test_nameless_rows_are_counted_not_silently_dropped(tmp_path, capsys):
+    """payload 坏掉 / 无 name 的行恰恰是要暴露的低质量行,不能悄悄从分母里剔掉。
+
+    第 9 轮 codex 评审(P2)。
+    """
+    audit = load_audit()
+    db = tmp_path / "nameless.db"
+    _build_db(
+        db, sources=1,
+        concepts_per_source=lambda s: ["good concept"],
+        claim_name=lambda s: "Transistor provides gain in saturation region.",
+    )
+    conn = sqlite3.connect(db)
+    for oid, payload in (("bad1", "not json at all"),
+                         ("bad2", json.dumps(["a", "list"])),
+                         ("bad3", json.dumps({"name": "   "}))):
+        conn.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,source_id,payload,evidence) "
+            "VALUES (?,'nb-1','concept','src-0',?,'[]')",
+            (oid, payload),
+        )
+    conn.commit()
+    conn.close()
+
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "[concept] 抽样 4 行" in out, "分母必须是全部 concept 行,不是有名字的行"
+    assert "无名/payload 异常: 3 行" in out, "无名行必须单独报出"
 
 
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):

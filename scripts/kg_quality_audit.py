@@ -228,11 +228,12 @@ def _drain_into(cursor, out: List[dict], budget: int) -> bool:
       * 蓄水池/ORDER BY RANDOM 能拿到无偏样本,但两者都要把全表的 payload 扫一遍。
         本工具的目标是 437GB / 千万行级的生产库,那等于几十分钟到几小时的冷 IO,
         会让「先抽样快速看一眼」这个唯一的使用姿势不成立。
-      * 真正的无偏抽样入口是 `--sources K`:来源是随机抽的,截断落在随机来源的前缀
-        上,不会按类型或插入年代系统性聚集。
-      * 全量模式(--sources 0)触顶时前缀确实可能有偏(SQLite 可能按插入序返回,
-        而插入序与来源、与抽取批次相关),所以那条路径的截断文案会明说「这不是随机
-        样本,比例可能有偏,要无偏样本请改用 --sources K」。
+      * `--sources K` 只把**来源**随机化,并不能消除偏差:截断必然落在某个来源
+        中途,留下的仍是那个来源的库内顺序前缀(一个来源自己就超过上限时尤其明显)。
+        所以两条路径触顶时都要发同一句偏差警告 —— 曾经只给全量模式发、还向抽样模式
+        保证「不会系统性聚集」,那是个过强且错误的保证。
+      * 真正让结论无偏的办法只有「别触顶」:调大 --max-objects,或用更小的
+        --sources K 让全部抽中来源都能读完。
 
     换言之:不消除偏差,但绝不隐瞒偏差。test_kg_quality_audit.py 里有反向护栏钉住
     这句声明必须出现。
@@ -419,11 +420,21 @@ def _bar(title: str) -> None:
 
 def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
                     seed: int) -> None:
+    # 分母是**全部** concept 行,不是「有名字的行」。payload 坏掉 / 不是 dict /
+    # name 缺失或空白的行,恰恰是这份审计要暴露的低质量行 —— 悄悄从分母里剔掉,
+    # 既低估了噪声占比,极端情况还会报出「抽样里没有 concept」而类型构成里明明有。
+    total = len(items)
     names = [it["name"] for it in items if it["name"]]
-    total = len(names)
+    n_nameless = total - len(names)
     _bar(f"[concept] 抽样 {total} 行")
     if not total:
         print("  (抽样里没有 concept)")
+        return
+    if n_nameless:
+        print(f"  ⚠ 无名/payload 异常: {n_nameless} 行 ({_pct(n_nameless, total)})"
+              " —— 本身就是质量信号;下面按名字算的指标只覆盖其余行")
+    if not names:
+        print("  所有 concept 行都没有可用的名字,按名字算的指标无从统计。")
         return
 
     norm_counts = Counter(_norm(n) for n in names)
@@ -527,11 +538,19 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
 
 
 def report_claims(items: List[dict], show_samples: bool, seed: int) -> None:
+    # 同 report_concepts:分母是全部 claim 行,无名/坏 payload 单独报,不静默剔除。
+    total = len(items)
     names = [it["name"] for it in items if it["name"]]
-    total = len(names)
+    n_nameless = total - len(names)
     _bar(f"[claim] 抽样 {total} 行")
     if not total:
         print("  (抽样里没有 claim)")
+        return
+    if n_nameless:
+        print(f"  ⚠ 无名/payload 异常: {n_nameless} 行 ({_pct(n_nameless, total)})"
+              " —— 本身就是质量信号;下面按文本算的指标只覆盖其余行")
+    if not names:
+        print("  所有 claim 行都没有可用的文本,按文本算的指标无从统计。")
         return
     norm_counts = Counter(_norm(n) for n in names)
     redundant = total - len(norm_counts)   # 同 report_concepts:只有 c-1 行是冗余
@@ -779,15 +798,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"  ⚠ 已达 --max-objects={args.max_objects:,} 上限,读取在此停止:")
             if covered is None:
                 print(f"    只读到全部 {grand:,} 个有效对象里的前 {len(items):,} 个。")
-                print("    ⚠ 这是**索引前缀,不是随机样本** —— 数据库可能按插入序返回,"
-                      "而插入序与来源、\n      与抽取批次相关,所以下面的比例可能有偏。"
-                      "要无偏样本请改用 --sources K\n      (来源随机抽,前缀落在随机"
-                      "来源上);要全都读请调大 --max-objects(注意内存)。")
             else:
                 print(f"    完整读完 {covered}/{len(source_ids)} 个来源,"
-                      "下面的比例只代表这一部分。")
-                print("    这些来源本身是随机抽的,所以前缀不会按类型或插入年代系统性"
-                      "聚集;要读更多请调大 --max-objects。")
+                      f"第 {covered + 1} 个只读了一半。")
+            # 两条路径都要发这句。抽样模式下来源虽是随机抽的,但截断必然落在某个来源
+            # **中途**,留下的是那个来源的库内顺序前缀 —— 一个来源自己就超过上限时尤其
+            # 明显。上一版只给全量模式发警告、还向抽样模式保证「不会系统性聚集」,那是
+            # 一个过强且错误的保证。
+            print("    ⚠ 截断留下的是**库内顺序前缀,不是随机样本** —— 数据库可能按"
+                  "插入序返回,\n      而插入序与抽取批次、对象类型相关,所以下面的比例"
+                  "可能有偏。")
+            print("      要更有代表性:调大 --max-objects(注意内存),或用更小的"
+                  " --sources K\n      让全部抽中来源都能读完。")
         by_type: Dict[str, List[dict]] = defaultdict(list)
         for it in items:
             by_type[it["object_type"]].append(it)
