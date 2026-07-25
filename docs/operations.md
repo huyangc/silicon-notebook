@@ -281,6 +281,14 @@ one-way SQLite→PostgreSQL snapshot migration; changing `DATABASE_URL` alone on
 different datastore. It does not import MySQL, continuously capture later writes, replay
 PostgreSQL→SQLite, or copy source/upload/asset files.
 
+This section is the authority on *why* the migration behaves as it does and what it refuses to
+do. For a step-by-step execution checklist — phases, per-step success criteria, the points that
+require a human decision, and the failures that are meant to stay failures — follow
+[docs/postgres-migration-runbook.md](postgres-migration-runbook.md), which defers to this
+section wherever the two disagree. That runbook is written in Chinese, matching the other
+runbooks under `docs/`; this section stays the complete English reference, so nothing here is
+only available there.
+
 ### 1. Prepare an empty target and preview
 
 Create a dedicated UTF-8 PostgreSQL database. Do not point the importer at an existing app
@@ -295,8 +303,22 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 The default is a read-only preflight. It validates the SQLite identity/schema and PostgreSQL
 UTF-8/current-schema/emptiness/migration-ledger state, then exits without creating a snapshot
-or writing the target. Ensure free space for a SQLite snapshot and upgrade working copy plus
-the PostgreSQL database and indexes. `pg_trgm` must be creatable in `public`.
+or writing the target. `pg_trgm` must be creatable in `public`.
+
+Size the work directory for **at least twice the source file**, not once — three times if the
+rehearsal and the cutover share one directory. The sealed snapshot stays for the whole import;
+a source whose schema lags the code is additionally copied into a full upgrade working copy;
+and activation unconditionally takes another complete snapshot as the write-freeze anchor,
+written in full as a temporary file and only deduplicated against the sealed one afterwards, so
+the peak is two copies even when their contents are identical. A rehearsal runs while SQLite is
+still online, so by the cutover the source has usually changed and the two sealed snapshots hash
+differently, get different filenames, and both remain. A 500 GB source therefore needs 1 TB with
+a dedicated cutover directory and 1.5 TB with a shared one; prefer a separate rehearsal
+directory and confirm it is archived or removed before the window opens. A 1× allocation fails
+at activation after hours of successful copying. Size the
+target separately: PostgreSQL data plus indexes normally exceed the SQLite file and the index
+rebuild needs additional scratch, so take the measured figure from a rehearsal
+(`SELECT pg_size_pretty(pg_database_size(current_database()));`) rather than the SQLite size.
 
 ### 2. Rehearse while SQLite remains online
 
@@ -423,6 +445,19 @@ For a large source, throughput and reliability are dominated by a few levers:
 
 - Before PostgreSQL accepts any business write, rollback is safe: stop the backend, restore
   the SQLite `DATABASE_URL`, start one worker, and repeat the readiness/auth/count/read smoke.
+- Note where that boundary actually falls. **Starting the backend always writes**, regardless of
+  what the data contains: `_initialize()` (`postgres/bundle.py`) re-hashes the configured admin
+  password with a fresh salt and unconditionally updates the built-in `user-local` row on every
+  start. Two further writes are data-dependent: `recover_interrupted_jobs()` settles leftover
+  running `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs`, `knowhow_rows` in
+  `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing` before readiness, and
+  clears both KG scratch tables; and `_reproject_legacy_knowhow_tables()` runs *after*
+  `mark_ready()`, scheduling background cell-level reprojection that replaces KG objects for any
+  knowhow table still carrying the older fixed KOs. A provably write-free rollback therefore has
+  to be decided *before* the first PostgreSQL start — there is no "started but untouched" state.
+  The bootstrap and recovery writes cost nothing to roll back (a SQLite start does the same),
+  but the legacy reprojection is a business-data change. After that, `/auth/login` writes
+  `auth_sessions` via `create_session()`, so rolling back past login costs the sessions.
 - After the first PostgreSQL business write, editing the URL back loses that write. This
   repository has no reverse importer or dual-write log. Freeze again, externally reconcile
   PostgreSQL→SQLite (including storage effects), verify both sides, and only then reopen

@@ -241,6 +241,10 @@ Authority 交换和 PostgreSQL→SQLite 回滚机制属于单独的
 SQLite→PostgreSQL 快照迁移；只改 `DATABASE_URL` 只会打开另一份数据存储。它不迁 MySQL、
 不持续捕获后续写入、不回放 PostgreSQL→SQLite，也不复制 source/upload/asset 文件。
 
+本节是「为什么这么设计、拒绝做什么」的真源。要按步骤执行（分阶段、每步判据、必须由人
+拍板的节点、以及那些本就应该失败的失败），走
+[docs/postgres-migration-runbook.md](postgres-migration-runbook.md)；两者冲突时以本节为准。
+
 ### 1. 准备空目标并预检
 
 创建专用的 UTF-8 PostgreSQL 数据库。不要指向已有应用库：任一业务表有行都会 fail closed。
@@ -254,8 +258,17 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 默认只做只读 preflight：检查 SQLite 身份/schema 与 PostgreSQL UTF-8、current schema、空库和
-migration ledger，然后退出；不会创建快照或写目标。磁盘要同时容纳 SQLite 快照、升级工作副本、
-PostgreSQL 数据与索引；目标用户还必须能在 `public` 安装/使用 `pg_trgm`。
+migration ledger，然后退出；不会创建快照或写目标。目标用户还必须能在 `public` 安装/使用 `pg_trgm`。
+
+工作目录要按**源库大小的两倍**准备，不是一倍；演练与正式切换共用同一目录时要三倍。密封快照在
+整个导入期间常驻；源库 schema 落后于代码时还会另拷一份完整升级工作副本；而激活阶段会**无条件**
+再生成一份完整快照作为停写锚点，它先完整写成临时文件、**之后**才按 hash 与密封快照判重，所以
+即使内容完全相同，峰值也确实是两份。演练是在 SQLite 仍在线时做的，到正式窗口时源库通常已经变了，
+两次的密封快照 hash 不同、文件名不同，会同时留在盘上。500GB 的源库因此是：正式窗口用独立目录
+需要 1TB，与演练共用需要 1.5TB；建议演练用单独目录，并在窗口开始前确认它已归档或删除。
+按 1× 准备会在成功导入数小时之后、激活那一步失败。目标库要分开估：PostgreSQL 的数据加索引通常大于 SQLite 文件，重建索引还需
+额外临时空间，应采用演练实测值（`SELECT pg_size_pretty(pg_database_size(current_database()));`），
+不要用 SQLite 文件大小推。
 
 ### 2. SQLite 在线时先做演练
 
@@ -360,6 +373,16 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 - PostgreSQL 尚未接受任何业务写入时，可以停后端、把 `DATABASE_URL` 恢复成 SQLite、以单 worker
   启动并重复 readiness/认证/数量/读取 smoke。
+- 注意这条边界的实际位置。**启动后端必然写入**，与数据内容无关：`_initialize()`
+  （`postgres/bundle.py`）每次启动都用新盐重算 admin 密码哈希，并无条件 `UPDATE` 内置的
+  `user-local` 行。另有两类取决于数据：`recover_interrupted_jobs()` 在 readiness 之前把遗留的
+  `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs` running 行、`knowhow_rows` 的
+  syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态并清空两张 KG scratch 表；
+  `_reproject_legacy_knowhow_tables()` 在 `mark_ready()` **之后**运行，对仍带旧版固定 KO 的
+  knowhow 表调度后台 cell 级重投影，**会替换 KG 对象**。所以**「可证明零写入」的回滚必须在
+  第一次启动 PostgreSQL 之前决定**——不存在「已启动但没动过」的状态。bootstrap 与恢复性写入
+  回滚无实质损失（SQLite 端启动做同样的事），但遗留 knowhow 重投影属于业务数据变更。
+  再往后，登录成功会经 `create_session()` 写 `auth_sessions`，此后回滚丢的是会话（重新登录即可）。
 - 第一次 PG 业务写入之后，直接改 URL 会丢这次及后续写入。仓库没有 reverse importer 或
   dual-write log；必须再次停写，在外部完成 PostgreSQL→SQLite 对账（包括 storage 副作用），
   验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。

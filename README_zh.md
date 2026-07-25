@@ -164,7 +164,7 @@ Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有�
 - 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
 - `scripts/batch_ingest.py` 的变更阶段仅支持 SQLite；PostgreSQL 请使用正常应用/API 摄取和 KG/索引流程。SQLite 存量库若有部分成功的 KG 抽取，可用 `kg --retry-partial`；每个来源会保留旧图，直到“零失败窗口且非空”的新图成功提交。
 
-preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
+preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；按步骤执行的清单见[迁移 runbook](./docs/postgres-migration-runbook.md)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
