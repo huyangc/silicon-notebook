@@ -345,6 +345,26 @@ def test_main_interrupt_exits_cleanly_with_shell_convention(
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
 
+def test_main_interrupt_after_a_committed_build_still_reports_130(
+    repo, monkeypatch, capsys
+):
+    """反向护栏(codex 评审 P2 的后半条被驳回,见 PR 说明):即使抽取任务本身已成功
+    提交,信号打断的仍是**整条批处理**——run_kg 后面的聚类重建与补向量都没跑完,
+    所以必须给 130 + 「已中断」,不能因为 job 行是 succeeded 就报成功退出 0。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+
+    def _succeed_then_interrupt(nb, *, progress=None):
+        # 模拟「分析已提交,信号在返回前落下」
+        raise KeyboardInterrupt("ctrl-c right after commit")
+
+    monkeypatch.setattr(repo, "build_notebook_kg", _succeed_then_interrupt)
+
+    rc = bi.main(["kg", "--notebook-id", nb_id, "--allow-no-embed"])
+
+    assert rc == 130
+    assert "已中断" in capsys.readouterr().err
+
+
 def test_install_termination_signals_converts_sigterm_and_restores():
     saved = bi._install_termination_signals()
     try:

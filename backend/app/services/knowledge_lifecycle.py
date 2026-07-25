@@ -975,20 +975,42 @@ class KnowledgeLifecycleService:
                     pass
             return None
 
-        for future in _cf.as_completed(futures):
-            abort = _record_result(future)
-            if abort is None:
-                continue
-            if on_abort is not None:
-                on_abort(abort)
+        try:
+            for future in _cf.as_completed(futures):
+                abort = _record_result(future)
+                if abort is None:
+                    continue
+                if on_abort is not None:
+                    on_abort(abort)
+                for pending in futures:
+                    pending.cancel()
+                _cf.wait(futures)
+                for drained in futures:
+                    if drained is future:
+                        continue
+                    _record_result(drained)
+                raise abort
+        except (KeyboardInterrupt, SystemExit):
+            # 中断只在主线程抛出,worker 还在飞——必须在这里就唤醒并**排空**它们,
+            # 之后才允许上层落终态。单飞守卫是跨进程的(kg_build_jobs 上的条件唯一
+            # 索引):一旦那行落了终态,活着的后端就能为同一 notebook 起新分析,而本
+            # 进程尚未退出的 worker 会在那之后继续写图、改来源状态,把新任务的状态
+            # 冲掉。与上面的熔断分支同形,只是失败分类换成人工中断,且用
+            # notify=False——状态由外层收尾统一公布,不记模型侧的 circuit_opened。
+            control.abort(
+                KgBuildFailure(
+                    "worker_interrupted",
+                    INTERRUPTED_KG_BUILD_ERROR_MESSAGE,
+                ),
+                notify=False,
+            )
             for pending in futures:
                 pending.cancel()
             _cf.wait(futures)
-            for drained in futures:
-                if drained is future:
-                    continue
-                _record_result(drained)
-            raise abort
+            # 刻意不像熔断分支那样 _record_result(排空结果):中断是不可恢复的收尾,
+            # 正在展开的栈上应尽量少写库。排空期间跑完的来源其图行本身已提交,下一次
+            # 增量运行按覆盖度重算目标,不依赖这里的计数。
+            raise
 
         done.sort()
         failed.sort()
@@ -1162,17 +1184,24 @@ class KnowledgeLifecycleService:
                 )
                 _mark_stopping(KgBuildAborted(failure), circuit=False)
                 control.abort(failure)
-                self.kg_build_jobs.finish(
+                # 信号可能落在成功路径 finish(succeeded) 之后、本函数返回之前:那时
+                # 三次写都带 WHERE status='running',全部命中 0 行,任务其实已经成功
+                # 提交。此时**不能**再拿那行已成功的记录发 kg_build_failed——事件里会
+                # 带着 status="succeeded" 自相矛盾。只有真的把 running 落成 failed
+                # (rowcount==1)才发失败事件。中断本身仍照原样抛出:分析虽已提交,
+                # 本次运行确实被中断了(后续 rebuild/补向量都没跑)。
+                settled = self.kg_build_jobs.finish(
                     job_id,
                     "failed",
                     error_code=failure.code,
                     error_message=failure.user_message,
                 )
-                self._emit_kg_build_event(
-                    "kg_build_failed",
-                    self.kg_build_jobs.get(job_id),
-                    latency_ms=_latency_ms(),
-                )
+                if settled:
+                    self._emit_kg_build_event(
+                        "kg_build_failed",
+                        self.kg_build_jobs.get(job_id),
+                        latency_ms=_latency_ms(),
+                    )
             except Exception:  # noqa: BLE001 - 收尾失败不得吞掉中断本身
                 # 收尾自身失败(例如与工作线程抢写锁超时)绝不能把中断替换成另一个
                 # 异常:那样操作者拿到的是无关 traceback,而这行仍留在 'running'。
