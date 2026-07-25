@@ -52,7 +52,7 @@
 ### 2.2 检索（design doc §④/PR#273）
 
 - **per-cell chunk**（默认路径）：每格一个 chunk 带向量，`section_path = 表名 › 行概念 › 列名`（行概念 = anchor 值），默认参与向量/FTS 检索。
-- **KG-node 检索**（`Settings.knowhow_kg_node_retrieval_enabled`，**默认关**）：让 cell KO 通过 chunk 反查拿语义分，命中 anchor KO 可顺 about 边带出整组。
+- **KG-node 检索**（`Settings.knowhow_kg_node_retrieval_enabled`，**默认开、可设 false 回滚**）：让 cell KO 通过 chunk 反查拿语义分，命中 anchor KO 可顺 about 边带出整组；关闭只影响直接节点路径，不移除逐格 chunk 召回。
 
 ---
 
@@ -139,7 +139,7 @@ rowspan 合并要求同概念物理行相邻。主网格按 **anchor 分组稳�
 
 ### 4.5 检索与引用
 
-- **召回逻辑不动**：默认 per-cell chunk 召回（同概念格子语义相近，命中一个大概率带出整组）；严格整组召回仍走 KG-node 检索这个既有 opt-in（`knowhow_kg_node_retrieval_enabled`）。不为"命中带出整组"写新代码（efficiency-first）。
+- **召回逻辑**：per-cell chunk 召回始终保留（同概念格子语义相近，命中一个大概率带出整组）；KG-node 检索默认开启（`knowhow_kg_node_retrieval_enabled`），可显式关闭以只保留 chunk 路径。默认开启的动态类型必须按 Knowhow 隐藏来源收窄，旁挂矩阵跨子查询缓存，版本同时覆盖 KG 变更和纯向量修复（efficiency-first）。
 - **引用跳转改目标**（必做）：ask 引用命中 knowhow chunk 时，现在跳"行详情抽屉"——改为跳**概念矩阵抽屉（C）并高亮命中的那个分支格**。定位信息现成（chunk `section_path = 表名 › 概念 › 列名` + element 的 row/column 归属）。
 
 ### 4.6 文案

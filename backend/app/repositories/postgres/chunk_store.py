@@ -7,6 +7,7 @@ from app.repositories.ports import ChunkWrite
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     execute_many,
+    iso_timestamp,
     json_value,
     jsonb,
     normalize_timestamp,
@@ -211,12 +212,25 @@ class ChunkStore:
     @staticmethod
     def knowhow_chunk_rows(connection, notebook_id: str):
         rows = connection.execute(
-            "SELECT id,element_ids FROM chunks WHERE notebook_id=%s AND source_id IN "
-            "(SELECT id FROM sources WHERE notebook_id=%s AND source_type='knowhow') "
-            "ORDER BY ordinal",
+            "SELECT c.id,c.element_ids FROM knowhow_tables kt "
+            "JOIN chunks c ON c.source_id=kt.hidden_source_id "
+            "WHERE kt.notebook_id=%s AND c.notebook_id=%s ORDER BY c.ordinal",
             (notebook_id, notebook_id),
         ).fetchall()
         return [_compat_element_ids(row) for row in rows]
+
+    @staticmethod
+    def knowhow_bridge_version_row(connection, notebook_id: str):
+        row = dict(connection.execute(
+            "SELECT COUNT(*) AS c,MAX(ce.created_at) AS ts "
+            "FROM knowhow_tables kt "
+            "JOIN chunks c ON c.source_id=kt.hidden_source_id "
+            "JOIN chunk_embeddings ce ON ce.chunk_id=c.id "
+            "WHERE kt.notebook_id=%s AND c.notebook_id=%s AND ce.notebook_id=%s",
+            (notebook_id, notebook_id, notebook_id),
+        ).fetchone())
+        row["ts"] = iso_timestamp(row["ts"])
+        return row
 
     @staticmethod
     def rows_by_ids(connection, chunk_ids: Sequence[str]):

@@ -55,6 +55,19 @@ from app.services.knowhow.projection import KnowhowProjector
 VALID_KINDS = _STORE_KINDS - {"anchor"}
 
 
+class KnowhowImportValidationError(ValueError):
+    """Safe, actionable copy for a validation failure in the import wizard.
+
+    Routes may expose ``user_message`` through ``user_error``. Other
+    ``ValueError`` instances remain diagnostic-only, so an internal exception
+    cannot become trusted UI copy merely because it happens to contain Chinese.
+    """
+
+    def __init__(self, user_message: str) -> None:
+        self.user_message = user_message
+        super().__init__(user_message)
+
+
 def _preview_row(row: list, anchor_index: "int | None") -> list:
     """Normalize a preview row's cells EXCEPT the anchor column's (P1-c). The
     anchor column is a grouping KEY, not prose: it must stay byte-stable, so
@@ -129,7 +142,9 @@ def preview_import(
         # 一样 400 拒绝，而不是当成「跳过一个不存在的列 -> 全列规整」静默放行——否则
         # 同一个越界 index 预览 200、提交 400，预览即所得撒谎。用与 commit 逐字相同的
         # 友好文案（负数在上面的分支已按「明确清空」处理、不落到这里）。
-        raise ValueError("行标题列索引超出范围")
+        raise KnowhowImportValidationError(
+            "行标题列选择已失效，请返回重新预览文件后再导入。"
+        )
     else:
         skip_index = anchor_index            # 用户所选列
     return {
@@ -151,7 +166,7 @@ def _columns_with_anchor(columns: list[dict], anchor_index: "int | None") -> lis
     ``kind`` entirely defaults to 'attribute' (mirrors PR-1's own
     ``role = column.get("role") or "plain"`` leniency — a wizard/import
     column with no explicit type is a plain content column, not an error).
-    Raises ValueError (friendly Chinese) for an explicit-but-illegal kind
+    Raises KnowhowImportValidationError for an explicit-but-illegal kind
     value (this also rejects a client sending ``kind: "anchor"`` directly —
     'anchor' is excluded from VALID_KINDS) or an out-of-range anchor_index.
     Does NOT validate name emptiness/uniqueness or the at-most-one-anchor
@@ -162,10 +177,14 @@ def _columns_with_anchor(columns: list[dict], anchor_index: "int | None") -> lis
     for column in columns:
         kind = column.get("kind") or "attribute"
         if kind not in VALID_KINDS:
-            raise ValueError(f"非法的列类型：{kind!r}")
+            raise KnowhowImportValidationError(
+                "列的内容类型无效，请重新选择后再导入。"
+            )
         kinds.append(kind)
     if anchor_index is not None and not (0 <= anchor_index < len(columns)):
-        raise ValueError("行标题列索引超出范围")
+        raise KnowhowImportValidationError(
+            "行标题列选择已失效，请返回重新预览文件后再导入。"
+        )
     result = [
         {"name": column["name"], "role": kind} for column, kind in zip(columns, kinds)
     ]
@@ -180,25 +199,37 @@ def parse_import_columns(
     """Validate + parse the user-confirmed column/kind mapping (PR-2+3 wire:
     ``columns_json=[{name,kind}]`` + a separate ``anchor_index`` — task
     brief: "columns_json 列数与文件一致...kind 值合法 —— 违规 400 友好中文").
-    Raises ValueError (friendly Chinese) for: invalid JSON, an empty/non-list
+    Raises KnowhowImportValidationError for: invalid JSON, an empty/non-list
     payload, a column missing its name, an illegal kind value, an
     out-of-range anchor_index, or a column count that doesn't match the
-    file. Duplicate/empty names and the store's own at-most-one-anchor
-    invariant are validated downstream by ``KnowhowStore.create_knowhow_table``
-    itself (same ValueError contract) — not duplicated here."""
+    file, or duplicate/empty names. The store retains the same checks as
+    defense in depth, but normal import input is rejected here so the route can
+    expose only this typed, reviewed copy."""
     try:
         columns = json.loads(columns_json)
     except (TypeError, ValueError) as exc:
-        raise ValueError("列定义不是合法的 JSON") from exc
+        raise KnowhowImportValidationError(
+            "列设置无法读取，请返回重新预览文件后再导入。"
+        ) from exc
     if not isinstance(columns, list) or not columns:
-        raise ValueError("列定义不能为空")
-    if len(columns) != len(grid.columns):
-        raise ValueError(
-            f"列定义数量（{len(columns)}）与文件列数（{len(grid.columns)}）不一致"
+        raise KnowhowImportValidationError(
+            "没有可导入的列，请检查表头后重新选择文件。"
         )
+    if len(columns) != len(grid.columns):
+        raise KnowhowImportValidationError(
+            "列设置与文件列数不一致，请返回重新预览文件后再导入。"
+        )
+    names: list[str] = []
     for column in columns:
         if not isinstance(column, dict) or not str(column.get("name", "")).strip():
-            raise ValueError("列定义缺少列名")
+            raise KnowhowImportValidationError(
+                "列设置中有空列名，请补齐列名后再导入。"
+            )
+        names.append(str(column["name"]).strip())
+    if len(names) != len(set(names)):
+        raise KnowhowImportValidationError(
+            "列名不能重复，请将重复列名改成唯一名称后再导入。"
+        )
     return _columns_with_anchor(columns, anchor_index)
 
 
@@ -316,6 +347,9 @@ def import_table(
     the readable audit snapshot threaded to every flow entry, with
     ``origin="import"`` so the history timeline can tell an imported table
     apart from one built through the empty-table wizard."""
+    title = str(title or "").strip()
+    if not title:
+        raise KnowhowImportValidationError("请输入表标题后再导入。")
     grid = parse_grid(filename, data, orientation)
     columns = parse_import_columns(columns_json, grid, anchor_index)
     # 分组型表：anchor 列可能是"只写一次"的分组列（转置/合并型表的
@@ -2541,6 +2575,7 @@ def delete_cell_code(
 
 __all__ = [
     "VALID_KINDS",
+    "KnowhowImportValidationError",
     "preview_import",
     "parse_import_columns",
     "build_projector",

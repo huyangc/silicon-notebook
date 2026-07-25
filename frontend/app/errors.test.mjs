@@ -441,6 +441,20 @@ test("throwHumanizedHttpError:诊断进 console,用户拿到中文", async () =>
   assert.match(logs[0], /notebook owner required/);
 });
 
+test("throwHumanizedHttpError: Knowhow 导入校验提示可原样进入向导", async () => {
+  const message = "这张表看起来是属性按行排列（第一列是属性名，每一列是一条记录），请先选择“属性按行”，再重新选择这个文件。";
+  await captureConsole(async () => {
+    await assert.rejects(
+      throwHumanizedHttpError(markedResponse(400, { detail: message }), "knowhow-import-preview"),
+      (error) => {
+        assert.equal(error.message, message);
+        assert.equal(toUserMessage(error, "解析文件失败，请重试"), message);
+        return true;
+      }
+    );
+  });
+});
+
 // httpErrorStatus:并发防护（P1-b）需要在 catch 里区分 409（他人已改 → 跳过该格）
 // 与其他失败（真报错）。humanizeHttpError 把 detail 压平成中文文案，丢了状态码；
 // 所以 throwHumanizedHttpError 把原始状态码挂在带品牌的 Error 上，httpErrorStatus

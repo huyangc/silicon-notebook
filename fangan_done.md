@@ -123,6 +123,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 集合页搜索调用后端搜索，并加 250ms debounce，避免每键触发请求。
 - 当前为 SQLite 文本匹配 + Python 余弦；尚未引入 BM25 / FTS5 / pgvector。
 - Ask 的联合范围按 mode 区分：`chunk` 基线只读 active notebook 的 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 走 federated KG 路径。
+- **Knowhow 格子知识对象默认进入节点检索（§6.5 / §11）**：`KNOWHOW_KG_NODE_RETRIEVAL_ENABLED` 默认改为 `true`，带行标题列的 Knowhow 投影对象会进入 reasoning/graph 的 KG-node 混合检索并保留引用直达行详情；`false` 仍可只回滚这条直接对象路径，逐格 chunk 召回不受影响。默认开启后的类型发现按 `knowhow_tables.hidden_source_id` 收窄，不会把其它自定义 Schema 类型误当作表格列；类型集合与标准化 chunk-vector→KO 旁挂做有界 single-flight 缓存，旁挂版本同时覆盖图变更序号、Knowhow chunk-vector 计数/时间和运行时向量维度，因此不会 bump KG 的纯向量修复也能刷新，KG 变更时还会显式失效，避免一次深入分析的多个子查询重复扫描隐藏格子和重建矩阵。SQLite / PostgreSQL store 均实现同义查询。已通过完整 `scripts/check.sh`（后端 6584 passed / 341 skipped、方案 harness 54 项、前端 Node 1508 项与组件 62 项、TypeScript 和 Next.js production build）。
 - exact-score 的 `base` 次序只适用于知识对象命中（`federated_retrieve()`）；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。base-wins 矛盾规则是独立的答案合成策略。
 
 ## 10. 自动抽取 Pipeline
@@ -347,6 +348,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **新表导入方向**：`POST /api/notebooks/{id}/knowhow/import/preview` 与 `POST /api/notebooks/{id}/knowhow/import` 支持请求级 `orientation=columns|rows`，默认 `columns` 兼容旧客户端。
 - **服务端统一规范化**：xlsx/csv/Markdown 原始矩阵在校验前按用户选择转置；属性行输入先补齐不等长行，再转成内部“列是属性”的网格。预览和正式导入使用同一方向，追加导入、存储、检索与投影契约不变。
 - **前端闭环**：导入向导第一步可选“属性按列 / 属性按行”，预览显示最终规范化形态；属性按行默认建议首列为行标题，用户可改选或取消。
+- **可操作失败提示**：属性行表的记录分组使用横向合并单元格时，解析器会识别展开后的重复首行并提示改选“属性按行”；空/重复表头、不支持的文件或编码、失效列设置等校验错误经安全标记进入向导，明确说明修改方式，内部异常仍不直出。
 - **验证**：相关解析/API/前端契约测试、`scripts/check.sh` 与前端生产构建均通过。
 
 ## 29. 系统模型服务统一管理与全局调度（2026-07-22）

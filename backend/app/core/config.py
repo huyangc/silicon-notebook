@@ -308,11 +308,11 @@ class Settings(BaseSettings):
     kg_canonical_fold_enabled: bool = Field(False, validation_alias="KG_CANONICAL_FOLD_ENABLED")
     kg_about_downweight_enabled: bool = Field(False, validation_alias="KG_ABOUT_DOWNWEIGHT_ENABLED")
     # knowhow 格子级 KO 进入 reasoning/graph 的 KG-node 检索路径(object_type=列名)。
-    # 默认关闭:开启 / 最终调参须等真机 recall+latency 评测(效率优先约束)。关闭时
-    # _retrieve_scored 字节不变(不加类型、不加查询、不注入);开启后仅当 notebook 真有
-    # knowhow 列名类型时才放开类型 + 跑一次针对隐藏 knowhow 源的小规模 chunk 向量旁挂。
+    # 默认开启，让结构化格子既参与 chunk 召回，也可作为 KG 节点参与图检索；仍保留
+    # env 回滚开关。仅当 notebook 真有 knowhow 投影类型时才放开类型并查询隐藏
+    # knowhow 源的缓存向量旁挂，普通 notebook 不增加检索工作。
     knowhow_kg_node_retrieval_enabled: bool = Field(
-        False, validation_alias="KNOWHOW_KG_NODE_RETRIEVAL_ENABLED")
+        True, validation_alias="KNOWHOW_KG_NODE_RETRIEVAL_ENABLED")
     # 孤立(度为0)KG 节点的检索排序降权乘子。仅压 score 不动 relevance([0,1]/tau 守恒)。
     # 1.0=不降权(no-op); 0.5=孤立节点 score 减半;与 _EDGE_TYPE_RANK_WEIGHT 同模式。
     kg_isolated_rank_penalty: float = Field(0.5, validation_alias="KG_ISOLATED_RANK_PENALTY")

@@ -215,15 +215,32 @@ class ChunkStore:
     def knowhow_chunk_rows(db: sqlite3.Connection, notebook_id: str):
         """``(id, element_ids)`` for chunks owned by the notebook's hidden
         knowhow source(s) — the tiny, bounded set gate-0 knowhow KG-node
-        retrieval reverse-looks-up (default-off feature). Scoped to
-        ``source_type='knowhow'`` so it is a knowhow-local probe, never a
-        notebook-wide chunk scan; empty when the notebook has no knowhow table."""
+        retrieval reverse-looks-up (default-on, env-reversible feature). Scoped to
+        live ``knowhow_tables.hidden_source_id`` values so it is a table-local
+        probe, never a notebook-wide or orphan-source scan."""
         return db.execute(
-            "SELECT id, element_ids FROM chunks "
-            "WHERE notebook_id = ? AND source_id IN "
-            "(SELECT id FROM sources WHERE notebook_id = ? AND source_type = 'knowhow')",
+            "SELECT c.id,c.element_ids FROM knowhow_tables kt "
+            "JOIN chunks c ON c.source_id=kt.hidden_source_id "
+            "WHERE kt.notebook_id=? AND c.notebook_id=?",
             (notebook_id, notebook_id),
         ).fetchall()
+
+    @staticmethod
+    def knowhow_bridge_version_row(db: sqlite3.Connection, notebook_id: str):
+        """Cheap generation row for the scoped Knowhow chunk-vector corpus.
+
+        ``kg_mutation_seq`` covers projection structure, while this count/time
+        pair also catches vector-only repair jobs, which deliberately do not
+        mutate KG state.
+        """
+        return db.execute(
+            "SELECT COUNT(*) AS c, COALESCE(MAX(ce.created_at), '') AS ts "
+            "FROM knowhow_tables kt "
+            "JOIN chunks c ON c.source_id=kt.hidden_source_id "
+            "JOIN chunk_embeddings ce ON ce.chunk_id=c.id "
+            "WHERE kt.notebook_id=? AND c.notebook_id=? AND ce.notebook_id=?",
+            (notebook_id, notebook_id, notebook_id),
+        ).fetchone()
 
     @staticmethod
     def rows_by_ids(db: sqlite3.Connection, chunk_ids: Sequence[str]):

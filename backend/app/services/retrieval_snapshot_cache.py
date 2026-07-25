@@ -7,7 +7,9 @@ inline and hand around by identity:
   LRU) behind the ``{nb}:matrix:*`` embedding matrices, ``{nb}:kwtok``
   keyword tokens, ``{active}:fed_rxgraph`` federated graphs,
   ``{nb}:ppr_graph`` HippoRAG graph, ``{nb}:entchunk`` / ``{nb}:elemchunk``
-  reverse maps, ``{nb}:edge_centrality`` betweenness map, ``{nb}:clustermap``
+  reverse maps, ``{nb}:knowhow_types`` source-scoped type tuple,
+  ``{nb}:knowhow_bridge`` cell-vector sidecar,
+  ``{nb}:edge_centrality`` betweenness map, ``{nb}:clustermap``
   membership map, ``{nb}:copystats`` size memo and ``{nb}:edge_support``
   annotation map. Version keys (table row counts / MAX created_at /
   kg_mutation_seq) stay computed at the call sites; LRU + single-flight stay
@@ -23,9 +25,10 @@ funnels through (``KgMutationCoordinator.invalidate_unified_cache`` delegates
 here; the frozen per-operation phase matrix in mutation_phases.json is
 untouched). It evicts exactly the frozen families — the embedding matrices
 (all four embedding tables), kwtok, EVERY fed_rxgraph entry, ppr_graph, entchunk,
-elemchunk, edge_centrality, clustermap and copystats — plus this notebook's
-unified-cache entries. ``{nb}:edge_support`` deliberately stays out: it is
-versioned by canonical_rel_seq and self-invalidates on table rewrites.
+elemchunk, knowhow_types, knowhow_bridge, edge_centrality, clustermap and
+copystats — plus this notebook's unified-cache entries.
+``{nb}:edge_support`` deliberately stays out: it is versioned by
+canonical_rel_seq and self-invalidates on table rewrites.
 """
 from __future__ import annotations
 
@@ -82,6 +85,11 @@ class RetrievalSnapshotCache:
         ):
             self.vector_cache.invalidate(f"{notebook_id}:matrix:{table}")
         self.vector_cache.invalidate(f"{notebook_id}:kwtok")
+        self.vector_cache.invalidate(f"{notebook_id}:knowhow_types")
+        # Knowhow hidden-chunk matrix + chunk→cell-KO reverse map. It is also
+        # versioned by graph_seq_row, but explicit eviction covers a same-seq
+        # delete/reingest collision and frees stale matrices promptly.
+        self.vector_cache.invalidate(f"{notebook_id}:knowhow_bridge")
         # Federated graph caches are keyed "{active_id}:fed_rxgraph" — the ACTIVE
         # (personal) notebook's id, NOT this notebook's. A change in THIS notebook
         # (e.g. a base notebook) may affect any federated graph that includes it,

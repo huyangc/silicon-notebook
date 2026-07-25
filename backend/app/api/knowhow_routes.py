@@ -56,10 +56,18 @@ from app.services.knowhow import api as knowhow_api
 from app.services.knowhow import audit as knowhow_audit
 from app.services.knowhow import history as knowhow_history
 from app.services.knowhow import transfer as _kh_transfer
+from app.services.knowhow.grid_parser import GridParseError
 from app.services.model_work import ModelNotConfiguredError
 
 
 router = APIRouter()
+
+
+def _knowhow_import_user_error(
+    exc: Union[GridParseError, knowhow_api.KnowhowImportValidationError],
+) -> HTTPException:
+    """Expose only messages carried by the import layer's safe exception types."""
+    return user_error(400, exc.user_message)
 
 
 # --- knowhow-tables PR-1 Task 6: table/import API. Guards mirror the asset
@@ -97,6 +105,8 @@ async def preview_knowhow_import(
             orientation=orientation,
             anchor_index=anchor_index,
         )
+    except (GridParseError, knowhow_api.KnowhowImportValidationError) as exc:
+        raise _knowhow_import_user_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -140,6 +150,8 @@ async def import_knowhow_table(
             created_by_id=principal.identity_id,
             actor_label=principal.audit_label,
         )
+    except (GridParseError, knowhow_api.KnowhowImportValidationError) as exc:
+        raise _knowhow_import_user_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -813,6 +825,8 @@ async def append_knowhow_rows(
             repo, table_id, table, file.filename or "append", data,
             actor_label=principal.audit_label,
         )
+    except GridParseError as exc:
+        raise _knowhow_import_user_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)

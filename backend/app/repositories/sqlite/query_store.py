@@ -79,6 +79,32 @@ class QueryStore:
         return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
     @staticmethod
+    def knowhow_knowledge_type_rows(
+        db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
+    ) -> "list[dict]":
+        """Return only dynamic KO types owned by hidden Knowhow sources.
+
+        Custom schema types are not necessarily Knowhow columns. Scoping through
+        ``knowledge_objects.source_id -> knowhow_tables.hidden_source_id`` keeps
+        default-on Ask retrieval from widening to unrelated user-defined types.
+        Starting from the notebook's few tables also avoids a cold GROUP BY over
+        every usable KG object; both join sides use existing indexes.
+        """
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        return db.execute(
+            "SELECT ko.object_type, COUNT(*) AS c "
+            "FROM knowhow_tables kt JOIN knowledge_objects ko "
+            "ON ko.source_id=kt.hidden_source_id "
+            "WHERE kt.notebook_id=? "
+            "AND ko.notebook_id=? "
+            f"AND ko.status IN ({placeholders}) GROUP BY ko.object_type "
+            "ORDER BY ko.object_type",
+            (notebook_id, notebook_id, *statuses),
+        ).fetchall()
+
+    @staticmethod
     def notebook_has_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
         row = db.execute(
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id = ?)",
