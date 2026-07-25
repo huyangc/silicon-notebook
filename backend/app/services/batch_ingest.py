@@ -459,8 +459,21 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                             reporter.done = i
                             reporter.total = n
                             print(f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True)
-                        out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
-                            notebook_id, progress=_kg_progress)
+                        # 只在这一条路径上把 SIGTERM/SIGHUP 转成 KeyboardInterrupt:
+                        # 唯有它建持久任务行(kg_build_jobs),也唯有它在中断时会取消
+                        # 并排空在飞抽取。装宽了反而有害——本函数下面的 limit/
+                        # retry_partial 分支以及 run_all/run_reparse/run_ingest 都各自
+                        # 用池且不排空,把 SIGTERM 转成异常只会让 main() 返回 130 后卡在
+                        # ThreadPoolExecutor 的 atexit join 里,worker 继续调模型写库,
+                        # 等于拿掉了运维用 kill 停批处理的能力(它们本来就没有需要收尾的
+                        # 持久状态)。Ctrl-C 在各阶段的行为不受此影响:SIGINT 本来就抛
+                        # KeyboardInterrupt。
+                        saved_signals = _install_termination_signals()
+                        try:
+                            out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
+                                notebook_id, progress=_kg_progress)
+                        finally:
+                            _restore_signals(saved_signals)
                     res["extracted"] = len(out["built"])
                     res["failed"] = len(out["failed"])
             else:
@@ -1505,7 +1518,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         else repo.current_user()
     )
     user_token = set_request_user(batch_user)
-    saved_signals = _install_termination_signals()
+    # 终止信号的转换**不**在这里全局安装(见 run_kg 里 build_notebook_kg 那一处的说明:
+    # 只有会排空的路径才配得上它)。这里只负责把中断收成干净的输出与 shell 惯例退出码。
     try:
         return _dispatch_main(args, repo, effective)
     except KgBuildAlreadyRunning as exc:
@@ -1522,5 +1536,4 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 130
     finally:
-        _restore_signals(saved_signals)
         reset_request_user(user_token)
