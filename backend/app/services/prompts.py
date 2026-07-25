@@ -432,7 +432,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
 REPORT_OUTLINE_SCHEMA_HINT = (
     '{"sections":[{"title":"","scope":"","sub_queries":[""]}]}')
 
-REPORT_INTENT_SCHEMA_HINT = (
+QUERY_INTENT_SCHEMA_HINT = (
     '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
     '"entities":[""],"mandatory_topics":[{"id":"","title":"",'
     '"question":"","retrieval_queries":[""]}],"comparison_axes":[""],'
@@ -441,10 +441,14 @@ REPORT_INTENT_SCHEMA_HINT = (
     '"reason":"","required":true,"options":[""]}],'
     '"confidence":0.0,"needs_clarification":false}')
 
+# Compatibility alias: reports and reasoning Ask now share this contract.
+REPORT_INTENT_SCHEMA_HINT = QUERY_INTENT_SCHEMA_HINT
 
-def report_intent_prompt(question: str, max_topics: int = 6,
-                         history_block: str = "", *,
-                         confirmation_mode: bool = False) -> str:
+
+def query_intent_prompt(question: str, max_topics: int = 6,
+                        history_block: str = "", *,
+                        purpose: str = "deep report",
+                        confirmation_mode: bool = False) -> str:
     history_section = (
         f"Prior conversation (context only; the latest request wins):\n{history_block}\n\n"
         if history_block else ""
@@ -457,13 +461,13 @@ def report_intent_prompt(question: str, max_topics: int = 6,
         if confirmation_mode else
         "Detect ambiguity before retrieval. Mark needs_clarification=true only when "
         "a missing referent, research object, comparison side, or essential scope "
-        "choice could materially change the report topic. Put each blocking issue in "
-        "ambiguities with required=true and ask one concise user-facing question. "
+        "choice could materially change the requested topic. Put each blocking issue "
+        "in ambiguities with required=true and ask one concise user-facing question. "
         "Do not block for optional stylistic preferences; record safe, reversible "
         "defaults in assumptions instead.\n"
     )
     return (
-        "Create an INTENT CONTRACT for a deep report before seeing any corpus. "
+        f"Create an INTENT CONTRACT for a {purpose} before seeing any corpus. "
         "Freeze what the user actually asks; evidence availability must never change "
         "the requested topic. Split only genuinely distinct required questions. "
         f"Return at most {max_topics} mandatory topics. Each topic needs a stable short "
@@ -477,7 +481,19 @@ def report_intent_prompt(question: str, max_topics: int = 6,
         "request is sufficiently specified.\n"
         f"{confirmation_rule}\n"
         f"{history_section}User request: {question}\n\n"
-        f"Return JSON only: {REPORT_INTENT_SCHEMA_HINT}"
+        f"Return JSON only: {QUERY_INTENT_SCHEMA_HINT}"
+    )
+
+
+def report_intent_prompt(question: str, max_topics: int = 6,
+                         history_block: str = "", *,
+                         confirmation_mode: bool = False) -> str:
+    return query_intent_prompt(
+        question,
+        max_topics=max_topics,
+        history_block=history_block,
+        purpose="deep report",
+        confirmation_mode=confirmation_mode,
     )
 
 

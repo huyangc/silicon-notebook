@@ -326,6 +326,7 @@ export type AskResponse = {
   retrieval_query?: string;
   top_relevance?: number;
   reasoning_trace?: ReasoningTraceStep[];
+  intent?: import("./ask-intent-model").QueryIntentContract;
   mode?: AskModeId;
   model_errors?: {
     service_id: string;

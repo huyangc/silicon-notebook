@@ -125,6 +125,34 @@ test("Ask stream awaits started handling before consuming progress", async () =>
   assert.deepEqual(order, ["started", "started-handled", "progress"]);
 });
 
+test("Ask intent preview runs before the streaming endpoint and carries conversation context", async () => {
+  installWindow();
+  let captured;
+  globalThis.fetch = async (url, init) => {
+    captured = { url, init };
+    return new Response(JSON.stringify({
+      objective: "分析一下这个问题",
+      resolved_question: "分析电荷泵 PLL",
+      mandatory_topics: [],
+      ambiguities: [],
+      needs_clarification: false,
+      confirmed: false,
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  const result = await ask.previewAskIntent(
+    "nb-1", "分析一下这个问题", "conv-1",
+  );
+
+  assert.equal(result.resolved_question, "分析电荷泵 PLL");
+  assert.match(String(captured.url), /notebooks\/nb-1\/ask\/intent$/);
+  assert.equal(captured.init.method, "POST");
+  assert.equal(captured.init.body, JSON.stringify({
+    question: "分析一下这个问题",
+    conversation_id: "conv-1",
+  }));
+});
+
 test("Ask stream maps stream errors and cancellation to safe outcomes", async () => {
   globalThis.fetch = async () => streamResponse(
     JSON.stringify({ event: "error", error: "raw backend detail" }),

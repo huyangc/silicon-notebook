@@ -9,7 +9,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 ## Highlights
 
 - Structured source ingestion with element-level evidence, formulas, tables, and retained document images when MinerU is configured.
-- Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes.
+- Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes. Reasoning questions are understood without corpus influence before retrieval; clear intent auto-continues, while direction-changing ambiguity pauses for confirmation and then governs every retrieval stage.
 - Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, and personal-to-base promotion.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
 - Free-form knowhow tables with Markdown cells, reasoning-backed library-wide empty-cell completion suggestions, deterministic graph projection, history, milestones, and isolated code attachments.

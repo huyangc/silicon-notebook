@@ -285,6 +285,7 @@
             "evidence_level": "grounded",
             "grounded": true,
             "index_required": false,
+            "intent": null,
             "kg_required": false,
             "llm_mode": "grounded",
             "mode": "reasoning",

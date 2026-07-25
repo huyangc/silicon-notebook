@@ -62,7 +62,7 @@ from app.models.sources import (
 from app.models.ask import (
     AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
     ConversationBulkDeleteResult, ConversationSummary, FeedbackRequest,
-    FeedbackResponse, NotebookSearchResponse, RuleCard,
+    FeedbackResponse, NotebookSearchResponse, QueryIntentContract, RuleCard,
 )
 from app.models.knowledge import (
     DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
@@ -542,6 +542,9 @@ class AdminQueryRepository(Protocol):
 
 
 class AskExecutionPort(Protocol):
+    def preview_reasoning_intent(
+        self, question: str, history: str = "", cancel_event: CancelEvent = None
+    ) -> QueryIntentContract: ...
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse: ...
     def ask_chunk(self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None) -> AskResponse: ...
     def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace: Callable[[Any], None] | None = None, cancel_event: CancelEvent = None) -> AskResponse: ...

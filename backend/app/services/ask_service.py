@@ -46,6 +46,7 @@ from app.models.ask import (
     Citation,
     ConversationBulkDeleteResult,
     ModelError,
+    QueryIntentContract,
     TraceStep,
 )
 from app.models.knowledge import (
@@ -404,6 +405,61 @@ class AskService:
         return self.memory_retriever.notebook_memory_hits(
             user_id, notebook_id, query, 8
         )
+
+    def preview_reasoning_intent(
+        self,
+        question: str,
+        history: str = "",
+        cancel_event: CancelEvent = None,
+    ) -> QueryIntentContract:
+        """Understand a reasoning request before any corpus retrieval starts."""
+        from app.services.query_intent import plan_query_intent
+
+        contract = plan_query_intent(
+            self.model_clients.chat("reasoning_agent"),
+            question,
+            history,
+            max_topics=self.settings.reasoning_max_subqueries,
+            purpose="step-by-step evidence-grounded answer",
+            cancel_event=cancel_event,
+        )
+        return QueryIntentContract(**contract)
+
+    @staticmethod
+    def _confirmed_reasoning_intent(
+        payload: AskRequest,
+        history: str,
+    ) -> QueryIntentContract:
+        """Freeze submitted intent; direct legacy callers get deterministic guard."""
+        from app.services.query_intent import (
+            finalize_query_intent,
+            plan_query_intent,
+        )
+
+        original = payload.question.strip()
+        if payload.intent is not None:
+            seed = payload.intent.contract.model_dump()
+            if str(seed.get("objective") or "").strip() != original:
+                raise ValueError("问题理解与当前问题不匹配，请重新确认")
+            final = finalize_query_intent(
+                seed,
+                resolved_question=payload.intent.resolved_question,
+                answers=[row.model_dump() for row in payload.intent.answers],
+            )
+            return QueryIntentContract(**final)
+
+        # Repository/MCP compatibility callers may not have used the HTTP
+        # preview endpoint.  Preserve zero-extra-model-call behavior for clear
+        # questions, while still failing closed on deterministic missing
+        # referents/generic requests instead of retrieving against guesswork.
+        seed = plan_query_intent(None, original, history, max_topics=4)
+        if seed.get("needs_clarification"):
+            raise ValueError("问题仍有关键歧义，请先确认问题理解")
+        # A caller that bypasses preview has not reviewed decomposition
+        # metadata. Keep its compatibility query byte-for-byte equal to the
+        # original instead of silently promoting fallback topics to authority.
+        seed["mandatory_topics"] = []
+        return QueryIntentContract(**finalize_query_intent(seed))
 
     def _append_memory_context(self, context_block: str, id_map: dict, hits):
         if not hits:
@@ -778,12 +834,15 @@ class AskService:
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
-                                     *, user_id: str, job_id: str = "") -> AskResponse:
+                                     *, user_id: str, job_id: str = "",
+                                     intent: QueryIntentContract | None = None,
+                                     retrieval_query: str = "") -> AskResponse:
         """系统模型已启用但漏绑问答工作负载时的统一短路响应。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
-            retrieval_query=question, llm_mode="deterministic")
+            retrieval_query=retrieval_query or question, llm_mode="deterministic",
+            intent=intent)
         response.mode = mode
         response.model_errors = [
             ModelError(stage="answer", model="", message="missing_config")
@@ -1095,12 +1154,41 @@ class AskService:
         )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
-        memory_hits = self._memory_hits(user_id, notebook_id, question)
+        intent_contract = self._confirmed_reasoning_intent(payload, history)
+        from app.services.query_intent import (
+            confirmed_intent_queries,
+            confirmed_research_question,
+        )
+        auto_confirmed_clear_intent = bool(
+            payload.intent is not None
+            and not payload.intent.contract.needs_clarification
+            and not payload.intent.answers
+        )
+        research_question = confirmed_research_question(
+            intent_contract.model_dump(),
+            question,
+            objective_is_authoritative=auto_confirmed_clear_intent,
+        )
+        intent_queries = (
+            confirmed_intent_queries(
+                intent_contract.model_dump(),
+                question,
+                # Preserve the normal topic budget and add one whole-question
+                # guard seed so decomposition cannot crowd out the user topic.
+                max_queries=self.settings.reasoning_max_subqueries + 1,
+                objective_is_authoritative=auto_confirmed_clear_intent,
+            )
+            if payload.intent is not None else []
+        )
+        memory_hits = self._memory_hits(
+            user_id, notebook_id, research_question
+        )
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning",
-                user_id=user_id, job_id=job_id)
+                user_id=user_id, job_id=job_id, intent=intent_contract,
+                retrieval_query=research_question)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1110,8 +1198,9 @@ class AskService:
                 conclusion="本笔记本尚未构建知识图谱,也没有已建图的参考库;"
                            "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
                            "公共知识库。",
-                conversation_id=conversation_id, retrieval_query=question,
-                llm_mode="deterministic", kg_required=True)
+                conversation_id=conversation_id, retrieval_query=research_question,
+                llm_mode="deterministic", kg_required=True,
+                intent=intent_contract)
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
@@ -1125,12 +1214,29 @@ class AskService:
         # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
         _emb_token = _ASK_EMBED_CACHE.set({})
         try:
+            intent_step = TraceStep(
+                step_type="intent",
+                summary="已按确认后的问题理解开始检索",
+                detail={
+                    "resolved_question": intent_contract.resolved_question,
+                    "entities": intent_contract.entities,
+                    "constraints": intent_contract.constraints,
+                    "excluded_topics": intent_contract.excluded_topics,
+                    "assumptions": intent_contract.assumptions,
+                    "expected_output": intent_contract.expected_output,
+                    "mandatory_topics": [
+                        topic.question for topic in intent_contract.mandatory_topics
+                    ],
+                },
+            )
+
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
                 if on_trace:
                     on_trace(step)
 
             try:
+                checked_trace(intent_step)
                 # 端口化构造(与冻结的 from_repository 工厂逐字段同源):检索/模型/
                 # 社区端口直通,communities 逐次新建 —— sibling_min_bridge 调用时读。
                 result = ReasoningRetriever(
@@ -1139,14 +1245,23 @@ class AskService:
                     communities=self.communities(),
                     settings=self.settings,
                     cancel_event=cancel_event,
-                ).run(notebook_id, question, history, on_step=checked_trace)
+                ).run(
+                    notebook_id,
+                    research_question,
+                    history,
+                    on_step=checked_trace,
+                    intent_queries=intent_queries,
+                )
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
                     result.chains)
+                trace = [intent_step, *trace]
             except AskCancelled:
                 raise
             except Exception:
-                top_hits, elements, trace, chunks, chains = [], [], [], [], []
+                top_hits, elements, trace, chunks, chains = (
+                    [], [], [intent_step], [], []
+                )
 
             registry = self.schemas.effective_schemas()
             seen_ids: set = set()
@@ -1179,7 +1294,7 @@ class AskService:
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: self._answer_reasoning(
-                        notebook_id, question, top_hits, elements, history,
+                        notebook_id, research_question, top_hits, elements, history,
                         cancel_event=cancel_event, chunks=chunks, chains=chains,
                         memory_hits=memory_hits, answer_client=answer_client),
                     getattr(answer_client, "model", ""),
@@ -1258,8 +1373,9 @@ class AskService:
                 evidence_level=evidence_level, anchors=anchors,
                 related_knowledge=related_knowledge, citations=citations,
                 llm_mode=llm_mode, conversation_id=conversation_id,
-                retrieval_query=question, top_relevance=top_relevance,
+                retrieval_query=research_question, top_relevance=top_relevance,
                 reasoning_trace=trace or None,
+                intent=intent_contract,
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)

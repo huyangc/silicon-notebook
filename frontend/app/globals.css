@@ -2237,6 +2237,27 @@ button.chat-session-card {
   gap: 14px;
 }
 
+.ask-intent-review {
+  max-height: min(58vh, 620px);
+  margin: 10px 18px 0;
+  padding: 15px;
+  overflow-y: auto;
+  border: 1px solid #dce4f2;
+  border-radius: 13px;
+  background: #fbfcff;
+  box-shadow: 0 8px 24px rgba(45, 62, 94, 0.08);
+}
+
+.ask-intent-checking {
+  margin: 10px 18px 0;
+  padding: 10px 12px;
+  border: 1px solid #dce4f2;
+  border-radius: 10px;
+  background: #f6f9ff;
+  color: #496079;
+  font-size: 12px;
+}
+
 .report-intent-review-head,
 .report-intent-actions {
   display: flex;

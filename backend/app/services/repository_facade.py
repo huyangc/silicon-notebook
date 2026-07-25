@@ -64,6 +64,7 @@ from app.models.ask import (
     FeedbackResponse,
     ModelError,
     NotebookSearchResponse,
+    QueryIntentContract,
     RuleCard,
 )
 from app.models.knowledge import (
@@ -2860,6 +2861,14 @@ class RepositoryFacade:
         atomic-final-save lifecycle as the streaming coordinator; its job id
         is not added to the AskResponse protocol."""
         return self._runtime.ask_component.ask_current(notebook_id, payload)
+
+    def preview_reasoning_intent(
+        self, question: str, history: str = "", cancel_event: CancelEvent = None
+    ) -> QueryIntentContract:
+        """Corpus-blind preflight used before a reasoning Ask creates a job."""
+        return self._runtime.ask_component.preview_reasoning_intent(
+            question, history, cancel_event
+        )
 
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到

@@ -693,6 +693,60 @@
           "title": "AnswerMemoryLinksResponse",
           "type": "object"
         },
+        "AskIntentConfirmation": {
+          "properties": {
+            "answers": {
+              "items": {
+                "$ref": "#/components/schemas/QueryIntentAnswer"
+              },
+              "maxItems": 8,
+              "title": "Answers",
+              "type": "array"
+            },
+            "contract": {
+              "$ref": "#/components/schemas/QueryIntentContract"
+            },
+            "resolved_question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Resolved Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "contract",
+            "resolved_question"
+          ],
+          "title": "AskIntentConfirmation",
+          "type": "object"
+        },
+        "AskIntentPreviewRequest": {
+          "properties": {
+            "conversation_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            },
+            "question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "title": "AskIntentPreviewRequest",
+          "type": "object"
+        },
         "AskRequest": {
           "properties": {
             "conversation_id": {
@@ -705,6 +759,16 @@
                 }
               ],
               "title": "Conversation Id"
+            },
+            "intent": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AskIntentConfirmation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "mode": {
               "default": "chunk",
@@ -778,6 +842,16 @@
               "default": false,
               "title": "Index Required",
               "type": "boolean"
+            },
+            "intent": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/QueryIntentContract"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "kg_required": {
               "default": false,
@@ -5241,6 +5315,224 @@
           "title": "PromotionRejectRequest",
           "type": "object"
         },
+        "QueryIntentAmbiguity": {
+          "properties": {
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "options": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 4,
+              "title": "Options",
+              "type": "array"
+            },
+            "question": {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "required": {
+              "default": true,
+              "title": "Required",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "question"
+          ],
+          "title": "QueryIntentAmbiguity",
+          "type": "object"
+        },
+        "QueryIntentAnswer": {
+          "properties": {
+            "answer": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Answer",
+              "type": "string"
+            },
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "answer"
+          ],
+          "title": "QueryIntentAnswer",
+          "type": "object"
+        },
+        "QueryIntentContract": {
+          "description": "Corpus-blind understanding shared by report and reasoning retrieval.",
+          "properties": {
+            "ambiguities": {
+              "items": {
+                "$ref": "#/components/schemas/QueryIntentAmbiguity"
+              },
+              "maxItems": 8,
+              "title": "Ambiguities",
+              "type": "array"
+            },
+            "assumptions": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Assumptions",
+              "type": "array"
+            },
+            "clarification_answers": {
+              "items": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "maxItems": 8,
+              "title": "Clarification Answers",
+              "type": "array"
+            },
+            "comparison_axes": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Comparison Axes",
+              "type": "array"
+            },
+            "confidence": {
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "confirmed": {
+              "default": false,
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "constraints": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Constraints",
+              "type": "array"
+            },
+            "entities": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Entities",
+              "type": "array"
+            },
+            "excluded_topics": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Excluded Topics",
+              "type": "array"
+            },
+            "expected_output": {
+              "default": "",
+              "maxLength": 1000,
+              "title": "Expected Output",
+              "type": "string"
+            },
+            "intent_type": {
+              "default": "other",
+              "title": "Intent Type",
+              "type": "string"
+            },
+            "mandatory_topics": {
+              "items": {
+                "$ref": "#/components/schemas/QueryIntentTopic"
+              },
+              "maxItems": 16,
+              "title": "Mandatory Topics",
+              "type": "array"
+            },
+            "needs_clarification": {
+              "default": false,
+              "title": "Needs Clarification",
+              "type": "boolean"
+            },
+            "objective": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Objective",
+              "type": "string"
+            },
+            "resolved_question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Resolved Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "objective",
+            "resolved_question"
+          ],
+          "title": "QueryIntentContract",
+          "type": "object"
+        },
+        "QueryIntentTopic": {
+          "properties": {
+            "id": {
+              "maxLength": 100,
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "question": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            },
+            "retrieval_queries": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 4,
+              "title": "Retrieval Queries",
+              "type": "array"
+            },
+            "title": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "question"
+          ],
+          "title": "QueryIntentTopic",
+          "type": "object"
+        },
         "RebuildScaleIndexRequest": {
           "properties": {
             "mode": {
@@ -9390,6 +9682,56 @@
             }
           },
           "summary": "Ask"
+        }
+      },
+      "/api/notebooks/{notebook_id}/ask/intent": {
+        "post": {
+          "description": "Understand a reasoning question before creating a conversation/job.",
+          "operationId": "preview_ask_intent_api_notebooks__notebook_id__ask_intent_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskIntentPreviewRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/QueryIntentContract"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Ask Intent"
         }
       },
       "/api/notebooks/{notebook_id}/ask/jobs/{job_id}": {
@@ -15135,6 +15477,7 @@
       "evidence_level": "inferred",
       "grounded": false,
       "index_required": false,
+      "intent": null,
       "kg_required": false,
       "llm_mode": "deterministic",
       "mode": "chunk",
@@ -15174,6 +15517,7 @@
             "evidence_level": "inferred",
             "grounded": false,
             "index_required": false,
+            "intent": null,
             "kg_required": false,
             "llm_mode": "deterministic",
             "mode": "chunk",

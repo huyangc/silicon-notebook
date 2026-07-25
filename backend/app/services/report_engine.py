@@ -360,26 +360,10 @@ class ReportEngine:
 
     @staticmethod
     def _confirmed_research_question(intent_contract: dict, fallback: str) -> str:
-        """Combine the reviewed wording and answers for downstream retrieval.
+        """Build the shared authoritative query without changing the visible title."""
+        from app.services.query_intent import confirmed_research_question
 
-        The visible ``resolved_question`` remains exactly what the user reviewed.
-        Blocking-ambiguity answers are separate authoritative inputs, so they must
-        still affect retrieval and drafting even when the user selects an option
-        without manually rewriting the question textarea.
-        """
-        base = str(intent_contract.get("resolved_question") or fallback).strip()
-        supplements = []
-        for row in (intent_contract.get("clarification_answers") or [])[:8]:
-            if not isinstance(row, dict):
-                continue
-            answer = str(row.get("answer") or "").strip()
-            if not answer:
-                continue
-            prompt = str(row.get("question") or row.get("id") or "补充信息").strip()
-            supplements.append(f"- {prompt[:200]}: {answer[:500]}")
-        if not supplements:
-            return base
-        return f"{base}\n用户确认的补充信息：\n" + "\n".join(supplements)
+        return confirmed_research_question(intent_contract, fallback)
 
     def _probe_queries(self, notebook_id: str, queries: List[str]) -> dict:
         seen, base, elements, sources = set(), set(), set(), set()

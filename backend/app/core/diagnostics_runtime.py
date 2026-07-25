@@ -68,6 +68,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("graph",),
     ("search",),
     ("ask",),
+    ("ask", "intent"),
     ("ask", "stream"),
     ("ask", "jobs", None),
     ("ask", "jobs", None, "cancel"),

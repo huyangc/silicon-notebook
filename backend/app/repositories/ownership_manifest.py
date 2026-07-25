@@ -962,6 +962,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.pending_conflicts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.pending_merges', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.prepare_notebook_kg_job', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.preview_reasoning_intent', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.process_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.propose_memory_promotion', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.propose_promotion', kind='attribute', target='_runtime'),
@@ -1785,6 +1786,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
@@ -1872,6 +1874,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.run_preview', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
@@ -2399,6 +2402,16 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='prepare_notebook_kg_job'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='prepare_notebook_kg_job'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='preview_reasoning_intent',
+        owner='AskService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.run_preview', kind='attribute', target='preview_reasoning_intent'),
         ),
         patches=(
         ),

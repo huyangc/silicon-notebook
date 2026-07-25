@@ -170,6 +170,7 @@
   "pending_conflicts": "(self, notebook_id: 'str') -> 'List[dict]'",
   "pending_merges": "(self, notebook_id: 'str') -> 'List[dict]'",
   "prepare_notebook_kg_job": "(self, notebook_id: 'str', mode: 'str') -> 'dict'",
+  "preview_reasoning_intent": "(self, question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'",
   "process_source": "(self, source_id: 'str') -> 'SourceSummary'",
   "propose_memory_promotion": "(self, memory_id: 'str', user_id: 'str', *, target_base_id: 'str' = '') -> 'dict'",
   "propose_promotion": "(self, notebook_id: 'str', object_id: 'str', *, target_base_id: 'str' = '') -> 'dict'",

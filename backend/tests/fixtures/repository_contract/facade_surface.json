@@ -3599,6 +3599,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.preview_reasoning_intent",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.process_source",
         "target": "_runtime"
       },
@@ -5598,6 +5604,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._intent_history",
+        "target": "get_conversation"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_conversation",
         "target": "get_conversation"
       },
@@ -5845,6 +5857,12 @@
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.ask_stream",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.preview_ask_intent.run_preview",
         "target": "get_notebook"
       },
       {
@@ -7149,6 +7167,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', mode: 'str') -> 'dict'"
+  },
+  "preview_reasoning_intent": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.preview_ask_intent.run_preview",
+        "target": "preview_reasoning_intent"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'"
   },
   "process_source": {
     "consumers": [
