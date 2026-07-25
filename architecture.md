@@ -43,7 +43,7 @@
 
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
-当前 schema 版本为 30。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v30 migration
+当前 schema 版本为 31。这里指 SQLite schema。已提交的 v9 兼容 fixture 会经由 v10–v31 migration
 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
 v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 为交互式规整的
@@ -55,7 +55,8 @@ anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化�
 （合法零分块解析 vs 中途失败的分块），v28 新增 app_settings 全局设置表与可空的
 user_profiles.upload_document_limit 列（每笔记本文档数量上限），v29 确定性清理旧的重复
 cluster membership 并增加唯一索引，v30 增加 sources(notebook_id, file_hash) 去重查找索引
-（内容哈希上传去重 / batch_ingest 续跑，此前是全表扫）；SQLite store
+（内容哈希上传去重 / batch_ingest 续跑，此前是全表扫），v31 增加 reports.understanding_json，
+持久化深度报告确认门之前的问题理解契约；SQLite store
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
@@ -247,7 +248,7 @@ evidence，不提供原始 revision/provenance 浏览。批准前会重新校验
 
 ### 3.6 深度报告
 
-深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段一做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；阶段二在确认后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。
+深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段 1a 先做完全不读取语料的问题理解，停在 `intent_ready`；确认端点通过 store 级 compare-and-set 原子认领 `intent_ready → planning`，把用户已审阅的合同和澄清答案确定性冻结，不再做隐藏的二次 LLM 理解。阶段 1b 才做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；不可复制的大库不扫描整表 element，而从有界 chunk ANN/FTS 命中的 `element_ids` 恢复精确元素。阶段二在确认大纲后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown，内部检索问题可含澄清答案，但可见标题只使用确认后的研究问题。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。
 
 ### 3.7 Knowhow 表投影与 Agent 面
 

@@ -13,7 +13,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 - Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, and personal-to-base promotion.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
 - Free-form knowhow tables with Markdown cells, reasoning-backed library-wide empty-cell completion suggestions, deterministic graph projection, history, milestones, and isolated code attachments.
-- Two-stage deep reports with editable outlines, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
+- Intent-first two-stage deep reports with corpus-blind question clarification, an atomically frozen confirmation contract before retrieval, bounded exact-element recovery for large libraries, editable coverage-aware outlines, paper-title-aware citations, verified grounding, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
 

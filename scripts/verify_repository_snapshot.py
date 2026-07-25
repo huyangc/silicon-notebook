@@ -2181,6 +2181,33 @@ MIGRATION_MANIFEST[(29, 30)] = {
     "views": {},
 }
 
+# v31: persist the corpus-blind Deep Report question-understanding contract and
+# its owner-reviewed clarification state. Broadcast the new reports column over
+# every cumulative hop, then retain the explicit v30→v31 single-hop contract.
+REPORTS_UNDERSTANDING_COLUMN = {
+    "understanding_json": ("understanding_json", "TEXT", 1, "'{}'", 0),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 31, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "reports": {
+                **manifest["columns"].get("reports", {}),
+                **REPORTS_UNDERSTANDING_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(30, 31)] = {
+    "tables": {},
+    "columns": {"reports": REPORTS_UNDERSTANDING_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

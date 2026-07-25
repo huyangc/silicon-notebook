@@ -6,6 +6,8 @@ SourceStore.report_source_rows(报告语料侦察的标题投影)。facade 冻�
 委托到 runtime 所有的同一个 store。
 """
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 
 @pytest.fixture
@@ -70,6 +72,46 @@ def test_facade_report_row_to_dict_delegates_to_store(repo):
     assert repo._report_row_to_dict(row, full=True)["content_md"] == ""
 
 
+def test_claim_report_intent_is_a_single_atomic_transition(repo):
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    repo.update_report(
+        nb.id, rid, status="intent_ready", understanding={"confirmed": False}
+    )
+    barrier = threading.Barrier(2)
+
+    def claim(value):
+        barrier.wait(timeout=5)
+        return repo.claim_report_intent(
+            nb.id, rid, {"confirmed": True, "winner": value}
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(claim, ("a", "b")))
+
+    assert sorted(outcomes) == [False, True]
+    detail = repo.get_report(nb.id, rid)
+    assert detail["status"] == "planning"
+    assert detail["understanding"]["winner"] in {"a", "b"}
+
+
+def test_claim_report_generation_is_a_single_atomic_transition(repo):
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    repo.update_report(nb.id, rid, status="outline_ready")
+    barrier = threading.Barrier(2)
+
+    def claim(_value):
+        barrier.wait(timeout=5)
+        return repo.claim_report_generation(nb.id, rid)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(claim, ("a", "b")))
+
+    assert sorted(outcomes) == [False, True]
+    assert repo.get_report(nb.id, rid)["status"] == "generating"
+
+
 # ---------------------------------------------------------------------------
 # CRUD 载荷/排序 golden(逐字对齐 master)
 # ---------------------------------------------------------------------------
@@ -88,7 +130,7 @@ def test_report_crud_payload_matches_master_golden(repo):
         "created_at": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00",
         "depth": 4, "section_count": 0,
         "outline": [], "sections": [], "gaps": [], "references": [],
-        "section_status": [], "content_md": "",
+        "section_status": [], "understanding": {}, "content_md": "",
     }
 
     now["v"] = "2026-01-02T00:00:00"
@@ -97,7 +139,8 @@ def test_report_crud_payload_matches_master_golden(repo):
         outline=[{"title": "机理", "scope": "s", "sub_queries": ["q1"]}],
         sections=[{"title": "机理", "markdown": "md", "grounded": True}],
         gaps=["缺 X"], references=[{"key": "k1", "label": "Razavi"}],
-        content_md="# 报告", section_status=[{"title": "机理", "phase": "完成", "step": 0}])
+        content_md="# 报告", section_status=[{"title": "机理", "phase": "完成", "step": 0}],
+        understanding={"resolved_question": "为什么 bandgap 是 1.2V?", "confirmed": True})
     full = store.get_report(nb.id, rid)
     assert full["created_at"] == "2026-01-01T00:00:00"          # 创建时间不动
     assert full["updated_at"] == "2026-01-02T00:00:00"          # 每次 update 走时钟
@@ -105,6 +148,7 @@ def test_report_crud_payload_matches_master_golden(repo):
     assert full["section_count"] == 1 and full["gaps"] == ["缺 X"]
     assert full["references"][0]["label"] == "Razavi"
     assert full["section_status"][0]["phase"] == "完成"
+    assert full["understanding"]["confirmed"] is True
 
     now["v"] = "2026-01-03T00:00:00"
     store.create_report(nb.id, "Q two")                          # 默认 depth=2

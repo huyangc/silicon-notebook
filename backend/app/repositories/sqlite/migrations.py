@@ -16,7 +16,7 @@ from app.services.kg.filters import _norm as _wl_norm
 # the merge migration that makes either already-deployed lineage converge.
 # v30 adds idx_sources_notebook_file_hash for content-hash upload dedup /
 # batch_ingest resume (previously a full-table scan).
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1730,6 +1730,16 @@ class SqliteMigrator:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sources_notebook_file_hash "
                 "ON sources(notebook_id, file_hash)"
+            )
+
+    def _migration_31(self) -> None:
+        """Persist report question-understanding and clarification review state."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db,
+                "reports",
+                "understanding_json",
+                "TEXT NOT NULL DEFAULT '{}'",
             )
 
     def _recover_interrupted_jobs(self) -> None:

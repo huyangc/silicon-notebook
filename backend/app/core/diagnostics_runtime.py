@@ -91,6 +91,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("reports",),
     ("reports", "export"),
     ("reports", None),
+    ("reports", None, "intent"),
     ("reports", None, "outline"),
     ("reports", None, "generate"),
     ("reports", None, "cancel"),

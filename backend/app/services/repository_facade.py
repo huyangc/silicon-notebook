@@ -3157,12 +3157,24 @@ class RepositoryFacade:
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
                       gaps=None, references=None, content_md=None,
-                      section_status=None) -> None:
+                      section_status=None, understanding=None) -> None:
         return self._runtime.report_store.update_report(
             notebook_id, report_id, status=status, progress=progress,
             error=error, outline=outline, sections=sections, gaps=gaps,
             references=references, content_md=content_md,
-            section_status=section_status)
+            section_status=section_status, understanding=understanding)
+
+    def claim_report_intent(
+        self, notebook_id: str, report_id: str, understanding: dict
+    ) -> bool:
+        return self._runtime.report_store.claim_report_intent(
+            notebook_id, report_id, understanding
+        )
+
+    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+        return self._runtime.report_store.claim_report_generation(
+            notebook_id, report_id
+        )
 
     def _report_row_to_dict(self, row, *, full: bool) -> dict:
         return self._runtime.report_store.row_to_dict(row, full=full)

@@ -1428,7 +1428,7 @@
   ],
   "sqlite_internal_tables": [],
   "sqlite_table_count": 77,
-  "sqlite_version": 30,
+  "sqlite_version": 31,
   "tables": {
     "agent_access_tokens": {
       "classification": "replicated",
@@ -5857,6 +5857,14 @@
           "name": "updated_at",
           "nullable": false,
           "postgres_type": "timestamp with time zone",
+          "sqlite_not_null": true,
+          "sqlite_type": "TEXT"
+        },
+        {
+          "default": {},
+          "name": "understanding_json",
+          "nullable": false,
+          "postgres_type": "jsonb",
           "sqlite_not_null": true,
           "sqlite_type": "TEXT"
         }

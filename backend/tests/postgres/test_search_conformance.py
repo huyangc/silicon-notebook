@@ -260,7 +260,7 @@ def search_harnesses(tmp_path, postgres_database) -> tuple[SearchHarness, Search
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'search-golden.db'}")
     sqlite_database = SqliteDatabase(settings, tmp_path)
     SqliteMigrator(sqlite_database, settings).initialize()
-    assert PostgresMigrator(postgres_database).migrate() == 9
+    assert PostgresMigrator(postgres_database).migrate() == 10
     seams = RepositoryCompatibilitySeams(
         new_id=lambda prefix: f"{prefix}-unused",
         now=lambda: NOW,
@@ -365,7 +365,7 @@ def test_zh_en_search_quality_and_citation_identity_golden(search_harnesses, que
 def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 9
+    assert PostgresMigrator(postgres_database).migrate() == 10
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "

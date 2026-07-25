@@ -5312,6 +5312,28 @@
           "title": "ReparseSourcesRequest",
           "type": "object"
         },
+        "ReportClarificationAnswer": {
+          "properties": {
+            "answer": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Answer",
+              "type": "string"
+            },
+            "id": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "answer"
+          ],
+          "title": "ReportClarificationAnswer",
+          "type": "object"
+        },
         "ReportCreate": {
           "properties": {
             "auto_generate": {
@@ -5427,6 +5449,11 @@
             "status": {
               "title": "Status",
               "type": "string"
+            },
+            "understanding": {
+              "additionalProperties": true,
+              "title": "Understanding",
+              "type": "object"
             }
           },
           "required": [
@@ -5465,6 +5492,29 @@
             }
           },
           "title": "ReportGenerateRequest",
+          "type": "object"
+        },
+        "ReportIntentConfirm": {
+          "properties": {
+            "answers": {
+              "items": {
+                "$ref": "#/components/schemas/ReportClarificationAnswer"
+              },
+              "maxItems": 8,
+              "title": "Answers",
+              "type": "array"
+            },
+            "resolved_question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Resolved Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "resolved_question"
+          ],
+          "title": "ReportIntentConfirm",
           "type": "object"
         },
         "ReportOutlineUpdate": {
@@ -13317,6 +13367,66 @@
           "summary": "Generate Report"
         }
       },
+      "/api/notebooks/{notebook_id}/reports/{report_id}/intent": {
+        "post": {
+          "operationId": "confirm_report_intent_api_notebooks__notebook_id__reports__report_id__intent_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "report_id",
+              "required": true,
+              "schema": {
+                "title": "Report Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportIntentConfirm"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Confirm Report Intent Api Notebooks  Notebook Id  Reports  Report Id  Intent Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Confirm Report Intent"
+        }
+      },
       "/api/notebooks/{notebook_id}/reports/{report_id}/outline": {
         "patch": {
           "operationId": "update_report_outline_api_notebooks__notebook_id__reports__report_id__outline_patch",
@@ -15207,7 +15317,8 @@
         }
       ],
       "sections": [],
-      "status": "outline_ready"
+      "status": "outline_ready",
+      "understanding": {}
     },
     "sharing": {
       "preview": {

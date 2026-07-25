@@ -159,6 +159,7 @@ class AskService:
     _MIX_KG_KEY_BASE = 1000
     _MIX_PROMPT_BUFFER_TOKENS = 2000
     _MEMORY_KEY_BASE = 3000
+    _ELEMENT_KEY_BASE = 4000
 
     def __init__(
         self,
@@ -712,8 +713,8 @@ class AskService:
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
         chain segment k1001+ (mirrors _answer_mix's keying), with final synthesis
         still handled by ``ask_answer``. Otherwise KG-only (legacy).
-        search_elements passages stay
-        reference-only (no [k] id). Context refinement uses
+        Direct ``SourceElement`` passages use the isolated k4001+ namespace and
+        are first-class citations rather than unbound prompt decoration. Context refinement uses
         ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
         (answer, llm_grounded, anchors)."""
         raise_if_cancelled(cancel_event)
@@ -747,11 +748,13 @@ class AskService:
                 context_block = f"{context_block}\n\n{chain_block}"
                 id_map = {**id_map, **chain_id_map}
         if elements:
-            extra = "\n".join(
-                f"(原文 {i+1}) {el.source_title} · {el.location_label}: {el.text[:200]}"
-                for i, el in enumerate(elements[:6])
+            element_block, element_id_map = self.evidence_context.element_context(
+                elements[:6], notebook_id=notebook_id,
+                id_offset=self._ELEMENT_KEY_BASE,
             )
-            context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
+            if element_block and element_block != "(none)":
+                context_block = f"{context_block}\n\n[Direct source elements]\n{element_block}"
+                id_map = {**id_map, **element_id_map}
         answer_client = answer_client or self.model_clients.chat("ask_answer")
         refine_client = self.model_clients.chat("evidence_refine")
         context_block = self._refine_context(
@@ -991,14 +994,18 @@ class AskService:
             # citations_from 的批量口径）。
             knowhow_refs = self.evidence_context.knowhow_refs_for(
                 c.element_ids[0] for c in selected if c.element_ids)
+            citation_titles = self.evidence_context.citation_titles(
+                c.source_id for c in selected
+            )
             if overlay_on:
                 by_id = {c.chunk_id: c for c in selected}
                 for a in anchors:
                     if a.object_type == "chunk" and a.object_id in by_id:
                         c = by_id[a.object_id]
                         eid = c.element_ids[0] if c.element_ids else ""
+                        source_title = citation_titles.get(c.source_id, c.source_title)
                         citations.append(Citation(
-                            label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                            label=f"{source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
                             tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
@@ -1006,8 +1013,9 @@ class AskService:
             else:
                 for c in selected:
                     eid = c.element_ids[0] if c.element_ids else ""
+                    source_title = citation_titles.get(c.source_id, c.source_title)
                     citations.append(Citation(
-                        label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                        label=f"{source_title} · {c.section_path}".strip(" ·"),
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200],
                         tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
@@ -1192,8 +1200,35 @@ class AskService:
                 object_id=relation_id, relevance=relevance,
             ) for relation_id, relevance in relation_relevances.items()]
             citations.extend(self._memory_citations(anchors, memory_hits))
+            element_by_id = {item.element_id: item for item in elements}
+            element_refs = self.evidence_context.knowhow_refs_for(element_by_id)
+            element_titles = self.evidence_context.citation_titles(
+                item.source_id for item in elements
+            )
+            element_tier = self._tier_map_for({notebook_id}).get(
+                notebook_id, "personal"
+            )
+            for anchor in anchors:
+                if anchor.object_type != "element" or anchor.object_id not in element_by_id:
+                    continue
+                item = element_by_id[anchor.object_id]
+                source_title = element_titles.get(item.source_id, item.source_title)
+                citations.append(Citation(
+                    label=f"{source_title} · {item.location_label}".strip(" ·"),
+                    source_id=item.source_id,
+                    element_id=item.element_id,
+                    location_label=item.location_label,
+                    quoted_span=item.text[:200],
+                    tier=element_tier,
+                    notebook_id="",
+                    knowhow=element_refs.get(item.element_id),
+                ))
+            element_evidence = [SimpleNamespace(
+                object_id=item.element_id, relevance=float(item.score or 0.0),
+            ) for item in elements]
             evidence_pool = (
-                list(top_hits) + list(chunks) + chain_evidence + list(memory_hits)
+                list(top_hits) + list(chunks) + chain_evidence
+                + element_evidence + list(memory_hits)
             )
             evidence_level, top_relevance = classify_evidence(
                 evidence_pool, anchors, llm_grounded,
@@ -1415,12 +1450,16 @@ class AskService:
                     # 侧口径,运行效率是一等约束)。
                     knowhow_refs = self.evidence_context.knowhow_refs_for(
                         c.element_ids[0] for c in ppr_chunks if c.element_ids)
+                    citation_titles = self.evidence_context.citation_titles(
+                        c.source_id for c in ppr_chunks
+                    )
                     for a in anchors:
                         if a.object_type == "chunk" and a.object_id in by_id:
                             c = by_id[a.object_id]
                             eid = c.element_ids[0] if c.element_ids else ""
+                            source_title = citation_titles.get(c.source_id, c.source_title)
                             citations.append(Citation(
-                                label=f"{c.source_title} · {c.section_path}".strip(" ·"),
+                                label=f"{source_title} · {c.section_path}".strip(" ·"),
                                 source_id=c.source_id, element_id=eid,
                                 location_label=c.section_path, quoted_span=c.text[:200],
                                 tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal"),
@@ -1557,7 +1596,7 @@ class AskService:
                 src_chunks = truncate_by_tokens(src_chunks, lambda c: c.text, chunk_budget)
                 # 源 chunk 的 source_title 补全(供引用标签;_kg_source_chunks 留空)
                 _sids = list({c.source_id for c in src_chunks})
-                _titles = self.source_titles(_sids) if _sids else {}
+                _titles = self.evidence_context.citation_titles(_sids) if _sids else {}
                 for c in src_chunks:
                     c.source_title = _titles.get(c.source_id, "")
                 answer, llm_grounded, anchors = "", False, []

@@ -18,6 +18,16 @@ class ReportGenerateRequest(BaseModel):
     depth: int | None = None
 
 
+class ReportClarificationAnswer(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    answer: str = Field(min_length=1, max_length=4000)
+
+
+class ReportIntentConfirm(BaseModel):
+    resolved_question: str = Field(min_length=1, max_length=4000)
+    answers: List[ReportClarificationAnswer] = Field(default_factory=list, max_length=8)
+
+
 class ReportSummary(BaseModel):
     id: str
     question: str
@@ -37,6 +47,7 @@ class ReportDetail(ReportSummary):
     sections: List[dict] = Field(default_factory=list)
     gaps: List[str] = Field(default_factory=list)
     references: List[dict] = Field(default_factory=list)
+    understanding: dict = Field(default_factory=dict)
     depth: int = 2
     section_status: List[dict] = Field(default_factory=list)
     content_md: str = ""

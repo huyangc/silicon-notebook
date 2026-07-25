@@ -329,7 +329,7 @@
         "citations": [
           {
             "element_id": "<el-id-1>",
-            "label": "KG evidence",
+            "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
             "source_id": "<src-id-1>",
@@ -444,7 +444,7 @@
         "citations": [
           {
             "element_id": "<el-id-1>",
-            "label": "KG evidence",
+            "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
             "source_id": "<src-id-1>",

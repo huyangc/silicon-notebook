@@ -1746,6 +1746,7 @@ button.chat-session-card {
   color: #1d4ed8;
 }
 
+.report-status.intent_ready,
 .report-status.outline_ready {
   background: #fef3e2;
   color: #b45309;
@@ -2189,6 +2190,28 @@ button.chat-session-card {
   color: #4f5663;
 }
 
+.report-reference-detail {
+  margin-top: 6px;
+  padding: 12px 14px;
+  border: 1px solid #dce3ed;
+  border-radius: 10px;
+  background: #f8fafc;
+  display: grid;
+  gap: 6px;
+}
+
+.report-reference-detail > span {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.report-reference-detail blockquote {
+  padding-left: 10px;
+  border-left-color: #7c8da8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .report-markdown hr {
   border: 0;
   border-top: 1px solid #e6eaf1;
@@ -2206,6 +2229,186 @@ button.chat-session-card {
   width: 9px;
   height: 9px;
   color: #1d4ed8;
+}
+
+/* ---- 问题理解确认(status==='intent_ready') ---- */
+.report-intent-review {
+  display: grid;
+  gap: 14px;
+}
+
+.report-intent-review-head,
+.report-intent-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.report-intent-review-head h3 {
+  margin: 0 0 4px;
+  color: #1f2430;
+  font-size: 16px;
+}
+
+.report-intent-review-head p,
+.report-intent-actions > span {
+  margin: 0;
+  color: #5b6371;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.report-intent-meta,
+.report-clarification-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.report-intent-meta span,
+.report-clarification-options button {
+  border: 1px solid #d8e0f0;
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: #f5f8fe;
+  color: #365aa8;
+  font-size: 12px;
+}
+
+.report-clarification-options button {
+  cursor: pointer;
+}
+
+.report-clarification-options button.selected {
+  border-color: #537bd1;
+  background: #e8effd;
+  color: #23478f;
+}
+
+.report-intent-question,
+.report-clarification-card {
+  display: grid;
+  gap: 7px;
+}
+
+.report-intent-question > span,
+.report-intent-block > strong,
+.report-intent-details strong,
+.report-intent-assumptions > strong {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.report-intent-question textarea,
+.report-clarification-card textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 9px;
+  background: #fff;
+  color: #1f2937;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.report-intent-question textarea:focus,
+.report-clarification-card textarea:focus {
+  outline: none;
+  border-color: #7aa0ef;
+  box-shadow: 0 0 0 3px rgba(122, 160, 239, 0.18);
+}
+
+.report-clarification-list {
+  display: grid;
+  gap: 10px;
+}
+
+.report-clarification-card {
+  padding: 12px;
+  border: 1px solid #e3c985;
+  border-radius: 11px;
+  background: #fffaf0;
+}
+
+.report-clarification-title {
+  color: #3f3a2c;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.report-clarification-title em {
+  margin-left: 7px;
+  color: #b45309;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.report-clarification-card small,
+.report-intent-assumptions small {
+  color: #77684a;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.report-intent-block,
+.report-intent-assumptions {
+  padding: 10px 12px;
+  border-left: 3px solid #6d8fd8;
+  border-radius: 7px;
+  background: #f5f8fe;
+}
+
+.report-intent-block ul,
+.report-intent-assumptions ul,
+.report-intent-details ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.report-intent-details {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.report-intent-details > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e2e6ee;
+  border-radius: 9px;
+  background: #fafbfd;
+}
+
+.report-intent-details p {
+  margin: 6px 0 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.report-intent-actions {
+  align-items: center;
+  padding-top: 3px;
+}
+
+.report-intent-actions .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 720px) {
+  .report-intent-details {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* ---- 大纲编辑器(status==='outline_ready') ---- */
@@ -2302,11 +2505,56 @@ button.chat-session-card {
 }
 
 .report-outline-card-title:focus,
-.report-outline-card-scope:focus {
+.report-outline-card-scope:focus,
+.report-outline-query-field textarea:focus {
   outline: none;
   border-color: #7aa0ef;
   background: #fff;
   box-shadow: 0 0 0 3px rgba(122, 160, 239, 0.18);
+}
+
+.report-intent-binding {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 10px;
+  border-left: 3px solid #6d8fd8;
+  border-radius: 6px;
+  background: #f5f8fe;
+  color: #334155;
+  font-size: 12px;
+}
+
+.report-intent-binding > span {
+  color: #365aa8;
+  font-weight: 700;
+}
+
+.report-intent-binding ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.report-outline-query-field {
+  display: grid;
+  gap: 5px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.report-outline-query-field textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 54px;
+  padding: 8px 10px;
+  border: 1px solid #e2e6ee;
+  border-radius: 8px;
+  background: #fafbfd;
+  color: #3b424e;
+  font: inherit;
+  font-weight: 400;
+  line-height: 1.45;
 }
 
 .report-outline-card-ops {
@@ -2390,6 +2638,19 @@ button.chat-session-card {
   border-radius: 999px;
   background: #f2f6fd;
   color: #3457a8;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.report-coverage {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border: 1px solid #d9dfeb;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #526071;
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;

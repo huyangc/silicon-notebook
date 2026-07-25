@@ -15,7 +15,9 @@ from app.models.ask import AnswerAnchor, Citation, CitationKnowhowRef
 from app.repositories.ports import (
     EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
 )
-from app.services.retrieval import RetrievedChunk, RetrievedKnowledge, est_tokens
+from app.services.retrieval import (
+    RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
+)
 
 
 _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
@@ -82,6 +84,28 @@ class EvidenceContextService:
         """Return bounded source classification for retrieval-only consumers."""
         return self.sources.source_metadata(source_ids)
 
+    def citation_titles(self, source_ids: Iterable[str]) -> dict[str, str]:
+        """Resolve user-facing citation titles in one bounded source lookup.
+
+        A grounded paper title is more meaningful than its upload/file name.  It
+        is authoritative for citation display only when the metadata row marks
+        the source as a paper and the parsed title is nonblank.  Every other
+        source retains its ordinary source title (then file name as fallback).
+        """
+        ids = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
+        if not ids:
+            return {}
+        metadata = self.source_metadata(ids)
+        titles: dict[str, str] = {}
+        for source_id in ids:
+            row = metadata.get(source_id) or {}
+            paper_title = str(row.get("paper_title") or "").strip()
+            ordinary_title = str(row.get("title") or row.get("file_name") or "").strip()
+            title = paper_title if bool(row.get("is_paper")) and paper_title else ordinary_title
+            if title:
+                titles[source_id] = title
+        return titles
+
     def chunk_context(
         self,
         chunks: Sequence[RetrievedChunk],
@@ -97,6 +121,7 @@ class EvidenceContextService:
         tiers = self.tier_map(
             list({getattr(chunk, "notebook_id", "") or notebook_id for chunk in chunks})
         )
+        citation_titles = self.citation_titles(chunk.source_id for chunk in chunks)
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         # Task 12b 评审修复（grounded 主路径可达性）：chunk 锚点也要带 knowhow。
@@ -116,6 +141,7 @@ class EvidenceContextService:
             if used >= budget and lines:
                 break
             key = f"k{index}"
+            source_title = citation_titles.get(chunk.source_id, chunk.source_title)
             line = f"{key}: {chunk.text}"
             lines.append(line)
             used += len(line)
@@ -131,25 +157,91 @@ class EvidenceContextService:
             origin = raw_origin or notebook_id
             if raw_origin == notebook_id:
                 raw_origin = ""
+            element_ids = getattr(chunk, "element_ids", None) or []
             evidence_by_id[key] = {
                 "object_id": chunk.chunk_id,
                 "object_type": "chunk",
-                "name": chunk.section_path or chunk.source_title,
+                "name": chunk.section_path or source_title,
                 "definition": None,
                 "snippet": chunk.text[:300],
-                "source_title": chunk.source_title,
+                "source_title": source_title,
                 "location_label": chunk.section_path,
                 "tier": tiers.get(origin, "personal"),
                 "notebook_id": raw_origin,
+                "source_id": chunk.source_id,
+                "element_id": element_ids[0] if len(element_ids) == 1 else "",
+                "relevance": float(getattr(chunk, "relevance", 0.0) or 0.0),
                 "knowhow": None,
             }
-            element_ids = getattr(chunk, "element_ids", None) or []
             if len(element_ids) == 1:
                 single_element_keys[key] = element_ids[0]
         if single_element_keys:
             refs = self.knowhow_refs_for(single_element_keys.values())
             for key, element_id in single_element_keys.items():
                 evidence_by_id[key]["knowhow"] = refs.get(element_id)
+        return ("\n".join(lines) if lines else "(none)"), evidence_by_id
+
+    def element_context(
+        self,
+        elements: Sequence[RetrievedElement],
+        *,
+        notebook_id: str,
+        id_offset: int = 4000,
+        budget_chars: int | None = None,
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """Render retrieved ``SourceElement`` rows as first-class citable evidence.
+
+        Elements are already the parser's smallest citation unit.  Keeping their
+        ids in the reverse map prevents the report/Ask layers from collapsing a
+        precise passage back to a source-level reference.
+        """
+        budget = (
+            self.settings.answer_context_budget_chars
+            if budget_chars is None else max(0, int(budget_chars))
+        )
+        tier = self.tier_map([notebook_id]).get(notebook_id, "personal")
+        citation_titles = self.citation_titles(element.source_id for element in elements)
+        lines: list[str] = []
+        evidence_by_id: dict[str, dict[str, Any]] = {}
+        used = 0
+        for index, element in enumerate(elements, 1):
+            key = f"k{id_offset + index}"
+            location = element.location_label or element.element_type
+            source_title = citation_titles.get(element.source_id, element.source_title)
+            prefix = (
+                f"{key}: [source-element][{tier}] {source_title} · "
+                f"{location} — "
+            )
+            remaining = budget - used - len(prefix)
+            if remaining <= 0:
+                break
+            text = element.text[:remaining]
+            if len(text) < len(element.text) and remaining > 1:
+                text = text[:-1] + "…"
+            line = prefix + text
+            lines.append(line)
+            used += len(line)
+            evidence_by_id[key] = {
+                "object_id": element.element_id,
+                "object_type": "element",
+                "name": location or source_title,
+                "definition": element.text,
+                "snippet": element.text[:300],
+                "source_id": element.source_id,
+                "element_id": element.element_id,
+                "source_title": source_title,
+                "location_label": location,
+                "tier": tier,
+                "notebook_id": "",
+                "relevance": float(element.score or 0.0),
+                "knowhow": None,
+            }
+        if evidence_by_id:
+            refs = self.knowhow_refs_for(
+                value["element_id"] for value in evidence_by_id.values()
+            )
+            for value in evidence_by_id.values():
+                value["knowhow"] = refs.get(value["element_id"])
         return ("\n".join(lines) if lines else "(none)"), evidence_by_id
 
     def knowledge_context(
@@ -224,11 +316,22 @@ class EvidenceContextService:
                 "location_label": occurrences[0].get("section_path", "") if occurrences else "",
                 "tier": tier,
                 "notebook_id": raw_origin,
+                "source_id": str(occurrences[0].get("source_id", "")) if occurrences else "",
+                "element_id": str(occurrences[0].get("element_id", "")) if occurrences else "",
+                "relevance": float(getattr(hit, "relevance", 0.0) or 0.0),
                 # Task 12b（引用跳转扩面，锚点侧）: KO payload 已在内存里（同
                 # 上面 hit.payload.get("name","") 的零额外查询惯例），命中单行
                 # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
                 "knowhow": _knowhow_ref_from_payload(hit.payload),
             }
+
+        preferred_titles = self.citation_titles(
+            value.get("source_id", "") for value in evidence_by_id.values()
+        )
+        for value in evidence_by_id.values():
+            source_id = str(value.get("source_id") or "")
+            if source_id in preferred_titles:
+                value["source_title"] = preferred_titles[source_id]
 
         object_to_key = {value["object_id"]: key for key, value in evidence_by_id.items()}
         if len(object_to_key) >= 2:
@@ -266,7 +369,17 @@ class EvidenceContextService:
     ) -> list[AnswerAnchor]:
         anchors: list[AnswerAnchor] = []
         seen: set[str] = set()
-        for marker_group in _MARKER_GROUP_RE.findall(answer or ""):
+        marker_groups = _MARKER_GROUP_RE.findall(answer or "")
+        cited_keys = list(dict.fromkeys(
+            key
+            for marker_group in marker_groups
+            for key in (part.strip() for part in marker_group.split(","))
+            if key in evidence_by_id
+        ))
+        preferred_titles = self.citation_titles(
+            str(evidence_by_id[key].get("source_id") or "") for key in cited_keys
+        )
+        for marker_group in marker_groups:
             keys = [part.strip() for part in marker_group.split(",")]
             if not keys or any(key not in evidence_by_id for key in keys):
                 continue
@@ -284,7 +397,10 @@ class EvidenceContextService:
                     name=name,
                     definition=context.get("definition"),
                     snippet=context.get("snippet"),
-                    source_title=str(context.get("source_title", "")),
+                    source_title=preferred_titles.get(
+                        str(context.get("source_id") or ""),
+                        str(context.get("source_title", "")),
+                    ),
                     location_label=str(context.get("location_label", "")),
                     tier=str(context.get("tier", "personal")),
                     # Task 14: 只有 chunk_context/knowledge_context 填了才非空
@@ -355,11 +471,19 @@ class EvidenceContextService:
         knowhow_refs = self.knowhow_refs_for(
             evidence.element_id for _tier, _nb, evidence in filtered
         )
+        preferred_titles = self.citation_titles(
+            evidence.source_id for _tier, _nb, evidence in filtered
+        )
 
         citations: list[Citation] = []
         for tier, hit_notebook_id, evidence in filtered:
+            source_title = preferred_titles.get(evidence.source_id, "")
+            citation_label = (
+                f"{source_title} · {evidence.location_label}".strip(" ·")
+                if source_title else label
+            )
             citations.append(Citation(
-                label=label,
+                label=citation_label,
                 source_id=evidence.source_id,
                 element_id=evidence.element_id,
                 location_label=evidence.location_label,

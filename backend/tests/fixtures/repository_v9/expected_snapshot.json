@@ -414,6 +414,7 @@
         }
       ],
       "status": "done",
+      "understanding": {},
       "updated_at": "<timestamp>"
     },
     "sharing": {
@@ -907,6 +908,7 @@
           }
         ],
         "status": "done",
+        "understanding_json": {},
         "updated_at": "<timestamp>"
       }
     ],
@@ -1821,7 +1823,7 @@
       },
       {
         "name": "reports",
-        "sql_sha256": "a9d808501c98af304a5993a924852cd88c380933a737718173908115e8aa63bc",
+        "sql_sha256": "6166fabc5b737523d5056f429895128420851f5b4602237eca4e623b575cac5b",
         "type": "table"
       },
       {
@@ -1880,6 +1882,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 30
+    "user_version": 31
   }
 }

@@ -437,6 +437,7 @@ reports.error|TEXT|1|''|0
 reports.created_by|TEXT|1|''|0
 reports.created_at|TEXT|1|None|0
 reports.updated_at|TEXT|1|None|0
+reports.understanding_json|TEXT|1|'{}'|0
 source_authors.id|TEXT|0|None|1
 source_authors.source_id|TEXT|1|None|0
 source_authors.notebook_id|TEXT|1|None|0

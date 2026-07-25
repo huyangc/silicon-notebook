@@ -45,14 +45,15 @@ class ReportStore:
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
                       gaps=None, references=None, content_md=None,
-                      section_status=None) -> None:
+                      section_status=None, understanding=None) -> None:
         sets, args = ["updated_at = ?"], [self.now()]
         for col, val, dump in (("status", status, False), ("progress", progress, False),
                                ("error", error, False), ("content_md", content_md, False),
                                ("outline_json", outline, True),
                                ("sections_json", sections, True), ("gaps_json", gaps, True),
                                ("references_json", references, True),
-                               ("section_status_json", section_status, True)):
+                               ("section_status_json", section_status, True),
+                               ("understanding_json", understanding, True)):
             if val is not None:
                 sets.append(f"{col} = ?")
                 args.append(json.dumps(val, ensure_ascii=False) if dump else val)
@@ -64,6 +65,35 @@ class ReportStore:
                 f"WHERE id = ? AND notebook_id = ?{guard}",
                 args,
             )
+
+    def claim_report_intent(
+        self, notebook_id: str, report_id: str, understanding: dict
+    ) -> bool:
+        """Atomically claim one reviewed intent for outline planning."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE reports SET status='planning',progress=?,"
+                "understanding_json=?,updated_at=? "
+                "WHERE id=? AND notebook_id=? AND status='intent_ready'",
+                (
+                    "按已确认问题规划中",
+                    json.dumps(understanding, ensure_ascii=False),
+                    self.now(),
+                    report_id,
+                    notebook_id,
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+        """Atomically claim one outline-ready report for generation."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE reports SET status='generating',progress=?,updated_at=? "
+                "WHERE id=? AND notebook_id=? AND status='outline_ready'",
+                ("准备生成", self.now(), report_id, notebook_id),
+            )
+        return cursor.rowcount > 0
 
     def cancel_report(self, notebook_id: str, report_id: str) -> bool:
         """Durably publish the sticky terminal state before signalling a worker."""
@@ -87,6 +117,7 @@ class ReportStore:
                      gaps=json.loads(row["gaps_json"] or "[]"),
                      references=json.loads(row["references_json"] or "[]"),
                      section_status=json.loads(row["section_status_json"] or "[]"),
+                     understanding=json.loads(row["understanding_json"] or "{}"),
                      content_md=row["content_md"])
         return d
 

@@ -396,6 +396,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -455,6 +456,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -509,6 +511,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -546,6 +549,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -594,6 +598,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_29(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -685,6 +690,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
     upgraded.close_local()
     db = sqlite3.connect(database)
     try:
+        db.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_31
         db.execute("DROP INDEX idx_sources_notebook_file_hash")  # _migration_30
         db.execute("DROP INDEX uq_clusters_notebook_type_member")
         db.executemany(
