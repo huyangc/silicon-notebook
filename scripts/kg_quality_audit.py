@@ -38,6 +38,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 try:
     from app.eval.probes import claim_degraded, classify_concept, formula_degraded
     from app.services.kg.filters import is_meta_claim, is_noise_concept
+    from app.services.knowledge_contracts import USABLE_STATUSES
 except ImportError as exc:  # pragma: no cover - 环境问题,不是逻辑分支
     sys.stderr.write(
         f"无法 import 产品判据模块({exc})。\n"
@@ -52,6 +53,14 @@ DEFAULT_SOURCE_SAMPLE = 60
 DEFAULT_DEGREE_SAMPLE = 4000
 SAMPLE_PRINT = 40
 KG_TYPES = ("concept", "claim", "formula", "procedure")
+
+# 审计口径必须与产品口径一致,否则结论回答的是另一个问题。
+#   - 对象:只有 USABLE_STATUSES 里的状态会进检索(合并/弃用掉的历史对象仍留在表里)。
+#   - 关系:产品的每一条图/检索查询都带 review_status != 'rejected'(knowledge_store
+#     里 6 处),被评审否掉的边不属于有效图。
+# 被排除的量单独报出来 —— 既不让它污染质量指标,也不让它凭空消失。
+_USABLE_PLACEHOLDERS = ",".join("?" for _ in USABLE_STATUSES)
+_NOT_REJECTED = "review_status != 'rejected'"
 
 _CJK_RE = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 # 与 filters._norm / kg_merge._norm 同族的显示归一(仅用于本报告的计数口径)。
@@ -125,14 +134,28 @@ def list_notebooks(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     ))
 
 
-def type_composition(conn: sqlite3.Connection, notebook_id: str) -> List[Tuple[str, int]]:
-    """全量类型构成。走 idx_knowledge_objects_nb_type_status,不读 payload。"""
+def type_composition(
+    conn: sqlite3.Connection, notebook_id: str
+) -> Tuple[List[Tuple[str, int]], int]:
+    """有效对象的类型构成 + 被状态排除的行数。
+
+    走 idx_knowledge_objects_nb_type_status,不读 payload。返回
+    ([(object_type, n_usable)], n_excluded) —— 排除的是合并/弃用等不进检索的
+    历史对象;把它们混进质量指标会让治理做得越多的库看起来质量越差。
+    """
     rows = conn.execute(
         "SELECT object_type, COUNT(*) AS n FROM knowledge_objects "
-        "WHERE notebook_id = ? GROUP BY object_type ORDER BY n DESC",
-        (notebook_id,),
+        f"WHERE notebook_id = ? AND status IN ({_USABLE_PLACEHOLDERS}) "
+        "GROUP BY object_type ORDER BY n DESC",
+        (notebook_id, *USABLE_STATUSES),
     ).fetchall()
-    return [(str(r["object_type"]), int(r["n"])) for r in rows]
+    excluded = conn.execute(
+        "SELECT COUNT(*) FROM knowledge_objects "
+        f"WHERE notebook_id = ? AND status NOT IN ({_USABLE_PLACEHOLDERS})",
+        (notebook_id, *USABLE_STATUSES),
+    ).fetchone()
+    return ([(str(r["object_type"]), int(r["n"])) for r in rows],
+            int(excluded[0] or 0) if excluded else 0)
 
 
 def sample_source_ids(
@@ -182,8 +205,9 @@ def count_sourceless(conn: sqlite3.Connection, notebook_id: str) -> int:
     """
     row = conn.execute(
         "SELECT COUNT(*) FROM knowledge_objects "
-        "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL)",
-        (notebook_id,),
+        "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL) "
+        f"AND status IN ({_USABLE_PLACEHOLDERS})",
+        (notebook_id, *USABLE_STATUSES),
     ).fetchone()
     return int(row[0] or 0) if row else 0
 
@@ -197,8 +221,9 @@ def load_sourceless_objects(
         for row in conn.execute(
             "SELECT id, object_type, source_id, payload, evidence "
             "FROM knowledge_objects "
-            "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL)",
-            (notebook_id,),
+            "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL) "
+            f"AND status IN ({_USABLE_PLACEHOLDERS})",
+            (notebook_id, *USABLE_STATUSES),
         )
     ]
 
@@ -214,8 +239,8 @@ def load_objects(
     for i, sid in enumerate(source_ids, 1):
         for row in conn.execute(
             "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
-            "WHERE source_id = ? AND notebook_id = ?",
-            (sid, notebook_id),
+            f"WHERE source_id = ? AND notebook_id = ? AND status IN ({_USABLE_PLACEHOLDERS})",
+            (sid, notebook_id, *USABLE_STATUSES),
         ):
             out.append(_as_item(row))
         if i % 200 == 0:
@@ -235,9 +260,9 @@ def degree_and_basis(
     # 两条字面量 SQL 而不是把列名插进 f-string:列名虽来自本地常量元组、没有注入
     # 面,但动态拼 SQL 在这个仓库里是需要理由的形态,写死更省事也更好读。
     outgoing = ("SELECT evidence FROM knowledge_relations "
-                "WHERE notebook_id = ? AND source_object_id = ?")
+                f"WHERE notebook_id = ? AND source_object_id = ? AND {_NOT_REJECTED}")
     incoming = ("SELECT evidence FROM knowledge_relations "
-                "WHERE notebook_id = ? AND target_object_id = ?")
+                f"WHERE notebook_id = ? AND target_object_id = ? AND {_NOT_REJECTED}")
     deg: Dict[str, int] = {}
     basis = Counter()
     for i, oid in enumerate(object_ids, 1):
@@ -462,6 +487,22 @@ def report_degree(deg: Dict[str, int], basis: Counter, items_by_id: Dict[str, di
                   "gleaning 出的无边节点靠它连上,所以「度数>0」不等于「LLM 认为它有关系」。")
 
 
+def _non_negative(raw: str) -> int:
+    """解析期就拒绝负数。
+
+    否则 `--sources -1` 会被 `k <= 0` 当成「全量」,在千万级生产库上**静默**执行
+    那条我们特意警告过很慢的全扫;`--degree-sample -1` 则要等对象都读完了才在
+    random.sample 里崩。手滑应该在打开库之前就失败。
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"需要整数,收到 {raw!r}")
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"不能为负数(收到 {value};0 表示全量)")
+    return value
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         prog="kg_quality_audit.py",
@@ -470,12 +511,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--db", default=DEFAULT_DB, help=f"SQLite 库路径(默认 {DEFAULT_DB})")
     ap.add_argument("--notebook", default=None,
                     help="要审计的 notebook id;不给则列出候选并选来源最多的那个")
-    ap.add_argument("--sources", type=int, default=DEFAULT_SOURCE_SAMPLE, metavar="K",
+    ap.add_argument("--sources", type=_non_negative, default=DEFAULT_SOURCE_SAMPLE,
+                    metavar="K",
                     help=f"随机抽 K 个来源做内容分析(默认 {DEFAULT_SOURCE_SAMPLE};"
-                         "0 = 全量,千万级库会很慢)")
-    ap.add_argument("--degree-sample", type=int, default=DEFAULT_DEGREE_SAMPLE,
-                    metavar="N",
-                    help=f"对其中 N 个节点查度数与边来源(默认 {DEFAULT_DEGREE_SAMPLE};0 = 全部抽样节点)")
+                         "0 = 全量,千万级库会很慢;不接受负数)")
+    ap.add_argument("--degree-sample", type=_non_negative,
+                    default=DEFAULT_DEGREE_SAMPLE, metavar="N",
+                    help=f"对其中 N 个节点查度数与边标注(默认 {DEFAULT_DEGREE_SAMPLE};"
+                         "0 = 全部抽样节点;不接受负数)")
     ap.add_argument("--seed", type=int, default=20260725, help="抽样随机种子(可复现)")
     ap.add_argument("--no-samples", action="store_true",
                     help="不打印具体名称样本(只出统计数字)")
@@ -519,14 +562,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _bar("一、对象类型构成(全量,不抽样)")
         sys.stderr.write("  正在统计类型构成(大库可能要几十秒)...\n")
         sys.stderr.flush()
-        comp = type_composition(conn, target)
+        comp, n_excluded = type_composition(conn, target)
         grand = sum(n for _t, n in comp)
         if not grand:
-            raise SystemExit("该 notebook 没有任何 KG 对象。")
+            raise SystemExit(
+                "该 notebook 没有任何有效 KG 对象"
+                f"(另有 {n_excluded} 个已合并/弃用的对象,不进检索)。"
+                if n_excluded else "该 notebook 没有任何 KG 对象。"
+            )
+        print(f"  口径:与产品一致 —— 只算 status ∈ {list(USABLE_STATUSES)} 的对象,")
+        print("       连通性只算 review_status != 'rejected' 的边。")
         for otype, n in comp:
             mark = "" if otype in KG_TYPES else "   (自定义类型)"
             print(f"  {otype:<16} {n:>12,}  {_pct(n, grand)}{mark}")
         print(f"  {'合计':<16} {grand:>12,}")
+        if n_excluded:
+            print(f"  另有 {n_excluded:,} 个对象因状态不在有效集内被排除"
+                  "(已合并/弃用的历史对象)。")
+            print("    它们仍占磁盘,但不进检索 —— 也不进下面的质量指标,"
+                  "否则治理做得越多的库看起来质量越差。")
         kg_share = sum(n for t, n in comp if t in ("claim",))
         print(f"\n  → Claim 占 {_pct(kg_share, grand)}。Claim 是句子级命题,本来就"
               "不是专有名词;\n    「节点里很多不是术语」多半首先由这个比例解释,"

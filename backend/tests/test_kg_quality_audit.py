@@ -42,12 +42,16 @@ def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name,
         """
         CREATE TABLE notebooks (id TEXT PRIMARY KEY, name TEXT, tier TEXT);
         CREATE TABLE sources (id TEXT PRIMARY KEY, notebook_id TEXT);
+        -- status / review_status 的默认值与真实 schema 一致:产品按它们区分
+        -- 「有效 KG」与「留在表里但不进检索的历史行」。
         CREATE TABLE knowledge_objects (
             id TEXT PRIMARY KEY, notebook_id TEXT, object_type TEXT,
-            source_id TEXT, payload TEXT, evidence TEXT);
+            source_id TEXT, payload TEXT, evidence TEXT,
+            status TEXT NOT NULL DEFAULT 'approved');
         CREATE TABLE knowledge_relations (
             id TEXT PRIMARY KEY, notebook_id TEXT, source_object_id TEXT,
-            target_object_id TEXT, edge_type TEXT, evidence TEXT);
+            target_object_id TEXT, edge_type TEXT, evidence TEXT,
+            review_status TEXT NOT NULL DEFAULT 'pending');
         CREATE TABLE concept_whitelist (term TEXT PRIMARY KEY);
         """
     )
@@ -58,26 +62,26 @@ def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name,
         conn.execute("INSERT INTO sources VALUES (?,'nb-1')", (sid,))
         for i, name in enumerate(concepts_per_source(s)):
             conn.execute(
-                "INSERT INTO knowledge_objects VALUES (?,'nb-1','concept',?,?,?)",
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,source_id,payload,evidence) VALUES (?,'nb-1','concept',?,?,?)",
                 (f"o-{s}-{i}", sid, json.dumps({"name": name}),
                  json.dumps([{"element_id": "e1"}])),
             )
         conn.execute(
-            "INSERT INTO knowledge_objects VALUES (?,'nb-1','claim',?,?,?)",
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,source_id,payload,evidence) VALUES (?,'nb-1','claim',?,?,?)",
             (f"c-{s}", sid, json.dumps({"name": claim_name(s)}),
              json.dumps([{"element_id": "e1"}])),
         )
     # 晋升 / Memory→KG 写路径:source_id 是字面量 ''(见 governance_store.py)
     for i in range(sourceless):
         conn.execute(
-            "INSERT INTO knowledge_objects VALUES (?,'nb-1','concept','',?,?)",
+            "INSERT INTO knowledge_objects (id,notebook_id,object_type,source_id,payload,evidence) VALUES (?,'nb-1','concept','',?,?)",
             (f"promoted-{i}", json.dumps({"name": f"promoted concept {i}"}),
              json.dumps([{"element_id": "e1"}])),
         )
     # knowhow 投影写的 about 边:evidence='[]',与 LLM 抽取的边不可区分
     for i in range(untagged_edges):
         conn.execute(
-            "INSERT INTO knowledge_relations VALUES (?,'nb-1',?,?, 'about','[]')",
+            "INSERT INTO knowledge_relations (id,notebook_id,source_object_id,target_object_id,edge_type,evidence) VALUES (?,'nb-1',?,?,'about','[]')",
             (f"rel-{i}", "o-0-0", f"c-{i % max(1, sources)}"),
         )
     conn.commit()
@@ -302,6 +306,57 @@ def test_no_samples_also_redacts_notebook_titles(tmp_path, capsys):
     # 反向:默认口径下名称照常出现,免得断言因「压根没渲染」而假绿
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0"]) == 0
     assert title in capsys.readouterr().out
+
+
+def test_audit_scope_matches_the_product_predicates(tmp_path, capsys):
+    """审计口径必须与产品一致,否则回答的是另一个问题。
+
+    第 3 轮 codex 评审(P2)抓到的:合并/弃用的对象仍留在 knowledge_objects 里但不进
+    检索,被评审否掉的边也不属于有效图 —— 都算进来会让治理做得越多的库显得越差。
+    """
+    audit = load_audit()
+    db = tmp_path / "scope.db"
+    _build_db(
+        db, sources=2, untagged_edges=2,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    conn = sqlite3.connect(db)
+    # 一个被弃用的对象 + 一条被否掉的边,都必须被排除在指标之外
+    conn.execute(
+        "INSERT INTO knowledge_objects "
+        "(id,notebook_id,object_type,source_id,payload,evidence,status) "
+        "VALUES ('dead','nb-1','concept','src-0',?,'[]','deprecated')",
+        (json.dumps({"name": "DEPRECATEDCONCEPT"}),),
+    )
+    conn.execute(
+        "INSERT INTO knowledge_relations "
+        "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence,"
+        "review_status) VALUES ('rej','nb-1','o-0-0','c-1','about',"
+        "'[{\"basis\":\"relink:name-match\"}]','rejected')",
+    )
+    conn.commit()
+    conn.close()
+
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "DEPRECATEDCONCEPT" not in out, "弃用对象不得进入内容分析"
+    assert "1 个对象因状态不在有效集内被排除" in out, "排除量必须显式报出,不能凭空消失"
+    assert "relink:name-match" not in out, "被评审否掉的边不得计入连通性统计"
+
+
+def test_negative_sampling_arguments_fail_before_touching_the_db(tmp_path, capsys):
+    """负数不能被当成 0(=全量):那会在千万级库上静默做一次极贵的全扫。"""
+    audit = load_audit()
+    missing = tmp_path / "never-opened.db"   # 不存在:若真打开了库会是另一种报错
+    for flag in ("--sources", "--degree-sample"):
+        try:
+            audit.main(["--db", str(missing), flag, "-1"])
+        except SystemExit as exc:
+            assert exc.code == 2, f"{flag} 负数应按参数错误退出(码 2)"
+        else:  # pragma: no cover - 回归时才会走到
+            raise AssertionError(f"{flag} 接受了负数")
+        assert "不能为负数" in capsys.readouterr().err
 
 
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):

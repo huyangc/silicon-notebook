@@ -1221,7 +1221,7 @@
       "target": "conn.execute"
     },
     {
-      "count": 1,
+      "count": 2,
       "kind": "independent_sql",
       "path": "scripts/kg_quality_audit.py",
       "reason": "read-only host database diagnostic",
