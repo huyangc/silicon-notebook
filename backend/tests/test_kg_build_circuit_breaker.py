@@ -1,4 +1,5 @@
 import json
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
@@ -359,6 +360,564 @@ def test_duplicate_preparation_never_enters_executor(repo):
 
     assert first["status"] == "running"
     assert repo._runtime.kg_build_jobs.get(first["id"])["status"] == "running"
+
+
+def _interrupt_during_extraction(repo, monkeypatch, exc_type=KeyboardInterrupt):
+    """让抽取阶段抛出 exc_type,并把该次运行的 run control 交给调用方检查。
+    模拟操作者 Ctrl-C / SIGTERM:中断只在主线程抛出,此时线程池里的窗口仍在飞。"""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    seen = {}
+
+    def _raise(
+        notebook_id, targets, skipped, skipped_no_elements, job_id,
+        control, controlled_client, progress=None, on_abort=None,
+    ):
+        seen["control"] = control
+        raise exc_type("interrupted")
+
+    monkeypatch.setattr(lifecycle, "_extract_targets", _raise)
+    return seen
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_interrupt_settles_job_and_frees_the_notebook(
+    repo, monkeypatch, exc_type
+):
+    """Ctrl-C / SIGTERM 必须把 job 落成终态。否则 kg_build_jobs 那行永久停在
+    'running',条件唯一索引会把该 notebook 之后的每次分析都挡成
+    KgBuildAlreadyRunning——而离线 CLI 刻意无权自行清理,只能等后端重启。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch, exc_type)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(exc_type):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["stage"] == "finished"
+    assert saved["error_code"] == "worker_interrupted"
+    assert saved["error_message"] != ""
+    assert saved["finished_at"] != ""
+    # 真正的回归点:单飞守卫已释放,同一 notebook 能再次发起分析。
+    again = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    assert again["status"] == "running"
+    assert again["id"] != job["id"]
+
+
+def test_interrupt_aborts_in_flight_windows_without_faking_a_model_outage(
+    repo, monkeypatch
+):
+    """中断要合作式停掉在飞窗口(否则它们在 job 落终态后继续调模型继续写图,
+    而线程池的 atexit join 会把进程按住不退——用户只会看到「Ctrl-C 没反应」),
+    但它不是模型熔断,不得记 kg_build_circuit_opened。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    seen = _interrupt_during_extraction(repo, monkeypatch)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    control = seen["control"]
+    assert control.aborted is True
+    assert control.failure.code == "worker_interrupted"
+    kinds = [str(event.get("kind", "")) for event in events]
+    assert "kg_build_stopping" in kinds
+    assert "kg_build_failed" in kinds
+    assert "kg_build_circuit_opened" not in kinds
+
+
+def test_failed_settlement_never_replaces_the_interrupt(repo, monkeypatch):
+    """收尾自身失败(如抢写锁超时)不得把中断换成别的异常:否则操作者拿到的是
+    无关 traceback,而这行仍留在 'running'。记日志 + 原样抛出中断。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    logged = []
+    monkeypatch.setattr(
+        repo._runtime.kg_build_jobs, "finish",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("database is locked")),
+    )
+    monkeypatch.setattr(
+        repo.event_log.logger, "exception",
+        lambda *a, **k: logged.append(a),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    assert logged, "收尾失败必须留下日志,不能静默"
+
+
+class _InterruptingKgClient(_ControlledKgClient):
+    """抽取过程中真的抛 KeyboardInterrupt(不打桩 _extract_targets),验证它确实能
+    穿过 per-source 的 `except Exception`、future 和 as_completed 抵达收尾处。"""
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        prompt = messages[0]["content"]
+        if prompt.startswith('Return {"ok":true}'):
+            return super().chat_json(messages, response_schema_hint, **kwargs)
+        raise KeyboardInterrupt("ctrl-c during extraction")
+
+
+def test_interrupt_inside_real_extraction_reaches_the_settlement(repo):
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _InterruptingKgClient())
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+    # 被中断打断的来源必须退回可重试终态,否则界面上它一直「分析中」。
+    assert "extracting" not in _source_statuses(repo, source_ids).values()
+
+
+class _InterruptOneDrainOther:
+    """一个来源抛 KeyboardInterrupt,另一个仍卡在模型调用里。后者只在看到熔断标志
+    后再多睡一小会儿才返回,于是「上层是否等它排空」变成可判定的事实。"""
+
+    configured = True
+    model = "test-kg"
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.calls = 0
+        self.blocked_started = threading.Event()
+        self.blocked_returned = threading.Event()
+        self.control = None
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        prompt = messages[0]["content"]
+        if prompt.startswith('Return {"ok":true}'):
+            return '{"ok":true}'
+        with self.lock:
+            self.calls += 1
+            first = self.calls == 1
+        if first:
+            # 先等另一个 worker 真的进到模型调用里再抛中断。否则(尤其在机器繁忙、
+            # 线程启动被拖慢时)它可能还没启动就被 cancel() 正确地取消掉,于是「有没有
+            # 排空」根本无从判定——那测的是取消而不是排空。
+            self.blocked_started.wait(10)
+            raise KeyboardInterrupt("ctrl-c during extraction")
+        self.blocked_started.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.control is not None and self.control.aborted:
+                break
+            time.sleep(0.01)
+        time.sleep(0.15)  # 若上层不排空,主线程会在这段时间里抢先返回
+        self.blocked_returned.set()
+        raise self._connection_error()
+
+    @staticmethod
+    def _connection_error():
+        return APIConnectionError(
+            request=httpx.Request(
+                "POST", "https://model.example/chat/completions"
+            )
+        )
+
+
+def test_interrupt_drains_in_flight_sources_before_releasing_the_guard(
+    repo, monkeypatch
+):
+    """跨进程单飞守卫在 job 落终态那一刻就放开,所以必须先排空在飞 worker:否则
+    活着的后端能立刻为同一 notebook 起新分析,而本进程的旧 worker 还在写图/改来源
+    状态,把新任务的状态冲掉(codex 评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    client = _InterruptOneDrainOther()
+    bind_chat_client(repo, "kg_extract", client)
+    kg_scheduler.reset()
+    kg_scheduler.configure(window_workers=2, job_workers=3)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle._extract_targets
+
+    def _capture(*args, **kwargs):
+        # 位置 6 是本次运行的 control(见 _extract_targets 签名)。
+        client.control = args[5]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_extract_targets", _capture)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    assert client.blocked_started.is_set(), (
+        "前提未成立:没有第二个来源真的进到模型调用里,本例无法判定排空"
+    )
+    assert client.blocked_returned.is_set(), (
+        "在飞来源尚未排空就放开了单飞守卫"
+    )
+    assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
+
+
+class _BlockUntilAbortedKgClient:
+    """进到模型调用就停住,直到本次运行被 abort;之后再多睡一会儿才返回,于是
+    「上层有没有等它排空」是可判定的。"""
+
+    configured = True
+    model = "test-kg"
+
+    def __init__(self):
+        self.blocked_started = threading.Event()
+        self.blocked_returned = threading.Event()
+        self.control = None
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        if messages[0]["content"].startswith('Return {"ok":true}'):
+            return '{"ok":true}'
+        self.blocked_started.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.control is not None and self.control.aborted:
+                break
+            time.sleep(0.01)
+        time.sleep(0.15)
+        self.blocked_returned.set()
+        raise APIConnectionError(
+            request=httpx.Request(
+                "POST", "https://model.example/chat/completions"
+            )
+        )
+
+
+def _capture_run_control(repo, monkeypatch, client):
+    """把本次运行的 control 交给测试用的模型客户端(位置 6,见 _extract_targets)。"""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original = lifecycle._extract_targets
+
+    def _capture(*args, **kwargs):
+        client.control = args[5]
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_extract_targets", _capture)
+
+
+def test_interrupt_while_still_submitting_drains_what_was_submitted(
+    repo, monkeypatch
+):
+    """中断可能落在「还在提交 job」的窗口里(大库要提交几十万个,这段不短)。那时
+    已提交的 worker 同样必须被取消并排空,不能因为提交循环没跑完就漏掉(评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    client = _BlockUntilAbortedKgClient()
+    bind_chat_client(repo, "kg_extract", client)
+    kg_scheduler.reset()
+    kg_scheduler.configure(window_workers=2, job_workers=3)
+    _capture_run_control(repo, monkeypatch, client)
+    real_submit = kg_scheduler.submit_job
+    submits = {"n": 0}
+
+    def _submit(fn, /, *args, **kwargs):
+        submits["n"] += 1
+        if submits["n"] == 1:
+            return real_submit(fn, *args, **kwargs)
+        # 第一个来源真的进到模型调用之后,模拟信号落在提交循环中间。
+        client.blocked_started.wait(10)
+        raise KeyboardInterrupt("ctrl-c while submitting")
+
+    monkeypatch.setattr(kg_scheduler, "submit_job", _submit)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    assert client.blocked_started.is_set(), "前提未成立:第一个来源没进到模型调用"
+    assert client.blocked_returned.is_set(), (
+        "提交期间被中断时,已提交的在飞来源没有被排空"
+    )
+    assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
+
+
+def test_interrupt_after_the_insert_but_before_create_job_returns_settles(
+    repo, monkeypatch
+):
+    """create_job 先 INSERT 再 get(job_id) 返回。信号落在这两者之间时 job 未赋值,
+    调用方的守卫也进不去,行永久留在 running(评审 P2)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    store = repo._runtime.kg_build_jobs
+    real_get = store.get
+    fired = {"n": 0}
+
+    def _get(job_id):
+        if not fired["n"]:
+            fired["n"] = 1  # 行已提交,但 create_job 还没返回
+            raise KeyboardInterrupt("ctrl-c between insert and return")
+        return real_get(job_id)
+
+    monkeypatch.setattr(store, "get", _get)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    saved = store.latest(notebook.id)
+    assert saved is not None and saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    assert repo.get_notebook(notebook.id).kg_building is False
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
+def test_interrupt_before_the_insert_never_touches_a_foreign_running_row(
+    repo, monkeypatch
+):
+    """反向护栏:中断若落在 INSERT **之前**,最新那行不是本次建的——它可能属于一个仍
+    活着的后端进程。离线进程无权裁决它,必须原样不动。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    store = repo._runtime.kg_build_jobs
+    foreign = store.create_job(notebook.id, "someone-else", "incremental", 5)
+    monkeypatch.setattr(
+        store, "create_job",
+        lambda *a, **k: (_ for _ in ()).throw(
+            KeyboardInterrupt("ctrl-c before the insert")
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    assert store.get(foreign["id"])["status"] == "running", (
+        "动了别人的进行中任务"
+    )
+
+
+@pytest.mark.parametrize(
+    "step", ["kg_build_started", "publish_pending"],
+)
+def test_interrupt_inside_preparation_after_the_row_exists_settles(
+    repo, monkeypatch, step
+):
+    """create_job 之后 prepare 还要走三步(登记进程内标志、写事件、推送待办)。信号落在
+    这里会直接逃出 prepare,连调用方的兜底都进不去,行就永久留在 running(评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    # 只打断第一次(收尾本身以及末尾「能否再次发起」的复查都还要走这些方法)。
+    fired = {"n": 0}
+    if step == "kg_build_started":
+        original = lifecycle._emit_kg_build_event
+
+        def _emit(kind, job, **kwargs):
+            if kind == "kg_build_started" and not fired["n"]:
+                fired["n"] = 1
+                raise KeyboardInterrupt("ctrl-c right after the row was created")
+            return original(kind, job, **kwargs)
+
+        monkeypatch.setattr(lifecycle, "_emit_kg_build_event", _emit)
+    else:
+        original_publish = lifecycle._publish_pending_started
+
+        def _publish():
+            if not fired["n"]:
+                fired["n"] = 1
+                raise KeyboardInterrupt("ctrl-c while publishing pending state")
+            return original_publish()
+
+        monkeypatch.setattr(lifecycle, "_publish_pending_started", _publish)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    saved = repo._runtime.kg_build_jobs.latest(notebook.id)
+    assert saved is not None and saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    # 守卫已释放:数据库层与界面层都要放开。
+    assert repo.get_notebook(notebook.id).kg_building is False
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
+@pytest.mark.parametrize("mode", ["incremental", "rebuild"])
+def test_interrupt_between_job_creation_and_run_still_settles(
+    repo, monkeypatch, mode
+):
+    """行已建、但 _run_notebook_kg_job 还没进到自己的保护区之间也有窗口(事件落盘、
+    待办推送、一次 DB 读)。信号落在这里时若没人收尾,行就永久留在 running,该 notebook
+    之后的分析全被挡死——正是本改动要消灭的状态(评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(
+        lifecycle, "_run_notebook_kg_job",
+        lambda *a, **k: (_ for _ in ()).throw(
+            KeyboardInterrupt("ctrl-c right after the row was created")
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        if mode == "incremental":
+            repo.build_notebook_kg(notebook.id)
+        else:
+            repo.rebuild_notebook_kg(notebook.id)
+
+    saved = repo._runtime.kg_build_jobs.latest(notebook.id)
+    assert saved is not None
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    # 进程内的构建标志也必须清掉:否则 get_notebook()/索引状态会在该进程余生都报
+    # 「构建中」,界面上的分析入口一直禁用,尽管数据库层已经允许新任务(评审 P2)。
+    assert repo.get_notebook(notebook.id).kg_building is False
+    # 真正的回归点:守卫已释放,同一 notebook 能再次发起分析。
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
+def test_repeated_interrupt_cannot_skip_the_drain(repo, monkeypatch):
+    """排空那次等待可能长到一次模型超时,运维会「再按一次 Ctrl-C」。第二个信号若能
+    逃出去,外层就会在 future 未排空时落终态、放开跨进程守卫(评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    # 必须走真实的 _extract_targets:排空(以及它对重复中断的抵抗)就在那里面。
+    client = _InterruptOneDrainOther()
+    bind_chat_client(repo, "kg_extract", client)
+    kg_scheduler.reset()
+    kg_scheduler.configure(window_workers=2, job_workers=3)
+    _capture_run_control(repo, monkeypatch, client)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    waits = {"n": 0}
+    real_wait = concurrent.futures.wait
+
+    def _wait(fs, *args, **kwargs):
+        waits["n"] += 1
+        if waits["n"] == 1:  # 模拟排空等待期间第二次 Ctrl-C
+            raise KeyboardInterrupt("second ctrl-c during drain")
+        return real_wait(fs, *args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "wait", _wait)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    # 断言不变量本身(在飞来源确实排空完了),而不是「wait 被调了几次」这种代理指标
+    # ——后者会因为别处也调 wait 而为错误的原因通过。
+    assert client.blocked_started.is_set(), "前提未成立:没有来源真的在飞"
+    assert client.blocked_returned.is_set(), (
+        "第二次中断绕过了排空:守卫已放开而在飞来源还在跑"
+    )
+    assert waits["n"] >= 2, "排空等待没有被重试"
+    assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
+
+
+def test_repeated_interrupt_during_settlement_still_settles(repo, monkeypatch):
+    """第二个信号也可能落在**落终态**这一段(公布 stopping / finish)。若它逃出去,行就
+    永久留在 running,该 notebook 之后的分析全被挡死(评审 P1:整段收尾都要顶住)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    real_finish = repo._runtime.kg_build_jobs.finish
+    calls = {"n": 0}
+
+    def _finish(job_id, status, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:  # 模拟落终态期间第二次 Ctrl-C
+            raise KeyboardInterrupt("second ctrl-c while settling")
+        return real_finish(job_id, status, **kwargs)
+
+    monkeypatch.setattr(repo._runtime.kg_build_jobs, "finish", _finish)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    # 效果断言:那行真的落到了终态(而不是「finish 被调了几次」这种代理指标)。
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed", "重复中断把行留在了 running"
+    assert saved["error_code"] == "worker_interrupted"
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
+def test_failed_stopping_publication_never_retries_as_a_circuit_event(
+    repo, monkeypatch
+):
+    """若「正在停止」那次写库撞上瞬时错误,stopping_marked 仍为 False,默认
+    notify=True 的 abort 会经 on_abort 以 circuit=True 重试一次——一次人工中断就被
+    记成模型熔断。宁可不重试那个瞬时中间态,也不能记错(评审 P2)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    real_set_stage = repo._runtime.kg_build_jobs.set_stage
+    stopping_attempts = {"n": 0}
+
+    def _set_stage(job_id, stage, **kwargs):
+        if stage != "stopping":
+            return real_set_stage(job_id, stage, **kwargs)
+        # 「正在停止」第一次瞬时失败,**第二次成功**——只有这样才会走到评审描述的
+        # 场景:重试成功了,于是那条 circuit=True 的回调把人工中断记成熔断。
+        stopping_attempts["n"] += 1
+        if stopping_attempts["n"] == 1:
+            raise RuntimeError("database is locked")
+        return real_set_stage(job_id, stage, **kwargs)
+
+    monkeypatch.setattr(repo._runtime.kg_build_jobs, "set_stage", _set_stage)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    kinds = [str(event.get("kind", "")) for event in events]
+    assert "kg_build_circuit_opened" not in kinds
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+
+
+def test_interrupt_after_success_keeps_the_succeeded_row_and_event(
+    repo, monkeypatch
+):
+    """信号落在 finish(succeeded) 之后、函数返回之前:三次写都命中 0 行,任务其实
+    已成功提交,不能再发一条带 status="succeeded" 的 kg_build_failed(评审 P2)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    kinds = []
+    original = lifecycle._emit_kg_build_event
+
+    def _emit(kind, job, **kwargs):
+        kinds.append(kind)
+        original(kind, job, **kwargs)
+        if kind == "kg_build_succeeded":
+            raise KeyboardInterrupt("ctrl-c right after commit")
+
+    monkeypatch.setattr(lifecycle, "_emit_kg_build_event", _emit)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "succeeded"
+    assert saved["error_code"] == ""
+    assert "kg_build_succeeded" in kinds
+    assert "kg_build_failed" not in kinds
+
+
+def test_model_outage_still_records_the_circuit_event(repo, monkeypatch):
+    """反向护栏:真正的模型故障仍要记 kg_build_circuit_opened(上面那条不能
+    把这个事件整体删掉当成「通过」)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(
+        repo, "kg_extract",
+        _ControlledKgClient(fail_after_successful_sources=0),
+    )
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    kinds = [str(event.get("kind", "")) for event in events]
+    assert "kg_build_circuit_opened" in kinds
+    assert "kg_build_stopping" in kinds
 
 
 def test_successful_job_emits_safe_started_progress_and_success_events(

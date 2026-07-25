@@ -76,8 +76,12 @@ export function kgBuildPresentation(
       };
     }
     if (job.stage === "stopping") {
+      // 人工中断（Ctrl-C / 终止信号，离线批量分析的常规结束方式）也会经过「正在
+      // 停止」，此时断言「模型服务异常」就是不实文案——停止原因只能按 error_code 判。
       return {
-        label: "模型服务异常，正在停止本次分析…",
+        label: job.error_code === "worker_interrupted"
+          ? "正在停止本次分析…"
+          : "模型服务异常，正在停止本次分析…",
         detail: "正在等待已开始的请求安全退出，已完成内容会保留",
         tone: "warning",
         actionLabel: null,

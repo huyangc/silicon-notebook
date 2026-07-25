@@ -222,22 +222,32 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
             if all(isinstance(fut, cf.Future) for fut in futs)
             else iter(futs)
         )
+        def _cancel_and_drain_windows() -> None:
+            for pending in futs:
+                cancel = getattr(pending, "cancel", None)
+                if cancel is not None:
+                    cancel()
+            real_futures = [
+                pending for pending in futs
+                if isinstance(pending, cf.Future)
+            ]
+            if real_futures:
+                cf.wait(real_futures)
+
         for fut in completed:
             try:
                 ns, es = fut.result()
                 nodes += ns
                 edges += es
             except KgBuildAborted:
-                for pending in futs:
-                    cancel = getattr(pending, "cancel", None)
-                    if cancel is not None:
-                        cancel()
-                real_futures = [
-                    pending for pending in futs
-                    if isinstance(pending, cf.Future)
-                ]
-                if real_futures:
-                    cf.wait(real_futures)
+                _cancel_and_drain_windows()
+                raise
+            except (KeyboardInterrupt, SystemExit):
+                # 与上一支同一件事,只是中断继承 BaseException 接不到。不排空兄弟窗口的
+                # 话,本来源的 future 会先完成,上层(_extract_targets)排空的是**来源**
+                # future,于是可能在兄弟窗口仍在调模型、仍会写图时就落终态、放开跨进程
+                # 单飞守卫,让新构建与它们重叠。排空必须逐层做。
+                _cancel_and_drain_windows()
                 raise
             except Exception:
                 failed += 1

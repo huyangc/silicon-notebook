@@ -4550,6 +4550,18 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_main_interrupt_after_a_committed_build_still_reports_130",
+        "target": "build_notebook_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_main_interrupt_exits_cleanly_with_shell_convention",
+        "target": "build_notebook_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_disables_fusion_and_rebuilds",
         "target": "build_notebook_kg"
       },
@@ -4569,6 +4581,22 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_kg_fresh_alone_forces_rebuild",
+        "target": "build_notebook_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_main_interrupt_after_a_committed_build_still_reports_130",
+        "target": "build_notebook_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_main_interrupt_exits_cleanly_with_shell_convention",
         "target": "build_notebook_kg"
       },
       {
@@ -5851,6 +5879,12 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.select_notebook.load",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._report_kg_build_already_running",
         "target": "get_notebook"
       },
       {
@@ -7263,6 +7297,12 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_no_signal_conversion_on_paths_that_do_not_drain",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
         "target": "rebuild_unified_kg"
       },
@@ -7360,6 +7400,14 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_main_kg_fresh_dispatches_force_and_fresh",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_no_signal_conversion_on_paths_that_do_not_drain",
         "target": "rebuild_unified_kg"
       },
       {

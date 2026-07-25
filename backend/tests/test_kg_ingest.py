@@ -207,6 +207,71 @@ def test_extract_graph_no_failures_zero_count():
     assert g.total_windows >= 1
 
 
+def test_extract_graph_cancels_and_drains_windows_after_interrupt(monkeypatch):
+    """中断(Ctrl-C/SIGTERM)也要逐层排空:兄弟窗口若不取消并等它们停下,来源 future
+    会先完成,上层排空的是**来源** future,于是可能在窗口仍在调模型、仍会写图时就落
+    终态、放开跨进程单飞守卫,让新构建与它们重叠(评审 P2)。"""
+    total = 12
+    elements = [
+        SourceElementQ(
+            id=f"e-{i}", type="paragraph", file="doc.md",
+            line_start=i + 1, line_end=i + 1,
+            char_start=i * 20, char_end=i * 20 + 12,
+            text=f"technical fact {i}",
+        )
+        for i in range(total)
+    ]
+    pairs = [
+        (SimpleNamespace(section_path=f"section-{i}"), [elements[i]])
+        for i in range(total)
+    ]
+    monkeypatch.setattr(
+        kg_ingest, "windows_with_elements", lambda *_args, **_kwargs: pairs
+    )
+    monkeypatch.setattr(
+        kg_ingest, "should_extract_window", lambda *_args, **_kwargs: (True, "")
+    )
+
+    executor = cf.ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(
+        kg_ingest, "submit_window",
+        lambda fn, *args, **kwargs: executor.submit(fn, *args, **kwargs),
+    )
+
+    class InterruptThenSlowClient:
+        configured = True
+
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.calls = 0
+            self.running = 0
+
+        def chat_json(self, messages, response_schema_hint):
+            with self.lock:
+                self.calls += 1
+                call_number = self.calls
+                self.running += 1
+            try:
+                if call_number == 1:
+                    raise KeyboardInterrupt("ctrl-c inside a window")
+                time.sleep(0.05)
+                return '{"nodes":[],"edges":[]}'
+            finally:
+                with self.lock:
+                    self.running -= 1
+
+    client = InterruptThenSlowClient()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            kg_ingest.extract_graph(
+                client, "ignored", "doc.md", "academic", n=10, m=0
+            )
+        assert client.running == 0, "兄弟窗口尚未停下就把中断抛了上去"
+        assert client.calls < total
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def test_extract_graph_cancels_and_drains_windows_after_task_abort(monkeypatch):
     total = 12
     elements = [

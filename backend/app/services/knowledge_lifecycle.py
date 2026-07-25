@@ -53,6 +53,7 @@ from app.repositories.ports import (
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
+    KgBuildFailure,
     KgExtractionRunControl,
     TaskScopedKgClients,
     probe_kg_model,
@@ -61,6 +62,13 @@ from app.services.kg.run_control import (
 
 INTERNAL_KG_BUILD_ERROR_MESSAGE = (
     "知识图谱分析意外中断；已完成内容已保留，可继续分析未完成内容。"
+)
+
+# Ctrl-C / SIGTERM 收尾用。措辞与启动期崩溃兜底
+# (SqliteMigrator._recover_interrupted_jobs) 保持同一口径,用户看到的都是
+# 「被中断 + 已完成内容保留 + 可继续」。
+INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
+    "本次分析被中断；已完成内容已保留，可继续分析未完成内容。"
 )
 
 
@@ -799,6 +807,36 @@ class KnowledgeLifecycleService:
             }
         )
 
+    def _absorbing_repeated_termination(self, job_id: str, step) -> None:
+        """反复执行 step,直到它不再被终止信号打断。
+
+        中断收尾的**每一步**都必须顶住重复信号,不只是最长的那次等待:运维最自然的
+        动作是「没反应,再按一次 Ctrl-C」,而第二个信号若落在 abort()(它会在 Condition
+        上等)、cancel 循环、公布 stopping 或 finish() 期间并逃出去,结果就是守卫在排空
+        前被放开、或那行永久留在 running——两者都是这次修复要消灭的状态。
+
+        重跑是安全的:abort() 对已有失败是幂等的,cancel()/wait() 幂等,set_stage 与
+        finish 都带 ``WHERE status='running'``(第二次自然是 0 行)。
+
+        不用 ``signal.pthread_sigmask`` 屏蔽信号,因为信号掩码是**按线程**的:worker
+        线程在设掩码之前就已创建、并未屏蔽,内核会把信号投给它们,而 CPython 的 C 层
+        handler 仍会置标志、由主线程执行 Python handler——KeyboardInterrupt 照样会在
+        掩码块内抛出。所以只能捕获并重试。
+
+        要立刻结束仍可 kill -9:那属于不可捕获的终止,残留行由服务端启动兜底清理。
+        """
+        while True:
+            try:
+                step()
+                return
+            except (KeyboardInterrupt, SystemExit):
+                self.event_log.logger.warning(
+                    "KG job %s: ignoring repeated termination signal during "
+                    "interrupt cleanup; the notebook guard is only released "
+                    "after in-flight work stops and the job is settled",
+                    job_id,
+                )
+
     def _kg_target_state(
         self, notebook_id: str, mode: str
     ) -> Tuple[List[str], List[str], List[str]]:
@@ -832,16 +870,40 @@ class KnowledgeLifecycleService:
         targets, _skipped, _skipped_no_elements = self._kg_target_state(
             notebook_id, mode
         )
-        job = self.kg_build_jobs.create_job(
-            notebook_id,
-            self._current_user_id(),
-            mode,
-            len(targets),
-        )
-        with self.kg_building_lock:
-            self.kg_building.add(notebook_id)
-        self._emit_kg_build_event("kg_build_started", job)
-        self._publish_pending_started()
+        # create_job 先 INSERT 再 get(job_id) 返回。信号落在「已提交、尚未返回」之间时
+        # job 根本没被赋值,连下面那层守卫都进不去,行就永久留在 running。这里按
+        # notebook 找回它——但只在**新出现**且仍 running 的行上动手:调用前后比对最新行
+        # id,变了才说明这次的 INSERT 已提交。若没变(中断落在 INSERT 之前),那行属于
+        # 别人,离线进程无权裁决,绝不能碰。
+        previous = self.kg_build_jobs.latest(notebook_id)
+        previous_id = previous["id"] if previous is not None else ""
+        try:
+            job = self.kg_build_jobs.create_job(
+                notebook_id,
+                self._current_user_id(),
+                mode,
+                len(targets),
+            )
+        except (KeyboardInterrupt, SystemExit):
+            stranded = self.kg_build_jobs.latest(notebook_id)
+            if (
+                stranded is not None
+                and stranded["id"] != previous_id
+                and stranded["status"] == "running"
+            ):
+                self._settle_unentered_job(stranded["id"], notebook_id)
+            raise
+        # create_job 已经提交了持久 running 行,而下面还有三步(登记进程内标志、写事件
+        # 文件、推送待办)。信号落在这里会直接逃出本方法,连调用方的兜底都进不去,行就
+        # 永久留在 running。守卫必须从「行已存在」这一刻起生效。
+        try:
+            with self.kg_building_lock:
+                self.kg_building.add(notebook_id)
+            self._emit_kg_build_event("kg_build_started", job)
+            self._publish_pending_started()
+        except (KeyboardInterrupt, SystemExit):
+            self._settle_unentered_job(job["id"], notebook_id)
+            raise
         return job
 
     def fail_notebook_kg_job_submission(self, job_id: str) -> bool:
@@ -913,6 +975,13 @@ class KnowledgeLifecycleService:
                     source_id, "parsed", error_message=""
                 )
                 raise
+            except (KeyboardInterrupt, SystemExit):
+                # 与上一支同一件事,只是中断继承 BaseException 接不到:不退回 'parsed'
+                # 这一篇来源就会一直显示「分析中」,直到后端重启才被兜底清理。
+                self._set_source_status(
+                    source_id, "parsed", error_message=""
+                )
+                raise
             except Exception:  # noqa: BLE001 - isolate non-model source failure
                 self._set_source_status(
                     source_id, "parsed", error_message=""
@@ -922,10 +991,10 @@ class KnowledgeLifecycleService:
                 )
                 return False
 
-        futures = {
-            _kg_scheduler.submit_job(_extract_one, source_id): source_id
-            for source_id in targets
-        }
+        # 提交本身也在中断保护范围内(见下面的 try):大库要提交几十万个 job,这段窗口
+        # 不短,中断落在这里时已提交的 worker 同样必须被取消并排空。故用增量填充的
+        # dict 而非推导式——清理路径要能看到「提交到一半」的那部分。
+        futures: dict = {}
         processed = set()
         progress_index = 0
 
@@ -960,20 +1029,54 @@ class KnowledgeLifecycleService:
                     pass
             return None
 
-        for future in _cf.as_completed(futures):
-            abort = _record_result(future)
-            if abort is None:
-                continue
-            if on_abort is not None:
-                on_abort(abort)
-            for pending in futures:
-                pending.cancel()
-            _cf.wait(futures)
-            for drained in futures:
-                if drained is future:
+        try:
+            for source_id in targets:
+                futures[
+                    _kg_scheduler.submit_job(_extract_one, source_id)
+                ] = source_id
+            for future in _cf.as_completed(futures):
+                abort = _record_result(future)
+                if abort is None:
                     continue
-                _record_result(drained)
-            raise abort
+                if on_abort is not None:
+                    on_abort(abort)
+                for pending in futures:
+                    pending.cancel()
+                _cf.wait(futures)
+                for drained in futures:
+                    if drained is future:
+                        continue
+                    _record_result(drained)
+                raise abort
+        except (KeyboardInterrupt, SystemExit):
+            # 中断只在主线程抛出,worker 还在飞——必须在这里就唤醒并**排空**它们,
+            # 之后才允许上层落终态。单飞守卫是跨进程的(kg_build_jobs 上的条件唯一
+            # 索引):一旦那行落了终态,活着的后端就能为同一 notebook 起新分析,而本
+            # 进程尚未退出的 worker 会在那之后继续写图、改来源状态,把新任务的状态
+            # 冲掉。与上面的熔断分支同形,只是失败分类换成人工中断,且用
+            # notify=False——状态由外层收尾统一公布,不记模型侧的 circuit_opened。
+            # 唤醒 + 取消 + 排空整段都要顶住重复中断(见
+            # _absorbing_repeated_termination):等待按设计可能长到一次模型超时,而第二个
+            # 信号无论落在 abort()、cancel 循环还是等待里,只要逃出去,外层就会在 future
+            # 尚未排空时落终态、放开跨进程守卫,旧 worker 于是与新构建并发写入,这段修复
+            # 就白做了。
+            def _stop_and_drain() -> None:
+                control.abort(
+                    KgBuildFailure(
+                        "worker_interrupted",
+                        INTERRUPTED_KG_BUILD_ERROR_MESSAGE,
+                    ),
+                    notify=False,
+                )
+                for pending in futures:
+                    pending.cancel()
+                _cf.wait(futures)
+
+            self._absorbing_repeated_termination(job_id, _stop_and_drain)
+            # 刻意不像熔断分支那样 _record_result(排空结果):中断是不可恢复的收尾,
+            # 正在展开的栈上应尽量少写库。排空期间跑完的来源其图行本身已提交,下一次
+            # 增量运行按覆盖度重算目标,不依赖这里的计数。
+            raise
 
         done.sort()
         failed.sort()
@@ -1032,7 +1135,12 @@ class KnowledgeLifecycleService:
         def _latency_ms() -> int:
             return round((time.perf_counter() - started) * 1000)
 
-        def _mark_stopping(exc: KgBuildAborted) -> None:
+        def _mark_stopping(
+            exc: KgBuildAborted, *, circuit: bool = True
+        ) -> None:
+            """circuit=False:操作者主动中断(Ctrl-C/SIGTERM)也要把在飞窗口停下并
+            公布 'stopping',但它不是模型侧的熔断——不能记 kg_build_circuit_opened,
+            否则事件日志里一次人工中断会被当成模型服务故障来统计。"""
             nonlocal stopping_marked
             if stopping_marked:
                 return
@@ -1053,11 +1161,12 @@ class KnowledgeLifecycleService:
                 return
             stopping_marked = True
             stopping = self.kg_build_jobs.get(job_id)
-            self._emit_kg_build_event(
-                "kg_build_circuit_opened",
-                stopping,
-                latency_ms=_latency_ms(),
-            )
+            if circuit:
+                self._emit_kg_build_event(
+                    "kg_build_circuit_opened",
+                    stopping,
+                    latency_ms=_latency_ms(),
+                )
             self._emit_kg_build_event(
                 "kg_build_stopping",
                 stopping,
@@ -1119,6 +1228,70 @@ class KnowledgeLifecycleService:
                 latency_ms=_latency_ms(),
             )
             raise
+        except (KeyboardInterrupt, SystemExit):
+            # KeyboardInterrupt/SystemExit 继承 BaseException,走不到下面的
+            # `except Exception`,而 finally 只清进程内的 kg_building 集合——不在这里
+            # 收尾,kg_build_jobs 那行就永久停在 'running',
+            # idx_kg_build_jobs_one_running(notebook 级条件唯一索引)会把该 notebook
+            # 之后的每一次构建都挡成 KgBuildAlreadyRunning。对离线 CLI 尤其致命:
+            # 启动期的崩溃兜底 _recover_interrupted_jobs 只由服务端 lifespan 调用
+            # (离线进程无权裁决可能属于活跃后端的 job),所以 CLI 自己修不了,
+            # 只能等后端重启。Ctrl-C 是 batch_ingest 长跑最常见的结束方式,
+            # 必须在这里落终态。SIGKILL/掉电仍只能靠启动兜底。
+            #
+            # 同时要 abort 掉运行控制:中断只在主线程抛出,窗口/文档线程池还在跑,
+            # 若不合作式停下,它们会在 job 已落终态之后继续调模型、继续写图,
+            # 而 ThreadPoolExecutor 的 atexit join 又会把进程按在原地等它们跑完
+            # ——用户看到的就是「Ctrl-C 没反应」,进而 kill -9,重新制造残留行。
+            # 已有模型侧失败时沿用它的分类,不要用中断把真实故障码盖掉。
+            def _settle() -> None:
+                failure = control.failure or KgBuildFailure(
+                    "worker_interrupted", INTERRUPTED_KG_BUILD_ERROR_MESSAGE
+                )
+                _mark_stopping(KgBuildAborted(failure), circuit=False)
+                # notify=False:状态已由上一行按人工中断的口径公布过了。若那次写库
+                # 撞上瞬时错误,stopping_marked 仍是 False,默认的 notify=True 会经
+                # on_abort 再试一次——而那条回调是 circuit=True 的,重试一旦成功就会
+                # 给一次人工中断记上 kg_build_circuit_opened,自相矛盾。宁可不重试那条
+                # 瞬时的中间态(终态由下面的 finish 负责),也不能记错熔断。
+                control.abort(failure, notify=False)
+                # 信号可能落在成功路径 finish(succeeded) 之后、本函数返回之前:那时
+                # 三次写都带 WHERE status='running',全部命中 0 行,任务其实已经成功
+                # 提交。此时**不能**再拿那行已成功的记录发 kg_build_failed——事件里会
+                # 带着 status="succeeded" 自相矛盾。只有真的把 running 落成 failed
+                # (rowcount==1)才发失败事件。中断本身仍照原样抛出:分析虽已提交,
+                # 本次运行确实被中断了(后续 rebuild/补向量都没跑)。
+                settled = self.kg_build_jobs.finish(
+                    job_id,
+                    "failed",
+                    error_code=failure.code,
+                    error_message=failure.user_message,
+                )
+                if settled:
+                    self._emit_kg_build_event(
+                        "kg_build_failed",
+                        self.kg_build_jobs.get(job_id),
+                        latency_ms=_latency_ms(),
+                    )
+
+            def _settle_reporting_failures() -> None:
+                try:
+                    _settle()
+                except Exception:  # noqa: BLE001 - 收尾失败不得吞掉中断本身
+                    # 收尾自身失败(例如与工作线程抢写锁超时)绝不能把中断替换成另一个
+                    # 异常:那样操作者拿到的是无关 traceback,而这行仍留在 'running'。
+                    # 记下原因后按原样把中断抛出去(CLI 仍给「已中断」+130),这一行退回
+                    # 由服务端启动兜底清理——与 SIGKILL 残留同一条出路。
+                    self.event_log.logger.exception(
+                        "failed to settle interrupted KG job %s", job_id
+                    )
+
+            # 落终态这一段同样要顶住重复中断:第二个信号若落在公布 stopping 或 finish()
+            # 期间并逃出去,那行就永久留在 running(离线 CLI 无权自清)。
+            self._absorbing_repeated_termination(
+                job_id, _settle_reporting_failures
+            )
+            raise
         except Exception:
             self.kg_build_jobs.finish(
                 job_id,
@@ -1136,6 +1309,40 @@ class KnowledgeLifecycleService:
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
 
+    def _settle_unentered_job(self, job_id: str, notebook_id: str) -> None:
+        """兜住「行已建、但 _run_notebook_kg_job 还没进到自己的 try/finally」这个窗口。
+
+        create_job 提交 running 行之后,到那个 try 之间还有几步(登记进程内标志、事件
+        落盘、待办推送、一次 DB 读),信号落在这里时没有任何人收尾,行就永久留在
+        running——正是本改动要消灭的状态。这里的收尾是幂等的:finish 带
+        ``WHERE status='running'``,若 _run 内部已经落过终态,这次就是 0 行、什么也不做。
+
+        进程内的 kg_building 标志也必须一并清掉:它由 prepare 登记、正常由
+        _run_notebook_kg_job 的 finally 移除。走不到那个 finally 时若不在这里清,
+        get_notebook()/索引状态会在**该进程余生**都报「构建中」,界面上的分析入口一直
+        禁用,尽管数据库层面已经允许新任务。"""
+
+        def _settle() -> None:
+            try:
+                if self.kg_build_jobs.finish(
+                    job_id,
+                    "failed",
+                    error_code="worker_interrupted",
+                    error_message=INTERRUPTED_KG_BUILD_ERROR_MESSAGE,
+                ):
+                    self._emit_kg_build_event(
+                        "kg_build_failed", self.kg_build_jobs.get(job_id)
+                    )
+            except Exception:  # noqa: BLE001 - 收尾失败不得顶替中断本身
+                self.event_log.logger.exception(
+                    "failed to settle interrupted KG job %s", job_id
+                )
+            finally:
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+
+        self._absorbing_repeated_termination(job_id, _settle)
+
     def build_notebook_kg(
         self, notebook_id: str, *, progress=None, job_id: str | None = None
     ) -> dict:
@@ -1143,6 +1350,13 @@ class KnowledgeLifecycleService:
             job_id = self.prepare_notebook_kg_job(
                 notebook_id, "incremental"
             )["id"]
+            try:
+                return self._run_notebook_kg_job(
+                    notebook_id, job_id, "incremental", progress
+                )
+            except (KeyboardInterrupt, SystemExit):
+                self._settle_unentered_job(job_id, notebook_id)
+                raise
         return self._run_notebook_kg_job(
             notebook_id, job_id, "incremental", progress
         )
@@ -1172,6 +1386,13 @@ class KnowledgeLifecycleService:
             job_id = self.prepare_notebook_kg_job(
                 notebook_id, "rebuild"
             )["id"]
+            try:
+                return self._run_notebook_kg_job(
+                    notebook_id, job_id, "rebuild"
+                )
+            except (KeyboardInterrupt, SystemExit):
+                self._settle_unentered_job(job_id, notebook_id)
+                raise
         return self._run_notebook_kg_job(
             notebook_id, job_id, "rebuild"
         )

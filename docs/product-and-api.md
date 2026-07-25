@@ -231,6 +231,13 @@ status APIs expose `probing → extracting → stopping → finished`, source co
 and a safe user-facing failure message; the frontend shows the same state after
 refresh and offers **继续分析未完成内容** after a failure.
 
+An interrupted task settles into that same failed state: a Ctrl-C or termination
+signal on an offline batch run stops in-flight windows cooperatively, drains them
+before the task settles (the guard is released with that row), and records
+`worker_interrupted`, so a killed run never leaves a notebook displaying an
+analysis that never finishes. Only an uncatchable end (SIGKILL, OOM kill, power
+loss) leaves the row in progress, and that case is settled by startup recovery.
+
 Each KG model request uses `KG_LLM_TIMEOUT_SECONDS` (default `60`) and at most
 `KG_LLM_MAX_RETRIES` retries (default `2`, allowed `0..3`). If transient
 unavailability persists, or the service rejects/authenticates the request

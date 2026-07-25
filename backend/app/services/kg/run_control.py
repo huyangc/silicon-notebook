@@ -57,7 +57,12 @@ class KgExtractionRunControl:
         with self._lock:
             return self._failure
 
-    def abort(self, failure: KgBuildFailure) -> KgBuildFailure:
+    def abort(
+        self, failure: KgBuildFailure, *, notify: bool = True
+    ) -> KgBuildFailure:
+        """notify=False:只置熔断标志把在飞窗口唤醒,不走 on_abort 公布状态。
+        供操作者主动中断(Ctrl-C/SIGTERM)使用——那条路径要先让窗口停下再排空,
+        状态由它自己的收尾统一公布,且不得记模型侧的 circuit_opened 事件。"""
         with self._lock:
             while self._publishing and self._failure is None:
                 self._lock.wait()
@@ -65,7 +70,7 @@ class KgExtractionRunControl:
                 return self._failure
             self._publishing = True
         try:
-            if self._on_abort is not None:
+            if notify and self._on_abort is not None:
                 self._on_abort(failure)
         except Exception:
             # State publication is retried by the outer source/job catch;
