@@ -1308,8 +1308,18 @@
         "type": "index"
       },
       {
+        "name": "idx_knowledge_relations_nb_source_id",
+        "sql_sha256": "201fc8ba94f0410e8571fbf830148600332b48a3da3e6614f6dc2b0d4f2e167e",
+        "type": "index"
+      },
+      {
         "name": "idx_knowledge_relations_nb_target",
         "sql_sha256": "f25bc67538780ba51f2a077d1942bd82a24bb4eeb2cc2eb91a436748f0a9e97a",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_relations_nb_target_id",
+        "sql_sha256": "7e651bccd9df5766934dcd3e7506fd582254ea53c655b57bba3e5120eb84e477",
         "type": "index"
       },
       {
@@ -1893,6 +1903,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 32
+    "user_version": 33
   }
 }

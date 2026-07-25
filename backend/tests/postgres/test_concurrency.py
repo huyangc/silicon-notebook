@@ -32,7 +32,7 @@ def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
     its own pooled connection. This covers both legal terminal outcomes; the
     cancelled outcome must never leave an answer row behind.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -136,7 +136,7 @@ def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
 def test_conversation_cleanup_cannot_split_continuation_job_creation(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -325,7 +325,7 @@ def _wait_for_memory_row_lock(postgres_database) -> None:
 def test_stale_conditional_delete_rechecks_revision_after_row_lock(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = _confirmed_race_memory(store, "memory-stale-delete")
@@ -368,7 +368,7 @@ def test_stale_conditional_delete_rechecks_revision_after_row_lock(
 def test_stale_embedding_failure_rechecks_revision_after_row_lock(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = _confirmed_race_memory(store, "memory-stale-embedding-failure")
@@ -409,7 +409,7 @@ def test_stale_embedding_failure_rechecks_revision_after_row_lock(
 
 @pytest.mark.postgres_integration
 def test_revoked_member_cannot_commit_save_answer_memory(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database, member=True)
     store = _memory_store(postgres_database)
     revoked_uncommitted = threading.Event()
@@ -462,7 +462,7 @@ def test_revoked_member_cannot_commit_save_answer_memory(postgres_database):
 
 @pytest.mark.postgres_integration
 def test_save_answer_holds_access_lock_until_atomic_commit(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database, member=True)
     store = _memory_store(postgres_database)
     save_scope_locked = threading.Event()
@@ -519,7 +519,7 @@ def test_save_answer_holds_access_lock_until_atomic_commit(postgres_database):
 
 @pytest.mark.postgres_integration
 def test_competing_memory_promotion_approval_is_idempotent(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = MemoryWrite(
@@ -629,7 +629,7 @@ def _insert_gc_asset(store, tmp_path, suffix: str):
 def test_asset_writer_first_blocks_gc_then_gc_rechecks_and_retains_reference(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, _table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -687,7 +687,7 @@ def test_asset_writer_first_blocks_gc_then_gc_rechecks_and_retains_reference(
 def test_atomic_append_holds_asset_lock_until_every_row_and_sequence_commit(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_id, anchor_id, procedure_id, _row_ids = _knowhow_race_store(
         postgres_database
@@ -753,7 +753,7 @@ def test_atomic_append_holds_asset_lock_until_every_row_and_sequence_commit(
 def test_asset_gc_first_blocks_writer_then_writer_rolls_back_missing_reference(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -811,7 +811,7 @@ def test_asset_gc_first_blocks_writer_then_writer_rolls_back_missing_reference(
 def test_multi_asset_writers_canonicalize_opposite_orders_without_deadlock_and_validate_all(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_a, _anchor_a, procedure_a, rows_a = _knowhow_race_store(
         postgres_database
@@ -886,7 +886,7 @@ def test_every_postgres_cell_insert_path_rejects_a_missing_rendered_asset(
     postgres_database,
 ):
     """Add/import, merged, CLI-guarded, and interactive-guarded share one guard."""
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -920,7 +920,7 @@ def test_asset_file_unlink_failure_cannot_leave_a_validatable_broken_row(
     postgres_database, tmp_path, monkeypatch
 ):
     """A filesystem failure may leak a file, never a live row without a file."""
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -952,7 +952,7 @@ def test_asset_file_unlink_failure_cannot_leave_a_validatable_broken_row(
 
 @pytest.mark.postgres_integration
 def test_stale_projection_pass_cannot_overwrite_newer_pending_edit(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -1004,7 +1004,7 @@ def test_stale_projection_pass_cannot_overwrite_newer_pending_edit(postgres_data
 
 @pytest.mark.postgres_integration
 def test_batch_reformat_membership_drift_is_zero_write_conflict(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store, table_id, anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -1082,7 +1082,7 @@ def _confirmed_memory_write(memory_id: str, content: str = "Before") -> MemoryWr
 
 @pytest.mark.postgres_integration
 def test_memory_edit_and_promotion_decision_share_one_lock_order(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = _confirmed_memory_write("memory-lock-order")
@@ -1162,7 +1162,7 @@ def test_memory_edit_and_promotion_decision_share_one_lock_order(postgres_databa
 def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     item = store.create_candidate_with_initial_revision(
@@ -1208,7 +1208,7 @@ def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
 
 @pytest.mark.postgres_integration
 def test_memory_copy_holds_source_through_vector_snapshot(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     source_write = _confirmed_memory_write("memory-copy-source-race", "Old text")
@@ -1280,7 +1280,7 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
     from app.services.knowledge_governance import KnowledgeGovernanceService
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     _seed_memory_race(postgres_database, member=True)
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:

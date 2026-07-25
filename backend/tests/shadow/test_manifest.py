@@ -49,7 +49,7 @@ EXPECTED_SHADOW_KEYS = {
 
 @pytest.fixture
 def fresh_sqlite(tmp_path: Path):
-    path = tmp_path / "fresh-v32.db"
+    path = tmp_path / "fresh-v33.db"
     settings = Settings(database_url=f"sqlite:///{path}")
     database = SqliteDatabase(settings, REPO_ROOT)
     try:
@@ -70,17 +70,17 @@ def test_manifest_matches_reviewed_fixture_and_current_running_pair():
     expected = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     assert manifest_contract(MANIFEST) == expected
     assert RUNNING_SCHEMA_PAIR == SchemaPair(
-        sqlite_version=32, postgres_version=10, epoch=1
+        sqlite_version=33, postgres_version=11, epoch=1
     )
     # The plan's old (24, 2) COPY staging pair predates five current tables and
     # is deliberately not advertised as compatible. SQLite v31 added capture
-    # state and v32 adds the report understanding contract.
+    # state, v32 added report understanding, and v33 adds relation indexes.
     assert RUNNING_SCHEMA_PAIR != SchemaPair(
         sqlite_version=24, postgres_version=2, epoch=1
     )
 
 
-def test_manifest_is_total_for_fresh_sqlite_v32(fresh_sqlite):
+def test_manifest_is_total_for_fresh_sqlite_v33(fresh_sqlite):
     report = validate_sqlite_schema(
         fresh_sqlite,
         MANIFEST,
@@ -88,7 +88,7 @@ def test_manifest_is_total_for_fresh_sqlite_v32(fresh_sqlite):
     )
     assert report.ordinary_tables == frozenset(MANIFEST.replicated_names)
     assert report.rebuilt_roots == frozenset(EXPECTED_FTS_ROOTS)
-    assert report.schema_version == 32
+    assert report.schema_version == 33
 
 
 def test_manifest_keys_ranks_transforms_blobs_and_paths_are_reviewed(fresh_sqlite):
@@ -164,7 +164,7 @@ def test_postgres_contract_reverse_totality_without_a_live_server():
         expected_pair=RUNNING_SCHEMA_PAIR,
     )
     assert report.ordinary_tables == frozenset(MANIFEST.replicated_names)
-    assert report.schema_version == 10
+    assert report.schema_version == 11
 
 
 @pytest.mark.parametrize("failure", ["missing", "nullable"])
@@ -183,7 +183,7 @@ def test_postgres_contract_rejects_missing_or_nullable_replication_key(failure):
     with pytest.raises(ValueError, match=message):
         validate_postgres_schema(
             tables=tables,
-            schema_version=10,
+            schema_version=11,
             manifest=MANIFEST,
             expected_pair=RUNNING_SCHEMA_PAIR,
         )
@@ -238,9 +238,9 @@ def test_sqlite_shadow_internal_tables_require_explicit_manifest_classification(
 @pytest.mark.parametrize(
     "expected_pair",
     [
-        SchemaPair(sqlite_version=32, postgres_version=10, epoch=2),
-        SchemaPair(sqlite_version=32, postgres_version=9, epoch=1),
-        SchemaPair(sqlite_version=31, postgres_version=10, epoch=1),
+        SchemaPair(sqlite_version=33, postgres_version=11, epoch=2),
+        SchemaPair(sqlite_version=33, postgres_version=10, epoch=1),
+        SchemaPair(sqlite_version=32, postgres_version=11, epoch=1),
     ],
 )
 def test_sqlite_requires_the_complete_manifest_schema_pair(fresh_sqlite, expected_pair):
@@ -251,9 +251,9 @@ def test_sqlite_requires_the_complete_manifest_schema_pair(fresh_sqlite, expecte
 @pytest.mark.parametrize(
     "expected_pair",
     [
-        SchemaPair(sqlite_version=32, postgres_version=10, epoch=2),
-        SchemaPair(sqlite_version=32, postgres_version=9, epoch=1),
-        SchemaPair(sqlite_version=31, postgres_version=10, epoch=1),
+        SchemaPair(sqlite_version=33, postgres_version=11, epoch=2),
+        SchemaPair(sqlite_version=33, postgres_version=10, epoch=1),
+        SchemaPair(sqlite_version=32, postgres_version=11, epoch=1),
     ],
 )
 def test_postgres_requires_the_complete_manifest_schema_pair(expected_pair):
@@ -261,7 +261,7 @@ def test_postgres_requires_the_complete_manifest_schema_pair(expected_pair):
     with pytest.raises(ValueError, match="does not match manifest"):
         validate_postgres_schema(
             tables=contract["tables"],
-            schema_version=10,
+            schema_version=11,
             manifest=MANIFEST,
             expected_pair=expected_pair,
         )
@@ -276,8 +276,8 @@ def test_live_postgres_validator_rejects_pair_before_catalog_access():
         validate_postgres_connection(
             NoCatalogAccess(),
             MANIFEST,
-            schema_version=10,
-            expected_pair=SchemaPair(31, 10, 2),
+            schema_version=11,
+            expected_pair=SchemaPair(33, 11, 2),
         )
 
 
@@ -328,7 +328,7 @@ def test_postgres_contract_rejects_unreviewed_topology_and_storage(mutation, mes
     with pytest.raises(ValueError, match=message):
         validate_postgres_schema(
             tables=tables,
-            schema_version=10,
+            schema_version=11,
             manifest=MANIFEST,
             expected_pair=RUNNING_SCHEMA_PAIR,
         )
@@ -345,7 +345,7 @@ def test_postgres_contract_rejects_unclassified_bytea_column():
     with pytest.raises(ValueError, match="BLOB/bytea classification drift"):
         validate_postgres_schema(
             tables=contract["tables"],
-            schema_version=10,
+            schema_version=11,
             manifest=unclassified,
             expected_pair=RUNNING_SCHEMA_PAIR,
         )
@@ -479,7 +479,7 @@ def test_sqlite_validator_supports_default_tuple_row_factory(tmp_path):
         report = validate_sqlite_schema(
             conn, MANIFEST, expected_pair=RUNNING_SCHEMA_PAIR
         )
-    assert report.schema_version == 32
+    assert report.schema_version == 33
     assert report.ordinary_tables == frozenset(MANIFEST.replicated_names)
 
 
@@ -509,12 +509,12 @@ def shadow_postgres_database():
 def test_live_postgres_manifest_totality(shadow_postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(shadow_postgres_database).migrate() == 10
+    assert PostgresMigrator(shadow_postgres_database).migrate() == 11
     with shadow_postgres_database.connect() as conn:
         report = validate_postgres_connection(
             conn,
             MANIFEST,
-            schema_version=10,
+            schema_version=11,
             expected_pair=RUNNING_SCHEMA_PAIR,
         )
     assert report.ordinary_tables == frozenset(MANIFEST.replicated_names)
@@ -561,7 +561,7 @@ def test_live_postgres_shadow_unique_preflight_scans_duplicates(
 
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(shadow_postgres_database).migrate() == 10
+    assert PostgresMigrator(shadow_postgres_database).migrate() == 11
     with shadow_postgres_database.write() as conn:
         conn.execute(insert_sql, values)
     duplicate_blocked = False
@@ -596,6 +596,6 @@ def test_live_postgres_shadow_unique_preflight_scans_duplicates(
                 validate_postgres_connection(
                     conn,
                     MANIFEST,
-                    schema_version=10,
+                    schema_version=11,
                     expected_pair=RUNNING_SCHEMA_PAIR,
                 )

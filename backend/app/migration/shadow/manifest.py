@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=32, postgres_version=10, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=33, postgres_version=11, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -661,7 +661,7 @@ def validate_sqlite_schema(
     expected_pair: SchemaPair,
     validate_rows: bool = True,
 ) -> SchemaValidationReport:
-    """Validate the frozen SQLite v32 schema and, by default, its key rows.
+    """Validate the frozen SQLite v33 schema and, by default, its key rows.
 
     ``validate_rows=False`` is reserved for short live-source fences that must
     validate catalog/control identity without scanning every business table

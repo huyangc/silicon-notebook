@@ -1113,7 +1113,7 @@ def _prepare_forward_run(source_database, postgres_database, *, poison_temp=Fals
         confirmation_secret=SECRET,
         now=1_000,
     )
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     install_postgres_control_schema(postgres_database)
     create_or_reuse_run(
         postgres_database,
@@ -1181,7 +1181,7 @@ def test_final_catalog_locks_block_concurrent_ledger_ddl_and_sequence_drift(
     postgres_database,
     postgres_scope,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     with postgres_database.write() as lock_conn:
         schema = str(
             lock_conn.execute("SELECT current_schema() AS name").fetchone()["name"]

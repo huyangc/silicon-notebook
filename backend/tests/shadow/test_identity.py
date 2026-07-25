@@ -201,13 +201,13 @@ def test_identity_failures_do_not_disclose_paths_or_credentials(tmp_path: Path):
 
 
 def test_identity_bound_confirmation_token_rejects_tamper_and_expiry():
-    binding = ConfirmationBinding("run-1", "a" * 64, "b" * 64, 31, 9, 1)
+    binding = ConfirmationBinding("run-1", "a" * 64, "b" * 64, 32, 10, 1)
     token = issue_confirmation_token(binding, secret=SECRET, now=1_000, ttl_seconds=60)
     verify_confirmation_token(token, binding, secret=SECRET, now=1_030)
     with pytest.raises(ValueError, match="bound"):
         verify_confirmation_token(
             token,
-            ConfirmationBinding("run-2", "a" * 64, "b" * 64, 31, 9, 1),
+            ConfirmationBinding("run-2", "a" * 64, "b" * 64, 32, 10, 1),
             secret=SECRET,
             now=1_030,
         )
@@ -228,7 +228,7 @@ def test_identity_bound_confirmation_token_rejects_tamper_and_expiry():
     "bad_time", [None, True, "1000", 1.5, float("nan"), float("inf"), 2**80]
 )
 def test_confirmation_token_malformed_times_fail_generically(bad_time):
-    binding = ConfirmationBinding("run-1", "a" * 64, "b" * 64, 31, 9, 1)
+    binding = ConfirmationBinding("run-1", "a" * 64, "b" * 64, 32, 10, 1)
     payload = binding.payload(issued_at=1_000, expires_at=1_060, nonce="c" * 32)
     payload["iat"] = bad_time
     raw = json.dumps(payload, separators=(",", ":"), allow_nan=True).encode()
@@ -271,8 +271,8 @@ def test_preflight_is_read_only_redacted_and_encoding_is_first_target_check(
         for statement in target_conn.statements
     )
     assert report.target_initial_schema_version == 0
-    assert report.schema_pair.sqlite_version == 32
-    assert report.schema_pair.postgres_version == 10
+    assert report.schema_pair.sqlite_version == 33
+    assert report.schema_pair.postgres_version == 11
     assert report.source_database_bytes >= database_path.stat().st_size
     assert "super-secret" not in repr(report)
     assert str(database_path.parent) not in repr(report)

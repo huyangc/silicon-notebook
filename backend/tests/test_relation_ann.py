@@ -280,6 +280,137 @@ def test_retrieve_relations_scored_returns_valid_scores(repo):
     assert all(0.0 <= h.score for h in hits)
 
 
+def test_relation_ann_unions_bounded_lexical_endpoint_candidates(repo, monkeypatch):
+    """A relation incident to an exact lexical KG hit survives ANN top-K miss."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept",
+         "payload": {"name": "semantic source", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept",
+         "payload": {"name": "semantic target", "section_path": ""}, "evidence": []},
+        {"local_id": "c", "object_type": "concept",
+         "payload": {"name": "ZXCV9000 controller", "section_path": ""}, "evidence": []},
+        {"local_id": "d", "object_type": "concept",
+         "payload": {"name": "timing sink", "section_path": ""}, "evidence": []},
+    ], [
+        {"source_local_id": "a", "target_local_id": "b",
+         "edge_type": "supports", "evidence": []},
+        {"source_local_id": "c", "target_local_id": "d",
+         "edge_type": "drives", "evidence": []},
+    ])
+    repo.rebuild_unified_kg(nb.id)
+    _backfill_relation_vector(repo, nb.id)
+    repo.build_scale_index(nb.id)
+    with repo._connect() as db:
+        rows = repo._relations_with_names(db, nb.id)
+    decoy_id = next(row["id"] for row in rows if "semantic source" in row["text"])
+    lexical_id = next(row["id"] for row in rows if "ZXCV9000 controller" in row["text"])
+
+    monkeypatch.setattr(repo.settings, "relation_recall", 1)
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_relation_ann_candidates",
+        lambda *_args, **_kwargs: {decoy_id: 0.9},
+    )
+
+    hits = repo._retrieve_relations_scored(nb.id, "ZXCV9000 controller")
+    assert lexical_id in {hit.relation_id for hit in hits}
+
+
+def test_relation_lexical_window_reserves_target_direction(repo):
+    """A high-degree source must not consume the target-side lexical budget."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    objects = [
+        {"local_id": "hub", "object_type": "concept",
+         "payload": {"name": "ZXCV9000 hub", "section_path": ""}, "evidence": []},
+        {"local_id": "incoming", "object_type": "concept",
+         "payload": {"name": "incoming source", "section_path": ""}, "evidence": []},
+        *[
+            {"local_id": f"sink-{index}", "object_type": "concept",
+             "payload": {"name": f"sink {index}", "section_path": ""}, "evidence": []}
+            for index in range(5)
+        ],
+    ]
+    relations = [
+        {"source_local_id": "hub", "target_local_id": f"sink-{index}",
+         "edge_type": "drives", "evidence": []}
+        for index in range(5)
+    ] + [
+        {"source_local_id": "incoming", "target_local_id": "hub",
+         "edge_type": "feeds", "evidence": []}
+    ]
+    repo.store_kg(nb.id, None, objects, relations)
+
+    with repo._connect() as db:
+        object_rows = db.execute(
+            "SELECT id,payload FROM knowledge_objects WHERE notebook_id=?", (nb.id,)
+        ).fetchall()
+        ids_by_name = {
+            json.loads(row["payload"])["name"]: row["id"] for row in object_rows
+        }
+        hub_id = ids_by_name["ZXCV9000 hub"]
+        incoming_id = ids_by_name["incoming source"]
+        incoming_relation = db.execute(
+            "SELECT id FROM knowledge_relations "
+            "WHERE notebook_id=? AND source_object_id=? AND target_object_id=?",
+            (nb.id, incoming_id, hub_id),
+        ).fetchone()["id"]
+        candidates = repo._runtime.knowledge.relation_id_rows_for_objects(
+            db, nb.id, [hub_id], 4
+        )
+
+    assert len(candidates) == 4
+    assert len({row["id"] for row in candidates}) == 4
+    assert incoming_relation in {row["id"] for row in candidates}
+
+
+def test_relation_keyset_continues_after_duplicate_only_round(repo):
+    """A duplicate-only keyset round must not hide a later unique relation."""
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept",
+         "payload": {"name": "ranked A", "section_path": ""}, "evidence": []},
+        {"local_id": "b", "object_type": "concept",
+         "payload": {"name": "ranked B", "section_path": ""}, "evidence": []},
+        {"local_id": "c1", "object_type": "concept",
+         "payload": {"name": "sink 1", "section_path": ""}, "evidence": []},
+        {"local_id": "c2", "object_type": "concept",
+         "payload": {"name": "sink 2", "section_path": ""}, "evidence": []},
+    ], [
+        {"source_local_id": "a", "target_local_id": "c1",
+         "edge_type": "early", "evidence": []},
+        {"source_local_id": "a", "target_local_id": "b",
+         "edge_type": "shared", "evidence": []},
+        {"source_local_id": "a", "target_local_id": "c2",
+         "edge_type": "late", "evidence": []},
+    ])
+    with repo._write() as db:
+        object_rows = db.execute(
+            "SELECT id,payload FROM knowledge_objects WHERE notebook_id=?", (nb.id,)
+        ).fetchall()
+        ids_by_name = {
+            json.loads(row["payload"])["name"]: row["id"] for row in object_rows
+        }
+        db.execute("DELETE FROM relation_embeddings WHERE notebook_id=?", (nb.id,))
+        for edge_type, relation_id in (
+            ("early", "rel-a"), ("shared", "rel-m"), ("late", "rel-z")
+        ):
+            db.execute(
+                "UPDATE knowledge_relations SET id=? "
+                "WHERE notebook_id=? AND edge_type=?",
+                (relation_id, nb.id, edge_type),
+            )
+    with repo._connect() as db:
+        candidates = repo._runtime.knowledge.relation_id_rows_for_objects(
+            db,
+            nb.id,
+            [ids_by_name["ranked A"], ids_by_name["ranked B"]],
+            3,
+        )
+
+    assert {row["id"] for row in candidates} == {"rel-a", "rel-m", "rel-z"}
+
+
 # ── core ⊕ delta merge: post-watermark relation retrievable ────────────────
 
 

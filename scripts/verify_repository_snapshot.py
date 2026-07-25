@@ -2246,6 +2246,32 @@ MIGRATION_MANIFEST[(31, 32)] = {
     "views": {},
 }
 
+# v33: relation endpoint probes page by stable relation id within each
+# notebook/source or notebook/target stream. These covering indexes keep that
+# keyset walk bounded without changing tables, columns, triggers, or views.
+RELATION_ENDPOINT_KEYSET_INDEXES = {
+    "idx_knowledge_relations_nb_source_id":
+        """CREATE INDEX idx_knowledge_relations_nb_source_id
+                  ON knowledge_relations(notebook_id, source_object_id, id)""",
+    "idx_knowledge_relations_nb_target_id":
+        """CREATE INDEX idx_knowledge_relations_nb_target_id
+                  ON knowledge_relations(notebook_id, target_object_id, id)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 33, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **RELATION_ENDPOINT_KEYSET_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(32, 33)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": RELATION_ENDPOINT_KEYSET_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -508,10 +508,60 @@ class CandidateRetrievalService(_RetrievalState):
                 "text": relation_embed_text(src_name, r["et"], tgt_name, spans),
             })
         return out
+
+    def _lexical_object_hits(
+        self,
+        db: object,
+        notebook_id: str,
+        query: str,
+        recall: int,
+        *,
+        site: str,
+    ) -> list[dict]:
+        """Fail-open bounded lexical object recall shared by KG and relations."""
+        try:
+            return self.knowledge.fts_search(db, notebook_id, query, k=recall)
+        except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
+            self.event_log.emit({
+                "kind": "lexical_retrieval_failed",
+                "notebook_id": notebook_id,
+                "site": site,
+                "error_type": type(exc).__name__,
+            })
+            return []
+
+    def _relation_lexical_candidate_ids(
+        self, db: object, notebook_id: str, query: str, recall: int
+    ) -> list[str]:
+        """Map lexical KG endpoint hits to a bounded relation candidate set."""
+        object_hits = self._lexical_object_hits(
+            db, notebook_id, query, recall, site="relation_endpoint_fts"
+        )
+        if not object_hits:
+            return []
+        try:
+            rows = self.knowledge.relation_id_rows_for_objects(
+                db,
+                notebook_id,
+                [hit["object_id"] for hit in object_hits],
+                recall,
+                batch_size=self._IN_CHUNK,
+            )
+        except Exception as exc:  # noqa: BLE001 — relation ANN remains usable
+            self.event_log.emit({
+                "kind": "lexical_retrieval_failed",
+                "notebook_id": notebook_id,
+                "site": "relation_endpoint_probe",
+                "error_type": type(exc).__name__,
+            })
+            return []
+        return [row["id"] for row in rows]
+
     def _relation_ann_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
         """ANN 核候选(idx.relation_ann_path=relation_embeddings)⊕ delta 关系暴力。
         镜像 _kg_object_candidates,relation 版。返回 {relation_id: sim∈[0,1]}。
-        fail-open 返回 {} 让上层退回全量矩阵/guard 路径。"""
+        词法端点候选由调用方另行并入,避免给 lex-only id 伪造 0 语义分。
+        fail-open 返回 {} 让上层退回词法/全量矩阵/guard 路径。"""
         import numpy as np
         from app.services.vector_index import build_matrix, query_sims
         sims: dict = {}
@@ -570,11 +620,11 @@ class CandidateRetrievalService(_RetrievalState):
         relation-ann task:候选界定优先级从高到低——
           ① relations 表空 → 早退 [](原有语义不变)。
           ② 持久化 relation ANN(self scale index allow_stale=True 且
-             has_relation_ann)存在 → ANN 核 ⊕ delta 暴力
-             (_relation_ann_candidates,镜像 _kg_object_candidates),只
-             hydrate top-K 候选文本做关键词+语义融合打分。knn_query 的 k 语义
-             与既有 relation_recall 一致(见下)。这是大库常态路径——ANN 侧路
-             让下面的冷矩阵守卫从常态退位为「无 ANN 大库」的最后兜底。
+             has_relation_ann)存在 → (ANN 核 ⊕ delta 暴力)∪词法命中的 KG
+             端点相邻关系,只 hydrate 最多 2K 个候选文本做关键词+语义融合打分。
+             词法候选不伪造 0 语义分,仍按 keyword-only 归一化。knn_query 与
+             词法窗口的 K 均沿用 relation_recall。这是大库常态路径——ANN
+             侧路让下面的冷矩阵守卫从常态退位为「无 ANN 大库」的最后兜底。
           ③ 无 ANN(或 ANN fail-open)→ 大库冷矩阵守卫(见下方「生产事故修复」
              段,语义原样保留:not copyable + _vector_matrix_warm peek 判冷 →
              skip + relation_scoring_skipped 事件 + 返回 []);小库/已热 →
@@ -641,20 +691,28 @@ class CandidateRetrievalService(_RetrievalState):
             idx = self._scale_index(notebook_id, allow_stale=True)
             if idx is not None and getattr(idx, "relation_ann_labels", None):
                 query_vector = self._embed_query(query)
+                cand_sims: dict[str, float] = {}
                 if query_vector is not None:
                     cand_sims = self._relation_ann_candidates(
                         notebook_id, query_vector, idx, self.settings.relation_recall)
-                    if cand_sims:
-                        top_ids = list(cand_sims.keys())
-                        relations = live_relations(
-                            self._relations_with_names(
-                                db, notebook_id, relation_ids=top_ids
-                            )
+                lexical_ids = self._relation_lexical_candidate_ids(
+                    db, notebook_id, query, self.settings.relation_recall
+                )
+                candidate_ids = list(dict.fromkeys([*cand_sims, *lexical_ids]))
+                if candidate_ids:
+                    relations = live_relations(
+                        self._relations_with_names(
+                            db, notebook_id, relation_ids=candidate_ids
                         )
-                        return score_relations(query, relations, query_vector=query_vector,
-                                               relation_sims=cand_sims,
-                                               downweight_edges=self.settings.kg_about_downweight_enabled)
-                # fail-open(embed 失败/空候选/ANN 打开失败)→ 继续走守卫/全量路径。
+                    )
+                    return score_relations(
+                        query,
+                        relations,
+                        query_vector=query_vector,
+                        relation_sims=cand_sims,
+                        downweight_edges=self.settings.kg_about_downweight_enabled,
+                    )
+                # fail-open(embed/FTS 失败或均为空)→ 继续走守卫/全量路径。
 
             # ── 分支③: 大库冷矩阵守卫(#171 语义原样;无 ANN 时的最后兜底)──
             if (not self.notebook_copy_stats(notebook_id)["copyable"]
@@ -846,8 +904,11 @@ class CandidateRetrievalService(_RetrievalState):
         knowhow_on = bool(set(type_list) - set(_KG_TYPES))
         query_vector = self._embed_query(query)
         t_embed = time.perf_counter()
-        # indexed 时用 ANN 核 ⊕ delta 取有界候选;无索引→cand_sims=None→全量(现状)。
-        cand_sims = None
+        # indexed 时用 (ANN 核 ⊕ delta)∪FTS 取有界候选。candidate_filter 与
+        # cand_sims 分开:lex-only id 进入 hydration,但不伪造 0 语义分。
+        cand_sims: Optional[dict[str, float]] = None
+        candidate_filter: Optional[set[str]] = None
+        lexical_candidate_count = 0
         if query_vector is not None:
             idx = self._scale_index(notebook_id, allow_stale=True)
             if idx is None:
@@ -858,26 +919,45 @@ class CandidateRetrievalService(_RetrievalState):
                 except Exception:
                     pass
             elif getattr(idx, "ann_labels", None):
-                cand_sims = self._kg_object_candidates(
+                ann_sims = self._kg_object_candidates(
                     notebook_id, query_vector, idx, self.settings.chunk_recall)
-                if not cand_sims:
-                    cand_sims = None   # fail-open → 全量
-        if cand_sims is None and not self.notebook_copy_stats(notebook_id)["copyable"]:
+                with self._connect() as db:
+                    lexical_hits = self._lexical_object_hits(
+                        db,
+                        notebook_id,
+                        query,
+                        self.settings.chunk_recall,
+                        site="kg_ann_fts",
+                    )
+                lexical_ids = [hit["object_id"] for hit in lexical_hits]
+                lexical_candidate_count = len(lexical_ids)
+                if ann_sims or lexical_ids:
+                    cand_sims = ann_sims
+                    candidate_filter = set(ann_sims) | set(lexical_ids)
+                # both fail/empty → candidate_filter=None → existing fail-open.
+        if candidate_filter is None and not self.notebook_copy_stats(notebook_id)["copyable"]:
             # 大库拿不到 ANN 候选(未建索引/ANN 打不开/维度失配/embed 失败)——
             # 一个原则:绝不全量暴力(全表 json 解析 + 全量分词 + GB 级矩阵,
             # 49 万对象生产实测数十分钟)。FTS 词法有界兜底:kg_objects_fts 覆盖
             # 全部对象(含 delta),候选的语义分仍由下方按候选 evidence 元素向量
             # 有界补充。FTS 空 → [](与 relation 侧冷矩阵守卫同一 fail-open 出口)。
             with self._connect() as db:
-                lex = self.knowledge.fts_search(
-                    db, notebook_id, query, k=self.settings.chunk_recall)
+                lex = self._lexical_object_hits(
+                    db,
+                    notebook_id,
+                    query,
+                    self.settings.chunk_recall,
+                    site="kg_large_fallback_fts",
+                )
             self.event_log.emit({
                 "kind": "kg_bruteforce_refused", "notebook_id": notebook_id,
                 "site": "_retrieve_scored", "lexical_candidates": len(lex),
             })
             if not lex:
                 return []
-            cand_sims = {h["object_id"]: 0.0 for h in lex}
+            cand_sims = {}
+            candidate_filter = {h["object_id"] for h in lex}
+            lexical_candidate_count = len(candidate_filter)
         t_ann = time.perf_counter()
         from app.services.vector_index import query_sims, build_matrix
         with self._connect() as db:
@@ -888,26 +968,27 @@ class CandidateRetrievalService(_RetrievalState):
             knowhow_sims = (
                 self._knowhow_ko_candidates(db, notebook_id, query, query_vector)
                 if knowhow_on else {})
-            if knowhow_sims and cand_sims is not None:
+            if knowhow_sims and candidate_filter is not None:
                 # Bounded path: union into the candidate set BEFORE id_filter so
                 # the KOs are fetched, and (via knowledge_sims=cand_sims below)
                 # pick up their semantic score.
                 for ko_id, sim in knowhow_sims.items():
+                    candidate_filter.add(ko_id)
                     cand_sims[ko_id] = max(cand_sims.get(ko_id, 0.0), sim)
-            id_filter = set(cand_sims.keys()) if cand_sims is not None else None
+            id_filter = candidate_filter
             kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
                        for t in type_list}
             all_kg_objs = [o for objs in kg_objs.values() for o in objs]
-            # P0-A: cand_sims is not None ⟺ we're on the bounded ANN/FTS candidate
-            # path (≤chunk_recall objects) — skip the knowledge_objects COUNT probe
+            # P0-A: candidate_filter is not None ⟺ bounded ANN∪FTS candidate path
+            # (≤2*chunk_recall objects, plus bounded knowhow bridge) — skip the COUNT probe
             # and the process-wide cache (which the candidate-set-varies-per-query
             # path never hit anyway) and build the token sets directly for this batch.
             token_sets = self._keyword_token_sets(
-                db, notebook_id, all_kg_objs, bounded=cand_sims is not None)
+                db, notebook_id, all_kg_objs, bounded=candidate_filter is not None)
             # candidate object ids for this retrieval call
             candidate_ids = {o["id"] for o in all_kg_objs}
             # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
-            if cand_sims is not None:
+            if candidate_filter is not None:
                 # 有界:每个候选只做带索引的 EXISTS 短路探测；绝不能拉取完整
                 # 邻接边，否则一个高出度 hub 就能把几十个候选的 hydration
                 # 放大成数百万行。candidate_ids 仍按参数上限分批。
@@ -935,7 +1016,7 @@ class CandidateRetrievalService(_RetrievalState):
                     connected_ids.add(row["source_object_id"])
                     connected_ids.add(row["target_object_id"])
             isolated_ids: set = candidate_ids - connected_ids
-            if cand_sims is not None:
+            if candidate_filter is not None:
                 knowledge_sims = cand_sims
                 e_ids, e_mat = build_matrix((r["vid"], r["vector"]) for r in erows)
                 element_sims = query_sims(query_vector, e_ids, e_mat) if e_ids else {}
@@ -944,7 +1025,7 @@ class CandidateRetrievalService(_RetrievalState):
                 kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
                 element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
                 knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
-            if knowhow_sims and cand_sims is None and knowledge_sims is not None:
+            if knowhow_sims and candidate_filter is None and knowledge_sims is not None:
                 # Full-scan path: knowhow KOs are absent from the
                 # knowledge_embeddings matrix (structural-only projection), so
                 # their semantic score comes solely from gate 0. Merge AFTER the
@@ -991,7 +1072,8 @@ class CandidateRetrievalService(_RetrievalState):
             "fold_ms": round((time.perf_counter() - t_score) * 1000),
             "total_ms": round((time.perf_counter() - t0) * 1000),
             "candidates": len(all_kg_objs),
-            "ann_gated": cand_sims is not None,
+            "ann_gated": candidate_filter is not None,
+            "lexical_candidates": lexical_candidate_count,
         })
         return scored
     def _federated_retrieve_impl(
@@ -1351,7 +1433,8 @@ class CandidateRetrievalService(_RetrievalState):
                 cid = h["chunk_id"]
                 if cid not in chunk_sims:
                     cand_ids.append(cid)
-                    chunk_sims[cid] = 0.0   # 词法命中无语义分;score_chunks 的 keyword 分兜底
+                    # Candidate identity and semantic evidence stay separate:
+                    # absence from chunk_sims means keyword-only fusion.
         except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
             self._note_model_error("chunk_fts", "", exc)
 

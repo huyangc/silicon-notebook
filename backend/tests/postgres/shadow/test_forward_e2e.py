@@ -166,7 +166,7 @@ def test_frozen_sqlite_fixture_converges_through_outage_and_two_full_verifiers(
             (str(storage / "notebooks" / "nb-fixture" / "fixture-source.md"),),
         )
     source_conn = source.connect()
-    assert source_conn.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert source_conn.execute("PRAGMA user_version").fetchone()[0] == 33
 
     report = preflight(
         run_id=run_id,
@@ -178,7 +178,7 @@ def test_frozen_sqlite_fixture_converges_through_outage_and_two_full_verifiers(
         backup_evidence=BackupEvidence("e2e-backup", True, True),
         confirmation_secret=SECRET,
     )
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     install_postgres_control_schema(postgres_database)
     create_or_reuse_run(
         postgres_database,

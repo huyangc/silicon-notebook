@@ -171,7 +171,7 @@ def shadow_run(tmp_path: Path, postgres_database, clean_control_schema):
         confirmation_secret=SECRET,
         now=1_000,
     )
-    assert PostgresMigrator(postgres_database).migrate() == 10
+    assert PostgresMigrator(postgres_database).migrate() == 11
     install_postgres_control_schema(postgres_database)
     create_or_reuse_run(
         postgres_database,

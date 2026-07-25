@@ -19,6 +19,7 @@ import sqlite3
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from app.models.common import Evidence
+from app.repositories.lexical_query import sqlite_fts_match_expression
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
@@ -375,6 +376,84 @@ class KnowledgeStore:
             rows.extend(db.execute(
                 base_sql + f" AND r.id IN ({ph})", (notebook_id, *batch),
             ).fetchall())
+        return rows
+
+    @staticmethod
+    def relation_id_rows_for_objects(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_ids,
+        limit: int,
+        *,
+        batch_size: int = 900,
+    ):
+        """Return a bounded set of live relations incident to lexical KG hits.
+
+        Source and target probes are separate so each uses its covering endpoint
+        index.  The caller supplies FTS-ranked object ids; once ``limit`` rows
+        have been collected, no lower-ranked endpoint is probed.
+        """
+        values = list(dict.fromkeys(object_ids))
+        remaining = max(0, int(limit))
+        if not values or not remaining:
+            return []
+        rows = []
+        seen: set[str] = set()
+        streams = [
+            (endpoint, object_id)
+            for object_id in values
+            for endpoint in ("source_object_id", "target_object_id")
+        ]
+        cursors = {stream_index: "" for stream_index in range(len(streams))}
+        active = list(range(len(streams)))
+        # Four bind slots per indexed keyset probe.  The UNION materializes only
+        # each stream's LIMIT page, never the complete adjacency of a hub.
+        stream_batch_size = max(1, min(int(batch_size), 200))
+        while remaining > 0 and active:
+            page_size = max(1, (remaining + len(active) - 1) // len(active))
+            counts = {stream_index: 0 for stream_index in active}
+            last_ids: dict[int, str] = {}
+            for batch_offset in range(0, len(active), stream_batch_size):
+                batch = active[batch_offset:batch_offset + stream_batch_size]
+                branches = []
+                params = []
+                for stream_index in batch:
+                    endpoint, object_id = streams[stream_index]
+                    branches.append(
+                        f"SELECT id,{stream_index} AS stream_index FROM ("
+                        f"SELECT id FROM knowledge_relations "
+                        f"WHERE notebook_id=? AND review_status!='rejected' "
+                        f"AND {endpoint}=? AND id>? ORDER BY id LIMIT ?"
+                        f") AS relation_stream_{stream_index}"
+                    )
+                    params.extend((
+                        notebook_id,
+                        object_id,
+                        cursors[stream_index],
+                        page_size,
+                    ))
+                found = db.execute(" UNION ALL ".join(branches), params).fetchall()
+                for row in sorted(found, key=lambda item: item["stream_index"]):
+                    stream_index = row["stream_index"]
+                    counts[stream_index] += 1
+                    last_ids[stream_index] = max(
+                        last_ids.get(stream_index, ""), row["id"]
+                    )
+                    if row["id"] in seen:
+                        continue
+                    seen.add(row["id"])
+                    rows.append(row)
+                    remaining -= 1
+                    if remaining <= 0:
+                        return rows
+            next_active = []
+            for stream_index in active:
+                fetched = counts[stream_index]
+                if stream_index in last_ids:
+                    cursors[stream_index] = last_ids[stream_index]
+                if fetched == page_size:
+                    next_active.append(stream_index)
+            active = next_active
         return rows
 
     @staticmethod
@@ -1237,14 +1316,14 @@ class KnowledgeStore:
     def fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
         """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
         [{object_id, name, score, match:'lexical'}]。q 空 → []。"""
-        needle = (q or "").strip()
-        if not needle:
+        match_query = sqlite_fts_match_expression(q)
+        if not match_query:
             return []
         rows = db.execute(
             "SELECT object_id, name, bm25(kg_objects_fts) AS rank "
             "FROM kg_objects_fts WHERE notebook_id=? AND kg_objects_fts MATCH ? "
             "ORDER BY rank LIMIT ?",
-            (notebook_id, '"' + needle.replace('"', '""') + '"', k)).fetchall()
+            (notebook_id, match_query, k)).fetchall()
         return [{"object_id": r["object_id"], "name": r["name"],
                  "score": -float(r["rank"]), "match": "lexical"} for r in rows]
 
@@ -1252,13 +1331,13 @@ class KnowledgeStore:
     def chunk_fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
         """FTS5 MATCH(chunks_fts, trigram)。notebook 维度过滤。返回
         [{chunk_id, score, match:'lexical'}]。q 空 → []。"""
-        needle = (q or "").strip()
-        if not needle:
+        match_query = sqlite_fts_match_expression(q)
+        if not match_query:
             return []
         rows = db.execute(
             "SELECT chunk_id, bm25(chunks_fts) AS rank FROM chunks_fts "
             "WHERE notebook_id=? AND chunks_fts MATCH ? ORDER BY rank LIMIT ?",
-            (notebook_id, '"' + needle.replace('"', '""') + '"', k)).fetchall()
+            (notebook_id, match_query, k)).fetchall()
         return [{"chunk_id": r["chunk_id"], "score": -float(r["rank"]),
                  "match": "lexical"} for r in rows]
 

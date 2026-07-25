@@ -16,7 +16,8 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # shadow-internal tables used by transactional forward capture. Capture
 # triggers remain run-scoped and are installed by migration.shadow.capture.
 # v32 persists the Deep Report question-understanding review contract.
-SCHEMA_VERSION = 32
+# v33 adds stable relation endpoint keyset indexes for bounded lexical recall.
+SCHEMA_VERSION = 33
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1772,6 +1773,18 @@ class SqliteMigrator:
                 "reports",
                 "understanding_json",
                 "TEXT NOT NULL DEFAULT '{}'",
+            )
+
+    def _migration_33(self) -> None:
+        """Stable keyset order for bounded source/target relation probes."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_source_id
+                  ON knowledge_relations(notebook_id, source_object_id, id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_target_id
+                  ON knowledge_relations(notebook_id, target_object_id, id);
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:
