@@ -158,6 +158,92 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
     )
 
 
+def _candidate_rows_for_terms(
+    connection,
+    *,
+    table: str,
+    id_column: str,
+    text_expression: str,
+    notebook_id: str,
+    terms: list[str],
+    per_term_limit: int,
+    live_only: bool = False,
+):
+    """Run one indexed LATERAL probe per term in a single PostgreSQL query."""
+    if not terms or per_term_limit <= 0:
+        return []
+    try:
+        target = _SEARCH_TARGETS[(table, id_column, text_expression)]
+    except KeyError:
+        raise ValueError(
+            "unsupported PostgreSQL lexical search table/expression pairing"
+        ) from None
+    if live_only and not target.live_predicate:
+        raise ValueError("PostgreSQL lexical target has no lifecycle predicate")
+
+    table_sql = sql.Identifier(target.table).as_string()
+    id_sql = sql.Identifier(target.id_column).as_string()
+    predicates = [
+        f"{sql.Identifier(target.notebook_column).as_string()}=%s",
+    ]
+    if live_only:
+        predicates.append(target.live_predicate)
+    predicates.append(
+        f"({target.text_expression} OPERATOR(public.%%) lexical_terms.term OR "
+        f"{target.text_expression} ILIKE ('%%' || lexical_terms.term || '%%'))"
+    )
+    term_values = ",".join("(%s,%s)" for _ in terms)
+    statement = (
+        f"WITH lexical_terms(term_rank,term) AS (VALUES {term_values}) "
+        "SELECT candidate.candidate_id,lexical_terms.term_rank,"
+        "candidate.candidate_similarity FROM lexical_terms "
+        "CROSS JOIN LATERAL ("
+        f"SELECT {id_sql} AS candidate_id,"
+        f"public.similarity({target.text_expression},lexical_terms.term) "
+        f"AS candidate_similarity FROM {table_sql} "
+        f"WHERE {' AND '.join(predicates)} "
+        f"ORDER BY candidate_similarity DESC,{id_sql} COLLATE \"C\" LIMIT %s"
+        ") AS candidate ORDER BY lexical_terms.term_rank,"
+        "candidate.candidate_similarity DESC,candidate.candidate_id COLLATE \"C\""
+    )
+    params = [
+        value
+        for term_rank, term in enumerate(terms)
+        for value in (term_rank, term)
+    ]
+    params.extend((notebook_id, int(per_term_limit)))
+    return connection.execute(statement, params).fetchall()
+
+
+def knowledge_candidate_rows_for_terms(
+    connection, notebook_id: str, terms: list[str], per_term_limit: int
+):
+    return _candidate_rows_for_terms(
+        connection,
+        table="knowledge_objects",
+        id_column="id",
+        text_expression=PAYLOAD_NAME_EXPRESSION,
+        notebook_id=notebook_id,
+        terms=terms,
+        per_term_limit=per_term_limit,
+        live_only=True,
+    )
+
+
+def chunk_candidate_rows_for_terms(
+    connection, notebook_id: str, terms: list[str], per_term_limit: int
+):
+    return _candidate_rows_for_terms(
+        connection,
+        table="chunks",
+        id_column="id",
+        text_expression=expression("chunk_text"),
+        notebook_id=notebook_id,
+        terms=terms,
+        per_term_limit=per_term_limit,
+    )
+
+
 def knowledge_candidate_documents(connection, ids):
     values = list(ids)
     if not values:
@@ -391,3 +477,28 @@ def deterministic_lexical_score(query: str, text: str) -> float:
         haystack[index : index + 2] for index in range(max(1, len(haystack) - 1))
     }
     return len(grams & text_grams) / max(1, len(grams | text_grams))
+
+
+def deterministic_lexical_score_terms(terms: list[str], text: str) -> float:
+    """Score multiple recall terms while building the document grams once."""
+    haystack = text.casefold()
+    if not terms or not haystack:
+        return 0.0
+    text_grams = {
+        haystack[index : index + 2] for index in range(max(1, len(haystack) - 1))
+    }
+    best = 0.0
+    for query in terms:
+        needle = query.casefold().strip()
+        if not needle:
+            continue
+        if needle in haystack:
+            score = 2.0 + min(1.0, len(needle) / max(1, len(haystack)))
+        else:
+            grams = {
+                needle[index : index + 2]
+                for index in range(max(1, len(needle) - 1))
+            }
+            score = len(grams & text_grams) / max(1, len(grams | text_grams))
+        best = max(best, score)
+    return best

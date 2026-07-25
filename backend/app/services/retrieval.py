@@ -636,7 +636,11 @@ def score_chunks(
     for c in chunks:
         keyword = keyword_score(query, c["text"])
         semantic = 0.0
-        has_vector = bool(query_vector and chunk_sims is not None)
+        has_vector = bool(
+            query_vector
+            and chunk_sims is not None
+            and c["chunk_id"] in chunk_sims
+        )
         if has_vector:
             semantic = chunk_sims.get(c["chunk_id"], 0.0)
         score = _fuse(keyword, semantic, has_vector)

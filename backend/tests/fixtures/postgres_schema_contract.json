@@ -123,7 +123,7 @@
   "postgres_internal_tables": [
     "silicon_schema_migrations"
   ],
-  "postgres_version": 9,
+  "postgres_version": 10,
   "rebuilt": {
     "fts_internal_tables": [
       "chunks_fts_config",
@@ -920,11 +920,51 @@
           "descending": false
         },
         {
+          "column": "source_object_id",
+          "descending": false
+        },
+        {
+          "column": "id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_nb_source_id",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
           "column": "target_object_id",
           "descending": false
         }
       ],
       "name": "idx_knowledge_relations_nb_target",
+      "predicate": null,
+      "table": "knowledge_relations",
+      "unique": false
+    },
+    {
+      "keys": [
+        {
+          "column": "notebook_id",
+          "descending": false
+        },
+        {
+          "column": "target_object_id",
+          "descending": false
+        },
+        {
+          "column": "id",
+          "descending": false
+        }
+      ],
+      "name": "idx_knowledge_relations_nb_target_id",
       "predicate": null,
       "table": "knowledge_relations",
       "unique": false
@@ -1428,7 +1468,7 @@
   ],
   "sqlite_internal_tables": [],
   "sqlite_table_count": 77,
-  "sqlite_version": 30,
+  "sqlite_version": 31,
   "tables": {
     "agent_access_tokens": {
       "classification": "replicated",

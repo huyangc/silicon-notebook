@@ -396,6 +396,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_31
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -455,6 +457,8 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_31
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -509,6 +513,8 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_31
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -546,6 +552,8 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_29(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_31
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -594,6 +602,8 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_29(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_31
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_31
         rollback.execute("DROP INDEX idx_sources_notebook_file_hash")    # _migration_30
         rollback.execute("DROP INDEX uq_clusters_notebook_type_member")  # _migration_29
         rollback.execute("DROP TABLE app_settings")                      # _migration_28
@@ -628,6 +638,27 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_29(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.normalized["scrubbed_model_profiles"] == 1
     assert result.normalized["scrubbed_model_statuses"] == 1
+
+
+def test_deployed_v30_database_verifies_relation_keyset_indexes(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")
+        rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")
+        rollback.execute("PRAGMA user_version = 30")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 30
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
 
 
 _V23_CLUSTER_ROWS = (
@@ -685,6 +716,8 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
     upgraded.close_local()
     db = sqlite3.connect(database)
     try:
+        db.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_31
+        db.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_31
         db.execute("DROP INDEX idx_sources_notebook_file_hash")  # _migration_30
         db.execute("DROP INDEX uq_clusters_notebook_type_member")
         db.executemany(

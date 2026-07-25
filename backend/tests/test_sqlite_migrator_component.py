@@ -35,7 +35,7 @@ def test_schema_version_constant_is_v30():
     # v27 加源完成标记 sources.chunked_at 列、v28 每笔记本文档数量上限，
     # v29 收敛合并前两条 v24 迁移线、v30 加 sources(notebook_id, file_hash)
     # 内容哈希去重索引。
-    assert SCHEMA_VERSION == 30
+    assert SCHEMA_VERSION == 31
 
 
 def test_v29_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
@@ -82,7 +82,7 @@ def test_v29_cluster_membership_migration_dedupes_before_unique_guard(tmp_path):
                 ],
             )
 
-        assert migrator.migrate() == [29, 30]
+        assert migrator.migrate() == [29, 30, 31]
         with database.connect() as db:
             rows = db.execute(
                 "SELECT id,canonical_id FROM concept_clusters "

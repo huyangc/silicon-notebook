@@ -10,6 +10,7 @@ from app.repositories.ports import ChunkWrite
 from app.repositories.postgres.search import (
     PAYLOAD_NAME_EXPRESSION,
     TAGS_JSON_EXPRESSION,
+    knowledge_candidate_rows_for_terms,
     lexical_candidate_sql,
 )
 
@@ -36,6 +37,32 @@ def test_lexical_candidate_sql_is_bounded_and_deterministic():
     assert "LIMIT %s" in statement
     assert '"id" COLLATE "C"' in statement
     assert "?" not in statement
+
+
+def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
+    class _Result:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class _Connection:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((statement, params))
+            return _Result()
+
+    connection = _Connection()
+    knowledge_candidate_rows_for_terms(
+        connection, "nb", ["thermal", "ZXCV9000"], per_term_limit=2
+    )
+
+    assert len(connection.calls) == 1
+    statement, params = connection.calls[0]
+    assert "CROSS JOIN LATERAL" in statement
+    assert statement.count("LIMIT %s") == 1
+    assert params == [0, "thermal", 1, "ZXCV9000", "nb", 2]
 
 
 @dataclass
@@ -260,7 +287,7 @@ def search_harnesses(tmp_path, postgres_database) -> tuple[SearchHarness, Search
     settings = Settings(database_url=f"sqlite:///{tmp_path / 'search-golden.db'}")
     sqlite_database = SqliteDatabase(settings, tmp_path)
     SqliteMigrator(sqlite_database, settings).initialize()
-    assert PostgresMigrator(postgres_database).migrate() == 9
+    assert PostgresMigrator(postgres_database).migrate() == 10
     seams = RepositoryCompatibilitySeams(
         new_id=lambda prefix: f"{prefix}-unused",
         now=lambda: NOW,
@@ -365,7 +392,7 @@ def test_zh_en_search_quality_and_citation_identity_golden(search_harnesses, que
 def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 9
+    assert PostgresMigrator(postgres_database).migrate() == 10
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "

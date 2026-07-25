@@ -27,7 +27,7 @@
 ### 硬门
 
 - 完整本地门是 `bash scripts/check.sh`（后端 pytest + 语法/契约/harness + 前端 test/typecheck/build 三条并发泳道）。CI 只是它的只读包装，不要在 workflow 里另起测试根。
-- **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。
+- **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v31；PostgreSQL checksummed schema 为 v10，两侧都包含关系端点 + id 的稳定 keyset 覆盖索引。
 - **界面词汇**：面向用户的文案只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG`/`schema` 这类内部黑话。真源是 `AGENTS.md`「界面词汇表」，`scripts/check_ui_vocabulary.py` 是硬门。**唯一放行的英文界面词是「图谱 Schema」**（图谱对象类型/字段管理，原「内容类型」，现从知识图谱视图头部进入）——守卫的 `SANCTIONED_UI` 只放行这一个复合短语（带 CJK 前置断言，不吞「知识图谱」尾字），裸 `schema`/`Schema` 仍拦。
 - **错误文案**：deny by default，信任按**出处**判定而非文本形状。后端中文用户文案必须走 `backend/app/api/deps.py` 的 `user_error()`（打 `X-User-Message` 头），前端翻译只在 `frontend/app/errors.ts`。
 - **`object_type` 标签**：后端 `OBJECT_TYPE_LABELS` 与前端 `KG_TYPE_LABELS` 必须逐字一致，改一侧就要改另一侧。
@@ -42,6 +42,7 @@
 
 - **效率是一等约束**：新增 LLM / embedding / DB 调用前先问代价——能否合并、缓存、异步、按需 gate。强一致做成 opt-in，默认走低开销路径。
 - **大库检索 hydration 必须按候选有界**：ANN 后的孤立节点判断只能对当前候选做带索引的逐候选 `EXISTS`，返回候选 id，不得物化高出度节点的完整邻边；canonical fold 只能经 `cluster_fold_rows` 查询本轮 scored id，不能加载全 notebook cluster map；同一 scale-index 实例同一工件类型的惰性 ANN open 必须单飞。这三项只优化执行成本，不得顺手改 score、阈值、PPR 或召回。
+- **词法候选属于索引检索契约**：SQLite FTS5 对每个用户派生 clause 单独按数据转义，可保留整句精确匹配加分，但必须 OR 拉丁字母/数字词项与重叠中文三字片段，禁止把多词查询只包装成一个强制连续短语；PostgreSQL 在原生 trigram 候选生成前拆分同一组有界词项。带索引的 Chunk/KG 检索合并有界 ANN 与词法窗口；带索引的 Relation 检索通过 source/target 索引补入与词法命中 KG 端点相邻的有界有效关系，并保留 FTS 端点顺序、为两个关系方向预留预算，禁止高出度 source 饿死 target-only 命中。候选 id 与语义分 map 必须分开，纯词法候选按 keyword-only 计分，不得写入伪造的零语义分。
 - **大库冷加载前置 readiness**：默认 `STARTUP_PRELOAD_SCALE_INDEXES=true`，服务必须在 `/api/ready` 前加载全部已发布 scale 索引、启用的 ANN handle 与可安全复用的单索引 PPR core；加载失败或索引数超过 `SCALE_IDX_CACHE_MAX` 必须 not-ready，不能把工件冷成本留给首位用户。单一 self-index 组合图复用原 node list/map/idf/PPR core，且 core 随专用 ScaleIndex LRU 常驻；不得在启动时全量物化跨库 mounted 组合图（现有拼接会成倍复制千万节点图并 OOM）。严格保证只覆盖启动时已经发布的工件集合；运行中 build/fold 或新增第 `SCALE_IDX_CACHE_MAX+1` 个索引仍走既有在线路径，稳定部署应提前扩容并重启以重新建立 readiness 保证。关闭 preload 只用于修复坏索引的临时恢复。
 - **LLM 响应缓存是 opt-in**：`chat_json` 的内容寻址缓存默认开，但**只有传 `response_validator` 的调用方才读写它**——不传就既不读也不写（对调用方透明、正确性保留、只失去性能）。占成本大头的 KG 抽取三处传 validator 保持缓存；Ask、paper_meta、summary 等不传的调用方刻意不缓存，一次关掉「偶发坏值被固化整个 TTL」的投毒类。健康探针走 `bypass_cache`；admin 清缓存 `tag` 与 `clear_all` 二选一（同时传即 400，绝不静默全清）。UI 上传按内容哈希做**同 notebook 内**去重（对齐 `batch_ingest`）；同内容不同后缀重传复用既有源、保留原解析（要换解析器请删除该源再重传）。本特性追加迁移 v30（`sources(notebook_id, file_hash)` 去重索引）。
 - 不引入 Docker 作为一期默认工作流；装新包前先问。

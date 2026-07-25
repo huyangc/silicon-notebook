@@ -41,6 +41,22 @@ def test_score_chunks_uses_semantic_sims():
     assert out[0].relevance >= 0.5
 
 
+def test_score_chunks_lexical_only_candidate_is_keyword_renormalized():
+    chunks = [_ck("lexical", "ZXCV9000 timing controller")]
+    keyword_only = score_chunks(
+        "ZXCV9000 controller", chunks, query_vector=None, chunk_sims=None, limit=10
+    )
+    mixed_window = score_chunks(
+        "ZXCV9000 controller",
+        chunks,
+        query_vector=[0.1] * 4,
+        chunk_sims={"semantic-other": 0.9},
+        limit=10,
+    )
+    assert keyword_only and mixed_window
+    assert mixed_window[0].score == pytest.approx(keyword_only[0].score)
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
@@ -48,6 +64,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "16")
+    monkeypatch.setenv("MODEL_SERVICES_CONFIG", "")
     for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
@@ -92,7 +109,8 @@ def test_mmr_select_caps_and_subsets(repo):
 
 
 def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
-    # 10 个 chunk;开 chunk_ann_enabled + recall=3 时只对 ANN 候选(≤3)打分,非全表 10 条
+    # 10 个 chunk;开 chunk_ann_enabled + recall=3 时只对 ANN∪FTS 有界候选
+    # (各≤3,合计≤6)打分,非全表 10 条。
     nb, _ = _seed_chunks(repo, [f"topic {i} content detail body " * 10 for i in range(10)])
     repo.rebuild_unified_kg(nb.id)
     repo.build_scale_index(nb.id)
@@ -115,11 +133,18 @@ def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
         monkeypatch.setattr(srepo, "score_chunks", spy)
 
     scored, ids, mat = repo._retrieve_chunks(nb.id, "topic 3 content")
-    assert seen.get("n", 10) <= 3            # 只对 ANN 候选打分,非全部 10 条
+    assert seen.get("n", 10) <= 6            # 只对 ANN∪FTS 候选打分,非全部 10 条
     assert isinstance(scored, list)
-    # ids 为候选子集且 ≤ recall
-    assert len(ids) <= 3
-    assert {c.chunk_id for c in scored} <= set(idx.chunk_ann_labels)
+    # ids 为 ANN∪FTS 候选子集且 ≤ 2*recall
+    assert len(ids) <= 6
+    with repo._connect() as db:
+        lexical_ids = {
+            hit["chunk_id"]
+            for hit in repo._runtime.knowledge.chunk_fts_search(
+                db, nb.id, "topic 3 content", k=3
+            )
+        }
+    assert {c.chunk_id for c in scored} <= set(idx.chunk_ann_labels) | lexical_ids
 
 
 def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):

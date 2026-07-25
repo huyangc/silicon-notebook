@@ -21,6 +21,7 @@ from psycopg import sql
 
 from app.core.json_safety import validate_finite_json
 from app.models.common import Evidence
+from app.repositories.lexical_query import lexical_recall_terms
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
@@ -36,10 +37,10 @@ from app.repositories.postgres.mount_sql import (
 )
 from app.repositories.postgres.search import (
     chunk_candidate_documents,
-    chunk_candidate_rows,
-    deterministic_lexical_score,
+    chunk_candidate_rows_for_terms,
+    deterministic_lexical_score_terms,
     knowledge_candidate_documents,
-    knowledge_candidate_rows,
+    knowledge_candidate_rows_for_terms,
 )
 
 
@@ -50,6 +51,81 @@ _GRAPH_RESET_TABLES = frozenset({
     "extraction_runs",
     "unified_kg_state",
 })
+
+
+def _lexical_candidate_union(
+    db: Any,
+    notebook_id: str,
+    query: str,
+    k: int,
+    *,
+    candidate_rows_for_terms,
+    candidate_documents,
+    output_id: str,
+    text_field: str,
+) -> list[dict]:
+    """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query."""
+    terms = lexical_recall_terms(query)
+    result_limit = max(0, int(k))
+    if not terms or not result_limit:
+        return []
+
+    # Give every term a bounded share so an exact-phrase crowd cannot suppress
+    # a rare independent identifier.  The union stays below 4K + 64 rows.
+    candidate_budget = max(result_limit * 4, len(terms), 12)
+    per_term_limit = max(1, (candidate_budget + len(terms) - 1) // len(terms))
+    candidates = candidate_rows_for_terms(
+        db, notebook_id, terms, per_term_limit
+    )
+    if not candidates:
+        return []
+
+    groups: dict[int, list[str]] = {rank: [] for rank in range(len(terms))}
+    term_ranks_by_id: dict[str, set[int]] = {}
+    for row in candidates:
+        candidate_id = row["candidate_id"]
+        term_rank = int(row["term_rank"])
+        groups[term_rank].append(candidate_id)
+        term_ranks_by_id.setdefault(candidate_id, set()).add(term_rank)
+
+    # Round-robin the scarcest term groups first.  This enforces the global K
+    # hydration bound and prevents a common term from crowding out a rare id.
+    ordered_ranks = sorted(groups, key=lambda rank: (len(groups[rank]), rank))
+    positions = {rank: 0 for rank in ordered_ranks}
+    ids: list[str] = []
+    selected: set[str] = set()
+    while len(ids) < result_limit:
+        progressed = False
+        for rank in ordered_ranks:
+            group = groups[rank]
+            while positions[rank] < len(group):
+                candidate_id = group[positions[rank]]
+                positions[rank] += 1
+                if candidate_id in selected:
+                    continue
+                selected.add(candidate_id)
+                ids.append(candidate_id)
+                progressed = True
+                break
+            if len(ids) >= result_limit:
+                break
+        if not progressed:
+            break
+
+    rows = candidate_documents(db, ids)
+    output = []
+    for row in rows:
+        text = row[text_field] or ""
+        matched_terms = [terms[rank] for rank in term_ranks_by_id[row["id"]]]
+        score = deterministic_lexical_score_terms(matched_terms, text)
+        output.append({
+            output_id: row["id"],
+            "score": score,
+            "match": "lexical",
+            **({"name": text} if output_id == "object_id" else {}),
+        })
+    output.sort(key=lambda item: (-item["score"], item[output_id]))
+    return output[:result_limit]
 
 
 def _json_document(value: Any, *, expected: type, field: str) -> Any:
@@ -474,6 +550,77 @@ class KnowledgeStore:
                 base_sql + f" AND r.id IN ({ph})", (notebook_id, *batch),
             ).fetchall())
         return KnowledgeStore._compat_relation_context(rows)
+
+    @staticmethod
+    def relation_id_rows_for_objects(
+        db: Any,
+        notebook_id: str,
+        object_ids,
+        limit: int,
+        *,
+        batch_size: int = 900,
+    ):
+        """PostgreSQL parity for bounded lexical-endpoint relation recall."""
+        values = list(dict.fromkeys(object_ids))
+        remaining = max(0, int(limit))
+        if not values or not remaining:
+            return []
+        rows = []
+        seen: set[str] = set()
+        streams = [
+            (endpoint, object_id)
+            for object_id in values
+            for endpoint in ("source_object_id", "target_object_id")
+        ]
+        cursors = {stream_index: "" for stream_index in range(len(streams))}
+        active = list(range(len(streams)))
+        stream_batch_size = max(1, min(int(batch_size), 200))
+        while remaining > 0 and active:
+            page_size = max(1, (remaining + len(active) - 1) // len(active))
+            counts = {stream_index: 0 for stream_index in active}
+            last_ids: dict[int, str] = {}
+            for batch_offset in range(0, len(active), stream_batch_size):
+                batch = active[batch_offset:batch_offset + stream_batch_size]
+                branches = []
+                params = []
+                for stream_index in batch:
+                    endpoint, object_id = streams[stream_index]
+                    branches.append(
+                        f"SELECT id,{stream_index} AS stream_index FROM ("
+                        f"SELECT id FROM knowledge_relations "
+                        f"WHERE notebook_id=%s AND review_status!='rejected' "
+                        f"AND {endpoint}=%s AND id>%s ORDER BY id LIMIT %s"
+                        f") AS relation_stream_{stream_index}"
+                    )
+                    params.extend((
+                        notebook_id,
+                        object_id,
+                        cursors[stream_index],
+                        page_size,
+                    ))
+                found = db.execute(" UNION ALL ".join(branches), params).fetchall()
+                for row in sorted(found, key=lambda item: item["stream_index"]):
+                    stream_index = row["stream_index"]
+                    counts[stream_index] += 1
+                    last_ids[stream_index] = max(
+                        last_ids.get(stream_index, ""), row["id"]
+                    )
+                    if row["id"] in seen:
+                        continue
+                    seen.add(row["id"])
+                    rows.append(row)
+                    remaining -= 1
+                    if remaining <= 0:
+                        return rows
+            next_active = []
+            for stream_index in active:
+                fetched = counts[stream_index]
+                if stream_index in last_ids:
+                    cursors[stream_index] = last_ids[stream_index]
+                if fetched == page_size:
+                    next_active.append(stream_index)
+            active = next_active
+        return rows
 
     @staticmethod
     def _compat_relation_context(rows):
@@ -1398,46 +1545,31 @@ class KnowledgeStore:
     def fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
-        if not needle:
-            return []
-        candidates = knowledge_candidate_rows(db, notebook_id, needle, max(k * 4, 12))
-        ids = [row["candidate_id"] for row in candidates]
-        if not ids:
-            return []
-        rows = knowledge_candidate_documents(db, ids)
-        output = [
-            {
-                "object_id": row["id"],
-                "name": row["name"] or "",
-                "score": deterministic_lexical_score(needle, row["name"] or ""),
-                "match": "lexical",
-            }
-            for row in rows
-        ]
-        output.sort(key=lambda item: (-item["score"], item["object_id"]))
-        return output[: max(0, int(k))]
+        return _lexical_candidate_union(
+            db,
+            notebook_id,
+            needle,
+            k,
+            candidate_rows_for_terms=knowledge_candidate_rows_for_terms,
+            candidate_documents=knowledge_candidate_documents,
+            output_id="object_id",
+            text_field="name",
+        )
 
     @staticmethod
     def chunk_fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
         """Return deterministic lexical chunk hits from trigram candidates."""
         needle = (q or "").strip()
-        if not needle:
-            return []
-        candidates = chunk_candidate_rows(db, notebook_id, needle, max(k * 4, 12))
-        ids = [row["candidate_id"] for row in candidates]
-        if not ids:
-            return []
-        rows = chunk_candidate_documents(db, ids)
-        output = [
-            {
-                "chunk_id": row["id"],
-                "score": deterministic_lexical_score(needle, row["text"]),
-                "match": "lexical",
-            }
-            for row in rows
-        ]
-        output.sort(key=lambda item: (-item["score"], item["chunk_id"]))
-        return output[: max(0, int(k))]
+        return _lexical_candidate_union(
+            db,
+            notebook_id,
+            needle,
+            k,
+            candidate_rows_for_terms=chunk_candidate_rows_for_terms,
+            candidate_documents=chunk_candidate_documents,
+            output_id="chunk_id",
+            text_field="text",
+        )
 
     @staticmethod
     def backfill_fts(db: Any, notebook_id: str) -> int:

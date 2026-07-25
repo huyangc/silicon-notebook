@@ -11,8 +11,8 @@ This document preserves the contributor-facing architecture summary, verificatio
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 30. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v30 and remains readable. Those migrations
+The current schema version is 31. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v31 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -29,10 +29,10 @@ build); v28 adds the app_settings key/value table and the nullable
 user_profiles.upload_document_limit column backing the per-notebook document
 limit; v29 deterministically deduplicates cluster memberships and installs the
 unique membership index; v30 adds the sources(notebook_id, file_hash) index
-backing content-hash upload dedup and batch_ingest resume. PostgreSQL's
-checksummed schema manifest currently targets migration v8 and declares
-compatibility with SQLite v29 (the v30 lookup index is a SQLite-only
-performance addition).
+backing content-hash upload dedup and batch_ingest resume; v31 adds covering
+`(notebook_id, source_object_id/target_object_id, id)` indexes for stable,
+bounded relation keyset recall. PostgreSQL's checksummed schema manifest targets
+migration v10 and declares compatibility with SQLite v31.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.

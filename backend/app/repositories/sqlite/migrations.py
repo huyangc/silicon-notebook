@@ -15,8 +15,9 @@ from app.services.kg.filters import _norm as _wl_norm
 # Both sides originally allocated migration 24 independently.  Version 29 is
 # the merge migration that makes either already-deployed lineage converge.
 # v30 adds idx_sources_notebook_file_hash for content-hash upload dedup /
-# batch_ingest resume (previously a full-table scan).
-SCHEMA_VERSION = 30
+# batch_ingest resume (previously a full-table scan). v31 adds stable relation
+# endpoint keyset indexes for bounded lexical relation recall.
+SCHEMA_VERSION = 31
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1730,6 +1731,18 @@ class SqliteMigrator:
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sources_notebook_file_hash "
                 "ON sources(notebook_id, file_hash)"
+            )
+
+    def _migration_31(self) -> None:
+        """Stable keyset order for bounded source/target relation probes."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_source_id
+                  ON knowledge_relations(notebook_id, source_object_id, id);
+                CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_target_id
+                  ON knowledge_relations(notebook_id, target_object_id, id);
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

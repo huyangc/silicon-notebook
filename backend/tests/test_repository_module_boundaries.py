@@ -67,6 +67,7 @@ def test_stores_own_the_plan_frozen_primitives():
         "insert_object_chunk", "insert_relation_chunk", "insert_kg_fts_rows",
         "replace_object_sources", "get_object_row", "add_relations",
         "relations_for_notebook", "fts_search", "chunk_fts_search",
+        "relation_id_rows_for_objects",
         "backfill_fts", "clear_source_extraction_state",
         "begin_extraction_run", "finish_extraction_run",
     ):

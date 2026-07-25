@@ -84,6 +84,47 @@ def test_retrieve_scored_bounded_when_indexed(repo, monkeypatch):
     assert len(ids) <= 3 + 1              # 有界:≤ recall(3)核 + delta(1),远小于 7 全量
 
 
+def test_retrieve_scored_unions_lexical_candidates_with_kg_ann(repo, monkeypatch):
+    """A lexical-only exact name outside the mocked ANN window remains recallable."""
+    import json
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="base"))
+    repo.store_kg(nb.id, None, [
+        {
+            "local_id": "decoy",
+            "object_type": "concept",
+            "payload": {"name": "semantic decoy", "section_path": ""},
+            "evidence": [],
+        },
+        {
+            "local_id": "lexical",
+            "object_type": "concept",
+            "payload": {"name": "ZXCV9000 timing controller", "section_path": ""},
+            "evidence": [],
+        },
+    ], [])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?", (nb.id,)
+        ).fetchall()
+    ids_by_name = {json.loads(row["payload"])["name"]: row["id"] for row in rows}
+    decoy_id = ids_by_name["semantic decoy"]
+    lexical_id = ids_by_name["ZXCV9000 timing controller"]
+
+    monkeypatch.setattr(repo.settings, "chunk_recall", 1)
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_kg_object_candidates",
+        lambda *_args, **_kwargs: {decoy_id: 0.9},
+    )
+
+    hits = repo._retrieve_scored(nb.id, "ZXCV9000 timing controller")
+    assert lexical_id in {hit.object_id for hit in hits}
+
+
 def test_keyword_score_ignores_stopwords():
     # Verbose phrasing must not dilute the score: only content tokens count.
     # Basis after dropping stopwords (what/is/and/are/its) -> {engram, problems};

@@ -70,7 +70,7 @@ def test_schema_version_is_30():
     # v27 → v28; v29 reconciles the two independently allocated v24
     # lineages (canonical scratch + cluster membership uniqueness); v30 adds the
     # sources(notebook_id, file_hash) content-hash dedup index.
-    assert sr.SCHEMA_VERSION == 30
+    assert sr.SCHEMA_VERSION == 31
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):
