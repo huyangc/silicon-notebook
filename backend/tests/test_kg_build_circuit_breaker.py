@@ -638,6 +638,59 @@ def test_interrupt_while_still_submitting_drains_what_was_submitted(
     assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
 
 
+def test_interrupt_after_the_insert_but_before_create_job_returns_settles(
+    repo, monkeypatch
+):
+    """create_job 先 INSERT 再 get(job_id) 返回。信号落在这两者之间时 job 未赋值,
+    调用方的守卫也进不去,行永久留在 running(评审 P2)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    store = repo._runtime.kg_build_jobs
+    real_get = store.get
+    fired = {"n": 0}
+
+    def _get(job_id):
+        if not fired["n"]:
+            fired["n"] = 1  # 行已提交,但 create_job 还没返回
+            raise KeyboardInterrupt("ctrl-c between insert and return")
+        return real_get(job_id)
+
+    monkeypatch.setattr(store, "get", _get)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    saved = store.latest(notebook.id)
+    assert saved is not None and saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    assert repo.get_notebook(notebook.id).kg_building is False
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
+def test_interrupt_before_the_insert_never_touches_a_foreign_running_row(
+    repo, monkeypatch
+):
+    """反向护栏:中断若落在 INSERT **之前**,最新那行不是本次建的——它可能属于一个仍
+    活着的后端进程。离线进程无权裁决它,必须原样不动。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    store = repo._runtime.kg_build_jobs
+    foreign = store.create_job(notebook.id, "someone-else", "incremental", 5)
+    monkeypatch.setattr(
+        store, "create_job",
+        lambda *a, **k: (_ for _ in ()).throw(
+            KeyboardInterrupt("ctrl-c before the insert")
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    assert store.get(foreign["id"])["status"] == "running", (
+        "动了别人的进行中任务"
+    )
+
+
 @pytest.mark.parametrize(
     "step", ["kg_build_started", "publish_pending"],
 )
