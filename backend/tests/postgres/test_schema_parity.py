@@ -214,19 +214,25 @@ ROWID_REVIEWED_NON_ORDINAL: dict[tuple[str, str], str] = {
         "`ORDER BY created_at DESC, rowid DESC LIMIT 1`; PostgreSQL breaks the "
         "same tie with `id COLLATE \"C\" DESC`, which is a random surrogate "
         "key and NOT insertion order. Reaching the tie needs two running jobs "
-        "in one conversation sharing a created_at, and created_at carries "
-        "microsecond precision (repository_facade._now), so the two backends "
-        "can only diverge on a sub-microsecond double submit. Giving ask_jobs "
-        "an ordinal column would cost a PostgreSQL migration plus a manifest "
-        "bump for an unreachable tie; revisit if the tie ever becomes real. "
-        "codex review round 2 argued the collision does not require "
-        "sub-microsecond calls because `now` is read before the write "
-        "transaction is acquired — rejected: the transaction boundary decides "
-        "which row lands first, not whether the two `datetime.now()` reads "
-        "return the same microsecond, and equal timestamps is the only way to "
-        "reach the tie-break at all. What WOULD make it reachable is the "
-        "timestamp losing resolution, so "
-        "test_ask_job_tie_waiver_rests_on_microsecond_timestamps pins that."
+        "in one conversation whose created_at values are equal at microsecond "
+        "precision (repository_facade._now) — rare, not impossible: two "
+        "submissions less than a microsecond apart do tie, and then the two "
+        "backends can surface different active jobs. This entry records that "
+        "as a KNOWN, BOUNDED divergence rather than a proof of impossibility. "
+        "Bounded because both rows are legitimate running jobs of the same "
+        "conversation, so the only user-visible effect is which one's trace is "
+        "restored; no answer, ownership, or durability is affected. Closing it "
+        "properly means giving ask_jobs an ordinal column — a PostgreSQL "
+        "migration plus a manifest bump, i.e. a schema change that belongs in "
+        "its own reviewed PR, not in a test-only guard. Raised by codex review "
+        "rounds 2 and 3; round 2's specific argument (that reading `now` "
+        "before the write transaction removes the sub-microsecond requirement) "
+        "is wrong — the transaction boundary decides which row lands first, "
+        "not whether two `datetime.now()` reads return the same microsecond. "
+        "The waiver's real dependency is timestamp resolution, which "
+        "test_ask_job_tie_waiver_rests_on_microsecond_timestamps pins: at "
+        "second resolution an ordinary double submit would tie and this "
+        "bounded divergence would stop being rare."
     ),
     (
         "app.repositories.sqlite.memory_store:MemoryStore.list_memories",
@@ -427,12 +433,13 @@ def test_schema_manifest_pairing_is_pinned_without_a_live_database():
 def test_ask_job_tie_waiver_rests_on_microsecond_timestamps():
     """Reverse guardrail for the ask_jobs entry in ROWID_REVIEWED_NON_ORDINAL.
 
-    That waiver is only sound while two Ask submissions practically cannot
-    share a ``created_at``.  Concurrency does not threaten it — two writers
-    still have to read the same microsecond — but a coarser timestamp would:
-    at second resolution an ordinary double submit ties, and the two backends
-    would then surface different running jobs.  So pin the resolution itself,
-    both the rendered format and the clock behind it.
+    The waiver does not claim the tie is impossible — two submissions inside
+    one microsecond do tie.  It claims the tie stays rare and its effect stays
+    bounded.  Rarity rests entirely on timestamp resolution: at second
+    resolution an ordinary double submit ties and the divergence becomes
+    routine.  So pin the resolution itself, both the rendered format and the
+    clock behind it.  This is a guardrail on the waiver's premise, not a proof
+    that equal timestamps cannot occur.
     """
     from app.services.repository_facade import _now
 
