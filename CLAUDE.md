@@ -30,6 +30,7 @@
 - **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v33；PostgreSQL checksummed schema 为 v11，两侧都包含关系端点 + id 的稳定 keyset 覆盖索引。
 - **界面词汇**：面向用户的文案只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG`/`schema` 这类内部黑话。真源是 `AGENTS.md`「界面词汇表」，`scripts/check_ui_vocabulary.py` 是硬门。**唯一放行的英文界面词是「图谱 Schema」**（图谱对象类型/字段管理，原「内容类型」，现从知识图谱视图头部进入）——守卫的 `SANCTIONED_UI` 只放行这一个复合短语（带 CJK 前置断言，不吞「知识图谱」尾字），裸 `schema`/`Schema` 仍拦。
 - **错误文案**：deny by default，信任按**出处**判定而非文本形状。后端中文用户文案必须走 `backend/app/api/deps.py` 的 `user_error()`（打 `X-User-Message` 头），前端翻译只在 `frontend/app/errors.ts`。
+- **Knowhow 导入校验**：属性按行/按列必须在解析前按用户选择统一；横向合并记录分组导致展开后首行重复时，应提示改选「属性按行」。只有 `GridParseError` / `KnowhowImportValidationError` 的固定可操作文案可经 `user_error()` 上屏，其他 `ValueError` 保持诊断专用。
 - **`object_type` 标签**：后端 `OBJECT_TYPE_LABELS` 与前端 `KG_TYPE_LABELS` 必须逐字一致，改一侧就要改另一侧。
 - **架构守卫**是语义化的（`{path, scope, kind, target}`），**不含行号**——仓库里任何提到「行号钉死」的注释都是过时残留。重生成走 `--rebaseline-surface` / `--rebaseline-callers`；新端点必须跑默认模式刷 `api_contract`。
 - **knowhow 变更历史**（`knowhow_changes`/`knowhow_milestones`，schema v26）：knowhow 表的**每条写路径**必须在写事务**最后一步**经模块级 `record_change` 追加一条流水（存 before/after + 变更后整表指纹，复用传输守卫的 `_FINGERPRINT_SQL`）；`test_knowhow_history_coverage_guard.py` 是硬门，新增写方法漏挂就报红。回退是逆序 delta 重放 + 前后置指纹守卫（行/列复用原 id 保引用与代码附件）；里程碑创建与 `create_milestone` 的复检必须在 `BEGIN IMMEDIATE` 之内，清理只删最老连续前缀且永留 head。完整契约见 `AGENTS.md`「Architecture Baseline」的 knowhow 历史条目与 `architecture.md` § 3.7。

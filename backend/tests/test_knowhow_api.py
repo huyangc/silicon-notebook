@@ -167,8 +167,47 @@ def test_preview_grid_parse_error_passthrough_400(tmp_path, monkeypatch):
         files={"file": ("rules.txt", b"not a grid", "text/plain")},
     )
     assert resp.status_code == 400, resp.text
+    assert resp.headers["X-User-Message"] == "1"
     detail = resp.json()["detail"]
     assert any("一" <= ch <= "鿿" for ch in detail)  # friendly Chinese, not a raw dump
+
+
+def test_preview_merged_attribute_rows_returns_actionable_marked_error(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000551")
+    nb = _mk_notebook(client, owner_h)
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["违例概念", "hold和setup打架", None, None, None, "setup", None])
+    ws.append(["现象识别方法", "A", "B", "C", "D", "E", "F"])
+    ws.append(["根因分析动作", "A", "B", "C", "D", "E", "F"])
+    ws.append(["修复方法", "A", "B", "C", "D", "E", "F"])
+    ws.append(["依赖工具", "A", "B", "C", "D", "E", "F"])
+    ws.merge_cells("B1:E1")
+    ws.merge_cells("F1:G1")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    resp = client.post(
+        f"/api/notebooks/{nb}/knowhow/import/preview",
+        headers=owner_h,
+        files={
+            "file": (
+                "know-how.xlsx",
+                buf.getvalue(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.headers["X-User-Message"] == "1"
+    assert resp.json()["detail"] == (
+        "这张表看起来是属性按行排列（第一列是属性名，每一列是一条记录），"
+        "请先选择“属性按行”，再重新选择这个文件。"
+    )
 
 
 # --- preview normalizes using the USER-confirmed anchor, not the guess -------
@@ -508,8 +547,9 @@ def test_import_column_count_mismatch_returns_friendly_400(tmp_path, monkeypatch
     short_columns = json.dumps([{"name": n, "kind": k} for n, k in zip(HEADER[:3], KINDS[:3])])
     resp = _import_xlsx(client, owner_h, nb, columns_json=short_columns)
     assert resp.status_code == 400, resp.text
+    assert resp.headers["X-User-Message"] == "1"
     detail = resp.json()["detail"]
-    assert any("一" <= ch <= "鿿" for ch in detail)
+    assert detail == "列设置与文件列数不一致，请返回重新预览文件后再导入。"
 
 
 def test_import_illegal_kind_value_returns_friendly_400(tmp_path, monkeypatch):
@@ -580,11 +620,12 @@ def test_import_empty_title_returns_friendly_400(tmp_path, monkeypatch):
     owner_h = _login(client, "a00000508")
     nb = _mk_notebook(client, owner_h)
 
-    # Valid grid + roles, but a whitespace-only title: create_knowhow_table's
-    # ValueError must surface through knowhow_routes.py's existing 400 idiom.
+    # Valid grid + roles, but a whitespace-only title: the import layer must
+    # return actionable, marked copy rather than exposing a store ValueError.
     resp = _import_xlsx(client, owner_h, nb, title="   ")
     assert resp.status_code == 400, resp.text
-    assert "表标题不能为空" in resp.json()["detail"]
+    assert resp.headers["X-User-Message"] == "1"
+    assert resp.json()["detail"] == "请输入表标题后再导入。"
 
 
 def test_import_grid_parse_error_passthrough_400(tmp_path, monkeypatch):

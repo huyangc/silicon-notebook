@@ -23,6 +23,10 @@ class GridParseError(ValueError):
     (corrupt / not a real .xlsx) or that contains no worksheet. Carries a
     user-facing Chinese message."""
 
+    def __init__(self, user_message: str) -> None:
+        self.user_message = user_message
+        super().__init__(user_message)
+
 
 @dataclass
 class ParsedGrid:
@@ -35,6 +39,10 @@ _SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 _PIPE_SPLIT_RE = re.compile(r"(?<!\\)\|")
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 IMPORT_ORIENTATIONS = frozenset({"columns", "rows"})
+ROWS_ORIENTATION_HINT = (
+    "这张表看起来是属性按行排列（第一列是属性名，每一列是一条记录），"
+    "请先选择“属性按行”，再重新选择这个文件。"
+)
 
 
 def _normalize_orientation(
@@ -73,7 +81,9 @@ def parse_grid(
     elif suffix in (".md", ".markdown"):
         raw_rows = _extract_markdown_rows(data)
     else:
-        raise GridParseError(f"不支持的表格文件类型：{suffix or filename}")
+        raise GridParseError(
+            "不支持这种表格文件，请选择 .xlsx、.xlsm、.csv 或 .md 文件后重试。"
+        )
     normalized_rows = _normalize_orientation(raw_rows, orientation)
     return _build_grid(
         normalized_rows,
@@ -84,17 +94,26 @@ def parse_grid(
 def _looks_transposed(raw_rows: list[list[str]]) -> bool:
     """行列相反的表（字段名在第一列、每列一条记录）的形状特征。
 
-    两个条件同时成立才认：表头除首格外含空列名——那行其实是第一条记录的
-    值、只有开头几个分支有值；且第一列自上而下全部有值——那才是真正的字
-    段名。只满足前者更可能是「表头漏填了几个列名」，别误导用户去转置。
+    第一列自上而下必须都有值（像一组字段名），然后满足以下之一才提示转置：
+    ① 首行除首格外有空值；② 首行有重复值，且第一列至少有三个互不重复的
+    后续字段。② 专门覆盖属性行表把记录分组名横向合并的常见 Excel 形状——
+    合并区展开后首行不再为空，而会变成重复表头。短小的普通列式表即使误写
+    重复表头也不据此判成转置，仍给「列名不能重复」的直接修复建议。
     """
     header = raw_rows[0]
     if len(header) < 2 or not header[0].strip():
         return False
-    if all(name.strip() for name in header[1:]):
-        return False
     first_column = [row[0] for row in raw_rows[1:] if row]
-    return bool(first_column) and all(cell.strip() for cell in first_column)
+    if not first_column or not all(cell.strip() for cell in first_column):
+        return False
+    if any(not name.strip() for name in header[1:]):
+        return True
+    has_duplicate_header = len(header) != len(set(header))
+    return (
+        has_duplicate_header
+        and len(first_column) >= 3
+        and len(first_column) == len(set(first_column))
+    )
 
 
 def _blank_header_error(
@@ -106,10 +125,7 @@ def _blank_header_error(
     已经选择属性按行后若规范化表头仍为空，只提示补齐属性名。
     """
     if suggest_rows_orientation and _looks_transposed(raw_rows):
-        return (
-            "这张表看起来是属性按行排列，"
-            "请返回并选择“属性按行”后重新导入。"
-        )
+        return ROWS_ORIENTATION_HINT
     return "表头存在空列名，请补齐缺失的列名后再导入。"
 
 
@@ -130,7 +146,11 @@ def _build_grid(
                 )
             )
         if name in seen:
-            raise GridParseError(f"表头存在重复列名：{name!r}")
+            if suggest_rows_orientation and _looks_transposed(raw_rows):
+                raise GridParseError(ROWS_ORIENTATION_HINT)
+            raise GridParseError(
+                "表头存在重复列名，请将第一行的每个列名改成不重复的名称后再导入。"
+            )
         seen.add(name)
 
     width = len(columns)

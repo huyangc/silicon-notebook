@@ -120,7 +120,37 @@ def test_parse_grid_xlsx_horizontal_merge_in_header_expands():
         parse_grid("rules.xlsx", buf.getvalue())
     # 保证不是「空列名」错误——合并已展开成同名列，才走「重复列名」分支。
     assert "重复" in str(info.value)
-    assert "date" in str(info.value)
+
+
+def test_parse_grid_xlsx_merged_record_groups_suggest_rows_orientation():
+    """Attribute-row workbook with merged record-group headings should point
+    to the wizard choice that makes the file valid, not merely report a
+    duplicate header after merged-cell expansion.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["违例概念", "hold和setup打架", None, None, None, "setup", None, None])
+    ws.append(["现象识别方法", "现象 A", "现象 B", "现象 C", "现象 D", "现象 E", "现象 F", "现象 G"])
+    ws.append(["根因分析动作", "根因 A", "根因 B", "根因 C", "根因 D", "根因 E", "根因 F", "根因 G"])
+    ws.append(["修复方法", "修复 A", "修复 B", "修复 C", "修复 D", "修复 E", "修复 F", "修复 G"])
+    ws.append(["依赖工具", "工具 A", "工具 B", "工具 C", "工具 D", "工具 E", "工具 F", "工具 G"])
+    ws.merge_cells("B1:E1")
+    ws.merge_cells("F1:H1")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    with pytest.raises(GridParseError) as info:
+        parse_grid("know-how.xlsx", buf.getvalue(), orientation="columns")
+    assert str(info.value) == (
+        "这张表看起来是属性按行排列（第一列是属性名，每一列是一条记录），"
+        "请先选择“属性按行”，再重新选择这个文件。"
+    )
+
+    grid = parse_grid("know-how.xlsx", buf.getvalue(), orientation="rows")
+    assert grid.columns == ["违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"]
+    assert len(grid.rows) == 7
+    assert grid.rows[0][0] == "hold和setup打架"
+    assert grid.rows[4][0] == "setup"
 
 
 def test_parse_grid_xlsx_horizontal_merge_in_data_row_fills_across():
@@ -449,8 +479,8 @@ def test_parse_grid_column_orientation_points_transposed_shape_to_ui_choice():
         parse_grid("rules.csv", data, orientation="columns")
 
     assert str(excinfo.value) == (
-        "这张表看起来是属性按行排列，"
-        "请返回并选择“属性按行”后重新导入。"
+        "这张表看起来是属性按行排列（第一列是属性名，每一列是一条记录），"
+        "请先选择“属性按行”，再重新选择这个文件。"
     )
 
 
