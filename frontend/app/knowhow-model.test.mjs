@@ -498,6 +498,15 @@ test("reformatKnowhowCell: POST 到 .../reformat，响应 source_md 映射为 so
   });
 });
 
+test("reformatKnowhowCell: 可选 AbortSignal 透传到共享请求客户端", () => {
+  const wire = { candidate_md: "x", source: "rule", changed: false, source_md: "x" };
+  return withFetchStub(wire, async (calls) => {
+    const controller = new AbortController();
+    await reformatKnowhowCell("nb-1", "t1", "r1", "c1", controller.signal);
+    assert.strictEqual(calls[0].init.signal, controller.signal);
+  });
+});
+
 // --- batchPatchKnowhowCells（followup A：合并格整组单事务批量写，spec §6）--------
 
 test("batchPatchKnowhowCells: PATCH 到 .../cells，请求体为 {column_id,row_ids,content_md}，响应列表按项 snake_case 映射为 camelCase", () => {
@@ -776,7 +785,7 @@ test("completeKnowhowRow: 未指定目标列时发送空对象，不伪造 null 
 // --- getCellCode / putCellCode / deleteCellCode（三态覆盖）------------------------
 
 test("getCellCode: GET .../rows/{row}/cells/{col}/code，status=implemented 时正常映射", () => {
-  const wireCode = { code_text: "print(1)", language: "python", status: "implemented", updated_at: "2026-07-15T00:00:00Z" };
+  const wireCode = { code_text: "print(1)", language: "python", status: "implemented", updated_at: "2026-07-15T00:00:00Z", updated_by: "a00123456" };
   return withFetchStub(wireCode, async (calls) => {
     const code = await getCellCode("r1", "c1");
     assert.match(calls[0].url, /\/agent\/knowhow\/rows\/r1\/cells\/c1\/code$/);
@@ -785,9 +794,7 @@ test("getCellCode: GET .../rows/{row}/cells/{col}/code，status=implemented 时�
       language: "python",
       status: "implemented",
       updatedAt: "2026-07-15T00:00:00Z",
-      // 单格端点刻意不带 updated_by（后端 wire 契约）——mapper 恒填 null，
-      // 溯源只经行级 map（fetchKnowhowRowCodeByColumn）进入展示层。
-      updatedBy: null,
+      updatedBy: "a00123456",
     });
   });
 });
@@ -809,13 +816,14 @@ test("getCellCode: status=none 时无附件，codeText/language 兜底为空串"
 });
 
 test("putCellCode: PUT 请求体为 {code_text,language}，响应映射同 getCellCode", () => {
-  const wireCode = { code_text: "print(2)", language: "python", status: "implemented", updated_at: "2026-07-15T01:00:00Z" };
+  const wireCode = { code_text: "print(2)", language: "python", status: "implemented", updated_at: "2026-07-15T01:00:00Z", updated_by: "a00123456" };
   return withFetchStub(wireCode, async (calls) => {
     const code = await putCellCode("r1", "c1", "print(2)", "python");
     assert.match(calls[0].url, /\/agent\/knowhow\/rows\/r1\/cells\/c1\/code$/);
     assert.strictEqual(calls[0].init.method, "PUT");
     assert.deepStrictEqual(bodyOf(calls[0]), { code_text: "print(2)", language: "python" });
     assert.strictEqual(code.status, "implemented");
+    assert.strictEqual(code.updatedBy, "a00123456");
   });
 });
 

@@ -67,6 +67,7 @@ import {
   X,
 } from "lucide-react";
 import { requestBlob } from "./api-client.ts";
+import { fetchModelServiceStatus } from "./model-services.ts";
 import { modeLabel } from "./ask-modes.ts";
 import { ReasoningTracePanel } from "./answer-panel.tsx";
 import { useFloatingWindow } from "./use-floating-window.ts";
@@ -147,6 +148,12 @@ import { KnowhowHistoryDrawer } from "./knowhow-history-drawer.tsx";
 import { DestinationPicker } from "./transfer-picker.tsx";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
+import { diffKnowhowMarkdown, type KnowhowDiffLine } from "./knowhow-markdown-diff.ts";
+import {
+  computeKnowhowColumnWidths,
+  sampleVisibleKnowhowRows,
+} from "./knowhow-column-widths.ts";
+import { isFloatingDisabledWidth } from "./floating-window-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
   OPTIMIZE_ORIGINAL_LABEL,
@@ -191,6 +198,7 @@ import {
   initReformatBatch,
   reformatBatchSummary,
   beginReformatBatchRun,
+  beginReformatBatchRetry,
   markReformatItemRunning,
   applyReformatResult,
   applyReformatError,
@@ -203,18 +211,22 @@ import {
   finishReformatBatchSave,
   reformatBatchSaveNeedsRefresh,
   reformatBatchRunNeedsRefresh,
-  reformatDedupeKey,
   applyReformatCachedResult,
-  reformatResultIsStale,
   markReformatItemRunStale,
   planReformatSaves,
   reformatSaveCellKey,
   isReformatUnitStale,
   markReformatItemStaleSkipped,
+  resolveReformatGenerationConcurrency,
+  runReformatGenerationPool,
+  openSavedReformatCellAfterReload,
+  REFORMAT_OPEN_CELL_ERROR,
+  BATCH_REFORMAT_RETRY_LABEL,
   BATCH_REFORMAT_STALE_SKIP_TEXT,
   type ReformatBatchState,
   type ReformatBatchItem,
   type ReformatBatchScope,
+  type ReformatGenerationResult,
 } from "./knowhow-optimize-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -302,6 +314,13 @@ export function KnowhowPanel({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const panelMountedRef = useRef(true);
+  useEffect(() => {
+    panelMountedRef.current = true;
+    return () => {
+      panelMountedRef.current = false;
+    };
+  }, []);
   // Task 12（引用跳转）：跳转目标（表/行）已不存在时的友好提示——与
   // actionError 分开是因为这不是「操作失败」，是「引用陈旧」，文案与触发
   // 时机都不同（见下方两个 initialTableId/initialRowId 相关 effect）。
@@ -409,20 +428,21 @@ export function KnowhowPanel({
   // retryReproject/handleManageChanged/handleCellSave 等）共用同一套防倒灌。
   const detailRequestRef = useRef(0);
   const loadDetail = useCallback(
-    (tableId: string) => {
+    async (tableId: string): Promise<KnowhowTableDetail | null> => {
       const requestId = ++detailRequestRef.current;
       setDetailLoading(true);
       setDetailError(null);
-      fetchKnowhowTable(notebookId, tableId)
-        .then((data) => {
-          if (detailRequestRef.current === requestId) setDetail(data);
-        })
-        .catch(() => {
-          if (detailRequestRef.current === requestId) setDetailError("加载表格详情失败，请重试");
-        })
-        .finally(() => {
-          if (detailRequestRef.current === requestId) setDetailLoading(false);
-        });
+      try {
+        const data = await fetchKnowhowTable(notebookId, tableId);
+        if (detailRequestRef.current !== requestId) return null;
+        setDetail(data);
+        return data;
+      } catch {
+        if (detailRequestRef.current === requestId) setDetailError("加载表格详情失败，请重试");
+        return null;
+      } finally {
+        if (detailRequestRef.current === requestId) setDetailLoading(false);
+      }
     },
     [notebookId],
   );
@@ -441,8 +461,9 @@ export function KnowhowPanel({
   // 经 handleCellSave -> setDetail 落库合并（没有未落盘的本地态会被覆盖），故「重取整表
   // 后整体 set」是安全的。useCallback 稳定 identity：既省无谓重渲染，也让编辑器那侧即便
   // 直接依赖它也不会误触发（编辑器另用 ref 兜底，双保险）。
-  const reloadTableDetail = useCallback(() => {
-    if (selectedTableId) loadDetail(selectedTableId);
+  const reloadTableDetail = useCallback(async (): Promise<KnowhowTableDetail | null> => {
+    if (!selectedTableId) return null;
+    return loadDetail(selectedTableId);
   }, [selectedTableId, loadDetail]);
 
   // Task 11：行详情抽屉展开的这一行的代码状态——独立于 loadDetail（整表结构/
@@ -904,6 +925,47 @@ export function KnowhowPanel({
     const content = row?.cells[columnId] ?? "";
     if (!content.trim() && !canEdit) return;
     setCellModal({ rowId, columnId, mode: content.trim() ? "preview" : "edit" });
+  }
+
+  function openReformatSavedCell(
+    scope: ReformatBatchScope,
+    rowId: string,
+    columnId: string,
+    needsReload: boolean,
+  ) {
+    const currentDetail = detail;
+    if (!currentDetail) {
+      setActionError(REFORMAT_OPEN_CELL_ERROR);
+      return;
+    }
+    setActionError(null);
+    void openSavedReformatCellAfterReload({
+      rowId,
+      columnId,
+      currentRows: currentDetail.rows,
+      currentColumns: currentDetail.columns,
+      currentAnchorColumnId: currentDetail.anchorColumnId,
+      closeBatch: () => {
+        if (scope === "row") setReformatRowId(null);
+        else setReformatTableOpen(false);
+      },
+      // loadDetail 只在 requestId 仍为最新且面板/表目标未变化时返回 detail；
+      // 失败、切表或卸载均返回 null，helper 因此不会迟到打开旧物理格。
+      reload: needsReload ? reloadTableDetail : undefined,
+      openCell: (targetRowId, targetColumnId, stableRows) => {
+        const content = stableRows.find((row) => row.id === targetRowId)?.cells[targetColumnId] ?? "";
+        if (!content.trim() && !canEdit) return;
+        setCellModal({
+          rowId: targetRowId,
+          columnId: targetColumnId,
+          mode: content.trim() ? "preview" : "edit",
+        });
+      },
+    }).then((result) => {
+      // reload 的请求 epoch 已失效、请求失败，或刷新后行/列已被删除时，批次已经
+      // 安全关闭；沿表格现有 actionError 横幅给出可恢复提示，绝不回开旧目标。
+      if (panelMountedRef.current && !result.ok) setActionError(result.errorText);
+    });
   }
 
   // 「本行其他格子」点击切换（KnowhowCellEditor/KnowhowCellPreview 的
@@ -1597,6 +1659,8 @@ export function KnowhowPanel({
           onSaveCell={handleCellSave}
           // F（review）：保存阶段跳过过 stale 格 -> 刷新整表，下次批量用新鲜基线复跑。
           onStaleReload={reloadTableDetail}
+          onOpenSavedCell={(rowId, columnId, needsReload) =>
+            openReformatSavedCell("row", rowId, columnId, needsReload)}
           onClose={() => setReformatRowId(null)}
         />
       )}
@@ -1617,6 +1681,8 @@ export function KnowhowPanel({
           onSaveCell={handleCellSave}
           // F（review）：保存阶段跳过过 stale 格 -> 刷新整表，下次批量用新鲜基线复跑。
           onStaleReload={reloadTableDetail}
+          onOpenSavedCell={(rowId, columnId, needsReload) =>
+            openReformatSavedCell("table", rowId, columnId, needsReload)}
           onClose={() => setReformatTableOpen(false)}
         />
       )}
@@ -1960,7 +2026,6 @@ export function KnowhowPanel({
         .knowhow-grid-table {
           border-collapse: separate;
           border-spacing: 0;
-          width: 100%;
           table-layout: fixed;
           font-size: 13px;
         }
@@ -1972,7 +2037,6 @@ export function KnowhowPanel({
           padding: 10px 12px;
           text-align: left;
           vertical-align: top;
-          width: 200px;
         }
 
         .knowhow-grid-table th:last-child,
@@ -3013,6 +3077,113 @@ export function KnowhowPanel({
           flex: 0 0 auto;
           font-size: 11.5px;
           font-weight: 600;
+        }
+
+        .kh-reformat-queue-actions,
+        .kh-reformat-item-toolbar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .kh-reformat-link-button {
+          border: 0;
+          padding: 2px 0;
+          color: var(--blue);
+          background: transparent;
+          font-size: 11.5px;
+          font-weight: 600;
+          cursor: pointer;
+        }
+
+        .kh-reformat-link-button:hover {
+          text-decoration: underline;
+        }
+
+        .kh-reformat-item-detail {
+          min-height: 0;
+          display: flex;
+          flex: 1 1 auto;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .kh-reformat-item-toolbar .kh-view-switch {
+          margin-left: auto;
+        }
+
+        .kh-md-diff {
+          min-height: 220px;
+          overflow: auto;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: #fff;
+        }
+
+        .kh-md-diff-notice {
+          margin: 0;
+          padding: 8px 12px;
+          border-bottom: 1px solid #f0dab3;
+          background: #fdf4e6;
+          color: #865000;
+          font-size: 12px;
+        }
+
+        .kh-md-diff-lines {
+          min-width: max-content;
+          padding: 6px 0;
+          font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
+
+        .kh-md-diff-line {
+          display: grid;
+          grid-template-columns: 28px minmax(0, 1fr);
+          min-height: 20px;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
+        }
+
+        .kh-md-diff-line--delete {
+          background: #fff0f0;
+          color: #842323;
+        }
+
+        .kh-md-diff-line--add {
+          background: #eaf7f0;
+          color: #176340;
+        }
+
+        .kh-md-diff-marker {
+          user-select: none;
+          padding: 0 8px;
+          color: var(--muted);
+          text-align: right;
+        }
+
+        .kh-md-diff-line code {
+          padding-right: 12px;
+          font: inherit;
+        }
+
+        .kh-md-diff-token--changed {
+          border-radius: 2px;
+          background: rgba(194, 42, 42, 0.2);
+          font-weight: 700;
+        }
+
+        .kh-md-diff-line--add .kh-md-diff-token--changed {
+          background: rgba(23, 122, 85, 0.22);
+        }
+
+        .kh-md-diff-token--whitespace {
+          text-decoration: underline dotted currentColor;
+          text-underline-offset: 3px;
+        }
+
+        .kh-md-diff-token--tab::before {
+          content: "⇥";
+          user-select: none;
+          opacity: 0.65;
         }
 
         .kh-optimize-queue-status--ready,
@@ -4124,10 +4295,28 @@ function KnowhowTableGrid({
 }) {
   const orderedColumns = useMemo(() => (detail ? orderColumnsForGrid(detail.columns) : []), [detail]);
   const filteredRows = useMemo(() => (detail ? filterRows(detail.rows, query) : []), [detail, query]);
+  const [compactColumnWidths, setCompactColumnWidths] = useState(false);
+
+  // Reuse the established 720px narrow-screen boundary. Width computation stays
+  // data-only; viewport changes merely select the approved compact clamp table.
+  useEffect(() => {
+    const sync = () => setCompactColumnWidths(isFloatingDisabledWidth(window.innerWidth));
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
+
+  const sampledRows = useMemo(() => sampleVisibleKnowhowRows(filteredRows), [filteredRows]);
 
   // 有 anchor 列 → 分组合并矩阵渲染（spec §4.2 G2）；无 anchor（记录型表）
   // → gridDisplayRows 为 null，<tbody> 落回原平铺渲染，零改动（spec §4.2.3）。
   const anchorColumnId = detail?.anchorColumnId ?? null;
+  const columnWidths = useMemo(() => computeKnowhowColumnWidths({
+    columns: orderedColumns,
+    visibleRowsSample: sampledRows,
+    anchorColumnId,
+    compact: compactColumnWidths,
+  }), [anchorColumnId, compactColumnWidths, orderedColumns, sampledRows]);
   const gridDisplayRows = useMemo(() => {
     if (!anchorColumnId) return null;
     const groups = groupRowsByAnchor(filteredRows, anchorColumnId);
@@ -4307,7 +4496,16 @@ function KnowhowTableGrid({
             />
           </div>
           <div className="knowhow-grid-scroll">
-            <table className="knowhow-grid-table">
+            <table
+              className="knowhow-grid-table"
+              style={{ width: columnWidths.tableWidthPx, minWidth: "100%" }}
+            >
+              <colgroup>
+                {columnWidths.columns.map((column) => (
+                  <col key={column.columnId} style={{ width: column.widthPx }} />
+                ))}
+                <col key="projection-status" style={{ width: columnWidths.statusWidthPx }} />
+              </colgroup>
               <thead>
                 <tr>
                   {orderedColumns.map((column) => (
@@ -5276,7 +5474,10 @@ interface KnowhowReformatBatchModalProps {
   /** F（review）：保存阶段发生过 stale 跳过（preflight 比对 或 409）时回调——请父级重取
    * 整表，把陈旧的 detail 快照（喂给下一次批量的 rows/originalMd 基线之源）换新，否则关掉
    * 重开会用同一陈旧基线复跑、那些格子永远跳过（判定见 reformatBatchSaveNeedsRefresh）。 */
-  onStaleReload?: () => void;
+  onStaleReload?: () => Promise<KnowhowTableDetail | null>;
+  /** 已保存项交给仍挂载的父级编排：先关批次；若 needsReload 则等待刷新成功，
+   * 再按新 detail 重算 representative 并打开既有格子详情。 */
+  onOpenSavedCell: (rowId: string, columnId: string, needsReload: boolean) => void;
   onClose: () => void;
 }
 
@@ -5292,6 +5493,7 @@ function KnowhowReformatBatchModal({
   title,
   onSaveCell,
   onStaleReload,
+  onOpenSavedCell,
   onClose,
 }: KnowhowReformatBatchModalProps) {
   // F2：批量规整排除 anchor 列——传入 anchorColumnId，buildReformatBatchItems 据此跳过
@@ -5308,12 +5510,20 @@ function KnowhowReformatBatchModal({
   // 后者根本没进过保存集，混进保存分母会把它撑大。用「确认时的 changed 数」当分母，
   // 再用 total - 仍在 changed/saving 的数当已完成数，两个来源天然都不掺进来。
   const [saveTargetCount, setSaveTargetCount] = useState(0);
+  const [batchView, setBatchView] = useState<
+    { kind: "queue" } | { kind: "item"; rowId: string; columnId: string; tab: "diff" | "preview" }
+  >({ kind: "queue" });
   // 中止只需要让"驱动循环的 for 语句"停止发起下一次请求——不经由 React
   // state（那样要等一次 re-render 才能读到，循环体里判断的仍是发起本次
   // 请求那一刻的旧值）。真正的 UI 状态翻转（phase -> reviewing、
   // aborted=true）仍然走 setBatch，两者各司其职。
-  const abortedRef = useRef(false);
   const mountedRef = useRef(true);
+  const runEpochRef = useRef(0);
+  const generationControllerRef = useRef<AbortController | null>(null);
+  const generationCacheRef = useRef(new Map<string, ReformatGenerationResult>());
+  const modalBodyRef = useRef<HTMLDivElement | null>(null);
+  const queueScrollTopRef = useRef(0);
+  const returnFocusKeyRef = useRef<string | null>(null);
   // F1（P1 回归：延迟重载）：run 阶段陈旧跳过与 save 阶段陈旧跳过是两个独立触发源（前者
   // 在 runBatch 收尾、后者在 runSave 收尾），都经 requestStaleReload **只置此标记**——批量
   // 进行中**绝不**立即重载父表 detail。原因：进行中重载会让 allRows/handleCellSave 读到刷新
@@ -5336,12 +5546,14 @@ function KnowhowReformatBatchModal({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      runEpochRef.current += 1;
+      generationControllerRef.current?.abort();
       // F1（延迟重载）：弹窗卸载=关闭。批量进行中攒下的「需要重载」标记在此唯一消费——run/save
       // 阶段的 stale 跳过意味着父级 detail 已落后于服务器，关窗时刷新一次整表，下次打开用新鲜
       // 基线复跑、被跳过的格子不再永远跳过。所有关闭路径（X/背景/Esc/父级清状态）都汇于卸载 ->
       // 天然「恰一次」；没跳过时标记为假 -> 不调（无谓 refetch 也省了）。onStaleReload 是稳定
       // useCallback（reloadTableDetail），弹窗生命周期内不变，[] 依赖捕获首帧即对应被编辑的这张表。
-      if (pendingReloadRef.current) onStaleReload?.();
+      if (pendingReloadRef.current) void onStaleReload?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -5361,6 +5573,16 @@ function KnowhowReformatBatchModal({
     return scope === "table" ? `${rowLabelById.get(item.rowId) ?? ""} · ${item.columnName}` : item.columnName;
   }
 
+  const selectedItem = batchView.kind === "item"
+    ? batch.items.find((item) => item.rowId === batchView.rowId && item.columnId === batchView.columnId) ?? null
+    : null;
+  const selectedDiff = useMemo(
+    () => selectedItem?.candidateMd === undefined
+      ? null
+      : diffKnowhowMarkdown(selectedItem.originalMd, selectedItem.candidateMd),
+    [selectedItem?.rowId, selectedItem?.columnId, selectedItem?.originalMd, selectedItem?.candidateMd],
+  );
+
   // F1（P1 回归：延迟重载）：run 阶段收尾（run-stale）与 save 阶段收尾（save-stale）都经这里
   // ——**只**置「需要重载」标记，**不**立即调用 onStaleReload。批量进行中重载父表 = 用他人新值
   // 覆盖的口子（见 pendingReloadRef 注释）。真正的 reloadTableDetail 延到弹窗卸载（关闭）才触发
@@ -5369,98 +5591,81 @@ function KnowhowReformatBatchModal({
     pendingReloadRef.current = true;
   }
 
-  // run 循环：按初始化时固定下来的 items 顺序（该数组的长度/顺序全程不变，
-  // 只有各项的 status 字段经 setBatch 改写——见 logic 文件 replaceReformatItem）
-  // 逐格调用 reformat_cell；用 for 循环本身的顺序驱动请求发起顺序，不需要
-  // 状态机里再维护一个 cursor（对照 RowOptimizeQueueState.cursor：那边的
-  // "当前格"同时驱动 UI 与请求发起，这里两者已经用 for 循环 + rowId/columnId
-  // 天然键解耦，见 logic 文件头注释）。
-  //
-  // 按内容去重（代码评审修复，见 knowhow-optimize-logic.ts reformatDedupeKey
-  // 注释）：anchor 分组的兄弟行会把同一份值 forward-fill 到每一行，"整表"
-  // 批量因此常常对同一列的一份内容重复建条目。dedupeCache 是本次 runBatch
-  // 调用局部的普通 Map（不进 React state——同 abortedRef，纯粹是循环内部的
-  // 记账，不驱动渲染），键为 reformatDedupeKey(columnId, originalMd)：命中时
-  // 直接用上一次拿到的结果套用到这一格（applyReformatCachedResult），完全
-  // 跳过网络请求；未命中时照常调用 reformat_cell，成功后把结果存进缓存供后面
-  // 的重复格复用。效果：每个 (列, 内容) 组合最多一次真实调用，所有重复格
-  // 拿到逐字相同的候选——确认保存时 handleCellSave 的合并共享格批量写因此
-  // 变成"用同一份内容覆盖同一份内容"的无害操作，弹窗展示的候选与最终落库
-  // 的内容不会再对不上。
-  async function runBatch() {
+  // 生成阶段只激活不超过模型状态快照许可（且产品上限为 3）的不同 dedupe key。
+  // 同 key 由 pool single-flight；只有 fresh success 进入 modal 生命周期缓存并扇出。
+  // error/stale leader 只结算自身，下一物理成员仍可成为 leader。
+  async function runBatch(retry = false) {
     if (busy) return;
     setBusy(true);
-    abortedRef.current = false;
-    setBatch((state) => beginReformatBatchRun(state));
-    const dedupeCache = new Map<string, { candidateMd: string; source: string; changed: boolean }>();
-    // F1：run 阶段因 sourceMd 陈旧跳过的格子数（从没进保存集）。收尾据它决定是否请
-    // 父级刷新整表——否则这些格子的父表快照永不刷新、关掉重开用同一陈旧基线永远跳过。
-    let runStaleSkipCount = 0;
-    for (const item of batch.items) {
-      if (abortedRef.current) break;
-      const dedupeKey = reformatDedupeKey(item.columnId, item.originalMd);
-      const cached = dedupeCache.get(dedupeKey);
-      if (cached) {
-        setBatch((state) => applyReformatCachedResult(state, item.rowId, item.columnId, cached));
-        continue;
-      }
-      setBatch((state) => markReformatItemRunning(state, item.rowId, item.columnId));
-      try {
-        const result = await reformatKnowhowCell(notebookId, tableId, item.rowId, item.columnId);
-        if (!mountedRef.current) return;
-        // 并发防护（P1-a）：后端回带 sourceMd = 它实际读到并规整的原文。若它 ≠ 本格
-        // 建批次那一刻的 originalMd 快照，说明这格在「建批次」到「这次 /reformat」之间
-        // 被别人改了——候选是拿客户端没见过的内容算出来的。此时该格直接判陈旧，且**不
-        // 写去重缓存**：否则它的重复格（同 trim 原文）会复用这份基于陌生内容的候选，
-        // 一旦污染就纠不回来。判定用本格自己的 originalMd（items 数组只改 status、
-        // originalMd 恒为建批次快照），在 setBatch 之外算，避免 reducer 里读副作用。
-        if (reformatResultIsStale(item.originalMd, result.sourceMd)) {
+    const epoch = runEpochRef.current + 1;
+    runEpochRef.current = epoch;
+    generationControllerRef.current?.abort();
+    const controller = new AbortController();
+    generationControllerRef.current = controller;
+    setBatch((state) => retry ? beginReformatBatchRetry(state) : beginReformatBatchRun(state));
+    const items = retry
+      ? batch.items.filter((item) => item.status === "pending" || item.status === "aborted" || item.status === "reformat_error")
+      : batch.items.filter((item) => item.status === "pending");
+    let concurrency = resolveReformatGenerationConcurrency(null);
+    try {
+      concurrency = resolveReformatGenerationConcurrency(await fetchModelServiceStatus());
+    } catch {
+      // 状态快照只是浏览器发压提示；读取失败固定回退 2，后端调度器仍是容量权威。
+    }
+    const currentRun = () => mountedRef.current && runEpochRef.current === epoch && !controller.signal.aborted;
+    const poolResult = await runReformatGenerationPool({
+      items,
+      concurrency,
+      signal: controller.signal,
+      cache: generationCacheRef.current,
+      run: (item, signal) => reformatKnowhowCell(notebookId, tableId, item.rowId, item.columnId, signal),
+      onRunning: (item) => {
+        if (currentRun()) setBatch((state) => markReformatItemRunning(state, item.rowId, item.columnId));
+      },
+      onFresh: (item, result, cached) => {
+        if (!currentRun()) return;
+        setBatch((state) => cached
+          ? applyReformatCachedResult(state, item.rowId, item.columnId, result)
+          : applyReformatResult(state, item.rowId, item.columnId, result));
+      },
+      onStale: (item) => {
+        if (currentRun()) {
+          // 一旦观察到 stale 就立刻记账；即使随后用户 abort 其它慢请求、epoch
+          // 失效而跳过 pool 收尾，关闭弹窗仍会消费此标记并刷新父表。
+          requestStaleReload();
           setBatch((state) =>
             markReformatItemRunStale(state, item.rowId, item.columnId, BATCH_REFORMAT_STALE_SKIP_TEXT),
           );
-          runStaleSkipCount += 1; // F1：计入 run 阶段 stale，收尾据它请父表刷新
-          continue; // 不缓存——这份候选不可用于任何重复格
         }
-        dedupeCache.set(dedupeKey, result);
-        setBatch((state) => applyReformatResult(state, item.rowId, item.columnId, result));
-      } catch (err) {
-        // 单格规整失败不阻断整批（任务硬要求④）：记下这一格的错误，循环
-        // 继续处理下一项。规整失败不写入缓存——不能让"这一格失败了"被误当
-        // 成"这份内容的规整结果就是失败"套用到它的重复格上；下一个重复格
-        // 仍会独立重试一次真实调用。
-        if (!mountedRef.current) return;
-        setBatch((state) =>
-          applyReformatError(state, item.rowId, item.columnId, extractErrorMessage(err, "规整格式失败，请重试")),
-        );
-      }
-    }
-    if (mountedRef.current) {
+      },
+      onError: (item, error) => {
+        if (currentRun()) {
+          setBatch((state) => applyReformatError(
+            state,
+            item.rowId,
+            item.columnId,
+            extractErrorMessage(error, "规整格式失败，请重试"),
+          ));
+        }
+      },
+    });
+    if (currentRun()) {
       setBatch((state) => finishReformatBatchRun(state));
       setBusy(false);
       // F1：run 阶段跳过过 stale 格 -> 父级 detail 快照已落后于服务器（这些格子是别人
       // 刚写的新内容），刷新一次整表，让下次批量用新鲜基线复跑、不再永远跳过。经
       // requestStaleReload 与保存阶段共用同一个「恰一次」闸（两阶段都跳过也只刷一次）。
-      if (reformatBatchRunNeedsRefresh(runStaleSkipCount)) requestStaleReload();
+      if (reformatBatchRunNeedsRefresh(poolResult.staleCount)) requestStaleReload();
     }
   }
 
-  // 「中止」：立即把 UI 切到 reviewing（已收集到的候选可以照常被确认保存），
-  // 并把 abortedRef 置真——for 循环在处理完当前正在等待的这一格后，下一次
-  // 循环体顶部的检查会让它不再发起新的请求（当前正在途中的这一格请求仍会
-  // 走完，落地的结果由 applyReformatResult/applyReformatError 自身的
-  // `state.phase !== "running"` 检查丢弃，见 logic 文件对应注释）。
-  //
-  // 故意不在这里 setBusy(false)：runBatch 的 for 循环仍在等当前这一格的
-  // 请求落地，要等它真正跑到循环尾部才会自己解除 busy。若这里抢先解除，
-  // "确认保存"按钮会在那个当前请求仍未落地的窗口内变得可点——用户手快的话
-  // 能在 runBatch 收尾之前就点开 runSave，两个循环并发跑，runBatch 收尾时
-  // 的 setBusy(false) 会把 runSave 才刚设的 busy=true 又踩回 false（保存
-  // 中却显示"可关闭"）。留给 runBatch 自己收尾解除，busy 短暂保持 true（最多
-  // 等一次已经在途的 HTTP 往返），关闭/确认按钮都会在真正安全的那一刻才变
-  // 回可点——不引入这个并发窗口。
+  // 中止递增 epoch 并 abort 全部在途 fetch；pending/running 同步结算 aborted。
+  // 后端端点不是 durable job，UI 只承诺不再等待/接收，不能承诺模型服务端已终止。
   function handleAbort() {
-    abortedRef.current = true;
+    runEpochRef.current += 1;
+    generationControllerRef.current?.abort();
     setBatch((state) => abortReformatBatchRun(state));
+    setBusy(false);
   }
 
   // save 循环：只处理"确认那一刻" status==="changed" 的项（changed=false 的
@@ -5612,6 +5817,33 @@ function KnowhowReformatBatchModal({
     onClose();
   }
 
+  function openItemView(item: ReformatBatchItem) {
+    queueScrollTopRef.current = modalBodyRef.current?.scrollTop ?? 0;
+    returnFocusKeyRef.current = `${item.rowId}:${item.columnId}`;
+    setBatchView({ kind: "item", rowId: item.rowId, columnId: item.columnId, tab: "diff" });
+  }
+
+  function returnToQueue() {
+    setBatchView({ kind: "queue" });
+    requestAnimationFrame(() => {
+      if (modalBodyRef.current) modalBodyRef.current.scrollTop = queueScrollTopRef.current;
+      const key = returnFocusKeyRef.current;
+      const button = key
+        ? modalBodyRef.current?.querySelector<HTMLButtonElement>(`[data-reformat-view="${CSS.escape(key)}"]`)
+        : null;
+      button?.focus();
+    });
+  }
+
+  function openSavedCell(item: ReformatBatchItem) {
+    if (item.status !== "saved" || busy) return;
+    const needsReload = pendingReloadRef.current;
+    // 交给父级显式消费，避免卸载 cleanup 再发第二次 reload；父级在批量子组件
+    // 卸载后仍存活，可安全 await 刷新并基于新 detail 重算 representative。
+    pendingReloadRef.current = false;
+    onOpenSavedCell(item.rowId, item.columnId, needsReload);
+  }
+
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") requestClose();
@@ -5635,7 +5867,8 @@ function KnowhowReformatBatchModal({
   // run 阶段可达的终态含 stale_skipped（P1-a：sourceMd 陈旧的格子在运行阶段就落
   // 终态）——不计进去 run 徽标会卡在 <100% 的假未完成。此徽标只在 phase==="running"
   // 显示，那时 stale_skipped 全部来自运行阶段（保存还没开始），故直接并入即准确。
-  const runProgressDone = summary.changed + summary.unchanged + summary.reformat_error + summary.stale_skipped;
+  const runProgressDone =
+    summary.changed + summary.unchanged + summary.reformat_error + summary.stale_skipped + summary.aborted;
   // save 阶段分母 = 点「确认保存」那一刻的 changed 数（saveTargetCount，定格一次）；
   // 已完成 = 分母 - 仍在 changed/saving 的数。这样天然把「运行阶段就 stale_skipped
   // 的格子」排除在保存进度之外（它们从没进过保存集），不必去区分两类 stale_skipped。
@@ -5647,16 +5880,48 @@ function KnowhowReformatBatchModal({
   // 列表 JSX）。
   const queueList = (
     <ul className="kh-optimize-queue-list">
-      {batch.items.map((item) => (
+      {batch.items.map((item) => {
+        const canView = item.candidateMd !== undefined
+          && ["changed", "saving", "saved", "save_error", "stale_skipped"].includes(item.status);
+        return (
         <li key={`${item.rowId}:${item.columnId}`} className="kh-optimize-queue-item">
           <span className="kh-optimize-queue-col">{itemLabel(item)}</span>
-          <span className={`kh-optimize-queue-status kh-optimize-queue-status--${item.status}`}>
-            {BATCH_REFORMAT_STATUS_LABELS[item.status]}
+          <span className="kh-reformat-queue-actions">
+            <span className={`kh-optimize-queue-status kh-optimize-queue-status--${item.status}`}>
+              {BATCH_REFORMAT_STATUS_LABELS[item.status]}
+            </span>
+            {canView && (
+              <button
+                type="button"
+                className="kh-reformat-link-button"
+                data-reformat-view={`${item.rowId}:${item.columnId}`}
+                onClick={() => openItemView(item)}
+              >
+                查看改动
+              </button>
+            )}
+            {item.status === "saved" && (
+              <button type="button" className="kh-reformat-link-button" onClick={() => openSavedCell(item)}>
+                打开格子
+              </button>
+            )}
           </span>
         </li>
-      ))}
+      )})}
     </ul>
   );
+
+  function renderDiffLineText(line: KnowhowDiffLine) {
+    if (!line.tokens) return line.text || " ";
+    return line.tokens.map((token, index) => (
+      <span
+        key={`${index}:${token.text}`}
+        className={`${token.changed ? "kh-md-diff-token--changed" : ""}${token.whitespace ? " kh-md-diff-token--whitespace" : ""}${token.text.includes("\t") ? " kh-md-diff-token--tab" : ""}`}
+      >
+        {token.text}
+      </span>
+    ));
+  }
 
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
@@ -5677,6 +5942,12 @@ function KnowhowReformatBatchModal({
               </span>
               <span className="kh-modal-sep">›</span>
               <span className="kh-modal-col-name">{buttonLabel}</span>
+              {selectedItem && (
+                <>
+                  <span className="kh-modal-sep">›</span>
+                  <span className="kh-modal-col-name">{itemLabel(selectedItem)}</span>
+                </>
+              )}
               {!isEmpty && batch.phase === "running" && (
                 <span className="knowhow-status-badge">{`${runProgressDone}/${summary.total}`}</span>
               )}
@@ -5685,6 +5956,11 @@ function KnowhowReformatBatchModal({
               )}
             </div>
             <div className="kh-modal-header-actions">
+              {batchView.kind === "item" && (
+                <button type="button" className="kh-preview-edit-button" onClick={returnToQueue}>
+                  <ChevronLeft size={14} /> 返回批量结果
+                </button>
+              )}
               {batch.phase === "running" && (
                 <button type="button" className="kh-preview-edit-button" onClick={handleAbort}>
                   {BATCH_REFORMAT_ABORT_LABEL}
@@ -5697,8 +5973,67 @@ function KnowhowReformatBatchModal({
           </div>
         </header>
 
-        <div className="kh-modal-body">
-          {isEmpty ? (
+        <div ref={modalBodyRef} className="kh-modal-body">
+          {batchView.kind === "item" && selectedItem && selectedDiff ? (
+            <div className="kh-reformat-item-detail">
+              <div className="kh-reformat-item-toolbar">
+                <strong>{itemLabel(selectedItem)}</strong>
+                <span className="kh-reformat-source-tag">{reformatSourceLabel(selectedItem.source ?? "")}</span>
+                <div className="kh-view-switch" role="tablist" aria-label="改动视图">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={batchView.tab === "diff"}
+                    className={`kh-view-switch-button${batchView.tab === "diff" ? " kh-view-switch-button--active" : ""}`}
+                    onClick={() => setBatchView({ ...batchView, tab: "diff" })}
+                  >
+                    Markdown 改动
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={batchView.tab === "preview"}
+                    className={`kh-view-switch-button${batchView.tab === "preview" ? " kh-view-switch-button--active" : ""}`}
+                    onClick={() => setBatchView({ ...batchView, tab: "preview" })}
+                  >
+                    渲染预览
+                  </button>
+                </div>
+              </div>
+              {batchView.tab === "diff" ? (
+                <div className="kh-md-diff" aria-label="Markdown 原文改动">
+                  {selectedDiff.degraded && (
+                    <p className="kh-md-diff-notice">内容较长，已切换为有界的粗粒度增删摘要；可用“渲染预览”查看完整前后内容。</p>
+                  )}
+                  <div className="kh-md-diff-lines">
+                    {selectedDiff.lines.map((line, index) => (
+                      <div key={`${index}:${line.kind}`} className={`kh-md-diff-line kh-md-diff-line--${line.kind}`}>
+                        <span className="kh-md-diff-marker" aria-hidden="true">
+                          {line.kind === "delete" ? "−" : line.kind === "add" ? "+" : " "}
+                        </span>
+                        <code>{renderDiffLineText(line)}{line.truncated ? " …" : ""}</code>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="kh-optimize-compare">
+                  <div className="kh-optimize-pane">
+                    <h5>{OPTIMIZE_ORIGINAL_LABEL}</h5>
+                    <div className="kh-optimize-pane-body">
+                      <KnowhowMarkdown md={selectedItem.originalMd} notebookId={notebookId} apiBase={apiBase} />
+                    </div>
+                  </div>
+                  <div className="kh-optimize-pane kh-optimize-pane--reformat-suggestion">
+                    <h5>{REFORMAT_SUGGESTION_LABEL}</h5>
+                    <div className="kh-optimize-pane-body">
+                      <KnowhowMarkdown md={selectedItem.candidateMd ?? ""} notebookId={notebookId} apiBase={apiBase} />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : isEmpty ? (
             <p className="kh-row-context-empty">{emptyText}</p>
           ) : (
             <>
@@ -5740,43 +6075,21 @@ function KnowhowReformatBatchModal({
                   </p>
                 ))}
 
-              {/* before/after 对照——只在 reviewing/saving/done 阶段展示（run
-                  阶段还没跑完，不急着展示部分结果），只列有候选内容的项
-                  （changed 及其后续的 saving/saved/save_error，unchanged/
-                  reformat_error 没有候选可比对，已经在上面的列表 + 错误提示
-                  里说明过）。复用「规整格式」单格对照同一套 .kh-optimize-*
-                  样式与 REFORMAT_SUGGESTION_LABEL/reformatSourceLabel（任务
-                  硬要求②：source 绝不直出原始枚举）。 */}
-              {(batch.phase === "reviewing" || batch.phase === "saving" || batch.phase === "done") &&
-                batch.items
-                  .filter((item) => item.candidateMd !== undefined)
-                  .map((item) => (
-                    <div className="kh-optimize-compare" key={`compare:${item.rowId}:${item.columnId}`}>
-                      <div className="kh-optimize-pane">
-                        <h5>
-                          {OPTIMIZE_ORIGINAL_LABEL} · {itemLabel(item)}
-                        </h5>
-                        <div className="kh-optimize-pane-body">
-                          <KnowhowMarkdown md={item.originalMd} notebookId={notebookId} apiBase={apiBase} />
-                        </div>
-                      </div>
-                      <div className="kh-optimize-pane kh-optimize-pane--reformat-suggestion">
-                        <h5>
-                          {REFORMAT_SUGGESTION_LABEL}{" "}
-                          <span className="kh-reformat-source-tag">{reformatSourceLabel(item.source ?? "")}</span>
-                        </h5>
-                        <div className="kh-optimize-pane-body">
-                          <KnowhowMarkdown md={item.candidateMd ?? ""} notebookId={notebookId} apiBase={apiBase} />
-                        </div>
-                      </div>
-                    </div>
-                  ))}
             </>
           )}
         </div>
 
         <footer className="kh-modal-footer">
-          {isEmpty ? (
+          {batchView.kind === "item" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={returnToQueue}>返回批量结果</button>
+              {selectedItem?.status === "saved" && (
+                <button type="button" className="kh-primary-button" onClick={() => openSavedCell(selectedItem)}>
+                  打开格子
+                </button>
+              )}
+            </div>
+          ) : isEmpty ? (
             <div className="kh-footer-actions">
               <button type="button" onClick={requestClose}>
                 {BATCH_REFORMAT_CLOSE_LABEL}
@@ -5787,7 +6100,7 @@ function KnowhowReformatBatchModal({
               <button type="button" onClick={requestClose} disabled={busy}>
                 {BATCH_REFORMAT_CLOSE_LABEL}
               </button>
-              <button type="button" className="kh-primary-button" onClick={runBatch} disabled={busy}>
+              <button type="button" className="kh-primary-button" onClick={() => runBatch()} disabled={busy}>
                 {BATCH_REFORMAT_START_LABEL}
               </button>
             </div>
@@ -5801,6 +6114,11 @@ function KnowhowReformatBatchModal({
               <button type="button" onClick={requestClose} disabled={busy}>
                 {summary.changed > 0 ? BATCH_REFORMAT_DISCARD_LABEL : BATCH_REFORMAT_CLOSE_LABEL}
               </button>
+              {(summary.reformat_error > 0 || summary.aborted > 0 || summary.pending > 0) && (
+                <button type="button" onClick={() => runBatch(true)} disabled={busy}>
+                  {BATCH_REFORMAT_RETRY_LABEL}
+                </button>
+              )}
               {summary.changed > 0 && (
                 <button type="button" className="kh-primary-button" onClick={runSave} disabled={busy}>
                   <Check size={14} /> {BATCH_REFORMAT_CONFIRM_LABEL}

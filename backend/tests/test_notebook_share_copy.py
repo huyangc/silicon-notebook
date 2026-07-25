@@ -405,7 +405,9 @@ def test_copy_route_maps_race_size_guard_to_409_not_500(repo, client, monkeypatc
         lambda self, nb: {"copyable": True},
     )
 
-    def _raise(self, source_notebook_id, *, new_owner_id, new_name=None):
+    def _raise(
+        self, source_notebook_id, *, new_owner_id, actor_label=None, new_name=None
+    ):
         raise ns.NotebookTooLargeToCopyError("raced past the threshold")
 
     monkeypatch.setattr(ns.NotebookSharingService, "copy_notebook", _raise)

@@ -28,6 +28,7 @@ vi.mock("./knowhow-model.ts", async (importOriginal) => {
     batchPatchKnowhowCells: vi.fn(),
   };
 });
+vi.mock("./model-services.ts", () => ({ fetchModelServiceStatus: vi.fn() }));
 
 import {
   batchPatchKnowhowCells,
@@ -38,6 +39,7 @@ import {
   type KnowhowTableDetail,
 } from "./knowhow-model.ts";
 import { KnowhowPanel } from "./knowhow-panel.tsx";
+import { fetchModelServiceStatus } from "./model-services.ts";
 
 // 同 knowhow-cell-restore.component.test.tsx：白名单掉 styled-jsx 在裸 jsdom 下
 // 的已知属性告警，其余 console.error 仍视为真实问题。
@@ -97,6 +99,14 @@ function makeDetail(): KnowhowTableDetail {
 test("批量规整保存：请求体 origin==='llm_reformat'（不落后端默认 user）", async () => {
   const user = userEvent.setup();
   vi.mocked(fetchKnowhowTables).mockResolvedValue([]);
+  vi.mocked(fetchModelServiceStatus).mockResolvedValue({
+    services: [{
+      service_id: "svc", display_name: "模型", kind: "chat", model: "m",
+      workloads: [{ id: "knowhow_reformat", label: "规整" }], status: "ok",
+      active: 0, maximum: 3, queued: 0, oldest_wait_ms: 0, latency_ms: 1,
+      checked_at: "", trigger: "", code: "", support_id: "",
+    }],
+  });
   vi.mocked(fetchKnowhowTable).mockResolvedValue(makeDetail());
   // reformat 回带 sourceMd="当前值" = 建批次那刻的 originalMd 快照（非陈旧），
   // changed=true + 一个不同的候选，令该格进入 "changed" 保存集。
@@ -119,6 +129,14 @@ test("批量规整保存：请求体 origin==='llm_reformat'（不落后端默�
   await user.click(await screen.findByRole("button", { name: "一键规整整表" }));
   await user.click(await screen.findByRole("button", { name: "开始规整" }));
   await waitFor(() => expect(reformatKnowhowCell).toHaveBeenCalled());
+  const viewButtons = await screen.findAllByRole("button", { name: "查看改动" });
+  await user.click(viewButtons[0]);
+  expect(await screen.findByRole("tab", { name: "Markdown 改动" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByLabelText("Markdown 原文改动")).toHaveTextContent("当前值");
+  expect(screen.getByLabelText("Markdown 原文改动")).toHaveTextContent("规整后的值");
+  await user.click(screen.getByRole("tab", { name: "渲染预览" }));
+  expect(screen.getByRole("tab", { name: "渲染预览" })).toHaveAttribute("aria-selected", "true");
+  await user.click(screen.getAllByRole("button", { name: "返回批量结果" })[0]);
   const saveButton = await screen.findByRole("button", { name: "确认保存" });
   await waitFor(() => expect(saveButton).toBeEnabled());
   await user.click(saveButton);
@@ -131,4 +149,10 @@ test("批量规整保存：请求体 origin==='llm_reformat'（不落后端默�
   expect(input.contentMd).toBe("规整后的值");
   // 本文件的核心断言：批量规整的变更流水归因为 llm_reformat，不是默认 user。
   expect(input.origin).toBe("llm_reformat");
+
+  const openButtons = await screen.findAllByRole("button", { name: "打开格子" });
+  await user.click(openButtons[1]);
+  // r2 属于共享格，必须稳定落到 position 最小的 canonical representative r1。
+  expect(await screen.findByRole("dialog", { name: "示波器 › 备注" })).toBeInTheDocument();
+  expect(screen.queryByText("已完成保存。 2 个已保存")).not.toBeInTheDocument();
 });

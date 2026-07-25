@@ -39,6 +39,7 @@ from app.models.knowhow import (
     KnowhowRowDetail,
 )
 from app.services.knowhow import api as knowhow_api
+from app.services.knowhow import audit as knowhow_audit
 
 agent_router = APIRouter()
 
@@ -104,6 +105,9 @@ async def get_agent_row(row_id: str, request: Request) -> dict:
         code_attachments = await run_in_threadpool(
             repo.list_knowhow_cell_code, location["table_id"]
         )
+        code_attachments = await run_in_threadpool(
+            knowhow_audit.project_nested_updated_by, repo, code_attachments
+        )
         try:
             return knowhow_api.build_row_detail(table, row_id, code_attachments)
         except KeyError:
@@ -122,8 +126,11 @@ async def get_agent_cell_code(row_id: str, column_id: str, request: Request) -> 
         not_found_detail="Row not found",
     ):
         try:
-            return await run_in_threadpool(
+            result = await run_in_threadpool(
                 knowhow_api.get_cell_code, repo, row_id, column_id
+            )
+            return await run_in_threadpool(
+                knowhow_audit.project_nested_updated_by, repo, result
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))

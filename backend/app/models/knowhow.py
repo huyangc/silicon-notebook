@@ -380,6 +380,7 @@ class KnowhowCellCodeResult(BaseModel):
     language: Optional[str] = None
     status: str
     updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
 
 
 class KnowhowTransferRequest(BaseModel):

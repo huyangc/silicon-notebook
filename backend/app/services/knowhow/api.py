@@ -294,7 +294,8 @@ def import_table(
     columns_json: str,
     anchor_index: "int | None" = None,
     orientation: str = "columns",
-    actor: str = "",
+    created_by_id: str = "",
+    actor_label: str = "",
 ) -> str:
     """Full import orchestration (task brief step 2): parse -> validate ->
     atomically create the table and insert every row+cell, with one
@@ -311,9 +312,8 @@ def import_table(
     at-most-one-anchor checks (create_knowhow_table) — routes.py's existing
     400 idiom catches all of these uniformly.
 
-    knowhow 表版本管理 Task 13: ``actor`` (the uploading user's id) is
-    threaded to every flow entry this import produces — the genesis
-    ``table_create`` AND every per-row ``row_add`` below — with
+    ``created_by_id`` is the stable creator identity and ``actor_label`` is
+    the readable audit snapshot threaded to every flow entry, with
     ``origin="import"`` so the history timeline can tell an imported table
     apart from one built through the empty-table wizard."""
     grid = parse_grid(filename, data, orientation)
@@ -362,8 +362,8 @@ def import_table(
         "",
         columns,
         normalized_rows,
-        created_by=actor,
-        actor=actor,
+        created_by=created_by_id,
+        actor=actor_label,
         origin="import",
     )
 
@@ -374,7 +374,8 @@ def create_table(
     title: str,
     columns: list[dict],
     anchor_index: "int | None",
-    actor: str = "",
+    created_by_id: str = "",
+    actor_label: str = "",
 ) -> str:
     """Wizard backend (PR-2+3 Task 3): create an EMPTY table (no grid/rows) —
     mirrors ``import_table``'s create step minus parsing a file. ``columns``
@@ -386,13 +387,16 @@ def create_table(
     zero rows/cells, so there is nothing to project yet; the first row/cell
     mutation schedules the table's first real run.
 
-    knowhow 表版本管理 Task 13: ``actor`` (the creating user's id) is
-    threaded to the table's genesis ``table_create`` flow entry;
+    ``created_by_id`` is stable creator identity; ``actor_label`` is threaded
+    to the table's genesis ``table_create`` flow entry;
     ``origin`` stays the store's own default (``"user"``) — an empty table
     built through the wizard is an ordinary user action, unlike
     ``import_table``'s ``origin="import"``."""
     merged = _columns_with_anchor(columns, anchor_index)
-    return repo.create_knowhow_table(notebook_id, title, "", merged, actor=actor)
+    return repo.create_knowhow_table(
+        notebook_id, title, "", merged,
+        created_by=created_by_id, actor=actor_label,
+    )
 
 
 # --- wire shaping: store `role` <-> wire `kind`, table-level anchor_column_id
@@ -876,7 +880,7 @@ def preview_append(table: dict, filename: str, data: bytes) -> dict:
 
 def commit_append(
     repo: Any, table_id: str, table: dict, filename: str, data: bytes,
-    actor: str = "",
+    actor_label: str = "",
 ) -> int:
     """Append commit (design doc §② 路B "确认后追加导入"): re-parses and
     re-aligns the file (deliberately not trusting a client-supplied preview
@@ -948,7 +952,7 @@ def commit_append(
             )
         batch_rows.append(cells)
     repo.append_knowhow_rows(
-        table_id, batch_rows, actor=actor, origin="import"
+        table_id, batch_rows, actor=actor_label, origin="import"
     )
     return len(aligned_rows)
 
@@ -2434,12 +2438,16 @@ def cell_code_view(
     (a legitimate 200, never a 404 — "no code yet" is a normal state, not an
     error)."""
     if attachment is None:
-        return {"code_text": None, "language": None, "status": "none", "updated_at": None}
+        return {
+            "code_text": None, "language": None, "status": "none",
+            "updated_at": None, "updated_by": None,
+        }
     return {
         "code_text": attachment["code_text"],
         "language": attachment["language"],
         "status": _code_status(cells, column_id, attachment),
         "updated_at": attachment["updated_at"],
+        "updated_by": attachment["updated_by"],
     }
 
 

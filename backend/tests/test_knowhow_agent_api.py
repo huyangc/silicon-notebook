@@ -25,7 +25,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import knowhow_agent_routes
 from app.services.knowhow import api as knowhow_api
+from app.services.knowhow import audit as knowhow_audit
 from app.services.knowhow import textops
 
 
@@ -202,21 +204,25 @@ def test_cell_code_view_three_states():
     fresh_hash = knowhow_api.cell_content_hash("先做A")
 
     assert knowhow_api.cell_code_view(cells, "c1", None) == {
-        "code_text": None, "language": None, "status": "none", "updated_at": None,
+        "code_text": None, "language": None, "status": "none",
+        "updated_at": None, "updated_by": None,
     }
 
     implemented = knowhow_api.cell_code_view(cells, "c1", {
         "code_text": "print(1)", "language": "python",
         "cell_content_hash": fresh_hash, "updated_at": "2026-01-01T00:00:00Z",
+        "updated_by": "alice",
     })
     assert implemented == {
         "code_text": "print(1)", "language": "python",
         "status": "implemented", "updated_at": "2026-01-01T00:00:00Z",
+        "updated_by": "alice",
     }
 
     stale = knowhow_api.cell_code_view(cells, "c1", {
         "code_text": "print(1)", "language": "python",
         "cell_content_hash": "deadbeef", "updated_at": "2026-01-01T00:00:00Z",
+        "updated_by": "alice",
     })
     assert stale["status"] == "stale"
 
@@ -451,7 +457,8 @@ def test_code_status_none_then_implemented_then_stale_after_edit_then_deleted(
     none_resp = client.get(url, headers=owner_h)
     assert none_resp.status_code == 200
     assert none_resp.json() == {
-        "code_text": None, "language": None, "status": "none", "updated_at": None,
+        "code_text": None, "language": None, "status": "none",
+        "updated_at": None, "updated_by": None,
     }
 
     put_resp = client.put(
@@ -463,6 +470,7 @@ def test_code_status_none_then_implemented_then_stale_after_edit_then_deleted(
     assert put_body["code_text"] == "print('scope')"
     assert put_body["language"] == "python"
     assert put_body["updated_at"]
+    assert put_body["updated_by"] == "a00002030"
 
     assert client.get(url, headers=owner_h).json()["status"] == "implemented"
 
@@ -574,12 +582,68 @@ def test_agent_token_with_code_scope_can_write_and_attribution_reaches_row_detai
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "implemented"
+    assert resp.json()["updated_by"] == "CodeAgent"
 
-    # updated_by attribution reaches row detail (the single-cell code
-    # endpoint deliberately omits updated_by — see design/wire contract).
+    # updated_by attribution reaches both the save response and row detail.
     detail = client.get(f"/api/agent/knowhow/rows/{row['id']}", headers=owner_h).json()
     code_entry = next(c for c in detail["code"] if c["column_id"] == col)
     assert code_entry["updated_by"] == "CodeAgent"
+
+
+def test_legacy_code_updater_id_is_resolved_without_fingerprint_rewrite(
+    tmp_path, monkeypatch,
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_h, _nb, table, row, col = _seed(client, "a00002048")
+    owner = client.get("/api/me", headers=owner_h).json()
+    url = f"/api/agent/knowhow/rows/{row['id']}/cells/{col}/code"
+    assert client.put(
+        url, headers=owner_h,
+        json={"code_text": "print(1)", "language": "python"},
+    ).status_code == 200
+    repo = _app_repo()
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_cell_code SET updated_by=? "
+            "WHERE row_id=? AND column_id=?",
+            (owner["id"], row["id"], col),
+        )
+    fingerprint_before = repo._runtime.knowhow_transfer_store.table_fingerprint(
+        table["id"]
+    )
+
+    single = client.get(url, headers=owner_h).json()
+    detail = client.get(f"/api/agent/knowhow/rows/{row['id']}", headers=owner_h).json()
+
+    assert single["updated_by"] == owner["username"]
+    assert detail["code"][0]["updated_by"] == owner["username"]
+    assert repo._runtime.knowhow_transfer_store.table_fingerprint(
+        table["id"]
+    ) == fingerprint_before
+    with repo._runtime.database.connect() as db:
+        stored = db.execute(
+            "SELECT updated_by FROM knowhow_cell_code "
+            "WHERE row_id=? AND column_id=?",
+            (row["id"], col),
+        ).fetchone()["updated_by"]
+    assert stored == owner["id"]
+
+
+def test_row_audit_projection_runs_in_threadpool(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h, _nb, _table, row, _col = _seed(client, "a00002049")
+    original = knowhow_agent_routes.run_in_threadpool
+    calls = []
+
+    async def tracked(func, *args, **kwargs):
+        calls.append(func)
+        return await original(func, *args, **kwargs)
+
+    monkeypatch.setattr(knowhow_agent_routes, "run_in_threadpool", tracked)
+    response = client.get(f"/api/agent/knowhow/rows/{row['id']}", headers=owner_h)
+
+    assert response.status_code == 200, response.text
+    assert knowhow_audit.project_nested_updated_by in calls
 
 
 # ===========================================================================

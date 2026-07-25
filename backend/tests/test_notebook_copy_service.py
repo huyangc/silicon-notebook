@@ -102,6 +102,22 @@ def test_copy_observes_new_id_patched_after_construction(repo, monkeypatch):
     assert source_ids and all(sid.startswith("src-t9fixed-") for sid in source_ids)
 
 
+def test_notebook_copy_separates_owner_id_from_knowhow_genesis_actor(repo):
+    src = _seed(repo, n=1)
+    _seed_user(repo, "user-audit-copy")
+    table_id = repo.create_knowhow_table(
+        src, "T", "", [{"name": "C", "role": "attribute"}]
+    )
+
+    copied = repo.copy_notebook(
+        src, new_owner_id="user-audit-copy", actor_label="a00123456"
+    )
+
+    copied_table = repo.list_knowhow_tables(copied.id)[0]
+    assert repo.get_knowhow_table(copied_table["id"])["created_by"] == "user-audit-copy"
+    assert repo.get_knowhow_change(copied_table["id"], 1)["actor"] == "a00123456"
+
+
 def test_copy_observes_copy_chunk_patched_after_construction(repo, monkeypatch):
     src = _seed(repo, n=3)
     _seed_user(repo, "user-carol")

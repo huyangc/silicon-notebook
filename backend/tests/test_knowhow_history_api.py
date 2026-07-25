@@ -170,15 +170,14 @@ def test_cell_patch_accepts_and_records_origin(tmp_path, monkeypatch, repo):
 # actor="user-1"). A mutation replacing every real `actor=user.id` in the
 # HTTP routes with `actor=""` left all 4817 existing tests green. The two
 # tests below drive the REAL HTTP path end to end and assert the recorded
-# actor is the actually-logged-in user's own id — not empty, not "user-local"
-# (the ambient ContextVar default a missing `set_request_user` would fall
-# back to), not some other ambient value.
+# actor is the canonical username audit label — not empty, not the stable id,
+# and not some other ambient value.
 # ===========================================================================
 
 
-def test_cell_patch_records_the_logged_in_users_id_as_actor(tmp_path, monkeypatch, repo):
+def test_cell_patch_records_the_logged_in_username_as_actor(tmp_path, monkeypatch, repo):
     ctx = _setup(tmp_path, monkeypatch)
-    owner_id = ctx["client"].get("/api/me", headers=ctx["owner"]).json()["id"]
+    owner = ctx["client"].get("/api/me", headers=ctx["owner"]).json()
 
     assert _patch_cell(ctx, "内容").status_code == 200
 
@@ -187,27 +186,64 @@ def test_cell_patch_records_the_logged_in_users_id_as_actor(tmp_path, monkeypatc
         headers=ctx["owner"],
     ).json()["changes"]
     cell_update = next(c for c in changes if c["kind"] == "cell_update")
-    assert cell_update["actor"] == owner_id
+    assert cell_update["actor"] == owner["username"]
+    assert cell_update["actor"] != owner["id"]
     assert cell_update["actor"] != ""
     assert cell_update["origin"] == "user"
 
 
-def test_create_table_genesis_change_records_the_creating_users_id_as_actor(
+def test_create_table_keeps_creator_id_but_genesis_records_username(
     tmp_path, monkeypatch, repo,
 ):
     """create_knowhow_table's genesis ``table_create`` flow entry (seq==1,
     written by ``_setup`` itself) must carry the CREATING user's id as
     actor."""
     ctx = _setup(tmp_path, monkeypatch)
-    owner_id = ctx["client"].get("/api/me", headers=ctx["owner"]).json()["id"]
+    owner = ctx["client"].get("/api/me", headers=ctx["owner"]).json()
 
     genesis = ctx["client"].get(
         f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history/1",
         headers=ctx["owner"],
     ).json()
     assert genesis["kind"] == "table_create"
-    assert genesis["actor"] == owner_id
+    assert genesis["actor"] == owner["username"]
+    assert genesis["actor"] != owner["id"]
     assert genesis["actor"] != ""
+    with repo._runtime.database.connect() as db:
+        creator = db.execute(
+            "SELECT created_by FROM knowhow_tables WHERE id=?",
+            (ctx["table"]["id"],),
+        ).fetchone()["created_by"]
+    assert creator == owner["id"]
+
+
+def test_legacy_user_id_is_resolved_on_read_without_rewriting_history(
+    tmp_path, monkeypatch, repo,
+):
+    ctx = _setup(tmp_path, monkeypatch)
+    owner = ctx["client"].get("/api/me", headers=ctx["owner"]).json()
+    assert _patch_cell(ctx, "旧流水").status_code == 200
+
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_changes SET actor=? "
+            "WHERE table_id=? AND kind='cell_update'",
+            (owner["id"], ctx["table"]["id"]),
+        )
+
+    changes = ctx["client"].get(
+        f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history",
+        headers=ctx["owner"],
+    ).json()["changes"]
+    assert next(c for c in changes if c["kind"] == "cell_update")["actor"] == owner["username"]
+
+    with repo._runtime.database.connect() as db:
+        stored = db.execute(
+            "SELECT actor FROM knowhow_changes "
+            "WHERE table_id=? AND kind='cell_update'",
+            (ctx["table"]["id"],),
+        ).fetchone()["actor"]
+    assert stored == owner["id"]
 
 
 def test_cell_patch_rejects_an_unknown_origin(tmp_path, monkeypatch, repo):

@@ -24,7 +24,7 @@ _log = logging.getLogger("silicon_notebook.knowhow.transfer")
 
 
 def _remap(
-    repo: Any, snapshot: dict, target_notebook_id: str, actor_id: str
+    repo: Any, snapshot: dict, target_notebook_id: str, creator_id: str
 ) -> tuple[dict, list, Any]:
     seams = repo._runtime.seams
     new = seams.new_id
@@ -53,7 +53,7 @@ def _remap(
     table_out = dict(src_table)
     table_out["id"] = khtbl_map[src_table["id"]]
     table_out["notebook_id"] = target_notebook_id
-    table_out["created_by"] = actor_id
+    table_out["created_by"] = creator_id
     table_out["created_at"] = now
     table_out["updated_at"] = now
     old_hidden = src_table.get("hidden_source_id")
@@ -225,8 +225,8 @@ def _remap(
 
 
 def copy_table(
-    repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str,
-    *, verb: str = "复制",
+    repo: Any, source_table_id: str, target_notebook_id: str, creator_id: str,
+    *, actor_label: "str | None" = None, verb: str = "复制",
 ) -> str:
     """``verb`` (knowhow 表版本管理 Task 13, spec §7.3) names the genesis
     flow entry's ``note`` text — ``"由《<源表标题>》{verb}而来"``. Defaults
@@ -238,7 +238,7 @@ def copy_table(
     do its own copying)."""
     store = repo._runtime.knowhow_transfer_store
     snapshot = store.snapshot_table(source_table_id)
-    payload, asset_files, seams = _remap(repo, snapshot, target_notebook_id, actor_id)
+    payload, asset_files, seams = _remap(repo, snapshot, target_notebook_id, creator_id)
     expected_counts = {
         "columns": len(snapshot["columns"]),
         "rows": len(snapshot["rows"]),
@@ -254,7 +254,8 @@ def copy_table(
     source_title = snapshot["table"]["title"]
     store.insert_transfer(
         payload, expected_counts,
-        new_id=seams.new_id, now=seams.now, actor=actor_id,
+        new_id=seams.new_id, now=seams.now,
+        actor=creator_id if actor_label is None else actor_label,
         note=f"由《{source_title}》{verb}而来",
     )
 
@@ -326,7 +327,8 @@ class SourceCleanupFailed(Exception):
 
 
 def move_table(
-    repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
+    repo: Any, source_table_id: str, target_notebook_id: str, creator_id: str,
+    *, actor_label: "str | None" = None,
 ) -> str:
     # 四步顺序是这个函数的全部要害，三条边界都不能动：
     # ① 先复制、复制成功了才碰源——copy_table 抛异常时源必须分毫未动。
@@ -361,7 +363,8 @@ def move_table(
     # verb="移动"（spec §7.3）：这次 copy_table 内部产生的 table_create 创世
     # 流水必须说"移动而来"，不是"复制而来"——move 语义上删源，note 措辞要如实。
     new_table_id = copy_table(
-        repo, source_table_id, target_notebook_id, actor_id, verb="移动",
+        repo, source_table_id, target_notebook_id, creator_id,
+        actor_label=actor_label, verb="移动",
     )
     # A3 评审附加需求：copy_table 已经 COMMIT，从这里往下任何一步再炸，副本
     # 都已经是既成事实——裸异常冒泡上去只会变成路由层的通用 500，调用方分不清
@@ -482,11 +485,19 @@ def transfer_table(
     repo: Any,
     source_table_id: str,
     target_notebook_id: str,
-    actor_id: str,
+    creator_id: str,
     mode: str,
+    *,
+    actor_label: "str | None" = None,
 ) -> str:
     if mode == "copy":
-        return copy_table(repo, source_table_id, target_notebook_id, actor_id)
+        return copy_table(
+            repo, source_table_id, target_notebook_id, creator_id,
+            actor_label=actor_label,
+        )
     if mode == "move":
-        return move_table(repo, source_table_id, target_notebook_id, actor_id)
+        return move_table(
+            repo, source_table_id, target_notebook_id, creator_id,
+            actor_label=actor_label,
+        )
     raise ValueError(f"unknown transfer mode: {mode}")

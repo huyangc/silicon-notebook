@@ -90,6 +90,7 @@ class NotebookCopyService:
         source_notebook_id: str,
         *,
         new_owner_id: str,
+        actor_label: "str | None" = None,
         new_name: "str | None" = None,
     ) -> NotebookSummary:
         """Deep-copy a notebook with remapped IDs and a hidden copy sentinel.
@@ -230,6 +231,7 @@ class NotebookCopyService:
             for data in snapshot["knowhow_tables"]:
                 data["id"] = khtbl_map.setdefault(data["id"], remapped_id(data["id"]))
                 data["notebook_id"] = new_id
+                data["created_by"] = new_owner_id
                 old_hidden = data.get("hidden_source_id")
                 data["hidden_source_id"] = (
                     source_map.get(old_hidden, old_hidden) if old_hidden else old_hidden
@@ -306,7 +308,7 @@ class NotebookCopyService:
                 list(khtbl_map.values()),
                 new_id=self._seams.new_id,
                 now=self._seams.now,
-                actor=new_owner_id,
+                actor=new_owner_id if actor_label is None else actor_label,
                 note=f"随笔记本《{source_notebook.name}》复制而来",
             )
             # --- end knowhow business tables -------------------------------
@@ -658,6 +660,7 @@ class NotebookSharingService:
         source_notebook_id: str,
         *,
         new_owner_id: str,
+        actor_label: "str | None" = None,
         new_name: "str | None" = None,
     ) -> NotebookSummary:
         # Fast early reject (defense-in-depth): the deep copy materialises every
@@ -674,7 +677,8 @@ class NotebookSharingService:
                 f"(exceeds notebook_copy_max_bytes/rows); share read-only instead"
             )
         return self._copies.copy_notebook(
-            source_notebook_id, new_owner_id=new_owner_id, new_name=new_name
+            source_notebook_id, new_owner_id=new_owner_id,
+            actor_label=actor_label, new_name=new_name,
         )
 
     def sweep_stuck_copies(self, created_by: "str | None" = None) -> int:

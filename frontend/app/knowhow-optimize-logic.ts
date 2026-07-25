@@ -17,7 +17,7 @@
 // 规格③ UI 文案在此逐字登记为导出常量（同 knowhow-cell-editor-logic.ts 的
 // PROCEDURE_HINT_TEXT 等既有写法），组件侧只引用、不内联硬编码字符串。
 
-import type { KnowhowAppendDuplicateTitle, KnowhowRow } from "./knowhow-model.ts";
+import type { KnowhowAppendDuplicateTitle, KnowhowColumn, KnowhowRow } from "./knowhow-model.ts";
 import { hasUnsavedChanges } from "./knowhow-cell-editor-logic.ts";
 // 批量保存去重（F1）复用 anchor 分组的「合并共享格」判定——不另发明第二套等价，
 // 与 knowhow-panel.tsx handleCellSave 用的是同一套 groupRowsByAnchor /
@@ -451,6 +451,9 @@ export const BATCH_REFORMAT_STALE_SKIP_TEXT = "内容已被其他人修改，已
 // 格子如实点成「未开始（已中止）」——不能算进「共处理 N」（否则 100 格中止在第
 // 10 格却谎报「共处理 100」）。友好中文、不暴露 pending 枚举。
 export const BATCH_REFORMAT_ABORTED_PENDING_LABEL = "未开始（已中止）";
+export const BATCH_REFORMAT_RETRY_LABEL = "重试未完成项";
+export const REFORMAT_GENERATION_PRODUCT_CEILING = 3;
+export const REFORMAT_GENERATION_FALLBACK = 2;
 
 export const BATCH_REFORMAT_STATUS_LABELS: Record<ReformatBatchCellStatus, string> = {
   pending: "待处理",
@@ -605,6 +608,24 @@ export function beginReformatBatchRun(state: ReformatBatchState): ReformatBatchS
   return state.phase === "idle" ? { ...state, phase: "running" } : state;
 }
 
+export function beginReformatBatchRetry(state: ReformatBatchState): ReformatBatchState {
+  if (state.phase !== "reviewing") return state;
+  const hasRetryable = state.items.some(
+    (item) => item.status === "pending" || item.status === "aborted" || item.status === "reformat_error",
+  );
+  if (!hasRetryable) return state;
+  return {
+    ...state,
+    phase: "running",
+    aborted: false,
+    items: state.items.map((item) =>
+      item.status === "pending" || item.status === "aborted" || item.status === "reformat_error"
+        ? { ...item, status: "pending", errorMessage: undefined }
+        : item
+    ),
+  };
+}
+
 // 即将为某一格发起 reformat_cell 请求：pending -> running。phase 不是
 // "running"（尚未开始、已跑完、已中止）时原样返回——调用方（前端 for 循环）
 // 自己也会在中止后不再发起下一次请求，这里是纯函数层再兜底一次。
@@ -695,9 +716,9 @@ export function markReformatItemRunStale(
 }
 
 // 「中止」：running -> reviewing 且 aborted=true——立即把 UI 切到"整体确认"
-// screen（不必等最后一次在途请求返回），已经收集到的候选照常可以被确认
-// 保存；尚未处理的格子停在 pending，不会再被处理（调用方的 for 循环按自己
-// 的 abortedRef 短路，不依赖这里；这里把 phase 一并翻到 reviewing 是为了让
+// screen（不必等在途请求返回），已经收集到的候选照常可以被确认保存；尚未
+// 出队与正在途中的物理格都结算 aborted（可在同 snapshot 重试）。这里把 phase
+// 一并翻到 reviewing 是为了让
 // 纯函数层自己也能正确拒绝任何后续 markReformatItemRunning 调用，见其
 // 头注释）。
 //
@@ -714,7 +735,9 @@ export function abortReformatBatchRun(state: ReformatBatchState): ReformatBatchS
     ...state,
     phase: "reviewing",
     aborted: true,
-    items: state.items.map((item) => (item.status === "running" ? { ...item, status: "aborted" } : item)),
+    items: state.items.map((item) =>
+      item.status === "running" || item.status === "pending" ? { ...item, status: "aborted" } : item
+    ),
   };
 }
 
@@ -903,6 +926,177 @@ export function applyReformatCachedResult(
   // 里的 changed 只为不引入无意义的差异。
   const changed = target ? result.candidateMd !== target.originalMd : result.changed;
   return applyReformatResult(running, rowId, columnId, { ...result, changed });
+}
+
+type ReformatStatusSnapshot = {
+  services: Array<{
+    maximum: number;
+    workloads: Array<{ id: string }>;
+  }>;
+};
+
+export function resolveReformatGenerationConcurrency(snapshot: ReformatStatusSnapshot | null | undefined): number {
+  const matches = snapshot?.services.filter((service) =>
+    service.workloads.some((workload) => workload.id === "knowhow_reformat")
+  ) ?? [];
+  if (matches.length !== 1 || !Number.isSafeInteger(matches[0].maximum) || matches[0].maximum <= 0) {
+    return Math.min(REFORMAT_GENERATION_FALLBACK, REFORMAT_GENERATION_PRODUCT_CEILING);
+  }
+  return Math.max(1, Math.min(matches[0].maximum, REFORMAT_GENERATION_PRODUCT_CEILING));
+}
+
+export type ReformatGenerationResult = {
+  candidateMd: string;
+  source: string;
+  changed: boolean;
+  sourceMd: string;
+};
+
+export type ReformatGenerationPoolResult = {
+  staleCount: number;
+  cacheFanOutCount: number;
+  leaderRetryCount: number;
+};
+
+export async function runReformatGenerationPool(options: {
+  items: ReformatBatchItem[];
+  concurrency: number;
+  signal: AbortSignal;
+  cache: Map<string, ReformatGenerationResult>;
+  run: (item: ReformatBatchItem, signal: AbortSignal) => Promise<ReformatGenerationResult>;
+  onRunning: (item: ReformatBatchItem) => void;
+  onFresh: (item: ReformatBatchItem, result: ReformatGenerationResult, cached: boolean) => void;
+  onStale: (item: ReformatBatchItem) => void;
+  onError: (item: ReformatBatchItem, error: unknown) => void;
+}): Promise<ReformatGenerationPoolResult> {
+  const groupsByKey = new Map<string, ReformatBatchItem[]>();
+  for (const item of options.items) {
+    const key = reformatDedupeKey(item.columnId, item.originalMd);
+    const members = groupsByKey.get(key);
+    if (members) members.push(item);
+    else groupsByKey.set(key, [item]);
+  }
+  const groups = Array.from(groupsByKey, ([key, members]) => ({ key, members: [...members] }));
+  const counters: ReformatGenerationPoolResult = { staleCount: 0, cacheFanOutCount: 0, leaderRetryCount: 0 };
+  let cursor = 0;
+
+  async function runGroup(group: { key: string; members: ReformatBatchItem[] }): Promise<void> {
+    const cached = options.cache.get(group.key);
+    if (cached) {
+      for (const item of group.members) {
+        if (options.signal.aborted) return;
+        options.onFresh(item, cached, true);
+        counters.cacheFanOutCount += 1;
+      }
+      return;
+    }
+    while (group.members.length > 0 && !options.signal.aborted) {
+      const leader = group.members.shift()!;
+      options.onRunning(leader);
+      try {
+        const result = await options.run(leader, options.signal);
+        if (options.signal.aborted) return;
+        if (reformatResultIsStale(leader.originalMd, result.sourceMd)) {
+          options.onStale(leader);
+          counters.staleCount += 1;
+          if (group.members.length > 0) counters.leaderRetryCount += 1;
+          continue;
+        }
+        options.cache.set(group.key, result);
+        options.onFresh(leader, result, false);
+        for (const follower of group.members) {
+          if (options.signal.aborted) return;
+          options.onFresh(follower, result, true);
+          counters.cacheFanOutCount += 1;
+        }
+        return;
+      } catch (error) {
+        if (options.signal.aborted) return;
+        options.onError(leader, error);
+        if (group.members.length > 0) counters.leaderRetryCount += 1;
+      }
+    }
+  }
+
+  async function worker(): Promise<void> {
+    while (!options.signal.aborted) {
+      const index = cursor;
+      cursor += 1;
+      const group = groups[index];
+      if (!group) return;
+      await runGroup(group);
+    }
+  }
+
+  const limit = Math.max(1, Math.min(
+    Number.isSafeInteger(options.concurrency) ? options.concurrency : REFORMAT_GENERATION_FALLBACK,
+    REFORMAT_GENERATION_PRODUCT_CEILING,
+  ));
+  await Promise.all(Array.from({ length: Math.min(limit, groups.length) }, () => worker()));
+  return counters;
+}
+
+export function canonicalReformatCellTarget(
+  rowId: string,
+  columnId: string,
+  rows: KnowhowRow[],
+  anchorColumnId: string | null,
+): { rowId: string; columnId: string } {
+  if (!anchorColumnId) return { rowId, columnId };
+  const group = groupRowsByAnchor(rows, anchorColumnId).find((candidate) =>
+    candidate.rows.some((row) => row.id === rowId)
+  );
+  if (!group || !isSharedColumn(group, columnId)) return { rowId, columnId };
+  const representative = [...group.rows].sort((left, right) => left.position - right.position || left.id.localeCompare(right.id))[0];
+  return { rowId: representative?.id ?? rowId, columnId };
+}
+
+export const REFORMAT_OPEN_CELL_ERROR = "格子定位不合法，请重新加载表格后重试";
+
+export type OpenSavedReformatCellResult =
+  | { ok: true }
+  | { ok: false; errorText: string };
+
+export async function openSavedReformatCellAfterReload(options: {
+  rowId: string;
+  columnId: string;
+  currentRows: KnowhowRow[];
+  currentColumns: KnowhowColumn[];
+  currentAnchorColumnId: string | null;
+  closeBatch: () => void;
+  reload?: () => Promise<{
+    rows: KnowhowRow[];
+    columns: KnowhowColumn[];
+    anchorColumnId: string | null;
+  } | null>;
+  openCell: (rowId: string, columnId: string, rows: KnowhowRow[]) => void;
+}): Promise<OpenSavedReformatCellResult> {
+  // 关闭由父组件同步持有：批量 modal 卸载后，本异步流程仍属于存活的面板，
+  // 不会依赖已卸载子组件的 timer/ref。存在 pending stale 时必须等请求 epoch
+  // 仍有效的 reload 返回新 detail，才可按新分组重算 representative。
+  options.closeBatch();
+  const refreshed = options.reload ? await options.reload() : undefined;
+  if (options.reload && !refreshed) return { ok: false, errorText: REFORMAT_OPEN_CELL_ERROR };
+  const rows = refreshed?.rows ?? options.currentRows;
+  const columns = refreshed?.columns ?? options.currentColumns;
+  const anchorColumnId = refreshed?.anchorColumnId ?? options.currentAnchorColumnId;
+  if (
+    !rows.some((row) => row.id === options.rowId)
+    || !columns.some((column) => column.id === options.columnId)
+  ) {
+    return { ok: false, errorText: REFORMAT_OPEN_CELL_ERROR };
+  }
+  const target = canonicalReformatCellTarget(
+    options.rowId,
+    options.columnId,
+    rows,
+    anchorColumnId,
+  );
+  if (!rows.some((row) => row.id === target.rowId)) {
+    return { ok: false, errorText: REFORMAT_OPEN_CELL_ERROR };
+  }
+  options.openCell(target.rowId, target.columnId, rows);
+  return { ok: true };
 }
 
 // ===========================================================================

@@ -1022,6 +1022,7 @@ def create_memory_mcp(
     # so no bespoke auth flow is needed here even though this feature's HTTP
     # side has no notebook_id in its URL at all.
     from app.services.knowhow import api as knowhow_api
+    from app.services.knowhow import audit as knowhow_audit
 
     @server.tool(
         description="List knowhow tables (structured tabular knowledge) in the selected notebook."
@@ -1098,7 +1099,9 @@ def create_memory_mcp(
                 table = knowhow_api.to_wire_table(
                     repo.get_knowhow_table(location["table_id"])
                 )
-                code_attachments = repo.list_knowhow_cell_code(location["table_id"])
+                code_attachments = knowhow_audit.project_nested_updated_by(
+                    repo, repo.list_knowhow_cell_code(location["table_id"])
+                )
                 return knowhow_api.build_row_detail(table, row_id, code_attachments)
 
         return _budget_response(

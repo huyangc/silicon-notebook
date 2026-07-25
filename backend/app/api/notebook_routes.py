@@ -11,6 +11,7 @@ from app.api.deps import (
     require_notebook_read,
     user_error,
 )
+from app.core.audit_actor import session_audit_principal
 from app.models.identity import UserProfile
 from app.models.notebooks import (
     MountedBase,
@@ -194,7 +195,11 @@ def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user))
         raise HTTPException(status_code=409, detail="notebook too large to copy")
     from app.services.notebook_sharing import NotebookTooLargeToCopyError
     try:
-        return sharing.copy_notebook(nb_id, new_owner_id=user.id)
+        principal = session_audit_principal(user)
+        return sharing.copy_notebook(
+            nb_id, new_owner_id=principal.identity_id,
+            actor_label=principal.audit_label,
+        )
     except NotebookTooLargeToCopyError:
         # If ingestion pushed the notebook past the limit after the pre-check
         # above, copy_notebook's atomic within_copy_row_limit() bound (checked on
