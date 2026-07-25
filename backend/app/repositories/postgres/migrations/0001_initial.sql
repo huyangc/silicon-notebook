@@ -583,7 +583,6 @@ CREATE TABLE reports (
   sections_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   gaps_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   references_json jsonb NOT NULL DEFAULT '[]'::jsonb,
-  understanding_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   depth bigint NOT NULL DEFAULT 2,
   section_status_json jsonb NOT NULL DEFAULT '[]'::jsonb,
   content_md text COLLATE "C" NOT NULL DEFAULT '',

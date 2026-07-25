@@ -457,6 +457,23 @@ def test_schema_manifest_pairing_is_pinned_without_a_live_database():
     )
 
 
+def test_report_understanding_stays_in_its_forward_postgres_migration():
+    """Keep fresh PostgreSQL column order aligned with SQLite v32.
+
+    SQLite adds ``reports.understanding_json`` with its v32 ALTER TABLE, so
+    shadow COPY sees it at the end of the row.  Backfilling the same column
+    into PostgreSQL's immutable initial migration moves it ahead of ``depth``
+    on fresh databases even though migration 0010 remains idempotent.
+    """
+    from app.repositories.postgres.migrator import load_migrations
+
+    migrations = load_migrations(MIGRATIONS_PATH)
+    assert "understanding_json" not in migrations[0].sql
+    assert migrations[-1].version == 10
+    assert "ALTER TABLE reports" in migrations[-1].sql
+    assert "understanding_json" in migrations[-1].sql
+
+
 def test_ask_job_tie_waiver_rests_on_microsecond_timestamps():
     """Reverse guardrail for the ask_jobs entry in ROWID_REVIEWED_NON_ORDINAL.
 
