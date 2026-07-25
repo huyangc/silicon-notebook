@@ -221,6 +221,21 @@ def _drain_into(cursor, out: List[dict], budget: int) -> bool:
     返回 True 当且仅当**确实还有没读的行** —— 判据是「已经攒够 budget 行、而游标
     又吐出了下一行」。恰好等于上限时不算截断:那种情况什么都没漏,报成截断会让读者
     以为覆盖不全(单来源时甚至会报出 0/1 这种荒谬数字)。
+
+    留下的是**索引前缀,不是随机样本**。这一点被刻意保留,并由调用方在报告里显式
+    声明(见 main 里的截断文案)——不是疏漏:
+
+      * 蓄水池/ORDER BY RANDOM 能拿到无偏样本,但两者都要把全表的 payload 扫一遍。
+        本工具的目标是 437GB / 千万行级的生产库,那等于几十分钟到几小时的冷 IO,
+        会让「先抽样快速看一眼」这个唯一的使用姿势不成立。
+      * 真正的无偏抽样入口是 `--sources K`:来源是随机抽的,截断落在随机来源的前缀
+        上,不会按类型或插入年代系统性聚集。
+      * 全量模式(--sources 0)触顶时前缀确实可能有偏(SQLite 可能按插入序返回,
+        而插入序与来源、与抽取批次相关),所以那条路径的截断文案会明说「这不是随机
+        样本,比例可能有偏,要无偏样本请改用 --sources K」。
+
+    换言之:不消除偏差,但绝不隐瞒偏差。test_kg_quality_audit.py 里有反向护栏钉住
+    这句声明必须出现。
     """
     for row in cursor:
         if budget and len(out) >= budget:
@@ -347,21 +362,27 @@ def degree_and_basis(
     # review_status 的话,一个只连着 deprecated 节点的节点会被报成「非孤立」,它的
     # 边也会进标注统计 —— 而产品眼里它就是孤立的。被查节点自身已从可用集合里抽出,
     # 故只需约束对端。
+    # 对端还必须属于**本 notebook**:关系的两个端点列都没有外键约束更没有 notebook
+    # 归属约束,历史/损坏数据可能指向别的库;而产品的节点集就是本 notebook 的可用
+    # 对象,那种边根本进不了图。少了这个条件,跨库的野边会被算成连通。
     outgoing = ("SELECT r.evidence FROM knowledge_relations r "
                 "JOIN knowledge_objects o ON o.id = r.target_object_id "
                 f"WHERE r.notebook_id = ? AND r.source_object_id = ? AND r.{_NOT_REJECTED} "
+                "AND o.notebook_id = ? "
                 f"AND o.status IN ({_USABLE_PLACEHOLDERS})")
     incoming = ("SELECT r.evidence FROM knowledge_relations r "
                 "JOIN knowledge_objects o ON o.id = r.source_object_id "
                 f"WHERE r.notebook_id = ? AND r.target_object_id = ? AND r.{_NOT_REJECTED} "
+                "AND o.notebook_id = ? "
                 f"AND o.status IN ({_USABLE_PLACEHOLDERS})")
     deg: Dict[str, int] = {}
     basis = Counter()
     for i, oid in enumerate(object_ids, 1):
         n = 0
         for statement in (outgoing, incoming):
-            for row in conn.execute(statement,
-                                    (notebook_id, oid, *USABLE_STATUSES)):
+            for row in conn.execute(
+                    statement,
+                    (notebook_id, oid, notebook_id, *USABLE_STATUSES)):
                 n += 1
                 try:
                     ev = json.loads(row["evidence"] or "[]")
@@ -754,13 +775,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # 绝不静默截断:上限一旦生效,「全量」就不再是全量,必须当场说清楚。
             print(f"  ⚠ 已达 --max-objects={args.max_objects:,} 上限,读取在此停止:")
             if covered is None:
-                print(f"    只读到全部 {grand:,} 个有效对象里的前 {len(items):,} 个,"
-                      "下面的比例只代表这一部分。")
+                print(f"    只读到全部 {grand:,} 个有效对象里的前 {len(items):,} 个。")
+                print("    ⚠ 这是**索引前缀,不是随机样本** —— 数据库可能按插入序返回,"
+                      "而插入序与来源、\n      与抽取批次相关,所以下面的比例可能有偏。"
+                      "要无偏样本请改用 --sources K\n      (来源随机抽,前缀落在随机"
+                      "来源上);要全都读请调大 --max-objects(注意内存)。")
             else:
                 print(f"    完整读完 {covered}/{len(source_ids)} 个来源,"
                       "下面的比例只代表这一部分。")
-            print("    要读更多:调大 --max-objects(注意内存),或用 --sources 缩小范围"
-                  "后分批看。")
+                print("    这些来源本身是随机抽的,所以前缀不会按类型或插入年代系统性"
+                      "聚集;要读更多请调大 --max-objects。")
         by_type: Dict[str, List[dict]] = defaultdict(list)
         for it in items:
             by_type[it["object_type"]].append(it)

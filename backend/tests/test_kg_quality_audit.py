@@ -380,6 +380,11 @@ def test_object_loading_is_bounded_independently_of_source_count(tmp_path, capsy
     assert "读到 10 个对象" in out, "对象上限没有生效"
     assert "已达 --max-objects=10 上限" in out, "截断必须显式报出,不能静默"
     assert "前 10 个" in out, "必须说清截断后实际读到了多少"
+    # 第 7 轮 codex 评审(P2)：截断留下的是索引前缀而非随机样本。我们不消除这个偏差
+    # （无偏抽样要全表扫 payload，在千万级目标库上会让这个工具不可用），但必须明说。
+    assert "不是随机样本" in out, "全量截断必须声明这不是随机样本"
+    assert "可能有偏" in out, "必须说明比例可能有偏"
+    assert "--sources K" in out, "必须指出拿无偏样本的正确入口"
 
     # 上限足够大时不应报截断，免得断言因「永远截断」而假绿
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
@@ -525,6 +530,44 @@ def test_full_mode_covers_objects_whose_source_row_is_gone(tmp_path, capsys):
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "1",
                        "--no-samples"]) == 0
     assert "未纳入下面的分析" in capsys.readouterr().out
+
+
+def test_cross_notebook_endpoints_do_not_count_as_connectivity(tmp_path, capsys):
+    """关系端点列没有 notebook 归属约束,但产品的节点集只含本 notebook 的可用对象。
+
+    第 7 轮 codex 评审(P2)：历史/损坏数据指向别的库时，那条边在产品图里根本不存在。
+    """
+    audit = load_audit()
+    db = tmp_path / "cross.db"
+    _build_db(
+        db, sources=1,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    conn = sqlite3.connect(db)
+    conn.execute("INSERT INTO notebooks VALUES ('nb-2','另一个库','personal')")
+    conn.execute(
+        "INSERT INTO knowledge_objects "
+        "(id,notebook_id,object_type,source_id,payload,evidence) "
+        "VALUES ('foreign','nb-2','concept','',?,'[]')",
+        (json.dumps({"name": "FOREIGNCONCEPT"}),),
+    )
+    # 边登记在 nb-1 名下，但对端对象属于 nb-2 且状态可用
+    conn.execute(
+        "INSERT INTO knowledge_relations "
+        "(id,notebook_id,source_object_id,target_object_id,edge_type,evidence) "
+        "VALUES ('x','nb-1','o-0-0','foreign','about',"
+        "'[{\"basis\":\"relink:name-match\"}]')",
+    )
+    conn.commit()
+    conn.close()
+
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "relink:name-match" not in out, "跨 notebook 的端点不得计入连通性"
+    assert re.search(r"concept\s+1 / 1\b", out), \
+        "只连着外库对象的节点应报为零度"
 
 
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):
