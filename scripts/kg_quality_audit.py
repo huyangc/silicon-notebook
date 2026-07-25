@@ -215,20 +215,41 @@ def count_sourceless(conn: sqlite3.Connection, notebook_id: str) -> int:
     return int(row[0] or 0) if row else 0
 
 
+def _drain_into(cursor, out: List[dict], budget: int) -> bool:
+    """把游标追加进 out,受 budget(**总**行数上限,0 = 不限)约束。
+
+    返回 True 当且仅当**确实还有没读的行** —— 判据是「已经攒够 budget 行、而游标
+    又吐出了下一行」。恰好等于上限时不算截断:那种情况什么都没漏,报成截断会让读者
+    以为覆盖不全(单来源时甚至会报出 0/1 这种荒谬数字)。
+    """
+    for row in cursor:
+        if budget and len(out) >= budget:
+            return True        # 这是第 budget+1 行,证明确有剩余
+        out.append(_as_item(row))
+    return False
+
+
 def load_sourceless_objects(
-    conn: sqlite3.Connection, notebook_id: str
-) -> List[dict]:
-    """读该 notebook 下不挂来源的对象(晋升 / Memory→KG 产物)。"""
-    return [
-        _as_item(row)
-        for row in conn.execute(
+    conn: sqlite3.Connection, notebook_id: str, out: List[dict], budget: int
+) -> bool:
+    """把不挂来源的对象(晋升 / Memory→KG 产物)追加进 ``out``,同样受行数上限约束。
+
+    晋升为主的 base 库这一批本身就可能有几百万行 —— 只给挂来源的那条路径设闸,
+    上限就是个摆设。**追加进调用方已有的 ``out``**(而不是自己开一个新列表)是刻意
+    的:budget 衡量的是这次审计读进内存的**总**行数,给它一份独立预算等于把上限
+    放宽一倍。返回是否被上限截断。
+    """
+    return _drain_into(
+        conn.execute(
             "SELECT id, object_type, source_id, payload, evidence "
             "FROM knowledge_objects "
             "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL) "
             f"AND status IN ({_USABLE_PLACEHOLDERS})",
             (notebook_id, *USABLE_STATUSES),
-        )
-    ]
+        ),
+        out,
+        budget,
+    )
 
 
 def load_objects(
@@ -245,22 +266,26 @@ def load_objects(
     这个工具的目标场景恰恰是千万级库,没有这道闸就会在读 payload/evidence 时把
     宿主机内存吃光。上限 0 = 不封顶(明确要全量时才用)。
 
-    返回 (对象, 实际覆盖的来源数, 是否被上限截断)。截断必须由调用方显式报出 ——
-    静默截断会让读者以为覆盖了全部抽样来源。
+    返回 (对象, 完整读完的来源数, 是否被上限截断)。截断必须由调用方显式报出 ——
+    静默截断会让读者以为覆盖了全部抽样来源。恰好读满上限而后面再无数据时**不**算
+    截断(见 _drain_into)。
 
     只覆盖挂了来源的对象;不挂来源的那部分见 load_sourceless_objects。"""
     out: List[dict] = []
     covered = 0
     for i, sid in enumerate(source_ids, 1):
-        for row in conn.execute(
-            "SELECT id, object_type, source_id, payload, evidence FROM knowledge_objects "
-            f"WHERE source_id = ? AND notebook_id = ? AND status IN ({_USABLE_PLACEHOLDERS})",
-            (sid, notebook_id, *USABLE_STATUSES),
+        if _drain_into(
+            conn.execute(
+                "SELECT id, object_type, source_id, payload, evidence "
+                "FROM knowledge_objects "
+                f"WHERE source_id = ? AND notebook_id = ? "
+                f"AND status IN ({_USABLE_PLACEHOLDERS})",
+                (sid, notebook_id, *USABLE_STATUSES),
+            ),
+            out,
+            max_objects,
         ):
-            out.append(_as_item(row))
-            if max_objects and len(out) >= max_objects:
-                # 读完当前这一行就停:半个来源也算覆盖到了,但不谎报为完整来源。
-                return out, covered, True
+            return out, covered, True     # 这个来源只读了一半,不计入 covered
         covered = i
         if i % 200 == 0:
             sys.stderr.write(f"  ... 已读 {i}/{len(source_ids)} 个来源\n")
@@ -651,18 +676,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         items, covered, capped = load_objects(
             conn, target, source_ids, args.max_objects)
         n_sourced = len(items)
+        sourceless_read = 0
         if full and n_sourceless and not capped:
-            items += load_sourceless_objects(conn, target)
+            # 追加进同一个 items:预算是这次审计的总行数,不是每条路径各来一份。
+            capped = load_sourceless_objects(
+                conn, target, items, args.max_objects)
+            sourceless_read = len(items) - n_sourced
             print(f"  读到 {n_sourced:,} 个挂来源的对象 + "
-                  f"{len(items) - n_sourced:,} 个不挂来源的对象 = {len(items):,}")
+                  f"{sourceless_read:,} 个不挂来源的对象 = {len(items):,}")
         else:
             print(f"  读到 {len(items):,} 个对象")
         if capped:
             # 绝不静默截断:上限一旦生效,「全量」就不再是全量,必须当场说清楚。
             print(f"  ⚠ 已达 --max-objects={args.max_objects:,} 上限,读取在此停止:")
-            print(f"    只覆盖了 {covered}/{len(source_ids)} 个来源"
-                  f"{'(且不挂来源的对象一个都没读)' if n_sourceless else ''},"
-                  "下面的比例只代表这一部分。")
+            missed_sourceless = (
+                n_sourceless and full and sourceless_read < n_sourceless
+            )
+            print(f"    完整读完 {covered}/{len(source_ids)} 个来源"
+                  + (f",不挂来源的对象读了 {sourceless_read:,}/{n_sourceless:,}"
+                     if missed_sourceless else "")
+                  + ",下面的比例只代表这一部分。")
             print("    要读更多:调大 --max-objects(注意内存),或用 --sources 缩小范围"
                   "后分批看。")
         by_type: Dict[str, List[dict]] = defaultdict(list)

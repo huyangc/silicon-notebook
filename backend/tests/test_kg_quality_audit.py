@@ -378,7 +378,7 @@ def test_object_loading_is_bounded_independently_of_source_count(tmp_path, capsy
     out = capsys.readouterr().out
     assert "读到 10 个对象" in out, "对象上限没有生效"
     assert "已达 --max-objects=10 上限" in out, "截断必须显式报出,不能静默"
-    assert "只覆盖了 0/2 个来源" in out, "必须说清截断时实际覆盖了多少来源"
+    assert "完整读完 0/2 个来源" in out, "必须说清截断时完整读完了多少来源"
 
     # 上限足够大时不应报截断，免得断言因「永远截断」而假绿
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
@@ -386,6 +386,35 @@ def test_object_loading_is_bounded_independently_of_source_count(tmp_path, capsy
     uncapped = capsys.readouterr().out
     assert "已达 --max-objects" not in uncapped
     assert "读到 122 个对象" in uncapped
+
+    # 上限恰好等于总行数：什么都没漏，不得报截断（第 5 轮 codex 评审 P2）
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--max-objects", "122", "--no-samples"]) == 0
+    exact = capsys.readouterr().out
+    assert "已达 --max-objects" not in exact, "恰好读满上限而无剩余时不得报截断"
+    assert "读到 122 个对象" in exact
+
+
+def test_object_cap_also_bounds_sourceless_objects(tmp_path, capsys):
+    """晋升 / Memory→KG 那批也得受上限约束,否则上限就是摆设。
+
+    第 5 轮 codex 评审(P1)：--max-objects 只挡住了挂来源的那条路径。
+    """
+    audit = load_audit()
+    db = tmp_path / "promo_cap.db"
+    _build_db(
+        db, sources=1, sourceless=50,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    # 一个来源贡献 2 个对象；上限 5 → 不挂来源的那批最多再读 3 个
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--max-objects", "5", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "读到 2 个挂来源的对象 + 3 个不挂来源的对象 = 5" in out, \
+        "不挂来源的对象必须共享同一份预算,不能各拿一份"
+    assert "已达 --max-objects=5 上限" in out
+    assert "不挂来源的对象读了 3/50" in out, "必须说清这批读了多少、总共多少"
 
 
 def test_edges_to_unusable_endpoints_do_not_count_as_connectivity(tmp_path, capsys):
