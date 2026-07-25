@@ -160,8 +160,16 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 The default is a read-only preflight. It validates the SQLite identity/schema and PostgreSQL
 UTF-8/current-schema/emptiness/migration-ledger state, then exits without creating a snapshot
-or writing the target. Ensure free space for a SQLite snapshot and upgrade working copy plus
-the PostgreSQL database and indexes. `pg_trgm` must be creatable in `public`.
+or writing the target. `pg_trgm` must be creatable in `public`.
+
+Size the work directory for **at least twice the source file**, not once. The sealed snapshot
+stays for the whole import; a source whose schema lags the code is additionally copied into a
+full upgrade working copy; and activation unconditionally takes another complete snapshot as
+the write-freeze anchor while the sealed one must still be present. A 500 GB source therefore
+needs 1 TB, and a 1× allocation fails at activation after hours of successful copying. Size the
+target separately: PostgreSQL data plus indexes normally exceed the SQLite file and the index
+rebuild needs additional scratch, so take the measured figure from a rehearsal
+(`SELECT pg_size_pretty(pg_database_size(current_database()));`) rather than the SQLite size.
 
 ### 2. Rehearse while SQLite remains online
 
@@ -283,6 +291,11 @@ For a large source, throughput and reliability are dominated by a few levers:
 
 - Before PostgreSQL accepts any business write, rollback is safe: stop the backend, restore
   the SQLite `DATABASE_URL`, start one worker, and repeat the readiness/auth/count/read smoke.
+- Note where that boundary actually falls during verification: a successful `/auth/login`
+  already writes PostgreSQL (`create_session()` inserts into `auth_sessions`). Losslessness
+  therefore ends at the first login, not at the canary write. Rolling back between the two
+  costs only the sessions — users log in again — while rolling back after the canary loses
+  business data. Decide before logging in if the run must stay provably write-free.
 - After the first PostgreSQL business write, editing the URL back loses that write. This
   repository has no reverse importer or dual-write log. Freeze again, externally reconcile
   PostgreSQL→SQLite (including storage effects), verify both sides, and only then reopen

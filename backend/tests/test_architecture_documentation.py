@@ -367,6 +367,20 @@ def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own
         "the English entry point must declare the runbook's language and that "
         "no instruction is available only there"
     )
+    # Claiming completeness is only honest while the operational requirements
+    # the runbook adds also exist here (codex review round 8 P2): the 2x work
+    # directory rule, whose absence fails an activation after hours of copying,
+    # and the login-versus-canary rollback boundary.
+    for name, sizing in (
+        ("docs/operations.md", "twice the source file"),
+        ("docs/operations_zh.md", "源库大小的两倍"),
+    ):
+        text = _read_file(name)
+        assert sizing in text, f"{name} must state the 2x work-directory rule"
+        assert "auth_sessions" in text, (
+            f"{name} must say login already writes PostgreSQL, so the lossless "
+            "rollback window closes there rather than at the canary write"
+        )
 
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():

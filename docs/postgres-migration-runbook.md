@@ -90,7 +90,18 @@ python scripts/migrate_sqlite_to_postgres.py \
 - 进度行:`COPY i/N` → `VERIFY i/N` → `INDEX i/N`;续跑时已完成的表报 `SKIP i/N ... (checkpointed)`。
 - **成功**:`MIGRATION OK: <行数> rows across <表数> tables; SQLite v<a>-><b>; snapshot=...; receipt=...`。
 - **中断**(崩溃、断连、重启):**原样重跑同一条命令**即可续跑。为避免重新快照多 GB 源库,
-  加上上一次打印的快照路径:`--snapshot <WORK_DIR>/sqlite-vNN-HASH.snapshot.db`。
+  显式复用已密封的快照。中断时不会打印 `MIGRATION OK` 那行,所以路径要自己从工作目录找:
+
+  ```bash
+  ls -t <WORK_DIR>/*.snapshot.db
+  ```
+
+  取最新的那个传给 `--snapshot`。传错了不会污染数据——名字里的 hash、来源记录、
+  `quick_check` 都会被复核,不匹配就拒绝。
+
+- **源库被改过之后不能续跑同一个目标。** 修脏值(或处置退休表数据)会改变源库内容,
+  密封快照的 hash 随之改变,而目标库里的续跑进度是绑在旧 hash 上的,重跑会被拒。
+  改过源库就要**换一个新的空目标库**(或清空当前这个)从头来。
 
 彩排要产出两个数,正式窗口都要用:**耗时**,以及**目标库实际占用**
 (`SELECT pg_size_pretty(pg_database_size(current_database()));` 在导入结束后执行)。
@@ -192,8 +203,8 @@ curl -fsS http://127.0.0.1:8000/api/ready
 | 现象 | 原因与处置 |
 | --- | --- |
 | 预检报目标非空 | 目标不是专用空库,或复用了彩排库。换一个新空库 |
-| `retired SQLite table <名> contains N rows` | 退役表(`articles`/`article_claims`/`derived_rule_candidates`/`extraction_candidates`)仍有数据。**这是拒绝丢弃历史数据,不是 bug**;先确认这些数据确实不再需要并自行处置 |
-| `invalid JSON in <表>.<列>` / `invalid legacy vector` / `invalid timestamp` | 源库脏值。回 SQLite 侧修数据后重跑;这正是必须先彩排的原因 |
+| `retired SQLite table <名> contains N rows` | 退役表(`articles`/`article_claims`/`derived_rule_candidates`/`extraction_candidates`)仍有数据。**这是拒绝丢弃历史数据,不是 bug**;先确认这些数据确实不再需要并自行处置。处置动作改了源库 → 按下一行换新目标 |
+| `invalid JSON in <表>.<列>` / `invalid legacy vector` / `invalid timestamp` | 源库脏值。回 SQLite 侧修数据;这正是必须先彩排的原因。**修完要换新的空目标库重跑**——源库变了,密封快照 hash 就变了,旧目标里的续跑进度绑在旧 hash 上会拒绝 |
 | `upgraded SQLite snapshot has the wrong schema version` / `table manifest mismatch` | 代码版本与源库 schema 不配对。用与源库匹配的代码版本,不要改 manifest 绕过 |
 | `--activate-env requires --apply and --confirm-service-stopped` | 少了确认参数;先真正停写再补上 |
 | 校验和不一致 | 激活会中止且不动 `.env`。不要重试激活,先查源库在导入期间是否仍在写 |

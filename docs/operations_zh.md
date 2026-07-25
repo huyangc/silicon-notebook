@@ -129,8 +129,14 @@ python scripts/migrate_sqlite_to_postgres.py \
 ```
 
 默认只做只读 preflight：检查 SQLite 身份/schema 与 PostgreSQL UTF-8、current schema、空库和
-migration ledger，然后退出；不会创建快照或写目标。磁盘要同时容纳 SQLite 快照、升级工作副本、
-PostgreSQL 数据与索引；目标用户还必须能在 `public` 安装/使用 `pg_trgm`。
+migration ledger，然后退出；不会创建快照或写目标。目标用户还必须能在 `public` 安装/使用 `pg_trgm`。
+
+工作目录要按**源库大小的两倍**准备，不是一倍：密封快照在整个导入期间常驻；源库 schema 落后于
+代码时还会另拷一份完整升级工作副本；而激活阶段会**无条件**再生成一份完整快照作为停写锚点，
+此时密封快照必须仍然存在。500GB 的源库因此需要 1TB——按 1× 准备会在成功导入数小时之后、
+激活那一步失败。目标库要分开估：PostgreSQL 的数据加索引通常大于 SQLite 文件，重建索引还需
+额外临时空间，应采用演练实测值（`SELECT pg_size_pretty(pg_database_size(current_database()));`），
+不要用 SQLite 文件大小推。
 
 ### 2. SQLite 在线时先做演练
 
@@ -231,6 +237,10 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 - PostgreSQL 尚未接受任何业务写入时，可以停后端、把 `DATABASE_URL` 恢复成 SQLite、以单 worker
   启动并重复 readiness/认证/数量/读取 smoke。
+- 注意这条边界在验收流程里的实际位置：登录成功本身就是 PostgreSQL 写入
+  （`/auth/login` → `create_session()` 插入 `auth_sessions`）。**无损窗口止于第一次登录，
+  而不是金丝雀写入**。两者之间回滚只丢会话（用户重新登录即可），金丝雀写入之后回滚才会丢
+  业务数据。若这次切换必须保持「可证明零写入」，就要在登录之前决定。
 - 第一次 PG 业务写入之后，直接改 URL 会丢这次及后续写入。仓库没有 reverse importer 或
   dual-write log；必须再次停写，在外部完成 PostgreSQL→SQLite 对账（包括 storage 副作用），
   验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。
