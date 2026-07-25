@@ -341,6 +341,90 @@ def test_root_readmes_are_entrypoints_for_complete_language_doc_bundles():
             assert (ROOT / detail_path).is_file()
 
 
+def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own():
+    """The cutover runbook follows the single-Chinese-file runbook precedent
+    (docs/runtime-dim-truncation-runbook.md) rather than the paired bundles in
+    DOCUMENTATION_BUNDLES, which enumerate the five narrative documents only.
+
+    codex review round 7 read that as breaking the bilingual contract. It does
+    not — but the concern underneath is real: an English reader must never be
+    silently handed a Chinese-only page, and must never lose access to any
+    instruction. So pin both properties instead of duplicating the runbook into
+    two files that would drift apart, which is exactly what the runbook's own
+    "not a second source of truth" rule exists to prevent.
+    """
+    runbook = "docs/postgres-migration-runbook.md"
+    assert (ROOT / runbook).is_file()
+    assert runbook not in {
+        path for bundle in DOCUMENTATION_BUNDLES.values() for path in bundle
+    }
+    for entry in ("docs/operations.md", "docs/operations_zh.md"):
+        assert "postgres-migration-runbook.md" in _read_file(entry), (
+            f"{entry} must link the execution runbook"
+        )
+    english = _read_file("docs/operations.md")
+    assert "written in Chinese" in english and "complete English reference" in english, (
+        "the English entry point must declare the runbook's language and that "
+        "no instruction is available only there"
+    )
+    # Claiming completeness is only honest while the operational requirements
+    # the runbook adds also exist here (codex review round 8 P2): the 2x work
+    # directory rule, whose absence fails an activation after hours of copying,
+    # and the login-versus-canary rollback boundary.
+    for name, sizing in (
+        ("docs/operations.md", "twice the source file"),
+        ("docs/operations_zh.md", "源库大小的两倍"),
+    ):
+        text = _read_file(name)
+        assert sizing in text, f"{name} must state the 2x work-directory rule"
+        # Startup writers are pinned by
+        # test_startup_writes_are_documented_as_unavoidable; here we only keep
+        # the login boundary, which closes the last cheap-rollback window.
+        assert "auth_sessions" in text, (
+            f"{name} must say login writes PostgreSQL too, so rolling back "
+            "after it costs the sessions"
+        )
+
+
+def test_startup_writes_are_documented_as_unavoidable():
+    """There is no "started but provably untouched" PostgreSQL state.
+
+    An earlier revision shipped a probe that counted in-progress rows and told
+    operators a zero result proved no startup writes. That premise was simply
+    false: `_initialize()` re-salts the admin password hash and updates the
+    built-in row on *every* start (codex review round 11 P2), so the probe was
+    guarding a property that cannot hold. It was removed rather than extended.
+    What remains worth pinning is that all three startup writers stay named,
+    including the post-readiness reprojection that rewrites KG objects — the
+    one that is business data rather than harmless bookkeeping.
+    """
+    bootstrap = _read_file("backend/app/repositories/postgres/bundle.py")
+    assert "WHERE id='user-local'" in bootstrap, (
+        "the unconditional admin bootstrap update moved; re-check the "
+        "rollback boundary the docs describe"
+    )
+    warmup = _read_file("backend/app/services/startup_warmup.py")
+    assert "_reproject_legacy_knowhow_tables" in warmup
+
+    runbook = _read_file("docs/postgres-migration-runbook.md")
+    assert "SELECT (SELECT COUNT(*)" not in runbook, (
+        "the zero-write probe is back; no probe can establish that claim while "
+        "bootstrap writes unconditionally"
+    )
+    for name in (
+        "docs/postgres-migration-runbook.md",
+        "docs/operations.md",
+        "docs/operations_zh.md",
+    ):
+        text = _read_file(name)
+        for writer in (
+            "user-local",
+            "recover_interrupted_jobs",
+            "_reproject_legacy_knowhow_tables",
+        ):
+            assert writer in text, f"{name} does not name startup writer {writer}"
+
+
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
     """Documentation records stable ownership, not source layout or totals."""
     _assert_phrases(
