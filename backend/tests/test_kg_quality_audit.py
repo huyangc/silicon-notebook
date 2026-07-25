@@ -570,6 +570,30 @@ def test_cross_notebook_endpoints_do_not_count_as_connectivity(tmp_path, capsys)
         "只连着外库对象的节点应报为零度"
 
 
+def test_redundancy_counts_only_the_excess_rows(tmp_path, capsys):
+    """一个名字出现 c 次,冗余的只有 c-1 行 —— 头一行不是冗余。
+
+    第 8 轮 codex 评审(P2)：原先 sum(c for c in ... if c > 1) 把「参与重名的行」
+    当成「冗余行」，系统性高估。
+    """
+    audit = load_audit()
+    db = tmp_path / "dup.db"
+    # concept: 4 行 1 个唯一名 → 冗余 3（错算成 4）
+    # claim:   4 行 2 个唯一名 → 冗余 2（错算成 4）
+    # 两处都必须有重复，否则错算与正解在该处恰好都等于 0，护栏覆不到那一处
+    # —— 第一版就漏在这里，靠「只改 claim 那处」的变异打不红才发现。
+    _build_db(
+        db, sources=4,
+        concepts_per_source=lambda s: ["same concept everywhere"],
+        claim_name=lambda s: f"Transistor {s % 2} provides gain in saturation region.",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "唯一名 1 / 行数 4  → 冗余 3 行" in out, "concept 冗余必须是 c-1 的和"
+    assert "唯一命题 2 / 行数 4  → 冗余 2 行" in out, "claim 冗余必须是 c-1 的和"
+
+
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):
     audit = load_audit()
     db = tmp_path / "bad.db"

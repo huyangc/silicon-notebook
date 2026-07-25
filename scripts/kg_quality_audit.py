@@ -427,9 +427,12 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
         return
 
     norm_counts = Counter(_norm(n) for n in names)
-    dup_rows = sum(c for c in norm_counts.values() if c > 1)
+    # 冗余行 = 总行数 − 唯一名数(等价于 sum(c-1))。一个名字出现 c 次,多出来的只有
+    # c-1 行 —— 头一行不是冗余。早先写成 sum(c) 会把「参与重名的行」当成「冗余行」,
+    # 系统性高估这个指标(9400 行 / 7412 唯一名:真值 21.1%,错算成 32.0%)。
+    redundant = total - len(norm_counts)
     print(f"  唯一名 {len(norm_counts)} / 行数 {total}"
-          f"  → 重名占用 {dup_rows} 行 ({_pct(dup_rows, total)})")
+          f"  → 冗余 {redundant} 行 ({_pct(redundant, total)})")
     top_dup = [f"{n}×{c}" for n, c in norm_counts.most_common(6) if c > 1]
     if top_dup and show_samples:   # 概念名是内容,--no-samples 下一律不打
         print(f"  最重复: {', '.join(top_dup)}")
@@ -531,9 +534,9 @@ def report_claims(items: List[dict], show_samples: bool, seed: int) -> None:
         print("  (抽样里没有 claim)")
         return
     norm_counts = Counter(_norm(n) for n in names)
-    dup_rows = sum(c for c in norm_counts.values() if c > 1)
+    redundant = total - len(norm_counts)   # 同 report_concepts:只有 c-1 行是冗余
     print(f"  唯一命题 {len(norm_counts)} / 行数 {total}"
-          f"  → 重复占用 {dup_rows} 行 ({_pct(dup_rows, total)})")
+          f"  → 冗余 {redundant} 行 ({_pct(redundant, total)})")
     meta = [n for n in names if is_meta_claim(n)[0]]
     print(f"  现有 is_meta_claim 命中(元叙述/导航): {len(meta)} ({_pct(len(meta), total)})")
     if meta and show_samples:      # 命题原文是内容
