@@ -271,8 +271,8 @@ def test_preflight_is_read_only_redacted_and_encoding_is_first_target_check(
         for statement in target_conn.statements
     )
     assert report.target_initial_schema_version == 0
-    assert report.schema_pair.sqlite_version == 31
-    assert report.schema_pair.postgres_version == 9
+    assert report.schema_pair.sqlite_version == 32
+    assert report.schema_pair.postgres_version == 10
     assert report.source_database_bytes >= database_path.stat().st_size
     assert "super-secret" not in repr(report)
     assert str(database_path.parent) not in repr(report)

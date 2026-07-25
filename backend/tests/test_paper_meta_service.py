@@ -145,6 +145,9 @@ def test_ensure_stores_verified_meta(repo, notebook_id, service):
     assert meta["pub_year"] == 2025
     assert [a["name"] for a in meta["authors"]] == ["Chen Hao"]
     assert meta["authors"][0]["affiliation"] == "Fudan University"
+    citation_meta = repo._runtime.source_store.source_metadata(["src-1"])["src-1"]
+    assert bool(citation_meta["is_paper"]) is True
+    assert citation_meta["paper_title"] == "Gate Sizing Under Variability"
 
 
 def test_ensure_idempotent_skip(repo, notebook_id, service):

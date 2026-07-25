@@ -105,6 +105,11 @@ test("formatDuration guards against non-finite and negative inputs", () => {
 });
 
 test("uses concise detail labels for trace step payloads", () => {
+  assert.equal(getTraceStepDetail({
+    step_type: "intent",
+    summary: "理解",
+    detail: { resolved_question: "分析电荷泵 PLL 的锁定问题" },
+  }), "分析电荷泵 PLL 的锁定问题");
   assert.equal(getTraceStepDetail({ step_type: "plan", summary: "", detail: { sub_queries: [{}, {}] } }), "2 个子查询");
   assert.equal(getTraceStepDetail({ step_type: "retrieve", summary: "", detail: { count: 8 } }), "8 个候选");
   assert.equal(getTraceStepDetail({ step_type: "expand", summary: "", detail: { found: 1 } }), "新增 1");

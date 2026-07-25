@@ -72,7 +72,7 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
     ev = register_cancel(rid)
     r = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
     assert r.json()["status"] == "cancelled" and ev.is_set()
-    unregister_cancel(rid)
+    unregister_cancel(rid, ev)
     assert cancel_report(rid) is False           # 注销后不再命中活动线程
     # 线程已结束路径:再 cancel → 直接落库 cancelled
     r = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
@@ -208,6 +208,157 @@ def test_two_phase_report_lifecycle(client, monkeypatch):
     # 触发生成
     assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/generate", json={}).status_code==200
     assert launched["gen"]==rid
+    duplicate_generate = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/generate", json={}
+    )
+    assert duplicate_generate.status_code == 409
+
+
+def test_intent_confirmation_requires_answers_then_resumes_planning(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    launched = []
+    monkeypatch.setattr(
+        R,
+        "_launch_plan_job",
+        lambda *args, **kwargs: launched.append((args, kwargs)),
+    )
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports",
+        json={"question": "分析一下这个问题"},
+    ).json()["report_id"]
+    understanding = {
+        "objective": "分析一下这个问题",
+        "resolved_question": "分析这个问题",
+        "mandatory_topics": [{
+            "id": "intent-1", "title": "待明确", "question": "分析什么？",
+            "retrieval_queries": ["分析"],
+        }],
+        "ambiguities": [{
+            "id": "ambiguity-input",
+            "question": "具体研究对象是什么？",
+            "required": True,
+            "options": [],
+        }],
+        "needs_clarification": True,
+        "confirmed": False,
+    }
+    repository().update_report(
+        nb["id"], rid, status="intent_ready", understanding=understanding
+    )
+
+    missing = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/intent",
+        json={"resolved_question": "分析 PLL 稳定性", "answers": []},
+    )
+    assert missing.status_code == 422
+    assert missing.json()["detail"] == "请先回答所有必填澄清问题"
+
+    confirmed = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/intent",
+        json={
+            "resolved_question": "分析 PLL 环路稳定性的机理与设计约束",
+            "answers": [{"id": "ambiguity-input", "answer": "对象是电荷泵 PLL"}],
+        },
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json() == {"status": "planning"}
+    detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert detail["status"] == "planning"
+    seed = detail["understanding"]["confirmed_input"]
+    assert seed["resolved_question"].startswith("分析 PLL")
+    assert seed["answers"][0]["answer"] == "对象是电荷泵 PLL"
+    assert launched[-1][1]["intent_contract"]["confirmed"] is True
+
+    launched_after_claim = len(launched)
+    duplicate = client.post(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/intent",
+        json={
+            "resolved_question": "重复确认不应启动第二个任务",
+            "answers": [{"id": "ambiguity-input", "answer": "另一个对象"}],
+        },
+    )
+    assert duplicate.status_code == 409
+    assert len(launched) == launched_after_claim
+
+
+def test_outline_patch_preserves_intent_catalog_and_bounds_sections(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    catalog = [
+        {"id": "intent-1", "title": "A", "question": "explain A",
+         "retrieval_queries": ["A"]},
+        {"id": "intent-2", "title": "B", "question": "explain B",
+         "retrieval_queries": ["B"]},
+    ]
+    contract = {"objective": "compare A and B", "mandatory_topics": catalog,
+                "comparison_axes": ["latency"]}
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["A"],
+                  "intent_ids": ["intent-1"], "intent_catalog": catalog,
+                  "intent_contract": contract}],
+    )
+    submitted = [
+        {"title": f"S{i}", "scope": " s ", "sub_queries": [" q ", "q2", "q3", "q4", "q5"],
+         "intent_ids": ["intent-1" if i == 0 else "intent-2", "unknown"]}
+        for i in range(repository().settings.report_max_sections + 2)
+    ]
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": submitted},
+    )
+    assert response.status_code == 200
+    outline = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()["outline"]
+    assert len(outline) == repository().settings.report_max_sections
+    assert outline[0]["sub_queries"] == ["q", "q2", "q3", "q4"]
+    assert outline[0]["intent_ids"] == ["intent-1"]
+    assert outline[0]["intent_questions"] == ["explain A"]
+    assert all(section["intent_catalog"] == catalog for section in outline)
+    assert all(section["intent_contract"] == contract for section in outline)
+
+
+def test_outline_patch_rejects_dropping_a_mandatory_intent(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    catalog = [
+        {"id": "intent-1", "title": "A", "question": "explain A", "retrieval_queries": ["A"]},
+        {"id": "intent-2", "title": "B", "question": "explain B", "retrieval_queries": ["B"]},
+    ]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        outline=[{"title": "A and B", "scope": "s", "sub_queries": ["A", "B"],
+                  "intent_ids": ["intent-1", "intent-2"], "intent_catalog": catalog,
+                  "intent_contract": {"objective": "compare A and B",
+                                      "mandatory_topics": catalog}}],
+    )
+
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": [{"title": "Only A", "scope": "s", "sub_queries": ["A"],
+                            "intent_ids": ["intent-1"]}]},
+    )
+
+    assert response.status_code == 422
+    assert response.headers["X-User-Message"] == "1"
+    assert response.json()["detail"] == "大纲必须保留每个必答主题，请恢复被删除的主题后再试"
 
 def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
     import app.api.report_routes as R

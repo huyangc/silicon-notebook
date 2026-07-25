@@ -1,8 +1,8 @@
 {
   "schema_pair": {
     "epoch": 1,
-    "postgres_version": 9,
-    "sqlite_version": 31
+    "postgres_version": 10,
+    "sqlite_version": 32
   },
   "tables": [
     {

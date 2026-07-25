@@ -26,7 +26,7 @@ REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
 
 SQL_REASON_BY_PATH = {
     "backend/app/migration/shadow/postgres_catalog.py": (
-        "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v9 business catalog before copying and checkpoint publication"
+        "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v10 business catalog before copying and checkpoint publication"
     ),
     "backend/app/migration/shadow/capture.py": (
         "temporary migration boundary owns run-scoped SQLite capture DDL"

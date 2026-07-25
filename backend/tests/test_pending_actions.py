@@ -48,7 +48,12 @@ def test_pending_actions_report_outline(repo):
             "VALUES (?,?,?,?,?,?,?)",
             ("r1", nb, "带隙基准的温漂机理?", "outline_ready", "user-a", "2026-07-07T01:00:00", "2026-07-07T01:00:00"),
         )
-        # 干扰项:非 outline_ready、他人的报告 —— 都不该出现
+        db.execute(
+            "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("r-intent", nb, "分析一下这个问题", "intent_ready", "user-a", "2026-07-07T02:00:00", "2026-07-07T02:00:00"),
+        )
+        # 干扰项:非待确认态、他人的报告 —— 都不该出现
         db.execute(
             "INSERT INTO reports (id, notebook_id, question, status, created_by, created_at, updated_at) "
             "VALUES (?,?,?,?,?,?,?)",
@@ -56,11 +61,10 @@ def test_pending_actions_report_outline(repo):
         )
     out = repo.pending_actions("user-a")
     items = [it for it in out["items"] if it["type"] == "report_outline"]
-    assert len(items) == 1
-    assert items[0]["report_id"] == "r1"
-    assert items[0]["notebook_id"] == nb
-    assert items[0]["title"]  # question 截断非空
-    assert out["count"] == 1
+    assert {item["report_id"] for item in items} == {"r1", "r-intent"}
+    assert all(item["notebook_id"] == nb for item in items)
+    assert all(item["title"] for item in items)  # question 截断非空
+    assert out["count"] == 2
 
 
 def test_pending_actions_governance_counts(repo):

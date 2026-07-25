@@ -46,7 +46,7 @@ from app.migration.shadow.snapshot import (
     assert_live_sqlite_path,
     open_fresh_live_sqlite,
 )
-from app.migration.shadow.postgres_catalog import validate_postgres_v9_catalog
+from app.migration.shadow.postgres_catalog import validate_postgres_v10_catalog
 from app.migration.shadow.transform import (
     PostgresColumn,
     canonical_json_value,
@@ -813,7 +813,7 @@ def _validate_full_copy_target_catalog(
             definition,
             business_schema=state.target_business_schema,
         )
-    validate_postgres_v9_catalog(
+    validate_postgres_v10_catalog(
         conn,
         business_schema=state.target_business_schema,
         manifest=manifest,

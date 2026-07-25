@@ -250,27 +250,44 @@ def test_small_lib_bruteforce_unchanged(repo):
 
 
 def _insert_source_element(repo, nb_id, sid, eid, text):
-    """一个 source + 一个 source_element(带 embedding)。"""
+    """一个 source + element + 可有界召回且绑定该 element 的 chunk。"""
     now = "2026-07-01T00:00:00"
+    cid = f"c-{eid}"
     with repo._write() as db:
         db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",
                    (sid, nb_id, "t", "md", "ready", now, now))
         db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                    "VALUES (?,?,?,?,?,?,?)",
                    (eid, sid, "paragraph", "p1", text, "{}", now))
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (cid, nb_id, sid, text, "p1", json.dumps([eid]), now),
+        )
+        db.execute(
+            "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+            (cid, nb_id, text),
+        )
         v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query(text)
         db.execute("INSERT INTO element_embeddings (element_id,source_id,notebook_id,vector,created_at) VALUES (?,?,?,?,?)",
                    (eid, sid, nb_id, json.dumps(v), now))
 
 
-def test_big_lib_element_search_skipped(repo, monkeypatch):
+def test_big_lib_element_search_hydrates_exact_ids_from_bounded_chunks(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="big"))
-    _insert_source_with_object(repo, nb.id, 3)
+    _insert_source_element(repo, nb.id, "sE", "eE", "large library exact passage")
     monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
     events = []
     monkeypatch.setattr(repo.event_log, "emit", lambda e: events.append(e))
-    assert repo._retrieve_elements(nb.id, "anything") == []
-    assert any(e.get("kind") == "element_scoring_skipped" for e in events)
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("large-library element retrieval must not full-scan")
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_gather_elements", _boom)
+    hits = repo._retrieve_elements(nb.id, "exact passage")
+
+    assert [item.element_id for item in hits] == ["eE"]
+    assert any(e.get("kind") == "element_scoring_bounded" for e in events)
 
 
 def test_small_lib_element_search_unchanged(repo):

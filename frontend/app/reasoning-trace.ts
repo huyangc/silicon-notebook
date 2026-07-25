@@ -3,6 +3,7 @@ import { label } from "./vocabulary.ts";
 
 export const TRACE_STEP_LABELS: Record<string, string> = {
   start: "启动",
+  intent: "理解",
   plan: "规划",
   retrieve: "检索",
   reflect: "反思",
@@ -58,6 +59,9 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
 
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
   const detail = step.detail ?? {};
+  if (step.step_type === "intent" && typeof detail.resolved_question === "string") {
+    return detail.resolved_question;
+  }
   if (step.step_type === "follow_chain") {
     const parts: string[] = [];
     if (typeof detail.hops === "number") parts.push(`${detail.hops} 跳`);

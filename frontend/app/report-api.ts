@@ -10,6 +10,17 @@ export const createReport = (nb: string, question: string, depth: number) =>
     body: JSON.stringify({ question, depth }),
   });
 
+export const confirmReportIntent = (
+  nb: string,
+  id: string,
+  payload: { resolved_question: string; answers: { id: string; answer: string }[] },
+) =>
+  requestJson<{ status: string }>(`/notebooks/${nb}/reports/${id}/intent`, {
+    ...options,
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
 export const listReports = (nb: string) =>
   requestJson<ReportSummaryT[]>(`/notebooks/${nb}/reports`, options);
 

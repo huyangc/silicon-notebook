@@ -14,6 +14,7 @@ import {
   type ReasoningTraceStep,
 } from "./ask-stream.ts";
 import type { AskJobDetail } from "./ask-reconnect.ts";
+import type { QueryIntentContract } from "./ask-intent-model.ts";
 import type {
   AskResponse,
   ConversationDetail,
@@ -28,6 +29,21 @@ export const searchNotebook = (id: string, query: string) =>
     `/notebooks/${id}/search?q=${encodeURIComponent(query)}`,
     options,
   );
+
+export const previewAskIntent = (
+  notebookId: string,
+  question: string,
+  conversationId?: string | null,
+  signal?: AbortSignal,
+) => requestJson<QueryIntentContract>(`/notebooks/${notebookId}/ask/intent`, {
+  ...options,
+  method: "POST",
+  body: JSON.stringify({
+    question,
+    conversation_id: conversationId || undefined,
+  }),
+  signal,
+});
 
 export async function runAskStream<TResponse = AskResponse>(
   notebookId: string,

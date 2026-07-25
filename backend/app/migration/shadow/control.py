@@ -277,7 +277,7 @@ _PROGRESS_INTEGER_FIELDS = {
     "tables_complete": 60,
     "rows_copied": None,
     "bytes_copied": None,
-    "migration_version": 9,
+    "migration_version": MANIFEST.schema_pair.postgres_version,
 }
 _PROGRESS_STAGES = {
     "preflight-confirmed",

@@ -150,5 +150,6 @@ class MemoryRetriever:
                 "location_label": "Memory",
                 "tier": "personal",
                 "provenance": dict(hit.provenance),
+                "relevance": float(hit.score),
             }
         return ("\n".join(lines) if lines else "(none)"), id_map

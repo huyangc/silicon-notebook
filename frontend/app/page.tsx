@@ -100,9 +100,9 @@ import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebook
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature } from "./checkup-view";
-import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
+import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
-import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
+import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import {
   type ModelServiceStatusItem,
@@ -123,6 +123,12 @@ import {
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
+import { AskIntentReview } from "./ask-intent-review";
+import {
+  buildAskIntentConfirmation,
+  type AskIntentConfirmation,
+  type QueryIntentContract,
+} from "./ask-intent-model";
 import { isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
@@ -709,6 +715,13 @@ export default function Home() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [asking, setAsking] = useState(false);
+  const [intentChecking, setIntentChecking] = useState(false);
+  const [askIntentReview, setAskIntentReview] = useState<{
+    notebookId: string;
+    conversationId: string | null;
+    question: string;
+    contract: QueryIntentContract;
+  } | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
   const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
@@ -1409,6 +1422,8 @@ export default function Home() {
   const sourceQueryRef = useRef("");
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
+  const askIntentAbortRef = useRef<AbortController | null>(null);
+  const askIntentFlowRef = useRef<"idle" | "preview" | "review" | "submitting">("idle");
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
   const askJobIdRef = useRef<string | null>(null);
@@ -1417,6 +1432,10 @@ export default function Home() {
   // callbacks may update UI only while both their run and workspace epochs
   // still match, preventing cross-user/notebook/conversation state bleed.
   const activeNotebookIdRef = useRef<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(conversationId);
+  const activeAskModeRef = useRef<AskModeId>(askMode);
+  activeConversationIdRef.current = conversationId;
+  activeAskModeRef.current = askMode;
   const workspaceEpochRef = useRef(0);
   const kgBuildRequestEpochRef = useRef(0);
   const askRunEpochRef = useRef(0);
@@ -1431,6 +1450,13 @@ export default function Home() {
   // 继续读到 started 拿到 jobId 后补打 cancel，再中止本地流。Set 而非单一
   // boolean：切会话后可能又启动新 run，取消意图不能串台。
   const cancelRequestedControllersRef = useRef<Set<AbortController>>(new Set());
+  useEffect(() => {
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
+    setIntentChecking(false);
+    setAskIntentReview(null);
+  }, [currentNotebookId, conversationId, askMode]);
   // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
   // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
@@ -2312,6 +2338,9 @@ export default function Home() {
     setSessionLoading(true);
     try {
       askRunEpochRef.current += 1;
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -2435,6 +2464,9 @@ export default function Home() {
     closeKnowhow();
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -2787,6 +2819,80 @@ export default function Home() {
   }
 
   async function runAsk(nextQuestion = question) {
+    if (
+      !currentNotebookId || asking || intentChecking || sessionLoading
+      || askIntentReview || askIntentFlowRef.current !== "idle"
+    ) return;
+    const q = nextQuestion.trim();
+    if (!q) return;
+    if (isAskBlocked(currentNotebook)) {
+      setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
+      return;
+    }
+    if (requiresKg(askMode) && !kgAvailable) {
+      setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
+      return;
+    }
+    if (askMode !== "reasoning") {
+      await executeAsk(q, askMode);
+      return;
+    }
+
+    const notebookId = currentNotebookId;
+    const conversationIdAtStart = conversationId;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const controller = new AbortController();
+    askIntentFlowRef.current = "preview";
+    askIntentAbortRef.current = controller;
+    setIntentChecking(true);
+    try {
+      const contract = await previewAskIntent(
+        notebookId, q, conversationIdAtStart, controller.signal,
+      );
+      if (
+        controller.signal.aborted
+        || workspaceEpochRef.current !== workspaceEpoch
+        || activeNotebookIdRef.current !== notebookId
+        || activeConversationIdRef.current !== conversationIdAtStart
+        || activeAskModeRef.current !== "reasoning"
+      ) return;
+      if (contract.needs_clarification) {
+        askIntentFlowRef.current = "review";
+        setAskIntentReview({
+          notebookId,
+          conversationId: conversationIdAtStart,
+          question: q,
+          contract,
+        });
+        setToast("问题存在会改变检索方向的歧义，请先补充确认");
+        return;
+      }
+      askIntentAbortRef.current = null;
+      setIntentChecking(false);
+      askIntentFlowRef.current = "submitting";
+      await executeAsk(
+        q,
+        "reasoning",
+        buildAskIntentConfirmation(contract, contract.resolved_question, {}),
+      );
+    } catch (error) {
+      if (!isAbortError(error)) reportError(error);
+    } finally {
+      if (askIntentAbortRef.current === controller) {
+        askIntentAbortRef.current = null;
+        setIntentChecking(false);
+      }
+      if (askIntentFlowRef.current !== "review") {
+        askIntentFlowRef.current = "idle";
+      }
+    }
+  }
+
+  async function executeAsk(
+    nextQuestion: string,
+    selectedMode: AskModeId,
+    intent?: AskIntentConfirmation,
+  ) {
     if (!currentNotebookId) return;
     if (asking || sessionLoading) return;
     const q = nextQuestion.trim();
@@ -2796,7 +2902,7 @@ export default function Home() {
       setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
-    if (requiresKg(askMode) && !kgAvailable) {
+    if (requiresKg(selectedMode) && !kgAvailable) {
       setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
     }
@@ -2816,7 +2922,7 @@ export default function Home() {
     setChatMode("ask");
     setQuestion("");
     setPendingQuestion(q);
-    setPendingMode(askMode);
+    setPendingMode(selectedMode);
     setPendingTrace([]);
     setAsking(true);
     const controller = new AbortController();
@@ -2826,7 +2932,12 @@ export default function Home() {
     askAbortRef.current = controller;
     askNotebookIdRef.current = notebookId;
     try {
-      const payload = { question: q, conversation_id: conversationId ?? undefined, mode: askMode };
+      const payload = {
+        question: q,
+        conversation_id: conversationId ?? undefined,
+        mode: selectedMode,
+        ...(intent ? { intent } : {}),
+      };
       const response = await runAskStream<AskResponse>(
         notebookId,
         payload,
@@ -2902,7 +3013,42 @@ export default function Home() {
     if (ownsRun()) await loadSessions(notebookId);
   }
 
+  async function confirmAskIntent(confirmation: AskIntentConfirmation) {
+    const review = askIntentReview;
+    if (!review || askIntentFlowRef.current !== "review") return;
+    if (
+      review.notebookId !== currentNotebookId
+      || review.conversationId !== conversationId
+      || askMode !== "reasoning"
+    ) {
+      setAskIntentReview(null);
+      setToast("问题上下文已经变化，请重新提交");
+      return;
+    }
+    askIntentFlowRef.current = "submitting";
+    setAskIntentReview(null);
+    try {
+      await executeAsk(review.question, "reasoning", confirmation);
+    } finally {
+      askIntentFlowRef.current = "idle";
+    }
+  }
+
+  function cancelAskIntentReview() {
+    askIntentFlowRef.current = "idle";
+    setAskIntentReview(null);
+    setToast("已返回修改问题");
+  }
+
   function abortAsk() {
+    if (intentChecking) {
+      askIntentAbortRef.current?.abort();
+      askIntentAbortRef.current = null;
+      askIntentFlowRef.current = "idle";
+      setIntentChecking(false);
+      setToast("已取消问题理解");
+      return;
+    }
     const jobId = askJobIdRef.current;
     const nb = askNotebookIdRef.current;
     const controller = askAbortRef.current;
@@ -3034,6 +3180,9 @@ export default function Home() {
   async function openSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
     setSessionLoading(true);
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -3053,6 +3202,9 @@ export default function Home() {
   function startNewSession() {
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setAsking(false);
@@ -3819,6 +3971,9 @@ export default function Home() {
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
     askAbortRef.current?.abort();
     memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
@@ -4671,6 +4826,7 @@ export default function Home() {
                     listReports={listReports}
                     getReport={getReport}
                     createReport={createReport}
+                    confirmReportIntent={confirmReportIntent}
                     updateReportOutline={updateReportOutline}
                     generateReport={generateReport}
                     cancelReport={cancelReport}
@@ -4688,14 +4844,28 @@ export default function Home() {
                 )}
               </div>
               {chatMode === "ask" && (
+                <>
+                  {intentChecking && (
+                    <div className="ask-intent-checking" role="status">
+                      正在理解问题，尚未读取资料或开始检索…
+                    </div>
+                  )}
+                  {askIntentReview && (
+                    <AskIntentReview
+                      contract={askIntentReview.contract}
+                      onConfirm={(confirmation) => confirmAskIntent(confirmation)}
+                      onCancel={cancelAskIntentReview}
+                    />
+                  )}
                 <AskComposer
                   value={question}
                   placeholder={askPlaceholderText}
                   onChange={setQuestion}
                   onSubmit={() => runAsk().catch(reportError)}
                   onAbort={abortAsk}
-                  running={asking}
-                  disabled={askBlocked || sessionLoading}
+                  running={asking || intentChecking}
+                  abortLabel={intentChecking ? "取消问题理解" : "中断生成"}
+                  disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                 >
                   <span>{notebookSourceTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
@@ -4704,7 +4874,7 @@ export default function Home() {
                         key={g.id}
                         type="button"
                         className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
-                        disabled={asking || sessionLoading}
+                        disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
                         onClick={() => setAskMode(defaultModeForGroup(g.id))}
                       >
                         {g.label}
@@ -4718,7 +4888,7 @@ export default function Home() {
                             type="button"
                             className={`mode-engine${askMode === m.id ? " active" : ""}`}
                             title={m.desc}
-                            disabled={asking || sessionLoading}
+                            disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
                             onClick={() => setAskMode(m.id)}
                           >
                             {m.label}
@@ -4751,6 +4921,7 @@ export default function Home() {
                     )}
                   </div>
                 </AskComposer>
+                </>
               )}
               {chatMode === "ask" && (
                 <ChatTurnNav

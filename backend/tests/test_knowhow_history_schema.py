@@ -17,8 +17,8 @@ def repo(tmp_path):
     )
 
 
-def test_schema_version_is_31():
-    assert sqlite_migrations.SCHEMA_VERSION == 31
+def test_schema_version_is_32():
+    assert sqlite_migrations.SCHEMA_VERSION == 32
 
 
 def _columns(repo, table: str) -> dict[str, str]:

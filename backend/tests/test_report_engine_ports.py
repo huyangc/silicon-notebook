@@ -87,6 +87,17 @@ class _Evidence:
         self.calls.append(("kg", notebook_id, id_offset))
         return "(none)", {}
 
+    def element_context(self, elements, *, notebook_id, id_offset=4000,
+                        budget_chars=None):
+        self.calls.append(("element", notebook_id, id_offset, budget_chars))
+        return "(none)", {}
+
+    def parse_anchors(self, answer, evidence_by_id):
+        return []
+
+    def citation_titles(self, source_ids):
+        return {}
+
 
 class _SectionLLM:
     """按 prompt 关键字出大纲/节/摘要(镜像 test_report_engine._OutlineLLM)。"""
@@ -359,6 +370,8 @@ def test_draft_section_routes_evidence_through_ports():
     assert deps.evidence_context.calls == [
         ("chunk", "nb", deps.settings.report_section_chunk_budget),
         ("kg", "nb", 0),
+        ("element", "nb", 4000,
+         max(2000, deps.settings.report_section_chunk_budget // 3)),
     ]
     section_prompt = next(p for p in llm.prompts if "ONE section" in p)
     assert "(no evidence retrieved)" in section_prompt  # 双 (none) 哨兵归一

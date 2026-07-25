@@ -15,7 +15,8 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # batch_ingest resume (previously a full-table scan). v31 adds the two
 # shadow-internal tables used by transactional forward capture. Capture
 # triggers remain run-scoped and are installed by migration.shadow.capture.
-SCHEMA_VERSION = 31
+# v32 persists the Deep Report question-understanding review contract.
+SCHEMA_VERSION = 32
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1761,6 +1762,16 @@ class SqliteMigrator:
                   schema_epoch INTEGER NOT NULL
                 );
                 """
+            )
+
+    def _migration_32(self) -> None:
+        """Persist report question-understanding and clarification review state."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db,
+                "reports",
+                "understanding_json",
+                "TEXT NOT NULL DEFAULT '{}'",
             )
 
     def _recover_interrupted_jobs(self) -> None:

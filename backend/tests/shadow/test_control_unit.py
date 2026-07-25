@@ -274,8 +274,8 @@ def _run_row(*, source_hash="a" * 64, target_hash="b" * 64):
         "target_identity": TARGET_FINGERPRINT.redacted_identity,
         "target_identity_hash": target_hash,
         "target_business_schema": "business",
-        "sqlite_version": 31,
-        "postgres_version": 9,
+        "sqlite_version": 32,
+        "postgres_version": 10,
         "schema_epoch": 1,
         "phase": "off",
         "active_backend": "sqlite",
@@ -614,7 +614,7 @@ def sqlite_capture(tmp_path: Path):
 def _report() -> PreflightReport:
     source = DatabaseFingerprint("sqlite", "sqlite:///<redacted>", "a" * 64)
     binding = ConfirmationBinding(
-        "run-1", source.identity_hash, TARGET_FINGERPRINT.identity_hash, 31, 9, 1
+        "run-1", source.identity_hash, TARGET_FINGERPRINT.identity_hash, 32, 10, 1
     )
     return PreflightReport(
         "run-1",
@@ -1021,6 +1021,16 @@ def test_every_control_mutation_rejects_catalog_drift(sqlite_capture, monkeypatc
 def test_progress_payload_is_a_closed_non_secret_contract(progress):
     with pytest.raises(ValueError, match="progress|forbidden|snapshot"):
         control._validated_progress(progress)
+
+
+def test_progress_accepts_the_running_migration_but_rejects_a_future_version():
+    control._validated_progress(
+        {"migration_version": MANIFEST.schema_pair.postgres_version}
+    )
+    with pytest.raises(ValueError, match="migration_version"):
+        control._validated_progress(
+            {"migration_version": MANIFEST.schema_pair.postgres_version + 1}
+        )
 
 
 def test_sqlite_report_from_source_a_cannot_enable_prepared_source_b(

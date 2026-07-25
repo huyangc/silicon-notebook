@@ -61,7 +61,7 @@ from app.migration.shadow.manifest import (
 )
 from app.migration.shadow.postgres_catalog import (
     EXPECTED_CONSTRAINTS,
-    validate_postgres_v9_catalog,
+    validate_postgres_v10_catalog,
 )
 from app.migration.shadow.replicator import Direction, _json_object_exact
 from app.migration.shadow.snapshot import (
@@ -693,7 +693,7 @@ class ShadowVerifier:
             _verify_postgres_guard(
                 conn, definition, business_schema=state.target_business_schema
             )
-        validate_postgres_v9_catalog(
+        validate_postgres_v10_catalog(
             conn,
             business_schema=state.target_business_schema,
             manifest=self.manifest,

@@ -461,7 +461,8 @@ class ReasoningRetriever:
                 continue
         return "\n".join(lines) if lines else "(no candidates yet)"
 
-    def run(self, notebook_id, question, history="", on_step=None, top_n=None, max_steps=None):
+    def run(self, notebook_id, question, history="", on_step=None, top_n=None,
+            max_steps=None, intent_queries=None):
         raise_if_cancelled(self.cancel_event)
         # top_n:显式传入(报告管线每节独立预算)直通;None=合成时按最终方面数
         # (used_queries,含 expand_community 兄弟)自适应解析 —— 见 effective_top_n。
@@ -510,13 +511,28 @@ class ReasoningRetriever:
                 self.ppr_retrieve, notebook_id, question)
 
         try:
-            subqueries = self.plan(question, history)
+            reviewed_queries = list(dict.fromkeys(
+                str(query).strip() for query in (intent_queries or [])
+                if str(query).strip()
+            ))[: self.settings.reasoning_max_subqueries + 1]
+            # A reviewed intent contract is authoritative. Do not ask a second
+            # model to reinterpret it before retrieval; the reflect loop may
+            # still add evidence-driven subqueries after the frozen seed pass.
+            subqueries = (
+                [SubQuery(query=query) for query in reviewed_queries]
+                if reviewed_queries else self.plan(question, history)
+            )
             raise_if_cancelled(self.cancel_event)
             record(TraceStep(
-                step_type="plan", summary=f"规划了 {len(subqueries)} 个子查询",
+                step_type="plan",
+                summary=(
+                    f"采用已确认意图的 {len(subqueries)} 个检索方向"
+                    if reviewed_queries else f"规划了 {len(subqueries)} 个子查询"
+                ),
                 detail={"sub_queries": [{"query": s.query, "types": s.types,
                                          "prefer": s.prefer, "reason": s.reason}
-                                        for s in subqueries]}))
+                                        for s in subqueries],
+                        "source": "confirmed_intent" if reviewed_queries else "planner"}))
 
             # 初检索:N 个子查询并发执行 search(只读检索,线程安全),按 subqueries
             # 原顺序收集结果再依次 setdefault —— 故去重/确定性与串行版完全等价

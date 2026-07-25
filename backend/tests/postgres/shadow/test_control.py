@@ -88,7 +88,7 @@ def test_complete_control_guard_and_capture_enable_protocol(
     # The preflight is intentionally against an empty target.  The formal
     # checksummed migrator is the only component that creates the v9 business
     # schema before control/guards are allowed.
-    assert PostgresMigrator(postgres_database).migrate() == 9
+    assert PostgresMigrator(postgres_database).migrate() == 10
     checksum = install_postgres_control_schema(postgres_database)
     assert len(checksum) == 64
     state = create_or_reuse_run(

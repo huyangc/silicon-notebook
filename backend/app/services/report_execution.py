@@ -48,9 +48,14 @@ class ReportCancellationRegistry:
         self._events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
 
-    def register(self, key: str, event: threading.Event) -> None:
+    def register(
+        self, key: str, event: threading.Event, *, replace: bool = False
+    ) -> bool:
         with self._lock:
+            if key in self._events and not replace:
+                return False
             self._events[key] = event
+            return True
 
     def cancel(self, key: str) -> bool:
         with self._lock:
@@ -60,9 +65,10 @@ class ReportCancellationRegistry:
             return True
         return False
 
-    def unregister(self, key: str) -> None:
+    def unregister(self, key: str, event: threading.Event | None = None) -> None:
         with self._lock:
-            self._events.pop(key, None)
+            if event is None or self._events.get(key) is event:
+                self._events.pop(key, None)
 
 
 # 进程全局唯一所有者(见模块 docstring;runtime 按身份引用,不建副本)。
@@ -80,30 +86,44 @@ class ReportExecutionCoordinator:
 
     def start_plan(self, notebook_id: str, report_id: str, question: str,
                    history: str = "", auto_generate: bool = False, *,
-                   user_id: str = "") -> None:
-        """阶段1(规划)后台 job:跑 plan_outline → outline_ready;auto_generate
-        时在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已
-        落库),读失败回退 2。"""
+                   user_id: str = "", intent_contract=None) -> bool:
+        """Run pre-retrieval understanding or resume with a confirmed contract."""
         cancel = threading.Event()
-        self.cancellations.register(report_id, cancel)
+        # A previous phase publishes intent_ready/outline_ready immediately
+        # before its finally unregisters.  A CAS-claimed next phase may safely
+        # replace that old event: identity-aware unregister prevents the old
+        # worker from removing this new registration.
+        if not self.cancellations.register(
+            report_id, cancel, replace=intent_contract is not None
+        ):
+            return False
 
         def worker():
             try:
                 depth = 2
                 try:
-                    depth = int(
-                        self.reports.get_report(notebook_id, report_id)
-                        .get("depth", 2))
+                    report = self.reports.get_report(notebook_id, report_id)
+                    if report.get("status") == "cancelled" or cancel.is_set():
+                        return
+                    depth = int(report.get("depth", 2))
                 except Exception:
                     pass
                 with model_work_scope(
                     priority=ModelPriority.REPORT, parent_id=report_id
                 ):
-                    self.engine_factory(user_id=user_id, cancel_event=cancel).run(
-                        notebook_id, report_id, question, history, depth=depth,
-                        auto_generate=auto_generate)
+                    engine = self.engine_factory(user_id=user_id, cancel_event=cancel)
+                    if intent_contract is None:
+                        engine.run(
+                            notebook_id, report_id, question, history, depth=depth,
+                            auto_generate=auto_generate,
+                            require_intent_review=True)
+                    else:
+                        engine.run(
+                            notebook_id, report_id, question, history, depth=depth,
+                            auto_generate=auto_generate,
+                            intent_contract=intent_contract)
             finally:
-                self.cancellations.unregister(report_id)
+                self.cancellations.unregister(report_id, cancel)
 
         # submit() 统一 copy_context() 传播 per-user 上下文并兜底顶层异常
         try:
@@ -116,24 +136,32 @@ class ReportExecutionCoordinator:
                     error=f"{type(exc).__name__}: {exc}", progress="规划失败",
                 )
             finally:
-                self.cancellations.unregister(report_id)
+                self.cancellations.unregister(report_id, cancel)
             raise
+        return True
 
     def start_generate(self, notebook_id: str, report_id: str, question: str,
-                       depth: int = 2, *, user_id: str = "") -> None:
+                       depth: int = 2, *, user_id: str = "") -> bool:
         """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
         cancel = threading.Event()
-        self.cancellations.register(report_id, cancel)
+        if not self.cancellations.register(report_id, cancel, replace=True):
+            return False
 
         def worker():
             try:
+                try:
+                    report = self.reports.get_report(notebook_id, report_id)
+                    if report.get("status") == "cancelled" or cancel.is_set():
+                        return
+                except Exception:
+                    pass
                 with model_work_scope(
                     priority=ModelPriority.REPORT, parent_id=report_id
                 ):
                     self.engine_factory(user_id=user_id, cancel_event=cancel).generate(
                         notebook_id, report_id, question, depth=depth)
             finally:
-                self.cancellations.unregister(report_id)
+                self.cancellations.unregister(report_id, cancel)
 
         try:
             self.job_submitter(worker, name=f"report-gen-{report_id}",
@@ -145,5 +173,6 @@ class ReportExecutionCoordinator:
                     error=f"{type(exc).__name__}: {exc}", progress="失败",
                 )
             finally:
-                self.cancellations.unregister(report_id)
+                self.cancellations.unregister(report_id, cancel)
             raise
+        return True

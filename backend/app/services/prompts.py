@@ -432,6 +432,70 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
 REPORT_OUTLINE_SCHEMA_HINT = (
     '{"sections":[{"title":"","scope":"","sub_queries":[""]}]}')
 
+QUERY_INTENT_SCHEMA_HINT = (
+    '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
+    '"entities":[""],"mandatory_topics":[{"id":"","title":"",'
+    '"question":"","retrieval_queries":[""]}],"comparison_axes":[""],'
+    '"constraints":[""],"excluded_topics":[""],"expected_output":"",'
+    '"assumptions":[""],"ambiguities":[{"id":"","question":"",'
+    '"reason":"","required":true,"options":[""]}],'
+    '"confidence":0.0,"needs_clarification":false}')
+
+# Compatibility alias: reports and reasoning Ask now share this contract.
+REPORT_INTENT_SCHEMA_HINT = QUERY_INTENT_SCHEMA_HINT
+
+
+def query_intent_prompt(question: str, max_topics: int = 6,
+                        history_block: str = "", *,
+                        purpose: str = "deep report",
+                        confirmation_mode: bool = False) -> str:
+    history_section = (
+        f"Prior conversation (context only; the latest request wins):\n{history_block}\n\n"
+        if history_block else ""
+    )
+    confirmation_rule = (
+        "The user has already reviewed the earlier understanding and supplied the "
+        "context below. Treat that confirmed wording and every explicit answer as "
+        "authoritative. Incorporate them into normalized_question and the topics; "
+        "return needs_clarification=false and no ambiguities.\n"
+        if confirmation_mode else
+        "Detect ambiguity before retrieval. Mark needs_clarification=true only when "
+        "a missing referent, research object, comparison side, or essential scope "
+        "choice could materially change the requested topic. Put each blocking issue "
+        "in ambiguities with required=true and ask one concise user-facing question. "
+        "Do not block for optional stylistic preferences; record safe, reversible "
+        "defaults in assumptions instead.\n"
+    )
+    return (
+        f"Create an INTENT CONTRACT for a {purpose} before seeing any corpus. "
+        "Freeze what the user actually asks; evidence availability must never change "
+        "the requested topic. Split only genuinely distinct required questions. "
+        f"Return at most {max_topics} mandatory topics. Each topic needs a stable short "
+        "id, a title in the user's language, the exact question it must answer, and "
+        "1-4 retrieval queries. Preserve requested comparisons, constraints, scope, "
+        "time range and output form. excluded_topics lists plausible but out-of-scope "
+        "directions. Do not answer the question and do not mention corpus coverage.\n"
+        "normalized_question is a standalone, precise formulation in the user's "
+        "language. intent_type classifies the requested operation. entities lists "
+        "the concrete research objects. confidence is 0..1 confidence that the "
+        "request is sufficiently specified.\n"
+        f"{confirmation_rule}\n"
+        f"{history_section}User request: {question}\n\n"
+        f"Return JSON only: {QUERY_INTENT_SCHEMA_HINT}"
+    )
+
+
+def report_intent_prompt(question: str, max_topics: int = 6,
+                         history_block: str = "", *,
+                         confirmation_mode: bool = False) -> str:
+    return query_intent_prompt(
+        question,
+        max_topics=max_topics,
+        history_block=history_block,
+        purpose="deep report",
+        confirmation_mode=confirmation_mode,
+    )
+
 
 def report_outline_prompt(question: str, max_sections: int = 6,
                           history_block: str = "") -> str:
@@ -508,24 +572,39 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
     )
 
 
-def report_summary_prompt(question: str, sections_block: str) -> str:
+REPORT_SUMMARY_SCHEMA_HINT = (
+    '{"summary":"","coverage":[{"intent_id":"","covered":true,"note":""}],'
+    '"contradictions":[""]}')
+
+
+def report_summary_prompt(question: str, sections_block: str,
+                          intent_block: str = "") -> str:
+    intent_section = (
+        f"Mandatory intent contract:\n{intent_block}\n\n" if intent_block else ""
+    )
     return (
-        "Write the EXECUTIVE SUMMARY (one tight paragraph, 120-250 words, in "
-        "the question's language) of the report below: the direct answer "
-        "first, then the load-bearing findings and the key engineering "
-        "recommendations. No new facts, no citations markers, no headings.\n\n"
-        f"Question: {question}\n\nReport sections:\n{sections_block}\n\n"
-        'Return JSON only: {"summary":""}'
+        "Act as the final REPORT EDITOR. Write the EXECUTIVE SUMMARY (one tight "
+        "paragraph, 120-250 words, in the question's language): direct answer first, "
+        "then load-bearing findings and engineering recommendations. Audit whether "
+        "each mandatory intent is actually answered and list material contradictions "
+        "between sections. The summary may use ONLY facts already present in the "
+        "sections: no new facts, no citation markers, no headings, and do not rewrite "
+        "or silently repair a missing topic. Coverage notes and contradictions must "
+        "also be grounded only in the supplied sections.\n\n"
+        f"Question: {question}\n\n{intent_section}Report sections:\n{sections_block}\n\n"
+        f"Return JSON only: {REPORT_SUMMARY_SCHEMA_HINT}"
     )
 
 
 REPORT_STORM_SCHEMA_HINT = (
     '{"sections":[{"title":"","scope":"","sub_queries":[""],'
-    '"perspectives":[""],"tensions":[""]}]}')
+    '"intent_ids":[""],"perspectives":[""],"tensions":[""]}]}')
 
 
 def report_storm_outline_prompt(question: str, corpus_map: str,
-                                max_sections: int = 6, history_block: str = "") -> str:
+                                max_sections: int = 6, history_block: str = "",
+                                intent_block: str = "",
+                                coverage_block: str = "") -> str:
     history_section = (f"Prior conversation:\n{history_block}\n\n" if history_block else "")
     return (
         "You plan the OUTLINE of a deep, insightful technical report — NOT a shallow "
@@ -543,25 +622,31 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         "4. PRESERVE the TENSION (tension): where perspectives disagree, keep the "
         "conflict explicit as an insight — never flatten into one-sided "
         "praise/summary.\n"
-        "5. Sections must be MECE (mutually exclusive, no overlap; collectively cover "
-        "the question).\n"
-        "6. Ground in the corpus map below: sub_queries MUST reuse the actual "
-        "vocabulary / entity names that appear in the map (verbatim spelling).\n"
-        "7. Keep a section the question explicitly asks for EVEN IF the map lacks it "
-        "(the map is a sample; the writing stage can bridge gaps as 【通识】).\n"
+        "5. The INTENT CONTRACT is immutable and higher priority than the corpus. "
+        "Every mandatory intent id MUST appear in one or more sections; corpus results "
+        "may refine terminology, retrieval wording and ordering, but may not replace, "
+        "narrow or redirect a mandatory topic.\n"
+        "6. Sections must be MECE (mutually exclusive, no overlap; collectively cover "
+        "the intent contract).\n"
+        "7. Use exact corpus vocabulary when it remains semantically faithful to the "
+        "intent. Keep an explicitly requested topic even when coverage is missing; "
+        "represent missing evidence as a gap instead of substituting a nearby topic.\n"
         "8. If the question compares an entity with its peers, plan ONE dedicated "
         "cross-model comparison section (横向对比) whose sub_queries target the peer "
         "entities' corresponding dimensions.\n"
         f"Produce 3-{max_sections} sections. Do NOT include executive-summary / "
         "references / knowledge-gap sections (auto-appended). Each section: title "
         "(question's language), scope (one line), sub_queries (2-4 focused ENGLISH "
-        "retrieval queries), perspectives (which lenses it came from), tensions "
+        "retrieval queries), intent_ids (mandatory ids answered by the section), "
+        "perspectives (which lenses it came from), tensions "
         "(one line each; which other section/lens it conflicts with, or []).\n\n"
         f"{history_section}"
         f"Question: {question}\n\n"
+        f"Immutable intent contract:\n{intent_block or '(not supplied)'}\n\n"
+        f"Intent-first coverage probe:\n{coverage_block or '(not supplied)'}\n\n"
         f"Corpus map (what the library actually contains):\n{corpus_map}\n\n"
         'Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""],'
-        '"perspectives":[""],"tensions":[""]}]}'
+        '"intent_ids":[""],"perspectives":[""],"tensions":[""]}]}'
     )
 
 
@@ -574,8 +659,8 @@ def report_sufficiency_prompt(question: str, probe_block: str) -> str:
     return (
         "You judge whether the notebook library has ENOUGH evidence for each planned "
         "report section. You are given each section's title and its OBJECTIVE retrieval "
-        "hit counts (hits = distinct knowledge items its sub-queries matched; base_hits "
-        "= from the authoritative base library). Trust the counts as the ground truth "
+        "hit counts (hits = distinct knowledge items; base_hits = authoritative base "
+        "items; element_hits = direct parsed SourceElements). Trust the counts as the ground truth "
         "of coverage; your job is to interpret them into a verdict + a one-line gap note "
         "+ a suggested action. Rough guide: many hits → 充足(keep); few/only-tangential "
         "→ 薄弱(supplement, note what's missing); ~0 hits → 缺失(external, the library "

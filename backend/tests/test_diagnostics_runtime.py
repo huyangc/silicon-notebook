@@ -1276,8 +1276,18 @@ def test_fastapi_background_job_retains_request_correlation_after_response():
             "nb-private",
         ),
         (
+            "/api/notebooks/nb-private/ask/intent",
+            "/api/notebooks/{id}/ask/intent",
+            "nb-private",
+        ),
+        (
             "/api/notebooks/nb-private/reports/report-private/generate",
             "/api/notebooks/{id}/reports/{id}/generate",
+            "nb-private",
+        ),
+        (
+            "/api/notebooks/nb-private/reports/report-private/intent",
+            "/api/notebooks/{id}/reports/{id}/intent",
             "nb-private",
         ),
         (

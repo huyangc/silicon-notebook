@@ -1,6 +1,7 @@
 import asyncio
 import json
 import queue
+import threading
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -16,6 +17,7 @@ from app.api.deps import (
 )
 from app.models.notebooks import NotebookSummary
 from app.models.ask import (
+    AskIntentPreviewRequest,
     AskRequest,
     AskResponse,
     ConversationBulkDeleteResult,
@@ -25,11 +27,13 @@ from app.models.ask import (
     FeedbackRequest,
     FeedbackResponse,
     NotebookSearchResponse,
+    QueryIntentContract,
 )
 from app.models.identity import UserProfile
 from app.repositories.ports import AskStreamPort, ConversationBusyError
 from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
 from app.services.cancellation import AskCancelled
+from app.services.query_intent import finalize_query_intent, plan_query_intent
 
 
 router = APIRouter()
@@ -65,6 +69,110 @@ def search_notebook(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
+def _intent_history(repo, notebook_id: str, conversation_id: str | None,
+                    user_id: str) -> str:
+    if not conversation_id:
+        return ""
+    if notebook_access_repository().conversation_owner(conversation_id) != user_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    try:
+        detail = repo.get_conversation(conversation_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if detail.notebook_id != notebook_id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    lines = []
+    for turn in detail.turns[-5:]:
+        # Only the user's own wording may resolve references. Assistant answers
+        # are corpus-derived and would let retrieved material bias this
+        # otherwise corpus-blind understanding step indirectly.
+        lines.append(f"User: {turn.question}")
+    return "\n".join(lines)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/ask/intent",
+    response_model=QueryIntentContract,
+    dependencies=[Depends(require_notebook_read)],
+)
+async def preview_ask_intent(
+    notebook_id: str,
+    payload: AskIntentPreviewRequest,
+    request: Request,
+    user: UserProfile = Depends(get_current_user),
+) -> QueryIntentContract:
+    """Understand a reasoning question before creating a conversation/job."""
+    question = payload.question.strip()
+    if not question:
+        raise user_error(422, "问题不能为空")
+    cancel_event = threading.Event()
+
+    def run_preview() -> QueryIntentContract:
+        repo = repository()
+        try:
+            notebook = repo.get_notebook(notebook_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+        _require_ask_available(notebook)
+        history = _intent_history(
+            repo, notebook_id, payload.conversation_id, user.id
+        )
+        return repo.preview_reasoning_intent(
+            question, history, cancel_event=cancel_event
+        )
+
+    task = asyncio.create_task(asyncio.to_thread(run_preview))
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=0.05)
+            if not task.done() and await request.is_disconnected():
+                cancel_event.set()
+                # The provider observes cancel_event. Consume its terminal
+                # exception without delaying a client that has already left.
+                task.add_done_callback(
+                    lambda done: None if done.cancelled() else done.exception()
+                )
+                raise HTTPException(status_code=499, detail="Client Closed Request")
+        return task.result()
+    except asyncio.CancelledError:
+        cancel_event.set()
+        task.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
+        raise
+    except AskCancelled:
+        raise HTTPException(status_code=499, detail="Client Closed Request")
+
+
+def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
+    """Reject malformed reviewed intent before a durable Ask job exists."""
+    if spec.id != "reasoning":
+        return
+    if payload.intent is None:
+        # Direct compatibility clients may bypass /ask/intent. Keep clear
+        # requests compatible, but fail closed on the same deterministic vague
+        # wording before begin_durable_job can publish a transient session.
+        seed = plan_query_intent(
+            None, payload.question.strip(), "", max_topics=1
+        )
+        if seed.get("needs_clarification"):
+            raise user_error(422, "问题仍有关键歧义，请先确认问题理解")
+        return
+    seed = payload.intent.contract.model_dump()
+    if str(seed.get("objective") or "").strip() != payload.question.strip():
+        raise user_error(422, "问题理解与当前问题不匹配，请重新确认")
+    try:
+        finalize_query_intent(
+            seed,
+            resolved_question=payload.intent.resolved_question,
+            answers=[row.model_dump() for row in payload.intent.answers],
+        )
+    except ValueError as exc:
+        if "必填澄清" in str(exc):
+            raise user_error(422, "请先回答所有必填澄清问题")
+        raise user_error(422, "确认后的问题不能为空")
+
+
 @router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     repo = repository()
@@ -74,10 +182,11 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=404, detail="Notebook not found")
     # 先校验模式(422 malformed 请求),再查可用性(409 前置条件不满足),口径与 stream 一致。
     try:
-        resolve_mode(payload.mode)
+        spec = resolve_mode(payload.mode)
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+    _validate_confirmed_reasoning_intent(payload, spec)
     _require_ask_available(notebook)
     try:
         return repo.ask(notebook_id, payload)
@@ -150,6 +259,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+    _validate_confirmed_reasoning_intent(payload, spec)
     _require_ask_available(notebook)  # 硬约束:空库 ask 权威拒绝(复用上面已拉的快照,零额外查询)
     return StreamingResponse(
         _stream_ask_events(repo, notebook_id, payload, spec, request),

@@ -225,8 +225,10 @@ class SourceStore:
             for offset in range(0, len(ids), self.IN_CHUNK):
                 batch = ids[offset : offset + self.IN_CHUNK]
                 rows = connection.execute(
-                    "SELECT id,notebook_id,title,file_name,summary,doc_type "
-                    f"FROM sources WHERE id IN ({placeholders(batch)})",
+                    "SELECT s.id,s.notebook_id,s.title,s.file_name,s.summary,s.doc_type,"
+                    "s.source_type,m.is_paper,m.paper_title "
+                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                    f"WHERE s.id IN ({placeholders(batch)})",
                     batch,
                 ).fetchall()
                 result.update({row["id"]: dict(row) for row in rows})

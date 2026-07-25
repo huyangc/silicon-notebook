@@ -5,9 +5,15 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.api.deps import repository, require_notebook_read, require_notebook_write
+from app.api.deps import (
+    repository,
+    require_notebook_read,
+    require_notebook_write,
+    user_error,
+)
 from app.models.reports import (
     ReportCreate,
+    ReportIntentConfirm,
     ReportDetail,
     ReportExportRequest,
     ReportGenerateRequest,
@@ -27,14 +33,19 @@ def _report_llm_ready(repo) -> bool:
 
 
 def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
-                     auto_generate: bool = False) -> None:
-    """阶段1(规划)后台 job:跑 plan_outline → outline_ready;auto_generate 时
-    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。
+                     auto_generate: bool = False, intent_contract=None) -> None:
+    """Run corpus-blind understanding, or resume planning after confirmation.
+
+    The first call has no ``intent_contract`` and stops at ``intent_ready``.
+    The confirmation endpoint supplies the reviewed contract; only that call may
+    proceed into retrieval and outline planning.
+
     Task 25:helper 名保留(测试 monkeypatch 位),编排移交运行时协调器——
     注册取消(submit 前)→ background_jobs.submit(copy_context)→ 收尾注销。"""
     repo.report_execution.start_plan(
         notebook_id, rid, question, history, auto_generate,
-        user_id=repo.current_user().id)
+        user_id=repo.current_user().id,
+        intent_contract=intent_contract)
 
 
 def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
@@ -61,6 +72,66 @@ def create_report(notebook_id: str, payload: ReportCreate) -> dict:
     _launch_plan_job(repo, notebook_id, rid, payload.question.strip(), payload.history,
                      payload.auto_generate)
     return {"report_id": rid, "status": "pending"}
+
+
+@router.post("/notebooks/{notebook_id}/reports/{report_id}/intent",
+             dependencies=[Depends(require_notebook_write)])
+def confirm_report_intent(notebook_id: str, report_id: str,
+                          payload: ReportIntentConfirm) -> dict:
+    repo = repository()
+    try:
+        cur = repo.get_report(notebook_id, report_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if cur.get("status") != "intent_ready":
+        raise user_error(409, "当前报告不在问题确认阶段")
+
+    understanding = dict(cur.get("understanding") or {})
+    ambiguities = {
+        str(row.get("id") or ""): row
+        for row in (understanding.get("ambiguities") or [])
+        if isinstance(row, dict) and row.get("id")
+    }
+    submitted = {
+        row.id.strip(): row.answer.strip()
+        for row in payload.answers
+        if row.id.strip() and row.answer.strip() and row.id.strip() in ambiguities
+    }
+    missing = [
+        row for ambiguity_id, row in ambiguities.items()
+        if row.get("required") is not False and not submitted.get(ambiguity_id)
+    ]
+    if missing:
+        raise user_error(422, "请先回答所有必填澄清问题")
+
+    resolved_question = payload.resolved_question.strip()
+    if not resolved_question:
+        raise user_error(422, "确认后的研究问题不能为空")
+    answer_rows = [
+        {
+            "id": ambiguity_id,
+            "question": str(ambiguities[ambiguity_id].get("question") or ""),
+            "answer": answer,
+        }
+        for ambiguity_id, answer in submitted.items()
+    ]
+    understanding["confirmed_input"] = {
+        "resolved_question": resolved_question,
+        "answers": answer_rows,
+    }
+    understanding["confirmed"] = True
+    if not repo.claim_report_intent(notebook_id, report_id, understanding):
+        raise user_error(409, "当前报告不再处于问题确认阶段")
+    _launch_plan_job(
+        repo,
+        notebook_id,
+        report_id,
+        cur["question"],
+        "",
+        bool(understanding.get("auto_generate_requested")),
+        intent_contract=understanding,
+    )
+    return {"status": "planning"}
 
 
 @router.get("/notebooks/{notebook_id}/reports",
@@ -110,10 +181,68 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
         raise HTTPException(status_code=404, detail="Report not found")
     if cur.get("status") != "outline_ready":
         raise HTTPException(status_code=409, detail="outline editable only when outline_ready")
-    secs = [s for s in payload.sections
-            if str(s.get("title", "")).strip() and (s.get("sub_queries") or [])]
+    intent_catalog = next(
+        (list(section.get("intent_catalog") or []) for section in (cur.get("outline") or [])
+         if isinstance(section, dict) and section.get("intent_catalog")),
+        [],
+    )
+    intent_contract = next(
+        (dict(section.get("intent_contract") or {}) for section in (cur.get("outline") or [])
+         if isinstance(section, dict) and section.get("intent_contract")),
+        {},
+    )
+    known_intents = {
+        str(item.get("id") or ""): item for item in intent_catalog
+        if isinstance(item, dict) and item.get("id")
+    }
+    secs = []
+    for raw in payload.sections[: repo.settings.report_max_sections]:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip()
+        raw_queries = raw.get("sub_queries") or []
+        if not isinstance(raw_queries, list):
+            continue
+        queries = [str(item).strip() for item in raw_queries if str(item).strip()][:4]
+        if not title or not queries:
+            continue
+        section = dict(raw)
+        section.update(
+            title=title,
+            scope=str(raw.get("scope") or "").strip(),
+            sub_queries=queries,
+        )
+        raw_intent_ids = raw.get("intent_ids") or []
+        if not isinstance(raw_intent_ids, list):
+            raw_intent_ids = []
+        intent_ids = list(dict.fromkeys(
+            str(item).strip() for item in raw_intent_ids
+            if str(item).strip() in known_intents
+        ))
+        section["intent_ids"] = intent_ids
+        section["intent_questions"] = [
+            str(known_intents[item].get("question") or "") for item in intent_ids
+        ]
+        if intent_catalog:
+            section["intent_catalog"] = intent_catalog
+        if intent_contract:
+            section["intent_contract"] = intent_contract
+        secs.append(section)
     if not secs:
         raise HTTPException(status_code=422, detail="at least one valid section required")
+    covered_intents = {
+        intent_id for section in secs for intent_id in section["intent_ids"]
+    }
+    missing_intents = [
+        str(item.get("title") or item.get("question") or intent_id)
+        for intent_id, item in known_intents.items()
+        if intent_id not in covered_intents
+    ]
+    if missing_intents:
+        raise user_error(
+            422,
+            "大纲必须保留每个必答主题，请恢复被删除的主题后再试",
+        )
     repo.update_report(notebook_id, report_id, outline=secs)
     return {"status": "ok", "sections": len(secs)}
 
@@ -131,6 +260,8 @@ def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateReq
     if cur.get("status") != "outline_ready":
         raise HTTPException(status_code=409, detail="generate only from outline_ready")
     depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
+    if not repo.claim_report_generation(notebook_id, report_id):
+        raise user_error(409, "当前报告不再处于大纲确认阶段")
     _launch_generate_job(repo, notebook_id, report_id, cur["question"], depth)
     return {"status": "generating"}
 

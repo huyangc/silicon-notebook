@@ -64,6 +64,7 @@ from app.models.ask import (
     FeedbackResponse,
     ModelError,
     NotebookSearchResponse,
+    QueryIntentContract,
     RuleCard,
 )
 from app.models.knowledge import (
@@ -2861,6 +2862,14 @@ class RepositoryFacade:
         is not added to the AskResponse protocol."""
         return self._runtime.ask_component.ask_current(notebook_id, payload)
 
+    def preview_reasoning_intent(
+        self, question: str, history: str = "", cancel_event: CancelEvent = None
+    ) -> QueryIntentContract:
+        """Corpus-blind preflight used before a reasoning Ask creates a job."""
+        return self._runtime.ask_component.preview_reasoning_intent(
+            question, history, cancel_event
+        )
+
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
     # "chunk"，不会触发 422。
@@ -3157,12 +3166,24 @@ class RepositoryFacade:
     def update_report(self, notebook_id: str, report_id: str, *, status=None,
                       progress=None, error=None, outline=None, sections=None,
                       gaps=None, references=None, content_md=None,
-                      section_status=None) -> None:
+                      section_status=None, understanding=None) -> None:
         return self._runtime.report_store.update_report(
             notebook_id, report_id, status=status, progress=progress,
             error=error, outline=outline, sections=sections, gaps=gaps,
             references=references, content_md=content_md,
-            section_status=section_status)
+            section_status=section_status, understanding=understanding)
+
+    def claim_report_intent(
+        self, notebook_id: str, report_id: str, understanding: dict
+    ) -> bool:
+        return self._runtime.report_store.claim_report_intent(
+            notebook_id, report_id, understanding
+        )
+
+    def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
+        return self._runtime.report_store.claim_report_generation(
+            notebook_id, report_id
+        )
 
     def _report_row_to_dict(self, row, *, full: bool) -> dict:
         return self._runtime.report_store.row_to_dict(row, full=full)
