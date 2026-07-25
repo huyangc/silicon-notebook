@@ -19,6 +19,7 @@ from app.api.deps import (
     require_notebook_read,
     user_error,
 )
+from app.core.audit_actor import session_audit_principal
 from app.models.identity import UserProfile
 from app.models.knowhow import (
     VALID_ORIGINS,
@@ -52,6 +53,7 @@ from app.repositories.sqlite.knowhow_history_store import (
     RevertVerifyFailed,
 )
 from app.services.knowhow import api as knowhow_api
+from app.services.knowhow import audit as knowhow_audit
 from app.services.knowhow import history as knowhow_history
 from app.services.knowhow import transfer as _kh_transfer
 from app.services.knowhow.grid_parser import GridParseError
@@ -137,16 +139,16 @@ async def import_knowhow_table(
     ``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form
     field (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the
     row-title designation is named ONLY via anchor_index, never inline)."""
-    # knowhow 表版本管理 Task 13: user.id 传给 import_table 作为创世流水的
-    # actor（origin="import" 在 import_table 内部设置）——不写进上面的
-    # docstring，理由同 create_knowhow_table 旁的注释（FastAPI 把它当 OpenAPI
-    # description 发布，会改动冻结的 api_contract.json）。
+    # 稳定 creator id 与可读流水 label 分开传递；wire 形状不变。
     repo = repository()
+    principal = session_audit_principal(user)
     data = await file.read()
     try:
         table_id = knowhow_api.import_table(
             repo, notebook_id, file.filename or "import", data, title,
-            columns_json, anchor_index, orientation, actor=user.id,
+            columns_json, anchor_index, orientation,
+            created_by_id=principal.identity_id,
+            actor_label=principal.audit_label,
         )
     except (GridParseError, knowhow_api.KnowhowImportValidationError) as exc:
         raise _knowhow_import_user_error(exc)
@@ -313,16 +315,16 @@ def create_knowhow_table(
     minus the file). Does not schedule a reprojection (nothing to project
     yet on a zero-row table); the first row/cell mutation schedules the
     table's first real run."""
-    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给创世流水（不写进上面
-    # 的 docstring——FastAPI 把路由函数 docstring 当 OpenAPI description 发布，
-    # 加一段说明文字会改变冻结的 api_contract.json，本任务未改这个端点的
-    # wire 形状，不该触发那份契约重生成）。
+    # 稳定 creator id 与可读创世流水 label 分开传递。
     repo = repository()
+    principal = session_audit_principal(user)
     try:
         table_id = knowhow_api.create_table(
             repo, notebook_id, body.title,
             [{"name": column.name, "kind": column.kind} for column in body.columns],
-            body.anchor_index, actor=user.id,
+            body.anchor_index,
+            created_by_id=principal.identity_id,
+            actor_label=principal.audit_label,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -346,19 +348,22 @@ def patch_knowhow_table(
     table still schedules reprojection: the table title feeds every row's
     chunk section_path label (design doc §④), so renaming it is itself a
     content change from the projector's point of view."""
-    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给下面两处可能的 store
-    # 写入（不写进上面的 docstring，理由同 create_knowhow_table 旁的注释）。
+    # 所有流水写入统一使用 session audit label。
     repo = repository()
+    principal = session_audit_principal(user)
     _require_table(repo, notebook_id, table_id)
     fields_set = patch.model_fields_set
     try:
         if "anchor_column_id" in fields_set:
-            repo.set_knowhow_anchor_column(table_id, patch.anchor_column_id, actor=user.id)
+            repo.set_knowhow_anchor_column(
+                table_id, patch.anchor_column_id, actor=principal.audit_label
+            )
         title = patch.title if "title" in fields_set else None
         description = patch.description if "description" in fields_set else None
         if title is not None or description is not None:
             repo.update_knowhow_table_meta(
-                table_id, title=title, description=description, actor=user.id,
+                table_id, title=title, description=description,
+                actor=principal.audit_label,
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -376,10 +381,12 @@ def add_knowhow_column(
     user: UserProfile = Depends(get_current_user),
 ) -> dict:
     repo = repository()
+    principal = session_audit_principal(user)
     _require_table(repo, notebook_id, table_id)
     try:
         column_id = repo.add_knowhow_column(
-            table_id, body.name, body.kind, body.position, actor=user.id,
+            table_id, body.name, body.kind, body.position,
+            actor=principal.audit_label,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -399,14 +406,19 @@ def patch_knowhow_column(
     user: UserProfile = Depends(get_current_user),
 ) -> dict:
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     _require_column_in_table(table, column_id)
     fields_set = body.model_fields_set
     try:
         if "name" in fields_set and body.name is not None:
-            repo.rename_knowhow_column(column_id, body.name, actor=user.id)
+            repo.rename_knowhow_column(
+                column_id, body.name, actor=principal.audit_label
+            )
         if "kind" in fields_set and body.kind is not None:
-            repo.set_knowhow_column_kind(column_id, body.kind, actor=user.id)
+            repo.set_knowhow_column_kind(
+                column_id, body.kind, actor=principal.audit_label
+            )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
@@ -425,9 +437,10 @@ def delete_knowhow_column(
     user: UserProfile = Depends(get_current_user),
 ) -> None:
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     _require_column_in_table(table, column_id)
-    repo.delete_knowhow_column(column_id, actor=user.id)
+    repo.delete_knowhow_column(column_id, actor=principal.audit_label)
     knowhow_api.get_scheduler(repo).schedule(table_id)
 
 
@@ -441,11 +454,14 @@ def add_knowhow_row(
     user: UserProfile = Depends(get_current_user),
 ) -> dict:
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     valid_column_ids = {column["id"] for column in table["columns"]}
     if set(body.cells) - valid_column_ids:
         raise user_error(400, "格子对应的列不属于本表")
-    row_id = repo.add_knowhow_row(table_id, body.cells, body.position, actor=user.id)
+    row_id = repo.add_knowhow_row(
+        table_id, body.cells, body.position, actor=principal.audit_label
+    )
     knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)
     return next(r for r in updated["rows"] if r["id"] == row_id)
@@ -461,9 +477,10 @@ def delete_knowhow_row(
     user: UserProfile = Depends(get_current_user),
 ) -> None:
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     _require_row_in_table(table, row_id)
-    repo.delete_knowhow_row(row_id, actor=user.id)
+    repo.delete_knowhow_row(row_id, actor=principal.audit_label)
     knowhow_api.get_scheduler(repo).schedule(table_id)
 
 
@@ -488,12 +505,11 @@ def patch_knowhow_cell(
     in-memory check with no DB lookups, and a hard 400 on anything outside
     VALID_ORIGINS (never a lenient default; see KnowhowCellPatch.origin's own
     docstring for why)."""
-    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给下面实际执行的那次
-    # store 写入（不写进上面的 docstring，理由同 create_knowhow_table 旁的
-    # 注释）。
+    # 流水使用 session audit label，权限仍由稳定 user id 守卫。
     if body.origin not in VALID_ORIGINS:
         raise user_error(400, "未知的变更来源")
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     if (
         not any(row["id"] == row_id for row in table["rows"])
@@ -528,7 +544,7 @@ def patch_knowhow_cell(
                 notebook_id,
                 [(table_id, row_id, column_id, body.expected_before, body.content_md)],
                 require_assets=added_assets,
-                actor=user.id, origin=body.origin,
+                actor=principal.audit_label, origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -547,7 +563,8 @@ def patch_knowhow_cell(
         try:
             repo.update_knowhow_cell(
                 row_id, column_id, body.content_md,
-                require_assets=added_assets, actor=user.id, origin=body.origin,
+                require_assets=added_assets, actor=principal.audit_label,
+                origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -592,12 +609,11 @@ def patch_knowhow_cells_batch(
     (see the module docstring above), so it needs the identical whitelist
     check or a batch reformat-accept could never be attributed as
     'llm_reformat' in the history timeline."""
-    # knowhow 表版本管理 Task 13: user.id 作为 actor 传给下面实际执行的那次
-    # store 写入（不写进上面的 docstring，理由同 create_knowhow_table 旁的
-    # 注释）。
+    # 流水使用 session audit label，权限仍由稳定 user id 守卫。
     if body.origin not in VALID_ORIGINS:
         raise user_error(400, "未知的变更来源")
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     row_ids = body.row_ids
     valid_row_ids = {row["id"] for row in table["rows"]}
@@ -665,7 +681,7 @@ def patch_knowhow_cells_batch(
                 require_assets=added_assets,
                 anchor_column_id=anchor_column_id,
                 expected_anchor=expected_anchor,
-                actor=user.id, origin=body.origin,
+                actor=principal.audit_label, origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -691,7 +707,8 @@ def patch_knowhow_cells_batch(
         try:
             repo.update_knowhow_cells(
                 row_ids, body.column_id, body.content_md,
-                require_assets=added_assets, actor=user.id, origin=body.origin,
+                require_assets=added_assets, actor=principal.audit_label,
+                origin=body.origin,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
@@ -791,23 +808,22 @@ async def append_knowhow_rows(
     performs the identical alignment, actually appends the rows, and
     schedules a debounced reprojection exactly like every other mutating
     knowhow endpoint."""
-    # knowhow 表版本管理 Task 13: user.id 传给 commit_append，成为整批新行
-    # 那一条 import_append 流水的 actor（origin="import" 在 commit_append
-    # 内部设置）——不写进上面的 docstring，理由同 create_knowhow_table 旁的
-    # 注释。
+    # 追加导入流水使用 session audit label。
     if mode not in ("preview", "commit"):
         # 分类:这不是用户文案。mode 是 Form 参数,UI 永远不会发错值,只有 API/MCP
         # 客户端会踩;「mode 必须是 preview 或 commit」对真人毫无意义。故降级成普通
         # HTTPException(英文 detail = API 契约),真人看到的是 400 的通用中文文案。
         raise HTTPException(status_code=400, detail="mode must be 'preview' or 'commit'")
     repo = repository()
+    principal = session_audit_principal(user)
     table = _require_table(repo, notebook_id, table_id)
     data = await file.read()
     try:
         if mode == "preview":
             return knowhow_api.preview_append(table, file.filename or "append", data)
         added = knowhow_api.commit_append(
-            repo, table_id, table, file.filename or "append", data, actor=user.id,
+            repo, table_id, table, file.filename or "append", data,
+            actor_label=principal.audit_label,
         )
     except GridParseError as exc:
         raise _knowhow_import_user_error(exc)
@@ -987,7 +1003,9 @@ def get_knowhow_history(
     ``milestones_only`` 的过滤是纯展示层，落在快照之后、对一致性无影响。"""
     repo = repository()
     _require_table(repo, notebook_id, table_id)
-    page = repo.knowhow_history_page(table_id, limit, before_seq)
+    page = knowhow_audit.project_history_page(
+        repo, repo.knowhow_history_page(table_id, limit, before_seq)
+    )
     changes = page["changes"]
     if milestones_only:
         milestone_seqs = {milestone["seq"] for milestone in page["milestones"]}
@@ -1016,7 +1034,9 @@ def get_knowhow_history_diff(
     repo = repository()
     _require_table(repo, notebook_id, table_id)
     changes = repo.knowhow_changes_between(table_id, from_seq, to_seq)
-    return knowhow_history.aggregate_diff(changes)
+    return knowhow_audit.project_nested_updated_by(
+        repo, knowhow_history.aggregate_diff(changes)
+    )
 
 
 @router.get(
@@ -1031,7 +1051,7 @@ def get_knowhow_change(notebook_id: str, table_id: str, seq: int) -> dict:
     change = repo.get_knowhow_change(table_id, seq)
     if change is None:
         raise HTTPException(status_code=404, detail="Change not found")
-    return change
+    return knowhow_audit.project_change(repo, change)
 
 
 @router.get(
@@ -1052,7 +1072,9 @@ def get_knowhow_cell_history(
         or not any(column["id"] == column_id for column in table["columns"])
     ):
         raise user_error(400, "格子定位不合法")
-    return repo.knowhow_cell_history(table_id, row_id, column_id, limit)
+    return knowhow_audit.project_cell_history(
+        repo, repo.knowhow_cell_history(table_id, row_id, column_id, limit)
+    )
 
 
 @router.post(
@@ -1070,6 +1092,7 @@ def revert_knowhow_table(
     oracle，同本文件"不存在"与"越权"统一 404 的既定约定）。重放本体 + 提交后
     的重投影调度都在 knowhow_history.revert_table 里，这里只做错误码翻译。"""
     repo = repository()
+    principal = session_audit_principal(user)
     try:
         knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
     except KeyError:
@@ -1077,7 +1100,7 @@ def revert_knowhow_table(
     try:
         return knowhow_history.revert_table(
             repo, notebook_id, table_id,
-            body.target_seq, body.expected_head_seq, user.id,
+            body.target_seq, body.expected_head_seq, principal.audit_label,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Change not found")
@@ -1115,6 +1138,7 @@ def create_knowhow_milestone(
     "这里不做预检，省一次往返"，把翻译成用户文案的职责留给了这一层）——接住
     它转成 400，而不是让用户看见一坨裸的 500 异常堆栈。"""
     repo = repository()
+    principal = session_audit_principal(user)
     _require_table(repo, notebook_id, table_id)
     # 事务外预检 = 快速失败给出明确 404；真正堵 TOCTOU 的是 create_milestone
     # 写事务内的复检（codex P2），那里 seq 不存在会 raise KeyError，下面接住转
@@ -1123,7 +1147,7 @@ def create_knowhow_milestone(
         raise HTTPException(status_code=404, detail="Change not found")
     try:
         return repo.create_knowhow_milestone(
-            table_id, body.seq, body.name, body.note, user.id
+            table_id, body.seq, body.name, body.note, principal.audit_label
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Change not found")
@@ -1192,6 +1216,7 @@ def transfer_knowhow_table(
     if payload.target_notebook_id == notebook_id:
         raise user_error(400, "源与目标不能是同一个笔记本")
     repo = repository()
+    principal = session_audit_principal(user)
     access = _kh_access()
     # 只有 copy 能放宽到「只读成员」——写成 `read if copy else access` 而不是
     # `access if move else read`，是为了失败关闭（默认最严兜底，同 deps.py 末尾
@@ -1203,9 +1228,11 @@ def transfer_knowhow_table(
         if payload.mode == "copy"
         else access.user_can_access_notebook
     )
-    if not source_check(notebook_id, user.id):
+    if not source_check(notebook_id, principal.identity_id):
         raise HTTPException(status_code=404, detail="Notebook not found")
-    if not access.user_can_access_notebook(payload.target_notebook_id, user.id):
+    if not access.user_can_access_notebook(
+        payload.target_notebook_id, principal.identity_id
+    ):
         raise HTTPException(status_code=404, detail="Notebook not found")
     try:
         # 复用既有 helper（同 reproject 路由 routes.py:583-586 的「只做存在性+
@@ -1217,7 +1244,9 @@ def transfer_knowhow_table(
         raise HTTPException(status_code=404, detail="Table not found")
     try:
         new_table_id = _kh_transfer.transfer_table(
-            repo, table_id, payload.target_notebook_id, user.id, payload.mode
+            repo, table_id, payload.target_notebook_id,
+            principal.identity_id, payload.mode,
+            actor_label=principal.audit_label,
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Table not found")

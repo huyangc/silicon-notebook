@@ -199,6 +199,24 @@ class IdentityStore:
         with self.database.write() as connection:
             connection.execute("DELETE FROM auth_sessions WHERE token=%s", (token,))
 
+    def audit_labels_for_user_ids(self, user_ids) -> dict[str, str]:
+        """PostgreSQL parity for bounded legacy audit-id resolution."""
+
+        ids = list(dict.fromkeys(str(value) for value in user_ids if value))[:512]
+        labels: dict[str, str] = {}
+        with self.database.connect() as connection:
+            for offset in range(0, len(ids), 200):
+                chunk = ids[offset : offset + 200]
+                rows = connection.execute(
+                    "SELECT id, username, display_name FROM users WHERE id = ANY(%s)",
+                    (chunk,),
+                ).fetchall()
+                for row in rows:
+                    username = str(row["username"] or "").strip()
+                    display_name = str(row["display_name"] or "").strip()
+                    labels[row["id"]] = username or display_name or row["id"]
+        return labels
+
     def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
         if role not in {"admin", "user"}:
             raise ValueError("invalid role")

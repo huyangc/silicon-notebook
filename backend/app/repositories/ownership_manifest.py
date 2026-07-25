@@ -821,6 +821,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_job_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_job_status', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.ask_reasoning', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.audit_labels_for_user_ids', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.authenticate_user', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.backfill_chunk_fts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.backfill_kg_fts', kind='attribute', target='_runtime'),
@@ -1233,6 +1234,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/ask_modes.py', scope='<module>.ASK_MODES', kind='registry', target='ask_reasoning'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='audit_labels_for_user_ids',
+        owner='IdentityStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/services/knowhow/audit.py', scope='<module>.resolve_audit_labels', kind='attribute', target='audit_labels_for_user_ids'),
         ),
         patches=(
         ),

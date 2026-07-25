@@ -17,6 +17,7 @@ const columns = [
   { id: "c-filled", name: "现象", role: "attribute", position: 1 },
   { id: "c-empty", name: "处理方法", role: "procedure", position: 2 },
   { id: "c-space", name: "工具", role: "entity", position: 3 },
+  { id: "c-missing", name: "缺省格", role: "attribute", position: 4 },
 ];
 
 test("completableKnowhowColumns: 排除 anchor、已有内容和纯空白，只保留精确空串列", () => {
@@ -26,7 +27,8 @@ test("completableKnowhowColumns: 排除 anchor、已有内容和纯空白，只�
   };
   assert.deepStrictEqual(
     completableKnowhowColumns(row, columns, "c-anchor").map((column) => column.id),
-    ["c-empty"],
+    // Wire 中缺省 cell 与存储层默认空串等价，仍可补；显式纯空白绝不可补。
+    ["c-empty", "c-missing"],
   );
 });
 

@@ -368,6 +368,14 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **并发与历史一致性**：打开复核窗时冻结目标列与原始空值；接受建议使用 `expected_before` 乐观并发保护并记录 `origin="llm_complete"`，历史界面显示“智能补全”。行标题分组中的共享目标格会冻结并校验所有物理成员行、目标空值与行标题值，任一成员已变化则拒绝写入，不允许覆盖用户或协作者的新内容。
 - **验证**：补全 API、双路证据映射、Memory/当前表前置过滤、严格模型故障、提示注入边界、预算、权限、并发保护、历史来源、前端纯逻辑和组件交互均有回归测试；专项后端 131 项、前端 Node 1416 项、组件 51 项通过，完整 `scripts/check.sh` 与前端 production build 已通过。
 
+## 31. Knowhow 批量规整审阅、审计 actor 与内容感知列宽（2026-07-25）
+
+- **批量候选与一致性**：行/整表一键规整的候选生成改为有界 worker pool，并发取 `min(3, knowhow_reformat 实时服务容量)`、状态失败回退 2；相同列与 trim 后原文 single-flight，只有成功且仍 fresh 的 leader 结果进入缓存并扇出，失败或 stale 时下一物理格可继续重试。AbortSignal 与 run epoch 阻止取消后的新请求和迟到回写，进度按物理格计数；保存仍按既有完整物理/共享单元串行，完整保留 frozen snapshot、`expected_before`、anchor/精确成员守卫、409 stale、候选保留与关窗后 reload。
+- **逐项审阅与打开格子**：批量队列的有改动/已保存项可在同一弹窗进入单项 Markdown diff，提供行级增删、面向中英文/emoji/空白/标点/Markdown 控制符的行内 token 高亮、严格字符/行/Myers/token 矩阵预算与超长降级，并可切换渲染预览；返回队列恢复滚动与焦点。已保存项先安全关闭弹窗，再打开既有格子详情；共享格稳定选择 `row.position`、再 row id 最小的代表格。整体确认保存语义未改成逐项接受/拒绝。
+- **审计 actor 治理**：稳定 ownership/权限/`created_by` 继续保存 user id；普通 session 审计快照统一为 `username.trim() → display_name.trim() → user.id`，Agent 保持 `profile_name`。import/create、单表复制/移动和整本 notebook copy 均拆开 identity id 与 actor label；历史页、单变更、单格历史、diff 与 Agent/MCP 代码附件展示在最多 512 个候选、每批 200 个 id 内解析旧 user id，未知/删除用户及 Agent 自由文本原样回退，无 N+1、无 schema migration、无破坏性回写，fingerprint 中的 `knowhow_cell_code.updated_by` 历史字节保持不变。
+- **内容感知列宽与补全回归**：主表继续使用 fixed layout、横向滚动与 sticky 首列，通过 `colgroup` 应用 memoized 宽度；只采样可见物理行前 48 + 后 16（最多 64），每格最多 8 行/每行 120 grapheme，按 Markdown 可见文本与 CJK/全角/emoji、ASCII、标点、空白权重估算，并套 desktop/窄屏 clamp，状态列固定。本次未增加拖拽或持久化。既有“智能补全空列”仍是零新增：行详情与矩阵物理分支入口保留，只补缺省/精确空串，纯空白和已有内容不可覆盖，最多 8 条同表参考、一次有界推理检索、最多 20 项且逐项接受。
+- **验证**：新增/相关前端 Node 583 项、组件 13 项、后端专项 175 项通过；分拆完整后端（排除需本机端口的生命周期文件）6579 项通过、341 项跳过，生命周期 9 项在沙箱外串行通过；`npm run build` 通过。最终以 `BACKEND_PYTEST_WORKERS=1` 运行完整 `scripts/check.sh` 退出 0，`git diff --check` 通过。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
 
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。

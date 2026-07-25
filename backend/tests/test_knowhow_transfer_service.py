@@ -58,7 +58,7 @@ def test_copy_creates_independent_table_in_target(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)  # 不投影：业务表拷贝与投影无关
 
-    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     assert new_tid != src_tid
     dst = repo.get_knowhow_table(new_tid)
@@ -69,13 +69,27 @@ def test_copy_creates_independent_table_in_target(repo):
     # 源不受影响
     assert repo.get_knowhow_table(src_tid)["notebook_id"] == src_nb
 
+
+def test_copy_separates_stable_creator_id_from_genesis_actor_label(repo):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    new_tid = kh_transfer.copy_table(
+        repo, src_tid, dst_nb, creator_id="user-stable",
+        actor_label="a00123456",
+    )
+
+    assert repo.get_knowhow_table(new_tid)["created_by"] == "user-stable"
+    genesis = repo.get_knowhow_change(new_tid, 1)
+    assert genesis["actor"] == "a00123456"
+
 def test_copy_reprojection_reuses_vectors_zero_reembed(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
     _project(repo, src_tid)  # 先把源投影好，产出 chunks + chunk_embeddings
     repo._runtime.models.embedding("retrieval_query_embedding").call_count = 0  # 归零，之后只观察 copy 引发的 embed
 
-    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
     _settle(repo, new_tid)  # 等重投影落地（copy_table 自己已调度）
 
     # K-1：chunk_embeddings 已随拷贝以稳定 id 落库 → 重投影零重嵌入
@@ -95,7 +109,7 @@ def test_copy_is_retrievable_in_target_via_lexical_and_vector(repo):
     src_tid = _table_with_row(repo, src_nb)
     _project(repo, src_tid)
 
-    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
     _settle(repo, new_tid)
 
     with repo._connect() as db:
@@ -132,7 +146,7 @@ def test_move_deletes_source_table_and_projection(repo):
         ).fetchone()[0]
     assert before > 0, "源表投影未产出 objects，删投影断言将空转"
 
-    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     # 目标有，新表可读
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
@@ -178,7 +192,7 @@ def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypat
 
     import pytest as _pytest
     with _pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert isinstance(exc_info.value.cause, RuntimeError)
     assert exc_info.value.new_table_id
     # round 10 P1-A：teardown 本身抛出异常——源原封未动，reason 必须是
@@ -251,7 +265,7 @@ def test_copy_survives_scheduler_failure_after_commit(repo, monkeypatch):
 
     # Must not raise: the DB side already committed, so a scheduling failure
     # is best-effort-lost KG rebuild, not a failed copy.
-    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
 
@@ -274,7 +288,7 @@ def test_move_survives_scheduler_failure_and_still_cleans_source(repo, monkeypat
 
     monkeypatch.setattr(kh_transfer, "get_scheduler", lambda _repo: _BoomScheduler())
 
-    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
     import pytest as _pytest
@@ -314,7 +328,7 @@ def test_copy_gives_asset_row_independent_source_id(repo):
     column_id = repo.get_knowhow_table(tid)["columns"][0]["id"]
     repo.add_knowhow_row(tid, {column_id: f"![img](asset://{asset['id']})"})
 
-    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, creator_id="user-x")
 
     with repo._connect() as db:
         new_assets = [
@@ -366,7 +380,7 @@ def test_move_does_not_delete_source_row_added_after_copy_snapshot(repo, monkeyp
     monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_row_add)
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     # round 10 P1-A：早退的指纹预检未命中——源是被有意保留以保护这份并发
     # 编辑的，reason 必须是 "source_changed"（绝不能引导用户删除源）。
@@ -395,7 +409,7 @@ def test_move_deletes_source_when_untouched_after_copy_snapshot(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
 
-    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
     with pytest.raises(KeyError):
@@ -451,7 +465,7 @@ def test_move_does_not_delete_source_row_added_during_projection_teardown(
     )
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     # round 10 P1-A：原子条件删除返回 False（指纹复核未命中）——源是被有意
     # 保留以保护这份并发编辑的，reason 必须是 "source_changed"。
@@ -510,7 +524,7 @@ def test_move_reschedules_projection_for_retained_source_when_edited_during_tear
     )
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     # round 10 P1-A：同上一条用例，原子条件删除返回 False——reason 必须是
     # "source_changed"。
     assert exc_info.value.reason == "source_changed"
@@ -569,7 +583,7 @@ def test_move_does_not_delete_source_table_title_edited_after_copy_snapshot(
     monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_title_edit)
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     # round 10 P1-A：早退的指纹预检未命中——reason 必须是 "source_changed"。
     assert exc_info.value.reason == "source_changed"
@@ -604,7 +618,7 @@ def test_move_does_not_delete_source_column_renamed_after_copy_snapshot(
     monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_rename)
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
@@ -638,7 +652,7 @@ def test_move_does_not_delete_source_anchor_moved_after_copy_snapshot(
     monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_anchor_move)
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
@@ -675,7 +689,7 @@ def test_move_does_not_delete_source_column_swapped_after_copy_snapshot(
     monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_swap)
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
@@ -725,7 +739,7 @@ def test_copy_skips_stale_elements_from_a_deleted_row(repo):
     repo.delete_knowhow_row(row1)  # 只删业务行本身——不触发任何重投影
 
     # 修复前：这里直接 KeyError（khrow_map 缺 row1），路由层会转成 404。
-    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, creator_id="user-x")
 
     dst = repo.get_knowhow_table(new_tid)
     assert len(dst["rows"]) == 1, "只有存活的第 2 行应该被复制（业务行快照本就只含活行）"
@@ -762,7 +776,7 @@ def test_copy_skips_stale_elements_from_a_deleted_column(repo):
 
     repo.delete_knowhow_column(cols["现象识别"])  # 只删列本身——不触发任何重投影
 
-    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, creator_id="user-x")
 
     dst = repo.get_knowhow_table(new_tid)
     assert {c["name"] for c in dst["columns"]} == {"违例类型"}
@@ -840,7 +854,7 @@ def test_move_sweeps_hidden_source_recreated_between_teardown_and_delete(
         store, "delete_table_if_unchanged", _recreate_hidden_source_then_delete
     )
 
-    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
     with pytest.raises(KeyError):
@@ -871,7 +885,7 @@ def test_move_sweep_is_idempotent_when_no_orphan_exists(repo):
     src_tid = _table_with_row(repo, src_nb)
     _project(repo, src_tid)
 
-    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
 
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
     with pytest.raises(KeyError):
@@ -922,7 +936,7 @@ def test_move_does_not_delete_source_cell_code_updated_by_changed_after_copy_sna
     monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_updated_by_change)
 
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
-        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+        kh_transfer.move_table(repo, src_tid, dst_nb, creator_id="user-x")
     assert exc_info.value.new_table_id
     assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 

@@ -403,7 +403,7 @@ def test_append_commit_records_one_import_append_with_import_origin_and_actor(
     is ``"import"`` (never the manual editor's ``"user"``)."""
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00002035")
-    owner_id = client.get("/api/me", headers=owner_h).json()["id"]
+    owner = client.get("/api/me", headers=owner_h).json()
     nb = _mk_notebook(client, owner_h)
     table = _create_table(client, owner_h, nb)
 
@@ -420,7 +420,8 @@ def test_append_commit_records_one_import_append_with_import_origin_and_actor(
     ).json()["changes"]
     import_change = next(c for c in changes if c["kind"] == "import_append")
     assert import_change["origin"] == "import"
-    assert import_change["actor"] == owner_id
+    assert import_change["actor"] == owner["username"]
+    assert import_change["actor"] != owner["id"]
     assert import_change["actor"] != ""
     assert len(import_change["payload"]["rows"]) == 2
 

@@ -433,7 +433,7 @@ def test_import_creates_table_with_full_detail_rows_and_cells(tmp_path, monkeypa
         assert row["projection_status"] in ("pending", "syncing", "synced")
 
 
-def test_import_genesis_change_records_import_origin_and_the_uploading_users_id(
+def test_import_keeps_creator_id_and_records_uploading_username_as_actor(
     tmp_path, monkeypatch,
 ):
     """knowhow 表版本管理 Task 13 code review: actor/origin threading through
@@ -447,7 +447,7 @@ def test_import_genesis_change_records_import_origin_and_the_uploading_users_id(
     test_knowhow_editing_api.py's own create-table coverage)."""
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000550")
-    owner_id = client.get("/api/me", headers=owner_h).json()["id"]
+    owner = client.get("/api/me", headers=owner_h).json()
     nb = _mk_notebook(client, owner_h)
 
     resp = _import_xlsx(client, owner_h, nb)
@@ -459,8 +459,13 @@ def test_import_genesis_change_records_import_origin_and_the_uploading_users_id(
     ).json()
     assert genesis["kind"] == "table_create"
     assert genesis["origin"] == "import"
-    assert genesis["actor"] == owner_id
+    assert genesis["actor"] == owner["username"]
+    assert genesis["actor"] != owner["id"]
     assert genesis["actor"] != ""
+    detail = client.get(
+        f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h,
+    ).json()
+    assert detail["created_by"] == owner["id"]
 
 
 def test_import_rows_orientation_persists_the_normalized_preview_shape(

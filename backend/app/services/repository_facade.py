@@ -772,6 +772,9 @@ class RepositoryFacade:
     def delete_session(self, token: str) -> None:
         return self._runtime.identity.delete_session(token)
 
+    def audit_labels_for_user_ids(self, user_ids: List[str]) -> dict[str, str]:
+        return self._runtime.identity.audit_labels_for_user_ids(user_ids)
+
     def visible_document_count(self, notebook_id: str) -> int:
         return self._runtime.source_store.visible_document_count(notebook_id)
 
@@ -1323,10 +1326,12 @@ class RepositoryFacade:
         source_notebook_id: str,
         *,
         new_owner_id: str,
+        actor_label: "str | None" = None,
         new_name: "str | None" = None,
     ) -> NotebookSummary:
         return self._runtime.sharing.copy_notebook(
-            source_notebook_id, new_owner_id=new_owner_id, new_name=new_name
+            source_notebook_id, new_owner_id=new_owner_id,
+            actor_label=actor_label, new_name=new_name,
         )
 
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool:

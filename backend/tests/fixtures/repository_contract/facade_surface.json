@@ -2753,6 +2753,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.audit_labels_for_user_ids",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.authenticate_user",
         "target": "_runtime"
       },
@@ -4523,6 +4529,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', payload: 'AskRequest', on_trace=None, cancel_event: 'CancelEvent' = None) -> 'AskResponse'"
+  },
+  "audit_labels_for_user_ids": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/audit.py",
+        "scope": "<module>.resolve_audit_labels",
+        "target": "audit_labels_for_user_ids"
+      }
+    ],
+    "kind": "method",
+    "owner": "IdentityStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, user_ids: 'List[str]') -> 'dict[str, str]'"
   },
   "backfill_paper_metadata": {
     "consumers": [

@@ -196,6 +196,26 @@ class IdentityStore:
         with self.database.write() as db:
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
 
+    def audit_labels_for_user_ids(self, user_ids) -> dict[str, str]:
+        """Resolve at most 512 exact ids, in SQLite-safe chunks of at most 200."""
+
+        ids = list(dict.fromkeys(str(value) for value in user_ids if value))[:512]
+        labels: dict[str, str] = {}
+        with self.database.connect() as db:
+            for offset in range(0, len(ids), 200):
+                chunk = ids[offset : offset + 200]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = db.execute(
+                    f"SELECT id, username, display_name FROM users "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    username = str(row["username"] or "").strip()
+                    display_name = str(row["display_name"] or "").strip()
+                    labels[row["id"]] = username or display_name or row["id"]
+        return labels
+
     def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
         """Assign a user/admin role with authorization rechecked in the write txn."""
         if role not in {"admin", "user"}:

@@ -6,6 +6,7 @@ from fastapi import Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
+from app.core.audit_actor import session_audit_principal
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.identity import UserProfile
 from app.repositories.factory import create_repository
@@ -155,9 +156,11 @@ class RequestActor:
     the resolved UserProfile (already set as the request's current user via
     set_request_user), and an actor_label for a write's audit trail (e.g.
     knowhow_cell_code.updated_by) that reads naturally for either kind of
-    caller (an Agent's profile_name, or a session user's own id)."""
+    caller (an Agent's profile_name, or the canonical session audit label).
+    ``identity_id`` remains the stable authorization/ownership identity."""
     user: UserProfile
     is_agent: bool
+    identity_id: str
     actor_label: str
 
 
@@ -221,7 +224,8 @@ async def user_or_agent_scope(
         marker = set_request_user(owner)
         try:
             yield RequestActor(
-                user=owner, is_agent=True, actor_label=principal.profile_name
+                user=owner, is_agent=True, identity_id=principal.owner_id,
+                actor_label=principal.profile_name,
             )
         finally:
             reset_request_user(marker)
@@ -237,7 +241,11 @@ async def user_or_agent_scope(
             raise HTTPException(status_code=404, detail=not_found_detail)
         marker = set_request_user(user)
         try:
-            yield RequestActor(user=user, is_agent=False, actor_label=user.id)
+            principal = session_audit_principal(user)
+            yield RequestActor(
+                user=user, is_agent=False, identity_id=principal.identity_id,
+                actor_label=principal.audit_label,
+            )
         finally:
             reset_request_user(marker)
 

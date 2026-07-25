@@ -2099,6 +2099,17 @@
                 }
               ],
               "title": "Updated At"
+            },
+            "updated_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Updated By"
             }
           },
           "required": [

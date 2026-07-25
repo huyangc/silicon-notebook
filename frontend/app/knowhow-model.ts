@@ -216,10 +216,8 @@ export type KnowhowCellCode = {
   status: CellCodeStatus;
   updatedAt: string | null;
   // 溯源（收尾修复）：这段代码最近一次是谁写入的（外部 Agent 名或用户名）。
-  // 只有行级端点（build_row_detail 的 code[]）携带 updated_by；单格 GET/PUT
-  // 线上形状刻意不带该字段（后端 wire 契约，见 test_knowhow_agent_api.py
-  // "the single-cell code endpoint deliberately omits updated_by"），
-  // mapCellCode 恒填 null——查看态只在非空时展示来源，绝不合成假溯源。
+  // 行级和单格 GET/PUT 都携带 updated_by；它是可读审计 label，不是 ownership id。
+  // 查看态只在非空时展示来源，绝不从当前登录人伪造溯源。
   updatedBy: string | null;
 };
 
@@ -331,6 +329,7 @@ type WireKnowhowCellCode = {
   language: string | null;
   status: CellCodeStatus;
   updated_at: string | null;
+  updated_by?: string | null;
 };
 
 function mapColumn(column: WireKnowhowColumn): KnowhowColumn {
@@ -430,9 +429,7 @@ function mapCellCode(code: WireKnowhowCellCode): KnowhowCellCode {
     language: code.language ?? "",
     status: code.status,
     updatedAt: code.updated_at ?? null,
-    // 单格端点的线上形状刻意不带 updated_by（见 KnowhowCellCode 类型注释），
-    // 恒 null——溯源只经行级 map（mapRowCodeByColumn）进入展示层。
-    updatedBy: null,
+    updatedBy: code.updated_by?.trim() || null,
   };
 }
 
@@ -806,10 +803,11 @@ export const reformatKnowhowCell = (
   tableId: string,
   rowId: string,
   columnId: string,
+  signal?: AbortSignal,
 ) =>
   requestJson<{ candidate_md: string; source: string; changed: boolean; source_md: string }>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/reformat`,
-    { method: "POST", tag: "knowhow" },
+    { method: "POST", signal, tag: "knowhow" },
   ).then((w) => ({ candidateMd: w.candidate_md, source: w.source, changed: w.changed, sourceMd: w.source_md }));
 
 // --- 格子级代码附件（Task 10；HTTP 端点 session/agent token 皆可访问，本文件

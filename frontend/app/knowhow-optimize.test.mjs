@@ -923,12 +923,12 @@ test("applyReformatError: 已跑完/已中止（phase 不是 running）时到达
   assert.strictEqual(next, reviewing);
 });
 
-test("abortReformatBatchRun: running -> reviewing 且 aborted=true，不改变各项已有状态", () => {
+test("abortReformatBatchRun: running -> reviewing 且 aborted=true，pending 结算为 aborted", () => {
   const state = batchStateOf("running", [makeItem("r1", "c-a", "changed"), makeItem("r1", "c-b", "pending")]);
   const next = abortReformatBatchRun(state);
   assert.strictEqual(next.phase, "reviewing");
   assert.strictEqual(next.aborted, true);
-  assert.deepStrictEqual(next.items.map((i) => i.status), ["changed", "pending"]);
+  assert.deepStrictEqual(next.items.map((i) => i.status), ["changed", "aborted"]);
 });
 
 test("abortReformatBatchRun: 非 running 态原样返回", () => {
@@ -952,8 +952,8 @@ test("abortReformatBatchRun: 在飞的 running 格子就地结算为终态 abort
   const next = abortReformatBatchRun(state);
   assert.strictEqual(next.phase, "reviewing");
   assert.strictEqual(next.aborted, true);
-  // 已完成的照旧、在飞的结算为 aborted、未处理的仍停在 pending。
-  assert.deepStrictEqual(next.items.map((i) => i.status), ["changed", "aborted", "pending"]);
+  // 已完成的照旧；在飞和未出队的物理格都立即结算为 aborted。
+  assert.deepStrictEqual(next.items.map((i) => i.status), ["changed", "aborted", "aborted"]);
 });
 
 test("abortReformatBatchRun: 结算 aborted 后 summary 各态计数之和仍等于 total（计数加总）", () => {
@@ -963,7 +963,7 @@ test("abortReformatBatchRun: 结算 aborted 后 summary 各态计数之和仍等
     makeItem("r1", "c-c", "pending"),
   ]);
   const summary = reformatBatchSummary(abortReformatBatchRun(state));
-  assert.strictEqual(summary.aborted, 1);
+  assert.strictEqual(summary.aborted, 2);
   assert.strictEqual(summary.running, 0); // 不再有任何格子卡在 running
   const {
     total, pending, running, changed, unchanged, reformat_error, aborted, saving, saved, save_error,
@@ -1007,7 +1007,7 @@ test("端到端（P2-g）：中止在飞项 → 已中止终态；确认保存�
   const cC = state.items.find((i) => i.columnId === "c-c");
   assert.strictEqual(cA.status, "changed");
   assert.strictEqual(cB.status, "aborted"); // 就地结算，不再是 running
-  assert.strictEqual(cC.status, "pending"); // 从未处理
+  assert.strictEqual(cC.status, "aborted"); // 从未出队，也立即结算
   assert.strictEqual(BATCH_REFORMAT_STATUS_LABELS[cB.status], "已中止");
 
   // 确认保存：只有 changed 会进入 saving——aborted/pending 都不带候选、进不了 save 阶段。
@@ -1022,7 +1022,7 @@ test("端到端（P2-g）：中止在飞项 → 已中止终态；确认保存�
   assert.strictEqual(state.phase, "done");
   assert.strictEqual(state.items.find((i) => i.columnId === "c-a").status, "saved");
   assert.strictEqual(state.items.find((i) => i.columnId === "c-b").status, "aborted"); // 从未被保存
-  assert.strictEqual(state.items.find((i) => i.columnId === "c-c").status, "pending");
+  assert.strictEqual(state.items.find((i) => i.columnId === "c-c").status, "aborted");
 });
 
 test("finishReformatBatchRun: running -> reviewing（自然跑完，未中止）", () => {
@@ -1187,7 +1187,7 @@ test("端到端：保存阶段一格失败不阻断其余格子保存（任务�
   });
 });
 
-test("端到端：中止批量处理——已处理的格子保留结果，未处理的格子停在 pending 不再被处理", () => {
+test("端到端：中止批量处理——已处理结果保留，未处理物理格结算 aborted", () => {
   let state = initReformatBatch(
     "row",
     [{ id: "r1", position: 0, cells: { "c-a": "1", "c-b": "2", "c-c": "3" } }],
@@ -1201,7 +1201,7 @@ test("端到端：中止批量处理——已处理的格子保留结果，未�
   assert.strictEqual(state.phase, "reviewing");
   assert.strictEqual(state.aborted, true);
   assert.strictEqual(state.items.find((i) => i.columnId === "c-a").status, "changed");
-  assert.strictEqual(state.items.find((i) => i.columnId === "c-c").status, "pending"); // 从未处理
+  assert.strictEqual(state.items.find((i) => i.columnId === "c-c").status, "aborted");
 
   // 中止后 phase 已不是 running：调用方按 abortedRef 短路不再发起新请求，
   // 这里额外验证纯函数自身的防御——不依赖调用方守规矩。
@@ -2406,72 +2406,45 @@ test("接线（F）：save 阶段收尾在 mounted 块内按谓词经 requestSta
 // --- 接线守卫（F1）：run 阶段陈旧也要刷父表——runBatch 在陈旧分支累加计数、收尾按
 //     谓词经 requestStaleReload 刷一次；两阶段都跳过时经同一个「恰一次」闸只刷一次。----
 
-test("接线（F1）：runBatch 声明 run 阶段 stale 计数并在陈旧分支累加（在 continue 之前）", () => {
+test("接线（F1）：runBatch 由有界 pool 返回 staleCount，不从 summary 混算", () => {
   const runBatch = findFunctionIn(
     panelModule,
     "KnowhowReformatBatchModal",
     "runBatch",
   );
-  assert.deepEqual(
-    variableInitializersIn(runBatch).find(
-      ({ name }) => name === "runStaleSkipCount",
-    ),
-    { name: "runStaleSkipCount", initializer: "0" },
-  );
-  const itemLoop = controlFlowIn(runBatch).find(
-    ({ kind, expression }) => kind === "for-of" && expression === "batch.items",
-  );
-  const runAttempt = itemLoop?.body.find(({ kind }) => kind === "try");
-  const stale = runAttempt?.try.find(
-    ({ kind, condition }) => (
-      kind === "if"
-      && condition === "reformatResultIsStale(item.originalMd, result.sourceMd)"
-    ),
-  );
-  assert.deepEqual(stale?.then.map(({ kind }) => kind), [
-    "expression",
-    "assignment",
-    "continue",
-  ]);
-  assert.ok(
-    stale?.then[0].calls.some(
-      ({ target }) => target === "markReformatItemRunStale",
-    ),
-  );
-  assert.deepEqual(stale?.then[1], {
-    kind: "assignment",
-    target: "runStaleSkipCount",
-    operator: "+=",
-    value: "1",
-    calls: [],
-  });
-  assert.deepEqual(
-    assignmentsIn(runBatch).filter(
-      ({ target }) => target === "runStaleSkipCount",
-    ),
-    [{ target: "runStaleSkipCount", operator: "+=", value: "1" }],
-  );
+  assert.ok(callSitesIn(runBatch).some(({ target }) => target === "runReformatGenerationPool"));
+  assert.ok(variableInitializersIn(runBatch).some(({ name }) => name === "poolResult"));
+  assert.equal(assignmentsIn(runBatch).some(({ target }) => target === "runStaleSkipCount"), false);
 });
 
-test("接线（F1）：runBatch 收尾在 mounted 块内按谓词经 requestStaleReload 刷父表", () => {
+test("接线（F1）：runBatch 收尾按 poolResult.staleCount 经延迟 reload 闸登记", () => {
   const runBatch = findFunctionIn(
     panelModule,
     "KnowhowReformatBatchModal",
     "runBatch",
-  );
-  const mounted = ifBranchesIn(runBatch).find(
-    ({ condition, thenCalls }) => (
-      condition === "mountedRef.current"
-      && thenCalls.includes("finishReformatBatchRun")
-    ),
   );
   const refresh = ifBranchesIn(runBatch).find(
     ({ condition }) => (
-      condition === "reformatBatchRunNeedsRefresh(runStaleSkipCount)"
+      condition === "reformatBatchRunNeedsRefresh(poolResult.staleCount)"
     ),
   );
-  assert.ok(mounted?.thenCalls.includes("requestStaleReload"));
   assert.deepEqual(refresh?.thenCalls, ["requestStaleReload"]);
+});
+
+test("接线（F1）：onStale 观察到陈旧时立即登记 reload，不依赖 abort 后不可达的 pool 收尾", () => {
+  const runBatch = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runBatch",
+  );
+  const observed = ifBranchesIn(runBatch).find(
+    ({ condition, thenCalls }) => (
+      condition === "currentRun()"
+      && thenCalls.includes("markReformatItemRunStale")
+      && thenCalls.includes("requestStaleReload")
+    ),
+  );
+  assert.ok(observed);
 });
 
 test("接线（F1）：stale 只登记待刷新，真正刷新发生在卸载 cleanup", () => {
@@ -2509,6 +2482,26 @@ test("接线（F1）：stale 只登记待刷新，真正刷新发生在卸载 cl
     ).length,
     1,
   );
+});
+
+test("接线：打开已保存格失败由父面板消费并写入可见 actionError", () => {
+  const openSaved = findFunctionIn(
+    panelModule,
+    "KnowhowPanel",
+    "openReformatSavedCell",
+  );
+  assert.ok(
+    callSitesIn(openSaved).some(
+      ({ target }) => target === "openSavedReformatCellAfterReload",
+    ),
+  );
+  const failure = ifBranchesIn(openSaved).find(
+    ({ condition, thenCalls }) => (
+      condition === "panelMountedRef.current && !result.ok"
+      && thenCalls.includes("setActionError")
+    ),
+  );
+  assert.ok(failure, "caller must surface helper failure through actionError");
 });
 
 test("接线（F1/P1）：runSave 的规划、写目标和锚点守卫同源于冻结快照", () => {
@@ -2573,7 +2566,7 @@ test("接线（F）：两处 KnowhowReformatBatchModal 都传 onStaleReload={rel
     ),
     {
       name: "reloadTableDetail",
-      initializer: "useCallback(() => { if (selectedTableId) loadDetail(selectedTableId); }, [selectedTableId, loadDetail])",
+      initializer: "useCallback(async (): Promise<KnowhowTableDetail | null> => { if (!selectedTableId) return null; return loadDetail(selectedTableId); }, [selectedTableId, loadDetail])",
     },
   );
 });
