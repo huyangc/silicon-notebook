@@ -384,9 +384,20 @@ def test_every_rowid_site_is_classified_and_ordinal_backed():
         f"stale={sorted(set(ROWID_TOKEN_SITES) - set(scanned))})"
     )
     for site, resolved in sorted(scanned.items()):
-        assert resolved <= set(ROWID_TOKEN_SITES[site]), (
-            f"{site} uses rowid on {sorted(resolved - set(ROWID_TOKEN_SITES[site]))} "
-            "but the classification omits it"
+        classified_tables = set(ROWID_TOKEN_SITES[site]) - ROWID_NON_CONTRACT_SENTINELS
+        if not resolved:
+            # Nothing resolvable here (cross-literal alias, f-string table
+            # hole, temp/FTS object). The hand classification stands alone.
+            continue
+        # Equality, not subset: a subset check would let a STALE classification
+        # survive after its SQL is deleted, keeping a waiver alive for an
+        # ordering the code no longer has (codex review round 4 P2). A site
+        # that legitimately mixes a resolvable and an unresolvable business
+        # table would fail here — that is intentional, it needs a human.
+        assert resolved == classified_tables, (
+            f"{site} rowid tables disagree with the classification "
+            f"(missing={sorted(resolved - classified_tables)}, "
+            f"stale={sorted(classified_tables - resolved)})"
         )
     unbacked = {
         (site, table)
@@ -443,14 +454,27 @@ def test_ask_job_tie_waiver_rests_on_microsecond_timestamps():
     """
     from app.services.repository_facade import _now
 
-    fraction = re.search(r"\.(\d+)", _now())
-    assert fraction is not None and len(fraction.group(1)) == 6, (
-        "ask_jobs tie waiver assumes microsecond-precision created_at"
+    samples = [_now() for _ in range(2000)]
+    fractions = []
+    for stamp in samples:
+        rendered = re.search(r"\.(\d+)", stamp)
+        assert rendered is not None and len(rendered.group(1)) == 6, (
+            "ask_jobs tie waiver assumes microsecond-precision created_at"
+        )
+        fractions.append(int(rendered.group(1)))
+    assert len(set(samples)) > 1, (
+        "created_at renders microseconds but the clock behind it never "
+        "advances; the ask_jobs tie is now routine"
     )
-    samples = {_now() for _ in range(1000)}
-    assert len(samples) > 1, (
-        "created_at renders microseconds but the clock behind it does not "
-        "advance within 1000 calls; the ask_jobs tie is now reachable"
+    # Rendering six digits proves nothing about the clock: a millisecond-
+    # quantized source renders .123000 and still ties every sub-millisecond
+    # double submit (codex review round 4 P2). Every fraction being a multiple
+    # of 1000 is exactly that signature, so require at least one sample to
+    # carry a sub-millisecond remainder.
+    assert any(value % 1000 for value in fractions), (
+        "created_at is quantized to milliseconds or coarser across 2000 "
+        "samples; the ask_jobs tie stops being rare and the waiver in "
+        "ROWID_REVIEWED_NON_ORDINAL no longer holds"
     )
 
 
