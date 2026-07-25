@@ -672,8 +672,15 @@ class RepositoryFacade:
                     )
                 )
             ),
-            begin_extraction_run=lambda source_id, notebook_id, run_id, created_at: (
-                self._begin_extraction_run(source_id, notebook_id, run_id, created_at)
+            begin_extraction_run=lambda source_id, notebook_id, run_id, created_at,
+            preserve_existing=False: (
+                self._begin_extraction_run(
+                    source_id,
+                    notebook_id,
+                    run_id,
+                    created_at,
+                    preserve_existing=preserve_existing,
+                )
             ),
             finish_extraction_run=lambda run_id, status, message: (
                 self._finish_extraction_run(run_id, status, message)
@@ -1552,13 +1559,21 @@ class RepositoryFacade:
     # --- extraction ORCHESTRATION and calls back through these seams so no
     # --- SQL leaks into the application service.
     def _begin_extraction_run(
-        self, source_id: str, notebook_id: str, run_id: str, created_at: str
+        self,
+        source_id: str,
+        notebook_id: str,
+        run_id: str,
+        created_at: str,
+        *,
+        preserve_existing: bool = False,
     ) -> None:
-        """Reset one source's prior KG artefacts and open its extraction_runs
-        row in ONE write transaction — the exact commit boundary the inline
-        _run_extraction body always had."""
+        """Open one source run, optionally retaining its graph for safe retry."""
         return self._runtime.knowledge.begin_extraction(
-            source_id, notebook_id, run_id, created_at
+            source_id,
+            notebook_id,
+            run_id,
+            created_at,
+            preserve_existing=preserve_existing,
         )
 
     def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:

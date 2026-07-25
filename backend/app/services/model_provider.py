@@ -411,6 +411,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         max_tokens=None,
         cancel_event=None,
         bypass_cache=False,
+        response_validator: Callable[[str], bool] | None = None,
     ) -> str:
         def invoke() -> str:
             content = self._runtime.raw.chat_json(
@@ -423,6 +424,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 max_tokens=max_tokens,
                 cancel_event=cancel_event,
                 bypass_cache=bypass_cache,
+                response_validator=response_validator,
             )
             return _validate_json_object(content)
 

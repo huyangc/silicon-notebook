@@ -533,7 +533,7 @@
     "owner": "KnowledgeStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, source_id: 'str', notebook_id: 'str', run_id: 'str', created_at: 'str') -> 'None'"
+    "signature": "(self, source_id: 'str', notebook_id: 'str', run_id: 'str', created_at: 'str', *, preserve_existing: 'bool' = False) -> 'None'"
   },
   "_bump_cluster_mutation_seq": {
     "consumers": [

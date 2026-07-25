@@ -65,6 +65,10 @@ RETYPE_REEXTRACT_FAILED_MESSAGE = (
 _DOC_TYPE_RECONCILE_MAX_ROUNDS = 3
 
 
+class PartialKgRetryIncomplete(RuntimeError):
+    """A safe partial-KG retry left the previous graph untouched."""
+
+
 @dataclass(frozen=True)
 class SourcePipelineHooks:
     """Fresh per-call compatibility hooks into the (still facade-owned) KG /
@@ -138,7 +142,7 @@ class SourceIngestionService:
         default_notebook_names: Iterable[str],
         # --- TEMPORARY KG/catalog callbacks (Task 13/15 targets) ----------
         clear_source_extraction_state: Callable[..., None],
-        begin_extraction_run: Callable[[str, str, str, str], None],
+        begin_extraction_run: Callable[..., None],
         finish_extraction_run: Callable[[str, str, str], None],
         notebook_tier: Callable[[str], str],
         concept_whitelist_terms: Callable[[], set],
@@ -1464,7 +1468,13 @@ class SourceIngestionService:
             for e in extra
         ]
 
-    def run_extraction(self, source_id: str, *, kg_client: Any | None = None) -> None:
+    def run_extraction(
+        self,
+        source_id: str,
+        *,
+        kg_client: Any | None = None,
+        preserve_existing_until_complete: bool = False,
+    ) -> None:
         control = getattr(kg_client, "control", None)
         if control is not None:
             control.raise_if_aborted()
@@ -1484,13 +1494,16 @@ class SourceIngestionService:
             or "academic_paper"
         )
         kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type_id, "academic")
-        # One write transaction: reset the source's prior KG artefacts and open
-        # its extraction_runs row (temporary facade callback — Task 13/15 target).
-        self.begin_extraction_run(source_id, source.notebook_id, run_id, now)
-        # begin_extraction_run committed a DELETE of this source's prior KG objects
-        # in its own transaction; the kg_mutation_seq bump only lands later in
-        # store_kg (success path). Invalidate the count cache here so the no-llm
-        # early-return and the exception path can't keep serving pre-delete counts.
+        # Normal extraction resets the old source graph up front. A partial-KG
+        # repair instead opens a run while retaining the old graph; only a
+        # zero-failed-window replacement may swap it later.
+        self.begin_extraction_run(
+            source_id,
+            source.notebook_id,
+            run_id,
+            now,
+            preserve_existing=preserve_existing_until_complete,
+        )
         self.invalidate_knowledge_counts(source.notebook_id)
         try:
             kg_llm_client = kg_client if kg_client is not None else self.model_clients
@@ -1499,6 +1512,13 @@ class SourceIngestionService:
                 if callable(getattr(kg_llm_client, "configured", None))
                 else getattr(kg_llm_client, "configured", False)
             ):
+                if preserve_existing_until_complete:
+                    message = (
+                        "partial KG retry incomplete; existing KG preserved "
+                        "retry_incomplete=1 no-llm"
+                    )
+                    self.finish_extraction_run(run_id, "completed", message)
+                    raise PartialKgRetryIncomplete(message)
                 self.finish_extraction_run(run_id, "completed", "no-llm")
                 return
             raw_text = self.source_files.read_source_text(
@@ -1545,10 +1565,26 @@ class SourceIngestionService:
                 relations = relations + self.relink_extra_relations(
                     objects, relations, source.id
                 )
+            fw, tw = graph.failed_windows, graph.total_windows
+            if preserve_existing_until_complete and (fw > 0 or not objects):
+                message = (
+                    "partial KG retry incomplete; existing KG preserved "
+                    "retry_incomplete=1 "
+                    f"windows_failed={fw}/{tw} "
+                    f"empty_result={int(not objects)} "
+                    f"candidate_objects={len(objects)} "
+                    f"candidate_relations={len(relations)}"
+                )
+                self.finish_extraction_run(run_id, "completed", message)
+                raise PartialKgRetryIncomplete(message)
             if control is not None:
                 control.raise_if_aborted()
             n_obj, n_rel = self.knowledge_lifecycle.store_kg(
-                source.notebook_id, source.id, objects, relations
+                source.notebook_id,
+                source.id,
+                objects,
+                relations,
+                replace_source=preserve_existing_until_complete,
             )
             try:
                 self.knowledge_lifecycle.incremental_fuse_source(
@@ -1564,7 +1600,6 @@ class SourceIngestionService:
                 self.event_log.logger.exception(
                     "maybe_auto_index failed for %s", source.notebook_id
                 )
-            fw, tw = graph.failed_windows, graph.total_windows
             self.finish_extraction_run(
                 run_id,
                 "completed",
@@ -1573,14 +1608,32 @@ class SourceIngestionService:
                 f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped}",
             )
         except KgBuildAborted as exc:
+            message = f"{exc.failure.code}: {exc.failure.user_message}"
+            status = "failed"
+            if preserve_existing_until_complete:
+                status = "completed"
+                message = (
+                    "partial KG retry incomplete; existing KG preserved "
+                    f"retry_incomplete=1 {message}"
+                )
             self.finish_extraction_run(
                 run_id,
-                "failed",
-                f"{exc.failure.code}: {exc.failure.user_message}",
+                status,
+                message,
             )
             raise
+        except PartialKgRetryIncomplete:
+            raise
         except Exception as exc:
-            self.finish_extraction_run(run_id, "failed", str(exc))
+            message = str(exc)
+            status = "failed"
+            if preserve_existing_until_complete:
+                status = "completed"
+                message = (
+                    "partial KG retry incomplete; existing KG preserved "
+                    f"retry_incomplete=1 {message}"
+                )
+            self.finish_extraction_run(run_id, status, message)
             raise
 
     # ---------------------------------------------------- paper metadata

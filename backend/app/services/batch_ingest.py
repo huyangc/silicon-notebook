@@ -400,7 +400,8 @@ def backfill_element_embeddings(
 def run_kg(repo: BatchIngestRepository, notebook_id: str,
            limit: int | None = None, log: LogFn | None = None,
            no_rebuild: bool = False, rebuild_only: bool = False, fresh: bool = False,
-           report_interval: int = 15) -> dict[str, int]:
+           report_interval: int = 15,
+           retry_partial: bool = False) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
     Model admission is owned by the system provider; this phase only submits
@@ -413,6 +414,8 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
       fresh=True         — 清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑(模型/阈值换了、
                             数据没变时用);隐含 force=True(否则清完 checkpoint 仍会被 force=False 的
                             门控挡回缓存簇数,--fresh 变假 no-op)。
+      retry_partial=True — 正常补缺失 KG 时一并重试 latest run 的 failed_windows>0
+                            来源；旧图保留到零失败窗口且非空的新图可事务替换为止。
 
     Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
     repo.build_scale_index(notebook_id) 使索引与新簇同步。
@@ -421,18 +424,27 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
 
     if no_rebuild and rebuild_only:
         raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
+    if retry_partial and rebuild_only:
+        raise ValueError("retry_partial 和 rebuild_only 互斥,不能同时为 True")
 
     log = log or (lambda _e: None)
     mnt = repo.maintenance
     orig_fusion = repo.settings.kg_incremental_fusion_enabled
     repo.settings.kg_incremental_fusion_enabled = False   # 批量期关 per-source 融合,收尾一次全量
-    res = {"extracted": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
+    res = {
+        "extracted": 0,
+        "failed": 0,
+        "partial_retried": 0,
+        "partial_failed_preserved": 0,
+        "clusters": 0,
+        "nodes_embedded": 0,
+    }
     try:
         # ── 抽取阶段(rebuild_only 时跳过) ────────────────────────────────────
         # 周期自报业务 producer/source 池；模型容量由 service scheduler 观测。
         if not rebuild_only:
             llm_ok = repo.configured("kg_extract")
-            if limit is None:
+            if limit is None and not retry_partial:
                 # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
                 if llm_ok or not no_rebuild:
                     # 尚无 KG 的源数当 total(build_notebook_kg 内部自算目标,故 done 靠其
@@ -455,26 +467,53 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                         "kg_extract workload 未绑定系统模型服务")
                 all_sids = mnt.source_ids(notebook_id)
                 kgful = mnt.kg_covered_source_ids(notebook_id)
-                targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
+                partial = (
+                    mnt.partial_kg_source_ids(notebook_id)
+                    if retry_partial else set()
+                )
+                parsed = (
+                    mnt.sources_with_elements(notebook_id)
+                    if retry_partial else set(all_sids)
+                )
+                partial &= parsed
+                targets = [
+                    s for s in all_sids
+                    if s in parsed and (s not in kgful or s in partial)
+                ]
+                if limit is not None:
+                    targets = targets[:max(0, limit)]
                 n_targets = len(targets)
 
-                def _extract_one(sid: str) -> tuple[str, Exception | None]:
+                def _extract_one(
+                    sid: str,
+                ) -> tuple[str, bool, Exception | None]:
+                    preserve_existing = sid in partial
                     try:
                         mnt.set_source_status(sid, "extracting")
-                        mnt.run_extraction(sid)
+                        if preserve_existing:
+                            mnt.run_extraction(
+                                sid, preserve_existing_until_complete=True
+                            )
+                        else:
+                            mnt.run_extraction(sid)
                         mnt.set_source_status(sid, "extracted")
-                        return sid, None
+                        return sid, preserve_existing, None
                     except Exception as exc:  # noqa: BLE001 — 单源失败隔离
-                        return sid, exc
+                        mnt.set_source_status(
+                            sid, "extracted" if preserve_existing else "parsed"
+                        )
+                        return sid, preserve_existing, exc
 
                 with _PoolReporter(report_interval, total=n_targets, log=log) as reporter:
                     futures = {
                         submit_job(_extract_one, sid): sid for sid in targets
                     }
                     for i, future in enumerate(as_completed(futures), 1):
-                        sid, error = future.result()
+                        sid, was_partial, error = future.result()
                         if error is None:
                             res["extracted"] += 1
+                            if was_partial:
+                                res["partial_retried"] += 1
                             log({
                                 "phase": "kg",
                                 "source_id": sid,
@@ -483,6 +522,8 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                             })
                         else:
                             res["failed"] += 1
+                            if was_partial:
+                                res["partial_failed_preserved"] += 1
                             log({
                                 "phase": "kg",
                                 "source_id": sid,
@@ -1100,6 +1141,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "大批量分批抽取用法:重复 'kg --limit N --no-rebuild',最后一次 'kg --rebuild-only'。")
     p.add_argument("--rebuild-only", action="store_true",
                    help="kg 阶段:跳过抽取,直接 rebuild_unified_kg + 节点向量 + scale index(base tier 时)。")
+    p.add_argument("--retry-partial", action="store_true",
+                   help="kg 阶段:一并重试最新抽取记录 windows_failed>0 且已有部分 KG 的来源；"
+                        "失败或空结果保留旧图，零失败窗口且非空后才事务替换。")
     p.add_argument("--fresh", action="store_true",
                    help="清空 rebuild checkpoint,强制 merge 审查/概念描述全量重跑"
                         "(kg 与 all 阶段的收尾 rebuild 均适用;用于只换了 KG 模型/阈值、"
@@ -1238,9 +1282,11 @@ def _dispatch_main(
         no_rebuild = getattr(args, "no_rebuild", False)
         rebuild_only = getattr(args, "rebuild_only", False)
         fresh = getattr(args, "fresh", False)
+        retry_partial = getattr(args, "retry_partial", False)
         print(
             f"phase=kg limit={args.limit} no_rebuild={no_rebuild} "
-            f"rebuild_only={rebuild_only} fresh={fresh}",
+            f"rebuild_only={rebuild_only} fresh={fresh} "
+            f"retry_partial={retry_partial}",
             flush=True,
         )
         _t = time.perf_counter()
@@ -1253,6 +1299,7 @@ def _dispatch_main(
             rebuild_only=rebuild_only,
             fresh=fresh,
             report_interval=args.pool_report_interval,
+            retry_partial=retry_partial,
         )
         print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 

@@ -237,6 +237,22 @@ def test_bound_workloads_share_one_raw_client_and_scheduler_per_service():
         provider.close()
 
 
+def test_scheduled_chat_forwards_response_validator_to_raw_client():
+    raw = _Chat('{"nodes": [], "edges": []}')
+    provider = _provider(chat=raw)
+
+    def validator(content: str) -> bool:
+        return content.startswith('{"nodes"')
+
+    try:
+        assert provider.chat("ask_answer").chat_json(
+            [], "{}", response_validator=validator
+        ) == raw.result
+        assert raw.calls[-1]["kwargs"]["response_validator"] is validator
+    finally:
+        provider.close()
+
+
 def test_embedding_calls_are_scheduled_and_bound_to_service_capacity():
     provider = _provider(registry=_registry(maximum=4))
     try:

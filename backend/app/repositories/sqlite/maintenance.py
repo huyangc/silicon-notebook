@@ -264,6 +264,40 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
+    def partial_kg_source_ids(self, notebook_id: str) -> set:
+        """Sources whose latest KG run reports at least one failed window.
+
+        Restrict this repair inventory to sources that still have graph objects;
+        zero-object runs are already handled by the normal incremental KG pass.
+        """
+        with self._runtime.database.connect() as db:
+            return {
+                row["source_id"]
+                for row in db.execute(
+                    "WITH latest AS ("
+                    "  SELECT er.source_id, er.error_message, "
+                    "         ROW_NUMBER() OVER ("
+                    "           PARTITION BY er.source_id "
+                    "           ORDER BY er.created_at DESC, er.rowid DESC"
+                    "         ) AS rn "
+                    "  FROM extraction_runs er "
+                    "  WHERE er.notebook_id=? AND er.run_type='kg'"
+                    ") "
+                    "SELECT l.source_id FROM latest l "
+                    "JOIN sources s ON s.id=l.source_id "
+                    "WHERE l.rn=1 AND s.source_type!='knowhow' "
+                    "AND ("
+                    "  l.error_message GLOB '*windows_failed=[1-9]*/*' "
+                    "  OR instr(l.error_message, 'retry_incomplete=1') > 0"
+                    ") "
+                    "AND EXISTS ("
+                    "  SELECT 1 FROM knowledge_objects ko "
+                    "  WHERE ko.notebook_id=? AND ko.source_id=l.source_id"
+                    ")",
+                    (notebook_id, notebook_id),
+                ).fetchall()
+            }
+
     def sources_with_elements(self, notebook_id: str) -> set:
         """该 notebook 下已产出 source_elements(即已成功 parse)的 source_id 集合。
         run_all 用它区分「已 parse、缺 KG → extract_source 补抽」与「无 elements →
@@ -294,9 +328,19 @@ class SQLiteMaintenanceAdapter:
                 (notebook_id,),
             ).fetchone()["c"]
 
-    def run_extraction(self, source_id: str) -> None:
+    def run_extraction(
+        self,
+        source_id: str,
+        *,
+        preserve_existing_until_complete: bool = False,
+    ) -> None:
         # Late-bound through the runtime so component-seam monkeypatches
         # (repo._runtime.source_ingestion.run_extraction) keep observing.
+        if preserve_existing_until_complete:
+            return self._runtime.source_ingestion.run_extraction(
+                source_id,
+                preserve_existing_until_complete=True,
+            )
         return self._runtime.source_ingestion.run_extraction(source_id)
 
     def set_source_status(
