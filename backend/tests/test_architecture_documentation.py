@@ -392,6 +392,30 @@ def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own
         )
 
 
+def test_zero_write_probe_covers_every_table_startup_recovery_mutates():
+    """The runbook tells operators a zero result proves PostgreSQL is untouched.
+
+    That claim is only true while the probe enumerates every table
+    `recover_interrupted_jobs()` writes on startup — it silently became false
+    once by omitting `extraction_runs`, `kg_build_jobs`, and the two KG scratch
+    tables it unconditionally deletes from (codex review round 10 P2). Derive
+    the set from the adapter so adding a table there forces the probe to follow.
+    """
+    adapter = _read_file("backend/app/repositories/postgres/maintenance.py")
+    body = adapter.split("def recover_interrupted_jobs", 1)[1].split("\n    def ", 1)[0]
+    mutated = set(re.findall(r"(?:UPDATE|DELETE FROM)\s+([a-z_]+)", body))
+    assert mutated, "could not read the startup recovery statements"
+    runbook = _read_file("docs/postgres-migration-runbook.md")
+    anchor = "SELECT (SELECT COUNT(*)"
+    assert anchor in runbook, "the zero-write probe query is missing"
+    probe = runbook.split(anchor, 1)[1].split("```", 1)[0]
+    missing = sorted(table for table in mutated if table not in probe)
+    assert not missing, (
+        "the runbook's zero-write probe omits tables that startup recovery "
+        f"mutates: {missing}"
+    )
+
+
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
     """Documentation records stable ownership, not source layout or totals."""
     _assert_phrases(

@@ -24,7 +24,8 @@
 | 占位符 | 含义 |
 | --- | --- |
 | `<SQLITE_DB>` | 源 SQLite 文件绝对路径(部署机上的 `.local/silicon_notebook.db`) |
-| `<WORK_DIR>` | 迁移私有工作目录绝对路径(放快照与 receipt;容量要求见 P0) |
+| `<WORK_DIR>` | **正式窗口**的私有工作目录绝对路径(放快照与 receipt;容量要求见 P0) |
+| `<REHEARSAL_WORK_DIR>` | **彩排专用**的工作目录绝对路径,与 `<WORK_DIR>` 分开(见 P0 容量说明) |
 | `<ENV_FILE>` | 部署 `.env` 绝对路径 |
 | `<TZ>` | SQLite **部署机**的 IANA 时区,如 `Asia/Shanghai` |
 | `<RECEIPT>` | `--apply` 成功后打印的 receipt 路径 |
@@ -101,8 +102,10 @@ python scripts/migrate_sqlite_to_postgres.py \
   显式复用已密封的快照。中断时不会打印 `MIGRATION OK` 那行,所以路径要自己从工作目录找:
 
   ```bash
-  ls -t <WORK_DIR>/*.snapshot.db
+  ls -t <REHEARSAL_WORK_DIR>/*.snapshot.db
   ```
+
+  (在这里找的是彩排目录——就是本步 `--work-dir` 传的那个;正式窗口同理换成 `<WORK_DIR>`。)
 
   取最新的那个传给 `--snapshot`。传错了不会污染数据——名字里的 hash、来源记录、
   `quick_check` 都会被复核,不匹配就拒绝。
@@ -168,8 +171,16 @@ python scripts/migrate_sqlite_to_postgres.py \
    > sqlite3 <SQLITE_DB> "SELECT (SELECT COUNT(*) FROM ask_jobs WHERE status='running')
    >   + (SELECT COUNT(*) FROM merge_review_jobs WHERE status='running')
    >   + (SELECT COUNT(*) FROM knowhow_rows WHERE projection_status IN ('syncing','pending'))
-   >   + (SELECT COUNT(*) FROM sources WHERE parse_status IN ('extracting','queued','parsing'));"
+   >   + (SELECT COUNT(*) FROM sources WHERE parse_status IN ('extracting','queued','parsing'))
+   >   + (SELECT COUNT(*) FROM extraction_runs WHERE run_type='kg' AND status='running')
+   >   + (SELECT COUNT(*) FROM kg_build_jobs WHERE status='running')
+   >   + (SELECT COUNT(*) FROM kg_cluster_scratch)
+   >   + (SELECT COUNT(*) FROM kg_canonical_scratch);"
    > ```
+   >
+   > 这八项与 `PostgresMaintenanceAdapter.recover_interrupted_jobs()` 逐条对应
+   > (`backend/app/repositories/postgres/maintenance.py`)——两张 scratch 表是**无条件
+   > DELETE**,有行就是写。少查一项,"零写入"的结论就是假的。
    >
    > 结果为 0 就没有启动写入;非 0 则启动即写。这类写入是恢复性的(把中间态收敛到终态),
    > 回滚到 SQLite 没有实质损失——SQLite 端启动时会做同样的事——但"零写入"的说法不再成立。
