@@ -187,6 +187,12 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "无内部黑话，只说「文档」。真实响应由 tests/test_document_limit.py 的"
         " import/upload/url 三端点 409 用例覆盖(断言 X-User-Message 头 + 「文档」文案)。"
     ),
+    "app/api/knowhow_routes.py::_knowhow_import_user_error": (
+        "detail 只能来自 GridParseError 或 KnowhowImportValidationError 的 user_message；"
+        "两个异常类型只接受导入层维护的固定中文可操作文案，其他 ValueError 仍走未标记的"
+        "诊断通道。真实响应由 test_knowhow_api.py 的解析失败、属性按行提示与列数不一致"
+        "用例覆盖，均断言 X-User-Message。"
+    ),
 }
 
 
