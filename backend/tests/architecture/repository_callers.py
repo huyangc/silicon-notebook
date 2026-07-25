@@ -49,6 +49,9 @@ SQL_REASON_BY_PATH = {
     "backend/app/migration/shadow/replicator.py": (
         "temporary migration boundary owns fail-stop forward apply and checkpoints"
     ),
+    "backend/app/migration/shadow/verifier.py": (
+        "temporary migration boundary owns barrier-aware cross-database verification and redacted reports"
+    ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"
     ),
@@ -118,6 +121,9 @@ SQLITE_CONNECT_REASON_BY_PATH = {
     ),
     "backend/app/migration/shadow/bulk_copy.py": (
         "temporary migration boundary streams its immutable private snapshot"
+    ),
+    "backend/app/migration/shadow/verifier.py": (
+        "temporary migration boundary streams facts through its private disposable SQLite spool"
     ),
     "backend/app/core/cache/sqlite_backend.py": (
         "independent content-addressed LLM/embedding cache database"

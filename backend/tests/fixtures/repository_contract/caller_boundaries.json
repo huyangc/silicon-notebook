@@ -1269,6 +1269,174 @@
       "target": "connection.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._cutover_source_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._finish",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._finish_failed",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._insert_fact",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._pin_target",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._refresh_barrier",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._scan_concurrent",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._scan_concurrent",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._start",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._stream_source",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._stream_source",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._stream_target",
+      "target": "cursor.execute"
+    },
+    {
+      "count": 12,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._table_reports",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._top_retrieval",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._validate_target_state",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._verify_constraints",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._verify_vectors",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier._wait_checkpoint",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier.verify",
+      "target": "source_conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>.ShadowVerifier.verify",
+      "target": "spool.conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary owns barrier-aware cross-database verification and redacted reports",
+      "scope": "<module>._Spool.__init__",
+      "target": "self.conn.executescript"
+    },
+    {
       "count": 4,
       "kind": "independent_sql",
       "path": "scripts/backfill_knowhow_md.py",
@@ -1724,6 +1892,14 @@
       "path": "backend/app/migration/shadow/snapshot.py",
       "reason": "temporary migration boundary opens its private validated backup",
       "scope": "<module>.open_fresh_live_sqlite",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/migration/shadow/verifier.py",
+      "reason": "temporary migration boundary streams facts through its private disposable SQLite spool",
+      "scope": "<module>._Spool.__init__",
       "target": "sqlite3.connect"
     },
     {

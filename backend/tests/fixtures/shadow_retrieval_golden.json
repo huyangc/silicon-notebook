@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "queries": [
+    {"id": "analog-design", "query": "analog circuit design 模拟 电路 设计"},
+    {"id": "device-noise", "query": "device noise 器件 噪声"},
+    {"id": "frequency-response", "query": "frequency response 频率 响应"},
+    {"id": "stability", "query": "stability compensation 稳定性 补偿"},
+    {"id": "measurement", "query": "measurement test 测量 测试"},
+    {"id": "procedure", "query": "procedure workflow 步骤 流程"}
+  ]
+}

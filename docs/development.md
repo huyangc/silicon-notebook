@@ -111,10 +111,30 @@ non-transient `sqlite3.OperationalError` is also a binding failure; locked,
 busy, and interrupted opens remain transient whole-batch retries, and later
 SQLite operational errors keep their existing schema/query classifications.
 Apply, ambiguous commit recognition, and poison
-publication bind snapshot source/target plus the live target identity. It does
-not yet include an operator CLI or end-to-end worker. Every valid batch outcome
-emits exactly one redacted metric; batch events use the actual accepted/observed
-raw-event count rather than lag, and retries are retained whenever observable.
+publication bind snapshot source/target plus the live target identity.
+
+The verifier opens a SQLite read snapshot at `Hv`, streams normalized facts to
+an owner-private disposable spool, releases SQLite before waiting for the PG
+checkpoint, then pins a PostgreSQL `REPEATABLE READ, READ ONLY` snapshot at
+`Ht`. A second SQLite transaction scans every retained dirty key in
+`(Hv, Hseen]`; only those keys are excluded from strict comparison, and the PG
+retention barrier remains live until the report commits. Structural checks
+cover the exact catalog, stable key sets and normalized hashes, source/target
+foreign keys, cascade/unique semantics, and storage-root-confined file
+references. Full checks add selected domain projections, float32
+byte/dimension/norm and sampled-cosine invariants, plus the fixed mixed
+Chinese/English retrieval set with recall@12 loss at most one percentage
+point, top-10 overlap at least 0.90, and exact citation/source-id sets. Cutover
+additionally rechecks that SQLite is still write-frozen, requires
+`Hv=Ht=MAX(seq)`, zero concurrent keys, 100% coverage, and a preceding complete
+full/cutover report. Persistent reports contain only safe table names, hashed
+stable keys, categories, counts, and fixed summaries; a clean report
+supersedes drift only at the same or a stronger verification level.
+
+It does not yet include an operator CLI or end-to-end worker. Every valid batch
+outcome emits exactly one redacted metric; batch events use the actual
+accepted/observed raw-event count rather than lag, and retries are retained
+whenever observable.
 `SHADOW_DATABASE_URL` remains inert by itself. Safety-critical PG
 control mutations always take the migration lock, then the control lock, then
 validate the exact live control catalog. A live SQLite transition acquires the
