@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -34,6 +35,7 @@ from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,
     KGBuildResult,
+    KgBuildAlreadyRunning,
     RebuildProgress,
     RepositoryRow,
     ScaleBuildManifest,
@@ -1332,6 +1334,111 @@ def _dispatch_main(
     return 0
 
 
+def _install_termination_signals() -> list[tuple[int, object]]:
+    """把 SIGTERM/SIGHUP 转成 KeyboardInterrupt,让批处理被终止时走和 Ctrl-C 同一条
+    收尾路径。对 kg 阶段是必需的:不收尾,kg_build_jobs 那行就永久停在 'running',
+    该 notebook 之后的每次分析都会被单飞守卫挡成 KgBuildAlreadyRunning,而离线进程
+    刻意无权自行清理(启动期兜底只属于服务端 lifespan)。
+
+    返回 [(signum, 原 handler)] 供调用方还原。约束三条:
+      * 只能在主线程装(signal.signal 的硬性限制),否则原样返回空表;
+      * **已被设成忽略的信号保持忽略**——`nohup` 会把 SIGHUP 置为 SIG_IGN,把它抢
+        回来会让本来能扛住掉线的长跑批处理在 SSH 断开时被杀掉;
+      * SIGINT 不动(Python 默认已抛 KeyboardInterrupt)。
+    SIGKILL / 掉电不可捕获,那类残留仍只能由后端启动时的崩溃兜底清理。
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return []
+
+    def _raise_interrupt(signum, _frame):
+        raise KeyboardInterrupt(f"terminated by signal {signum}")
+
+    installed: list[tuple[int, object]] = []
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is None:  # pragma: no cover - 平台差异(Windows 无 SIGHUP)
+            continue
+        try:
+            previous = signal.getsignal(sig)
+            if previous is signal.SIG_IGN:
+                continue
+            signal.signal(sig, _raise_interrupt)
+        except (OSError, ValueError):  # pragma: no cover - 平台限制
+            continue
+        installed.append((int(sig), previous))
+    return installed
+
+
+def _restore_signals(saved: Sequence[tuple[int, object]]) -> None:
+    for signum, previous in saved:
+        try:
+            signal.signal(signum, previous)
+        except (OSError, ValueError, TypeError):  # pragma: no cover
+            continue
+
+
+def _idle_since(updated_at: str) -> str:
+    """把 job 的 updated_at 转成「距今」;解析不了就返回空串(只用于提示)。"""
+    from datetime import datetime, timezone
+
+    try:
+        stamp = datetime.fromisoformat(str(updated_at))
+    except (TypeError, ValueError):
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    seconds = int((datetime.now(timezone.utc) - stamp).total_seconds())
+    if seconds < 0:
+        return ""
+    hours, rest = divmod(seconds, 3600)
+    return f"{hours}h{rest // 60:02d}m" if hours else f"{rest // 60}m{rest % 60:02d}s"
+
+
+def _report_kg_build_already_running(
+    repo: BatchIngestRepository, notebook_id: str
+) -> None:
+    """单飞守卫挡回时给出可操作的说明,而不是抛 sqlite 的 UNIQUE 约束 traceback。
+    判据(最后更新是否停滞)交给操作者:离线进程无法确认那行是否属于一个仍活着的
+    后端进程,所以只呈现事实 + 两条出路,绝不代为清理。"""
+    print(
+        "error: 该笔记本已有一个分析任务处于「进行中」，本次不启动"
+        "（同一笔记本同时只允许一个）。",
+        file=sys.stderr,
+    )
+    print(f"  笔记本: {notebook_id}", file=sys.stderr)
+    job = None
+    try:
+        job = repo.get_notebook(notebook_id).kg_build
+    except Exception:  # noqa: BLE001 - 诊断信息拿不到也要把出路打印出来
+        job = None
+    if job is not None:
+        idle = _idle_since(job.updated_at)
+        mode = {
+            "incremental": "增量分析",
+            "rebuild": "全部重新分析",
+        }.get(job.mode, job.mode)
+        print(
+            f"  现存任务: id={job.job_id} 方式={mode} 阶段={job.stage} "
+            f"完成 {job.completed_sources}/{job.total_sources} "
+            f"失败 {job.failed_sources}",
+            file=sys.stderr,
+        )
+        print(
+            f"  最后更新: {job.updated_at}"
+            + (f"（距今 {idle}）" if idle else ""),
+            file=sys.stderr,
+        )
+    print(
+        "  · 若它确实在运行（另一个 batch_ingest 进程，或网页端触发的分析），"
+        "等它结束后重跑本命令即可。\n"
+        "  · 若「最后更新」已停滞很久，它多半是上次被强制终止"
+        "（kill -9 / 掉电 / 机器重启）留下的残留：重启后端服务即可清理"
+        "（启动时会把这类进行中的任务统一落成「已中断」）。\n"
+        "    离线命令刻意不代为清理——它无法确认这行是否属于一个仍在运行的后端。",
+        file=sys.stderr,
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
 
@@ -1398,7 +1505,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         else repo.current_user()
     )
     user_token = set_request_user(batch_user)
+    saved_signals = _install_termination_signals()
     try:
         return _dispatch_main(args, repo, effective)
+    except KgBuildAlreadyRunning as exc:
+        _report_kg_build_already_running(
+            repo, str(exc).strip() or (args.notebook_id or "")
+        )
+        return 2
+    except KeyboardInterrupt:
+        # 收尾已在被中断的那层各自完成(kg 会把 job 落成「已中断」终态);
+        # 这里只负责不要用 traceback 糊住终端,并给出 shell 惯例的 130。
+        print(
+            "\n已中断。已完成的内容都已保留，可重跑同一命令继续未完成部分。",
+            file=sys.stderr,
+        )
+        return 130
     finally:
+        _restore_signals(saved_signals)
         reset_request_user(user_token)

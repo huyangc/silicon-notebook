@@ -53,6 +53,7 @@ from app.repositories.ports import (
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
+    KgBuildFailure,
     KgExtractionRunControl,
     TaskScopedKgClients,
     probe_kg_model,
@@ -61,6 +62,13 @@ from app.services.kg.run_control import (
 
 INTERNAL_KG_BUILD_ERROR_MESSAGE = (
     "知识图谱分析意外中断；已完成内容已保留，可继续分析未完成内容。"
+)
+
+# Ctrl-C / SIGTERM 收尾用。措辞与启动期崩溃兜底
+# (SqliteMigrator._recover_interrupted_jobs) 保持同一口径,用户看到的都是
+# 「被中断 + 已完成内容保留 + 可继续」。
+INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
+    "本次分析被中断；已完成内容已保留，可继续分析未完成内容。"
 )
 
 
@@ -913,6 +921,13 @@ class KnowledgeLifecycleService:
                     source_id, "parsed", error_message=""
                 )
                 raise
+            except (KeyboardInterrupt, SystemExit):
+                # 与上一支同一件事,只是中断继承 BaseException 接不到:不退回 'parsed'
+                # 这一篇来源就会一直显示「分析中」,直到后端重启才被兜底清理。
+                self._set_source_status(
+                    source_id, "parsed", error_message=""
+                )
+                raise
             except Exception:  # noqa: BLE001 - isolate non-model source failure
                 self._set_source_status(
                     source_id, "parsed", error_message=""
@@ -1032,7 +1047,12 @@ class KnowledgeLifecycleService:
         def _latency_ms() -> int:
             return round((time.perf_counter() - started) * 1000)
 
-        def _mark_stopping(exc: KgBuildAborted) -> None:
+        def _mark_stopping(
+            exc: KgBuildAborted, *, circuit: bool = True
+        ) -> None:
+            """circuit=False:操作者主动中断(Ctrl-C/SIGTERM)也要把在飞窗口停下并
+            公布 'stopping',但它不是模型侧的熔断——不能记 kg_build_circuit_opened,
+            否则事件日志里一次人工中断会被当成模型服务故障来统计。"""
             nonlocal stopping_marked
             if stopping_marked:
                 return
@@ -1053,11 +1073,12 @@ class KnowledgeLifecycleService:
                 return
             stopping_marked = True
             stopping = self.kg_build_jobs.get(job_id)
-            self._emit_kg_build_event(
-                "kg_build_circuit_opened",
-                stopping,
-                latency_ms=_latency_ms(),
-            )
+            if circuit:
+                self._emit_kg_build_event(
+                    "kg_build_circuit_opened",
+                    stopping,
+                    latency_ms=_latency_ms(),
+                )
             self._emit_kg_build_event(
                 "kg_build_stopping",
                 stopping,
@@ -1118,6 +1139,48 @@ class KnowledgeLifecycleService:
                 self.kg_build_jobs.get(job_id),
                 latency_ms=_latency_ms(),
             )
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            # KeyboardInterrupt/SystemExit 继承 BaseException,走不到下面的
+            # `except Exception`,而 finally 只清进程内的 kg_building 集合——不在这里
+            # 收尾,kg_build_jobs 那行就永久停在 'running',
+            # idx_kg_build_jobs_one_running(notebook 级条件唯一索引)会把该 notebook
+            # 之后的每一次构建都挡成 KgBuildAlreadyRunning。对离线 CLI 尤其致命:
+            # 启动期的崩溃兜底 _recover_interrupted_jobs 只由服务端 lifespan 调用
+            # (离线进程无权裁决可能属于活跃后端的 job),所以 CLI 自己修不了,
+            # 只能等后端重启。Ctrl-C 是 batch_ingest 长跑最常见的结束方式,
+            # 必须在这里落终态。SIGKILL/掉电仍只能靠启动兜底。
+            #
+            # 同时要 abort 掉运行控制:中断只在主线程抛出,窗口/文档线程池还在跑,
+            # 若不合作式停下,它们会在 job 已落终态之后继续调模型、继续写图,
+            # 而 ThreadPoolExecutor 的 atexit join 又会把进程按在原地等它们跑完
+            # ——用户看到的就是「Ctrl-C 没反应」,进而 kill -9,重新制造残留行。
+            # 已有模型侧失败时沿用它的分类,不要用中断把真实故障码盖掉。
+            try:
+                failure = control.failure or KgBuildFailure(
+                    "worker_interrupted", INTERRUPTED_KG_BUILD_ERROR_MESSAGE
+                )
+                _mark_stopping(KgBuildAborted(failure), circuit=False)
+                control.abort(failure)
+                self.kg_build_jobs.finish(
+                    job_id,
+                    "failed",
+                    error_code=failure.code,
+                    error_message=failure.user_message,
+                )
+                self._emit_kg_build_event(
+                    "kg_build_failed",
+                    self.kg_build_jobs.get(job_id),
+                    latency_ms=_latency_ms(),
+                )
+            except Exception:  # noqa: BLE001 - 收尾失败不得吞掉中断本身
+                # 收尾自身失败(例如与工作线程抢写锁超时)绝不能把中断替换成另一个
+                # 异常:那样操作者拿到的是无关 traceback,而这行仍留在 'running'。
+                # 记下原因后按原样把中断抛出去(CLI 仍给「已中断」+130),这一行退回
+                # 由服务端启动兜底清理——与 SIGKILL 残留同一条出路。
+                self.event_log.logger.exception(
+                    "failed to settle interrupted KG job %s", job_id
+                )
             raise
         except Exception:
             self.kg_build_jobs.finish(
