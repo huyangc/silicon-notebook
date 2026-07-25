@@ -150,11 +150,66 @@ def sample_source_ids(
     return sorted(random.Random(seed).sample(all_ids, k)), total
 
 
+def _as_item(row: sqlite3.Row) -> dict:
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        n_ev = len(json.loads(row["evidence"] or "[]"))
+    except (TypeError, ValueError):
+        n_ev = 0
+    return {
+        "id": str(row["id"]),
+        "object_type": str(row["object_type"] or ""),
+        "source_id": str(row["source_id"] or ""),
+        "name": str(payload.get("name") or "").strip(),
+        "payload": payload,
+        "n_evidence": n_ev,
+    }
+
+
+def count_sourceless(conn: sqlite3.Connection, notebook_id: str) -> int:
+    """不挂任何来源的对象数。
+
+    这些**不是**脏数据:晋升(personal→base)与 Memory→KG 的写路径刻意把
+    `source_id` 写成字面量 ''(见 repositories/*/governance_store.py 的
+    `VALUES (?,?,?,'approved','',?,?,?,'',?,?)`)。按来源抽样天生看不见它们,
+    而第一节的全量构成又把它们算进去 —— 不显式报出来,一个晋升为主的 base 库
+    会出现「构成有几十万行、内容分析却几乎是空的」而读者无从察觉。
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM knowledge_objects "
+        "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL)",
+        (notebook_id,),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def load_sourceless_objects(
+    conn: sqlite3.Connection, notebook_id: str
+) -> List[dict]:
+    """读该 notebook 下不挂来源的对象(晋升 / Memory→KG 产物)。"""
+    return [
+        _as_item(row)
+        for row in conn.execute(
+            "SELECT id, object_type, source_id, payload, evidence "
+            "FROM knowledge_objects "
+            "WHERE notebook_id = ? AND (source_id = '' OR source_id IS NULL)",
+            (notebook_id,),
+        )
+    ]
+
+
 def load_objects(
     conn: sqlite3.Connection, notebook_id: str, source_ids: Sequence[str]
 ) -> List[dict]:
     """读抽中来源下的全部 KG 对象。按 source_id 逐个查,走 idx_knowledge_objects_source
-    —— 不做一条巨型 IN(百万级 id 会撞 SQLite 变量上限,见部署机冻结那次教训)。"""
+    —— 不做一条巨型 IN(百万级 id 会撞 SQLite 变量上限,见部署机冻结那次教训)。
+
+    只覆盖挂了来源的对象;不挂来源的那部分见 load_sourceless_objects。"""
     out: List[dict] = []
     for i, sid in enumerate(source_ids, 1):
         for row in conn.execute(
@@ -162,22 +217,7 @@ def load_objects(
             "WHERE source_id = ? AND notebook_id = ?",
             (sid, notebook_id),
         ):
-            try:
-                payload = json.loads(row["payload"] or "{}")
-            except (TypeError, ValueError):
-                payload = {}
-            try:
-                n_ev = len(json.loads(row["evidence"] or "[]"))
-            except (TypeError, ValueError):
-                n_ev = 0
-            out.append({
-                "id": str(row["id"]),
-                "object_type": str(row["object_type"] or ""),
-                "source_id": str(row["source_id"] or ""),
-                "name": str(payload.get("name") or "").strip(),
-                "payload": payload,
-                "n_evidence": n_ev,
-            })
+            out.append(_as_item(row))
         if i % 200 == 0:
             sys.stderr.write(f"  ... 已读 {i}/{len(source_ids)} 个来源\n")
             sys.stderr.flush()
@@ -209,10 +249,14 @@ def degree_and_basis(
                     ev = json.loads(row["evidence"] or "[]")
                 except (TypeError, ValueError):
                     ev = []
+                # 只有 relink 会写 basis。没有 basis 的边**不能**记成「LLM 抽取」:
+                # knowhow 投影写的 about 边就是 evidence='[]'(见
+                # services/knowhow/projection.py 的 `..., "about", "[]", now`),
+                # 与 LLM 抽取的边在这里不可区分。归到「未标注」,别替它认领出处。
                 tag = ""
                 if isinstance(ev, list) and ev and isinstance(ev[0], dict):
                     tag = str(ev[0].get("basis") or "")
-                basis[tag or "llm"] += 1
+                basis[tag or "untagged"] += 1
         deg[oid] = n
         if i % 1000 == 0:
             sys.stderr.write(f"  ... 已查 {i}/{len(object_ids)} 个节点的度数\n")
@@ -248,20 +292,32 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
     print(f"  唯一名 {len(norm_counts)} / 行数 {total}"
           f"  → 重名占用 {dup_rows} 行 ({_pct(dup_rows, total)})")
     top_dup = [f"{n}×{c}" for n, c in norm_counts.most_common(6) if c > 1]
-    if top_dup:
+    if top_dup and show_samples:   # 概念名是内容,--no-samples 下一律不打
         print(f"  最重复: {', '.join(top_dup)}")
 
     # 文档频次:一个名字出现在多少个来源里。抽样口径下 DF 被系统性低估,已在结尾说明。
+    # 不挂来源的对象(source_id='')不参与 —— 它们共享同一个空 source_id,算进去会
+    # 被当成「同一篇文档」,那是个凭空造出来的文档频次。
     df: Dict[str, set] = defaultdict(set)
     mention: Counter = Counter()
+    n_no_source = 0
     for it in items:
         if not it["name"]:
+            continue
+        if not it["source_id"]:
+            n_no_source += 1
             continue
         key = _norm(it["name"])
         df[key].add(it["source_id"])
         mention[key] += max(1, it["n_evidence"])
+    if not df:
+        print("  文档频次(DF):本批全部对象都不挂来源,无法统计。")
+        return
     buckets = Counter(min(len(s), 5) for s in df.values())
-    print("  文档频次(DF)分桶 [按唯一名]:")
+    if n_no_source:
+        print(f"  文档频次(DF)分桶 [按唯一名;已排除 {n_no_source} 个不挂来源的对象]:")
+    else:
+        print("  文档频次(DF)分桶 [按唯一名]:")
     for k in sorted(buckets):
         label = f"{k} 篇" if k < 5 else "≥5 篇"
         print(f"    DF = {label:<6} {buckets[k]:7d}  {_pct(buckets[k], len(df))}")
@@ -285,13 +341,14 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
     for n in names:
         for tag in classify_concept(n):
             probe[tag] += 1
-            if len(probe_samples[tag]) < 6:
+            if show_samples and len(probe_samples[tag]) < 6:
                 probe_samples[tag].append(n)
     print(f"  probes.classify_concept 疑似信号(比过滤器口径宽):")
     if not probe:
         print("    (无命中)")
     for tag, c in probe.most_common():
-        print(f"    {tag:<10} {c:7d}  {_pct(c, total)}   e.g. {probe_samples[tag]}")
+        example = f"   e.g. {probe_samples[tag]}" if show_samples else ""
+        print(f"    {tag:<10} {c:7d}  {_pct(c, total)}{example}")
 
     words = Counter(min(len(n.split()), 6) for n in names)
     print("  按词数: " + ", ".join(
@@ -307,8 +364,14 @@ def report_concepts(items: List[dict], whitelist: set, show_samples: bool,
               f"  字数分布: " + ", ".join(
                   f"{'≥6' if k == 6 else k}字={lens[k]}" for k in sorted(lens)))
         if lens.get(2, 0) == 0 and lens.get(3, 0) > 0:
-            print("    ⚠ 2 字档为 0 而 3 字档非 0:filters.is_noise_concept 的"
-                  " `len(raw) <= 2` 正在丢弃中文双字术语。")
+            # 措辞刻意停在「风险」而不是「已发生」:直方图证明不了丢弃 —— 语料可能
+            # 天然没有双字术语,抽样也可能恰好没抽到。真正的损失量只能从过滤前的
+            # 抽取产物里数,那不是这个只读工具能看到的东西。
+            print("    ⚠ 风险提示:含中日韩字符的概念里 2 字档为 0、3 字档非 0。"
+                  "filters.is_noise_concept\n      的 `len(raw) <= 2` 会把中文双字"
+                  "术语(汇率/栅极/沟道)判成 too_short 丢掉,这个形状与该规则生效"
+                  "相符。\n      但直方图不构成证据(语料可能本就没有双字术语,抽样"
+                  "也可能漏掉);要定性\n      得对着原文查一批双字术语是否真的缺席。")
 
     if show_samples:
         rng = random.Random(seed)
@@ -330,7 +393,7 @@ def report_claims(items: List[dict], show_samples: bool, seed: int) -> None:
           f"  → 重复占用 {dup_rows} 行 ({_pct(dup_rows, total)})")
     meta = [n for n in names if is_meta_claim(n)[0]]
     print(f"  现有 is_meta_claim 命中(元叙述/导航): {len(meta)} ({_pct(len(meta), total)})")
-    if meta:
+    if meta and show_samples:      # 命题原文是内容
         print(f"    e.g. {meta[:3]}")
     degraded = [n for n in names if claim_degraded(n)]
     n_cjk = sum(1 for n in names if _has_cjk(n))
@@ -348,14 +411,15 @@ def report_claims(items: List[dict], show_samples: bool, seed: int) -> None:
             print(f"    {n}")
 
 
-def report_formulas_procedures(items: List[dict]) -> None:
+def report_formulas_procedures(items: List[dict], show_samples: bool) -> None:
     formulas = [it for it in items if it["object_type"] == "formula"]
     procedures = [it for it in items if it["object_type"] == "procedure"]
     _bar(f"[formula / procedure] 抽样 {len(formulas)} / {len(procedures)} 行")
     if formulas:
         bad = [it["name"] for it in formulas if formula_degraded(it["name"])]
+        example = f"  e.g. {bad[:4]}" if show_samples else ""   # 公式原文是内容
         print(f"  formula 无任何运算符(疑似不是公式): {len(bad)}"
-              f" ({_pct(len(bad), len(formulas))})  e.g. {bad[:4]}")
+              f" ({_pct(len(bad), len(formulas))}){example}")
     if procedures:
         empty = [it for it in procedures
                  if not (it["payload"].get("steps") or [])]
@@ -381,10 +445,13 @@ def report_degree(deg: Dict[str, int], basis: Counter, items_by_id: Dict[str, di
               f"  {_pct(by_type_zero[otype], by_type_total[otype])}")
     total_edges = sum(basis.values())
     if total_edges:
-        print(f"  这些节点上的边按来源({total_edges} 条边端):")
+        print(f"  这些节点上的边按标注({total_edges} 条边端):")
         for tag, c in basis.most_common(6):
-            label = {"llm": "LLM 抽取"}.get(tag, tag)
-            print(f"    {label:<26} {c:7d}  {_pct(c, total_edges)}")
+            label = {"untagged": "未标注(LLM 抽取或 knowhow 投影)"}.get(tag, tag)
+            print(f"    {label:<30} {c:7d}  {_pct(c, total_edges)}")
+        print("    注:只有 relink 会写 basis。未标注一档里 LLM 抽取的边与 knowhow"
+              "投影的 about 边\n      不可区分(后者 evidence='[]'),别把这一档整个"
+              "当成 LLM 的产出。")
         relink = sum(c for tag, c in basis.items() if tag.startswith("relink:"))
         if relink:
             print(f"    → relink 补出来的占 {_pct(relink, total_edges)};"
@@ -420,7 +487,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("=" * 78)
         print("KG 抽取质量审计 —— 只读、零 LLM、零写库")
         print(f"库: {args.db}")
-        print("⚠ 本报告含知识库内容样本(概念名/命题原文),按内部资料对待,不要外发。")
+        if args.no_samples:
+            print("口径:--no-samples,只出统计数字,不打印任何概念名/命题/公式原文。")
+        else:
+            print("⚠ 本报告含知识库内容样本(概念名/命题原文),按内部资料对待,不要外发。")
         print("=" * 78)
 
         _bar("候选 notebook(按来源数排序)")
@@ -461,10 +531,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("  ⚠ 以下所有比例来自抽样,不是全量。DF(文档频次)在抽样下被系统性")
             print("    低估 —— 只在 1 篇出现的名字里,有一部分其实在没抽到的来源中也出现。")
             print(f"    要全量:重跑并加 --sources 0(千万级库会很慢)。")
+
+        # 不挂来源的对象(晋升 / Memory→KG 写路径刻意写 source_id='')按来源永远抽
+        # 不到。全量模式必须纳入,抽样模式至少要把它们的存在和数量说出来 —— 否则
+        # 一个晋升为主的 base 库会「构成几十万行、内容分析近乎空」而读者无从察觉。
+        sys.stderr.write("  正在清点不挂来源的对象...\n")
+        sys.stderr.flush()
+        n_sourceless = count_sourceless(conn, target)
+        if n_sourceless:
+            print(f"  不挂来源的对象: {n_sourceless:,} 个 ({_pct(n_sourceless, grand)} 的全库)"
+                  " —— 来自晋升 / Memory→KG 写路径")
+            if full:
+                print("    全量模式:已纳入下面的分析(它们没有来源,故不参与 DF 统计)。")
+            else:
+                print("    ⚠ 抽样模式按来源抽样,这部分一个都抽不到,未纳入下面的分析。")
+                print("      要覆盖它们:重跑并加 --sources 0。")
+
         sys.stderr.write(f"  正在读取 {len(source_ids)} 个来源的对象...\n")
         sys.stderr.flush()
         items = load_objects(conn, target, source_ids)
-        print(f"  读到 {len(items):,} 个对象")
+        n_sourced = len(items)
+        if full and n_sourceless:
+            items += load_sourceless_objects(conn, target)
+            print(f"  读到 {n_sourced:,} 个挂来源的对象 + "
+                  f"{len(items) - n_sourced:,} 个不挂来源的对象 = {len(items):,}")
+        else:
+            print(f"  读到 {len(items):,} 个对象")
         by_type: Dict[str, List[dict]] = defaultdict(list)
         for it in items:
             by_type[it["object_type"]].append(it)
@@ -480,7 +572,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report_concepts(by_type.get("concept", []), whitelist,
                         not args.no_samples, args.seed)
         report_claims(by_type.get("claim", []), not args.no_samples, args.seed)
-        report_formulas_procedures(items)
+        report_formulas_procedures(items, not args.no_samples)
 
         pool = [it["id"] for it in items]
         if args.degree_sample and args.degree_sample < len(pool):
@@ -500,7 +592,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("  3) DF 分桶 + 只出现一次的长尾 = 「哪些概念对检索几乎没贡献」的语料统计信号,")
         print("     比正则形状规则可分得多。")
         print("  4) probes 是宽口径疑似信号,会误报;拿随机样本人工过一遍再下结论。")
-        print("  5) relink 边占比高 → 度数不能再当质量信号用。")
+        print("  5) relink 边占比高 → 度数不能再当质量信号用。「未标注」一档混了 LLM")
+        print("     抽取与 knowhow 投影两种出处,不可拆,别整个算到 LLM 头上。")
+        print("  6) 不挂来源的对象(晋升 / Memory→KG)按来源抽不到:抽样模式只报数量,")
+        print("     --sources 0 才会纳入内容分析。")
         return 0
     finally:
         conn.close()

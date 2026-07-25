@@ -34,7 +34,8 @@ def load_audit():
     return module
 
 
-def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name) -> None:
+def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name,
+              sourceless: int = 0, untagged_edges: int = 0) -> None:
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -63,6 +64,19 @@ def _build_db(path: Path, *, sources: int, concepts_per_source, claim_name) -> N
             "INSERT INTO knowledge_objects VALUES (?,'nb-1','claim',?,?,?)",
             (f"c-{s}", sid, json.dumps({"name": claim_name(s)}),
              json.dumps([{"element_id": "e1"}])),
+        )
+    # 晋升 / Memory→KG 写路径:source_id 是字面量 ''(见 governance_store.py)
+    for i in range(sourceless):
+        conn.execute(
+            "INSERT INTO knowledge_objects VALUES (?,'nb-1','concept','',?,?)",
+            (f"promoted-{i}", json.dumps({"name": f"promoted concept {i}"}),
+             json.dumps([{"element_id": "e1"}])),
+        )
+    # knowhow 投影写的 about 边:evidence='[]',与 LLM 抽取的边不可区分
+    for i in range(untagged_edges):
+        conn.execute(
+            "INSERT INTO knowledge_relations VALUES (?,'nb-1',?,?, 'about','[]')",
+            (f"rel-{i}", "o-0-0", f"c-{i % max(1, sources)}"),
         )
     conn.commit()
     conn.close()
@@ -112,7 +126,7 @@ def test_cjk_library_gets_both_english_only_caveats(tmp_path, capsys):
     assert audit.main(["--db", str(db), "--notebook", "nb-1",
                        "--sources", "0", "--no-samples"]) == 0
     out = capsys.readouterr().out
-    assert "2 字档为 0 而 3 字档非 0" in out
+    assert "2 字档为 0、3 字档非 0" in out
     assert "len(raw) <= 2" in out
     assert "只覆盖英文" in out, "中文库上必须声明 claim_degraded 数字无效"
 
@@ -155,6 +169,90 @@ def test_run_leaves_product_data_byte_identical(tmp_path, capsys):
     # 只读打开可能重建它们(见 open_readonly 的 docstring),不在断言范围内。
     assert data_fingerprint() == before_data, "诊断改动了产品数据"
     assert db.stat().st_size == before_size, "主库文件大小变化 —— 有写入发生"
+
+
+def test_no_samples_prints_zero_content(tmp_path, capsys):
+    """--no-samples 承诺「只出数字」,那就一个概念名/命题/公式原文都不能漏出来。
+
+    第 1 轮 codex 评审(P2)抓到的:probe 的 e.g.、最重复名、meta-claim 例句、公式
+    例子都曾无条件打印,与文档承诺不符。
+    """
+    audit = load_audit()
+    db = tmp_path / "quiet.db"
+    secret = "SECRETCONCEPTNAME"
+    _build_db(
+        db, sources=6,
+        # 每个来源都放同一个名字 → 必进「最重复」;带下划线 → 必被 probe 判 symbol
+        concepts_per_source=lambda s: [secret, f"{secret}_sym", "Q1"],
+        claim_name=lambda s: f"This chapter covers {secret} in detail.",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "0", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert secret not in out, "--no-samples 下仍打印了概念名/命题原文"
+    assert "e.g." not in out, "--no-samples 下仍打印了示例"
+    assert "不打印任何概念名" in out, "报告头必须声明当前是无内容口径"
+    # 反向:默认口径下这些内容是要出现的,否则上面的断言会因为「压根没数据」而假绿
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0"]) == 0
+    assert secret in capsys.readouterr().out
+
+
+def test_sourceless_objects_are_declared_and_included_in_full_mode(tmp_path, capsys):
+    """晋升 / Memory→KG 的对象 source_id='',按来源永远抽不到 —— 不能装作不存在。"""
+    audit = load_audit()
+    db = tmp_path / "promo.db"
+    _build_db(
+        db, sources=30, sourceless=25,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    # 抽样模式:必须报出数量并说明未纳入
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "4", "--no-samples"]) == 0
+    sampled = capsys.readouterr().out
+    assert "不挂来源的对象: 25" in sampled
+    assert "一个都抽不到,未纳入下面的分析" in sampled
+
+    # 全量模式:必须真的读进来
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "0", "--no-samples"]) == 0
+    full = capsys.readouterr().out
+    assert "25 个不挂来源的对象" in full
+    assert "已排除 25 个不挂来源的对象" in full, "DF 不能把空 source_id 当成一篇文档"
+
+
+def test_untagged_edges_are_not_credited_to_the_llm(tmp_path, capsys):
+    """knowhow 投影写的 about 边 evidence='[]',与 LLM 抽取的边不可区分。"""
+    audit = load_audit()
+    db = tmp_path / "edges.db"
+    _build_db(
+        db, sources=4, untagged_edges=6,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "0", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "未标注(LLM 抽取或 knowhow 投影)" in out
+    assert "LLM 抽取  " not in out, "无 basis 的边不得被单独标成 LLM 抽取"
+    assert "不可区分" in out
+
+
+def test_cjk_warning_is_phrased_as_risk_not_as_established_loss(tmp_path, capsys):
+    """直方图证明不了丢弃(语料可能天然没有双字词,抽样也可能漏)。措辞必须停在风险。"""
+    audit = load_audit()
+    db = tmp_path / "cjk2.db"
+    _build_db(
+        db, sources=4,
+        concepts_per_source=lambda s: [f"金汇兑本位制{s}", "布雷顿森林体系", "金本位"],
+        claim_name=lambda s: f"浮动汇率制度使得货币当局无须持有大量外汇储备{s}。",
+    )
+    assert audit.main(["--db", str(db), "--notebook", "nb-1",
+                       "--sources", "0", "--no-samples"]) == 0
+    out = capsys.readouterr().out
+    assert "风险提示" in out
+    assert "直方图不构成证据" in out
+    assert "正在丢弃" not in out, "不得把形状相符说成已确认的丢弃"
 
 
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):

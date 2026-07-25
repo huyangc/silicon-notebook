@@ -217,8 +217,8 @@ PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb
 ```
 
 报告分三节:①对象类型构成(全量,走索引);②内容分析(默认随机抽 `--sources` 个来源,
-报告里会写明是抽样还是全量);③连通性与边来源(对节点子样本,含 relink 补边占比)。
-`--no-samples` 只出数字不打印名称。
+报告里会写明是抽样还是全量);③连通性与边标注(对节点子样本,含 relink 补边占比)。
+`--no-samples` 只出数字,一个概念名/命题/公式原文都不打印。
 
 要点:
 
@@ -229,8 +229,15 @@ PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb
   上 SQLite 仍可能创建/触碰 `-wal`/`-shm`(读最新快照的必需品);服务在跑时这两个文件
   本就存在。它不是「一个文件都不碰」。
 - **抽样绝不静默**:每一节都标注口径;DF(文档频次)在抽样下被系统性低估,报告里有明说。
-- 两条已知的判据局限会被自动提示:`is_noise_concept` 的 `len(raw) <= 2` 会丢中文双字
-  术语;`probes.claim_degraded` 的动词表只覆盖英文,中文库上该数字无效。
+- **不挂来源的对象**(晋升 / Memory→KG 写路径刻意写 `source_id=''`)按来源抽不到:抽样
+  模式会报出它们的数量并说明未纳入,`--sources 0` 才会读进来。晋升为主的 base 库尤其
+  要注意这一段,否则会出现「构成几十万行、内容分析近乎空」而看不出原因。
+- **边的出处只认标注**:只有 relink 会写 `basis`;没有 `basis` 的边归「未标注」,因为
+  knowhow 投影写的 `about` 边也是 `evidence='[]'`,与 LLM 抽取的边不可区分 —— 不替它
+  们认领出处。
+- 两条已知的判据局限会被自动提示:`is_noise_concept` 的 `len(raw) <= 2` 有丢中文双字
+  术语的风险(报告按**风险**措辞,不按已确认的丢失 —— 长度直方图证明不了这件事);
+  `probes.claim_degraded` 的动词表只覆盖英文,中文库上该数字无效。
 
 ---
 
