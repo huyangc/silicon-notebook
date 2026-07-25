@@ -1,6 +1,7 @@
 # backend/tests/test_batch_ingest.py
 import json
 import inspect
+import signal
 import threading
 import time
 import pytest
@@ -10,10 +11,15 @@ from typing import Mapping
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user, set_request_user, reset_request_user
+from app.repositories.ports import KgBuildAlreadyRunning
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.services import batch_ingest as bi
-from tests.model_testkit import RecordingModelProvider, bind_embedding_client
+from tests.model_testkit import (
+    RecordingModelProvider,
+    bind_chat_client,
+    bind_embedding_client,
+)
 
 
 @pytest.fixture
@@ -261,6 +267,122 @@ def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
     assert res["clusters"] == 7
     assert calls["fusion_flag_during"] is False
     assert calls["build_nb"] == nb_id and calls["rebuild_nb"] == nb_id
+
+
+class _StubKgChatClient:
+    configured = True
+    model = "test-kg"
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):  # pragma: no cover
+        raise AssertionError("单飞守卫应在任何模型调用之前挡回")
+
+
+def test_main_reports_already_running_kg_job_without_a_traceback(
+    repo, monkeypatch, capsys
+):
+    """单飞守卫挡回时 CLI 必须给出可操作说明并以 2 退出,而不是把 sqlite 的
+    UNIQUE 约束 traceback 糊到运维脸上(该异常正是从 build_notebook_kg 冒出来的)。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bind_chat_client(repo, "kg_extract", _StubKgChatClient())
+    repo._runtime.kg_build_jobs.create_job(nb_id, "u", "incremental", 812)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE kg_build_jobs SET stage='extracting', completed_sources=3, "
+            "updated_at='2026-07-20T00:00:00+00:00' WHERE notebook_id=?",
+            (nb_id,),
+        )
+
+    rc = bi.main(["kg", "--notebook-id", nb_id, "--allow-no-embed"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "进行中" in err
+    assert nb_id in err
+    assert "extracting" in err and "3/812" in err
+    assert "重启后端服务" in err
+    assert "Traceback" not in err
+
+
+def test_report_already_running_still_prints_paths_when_details_unreadable(
+    capsys,
+):
+    """诊断信息读不到也必须打印出路——不能因为取现存任务失败就把异常再抛出去,
+    否则运维拿到的仍是 traceback。"""
+    class _Unreadable:
+        def get_notebook(self, _notebook_id):
+            raise RuntimeError("catalog unavailable")
+
+    bi._report_kg_build_already_running(_Unreadable(), "nb-xyz")
+
+    err = capsys.readouterr().err
+    assert "nb-xyz" in err
+    assert "重启后端服务" in err
+    assert "现存任务" not in err
+
+
+def test_main_interrupt_exits_cleanly_with_shell_convention(
+    repo, monkeypatch, capsys
+):
+    """Ctrl-C 不该以 traceback 收场;收尾在被中断的那层完成,这里只给 130。
+    顺带钉住 main() 真的在跑批处理期间装上了终止信号转换,并在返回时还原
+    (装在别处/装完不还原都算回归)。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    during = {}
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+    def _interrupt(nb, *, progress=None):
+        during["sigterm"] = signal.getsignal(signal.SIGTERM)
+        raise KeyboardInterrupt("ctrl-c")
+
+    monkeypatch.setattr(repo, "build_notebook_kg", _interrupt)
+
+    rc = bi.main(["kg", "--notebook-id", nb_id, "--allow-no-embed"])
+
+    assert rc == 130
+    assert "已中断" in capsys.readouterr().err
+    assert callable(during["sigterm"])
+    assert during["sigterm"] is not signal.SIG_DFL
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+def test_install_termination_signals_converts_sigterm_and_restores():
+    saved = bi._install_termination_signals()
+    try:
+        assert signal.SIGTERM in [signum for signum, _ in saved]
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler)
+        with pytest.raises(KeyboardInterrupt):
+            handler(signal.SIGTERM, None)
+    finally:
+        bi._restore_signals(saved)
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+def test_install_termination_signals_keeps_ignored_sighup_ignored():
+    """`nohup` 把 SIGHUP 置为 SIG_IGN;抢回来会让本来能扛住 SSH 掉线的长跑批处理
+    在断连时被杀掉,所以已忽略的信号必须保持忽略。"""
+    previous = signal.getsignal(signal.SIGHUP)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        saved = bi._install_termination_signals()
+        try:
+            assert signal.SIGHUP not in [signum for signum, _ in saved]
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+        finally:
+            bi._restore_signals(saved)
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+def test_install_termination_signals_noop_off_the_main_thread():
+    """signal.signal 只能在主线程调用;工作线程里必须原样退回,不能抛。"""
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(saved=bi._install_termination_signals())
+    )
+    worker.start()
+    worker.join()
+    assert result["saved"] == []
 
 
 def test_main_dry_run_lists_files(repo, tmp_path, capsys):

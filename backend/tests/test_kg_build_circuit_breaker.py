@@ -361,6 +361,145 @@ def test_duplicate_preparation_never_enters_executor(repo):
     assert repo._runtime.kg_build_jobs.get(first["id"])["status"] == "running"
 
 
+def _interrupt_during_extraction(repo, monkeypatch, exc_type=KeyboardInterrupt):
+    """让抽取阶段抛出 exc_type,并把该次运行的 run control 交给调用方检查。
+    模拟操作者 Ctrl-C / SIGTERM:中断只在主线程抛出,此时线程池里的窗口仍在飞。"""
+    lifecycle = repo._runtime.knowledge_lifecycle
+    seen = {}
+
+    def _raise(
+        notebook_id, targets, skipped, skipped_no_elements, job_id,
+        control, controlled_client, progress=None, on_abort=None,
+    ):
+        seen["control"] = control
+        raise exc_type("interrupted")
+
+    monkeypatch.setattr(lifecycle, "_extract_targets", _raise)
+    return seen
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit])
+def test_interrupt_settles_job_and_frees_the_notebook(
+    repo, monkeypatch, exc_type
+):
+    """Ctrl-C / SIGTERM 必须把 job 落成终态。否则 kg_build_jobs 那行永久停在
+    'running',条件唯一索引会把该 notebook 之后的每次分析都挡成
+    KgBuildAlreadyRunning——而离线 CLI 刻意无权自行清理,只能等后端重启。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch, exc_type)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(exc_type):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["stage"] == "finished"
+    assert saved["error_code"] == "worker_interrupted"
+    assert saved["error_message"] != ""
+    assert saved["finished_at"] != ""
+    # 真正的回归点:单飞守卫已释放,同一 notebook 能再次发起分析。
+    again = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    assert again["status"] == "running"
+    assert again["id"] != job["id"]
+
+
+def test_interrupt_aborts_in_flight_windows_without_faking_a_model_outage(
+    repo, monkeypatch
+):
+    """中断要合作式停掉在飞窗口(否则它们在 job 落终态后继续调模型继续写图,
+    而线程池的 atexit join 会把进程按住不退——用户只会看到「Ctrl-C 没反应」),
+    但它不是模型熔断,不得记 kg_build_circuit_opened。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    seen = _interrupt_during_extraction(repo, monkeypatch)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    control = seen["control"]
+    assert control.aborted is True
+    assert control.failure.code == "worker_interrupted"
+    kinds = [str(event.get("kind", "")) for event in events]
+    assert "kg_build_stopping" in kinds
+    assert "kg_build_failed" in kinds
+    assert "kg_build_circuit_opened" not in kinds
+
+
+def test_failed_settlement_never_replaces_the_interrupt(repo, monkeypatch):
+    """收尾自身失败(如抢写锁超时)不得把中断换成别的异常:否则操作者拿到的是
+    无关 traceback,而这行仍留在 'running'。记日志 + 原样抛出中断。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    logged = []
+    monkeypatch.setattr(
+        repo._runtime.kg_build_jobs, "finish",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("database is locked")),
+    )
+    monkeypatch.setattr(
+        repo.event_log.logger, "exception",
+        lambda *a, **k: logged.append(a),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    assert logged, "收尾失败必须留下日志,不能静默"
+
+
+class _InterruptingKgClient(_ControlledKgClient):
+    """抽取过程中真的抛 KeyboardInterrupt(不打桩 _extract_targets),验证它确实能
+    穿过 per-source 的 `except Exception`、future 和 as_completed 抵达收尾处。"""
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        prompt = messages[0]["content"]
+        if prompt.startswith('Return {"ok":true}'):
+            return super().chat_json(messages, response_schema_hint, **kwargs)
+        raise KeyboardInterrupt("ctrl-c during extraction")
+
+
+def test_interrupt_inside_real_extraction_reaches_the_settlement(repo):
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _InterruptingKgClient())
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+    # 被中断打断的来源必须退回可重试终态,否则界面上它一直「分析中」。
+    assert "extracting" not in _source_statuses(repo, source_ids).values()
+
+
+def test_model_outage_still_records_the_circuit_event(repo, monkeypatch):
+    """反向护栏:真正的模型故障仍要记 kg_build_circuit_opened(上面那条不能
+    把这个事件整体删掉当成「通过」)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(
+        repo, "kg_extract",
+        _ControlledKgClient(fail_after_successful_sources=0),
+    )
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    kinds = [str(event.get("kind", "")) for event in events]
+    assert "kg_build_circuit_opened" in kinds
+    assert "kg_build_stopping" in kinds
+
+
 def test_successful_job_emits_safe_started_progress_and_success_events(
     repo, monkeypatch
 ):

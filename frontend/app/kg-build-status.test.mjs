@@ -60,6 +60,19 @@ test("probing/extracting/stopping labels are explicit", () => {
   );
 });
 
+test("an operator interrupt while stopping is not reported as a model failure", () => {
+  // 离线批量分析被 Ctrl-C / 终止信号结束时也会经过「正在停止」,不能沿用模型
+  // 故障文案冤枉模型服务。
+  const view = kgBuildPresentation(
+    job("running", "stopping", { error_code: "worker_interrupted" }),
+    68,
+    false,
+  );
+  assert.equal(view.label, "正在停止本次分析…");
+  assert.ok(!view.label.includes("模型服务异常"));
+  assert.equal(view.detail, "正在等待已开始的请求安全退出，已完成内容会保留");
+});
+
 test("model failure preserves progress and exposes continuation", () => {
   const view = kgBuildPresentation(
     job("failed", "finished", {
