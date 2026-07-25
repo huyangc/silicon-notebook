@@ -218,7 +218,8 @@ PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb
 
 报告分三节:①对象类型构成(全量,走索引);②内容分析(默认随机抽 `--sources` 个来源,
 报告里会写明是抽样还是全量);③连通性与边标注(对节点子样本,含 relink 补边占比)。
-`--no-samples` 只出数字,一个概念名/命题/公式原文都不打印。
+`--no-samples` 只出数字:概念名/命题/公式原文、笔记本名称、以及自定义 `object_type`
+(knowhow 投影用的是**用户列名**)一律不打印。
 
 要点:
 
@@ -238,9 +239,11 @@ PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb
 - **抽样绝不静默**:每一节都标注口径;DF(文档频次)在抽样下被系统性低估,报告里有明说。
   `--sources` / `--degree-sample` 拒绝负数(手滑写成 `-1` 会被当成「全量」而在大库上
   静默全扫),在打开库之前就报错。
-- **不挂来源的对象**(晋升 / Memory→KG 写路径刻意写 `source_id=''`)按来源抽不到:抽样
-  模式会报出它们的数量并说明未纳入,`--sources 0` 才会读进来。晋升为主的 base 库尤其
-  要注意这一段,否则会出现「构成几十万行、内容分析近乎空」而看不出原因。
+- **全量是真全量**:`--sources 0` 按 notebook 直查、不经 `sources` 表,所以挂来源的、
+  不挂来源的(晋升 / Memory→KG 刻意写 `source_id=''`)、以及 `source_id` 指向已删来源的
+  孤儿对象(该列无外键约束)一并覆盖。抽样模式走 `sources` 表,后两类抽不到 —— 报告会
+  报出它们的数量并说明未纳入。晋升为主的 base 库尤其要看这一段,否则会出现「构成几十
+  万行、内容分析近乎空」而看不出原因。
 - **边的出处只认标注**:只有 relink 会写 `basis`;没有 `basis` 的边归「未标注」,因为
   knowhow 投影写的 `about` 边也是 `evidence='[]'`,与 LLM 抽取的边不可区分 —— 不替它
   们认领出处。

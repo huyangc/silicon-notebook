@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -378,7 +379,7 @@ def test_object_loading_is_bounded_independently_of_source_count(tmp_path, capsy
     out = capsys.readouterr().out
     assert "读到 10 个对象" in out, "对象上限没有生效"
     assert "已达 --max-objects=10 上限" in out, "截断必须显式报出,不能静默"
-    assert "完整读完 0/2 个来源" in out, "必须说清截断时完整读完了多少来源"
+    assert "前 10 个" in out, "必须说清截断后实际读到了多少"
 
     # 上限足够大时不应报截断，免得断言因「永远截断」而假绿
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
@@ -407,14 +408,19 @@ def test_object_cap_also_bounds_sourceless_objects(tmp_path, capsys):
         concepts_per_source=lambda s: [f"concept alpha {s}"],
         claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
     )
-    # 一个来源贡献 2 个对象；上限 5 → 不挂来源的那批最多再读 3 个
+    # 一个来源贡献 2 个对象 + 50 个不挂来源的。上限 5 是**总**预算：
+    # 若不挂来源的那批另拿一份预算，总数会变成 2+5=7 而不是 5。
     assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
                        "--max-objects", "5", "--no-samples"]) == 0
     out = capsys.readouterr().out
-    assert "读到 2 个挂来源的对象 + 3 个不挂来源的对象 = 5" in out, \
-        "不挂来源的对象必须共享同一份预算,不能各拿一份"
+    assert "读到 5 个对象" in out, "不挂来源的对象必须共享同一份预算,不能各拿一份"
     assert "已达 --max-objects=5 上限" in out
-    assert "不挂来源的对象读了 3/50" in out, "必须说清这批读了多少、总共多少"
+    assert "不挂来源的对象: 50" in out, "这批的总量仍要报出来"
+
+    # 不封顶时应读满 52，证明上面的 5 是被上限挡下的、不是压根没读到
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--max-objects", "0", "--no-samples"]) == 0
+    assert "读到 52 个对象" in capsys.readouterr().out
 
 
 def test_edges_to_unusable_endpoints_do_not_count_as_connectivity(tmp_path, capsys):
@@ -447,7 +453,78 @@ def test_edges_to_unusable_endpoints_do_not_count_as_connectivity(tmp_path, caps
                        "--no-samples"]) == 0
     out = capsys.readouterr().out
     assert "relink:shared-element" not in out, "指向 deprecated 对端的边不得计入连通性"
-    assert "concept         1 / 1" in out, "只连着 deprecated 节点的节点应报为零度"
+    # 列宽不参与断言:只要求 concept 那行报出 1/1 全零度
+    assert re.search(r"concept\s+1 / 1\b", out), \
+        "只连着 deprecated 节点的节点应报为零度"
+
+
+def test_custom_object_types_are_redacted_in_no_samples_mode(tmp_path, capsys):
+    """knowhow 投影拿**用户列名**当 object_type,专有表头不能从「只出数字」的报告漏出。
+
+    第 6 轮 codex 评审(P2)。内置四类是产品固定词汇,不算内容,照常显示。
+    """
+    audit = load_audit()
+    db = tmp_path / "custom.db"
+    heading = "客户专有列名"
+    _build_db(
+        db, sources=1,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO knowledge_objects "
+        "(id,notebook_id,object_type,source_id,payload,evidence) "
+        "VALUES ('kh','nb-1',?,'src-0',?,'[]')",
+        (heading, json.dumps({"name": "row value"})),
+    )
+    conn.commit()
+    conn.close()
+
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0",
+                       "--no-samples"]) == 0
+    quiet = capsys.readouterr().out
+    assert heading not in quiet, "--no-samples 下仍打印了自定义类型(用户表头)"
+    assert "<自定义类型 #1>" in quiet, "脱敏后仍要能看出有几种自定义类型"
+    assert "concept" in quiet, "内置类型不该被一起脱敏"
+    # 反向:默认口径下照常显示,免得断言因「压根没渲染」而假绿
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0"]) == 0
+    assert heading in capsys.readouterr().out
+
+
+def test_full_mode_covers_objects_whose_source_row_is_gone(tmp_path, capsys):
+    """source_id 无外键约束:指向已删来源的对象不能在「全量」里被静默漏掉。
+
+    第 6 轮 codex 评审(P2)。全量改为按 notebook 直查,不经 sources 表。
+    """
+    audit = load_audit()
+    db = tmp_path / "orphan.db"
+    # 3 个来源，这样下面的 --sources 1 才真的是抽样而不是退化成全量
+    _build_db(
+        db, sources=3,
+        concepts_per_source=lambda s: [f"concept alpha {s}"],
+        claim_name=lambda s: f"Transistor {s} provides gain in saturation region.",
+    )
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO knowledge_objects "
+        "(id,notebook_id,object_type,source_id,payload,evidence) "
+        "VALUES ('orphan','nb-1','concept','src-deleted',?,'[]')",
+        (json.dumps({"name": "ORPHANEDCONCEPT"}),),
+    )
+    conn.commit()
+    conn.close()
+
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "0"]) == 0
+    full = capsys.readouterr().out
+    assert "孤儿来源引用: 1" in full, "孤儿引用的数量必须报出"
+    assert "ORPHANEDCONCEPT" in full, "全量模式必须真的读到它,不能只报数不覆盖"
+    assert "读到 7 个对象" in full, "3 来源 × (1 概念 + 1 命题) + 1 个孤儿"
+
+    # 抽样模式抽不到它,必须明说
+    assert audit.main(["--db", str(db), "--notebook", "nb-1", "--sources", "1",
+                       "--no-samples"]) == 0
+    assert "未纳入下面的分析" in capsys.readouterr().out
 
 
 def test_missing_tables_fail_loudly_instead_of_skipping(tmp_path):

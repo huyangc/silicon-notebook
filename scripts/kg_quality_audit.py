@@ -229,6 +229,44 @@ def _drain_into(cursor, out: List[dict], budget: int) -> bool:
     return False
 
 
+def count_orphan_source_refs(conn: sqlite3.Connection, notebook_id: str) -> int:
+    """source_id 非空、却在 sources 表里找不到对应行的对象数。
+
+    `knowledge_objects.source_id` 没有外键约束(schema 里只是
+    `source_id TEXT NOT NULL DEFAULT ''`),历史清理/部分删除都可能留下这种孤儿引用。
+    按来源逐个查天然看不见它们 —— 不报出来,一次「全量」审计会悄悄漏掉一批有效对象。
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM knowledge_objects o "
+        "WHERE o.notebook_id = ? AND o.source_id != '' AND o.source_id IS NOT NULL "
+        f"AND o.status IN ({_USABLE_PLACEHOLDERS}) "
+        "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id = o.source_id)",
+        (notebook_id, *USABLE_STATUSES),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def load_all_usable_objects(
+    conn: sqlite3.Connection, notebook_id: str, out: List[dict], budget: int
+) -> bool:
+    """全量模式:一条查询覆盖该 notebook 下**全部**有效对象。
+
+    刻意不复用按来源逐个查的路径 —— 那条路只能看见 `sources` 表里还存在的 id,
+    孤儿 source_id 的对象会被静默漏掉,而报告却写着「全量」。这里按 notebook_id
+    直接查,挂来源的、不挂来源的、孤儿引用的一并覆盖,「全量」才名副其实。
+    """
+    return _drain_into(
+        conn.execute(
+            "SELECT id, object_type, source_id, payload, evidence "
+            "FROM knowledge_objects "
+            f"WHERE notebook_id = ? AND status IN ({_USABLE_PLACEHOLDERS})",
+            (notebook_id, *USABLE_STATUSES),
+        ),
+        out,
+        budget,
+    )
+
+
 def load_sourceless_objects(
     conn: sqlite3.Connection, notebook_id: str, out: List[dict], budget: int
 ) -> bool:
@@ -511,7 +549,7 @@ def report_formulas_procedures(items: List[dict], show_samples: bool) -> None:
 
 
 def report_degree(deg: Dict[str, int], basis: Counter, items_by_id: Dict[str, dict],
-                  sampled: int, pool: int) -> None:
+                  sampled: int, pool: int, show_samples: bool) -> None:
     _bar(f"[连通性] 度数子样本 {sampled} / 抽样节点 {pool}")
     if not deg:
         print("  (没有可查的节点)")
@@ -524,8 +562,15 @@ def report_degree(deg: Dict[str, int], basis: Counter, items_by_id: Dict[str, di
         if d == 0:
             by_type_zero[otype] += 1
     print("  零度(无任何关系)占比:")
+    # 同第一节:自定义 object_type 是用户表头,--no-samples 下按序号脱敏。
+    custom_seen = 0
     for otype in sorted(by_type_total):
-        print(f"    {otype:<10} {by_type_zero[otype]:6d} / {by_type_total[otype]:<6d}"
+        if otype in KG_TYPES or show_samples:
+            shown = otype
+        else:
+            custom_seen += 1
+            shown = f"<自定义类型 #{custom_seen}>"
+        print(f"    {shown:<20} {by_type_zero[otype]:6d} / {by_type_total[otype]:<6d}"
               f"  {_pct(by_type_zero[otype], by_type_total[otype])}")
     total_edges = sum(basis.values())
     if total_edges:
@@ -631,9 +676,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         print(f"  口径:与产品一致 —— 只算 status ∈ {list(USABLE_STATUSES)} 的对象,")
         print("       连通性只算 review_status != 'rejected' 的边。")
+        # 自定义 object_type 是 knowhow 投影用的**用户列名**(专有表头),在
+        # --no-samples 下必须脱敏 —— 否则「只出数字」的报告照样泄漏业务词汇。
+        # 内置四类是产品固定词汇,不是内容,照常显示。
+        custom_seen = 0
         for otype, n in comp:
-            mark = "" if otype in KG_TYPES else "   (自定义类型)"
-            print(f"  {otype:<16} {n:>12,}  {_pct(n, grand)}{mark}")
+            builtin = otype in KG_TYPES
+            if builtin:
+                shown, mark = otype, ""
+            elif show_samples:
+                shown, mark = otype, "   (自定义类型)"
+            else:
+                custom_seen += 1
+                shown, mark = f"<自定义类型 #{custom_seen}>", "   (名称已脱敏)"
+            print(f"  {shown:<20} {n:>12,}  {_pct(n, grand)}{mark}")
         print(f"  {'合计':<16} {grand:>12,}")
         if n_excluded:
             print(f"  另有 {n_excluded:,} 个对象因状态不在有效集内被排除"
@@ -662,6 +718,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stderr.write("  正在清点不挂来源的对象...\n")
         sys.stderr.flush()
         n_sourceless = count_sourceless(conn, target)
+        n_orphan = count_orphan_source_refs(conn, target)
         if n_sourceless:
             print(f"  不挂来源的对象: {n_sourceless:,} 个 ({_pct(n_sourceless, grand)} 的全库)"
                   " —— 来自晋升 / Memory→KG 写路径")
@@ -670,32 +727,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             else:
                 print("    ⚠ 抽样模式按来源抽样,这部分一个都抽不到,未纳入下面的分析。")
                 print("      要覆盖它们:重跑并加 --sources 0。")
+        if n_orphan:
+            print(f"  孤儿来源引用: {n_orphan:,} 个对象的 source_id 在 sources 表里"
+                  "已不存在(历史清理残留)")
+            if full:
+                print("    全量模式:已纳入(全量按 notebook 直查,不经 sources 表)。")
+            else:
+                print("    ⚠ 抽样模式按 sources 表抽样,这部分抽不到,未纳入下面的分析。")
 
-        sys.stderr.write(f"  正在读取 {len(source_ids)} 个来源的对象...\n")
-        sys.stderr.flush()
-        items, covered, capped = load_objects(
-            conn, target, source_ids, args.max_objects)
-        n_sourced = len(items)
-        sourceless_read = 0
-        if full and n_sourceless and not capped:
-            # 追加进同一个 items:预算是这次审计的总行数,不是每条路径各来一份。
-            capped = load_sourceless_objects(
+        if full:
+            # 全量按 notebook_id 直查:挂来源的、不挂来源的、孤儿引用的一并覆盖。
+            # 绕开 sources 表,「全量」才名副其实(见 load_all_usable_objects)。
+            sys.stderr.write("  正在读取该 notebook 的全部有效对象...\n")
+            sys.stderr.flush()
+            items: List[dict] = []
+            capped = load_all_usable_objects(
                 conn, target, items, args.max_objects)
-            sourceless_read = len(items) - n_sourced
-            print(f"  读到 {n_sourced:,} 个挂来源的对象 + "
-                  f"{sourceless_read:,} 个不挂来源的对象 = {len(items):,}")
+            covered = None
         else:
-            print(f"  读到 {len(items):,} 个对象")
+            sys.stderr.write(f"  正在读取 {len(source_ids)} 个来源的对象...\n")
+            sys.stderr.flush()
+            items, covered, capped = load_objects(
+                conn, target, source_ids, args.max_objects)
+        print(f"  读到 {len(items):,} 个对象")
         if capped:
             # 绝不静默截断:上限一旦生效,「全量」就不再是全量,必须当场说清楚。
             print(f"  ⚠ 已达 --max-objects={args.max_objects:,} 上限,读取在此停止:")
-            missed_sourceless = (
-                n_sourceless and full and sourceless_read < n_sourceless
-            )
-            print(f"    完整读完 {covered}/{len(source_ids)} 个来源"
-                  + (f",不挂来源的对象读了 {sourceless_read:,}/{n_sourceless:,}"
-                     if missed_sourceless else "")
-                  + ",下面的比例只代表这一部分。")
+            if covered is None:
+                print(f"    只读到全部 {grand:,} 个有效对象里的前 {len(items):,} 个,"
+                      "下面的比例只代表这一部分。")
+            else:
+                print(f"    完整读完 {covered}/{len(source_ids)} 个来源,"
+                      "下面的比例只代表这一部分。")
             print("    要读更多:调大 --max-objects(注意内存),或用 --sources 缩小范围"
                   "后分批看。")
         by_type: Dict[str, List[dict]] = defaultdict(list)
@@ -724,7 +787,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sys.stderr.flush()
         deg, basis = degree_and_basis(conn, target, picked)
         report_degree(deg, basis, {it["id"]: it for it in items},
-                      len(picked), len(pool))
+                      len(picked), len(pool), show_samples)
 
         _bar("怎么读这份报告")
         print("  1) 先看第一节的类型构成 —— 它解释「一千万节点」的量级从哪来。")

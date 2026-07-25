@@ -1153,6 +1153,14 @@
       "kind": "independent_sql",
       "path": "scripts/kg_quality_audit.py",
       "reason": "read-only host database diagnostic",
+      "scope": "<module>.count_orphan_source_refs",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
       "scope": "<module>.count_sourceless",
       "target": "conn.execute"
     },
@@ -1170,6 +1178,14 @@
       "path": "scripts/kg_quality_audit.py",
       "reason": "read-only host database diagnostic",
       "scope": "<module>.list_notebooks",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/kg_quality_audit.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.load_all_usable_objects",
       "target": "conn.execute"
     },
     {
