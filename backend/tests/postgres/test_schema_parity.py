@@ -1288,7 +1288,10 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             worker.join(timeout=20)
         assert not any(worker.is_alive() for worker in workers)
         assert failures == []
-        assert sorted(versions) == [9, 9]
+        assert sorted(versions) == [
+            POSTGRES_SCHEMA_MANIFEST.postgres_version,
+            POSTGRES_SCHEMA_MANIFEST.postgres_version,
+        ]
 
         with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
             extension_schema = conn.execute(
