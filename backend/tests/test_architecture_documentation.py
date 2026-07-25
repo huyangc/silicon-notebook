@@ -377,43 +377,52 @@ def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own
     ):
         text = _read_file(name)
         assert sizing in text, f"{name} must state the 2x work-directory rule"
-        # The write-free window closes at the first PostgreSQL start, not at
-        # login: startup settles leftover in-progress rows before readiness
-        # (codex review round 9 P1). Both writers must stay documented, because
-        # naming only the later one overstates how long rollback is provably
-        # lossless.
-        assert "_recover_interrupted_jobs" in text, (
-            f"{name} must say starting the backend already writes PostgreSQL "
-            "when the data contains in-progress rows"
-        )
+        # Startup writers are pinned by
+        # test_startup_writes_are_documented_as_unavoidable; here we only keep
+        # the login boundary, which closes the last cheap-rollback window.
         assert "auth_sessions" in text, (
             f"{name} must say login writes PostgreSQL too, so rolling back "
             "after it costs the sessions"
         )
 
 
-def test_zero_write_probe_covers_every_table_startup_recovery_mutates():
-    """The runbook tells operators a zero result proves PostgreSQL is untouched.
+def test_startup_writes_are_documented_as_unavoidable():
+    """There is no "started but provably untouched" PostgreSQL state.
 
-    That claim is only true while the probe enumerates every table
-    `recover_interrupted_jobs()` writes on startup — it silently became false
-    once by omitting `extraction_runs`, `kg_build_jobs`, and the two KG scratch
-    tables it unconditionally deletes from (codex review round 10 P2). Derive
-    the set from the adapter so adding a table there forces the probe to follow.
+    An earlier revision shipped a probe that counted in-progress rows and told
+    operators a zero result proved no startup writes. That premise was simply
+    false: `_initialize()` re-salts the admin password hash and updates the
+    built-in row on *every* start (codex review round 11 P2), so the probe was
+    guarding a property that cannot hold. It was removed rather than extended.
+    What remains worth pinning is that all three startup writers stay named,
+    including the post-readiness reprojection that rewrites KG objects — the
+    one that is business data rather than harmless bookkeeping.
     """
-    adapter = _read_file("backend/app/repositories/postgres/maintenance.py")
-    body = adapter.split("def recover_interrupted_jobs", 1)[1].split("\n    def ", 1)[0]
-    mutated = set(re.findall(r"(?:UPDATE|DELETE FROM)\s+([a-z_]+)", body))
-    assert mutated, "could not read the startup recovery statements"
-    runbook = _read_file("docs/postgres-migration-runbook.md")
-    anchor = "SELECT (SELECT COUNT(*)"
-    assert anchor in runbook, "the zero-write probe query is missing"
-    probe = runbook.split(anchor, 1)[1].split("```", 1)[0]
-    missing = sorted(table for table in mutated if table not in probe)
-    assert not missing, (
-        "the runbook's zero-write probe omits tables that startup recovery "
-        f"mutates: {missing}"
+    bootstrap = _read_file("backend/app/repositories/postgres/bundle.py")
+    assert "WHERE id='user-local'" in bootstrap, (
+        "the unconditional admin bootstrap update moved; re-check the "
+        "rollback boundary the docs describe"
     )
+    warmup = _read_file("backend/app/services/startup_warmup.py")
+    assert "_reproject_legacy_knowhow_tables" in warmup
+
+    runbook = _read_file("docs/postgres-migration-runbook.md")
+    assert "SELECT (SELECT COUNT(*)" not in runbook, (
+        "the zero-write probe is back; no probe can establish that claim while "
+        "bootstrap writes unconditionally"
+    )
+    for name in (
+        "docs/postgres-migration-runbook.md",
+        "docs/operations.md",
+        "docs/operations_zh.md",
+    ):
+        text = _read_file(name)
+        for writer in (
+            "user-local",
+            "recover_interrupted_jobs",
+            "_reproject_legacy_knowhow_tables",
+        ):
+            assert writer in text, f"{name} does not name startup writer {writer}"
 
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():

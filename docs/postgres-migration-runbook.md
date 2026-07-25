@@ -160,30 +160,21 @@ python scripts/migrate_sqlite_to_postgres.py \
 
    成功打印 `ACTIVATION OK: ...`。CLI 只改 `DATABASE_URL`,把原 SQLite URL 存为惰性的
    `SHADOW_DATABASE_URL`(不参与选择、不同步),**不启停任何进程**。
-   > ⚠️ **「PostgreSQL 上一个字都没写过」的窗口到这一步为止。** 后端启动会在
-   > readiness **之前**无条件跑一次中断恢复(`_recover_interrupted_jobs`,
-   > `startup_warmup.py`):把上次遗留的 `ask_jobs`/`merge_review_jobs` running 行、
-   > `knowhow_rows` 的 syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态。
-   > 库里只要有这类中间态行,**一启动就写 PostgreSQL**。要停在可证明零写入的状态,
-   > 必须在启动之前决定。想确认自己库里有没有,停写后在源库上查:
+   > ⚠️ **「PostgreSQL 上一个字都没写过」的窗口到这一步为止,而且不取决于你的数据。**
+   > 启动 PostgreSQL 后端**必然**产生写入,至少三类:
    >
-   > ```bash
-   > sqlite3 <SQLITE_DB> "SELECT (SELECT COUNT(*) FROM ask_jobs WHERE status='running')
-   >   + (SELECT COUNT(*) FROM merge_review_jobs WHERE status='running')
-   >   + (SELECT COUNT(*) FROM knowhow_rows WHERE projection_status IN ('syncing','pending'))
-   >   + (SELECT COUNT(*) FROM sources WHERE parse_status IN ('extracting','queued','parsing'))
-   >   + (SELECT COUNT(*) FROM extraction_runs WHERE run_type='kg' AND status='running')
-   >   + (SELECT COUNT(*) FROM kg_build_jobs WHERE status='running')
-   >   + (SELECT COUNT(*) FROM kg_cluster_scratch)
-   >   + (SELECT COUNT(*) FROM kg_canonical_scratch);"
-   > ```
+   > 1. **bootstrap 无条件改写内置 admin 行**——`_initialize()`
+   >    (`postgres/bundle.py`)每次启动都用**新盐**重算密码哈希并
+   >    `UPDATE users SET ... WHERE id='user-local'`。与数据内容无关,必然发生。
+   > 2. **中断恢复**(`PostgresMaintenanceAdapter.recover_interrupted_jobs()`,
+   >    readiness 之前):把遗留的 `ask_jobs`/`merge_review_jobs`/`extraction_runs`/
+   >    `kg_build_jobs` running 行、`knowhow_rows` 的 syncing/pending、`sources` 的
+   >    extracting/queued/parsing 收敛到终态,并清空两张 KG scratch 表。库里有这类行时发生。
+   > 3. **遗留 knowhow 表自动重投影**(`_reproject_legacy_knowhow_tables`,readiness
+   >    **之后**):对仍带旧版固定 KO 的 knowhow 表调度后台 cell 级重投影,**会替换 KG 对象**
+   >    ——这已经是业务数据变更,且无人触发。库里有这类表时发生。
    >
-   > 这八项与 `PostgresMaintenanceAdapter.recover_interrupted_jobs()` 逐条对应
-   > (`backend/app/repositories/postgres/maintenance.py`)——两张 scratch 表是**无条件
-   > DELETE**,有行就是写。少查一项,"零写入"的结论就是假的。
-   >
-   > 结果为 0 就没有启动写入;非 0 则启动即写。这类写入是恢复性的(把中间态收敛到终态),
-   > 回滚到 SQLite 没有实质损失——SQLite 端启动时会做同样的事——但"零写入"的说法不再成立。
+   > 所以不存在「启动了但可证明没写过」的状态。要停在真正零写入,只能在**启动之前**决定。
 
 5. **重启后端**(人执行),保持 `--workers 1`。
 
@@ -198,7 +189,9 @@ curl -fsS http://127.0.0.1:8000/api/ready
    (`/auth/login` → `create_session()` → 插入 `auth_sessions`);此后回滚会丢掉这些会话
    (代价只是重新登录,不涉及业务数据)。
 3. 笔记本/来源数量与 receipt 对得上。
-4. 抽查检索、Ask、知识、Memory、Knowhow、报告的代表性读取。
+4. 抽查检索、Ask、知识、Memory、Knowhow、报告的代表性读取。若后端日志出现
+   `scheduled cell-model reprojection`,说明库里有遗留 knowhow 表、启动已自动改写它们的
+   KG 对象;等这些后台作业结束再继续,别在重投影进行中评估检索结果。
 5. 确认引用到的文件能打开(见下「迁移不覆盖什么」)。
 6. 做**一次**明确批准的金丝雀写入,并确认其后台任务跑完。**这是第一笔真正的业务数据
    写入**,过了它回滚就会丢业务数据。
@@ -213,8 +206,8 @@ curl -fsS http://127.0.0.1:8000/api/ready
 | 时点 | 回滚代价 |
 | --- | --- |
 | 激活之后、**启动 PostgreSQL 后端之前** | 真正的零写入。要「可证明没动过 PostgreSQL」只有这一段 |
-| 启动之后、登录之前 | 库里有中间态行的话,启动已跑过中断恢复。无实质损失(SQLite 端启动会做同样的收敛),但不再是零写入 |
-| 登录之后、金丝雀写入之前 | 再丢掉 `auth_sessions` 里的会话,用户重新登录即可。业务数据仍无损 |
+| 启动之后、登录之前 | 必然已有 bootstrap 写入(admin 行重新加盐);库里有中间态行则还有恢复性收敛。这些回滚到 SQLite 无实质损失(SQLite 端启动做同样的事),但「零写入」不再成立。**若库里有遗留 knowhow 表,readiness 后的自动重投影会替换 KG 对象——那已经是业务数据变更**,回滚就会丢掉它 |
+| 登录之后、金丝雀写入之前 | 再丢掉 `auth_sessions` 里的会话,用户重新登录即可 |
 | **金丝雀写入或放流量之后** | 丢掉那些业务写入。本仓库**没有**反向导入器,也没有双写日志。此时 PostgreSQL 就是回滚边界 |
 
 ## 迁移不覆盖什么

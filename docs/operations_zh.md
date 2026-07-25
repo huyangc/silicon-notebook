@@ -240,14 +240,16 @@ python scripts/migrate_sqlite_to_postgres.py \
 
 - PostgreSQL 尚未接受任何业务写入时，可以停后端、把 `DATABASE_URL` 恢复成 SQLite、以单 worker
   启动并重复 readiness/认证/数量/读取 smoke。
-- 注意这条边界的实际位置。**启动后端本身就可能是写入**：迁移过来的数据里若有中间态行，
-  启动会在 readiness 之前跑 `_recover_interrupted_jobs()`（`startup_warmup.py`），把遗留的
-  `ask_jobs`/`merge_review_jobs` running 行、`knowhow_rows` 的 syncing/pending、`sources` 的
-  extracting/queued/parsing 收敛到终态。所以**「可证明零写入」的回滚必须在第一次启动
-  PostgreSQL 之前决定**；想知道自己库里有没有这类行，可在停写后的源库上直接统计。这类恢复性
-  更新回滚起来没有实质损失（SQLite 端启动会做同样的收敛），但「一个字没动过」的说法不再成立。
+- 注意这条边界的实际位置。**启动后端必然写入**，与数据内容无关：`_initialize()`
+  （`postgres/bundle.py`）每次启动都用新盐重算 admin 密码哈希，并无条件 `UPDATE` 内置的
+  `user-local` 行。另有两类取决于数据：`recover_interrupted_jobs()` 在 readiness 之前把遗留的
+  `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs` running 行、`knowhow_rows` 的
+  syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态并清空两张 KG scratch 表；
+  `_reproject_legacy_knowhow_tables()` 在 `mark_ready()` **之后**运行，对仍带旧版固定 KO 的
+  knowhow 表调度后台 cell 级重投影，**会替换 KG 对象**。所以**「可证明零写入」的回滚必须在
+  第一次启动 PostgreSQL 之前决定**——不存在「已启动但没动过」的状态。bootstrap 与恢复性写入
+  回滚无实质损失（SQLite 端启动做同样的事），但遗留 knowhow 重投影属于业务数据变更。
   再往后，登录成功会经 `create_session()` 写 `auth_sessions`，此后回滚丢的是会话（重新登录即可）。
-  只有金丝雀写入与正式流量才会让业务数据处于风险中。
 - 第一次 PG 业务写入之后，直接改 URL 会丢这次及后续写入。仓库没有 reverse importer 或
   dual-write log；必须再次停写，在外部完成 PostgreSQL→SQLite 对账（包括 storage 副作用），
   验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。

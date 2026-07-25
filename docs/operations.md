@@ -297,16 +297,19 @@ For a large source, throughput and reliability are dominated by a few levers:
 
 - Before PostgreSQL accepts any business write, rollback is safe: stop the backend, restore
   the SQLite `DATABASE_URL`, start one worker, and repeat the readiness/auth/count/read smoke.
-- Note where that boundary actually falls. **Starting the backend is already a write** when the
-  migrated data contains in-progress rows: startup runs `_recover_interrupted_jobs()` before
-  readiness (`startup_warmup.py`), settling leftover `ask_jobs`/`merge_review_jobs` running rows,
-  `knowhow_rows` in `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing`. A
-  provably write-free rollback therefore has to be decided *before* the first PostgreSQL start;
-  count those rows in the frozen source if you need to know whether your database has any. Those
-  recovery updates cost nothing to roll back — a SQLite start performs the same settling — but
-  the "untouched" claim no longer holds. Next, a successful `/auth/login` writes `auth_sessions`
-  via `create_session()`, so rolling back after login costs the sessions and users log in again.
-  Only the canary write and real traffic put business data at risk.
+- Note where that boundary actually falls. **Starting the backend always writes**, regardless of
+  what the data contains: `_initialize()` (`postgres/bundle.py`) re-hashes the configured admin
+  password with a fresh salt and unconditionally updates the built-in `user-local` row on every
+  start. Two further writes are data-dependent: `recover_interrupted_jobs()` settles leftover
+  running `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs`, `knowhow_rows` in
+  `syncing`/`pending`, and `sources` in `extracting`/`queued`/`parsing` before readiness, and
+  clears both KG scratch tables; and `_reproject_legacy_knowhow_tables()` runs *after*
+  `mark_ready()`, scheduling background cell-level reprojection that replaces KG objects for any
+  knowhow table still carrying the older fixed KOs. A provably write-free rollback therefore has
+  to be decided *before* the first PostgreSQL start — there is no "started but untouched" state.
+  The bootstrap and recovery writes cost nothing to roll back (a SQLite start does the same),
+  but the legacy reprojection is a business-data change. After that, `/auth/login` writes
+  `auth_sessions` via `create_session()`, so rolling back past login costs the sessions.
 - After the first PostgreSQL business write, editing the URL back loses that write. This
   repository has no reverse importer or dual-write log. Freeze again, externally reconcile
   PostgreSQL→SQLite (including storage effects), verify both sides, and only then reopen
