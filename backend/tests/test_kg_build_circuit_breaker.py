@@ -638,6 +638,37 @@ def test_interrupt_while_still_submitting_drains_what_was_submitted(
     assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
 
 
+@pytest.mark.parametrize("mode", ["incremental", "rebuild"])
+def test_interrupt_between_job_creation_and_run_still_settles(
+    repo, monkeypatch, mode
+):
+    """行已建、但 _run_notebook_kg_job 还没进到自己的保护区之间也有窗口(事件落盘、
+    待办推送、一次 DB 读)。信号落在这里时若没人收尾,行就永久留在 running,该 notebook
+    之后的分析全被挡死——正是本改动要消灭的状态(评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(
+        lifecycle, "_run_notebook_kg_job",
+        lambda *a, **k: (_ for _ in ()).throw(
+            KeyboardInterrupt("ctrl-c right after the row was created")
+        ),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        if mode == "incremental":
+            repo.build_notebook_kg(notebook.id)
+        else:
+            repo.rebuild_notebook_kg(notebook.id)
+
+    saved = repo._runtime.kg_build_jobs.latest(notebook.id)
+    assert saved is not None
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    # 真正的回归点:守卫已释放,同一 notebook 能再次发起分析。
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
 def test_repeated_interrupt_cannot_skip_the_drain(repo, monkeypatch):
     """排空那次等待可能长到一次模型超时,运维会「再按一次 Ctrl-C」。第二个信号若能
     逃出去,外层就会在 future 未排空时落终态、放开跨进程守卫(评审 P1)。"""
@@ -671,6 +702,34 @@ def test_repeated_interrupt_cannot_skip_the_drain(repo, monkeypatch):
     )
     assert waits["n"] >= 2, "排空等待没有被重试"
     assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
+
+
+def test_repeated_interrupt_during_settlement_still_settles(repo, monkeypatch):
+    """第二个信号也可能落在**落终态**这一段(公布 stopping / finish)。若它逃出去,行就
+    永久留在 running,该 notebook 之后的分析全被挡死(评审 P1:整段收尾都要顶住)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    _interrupt_during_extraction(repo, monkeypatch)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    real_finish = repo._runtime.kg_build_jobs.finish
+    calls = {"n": 0}
+
+    def _finish(job_id, status, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:  # 模拟落终态期间第二次 Ctrl-C
+            raise KeyboardInterrupt("second ctrl-c while settling")
+        return real_finish(job_id, status, **kwargs)
+
+    monkeypatch.setattr(repo._runtime.kg_build_jobs, "finish", _finish)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    # 效果断言:那行真的落到了终态(而不是「finish 被调了几次」这种代理指标)。
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed", "重复中断把行留在了 running"
+    assert saved["error_code"] == "worker_interrupted"
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
 
 
 def test_failed_stopping_publication_never_retries_as_a_circuit_event(
