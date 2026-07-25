@@ -142,7 +142,9 @@ This section is the authority on *why* the migration behaves as it does and what
 do. For a step-by-step execution checklist — phases, per-step success criteria, the points that
 require a human decision, and the failures that are meant to stay failures — follow
 [docs/postgres-migration-runbook.md](postgres-migration-runbook.md), which defers to this
-section wherever the two disagree.
+section wherever the two disagree. That runbook is written in Chinese, matching the other
+runbooks under `docs/`; this section stays the complete English reference, so nothing here is
+only available there.
 
 ### 1. Prepare an empty target and preview
 

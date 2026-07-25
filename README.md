@@ -143,7 +143,7 @@ The application never dual-writes. `SHADOW_DATABASE_URL` is reserved and cannot 
 - Returning to SQLite cannot replay PostgreSQL-only writes. Lossless rollback therefore requires no post-cutover writes or an externally reconciled and verified migration in both directions.
 - `scripts/batch_ingest.py` mutation phases are SQLite-only; on PostgreSQL use the normal application/API ingestion and KG/index flows. For SQLite libraries with historical partial KG runs, `kg --retry-partial` retains each source's current graph until a non-empty, zero-failed-window replacement commits.
 
-Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback); the step-by-step execution checklist is the [migration runbook](./docs/postgres-migration-runbook.md). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
+Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback); the step-by-step execution checklist is the [migration runbook](./docs/postgres-migration-runbook.md) (Chinese, like the other runbooks in `docs/`; this English section remains the complete reference). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
 

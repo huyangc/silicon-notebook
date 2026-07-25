@@ -341,6 +341,34 @@ def test_root_readmes_are_entrypoints_for_complete_language_doc_bundles():
             assert (ROOT / detail_path).is_file()
 
 
+def test_migration_runbook_is_reachable_from_both_languages_and_declares_its_own():
+    """The cutover runbook follows the single-Chinese-file runbook precedent
+    (docs/runtime-dim-truncation-runbook.md) rather than the paired bundles in
+    DOCUMENTATION_BUNDLES, which enumerate the five narrative documents only.
+
+    codex review round 7 read that as breaking the bilingual contract. It does
+    not — but the concern underneath is real: an English reader must never be
+    silently handed a Chinese-only page, and must never lose access to any
+    instruction. So pin both properties instead of duplicating the runbook into
+    two files that would drift apart, which is exactly what the runbook's own
+    "not a second source of truth" rule exists to prevent.
+    """
+    runbook = "docs/postgres-migration-runbook.md"
+    assert (ROOT / runbook).is_file()
+    assert runbook not in {
+        path for bundle in DOCUMENTATION_BUNDLES.values() for path in bundle
+    }
+    for entry in ("docs/operations.md", "docs/operations_zh.md"):
+        assert "postgres-migration-runbook.md" in _read_file(entry), (
+            f"{entry} must link the execution runbook"
+        )
+    english = _read_file("docs/operations.md")
+    assert "written in Chinese" in english and "complete English reference" in english, (
+        "the English entry point must declare the runbook's language and that "
+        "no instruction is available only there"
+    )
+
+
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
     """Documentation records stable ownership, not source layout or totals."""
     _assert_phrases(
