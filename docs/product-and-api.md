@@ -232,7 +232,8 @@ and a safe user-facing failure message; the frontend shows the same state after
 refresh and offers **继续分析未完成内容** after a failure.
 
 An interrupted task settles into that same failed state: a Ctrl-C or termination
-signal on an offline batch run stops in-flight windows cooperatively and records
+signal on an offline batch run stops in-flight windows cooperatively, drains them
+before the task settles (the guard is released with that row), and records
 `worker_interrupted`, so a killed run never leaves a notebook displaying an
 analysis that never finishes. Only an uncatchable end (SIGKILL, OOM kill, power
 loss) leaves the row in progress, and that case is settled by startup recovery.
