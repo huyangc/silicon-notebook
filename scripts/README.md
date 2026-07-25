@@ -194,9 +194,72 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 | `kg_product_smoke.py` | 用真实产品抽取链路对样例 source 冒烟 |
 | `kg_strip_attrs.py` | 一次性迁移:从 gold 草稿去掉 `attrs` |
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
+| `kg_quality_audit.py` | 审计现有库的 KG 抽取质量:类型构成 / 重名率 / 文档频次长尾 / 噪声探针 / 连通性(只读、零 LLM),见下 |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
 | `git-cleanup.sh` | 清理「PR 已合并」的本地分支 + worktree:默认 dry-run 预演,`--apply` 执行,`--remote` 连带删远程(保护 master / 当前分支 / `eval` / `backup/*`) |
+
+### `kg_quality_audit.py` —— 「库里的节点都是些什么」
+
+回答「这个库为什么有这么多节点、其中有多少是噪声」。只读、零 LLM、零写库,可以对
+生产库直接跑(服务在跑也没关系)。
+
+```bash
+# 不指定 notebook 时先列候选,并选来源最多的那个
+PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db .local/silicon_notebook.db
+
+# 指定库 + 加大抽样
+PYTHONPATH=backend python3 scripts/kg_quality_audit.py \
+  --db .local/silicon_notebook.db --notebook nb-xxxxxxxx --sources 200
+
+# 全量(千万级库很慢)
+PYTHONPATH=backend python3 scripts/kg_quality_audit.py --db <path> --notebook nb-xxxx --sources 0
+```
+
+报告分三节:①对象类型构成(全量,走索引);②内容分析(默认随机抽 `--sources` 个来源,
+报告里会写明是抽样还是全量);③连通性与边标注(对节点子样本,含 relink 补边占比)。
+`--no-samples` 只出数字:概念名/命题/公式原文、笔记本名称、以及自定义 `object_type`
+(knowhow 投影用的是**用户列名**)一律不打印。
+
+要点:
+
+- **判据直接 import 产品代码**(`app.services.kg.filters` / `app.eval.probes`),不重实现
+  —— 否则「现有过滤器拦下多少」会因口径漂移失真。所以必须带 `PYTHONPATH=backend`
+  并用后端解释器;缺了会直接报错退出,不会静默降级。
+- **只读的准确边界**:产品数据一个字节不动(`mode=ro` + `PRAGMA query_only`)。但 WAL 库
+  上 SQLite 仍可能创建/触碰 `-wal`/`-shm`(读最新快照的必需品);服务在跑时这两个文件
+  本就存在。它不是「一个文件都不碰」。
+- **口径与产品一致**:只统计 `USABLE_STATUSES` 内的对象、`review_status != 'rejected'`
+  且**两端都可用**的边 —— 合并/弃用的历史对象、被评审否掉的边、以及指向已合并对端的
+  边都不进产品图,算进来会让治理做得越多的库看起来质量越差。被排除的数量单独报出,
+  不凭空消失。
+- **内存闸是 `--max-objects`(默认 30 万),不是来源抽样**:来源数少于 `--sources` 时
+  一个都不会被抽掉,单个来源也可能自己就有几百万对象。触到上限会当场声明,绝不静默。
+- **触顶就会有偏,两种模式都一样**:截断留下的是库内顺序前缀而非随机样本;`--sources K`
+  只随机化了**来源**,截断仍必然落在某个来源中途(一个来源自己超过上限时尤其明显)。
+  两条路径触顶时都会打同一句偏差警告。让结论无偏的唯一办法是**别触顶**:调大
+  `--max-objects`,或用更小的 `--sources K` 让抽中的来源都能读完。刻意不做蓄水池 /
+  `ORDER BY RANDOM` —— 那要把全表 payload 扫一遍,在千万级目标库上是几十分钟到几小时,
+  会让「先抽样快速看一眼」这唯一的使用姿势不成立。取舍是**不消除偏差、但绝不隐瞒
+  偏差**,有反向护栏钉住那句声明必须出现。
+- **无名/坏 payload 的行照样进分母**:它们恰恰是要暴露的低质量行,单独报数而不是从
+  统计里悄悄剔掉。
+- **连通性只认本 notebook 的可用对端**:关系的端点列既无外键也无 notebook 归属约束,
+  跨库的野边不进产品图,也不计入这里的度数。
+- **抽样绝不静默**:每一节都标注口径;DF(文档频次)在抽样下被系统性低估,报告里有明说。
+  `--sources` / `--degree-sample` 拒绝负数(手滑写成 `-1` 会被当成「全量」而在大库上
+  静默全扫),在打开库之前就报错。
+- **全量是真全量**:`--sources 0` 按 notebook 直查、不经 `sources` 表,所以挂来源的、
+  不挂来源的(晋升 / Memory→KG 刻意写 `source_id=''`)、以及 `source_id` 指向已删来源的
+  孤儿对象(该列无外键约束)一并覆盖。抽样模式走 `sources` 表,后两类抽不到 —— 报告会
+  报出它们的数量并说明未纳入。晋升为主的 base 库尤其要看这一段,否则会出现「构成几十
+  万行、内容分析近乎空」而看不出原因。
+- **边的出处只认标注**:只有 relink 会写 `basis`;没有 `basis` 的边归「未标注」,因为
+  knowhow 投影写的 `about` 边也是 `evidence='[]'`,与 LLM 抽取的边不可区分 —— 不替它
+  们认领出处。
+- 两条已知的判据局限会被自动提示:`is_noise_concept` 的 `len(raw) <= 2` 有丢中文双字
+  术语的风险(报告按**风险**措辞,不按已确认的丢失 —— 长度直方图证明不了这件事);
+  `probes.claim_degraded` 的动词表只覆盖英文,中文库上该数字无效。
 
 ---
 
