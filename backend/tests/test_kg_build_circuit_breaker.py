@@ -638,6 +638,51 @@ def test_interrupt_while_still_submitting_drains_what_was_submitted(
     assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
 
 
+@pytest.mark.parametrize(
+    "step", ["kg_build_started", "publish_pending"],
+)
+def test_interrupt_inside_preparation_after_the_row_exists_settles(
+    repo, monkeypatch, step
+):
+    """create_job 之后 prepare 还要走三步(登记进程内标志、写事件、推送待办)。信号落在
+    这里会直接逃出 prepare,连调用方的兜底都进不去,行就永久留在 running(评审 P1)。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    # 只打断第一次(收尾本身以及末尾「能否再次发起」的复查都还要走这些方法)。
+    fired = {"n": 0}
+    if step == "kg_build_started":
+        original = lifecycle._emit_kg_build_event
+
+        def _emit(kind, job, **kwargs):
+            if kind == "kg_build_started" and not fired["n"]:
+                fired["n"] = 1
+                raise KeyboardInterrupt("ctrl-c right after the row was created")
+            return original(kind, job, **kwargs)
+
+        monkeypatch.setattr(lifecycle, "_emit_kg_build_event", _emit)
+    else:
+        original_publish = lifecycle._publish_pending_started
+
+        def _publish():
+            if not fired["n"]:
+                fired["n"] = 1
+                raise KeyboardInterrupt("ctrl-c while publishing pending state")
+            return original_publish()
+
+        monkeypatch.setattr(lifecycle, "_publish_pending_started", _publish)
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    saved = repo._runtime.kg_build_jobs.latest(notebook.id)
+    assert saved is not None and saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
+    # 守卫已释放:数据库层与界面层都要放开。
+    assert repo.get_notebook(notebook.id).kg_building is False
+    assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
+
+
 @pytest.mark.parametrize("mode", ["incremental", "rebuild"])
 def test_interrupt_between_job_creation_and_run_still_settles(
     repo, monkeypatch, mode
@@ -665,6 +710,9 @@ def test_interrupt_between_job_creation_and_run_still_settles(
     assert saved is not None
     assert saved["status"] == "failed"
     assert saved["error_code"] == "worker_interrupted"
+    # 进程内的构建标志也必须清掉:否则 get_notebook()/索引状态会在该进程余生都报
+    # 「构建中」,界面上的分析入口一直禁用,尽管数据库层已经允许新任务(评审 P2)。
+    assert repo.get_notebook(notebook.id).kg_building is False
     # 真正的回归点:守卫已释放,同一 notebook 能再次发起分析。
     assert repo.prepare_notebook_kg_job(notebook.id, "incremental")["id"]
 
