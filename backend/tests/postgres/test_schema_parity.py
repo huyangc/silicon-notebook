@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -21,6 +22,8 @@ from app.repositories.postgres.schema_manifest import (
     POSTGRES_EMPTY_JSON_LIST_SENTINELS,
     POSTGRES_EMPTY_TIME_SENTINELS,
     POSTGRES_JSON_COLUMNS,
+    POSTGRES_ROWID_ORDINAL_TABLES,
+    POSTGRES_SCHEMA_MANIFEST,
     SQLITE_RETIRED_TABLES,
 )
 from tests.postgres.conftest import (
@@ -121,6 +124,181 @@ ROWID_ORDER_EVIDENCE = {
         "app.repositories.sqlite.source_store:SourceStore.notebook_element_sample",
     ],
 }
+
+# ROWID_ORDER_EVIDENCE above is the curated per-table narrative ("why is this
+# table ordinal"), and comparing it against itself proves nothing.  The map
+# below is the machine-checkable counterpart: EVERY site in the SQLite
+# repository package whose SQL mentions ``rowid``, discovered by scanning the
+# source, classified by hand exactly once.
+#
+# A value that names a business table declares "this table's rowid order is an
+# observable contract", which is precisely the property PostgreSQL can only
+# reproduce through the ``ordinal`` identity column — so the test asserts every
+# such table is in POSTGRES_ROWID_ORDINAL_TABLES.  The sentinels mark the
+# reviewed usages that are NOT a cross-backend ordering contract:
+#
+#   fts-docid            join to an FTS shadow table's docid; PostgreSQL uses
+#                        GIN on the base row and has no counterpart at all
+#   fts-ddl              FTS trigger/DDL text inside a SQLite migration
+#   temp-fts             a per-query ``temp.`` FTS scratch table
+#   scratch-table        a rebuild scratch table repopulated every run (the
+#                        PostgreSQL adapter orders by knowledge_objects.ordinal)
+#   sqlite-keyset-paging SQLite-only keyset pagination over a full scan whose
+#                        output is de-duplicated and order-independent (the
+#                        PostgreSQL adapter streams a server-side cursor)
+#
+# Adding any new rowid SQL makes the scan disagree with this map and turns the
+# test red, which is the point: the author must classify it, and picking a
+# non-ordinal business table forces the paired PostgreSQL schema work instead
+# of silently shipping an order SQLite keeps and PostgreSQL cannot.
+ROWID_TOKEN_SITES = {
+    "app.repositories.sqlite.ask_state_store:AskStateStore.conversation_history": "answers",
+    "app.repositories.sqlite.ask_state_store:AskStateStore.get_conversation": "answers",
+    "app.repositories.sqlite.ask_state_store:AskStateStore.list_conversations": "answers",
+    "app.repositories.sqlite.chunk_store:ChunkStore.language_probe_rows": "chunks",
+    "app.repositories.sqlite.index_projection_store:"
+    "IndexProjectionStore.embedding_matrix._stream_rows": "sqlite-keyset-paging",
+    "app.repositories.sqlite.index_projection_store:"
+    "IndexProjectionStore.graph_rows": "knowledge_objects",
+    "app.repositories.sqlite.kg_build_job_store:KgBuildJobStore.latest_on": "kg_build_jobs",
+    "app.repositories.sqlite.knowledge_counts_cache:"
+    "_pending_source_count_query": "extraction_runs",
+    "app.repositories.sqlite.knowledge_store:"
+    "KnowledgeStore.graph_object_rows": "knowledge_objects",
+    "app.repositories.sqlite.knowledge_store:"
+    "KnowledgeStore.source_build_rows": "extraction_runs",
+    "app.repositories.sqlite.knowledge_store:KnowledgeStore.source_has_kg": "extraction_runs",
+    "app.repositories.sqlite.maintenance:"
+    "SQLiteMaintenanceAdapter.count_sources_missing_kg": "extraction_runs",
+    "app.repositories.sqlite.maintenance:"
+    "SQLiteMaintenanceAdapter.partial_kg_source_ids": "extraction_runs",
+    "app.repositories.sqlite.memory_store:MemoryStore.list_memories": "fts-docid",
+    "app.repositories.sqlite.memory_store:MemoryStore.memory_retrieval_rows": "fts-docid",
+    "app.repositories.sqlite.migrations:SqliteMigrator._migration_13": "fts-ddl",
+    "app.repositories.sqlite.source_store:"
+    "SourceStore.notebook_element_sample": "source_elements",
+    "app.repositories.sqlite.source_store:SourceStore.source_from_row": "extraction_runs",
+    "app.repositories.sqlite.source_store:SourceStore.sources_from_rows": "extraction_runs",
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.claim_name_rows": "knowledge_objects",
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.mention_alias_candidate_batches.batches": "temp-fts",
+    "app.repositories.sqlite.unified_kg_store:UnifiedKgStore.mention_scan_matches": "temp-fts",
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.seed_payload_rows": "knowledge_objects",
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.stream_seed_rows": "knowledge_objects",
+    "app.repositories.sqlite.unified_kg_store:"
+    "UnifiedKgStore.swap_cluster_map_from_scratch": "scratch-table",
+}
+
+ROWID_NON_CONTRACT_SENTINELS = frozenset(
+    {"fts-docid", "fts-ddl", "temp-fts", "scratch-table", "sqlite-keyset-paging"}
+)
+
+# The one ordering contract carried by SQLite's *implicit* rowid order — the
+# query deliberately omits ORDER BY (see the method's docstring), so no scan
+# can find it from the SQL text.  Pinned here so the evidence list and the
+# scanned sites can be compared without hiding it.
+ROWID_IMPLICIT_ORDER_SITES = frozenset(
+    {"app.repositories.sqlite.governance_store:GovernanceStore.pending_merges_batch"}
+)
+
+SQLITE_REPOSITORY_PACKAGE = (
+    REPO_ROOT / "backend" / "app" / "repositories" / "sqlite"
+)
+_ROWID_TOKEN = re.compile(r"\browid\b", re.I)
+_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
+
+
+def _string_values(node: ast.AST) -> list[str]:
+    """The literal text a node contributes, f-strings included (holes elided)."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.JoinedStr):
+        return [
+            "".join(
+                part.value
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                else "{}"
+                for part in node.values
+            )
+        ]
+    return []
+
+
+def _docstring_nodes(tree: ast.Module) -> set[int]:
+    """Docstrings discuss rowid in prose; they are not SQL."""
+    nodes: set[int] = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ) or not body:
+            continue
+        first = body[0]
+        if isinstance(first, ast.Expr) and _string_values(first.value):
+            nodes.add(id(first.value))
+    return nodes
+
+
+def _scan_rowid_sites() -> set[str]:
+    sites: set[str] = set()
+    for path in sorted(SQLITE_REPOSITORY_PACKAGE.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        skip = _docstring_nodes(tree)
+        module = f"app.repositories.sqlite.{path.stem}"
+
+        def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    visit(child, scope + (child.name,))
+                    continue
+                if id(child) not in skip:
+                    for text in _string_values(child):
+                        if _ROWID_TOKEN.search(_SQL_LINE_COMMENT.sub("", text)):
+                            sites.add(f"{module}:{'.'.join(scope) or '<module>'}")
+                visit(child, scope)
+
+        visit(tree, ())
+    return sites
+
+
+def test_every_rowid_site_is_classified_and_ordinal_backed():
+    scanned = _scan_rowid_sites()
+    assert scanned == set(ROWID_TOKEN_SITES), (
+        "unclassified rowid SQL "
+        f"(new={sorted(scanned - set(ROWID_TOKEN_SITES))}, "
+        f"stale={sorted(set(ROWID_TOKEN_SITES) - scanned)})"
+    )
+    contract_tables = {
+        table
+        for table in ROWID_TOKEN_SITES.values()
+        if table not in ROWID_NON_CONTRACT_SENTINELS
+    }
+    assert contract_tables <= set(POSTGRES_BUSINESS_TABLES)
+    assert contract_tables <= set(POSTGRES_ROWID_ORDINAL_TABLES)
+    evidence = {site for sites in ROWID_ORDER_EVIDENCE.values() for site in sites}
+    assert evidence - scanned == ROWID_IMPLICIT_ORDER_SITES
+    for table, sites in ROWID_ORDER_EVIDENCE.items():
+        for site in sites:
+            if site in ROWID_TOKEN_SITES:
+                assert ROWID_TOKEN_SITES[site] == table
+
+
+def test_schema_manifest_pairing_is_pinned_without_a_live_database():
+    """The paired versions used to be asserted only inside the PostgreSQL lane,
+    so a `check.sh`-green change could ship a manifest that refuses to import
+    (the importer and PostgresMigrator both fail closed, but only at runtime).
+    """
+    from app.repositories.postgres.migrator import load_migrations
+
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == SCHEMA_VERSION
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == len(
+        load_migrations(MIGRATIONS_PATH)
+    )
 
 
 def _is_time_column(table: str, column: str) -> bool:
