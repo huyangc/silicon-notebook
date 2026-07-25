@@ -66,6 +66,9 @@ SQL_REASON_BY_PATH = {
     ),
     "backend/app/core/llm_cache.py": "independent LLM response cache database",
     "backend/app/eval/db.py": "independent evaluation-results database",
+    "backend/app/migration/sqlite_to_postgres.py": (
+        "owned offline cross-backend snapshot-import boundary"
+    ),
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark database",
     "scripts/backfill_knowhow_md.py": "read-only planning for an operator-supplied maintenance database",
     "scripts/diag_open_latency.py": "read-only host database diagnostic",
@@ -142,6 +145,9 @@ SQLITE_CONNECT_REASON_BY_PATH = {
     ),
     "backend/app/core/llm_cache.py": "independent LLM response cache database",
     "backend/app/eval/db.py": "independent evaluation-results database",
+    "backend/app/migration/sqlite_to_postgres.py": (
+        "owned offline cross-backend snapshot-import boundary"
+    ),
     "scripts/backfill_promotion_targets.py": "operator-supplied offline maintenance database",
     "scripts/backfill_knowhow_md.py": "read-only planning connection to an operator-supplied database",
     "scripts/diag_open_latency.py": "read-only host database diagnostic",

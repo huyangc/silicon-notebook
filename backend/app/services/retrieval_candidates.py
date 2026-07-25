@@ -168,6 +168,19 @@ class _RetrievalState:
         with self._connect() as database:
             return self.unified_kg.cluster_map_rows(database, notebook_id)
 
+    def _candidate_cluster_map(
+        self, notebook_id: str, object_ids: Iterable[str]
+    ) -> dict[str, str]:
+        """Load canonical mappings for this scored window, never the full KG."""
+        folded: dict[str, str] = {}
+        with self._connect() as database:
+            for batch in self._in_batches(object_ids):
+                for row in self.unified_kg.cluster_fold_rows(
+                    database, notebook_id, batch
+                ):
+                    folded[row["member_object_id"]] = row["canonical_id"]
+        return folded
+
     def _gather_kg_graph(self, notebook_id: str, source_ids=None, synonym_edges=None,
                          as_arrays: bool = False):
         return self.scale_runtime.builder.gather_graph(
@@ -895,16 +908,17 @@ class CandidateRetrievalService(_RetrievalState):
             candidate_ids = {o["id"] for o in all_kg_objs}
             # 孤立节点降权: 有边节点集合。降权仅作用于 score(排序),不进 relevance([0,1]/tau 守恒)。
             if cand_sims is not None:
-                # 有界:仅按候选对象查边(避免全表扫),element_sims 仅候选证据元素。
-                # candidate_ids 量随 delta 候选无界增长——按 _in_batches 分批,每批
-                # 两个 IN 位置都放该批(并集正确:一条边只要任一端点落在某批即被
-                # 捕获,批间可能重复捕获同一条边,但 rel_rows 只喂 connected_ids
-                # 集合,重复无害)。
-                rel_rows = []
+                # 有界:每个候选只做带索引的 EXISTS 短路探测；绝不能拉取完整
+                # 邻接边，否则一个高出度 hub 就能把几十个候选的 hydration
+                # 放大成数百万行。candidate_ids 仍按参数上限分批。
+                connected_ids: set[str] = set()
                 for batch in self._in_batches(candidate_ids):
-                    rel_rows.extend(self.knowledge.relation_connected_rows(
-                        db, notebook_id, batch,
-                    ))
+                    connected_ids.update(
+                        row["object_id"]
+                        for row in self.knowledge.relation_connected_object_ids(
+                            db, notebook_id, batch,
+                        )
+                    )
                 elem_id_set = {ev.element_id for o in all_kg_objs
                                for ev in o.get("evidence", []) if getattr(ev, "element_id", None)}
                 # elem_id_set 同理分批;各批互不相交(_in_batches 去重保序切片),
@@ -916,10 +930,10 @@ class CandidateRetrievalService(_RetrievalState):
                     ))
             else:
                 rel_rows = self.knowledge.relation_endpoint_rows(db, notebook_id)
-            connected_ids: set = set()
-            for r in rel_rows:
-                connected_ids.add(r["source_object_id"])
-                connected_ids.add(r["target_object_id"])
+                connected_ids = set()
+                for row in rel_rows:
+                    connected_ids.add(row["source_object_id"])
+                    connected_ids.add(row["target_object_id"])
             isolated_ids: set = candidate_ids - connected_ids
             if cand_sims is not None:
                 knowledge_sims = cand_sims
@@ -961,7 +975,12 @@ class CandidateRetrievalService(_RetrievalState):
         t_score = time.perf_counter()
         if self.settings.kg_canonical_fold_enabled:
             from app.services.retrieval import fold_by_canonical
-            scored = fold_by_canonical(scored, self.cluster_map(notebook_id))
+            scored = fold_by_canonical(
+                scored,
+                self._candidate_cluster_map(
+                    notebook_id, (hit.object_id for hit in scored)
+                ),
+            )
         self.event_log.emit({
             "kind": "ask_stage", "site": "_retrieve_scored",
             "notebook_id": notebook_id,

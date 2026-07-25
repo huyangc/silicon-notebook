@@ -20,6 +20,8 @@ scripts/backend.sh restart    # 停当前 + 启 silicon-notebook
 
 **关键:** DB / storage / `.env` 的相对路径已在代码层锚定到**仓库根**(见 `backend/app/core/config.py` 的 `_ROOT_DIR`),从哪个目录启动 uvicorn 都指向同一套 `仓库根/.local` 与根 `.env`——后端启动日志首行会打印解析后的绝对路径,可一眼核对。脚本仍从 `backend/` 目录启动只是为了模块导入(`app.main`)。注意:多 worktree 时各 worktree 锚各自的根(`.local` 互相独立)。生产启动用仓库根的 `npm run start`（`scripts/prod.sh`：前端 build+start + 后端固定 `--workers 1`）；模型调度容量位于单个后端进程内，禁止以多 worker 乘大 TOML 声明的容量。
 
+大库默认在 `/api/ready` 前加载全部已发布 scale 索引、启用的 ANN handle 与可安全复用的单索引 PPR core；不会启动时全量复制跨库 mounted 组合图，以免千万节点图成倍常驻导致 OOM。`backend.sh start` 会打印 `warming` / `preloading_indexes` 的进度，默认最多等 1,800 秒，避免原 40 秒窗口误杀正常的大索引加载；极慢磁盘用 `START_TIMEOUT_SECONDS=3600 scripts/backend.sh start` 覆盖。若显示 `error`，脚本会立即清理本次进程并提示看日志。索引数不得超过 `SCALE_IDX_CACHE_MAX`，否则无法保证“全部加载后仍常驻”。
+
 系统模型服务由维护人员统一配置：
 
 ```bash
@@ -40,7 +42,7 @@ python scripts/migrate_legacy_model_env.py --env .env --apply  # 备份后写入
 
 脚本从旧值生成 `.local/model-services.toml`，把密钥迁移到新的 `.env` 槽位，并移除已废弃的模型/并发字段；不会在 TOML 或终端中泄露密钥，当前 `.env` 与含密钥备份都会收紧为 `0600`。推算出的 `max_concurrency` 只是初始值，应按真实服务容量复核；可用可重复的 `--max-concurrency ROLE=N` 覆盖。安装流程生成且未改动的示例 TOML 可直接替换；其他已有配置只有显式 `--force` 才会替换，且都会先备份。
 
-环境变量:`PYTHON_BIN` `HOST`(默认 127.0.0.1) `PORT`(默认 8000) `LOG_FILE`。
+环境变量:`PYTHON_BIN` `HOST`(默认 127.0.0.1) `PORT`(默认 8000) `LOG_FILE` `START_TIMEOUT_SECONDS`(默认 1800)。
 例:换端口 `PORT=8001 scripts/backend.sh start`。
 
 ### `dev.sh` —— 前后端一起跑(前台开发)
@@ -55,6 +57,37 @@ scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C
 PYTHON_BIN=/path/to/python bash scripts/check.sh
 ```
 contracts + 后端测试/离线 smoke + 前端测试/tsc/build 三条 lane 并行执行。脚本会强制 `MODEL_SERVICES_CONFIG=""`，不读取开发者真实密钥，也不会访问付费/网络模型服务；EXIT=0 即过。
+
+### `migrate_sqlite_to_postgres.py` —— SQLite 存量迁移到 PostgreSQL
+
+默认只预检；目标必须是空的 PostgreSQL 16 UTF-8 数据库，URL 从环境变量读取而不出现在 CLI 参数：
+
+```bash
+export POSTGRES_MIGRATION_URL='postgresql://USER:PASSWORD@HOST:5432/EMPTY_DB'
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/.local/silicon_notebook.db
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/.local/silicon_notebook.db --apply
+```
+
+导入按表提交并记录 checkpoint(run 头绑定 sealed snapshot hash):中途失败(崩溃/远程连接断开/重启)后重跑同一条命令即从最后完成的表**续跑**,不必整体重来;显式传 `--snapshot` 复用本工具生成的 sealed snapshot 可省去重新快照数 GB 源库(重新检查目录、文件名/hash、`quick_check`、schema 版本和 WAL/SHM sidecar,且 hash 必须匹配该 run,不接受任意 SQLite 文件或异源 checkpoint)。大库可传会话级批量装载调优:`--maintenance-work-mem 2GB`、`--max-parallel-index-workers N`(加速建索引)、`--batch-rows`(默认 1000);详见 `docs/operations_zh.md`「大库的调优与前置条件」。在线运行只得到某一时刻的一致演练快照,不会同步后续写入;正式切换的停写、URL 修改和回滚步骤见 `docs/operations_zh.md`。脚本只迁 DB 行,不复制 `.local/storage`,也不支持 MySQL。
+
+停掉全部 writer 和后端后，可让同一个 CLI 在重新核对 SQLite 快照和 PostgreSQL 全表 checksum
+后原子激活本地 `.env`：
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/.local/silicon_notebook.db \
+  --work-dir /absolute/path/postgres-migration \
+  --activation-receipt /absolute/path/postgres-migration/migration-TIMESTAMP.receipt.json \
+  --activate-env /absolute/path/.env \
+  --confirm-service-stopped
+```
+
+未来的最终迁移也可把 `--apply`、`--activate-env`、`--confirm-service-stopped` 放在同一条命令。
+大目标上可加 `--fast-activation`：只跳过激活阶段第二遍 PostgreSQL 全表 checksum(导入已逐表校验并落
+checkpoint),源库重新快照锚点与 schema/清单校验仍执行。CLI 原子替换配置并保存权限受限的回退副本,
+但不会自行停止或重启服务。
 
 ---
 
@@ -163,7 +196,7 @@ report/object/chunk id、标题、问题、正文、文件名、路径、异常�
 | `qiefen_cv.py` | LLM 原子选择器的交叉验证评测 |
 | `validate_concept_filter.py` | 离线试跑 concept 噪声过滤(无 LLM/不写库) |
 | `validate_overmerge_fix.py` | 验证 concept 去过度合并 |
-| `migrate_sqlite_to_postgres.py` | 显式 SQLite→PostgreSQL 正向 shadow CLI：`preflight` / `start-forward` / `status` / `verify` / 前台 `worker`；单独设置 `SHADOW_DATABASE_URL` 不会启动同步，完整 runbook 见 `docs/operations_zh.md` |
+| `shadow_sqlite_to_postgres.py` | 显式 SQLite→PostgreSQL 正向 shadow CLI：`preflight` / `start-forward` / `status` / `verify` / 前台 `worker`；单独设置 `SHADOW_DATABASE_URL` 不会启动同步，且不得与停写 importer 共用目标库，完整 runbook 见 `docs/operations_zh.md` |
 | `shadow.sh` | 本机 shadow worker supervisor：按 run/work-dir 做 PID identity 校验并提供 `start/status/stop/restart`；生产也必须保持单 worker |
 | `git-cleanup.sh` | 清理「PR 已合并」的本地分支 + worktree:默认 dry-run 预演,`--apply` 执行,`--remote` 连带删远程(保护 master / 当前分支 / `eval` / `backup/*`) |
 

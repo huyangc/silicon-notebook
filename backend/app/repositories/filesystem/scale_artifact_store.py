@@ -45,15 +45,40 @@ class ScaleArtifactStore:
     def viz_dir(self, notebook_id: str) -> Path:
         return Path(os.path.join(str(self.settings.storage_dir), "kg_viz", notebook_id))
 
+    def indexed_notebook_ids(self) -> list[str]:
+        """Return published scale-index directory names in stable order.
+
+        Only a direct child carrying ``manifest.json`` is a published artifact.
+        Atomic-build scratch/rollback directories (``*.tmp`` / ``*.old``) are
+        deliberately excluded even if an interrupted operator copied a manifest
+        into them.  This is a filesystem inventory only; the runtime separately
+        drops orphan artifacts whose notebook row no longer exists.
+        """
+        root = Path(os.path.join(self.settings.storage_dir, "kg_index"))
+        if not root.is_dir():
+            return []
+        return sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and not entry.name.endswith((".tmp", ".old"))
+            and (entry / "manifest.json").is_file()
+        )
+
     # ─────────────────────────────────────────────────── manifest reads ──
     def read_manifest(self, directory) -> Optional[dict]:
         """Full manifest read: missing file → None; a corrupt manifest keeps
-        raising (frozen watermark/status semantics)."""
+        raising (frozen watermark/status semantics). **Valid-but-non-object JSON
+        (e.g. ``[]`` / ``"x"`` / ``123``)→ None**:codex 第4轮 P1——那是结构性损坏,
+        与「读不出」同款返 None,让 status() 的 ``manifest is None`` 分支把它归为
+        stale/corrupt;否则下游 ``manifest.get(...)`` 抛 AttributeError→/index-status 500、
+        H8 也漏报,恰好在损坏(最需重建)时够不着重建 CTA。"""
         path = os.path.join(str(directory), "manifest.json")
         if not os.path.exists(path):
             return None
         with open(path) as fh:
-            return json.load(fh)
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
 
     def read_manifest_version(self, directory):
         """廉价读 directory/manifest.json 的 version 字段(几 KB,sub-ms)。用于
@@ -63,9 +88,29 @@ class ScaleArtifactStore:
         mpath = os.path.join(str(directory), "manifest.json")
         try:
             with open(mpath) as fh:
-                return json.load(fh).get("version")
+                data = json.load(fh)
         except (OSError, ValueError):
             return None
+        # 非对象 JSON(如 [])也算无有效 version:isinstance 守卫,否则 [].get 抛
+        # AttributeError→H8 身份路径(scale_manifest_identity)被 checkup 当「探测不确定」
+        # 吞掉→漏报损坏、重建 CTA 够不着(codex 第4轮 P1)。fail-soft:返 None,让 H8
+        # 继续走磁盘探针(load_scale_index 已有 isinstance 守卫、能正确判 [] 为损坏)。
+        return data.get("version") if isinstance(data, dict) else None
+
+    def scale_manifest_identity(self, notebook_id: str) -> "tuple[bool, object]":
+        """H8 体检缓存键:磁盘 scale 索引的**产物身份** `(manifest 是否存在, manifest.version)`。
+
+        为什么不是 version_signal:磁盘索引只在 rebuild/fold(`.tmp`+swap 原子换目录)时换新
+        `manifest.version`,**与 kg_mutation_seq / version_signal 解耦**(见上 read_manifest_version
+        与本类顶部说明)。version_signal 只由 unified_kg_state 的 seq 组成、rebuild/fold 不 bump 它,
+        用它当 H8 缓存键会:损坏被缓存后、用户点重建(原子换成健康产物、seq 不变)仍报损坏清不掉。
+        改用磁盘 manifest 身份——rebuild/fold 换新 version 即让缓存失效,正是「产物变没变」的真信号。
+
+        `exists=False` → 未建索引(H8 直接判 0、不必 load)。`exists=True, version=None` → manifest 在
+        但损坏/无 version(探针会真 load 判损坏,且损坏结论不进缓存,故 None 键不会粘住)。sub-ms。"""
+        scale_dir = self.scale_dir(notebook_id)
+        manifest_path = os.path.join(str(scale_dir), "manifest.json")
+        return os.path.exists(manifest_path), self.read_manifest_version(scale_dir)
 
     # ──────────────────────────────────────────────────────── load/save ──
     def load_scale(self, notebook_id: str):

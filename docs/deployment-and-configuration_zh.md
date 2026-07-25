@@ -346,6 +346,35 @@ REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容
 ```text
 SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 true）
 SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
+STARTUP_PRELOAD_SCALE_INDEXES # readiness 前加载全部已发布 scale 索引、启用 ANN 与安全的单索引 PPR core（默认 true）
+SCALE_IDX_CACHE_MAX        # scale 索引常驻上限；开预加载时必须不少于存量有效索引数（默认 8）
+```
+
+开启启动预加载后，`/api/ready` 会在 `preloading_indexes` 阶段持续返回 false。任一必需
+工件损坏，或存量已发布索引数超过 `SCALE_IDX_CACHE_MAX`，启动都会保持 not-ready，不把冷加载
+转嫁给首位用户。应按全部常驻索引配置 cache 与 RAM。只有在需要进入 UI/维护流程重建损坏索引
+时才临时设 `STARTUP_PRELOAD_SCALE_INDEXES=false`，修复后恢复。`scripts/backend.sh start` 默认等待
+1,800 秒并打印 readiness 阶段变化；极慢磁盘可用 `START_TIMEOUT_SECONDS` 覆盖。
+
+预加载边界覆盖可复用的落盘工件、ANN handle 和每个 ScaleIndex 的 self-only PPR
+transition/chunk-id core。它刻意不在启动时物化每一种跨 notebook mounted 组合图：当前多
+participant 拼接会复制完整 node map，并可能还原全部 CSR 边；对所有挂载组合这样做会让一个
+千万节点图成倍膨胀直至启动 OOM。跨库组合图在获得有界/共享表示前继续按需构造。严格保证
+只覆盖启动时已经发布的工件集合；运行中 build/fold 或新增第
+`SCALE_IDX_CACHE_MAX+1` 个索引仍走既有在线发布路径，应在变更前扩容并重启以重新建立
+readiness 保证。
+
+**Notebook 拷贝 vs 只读分享——规模闸：** 分享一个 notebook 时,库足够小就给「深拷贝」,
+否则给只读「加入」。「足够小」(以及上面那条不可拷贝阈值)是同一组界限——必须**同时**低于
+全部三条才算可拷贝。深拷贝会把该 notebook 的**每一张表**读进内存做 id 重映射,所以最后一条
+对这个总量单独封顶,与 chunk+node 数无关:
+
+```text
+NOTEBOOK_COPY_MAX_BYTES          # 源文件总字节上限（默认 50MB）
+NOTEBOOK_COPY_MAX_ROWS           # chunks + 知识对象 行数上限（默认 5000）
+NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS  # 深拷贝将物化的「所有表」总行数上限(含 relations/embeddings/
+                                 # elements/knowhow)——纵深护栏:图/向量扇出远超 chunk+node 数时
+                                 # 不至于把拷贝 OOM;超过即改为只读分享（默认 200000）
 ```
 
 **内容寻址缓存（LLM + 向量化调用）：**

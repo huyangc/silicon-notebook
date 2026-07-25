@@ -44,6 +44,156 @@ def _rows(repo, table, nb):
         return db.execute(f"SELECT * FROM {table} WHERE notebook_id=?", (nb,)).fetchall()
 
 
+def test_copy_notebook_service_refuses_non_copyable_defense_in_depth(tmp_path, monkeypatch):
+    """OOM audit P2-7: the deep copy materialises every table into ONE in-memory
+    snapshot (300GB+ at 8M objects). The API route already 409s a non-copyable
+    notebook, but the service-layer copy_notebook must ALSO refuse it — a
+    non-router caller must never be able to trigger that OOM. Removing the guard
+    lets the copy proceed (no raise) and fails here."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "0")   # any node/chunk → not copyable
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ko-x", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
+    assert repo.notebook_copy_stats(nb)["copyable"] is False
+    with pytest.raises(ValueError, match="too large to deep-copy"):
+        repo.copy_notebook(nb, new_owner_id="user-local")
+
+
+def _seed_nodes(repo, nb, n):
+    with repo._write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"ko-{nb}-{i}", nb, "concept", "approved", "", "{}", "[]", "", _now(), _now()))
+
+
+def test_snapshot_copy_rows_enforces_row_bound_in_its_own_transaction(tmp_path, monkeypatch):
+    """codex PR#353 r3: the copyable-row bound is counted INSIDE
+    snapshot_copy_rows' own stable-snapshot read transaction (atomic with the
+    fetchall), raising BEFORE materialising the oversized rows. Under the limit →
+    returns the snapshot; over → raises."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    assert store.snapshot_copy_rows(nb)["notebooks"]        # 0 rows <= 1 → snapshot returned
+    _seed_nodes(repo, nb, 2)                                 # 2 nodes > 1
+    with pytest.raises(ValueError, match="crossed the copy-size limit"):
+        store.snapshot_copy_rows(nb)
+
+
+def test_copy_notebook_atomic_bound_refuses_grown_source(tmp_path, monkeypatch):
+    """The atomic snapshot bound refuses an over-limit notebook even when the
+    cached copy_stats pre-check is made to pass (the race it can't close), and
+    the raise propagates through copy_notebook. Removing the bound from
+    snapshot_copy_rows lets the (grown) snapshot materialize (no raise)."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1")
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    _seed_nodes(repo, nb, 2)                                 # 2 nodes > 1
+    # force the cached pre-check to pass so the atomic snapshot bound is the
+    # thing that must refuse the copy
+    monkeypatch.setattr(repo._runtime.sharing, "notebook_copy_stats",
+                        lambda n: {"copyable": True})
+    with pytest.raises(ValueError, match="crossed the copy-size limit"):
+        repo.copy_notebook(nb, new_owner_id="user-local")
+
+
+def _seed_relations(repo, nb, n):
+    with repo._write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO knowledge_relations "
+                "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"rel-{nb}-{i}", nb, None, "ko-a", "ko-b", "rel", "[]", _now()))
+
+
+def test_snapshot_copy_rows_bounds_every_table_not_just_chunks_nodes(tmp_path, monkeypatch):
+    """codex PR#353 r5 P2: the chunks+nodes gate does NOT bound relations /
+    embeddings / elements / knowhow, whose combined rows are what the copy holds
+    in memory. A notebook with few nodes but many relations passes the chunks+nodes
+    gate yet must be refused by the second, total-materialisation bound — so peak
+    copy memory is decoupled from a pathological graph/embedding fan-out. Removing
+    that second bound lets the (unbounded) snapshot materialise (no raise) and
+    fails here."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1000")         # chunks+nodes gate: generous
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS", "10")  # total-materialisation gate: tight
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    _seed_nodes(repo, nb, 2)                                     # 2 nodes ≤ 1000, few total rows
+    assert store.snapshot_copy_rows(nb)["notebooks"]            # under both bounds → snapshot returned
+    _seed_relations(repo, nb, 20)                               # relations aren't counted by chunks+nodes…
+    # chunks+nodes is still 2 ≤ 1000 (passes the FIRST gate), but total materialised
+    # rows now exceed 10 → the SECOND bound must refuse it before any fetchall.
+    with pytest.raises(ValueError, match="crossed the copy-materialisation limit"):
+        store.snapshot_copy_rows(nb)
+
+
+def test_copy_stats_reports_snapshot_exceeding_notebook_non_copyable(tmp_path, monkeypatch):
+    """codex PR#354 r1 P2: a notebook under the byte + chunk+node limits but over
+    the total-materialisation limit must read NON-copyable (share-routing), so the
+    UI routes it to read-only join instead of a copy that dead-ends at the guard's
+    409 (recipient could then neither copy nor join-as-large — stuck). The share
+    service's notebook_copy_stats (what notebook_sharing_repository() returns, and
+    the copy/join routes call) applies the SAME snapshot-row criterion the guard
+    does. Dropping its recheck lets B read copyable (the stuck-recipient bug)."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1000")        # chunks+nodes gate: generous
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS", "10")  # total gate: tight
+    repo = SQLiteRepository(Settings())
+    # A: 2 nodes + 3 relations → 1 nb + 2 + 3 = 6 rows ≤ 10 → copyable
+    a = _mk_nb(repo); _seed_nodes(repo, a, 2); _seed_relations(repo, a, 3)
+    assert repo._runtime.sharing.notebook_copy_stats(a)["copyable"] is True
+    # B: same 2 nodes (passes chunks+nodes gate) but 20 relations → total 23 > 10.
+    # Relations aren't counted by chunks+nodes, so ONLY the snapshot term rejects it.
+    b = _mk_nb(repo); _seed_nodes(repo, b, 2); _seed_relations(repo, b, 20)
+    assert repo._runtime.sharing.notebook_copy_stats(b)["copyable"] is False
+
+
+def _seed_assets(repo, nb, n):
+    with repo._write() as db:
+        for i in range(n):
+            db.execute(
+                "INSERT INTO notebook_assets "
+                "(id, notebook_id, filename, mime, size, created_by, created_at, source_id) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"asset-{nb}-{i}", nb, f"f{i}.png", "image/png", 1, "user-local", _now(), None))
+
+
+def test_notebook_copy_stats_rechecks_snapshot_bound_fresh_not_stale(tmp_path, monkeypatch):
+    """codex PR#354 r2 P2: notebook_assets (and sources/paper_meta) grow WITHOUT
+    bumping the KG-version key that scale_artifacts' copy_stats caches on. The
+    share-routing copyability must re-check the total-materialisation bound FRESH
+    (at the facade), so a notebook that crosses the bound via such an untracked
+    table stops reading copyable even with NO intervening KG mutation — otherwise a
+    stale cached 'copyable' offers a copy that 409s while join rejects it as small
+    (the dead end). Dropping the fresh facade recheck keeps the stale True here."""
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_ROWS", "1000")
+    monkeypatch.setenv("NOTEBOOK_COPY_MAX_SNAPSHOT_ROWS", "5")
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    _seed_nodes(repo, nb, 2)                                    # 1 nb + 2 nodes = 3 ≤ 5 → copyable
+    assert repo._runtime.sharing.notebook_copy_stats(nb)["copyable"] is True   # warms the cached copy_stats
+    _seed_assets(repo, nb, 10)                                  # assets DON'T bump kg_mutation_seq…
+    # …so the cached verdict is unchanged, but the FRESH facade recheck counts
+    # 1 nb + 2 nodes + 10 assets = 13 > 5 → non-copyable.
+    assert repo._runtime.sharing.notebook_copy_stats(nb)["copyable"] is False
+
+
 def test_share_sets_token_idempotent_then_unshare_clears(repo):
     nb = _mk_nb(repo, "L")
     out = repo.share_notebook(nb)
@@ -238,6 +388,28 @@ def test_share_preview_copy_end_to_end(repo, client):
     assert client.delete(f"/api/notebooks/{src}/share").status_code == 204
     assert client.get(f"/api/shared/{token}").status_code == 404
     assert client.post(f"/api/shared/{token}/copy").status_code == 404
+
+
+def test_copy_route_maps_race_size_guard_to_409_not_500(repo, client, monkeypatch):
+    """OOM audit P2-7 (codex PR#353): if a notebook crosses the copy-size
+    threshold between the route's pre-check and copy_notebook's defense-in-depth
+    recheck (concurrent ingestion), the route must keep its documented 409 — not
+    surface the guard's exception as a 500. Reverting the route's catch → 500."""
+    from app.services import notebook_sharing as ns
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+    # simulate the race: the route's pre-check sees copyable, the deep-copy
+    # defense-in-depth recheck rejects.
+    monkeypatch.setattr(
+        ns.NotebookSharingService, "notebook_copy_stats",
+        lambda self, nb: {"copyable": True},
+    )
+
+    def _raise(self, source_notebook_id, *, new_owner_id, new_name=None):
+        raise ns.NotebookTooLargeToCopyError("raced past the threshold")
+
+    monkeypatch.setattr(ns.NotebookSharingService, "copy_notebook", _raise)
+    assert client.post(f"/api/shared/{token}/copy").status_code == 409
 
 
 def test_share_preview_count_is_visible_while_copy_size_stays_physical(repo):

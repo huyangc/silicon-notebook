@@ -240,6 +240,33 @@ def test_active_lease_held_during_processing_and_released_after(
     assert sid not in service._active_sources, "退出后租约仍含该源(finally 未释放)"
 
 
+def test_embedding_sources_join_active_snapshot_independently(repo):
+    """codex 第5轮 P2:后台嵌入在途源(``_embedding_sources``)并入 H4/H5 用的活跃集
+    (``_active_source_ids_snapshot``),但与 ``_active_sources``(process_source 生命周期 + 分块锁的
+    引用计数)**独立**——process_source 可能先返回、撤自己的租约,而嵌入 worker 还在写向量;不并入
+    的话在途向量被误报缺失 + 诱发重复(可能昂贵)backfill。这里直接测机制(stamp→并入快照→release
+    →移出 + 与 _active_sources 隔离);process_source 在 spawn 前 stamp、_embed_bg 的 finally release
+    的 wiring 见 source_ingestion。
+
+    **变异锚点**:把 _active_source_ids_snapshot 的 ``| set(ingestion._embedding_sources)`` 去掉 →
+    「snapshot 含 sid」断言红。"""
+    si = repo._runtime.source_ingestion
+    sid = "src-embedding-inflight"
+    assert sid not in repo._runtime._active_source_ids_snapshot()
+
+    # 模拟嵌入 worker spawn 前的 stamp(process_source 的真实做法)。
+    with si._active_sources_lock:
+        si._embedding_sources[sid] = si._embedding_sources.get(sid, 0) + 1
+    # 并入 H4/H5 的活跃集,但不进 _active_sources(与 process_source 租约/分块锁隔离)。
+    assert sid in repo._runtime._active_source_ids_snapshot(), "嵌入在途源没并进活跃集(H4/H5 会误报)"
+    assert sid not in si._active_sources, "嵌入 worker 不该动 _active_sources"
+
+    # 嵌入完成 → release → 移出快照。
+    si._release_embedding_source(sid)
+    assert sid not in si._embedding_sources
+    assert sid not in repo._runtime._active_source_ids_snapshot()
+
+
 def test_active_lease_released_on_exception_exit(repo, tmp_path, monkeypatch):
     """异常出口也释放:某阶段抛异常 → 外层 except 落 'failed' → finally 仍 pop 掉租约。
 
@@ -444,6 +471,33 @@ def test_concurrent_same_source_reparse_serializes_element_swap_and_chunk_build(
     assert chunked_at is not None, "两次成功 reparse 串行后 marker 应已置"
     # 锁在 refcount 归零后被清除(有界化,不泄漏)。
     assert sid not in repo._runtime.source_ingestion._source_chunk_locks
+
+
+def test_backfill_lock_guard_registers_lease_so_lock_survives_concurrent_release(repo):
+    """codex 第2轮 P1:hold_source_chunk_lock(体检 backfill 用)持锁期间**登记活跃租约**,使并发
+    process_source 的 finally(_release_source_lease)不会在本方仍持锁时把锁 pop 掉——否则后续
+    reparse 会另建一把**新锁**、与本方互斥失效,给复用的 element/chunk id 挂上永久陈旧向量;且
+    backfill-only 的源没有租约触发 pop→锁泄漏。本方作为最后持有者退出时连锁带租约一并清除。
+
+    **变异锚点**:把 hold_source_chunk_lock 里登记租约的那句 stamp 去掉(或改回直接
+    `with self._source_chunk_lock(...)`)→ 持锁期租约为 0,下面模拟的并发释放会把锁 pop 掉 →
+    `is held`(锁仍在且是同一把)断言变红。"""
+    si = repo._runtime.source_ingestion
+    sid = "src-backfill-hold"
+    assert sid not in si._active_sources and sid not in si._source_chunk_locks
+    with si.hold_source_chunk_lock(sid):
+        held = si._source_chunk_locks.get(sid)
+        assert held is not None and held.locked()       # 锁在注册表且被本方持有
+        assert si._active_sources.get(sid) == 1          # 持锁期登记了租约
+        # 模拟一个并发 process_source:先 stamp(1→2),干完 finally 减一(2→1)。
+        with si._active_sources_lock:
+            si._active_sources[sid] = si._active_sources.get(sid, 0) + 1
+        si._release_source_lease(sid)
+        assert si._source_chunk_locks.get(sid) is held   # 本方租约还在 → 锁没被 pop(同一把)
+        assert si._source_chunk_locks[sid].locked()      # 仍被本方持有
+    # 退出:本方是最后持有者 → 锁与租约都清除(有界化,不泄漏)。
+    assert sid not in si._active_sources
+    assert sid not in si._source_chunk_locks
 
 
 class _ElementBlockingEmbedder:

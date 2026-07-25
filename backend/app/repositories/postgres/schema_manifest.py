@@ -29,10 +29,10 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 
 
 # Every ordinary application table in the current SQLite v31 / PostgreSQL v9
-# compatibility pair.  SQLite FTS virtual tables are rebuilt on PostgreSQL and
-# the migration ledger/shadow control tables are adapter-internal.  Keeping the
-# reverse-totality set beside the version pair prevents either the adapter or
-# shadow tooling from silently accepting a newly added business table.
+# compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
+# the migration ledger/shadow control tables are adapter-internal. Import and
+# shadow preflight use this reverse-totality list to reject unrelated/live
+# targets and any newly added business table that lacks a reviewed mapping.
 POSTGRES_BUSINESS_TABLES = (
     "agent_access_tokens",
     "agent_profiles",
@@ -94,6 +94,105 @@ POSTGRES_BUSINESS_TABLES = (
     "unified_kg_state",
     "user_profiles",
     "users",
+)
+
+
+# Deployed SQLite databases can retain these pre-retirement tables even after
+# reaching the current user_version. No current service reads them and the
+# PostgreSQL schema intentionally has no counterpart. The importer may ignore
+# them only when every table is empty; a non-empty legacy table fails closed so
+# historical user data is never silently discarded.
+SQLITE_RETIRED_TABLES = (
+    "article_claims",
+    "articles",
+    "derived_rule_candidates",
+    "extraction_candidates",
+)
+
+
+# Current SQLite databases carry these operational tables for the independent
+# forward-shadow path. They are not business data and PostgreSQL intentionally
+# owns its migration controls in a separate schema, so the stopped-snapshot
+# importer excludes them even when an earlier shadow run left audit rows.
+SQLITE_MIGRATION_INTERNAL_TABLES = (
+    "shadow_capture_control",
+    "shadow_change_log",
+)
+
+
+# Reviewed cross-backend storage transforms.  Keep these classifications next
+# to the schema pairing so schema parity, the offline importer, and future
+# migration tooling cannot silently disagree about TEXT values that become
+# typed PostgreSQL values.
+POSTGRES_JSON_COLUMNS = frozenset(
+    {
+        "agent_access_tokens.scopes_json",
+        "answers.payload",
+        "ask_jobs.trace_json",
+        "ask_trace_steps.step_json",
+        "canonical_relations.sample_relation_ids",
+        "chunks.element_ids",
+        "communities.findings",
+        "communities.member_ids",
+        "kg_conflict_candidates.resolved_payload",
+        "kg_rebuild_checkpoint.payload",
+        "knowledge_objects.evidence",
+        "knowledge_objects.payload",
+        "knowledge_relations.evidence",
+        "memory_items.tags_json",
+        "memory_provenance.payload_json",
+        "memory_revisions.tags_json",
+        "notebooks.expected_questions",
+        "notebooks.source_types",
+        "notebooks.taxonomy",
+        "object_schemas.fields",
+        "object_schemas.list_fields",
+        "reports.gaps_json",
+        "reports.outline_json",
+        "reports.references_json",
+        "reports.section_status_json",
+        "reports.sections_json",
+        "source_elements.metadata",
+        "source_paper_meta.keywords",
+        "source_paper_meta.raw_json",
+        "user_profiles.domain_focus",
+        "user_profiles.model_settings",
+    }
+)
+
+POSTGRES_BYTEA_COLUMNS = frozenset(
+    {
+        "chunk_embeddings.vector",
+        "element_embeddings.vector",
+        "knowledge_embeddings.vector",
+        "memory_embeddings.vector",
+        "relation_embeddings.vector",
+    }
+)
+
+POSTGRES_EMPTY_JSON_LIST_SENTINELS = frozenset(
+    {
+        "ask_jobs.trace_json",
+        "notebooks.expected_questions",
+        "notebooks.source_types",
+        "notebooks.taxonomy",
+    }
+)
+
+# SQLite historically stored an empty string for these optional timestamps.
+# PostgreSQL uses NULL; repository row mappers restore the domain-facing empty
+# value where the old contract requires it.
+POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
+    {
+        "ask_jobs.created_at",
+        "ask_jobs.updated_at",
+        "ask_trace_steps.created_at",
+        "kg_build_jobs.finished_at",
+        "knowledge_objects.last_reviewed",
+        "merge_review_jobs.started_at",
+        "merge_review_jobs.updated_at",
+        "unified_kg_state.last_rebuild_at",
+    }
 )
 
 

@@ -429,24 +429,24 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     if not elements:
         return [], []
     labeled = "\n".join(f"[{i}] {e.text}" for i, e in enumerate(elements))
-    try:
-        # OpenAICompatibleClient.chat_json takes (messages, response_schema_hint).
-        raw = client.chat_json(
-            [{"role": "user",
-              "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
-            _KG_SCHEMA_HINT,
-            **_extract_call_kwargs(
-                client,
-                lambda content: _fragment_grounds_something(content, elements),
-            ),
-        )
-        data = safe_json(raw)
-    except KgBuildAborted:
-        raise
-    except (APIConnectionError, APITimeoutError):
-        raise            # hard failure: window never processed — caller counts it
-    except Exception:
-        return [], []    # soft: unparseable/empty — legitimately 0 nodes
+    # OpenAICompatibleClient.chat_json takes (messages, response_schema_hint).
+    # Let every invocation exception escape: extract_graph owns per-window
+    # isolation and increments failed_windows when a Future raises.  Returning an
+    # empty fragment here used to turn adapter/programming failures (notably an
+    # unsupported response_validator kwarg) into false successes, producing
+    # completed runs with windows_failed=0/N and objects=0 without ever calling
+    # the model.  Malformed *content* remains a soft empty fragment through
+    # safe_json below; only a failed invocation is counted as a failed window.
+    raw = client.chat_json(
+        [{"role": "user",
+          "content": _prompt(labeled, section_path, doc_type, base_filter=base_filter)}],
+        _KG_SCHEMA_HINT,
+        **_extract_call_kwargs(
+            client,
+            lambda content: _fragment_grounds_something(content, elements),
+        ),
+    )
+    data = safe_json(raw)
     nodes: List[Node] = []
     by_local = {}
     for it in (data.get("nodes") or []):

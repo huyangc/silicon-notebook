@@ -30,7 +30,7 @@ PID_FILE="$WORK_DIR/worker.pid"
 START_FILE="$WORK_DIR/worker.start"
 LOG_FILE="$WORK_DIR/worker.log"
 TOKEN_FILE="$WORK_DIR/worker.confirmation"
-ENTRY="$ROOT_DIR/scripts/migrate_sqlite_to_postgres.py"
+ENTRY="$ROOT_DIR/scripts/shadow_sqlite_to_postgres.py"
 
 process_identity() {
   local pid="$1"

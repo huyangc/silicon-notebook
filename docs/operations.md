@@ -158,7 +158,7 @@ umask 077
 mkdir -p "$WORK_DIR"
 chmod 700 "$WORK_DIR"
 
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py preflight \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json \
   --disk-evidence-id capacity-20260725 --available-target-bytes 500000000000 \
   --backup-evidence-id restore-test-20260725 \
@@ -166,7 +166,7 @@ PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight \
 
 CONFIRMATION_TOKEN="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["confirmation_token"])' \
   "$WORK_DIR/preflight-output.json")"
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py start-forward \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py start-forward \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" \
   --confirmation-token "$CONFIRMATION_TOKEN"
 
@@ -185,14 +185,14 @@ before starting the supervisor again.
 ### Monitor and verify
 
 ```bash
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py status \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json
 
 # Reissue a fresh confirmation token with preflight before a later verification.
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py verify \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level structural \
   --confirmation-token "$CONFIRMATION_TOKEN" --json
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py verify \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level full \
   --confirmation-token "$CONFIRMATION_TOKEN" --json
 ```
@@ -232,7 +232,7 @@ User=silicon-notebook
 WorkingDirectory=/opt/silicon-notebook
 EnvironmentFile=/etc/silicon-notebook/shadow.env
 UMask=0077
-ExecStart=/opt/silicon-notebook/.venv/bin/python scripts/migrate_sqlite_to_postgres.py worker --run-id shadow-20260725 --direction forward --work-dir /srv/silicon-notebook/shadow/shadow-20260725 --confirmation-token-file /srv/silicon-notebook/shadow/shadow-20260725/worker.confirmation
+ExecStart=/opt/silicon-notebook/.venv/bin/python scripts/shadow_sqlite_to_postgres.py worker --run-id shadow-20260725 --direction forward --work-dir /srv/silicon-notebook/shadow/shadow-20260725 --confirmation-token-file /srv/silicon-notebook/shadow/shadow-20260725/worker.confirmation
 KillSignal=SIGTERM
 TimeoutStopSec=120
 Restart=no
@@ -269,6 +269,168 @@ SQLite source during shadowing.
 The authority swap and PostgreSQL→SQLite rollback mechanics belong to the separate
 [formal cutover and rollback plan](./superpowers/plans/2026-07-22-postgresql-cutover-and-rollback.md);
 do not execute that future plan as part of forward shadowing.
+
+## SQLite → PostgreSQL stopped snapshot migration and cutover
+
+This stopped-writer importer is separate from forward shadowing. It uses
+`scripts/migrate_sqlite_to_postgres.py`, must target a different PostgreSQL database, and must
+never run against a database owned by a shadow run.
+
+There is exactly one active database and no application dual-write. The included importer is
+one-way SQLite→PostgreSQL snapshot migration; changing `DATABASE_URL` alone only opens a
+different datastore. It does not import MySQL, continuously capture later writes, replay
+PostgreSQL→SQLite, or copy source/upload/asset files.
+
+### 1. Prepare an empty target and preview
+
+Create a dedicated UTF-8 PostgreSQL database. Do not point the importer at an existing app
+database: any business row fails preflight. Keep the URL out of command arguments:
+
+```bash
+export POSTGRES_MIGRATION_URL='postgresql://USER:PASSWORD@HOST:5432/EMPTY_DB'
+
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db
+```
+
+The default is a read-only preflight. It validates the SQLite identity/schema and PostgreSQL
+UTF-8/current-schema/emptiness/migration-ledger state, then exits without creating a snapshot
+or writing the target. Ensure free space for a SQLite snapshot and upgrade working copy plus
+the PostgreSQL database and indexes. `pg_trgm` must be creatable in `public`.
+
+### 2. Rehearse while SQLite remains online
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --apply
+```
+
+The tool uses SQLite's backup API, so committed WAL state is included without copying a live
+`.db` file incorrectly. It upgrades only a private snapshot copy, streams bounded COPY in FK
+order, preserves historical ordinals, converts legacy JSON vectors to float32 `bytea`, escapes
+PostgreSQL-unrepresentable NUL codepoints to the literal text `\\u0000` (a one-way
+normalization — PostgreSQL text/JSON cannot store a NUL), verifies every
+table with a content checksum, and commits each verified table together with a per-table
+checkpoint. A run header keyed to the sealed snapshot hash lets a stopped import resume from the
+last completed table instead of restarting the whole copy; finalize (ordinal reseed, index
+rebuild, `ANALYZE`) is idempotent. Full single-transaction atomicity is deliberately traded for
+restartability — the final activation pass re-verifies every table's checksum before any cutover.
+Its credential-free receipt records table counts/checksums, every NUL normalization, and the
+tuning used. Empty retired SQLite tables are recorded but not copied; a non-empty retired table
+fails closed.
+
+The SQLite-only `shadow_capture_control` and `shadow_change_log` tables are operational state,
+not business data: the stopped importer excludes them even when a prior shadow run left rows,
+and records that reviewed exclusion in the receipt. This does not relax the empty-only rule for
+retired user-data tables.
+
+If an import stops partway (crash, dropped remote connection, machine reboot), re-run the same
+command: the copier reuses the checkpoint keyed to the identical stopped source, skips the
+already-committed tables, and continues. Avoid re-snapshotting the multi-gigabyte source on each
+retry by naming the importer-owned sealed snapshot:
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --snapshot /protected/path/postgres-migration/sqlite-vNN-HASH.snapshot.db \
+  --apply
+```
+
+Name, directory, SHA-256 prefix, `quick_check`, schema version, and WAL/SHM absence are all
+revalidated; the snapshot hash must match the recorded run; and the snapshot's recorded source
+origin must match the selected `--source` — reusing a snapshot sealed from a different database (or
+one missing its origin record) fails closed rather than importing the wrong data. Never use
+`--snapshot` for the final cutover merely because an older rehearsal succeeded: SQLite commits
+after that snapshot are absent.
+
+### 2a. Tuning and prerequisites for a large database
+
+For a large source, throughput and reliability are dominated by a few levers:
+
+- **Run the CLI on (or on the same fast network as) the PostgreSQL host.** Every COPY and the
+  read-back verification cross the connection; a remote link moves the whole dataset out and
+  back twice.
+- **Raise the index-rebuild budget.** Rebuilding indexes on fully loaded large tables is the
+  slowest finalize step. Pass `--maintenance-work-mem 2GB` (or larger, within host memory) and
+  `--max-parallel-index-workers N`; both are session-scoped and only affect this import.
+- **Session bulk-load settings.** The import holds one connection with `synchronous_commit=off`,
+  `statement_timeout=0`, and `idle_in_transaction_session_timeout=0` (pass
+  `--keep-synchronous-commit` to opt out of the first). Confirm the server imposes no global
+  `statement_timeout`/`idle_in_transaction_session_timeout` that would abort a multi-hour copy,
+  that TCP keepalives keep a long remote connection alive, and that `pg_wal` has room — a large
+  load produces a large volume of WAL before checkpoints recycle it.
+- **Measure first.** Rehearse `--apply` against a copy of production data on the target host to
+  measure real throughput before committing to a maintenance window. Per-table progress lines
+  (`COPY i/N`, `VERIFY i/N`, `INDEX i/N`) show where time is spent, and a resumed run reports
+  `SKIP i/N ... (checkpointed)` for tables it reuses.
+- **`--batch-rows`** bounds the SQLite fetch / COPY batch (default 1000); raise it for narrow
+  tables, lower it if very wide rows pressure memory.
+- **`--source-timezone`** sets the timezone in which legacy *naive* SQLite timestamps are
+  interpreted before conversion to UTC. It defaults to the importer host's local zone, which is
+  correct only when the importer runs on a host in the same timezone as the SQLite deployment.
+  If you run the importer on a PostgreSQL host in a different timezone, set the SQLite host's
+  IANA zone explicitly (e.g. `--source-timezone Asia/Shanghai`) or every naive instant shifts by
+  the offset. The zone used is recorded in the receipt.
+- **Run the final activation as the deployment env file's owner** (or as root). Activation writes
+  the credential `.env` `0600`; when it runs as a *different* user than the backend service
+  account, it restores the original owner so the service can still read the file, and fails
+  closed if it lacks the privilege to do so rather than locking the service out after cutover.
+
+### 3. Perform the final SQLite→PostgreSQL cutover
+
+1. Announce the maintenance window. Stop every API, background worker, MCP client writer,
+   batch/maintenance process, and scheduler; then stop the backend after in-flight writes end.
+2. Create a **new empty final PostgreSQL database**. A rehearsal target contains an older
+   snapshot and is intentionally rejected. Take/restore-test the normal SQLite and PostgreSQL
+   backups required by your deployment policy.
+3. Run preview again against the stopped SQLite source. Then perform the final import and
+   atomic local activation in one command (all paths must be absolute):
+
+   ```bash
+   python scripts/migrate_sqlite_to_postgres.py \
+     --source /absolute/path/to/.local/silicon_notebook.db \
+     --work-dir /protected/path/postgres-migration \
+     --apply \
+     --activate-env /absolute/path/to/.env \
+     --confirm-service-stopped
+   ```
+
+   The activation pass repeats the SQLite snapshot and every PostgreSQL table checksum before
+   it atomically replaces `.env`; a mismatch leaves `.env` unchanged. On a large target you may
+   add `--fast-activation` to skip only that second full-table PostgreSQL checksum read — the
+   import already checksum-verified and checkpointed every table — while the SQLite source
+   re-snapshot (the cutover anchor proving no write slipped in) and the schema/manifest checks
+   still run. Retain the final sealed
+   snapshot, receipt, and restricted `.env.pre-postgres-*.bak` file. Verify that
+   `SILICON_NOTEBOOK_STORAGE_DIR` points to the same files on the new deployment host, or copy
+   that directory separately and verify it; database migration never copies those files.
+   To activate a migration that already completed while the source has remained stopped, use
+   `--activation-receipt /absolute/path/migration-*.receipt.json` instead of `--apply`; the same
+   full verification still runs. The CLI sets PostgreSQL as the only `DATABASE_URL` and stores
+   the prior SQLite URL as inert `SHADOW_DATABASE_URL`; it does not stop or start processes.
+4. Restart the backend; deployment remains `--workers 1`. Do not manually edit the selector
+   between receipt verification and startup.
+5. Before traffic, require `curl -fsS http://127.0.0.1:8000/api/ready` to report
+   `"ready": true`; log in as admin and a normal user; compare notebook/source counts with
+   the receipt; exercise search and representative Ask/Knowledge/Memory/Knowhow/report reads;
+   verify referenced files; then perform one explicitly approved canary write and its
+   background-job completion. Only then reopen traffic.
+
+### 4. Switch back safely
+
+- Before PostgreSQL accepts any business write, rollback is safe: stop the backend, restore
+  the SQLite `DATABASE_URL`, start one worker, and repeat the readiness/auth/count/read smoke.
+- After the first PostgreSQL business write, editing the URL back loses that write. This
+  repository has no reverse importer or dual-write log. Freeze again, externally reconcile
+  PostgreSQL→SQLite (including storage effects), verify both sides, and only then reopen
+  SQLite. If that process has not been designed and rehearsed, PostgreSQL is the rollback
+  boundary.
+- Merely toggling the URL during development selects two independent histories. Neither side
+  is kept synchronized. Never run SQLite-only maintenance or `scripts/batch_ingest.py`
+  mutation phases while PostgreSQL is selected.
 
 ## PDF parsing with MinerU
 
@@ -370,6 +532,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --lim
 # 3) extract KG for the whole notebook (idempotent; skips already-extracted; resumable)
 PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 
+# repair graph-bearing sources whose latest KG run left failed windows
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --retry-partial
+
 # or run both phases in one command
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "My KB"
 
@@ -406,6 +571,8 @@ The `backfill-source-index` subcommand proactively populates `knowledge_object_s
 The `metadata` subcommand backfills paper metadata (title, authors, affiliations, venue, year) for a notebook's sources that don't have it yet — useful for a library ingested before paper-metadata extraction existed, or after upgrading the extraction prompt/schema and wanting a refresh. It only targets sources that have already been parsed and look like an academic paper (empty or `academic_paper` doc type); it reads text from the already-stored parsed elements, so the original PDF doesn't need to still be on disk. It requires `--notebook-id` (this subcommand never creates a notebook) and a configured service binding for the `paper_metadata` workload; it errors out rather than silently skipping when that workload is unbound, and needs no embedding workload. It's idempotent and restartable: sources that already have a metadata row are skipped on a re-run; pass `--force` to re-extract everything in scope regardless (e.g. after a prompt/validation upgrade). Progress prints one line per source (`[meta <done>/<total>] <source-id> <status>`) followed by a final JSON summary of status counts.
 
 The `reparse` subcommand fixes a class of historical leftover: sources that were created and whose `parse_status` looks advanced, yet have no `source_elements` (a prior parse that was interrupted or never landed). KG extraction has a zero-LLM grounding check — every node the LLM emits must bind its quoted evidence back to one of the source's elements, or it is dropped; a source with no elements has *all* of its extracted nodes discarded, so `knowledge_objects` never grows (the extraction is wasted) and re-extracting directly never recovers it. Older `all` resume logic used "has KG?" as a proxy for "has been parsed?", routing these element-less sources straight to extraction — exactly this trap (that split is now fixed, so fresh imports no longer hit it). This command re-runs `process_source` (parse → generate elements) for every source in the notebook missing `source_elements`, then does one KG rebuild; sources that already have elements are skipped (idempotent, restartable). `--limit N` processes only the first N; `--no-rebuild` skips the closing clustering (batched runs). Requires `--notebook-id`.
+
+`kg --retry-partial` repairs a different state: the source still has graph objects, but its latest KG extraction record reports `windows_failed>0`. Normal incremental `kg` intentionally treats a completed graph-bearing source as covered, so it does not revisit these rows. The explicit repair flag adds them to the normal missing-KG target set. For each partial source, the existing objects and relations remain readable while model windows run. If any retry window fails or the replacement is empty, the batch counts that attempt as failed/incomplete and the old graph remains untouched; only a non-empty, zero-failed-window result transactionally replaces that source's graph. `--limit N` bounds the combined missing + partial target set, `--no-rebuild` supports batching, and the final rebuild/index flow is unchanged. This is not a parser repair; sources without `source_elements` still require `reparse`.
 
 **MRL truncation quality spike (`app.eval.mrl_truncation`).** Answers "how much retrieval quality do we lose if we truncate stored embeddings to their first 1024/2048 dimensions (+ re-normalize)?" — the gate for both shrinking in-process vector memory (~4× at 4096→1024) and for pgvector HNSW indexing (which caps at 2000/4000 dims). Read-only, streams the DB in blocks (bounded memory on million-row tables), and always prints the per-table embedding row counts for the notebook first.
 
@@ -452,9 +619,15 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` — in the `all`, `kg`, and `reparse` phases, print producer/source business-pool utilization every N seconds (default 15; `0` disables it). This is not the model-capacity authority; inspect the read-only Model Services status for per-service running/queued counts, health, and breaker state.
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding.
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--retry-partial` (`kg` only: safely retry graph-bearing sources whose latest run has failed windows), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running when `chunk_embedding` is unbound; refused by default, never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between producer/source business-pool reports in `all`/`kg`/`reparse`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + element + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` plus a `paper_metadata` binding.
 
 Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, and `paper_metadata`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
+
+### Large-library retrieval hot path
+
+Indexed KG retrieval must remain bounded after ANN candidate generation. The isolated-node rank penalty probes each candidate with indexed `EXISTS` checks and returns only connected candidate ids; it never fetches a hub's complete adjacency list. Canonical folding reads mappings only for the scored ids through `cluster_fold_rows`. Concurrent reasoning subqueries share one lazy ANN load per scale-index instance and artifact kind. These optimizations preserve the retrieved ids, scores, thresholds, PPR behavior, and recall.
+
+For a production regression, capture stacks and the slow-stage breakdown with `python3 scripts/diag.py incident` and `python3 scripts/diag.py slow --since 6 --deep`. In `_retrieve_scored` events, compare `ann_ms`, `hydrate_ms`, and `fold_ms`; a small candidate count must not cause hydration work proportional to total relation or cluster rows. Before/after acceptance should use the exact replay comparison below.
 
 ### Retrieval replay diff (`scripts/replay_retrieval.py`)
 

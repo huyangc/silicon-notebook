@@ -443,6 +443,97 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
     assert peak == min(len(targets), scheduler.job_concurrency())
 
 
+def test_run_kg_retry_partial_adds_safe_repair_targets(repo, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb-retry-partial")
+    targets = ["src-missing", "src-partial", "src-complete"]
+    monkeypatch.setattr(repo.maintenance, "source_ids", lambda _nb: targets)
+    monkeypatch.setattr(
+        repo.maintenance,
+        "kg_covered_source_ids",
+        lambda _nb: {"src-partial", "src-complete"},
+    )
+    monkeypatch.setattr(
+        repo.maintenance,
+        "partial_kg_source_ids",
+        lambda _nb: {"src-partial"},
+    )
+    monkeypatch.setattr(
+        repo.maintenance,
+        "sources_with_elements",
+        lambda _nb: set(targets),
+    )
+    monkeypatch.setattr(repo.maintenance, "set_source_status", lambda *a, **k: None)
+    seen = []
+
+    def extract(source_id, *, preserve_existing_until_complete=False):
+        seen.append((source_id, preserve_existing_until_complete))
+
+    monkeypatch.setattr(repo.maintenance, "run_extraction", extract)
+    repo._runtime.models.chat_clients = {
+        **repo._runtime.models.chat_clients,
+        "kg_extract": _StubLLM(),
+    }
+
+    res = bi.run_kg(
+        repo,
+        nb_id,
+        no_rebuild=True,
+        retry_partial=True,
+    )
+
+    assert set(seen) == {
+        ("src-missing", False),
+        ("src-partial", True),
+    }
+    assert res["extracted"] == 2
+    assert res["partial_retried"] == 1
+    assert res["partial_failed_preserved"] == 0
+
+
+def test_partial_kg_source_ids_uses_latest_run_and_requires_existing_graph(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb-partial-inventory")
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        for sid in ("src-partial", "src-clean", "src-empty", "src-retry-empty"):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, nb_id, sid, "document", f"{sid}.md", f"/tmp/{sid}.md",
+                 0, f"hash-{sid}", "", "", "parsed", now, now),
+            )
+        for sid, message in (
+            ("src-partial", "kg objects=1 windows_failed=2/5"),
+            ("src-clean", "kg objects=1 windows_failed=0/5"),
+            ("src-empty", "kg objects=0 windows_failed=2/5"),
+            ("src-retry-empty", "retry_incomplete=1 windows_failed=0/5 empty_result=1"),
+        ):
+            db.execute(
+                "INSERT INTO extraction_runs "
+                "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"run-{sid}", nb_id, sid, "kg", "completed", message, now, now),
+            )
+        for sid in ("src-partial", "src-clean", "src-retry-empty"):
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,payload,evidence,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (f"ko-{sid}", nb_id, "concept", "approved", "{}", "[]", sid, now, now),
+            )
+
+    assert repo.maintenance.partial_kg_source_ids(nb_id) == {
+        "src-partial",
+        "src-retry-empty",
+    }
+
+
+def test_run_kg_rejects_retry_partial_with_rebuild_only(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb-retry-conflict")
+    with pytest.raises(ValueError, match="retry_partial"):
+        bi.run_kg(repo, nb_id, retry_partial=True, rebuild_only=True)
+
+
 def _seed_sources(repo, nb_id, n, prefix):
     now = "2026-01-01T00:00:00"
     sids = [f"{prefix}-{i}" for i in range(n)]
@@ -1933,6 +2024,13 @@ def test_arg_parser_has_fresh_flag():
     assert args.fresh is False
     args2 = bi.build_arg_parser().parse_args(["kg", "--fresh"])
     assert args2.fresh is True
+
+
+def test_arg_parser_has_retry_partial_flag():
+    args = bi.build_arg_parser().parse_args(["kg"])
+    assert args.retry_partial is False
+    args2 = bi.build_arg_parser().parse_args(["kg", "--retry-partial"])
+    assert args2.retry_partial is True
 
 
 def test_main_kg_fresh_dispatches_force_and_fresh(repo, monkeypatch):

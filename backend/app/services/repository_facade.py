@@ -84,7 +84,7 @@ from app.models.knowledge import (
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.vector_cache import LRUProcessCache
+from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
 from app.services.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -392,7 +392,36 @@ class RepositoryFacade:
         # numpy arrays + a memoized hnsw handle, tens-of-MB to GB). Eviction
         # just drops the reference — GC frees the arrays, and hnswlib.Index
         # has no explicit close() to call (see LRUProcessCache docstring).
-        scale_idx_cache = LRUProcessCache(max_entries=self.settings.scale_idx_cache_max)
+        # PR-4: a large-library ScaleIndex is tens of GB; cap how many of those
+        # stay resident (scale_idx_cache_max_large) so multi-domain base warm-up
+        # can't accumulate hundreds of GB → OOM. "Large" = the estimated resident
+        # bytes of its ANN matrices — the kg (n_ann), chunk (n_chunk_ann) and
+        # relation (n_relation_ann) hnsw handles, each rows×runtime_dim×4 bytes, the
+        # dominant footprint — over scale_idx_large_bytes. Summing all three (not
+        # just n_nodes) catches a KG-node-light but chunk/relation-ANN-heavy source
+        # base (codex PR#359 r1 P1). A missing count contributes 0 → an old index
+        # that never wrote these keys classifies as small (never over-evicts real
+        # large indexes on a missing count). Only the scale-index cache needs this —
+        # viz arrays (viz_idx_cache) are far smaller than the ANN matrices.
+        from app.services.kg.scale_index import estimated_ann_bytes
+        from app.services.vector_index import resolve_runtime_dim
+
+        # Capture the Settings object (already held by the runtime), NOT ``self`` —
+        # this closure lives inside scale_idx_cache, so closing over the facade
+        # would make the cache transitively retain the whole repository (see
+        # test_retained_scale_runtime_does_not_transitively_retain_repository).
+        _settings = self.settings
+
+        def _scale_idx_is_large(idx) -> bool:
+            m = getattr(idx, "manifest", None) or {}
+            dim = resolve_runtime_dim(_settings) or _settings.embed_dim
+            return estimated_ann_bytes(m, dim) > _settings.scale_idx_large_bytes
+
+        scale_idx_cache = LargeAwareLRUCache(
+            max_entries=self.settings.scale_idx_cache_max,
+            max_large=self.settings.scale_idx_cache_max_large,
+            is_large=_scale_idx_is_large,
+        )
         # P1-8: memoize _scale_index_version keyed on kg_mutation_seq. Maps
         # notebook_id -> (last_seq, version_list). When seq is unchanged we skip
         # the 5 COUNT/MAX aggregates and return the cached list (same format —
@@ -672,8 +701,15 @@ class RepositoryFacade:
                     )
                 )
             ),
-            begin_extraction_run=lambda source_id, notebook_id, run_id, created_at: (
-                self._begin_extraction_run(source_id, notebook_id, run_id, created_at)
+            begin_extraction_run=lambda source_id, notebook_id, run_id, created_at,
+            preserve_existing=False: (
+                self._begin_extraction_run(
+                    source_id,
+                    notebook_id,
+                    run_id,
+                    created_at,
+                    preserve_existing=preserve_existing,
+                )
             ),
             finish_extraction_run=lambda run_id, status, message: (
                 self._finish_extraction_run(run_id, status, message)
@@ -1552,13 +1588,21 @@ class RepositoryFacade:
     # --- extraction ORCHESTRATION and calls back through these seams so no
     # --- SQL leaks into the application service.
     def _begin_extraction_run(
-        self, source_id: str, notebook_id: str, run_id: str, created_at: str
+        self,
+        source_id: str,
+        notebook_id: str,
+        run_id: str,
+        created_at: str,
+        *,
+        preserve_existing: bool = False,
     ) -> None:
-        """Reset one source's prior KG artefacts and open its extraction_runs
-        row in ONE write transaction — the exact commit boundary the inline
-        _run_extraction body always had."""
+        """Open one source run, optionally retaining its graph for safe retry."""
         return self._runtime.knowledge.begin_extraction(
-            source_id, notebook_id, run_id, created_at
+            source_id,
+            notebook_id,
+            run_id,
+            created_at,
+            preserve_existing=preserve_existing,
         )
 
     def _finish_extraction_run(self, run_id: str, status: str, message: str) -> None:
@@ -3169,6 +3213,12 @@ class RepositoryFacade:
     ) -> int:
         return self._runtime.catalog.warm_open_path_caches(progress)
 
+    def _preload_scale_retrieval_artifacts(
+        self, progress: Optional[Callable[[int, int], None]] = None
+    ) -> dict[str, int]:
+        """Startup-only strict preload behind the process readiness gate."""
+        return self.retrieval.preload_scale_artifacts(progress)
+
     # object_type -> counts-dict key mapping (C5 batched GROUP BY projection).
     # Canonical map lives on NotebookSummaryQuery; the facade keeps the frozen
     # compatibility name pointing at the same object.
@@ -3563,7 +3613,10 @@ class RepositoryFacade:
 
 
 def _now() -> str:
-    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+    # Ask history is ordered by conversation.updated_at.  Preserve sub-second
+    # precision so two conversations touched inside one wall-clock second still
+    # have a meaningful recency order (UUID/id tie-breakers are not activity).
+    return datetime.now().astimezone().isoformat(timespec="microseconds")
 
 
 def _citation(label: str, evidence: Evidence, tier: str = "personal") -> Citation:

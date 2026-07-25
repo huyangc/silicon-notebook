@@ -78,7 +78,7 @@ test("Ask stream consumes started progress final events and yields for paint", a
   globalThis.fetch = async (url, init) => {
     captured = { url, init };
     return streamResponse(
-      JSON.stringify({ event: "started", job_id: "job-1" }),
+      JSON.stringify({ event: "started", job_id: "job-1", conversation_id: "conv-1" }),
       JSON.stringify({ event: "progress", step: { step_type: "retrieve", summary: "检索", detail: {} } }),
       JSON.stringify({ event: "final", response: { answer_id: "answer-1" } }),
     );
@@ -89,16 +89,40 @@ test("Ask stream consumes started progress final events and yields for paint", a
     { question: "what" },
     (step) => progress.push(step.summary),
     undefined,
-    (id) => starts.push(id),
+    (jobId, conversationId) => starts.push([jobId, conversationId]),
   );
 
-  assert.deepEqual(starts, ["job-1"]);
+  assert.deepEqual(starts, [["job-1", "conv-1"]]);
   assert.deepEqual(progress, ["检索"]);
   assert.deepEqual(result, { answer_id: "answer-1" });
   assert.match(String(captured.url), /notebooks\/nb-1\/ask\/stream$/);
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.body, JSON.stringify({ question: "what" }));
   assert.equal(paints(), 1);
+});
+
+test("Ask stream awaits started handling before consuming progress", async () => {
+  installWindow();
+  const order = [];
+  globalThis.fetch = async () => streamResponse(
+    JSON.stringify({ event: "started", job_id: "job-1", conversation_id: "conv-1" }),
+    JSON.stringify({ event: "progress", step: { step_type: "retrieve", summary: "检索", detail: {} } }),
+    JSON.stringify({ event: "final", response: { answer_id: "answer-1" } }),
+  );
+
+  await ask.runAskStream(
+    "nb-1",
+    { question: "what" },
+    () => { order.push("progress"); },
+    undefined,
+    async () => {
+      order.push("started");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      order.push("started-handled");
+    },
+  );
+
+  assert.deepEqual(order, ["started", "started-handled", "progress"]);
 });
 
 test("Ask stream maps stream errors and cancellation to safe outcomes", async () => {
@@ -134,6 +158,8 @@ test("ready probe is unauthenticated no-store and fails open", async () => {
     detail: "loading",
     warmed_notebooks: undefined,
     total_notebooks: undefined,
+    preloaded_indexes: undefined,
+    total_indexes: undefined,
     error: null,
   });
   assert.equal(captured.cache, "no-store");

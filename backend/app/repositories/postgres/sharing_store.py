@@ -8,6 +8,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
+from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.postgres._store_utils import (
     TimestampInput,
     iso_timestamp,
@@ -322,14 +323,78 @@ class SharingStore:
         return row["notebook_id"] if row else None
 
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
+        """Read every copyable table's rows in ONE REPEATABLE READ transaction,
+        with the copyable-row bound enforced atomically inside it (codex PR#353
+        r3). READ COMMITTED (the default) would let each statement see newer
+        commits, so the count and the per-table fetchalls could disagree; under
+        REPEATABLE READ every read observes the snapshot fixed at the first
+        statement, so a concurrent ingestion commit cannot slip an over-limit
+        notebook between the check and the materialisation. Over the copyable row
+        limit → raise BEFORE any fetchall (never materialises the oversized rows,
+        the 300GB+ OOM). f.chunks + f.nodes = all chunks + all knowledge_objects.
+        `SET TRANSACTION` is the first statement so it governs this transaction.
+
+        The chunks+nodes gate does NOT bound the other materialised tables
+        (relations / embeddings / elements / knowhow); a source whose graph or
+        embedding fan-out dwarfs its chunk+node count passes it yet would
+        materialise gigabytes here. The second bound caps the SUM of every
+        snapshot table's rows — counted, not fetched, in the SAME REPEATABLE READ
+        snapshot — and raises before any fetchall (codex PR#353 r5 P2)."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as connection:
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            violation = self._copy_limit_violation(connection, notebook_id)
+            if violation is not None:
+                raise NotebookTooLargeToCopyError(violation)
             for table, query in _COPY_SNAPSHOT_QUERIES:
                 snapshot[table] = [
                     _snapshot_compat_row(table, row)
                     for row in connection.execute(query, (notebook_id,)).fetchall()
                 ]
         return snapshot
+
+    def _copy_limit_violation(self, connection, notebook_id: str) -> "str | None":
+        """Both copy bounds, counted (not fetched) on the caller's connection: the
+        message to raise if either is crossed, else None. Single source of truth
+        shared by snapshot_copy_rows (atomic, in its REPEATABLE READ snapshot) and
+        snapshot_copy_within_limits (the fresh share-routing recheck), so the
+        copyable verdict and the guard never disagree (codex PR#354 r2 P2)."""
+        row = connection.execute(
+            "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=%s) + "
+            "(SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=%s) AS n",
+            (notebook_id, notebook_id),
+        ).fetchone()
+        total = int(row["n"] if hasattr(row, "keys") else row[0])
+        if total > self.settings.notebook_copy_max_rows:
+            return (
+                f"notebook {notebook_id} crossed the copy-size limit "
+                f"({total} rows > {self.settings.notebook_copy_max_rows}); "
+                f"share read-only instead"
+            )
+        materialised = 0
+        for _table, query in _COPY_SNAPSHOT_QUERIES:
+            crow = connection.execute(
+                f"SELECT COUNT(*) AS n FROM ({query}) AS _c", (notebook_id,)
+            ).fetchone()
+            materialised += int(crow["n"] if hasattr(crow, "keys") else crow[0])
+        if materialised > self.settings.notebook_copy_max_snapshot_rows:
+            return (
+                f"notebook {notebook_id} crossed the copy-materialisation limit "
+                f"({materialised} rows across all tables > "
+                f"{self.settings.notebook_copy_max_snapshot_rows}); share read-only instead"
+            )
+        return None
+
+    def snapshot_copy_within_limits(self, notebook_id: str) -> bool:
+        """Fresh, non-materialising twin of snapshot_copy_rows' bounds: True iff a
+        deep copy would pass BOTH copy bounds right now. The share-routing facade
+        consults it so the copy-vs-read-only verdict reflects the total-
+        materialisation bound WITHOUT the staleness of the KG-version-cached
+        copy_stats (codex PR#354 r2 P2). Own REPEATABLE READ transaction;
+        COUNT-only, never materialises the rows."""
+        with self.database.connect() as connection:
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            return self._copy_limit_violation(connection, notebook_id) is None
 
     def insert_copy_rows(self, table: str, rows: Sequence[dict], *, chunk_size: int) -> None:
         if table not in _COPY_TABLES:

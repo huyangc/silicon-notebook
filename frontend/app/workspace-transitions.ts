@@ -29,6 +29,86 @@ export function workspaceRequestIsCurrent(
 }
 
 
+export function notebookIsActive(
+  expectedNotebook: string,
+  currentNotebook: string | null,
+): boolean {
+  return expectedNotebook === currentNotebook;
+}
+
+
+export function sessionListRequestIsCurrent(
+  expectedRequest: number,
+  currentRequest: number,
+  expectedNotebook: string,
+  currentNotebook: string | null,
+): boolean {
+  return (
+    expectedRequest === currentRequest
+    && notebookIsActive(expectedNotebook, currentNotebook)
+  );
+}
+
+
+export type NotebookRequest<T> = {
+  notebookId: string;
+  requestId: number;
+  promise: Promise<T>;
+};
+
+
+export async function followLatestNotebookRequest<T>(
+  initial: NotebookRequest<T>,
+  latest: () => NotebookRequest<T> | null,
+  isNotebookActive: () => boolean,
+): Promise<{ requestId: number; generationId: number; value: T } | null> {
+  let current = initial;
+  let fallback: { requestId: number; value: T } | null = null;
+  while (true) {
+    let value: T;
+    try {
+      value = await current.promise;
+    } catch (error) {
+      const candidate = latest();
+      if (
+        candidate
+        && candidate.notebookId === current.notebookId
+        && candidate.requestId > current.requestId
+      ) {
+        current = candidate;
+        continue;
+      }
+      if (fallback && isNotebookActive()) {
+        return {
+          ...fallback,
+          // The fallback resolved the generation whose request failed. It is
+          // safe to publish only while that generation is still current.
+          generationId: current.requestId,
+        };
+      }
+      throw error;
+    }
+    if (!isNotebookActive()) return null;
+
+    const candidate = latest();
+    if (
+      candidate
+      && candidate.notebookId === current.notebookId
+      && candidate.requestId > current.requestId
+    ) {
+      fallback = { requestId: current.requestId, value };
+      current = candidate;
+      continue;
+    }
+    return {
+      requestId: current.requestId,
+      generationId: current.requestId,
+      value,
+    };
+  }
+}
+
+
 export function historyModeForTransition(
   currentNotebookId: string | null,
   nextNotebookId: string,

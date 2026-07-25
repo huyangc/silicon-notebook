@@ -47,13 +47,16 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     (),
     ("analytics",),
     ("analytics", "content-overview"),
+    ("checkup",),
     ("memories",),
     ("memories", "from-answer"),
     ("answer-memory-links",),
     ("sources",),
     ("sources", "import"),
     ("sources", "url"),
+    ("sources", "reparse"),
     ("sources", None),
+    ("backfill-vectors",),
     ("assets",),
     ("assets", None),
     ("knowledge-types",),
@@ -693,7 +696,12 @@ class DiagnosticsRuntime:
                 readiness["ready"] = raw_readiness["ready"]
             if isinstance(raw_readiness.get("phase"), str):
                 readiness["phase"] = raw_readiness["phase"][:80]
-            for key in ("warmed_notebooks", "total_notebooks"):
+            for key in (
+                "warmed_notebooks",
+                "total_notebooks",
+                "preloaded_indexes",
+                "total_indexes",
+            ):
                 value = raw_readiness.get(key)
                 if (
                     isinstance(value, int)

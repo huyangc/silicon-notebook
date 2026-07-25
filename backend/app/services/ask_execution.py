@@ -12,7 +12,8 @@ Owns the streaming-ask EXECUTION orchestration that previously lived inline in
   sequence: begin the durable job in ONE transaction (which mutates
   ``payload.conversation_id`` in place at the baseline point — the coordinator
   observes the returned value and never mutates a second time) → register the
-  cancel event → emit ``started`` → emit the synthetic ``start`` step WITHOUT
+  cancel event → emit ``started`` with the durable job/conversation ids →
+  emit the synthetic ``start`` step WITHOUT
   persistence → submit the worker through the copied-context job helper
   (contextvars propagation is the per-user model lifeline) → per real trace:
   persist first, fail-open (log and still deliver — error_policies.json:
@@ -148,10 +149,17 @@ class AskExecutionCoordinator:
         """
         events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
         cancel_event = threading.Event()
-        job_id, _conversation_id = self.ask_state.begin_durable_job(
+        job_id, conversation_id = self.ask_state.begin_durable_job(
             notebook_id, payload, mode.id, user_id)
         self.cancellations.register(job_id, cancel_event)
-        events.put({"event": "started", "job_id": job_id})
+        # conversation_id is durable before this event is delivered.  The UI
+        # can therefore publish/reopen a first-turn session immediately,
+        # without waiting for the model's final response.
+        events.put({
+            "event": "started",
+            "job_id": job_id,
+            "conversation_id": conversation_id,
+        })
         # 合成 start 步:只上流、不落 ask_trace_steps(基线语义)。
         events.put({"event": "progress", "step": {
             "step_type": "start", "summary": "启动检索", "detail": {"mode": mode.id}}})

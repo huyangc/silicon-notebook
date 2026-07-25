@@ -9,7 +9,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 ## Highlights
 
 - Structured source ingestion with element-level evidence, formulas, tables, and retained document images when MinerU is configured.
-- Grounded multi-turn Ask with compact citations and `chunk`, `reasoning`, and experimental `graph` retrieval modes.
+- Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes.
 - Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, and personal-to-base promotion.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
 - Free-form knowhow tables with Markdown cells, reasoning-backed library-wide empty-cell completion suggestions, deterministic graph projection, history, milestones, and isolated code attachments.
@@ -119,6 +119,7 @@ Optional external services
 - SQLite defaults to `.local/silicon_notebook.db`; PostgreSQL is a direct alternative. Uploaded files and generated artifacts stay under `.local/` for either database.
 - The production backend is deliberately single-worker because model queues, breakers, health, and cancellation state are process-local.
 - Baseline `chunk` retrieval is active-notebook-only. KG-assisted and reasoning paths may federate through explicitly mounted base notebooks.
+- Indexed large-library retrieval keeps post-ANN database hydration bounded by the candidate window and single-flights ANN handle loading across concurrent reasoning subqueries. By default, every published scale index, enabled ANN handle, and safely reusable single-index PPR core is loaded behind `/api/ready` before user traffic is admitted; cross-notebook combined graphs remain lazy to avoid multiplying 10M-node graph copies.
 - The candidate review queue has been retired; current knowledge governance operates on stored knowledge objects.
 - DATABASE_URL selects the formal repository backend through one repository factory. Exactly one active repository backend is selected centrally from `DATABASE_URL`. SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.
 
@@ -144,6 +145,11 @@ changes. Keep SQLite active, keep both backups current, and treat PostgreSQL as 
 shadow until the separately reviewed cutover phase. The complete command sequence and failure
 rules are in [Operations](./docs/operations.md).
 
+The separate, dry-run-first `scripts/migrate_sqlite_to_postgres.py` remains the owned
+stopped-snapshot importer and local-activation tool. It is not continuous replication; use
+`scripts/shadow_sqlite_to_postgres.py` only for the SQLite-active forward shadow described
+above, and never run the two workflows against the same target.
+
 Baseline snapshot/COPY additionally requires an owner-only real snapshot directory, qualifies every business statement to the run-bound schema, revalidates enabled live SQLite capture under a short write fence at critical bindings, uses bounded named server cursors and statement timeouts, and validates the complete migration-derived v9 table/column/constraint/operational+GIN-index/extension catalog at start and finalization. Snapshot/fence reads use a dedicated fresh connection to the current SQLite path—not the repository's thread-cached connection—and bind the resolved path plus device/inode before/after open and again before publication/PG commit. The final SQLite fence is acquired only after long PG proof/ANALYZE work and remains held until the PG H0 transaction commits.
 
 - On the shipped SQLite default, search uses SQLite FTS/vector storage. The PostgreSQL backend uses `pg_trgm`/`ILIKE`; float32 vectors remain `bytea`, so pgvector is not installed or required.
@@ -157,11 +163,12 @@ Baseline snapshot/COPY additionally requires an owner-only real snapshot directo
   ```
 
   `pg_trgm | public` means the prerequisite is ready. If the query returns no row, the first migration automatically attempts `CREATE EXTENSION pg_trgm`; an existing `pg_trgm` in any other schema fails closed.
-- Switch with a stop/change/start boundary: quiesce writes, stop the backend, take and verify a consistent backup, change the single `DATABASE_URL`, start with `--workers 1`, then verify status, `/api/ready`, login, counts, and representative reads before sending traffic.
+- The importer requires an empty UTF-8 PostgreSQL target, reads its URL from `POSTGRES_MIGRATION_URL` (never a URL CLI argument), takes an online SQLite backup-API snapshot including committed WAL state, upgrades only a working copy to the paired schema, streams bounded `COPY`, preserves ordinal values, converts legacy JSON vectors to float32 `bytea`, verifies every table with content checksums, and commits each verified table with a per-table checkpoint so a stopped import (crash, dropped remote connection, reboot) resumes from the last completed table instead of restarting; finalize (ordinal reseed, index rebuild, `ANALYZE`) is idempotent. It explicitly excludes the SQLite-only shadow control/change-log tables and records that exclusion in its receipt. It accepts bounded session bulk-load tuning (`--maintenance-work-mem`, `--max-parallel-index-workers`) for large targets. Its default preview/apply modes do not change `DATABASE_URL` and it never copies `.local/storage`.
+- An online import is a rehearsal snapshot only: SQLite writes committed after its snapshot are not synchronized. For a stopped local deployment, the explicit `--activate-env ... --confirm-service-stopped` mode re-snapshots SQLite and rechecks every PostgreSQL table against the credential-free receipt before atomically replacing `.env`; it preserves the former SQLite URL as inert `SHADOW_DATABASE_URL` and writes a restricted rollback copy. The CLI does not stop or restart services. Start with `--workers 1`, then verify `/api/ready`, login, counts, search, representative reads, and one canary write before sending traffic.
 - Returning to SQLite cannot replay PostgreSQL-only writes. Lossless rollback therefore requires no post-cutover writes or an externally reconciled and verified migration in both directions.
-- `scripts/batch_ingest.py` mutation phases are SQLite-only; on PostgreSQL use the normal application/API ingestion and KG/index flows.
+- `scripts/batch_ingest.py` mutation phases are SQLite-only; on PostgreSQL use the normal application/API ingestion and KG/index flows. For SQLite libraries with historical partial KG runs, `kg --retry-partial` retains each source's current graph until a non-empty, zero-failed-window replacement commits.
 
-The complete decision table, backup rules, and rollback procedure are in [Deployment and configuration](./docs/deployment-and-configuration.md) and [Operations](./docs/operations.md).
+Exact preview/apply/retry commands, the SQLite↔PostgreSQL selector values, the final cutover checklist, storage handling, and rollback limits are in [Operations](./docs/operations.md#sqlite--postgresql-cutover-and-rollback). Deployment settings are in [Deployment and configuration](./docs/deployment-and-configuration.md).
 
 See [architecture.md](./architecture.md) for runtime boundaries and [Development and repository contracts](./docs/development.md) for contributor-facing constraints.
 
@@ -183,7 +190,7 @@ Chinese counterparts are linked from the top of each split document.
 
 ## Current boundaries
 
-- SQLite is the shipped default; PostgreSQL 16 is a supported direct backend. Existing data still requires an externally controlled, verified migration between them.
+- SQLite is the shipped default; PostgreSQL 16 is a supported direct backend. The repository includes a verified one-way SQLite→PostgreSQL snapshot importer; it does not provide live synchronization, PostgreSQL→SQLite replay, or MySQL migration.
 - No Docker is required or provided as the default first-version workflow.
 - High-fidelity formulas, tables, layout, and scanned PDFs require MinerU; `MINERU_MODE=off` uses pypdf text fallback.
 - Knowledge extraction and model-backed answers require the relevant workload bindings; offline mode does not synthesize knowledge.

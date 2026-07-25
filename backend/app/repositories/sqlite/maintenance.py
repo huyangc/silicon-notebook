@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterator, Optional, Sequence
 
 from app.repositories.ports import VectorBatchEncoder
 from app.repositories.sqlite.knowhow_history_store import content_strings_in_payload
+from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,postgres maintenance 共用
 from app.services.vector_index import decode_vector
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
@@ -38,19 +39,9 @@ VECTOR_TABLES = (
 )
 _VECTOR_TABLE_IDS = dict(VECTOR_TABLES)
 
-# Every character Python's ``str.strip()`` removes (i.e. ``str.isspace()`` is
-# True) - pinned by tests/test_batch_ingest.py against the live Unicode
-# tables. The element-vector missing queries must use EXACTLY this set
-# as the TRIM charset: SourceEmbeddingService.embed_source skips elements whose
-# ``text.strip()`` is empty, so an element these queries call "missing" but the
-# embed path refuses to embed would be reported missing forever - the backfill
-# command would never converge. SQLite's bare TRIM(X) strips U+0020 only, a
-# strictly weaker filter that a tab/newline-only element slips right through.
-PY_WHITESPACE = (
-    "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0"
-    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-    "\u2028\u2029\u202f\u205f\u3000"
-)
+# PY_WHITESPACE(= Python str.strip() \u7684\u5168\u96c6)\u73b0\u79fb\u5230\u540e\u7aef\u4e2d\u6027\u7684
+# app.repositories.text_whitespace,\u4f9b sqlite/postgres maintenance \u5171\u7528\u540c\u4e00\u4efd TRIM charset
+# (\u89c1\u8be5\u6a21\u5757 docstring)\u3002\u8fd9\u91cc\u4ece\u9876\u90e8 import \u518d\u5bfc\u51fa,test_batch_ingest \u4ecd\u53ef\u4ece\u672c\u6a21\u5757\u53d6\u3002
 
 
 def _now() -> str:
@@ -273,6 +264,40 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
+    def partial_kg_source_ids(self, notebook_id: str) -> set:
+        """Sources whose latest KG run reports at least one failed window.
+
+        Restrict this repair inventory to sources that still have graph objects;
+        zero-object runs are already handled by the normal incremental KG pass.
+        """
+        with self._runtime.database.connect() as db:
+            return {
+                row["source_id"]
+                for row in db.execute(
+                    "WITH latest AS ("
+                    "  SELECT er.source_id, er.error_message, "
+                    "         ROW_NUMBER() OVER ("
+                    "           PARTITION BY er.source_id "
+                    "           ORDER BY er.created_at DESC, er.rowid DESC"
+                    "         ) AS rn "
+                    "  FROM extraction_runs er "
+                    "  WHERE er.notebook_id=? AND er.run_type='kg'"
+                    ") "
+                    "SELECT l.source_id FROM latest l "
+                    "JOIN sources s ON s.id=l.source_id "
+                    "WHERE l.rn=1 AND s.source_type!='knowhow' "
+                    "AND ("
+                    "  l.error_message GLOB '*windows_failed=[1-9]*/*' "
+                    "  OR instr(l.error_message, 'retry_incomplete=1') > 0"
+                    ") "
+                    "AND EXISTS ("
+                    "  SELECT 1 FROM knowledge_objects ko "
+                    "  WHERE ko.notebook_id=? AND ko.source_id=l.source_id"
+                    ")",
+                    (notebook_id, notebook_id),
+                ).fetchall()
+            }
+
     def sources_with_elements(self, notebook_id: str) -> set:
         """该 notebook 下已产出 source_elements(即已成功 parse)的 source_id 集合。
         run_all 用它区分「已 parse、缺 KG → extract_source 补抽」与「无 elements →
@@ -303,9 +328,19 @@ class SQLiteMaintenanceAdapter:
                 (notebook_id,),
             ).fetchone()["c"]
 
-    def run_extraction(self, source_id: str) -> None:
+    def run_extraction(
+        self,
+        source_id: str,
+        *,
+        preserve_existing_until_complete: bool = False,
+    ) -> None:
         # Late-bound through the runtime so component-seam monkeypatches
         # (repo._runtime.source_ingestion.run_extraction) keep observing.
+        if preserve_existing_until_complete:
+            return self._runtime.source_ingestion.run_extraction(
+                source_id,
+                preserve_existing_until_complete=True,
+            )
         return self._runtime.source_ingestion.run_extraction(source_id)
 
     def set_source_status(
@@ -423,48 +458,121 @@ class SQLiteMaintenanceAdapter:
 
     # -- embeddings -----------------------------------------------------------
 
-    def missing_chunk_embedding_rows(self, notebook_id: str) -> list[dict]:
+    def missing_chunk_embedding_rows(
+        self,
+        notebook_id: str,
+        only_source_id: "str | None" = None,
+    ) -> list[dict]:
+        """``only_source_id`` 只取某源的 chunk——体检 backfill **持该源的分块锁、在锁内**逐源取
+        缺失行再嵌(codex P1:element/chunk id 在 reparse 时复用,锁外读到的旧代行在替换后提交会
+        挂上永久陈旧向量;锁内读→嵌保证 reparse 的换血不会插进来)。CLI 盘点/补齐不传、口径不变。"""
+        params: list = [notebook_id]
+        clause = ""
+        if only_source_id is not None:
+            clause += " AND c.source_id = ?"
+            params.append(only_source_id)
         with self._runtime.database.connect() as db:
             return [
                 dict(r)
                 for r in db.execute(
-                    "SELECT c.id, c.text FROM chunks c WHERE c.notebook_id=? "
+                    "SELECT c.id, c.source_id, c.text FROM chunks c WHERE c.notebook_id=? "
                     "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
-                    "WHERE e.chunk_id=c.id)",
-                    (notebook_id,),
+                    "WHERE e.chunk_id=c.id)" + clause,
+                    tuple(params),
                 ).fetchall()
             ]
 
-    def missing_element_embedding_rows(self, notebook_id: str) -> list[dict]:
+    def missing_element_embedding_rows(
+        self,
+        notebook_id: str,
+        only_source_id: "str | None" = None,
+    ) -> list[dict]:
         """该 notebook 下缺 element 向量、且文本非空白的 source_elements 行
         ([{"id","source_id","text"}, ...])。空白文本必须排除:embed_source 会跳过
         它们(text.strip() 为空),永远不会有向量——不排除的话补齐命令每次都报「还有
         N 个缺失」、每次都试着嵌入空串,成为永不收敛的脏状态。TRIM 的字符集用
-        PY_WHITESPACE(= Python str.strip() 的全集),与 embed_source 的过滤逐字符一致。"""
+        PY_WHITESPACE(= Python str.strip() 的全集),与 embed_source 的过滤逐字符一致。
+        ``only_source_id`` 只取某源——体检 backfill **持该源的分块锁、在锁内**逐源取再嵌
+        (codex P1:element id 在 reparse 时复用,锁外读到的旧代文本行在替换后提交会挂上永久
+        陈旧向量;锁内读→嵌保证 reparse 换血不会插进来)。CLI 不传、口径不变。"""
+        params: list = [notebook_id, PY_WHITESPACE]
+        clause = ""
+        if only_source_id is not None:
+            clause += " AND e.source_id = ?"
+            params.append(only_source_id)
         with self._runtime.database.connect() as db:
             return [
                 dict(r)
                 for r in db.execute(
                     "SELECT e.id, e.source_id, e.text FROM source_elements e "
                     "JOIN sources s ON s.id = e.source_id "
-                    "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                    "WHERE s.notebook_id=? "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND TRIM(e.text, ?) != '' "
                     "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
-                    "WHERE v.element_id = e.id)",
+                    "WHERE v.element_id = e.id)" + clause,
+                    tuple(params),
+                ).fetchall()
+            ]
+
+    def missing_chunk_vector_source_ids(self, notebook_id: str) -> list[str]:
+        """有缺 chunk 向量的 **DISTINCT source_id**(不取正文)——体检 backfill 的轻量源发现
+        (codex 第2轮 P1:大库上别把每行全文物化进内存仅为收 id,会 GB 级/OOM)。判据与
+        missing_chunk_embedding_rows 的 NOT EXISTS 逐字一致,只把投影换成 DISTINCT source_id。"""
+        with self._runtime.database.connect() as db:
+            return [
+                r["source_id"]
+                for r in db.execute(
+                    "SELECT DISTINCT c.source_id FROM chunks c WHERE c.notebook_id=? "
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
+                    (notebook_id,),
+                ).fetchall()
+            ]
+
+    def missing_element_vector_source_ids(self, notebook_id: str) -> list[str]:
+        """有缺 element 向量(且文本非空白)的 **DISTINCT source_id**——体检 backfill 的轻量源发现。
+        判据(TRIM 非空白 + NOT EXISTS)与 missing_element_embedding_rows 逐字一致,只投影 source_id,
+        不物化正文(codex 第2轮 P1)。"""
+        with self._runtime.database.connect() as db:
+            return [
+                r["source_id"]
+                for r in db.execute(
+                    "SELECT DISTINCT e.source_id FROM source_elements e "
+                    "JOIN sources s ON s.id = e.source_id "
+                    "WHERE s.notebook_id=? "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND TRIM(e.text, ?) != '' "
+                    "AND NOT EXISTS (SELECT 1 FROM element_embeddings v WHERE v.element_id = e.id)",
                     (notebook_id, PY_WHITESPACE),
                 ).fetchall()
             ]
 
-    def count_missing_element_vectors(self, notebook_id: str) -> int:
+    def count_missing_element_vectors(
+        self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
+    ) -> int:
         """missing_element_embedding_rows 的计数版(盘点用)。判据必须与它逐字一致,
-        否则「盘点数」和「实际可补数」会对不上。"""
+        否则「盘点数」和「实际可补数」会对不上。``exclude_source_ids`` 排除指定源的 element——
+        体检 H5 传活跃租约快照,免得把**正在嵌入**的源误报缺向量(codex);CLI 盘点不传、逐字一致。
+
+        **排除 memory/knowhow 隐藏合成源**(codex 第6轮 P2,element/rows/source_ids 三处同款,两后端
+        对齐):它们**设计上就没有** element 向量——knowhow 投影只嵌生成的 chunk(embed_chunk_ids,
+        workload=knowhow_embedding)、memory 走独立 memory_embedding,两者的 source_elements 都不走通用
+        embed_source。含进来会:①H5 在成功投影后仍报损坏;②backfill 白嵌派生格(触效率红线)。与
+        H2/H3/H6 的 memory/knowhow 排除口径一致。"""
+        exclude = tuple(exclude_source_ids or ())
+        clause = (
+            f" AND e.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+        )
         with self._runtime.database.connect() as db:
             return db.execute(
                 "SELECT COUNT(*) c FROM source_elements e "
                 "JOIN sources s ON s.id = e.source_id "
-                "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                "WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND TRIM(e.text, ?) != '' "
                 "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
-                "WHERE v.element_id = e.id)",
-                (notebook_id, PY_WHITESPACE),
+                "WHERE v.element_id = e.id)" + clause,
+                (notebook_id, PY_WHITESPACE, *exclude),
             ).fetchone()["c"]
 
     def embed_elements_batch(self, notebook_id: str, items: list[dict]) -> int:
@@ -535,12 +643,21 @@ class SQLiteMaintenanceAdapter:
             ).fetchone()["c"]
         return objs, emb
 
-    def count_missing_chunk_vectors(self, notebook_id: str) -> int:
+    def count_missing_chunk_vectors(
+        self, notebook_id: str, exclude_source_ids: "set[str] | None" = None
+    ) -> int:
+        """缺 chunk 向量的 chunk 数。``exclude_source_ids`` 排除指定源的 chunk——体检 H4 传
+        活跃租约快照,免得把**正在嵌入**的源(chunk 已在、向量还没落)误报成损坏(codex);
+        CLI 盘点不传、口径不变。"""
+        exclude = tuple(exclude_source_ids or ())
+        clause = (
+            f" AND c.source_id NOT IN ({','.join('?' * len(exclude))})" if exclude else ""
+        )
         with self._runtime.database.connect() as db:
             return db.execute(
                 "SELECT COUNT(*) c FROM chunks c WHERE c.notebook_id=? AND NOT EXISTS "
-                "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)",
-                (notebook_id,),
+                "(SELECT 1 FROM chunk_embeddings e WHERE e.chunk_id=c.id)" + clause,
+                (notebook_id, *exclude),
             ).fetchone()["c"]
 
     def count_missing_node_vectors(self, notebook_id: str) -> int:

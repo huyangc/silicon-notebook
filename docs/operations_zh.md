@@ -131,7 +131,7 @@ umask 077
 mkdir -p "$WORK_DIR"
 chmod 700 "$WORK_DIR"
 
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py preflight \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json \
   --disk-evidence-id capacity-20260725 --available-target-bytes 500000000000 \
   --backup-evidence-id restore-test-20260725 \
@@ -139,7 +139,7 @@ PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py preflight \
 
 CONFIRMATION_TOKEN="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["confirmation_token"])' \
   "$WORK_DIR/preflight-output.json")"
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py start-forward \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py start-forward \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" \
   --confirmation-token "$CONFIRMATION_TOKEN"
 
@@ -156,14 +156,14 @@ H0，并写入有效期一小时的 worker 启动 token。若一小时后需要�
 ### 监控与校验
 
 ```bash
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py status \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py status \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --json
 
 # 较晚执行校验前，先用 preflight 重新签发 confirmation token。
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py verify \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level structural \
   --confirmation-token "$CONFIRMATION_TOKEN" --json
-PYTHONPATH=backend python scripts/migrate_sqlite_to_postgres.py verify \
+PYTHONPATH=backend python scripts/shadow_sqlite_to_postgres.py verify \
   --run-id "$RUN_ID" --work-dir "$WORK_DIR" --level full \
   --confirmation-token "$CONFIRMATION_TOKEN" --json
 ```
@@ -200,7 +200,7 @@ User=silicon-notebook
 WorkingDirectory=/opt/silicon-notebook
 EnvironmentFile=/etc/silicon-notebook/shadow.env
 UMask=0077
-ExecStart=/opt/silicon-notebook/.venv/bin/python scripts/migrate_sqlite_to_postgres.py worker --run-id shadow-20260725 --direction forward --work-dir /srv/silicon-notebook/shadow/shadow-20260725 --confirmation-token-file /srv/silicon-notebook/shadow/shadow-20260725/worker.confirmation
+ExecStart=/opt/silicon-notebook/.venv/bin/python scripts/shadow_sqlite_to_postgres.py worker --run-id shadow-20260725 --direction forward --work-dir /srv/silicon-notebook/shadow/shadow-20260725 --confirmation-token-file /srv/silicon-notebook/shadow/shadow-20260725/worker.confirmation
 KillSignal=SIGTERM
 TimeoutStopSec=120
 Restart=no
@@ -231,6 +231,140 @@ WantedBy=multi-user.target
 Authority 交换和 PostgreSQL→SQLite 回滚机制属于单独的
 [正式 cutover/rollback 计划](./superpowers/plans/2026-07-22-postgresql-cutover-and-rollback.md)；
 正向 shadow 阶段不得执行该未来计划。
+
+## SQLite → PostgreSQL 停写快照迁移与切换
+
+停写 importer 与正向影子同步彼此独立。它使用 `scripts/migrate_sqlite_to_postgres.py`，必须使用
+另一个 PostgreSQL 目标库，绝不能指向任何 shadow run 已占用的数据库。
+
+运行时只有一个 active database，应用不做 dual-write。仓库内 importer 只提供单向
+SQLite→PostgreSQL 快照迁移；只改 `DATABASE_URL` 只会打开另一份数据存储。它不迁 MySQL、
+不持续捕获后续写入、不回放 PostgreSQL→SQLite，也不复制 source/upload/asset 文件。
+
+### 1. 准备空目标并预检
+
+创建专用的 UTF-8 PostgreSQL 数据库。不要指向已有应用库：任一业务表有行都会 fail closed。
+URL 通过环境变量传入，不放进命令参数：
+
+```bash
+export POSTGRES_MIGRATION_URL='postgresql://USER:PASSWORD@HOST:5432/EMPTY_DB'
+
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db
+```
+
+默认只做只读 preflight：检查 SQLite 身份/schema 与 PostgreSQL UTF-8、current schema、空库和
+migration ledger，然后退出；不会创建快照或写目标。磁盘要同时容纳 SQLite 快照、升级工作副本、
+PostgreSQL 数据与索引；目标用户还必须能在 `public` 安装/使用 `pg_trgm`。
+
+### 2. SQLite 在线时先做演练
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --apply
+```
+
+工具使用 SQLite backup API，能包含已提交 WAL，不会错误地裸复制 live `.db`。它只升级私有
+快照副本，按 FK 顺序和有界 batch 流式 COPY，保留历史 ordinal，把旧 JSON 向量转换为
+float32 `bytea`；PostgreSQL 无法表示的 NUL codepoint 会规整为字面文本 `\\u0000`(单向规整——PostgreSQL 文本/JSON 无法存 NUL)。随后
+逐表做内容 checksum，并把每张已校验的表连同一条 per-table checkpoint 一起提交。run 头绑定
+sealed snapshot hash，使中断的导入能从最后完成的表续跑，而不是整体重来；finalize（ordinal
+reseed、重建索引、`ANALYZE`）是幂等的。这里**刻意用整体单事务原子性换取可续跑**——最终激活阶段
+会在任何切换前重算每张表的 checksum。无凭据 receipt 记录每表数量/checksum、全部 NUL
+normalization 与所用调优。退役 SQLite 表为空时只记录不复制；只要其中一张非空就拒绝迁移，
+绝不静默丢历史数据。
+
+SQLite-only 的 `shadow_capture_control` 与 `shadow_change_log` 是运维状态而非业务数据：即使旧
+shadow run 留有行，停写 importer 也会明确排除它们，并把这一受审排除写入 receipt；退役用户
+数据表必须为空的规则不因此放宽。
+
+若导入中途停止（崩溃、远程连接断开、机器重启），重跑同一条命令即可:copier 会复用绑定到同一停写
+源的 checkpoint，跳过已提交的表继续。要避免每次重试都重新快照数 GB 源库，显式传入本工具生成的
+sealed snapshot：
+
+```bash
+python scripts/migrate_sqlite_to_postgres.py \
+  --source /absolute/path/to/.local/silicon_notebook.db \
+  --work-dir /protected/path/postgres-migration \
+  --snapshot /protected/path/postgres-migration/sqlite-vNN-HASH.snapshot.db \
+  --apply
+```
+
+工具会重新验证目录、文件名、SHA-256 前缀、`quick_check`、schema 版本以及不存在 WAL/SHM；
+快照 hash 必须与已记录的 run 一致;快照记录的**源身份**也必须与所选 `--source` 一致——复用一个
+从**别的库**封出的快照(或缺少源身份记录的快照)会 fail closed,而不会把错的数据导进去。不要
+因为旧演练成功就拿其 `--snapshot` 做正式切换:快照之后的 SQLite commit 不在里面。
+
+### 2a. 大库的调优与前置条件
+
+源库很大时，吞吐与可靠性由几个杠杆主导：
+
+- **把 CLI 跑在 PostgreSQL 本机（或同一高速网络内）。** 每次 COPY 与读回校验都过连接；远程链路
+  会把整份数据来回搬两遍。
+- **抬高建索引预算。** 在已装满的大表上重建索引是 finalize 最慢的一步。传
+  `--maintenance-work-mem 2GB`（或在主机内存允许下更大）和 `--max-parallel-index-workers N`；
+  二者都是会话级、只影响本次导入。
+- **会话级批量装载设置。** 导入用一条独占连接跑，带 `synchronous_commit=off`、
+  `statement_timeout=0`、`idle_in_transaction_session_timeout=0`（可用 `--keep-synchronous-commit`
+  关掉第一项）。确认服务端没有会掐断数小时长拷贝的全局 `statement_timeout`/
+  `idle_in_transaction_session_timeout`，长连接有 TCP keepalive，`pg_wal` 有空间——大库装载在
+  checkpoint 回收 WAL 前会累积大量 WAL。
+- **先量后切。** 正式切换前，在目标主机上用生产数据的副本实跑一次 `--apply` 量真实吞吐。逐表进度
+  行（`COPY i/N`、`VERIFY i/N`、`INDEX i/N`）能看出时间花在哪，续跑对复用的表会打
+  `SKIP i/N ...（checkpointed）`。
+- **`--batch-rows`** 界定 SQLite 取数 / COPY 的批大小（默认 1000）；窄表可调大，超宽行压内存则调小。
+- **`--source-timezone`** 指定把旧的 *naive* SQLite 时间戳按哪个时区解读再转 UTC。默认取导入
+  主机的本地时区——只有当导入运行在与 SQLite 部署同时区的主机上才正确。若把导入跑在不同时区
+  的 PostgreSQL 主机上,必须显式给出 SQLite 主机的 IANA 时区(如 `--source-timezone
+  Asia/Shanghai`),否则每个 naive 时间都会平移一个偏移量。所用时区会记入 receipt。
+- **正式激活要以部署 env 文件的属主(或 root)身份运行。** 激活把凭据 `.env` 写成 `0600`;当它以
+  与后端服务账号**不同**的用户运行时,会把文件属主恢复为原属主以保证服务仍能读取,若没有权限则
+  fail-closed,而不是切换后把服务锁在门外。
+
+### 3. 正式从 SQLite 切到 PostgreSQL
+
+1. 公告维护窗口。停止所有 API、后台 worker、会写数据的 MCP 客户端、batch/maintenance 和
+   scheduler；等进行中写入结束后停止后端。
+2. 创建一个**新的空最终 PostgreSQL 数据库**。演练目标保存的是旧时间点，会被工具主动拒绝。
+   同时按部署策略完成 SQLite、PostgreSQL 常规备份与恢复演练。
+3. 对已停止的 SQLite 源重新执行 preview，然后用一个命令完成最终迁移和本地配置原子激活
+   （所有路径必须是绝对路径）：
+
+   ```bash
+   python scripts/migrate_sqlite_to_postgres.py \
+     --source /absolute/path/to/.local/silicon_notebook.db \
+     --work-dir /protected/path/postgres-migration \
+     --apply \
+     --activate-env /absolute/path/to/.env \
+     --confirm-service-stopped
+   ```
+
+   激活阶段会再次生成 SQLite 快照并重算 PostgreSQL 每张表的 checksum，全部匹配 receipt 后才
+   原子替换 `.env`；不匹配时 `.env` 保持不变。大目标上可加 `--fast-activation` 只跳过这第二遍
+   PostgreSQL 全表 checksum（导入时已逐表校验并落 checkpoint），而 SQLite 源重新快照（证明没有
+   写入偷偷混入的切换锚点）与 schema/清单校验仍会执行。保留最终 sealed snapshot、receipt 和权限受限的
+   `.env.pre-postgres-*.bak`。确认新部署仍能访问同一个 `SILICON_NOTEBOOK_STORAGE_DIR`；若换主机，
+   单独复制并校验这个目录，因为 DB importer 不复制文件。已经完成迁移且 SQLite 此后一直停写时，
+   可用 `--activation-receipt /absolute/path/migration-*.receipt.json` 代替 `--apply`，仍会执行相同
+   的全量校验。CLI 把 PostgreSQL 写成唯一 `DATABASE_URL`，旧 SQLite URL 只保存为惰性的
+   `SHADOW_DATABASE_URL`；CLI 不负责停止或启动进程。
+4. 重启后端，部署仍固定 `--workers 1`。receipt 校验和启动之间不要再手工改 selector。
+5. 放流量前要求 `curl -fsS http://127.0.0.1:8000/api/ready` 返回 `"ready": true`；分别用 admin
+   和普通用户登录；按 receipt 核对 notebook/source 数量；检查搜索和 Ask/Knowledge/Memory/
+   Knowhow/report 代表性读取与引用文件；最后做一次明确批准的 canary 写入并等其后台任务结束。
+   全部通过后才恢复流量。
+
+### 4. 安全切回 SQLite
+
+- PostgreSQL 尚未接受任何业务写入时，可以停后端、把 `DATABASE_URL` 恢复成 SQLite、以单 worker
+  启动并重复 readiness/认证/数量/读取 smoke。
+- 第一次 PG 业务写入之后，直接改 URL 会丢这次及后续写入。仓库没有 reverse importer 或
+  dual-write log；必须再次停写，在外部完成 PostgreSQL→SQLite 对账（包括 storage 副作用），
+  验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。
+- 开发时反复切 URL 只是选择两条彼此独立的历史，任何一边都不会自动同步。选择 PostgreSQL 时
+  不得运行 SQLite-only maintenance 或 `scripts/batch_ingest.py` 的变更阶段。
 
 ## 用 MinerU 解析 PDF
 
@@ -331,6 +465,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --lim
 # 3) 整批抽 KG(幂等,跳过已抽;失败可重跑续抽)
 PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx
 
+# 修复最近一次抽取留下部分 KG 的来源（有失败窗口且已有对象）
+PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --retry-partial
+
 # 或一条命令跑完(ingest 然后 kg)
 PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_dir --notebook-name "我的库"
 
@@ -365,6 +502,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 `metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按源逐行打印（`[meta <done>/<total>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
 `reparse` 子命令修复一类历史存量:某些源已建、`parse_status` 看似前进,却没有 `source_elements`(上次 parse 中断或未落地)。KG 抽取有一道零-LLM 接地校验——每个 LLM 抽出的节点必须把引文匹配回该源的某个 element,否则丢弃;一个源若没有任何 element,抽出的节点会被**整源丢光**,导致 `knowledge_objects` 一行不增(抽了等于白抽),且直接重抽永远补不出。旧版 `all` 的续跑分流曾用「有没有 KG」当「是否已 parse」,把这类无-elements 源当成「已 parse、缺 KG」直接送去抽取,正是踩中此坑(该分流已修正,新导入不再遇到)。本命令对该 notebook 内所有缺 `source_elements` 的源重新跑 `process_source`(parse → 生成 elements),收尾一次 KG rebuild;有 elements 的源自动跳过(幂等、可中断重跑)。`--limit N` 只处理前 N 个;`--no-rebuild` 跳过收尾聚类(分批场景)。必须给 `--notebook-id`。
+
+`kg --retry-partial` 修复的是另一种状态：来源仍有 KG 对象，但最近一次 KG 抽取记录为 `windows_failed>0`。普通增量 `kg` 会把“已完成且已有对象”的来源视为已覆盖，不会自动重跑；显式加此参数后，它们会与正常缺 KG 来源一起进入目标集合。部分来源重试期间，旧对象和关系仍保持可读；若任一窗口再次失败或新结果为空，批处理会把本次尝试计为失败/未完整且旧图不变，只有“零失败窗口且非空”的新结果才会在一个事务内替换该来源的图。`--limit N` 限制“缺失 + 部分”合并后的目标数，`--no-rebuild` 可用于分批，末尾 rebuild/index 行为不变。它不是解析修复；没有 `source_elements` 的来源仍应使用 `reparse`。
 
 **MRL 截断质量 spike(`app.eval.mrl_truncation`)。** 回答「把存量向量截断到前 1024/2048 维(+ re-normalize),检索质量掉多少」——这既是进程内向量内存瘦身(4096→1024 约 ÷4)的前置,也是 pgvector HNSW 建索引(维度上限 2000/4000)的 gate。只读、流式分块(百万行表内存有界),并总是先打印该 notebook 四张 embeddings 表的行数。
 
@@ -410,9 +549,15 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
+
+### 大库检索热路径
+
+索引 KG 检索在 ANN 生成候选后仍必须保持有界。孤立节点排序降权只对每个候选执行带索引的 `EXISTS`，并且只返回已有连接的候选 id，绝不能拉取 hub 的完整邻边；canonical fold 只能通过 `cluster_fold_rows` 读取 scored id 的映射。并发推理子查询按 scale-index 实例和工件类型共享一次惰性 ANN 加载。这些优化不改变检索 id、score、阈值、PPR 行为或召回。
+
+生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
 
 ### 检索回放对照(`scripts/replay_retrieval.py`)
 

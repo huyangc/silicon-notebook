@@ -536,7 +536,7 @@ def _start_forward(args: argparse.Namespace, settings: Settings) -> Mapping[str,
         command = "PYTHONPATH=backend " + shlex.join(
             [
                 "python",
-                "scripts/migrate_sqlite_to_postgres.py",
+                "scripts/shadow_sqlite_to_postgres.py",
                 "worker",
                 "--run-id",
                 args.run_id,
@@ -659,7 +659,7 @@ def _worker(args: argparse.Namespace, settings: Settings) -> Mapping[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="migrate_sqlite_to_postgres.py",
+        prog="shadow_sqlite_to_postgres.py",
         description="Operate explicit SQLite-to-PostgreSQL forward shadow sync.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)

@@ -533,7 +533,7 @@
     "owner": "KnowledgeStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, source_id: 'str', notebook_id: 'str', run_id: 'str', created_at: 'str') -> 'None'"
+    "signature": "(self, source_id: 'str', notebook_id: 'str', run_id: 'str', created_at: 'str', *, preserve_existing: 'bool' = False) -> 'None'"
   },
   "_bump_cluster_mutation_seq": {
     "consumers": [
@@ -1614,6 +1614,12 @@
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
         "scope": "<module>.generate_report",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
         "target": "_runtime"
       },
       {
@@ -4103,6 +4109,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.checkup",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.close_local",
         "target": "_runtime"
       },
@@ -4457,6 +4469,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.cancel_ask_job",
+        "target": "ask_job_detail"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_ask_job",
         "target": "ask_job_detail"
       },
@@ -4681,6 +4699,21 @@
     "scope": "facade",
     "signature": "(self, workload_id: 'str')"
   },
+  "checkup": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.checkup_service",
+        "target": "checkup"
+      }
+    ],
+    "kind": "property",
+    "owner": "CheckupService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self) -> 'CheckupService'"
+  },
   "close": {
     "consumers": [
       {
@@ -4796,6 +4829,18 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_vectors",
+        "target": "configured"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/eval/speed.py",
         "scope": "<module>.measure_speed",
         "target": "configured"
@@ -4843,6 +4888,12 @@
         "target": "configured"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
+        "target": "configured"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/backfill_kg_embeddings.py",
         "scope": "<module>.main",
@@ -4857,7 +4908,16 @@
     ],
     "kind": "method",
     "owner": "ModelProvider",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_checkup_service.py",
+        "scope": "<module>.test_backfill_job_embeds_under_per_source_lock",
+        "target": "configured"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, workload_id: 'str') -> 'bool'"
   },
@@ -5912,6 +5972,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.reparse_sources",
+        "target": "get_source"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>._source_evidence",
         "target": "get_source"
@@ -6338,6 +6404,18 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>._backfill_vectors_job",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_vectors",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/scripts/backfill_relation_embeddings.py",
         "scope": "<module>.main",
         "target": "maintenance"
@@ -6454,6 +6532,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository._backfill_relation_embeddings",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.checkup.<lambda>",
         "target": "maintenance"
       },
       {
@@ -7024,6 +7108,12 @@
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>.add_url_sources.<lambda>",
+        "target": "process_source"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.reparse_sources",
         "target": "process_source"
       },
       {
@@ -7803,6 +7893,12 @@
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade._ppr_retrieve",
+        "target": "retrieval"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade._preload_scale_retrieval_artifacts",
         "target": "retrieval"
       },
       {

@@ -632,6 +632,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.complete_row', kind='attribute', target='_runtime'),
@@ -1046,6 +1047,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._connect', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._write_lock', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.checkup', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.close_local', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.db_path', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance', kind='attribute', target='_runtime'),
@@ -1215,6 +1217,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='ask_job_detail'),
         ),
@@ -1315,6 +1318,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='checkup',
+        owner='CheckupService',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.checkup_service', kind='attribute', target='checkup'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='close',
         owner='RepositoryRuntime.close',
         kind='method',
@@ -1390,6 +1403,8 @@ SURFACE_MEMBERS = (
         owner='ModelProvider',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='configured'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>.measure_speed', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>._dispatch_main', kind='attribute', target='configured'),
@@ -1398,10 +1413,12 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.backfill_node_embeddings', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='configured'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='configured'),
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='configured'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='configured'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_checkup_service.py', scope='<module>.test_backfill_job_embeds_under_per_source_lock', kind='patch', target='configured'),
         ),
     ),
     SurfaceMember(
@@ -1883,6 +1900,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.reparse_sources', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._source_evidence', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_pipeline_event_logging', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='get_source'),
@@ -2104,6 +2122,8 @@ SURFACE_MEMBERS = (
         owner='SQLiteMaintenanceAdapter',
         kind='property',
         consumers=(
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>._backfill_vectors_job', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_vectors', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/backfill_relation_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/gen_recall_gold.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>.main', kind='attribute', target='maintenance'),
@@ -2124,6 +2144,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.source_id_by_hash', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.maybe_sweep_orphan_assets._sweep', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._backfill_relation_embeddings', kind='attribute', target='maintenance'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.checkup.<lambda>', kind='attribute', target='maintenance'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.eval_insert_source_for_test', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>._counts', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
@@ -2365,6 +2386,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.add_url_sources.<lambda>', kind='attribute', target='process_source'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.reparse_sources', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.upload_sources.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all._sched', kind='attribute', target='process_source'),
@@ -2632,6 +2654,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._ppr_graph', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._ppr_reset_vector', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._ppr_retrieve', kind='attribute', target='retrieval'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._preload_scale_retrieval_artifacts', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._relation_ann_candidates', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._relations_with_names', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._retrieve_chunks', kind='attribute', target='retrieval'),

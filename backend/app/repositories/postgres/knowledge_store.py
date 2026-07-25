@@ -395,10 +395,23 @@ class KnowledgeStore:
         )
 
     def begin_extraction(
-        self, source_id: str, notebook_id: str, run_id: str, created_at: str
+        self,
+        source_id: str,
+        notebook_id: str,
+        run_id: str,
+        created_at: str,
+        *,
+        preserve_existing: bool = False,
     ) -> None:
         with self.database.write() as db:
-            self.begin_extraction_run(db, source_id, notebook_id, run_id, created_at)
+            self.begin_extraction_run(
+                db,
+                source_id,
+                notebook_id,
+                run_id,
+                created_at,
+                preserve_existing=preserve_existing,
+            )
 
     def finish_extraction(self, run_id: str, status: str, message: str) -> None:
         notebook_id = ""
@@ -497,15 +510,28 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
-    def relation_connected_rows(db: Any, notebook_id: str, object_ids):
-        values = list(object_ids)
+    def relation_connected_object_ids(db: Any, notebook_id: str, object_ids):
+        """Return only candidates that have at least one incident relation.
+
+        Each correlated EXISTS can stop at the first indexed edge, keeping the
+        result and database work bounded by the candidate window rather than a
+        high-degree node's complete adjacency list.
+        """
+        values = list(dict.fromkeys(object_ids))
         if not values:
             return []
-        ph = ",".join("%s" for _ in values)
+        candidates = ",".join("(%s)" for _ in values)
         return db.execute(
-            f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-            f"WHERE notebook_id=%s AND (source_object_id IN ({ph}) OR target_object_id IN ({ph}))",
-            (notebook_id, *values, *values),
+            f"WITH candidates(object_id) AS (VALUES {candidates}) "
+            "SELECT object_id FROM candidates AS c "
+            "WHERE EXISTS ("
+            "SELECT 1 FROM knowledge_relations AS r "
+            "WHERE r.notebook_id=%s AND r.source_object_id=c.object_id LIMIT 1"
+            ") OR EXISTS ("
+            "SELECT 1 FROM knowledge_relations AS r "
+            "WHERE r.notebook_id=%s AND r.target_object_id=c.object_id LIMIT 1"
+            ")",
+            (*values, notebook_id, notebook_id),
         ).fetchall()
 
     @staticmethod
@@ -1281,16 +1307,13 @@ class KnowledgeStore:
         self.mark_source_index_backfilled(db, notebook_id)
         return stale_knowledge_ids
 
-    def clear_source_extraction_state(
+    def clear_source_graph_state(
         self,
         db: Any,
         source_id: str,
         notebook_id: str,
-        *,
-        clear_embeddings: bool,
     ) -> None:
-        # KG writes directly to knowledge_objects; find stale objects by evidence source_id
-        # (see stale_object_ids_for_source for the reverse-index/legacy-scan split).
+        """Delete one source's graph rows without touching its extraction history."""
         stale_knowledge_ids = self.stale_object_ids_for_source(db, source_id, notebook_id)
 
         if stale_knowledge_ids:
@@ -1304,6 +1327,29 @@ class KnowledgeStore:
                 stale_knowledge_ids,
             )
             self.delete_object_sources(db, stale_knowledge_ids)
+        self.delete_relations_for_source(db, source_id)
+        db.execute(
+            "DELETE FROM knowledge_embeddings WHERE object_id IN "
+            "(SELECT id FROM knowledge_objects WHERE source_id = %s)",
+            (source_id,),
+        )
+        direct_ids = [
+            r["id"] for r in db.execute(
+                "SELECT id FROM knowledge_objects WHERE source_id = %s", (source_id,)
+            ).fetchall()
+        ]
+        db.execute("DELETE FROM knowledge_objects WHERE source_id = %s", (source_id,))
+        self.delete_object_sources(db, direct_ids)
+
+    def clear_source_extraction_state(
+        self,
+        db: Any,
+        source_id: str,
+        notebook_id: str,
+        *,
+        clear_embeddings: bool,
+    ) -> None:
+        self.clear_source_graph_state(db, source_id, notebook_id)
         db.execute("DELETE FROM extraction_runs WHERE source_id = %s", (source_id,))
         if clear_embeddings:
             db.execute("DELETE FROM element_embeddings WHERE source_id = %s", (source_id,))
@@ -1319,24 +1365,14 @@ class KnowledgeStore:
         notebook_id: str,
         run_id: str,
         created_at: str,
+        *,
+        preserve_existing: bool = False,
     ) -> None:
-        """Reset one source's prior KG artefacts and open its extraction_runs
-        row — the caller owns the ONE write transaction this rides (the exact
-        commit boundary the inline _run_extraction body always had)."""
-        self.clear_source_extraction_state(db, source_id, notebook_id, clear_embeddings=False)
-        self.delete_relations_for_source(db, source_id)
-        db.execute(
-            "DELETE FROM knowledge_embeddings WHERE object_id IN "
-            "(SELECT id FROM knowledge_objects WHERE source_id = %s)",
-            (source_id,),
-        )
-        direct_ids = [
-            r["id"] for r in db.execute(
-                "SELECT id FROM knowledge_objects WHERE source_id = %s", (source_id,)
-            ).fetchall()
-        ]
-        db.execute("DELETE FROM knowledge_objects WHERE source_id = %s", (source_id,))
-        self.delete_object_sources(db, direct_ids)
+        """Open a run, optionally retaining the current graph until replacement."""
+        if not preserve_existing:
+            self.clear_source_extraction_state(
+                db, source_id, notebook_id, clear_embeddings=False
+            )
         db.execute(
             """INSERT INTO extraction_runs
                (id, notebook_id, source_id, run_type, status, error_message, created_at, updated_at)

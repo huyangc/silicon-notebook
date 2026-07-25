@@ -60,7 +60,7 @@ PostgreSQL adapter、在线同步与可验证切换能力。
 backend/app/repositories/postgres/       # PostgreSQL 正式持久化实现
 backend/app/migration/shadow/            # 临时影子同步与切换模块
 backend/app/repositories/factory.py      # 唯一 repository 选择点
-scripts/migrate_sqlite_to_postgres.py    # shadowctl 的薄 CLI 入口
+scripts/shadow_sqlite_to_postgres.py     # shadowctl 的薄 CLI 入口
 ```
 
 ### 3.1 依赖规则

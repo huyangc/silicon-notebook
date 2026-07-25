@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterable, List, Optional
@@ -62,6 +63,10 @@ RETYPE_REEXTRACT_FAILED_MESSAGE = (
 #: → 补跑一次）；上限只为挡住病态循环——有人不停改类型时，这条源不能永远占着 KG
 #: job 池的一个槽位。
 _DOC_TYPE_RECONCILE_MAX_ROUNDS = 3
+
+
+class PartialKgRetryIncomplete(RuntimeError):
+    """A safe partial-KG retry left the previous graph untouched."""
 
 
 @dataclass(frozen=True)
@@ -137,7 +142,7 @@ class SourceIngestionService:
         default_notebook_names: Iterable[str],
         # --- TEMPORARY KG/catalog callbacks (Task 13/15 targets) ----------
         clear_source_extraction_state: Callable[..., None],
-        begin_extraction_run: Callable[[str, str, str, str], None],
+        begin_extraction_run: Callable[..., None],
         finish_extraction_run: Callable[[str, str, str], None],
         notebook_tier: Callable[[str], str],
         concept_whitelist_terms: Callable[[], set],
@@ -207,6 +212,12 @@ class SourceIngestionService:
         # source_id → 活跃 invocation 数;P2 体检把 keys() 当 active 集做减法。
         self._active_sources: dict[str, int] = {}
         self._active_sources_lock = threading.Lock()
+        # source_id → 「后台嵌入进行中」的 worker 数(codex 第5轮 P2)。process_source 可能在其后台
+        # 嵌入 worker 写完向量**之前**就返回、撤掉自己那份活跃租约;体检 H4/H5 用活跃集排除在途源,
+        # 若不单独记这段「在嵌入」,in-flight 向量会被误报缺失+诱发重复 backfill。刻意与 _active_sources
+        # 分开(那是 process_source 生命周期 + 分块锁的引用计数,嵌入 worker 晚于它结束);两者的并集
+        # 由 _active_source_ids_snapshot 出给体检。同一 _active_sources_lock 守护(都是小 dict)。
+        self._embedding_sources: dict[str, int] = {}
         # 源级分块串行锁(per-source):同一源的并发 reparse 必须在「换 elements →
         # 建 chunks + 置 marker」这段串行,否则一次 invocation 可能读到 A 代 elements、
         # 另一次把它换成 B 代、第一次再把基于 A 代的 chunks 连同 marker 写回,留下
@@ -229,6 +240,53 @@ class SourceIngestionService:
                 lock = threading.Lock()
                 self._source_chunk_locks[source_id] = lock
             return lock
+
+    def _release_source_lease(self, source_id: str) -> None:
+        """租约计数减一;归零(无活跃 invocation)时连该源的分块锁一并从注册表清除。
+        process_source 的 finally 与 ``hold_source_chunk_lock`` 守卫**共用**这一套 refcount
+        生命周期,保证「计数归零才 pop 锁」只有一处实现。调用方须已释放它持有的分块锁
+        (pop 假定此刻无人持该锁)。"""
+        with self._active_sources_lock:
+            remaining = self._active_sources.get(source_id, 0) - 1
+            if remaining > 0:
+                self._active_sources[source_id] = remaining
+            else:
+                self._active_sources.pop(source_id, None)
+                # 计数归零=无 invocation 持该源分块锁,顺手清锁(有界化)。见 __init__ 说明。
+                self._source_chunk_locks.pop(source_id, None)
+
+    def _release_embedding_source(self, source_id: str) -> None:
+        """「后台嵌入进行中」计数减一,归零即从 _embedding_sources 移除(codex 第5轮 P2)。与
+        _release_source_lease 分开:嵌入 worker 不碰 _active_sources / 分块锁,只标记「在嵌入」。"""
+        with self._active_sources_lock:
+            remaining = self._embedding_sources.get(source_id, 0) - 1
+            if remaining > 0:
+                self._embedding_sources[source_id] = remaining
+            else:
+                self._embedding_sources.pop(source_id, None)
+
+    @contextmanager
+    def hold_source_chunk_lock(self, source_id: str):
+        """给**非 process_source 的持锁方**(体检 backfill)用的守卫:持有该源分块锁的同时,
+        把它登记进活跃租约(``_active_sources``),使 process_source 的 finally **不会在本方仍
+        持锁时把锁从注册表 pop 掉**(codex 第2轮 P1:否则 process_source 释放锁→finally 见租约归零
+        →pop 锁,而本方仍持旧锁;随后新的 reparse 会另建一把**新锁**、与本方互斥失效→给复用的
+        element/chunk id 挂上永久陈旧向量,正是这把锁要防的;且 backfill-only 的源没有任何租约触发
+        pop→**锁泄漏**)。先登记租约(计数≥1 → 锁在本方持有期不会被 pop),再取锁 acquire;退出时
+        先释放锁、再经 ``_release_source_lease`` 减租约(归零则本方作为最后持有者连锁清除)。
+
+        与 process_source 的正确串行由**同一把锁 + 同一套租约**保证:本方登记租约后取到的锁,与
+        process_source 在 `_source_chunk_lock` 取到的是**同一对象**(租约≥1 保证注册表项不被中途 pop
+        重建);任一方持锁,另一方 acquire 阻塞。process_source 持锁时其租约必≥1(在管线入口登记、
+        finally 才减),故本方减租约到 0 时必无 process_source 持锁,pop 安全。"""
+        with self._active_sources_lock:
+            self._active_sources[source_id] = self._active_sources.get(source_id, 0) + 1
+        try:
+            # 租约已≥1,注册表项在本方持有期不会被 pop,get-or-create 与 pop 无竞争。
+            with self._source_chunk_lock(source_id):
+                yield
+        finally:
+            self._release_source_lease(source_id)
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -1033,13 +1091,31 @@ class SourceIngestionService:
                     self.event_log.logger.exception(
                         "background embed failed for %s", source_id
                     )
+                finally:
+                    # 嵌入 worker 完成才撤它这份「在嵌入」标记(见下面 spawn 前的 stamp)。
+                    self._release_embedding_source(source_id)
 
+            # 嵌入 worker 单独记「在嵌入」(codex 第5轮 P2):process_source 的活跃租约在它自己 finally
+            # 里就撤了,而**后台嵌入可能还没写完向量**——H4/H5 用活跃集(见 _active_source_ids_snapshot,
+            # 并入 _embedding_sources)排除在途源,不给这个 worker 单记一份的话,这段 in-flight 会被误报
+            # 缺 chunk/element 向量(假告警)+诱发重复的、可能昂贵的 backfill。刻意用**独立的**
+            # _embedding_sources 而非 _active_sources:后者是 process_source 生命周期 + 分块锁的引用计数,
+            # 嵌入 worker 会**晚于** process_source 结束,混进去会打乱那套租约/锁语义。stamp 必须在 start
+            # 之前(否则线程先跑到 embed、标记还没记上有窗口)。
+            with self._active_sources_lock:
+                self._embedding_sources[source_id] = (
+                    self._embedding_sources.get(source_id, 0) + 1
+                )
             embed_ctx = contextvars.copy_context()
             embed_thread = threading.Thread(
                 target=lambda: embed_ctx.run(_embed_bg),
                 name=f"embed-{source_id}", daemon=True
             )
-            embed_thread.start()
+            try:
+                embed_thread.start()
+            except BaseException:  # 起线程失败:_embed_bg 不会跑、其 finally 撤不了 → 这里补撤,免泄漏
+                self._release_embedding_source(source_id)
+                raise
 
             if hooks.should_extract_kg(notebook_id):
                 # Status already flipped to 'extracting' above.
@@ -1087,18 +1163,11 @@ class SourceIngestionService:
             # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的
             # BaseException:一律给租约计数减一。置 'parsing' 也在 try 内(见上),故进入
             # try 后再无未覆盖的泄漏边。计数归零才真正撤租(见 stamp 处:并发处理同一源
-            # 时先完成者不能撤掉仍在跑者的租约)。刻意早于下面的 maybe_enqueue_scale_fold,
-            # 后者是独立的空闲收尾、不需要持租约。
-            with self._active_sources_lock:
-                remaining = self._active_sources.get(source_id, 0) - 1
-                if remaining > 0:
-                    self._active_sources[source_id] = remaining
-                else:
-                    self._active_sources.pop(source_id, None)
-                    # refcount 归零=无活跃 invocation 持该源的分块锁,顺手清掉,免得
-                    # 每见一个源就永久留一把锁(有界化)。remaining>0 时不能清——还有
-                    # invocation 在跑、可能正持或将取这把锁。
-                    self._source_chunk_locks.pop(source_id, None)
+            # 时先完成者不能撤掉仍在跑者的租约),并连该源分块锁一并清除(有界化)。刻意早于
+            # 下面的 maybe_enqueue_scale_fold,后者是独立的空闲收尾、不需要持租约。此处的
+            # 分块锁在本方 with 块内已释放,减租约到 0 时可安全 pop(与 backfill 守卫共用
+            # _release_source_lease:backfill 也登记租约,故本方持锁的窗口里锁不会被它 pop)。
+            self._release_source_lease(source_id)
         # Content-add settle point: if this notebook already has a scale index,
         # enqueue an idle incremental fold so the new (post-watermark) source
         # becomes semantically searchable. Idle queue coalesces batch runs (many
@@ -1399,7 +1468,13 @@ class SourceIngestionService:
             for e in extra
         ]
 
-    def run_extraction(self, source_id: str, *, kg_client: Any | None = None) -> None:
+    def run_extraction(
+        self,
+        source_id: str,
+        *,
+        kg_client: Any | None = None,
+        preserve_existing_until_complete: bool = False,
+    ) -> None:
         control = getattr(kg_client, "control", None)
         if control is not None:
             control.raise_if_aborted()
@@ -1419,13 +1494,16 @@ class SourceIngestionService:
             or "academic_paper"
         )
         kg_doc_type = kg_ingest.DOC_TYPE_MAP.get(doc_type_id, "academic")
-        # One write transaction: reset the source's prior KG artefacts and open
-        # its extraction_runs row (temporary facade callback — Task 13/15 target).
-        self.begin_extraction_run(source_id, source.notebook_id, run_id, now)
-        # begin_extraction_run committed a DELETE of this source's prior KG objects
-        # in its own transaction; the kg_mutation_seq bump only lands later in
-        # store_kg (success path). Invalidate the count cache here so the no-llm
-        # early-return and the exception path can't keep serving pre-delete counts.
+        # Normal extraction resets the old source graph up front. A partial-KG
+        # repair instead opens a run while retaining the old graph; only a
+        # zero-failed-window replacement may swap it later.
+        self.begin_extraction_run(
+            source_id,
+            source.notebook_id,
+            run_id,
+            now,
+            preserve_existing=preserve_existing_until_complete,
+        )
         self.invalidate_knowledge_counts(source.notebook_id)
         try:
             kg_llm_client = kg_client if kg_client is not None else self.model_clients
@@ -1434,6 +1512,13 @@ class SourceIngestionService:
                 if callable(getattr(kg_llm_client, "configured", None))
                 else getattr(kg_llm_client, "configured", False)
             ):
+                if preserve_existing_until_complete:
+                    message = (
+                        "partial KG retry incomplete; existing KG preserved "
+                        "retry_incomplete=1 no-llm"
+                    )
+                    self.finish_extraction_run(run_id, "completed", message)
+                    raise PartialKgRetryIncomplete(message)
                 self.finish_extraction_run(run_id, "completed", "no-llm")
                 return
             raw_text = self.source_files.read_source_text(
@@ -1480,10 +1565,26 @@ class SourceIngestionService:
                 relations = relations + self.relink_extra_relations(
                     objects, relations, source.id
                 )
+            fw, tw = graph.failed_windows, graph.total_windows
+            if preserve_existing_until_complete and (fw > 0 or not objects):
+                message = (
+                    "partial KG retry incomplete; existing KG preserved "
+                    "retry_incomplete=1 "
+                    f"windows_failed={fw}/{tw} "
+                    f"empty_result={int(not objects)} "
+                    f"candidate_objects={len(objects)} "
+                    f"candidate_relations={len(relations)}"
+                )
+                self.finish_extraction_run(run_id, "completed", message)
+                raise PartialKgRetryIncomplete(message)
             if control is not None:
                 control.raise_if_aborted()
             n_obj, n_rel = self.knowledge_lifecycle.store_kg(
-                source.notebook_id, source.id, objects, relations
+                source.notebook_id,
+                source.id,
+                objects,
+                relations,
+                replace_source=preserve_existing_until_complete,
             )
             try:
                 self.knowledge_lifecycle.incremental_fuse_source(
@@ -1499,7 +1600,6 @@ class SourceIngestionService:
                 self.event_log.logger.exception(
                     "maybe_auto_index failed for %s", source.notebook_id
                 )
-            fw, tw = graph.failed_windows, graph.total_windows
             self.finish_extraction_run(
                 run_id,
                 "completed",
@@ -1508,14 +1608,32 @@ class SourceIngestionService:
                 f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped}",
             )
         except KgBuildAborted as exc:
+            message = f"{exc.failure.code}: {exc.failure.user_message}"
+            status = "failed"
+            if preserve_existing_until_complete:
+                status = "completed"
+                message = (
+                    "partial KG retry incomplete; existing KG preserved "
+                    f"retry_incomplete=1 {message}"
+                )
             self.finish_extraction_run(
                 run_id,
-                "failed",
-                f"{exc.failure.code}: {exc.failure.user_message}",
+                status,
+                message,
             )
             raise
+        except PartialKgRetryIncomplete:
+            raise
         except Exception as exc:
-            self.finish_extraction_run(run_id, "failed", str(exc))
+            message = str(exc)
+            status = "failed"
+            if preserve_existing_until_complete:
+                status = "completed"
+                message = (
+                    "partial KG retry incomplete; existing KG preserved "
+                    f"retry_incomplete=1 {message}"
+                )
+            self.finish_extraction_run(run_id, status, message)
             raise
 
     # ---------------------------------------------------- paper metadata

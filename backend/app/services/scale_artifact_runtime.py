@@ -258,6 +258,144 @@ class ScaleArtifactRuntime:
     def open_ann(self, index, kind: str):
         return self.catalog.open_ann(index, kind)
 
+    def _prepare_ppr_core(self, index) -> bool:
+        """Prepare only the reusable, single-index PPR substrate.
+
+        Cross-notebook combined graphs are deliberately *not* materialized here:
+        the legacy composition path copies multi-million-entry Python maps and
+        can transiently reconstruct every edge.  Eagerly doing that for every
+        mount would turn readiness into an OOM hazard.  The safe reusable pieces
+        are attached to the ScaleIndex itself, whose dedicated LRU is capacity-
+        checked by startup: a configured float32 CSR and the chunk-id set.  The
+        self-only fast path can then rebuild its tiny wrapper in O(1), even if a
+        shared VectorCache entry is later evicted.
+        """
+        if not self.settings.graph_ppr_enabled:
+            return False
+        prepare_key = "f32" if self.settings.ppr_float32 else "native"
+        if getattr(index, "_ppr_prepare_key", None) == prepare_key:
+            return True
+        transition = index.transition
+        if self.settings.ppr_float32:
+            import numpy as np
+
+            transition = transition.astype(np.float32, copy=False)
+        setattr(index, "_ppr_transition", transition)
+        setattr(
+            index,
+            "_ppr_chunk_ids",
+            {
+                index.node_ids[int(position)]
+                for position in index.chunk_index
+                if 0 <= int(position) < len(index.node_ids)
+            },
+        )
+        # Publish the idempotence marker last so a concurrent reader never
+        # treats a partially prepared core as complete.
+        setattr(index, "_ppr_prepare_key", prepare_key)
+        return True
+
+    def _preload_one_retrieval_index(self, notebook_id: str) -> dict[str, int]:
+        index = self.load(notebook_id, allow_stale=True)
+        if index is None:
+            raise RuntimeError("published scale index is not loadable")
+
+        ann_handles = 0
+        ann_specs = [
+            ("kg", None, index.ann_labels, True),
+            (
+                "chunk",
+                "has_chunk_ann",
+                index.chunk_ann_labels,
+                self.settings.chunk_ann_enabled,
+            ),
+            (
+                "relation",
+                "has_relation_ann",
+                index.relation_ann_labels,
+                self.settings.relation_retrieval_enabled,
+            ),
+        ]
+        for kind, manifest_flag, labels, enabled in ann_specs:
+            if not enabled:
+                continue
+            if manifest_flag and index.manifest.get(manifest_flag) and labels is None:
+                raise RuntimeError("declared scale ANN artifact is not loadable")
+            if not labels:
+                continue
+            if self.open_ann(index, kind) is None:
+                raise RuntimeError("required scale ANN artifact is not loadable")
+            ann_handles += 1
+
+        return {
+            "ann_handles": ann_handles,
+            "ppr_cores": int(self._prepare_ppr_core(index)),
+        }
+
+    def preload_retrieval_artifacts(
+        self,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        """Strictly preload every live notebook's published retrieval index.
+
+        The scale-index LRU is a memory safety boundary.  "Preload all" would be
+        dishonest if earlier entries were evicted while later ones loaded, so an
+        undersized ``SCALE_IDX_CACHE_MAX`` fails startup before allocating the
+        first large artifact.  Corrupt/missing required files likewise fail: the
+        readiness gate must not claim the cold path is warm when it is not.
+
+        Optional ANN families are opened only when their online retrieval feature
+        is enabled.  KG ANN is always relevant to indexed KG/PPR retrieval.  The
+        reusable single-index PPR substrate is prepared on the ScaleIndex itself;
+        cross-notebook graph combinations stay lazy because eager full copies are
+        not a memory-safe form of preload.
+        """
+        started = time.perf_counter()
+        candidates = self.artifacts.indexed_notebook_ids()
+        notebook_ids = [
+            notebook_id
+            for notebook_id in candidates
+            if self.projections.notebook_tier(notebook_id) is not None
+        ]
+        total = len(notebook_ids)
+        capacity = int(self.settings.scale_idx_cache_max)
+        if total > capacity:
+            self.event_log.logger.error(
+                "startup scale preload refused: indexes=%d exceeds "
+                "SCALE_IDX_CACHE_MAX=%d",
+                total,
+                capacity,
+            )
+            raise RuntimeError(
+                "published scale-index count exceeds SCALE_IDX_CACHE_MAX"
+            )
+
+        ann_handles = 0
+        ppr_cores = 0
+        if progress is not None:
+            progress(0, total)
+        for done, notebook_id in enumerate(notebook_ids, start=1):
+            item = self._preload_one_retrieval_index(notebook_id)
+            ann_handles += item["ann_handles"]
+            ppr_cores += item["ppr_cores"]
+            if progress is not None:
+                progress(done, total)
+
+        self.event_log.emit({
+            "kind": "startup_scale_preload",
+            "status": "done",
+            "indexes": total,
+            "ann_handles": ann_handles,
+            "ppr_cores": ppr_cores,
+            "latency_ms": round((time.perf_counter() - started) * 1000),
+        })
+        return {
+            "indexes": total,
+            "ann_handles": ann_handles,
+            "ppr_cores": ppr_cores,
+        }
+
     # ------------------------------ viz read/build
 
     def _start_daemon(self, name: str, target: Callable[[], None]) -> None:
@@ -293,14 +431,26 @@ class ScaleArtifactRuntime:
     def viz_index(self, notebook_id: str):
         scale = self.load(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
+            # Scale-embedded viz: freshness rides on the scale index's own version
+            # (load() returns it only when version-fresh). Intentionally NOT
+            # cluster_seq-checked — the scale manifest carries no cluster_seq, and
+            # for the large notebooks that hold a scale index a cluster rebuild
+            # spans minutes so version_facts' MAX(created_at) advances and load()
+            # already sees it stale (the same-second blind spot cluster_seq closes
+            # is unreachable here — codex PR#356 r2 finding 2). The cluster_seq
+            # check below governs the STANDALONE viz artifact, which is what a
+            # notebook without a fresh scale index serves. cur_cseq is computed
+            # only past this early return, so a scale-embedded serve pays no extra
+            # version_signal read (finding 3).
             return scale
         cur = self.version(notebook_id)
+        cur_cseq = int(self.projections.version_signal(notebook_id)[1])
         cached = self.viz_cache.get(notebook_id)
-        if cached is not None and cached.manifest.get("version") == cur:
+        if cached is not None and self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
             return cached
         index = self.artifacts.load_viz(notebook_id)
         if index is not None:
-            if index.manifest.get("version") == cur:
+            if self._viz_manifest_fresh(index.manifest, cur, cur_cseq):
                 self.viz_cache[notebook_id] = index
                 return index
             self._spawn_viz_build(notebook_id)
@@ -312,11 +462,29 @@ class ScaleArtifactRuntime:
         self._spawn_viz_build(notebook_id)
         return None
 
+    @staticmethod
+    def _viz_manifest_fresh(manifest: dict, cur, cur_cseq: int) -> bool:
+        """A persisted STANDALONE-viz manifest is fresh iff its coarse version
+        matches AND its cluster_mutation_seq matches. cluster_seq guards a
+        same-second, same-count cluster-only rewrite that version() (a version_facts
+        memo with no cseq) cannot see, which would otherwise leave the standalone
+        viz served as current forever (codex PR#356 r1 P1). Scale-EMBEDDED viz does
+        not go through here — it inherits the scale index's version-only freshness
+        by design (see viz_index). Manifests written before cluster_seq existed
+        default to cur_cseq → version-only check, so a deploy never force-rebuilds
+        every existing viz (no thundering herd; a bounded accepted staleness for a
+        pre-cseq manifest whose version still matches after a same-second edit)."""
+        return (
+            manifest.get("version") == cur
+            and int(manifest.get("cluster_seq", cur_cseq)) == cur_cseq
+        )
+
     def viz_probe(self, notebook_id: str) -> dict:
         """Read persisted state only; this method never schedules a build."""
-        cur = self.version(notebook_id)
         scale = self.load(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
+            # Scale-embedded viz: version-fresh by construction (load() gates on
+            # version); cluster_seq is not consulted — see viz_index (finding 2).
             manifest = scale.manifest
             return {
                 "viz_indexed": True,
@@ -336,8 +504,12 @@ class ScaleArtifactRuntime:
                 "viz_edges": 0,
                 "viz_stale": False,
             }
+        # Standalone viz artifact: the cluster_seq check (and its version_signal
+        # read) is paid ONLY here, not on every scale-embedded status poll (finding 3).
+        cur = self.version(notebook_id)
+        cur_cseq = int(self.projections.version_signal(notebook_id)[1])
         manifest = index.manifest
-        fresh = manifest.get("version") == cur
+        fresh = self._viz_manifest_fresh(manifest, cur, cur_cseq)
         return {
             "viz_indexed": fresh,
             "viz_nodes": int(manifest.get("n_viz_nodes", 0)),
@@ -359,6 +531,33 @@ class ScaleArtifactRuntime:
         return self.builder.build_viz(notebook_id)
 
     # ------------------------------ status and scheduling
+
+    def state_signature(self, notebook_id: str) -> tuple:
+        """H7 体检 memo 的**廉价**失效键:变则 status() 的 state 可能变,但**不**跑 _index_delta 的
+        全量 source-id 扫(codex P2:大库上每次 /checkup 都全量扫过期判定太贵)。构成——
+
+        - ``version_signal``:数据变更信号(unified_kg_state 单行读)。**唯一的 chunk 写入者会 bump
+          kg_mutation_seq**(见 knowledge_counts_cache 头注释),故新 chunk / KG 都在此反映;runtime_dim
+          等 settings 也在其 tail 里 → 覆盖 delta_over 的 chunk 侧与 dim_stale。
+        - manifest 的 ``(exists, mtime_ns)``:捕获任何 manifest 重写——build / fold / rebuild(**即便
+          version 串不变**:rebuild 刻意保持 kg_mutation_seq 稳定却换了 watermark_sources,单靠 seq 会
+          漏这次 delta 归零)、以及 .tmp+swap 原子换目录。
+        - ``building`` / ``queued``:纯内存态转换(无 DB 信号),build 起止直接改这两个集合。
+
+        盲区仅剩「不 bump seq 的 embedding 变更改 version_facts」——但 status() 自身的 version() 也
+        memo 在 version_signal 上、**同一盲区**,故本键不会比 status() 更陈旧。异常由调用方(Checkup
+        service)fail-soft 兜住,这里不吞。"""
+        out_dir = self.artifacts.scale_dir(notebook_id)
+        try:
+            manifest_ident = (True, (out_dir / "manifest.json").stat().st_mtime_ns)
+        except OSError:
+            manifest_ident = (False, 0)  # 不存在/取不到 → 未建索引态(H7=0)
+        return (
+            tuple(self.projections.version_signal(notebook_id)),
+            manifest_ident,
+            notebook_id in self.building,
+            notebook_id in self.idle_queue,
+        )
 
     def status(self, notebook_id: str) -> dict:
         # status() consumes ONLY the notebook's tier; read it with a cheap PK
@@ -404,7 +603,19 @@ class ScaleArtifactRuntime:
                 else "unindexed"
             )
         else:
-            manifest = self.artifacts.read_manifest(out_dir)
+            try:
+                manifest = self.artifacts.read_manifest(out_dir)
+            except Exception:  # noqa: BLE001 — 损坏 manifest:read_manifest 刻意 raise,这里兜住
+                manifest = None
+            if manifest is None:
+                # manifest 文件在、却读不出来(损坏)→ 索引不可用、须重建。**不把异常抛出
+                # status()**:否则前端 /index-status 拿不到、「索引与构建」块卡在「加载中」,而
+                # H8 重建 CTA 嵌在该块里就够不着——恰好在损坏(最需要重建)时修不了(codex P1)。
+                # H8 由 /checkup 独立报「已损坏」;这里只保证状态可达、重建动作可发起
+                # (承 P0:损坏返结构化结果、绝不 raise 进状态/热路径)。
+                result["state"] = "stale"
+                result.update({"stale": True, "stale_reason": "corrupt", "last_built_at": ""})
+                return result
             version_stale = manifest.get("version") != self.version(notebook_id)
             delta_over = (
                 delta["delta_chunks"] > self.settings.index_stale_delta_threshold

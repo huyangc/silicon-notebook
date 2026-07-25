@@ -266,6 +266,7 @@ def test_shadow_database_pairing_is_confined_to_the_migration_composition_root()
 def test_shadow_configuration_and_calls_cannot_escape_operator_boundaries():
     allowed_config = {
         "backend/app/core/config.py",
+        "backend/app/migration/database_activation.py",
         "backend/app/migration/shadow/cli.py",
     }
     config_offenders: list[str] = []
@@ -293,7 +294,7 @@ def test_shadow_configuration_and_calls_cannot_escape_operator_boundaries():
 
 
 def test_shadow_cli_entry_is_thin_and_manifest_validation_remains_total():
-    entry = ROOT / "scripts/migrate_sqlite_to_postgres.py"
+    entry = ROOT / "scripts/shadow_sqlite_to_postgres.py"
     tree = ast.parse(entry.read_text(encoding="utf-8"), filename=str(entry))
     imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]

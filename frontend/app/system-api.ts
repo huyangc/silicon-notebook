@@ -4,10 +4,18 @@ import type { Health } from "./workspace-model.ts";
 
 export type ReadySnapshot = {
   ready: boolean;
-  phase: "starting" | "migrating" | "warming" | "ready" | "error";
+  phase:
+    | "starting"
+    | "migrating"
+    | "warming"
+    | "preloading_indexes"
+    | "ready"
+    | "error";
   detail?: string;
   warmed_notebooks?: number;
   total_notebooks?: number;
+  preloaded_indexes?: number;
+  total_indexes?: number;
   error?: string | null;
 };
 
@@ -38,6 +46,8 @@ export async function probeReady(): Promise<ReadySnapshot | null> {
           detail: body?.detail,
           warmed_notebooks: body?.warmed_notebooks,
           total_notebooks: body?.total_notebooks,
+          preloaded_indexes: body?.preloaded_indexes,
+          total_indexes: body?.total_indexes,
           error: body?.error ?? null,
         }
       : body as ReadySnapshot;

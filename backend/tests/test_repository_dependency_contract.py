@@ -33,6 +33,7 @@ LIFECYCLE_STORE_CALLS = {
     "knowledge": {
         "active_object_count",
         "community_context_rows",
+        "clear_source_graph_state",
         "delete_notebook_graph_rows",
         "embedding_rows",
         "embedding_rows_for_objects",

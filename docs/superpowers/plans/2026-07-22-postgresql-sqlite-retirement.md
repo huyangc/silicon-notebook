@@ -215,6 +215,7 @@ git commit -m "feat: isolate legacy SQLite backup import"
 - Delete: `backend/app/repositories/sqlite/`
 - Delete: `backend/app/services/sqlite_repository.py`
 - Delete: `scripts/migrate_sqlite_to_postgres.py`
+- Delete: `scripts/shadow_sqlite_to_postgres.py`
 - Delete: `scripts/shadow.sh`
 - Modify: `backend/app/repositories/factory.py`
 - Modify: `backend/app/core/config.py`

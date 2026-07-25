@@ -811,6 +811,57 @@ def test_retrieve_neighbors_excludes_rejected_relations_on_both_backends(
     ) == []
 
 
+def test_relation_connected_probe_returns_only_candidate_ids_on_both_backends(
+    knowledge_harness,
+):
+    object_ids = ["ko-probe-hub", "ko-probe-isolated"] + [
+        f"ko-probe-leaf-{index:03d}" for index in range(128)
+    ]
+    objects = [
+        (
+            object_id,
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": object_id}),
+            "[]",
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for object_id in object_ids
+    ]
+    relations = [
+        (
+            f"rel-probe-{index:03d}",
+            "nb-personal",
+            "source-golden",
+            "ko-probe-hub",
+            f"ko-probe-leaf-{index:03d}",
+            "supports",
+            "[]",
+            NOW,
+        )
+        for index in range(128)
+    ]
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, relations)
+
+    with knowledge_harness.database.connect() as connection:
+        rows = knowledge_harness.knowledge.relation_connected_object_ids(
+            connection,
+            "nb-personal",
+            ["ko-probe-hub", "ko-probe-leaf-000", "ko-probe-isolated"],
+        )
+
+    assert {row["object_id"] for row in rows} == {
+        "ko-probe-hub",
+        "ko-probe-leaf-000",
+    }
+    assert len(rows) == 2
+
+
 @pytest.mark.postgres_integration
 def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
     postgres_database,

@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -97,8 +97,9 @@ import { clearToken, getToken } from "./auth-session";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
-import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
+import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -124,6 +125,7 @@ import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
 import { isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
+import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
@@ -143,11 +145,14 @@ import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import {
   doneItemDestination,
+  followLatestNotebookRequest,
   historyModeForTransition,
   NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
+  notebookIsActive,
   openMemoryDeepLink,
   ownsWorkspaceRun,
   restoreLatestConversation,
+  sessionListRequestIsCurrent,
   workspaceCapabilities,
   workspaceRequestIsCurrent,
 } from "./workspace-transitions";
@@ -184,6 +189,7 @@ import {
   type MergeReviewSummary,
   type MemoryRecord,
   type NodeContext,
+  type CheckupResponse,
   type NotebookAnalytics,
   type NotebookContentOverview,
   type NotebookSummary,
@@ -200,7 +206,7 @@ import {
   type UnifiedKgStatus,
 } from "./workspace-model";
 import { resolveDocumentCapacity } from "./document-limit";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -437,6 +443,11 @@ function startupPhaseText(snap: ReadySnapshot | null): string {
     const total = snap?.total_notebooks ?? 0;
     return `正在预热 (${warmed}/${total} 笔记本)…`;
   }
+  if (phase === "preloading_indexes") {
+    const loaded = snap?.preloaded_indexes ?? 0;
+    const total = snap?.total_indexes ?? 0;
+    return `正在加载大库检索索引 (${loaded}/${total})…`;
+  }
   // ⚠别把 snap.error 直出:它是后端的原始异常串。原文已在 probeReady() 里进
   // console,这里只给稳定文案。
   if (phase === "error") return "启动时遇到问题，正在重试…";
@@ -458,7 +469,7 @@ function StartingScreen({ snapshot, onRetry }: { snapshot: ReadySnapshot | null;
             <button type="button" className="auth-submit startup-retry" onClick={onRetry}>重试</button>
           </>
         ) : (
-          <div className="startup-sub">首次启动需迁移与预热，请稍候…</div>
+          <div className="startup-sub">首次启动需迁移、预热并加载检索索引，请稍候…</div>
         )}
       </div>
     </div>
@@ -698,6 +709,7 @@ export default function Home() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [asking, setAsking] = useState(false);
+  const [sessionLoading, setSessionLoading] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
   const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
@@ -838,6 +850,12 @@ export default function Home() {
   // 「索引与构建」面板(看板弹窗)的三系统聚合状态——openAnalytics 打开时经 fetchIndexStatus
   // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  // 流水线体检(P2):看板弹窗打开时随 indexStatus 一起拉取,驱动「来源状态」块的
+  // 源级问题(H2–H6)、「索引与构建」块的索引可信度(H7/H8),以及铃铛的一条聚合提醒。
+  const [checkup, setCheckup] = useState<CheckupResponse | null>(null);
+  // 修复触发后短暂轮询 checkup 到此刻(反映 count 下降):reparse/backfill 是后台 job、
+  // 无 build 忙碌位,不走三系统聚合 poll,故用这个有界窗口驱动一条专门的 checkup 轮询。
+  const [checkupRepairPollUntil, setCheckupRepairPollUntil] = useState(0);
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
@@ -1168,6 +1186,36 @@ export default function Home() {
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, trackedKgJobId, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
+  // 切库即清空旧库体检结果(per-notebook,旧库结论不能跨库显示)+ 对新库**立即拉一次**
+  // 体检——不等看板打开(codex P2:否则铃铛在用户打开看板前无从提醒,违背主动提醒初衷)。
+  // best-effort、只读、无模型;仅当仍是当前库时落状态。
+  useEffect(() => {
+    setCheckup(null);
+    setCheckupRepairPollUntil(0);
+    const nb = currentNotebookId;
+    if (!nb) return;
+    void fetchCheckup(nb).then((c) => {
+      if (activeNotebookIdRef.current === nb) setCheckup(c);
+    }).catch(() => {});
+  }, [currentNotebookId]);
+  // 体检修复触发后的有界轮询:reparse/backfill(乃至 H6/H7/H8 的既有构建入口)都是
+  // 后台 job,点完不会立即反映到 count。看板开着且 checkupRepairPollUntil 未到期时,
+  // 每 8s 重拉一次 checkup,直到健康(healthy)或到期即停——不做无界轮询(承效率约束:
+  // 体检含 H8 磁盘探针,只在用户显式修复的窗口内刷新)。
+  useEffect(() => {
+    if (!analytics || !currentNotebookId || checkupRepairPollUntil <= Date.now()) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(() => {
+      if (Date.now() > checkupRepairPollUntil) { setCheckupRepairPollUntil(0); return; }
+      fetchCheckup(nb).then((c) => {
+        if (cancelled) return;
+        setCheckup(c);
+        if (c.healthy) setCheckupRepairPollUntil(0);
+      }).catch(() => {});
+    }, 8000);
+    return () => { cancelled = true; window.clearInterval(poll); };
+  }, [analytics, currentNotebookId, checkupRepairPollUntil]);
   // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
   // building for a large notebook, poll every 6s until it flips false, then swap in the
   // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
@@ -1210,11 +1258,16 @@ export default function Home() {
   // 「检索索引」三个精确动作 —— 各自弹确认(描述具体精确)后立即后台执行:
   //   build  未构建/建议 → 从零构建(full)    update 已过期 → 增量收录新增源(fold)
   //   rebuild 已建成     → 删除现有索引从头全量重建(full)。与 tier 解耦,大库亦可建。
-  const runScaleIndexOp = (op: ScaleIndexOp) => {
+  const runScaleIndexOp = (op: ScaleIndexOp, onStarted?: () => void) => {
     const s = scaleIndexStatus;
     if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
     const nb = currentNotebookId;
-    confirmIndexAction(scaleIndexOpConfirm(op, s), () => startScaleIndexRebuild(nb, "now", SCALE_OP_MODE[op]));
+    // onStarted 只在**确认弹窗点确定后**跑(放进 onConfirm 内)——H8 修复 CTA 用它 arm
+    // checkup 轮询;取消确认/早退守卫命中时都不 arm,免得空转 10min(评审)。
+    confirmIndexAction(scaleIndexOpConfirm(op, s), () => {
+      startScaleIndexRebuild(nb, "now", SCALE_OP_MODE[op]);
+      onStarted?.();
+    });
   };
   // 「空闲时建」—— 与上面三个精确动作同一确认机制,仅 when 改为 idle(排队等服务器空闲/
   // 低峰再建,mode 沿用 "auto" 交给后端按当时状态判断 fold/full)。原 admin 动作列表里的
@@ -1246,6 +1299,45 @@ export default function Home() {
       if (!shouldResumeScaleIndex(s.scale_index)) setBuildingScaleIndex(false);
     } catch (e) { reportError(e); }
     finally { setCancelingScaleIndex(false); }
+  };
+  // ---- 流水线体检修复(P2)----
+  // 重拉 checkup(修复后反映 count 下降);仅当仍是当前库时落状态。
+  const reloadCheckup = (nb: string) => {
+    fetchCheckup(nb)
+      .then((c) => { if (activeNotebookIdRef.current === nb) setCheckup(c); })
+      .catch(() => {});
+  };
+  // 修复是后台 job、count 不会立即下降,故点完开一段有界的 checkup 轮询窗口(见上方
+  // effect,健康即停,10 分钟封顶)。所有修复 CTA(重新解析/补齐向量,及复用的分析/
+  // 更新/重建索引)共用它。
+  const bumpCheckupRepairPoll = () => setCheckupRepairPollUntil(Date.now() + 10 * 60 * 1000);
+  // H2/H3 修复:批量重新解析命中项样本(source_ids 来自 checkup.sample,后端按 notebook
+  // 作用域过滤)。样本有上界(≤20),命中更多时逐轮修复、每轮 count 下降。
+  const runReparse = async (nb: string, sourceIds: string[]) => {
+    if (sourceIds.length === 0) return;
+    try {
+      const r = await reparseSources(nb, sourceIds);
+      setToast(`已开始重新解析 ${r.scheduled.length} 篇来源；完成后会自动更新`);
+      bumpCheckupRepairPoll();
+      reloadCheckup(nb);
+      // 让来源列表的状态标签也及时反映(分析中/已就绪)。
+      loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+    } catch (e) { reportError(e); }
+  };
+  // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
+  const runBackfillVectors = async (nb: string) => {
+    try {
+      const r = await backfillVectors(nb);
+      if (!r.accepted) {
+        // 后端未配嵌入服务 → 不受理(codex):提示配置、**不** arm 轮询——否则空转 10min、
+        // 而缺向量永远补不上、H4/H5 清不掉。
+        setToast("未配置嵌入服务，无法补齐检索向量");
+        return;
+      }
+      setToast("已开始补齐检索向量；完成后会自动更新");
+      bumpCheckupRepairPoll();
+      reloadCheckup(nb);
+    } catch (e) { reportError(e); }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
@@ -1328,8 +1420,17 @@ export default function Home() {
   const workspaceEpochRef = useRef(0);
   const kgBuildRequestEpochRef = useRef(0);
   const askRunEpochRef = useRef(0);
-  // started 事件落地前(jobId 尚未知晓)点了「停止」:先记下意图,onStart 拿到 jobId 后立即补打 cancel。
-  const cancelRequestedRef = useRef(false);
+  const sessionListRequestRef = useRef(0);
+  const latestSessionListRef = useRef<{
+    notebookId: string;
+    requestId: number;
+    promise: Promise<ConversationSummary[]>;
+  } | null>(null);
+  const optimisticConversationIdsRef = useRef<Set<string>>(new Set());
+  // started 事件落地前(jobId 尚未知晓)点了「停止」:保留该 run 的 controller，
+  // 继续读到 started 拿到 jobId 后补打 cancel，再中止本地流。Set 而非单一
+  // boolean：切会话后可能又启动新 run，取消意图不能串台。
+  const cancelRequestedControllersRef = useRef<Set<AbortController>>(new Set());
   // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
   // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
@@ -1390,6 +1491,7 @@ export default function Home() {
           askJobIdRef.current = null;
           if (d.status === "done") {
             await openSession(reconnectConvIdRef.current ?? "");   // 见注: 重载拿最终答案
+            await loadSessions(nb);                                // 同步终态轮数/reasoning 摘要
           } else if (d.status === "cancelled") {
             setToast("该问答已被取消");
             await loadSessions(nb);   // 后端对取消的首轮会话做了空会话清理,刷新列表去掉幽灵项
@@ -1754,6 +1856,9 @@ export default function Home() {
           await loadNotebookCollection();
           const refreshed = await getNotebook(currentNotebookId);
           if (!cancelled) setCurrentNotebook(refreshed);
+          // 源达终态(extracted/failed)可能新增 H2–H6:刷新体检,新损坏才会冒进铃铛而非等用户手动
+          // 打开看板(codex 第5轮 P2:proactive fetch 只在 notebook ID 变时跑,漏了上传后 parse 完成)。
+          if (!cancelled) reloadCheckup(currentNotebookId);
         }
       } catch (error) {
         reportError(error);
@@ -2204,10 +2309,16 @@ export default function Home() {
     closeAnalytics();
     closeKnowhow();
     const workspaceEpoch = ++workspaceEpochRef.current;
-    askRunEpochRef.current += 1;
+    setSessionLoading(true);
+    try {
+      askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
+    optimisticConversationIdsRef.current.clear();
+    askAbortRef.current = null;
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
     setAsking(false);
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
@@ -2254,7 +2365,7 @@ export default function Home() {
     setCurrentNotebookBases([]);
     setSessions([]);
     pollCountRef.current = 0;
-    const sessionList = await loadSessions(notebookId, workspaceEpoch);
+    const sessionList = await loadSessions(notebookId);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
     // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
     // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
@@ -2271,8 +2382,11 @@ export default function Home() {
     } else if (historyMode === "replace") {
       window.history.replaceState(null, "", notebookHash(notebookId));
     }
-    window.scrollTo(0, 0);
-    return true;
+      window.scrollTo(0, 0);
+      return true;
+    } finally {
+      if (workspaceEpochRef.current === workspaceEpoch) setSessionLoading(false);
+    }
   }
 
   async function openNotebookMemory(notebookId: string) {
@@ -2324,6 +2438,10 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
+    optimisticConversationIdsRef.current.clear();
+    askAbortRef.current = null;
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
     setSources([]);
@@ -2332,6 +2450,7 @@ export default function Home() {
     setConversationId(null);
     setSessions([]);
     setAsking(false);
+    setSessionLoading(false);
     setPendingQuestion("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
@@ -2560,6 +2679,7 @@ export default function Home() {
     // false → 处理轮询的 reachedExtracted 分支不触发 → ask_available 陈旧为假、对话框空锁。显式
     // 重拉解禁;仍在解析中的慢路径由处理轮询覆盖。
     revalidateAskAvailability();
+    reloadCheckup(currentNotebookId);  // 新源可能立即/后续成 H2–H6:刷新体检铃铛(codex 第5轮 P2)
     setStagedFiles([]);
     setStagedDocTypes([]);
     applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []);
@@ -2595,6 +2715,7 @@ export default function Home() {
         setNotebookSourceTotal((t) => t + result.created.length);
         await loadNotebookCollection();
         revalidateAskAvailability(); // P1:导入即产出可检索证据时解禁对话框(同 confirmUpload)
+        reloadCheckup(currentNotebookId);  // 同理刷新体检铃铛(codex 第5轮 P2)
       }
       setUrlRejected(result.rejected);
       setToast(`已添加 ${result.created.length} 个，被拒 ${result.rejected.length} 个`);
@@ -2661,12 +2782,13 @@ export default function Home() {
     setCurrentNotebook(refreshed);
     setKnowledge(EMPTY_KNOWLEDGE);
     setDuplicates(null);
+    reloadCheckup(notebookId);  // 删掉损坏源后旧告警须消:刷新体检铃铛(codex 第5轮 P2)
     setToast("来源已删除");
   }
 
   async function runAsk(nextQuestion = question) {
     if (!currentNotebookId) return;
-    if (asking) return;
+    if (asking || sessionLoading) return;
     const q = nextQuestion.trim();
     if (!q) return;
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
@@ -2679,6 +2801,8 @@ export default function Home() {
       return;
     }
     const notebookId = currentNotebookId;
+    const conversationIdAtStart = conversationId;
+    let startedConversationId = conversationIdAtStart;
     const workspaceEpoch = workspaceEpochRef.current;
     const runEpoch = ++askRunEpochRef.current;
     const ownsRun = () => ownsWorkspaceRun(
@@ -2695,8 +2819,10 @@ export default function Home() {
     setPendingMode(askMode);
     setPendingTrace([]);
     setAsking(true);
-    cancelRequestedRef.current = false;   // 每次新 ask 复位「停止」意图
     const controller = new AbortController();
+    // Bind this controller to a not-yet-started run. A job id from a detached
+    // previous notebook/session must never be paired with the new transport.
+    askJobIdRef.current = null;
     askAbortRef.current = controller;
     askNotebookIdRef.current = notebookId;
     try {
@@ -2708,22 +2834,54 @@ export default function Home() {
           if (ownsRun()) setPendingTrace((previous) => [...previous, step]);
         },
         controller.signal,
-        (jobId) => {
-          if (!ownsRun()) return;
-          askJobIdRef.current = jobId;
-          if (cancelRequestedRef.current) {
-            // started 落地前已点过「停止」:jobId 当时还不存在,补打 cancel 端点真取消 worker。
-            cancelRequestedRef.current = false;
-            cancelAskJob(notebookId, jobId).catch(() => {});
+        async (jobId, durableConversationId) => {
+          startedConversationId = durableConversationId;
+          if (cancelRequestedControllersRef.current.delete(controller)) {
+            // 不能在 jobId 出现前 abort，否则 started 永远无法被读取，后端 detached
+            // worker 也就无法被显式取消。runAskStream 会 await 此回调，所以取消完成前
+            // 不会继续消费 progress/final。
+            await cancelAskJob(notebookId, jobId).catch(() => {});
+            controller.abort();
+            await refreshActiveSessions(notebookId).catch(() => {});
+            return;
           }
+
+          const ownsVisibleRun = ownsRun();
+          if (ownsVisibleRun) {
+            askJobIdRef.current = jobId;
+            setConversationId(durableConversationId);
+          }
+          if (notebookIsActive(notebookId, activeNotebookIdRef.current)) {
+            optimisticConversationIdsRef.current.add(durableConversationId);
+            setSessions((current) => recordStartedConversation(current, {
+              conversationId: durableConversationId,
+              question: q,
+              startedAt: new Date().toISOString(),
+            }));
+            // 历史归属于 notebook，不归属于当前展示的 run。即使 started 前已切到
+            // 同库旧会话，也必须发布这条可重开的 durable conversation。
+            loadSessions(notebookId).catch(() => {
+              // 乐观历史项已可用，短暂列表失败不终止 Ask stream。
+            });
+          }
+          if (!ownsVisibleRun) return;
         },
       );
-      if (!ownsRun()) return;
+      if (!ownsRun()) {
+        await refreshActiveSessions(notebookId).catch(() => {});
+        return;
+      }
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
-      if (!ownsRun()) return;
+      if (!ownsRun()) {
+        await refreshActiveSessions(notebookId).catch(() => {});
+        return;
+      }
       setQuestion(q);
+      if (startedConversationId !== conversationIdAtStart) {
+        setConversationId(conversationIdAtStart);
+      }
       if (isAbortError(error)) {
         setToast("已中断回答");
         return;
@@ -2734,42 +2892,93 @@ export default function Home() {
         if (askAbortRef.current === controller) askAbortRef.current = null;
         askJobIdRef.current = null;
         askNotebookIdRef.current = null;
-        cancelRequestedRef.current = false;
         setPendingQuestion("");
         setPendingMode(DEFAULT_ASK_MODE);
         setPendingTrace([]);
         setAsking(false);
       }
+      cancelRequestedControllersRef.current.delete(controller);
     }
-    if (ownsRun()) await loadSessions(notebookId, workspaceEpoch);
+    if (ownsRun()) await loadSessions(notebookId);
   }
 
   function abortAsk() {
     const jobId = askJobIdRef.current;
     const nb = askNotebookIdRef.current;
+    const controller = askAbortRef.current;
     // 显式取消 = 打 cancel 端点(真取消后端 worker),再 abort 本地流(立即停读)。
     // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
     if (jobId && nb) {
-      cancelAskJob(nb, jobId).catch(() => {});
-    } else {
-      // started 事件还没落地,jobId 未知:记下意图,onStart 拿到 jobId 后补打 cancel(见 runAsk)。
-      cancelRequestedRef.current = true;
+      cancelAskJob(nb, jobId)
+        .then(() => refreshActiveSessions(nb))
+        .catch(() => {});
+      controller?.abort();
+    } else if (controller) {
+      // 先不 abort：继续读取第一条 started，回调中补打后端 cancel 后再 abort。
+      // 否则请求已到后端但首 chunk 未达时，worker 会脱离客户端继续执行。
+      cancelRequestedControllersRef.current.add(controller);
+      // UI 立即退出占用态并恢复草稿；后台 stream 仍由该 controller 的闭包继续
+      // 读到 started 完成取消握手。递增 run epoch 防止旧 final 回写回答区。
+      askRunEpochRef.current += 1;
+      if (askAbortRef.current === controller) askAbortRef.current = null;
+      askJobIdRef.current = null;
+      askNotebookIdRef.current = null;
+      setQuestion(pendingQuestion);
+      setPendingQuestion("");
+      setPendingMode(DEFAULT_ASK_MODE);
+      setPendingTrace([]);
+      setAsking(false);
+      setToast("正在中断回答");
     }
-    askAbortRef.current?.abort();
+  }
+
+  function refreshActiveSessions(notebookId: string): Promise<ConversationSummary[] | null> {
+    if (!notebookIsActive(notebookId, activeNotebookIdRef.current)) {
+      return Promise.resolve(null);
+    }
+    return loadSessions(notebookId);
   }
 
   async function loadSessions(
     notebookId: string | null = currentNotebookId,
-    expectedWorkspaceEpoch = workspaceEpochRef.current,
   ): Promise<ConversationSummary[] | null> {
     if (!notebookId) return null;
-    const list = await listConversations(notebookId);
-    if (
-      activeNotebookIdRef.current !== notebookId
-      || workspaceEpochRef.current !== expectedWorkspaceEpoch
-    ) return null;
-    setSessions(list);
-    return list;
+    // 历史列表是 notebook 级状态，同库切会话不应使有效响应过期；旧 notebook
+    // 的延迟刷新则不应发请求，也不能递增 generation。
+    if (!notebookIsActive(notebookId, activeNotebookIdRef.current)) return null;
+    const requestId = ++sessionListRequestRef.current;
+    const request = {
+      notebookId,
+      requestId,
+      promise: listConversations(notebookId),
+    };
+    latestSessionListRef.current = request;
+    const resolved = await followLatestNotebookRequest(
+      request,
+      () => latestSessionListRef.current,
+      () => notebookIsActive(notebookId, activeNotebookIdRef.current),
+    );
+    if (!resolved) return null;
+    if (sessionListRequestIsCurrent(
+      resolved.generationId,
+      sessionListRequestRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
+    )) {
+      if (resolved.requestId === resolved.generationId) {
+        optimisticConversationIdsRef.current.clear();
+        setSessions(resolved.value);
+      } else {
+        setSessions((current) => mergeSessionListFallback(
+          current,
+          resolved.value,
+          optimisticConversationIdsRef.current,
+        ));
+      }
+    }
+    // Even when a superseding request failed, orchestration callers can use
+    // this valid same-notebook fallback; stale data is never published here.
+    return resolved.value;
   }
 
   // 会话详情 → state 的灌入内核。刻意不碰 workspaceEpochRef:调用方各自持有
@@ -2778,6 +2987,18 @@ export default function Home() {
   async function applySessionDetail(id: string, expectedWorkspaceEpoch: number) {
     const detail = await getConversation(id);
     if (workspaceEpochRef.current !== expectedWorkspaceEpoch) return;
+    const summary: ConversationSummary = {
+      id: detail.id,
+      title: detail.title,
+      updated_at: detail.updated_at,
+      turn_count: detail.turn_count,
+      used_reasoning: detail.used_reasoning ?? Boolean(
+        detail.turns[detail.turns.length - 1]?.response.reasoning_trace?.length,
+      ),
+    };
+    setSessions((current) => current.some((session) => session.id === detail.id)
+      ? current.map((session) => session.id === detail.id ? summary : session)
+      : [summary, ...current]);
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
@@ -2787,6 +3008,10 @@ export default function Home() {
     setChatMode("ask");
     setSessionPanelOpen(false);
     setRenamingSessionId(null);
+    // Reconnected jobs do not own a local fetch controller. Drop any detached
+    // stream controller from a previously viewed run so cancel cannot pair B's
+    // job id with A's transport; A's closure/Set still owns its own controller.
+    askAbortRef.current = null;
     const active = detail.active_job;
     if (active) {
       // 把在途 turn 渲染成「生成中」并接回实时轨迹(仿正在 ask 的 UI)。
@@ -2809,12 +3034,20 @@ export default function Home() {
   async function openSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
+    setSessionLoading(true);
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setAsking(false);
     setReconnectJob(null);
     setMemoryAnswerId(null);
-    await applySessionDetail(id, workspaceEpoch);
+    askAbortRef.current = null;
+    askJobIdRef.current = null;
+    askNotebookIdRef.current = null;
+    try {
+      await applySessionDetail(id, workspaceEpoch);
+    } finally {
+      if (workspaceEpochRef.current === workspaceEpoch) setSessionLoading(false);
+    }
   }
 
   function startNewSession() {
@@ -2823,8 +3056,10 @@ export default function Home() {
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setAsking(false);
+    setSessionLoading(false);
     setReconnectJob(null);
     setMemoryAnswerId(null);
+    askAbortRef.current = null;
     askJobIdRef.current = null;
     askNotebookIdRef.current = null;
     setTurns([]);
@@ -2911,7 +3146,7 @@ export default function Home() {
         }
       },
       async () => {
-        await loadSessions(notebookId, workspaceEpoch);
+        await loadSessions(notebookId);
       },
       ({ deleted }) => {
         setToast(conversationCleanupToast(deleted));
@@ -3028,6 +3263,12 @@ export default function Home() {
       indexStatus: () => fetchIndexStatus(nb),
       contentOverview: () => fetchNotebookContentOverview(nb),
     });
+    // 体检:看板打开时随三系统状态一起拉一次(只读、无模型)。命中问题时驱动「来源
+    // 状态」块(H2–H6 源级)、「索引与构建」块(H7/H8 索引可信度)与铃铛的一条聚合
+    // 提醒。best-effort:失败不拦看板其余部分。
+    void fetchCheckup(nb).then((result) => {
+      if (isCurrent()) setCheckup(result);
+    }).catch(() => {});
     // 看板打开时经聚合端点一次拉齐三系统(kg/概念合并/检索索引)当前态(而非上次切库的
     // 快照),取代原先仅单独拉检索索引状态;顺带回填 scaleIndexStatus(供既有
     // runScaleIndexOp 等复用)与忙碌位(供既有轮询接回跨会话发起的构建)。
@@ -3726,6 +3967,19 @@ export default function Home() {
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
             userId={currentUser?.id}
+            checkup={(() => {
+              // 体检一条聚合提醒:命中问题即冒、点击直达看板。不复制体检详情、不新增
+              // 待办类型(见 pending-center.tsx CheckupAlert)。签名随命中集合变化。
+              // ⚠ 只读成员不冒此提醒:他们能看健康信息但所有修复 CTA 都 !isReader 隐藏了,
+              // 「发现可修复的问题」对他们是无可点动作的噪音(评审)。
+              const sig = checkupAlertSignature(checkup);
+              if (!sig || !currentNotebook || isReader) return null;
+              return {
+                sig,
+                label: `「${currentNotebook.name}」发现可修复的问题`,
+                onOpen: () => { void openAnalytics(); },
+              };
+            })()}
             onOpenItem={(it) => openPendingItem(it).catch(reportError)}
             onOpenDone={openDoneItem}
             onDismissDone={pending.dismissDone}
@@ -4441,7 +4695,7 @@ export default function Home() {
                   onSubmit={() => runAsk().catch(reportError)}
                   onAbort={abortAsk}
                   running={asking}
-                  disabled={askBlocked}
+                  disabled={askBlocked || sessionLoading}
                 >
                   <span>{notebookSourceTotal} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
@@ -4450,7 +4704,7 @@ export default function Home() {
                         key={g.id}
                         type="button"
                         className={`mode-tab${groupOf(askMode) === g.id ? " active" : ""}`}
-                        disabled={asking}
+                        disabled={asking || sessionLoading}
                         onClick={() => setAskMode(defaultModeForGroup(g.id))}
                       >
                         {g.label}
@@ -4464,7 +4718,7 @@ export default function Home() {
                             type="button"
                             className={`mode-engine${askMode === m.id ? " active" : ""}`}
                             title={m.desc}
-                            disabled={asking}
+                            disabled={asking || sessionLoading}
                             onClick={() => setAskMode(m.id)}
                           >
                             {m.label}
@@ -4479,7 +4733,7 @@ export default function Home() {
                           type="button"
                           className="mode-engine"
                           style={{ marginLeft: 6 }}
-                          disabled={buildingKg || asking}
+                          disabled={buildingKg || asking || sessionLoading}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
                           {buildingKg ? "整理中…" : "整理知识图谱"}
@@ -5177,6 +5431,52 @@ export default function Home() {
               <div className="tag-row">
                 {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{label(PARSE_STATUS, k, "其他")} {v}</span>)}
               </div>
+              {/* 体检:无异常时不打扰(上方中性 tag 行照旧);命中 H2–H6 源级问题时,列出
+                  问题(界面词标签 + 数量 + 命中样本标题)+ 对应一键修复 CTA。*/}
+              {(() => {
+                const groups = sourceHealthGroups(checkup);
+                if (groups.length === 0) return null;
+                const titleOf = (id: string) => {
+                  const s = sources.find((x) => x.id === id);
+                  return s ? (s.title || s.file_name || "") : "";
+                };
+                return (
+                  <div className="stack" style={{ marginTop: 8 }}>
+                    <p className="tool-hint">部分来源需要处理：</p>
+                    {groups.map((g) => {
+                      const titles = g.sample.map(titleOf).filter(Boolean).slice(0, 6);
+                      const runFix = () => {
+                        const nb = currentNotebookId;
+                        if (!nb) return;
+                        if (g.fix === "reparse") void runReparse(nb, g.sample);
+                        else if (g.fix === "backfill_vectors") void runBackfillVectors(nb);
+                        else if (g.fix === "extract_kg") { startKgBuild(nb); bumpCheckupRepairPoll(); }
+                      };
+                      return (
+                        <div className="index-card index-tone-warn" key={g.key}>
+                          <span className="index-ic" aria-hidden="true"><AlertTriangle size={19} /></span>
+                          <div className="index-main">
+                            <div className="tag-row" style={{ alignItems: "center" }}>
+                              <span className="index-state">{g.label}</span>
+                              <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }}>{g.count} {g.unit}</span>
+                            </div>
+                            {titles.length > 0 && (
+                              <div className="index-sub">{titles.join("、")}{g.count > titles.length ? " 等" : ""}</div>
+                            )}
+                          </div>
+                          {!isReader && (
+                            <div className="index-ctas">
+                              <button type="button" className="index-cta primary" onClick={runFix}>
+                                {label(CHECKUP_FIX, g.fix, "处理")}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
               {analytics.paper_meta_counts && (
                 <>
                   <p className="section-title">论文元数据</p>
@@ -5302,8 +5602,32 @@ export default function Home() {
                       </div>
                     );
                   })()}
-                  {/* 检索索引行:状态取 indexStatus.scale_index,忙碌(排队/构建中)时唯一动作变为「取消」。 */}
-                  {(() => {
+                  {/* 检索索引行:状态取 indexStatus.scale_index,忙碌(排队/构建中)时唯一动作变为「取消」。
+                      体检 H8(索引产物损坏)优先:这是「索引与构建」里唯一会静默出错的一格——索引存在
+                      且不过期、产物却坏了,普通状态卡会照常显示绿色「最新」。命中即整格换成红色「已损坏」
+                      告警 +「重建索引」(复用既有全量重建 runScaleIndexOp("rebuild")),避免与「最新」并列
+                      自相矛盾。H7 索引过期不另设:下方正常态本就按 scale_index.state 渲染「已过期 → 更新
+                      索引」(与 H7 同源),重复一遍反成冗余控件。*/}
+                  {checkupCount(checkup, "H8") > 0 ? (
+                    <div className="index-card index-tone-error">
+                      <span className="index-ic" aria-hidden="true"><AlertTriangle size={19} /></span>
+                      <div className="index-main">
+                        <div className="tag-row" style={{ alignItems: "center" }}>
+                          <span className="index-state">检索索引</span>
+                          <span className="tag" style={{ color: "var(--color-danger, #b42318)" }}>已损坏</span>
+                        </div>
+                        <div className="index-sub">检索索引已损坏，检索与{strictLabel}结果可能不完整，请重建索引。</div>
+                      </div>
+                      {!isReader && (
+                        <div className="index-ctas">
+                          <button type="button" className="index-cta primary"
+                                  onClick={() => runScaleIndexOp("rebuild", bumpCheckupRepairPoll)}>
+                            重建索引
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ) : (() => {
                     const s = indexStatus.scale_index;
                     const v = describeScaleIndex(s);
                     // 本地忙碌位兜底(与知识图谱/概念合并两行一致):server-derived state 靠聚合轮询

@@ -231,6 +231,30 @@ export type PaginatedSources = {
 
 export const SOURCES_PAGE_SIZE = 50;
 
+// 流水线体检(P2)。/checkup 响应体是内部契约:code(H2..H8)与 fix(修复动作枚举)
+// 都是内部代号,面向用户的界面词由 vocabulary.ts 的 CHECKUP_ISSUE / CHECKUP_FIX 映射。
+// sample 只给 source_id(前端自取标题);H4–H8 是计数/布尔型,sample 为空。
+export type CheckupItem = {
+  code: string;
+  count: number;
+  sample: string[];
+  fix: string;
+};
+
+export type CheckupResponse = {
+  notebook_id: string;
+  checked_at: string;
+  healthy: boolean;
+  checks: CheckupItem[];
+};
+
+// 一个后台修复动作的受理回执:reparse 回 scheduled(实际排入的 source_id),
+// notebook 级动作(补齐向量)回 accepted。
+export type RepairScheduledResult = {
+  scheduled: string[];
+  accepted: boolean;
+};
+
 export type PaginatedKnowledge = {
   items: KnowledgeRecord[];
   total_count: number;
@@ -330,6 +354,7 @@ export type ConversationDetail = {
   title: string;
   updated_at: string;
   turn_count: number;
+  used_reasoning?: boolean;
   turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
   active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
 };

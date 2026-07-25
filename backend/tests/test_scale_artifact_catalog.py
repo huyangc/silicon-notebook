@@ -11,8 +11,13 @@ base-offline-ANN / active-brute cost-separation invariant), and the facade's
 from __future__ import annotations
 
 import shutil
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -128,6 +133,91 @@ def test_open_ann_memoizes_handle_and_fails_open(repo):
     assert handle is not None
     assert catalog.open_ann(idx, "kg") is handle          # memoized on the instance
     assert catalog.open_ann(idx, "chunk") is None         # no chunk artifact → fail-open
+
+
+def test_open_ann_singleflights_concurrent_cold_load(repo, monkeypatch):
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(6)
+
+    class FakeIndex:
+        def __init__(self, *, space, dim):
+            assert (space, dim) == ("cosine", 16)
+
+        def load_index(self, path, *, max_elements):
+            nonlocal calls
+            assert (path, max_elements) == ("kg-ann.bin", 3)
+            with calls_lock:
+                calls += 1
+            # Keep the first load open long enough for all callers to race on
+            # the empty handle. Without the per-index lock, each loads a copy.
+            time.sleep(0.05)
+
+    monkeypatch.setitem(sys.modules, "hnswlib", SimpleNamespace(Index=FakeIndex))
+    index = SimpleNamespace(
+        manifest={"dim": 16},
+        ann_path="kg-ann.bin",
+        ann_labels=["a", "b", "c"],
+        ann_handle=None,
+    )
+    catalog = repo._runtime.scale_catalog
+
+    def open_concurrently():
+        start.wait()
+        return catalog.open_ann(index, "kg")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(open_concurrently) for _ in range(5)]
+        start.wait()
+        handles = [future.result() for future in futures]
+
+    assert calls == 1
+    assert all(handle is handles[0] for handle in handles)
+
+
+def test_open_ann_shares_concurrent_failure_but_later_request_retries(
+    repo, monkeypatch
+):
+    calls = 0
+    calls_lock = threading.Lock()
+    start = threading.Barrier(6)
+
+    class FailingIndex:
+        def __init__(self, *, space, dim):
+            assert (space, dim) == ("cosine", 16)
+
+        def load_index(self, path, *, max_elements):
+            nonlocal calls
+            assert (path, max_elements) == ("kg-ann.bin", 3)
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            raise OSError("corrupt ANN fixture")
+
+    monkeypatch.setitem(sys.modules, "hnswlib", SimpleNamespace(Index=FailingIndex))
+    index = SimpleNamespace(
+        manifest={"dim": 16},
+        ann_path="kg-ann.bin",
+        ann_labels=["a", "b", "c"],
+        ann_handle=None,
+    )
+    catalog = repo._runtime.scale_catalog
+
+    def open_concurrently():
+        start.wait()
+        return catalog.open_ann(index, "kg")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(open_concurrently) for _ in range(5)]
+        start.wait()
+        handles = [future.result() for future in futures]
+
+    assert calls == 1
+    assert handles == [None] * 5
+    # A new request after the failed wave is allowed to retry rather than
+    # turning a transient I/O/OOM failure into a permanent negative cache.
+    assert catalog.open_ann(index, "kg") is None
+    assert calls == 2
 
 
 def test_graph_rows_matches_the_facade_gather(repo):

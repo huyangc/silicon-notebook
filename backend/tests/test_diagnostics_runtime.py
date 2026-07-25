@@ -681,6 +681,8 @@ def test_snapshot_bounds_readiness_counts_and_active_sql_names(tmp_path):
             "phase": "w" * 10_000,
             "warmed_notebooks": huge_number,
             "total_notebooks": huge_number,
+            "preloaded_indexes": huge_number,
+            "total_indexes": huge_number,
         },
         concurrency_provider=lambda: {},
     )
@@ -693,6 +695,8 @@ def test_snapshot_bounds_readiness_counts_and_active_sql_names(tmp_path):
     assert len(snapshot["readiness"]["phase"]) <= 80
     assert "warmed_notebooks" not in snapshot["readiness"]
     assert "total_notebooks" not in snapshot["readiness"]
+    assert "preloaded_indexes" not in snapshot["readiness"]
+    assert "total_indexes" not in snapshot["readiness"]
     assert len(active_sql["verb"]) <= 16
     assert len(active_sql["table"]) <= 128
     encoded = json.dumps(snapshot, allow_nan=False)

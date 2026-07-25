@@ -130,6 +130,28 @@ class ScaleIndexBuilder:
     ) -> dict:
         """Build the complete persisted scale index for one notebook."""
         self.get_notebook(notebook_id)
+        # OOM guard (audit P2-6): building every vector matrix / hnsw at full
+        # native width costs ~4x the truncated path's memory — the difference
+        # between fitting and OOM on a multi-million-vector base library. The
+        # EFFECTIVE build width is EMBED_RUNTIME_DIM only when it actually
+        # truncates (0 < runtime < EMBED_DIM); otherwise it is EMBED_DIM. So warn
+        # whenever that effective width is large — runtime unset (0) OR runtime
+        # >= EMBED_DIM (a no-op truncation, e.g. EMBED_RUNTIME_DIM == EMBED_DIM,
+        # which the validator permits — codex PR#353 r4) both build full width.
+        # Loud, NOT fatal: a natively small-dim model legitimately needs none.
+        from app.services.vector_index import resolve_runtime_dim as _runtime_dim
+        _embed_dim = int(self.settings.embed_dim)
+        _runtime = _runtime_dim(self.settings)
+        _effective_dim = _runtime if 0 < _runtime < _embed_dim else _embed_dim
+        if _effective_dim >= 4096:
+            self.event_log.logger.warning(
+                "scale-index build for %s: vectors/ANN build at effective width %s "
+                "(EMBED_DIM=%s, EMBED_RUNTIME_DIM=%s) — a large index, ~%sx the "
+                "memory of a 1024-dim one. Lower EMBED_RUNTIME_DIM below EMBED_DIM "
+                "(e.g. 1024) to shrink it if the similarity space allows.",
+                notebook_id, _effective_dim, self.settings.embed_dim, _runtime,
+                _effective_dim // 1024,
+            )
         build_started = time.perf_counter()
         timings: dict[str, int] = {}
 
@@ -395,9 +417,12 @@ class ScaleIndexBuilder:
 
     def _index_delta(self, notebook_id: str) -> dict:
         current_sources = self.projections.source_ids(notebook_id)
-        manifest = self.artifacts.read_manifest(
-            self.artifacts.scale_dir(notebook_id)
-        )
+        try:
+            manifest = self.artifacts.read_manifest(
+                self.artifacts.scale_dir(notebook_id)
+            )
+        except Exception:  # noqa: BLE001 — 损坏 manifest:read_manifest 刻意 raise。等价于
+            manifest = None  # 「无可用索引」(下面 None/missing 分支同款)→ 视作全量待建,须重建。
         if manifest is None:
             return {
                 "delta_sources": sorted(current_sources),
@@ -638,6 +663,16 @@ class ScaleIndexBuilder:
 
     def build_viz(self, notebook_id: str) -> Optional[dict]:
         self.get_notebook(notebook_id)
+        # Capture the freshness stamps BEFORE deriving the graph. If a cluster
+        # write commits between here and the fetch below, the artifact is stamped
+        # with the PRE-derive version/cseq — so viz_index()/viz_probe() see it as
+        # stale and re-run, instead of mislabelling a pre-rebuild graph as current
+        # (codex PR#356 r2 P1a — the derive-then-stamp race). cluster_seq is the
+        # cluster_mutation_seq the rebuild bumps but version() (a version_facts memo
+        # key) doesn't expose, so viz freshness would otherwise miss a same-second
+        # cluster-only rewrite (codex PR#356 r1 P1).
+        ver = self.version(notebook_id)
+        cseq = int(self.projections.version_signal(notebook_id)[1])
         full = self._derive_object_graph_lite(notebook_id)
         if not full["nodes"]:
             return None
@@ -645,7 +680,8 @@ class ScaleIndexBuilder:
             viz_index_module.arrays_from_graph(full)
         )
         manifest = {
-            "version": self.version(notebook_id),
+            "version": ver,
+            "cluster_seq": cseq,
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
         }

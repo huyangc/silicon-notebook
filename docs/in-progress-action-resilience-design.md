@@ -130,7 +130,9 @@ ask_jobs(
 
 ### 5.3 jobId 下发
 
-保持单一 `POST …/ask/stream`，但流的**第一行事件**改为 `{"event":"started","job_id":"…"}`，前端据此拿到 jobId（供「停止」与后续重连）。其余 `progress` / `final` / `error` 事件不变。
+保持单一 `POST …/ask/stream`，但流的**第一行事件**改为 `{"event":"started","job_id":"…","conversation_id":"…"}`，前端据此拿到 jobId（供「停止」与后续重连）与已持久化的 conversationId（供首轮回答前即时入历史和重新打开）。其余 `progress` / `final` / `error` 事件不变。
+
+`started` 的历史发布按“当前是否仍在同一 notebook”判断，不按旧 run 是否仍占有回答区判断；因此用户在首行抵达前切到同库旧会话，也不会遗失新会话。切走后的 success/failure/cancel 终态仍独立刷新当前 notebook 的摘要；列表请求 generation 也是 notebook 级，同库会话 epoch 变化不丢弃有效响应，其他 notebook 的延迟调用则在发请求/递增 generation 前被拒绝。若用户在首行抵达前点击「停止」，界面立即恢复草稿，但客户端不能立刻 abort transport（那会永远丢掉 jobId）；它按 run 记录 controller，读到 `started` 后先调用取消端点，再停止该 run 的本地流。重连会话只持有 job id、不复用旧 stream controller，避免多在途会话取消串台。
 
 ### 5.4 空壳会话策略
 
@@ -179,7 +181,7 @@ WS2b = 一个 PR。轨迹持久化 + `GET …/ask/jobs/{jobId}` + 会话详情 J
 
 | 端点 | 工作流 | 说明 |
 |---|---|---|
-| `POST …/ask/stream` | WS2a | 断连不取消；首行发 `started`+job_id |
+| `POST …/ask/stream` | WS2a | 断连不取消；首行发 `started` + `job_id` + `conversation_id` |
 | `POST …/ask/jobs/{jobId}/cancel` | WS2a | 显式取消（新） |
 | `GET …/ask/jobs/{jobId}` | WS2b | 状态 + 回放轨迹 + 终态答案（新） |
 | `GET …/notebooks/{id}` | WS1 | 增 `kg_building` 字段（`get_notebook` 从进程内 `_kg_building` set 回填；无新端点） |

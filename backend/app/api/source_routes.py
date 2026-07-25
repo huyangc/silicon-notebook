@@ -18,6 +18,8 @@ from app.models.sources import (
     AddUrlSourcesRequest,
     AddUrlSourcesResult,
     PaginatedSources,
+    ReparseSourcesRequest,
+    RepairScheduledResult,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
@@ -32,6 +34,10 @@ from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 
 
 router = APIRouter()
+
+# 批量重解析一次最多受理的源数(去重后)。体检命中样本本就 ≤20;给宽松上限只为挡住
+# 「重复 id/超大列表灌满无界执行器队列」(codex),不是产品限制。
+_REPARSE_MAX = 200
 
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -204,6 +210,126 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
         return source_repository().parse_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/sources/reparse",
+    response_model=RepairScheduledResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def reparse_sources(
+    notebook_id: str, payload: ReparseSourcesRequest
+) -> RepairScheduledResult:
+    """体检修复(H2 空源 / H3 缺分块):批量重新解析。逐个后台 submit_job(process_source)
+    ——复用既有摄取管线(含 P1.5 的活跃租约 + 分块串行锁),**不**另造摄取路径。
+    ⚠ 每个 source_id 必须真属于本 notebook 才排入(防越权:``require_notebook_access`` 只守
+    notebook,不守 body 里带来的任意 source_id)。不属于本库/不存在的静默跳过,回执只含实际排入的。
+    ⚠ **先去重 + 限量**再排(codex):重复 id 会把同一源的解析/嵌入/KG 昂贵管线在无界队列里并发
+    排多次;超大列表同理会灌满执行器。dict.fromkeys 保序去重;超 _REPARSE_MAX 直接 400 拒绝。"""
+    unique_ids = list(dict.fromkeys(payload.source_ids))
+    if len(unique_ids) > _REPARSE_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many sources to reparse at once (max {_REPARSE_MAX})",
+        )
+    repo = source_repository()
+    scheduled: List[str] = []
+    for source_id in unique_ids:
+        try:
+            src = repo.get_source(source_id)
+        except KeyError:
+            continue
+        if src.notebook_id != notebook_id:
+            continue
+        # ⚠ 只重解析**导入型**用户源(codex):memory/knowhow 隐藏合成源无 file_path、由各自
+        # 投影服务维护;把它们喂给文档解析 process_source 只会标失败/清派生态,不是修复。
+        # 与 H2/H3 判据同口径(那两项本就排除 memory/knowhow),这里挡住 body 里带来的 id。
+        if src.type in ("memory", "knowhow"):
+            continue
+        kg_scheduler.submit_job(repo.process_source, source_id)
+        scheduled.append(source_id)
+    return RepairScheduledResult(scheduled=scheduled)
+
+
+def _backfill_vectors_job(repo, notebook_id: str) -> None:
+    """后台补齐该 notebook 缺失的 chunk + element 向量(只补缺失、幂等)。EMBED 未配则跳过。
+
+    ⚠ **逐源经 hold_source_chunk_lock 持 P1.5 的分块锁、锁内读→嵌**(codex P1):element/chunk id
+    在 reparse 时复用,并发补齐若在锁外读到旧代行、embedding 后在替换之后才提交,会给新文本挂上
+    **永久陈旧向量**(后续缺向量检查也发现不了——向量「在」,只是内容旧)。守卫在持锁期间同时登记
+    活跃租约,使 process_source 不会在本方仍持锁时把锁 pop 掉(codex 第2轮 P1:否则后续 reparse 另建
+    新锁、互斥失效;backfill-only 源还会锁泄漏)。锁内才读缺失行,故读到的行在补齐提交前不会被
+    reparse 换掉——彻底关掉「快照后才开始 reparse」的残留窗口。best-effort:一源失败不拦其余。
+
+    源发现只用**轻量 DISTINCT source_id 查询**、且只查已配的 workload(codex 第2轮 P1:大库上
+    把每行全文物化进内存仅为收 source_id 会 GB 级/OOM,还会白扫未配的那侧)。"""
+    mnt = repo.maintenance
+    ingestion = repo._runtime.source_ingestion
+    chunk_ok = repo.configured("chunk_embedding")
+    elem_ok = repo.configured("source_element_embedding")
+    if not (chunk_ok or elem_ok):
+        return
+    # 廉价定位「有缺失向量的源」:只取 DISTINCT source_id(不物化正文),且只查已配 workload。
+    # 真正补齐在锁内按 only_source_id 重读(读到的才是待嵌的行)。
+    sources: set[str] = set()
+    if chunk_ok:
+        sources |= set(mnt.missing_chunk_vector_source_ids(notebook_id))
+    if elem_ok:
+        sources |= set(mnt.missing_element_vector_source_ids(notebook_id))
+    for source_id in sources:
+        with ingestion.hold_source_chunk_lock(source_id):
+            try:
+                if chunk_ok:
+                    rows = mnt.missing_chunk_embedding_rows(notebook_id, only_source_id=source_id)
+                    if rows:
+                        mnt.embed_chunks_batch(
+                            notebook_id,
+                            [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows],
+                        )
+            except Exception:  # noqa: BLE001 — 后台 job 自负错误,一源失败不拦其余
+                pass
+            try:
+                if elem_ok:
+                    rows = mnt.missing_element_embedding_rows(notebook_id, only_source_id=source_id)
+                    if rows:
+                        mnt.embed_elements_batch(
+                            notebook_id,
+                            [{"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]} for r in rows],
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+
+
+@router.post(
+    "/notebooks/{notebook_id}/backfill-vectors",
+    response_model=RepairScheduledResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def backfill_vectors(notebook_id: str) -> RepairScheduledResult:
+    """体检修复(H4 缺 chunk 向量 / H5 缺 element 向量):后台补齐该 notebook 的缺失向量
+    (只补缺失、幂等,仅 embedding、不动解析/KG)。用户点触发、非自动(承 efficiency-first:
+    凡调 embedding 的修复不自动)。补完后 H4/H5 计数下降,前端重拉 checkup 反映。
+    用完整 facade(``repository()``)——backfill 需要 maintenance/configured(BatchIngestRepository)。"""
+    repo = repository()
+    mnt = repo.maintenance
+    # 按**损坏所属的 workload** 精判受理(codex P2):某类缺向量确实存在**且**其嵌入 workload 已配,
+    # job 才补得动该类。粗判 `configured(chunk) or configured(element)` 会在「损坏是 element、却只配
+    # 了 chunk」时假受理→前端「修复中」空转轮询、而 H5 永远清不掉。短路:未配某类就不跑那类 COUNT。
+    # 计数不排活跃租约:看板 H4/H5 是排除活跃后的口径,本处是其超集,故看板显示有损坏时这里必也判
+    # 有缺——不会误拒用户看到的损坏(在途嵌入的源即便被算进来,job 也在其分块锁内 no-op,无害)。
+    chunk_fixable = (
+        repo.configured("chunk_embedding")
+        and mnt.count_missing_chunk_vectors(notebook_id) > 0
+    )
+    elem_fixable = (
+        repo.configured("source_element_embedding")
+        and mnt.count_missing_element_vectors(notebook_id) > 0
+    )
+    if not (chunk_fixable or elem_fixable):
+        # 无「已配 + 有缺」的类 → job 必 no-op。accepted=false,前端据此提示而非「修复中」。
+        return RepairScheduledResult(accepted=False)
+    kg_scheduler.submit_job(_backfill_vectors_job, repo, notebook_id)
+    return RepairScheduledResult(accepted=True)
 
 
 @router.get("/sources/{source_id}/elements", response_model=List[SourceElement])

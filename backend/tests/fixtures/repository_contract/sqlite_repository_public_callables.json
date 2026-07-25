@@ -35,6 +35,7 @@
   "cancel_ask_job": "(self, job_id: 'str', user_id: 'str') -> 'dict'",
   "cancel_scale_index": "(self, notebook_id: 'str') -> 'dict'",
   "chat": "(self, workload_id: 'str')",
+  "checkup": "(self) -> 'CheckupService'",
   "close": "(self) -> 'None'",
   "close_local": "(self) -> 'None'",
   "cluster_map": "(self, notebook_id: 'str') -> 'Dict[str, str]'",

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Sequence
 
 from app.core.config import Settings
+from app.repositories.ports import NotebookTooLargeToCopyError
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
 
@@ -365,15 +366,81 @@ class SharingStore:
 
     # ------------------------------------------------------- copy primitives
     def snapshot_copy_rows(self, notebook_id: str) -> dict[str, list[dict]]:
-        """Read every copyable table's rows for the source notebook (the exact
-        SELECTs the former mixin issued, one read connection)."""
+        """Read every copyable table's rows in ONE stable-snapshot read
+        transaction, with the copyable-row bound enforced atomically inside it.
+
+        `BEGIN` (deferred) pins the WAL read snapshot at the first read, so the
+        row-count check and every table fetchall below observe the SAME data — a
+        concurrent ingestion commit cannot slip an over-limit notebook between
+        the check and the materialisation (codex PR#353 r3: the former
+        separate-connection recheck couldn't guarantee this). Over the copyable
+        row limit → raise BEFORE any fetchall, so the oversized rows are never
+        materialised (the 300GB+ OOM this guards). f.chunks + f.nodes = all
+        chunks + all knowledge_objects (mirrors load_notebook_scale_facts /
+        copy_stats).
+
+        The chunks+nodes gate above does NOT bound the other materialised tables
+        (relations / embeddings / elements / knowhow), whose combined row payload
+        is what the copy actually holds in memory. A source whose graph/embedding
+        fan-out dwarfs its chunk+node count (few nodes, millions of relations)
+        passes that gate yet would materialise gigabytes here. The second bound
+        caps the SUM of every snapshot table's rows — counted, not fetched, in the
+        SAME snapshot transaction — and raises before any fetchall, so peak copy
+        memory is decoupled from pathological fan-out (codex PR#353 r5 P2). The
+        enclosing ``with`` commits (read-only no-op) or, on a raise, rolls back."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as db:
+            db.execute("BEGIN")
+            violation = self._copy_limit_violation(db, notebook_id)
+            if violation is not None:
+                raise NotebookTooLargeToCopyError(violation)
             for table, sql in _COPY_SNAPSHOT_QUERIES:
                 snapshot[table] = [
                     dict(row) for row in db.execute(sql, (notebook_id,)).fetchall()
                 ]
         return snapshot
+
+    def _copy_limit_violation(self, db, notebook_id: str) -> "str | None":
+        """Both copy bounds, counted (not fetched) on the caller's connection:
+        the message to raise if either is crossed, else None. Single source of
+        truth shared by snapshot_copy_rows (atomic, in its BEGIN read snapshot)
+        and snapshot_copy_within_limits (the fresh share-routing recheck) — so the
+        copyable verdict and the guard can never disagree on which notebooks are
+        over-limit (codex PR#354 r2 P2)."""
+        total = int(db.execute(
+            "SELECT (SELECT COUNT(*) FROM chunks WHERE notebook_id=?) + "
+            "(SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?) AS n",
+            (notebook_id, notebook_id),
+        ).fetchone()["n"])
+        if total > self.settings.notebook_copy_max_rows:
+            return (
+                f"notebook {notebook_id} crossed the copy-size limit "
+                f"({total} rows > {self.settings.notebook_copy_max_rows}); "
+                f"share read-only instead"
+            )
+        materialised = sum(
+            int(db.execute(f"SELECT COUNT(*) FROM ({sql}) AS _c", (notebook_id,)).fetchone()[0])
+            for _table, sql in _COPY_SNAPSHOT_QUERIES
+        )
+        if materialised > self.settings.notebook_copy_max_snapshot_rows:
+            return (
+                f"notebook {notebook_id} crossed the copy-materialisation limit "
+                f"({materialised} rows across all tables > "
+                f"{self.settings.notebook_copy_max_snapshot_rows}); share read-only instead"
+            )
+        return None
+
+    def snapshot_copy_within_limits(self, notebook_id: str) -> bool:
+        """Fresh, non-materialising twin of snapshot_copy_rows' bounds: True iff a
+        deep copy would pass BOTH copy bounds right now. The share-routing facade
+        consults it so the copy-vs-read-only verdict reflects the total-
+        materialisation bound WITHOUT the staleness of the KG-version-cached
+        copy_stats (assets/sources grow without bumping that version) — a notebook
+        the guard would 409 is offered as read-only join, not a dead-end copy
+        (codex PR#354 r2 P2). Own read transaction; COUNT-only."""
+        with self.database.connect() as db:
+            db.execute("BEGIN")
+            return self._copy_limit_violation(db, notebook_id) is None
 
     def insert_copy_rows(
         self,

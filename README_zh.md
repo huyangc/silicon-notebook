@@ -9,7 +9,7 @@
 ## 核心能力
 
 - 结构化来源摄取；MinerU 配置后可保留元素级证据、公式、表格和文档内图片。
-- 带紧凑引用的多轮问答，支持 `chunk`、`reasoning` 和实验性的 `graph` 检索模式。
+- 带紧凑引用的多轮问答，会话历史按最近活动排序（首轮生成中会话即使立即切走也可重新打开），支持 `chunk`、`reasoning` 和实验性的 `graph` 检索模式。
 - Concept / Claim / Formula / Procedure 知识抽取、治理、统一图谱可视化和个人知识向公共库提交。
 - 与笔记本绑定、仅创建者可见的 Memory，并通过受限 MCP 向外部 Agent 提供访问。
 - 自由列 knowhow 表、Markdown 格子、全库推理检索驱动的显式空列补全建议、确定性图谱映射、历史/里程碑和隔离的代码附件。
@@ -119,6 +119,7 @@ bash scripts/check.sh
 - SQLite 默认位于 `.local/silicon_notebook.db`；PostgreSQL 是可直接选择的替代后端。两者的上传文件和生成工件仍位于 `.local/`。
 - 生产后端刻意保持单 worker，因为模型队列、熔断、健康和取消状态都在进程内。
 - 默认 `chunk` 检索只读取当前笔记本；图谱增强和推理路径可通过显式挂载的公共库联合检索。
+- 大库的索引检索会把 ANN 后的数据库 hydration 限制在候选窗口内，并让并发推理子查询单飞加载 ANN handle。默认会在 `/api/ready` 放行用户流量前加载全部已发布 scale 索引、已启用的 ANN handle 和可安全复用的单索引 PPR core；跨 notebook 组合图保持按需构造，避免成倍复制千万节点图。
 - 候选 Review Queue 已退出当前流程；知识治理直接作用于已存知识对象。
 - DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。
 
@@ -141,6 +142,10 @@ run-scoped capture/guard 并复制一致的 60 表 baseline，随后由一个受
 持续维护两端备份，并在另行评审的切换阶段之前把 PostgreSQL 视为禁止业务读取的影子库。
 完整命令顺序与故障规则见[运维文档](./docs/operations_zh.md)。
 
+独立的、默认 dry-run 的 `scripts/migrate_sqlite_to_postgres.py` 继续作为受控的停机快照
+importer 与本地激活工具；它不是持续复制。SQLite-active 正向 shadow 只使用
+`scripts/shadow_sqlite_to_postgres.py`，且两种流程绝不能指向同一个 target。
+
 Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有业务 SQL 全限定到 run 绑定 schema，在关键绑定处以短写栅栏复核 live SQLite capture 仍启用，采用有界 named server cursor/statement timeout，并在起始和最终验证由正式 migration 派生的完整 v9 表/列/约束/operational+GIN-index/extension catalog。Snapshot/fence 必须用指向当前 SQLite 路径的 fresh 专用连接，不得复用 repository 的线程缓存连接；open 前后以及发布/PG commit 前都要复核 resolved path 与 device/inode。最终 SQLite 栅栏只在 PG 长 proof/ANALYZE 完成后取得，并保持到 PG H0 事务提交成功。
 
 - 在发行默认的 SQLite 后端上，搜索使用 SQLite FTS/向量存储；PostgreSQL 后端改用 `pg_trgm`/`ILIKE`。float32 向量仍存为 `bytea`，不安装也不需要 pgvector。
@@ -154,11 +159,12 @@ Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有�
   ```
 
   `pg_trgm | public` 表示前置条件已就绪。若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`；既有 `pg_trgm` 位于其他 schema 时会 fail closed。
-- 切换必须走“停写 → 停后端 → 制作并验证一致备份 → 只改一个 `DATABASE_URL` → 以 `--workers 1` 启动 → 校验 status、`/api/ready`、登录、数量和代表性读取 → 放流量”。
+- importer 要求目标 PostgreSQL 是空的且使用 UTF-8；目标 URL 只从 `POSTGRES_MIGRATION_URL` 读取，不放在 CLI 参数中。它用 SQLite backup API 获取包含已提交 WAL 的在线一致快照，只在工作副本上升级到配对 schema，按有界 batch 流式 `COPY`，保留 ordinal，把旧 JSON 向量转换成 float32 `bytea`，逐表做内容 checksum，并逐表提交 + 记录 checkpoint，中断（崩溃、远程连接断开、重启）后从最后完成的表续跑而非整体重来；finalize（ordinal reseed、重建索引、`ANALYZE`）是幂等的。SQLite-only 的 shadow control/change-log 表会被明确排除并记录在 receipt 中。可为大目标传入会话级批量装载调优（`--maintenance-work-mem`、`--max-parallel-index-workers`）。默认 preview/apply 不会修改 `DATABASE_URL`，也不会复制 `.local/storage`。
+- 在线迁移只能算演练快照：快照之后继续写入 SQLite 的数据不会被同步。对已经停服的本地部署，显式 `--activate-env ... --confirm-service-stopped` 会重新生成 SQLite 一致快照，并按无凭据 receipt 重算 PostgreSQL 全表 checksum；全部一致后才原子替换 `.env`，把旧 SQLite URL 保存在惰性的 `SHADOW_DATABASE_URL`，并创建权限受限的回退副本。CLI 不会自行停止或重启服务。随后以 `--workers 1` 启动，并在放流量前检查 `/api/ready`、登录、数量、搜索、代表性读取和一次 canary 写入。
 - 切回 SQLite 不会回放 PostgreSQL-only 写入。无损回滚要求切换后尚无新写入，或已经完成并验证双向外部对账迁移。
-- `scripts/batch_ingest.py` 的变更阶段仅支持 SQLite；PostgreSQL 请使用正常应用/API 摄取和 KG/索引流程。
+- `scripts/batch_ingest.py` 的变更阶段仅支持 SQLite；PostgreSQL 请使用正常应用/API 摄取和 KG/索引流程。SQLite 存量库若有部分成功的 KG 抽取，可用 `kg --retry-partial`；每个来源会保留旧图，直到“零失败窗口且非空”的新图成功提交。
 
-完整决策表、备份规则和回滚步骤见[部署与配置](./docs/deployment-and-configuration_zh.md)与[运维文档](./docs/operations_zh.md)。
+preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正式切换清单、storage 处理和回滚限制见[运维文档](./docs/operations_zh.md#sqlite--postgresql-切换与回滚)；部署配置见[部署与配置](./docs/deployment-and-configuration_zh.md)。
 
 运行时边界见 [architecture.md](./architecture.md)，贡献者约束见[开发与仓库契约](./docs/development_zh.md)。
 
@@ -180,7 +186,7 @@ Baseline snapshot/COPY 还要求 owner-only 的真实 snapshot 目录；所有�
 
 ## 当前边界
 
-- SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。两者之间的存量数据仍需外部受控迁移并验证。
+- SQLite 是发行默认值；PostgreSQL 16 已是可直接选择的后端。仓库提供经过校验的单向 SQLite→PostgreSQL 快照 importer；它不提供实时同步、PostgreSQL→SQLite 回放或 MySQL 迁移。
 - Docker 不是一期默认工作流，也不是运行前提。
 - 公式、表格、版面和扫描 PDF 的高保真解析需要 MinerU；`MINERU_MODE=off` 使用 pypdf 文本降级。
 - 知识抽取和模型回答需要绑定对应 workload；离线模式不会合成知识。

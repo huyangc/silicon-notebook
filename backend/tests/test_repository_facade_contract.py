@@ -675,7 +675,7 @@ def test_sqlite_wrapper_has_only_explicit_migration_maintenance_compatibility_me
         "_migration_10", "_migration_19", "_migration_27", "_run_migration",
         "_recover_interrupted_jobs",
         "_recover_interrupted_jobs_legacy", "_seed", "_seed_legacy",
-        "maintenance", "eval_insert_source_for_test",
+        "maintenance", "checkup", "eval_insert_source_for_test",
         "_backfill_relation_embeddings", "_source_ids_from_evidence",
         "_delete_knowledge_object_sources", "_insert_row", "_seed_fn_for",
         "_merge_evidence_lists", "_read_ask_trace",

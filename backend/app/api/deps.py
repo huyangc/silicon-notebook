@@ -301,11 +301,19 @@ def user_error(status_code: int, message: str) -> HTTPException:
 
 
 from app.services.content_overview import ContentOverviewService  # noqa: E402
+from app.services.checkup import CheckupService  # noqa: E402
 
 
 def content_overview_service() -> ContentOverviewService:
     runtime = repository()._runtime  # type: ignore[attr-defined]
     return ContentOverviewService(runtime.memory_store, runtime.knowhow_store)
+
+
+def checkup_service() -> CheckupService:
+    """体检聚合 service(P2)。**由后端相关的 facade(SQLiteRepository)懒构造**——checkup 依赖
+    maintenance 的 COUNT + sqlite QueryStore,不能落在中性 repository_runtime(neutrality 守卫禁其
+    import sqlite/postgres)。facade 是 lru_cache 单例 → checkup 也是单例,H7/H8 进程内缓存跨请求存活。"""
+    return repository().checkup  # type: ignore[attr-defined]
 
 
 def shutdown_repository_if_initialized() -> None:

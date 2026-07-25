@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
-from app.repositories.ports import RepositoryDatabasePort, SharingStorePort
+from app.repositories.ports import (
+    NotebookTooLargeToCopyError,
+    RepositoryDatabasePort,
+    SharingStorePort,
+)
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.knowhow.ids import cell_chunk_id, element_id
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
@@ -122,6 +126,12 @@ class NotebookCopyService:
                 shutil.copytree(source_dir, destination_dir)
                 copied_files = True
 
+            # snapshot_copy_rows enforces the copyable-row bound ATOMICALLY inside
+            # its own stable-snapshot read transaction (raises
+            # NotebookTooLargeToCopyError before materialising any rows), so a
+            # concurrent ingestion cannot slip an over-limit notebook past the
+            # cached pre-checks into the fetchall (codex PR#353 r3). copytree
+            # above is disk, not memory; the except below rmtree's it on a raise.
             snapshot = self._store.snapshot_copy_rows(source_notebook_id)
 
             notebook_row = snapshot["notebooks"][0]
@@ -595,7 +605,20 @@ class NotebookSharingService:
         return self._store.find_by_token(token)
 
     def notebook_copy_stats(self, notebook_id: str) -> dict:
-        return self._copy_stats(notebook_id)
+        # Share-routing copyability (copy vs read-only join — read by the
+        # copy/join/preview routes and every share path below). ``self._copy_stats``
+        # is the KG-version-cached bytes+chunks+nodes verdict; re-check the deep-copy
+        # total-materialisation bound FRESH, because assets / sources / paper_meta
+        # grow WITHOUT bumping that cache's version key. Otherwise a stale-copyable
+        # notebook offers a copy that 409s at the guard while join rejects it as
+        # small — a dead end (codex PR#354 r2 P2). Short-circuited to notebooks
+        # already copyable by bytes+chunks+nodes (large libraries never pay the
+        # count); retrieval reads scale_artifacts' cached stats directly and never
+        # enters this path.
+        stats = self._copy_stats(notebook_id)
+        if stats.get("copyable") and not self._store.snapshot_copy_within_limits(notebook_id):
+            stats = {**stats, "copyable": False}
+        return stats
 
     def shared_preview(self, notebook_id: str) -> dict:
         notebook = self._catalog.get_notebook(notebook_id)
@@ -637,6 +660,19 @@ class NotebookSharingService:
         new_owner_id: str,
         new_name: "str | None" = None,
     ) -> NotebookSummary:
+        # Fast early reject (defense-in-depth): the deep copy materialises every
+        # table (objects / relations / chunks / all vector tables) into one
+        # in-memory snapshot — 300GB+ at 8M-object scale. This cached copy_stats
+        # check rejects an already-large source cheaply (before copytree) and
+        # covers non-route callers. It does NOT need to be race-free: the
+        # authoritative, race-proof bound is NotebookCopyService.copy_notebook's
+        # within_copy_row_limit(), checked FRESH on the snapshot's own connection
+        # immediately before the fetchall (OOM audit P2-7).
+        if not self.notebook_copy_stats(source_notebook_id)["copyable"]:
+            raise NotebookTooLargeToCopyError(
+                f"notebook {source_notebook_id} is too large to deep-copy "
+                f"(exceeds notebook_copy_max_bytes/rows); share read-only instead"
+            )
         return self._copies.copy_notebook(
             source_notebook_id, new_owner_id=new_owner_id, new_name=new_name
         )

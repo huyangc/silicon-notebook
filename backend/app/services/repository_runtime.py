@@ -302,6 +302,24 @@ class RepositoryRuntime:
         # id/时钟来源单一（record_change 本身是模块级函数，不在这里持有——
         # 由 Task 4-6 的写方法在各自事务内直接调用）。
         self.knowhow_history_store = bundle.knowhow_history
+        # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
+        # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
+        # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
+        # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
+        # 本 runtime 只提供 ``_active_source_ids_snapshot`` 这个窄 seam 给它。
+
+    def _active_source_ids_snapshot(self) -> "set[str]":
+        """内存活跃源快照(H2/H3/H4/H5 的 Python 后置减法用)= 活跃租约(process_source 在途)
+        **并上**后台嵌入进行中的源(codex 第5轮 P2:process_source 可能先返回、撤自己的租约,而
+        嵌入 worker 还在写向量——不并入 H4/H5 会把在途向量误报缺失+诱发重复 backfill)。**必须
+        在锁下取**:并发 stamp/pop 改 dict 大小,不加锁的 ``set(...)`` 迭代会触发 ``dict changed
+        size during iteration``。source_ingestion 未 wire 时(纯读最小 runtime)天然返回空集。两个
+        私有 dict 的读取收拢在这个组合根方法里,CheckupService 只见到窄接口 ``Callable[[], set]``。"""
+        ingestion = self.source_ingestion
+        if ingestion is None:
+            return set()
+        with ingestion._active_sources_lock:
+            return set(ingestion._active_sources) | set(ingestion._embedding_sources)
 
     @property
     def storage_dir(self) -> Path:

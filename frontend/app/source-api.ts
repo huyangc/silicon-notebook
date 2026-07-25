@@ -1,6 +1,8 @@
 import { requestBlob, requestJson, requestVoid } from "./api-client.ts";
 import type {
+  CheckupResponse,
   PaginatedSources,
+  RepairScheduledResult,
   SourceElement,
   SourceSummary,
   UploadedSource,
@@ -61,3 +63,23 @@ export const deleteSource = (id: string) =>
 
 /** Returns a Blob only; the component owns object-URL creation and revocation. */
 export const fetchInternalAssetBlob = (url: string) => requestBlob(url, options);
+
+// 流水线体检(P2):只读聚合 H2–H8。看板弹窗打开时拉取(与 fetchIndexStatus 同处)。
+export const fetchCheckup = (notebookId: string) =>
+  requestJson<CheckupResponse>(`/notebooks/${notebookId}/checkup`, options);
+
+// 体检修复(H2/H3 空源·缺分块):批量重新解析。source_ids 从命中项的 sample 带来;
+// 后端按 notebook 作用域过滤后逐个后台重跑既有摄取管线。
+export const reparseSources = (notebookId: string, sourceIds: string[]) =>
+  requestJson<RepairScheduledResult>(`/notebooks/${notebookId}/sources/reparse`, {
+    ...options,
+    method: "POST",
+    body: JSON.stringify({ source_ids: sourceIds }),
+  });
+
+// 体检修复(H4/H5 缺向量):后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
+export const backfillVectors = (notebookId: string) =>
+  requestJson<RepairScheduledResult>(`/notebooks/${notebookId}/backfill-vectors`, {
+    ...options,
+    method: "POST",
+  });

@@ -3,6 +3,7 @@ import pytest
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.core.config import Settings
+from app.services.source_ingestion import PartialKgRetryIncomplete
 from uuid import uuid4
 from tests.model_testkit import bind_chat_client
 
@@ -276,6 +277,150 @@ def test_extraction_warning_empty_on_clean_run(repo):
     repo._run_extraction(src.id)
     detail = repo.get_source(src.id)
     assert not detail.extraction_warning
+
+
+def test_partial_retry_preserves_old_graph_until_clean_replacement(repo):
+    repo.settings.paper_meta_enabled = False
+    repo.settings.kg_gleaning_enabled = False
+    repo.settings.kg_refine_enabled = False
+    old_payload = json.dumps({
+        "nodes": [{"local_id": "old", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram is a memory architecture"}],
+        "edges": [],
+    })
+    new_payload = json.dumps({
+        "nodes": [{"local_id": "new", "type": "Concept", "name": "Memory architecture",
+                   "evidence": "memory architecture"}],
+        "edges": [],
+    })
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(
+        repo, nb.id, "Doc", "doc.md", "academic_paper",
+        "Engram is a memory architecture.",
+    )
+    bind_chat_client(repo, "kg_extract", _FakeLLM(old_payload))
+    repo._run_extraction(src.id)
+    with repo._connect() as db:
+        before = {
+            row["id"]: json.loads(row["payload"])["name"]
+            for row in db.execute(
+                "SELECT id,payload FROM knowledge_objects WHERE source_id=?",
+                (src.id,),
+            ).fetchall()
+        }
+    assert list(before.values()) == ["Engram"]
+
+    bind_chat_client(repo, "kg_extract", _FlakyLLM(new_payload, fail_n=1))
+    with pytest.raises(PartialKgRetryIncomplete, match="existing KG preserved"):
+        repo._runtime.source_ingestion.run_extraction(
+            src.id, preserve_existing_until_complete=True
+        )
+    with repo._connect() as db:
+        after_failed = {
+            row["id"]: json.loads(row["payload"])["name"]
+            for row in db.execute(
+                "SELECT id,payload FROM knowledge_objects WHERE source_id=?",
+                (src.id,),
+            ).fetchall()
+        }
+        failed_run = db.execute(
+            "SELECT status,error_message FROM extraction_runs WHERE source_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (src.id,),
+        ).fetchone()
+    assert after_failed == before
+    assert failed_run["status"] == "completed"
+    assert "windows_failed=1/1" in failed_run["error_message"]
+
+    bind_chat_client(
+        repo,
+        "kg_extract",
+        _FakeLLM(json.dumps({"nodes": [], "edges": []})),
+    )
+    with pytest.raises(PartialKgRetryIncomplete, match="existing KG preserved"):
+        repo._runtime.source_ingestion.run_extraction(
+            src.id, preserve_existing_until_complete=True
+        )
+    with repo._connect() as db:
+        after_empty = {
+            row["id"]: json.loads(row["payload"])["name"]
+            for row in db.execute(
+                "SELECT id,payload FROM knowledge_objects WHERE source_id=?",
+                (src.id,),
+            ).fetchall()
+        }
+        empty_run = db.execute(
+            "SELECT status,error_message FROM extraction_runs WHERE source_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (src.id,),
+        ).fetchone()
+    assert after_empty == before
+    assert empty_run["status"] == "completed"
+    assert "retry_incomplete=1" in empty_run["error_message"]
+    assert "empty_result=1" in empty_run["error_message"]
+
+    bind_chat_client(repo, "kg_extract", _FlakyLLM(new_payload, fail_n=0))
+    repo._runtime.source_ingestion.run_extraction(
+        src.id, preserve_existing_until_complete=True
+    )
+    with repo._connect() as db:
+        after_success = {
+            row["id"]: json.loads(row["payload"])["name"]
+            for row in db.execute(
+                "SELECT id,payload FROM knowledge_objects WHERE source_id=?",
+                (src.id,),
+            ).fetchall()
+        }
+        completed_run = db.execute(
+            "SELECT status,error_message FROM extraction_runs WHERE source_id=? "
+            "ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            (src.id,),
+        ).fetchone()
+    assert list(after_success.values()) == ["Memory architecture"]
+    assert set(after_success).isdisjoint(before)
+    assert completed_run["status"] == "completed"
+    assert "windows_failed=0/1" in completed_run["error_message"]
+
+
+def test_partial_retry_store_failure_rolls_back_to_old_graph(repo, monkeypatch):
+    repo.settings.paper_meta_enabled = False
+    repo.settings.kg_gleaning_enabled = False
+    repo.settings.kg_refine_enabled = False
+    payload = json.dumps({
+        "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
+                   "evidence": "Engram is a memory architecture"}],
+        "edges": [],
+    })
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src = _test_insert_source(
+        repo, nb.id, "Doc", "doc.md", "academic_paper",
+        "Engram is a memory architecture.",
+    )
+    bind_chat_client(repo, "kg_extract", _FakeLLM(payload))
+    repo._run_extraction(src.id)
+    with repo._connect() as db:
+        before_ids = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM knowledge_objects WHERE source_id=?", (src.id,)
+            ).fetchall()
+        }
+
+    def fail_insert(*_args, **_kwargs):
+        raise RuntimeError("replacement insert failed")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "insert_object_chunk", fail_insert)
+    with pytest.raises(RuntimeError, match="replacement insert failed"):
+        repo._runtime.source_ingestion.run_extraction(
+            src.id, preserve_existing_until_complete=True
+        )
+
+    with repo._connect() as db:
+        after_ids = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM knowledge_objects WHERE source_id=?", (src.id,)
+            ).fetchall()
+        }
+    assert after_ids == before_ids
 
 
 def test_knowledge_graph_from_kg_tables(repo):

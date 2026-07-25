@@ -57,8 +57,8 @@ def test_retrieve_scored_fold_flag(repo, monkeypatch):
         ids = [r["id"] for r in db.execute(
             "SELECT id FROM knowledge_objects WHERE notebook_id=?", (nb.id,)).fetchall()]
     assert len(ids) == 2
-    monkeypatch.setattr(repo.retrieval.candidates, "cluster_map",
-                        lambda n: {ids[0]: "K", ids[1]: "K"})
+    monkeypatch.setattr(repo.retrieval.candidates, "_candidate_cluster_map",
+                        lambda n, object_ids: {ids[0]: "K", ids[1]: "K"})
     monkeypatch.setattr(repo.settings, "kg_canonical_fold_enabled", False)
     off = repo._retrieve_scored(nb.id, "KV cache")
     monkeypatch.setattr(repo.settings, "kg_canonical_fold_enabled", True)
