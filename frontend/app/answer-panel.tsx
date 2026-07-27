@@ -28,6 +28,7 @@ import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { copyTextSafely } from "./copy-text";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
+import { unwrapStandaloneLatex } from "./math-markdown";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   modelFailureText,
@@ -51,12 +52,17 @@ import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
 
 function InlineFormula({ latex }: { latex: string }) {
   let html = "";
+  const normalized = unwrapStandaloneLatex(latex);
   try {
-    html = katex.renderToString(latex, { throwOnError: false, displayMode: false });
+    html = katex.renderToString(normalized, {
+      throwOnError: true,
+      strict: "ignore",
+      displayMode: false,
+    });
   } catch {
     html = "";
   }
-  if (!html) return <code className="answer-inline-code">{latex}</code>;
+  if (!html) return <code className="answer-inline-code math-render-fallback">{latex}</code>;
   return <span className="answer-inline-formula" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 

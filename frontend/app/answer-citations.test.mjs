@@ -9,6 +9,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
 import { remarkCitations } from "./answer-citations.ts";
+import { normalizeMathMarkdown } from "./math-markdown.ts";
 
 // 与 AnswerMarkdown 完全一致的渲染管线（含 [remarkCitations, refsByKey] 元组形态
 // —— 正是这种形态暴露了「多一层 ()=>」的 bug）。
@@ -23,7 +24,7 @@ function render(answer, refsByKey) {
         rehypePlugins: [rehypeKatex],
         urlTransform,
       },
-      answer,
+      normalizeMathMarkdown(answer),
     ),
   );
 }
@@ -92,4 +93,60 @@ test("普通外链经默认 urlTransform 仍被正常处理(不放行不安全�
   const html = render("[link](javascript:alert(1))", {});
   // 默认 urlTransform 会清掉 javascript: 协议
   assert.doesNotMatch(html, /javascript:/);
+});
+
+test("回归:紧邻正文的单行 $$ 功耗公式渲染为可滚动的 display KaTeX", () => {
+  const refs = { k20: { id: "r20", displayLabel: "[1]" } };
+  const answer = [
+    "**第二层：分模块功耗计算**",
+    "将预测得到的模块级利用率代入标准动态功耗方程：[k20]",
+    "$$P^{\\mathrm{dyn}} = \\alpha_{\\mathrm{DRAM}} \\cdot C_{\\mathrm{D}} V_{\\mathrm{D}}^2 f_{\\mathrm{D}} + \\sum_{\\mathrm{modules}} \\alpha_{\\mathrm{module}} \\cdot C_{\\mathrm{m}} V^2 f$$",
+    "其中 $\\alpha$ 为利用率，$V$ 和 $f$ 为工作电压和频率（作为DVFS配置输入）",
+  ].join("\n");
+
+  const html = render(answer, refs);
+  assert.match(html, /class="katex-display"/);
+  assert.match(html, /<mi>α<\/mi>/);
+  assert.match(html, /href="cite:k20"/);
+  assert.doesNotMatch(html, /katex-error/);
+});
+
+test("引用与列表容器中的单行 $$ 公式仍渲染为 display KaTeX", () => {
+  for (const answer of ["> $$E=mc^2$$", "- $$P=VI$$", "1. $$f=ma$$"]) {
+    const html = render(answer, {});
+    assert.match(html, /class="katex-display"/);
+    assert.doesNotMatch(html, /katex-error/);
+  }
+});
+
+test("额外转义的 aligned 公式保留 LaTeX 换行并正常渲染", () => {
+  const answer = String.raw`Intro\n$$\\begin{aligned}a&=b\\\\c&=d\\end{aligned}$$\nWhere the rows differ`;
+  const html = render(answer, {});
+  assert.match(html, /class="katex-display"/);
+  assert.match(html, /Where the rows differ/);
+  assert.doesNotMatch(html, /katex-error/);
+});
+
+test("纯公式及末尾容器公式的额外转义仍恢复为 display KaTeX", () => {
+  for (const answer of [
+    String.raw`$$\n\\begin{aligned}a&=b\\\\c&=d\\end{aligned}\n$$`,
+    String.raw`Intro\n> $$E=mc^2$$`,
+    String.raw`Intro\n- $$E=mc^2$$`,
+  ]) {
+    const html = render(answer, {});
+    assert.match(html, /class="katex-display"/);
+    assert.doesNotMatch(html, /katex-error/);
+    assert.doesNotMatch(html, /\\n/);
+  }
+});
+
+test("容器内未闭合 fence 不吞掉容器结束后的 display 公式", () => {
+  for (const answer of [
+    ["> ```md", "> code", "Text", "$$E=mc^2$$", "After"].join("\n"),
+    ["- ```md", "  code", "Text", "$$E=mc^2$$", "After"].join("\n"),
+  ]) {
+    const html = render(answer, {});
+    assert.match(html, /class="katex-display"/);
+    assert.doesNotMatch(html, /katex-error/);
+  }
 });

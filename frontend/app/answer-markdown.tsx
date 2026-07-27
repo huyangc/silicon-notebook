@@ -20,6 +20,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { remarkCitations } from "./answer-citations";
+import { normalizeMathMarkdown } from "./math-markdown";
 
 // Re-export types for external callers (page.tsx uses these).
 export type { AnswerReference };
@@ -114,7 +115,7 @@ export function AnswerMarkdown({
         urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
         components={components}
       >
-        {answer}
+        {normalizeMathMarkdown(answer)}
       </ReactMarkdown>
     </div>
   );
