@@ -13,6 +13,12 @@ export type AskRetrievalEffortId =
 export type AskRetrievalEffort = {
   id: AskRetrievalEffortId;
   label: string;
+  /**
+   * 选中该档时档位控件里显示的那句说明——**这是面向用户的界面文案**，不是内部备注。
+   * 它曾长期无人渲染，于是攒下了「不把枚举伪装成大 TopN」这种写给开发者看的措辞，
+   * 直到控件收敛后第一次上屏才暴露。改这里等同于改界面：只写用户能理解的中性描述，
+   * 不带内部黑话，也不在这里陈述实现契约（契约在 docs/product-and-api*.md）。
+   */
   description: string;
   ranked: {
     perQuery: number;
@@ -44,7 +50,7 @@ export const ASK_RETRIEVAL_EFFORTS: readonly AskRetrievalEffort[] = Object.freez
     ranked: { perQuery: 12, finalFloor: 32, finalAspect: 5, finalCap: 64, maxSteps: 32, maxSubqueries: 8, kgContextChars: 12_000, chunkContextChars: 80_000 },
   },
   {
-    id: "exhaustive", label: "穷尽", description: "优先覆盖，不把枚举伪装成大 TopN",
+    id: "exhaustive", label: "穷尽", description: "覆盖优先，用时最长",
     ranked: { perQuery: 16, finalFloor: 40, finalAspect: 6, finalCap: 96, maxSteps: 50, maxSubqueries: 10, kgContextChars: 16_000, chunkContextChars: 120_000 },
   },
 ] as const);
