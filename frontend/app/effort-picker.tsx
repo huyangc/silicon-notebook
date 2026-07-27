@@ -14,7 +14,39 @@
  */
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
+import { clampPopoverLeft } from "./effort-picker-logic";
+
+
+/** popover 与容器内缘之间保留的留白。 */
+const POPOVER_MARGIN = 8;
+
+
+/**
+ * 最近的水平裁剪祖先与视口的交集。问答那侧真正裁掉 popover 的是
+ * `.workspace-panel { overflow: hidden }`,它比视口窄得多,只夹视口不够。
+ */
+function clippingBounds(node: HTMLElement): { left: number; right: number } {
+  let left = 0;
+  // 视口只是兜底上界。隐藏/离屏的渲染环境会把 innerWidth 报成 0(内嵌预览面板实测如此),
+  // 那样会把可用区间压成负数、把 popover 钉到荒谬的位置 —— 拿不到可信宽度时干脆不设上界,
+  // 让真正裁剪的祖先说了算。
+  const viewport = typeof window === "undefined" ? 0 : window.innerWidth;
+  let right = viewport > 0 ? viewport : Number.POSITIVE_INFINITY;
+  for (let el = node.parentElement; el; el = el.parentElement) {
+    const style = window.getComputedStyle(el);
+    // 真实浏览器会把 `overflow: hidden` 简写展开进 overflowX;jsdom 不一定,所以简写兜底。
+    // 目标那条正是简写(`.workspace-panel { overflow: hidden }`),只读 overflowX 会漏掉它。
+    const overflowX = style.overflowX || style.overflow;
+    if (!overflowX || overflowX === "visible") continue;
+    const box = el.getBoundingClientRect();
+    if (box.width <= 0) continue;
+    left = Math.max(left, box.left);
+    right = Math.min(right, box.right);
+  }
+  return { left, right };
+}
 
 
 export type EffortOption = {
@@ -53,6 +85,39 @@ export function EffortPicker({
 }: EffortPickerProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  // null = 用 CSS 的默认位(右对齐控件);量出越界才写具体 left。
+  const [popoverLeft, setPopoverLeft] = useState<number | null>(null);
+
+  // 打开时把 popover 夹回可视容器内。用 layout effect 是为了在绘制前完成,不让它先
+  // 在越界位置闪一帧;宽度变化会改变控件在折行里的落位,所以 resize 时重算。
+  useLayoutEffect(() => {
+    if (!open) {
+      setPopoverLeft(null);
+      return;
+    }
+    const sync = () => {
+      const root = rootRef.current;
+      const popover = popoverRef.current;
+      if (!root || !popover) return;
+      const anchor = root.getBoundingClientRect();
+      const box = popover.getBoundingClientRect();
+      // 尚未布局(如 jsdom 默认全零)时不要写入一个凭空算出的位置——保持 CSS 默认位。
+      if (box.width <= 0) return;
+      const bounds = clippingBounds(root);
+      setPopoverLeft(clampPopoverLeft({
+        anchorLeft: anchor.left,
+        anchorRight: anchor.right,
+        popoverWidth: box.width,
+        containerLeft: bounds.left,
+        containerRight: bounds.right,
+        margin: POPOVER_MARGIN,
+      }));
+    };
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, [open]);
 
   // 点外部 / Esc 关闭(镜像 page.tsx 的菜单收起写法)。
   useEffect(() => {
@@ -99,7 +164,13 @@ export function EffortPicker({
         <span className="effort-picker-chip-value">{current.label}</span>
       </button>
       {open && (
-        <div className="effort-picker-popover" role="dialog" aria-label={title}>
+        <div
+          className="effort-picker-popover"
+          role="dialog"
+          aria-label={title}
+          ref={popoverRef}
+          style={popoverLeft === null ? undefined : { left: popoverLeft, right: "auto" }}
+        >
           <div className="effort-picker-popover-head">
             <span className="effort-picker-popover-title">{title}</span>
             <span className="effort-picker-popover-current">{current.label}</span>
