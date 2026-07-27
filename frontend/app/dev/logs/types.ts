@@ -1,4 +1,13 @@
 export type { Summary } from "./format";
+import type { Summary } from "./format";
+
+export type LogScope = {
+  owner: string;
+  date: string;
+  requestKey: string;
+};
+
+export type ScopedSummary = Summary & { _scope: LogScope };
 
 export type Facets = { kinds: string[]; statuses: string[]; models: string[] };
 
@@ -17,7 +26,6 @@ export type Stats = {
 export type ChannelInfo = { name: string; file: string; exists: boolean; count?: number; bytes?: number };
 export type ChannelsResponse = { channels: ChannelInfo[] };
 
-import type { Summary } from "./format";
 export type ListResponse = {
   channel: string;
   date: string;

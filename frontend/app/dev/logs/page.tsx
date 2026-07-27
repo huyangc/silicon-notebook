@@ -1,8 +1,8 @@
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import "./logs.css";
-import type { ChannelInfo, FullRecord, Stats, Summary } from "./types";
+import type { ChannelInfo, FullRecord, ScopedSummary, Stats, Summary } from "./types";
 import { fetchChannels, fetchDays, fetchRecord, fetchRecords } from "./api";
 import { ChannelTabs } from "./components/ChannelTabs";
 import { StatsBar } from "./components/StatsBar";
@@ -18,15 +18,31 @@ import { dayLabel, TODAY_VALUE } from "./date.ts";
 const PAGE = 200;
 const POLL_MS = 5000;
 
+function scopeKey(owner: string, date: string): string {
+  return JSON.stringify([owner, date]);
+}
+
+function bindRecordScope(
+  records: Summary[],
+  owner: string,
+  date: string,
+  requestKey: string,
+): ScopedSummary[] {
+  return records.map((record) => ({
+    ...record,
+    _scope: { owner, date, requestKey },
+  }));
+}
+
 export default function LogsPage() {
   const [channels, setChannels] = useState<ChannelInfo[]>([]);
   const channel = "llm"; // v1: fixed channel
-  const [records, setRecords] = useState<Summary[]>([]);
+  const [records, setRecords] = useState<ScopedSummary[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [newestSeq, setNewestSeq] = useState<number | null>(null);
-  const [pending, setPending] = useState<Summary[]>([]);
+  const [pending, setPending] = useState<ScopedSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<FullRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -50,6 +66,30 @@ export default function LogsPage() {
     () => ({ kind, status, model, q, owner, date }),
     [kind, status, model, q, owner, date],
   );
+  const requestScopeKey = useMemo(() => scopeKey(owner, date), [owner, date]);
+  const filterKey = useMemo(() => JSON.stringify(filterParams), [filterParams]);
+  const currentScopeKeyRef = useRef(requestScopeKey);
+  const currentFilterKeyRef = useRef(filterKey);
+  const listGenerationRef = useRef(0);
+  const detailGenerationRef = useRef(0);
+  currentScopeKeyRef.current = requestScopeKey;
+  currentFilterKeyRef.current = filterKey;
+
+  const clearScopedResults = useCallback(() => {
+    listGenerationRef.current += 1;
+    detailGenerationRef.current += 1;
+    setRecords([]);
+    setPending([]);
+    setStats(null);
+    setHasMore(false);
+    setTruncated(false);
+    setNewestSeq(null);
+    setSelectedId(null);
+    setDetail(null);
+    setDetailLoading(false);
+    setLoading(false);
+    setError("");
+  }, []);
 
   // read ?owner= and ?date= from the URL once on mount (admin drill-down / deep-link entry points)
   useEffect(() => {
@@ -75,26 +115,38 @@ export default function LogsPage() {
       .catch(() => undefined);
   }, []);
 
-  const selectOwner = useCallback((next: string) => {
-    setOwner(next);
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    if (next) params.set("owner", next);
-    else params.delete("owner");
-    const qs = params.toString();
-    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
-  }, []);
+  const selectOwner = useCallback(
+    (next: string) => {
+      if (next !== owner) clearScopedResults();
+      setOwner(next);
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(window.location.search);
+      if (next) params.set("owner", next);
+      else params.delete("owner");
+      const qs = params.toString();
+      window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+    },
+    [clearScopedResults, owner],
+  );
 
-  const selectDate = useCallback((next: string) => {
-    setDate(next);
-    if (next !== TODAY_VALUE) setAutoRefresh(false); // 仅当天可实时；切到历史天时关闭自动刷新，避免勾选态和禁用态不一致
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    if (next) params.set("date", next);
-    else params.delete("date");
-    const qs = params.toString();
-    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
-  }, []);
+  const selectDate = useCallback(
+    (next: string) => {
+      if (next !== date) clearScopedResults();
+      setDate(next);
+      if (next !== TODAY_VALUE) setAutoRefresh(false); // 仅当天可实时；切到历史天时关闭自动刷新，避免勾选态和禁用态不一致
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(window.location.search);
+      if (next) params.set("date", next);
+      else params.delete("date");
+      const qs = params.toString();
+      window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+    },
+    [clearScopedResults, date],
+  );
+
+  useEffect(() => {
+    clearScopedResults();
+  }, [clearScopedResults, requestScopeKey]);
 
   useEffect(() => {
     fetchChannels(owner)
@@ -109,22 +161,36 @@ export default function LogsPage() {
   }, [owner]);
 
   const reload = useCallback(async () => {
+    const generation = ++listGenerationRef.current;
+    const requestedFilterKey = filterKey;
+    const requestedScopeKey = requestScopeKey;
     setLoading(true);
     setError("");
     try {
       const r = await fetchRecords(channel, { limit: PAGE, ...filterParams });
-      setRecords(r.records);
+      if (
+        generation !== listGenerationRef.current
+        || requestedFilterKey !== currentFilterKeyRef.current
+      ) return;
+      setRecords(bindRecordScope(r.records, filterParams.owner, r.date, requestedScopeKey));
       setStats(r.stats);
       setHasMore(r.has_more);
       setTruncated(r.truncated);
       setNewestSeq(r.newest_seq);
       setPending([]);
     } catch (e) {
+      if (
+        generation !== listGenerationRef.current
+        || requestedFilterKey !== currentFilterKeyRef.current
+      ) return;
       setError(toUserMessage(e, "日志加载失败，请重试"));
     } finally {
-      setLoading(false);
+      if (
+        generation === listGenerationRef.current
+        && requestedFilterKey === currentFilterKeyRef.current
+      ) setLoading(false);
     }
-  }, [filterParams]);
+  }, [filterKey, filterParams, requestScopeKey]);
 
   useEffect(() => {
     void reload();
@@ -142,12 +208,21 @@ export default function LogsPage() {
     if (!autoRefresh || date !== TODAY_VALUE) return;
     const t = setInterval(async () => {
       if (newestSeq == null) return;
+      const requestedFilterKey = filterKey;
+      const requestedScopeKey = requestScopeKey;
       try {
         const r = await fetchRecords(channel, { since: newestSeq, ...filterParams });
+        if (requestedFilterKey !== currentFilterKeyRef.current) return;
         if (r.records.length) {
+          const scopedRecords = bindRecordScope(
+            r.records,
+            filterParams.owner,
+            r.date,
+            requestedScopeKey,
+          );
           setPending((prev) => {
             const seen = new Set(prev.map((x) => x.seq));
-            const fresh = r.records.filter((x) => !seen.has(x.seq));
+            const fresh = scopedRecords.filter((x) => !seen.has(x.seq));
             return [...fresh, ...prev];
           });
           if (r.newest_seq != null) setNewestSeq(r.newest_seq);
@@ -158,7 +233,7 @@ export default function LogsPage() {
       }
     }, POLL_MS);
     return () => clearInterval(t);
-  }, [autoRefresh, newestSeq, filterParams]);
+  }, [autoRefresh, newestSeq, filterKey, filterParams, requestScopeKey]);
 
   const showNew = useCallback(() => {
     setRecords((prev) => {
@@ -171,32 +246,72 @@ export default function LogsPage() {
   const loadMore = useCallback(async () => {
     if (!records.length) return;
     const oldest = records[records.length - 1].seq;
+    const generation = ++listGenerationRef.current;
+    const requestedFilterKey = filterKey;
+    const requestedScopeKey = requestScopeKey;
     setLoading(true);
     try {
       const r = await fetchRecords(channel, { before: oldest, limit: PAGE, ...filterParams });
-      setRecords((prev) => [...prev, ...r.records]);
+      if (
+        generation !== listGenerationRef.current
+        || requestedFilterKey !== currentFilterKeyRef.current
+      ) return;
+      const scopedRecords = bindRecordScope(
+        r.records,
+        filterParams.owner,
+        r.date,
+        requestedScopeKey,
+      );
+      setRecords((prev) => [...prev, ...scopedRecords]);
       setHasMore(r.has_more);
     } catch (e) {
+      if (
+        generation !== listGenerationRef.current
+        || requestedFilterKey !== currentFilterKeyRef.current
+      ) return;
       setError(toUserMessage(e, "日志加载失败，请重试"));
     } finally {
-      setLoading(false);
+      if (
+        generation === listGenerationRef.current
+        && requestedFilterKey === currentFilterKeyRef.current
+      ) setLoading(false);
     }
-  }, [records, filterParams]);
+  }, [records, filterKey, filterParams, requestScopeKey]);
 
   const select = useCallback(
-    async (rec: Summary) => {
+    async (rec: ScopedSummary) => {
+      const generation = ++detailGenerationRef.current;
+      const recordScope = rec._scope;
       setSelectedId(rec.id);
       setDetail(null);
       setDetailLoading(true);
       try {
-        setDetail(await fetchRecord(channel, rec.id, date || undefined, rec.seq, owner || undefined));
+        const nextDetail = await fetchRecord(
+          channel,
+          rec.id,
+          recordScope.date || undefined,
+          rec.seq,
+          recordScope.owner || undefined,
+        );
+        if (
+          generation !== detailGenerationRef.current
+          || recordScope.requestKey !== currentScopeKeyRef.current
+        ) return;
+        setDetail(nextDetail);
       } catch (e) {
+        if (
+          generation !== detailGenerationRef.current
+          || recordScope.requestKey !== currentScopeKeyRef.current
+        ) return;
         setError(toUserMessage(e, "日志加载失败，请重试"));
       } finally {
-        setDetailLoading(false);
+        if (
+          generation === detailGenerationRef.current
+          && recordScope.requestKey === currentScopeKeyRef.current
+        ) setDetailLoading(false);
       }
     },
-    [date, owner],
+    [],
   );
 
   const facets = stats?.facets;

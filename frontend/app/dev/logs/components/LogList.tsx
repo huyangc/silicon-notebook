@@ -1,5 +1,5 @@
 "use client";
-import type { Summary } from "../types";
+import type { ScopedSummary } from "../types";
 import { LogRow } from "./LogRow";
 
 export function LogList({
@@ -12,9 +12,9 @@ export function LogList({
   onShowNew,
   loading,
 }: {
-  records: Summary[];
+  records: ScopedSummary[];
   selectedId: string | null;
-  onSelect: (rec: Summary) => void;
+  onSelect: (rec: ScopedSummary) => void;
   hasMore: boolean;
   onLoadMore: () => void;
   newCount: number;
