@@ -98,6 +98,16 @@ test("implicitly closes unterminated fences when their container ends", () => {
   }
 });
 
+test("keeps literal blockquote markers inside list fenced-code content", () => {
+  const markdown = [
+    "- ```md",
+    "  > literal",
+    "  $$E = mc^2$$",
+    "  ```",
+  ].join("\n");
+  assert.equal(normalizeMathMarkdown(markdown), markdown);
+});
+
 test("promotes display formulas inside blockquote and list containers", () => {
   const markdown = [
     "> $$E = mc^2$$",

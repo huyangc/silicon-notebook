@@ -99,6 +99,16 @@ function splitBlockquotePrefix(line: string): { quoteDepth: number; rest: string
   return { quoteDepth, rest };
 }
 
+function consumeBlockquoteDepth(line: string, requiredDepth: number): string | null {
+  let rest = line;
+  for (let depth = 0; depth < requiredDepth; depth += 1) {
+    const marker = rest.match(/^ {0,3}>[ \t]?/);
+    if (!marker) return null;
+    rest = rest.slice(marker[0].length);
+  }
+  return rest;
+}
+
 function parseOpeningFence(line: string): FenceState | null {
   const { quoteDepth, rest } = splitBlockquotePrefix(line);
   const match = rest.match(
@@ -118,8 +128,8 @@ function parseOpeningFence(line: string): FenceState | null {
 }
 
 function isClosingFence(line: string, fence: FenceState): boolean {
-  const { quoteDepth, rest: containerRest } = splitBlockquotePrefix(line);
-  if (quoteDepth !== fence.quoteDepth) return false;
+  const containerRest = consumeBlockquoteDepth(line, fence.quoteDepth);
+  if (containerRest === null) return false;
   let rest = containerRest;
   if (fence.listContentIndent !== null) {
     const continuation = consumeIndentColumns(rest, fence.listContentIndent);
@@ -135,8 +145,8 @@ function isClosingFence(line: string, fence: FenceState): boolean {
 }
 
 function isInsideFenceContainer(line: string, fence: FenceState): boolean {
-  const { quoteDepth, rest } = splitBlockquotePrefix(line);
-  if (quoteDepth < fence.quoteDepth) return false;
+  const rest = consumeBlockquoteDepth(line, fence.quoteDepth);
+  if (rest === null) return false;
   if (fence.listContentIndent === null || rest.trim() === "") return true;
   return consumeIndentColumns(rest, fence.listContentIndent) !== null;
 }
