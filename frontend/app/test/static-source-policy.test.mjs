@@ -18,6 +18,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   "test/static-source-policy.test.mjs",
   // Reads package/config metadata only.
   "test-runner-config.test.mjs",
+  // Reads globals.css to compare selector specificity. Not production TS source and
+  // not a source-position query — a stylesheet cascade contract has no AST to consume,
+  // and jsdom's getComputedStyle ignores specificity, so text is the only honest input.
+  "effort-picker-style-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

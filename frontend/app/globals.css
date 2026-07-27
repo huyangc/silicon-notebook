@@ -1558,8 +1558,15 @@ button.chat-session-card {
   cursor: not-allowed;
 }
 
-.effort-picker-chip-label {
+/* 下面四条(chip 的 label/value、popover 的 title/current)渲染成 <span>，都刻意写成
+   两个类的后代选择器：控件嵌进问答输入行时会落进 `.chat-input-bar span`（一类+一元素，
+   比单类更具体）的射程，被它的 13px/#667085 压掉蓝色与字号 —— 报告那侧不在射程内，
+   于是「同一个控件」在两处长得不一样。这是本控件被评审抓到的实际回归，不是防御性写法：
+   把任何一条降回单类，问答侧的当前档名就会掉色。同一坑的既有先例见 `.ask-mode-control
+   .chat-hint` 的注释。 */
+.effort-picker .effort-picker-chip-label {
   color: #6b7280;
+  font-size: inherit;
   font-weight: 650;
 }
 
@@ -1567,8 +1574,9 @@ button.chat-session-card {
   font-weight: 500;
 }
 
-.effort-picker-chip-value {
+.effort-picker .effort-picker-chip-value {
   color: #1d4ed8;
+  font-size: inherit;
   font-weight: 700;
 }
 
@@ -1594,13 +1602,13 @@ button.chat-session-card {
   gap: 8px;
 }
 
-.effort-picker-popover-title {
+.effort-picker .effort-picker-popover-title {
   color: #6b7280;
   font-size: 12px;
   font-weight: 700;
 }
 
-.effort-picker-popover-current {
+.effort-picker .effort-picker-popover-current {
   color: #1d4ed8;
   font-size: 13px;
   font-weight: 750;

@@ -312,6 +312,8 @@ What the Ask panel *shows* is a separate, UI-only layer owned by the front-end r
 
 ### Reasoning effort and complete collection requests
 
+The grade is picked in the Ask composer through the same graded-effort control as a deep report's research depth — one shared component, so the two never drift apart: a chip carrying the current grade name, opening a slider popover that shows that grade plus one neutral sentence about it. The interface deliberately exposes only the grade name and that sentence; the exact ceilings live in this table (mirrored by `frontend/app/ask-retrieval-effort.ts` and `backend/app/core/ask_retrieval_policy.py`) rather than being printed onto the control.
+
 Reasoning Ask accepts the stable `retrieval_effort` ids below; the default is `standard`. The model may stop before a ceiling when evidence is sufficient, but it may not raise a ceiling. “Final floor/aspect/cap” means `min(cap, max(floor, aspect × executed query count))`. The context values are hard evidence-character ceilings: the source partition contains structured preview, chunks, and direct source elements; the KG partition contains KG objects/relations, confirmed Memory, and query-time chains. Their combined evidence block cannot exceed the sum of the two values.
 
 | Effort id | UI label | Per-query ranked take | Final floor / aspect / cap | Max reasoning steps / initial subqueries | KG / chunk context characters |
