@@ -178,3 +178,66 @@ test("切换用户后忽略较晚返回的旧日志详情", async () => {
   expect(screen.getByText("model: model-new")).toBeInTheDocument();
   expect(screen.queryByText("model: model-old")).not.toBeInTheDocument();
 });
+
+test("切换用户后忽略较晚返回的旧频道和日期", async () => {
+  const oldChannels = deferred<{ channels: { name: string; file: string; exists: boolean }[] }>();
+  const oldDays = deferred<{ channel: string; days: string[] }>();
+  mocks.fetchChannels.mockImplementation((owner) => (
+    owner === "user-target"
+      ? Promise.resolve({ channels: [{ name: "llm", file: "llm.jsonl", exists: true }] })
+      : oldChannels.promise
+  ));
+  mocks.fetchDays.mockImplementation((_channel, owner) => (
+    owner === "user-target"
+      ? Promise.resolve({ channel: "llm", days: ["2026-07-26"] })
+      : oldDays.promise
+  ));
+  mocks.fetchRecords.mockResolvedValue(listResponse([]));
+  const user = userEvent.setup();
+  const { container } = render(<LogsPage />);
+
+  await user.selectOptions(await ownerSelect(container), "user-target");
+  expect(await screen.findByRole("option", { name: "2026-07-26" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: /LLM/ })).toBeInTheDocument();
+
+  await act(async () => {
+    oldChannels.resolve({ channels: [{ name: "events", file: "events.jsonl", exists: true }] });
+    oldDays.resolve({ channel: "llm", days: ["2026-07-25"] });
+    await Promise.all([oldChannels.promise, oldDays.promise]);
+  });
+
+  expect(screen.getByRole("option", { name: "2026-07-26" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "2026-07-25" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /LLM/ })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /EVENTS/ })).not.toBeInTheDocument();
+});
+
+test("筛选刷新开始后旧批次不再提供加载更多", async () => {
+  const filteredList = deferred<ReturnType<typeof listResponse>>();
+  let calls = 0;
+  mocks.fetchRecords.mockImplementation(() => {
+    calls += 1;
+    return calls === 1
+      ? Promise.resolve({
+          ...listResponse([summary("llm-old", 11, "old filter preview", "model-old")]),
+          has_more: true,
+        })
+      : filteredList.promise;
+  });
+  const user = userEvent.setup();
+  const { container } = render(<LogsPage />);
+
+  expect(await screen.findByRole("button", { name: "加载更多" })).toBeInTheDocument();
+  const kindSelect = container.querySelector<HTMLSelectElement>(".logview-filters select");
+  expect(kindSelect).not.toBeNull();
+  await user.selectOptions(kindSelect as HTMLSelectElement, "chat");
+
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument();
+  });
+
+  await act(async () => {
+    filteredList.resolve(listResponse([]));
+    await filteredList.promise;
+  });
+});

@@ -27,11 +27,16 @@ function bindRecordScope(
   owner: string,
   date: string,
   requestKey: string,
+  filterKey: string,
 ): ScopedSummary[] {
   return records.map((record) => ({
     ...record,
-    _scope: { owner, date, requestKey },
+    _scope: { owner, date, requestKey, filterKey },
   }));
+}
+
+function recordKey(record: Summary): string {
+  return `${record.seq}\u0000${record.id}`;
 }
 
 export default function LogsPage() {
@@ -70,10 +75,16 @@ export default function LogsPage() {
   const filterKey = useMemo(() => JSON.stringify(filterParams), [filterParams]);
   const currentScopeKeyRef = useRef(requestScopeKey);
   const currentFilterKeyRef = useRef(filterKey);
+  const currentOwnerRef = useRef(owner);
   const listGenerationRef = useRef(0);
   const detailGenerationRef = useRef(0);
+  const channelGenerationRef = useRef(0);
+  const daysGenerationRef = useRef(0);
+  const recordsRef = useRef(records);
   currentScopeKeyRef.current = requestScopeKey;
   currentFilterKeyRef.current = filterKey;
+  currentOwnerRef.current = owner;
+  recordsRef.current = records;
 
   const clearScopedResults = useCallback(() => {
     listGenerationRef.current += 1;
@@ -149,14 +160,35 @@ export default function LogsPage() {
   }, [clearScopedResults, requestScopeKey]);
 
   useEffect(() => {
-    fetchChannels(owner)
-      .then((r) => setChannels(r.channels))
-      .catch((e) => setError(toUserMessage(e, "日志加载失败，请重试")));
+    const generation = ++channelGenerationRef.current;
+    const requestedOwner = owner;
+    setChannels([]);
+    fetchChannels(requestedOwner)
+      .then((r) => {
+        if (
+          generation === channelGenerationRef.current
+          && requestedOwner === currentOwnerRef.current
+        ) setChannels(r.channels);
+      })
+      .catch((e) => {
+        if (
+          generation === channelGenerationRef.current
+          && requestedOwner === currentOwnerRef.current
+        ) setError(toUserMessage(e, "日志加载失败，请重试"));
+      });
   }, [owner]);
 
   useEffect(() => {
-    fetchDays(channel, owner)
-      .then((r) => setDays(r.days))
+    const generation = ++daysGenerationRef.current;
+    const requestedOwner = owner;
+    setDays([]);
+    fetchDays(channel, requestedOwner)
+      .then((r) => {
+        if (
+          generation === daysGenerationRef.current
+          && requestedOwner === currentOwnerRef.current
+        ) setDays(r.days);
+      })
       .catch(() => undefined);
   }, [owner]);
 
@@ -172,7 +204,13 @@ export default function LogsPage() {
         generation !== listGenerationRef.current
         || requestedFilterKey !== currentFilterKeyRef.current
       ) return;
-      setRecords(bindRecordScope(r.records, filterParams.owner, r.date, requestedScopeKey));
+      setRecords(bindRecordScope(
+        r.records,
+        filterParams.owner,
+        r.date,
+        requestedScopeKey,
+        requestedFilterKey,
+      ));
       setStats(r.stats);
       setHasMore(r.has_more);
       setTruncated(r.truncated);
@@ -208,24 +246,34 @@ export default function LogsPage() {
     if (!autoRefresh || date !== TODAY_VALUE) return;
     const t = setInterval(async () => {
       if (newestSeq == null) return;
+      const generation = listGenerationRef.current;
       const requestedFilterKey = filterKey;
       const requestedScopeKey = requestScopeKey;
       try {
         const r = await fetchRecords(channel, { since: newestSeq, ...filterParams });
-        if (requestedFilterKey !== currentFilterKeyRef.current) return;
+        if (
+          generation !== listGenerationRef.current
+          || requestedFilterKey !== currentFilterKeyRef.current
+        ) return;
         if (r.records.length) {
           const scopedRecords = bindRecordScope(
             r.records,
             filterParams.owner,
             r.date,
             requestedScopeKey,
+            requestedFilterKey,
           );
           setPending((prev) => {
-            const seen = new Set(prev.map((x) => x.seq));
-            const fresh = scopedRecords.filter((x) => !seen.has(x.seq));
+            const seen = new Set([
+              ...recordsRef.current.map(recordKey),
+              ...prev.map(recordKey),
+            ]);
+            const fresh = scopedRecords.filter((x) => !seen.has(recordKey(x)));
             return [...fresh, ...prev];
           });
-          if (r.newest_seq != null) setNewestSeq(r.newest_seq);
+          if (r.newest_seq != null) {
+            setNewestSeq((previous) => Math.max(previous ?? r.newest_seq!, r.newest_seq!));
+          }
           setStats(r.stats);
         }
       } catch {
@@ -244,8 +292,10 @@ export default function LogsPage() {
   }, [pending]);
 
   const loadMore = useCallback(async () => {
-    if (!records.length) return;
-    const oldest = records[records.length - 1].seq;
+    if (loading || !records.length) return;
+    const lastRecord = records[records.length - 1];
+    if (lastRecord._scope.filterKey !== currentFilterKeyRef.current) return;
+    const oldest = lastRecord.seq;
     const generation = ++listGenerationRef.current;
     const requestedFilterKey = filterKey;
     const requestedScopeKey = requestScopeKey;
@@ -261,6 +311,7 @@ export default function LogsPage() {
         filterParams.owner,
         r.date,
         requestedScopeKey,
+        requestedFilterKey,
       );
       setRecords((prev) => [...prev, ...scopedRecords]);
       setHasMore(r.has_more);
@@ -276,7 +327,7 @@ export default function LogsPage() {
         && requestedFilterKey === currentFilterKeyRef.current
       ) setLoading(false);
     }
-  }, [records, filterKey, filterParams, requestScopeKey]);
+  }, [loading, records, filterKey, filterParams, requestScopeKey]);
 
   const select = useCallback(
     async (rec: ScopedSummary) => {
@@ -416,7 +467,11 @@ export default function LogsPage() {
           records={records}
           selectedId={selectedId}
           onSelect={select}
-          hasMore={hasMore}
+          hasMore={
+            hasMore
+            && records.length > 0
+            && records[records.length - 1]._scope.filterKey === filterKey
+          }
           onLoadMore={() => void loadMore()}
           newCount={pending.length}
           onShowNew={showNew}

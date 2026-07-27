@@ -34,7 +34,7 @@ export function LogList({
       ))}
       {loading ? <div className="empty">加载中…</div> : null}
       {hasMore ? (
-        <button className="loadmore" onClick={onLoadMore}>
+        <button className="loadmore" onClick={onLoadMore} disabled={loading}>
           加载更多
         </button>
       ) : null}

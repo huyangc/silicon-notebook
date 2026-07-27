@@ -5,6 +5,7 @@ export type LogScope = {
   owner: string;
   date: string;
   requestKey: string;
+  filterKey: string;
 };
 
 export type ScopedSummary = Summary & { _scope: LogScope };
