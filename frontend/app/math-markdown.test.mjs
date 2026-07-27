@@ -74,6 +74,15 @@ test("does not rewrite formulas inside blockquote or list fenced code", () => {
   }
 });
 
+test("requires a closing fence to keep the opener container and relative indent", () => {
+  for (const markdown of [
+    ["```md", "    ```", "$$E = mc^2$$", "```"].join("\n"),
+    ["> ```md", "```", "> $$E = mc^2$$", "> ```"].join("\n"),
+  ]) {
+    assert.equal(normalizeMathMarkdown(markdown), markdown);
+  }
+});
+
 test("promotes display formulas inside blockquote and list containers", () => {
   const markdown = [
     "> $$E = mc^2$$",

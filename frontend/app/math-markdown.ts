@@ -26,30 +26,20 @@ export function normalizeMathMarkdown(markdown: string): string {
 
   const lines = normalized.split("\n");
   const output: string[] = [];
-  let fence: { marker: "`" | "~"; length: number } | null = null;
+  let fence: FenceState | null = null;
 
   for (const line of lines) {
     if (fence) {
-      const closingFence = line.match(/^(?:(?: {0,3}>[ \t]?)+)?[ \t]*(`+|~+)[ \t]*$/);
-      if (
-        closingFence
-        && closingFence[1][0] === fence.marker
-        && closingFence[1].length >= fence.length
-      ) {
-        fence = null;
-      }
+      if (isClosingFence(line, fence)) fence = null;
       output.push(line);
       continue;
     }
 
-    const openingFence = line.match(
-      /^(?:(?: {0,3}>[ \t]?)+)? {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/,
-    );
+    const openingFence = parseOpeningFence(line);
     if (openingFence) {
-      const marker = openingFence[1][0] as "`" | "~";
-      const validInfoString = marker === "~" || !openingFence[2].includes("`");
+      const validInfoString = openingFence.marker === "~" || !openingFence.info.includes("`");
       if (validInfoString) {
-        fence = { marker, length: openingFence[1].length };
+        fence = openingFence;
         output.push(line);
         continue;
       }
@@ -78,6 +68,85 @@ export function normalizeMathMarkdown(markdown: string): string {
   }
 
   return output.join("\n");
+}
+
+type FenceState = {
+  marker: "`" | "~";
+  length: number;
+  quoteDepth: number;
+  listContentIndent: number | null;
+  info: string;
+};
+
+function splitBlockquotePrefix(line: string): { quoteDepth: number; rest: string } {
+  let quoteDepth = 0;
+  let rest = line;
+  while (true) {
+    const marker = rest.match(/^ {0,3}>[ \t]?/);
+    if (!marker) break;
+    quoteDepth += 1;
+    rest = rest.slice(marker[0].length);
+  }
+  return { quoteDepth, rest };
+}
+
+function parseOpeningFence(line: string): FenceState | null {
+  const { quoteDepth, rest } = splitBlockquotePrefix(line);
+  const match = rest.match(
+    /^( {0,3})(?:([-+*]|\d{1,9}[.)])([ \t]+))?(`{3,}|~{3,})(.*)$/,
+  );
+  if (!match) return null;
+  const listContentIndent = match[2]
+    ? match[1].length + match[2].length + whitespaceColumns(match[3])
+    : null;
+  return {
+    marker: match[4][0] as "`" | "~",
+    length: match[4].length,
+    quoteDepth,
+    listContentIndent,
+    info: match[5],
+  };
+}
+
+function isClosingFence(line: string, fence: FenceState): boolean {
+  const { quoteDepth, rest: containerRest } = splitBlockquotePrefix(line);
+  if (quoteDepth !== fence.quoteDepth) return false;
+  let rest = containerRest;
+  if (fence.listContentIndent !== null) {
+    const continuation = consumeIndentColumns(rest, fence.listContentIndent);
+    if (continuation === null) return false;
+    rest = continuation;
+  }
+  const closing = rest.match(/^ {0,3}(`+|~+)[ \t]*$/);
+  return Boolean(
+    closing
+    && closing[1][0] === fence.marker
+    && closing[1].length >= fence.length,
+  );
+}
+
+function whitespaceColumns(value: string): number {
+  let columns = 0;
+  for (const character of value) {
+    columns += character === "\t" ? 4 - (columns % 4) : 1;
+  }
+  return columns;
+}
+
+function consumeIndentColumns(value: string, requiredColumns: number): string | null {
+  let columns = 0;
+  let index = 0;
+  while (index < value.length && columns < requiredColumns) {
+    if (value[index] === " ") {
+      columns += 1;
+    } else if (value[index] === "\t") {
+      columns += 4 - (columns % 4);
+    } else {
+      return null;
+    }
+    index += 1;
+  }
+  return columns >= requiredColumns ? value.slice(index) : null;
 }
 
 function hasEscapedLineBreakOutsideMath(value: string): boolean {
