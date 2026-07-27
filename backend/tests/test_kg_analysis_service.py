@@ -609,20 +609,47 @@ def test_zero_board_library_absence_of_source_profiles_is_expected(repo):
     assert view.absence == ABSENCE_EXPECTED
 
 
-def test_source_profiles_missing_with_boards_present_is_unexpected(repo):
-    """有板块却没有来源画像 = 这一轮漏写了,不是合法缺席。两者的读侧表现完全一样
-    (都是「没有这张表」),不区分就没有任何东西会报出这次漏写。"""
+@pytest.mark.parametrize(
+    "boards, expected_absence, expected_state",
+    [
+        # 零板块:来源画像合法缺席,账本仍然是**齐全**的(S4 的决定 —— 见
+        # `OPTIONAL_ARTIFACT_KINDS`)。判成 partial 会让这类库永远「不齐」。
+        (0, ABSENCE_EXPECTED, LEDGER_COMPLETE),
+        # 有板块却没有来源画像:这一轮漏写了。两个格子必须**同时**说这件事。
+        (3, ABSENCE_UNEXPECTED, LEDGER_PARTIAL),
+    ],
+)
+def test_ledger_state_never_says_complete_while_absence_says_unexpected(
+    repo, boards, expected_absence, expected_state
+):
+    """账本档位与 absence 必须是**同一条**判据的两种表述,不能同屏互相打脸。
+
+    这条钉的是 codex 第 3 轮评审那个矛盾:有板块却缺来源画像时,`_absence` 判
+    「本该有却缺失」(红档),而 `_ledger_state` 当时只看四份恒定必需的,照报「齐全」。
+    一份能同时说出这两句话的完整性报告本身就不可信 —— 读者无从知道该信哪一句,而这
+    正是本视图存在的理由。
+
+    **两个方向一起钉,不能只钉一个**:
+      · 只钉 boards=3 → 把 source_profiles 无条件塞进必需集也全绿,而那会让零板块库
+        永远报「残缺」,直接违反 S4;
+      · 只钉 boards=0 → 就是把 bug 本身钉住。
+    """
     with repo._write() as db:
         _state(db)
         _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload())
         _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload())
         _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload())
-        _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(communities=3))
+        _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(communities=boards))
 
     overview = _service(repo).overview(NB)
 
-    assert _artifact_of(overview, ARTIFACT_SOURCE_PROFILES).absence == ABSENCE_UNEXPECTED
-    assert overview.ledger_state == LEDGER_COMPLETE
+    assert _artifact_of(overview, ARTIFACT_SOURCE_PROFILES).absence == expected_absence
+    assert overview.ledger_state == expected_state
+    # 反过来也钉死:凡是有任何一份产物报「本该有却缺失」,档位就不能是「齐全」。
+    unexpected = [a.kind for a in overview.artifacts if a.absence == ABSENCE_UNEXPECTED]
+    assert not (unexpected and overview.ledger_state == LEDGER_COMPLETE), (
+        f"{unexpected} 报「本该有却缺失」,账本档位却是「齐全」"
+    )
 
 
 def test_missing_required_artifact_is_unexpected_and_ledger_is_partial(repo):
@@ -679,6 +706,91 @@ def test_malformed_ledger_payload_fails_loudly(repo):
 
     with pytest.raises(ValueError, match="payload 不是对象"):
         _service(repo).overview(NB)
+
+
+# --------------------------------------- 账本说不在 → 明细表一行都不许回到响应里
+
+
+def test_absent_edge_ledger_never_returns_orphan_detail_rows(repo):
+    """账本行不在,`kg_community_edges` 里却还躺着行 —— 响应里一条都不许出现。
+
+    这两张明细表与账本之间**没有外键、没有任何数据库级约束**保证同生同灭。写侧确实
+    是同事务整批重写/整批作废,但那是纪律不是不变量:库被手工改过、迁移只跑了一半、
+    或者某个未来的写路径漏一步,留下的就是这个形状。
+
+    不门控的话,同一份响应会既报 `present=false`(前端据此打「本该有却缺失」的红标),
+    又把那些行发出去 —— 而俯瞰图**照着 edges 画连线**,于是视图同屏既说「这份产物
+    缺失」又把它的边画出来。那些边按定义是悬空的(板块 id 可能已被重铸)。
+
+    顺带钉住:这一趟**连查都不查**。查完再丢掉虽然也能给出同样的响应,但那是在为一份
+    已知不存在的产物付一次扫描。
+    """
+    with repo._write() as db:
+        _state(db)
+        _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload())
+        _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload())
+        _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload())
+        _edge(db, "cm-1", "cm-2", 30)
+        _edge(db, "cm-1", "cm-3", 20)
+
+    spy = _SpyStore(repo._runtime.unified_kg)
+    view = _service(repo, store=spy).overview(NB).board_edges
+
+    assert view.present is False
+    assert view.edges == []
+    assert view.returned == 0
+    assert view.returned_weight == 0
+    assert view.weight_coverage is None
+    assert "kg_community_edges_top" not in spy.calls
+
+    # 对照(否则「edges 恒为空」也能全绿):账本行补上,同样这两行就必须回来。
+    with repo._write() as db:
+        _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload())
+    present = _service(repo).overview(NB).board_edges
+    assert present.present is True
+    assert [e["weight"] for e in present.edges] == [30, 20]
+
+
+def test_absent_profile_ledger_never_returns_orphan_detail_rows(repo):
+    """/sources 的同一条:账本行不在 → `present=false` 且**一行都不发**,连查都不查。
+
+    这里用的是**合法缺席**那一档(零板块库不写来源画像),因为它是生产上真会发生的
+    形状:上一轮有板块、写过一整张画像表;这一轮板块归零,预计算整份跳过来源画像 ——
+    而明细行会不会被上一轮的残留留下来,取决于写路径有没有走到那一步。响应必须只听
+    账本的:说不在,就一行都不给。
+
+    `total` 也必须是 0:它是分页的分母,拿悬空行去数会给出一份「说产物不存在、却告诉
+    你有 2 个来源、还能翻页」的响应。
+    """
+    with repo._write() as db:
+        _state(db)
+        _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload())
+        _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload())
+        _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload())
+        _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(communities=0))
+        _profile(db, "s-1", mainstream=0.0)
+        _profile(db, "s-2", mainstream=0.4)
+
+    spy = _SpyStore(repo._runtime.unified_kg)
+    page = _service(repo, store=spy).source_profiles(NB, limit=1)
+
+    assert page.present is False
+    assert page.absence == ABSENCE_EXPECTED
+    assert page.rows == []
+    assert page.total == 0
+    assert page.returned == 0
+    assert page.has_more is False
+    assert page.summary is None
+    assert "kg_source_profile_page" not in spy.calls
+
+    # 对照:账本行补上,同样这两行就必须回来(证明上面的空不是「表里本来就没行」)。
+    with repo._write() as db:
+        _artifact(db, ARTIFACT_SOURCE_PROFILES, _profiles_payload())
+    restored = _service(repo).source_profiles(NB, limit=1)
+    assert restored.present is True
+    assert restored.total == 2
+    assert [r["source_id"] for r in restored.rows] == ["s-1"]
+    assert restored.has_more is True
 
 
 # ------------------------------------------------------------------ 截断显式

@@ -148,6 +148,28 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
             )
 
 
+def required_artifact_kinds(*, has_boards: bool) -> set:
+    """这一轮**必须**出现在账本里的 kind 集合。
+
+    「有板块 → `source_profiles` 是必需的」这条判据有三个执行点:写入口
+    `check_artifact_payloads`(少写就硬失败,它刻意分成两条错误文案,所以自己展开这条
+    判据而不调本函数)、预计算的新鲜度闸 `analysis_ledger_is_current`(缺就补跑)、
+    以及 T3 报告里的「账本齐不齐」(`kg_analysis._ledger_state`)。后两处共用本函数。
+
+    为什么必须共用:各写一遍就会漂,而漂出来的表现是一份**自相矛盾的报告** —— 同一份
+    产物被 `_absence` 判成「本该有却缺失」(红档),却同屏被账本档位判成「齐全」。
+    codex 第 3 轮评审就是这么复现的(`_ledger_state` 当时只看四份必需的)。
+
+    ``has_boards=False``(一个板块都没有)时 `source_profiles` 合法缺席,理由见
+    `OPTIONAL_ARTIFACT_KINDS`:那一档必须仍然算「齐全」,否则空板块库永远齐不了,
+    新鲜度闸也会让它每次调用都重跑一遍全部重活。
+    """
+    required = set(REQUIRED_ARTIFACT_KINDS)
+    if has_boards:
+        required.add(ARTIFACT_SOURCE_PROFILES)
+    return required
+
+
 def analysis_ledger_is_current(
     ledger_seqs: Mapping[str, int], seq: int, *, has_boards: bool
 ) -> bool:
@@ -157,14 +179,9 @@ def analysis_ledger_is_current(
     `rebuild_communities` 里的 B1 说明)。判据只看账本:齐不齐、戳对不对。
     任一必需 kind 缺席、或任一行的戳与 ``seq`` 不同 → 不新鲜,要补跑。
 
-    ``has_boards`` 决定 `source_profiles` 算不算必需:没有板块时它合法缺席
-    (见 `OPTIONAL_ARTIFACT_KINDS`),此时不能因为它不在就永远判成「不新鲜」——
-    那会让空板块库每次调用都重跑一遍全部重活。
+    「齐不齐」用的是共享的 `required_artifact_kinds` —— 与写入口和 T3 报告同一条判据。
     """
-    required = set(REQUIRED_ARTIFACT_KINDS)
-    if has_boards:
-        required.add(ARTIFACT_SOURCE_PROFILES)
-    if not required <= set(ledger_seqs):
+    if not required_artifact_kinds(has_boards=has_boards) <= set(ledger_seqs):
         return False
     return all(int(value) == int(seq) for value in ledger_seqs.values())
 

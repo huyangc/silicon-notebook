@@ -734,9 +734,11 @@ class UnifiedKgStore:
         """作废依赖板块划分的两份 KG 分析产物 —— 必须与 `replace_communities`
         **同一个写事务**(理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)。
 
-        明细行与账本行都删:读侧判「这份产物在不在」只看账本行,但明细表是被
-        **单独查询**的(`kg_community_edges_top` / `kg_source_profile_page` 在总览与
-        /sources 里无条件跑),只删账本会让悬空的板块 id 照样回到载荷里。
+        明细行与账本行都删。读侧确实**不会**把只剩明细行的那一半读出来 —— T3 的
+        `kg_analysis._detail_rows_are_readable` 把两条明细查询门控在账本行上 —— 但那是
+        读侧的自保,不是这里可以少删一半的理由:留着的是指向已重铸板块 id 的悬空行,
+        生产上量级不小(跨板块边上限 20 万行 / 来源画像 ≈ 来源数),而且下一轮预计算
+        若在写明细之前失败,它们就会一直躺在库里。两侧都做,才是「悬空行不存在」。
 
         另三份统计快照与板块无关,刻意不动 —— 见那个常量的说明。
         """

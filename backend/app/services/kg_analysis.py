@@ -29,6 +29,10 @@
   · `community_overview`         COUNT + `ORDER BY size DESC LIMIT ≤200` + ≤200 次有界 top-K
   · `kg_source_profile_page`     COUNT + 一页 ≤200 行 + ≤200 次主键点查(仅 /sources)
 
+后两条里读**明细表**的那两条(`kg_community_edges_top` / `kg_source_profile_page`)还带
+一道账本闸:账本行不在就整条跳过(见 `_detail_rows_are_readable`)。这不是性能优化而是
+正确性 —— 无条件查会让同一份响应既说「这份产物不在」又把明细行发出去。
+
 **随库规模线性增长的有两条,不是一条**(别把这句读成「只有 community_overview 要留意」):
 
   · `community_overview` —— 板块数没有结构性上限,而 `communities` 上**没有 size 索引**,
@@ -78,6 +82,7 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
     OPTIONAL_ARTIFACT_KINDS,
+    required_artifact_kinds,
 )
 from app.services.knowledge_contracts import (
     KG_COMMUNITY_EDGES_MAX,
@@ -481,10 +486,15 @@ class KgAnalysisService:
             boards_payload = self._unified_kg.community_overview(
                 notebook_id, level=level, limit=board_limit, top_k=top_members
             )
-            with self._database.connect() as db:
-                edge_rows = self._unified_kg.kg_community_edges_top(
-                    db, notebook_id, edge_limit
-                )
+            # ⚠ 明细表**只在账本行在场时**才查(见 `_detail_rows_are_readable`)。
+            # 账本说这份产物不在,却把明细表里的行画进俯瞰图,就是同屏既说「缺失」
+            # 又把它的边画出来 —— 而那些行按定义是悬空的。顺带也省掉这次扫描。
+            edge_rows: List[Tuple[str, str, int]] = []
+            if _detail_rows_are_readable(ARTIFACT_COMMUNITY_EDGES, ledger):
+                with self._database.connect() as db:
+                    edge_rows = self._unified_kg.kg_community_edges_top(
+                        db, notebook_id, edge_limit
+                    )
             cached = (boards_payload, edge_rows)
             self._cache_put(key, signature, cached)
         boards_payload, edge_rows = cached
@@ -523,6 +533,10 @@ class KgAnalysisService:
 
         ``present`` / ``absence`` 与总览里那一份同源(都看账本行在不在),所以两个端点
         对「这份产物在不在」永远给同一个答案。
+
+        ⚠ 账本行不在时**连查都不查**明细表(见 `_detail_rows_are_readable`):
+        ``present=False`` 却回一页行,就是同一份响应既说「这份产物不在」又把它的内容
+        发出去。顺带省掉那次 `COUNT(*)`(O(来源数),生产 48 836 行)。
         """
         self._reject_inside_write_transaction("KG 分析来源画像")
         if order not in SOURCE_ORDERS:
@@ -531,16 +545,19 @@ class KgAnalysisService:
             )
         limit = max(1, min(int(limit), KG_SOURCE_PAGE_MAX))
         offset = max(0, int(offset))
+        total = 0
+        rows: List[Dict[str, Any]] = []
         with self._database.connect() as db:
             state_row = self._unified_kg.state_row(db, notebook_id)
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
-            total, rows = self._unified_kg.kg_source_profile_page(
-                db,
-                notebook_id,
-                limit=limit,
-                offset=offset,
-                ascending=(order == ORDER_SPARSE),
-            )
+            if _detail_rows_are_readable(ARTIFACT_SOURCE_PROFILES, ledger):
+                total, rows = self._unified_kg.kg_source_profile_page(
+                    db,
+                    notebook_id,
+                    limit=limit,
+                    offset=offset,
+                    ascending=(order == ORDER_SPARSE),
+                )
         state = _state_view(state_row)
         entry = ledger.get(ARTIFACT_SOURCE_PROFILES)
         return SourceProfilePage(
@@ -639,15 +656,61 @@ def _ledger_level(ledger: Dict[str, Dict[str, Any]]) -> int:
     return int(entry["payload"].get("level", 0) or 0)
 
 
+def _detail_rows_are_readable(kind: str, ledger: Dict[str, Dict[str, Any]]) -> bool:
+    """这份产物的**明细表**这一趟能不能读 —— 判据只有一条:账本行在不在。
+
+    两张明细表(`kg_community_edges` / `kg_source_profiles`)是被**单独查询**的,它们与
+    账本之间没有外键、也没有任何数据库级约束保证同生同灭。正常写路径确实是同事务整批
+    重写(`replace_kg_analysis_artifacts`)、同事务整批作废
+    (`discard_board_dependent_kg_analysis_artifacts`),但那是**写侧的纪律**,不是读侧
+    可以依赖的不变量:库被手工改过、一次迁移只删了一半、或者一个未来的写路径漏了一步,
+    留下的就是「账本说没有、明细表里还有行」。
+
+    此时无条件查明细表 = 同一份响应既报 ``present=False``,又把那些行发出去,让消费者
+    (俯瞰图会照着画连线)呈现一份账本说不存在的产物。判据必须是账本行 —— 这是本特性
+    从 T2 到 T3 反复声明的那条(见 `kg_analysis_precompute.ARTIFACT_KINDS` 段头:
+    「账本行的**存在与否**才是这份产物在不在的唯一判据,明细表的行数不是」)。
+
+    ⚠ 反过来**不**成立:账本行在、明细表零行是完全正常的一档(单一板块的图
+    legitimately 产出 0 条跨板块边),那一档必须照读、照报「在场且为空」。
+
+    悬空的明细行不会被静默吞掉:账本档位(`_ledger_state`)与 `absence` 已经把「本该有
+    却缺失」报成红档,读者看得到异常;而把悬空行也一并展示只会让那条异常自相矛盾。
+    """
+    return kind in ledger
+
+
+def _ledger_boards(ledger: Dict[str, Dict[str, Any]]) -> Optional[int]:
+    """这一轮预计算记下的板块数;``None`` = 无从判断(跨板块边的账本行本身就缺席)。
+
+    来源是跨板块边账本 payload 里的 ``communities`` —— 与写入口
+    `check_artifact_payloads` 的复核**同一条**判据、同一个字段。它必须由账本自己回答,
+    不能去数 `communities` 表:那是 O(板块数) 的读(生产 88 580 个板块),而且数的是
+    **此刻**的板块,不是这一轮产物建在其上的那批。
+    """
+    entry = ledger.get(ARTIFACT_COMMUNITY_EDGES)
+    if entry is None:
+        return None
+    return int(entry["payload"].get("communities", 0) or 0)
+
+
 def _ledger_state(ledger: Dict[str, Dict[str, Any]]) -> str:
     """账本整体处在哪一档:空 / 残缺 / 齐全。
 
-    「齐全」= 四份必需的都在(来源画像是唯一允许缺席的一份,见
-    `kg_analysis_precompute.OPTIONAL_ARTIFACT_KINDS`)。
+    「必需」的集合与写侧共用 `required_artifact_kinds` —— 有板块时来源画像就是必需的,
+    零板块时它合法缺席(见 `kg_analysis_precompute.OPTIONAL_ARTIFACT_KINDS`)。
+
+    ⚠ 这里**必须**跟着板块数走,不能只看那四份恒定必需的。否则「有板块却少了来源画像」
+    这一档会同屏给出两个互相矛盾的说法:`_absence` 判「本该有却缺失」(红档),而档位
+    却报「齐全」。一份能同时说这两句话的完整性报告本身就不可信 —— 读者无从知道该信哪
+    一句,而这正是本视图存在的理由(codex 第 3 轮评审复现)。
+
+    跨板块边账本本身缺席时 `_ledger_boards` 给 None:此时那四份必需的已经少了一份,
+    档位落 `partial`,板块数是多少都不改变结论。
     """
     if not ledger:
         return LEDGER_EMPTY
-    required = set(ARTIFACT_KINDS) - set(OPTIONAL_ARTIFACT_KINDS)
+    required = required_artifact_kinds(has_boards=bool(_ledger_boards(ledger)))
     return LEDGER_COMPLETE if required <= set(ledger) else LEDGER_PARTIAL
 
 
@@ -675,10 +738,11 @@ def _absence(kind: str, ledger: Dict[str, Dict[str, Any]]) -> Optional[str]:
         return ABSENCE_NEVER_COMPUTED
     if kind not in OPTIONAL_ARTIFACT_KINDS:
         return ABSENCE_UNEXPECTED
-    edges = ledger.get(ARTIFACT_COMMUNITY_EDGES)
-    if edges is None:
+    boards = _ledger_boards(ledger)
+    if boards is None:
+        # 跨板块边的账本行也不在 —— 判不出「这一轮到底有没有板块」,所以判不出这次
+        # 缺席合不合法。存疑时报异常,不给一个可能是假的「合法缺席」。
         return ABSENCE_UNEXPECTED
-    boards = int(edges["payload"].get("communities", 0) or 0)
     return ABSENCE_EXPECTED if boards == 0 else ABSENCE_UNEXPECTED
 
 
