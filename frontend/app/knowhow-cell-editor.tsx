@@ -49,6 +49,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { normalizeMathMarkdown } from "./math-markdown";
 import {
   ArrowRight,
   Check,
@@ -246,7 +247,7 @@ export function KnowhowMarkdown({
   return (
     <div className="answer-markdown knowhow-markdown">
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>
-        {content}
+        {normalizeMathMarkdown(content)}
       </ReactMarkdown>
     </div>
   );

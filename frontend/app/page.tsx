@@ -120,6 +120,7 @@ import {
 } from "./model-services.ts";
 import { FloatingModalCard } from "./floating-modal-card";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
+import { unwrapStandaloneLatex } from "./math-markdown";
 import {
   ModelTestCoordinator,
   acceptModelServiceStatusSnapshot,
@@ -6580,8 +6581,13 @@ function SearchHits({ hits, compact }: { hits: SearchHit[]; compact: boolean }) 
 
 function FormulaView({ latex }: { latex: string }) {
   let html = "";
+  const normalized = unwrapStandaloneLatex(latex);
   try {
-    html = katex.renderToString(latex, { throwOnError: false, displayMode: true });
+    html = katex.renderToString(normalized, {
+      throwOnError: true,
+      strict: "ignore",
+      displayMode: true,
+    });
   } catch {
     html = "";
   }

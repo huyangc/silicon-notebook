@@ -64,7 +64,7 @@ Reparse preserves the source row and original file: it replaces source elements/
 
 Visible imported-source counts deliberately differ from physical bookkeeping: hidden Memory/Knowhow projection sources do not appear in the source rail or user-facing counts, but `size.sources`, copy thresholds, storage accounting, and background scheduling retain physical-row semantics. Likewise, `has_unindexed_content` keeps the scale-index update decision true when derived content changed even if the visible imported-source delta is zero.
 
-The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
+The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment. Markdown shown in Ask, reports, Memory, and Knowhow treats a whole-line one-line `$$...$$` as display math even when it is adjacent to prose; wide display equations scroll inside their own content block. Source-detail and knowledge-object formula views remove full-value Markdown math delimiters before direct KaTeX rendering and show the original text if parsing still fails, so malformed formula input never becomes a blank visualization.
 
 ## Knowhow tables
 

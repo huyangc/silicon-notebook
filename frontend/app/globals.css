@@ -3197,6 +3197,28 @@ button.chat-session-card {
   vertical-align: middle;
 }
 
+/* Keep wide display equations inside the answer/report/cell that owns them.
+   Left alignment also prevents a centered over-wide formula from beginning
+   outside an overflow-clipped notebook panel. */
+.answer-markdown .katex-display {
+  max-width: 100%;
+  margin: 0;
+  padding: 4px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: left;
+}
+
+.answer-markdown .katex-display > .katex,
+.element-formula .katex-display > .katex {
+  text-align: left;
+}
+
+.math-render-fallback {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .answer-table-wrap {
   max-width: 100%;
   overflow-x: auto;

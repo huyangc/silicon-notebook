@@ -9,6 +9,7 @@ import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 
 import { remarkCitations } from "./answer-citations.ts";
+import { normalizeMathMarkdown } from "./math-markdown.ts";
 
 // 与 AnswerMarkdown 完全一致的渲染管线（含 [remarkCitations, refsByKey] 元组形态
 // —— 正是这种形态暴露了「多一层 ()=>」的 bug）。
@@ -23,7 +24,7 @@ function render(answer, refsByKey) {
         rehypePlugins: [rehypeKatex],
         urlTransform,
       },
-      answer,
+      normalizeMathMarkdown(answer),
     ),
   );
 }
@@ -92,4 +93,20 @@ test("普通外链经默认 urlTransform 仍被正常处理(不放行不安全�
   const html = render("[link](javascript:alert(1))", {});
   // 默认 urlTransform 会清掉 javascript: 协议
   assert.doesNotMatch(html, /javascript:/);
+});
+
+test("回归:紧邻正文的单行 $$ 功耗公式渲染为可滚动的 display KaTeX", () => {
+  const refs = { k20: { id: "r20", displayLabel: "[1]" } };
+  const answer = [
+    "**第二层：分模块功耗计算**",
+    "将预测得到的模块级利用率代入标准动态功耗方程：[k20]",
+    "$$P^{\\mathrm{dyn}} = \\alpha_{\\mathrm{DRAM}} \\cdot C_{\\mathrm{D}} V_{\\mathrm{D}}^2 f_{\\mathrm{D}} + \\sum_{\\mathrm{modules}} \\alpha_{\\mathrm{module}} \\cdot C_{\\mathrm{m}} V^2 f$$",
+    "其中 $\\alpha$ 为利用率，$V$ 和 $f$ 为工作电压和频率（作为DVFS配置输入）",
+  ].join("\n");
+
+  const html = render(answer, refs);
+  assert.match(html, /class="katex-display"/);
+  assert.match(html, /<mi>α<\/mi>/);
+  assert.match(html, /href="cite:k20"/);
+  assert.doesNotMatch(html, /katex-error/);
 });

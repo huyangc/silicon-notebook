@@ -19,6 +19,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { normalizeMathMarkdown } from "./math-markdown";
 import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
@@ -285,7 +286,7 @@ export function ReportMarkdown({
         urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
         components={components}
       >
-        {markdown}
+        {normalizeMathMarkdown(markdown)}
       </ReactMarkdown>
       {selectedReference && (
         <aside className="report-reference-detail" aria-label="引用原文">
