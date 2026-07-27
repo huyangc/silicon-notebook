@@ -139,3 +139,14 @@ test("纯公式及末尾容器公式的额外转义仍恢复为 display KaTeX", 
     assert.doesNotMatch(html, /\\n/);
   }
 });
+
+test("容器内未闭合 fence 不吞掉容器结束后的 display 公式", () => {
+  for (const answer of [
+    ["> ```md", "> code", "Text", "$$E=mc^2$$", "After"].join("\n"),
+    ["- ```md", "  code", "Text", "$$E=mc^2$$", "After"].join("\n"),
+  ]) {
+    const html = render(answer, {});
+    assert.match(html, /class="katex-display"/);
+    assert.doesNotMatch(html, /katex-error/);
+  }
+});

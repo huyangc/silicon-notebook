@@ -30,9 +30,18 @@ export function normalizeMathMarkdown(markdown: string): string {
 
   for (const line of lines) {
     if (fence) {
-      if (isClosingFence(line, fence)) fence = null;
-      output.push(line);
-      continue;
+      if (isClosingFence(line, fence)) {
+        fence = null;
+        output.push(line);
+        continue;
+      }
+      if (isInsideFenceContainer(line, fence)) {
+        output.push(line);
+        continue;
+      }
+      // Blockquote/list containers implicitly close an unterminated fence when
+      // the current line leaves that container. Reprocess this line normally.
+      fence = null;
     }
 
     const openingFence = parseOpeningFence(line);
@@ -123,6 +132,13 @@ function isClosingFence(line: string, fence: FenceState): boolean {
     && closing[1][0] === fence.marker
     && closing[1].length >= fence.length,
   );
+}
+
+function isInsideFenceContainer(line: string, fence: FenceState): boolean {
+  const { quoteDepth, rest } = splitBlockquotePrefix(line);
+  if (quoteDepth < fence.quoteDepth) return false;
+  if (fence.listContentIndent === null || rest.trim() === "") return true;
+  return consumeIndentColumns(rest, fence.listContentIndent) !== null;
 }
 
 function whitespaceColumns(value: string): number {

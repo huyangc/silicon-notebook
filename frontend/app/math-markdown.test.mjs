@@ -83,6 +83,21 @@ test("requires a closing fence to keep the opener container and relative indent"
   }
 });
 
+test("implicitly closes unterminated fences when their container ends", () => {
+  for (const markdown of [
+    ["> ```md", "> code", "Text", "$$E = mc^2$$", "After"].join("\n"),
+    ["- ```md", "  code", "Text", "$$E = mc^2$$", "After"].join("\n"),
+  ]) {
+    assert.equal(
+      normalizeMathMarkdown(markdown),
+      markdown.replace(
+        "$$E = mc^2$$",
+        () => ["$$", "E = mc^2", "$$"].join("\n"),
+      ),
+    );
+  }
+});
+
 test("promotes display formulas inside blockquote and list containers", () => {
   const markdown = [
     "> $$E = mc^2$$",
