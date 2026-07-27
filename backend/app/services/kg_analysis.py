@@ -81,7 +81,11 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
     OPTIONAL_ARTIFACT_KINDS,
+    artifact_cluster_seq,
+    artifact_is_current,
     required_artifact_kinds,
 )
 from app.services.knowledge_contracts import (
@@ -151,6 +155,10 @@ UNIT_LEVEL = "level"                         # 社区层级(不是数量)
 # (跨载荷可以不同 —— `clusters` 在直方图里是整数、在最大簇榜单里是一个列表,所以
 # 每份载荷各有一张表)。守卫 `test_every_numeric_field_declares_a_unit` 会遍历真实
 # 载荷的每一个数值叶子,少一条就报红。
+#
+# `CLUSTER_SEQ_PAYLOAD_KEY`(簇世代的戳)只出现在**依赖合并结果**的那四份载荷里,
+# 所以按那个集合展开而不是四处手抄 —— 分类改了,单位表跟着改,不会漏。
+_CLUSTER_SEQ_UNIT: Dict[str, str] = {CLUSTER_SEQ_PAYLOAD_KEY: UNIT_SEQ}
 _HISTOGRAM_UNITS: Dict[str, str] = {
     "member_rows": UNIT_CLUSTER_MEMBER_ROWS,
     "clusters": UNIT_CLUSTERS,
@@ -190,11 +198,18 @@ _SOURCE_PROFILES_UNITS: Dict[str, str] = {
     "total_members": UNIT_CANONICAL,
 }
 ARTIFACT_UNITS: Dict[str, Dict[str, str]] = {
-    ARTIFACT_CLUSTER_HISTOGRAM: _HISTOGRAM_UNITS,
-    ARTIFACT_LARGEST_CLUSTERS: _LARGEST_CLUSTERS_UNITS,
-    ARTIFACT_RELATION_PROVENANCE: _RELATION_PROVENANCE_UNITS,
-    ARTIFACT_COMMUNITY_EDGES: _COMMUNITY_EDGES_UNITS,
-    ARTIFACT_SOURCE_PROFILES: _SOURCE_PROFILES_UNITS,
+    kind: (
+        {**units, **_CLUSTER_SEQ_UNIT}
+        if kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS
+        else units
+    )
+    for kind, units in {
+        ARTIFACT_CLUSTER_HISTOGRAM: _HISTOGRAM_UNITS,
+        ARTIFACT_LARGEST_CLUSTERS: _LARGEST_CLUSTERS_UNITS,
+        ARTIFACT_RELATION_PROVENANCE: _RELATION_PROVENANCE_UNITS,
+        ARTIFACT_COMMUNITY_EDGES: _COMMUNITY_EDGES_UNITS,
+        ARTIFACT_SOURCE_PROFILES: _SOURCE_PROFILES_UNITS,
+    }.items()
 }
 
 BOARD_UNITS: Dict[str, str] = {
@@ -245,18 +260,31 @@ _OVERVIEW_CACHE_MAX = 64
 
 @dataclass(frozen=True)
 class Freshness:
-    """一份产物的新鲜度三件套 + 口径来源。
+    """一份产物的新鲜度 + 口径来源 —— **两条相互独立的世代线**。
 
     ``built_at_seq`` 是它建于哪个 ``kg_mutation_seq``;``seq_behind`` 是当前 seq 减去
     它 —— **不 clamp 到 0**:账本比当前还新是一种不该发生的状态(库被手工改过),把它
     压成 0 等于替读者把异常藏起来。产物缺席时三个都是 None(不是 0 —— 0 会被读成
     「刚建好」)。
+
+    ``built_at_cluster_seq`` / ``cluster_seq_behind`` 是**合并结果**那条线
+    (``unified_kg_state.cluster_mutation_seq``)。它必须独立报,因为簇的写路径刻意
+    不动 ``kg_mutation_seq``:只看 KG 世代的话,一次纯合并写入之后簇大小直方图与最大簇
+    榜单已经陈旧,报告却会说「与当前一致」(codex 第 5 轮评审复现)。
+    两个字段在**两种**情况下是 None,而且读者不需要分辨:
+      · 这份产物与合并结果无关(`relation_provenance` —— 它的 SQL 一个字都没提
+        `concept_clusters`),没有落后量可报;
+      · 产物缺席,或它压根没盖这个戳(库被手工改过)。
+    ``stale`` 是**两条线的合取**(判据 `artifact_is_current`,与写侧的闸同一个函数):
+    任一条落后即为 True。
     """
 
     basis: str
     built_at_seq: Optional[int]
     seq_behind: Optional[int]
     stale: Optional[bool]
+    built_at_cluster_seq: Optional[int] = None
+    cluster_seq_behind: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -474,7 +502,9 @@ class KgAnalysisService:
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
         state = _state_view(state_row)
         level = _ledger_level(ledger)
-        artifacts = _artifact_views(ledger, state.kg_mutation_seq)
+        artifacts = _artifact_views(
+            ledger, state.kg_mutation_seq, state.cluster_mutation_seq
+        )
         signature = _signature(state, ledger)
         key = (notebook_id, level, int(board_limit), int(top_members), int(edge_limit))
         cached = self._cache_get(key, signature)
@@ -512,7 +542,8 @@ class KgAnalysisService:
                 payload=boards_payload,
             ),
             board_edges=_board_edge_view(
-                ledger, state.kg_mutation_seq, edge_rows, edge_limit
+                ledger, state.kg_mutation_seq, state.cluster_mutation_seq,
+                edge_rows, edge_limit,
             ),
         )
 
@@ -566,7 +597,8 @@ class KgAnalysisService:
             present=entry is not None,
             absence=_absence(ARTIFACT_SOURCE_PROFILES, ledger),
             freshness=_artifact_freshness(
-                ARTIFACT_SOURCE_PROFILES, entry, state.kg_mutation_seq
+                ARTIFACT_SOURCE_PROFILES, entry, state.kg_mutation_seq,
+                state.cluster_mutation_seq,
             ),
             kg_mutation_seq=state.kg_mutation_seq,
             order=order,
@@ -747,8 +779,19 @@ def _absence(kind: str, ledger: Dict[str, Dict[str, Any]]) -> Optional[str]:
 
 
 def _artifact_freshness(
-    kind: str, entry: Optional[Dict[str, Any]], current_seq: int
+    kind: str,
+    entry: Optional[Dict[str, Any]],
+    current_seq: int,
+    current_cluster_seq: int,
 ) -> Freshness:
+    """一份产物的两条世代线 + ``stale``。
+
+    ⚠ ``stale`` **不是**在这里重新推一遍,而是调写侧的闸用的同一个
+    `artifact_is_current`。两处各写一份判据必然漂,而漂出来的表现就是一份自相矛盾的
+    报告 —— 闸说「不用重算」、读侧说「陈旧」,或者反过来(闸短路、读侧报「与当前
+    一致」,而那正是 codex 第 5 轮报的那一条)。判据只写一次是这个特性反复被打回的
+    那个教训(第 3 轮的 `_ledger_state` 与写侧 required 集合分岔是同一个病)。
+    """
     if entry is None:
         return Freshness(
             basis=ARTIFACT_BASIS[kind],
@@ -757,12 +800,22 @@ def _artifact_freshness(
             stale=None,
         )
     built = int(entry["kg_mutation_seq"])
-    behind = int(current_seq) - built
+    payload = entry["payload"]
+    built_cluster = artifact_cluster_seq(kind, payload)
     return Freshness(
         basis=ARTIFACT_BASIS[kind],
         built_at_seq=built,
-        seq_behind=behind,
-        stale=behind != 0,
+        # 不 clamp:账本比库还新是「被手工改过」的信号,压成 0 等于藏起异常。
+        seq_behind=int(current_seq) - built,
+        stale=not artifact_is_current(
+            kind, built, payload,
+            seq=current_seq, cluster_seq=current_cluster_seq,
+        ),
+        built_at_cluster_seq=built_cluster,
+        cluster_seq_behind=(
+            None if built_cluster is None
+            else int(current_cluster_seq) - built_cluster
+        ),
     )
 
 
@@ -771,6 +824,14 @@ def _community_freshness(state: KgState) -> Freshness:
 
     ``community_seq == -1`` = 从没建过社区 → 与产物缺席同一种表达(三个 None),
     而不是谎报「落后 N 次」。
+
+    ⚠ **已知缺口,如实记在这里。** 板块划分本身是在 canonical 图上跑出来的,合并结果
+    一变它同样陈旧;但 `communities` / `unified_kg_state` 里**没有地方**记「这批板块建
+    在哪一代合并结果上」,所以这一格的 ``built_at_cluster_seq`` / ``cluster_seq_behind``
+    只能是 None(契约里的「无从判断」),而不是一个编出来的 0。补它要给
+    `unified_kg_state` 加一列 = 追加迁移 + bump `SCHEMA_VERSION`,不在本次修复范围内。
+    真正让板块跟上合并结果的是 `rebuild_unified_kg` 收尾那次 `force=True` 的
+    `rebuild_communities`。
     """
     if state.community_seq < 0:
         return Freshness(
@@ -789,7 +850,7 @@ def _community_freshness(state: KgState) -> Freshness:
 
 
 def _artifact_views(
-    ledger: Dict[str, Dict[str, Any]], current_seq: int
+    ledger: Dict[str, Dict[str, Any]], current_seq: int, current_cluster_seq: int
 ) -> List[ArtifactView]:
     """**恒定长度、恒定顺序**的五条 —— 缺席的那几份也在列表里,带 absence 说明。
 
@@ -805,7 +866,9 @@ def _artifact_views(
                 present=entry is not None,
                 optional=kind in OPTIONAL_ARTIFACT_KINDS,
                 absence=_absence(kind, ledger),
-                freshness=_artifact_freshness(kind, entry, current_seq),
+                freshness=_artifact_freshness(
+                    kind, entry, current_seq, current_cluster_seq
+                ),
                 created_at=(str(entry["created_at"]) if entry is not None else ""),
                 units=dict(ARTIFACT_UNITS[kind]),
                 payload=(entry["payload"] if entry is not None else None),
@@ -817,6 +880,7 @@ def _artifact_views(
 def _board_edge_view(
     ledger: Dict[str, Dict[str, Any]],
     current_seq: int,
+    current_cluster_seq: int,
     edge_rows: List[Tuple[str, str, int]],
     limit: int,
 ) -> BoardEdgeView:
@@ -826,7 +890,9 @@ def _board_edge_view(
     returned_weight = sum(int(weight) for _src, _dst, weight in edge_rows)
     return BoardEdgeView(
         present=entry is not None,
-        freshness=_artifact_freshness(ARTIFACT_COMMUNITY_EDGES, entry, current_seq),
+        freshness=_artifact_freshness(
+            ARTIFACT_COMMUNITY_EDGES, entry, current_seq, current_cluster_seq
+        ),
         limit=max(1, min(int(limit), KG_COMMUNITY_EDGES_MAX)),
         returned=len(edge_rows),
         returned_weight=returned_weight,

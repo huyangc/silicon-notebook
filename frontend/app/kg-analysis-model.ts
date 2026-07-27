@@ -134,11 +134,21 @@ export function countText(
 export type FreshnessNote = {
   /** 口径来源(「上次主题板块划分」…)。 */
   basis: string;
-  /** 建于哪次变更(「建于变更 #128」/「尚未生成」)。 */
+  /** 建于哪次变更(「建于变更 #128」/「建于变更 #128、合并 #7」/「尚未生成」)。 */
   built: string;
-  /** 落后多少(「与当前一致」/「落后 12 次变更」/「比当前新 3 次变更」)。 */
+  /**
+   * 落后多少 —— **两条世代线合起来说**:「与当前一致」/「落后 12 次变更」/
+   * 「落后 3 次合并」/「落后 12 次变更 · 落后 3 次合并」/「比当前新 3 次变更」。
+   */
   behind: string;
 };
+
+/** 一条世代线的落后量 → 界面词;0 或 null 不出词(合起来怎么说由调用方决定)。 */
+function driftClause(behind: number | null | undefined, noun: string): string {
+  if (behind === null || behind === undefined || behind === 0) return "";
+  if (behind > 0) return `落后 ${formatCount(behind)} 次${noun}`;
+  return `比当前新 ${formatCount(-behind)} 次${noun}`;
+}
 
 /**
  * 逐指标新鲜度(设计 §3.3,**有真实教训**:有人拿一份陈旧数据推出了关于图结构的
@@ -146,18 +156,32 @@ export type FreshnessNote = {
  *
  * 所以每一格数据都要能自证「建于何时、落后多少、什么口径」,而不是靠报告顶部一条
  * 「可能过期」的横幅。三个字段都是 null 时说的是「从没算过」——不是「刚建好」。
+ *
+ * ⚠ **两条世代线,少说一条就会谎报「与当前一致」。** 变更(知识对象与关系的写入)
+ * 与合并(把同一个概念散落的多条记录并成一条)是各自独立会动的两件事:合并单独动过
+ * 之后,收敛率与最大概念榜单已经不是屏幕上这一份了,而变更计数一动没动。只说变更那
+ * 条线的话,这一格会理直气壮地说「与当前一致」—— 那正是这个视图存在的理由的反面。
+ * 与合并无关的数据(边的出处构成只读关系表)后端给 null,这里就不出那半句,而不是
+ * 替它编一个恒为 0 的落后量。
  */
 export function freshnessNote(freshness: KgFreshness | null | undefined): FreshnessNote {
   const basis = basisLabel(freshness?.basis);
   if (!freshness || freshness.built_at_seq === null || freshness.built_at_seq === undefined) {
     return { basis, built: "尚未生成", behind: "" };
   }
-  const built = `建于变更 #${formatCount(freshness.built_at_seq)}`;
-  const behind = freshness.seq_behind ?? null;
-  if (behind === null) return { basis, built, behind: "" };
-  if (behind === 0) return { basis, built, behind: "与当前一致" };
-  if (behind > 0) return { basis, built, behind: `落后 ${formatCount(behind)} 次变更` };
-  return { basis, built, behind: `比当前新 ${formatCount(-behind)} 次变更` };
+  const builtCluster = freshness.built_at_cluster_seq ?? null;
+  const built =
+    builtCluster === null
+      ? `建于变更 #${formatCount(freshness.built_at_seq)}`
+      : `建于变更 #${formatCount(freshness.built_at_seq)}、合并 #${formatCount(builtCluster)}`;
+  const seqBehind = freshness.seq_behind ?? null;
+  const clusterBehind = freshness.cluster_seq_behind ?? null;
+  // 两条线都无从判断时不编一句「与当前一致」——那是替读者下一个我们没有依据的结论。
+  if (seqBehind === null && clusterBehind === null) return { basis, built, behind: "" };
+  const drift = [driftClause(seqBehind, "变更"), driftClause(clusterBehind, "合并")].filter(
+    (clause) => clause !== "",
+  );
+  return { basis, built, behind: drift.length > 0 ? drift.join(" · ") : "与当前一致" };
 }
 
 // ------------------------------------------------------ 载荷读取(防御式)

@@ -1269,23 +1269,6 @@ class UnifiedKgStore:
     # `replace_kg_analysis_artifacts` 与它的账本行必须落在同一个事务里 —— 设计 §3.3:
     # 一次预计算要么整批可见、要么完全不可见。
 
-    @staticmethod
-    def kg_analysis_artifact_seqs(db: Any, notebook_id: str) -> Dict[str, int]:
-        """账本现状:``{kind: kg_mutation_seq}``。最多 5 行,点读。
-
-        与 SQLite 侧逐条对应。预计算**自己的**新鲜度闸靠它判定(见
-        `KnowledgeLifecycleService.rebuild_communities` 的 B1 说明);判定本身留在
-        后端中性的 `kg_analysis_precompute.analysis_ledger_is_current` 里,store 不
-        替它下结论。
-        """
-        return {
-            row["kind"]: int(row["kg_mutation_seq"])
-            for row in db.execute(
-                "SELECT kind, kg_mutation_seq FROM kg_analysis_artifacts "
-                "WHERE notebook_id=%s", (notebook_id,),
-            ).fetchall()
-        }
-
     # ------------------------ KG 质量分析产物的**读**路径(T3,在线请求路径)
     # 与 sqlite/unified_kg_store.py 的同名段落逐条对应、语义等价:同样的排序键、同样的
     # 并列消歧、同样的行形状。方言差异只有占位符、``timestamptz`` → ISO 文本的收口、
@@ -1301,8 +1284,9 @@ class UnifiedKgStore:
     ) -> Dict[str, Dict[str, object]]:
         """账本全文:``{kind: {kg_mutation_seq, payload, created_at}}``。最多 5 行,点读。
 
-        与 SQLite 侧逐条对应(见那边的 docstring:与 `kg_analysis_artifact_seqs` 的分工、
-        「行在不在才是产物在不在」的判据)。``payload`` 这边是 jsonb → psycopg 直接给
+        与 SQLite 侧逐条对应(见那边的 docstring:**读账本只有这一个入口**,T3 的报告
+        与预计算的新鲜度闸共用;「行在不在才是产物在不在」的判据)。``payload`` 这边是
+        jsonb → psycopg 直接给
         dict,SQLite 那边是 JSON 文本,两种都由中性的
         `kg_analysis_payloads.artifact_ledger_rows` 收成同一个形状。
         ``created_at`` 是 timestamptz,按本 store 既有惯例(`state_row`)收成 ISO 文本。

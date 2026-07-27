@@ -203,6 +203,37 @@
   在、明细零行是完全正常的一档（单一板块的图 legitimately 产出 0 条跨板块边），必须
   照读、照报「在场且为空」。
 
+**批 1 上 codex 第 5 轮评审后的订正（2026-07-27）——「新鲜度」有两条世代线，不是一条**：
+
+`concept_clusters` 的写路径（`write_clusters` / `append_clusters` / 整理时的 cluster-map
+swap）**刻意不动** `kg_mutation_seq`，变化信号独立在 `cluster_mutation_seq` 上。而账本闸
+与读侧的落后量此前只比 `kg_mutation_seq` —— 于是**整条簇写路径完全不被新鲜度契约覆盖**：
+簇变了、从簇算出来的数字跟着变了，闸却直接短路，API 照报 `seq_behind = 0`（「与当前一致」）。
+这正命中本特性反复声明的「逐指标新鲜度、每个数字都要能说出自己建于何时」。
+
+- **世代存进账本 payload，不加列。** `kg_analysis_artifacts.payload` 两侧分别是 JSON 文本
+  与 jsonb，加字段无需迁移；加列则要追加 `_migration_N` + bump `SCHEMA_VERSION`，波及全仓
+  的迁移计数断言。戳是**逐行**盖的（`built_at_cluster_seq`），粒度与 `kg_mutation_seq` 那
+  一列一致，每份产物因此能独立回答「我建在哪一代合并结果上」。
+- **闸与读侧共用一个判据函数**（`artifact_is_current`）。写侧判「要不要重算」、读侧判
+  「落后多少 / stale」，两处各写一份必然漂 —— 第 3 轮的 `_ledger_state` 与写侧 required
+  集合分岔就是同一个病。
+- **哪几份受影响，依据是那条查询读没读 `concept_clusters`**（不是「感觉上相关」）：
+  簇大小直方图与最大簇榜单直接 `FROM concept_clusters`；跨板块边的输入 `ew` 经
+  `community_graph_rows` 的 `LEFT JOIN concept_clusters cs/ct` 把边两端映射到 canonical；
+  来源画像经 `source_community_counts` 的 `COALESCE(c.canonical_id, o.id)`。
+  **`relation_provenance` 不在此列**：它的 SQL 只有 `knowledge_relations` 全扫 + 两次端点
+  探查，一个字都没提 `concept_clusters`。它同时是五份里最贵的一份（生产 836 万边、每行
+  两次随机 PK 探查），所以纯合并触发的补账本**复用**上一轮的载荷而不是重算 —— 依据与闸
+  赖以成立的是同一条不变式（那两个输入表的每条写路径都 bump `kg_mutation_seq`）。
+  `force=True` 不复用：那是口径/代码改了之后唯一的人工恢复手段。
+- **读账本收敛成一个入口。** 闸现在也要 payload，于是只保留 `kg_analysis_artifact_rows`，
+  删掉早先那个只取 seq 的窄读 —— 账本的读取与判据各只剩一处。
+- **已知残留缺口（需要一列，本次不做）**：板块划分本身也建在 canonical 图上，但
+  `communities` / `unified_kg_state` 里没有地方记「这批板块建在哪一代合并结果上」，所以
+  `boards` 那一格的合并世代只能是 null（契约里的「无从判断」），不编一个 0。让板块跟上
+  合并结果的仍是 `rebuild_unified_kg` 收尾那次 `force=True` 的 `rebuild_communities`。
+
 **边界（这是 DFX 诊断工具，不是产品引导）**：本视图的职责到「如实标注」为止 ——
 标出版本戳、落后量、以及每个数字的口径来源。**不做**折叠/置灰/催促整理这类替读者
 做判断的产品行为，也不为「整理要跑多久」承担期望管理。看报告的是知道自己在看什么的人。

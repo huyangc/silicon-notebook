@@ -38,12 +38,23 @@ class Freshness(BaseModel):
     (**不 clamp 到 0**:负值意味着账本比当前还新,是库被手工改过的信号,压成 0 等于
     把异常藏起来)。产物缺席 / 社区从没建过时三个都是 null,不是 0 —— 0 会被读成
     「刚刚建好」。
+
+    ``built_at_cluster_seq`` / ``cluster_seq_behind`` 是**合并结果**那条世代线
+    (``cluster_mutation_seq``),必须独立于 KG 世代:合并的写路径刻意不动
+    ``kg_mutation_seq``,所以只看前一条的话,一次纯合并之后簇大小直方图与最大簇榜单
+    已经陈旧、报告却会说「与当前一致」。两个字段为 null 有两种情形,读者不需要分辨:
+    这份产物与合并结果无关(``relation_provenance`` —— 它的查询只读关系表),或者
+    它缺席 / 没盖这个戳。
+
+    ``stale`` 是两条线的合取:任一条落后即为 true。
     """
 
     basis: str
     built_at_seq: Optional[int] = None
     seq_behind: Optional[int] = None
     stale: Optional[bool] = None
+    built_at_cluster_seq: Optional[int] = None
+    cluster_seq_behind: Optional[int] = None
 
 
 class ArtifactView(BaseModel):

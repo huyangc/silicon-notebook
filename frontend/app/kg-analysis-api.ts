@@ -20,13 +20,23 @@ import { requestJson } from "./api-client.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
-/** 一份数据的新鲜度 + 口径来源。产物缺席时三个数值字段都是 null(不是 0)。 */
+/**
+ * 一份数据的新鲜度 + 口径来源 —— **两条相互独立的世代线**。产物缺席时全是 null
+ * (不是 0)。
+ *
+ * `*_seq` 那条是知识对象与关系的写入;`*_cluster_seq` 那条是合并结果。合并的写路径
+ * **刻意不动**前一条,所以只看它的话,一次纯合并之后收敛率与最大概念榜单已经陈旧、
+ * 报告却会说「与当前一致」。与合并无关的数据(边的出处构成只读关系表)后端给 null,
+ * 那半句就不出。`stale` 是两条线的合取。
+ */
 export type KgFreshness = {
   basis: string;
   built_at_seq: number | null;
   /** 当前 seq 减去它。**不 clamp**:负值 = 账本比库还新,是异常信号而不是 0。 */
   seq_behind: number | null;
   stale: boolean | null;
+  built_at_cluster_seq: number | null;
+  cluster_seq_behind: number | null;
 };
 
 /** 账本里的一份预计算产物(或它的缺席)。payload 形状随 kind 变,故是自由对象。 */

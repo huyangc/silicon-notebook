@@ -133,6 +133,54 @@ test("新鲜度:落后量为负(数据比库还新)单独成一档,不 clamp 成
   assert.equal(ahead.behind, "比当前新 3 次变更");
 });
 
+test("新鲜度:合并单独动过时必须说出来,不能因为变更没动就报「与当前一致」", () => {
+  // 这正是后端那条闸漏掉的形态:变更计数一动没动,合并结果换了一代,而收敛率与
+  // 最大概念榜单都是从合并结果算的。少说这半句,整块数据就是在骗人。
+  const merged = freshnessNote({
+    basis: "usable_live",
+    built_at_seq: 128,
+    seq_behind: 0,
+    stale: true,
+    built_at_cluster_seq: 6,
+    cluster_seq_behind: 3,
+  });
+  assert.equal(merged.built, "建于变更 #128、合并 #6");
+  assert.equal(merged.behind, "落后 3 次合并");
+
+  const both = freshnessNote({
+    basis: "community_snapshot",
+    built_at_seq: 100,
+    seq_behind: 28,
+    stale: true,
+    built_at_cluster_seq: 6,
+    cluster_seq_behind: 3,
+  });
+  assert.equal(both.behind, "落后 28 次变更 · 落后 3 次合并");
+
+  const aheadOnMerge = freshnessNote({
+    basis: "usable_live",
+    built_at_seq: 128,
+    seq_behind: 0,
+    stale: true,
+    built_at_cluster_seq: 9,
+    cluster_seq_behind: -2,
+  });
+  assert.equal(aheadOnMerge.behind, "比当前新 2 次合并");
+});
+
+test("新鲜度:与合并无关的数据不编造合并世代(边的出处只读关系表)", () => {
+  const provenance = freshnessNote({
+    basis: "usable_live",
+    built_at_seq: 128,
+    seq_behind: 0,
+    stale: false,
+    built_at_cluster_seq: null,
+    cluster_seq_behind: null,
+  });
+  assert.equal(provenance.built, "建于变更 #128");
+  assert.equal(provenance.behind, "与当前一致");
+});
+
 test("口径来源未声明时说「口径未标注」,不假装知道", () => {
   assert.equal(basisLabel("unified_rebuild_snapshot"), "上次整理时的规模");
   assert.equal(basisLabel(""), "口径未标注");

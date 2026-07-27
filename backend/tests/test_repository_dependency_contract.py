@@ -98,7 +98,9 @@ LIFECYCLE_STORE_CALLS = {
         "mention_alias_candidate_batches",
         "mention_seed_rows",
         "cluster_size_histogram",
-        "kg_analysis_artifact_seqs",
+        # 预计算的新鲜度闸读的是账本**整行**(簇世代盖在 payload 里,刻意不加列),
+        # 与 T3 报告共用同一个读 —— 早先那个只取 seq 的窄读已经删掉。
+        "kg_analysis_artifact_rows",
         "largest_clusters",
         "relation_provenance_counts",
         "replace_canonical_relations",

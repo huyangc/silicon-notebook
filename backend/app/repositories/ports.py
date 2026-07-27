@@ -1089,14 +1089,8 @@ class UnifiedKgStorePort(Protocol):
     # 的永远是一套自洽的产物,它描述的 level 记在账本 payload 里。三张表统一按 notebook
     # 整表重写,删除口径因此只有一个。
     #
-    # ⚠ `kg_analysis_artifact_seqs` 是预计算**自己的**新鲜度闸的输入(见
-    # `rebuild_communities`:社区图与分析账本是两份可以各自陈旧的产物)。store 只返回
-    # 原始 `{kind: seq}`,是否新鲜由后端中性的 `analysis_ledger_is_current` 判。
-    #
     # ⚠ `edges` / `profiles` 按**可迭代**声明,实现必须分批消费、不得再物化一份完整
     # 列表:落库这一刻 `rebuild_communities` 的栈帧上还压着整张 `ew`。
-    @staticmethod
-    def kg_analysis_artifact_seqs(db: object, notebook_id: str) -> dict[str, int]: ...
     @staticmethod
     def source_community_counts(db: object, notebook_id: str, level: int) -> object: ...
     @staticmethod
@@ -1115,8 +1109,11 @@ class UnifiedKgStorePort(Protocol):
     #
     #   · kg_analysis_artifact_rows  账本全文,每 notebook ≤5 行,复合主键点读。
     #                                返回 `{kind: {kg_mutation_seq, payload, created_at}}`。
-    #                                与 `kg_analysis_artifact_seqs` 分工:那个只喂预计算
-    #                                的新鲜度闸(热路径,只要 seq),这个喂报告(要 payload)。
+    #                                **读账本只有这一个入口**:预计算的新鲜度闸与 T3 的
+    #                                报告共用它。早先另有一个只取 seq 的窄读,簇世代改盖
+    #                                进 payload(刻意不加列)之后闸也必须拿 payload,两个
+    #                                方法就只差一个 created_at —— 合成一个,账本的判据与
+    #                                读取都只剩一处,不可能漂。
     #   · kg_community_edges_top     跨板块边 top-N。**没有 weight 索引**(主键是
     #                                (notebook_id, src, dst)),所以是本 notebook 分片
     #                                的一次范围扫 + 有界 top-N 排序器 —— 有界靠的是 T2

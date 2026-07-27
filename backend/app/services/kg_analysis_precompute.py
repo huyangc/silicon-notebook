@@ -121,6 +121,145 @@ REQUIRED_ARTIFACT_KINDS = _ARTIFACT_KINDS - OPTIONAL_ARTIFACT_KINDS
 # 仍然可读、只是「落后 N 次变更」的快照。
 BOARD_DEPENDENT_ARTIFACT_KINDS = (ARTIFACT_COMMUNITY_EDGES, ARTIFACT_SOURCE_PROFILES)
 
+# 依赖**簇世代**(`unified_kg_state.cluster_mutation_seq`)的产物。
+#
+# ⚠ 为什么这是一条独立于 `kg_mutation_seq` 的判据:`concept_clusters` 的写路径
+# (`write_clusters` / `append_clusters` / rebuild 的 cluster-map swap)**刻意不动**
+# `kg_mutation_seq` —— 合并是幂等的重算,让它抬 KG 世代会把每一次「整理」都伪装成
+# 一次内容变更。变化信号独立成列(见 `unified_kg_store.bump_cluster_seq`)。于是只看
+# `kg_mutation_seq` 的新鲜度契约对**整条簇写路径完全失明**:簇变了、直方图与收敛率
+# 跟着变了,而账本闸短路、读侧报「与当前一致」。codex 第 5 轮评审报的就是这一条。
+#
+# 分类的依据是**那几条查询到底读没读 `concept_clusters`**,不是「感觉上相关」:
+#   · cluster_size_histogram  `FROM concept_clusters c LEFT JOIN knowledge_objects o
+#                              … GROUP BY c.object_type, c.canonical_id` —— 它数的就是
+#                              这张表的行;
+#   · largest_clusters        `FROM concept_clusters c JOIN knowledge_objects o …
+#                              WHERE c.object_type='concept' GROUP BY c.canonical_id`;
+#   · community_edges         折叠的输入 `ew` 来自 `community_graph_rows`,那条
+#                              `LEFT JOIN concept_clusters cs/ct` 把每条边的两端映射到
+#                              canonical —— 簇一变,同一批关系折出来的板块对就不同;
+#   · source_profiles         `source_community_counts` 的 `COALESCE(c.canonical_id,
+#                              o.id)` 同样经 `concept_clusters` 再 join
+#                              `community_members`。
+#
+# **`relation_provenance` 刻意不在此列**,而且这不是省事:它的 SQL 只有
+# `knowledge_relations` 全扫 + 两次 `knowledge_objects` 端点探查,一个字都没提
+# `concept_clusters`(见两侧 store 的 `relation_provenance_counts`)。它同时是五份里
+# **最贵**的一份(生产 836 万边、每行两次随机 PK 探查,与仓库那次「835 万边冷扫
+# 39 分钟」同量级)。把它一刀切进作废集合,等于每一次纯合并写入都白付一趟全表扫,
+# 而它的输入一个字节都没变。
+CLUSTER_DEPENDENT_ARTIFACT_KINDS = frozenset({
+    ARTIFACT_CLUSTER_HISTOGRAM,
+    ARTIFACT_LARGEST_CLUSTERS,
+    ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_SOURCE_PROFILES,
+})
+
+# 簇世代盖在账本 payload 里的字段名。
+#
+# ⚠ **刻意不加列。** `kg_analysis_artifacts` 的 `payload` 两侧分别是 JSON 文本与
+# jsonb,加字段不需要迁移;而加一列要追加 `_migration_N` + bump `SCHEMA_VERSION`,
+# 波及全仓的迁移计数断言。世代是**每行**盖的(不是整批一个),这样每一份产物都能
+# 独立回答「我建在哪一代合并结果上」—— 与 `kg_mutation_seq` 那一列同样的粒度。
+CLUSTER_SEQ_PAYLOAD_KEY = "built_at_cluster_seq"
+
+
+def stamp_cluster_seq(
+    payloads: Mapping[str, dict], cluster_seq: int
+) -> Dict[str, dict]:
+    """把簇世代盖进**依赖簇**的那几份 payload,返回新的 payload 表。
+
+    只盖 `CLUSTER_DEPENDENT_ARTIFACT_KINDS`:给 `relation_provenance` 也盖一个,读侧
+    就会替它报一个它根本不依赖的落后量,而那是**假的新鲜度信息** —— 一次纯合并写入
+    之后它会显示「落后 1 代合并」,可它的两个输入表一个字节都没变。
+
+    刻意在 service 侧盖、在 store 侧(`check_artifact_payloads`)查:两件事放同一个
+    函数里,守卫就恒真了 —— 那正是本 PR 已经抓出 15 个的「空守卫」形态。
+    """
+    return {
+        kind: (
+            {**payload, CLUSTER_SEQ_PAYLOAD_KEY: int(cluster_seq)}
+            if kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS
+            else payload
+        )
+        for kind, payload in payloads.items()
+    }
+
+
+def artifact_cluster_seq(kind: str, payload: Mapping[str, object]) -> Optional[int]:
+    """这份产物记下的簇世代;``None`` = 无从判断。
+
+    两种 ``None`` 刻意不区分,因为**下游对它们的处置相同**:
+      · 这个 kind 与簇世代无关(`relation_provenance`)—— 没有落后量可报;
+      · 依赖簇却没盖戳(库被手工改过,或者是本次修复**之前**写下的行)—— 判不出
+        它建在哪一代合并结果上,那就当它不新鲜:闸会补跑、读侧报「未知」。
+    区分这两种的责任在调用方,它知道 kind(见 `artifact_is_current`)。
+    """
+    if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
+        return None
+    value = payload.get(CLUSTER_SEQ_PAYLOAD_KEY)
+    # bool 是 int 的子类,`True` 会被 `isinstance(value, int)` 放行并当成 1。
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return int(value)
+
+
+def artifact_is_current(
+    kind: str,
+    built_seq: int,
+    payload: Mapping[str, object],
+    *,
+    seq: int,
+    cluster_seq: int,
+) -> bool:
+    """这一份产物是不是建在**当前**的 (KG 世代, 簇世代) 上 —— 唯一的判据函数。
+
+    ⚠ **写侧的闸与读侧的落后量必须共用它。** 闸判「要不要重算」、读侧判「落后多少」,
+    两处一旦各写一份判据就会漂,而漂出来的表现是自相矛盾的报告:闸说新鲜、读侧说陈旧,
+    或者反过来。本 PR 第 3 轮评审(`_ledger_state` 与写侧 required 集合分岔)就是同一
+    个病的另一处发作,所以这一次直接把判据收成一个函数:
+      · `analysis_ledger_is_current`(预计算的新鲜度闸)对每一份必需产物调它;
+      · `kg_analysis._artifact_freshness`(报告里的 `stale`)对每一份在场产物调它。
+
+    与簇无关的 kind 只看 KG 世代;依赖簇的 kind 两个世代都要对齐,而且**没盖戳等于
+    不新鲜**(见 `artifact_cluster_seq`)。
+    """
+    if int(built_seq) != int(seq):
+        return False
+    if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
+        return True
+    built_cluster_seq = artifact_cluster_seq(kind, payload)
+    return built_cluster_seq is not None and built_cluster_seq == int(cluster_seq)
+
+
+def reusable_artifact_payloads(
+    ledger: Mapping[str, Mapping[str, object]], seq: int
+) -> Dict[str, dict]:
+    """账本里**可以原样搬到这一轮**的 payload —— 只可能是与簇无关的那几份。
+
+    为什么这不是投机取巧:`relation_provenance` 的两个输入表(`knowledge_relations` +
+    `knowledge_objects`)的**每一条**写路径都会 bump `kg_mutation_seq`(那正是
+    `unified_kg_store.graph_seq_row` 逐条核过的覆盖面),所以「账本行的 seq == 这一轮
+    的 seq」⟹ 它的输入一个字节都没变 ⟹ 重算必然得到逐字相同的载荷。这与新鲜度闸赖以
+    成立的是**同一条**不变式;闸敢据它跳过整轮预计算,这里就敢据它跳过一份产物。
+
+    收益不是理论上的:纯合并写入(`write_clusters` / `append_clusters` / 整理时的
+    cluster-map swap)不动 `kg_mutation_seq`,所以簇世代闸新触发的每一次补账本,若不
+    复用就要白跑一趟 `relation_provenance` 的全表扫 —— 生产 836 万边、每行两次随机
+    PK 探查,与仓库那次「835 万边冷扫 39 分钟」同量级。
+
+    ⚠ **`force=True` 不复用**(由调用方决定不传本函数的结果)。`force` 是「用户明确
+    要求重算」,是抽取口径改了、代码修了之后唯一的人工恢复手段;在它上面省这一趟,
+    等于宣布一份按旧代码算出的载荷只要 KG 没变就永远换不掉。省下的那点钱远不值。
+    """
+    return {
+        kind: dict(entry["payload"])                # type: ignore[arg-type]
+        for kind, entry in ledger.items()
+        if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS
+        and int(entry["kg_mutation_seq"]) == int(seq)  # type: ignore[arg-type]
+    }
+
 
 def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
     """账本写入口的守卫:**多写**与**少写**都硬失败。
@@ -133,6 +272,12 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
     ``OPTIONAL_ARTIFACT_KINDS``;而且它只在**真的一个板块都没有**时才可以缺席,
     这一条由 `community_edges` 账本里的 ``communities`` 计数当场复核 —— 否则
     「允许缺席」就会变成「随便漏一份也不报错」。
+
+    **簇世代的戳同样是硬要求**:依赖簇的四份必须带一个整数
+    ``built_at_cluster_seq``(由 service 侧的 `stamp_cluster_seq` 盖),不依赖簇的
+    `relation_provenance` 必须**不带**。漏盖的表现极其隐蔽 —— 读侧只会把它报成
+    「合并世代未知」、闸每次都判它不新鲜,于是这个库的预计算**永远**重跑,而没有任何
+    报错;多盖则相反,给一份根本不依赖合并的产物编造一个落后量。两个方向都在这里拦。
     """
     unknown = sorted(set(payloads) - _ARTIFACT_KINDS)
     if unknown:
@@ -152,6 +297,22 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
             raise ValueError(
                 f"KG 分析产物账本:{ARTIFACT_SOURCE_PROFILES} 只有在一个主题板块都没有时"
                 f"才允许缺席,但这一轮有 {boards} 个板块"
+            )
+    for kind in sorted(payloads):
+        payload = payloads[kind]
+        stamped = CLUSTER_SEQ_PAYLOAD_KEY in payload
+        depends = kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS
+        if depends and artifact_cluster_seq(kind, payload) is None:
+            raise ValueError(
+                f"KG 分析产物账本:{kind} 依赖合并结果,payload 必须带整数 "
+                f"{CLUSTER_SEQ_PAYLOAD_KEY}(见 stamp_cluster_seq)。"
+                "漏盖不会报错,只会让这个库的预计算永远重跑、读侧永远报「合并世代未知」"
+            )
+        if not depends and stamped:
+            raise ValueError(
+                f"KG 分析产物账本:{kind} 不依赖合并结果,不该带 "
+                f"{CLUSTER_SEQ_PAYLOAD_KEY} —— 盖了它,读侧就会替一份输入根本没变的"
+                "产物编造一个落后量"
             )
 
 
@@ -178,19 +339,38 @@ def required_artifact_kinds(*, has_boards: bool) -> set:
 
 
 def analysis_ledger_is_current(
-    ledger_seqs: Mapping[str, int], seq: int, *, has_boards: bool
+    ledger: Mapping[str, Mapping[str, object]],
+    seq: int,
+    cluster_seq: int,
+    *,
+    has_boards: bool,
 ) -> bool:
-    """账本是否已经**齐全地**建在 ``seq`` 这个 KG 状态上。
+    """账本是否已经**齐全地**建在当前的 (KG 世代, 簇世代) 上。
 
     这是预计算**自己的**新鲜度闸,与「社区图要不要重建」是两件事(见
     `rebuild_communities` 里的 B1 说明)。判据只看账本:齐不齐、戳对不对。
-    任一必需 kind 缺席、或任一行的戳与 ``seq`` 不同 → 不新鲜,要补跑。
+    任一必需 kind 缺席、或任一行不满足 `artifact_is_current` → 不新鲜,要补跑。
 
-    「齐不齐」用的是共享的 `required_artifact_kinds` —— 与写入口和 T3 报告同一条判据。
+    两条判据都是**共享的**,一个字都不在这里重写:
+      · 「齐不齐」= `required_artifact_kinds`(与写入口、T3 的账本档位同一条);
+      · 「戳对不对」= `artifact_is_current`(与 T3 报告里的 `stale` 同一条)。
+
+    ``ledger`` 是 `kg_analysis_artifact_rows` 的返回形状
+    (``{kind: {kg_mutation_seq, payload, created_at}}``)—— 簇世代盖在 payload 里
+    (刻意不加列,见 `CLUSTER_SEQ_PAYLOAD_KEY`),所以闸必须拿到 payload 才判得了。
     """
-    if not required_artifact_kinds(has_boards=has_boards) <= set(ledger_seqs):
+    if not required_artifact_kinds(has_boards=has_boards) <= set(ledger):
         return False
-    return all(int(value) == int(seq) for value in ledger_seqs.values())
+    return all(
+        artifact_is_current(
+            kind,
+            int(entry["kg_mutation_seq"]),          # type: ignore[arg-type]
+            entry["payload"],                       # type: ignore[arg-type]
+            seq=seq,
+            cluster_seq=cluster_seq,
+        )
+        for kind, entry in ledger.items()
+    )
 
 
 def head_community_ids(

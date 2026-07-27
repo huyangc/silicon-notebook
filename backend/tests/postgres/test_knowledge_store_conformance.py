@@ -29,7 +29,10 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
     BOARD_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
     MAINSTREAM_COVERAGE,
+    stamp_cluster_seq,
 )
 from app.services.knowledge_contracts import (
     KG_COMMUNITY_EDGES_MAX,
@@ -2436,6 +2439,18 @@ def _analysis_unified_store(harness):
     return PostgresUnifiedKgStore(harness.database, now=lambda: NOW)
 
 
+def _analysis_payloads(*, cluster_seq: int = 0, **overrides) -> dict:
+    """一批合法的账本 payload,簇世代照生产路径经 `stamp_cluster_seq` 盖上。
+
+    夹具刻意**不手抄**那个 key —— 分类(哪几份依赖合并结果)一旦改了,夹具跟着改,
+    不会出现「守卫按新分类查、夹具还按旧分类拼」这种两侧各自自洽却对不上的局面。
+    """
+    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
+    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads.update(overrides)
+    return stamp_cluster_seq(payloads, cluster_seq)
+
+
 def _analysis_object(object_id: str, *, notebook: str = ANALYSIS_NB,
                      status: str = "approved", object_type: str = "concept") -> tuple:
     return (
@@ -3090,7 +3105,7 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
     unified = _analysis_unified_store(knowledge_harness)
     edges = [("cm-big", "cm-small", 7)]
     profiles = [("source-golden", 12, 9, "cm-big", 0.75, 2, 0.5)]
-    payloads = {
+    payloads = stamp_cluster_seq({
         ARTIFACT_COMMUNITY_EDGES: {"level": 0, "edges": 1, "edges_total": 1,
                                    "truncated": False, "edge_limit": 200000,
                                    "cross_weight": 7, "intra_weight": 3,
@@ -3102,7 +3117,7 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
         ARTIFACT_CLUSTER_HISTOGRAM: unified.cluster_size_histogram(ANALYSIS_NB),
         ARTIFACT_LARGEST_CLUSTERS: unified.largest_clusters(ANALYSIS_NB, 20),
         ARTIFACT_RELATION_PROVENANCE: unified.relation_provenance_counts(ANALYSIS_NB),
-    }
+    }, 19)
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 41, edges, profiles, payloads, NOW
@@ -3162,8 +3177,7 @@ def test_discarding_board_dependent_artifacts_on_postgres(
     """
     _seed_analysis_fixture(knowledge_harness)
     unified = _analysis_unified_store(knowledge_harness)
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads = _analysis_payloads()
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 41,
@@ -3223,8 +3237,7 @@ def test_replace_kg_analysis_artifacts_rejects_a_missing_kind_on_postgres(
     """账本整批重写:少写一行 = 下游读成「从来没算过」,两侧都必须硬失败。"""
     _seed_analysis_fixture(knowledge_harness)
     unified = _analysis_unified_store(knowledge_harness)
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads = _analysis_payloads()
     payloads.pop(ARTIFACT_CLUSTER_HISTOGRAM)
     with pytest.raises(ValueError, match="缺少必需的 kind"):
         with knowledge_harness.database.write() as connection:
@@ -3254,23 +3267,67 @@ def test_analysis_snapshots_refuse_a_write_transaction_on_postgres(
                 call()
 
 
-def test_kg_analysis_artifact_seqs_match_on_postgres(knowledge_harness):
-    """预计算自己的新鲜度闸的输入:账本齐不齐、戳对不对。"""
+def test_replace_kg_analysis_artifacts_polices_the_cluster_stamp_on_postgres(
+    knowledge_harness,
+):
+    """簇世代的戳:依赖合并结果的四份必须有、不依赖的那份必须没有 —— 硬失败。
+
+    这道守卫读的正是 `payload` 列(PostgreSQL 上是 jsonb)。一次参数适配的差错
+    就会让守卫在生产后端上静默失效 —— 而它失效的表现是「这个库的预计算永远重跑」,
+    没有任何报错。
+    """
     _seed_analysis_fixture(knowledge_harness)
     unified = _analysis_unified_store(knowledge_harness)
-    with knowledge_harness.database.connect() as connection:
-        assert unified.kg_analysis_artifact_seqs(connection, ANALYSIS_NB) == {}
 
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+        payloads = _analysis_payloads()
+        payloads[kind] = {
+            key: value for key, value in payloads[kind].items()
+            if key != CLUSTER_SEQ_PAYLOAD_KEY
+        }
+        with pytest.raises(ValueError, match="必须带整数"):
+            with knowledge_harness.database.write() as connection:
+                unified.replace_kg_analysis_artifacts(
+                    connection, ANALYSIS_NB, 1, [], [], payloads, NOW
+                )
+
+    extra = _analysis_payloads()
+    extra[ARTIFACT_RELATION_PROVENANCE] = dict(
+        extra[ARTIFACT_RELATION_PROVENANCE], **{CLUSTER_SEQ_PAYLOAD_KEY: 3}
+    )
+    with pytest.raises(ValueError, match="不依赖合并结果"):
+        with knowledge_harness.database.write() as connection:
+            unified.replace_kg_analysis_artifacts(
+                connection, ANALYSIS_NB, 1, [], [], extra, NOW
+            )
+
+
+def test_the_cluster_stamp_round_trips_identically_on_postgres(knowledge_harness):
+    """簇世代写进 payload、再读回来必须是 **int**。
+
+    这是「刻意不加列」那个决定的证人:世代存在 JSON 里(PostgreSQL 上是 jsonb)。
+    读回字符串 `"77"` 而不是 `77`,新鲜度判据就会恒判「不新鲜」——预计算永远重跑,
+    而且不报错。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
-            connection, ANALYSIS_NB, 77, [], [], payloads, NOW
+            connection, ANALYSIS_NB, 77, [], [],
+            _analysis_payloads(cluster_seq=19), NOW,
         )
+
     with knowledge_harness.database.connect() as connection:
-        assert unified.kg_analysis_artifact_seqs(connection, ANALYSIS_NB) == {
-            kind: 77 for kind in ARTIFACT_KINDS
-        }
+        rows = unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
+
+    assert set(rows) == set(ARTIFACT_KINDS)
+    for kind, entry in rows.items():
+        assert entry["kg_mutation_seq"] == 77, kind
+        stamp = entry["payload"].get(CLUSTER_SEQ_PAYLOAD_KEY)
+        if kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
+            assert stamp == 19 and isinstance(stamp, int), kind
+        else:
+            assert stamp is None, kind
 
 
 # ------------------------------------------------- KG 分析产物的读路径(T3)
@@ -3282,11 +3339,10 @@ def test_kg_analysis_artifact_seqs_match_on_postgres(knowledge_harness):
 
 def _seed_analysis_ledger(harness, *, seq: int = 55) -> dict:
     unified = _analysis_unified_store(harness)
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {
+    payloads = _analysis_payloads(**{ARTIFACT_COMMUNITY_EDGES: {
         "level": 0, "edges": 3, "edges_total": 9, "truncated": True,
         "edge_limit": 3, "cross_weight": 40, "intra_weight": 5, "communities": 4,
-    }
+    }})
     with harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, seq, [], [], payloads, NOW
@@ -3353,8 +3409,8 @@ def test_kg_community_edges_top_matches_on_postgres(knowledge_harness):
         ("cm-b", "cm-c", 4),
         ("cm-c", "cm-d", 1),
     ]
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 4}
+    payloads = _analysis_payloads(**{
+        ARTIFACT_COMMUNITY_EDGES: {"level": 0, "communities": 4}})
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 12, edges, [], payloads, NOW
@@ -3385,8 +3441,7 @@ def test_kg_source_profile_page_matches_on_postgres(knowledge_harness):
         ("src-b", 20, 16, "cm-big", 0.6, 3, 0.0),
         ("src-a", 10, 8, "cm-big", 0.5, 2, 0.0),
     ]
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads = _analysis_payloads()
     placeholder = "%s"
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
@@ -3441,8 +3496,7 @@ def test_kg_community_edges_top_is_clamped_on_postgres(knowledge_harness):
     over = KG_COMMUNITY_EDGES_MAX + 5
     # weight 全部互不相同,排序结果与并列消歧无关 —— 这条只测「有界」这一件事。
     edges = [("cm-src", f"cm-{i:06d}", over - i) for i in range(over)]
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads = _analysis_payloads()
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 14, edges, [], payloads, NOW
@@ -3476,8 +3530,7 @@ def test_kg_source_profile_page_is_clamped_and_stable_on_ties_on_postgres(
     profiles = [
         (source_id, 10, 8, "cm-big", 0.5, 2, 0.0) for source_id in reversed(ids)
     ]
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads = _analysis_payloads()
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 15, [], profiles, payloads, NOW

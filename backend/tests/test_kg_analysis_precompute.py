@@ -29,14 +29,20 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
     MAINSTREAM_COVERAGE,
     MAX_PERSISTED_COMMUNITY_EDGES,
     CrossCommunityEdgeFolder,
     SourceProfileFolder,
     analysis_ledger_is_current,
+    artifact_is_current,
     check_artifact_payloads,
     fold_cross_community_edges,
     head_community_ids,
+    required_artifact_kinds,
+    reusable_artifact_payloads,
+    stamp_cluster_seq,
 )
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
@@ -195,11 +201,26 @@ def test_source_profile_rows_are_source_id_ordered():
     assert [row[0] for row in folder.rows()] == ["src-a", "src-b", "src-c"]
 
 
-def _full_payloads(**overrides) -> dict:
+def _full_payloads(*, cluster_seq: int = 0, **overrides) -> dict:
+    """一批合法的账本 payload —— 簇世代照生产路径经 `stamp_cluster_seq` 盖上。
+
+    夹具刻意**不手抄**那个 key:分类(哪几份依赖合并结果)一旦改了,夹具跟着改,
+    不会出现「守卫按新分类查、夹具还按旧分类拼」这种两边各自自洽却对不上的局面。
+    """
     payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
     payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
     payloads.update(overrides)
-    return payloads
+    return stamp_cluster_seq(payloads, cluster_seq)
+
+
+def _ledger(seqs: dict, *, cluster_seq: int = 0) -> dict:
+    """``{kind: kg_seq}`` → `kg_analysis_artifact_rows` 的形状(闸真正吃的那个)。"""
+    stamped = stamp_cluster_seq({kind: {"level": 0} for kind in seqs}, cluster_seq)
+    return {
+        kind: {"kg_mutation_seq": seq, "payload": stamped[kind],
+               "created_at": "2026-07-27"}
+        for kind, seq in seqs.items()
+    }
 
 
 def test_check_artifact_payloads_rejects_unknown_kinds():
@@ -221,7 +242,9 @@ def test_check_artifact_payloads_rejects_a_missing_kind():
 def test_check_artifact_payloads_allows_absent_profiles_only_without_boards():
     empty = _full_payloads()
     empty.pop(ARTIFACT_SOURCE_PROFILES)
-    empty[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 0}
+    empty[ARTIFACT_COMMUNITY_EDGES] = dict(
+        empty[ARTIFACT_COMMUNITY_EDGES], communities=0
+    )
     check_artifact_payloads(empty)                      # 零板块:合法缺席
 
     with_boards = _full_payloads()
@@ -230,27 +253,112 @@ def test_check_artifact_payloads_allows_absent_profiles_only_without_boards():
         check_artifact_payloads(with_boards)            # 有板块却缺席 = 漏写
 
 
+def test_check_artifact_payloads_demands_the_cluster_stamp_exactly_where_it_belongs():
+    """簇世代的戳:依赖合并结果的四份必须有,不依赖的那份必须没有。
+
+    两个方向都拦是有理由的 —— 漏盖不会报错,只会让这个库的预计算**永远**重跑
+    (闸判它不新鲜)、读侧永远报「合并世代未知」;多盖则相反,给一份输入根本没变的
+    产物编造一个落后量。两种都是静默的错。
+    """
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+        missing = _full_payloads()
+        missing[kind] = {
+            key: value for key, value in missing[kind].items()
+            if key != CLUSTER_SEQ_PAYLOAD_KEY
+        }
+        with pytest.raises(ValueError, match="必须带整数"):
+            check_artifact_payloads(missing)
+        # 盖了但不是整数,与没盖同档(库被手工改过)。
+        garbled = _full_payloads()
+        garbled[kind] = dict(garbled[kind], **{CLUSTER_SEQ_PAYLOAD_KEY: "7"})
+        with pytest.raises(ValueError, match="必须带整数"):
+            check_artifact_payloads(garbled)
+
+    extra = _full_payloads()
+    extra[ARTIFACT_RELATION_PROVENANCE] = dict(
+        extra[ARTIFACT_RELATION_PROVENANCE], **{CLUSTER_SEQ_PAYLOAD_KEY: 3}
+    )
+    with pytest.raises(ValueError, match="不依赖合并结果"):
+        check_artifact_payloads(extra)
+
+
+def test_relation_provenance_is_the_only_kind_outside_the_cluster_classification():
+    """分类的依据是「那条查询读没读 concept_clusters」,这里把结论钉死。
+
+    钉住它不是形式主义:分类同时决定**哪些产物会被合并写入作废**。一刀切多算一份,
+    每次纯合并写入都要白付一趟 836 万边的全表扫;少算一份,那份就永远陈旧而报告
+    还说「与当前一致」—— 正是本次修复要消灭的那一档。
+    """
+    assert set(ARTIFACT_KINDS) - CLUSTER_DEPENDENT_ARTIFACT_KINDS == {
+        ARTIFACT_RELATION_PROVENANCE
+    }
+
+
 def test_analysis_ledger_is_current_requires_every_kind_at_the_same_seq():
-    full = {kind: 7 for kind in ARTIFACT_KINDS}
-    assert analysis_ledger_is_current(full, 7, has_boards=True)
-    assert not analysis_ledger_is_current({}, 7, has_boards=True)
-    assert not analysis_ledger_is_current(full, 8, has_boards=True)
+    full = _ledger({kind: 7 for kind in ARTIFACT_KINDS})
+    assert analysis_ledger_is_current(full, 7, 0, has_boards=True)
+    assert not analysis_ledger_is_current({}, 7, 0, has_boards=True)
+    assert not analysis_ledger_is_current(full, 8, 0, has_boards=True)
     partial = dict(full)
     partial.pop(ARTIFACT_RELATION_PROVENANCE)
-    assert not analysis_ledger_is_current(partial, 7, has_boards=True)
+    assert not analysis_ledger_is_current(partial, 7, 0, has_boards=True)
     # 一行落后 = 整份不新鲜(否则「补一半」会被判成齐了)
     mixed = dict(full)
-    mixed[ARTIFACT_LARGEST_CLUSTERS] = 6
-    assert not analysis_ledger_is_current(mixed, 7, has_boards=True)
+    mixed[ARTIFACT_LARGEST_CLUSTERS] = {
+        **full[ARTIFACT_LARGEST_CLUSTERS], "kg_mutation_seq": 6,
+    }
+    assert not analysis_ledger_is_current(mixed, 7, 0, has_boards=True)
+
+
+def test_analysis_ledger_is_current_also_tracks_the_cluster_generation():
+    """簇世代漂了就必须补跑 —— 哪怕 KG 世代一动没动(codex 第 5 轮报的那一条)。
+
+    ⚠ 与簇无关的那份**不能**被簇世代拖下水:否则每一次纯合并写入都要白付一趟
+    836 万边的全表扫,而它的输入一个字节都没变。
+    """
+    ledger = _ledger({kind: 7 for kind in ARTIFACT_KINDS}, cluster_seq=3)
+    assert analysis_ledger_is_current(ledger, 7, 3, has_boards=True)
+    assert not analysis_ledger_is_current(ledger, 7, 4, has_boards=True)
+
+    only_provenance = {ARTIFACT_RELATION_PROVENANCE: ledger[ARTIFACT_RELATION_PROVENANCE]}
+    assert analysis_ledger_is_current(
+        only_provenance, 7, 999, has_boards=False
+    ) is (required_artifact_kinds(has_boards=False) <= {ARTIFACT_RELATION_PROVENANCE})
+    # 直接对那一份问判据:簇世代再怎么漂,它都新鲜。
+    assert artifact_is_current(
+        ARTIFACT_RELATION_PROVENANCE,
+        7,
+        ledger[ARTIFACT_RELATION_PROVENANCE]["payload"],
+        seq=7,
+        cluster_seq=999,
+    )
+    # 依赖合并结果的那几份没盖戳(修复之前写下的行)= 不新鲜,而不是默认新鲜。
+    unstamped = {
+        ARTIFACT_CLUSTER_HISTOGRAM: {
+            "kg_mutation_seq": 7, "payload": {"level": 0}, "created_at": "x",
+        }
+    }
+    assert not artifact_is_current(
+        ARTIFACT_CLUSTER_HISTOGRAM, 7, unstamped[ARTIFACT_CLUSTER_HISTOGRAM]["payload"],
+        seq=7, cluster_seq=0,
+    )
 
 
 def test_analysis_ledger_without_boards_does_not_require_source_profiles():
     """零板块的库合法地没有来源画像;要求它存在会让这类库每次调用都重跑全部重活。"""
-    without_profiles = {
+    without_profiles = _ledger({
         kind: 7 for kind in ARTIFACT_KINDS if kind != ARTIFACT_SOURCE_PROFILES
-    }
-    assert analysis_ledger_is_current(without_profiles, 7, has_boards=False)
-    assert not analysis_ledger_is_current(without_profiles, 7, has_boards=True)
+    })
+    assert analysis_ledger_is_current(without_profiles, 7, 0, has_boards=False)
+    assert not analysis_ledger_is_current(without_profiles, 7, 0, has_boards=True)
+
+
+def test_reusable_payloads_only_carry_cluster_independent_kinds_at_the_same_seq():
+    """复用只覆盖与簇无关、且 KG 世代未动的那几份 —— 判据与闸赖以成立的是同一条。"""
+    ledger = _ledger({kind: 7 for kind in ARTIFACT_KINDS}, cluster_seq=3)
+    assert set(reusable_artifact_payloads(ledger, 7)) == {ARTIFACT_RELATION_PROVENANCE}
+    # KG 世代动了 → 输入可能变了 → 一份都不复用。
+    assert reusable_artifact_payloads(ledger, 8) == {}
 
 
 # ------------------------------------------------------------- 端到端
@@ -549,12 +657,20 @@ def test_statistic_snapshots_round_trip_the_query_layer_payloads(repo):
     artifacts = _artifacts(repo, notebook_id)
     store = repo._runtime.unified_kg
 
-    assert artifacts[ARTIFACT_CLUSTER_HISTOGRAM]["payload"] == json.loads(
+    # 依赖合并结果的两份多带一个簇世代的戳(`stamp_cluster_seq` 盖的),其余逐字相同。
+    def _unstamped(kind: str) -> dict:
+        return {
+            key: value for key, value in artifacts[kind]["payload"].items()
+            if key != CLUSTER_SEQ_PAYLOAD_KEY
+        }
+
+    assert _unstamped(ARTIFACT_CLUSTER_HISTOGRAM) == json.loads(
         json.dumps(store.cluster_size_histogram(notebook_id))
     )
-    assert artifacts[ARTIFACT_LARGEST_CLUSTERS]["payload"] == json.loads(
+    assert _unstamped(ARTIFACT_LARGEST_CLUSTERS) == json.loads(
         json.dumps(store.largest_clusters(notebook_id, 20))
     )
+    # 与合并无关的那份**不盖**戳:它逐字就是查询层的载荷。
     assert artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"] == json.loads(
         json.dumps(store.relation_provenance_counts(notebook_id))
     )
@@ -930,6 +1046,120 @@ def test_version_gate_does_not_recompute_when_the_kg_is_unchanged(repo, monkeypa
     } == created_at
 
 
+def _merge_only_write(repo, notebook_id: str) -> int:
+    """一次**只动合并结果**的写入 —— `kg_mutation_seq` 刻意不动(生产语义)。
+
+    走的是真的写路径 `append_clusters`(facade 的公开入口,`incremental_fuse_source`
+    也用它),不是手工 UPDATE 计数器:被测的正是「簇写路径不抬 KG 世代」这条真实行为。
+    返回写入的簇成员行数。
+    """
+    with repo._connect() as db:
+        object_ids = [
+            row["id"] for row in db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=? "
+                "AND status != 'deprecated' ORDER BY id",
+                (notebook_id,),
+            )
+        ]
+    return repo.append_clusters(
+        notebook_id,
+        [{"canonical_id": "K-merged", "canonical_name": "merged",
+          "member_object_id": object_id} for object_id in object_ids[:3]],
+        object_type="concept",
+    )
+
+
+def _seqs(repo, notebook_id: str) -> tuple:
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT kg_mutation_seq, cluster_mutation_seq FROM unified_kg_state "
+            "WHERE notebook_id=?", (notebook_id,)).fetchone()
+    return int(row["kg_mutation_seq"]), int(row["cluster_mutation_seq"])
+
+
+def test_a_merge_only_write_does_not_move_the_kg_generation(repo):
+    """本次修复的**前提事实**:合并写入只抬簇世代,KG 世代一动没动。
+
+    钉住它是因为整条修复都建立在这上面 —— 如果哪天簇写路径开始 bump
+    `kg_mutation_seq`,下面那几条守卫会全部变成恒真的空守卫而没人发现。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    kg_before, cluster_before = _seqs(repo, notebook_id)
+    assert _merge_only_write(repo, notebook_id) == 3
+    kg_after, cluster_after = _seqs(repo, notebook_id)
+    assert kg_after == kg_before, "簇写路径不该抬 KG 世代"
+    assert cluster_after == cluster_before + 1
+
+
+def test_a_merge_only_write_makes_the_ledger_stale_and_a_plain_rebuild_heals_it(repo):
+    """codex 第 5 轮:纯合并写入之后闸必须判「不新鲜」,而且非 force 调用就能补上。
+
+    修复之前:闸只比 `kg_mutation_seq`,合并写入之后它直接短路 —— 簇大小直方图与最大
+    簇榜单(**从 `concept_clusters` 算出来**)永远停在旧内容上,而账本的戳一动没动,
+    读侧照报「与当前一致」。这里用**产物内容真的变了**来证明它确实重算过,不是只把
+    戳改了一下。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    before = _artifacts(repo, notebook_id)
+    _merge_only_write(repo, notebook_id)
+
+    assert repo.rebuild_communities(notebook_id) == 2      # 刻意不带 force
+
+    after = _artifacts(repo, notebook_id)
+    kg_seq, cluster_seq = _seqs(repo, notebook_id)
+    # 两条统计快照的内容真的变了(多了一个 3 成员的簇),不是只换了个戳。
+    assert (before[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]["clusters"]
+            < after[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]["clusters"])
+    # 依赖合并结果的四份都盖上了当前簇世代;与合并无关的那份仍然不带这个戳。
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+        assert after[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq
+        assert after[kind]["seq"] == kg_seq
+    assert CLUSTER_SEQ_PAYLOAD_KEY not in after[ARTIFACT_RELATION_PROVENANCE]["payload"]
+
+    # 补完之后闸重新短路:再调一次不写任何东西(否则每次打开视图都在重算)。
+    settled = {kind: entry["created_at"] for kind, entry in after.items()}
+    repo.rebuild_communities(notebook_id)
+    assert {
+        kind: entry["created_at"]
+        for kind, entry in _artifacts(repo, notebook_id).items()
+    } == settled
+
+
+def test_a_merge_only_backfill_does_not_rescan_the_relation_table(repo, monkeypatch):
+    """成本主张:纯合并写入触发的补账本**不重扫关系表**。
+
+    `relation_provenance` 只读 `knowledge_relations` + 两次端点探查,一个字都没提
+    `concept_clusters`,而 KG 世代没动 ⟹ 它的输入一个字节都没变。它同时是五份里最贵的
+    一份(生产 836 万边、每行两次随机 PK 探查)。一刀切作废等于每次合并都白付一趟。
+
+    反向也钉住:`force=True` 必须重扫 —— 那是抽取口径/代码改了之后唯一的人工恢复手段,
+    在它上面省这趟等于宣布旧载荷永远换不掉。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    baseline = _artifacts(repo, notebook_id)[ARTIFACT_RELATION_PROVENANCE]["payload"]
+
+    store = repo._runtime.unified_kg
+    calls: list[int] = []
+    original = store.relation_provenance_counts
+    monkeypatch.setattr(
+        store, "relation_provenance_counts",
+        lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1],
+    )
+
+    _merge_only_write(repo, notebook_id)
+    assert repo.rebuild_communities(notebook_id) == 2
+    assert calls == [], "纯合并写入的补账本不该重扫 knowledge_relations"
+    # 复用的必须是**逐字相同**的载荷,不是一个空壳。
+    assert (_artifacts(repo, notebook_id)[ARTIFACT_RELATION_PROVENANCE]["payload"]
+            == baseline)
+
+    repo.rebuild_communities(notebook_id, force=True)
+    assert len(calls) == 1, "force 是人工恢复手段,必须真的重扫"
+
+
 def test_replace_artifacts_consumes_edges_and_profiles_as_one_shot_iterators(repo):
     """落库入口按**可迭代**消费,不得要求 Sequence(len / 下标 / 二次遍历)。
 
@@ -939,8 +1169,7 @@ def test_replace_artifacts_consumes_edges_and_profiles_as_one_shot_iterators(rep
     notebook = repo.create_notebook(NotebookCreate(name="stream"))
     _add_sources(repo, notebook.id, "src-a")
     store = repo._runtime.unified_kg
-    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
-    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 1}
+    payloads = _full_payloads(**{ARTIFACT_COMMUNITY_EDGES: {"level": 0, "communities": 1}})
     edges = iter([("cm-a", "cm-b", 3)])
     profiles = iter([("src-a", 5, 4, "cm-a", 1.0, 1, 1.0)])
     with repo._write() as db:

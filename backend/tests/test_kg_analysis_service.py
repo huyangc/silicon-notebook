@@ -50,6 +50,8 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+    stamp_cluster_seq,
 )
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
@@ -109,11 +111,24 @@ def _community(db, cid: str, members: list[tuple[str, float]], *, level: int = 0
 
 
 def _artifact(db, kind: str, payload: dict, *, seq: int = 10,
-              created_at: str = "2026-01-02T00:00:00") -> None:
+              created_at: str = "2026-01-02T00:00:00",
+              cluster_seq: "int | None" = None, stamp: bool = True) -> None:
+    """写一行账本。默认照生产路径盖簇世代的戳(`stamp_cluster_seq` 知道该盖哪几份)。
+
+    ``cluster_seq=None`` → 跟 ``seq`` 走(``_state`` 的两个计数器默认也是同一个数,
+    所以不特意错开时一切对齐)。``stamp=False`` 模拟**本次修复之前**写下的行:依赖
+    合并结果却没盖戳,读侧必须报「无从判断」而不是默认新鲜。
+    """
+    stamped = (
+        stamp_cluster_seq(
+            {kind: payload}, seq if cluster_seq is None else cluster_seq
+        )[kind]
+        if stamp else payload
+    )
     db.execute(
         "INSERT INTO kg_analysis_artifacts "
         "(notebook_id, kind, kg_mutation_seq, payload, created_at) VALUES (?,?,?,?,?)",
-        (NB, kind, seq, json.dumps(payload, ensure_ascii=False), created_at),
+        (NB, kind, seq, json.dumps(stamped, ensure_ascii=False), created_at),
     )
 
 
@@ -197,17 +212,13 @@ def _profiles_payload(**overrides) -> dict:
 
 
 def _seed_complete_ledger(db, *, seq: int = 10, created_at: str = "2026-01-02T00:00:00",
-                          **edge_overrides) -> None:
-    _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload(),
-              seq=seq, created_at=created_at)
-    _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload(),
-              seq=seq, created_at=created_at)
-    _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload(),
-              seq=seq, created_at=created_at)
-    _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(**edge_overrides),
-              seq=seq, created_at=created_at)
-    _artifact(db, ARTIFACT_SOURCE_PROFILES, _profiles_payload(),
-              seq=seq, created_at=created_at)
+                          cluster_seq: "int | None" = None, **edge_overrides) -> None:
+    common = {"seq": seq, "created_at": created_at, "cluster_seq": cluster_seq}
+    _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload(), **common)
+    _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload(), **common)
+    _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload(), **common)
+    _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload(**edge_overrides), **common)
+    _artifact(db, ARTIFACT_SOURCE_PROFILES, _profiles_payload(), **common)
 
 
 def _service(repo, store=None) -> KgAnalysisService:
@@ -411,6 +422,101 @@ def test_mixed_ledger_seqs_are_flagged_as_inconsistent(repo):
     assert overview.ledger_consistent is False
     assert _artifact_of(overview, ARTIFACT_RELATION_PROVENANCE).freshness.seq_behind == 6
     assert _artifact_of(overview, ARTIFACT_CLUSTER_HISTOGRAM).freshness.seq_behind == 0
+
+
+def test_a_merge_only_drift_is_reported_per_artifact_not_swallowed(repo):
+    """codex 第 5 轮:合并世代单独漂了,依赖它的四份必须报陈旧。
+
+    形状是真实的:合并的写路径刻意不动 `kg_mutation_seq`,所以 KG 世代对齐、合并世代
+    落后。只看前者的话这四份会齐刷刷地说「与当前一致」,而它们的数字全是从
+    `concept_clusters` 算出来的。
+    """
+    with repo._write() as db:
+        _state(db, seq=40, community_seq=40)             # cluster_mutation_seq 也 = 40
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_mutation_seq=43 WHERE notebook_id=?",
+            (NB,),
+        )
+        _seed_complete_ledger(db, seq=40, cluster_seq=40)
+
+    overview = _service(repo).overview(NB)
+
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+        freshness = _artifact_of(overview, kind).freshness
+        assert freshness.seq_behind == 0, kind          # KG 世代确实没动
+        assert freshness.built_at_cluster_seq == 40, kind
+        assert freshness.cluster_seq_behind == 3, kind
+        assert freshness.stale is True, kind
+    # 与合并无关的那份不被拖下水:它的两个输入表都没变,报陈旧是在制造假警报。
+    provenance = _artifact_of(overview, ARTIFACT_RELATION_PROVENANCE).freshness
+    assert (provenance.built_at_cluster_seq, provenance.cluster_seq_behind) == (None, None)
+    assert provenance.stale is False
+    assert overview.state.cluster_mutation_seq == 43
+
+
+def test_the_read_side_and_the_precompute_gate_share_one_verdict(repo):
+    """读侧的 `stale` 与写侧的闸**必须**同一个判据 —— 不是「看起来一样」。
+
+    分岔的表现是一份自相矛盾的报告:闸说「不用重算」而读侧说「陈旧」,或者反过来
+    (闸短路、读侧报「与当前一致」,那正是第 5 轮报的那一条)。这里对同一批账本行
+    分别问两侧,逐 kind 比对结论。
+    """
+    from app.services.kg_analysis_precompute import analysis_ledger_is_current
+
+    verdicts = set()
+    for cluster_now, kg_now in ((40, 40), (43, 40), (40, 41), (43, 41)):
+        with repo._write() as db:
+            db.execute("DELETE FROM kg_analysis_artifacts WHERE notebook_id=?", (NB,))
+            db.execute("DELETE FROM unified_kg_state WHERE notebook_id=?", (NB,))
+            _state(db, seq=kg_now, community_seq=kg_now)
+            db.execute(
+                "UPDATE unified_kg_state SET cluster_mutation_seq=? WHERE notebook_id=?",
+                (cluster_now, NB),
+            )
+            _seed_complete_ledger(db, seq=40, cluster_seq=40)
+
+        overview = _service(repo).overview(NB)
+        store = repo._runtime.unified_kg
+        with repo._connect() as db:
+            ledger = store.kg_analysis_artifact_rows(db, NB)
+        gate_says_current = analysis_ledger_is_current(
+            ledger, kg_now, cluster_now, has_boards=True
+        )
+        read_says_current = all(
+            view.freshness.stale is False for view in overview.artifacts
+        )
+        assert gate_says_current == read_says_current, (
+            f"闸与读侧对同一批账本给出了不同结论(kg={kg_now}, cluster={cluster_now})"
+        )
+        verdicts.add(gate_says_current)
+    # 四个组合里两种结论都必须出现过 —— 否则这条守卫只是在比对一个恒定值。
+    assert verdicts == {True, False}
+
+
+def test_an_unstamped_legacy_row_reports_unknown_not_fresh(repo):
+    """修复**之前**写下的账本行(依赖合并结果却没盖戳)必须报「无从判断」+ 陈旧。
+
+    默认成新鲜是最坏的一档:它会让一批建在未知合并结果上的数字冒充当前值,而这正是
+    本视图存在的理由的反面。判不出来就补跑 + 明说,不猜。
+    """
+    with repo._write() as db:
+        _state(db, seq=10, community_seq=10)
+        _seed_complete_ledger(db, seq=10)
+        db.execute(
+            "DELETE FROM kg_analysis_artifacts WHERE notebook_id=? AND kind=?",
+            (NB, ARTIFACT_CLUSTER_HISTOGRAM),
+        )
+        _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload(),
+                  seq=10, stamp=False)
+
+    freshness = _artifact_of(
+        _service(repo).overview(NB), ARTIFACT_CLUSTER_HISTOGRAM
+    ).freshness
+
+    assert freshness.built_at_seq == 10 and freshness.seq_behind == 0
+    assert freshness.built_at_cluster_seq is None
+    assert freshness.cluster_seq_behind is None
+    assert freshness.stale is True
 
 
 def test_boards_are_stamped_with_community_seq_not_the_ledger_seq(repo):
@@ -866,7 +972,10 @@ def test_source_page_is_ordered_by_mainstream_share_ascending(repo):
     assert [r["source_id"] for r in page.rows] == ["s-lo", "s-mid", "s-hi"]
     assert page.order == ORDER_SPARSE
     assert page.total == 3 and page.returned == 3 and page.has_more is False
-    assert page.summary == _profiles_payload()
+    # summary 就是账本行的 payload 原样(含生产路径盖上的簇世代戳)。
+    assert page.summary == stamp_cluster_seq(
+        {ARTIFACT_SOURCE_PROFILES: _profiles_payload()}, 10
+    )[ARTIFACT_SOURCE_PROFILES]
 
 
 def test_source_page_order_connected_reverses(repo):

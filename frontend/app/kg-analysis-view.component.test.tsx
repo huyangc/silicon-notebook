@@ -38,7 +38,7 @@ function artifact(kind: string, overrides: Partial<KgArtifactView> = {}): KgArti
     present: true,
     optional: kind === "source_profiles",
     absence: null,
-    freshness: { basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false },
+    freshness: { basis: "usable_live", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
     created_at: "2026-07-25T09:00:00Z",
     units: {},
     payload: {},
@@ -69,7 +69,7 @@ function histogramArtifact(overrides: Partial<KgArtifactView> = {}): KgArtifactV
 
 function boards(count: number, total: number) {
   return {
-    freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true },
+    freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true, built_at_cluster_seq: 5, cluster_seq_behind: 2 },
     units: {
       level: "level",
       total: "communities",
@@ -128,7 +128,7 @@ function report(overrides: Partial<KgAnalysisReport> = {}): KgAnalysisReport {
       artifact("largest_clusters"),
       artifact("relation_provenance"),
       artifact("community_edges", {
-        freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true },
+        freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true, built_at_cluster_seq: 5, cluster_seq_behind: 2 },
         payload: {
           level: 0,
           edges: 3,
@@ -142,7 +142,7 @@ function report(overrides: Partial<KgAnalysisReport> = {}): KgAnalysisReport {
       }),
       artifact("source_profiles", {
         // 与 community_edges 同批算出,所以同样建于 #100、同样落后 28 次变更。
-        freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true },
+        freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true, built_at_cluster_seq: 5, cluster_seq_behind: 2 },
         units: {
           head_communities: "communities",
           head_members: "canonical",
@@ -162,7 +162,7 @@ function report(overrides: Partial<KgAnalysisReport> = {}): KgAnalysisReport {
     boards: boards(30, 1217),
     board_edges: {
       present: true,
-      freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true },
+      freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true, built_at_cluster_seq: 5, cluster_seq_behind: 2 },
       limit: 200,
       returned: 3,
       returned_weight: 60,
@@ -199,7 +199,7 @@ function sourcePage(overrides: Partial<KgSourceProfilePage> = {}): KgSourceProfi
     generated_at: "2026-07-25T10:00:00Z",
     present: true,
     absence: null,
-    freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true },
+    freshness: { basis: "community_snapshot", built_at_seq: 100, seq_behind: 28, stale: true, built_at_cluster_seq: 5, cluster_seq_behind: 2 },
     kg_mutation_seq: 128,
     order: "sparse",
     limit: 20,
@@ -272,13 +272,14 @@ test("每一块数据各自标注口径与落后量，而不是页顶挂一条�
   // 同屏并列的两块口径不同、新鲜度也不同——这正是必须逐块标注的理由。
   const composition = blockByTitle("对象构成");
   expect(within(composition).getByText("整理当时的实时口径")).toBeInTheDocument();
-  expect(within(composition).getByText("建于变更 #128")).toBeInTheDocument();
+  // 两条世代线一起上屏:合并那条会单独动,只说变更就会谎报「与当前一致」。
+  expect(within(composition).getByText("建于变更 #128、合并 #7")).toBeInTheDocument();
   expect(within(composition).getByText("与当前一致")).toBeInTheDocument();
 
   const boardsBlock = blockByTitle("主题板块");
   expect(within(boardsBlock).getByText("上次主题板块划分")).toBeInTheDocument();
-  expect(within(boardsBlock).getByText("建于变更 #100")).toBeInTheDocument();
-  expect(within(boardsBlock).getByText("落后 28 次变更")).toBeInTheDocument();
+  expect(within(boardsBlock).getByText("建于变更 #100、合并 #5")).toBeInTheDocument();
+  expect(within(boardsBlock).getByText("落后 28 次变更 · 落后 2 次合并")).toBeInTheDocument();
 
   // 每一块(含数据清单里的每一行)都挂着自己的那一条,不是全局一条。
   expect(container.querySelectorAll(".kg-analysis-freshness").length).toBeGreaterThanOrEqual(9);
@@ -364,7 +365,7 @@ test("从没算过：说「还没算过」并明确它不是 0", async () => {
               present: false,
               absence: "never_computed",
               payload: null,
-              freshness: { basis: "usable_live", built_at_seq: null, seq_behind: null, stale: null },
+              freshness: { basis: "usable_live", built_at_seq: null, seq_behind: null, stale: null, built_at_cluster_seq: null, cluster_seq_behind: null },
             })
           : item
       )),
@@ -391,7 +392,7 @@ test("本该有却缺失：升级成红色异常小字，措辞与「没算过�
               present: false,
               absence: "unexpected",
               payload: null,
-              freshness: { basis: "usable_live", built_at_seq: null, seq_behind: null, stale: null },
+              freshness: { basis: "usable_live", built_at_seq: null, seq_behind: null, stale: null, built_at_cluster_seq: null, cluster_seq_behind: null },
             })
           : item
       )),
@@ -416,7 +417,7 @@ test("合法缺席（零板块的库不出来源画像）：说清是刻意不�
       returned: 0,
       has_more: false,
       rows: [],
-      freshness: { basis: "community_snapshot", built_at_seq: null, seq_behind: null, stale: null },
+      freshness: { basis: "community_snapshot", built_at_seq: null, seq_behind: null, stale: null, built_at_cluster_seq: null, cluster_seq_behind: null },
     }),
   );
   renderView();
@@ -558,7 +559,7 @@ test("主体板块口径不与来源画像的缺席同屏打脸：这一页没�
       returned: 0,
       has_more: false,
       rows: [],
-      freshness: { basis: "community_snapshot", built_at_seq: 140, seq_behind: 0, stale: false },
+      freshness: { basis: "community_snapshot", built_at_seq: 140, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
     }),
   );
   renderView();
@@ -591,7 +592,7 @@ test("主题板块陈旧时挂同一档黄色徽标，不是唯一一块只有�
     report({
       boards: {
         ...base.boards,
-        freshness: { basis: "community_snapshot", built_at_seq: 128, seq_behind: 0, stale: false },
+        freshness: { basis: "community_snapshot", built_at_seq: 128, seq_behind: 0, stale: false, built_at_cluster_seq: 7, cluster_seq_behind: 0 },
       },
     }),
   );

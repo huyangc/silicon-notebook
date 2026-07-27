@@ -1231,35 +1231,16 @@ class UnifiedKgStore:
     # 会被 `WHERE level=0` 读出来。现在三张表统一按 notebook 整表重写:一次预计算产出
     # 的永远是**一套**自洽的产物,描述账本里记着的那个 level。
 
-    @staticmethod
-    def kg_analysis_artifact_seqs(
-        db: sqlite3.Connection, notebook_id: str
-    ) -> Dict[str, int]:
-        """账本现状:``{kind: kg_mutation_seq}``。最多 5 行,点读。
-
-        预计算**自己的**新鲜度闸靠它判定(见 `rebuild_communities` 的 B1 说明):
-        账本齐不齐、戳对不对,与「社区图要不要重建」是两件独立的事。返回原始行让
-        判定留在后端中性的 `kg_analysis_precompute.analysis_ledger_is_current` 里,
-        store 不替它下结论。
-        """
-        return {
-            row["kind"]: int(row["kg_mutation_seq"])
-            for row in db.execute(
-                "SELECT kind, kg_mutation_seq FROM kg_analysis_artifacts "
-                "WHERE notebook_id=?", (notebook_id,),
-            )
-        }
-
     # ------------------------ KG 质量分析产物的**读**路径(T3,在线请求路径)
     # 与上面那三条 T1 只读聚合的关键区别:这三个只读**预计算产物表**,代价按行数硬
     # 有界(账本 ≤5 行;来源画像 ≤ 来源数、一次只取一页;跨板块边 ≤
     # MAX_PERSISTED_COMMUNITY_EDGES,一次只取 top-N)。所以它们**可以**挂在在线请求上,
     # 那三条全表重活不行。
     #
-    # 连接契约:connection-taking,骑调用方(T3 的 KgAnalysisService)的读连接 —— 与
-    # `kg_analysis_artifact_seqs` 同款,不自开连接,故不需要那道
-    # `_reject_inside_write_transaction`(它防的是「自开的另一条连接读到提交前的库」,
-    # 骑调用方连接不存在这个失配)。服务层另有一道同语义的入口断言。
+    # 连接契约:connection-taking,骑调用方(T3 的 KgAnalysisService / 预计算的新鲜度闸)
+    # 的读连接 —— 不自开连接,故不需要那道 `_reject_inside_write_transaction`(它防的是
+    # 「自开的另一条连接读到提交前的库」,骑调用方连接不存在这个失配)。服务层另有一道
+    # 同语义的入口断言。
 
     @staticmethod
     def kg_analysis_artifact_rows(
@@ -1267,9 +1248,12 @@ class UnifiedKgStore:
     ) -> Dict[str, Dict[str, object]]:
         """账本全文:``{kind: {kg_mutation_seq, payload, created_at}}``。最多 5 行,点读。
 
-        与 `kg_analysis_artifact_seqs` 的分工:那个只给预计算的新鲜度闸用(只要 seq),
-        这个给报告用(还要 payload 与建库时刻)。刻意不把它们合成一个 —— 闸在
-        `rebuild_communities` 的热路径上每次都跑,不该顺带把五份 payload 也读出来。
+        **读账本只有这一个入口**:T3 的报告与预计算的新鲜度闸
+        (`rebuild_communities`)共用它。早先另有一个只取 seq 的窄读,理由是「闸在热
+        路径上,不该顺带把五份 payload 也读出来」;簇世代改盖进 payload(刻意不加列,
+        见 `kg_analysis_precompute.CLUSTER_SEQ_PAYLOAD_KEY`)之后那个理由不再成立 ——
+        闸也必须拿 payload 才判得出簇是否漂过,两个方法就只差一个 `created_at`。
+        合成一个:账本的读取与判据都只剩一处,不可能漂。
 
         **行的存在与否才是「这份产物在不在」的判据**,明细表的行数不是:单一板块的图
         legitimately 产出 0 条跨板块边。调用方据此区分「缺失」与「为空」。

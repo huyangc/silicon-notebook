@@ -64,6 +64,8 @@ from app.services.kg_analysis_precompute import (
     analysis_ledger_is_current,
     fold_cross_community_edges,
     head_community_ids,
+    reusable_artifact_payloads,
+    stamp_cluster_seq,
 )
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
@@ -3251,7 +3253,9 @@ class KnowledgeLifecycleService:
 
         · 社区图闸(历史行为):`community_seq == kg_mutation_seq` → 不重跑 Louvain、
           不重写成员表。
-        · 分析账本闸:`kg_analysis_artifacts` 齐全且每一行的戳都等于同一个 seq。
+        · 分析账本闸:`kg_analysis_artifacts` 齐全,且每一行都建在**当前的两个世代**
+          上 —— KG 世代 `kg_mutation_seq`,以及依赖合并结果的那四份还要对齐簇世代
+          `cluster_mutation_seq`(判据见 `kg_analysis_precompute.artifact_is_current`)。
 
         只有**两个闸都过**才是真正的 no-op。图新鲜而账本不新鲜时走「只补账本」路径:
         重建 canonical 边图并沿用库里**已有**的板块划分,跳过 Louvain、跳过
@@ -3277,6 +3281,24 @@ class KnowledgeLifecycleService:
         来源画像(设计 §3.3 的 S4 —— 那张表单独看是在说「所有来源都关联稀疏」),
         硬写 True 等于宣布这类库的账本永远不完整。判据与写入口
         `check_artifact_payloads` 的复核**同一条**(都是板块个数),两边不会分岔。
+
+        ⚠ **簇世代也是账本闸的一部分**(codex 第 5 轮评审)。`concept_clusters` 的
+        写路径(`write_clusters` / `append_clusters` / 整理时的 cluster-map swap)
+        **刻意不动** `kg_mutation_seq`,变化信号独立在 `cluster_mutation_seq` 上。
+        只看 KG 世代的闸对整条簇写路径完全失明:簇变了、簇大小直方图与最大簇榜单
+        (直接从 `concept_clusters` 算)跟着变了,而闸短路、读侧报「与当前一致」。
+        哪四份受影响、`relation_provenance` 为什么不受影响,依据见
+        `kg_analysis_precompute.CLUSTER_DEPENDENT_ARTIFACT_KINDS` 的逐条 SQL 说明。
+
+        簇世代触发的补账本走的仍是上面那条「只补账本」路径 —— 它**沿用库里已有的板块
+        划分**,而那批板块是在旧的合并结果上跑出来的。这不是本次新引入的近似:B1 那条
+        路径本来就是「用当前的 canonical 边图 + 库里已有的划分」,设计里已经明确接受
+        (代价是 171 万成员行的整表重写)。真正把板块也重铸的是 `rebuild_unified_kg`
+        的收尾 —— 它在聚类真的重算之后用 `force=True` 调本方法,理由与本段同源。
+        ⚠ 已知的残留缺口(**不**在本次修复范围内,需要一列才能补):板块划分自己没有
+        地方记「它建在哪一代合并结果上」,所以 `boards` 那一格的落后量只按
+        `community_seq` 报,报不出簇世代。补它要给 `unified_kg_state` 加一列
+        = 追加迁移 + bump `SCHEMA_VERSION`。
         """
         self.get_notebook(notebook_id)
         if not self.settings.community_layer_enabled:
@@ -3285,17 +3307,22 @@ class KnowledgeLifecycleService:
         # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
         # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
         # ⚠ 判据里**没有**板块数:零板块是合法终态,理由见 docstring 那段。
+        # 账本读的是**整行**(含 payload)而不是只读 seq:簇世代盖在 payload 里(刻意
+        # 不加列,见 `kg_analysis_precompute.CLUSTER_SEQ_PAYLOAD_KEY`),闸拿不到 payload
+        # 就判不出簇是否漂过。这也是同一次读同时喂给下面 `_precompute_kg_analysis` 的
+        # 复用判断 —— 账本只读一遍,闸与复用不可能读到两份不同的账本。
         with self._connect() as _db:
             _st = self.unified_kg.state_row(_db, notebook_id)
             _cnt = self.unified_kg.communities_count(_db, notebook_id, level)
-            _ledger = self.unified_kg.kg_analysis_artifact_seqs(_db, notebook_id)
+            _ledger = self.unified_kg.kg_analysis_artifact_rows(_db, notebook_id)
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
+        _cseq = int(_st["cluster_mutation_seq"]) if _st else 0
         _boards = int(_cnt["c"]) if _cnt else 0
         graph_fresh = bool(
             not force and _st is not None and int(_st["community_seq"]) == _seq
         )
         if graph_fresh and analysis_ledger_is_current(
-            _ledger, _seq, has_boards=_boards > 0
+            _ledger, _seq, _cseq, has_boards=_boards > 0
         ):
             return _boards
         # 社区检测后端:igraph(整数边表 + C 核,10^6–10^7 边内存/耗时有界)优先;
@@ -3425,7 +3452,11 @@ class KnowledgeLifecycleService:
         # `except Exception` 捕获。
         try:
             self._precompute_kg_analysis(
-                notebook_id, level, _seq, kept_rows, ew, can2idx
+                notebook_id, level, _seq, _cseq, kept_rows, ew, can2idx,
+                # `force` 是「用户明确要求重算」——它上面不省钱,见
+                # `reusable_artifact_payloads` 的最后一段。
+                reusable=({} if force
+                          else reusable_artifact_payloads(_ledger, _seq)),
             )
         except KgBuildAborted:
             raise
@@ -3452,9 +3483,12 @@ class KnowledgeLifecycleService:
         notebook_id: str,
         level: int,
         seq: int,
+        cluster_seq: int,
         kept_rows: "List[Tuple[str, List[str]]]",
         edge_weights: "Dict[tuple, int]",
         can2idx: "Dict[str, int]",
+        *,
+        reusable: "Optional[Dict[str, dict]]" = None,
     ) -> None:
         """把 KG 质量分析的产物在**这一次**图构建里算出来并整批落库(设计 §3.2)。
 
@@ -3475,6 +3509,17 @@ class KnowledgeLifecycleService:
         `kg_mutation_seq`,与 `community_seq` 同一个数),账本因此能逐份回答「我建于
         哪个 KG 状态」。生产上「产物严重落后于当前 KG」是常态而非边缘情况,所以这个戳
         是产品需求,不是审计装饰。
+
+        ⚠ **两个世代,不是一个。** 依赖合并结果的四份还要盖 `cluster_seq`
+        (= `unified_kg_state.cluster_mutation_seq`),因为簇的写路径刻意不动
+        `kg_mutation_seq`。盖戳由中性的 `stamp_cluster_seq` 统一做(它知道哪四份要盖),
+        两侧 store 的 `check_artifact_payloads` 当场复核少盖/多盖 —— 盖与查刻意分在
+        不同的函数里,同一个函数里既盖又查的守卫恒真。
+
+        ``reusable``:上一轮账本里**可以原样搬过来**的 payload(只可能是与簇无关的
+        `relation_provenance`,判据与理由见 `reusable_artifact_payloads`)。给了就不
+        重算那一份 —— 纯合并写入触发的补账本因此不用白跑一趟 836 万边的全表扫。
+        为空 / 不传 = 全部重算(`force=True` 与首次构建走这条)。
 
         ⚠ **这个戳保证的是「都属于同一轮预计算」,不是「都读到了同一份 KG 快照」。**
         本方法里有四个以上互不同步的读点(跨板块边用的 `ew` 建于 rebuild 的图扫描、
@@ -3544,10 +3589,14 @@ class KnowledgeLifecycleService:
             ARTIFACT_LARGEST_CLUSTERS: self.unified_kg.largest_clusters(
                 notebook_id, PRECOMPUTED_LARGEST_CLUSTERS
             ),
-            ARTIFACT_RELATION_PROVENANCE: self.unified_kg.relation_provenance_counts(
-                notebook_id
-            ),
         }
+        # 与簇无关的那份:上一轮的账本行还在同一个 `seq` 上就直接搬过来,不重扫 836 万
+        # 边(判据、不变式与「force 不复用」的理由见 `reusable_artifact_payloads`)。
+        reused = (reusable or {}).get(ARTIFACT_RELATION_PROVENANCE)
+        payloads[ARTIFACT_RELATION_PROVENANCE] = (
+            reused if reused is not None
+            else self.unified_kg.relation_provenance_counts(notebook_id)
+        )
         profiles: "List[tuple]" = []
         if total_members:
             source_folder = SourceProfileFolder(head)
@@ -3567,7 +3616,8 @@ class KnowledgeLifecycleService:
             }
         with self._write() as db:
             self.unified_kg.replace_kg_analysis_artifacts(
-                db, notebook_id, seq, edges, profiles, payloads, self._now()
+                db, notebook_id, seq, edges, profiles,
+                stamp_cluster_seq(payloads, cluster_seq), self._now(),
             )
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
