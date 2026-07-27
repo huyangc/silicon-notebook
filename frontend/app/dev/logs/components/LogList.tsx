@@ -1,5 +1,5 @@
 "use client";
-import type { Summary } from "../types";
+import type { ScopedSummary } from "../types";
 import { LogRow } from "./LogRow";
 
 export function LogList({
@@ -12,9 +12,9 @@ export function LogList({
   onShowNew,
   loading,
 }: {
-  records: Summary[];
+  records: ScopedSummary[];
   selectedId: string | null;
-  onSelect: (rec: Summary) => void;
+  onSelect: (rec: ScopedSummary) => void;
   hasMore: boolean;
   onLoadMore: () => void;
   newCount: number;
@@ -34,7 +34,7 @@ export function LogList({
       ))}
       {loading ? <div className="empty">加载中…</div> : null}
       {hasMore ? (
-        <button className="loadmore" onClick={onLoadMore}>
+        <button className="loadmore" onClick={onLoadMore} disabled={loading}>
           加载更多
         </button>
       ) : null}

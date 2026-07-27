@@ -1,5 +1,5 @@
 "use client";
-import type { Summary } from "../types";
+import type { ScopedSummary } from "../types";
 import { formatLatency, formatTokens, statusClass } from "../format";
 
 export function LogRow({
@@ -7,9 +7,9 @@ export function LogRow({
   selected,
   onSelect,
 }: {
-  rec: Summary;
+  rec: ScopedSummary;
   selected: boolean;
-  onSelect: (rec: Summary) => void;
+  onSelect: (rec: ScopedSummary) => void;
 }) {
   return (
     <button className={`logrow${selected ? " selected" : ""}`} onClick={() => onSelect(rec)}>
