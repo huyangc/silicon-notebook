@@ -35,10 +35,6 @@ NOTEBOOK_SCOPED_TABLES = [
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
     "kg_relation_completion_state",
     "kg_cluster_scratch", "kg_canonical_scratch", "kg_conflict_candidates",
-    # v32: KG 质量分析的预计算产物(跨板块边 / 来源画像 / 产物账本)。它们是派生数据,
-    # 但按 notebook 拷贝仍然正确且必要:产物账本带 kg_mutation_seq, 跟着 notebook 走
-    # 就能在合并后的库里如实报出「建于哪个 KG 状态」。
-    "kg_community_edges", "kg_source_profiles", "kg_analysis_artifacts",
     "merge_review_jobs",
     "promotion_candidates", "derived_rule_candidates", "extraction_runs",
     "extraction_candidates", "articles", "article_claims", "conversations",
@@ -83,7 +79,10 @@ GLOBAL_UNION_TABLES = [
 # 外部内容 FTS —— 导入后 rebuild
 EXTERNAL_FTS_TABLES = ["memory_items_fts"]
 
-# 副库不导入(临时登录会话, 用户重登即可; primary 的随整库复制保留)
+# 副库不导入(primary 自己的行随整库复制原样保留)。本类混着两种理由, 都是"不导入",
+# 所以共用一个分类桶, 但别把它们的理由混为一谈:
+#   (a) 属于 primary 部署/本次运行的状态 —— 导入副库那份会把两个部署的身份搅在一起;
+#   (b) 派生产物 —— 合并后本来就该由重建重新产出, 拷过来只会带着**源库的版本戳**落地。
 SKIP_SECONDARY_TABLES = [
     "auth_sessions",
     # Forward-shadow capture state and event history belong to the primary
@@ -97,6 +96,18 @@ SKIP_SECONDARY_TABLES = [
     # 全局设置 KV(含每笔记本文档数量上限的全局默认)属于 primary 部署;导入副库的
     # app_settings 会覆盖 primary 的部署级配置,故与部署健康表同款只保 primary。
     "app_settings",
+    # --- 理由 (b): KG 质量分析的预计算产物(跨板块边 / 来源画像 / 产物账本, v34)。---
+    # 三张都是 `rebuild_communities` 一次事务整体重写的派生数据,而 `kg_analysis_artifacts`
+    # 这本账里每行都钉着它建于哪个 `kg_mutation_seq`。这个版本戳只在**它自己那个库**里
+    # 有意义:导入 notebook 的 `unified_kg_state` 紧接着就被 KG_STATE_TABLES 清掉(当前
+    # seq 因此合成为 0),账本却带着源库的 seq(生产上是几百)活下来 —— 分析视图一比就得出
+    # `seq_behind < 0`,而那一档是刻意不 clamp 的红色 integrity 告警,语义是「库被手工改过、
+    # 数字不可信」。一次正常合并稳定造出这个假警报,是纯粹的噪声。
+    # 所以这三张跟着 KG 状态一起归零:不导入(留白 = 「从未计算过」的诚实表达),等部署后
+    # 那次「刷新图谱 / 重新合并」把它们连同社区图一起重新算出来。
+    # ⚠ 反过来做(照拷进来再由 KG_STATE_TABLES 清)语义一样, 但要先把生产 base 库里
+    #   数以百万计的跨板块边搬进合并事务再删掉 —— 白付一遍 IO。
+    "kg_community_edges", "kg_source_profiles", "kg_analysis_artifacts",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

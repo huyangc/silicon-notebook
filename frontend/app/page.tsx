@@ -869,8 +869,12 @@ export default function Home() {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
-  // 「图谱分析」只读报告(kg-analysis-view.tsx)。渲染在知识图谱视图内部,所以关掉
-  // 图谱视图时它自动跟着卸载,不必再维护一条「父关了子也要关」的联动。
+  // 「图谱分析」只读报告(kg-analysis-view.tsx)。渲染在知识图谱视图内部,但**卸载不等于
+  // 复位** —— 这个 state 挂在父层,子组件被卸载后它仍是 true。所以父视图的开与关都必须
+  // 显式把它推回 false,否则下次打开知识图谱会立刻自弹一次分析窗,而且 notebookId 取的是
+  // 当时的 currentNotebookId —— 中间换过库的话,弹出来的是**另一个库**的报告。
+  // 复位点恰好两处:openKgView(打开/重开)与 closeKgView(关闭),由
+  // kg-analysis-view-toggle.test.mjs 钉住。
   const [kgAnalysisOpen, setKgAnalysisOpen] = useState(false);
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
@@ -3852,6 +3856,7 @@ export default function Home() {
     const requestId = ++kgOpenRequestRef.current;
     const workspaceEpoch = workspaceEpochRef.current;
     setKgViewOpen(true);
+    setKgAnalysisOpen(false);                     // 上次留下的分析窗不得跟着重开(见 state 声明处)
     setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
     setKgSearch(""); setKgSearchHits([]); setKgSearchBusy(false);
     setKgExpandedNodes([]); setKgExpandedEdges([]);
@@ -3912,6 +3917,14 @@ export default function Home() {
         setToast("知识图谱已打开，但引用节点定位失败，请重试");
       }
     } catch (err) { reportError(err); }
+  }
+
+  // 关闭知识图谱视图。刻意做成具名函数而不是内联 `() => setKgViewOpen(false)`:
+  // 视图内还挂着「图谱分析」弹窗的开关,它必须和父视图一起归零(见 kgAnalysisOpen 声明处),
+  // 而"关闭时要一起做的事"散在内联箭头里就迟早会漏掉一条。
+  function closeKgView() {
+    setKgViewOpen(false);
+    setKgAnalysisOpen(false);
   }
 
   // 防抖定时器 ref — 搜索词变化后延迟 300ms 再发请求。
@@ -6465,7 +6478,7 @@ export default function Home() {
                   <Database size={16} /> 图谱 Schema
                 </button>
               )}
-              <button className="icon-button" onClick={() => setKgViewOpen(false)} title="Close">×</button>
+              <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
             </div>
           </div>
           <div className="kg-view-body">

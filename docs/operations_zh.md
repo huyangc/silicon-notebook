@@ -635,6 +635,8 @@ PYTHONPATH=backend python scripts/merge_dbs.py \
 
 **落败一侧 base 自己的参考库挂载边:** 合并后保留的 base notebook(`--keep-base` 那一侧)只保留它自己的参考库挂载边;如果**另一侧**的 base notebook 曾挂载过别的参考库,这些挂载边不会被带过来——这和该 base 名下其它 notebook-scoped 数据(它自己的 sources、chunks、knowledge objects……)的既定规则完全一致。两侧其它(个人)notebook 自己持有的挂载边则原样全部并入,不受影响。
 
+**被导入 notebook 的图谱状态与「图谱分析」产物一律归零:** 从副库带过来的每个 notebook,其图谱构建状态与「图谱分析」报告的预计算产物都不保留(前者导入后清空,后者根本不导入)。两者都是派生数据,而且它们记录的版本戳只在原来那个库里有意义——留着会让分析报告拿源库的版本戳去比合并库的当前状态,得出「这份数字比当前内容还新」这种本不该出现的告警。归零之后这些报告如实显示为「从未计算过」,由下面那次「刷新图谱」连同主题板块一起重新算出来。
+
 合并完成后,把 `merged/` 产出(db + storage)部署到要保留下来的那台主机,首次启动后在 app 内触发一次索引重建(「重建索引」/「刷新图谱」)以重新生成 `kg_index`/`kg_viz`/ANN 等未被拷贝的产物。
 
 ### 补齐存量待批晋升候选的目标公共知识库(`scripts/backfill_promotion_targets.py`)

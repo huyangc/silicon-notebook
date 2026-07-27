@@ -729,6 +729,8 @@ Preconditions: each side must have exactly one `tier='base'` public knowledge ba
 
 **Reference-library mounts on the losing base:** the surviving base notebook (the `--keep-base` side) keeps only its own reference-library mounts; if the *other* side's base notebook had mounted other reference libraries, those mounts are dropped, same as every other piece of notebook-scoped data the non-surviving base owns (its sources, chunks, knowledge objects, ...). Every other (personal) notebook's own mounts are carried over untouched from both sides.
 
+**Graph state and graph-analysis artifacts of imported notebooks are reset:** for every notebook carried over from the secondary side, its graph build state and the precomputed artifacts behind the "Graph analysis" report are not preserved (the former is cleared after import, the latter is never imported). Both are derived data, and the version stamps they carry are only meaningful inside the database they were computed in — keeping them would make the analysis report compare the source database's stamp against the merged database's current state and raise a "this figure is newer than the current content" alarm that should never occur. Reset, those reports honestly read "never computed", and the rebuild below recomputes them along with the topic boards.
+
 After merging, deploy the `merged/` output (db + storage) to whichever host keeps running, and on first start trigger an index rebuild in the app ("Rebuild index" / "Refresh graph") to regenerate the `kg_index`/`kg_viz`/ANN artifacts, which are intentionally not copied.
 
 ### Backfilling legacy promotion-candidate targets (`scripts/backfill_promotion_targets.py`)
