@@ -36,12 +36,12 @@ import {
   groupOf, groupLabel, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
 } from "./ask-modes";
 import {
-  ASK_RETRIEVAL_EFFORTS,
+  ASK_RETRIEVAL_EFFORT_OPTIONS,
   DEFAULT_ASK_RETRIEVAL_EFFORT,
   retrievalEffortFromTurn,
-  retrievalEffortThresholdText,
   type AskRetrievalEffortId,
 } from "./ask-retrieval-effort";
+import { EffortPicker } from "./effort-picker";
 import {
   approvePromotion,
   fetchPromotionQueue,
@@ -4910,25 +4910,18 @@ export default function Home() {
                       </span>
                     )}
                     {askMode === "reasoning" && (
-                      <span className="ask-retrieval-effort" role="group" aria-label="推理检索档位">
-                        <span className="ask-retrieval-effort-label">检索档位</span>
-                        {ASK_RETRIEVAL_EFFORTS.map((effort) => (
-                          <button
-                            key={effort.id}
-                            type="button"
-                            className={`mode-engine${askRetrievalEffort === effort.id ? " active" : ""}`}
-                            title={retrievalEffortThresholdText(effort.id)}
-                            aria-label={`${effort.label}：${retrievalEffortThresholdText(effort.id)}`}
-                            disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
-                            onClick={() => setAskRetrievalEffort(effort.id)}
-                          >
-                            {effort.label}
-                          </button>
-                        ))}
-                        <details className="ask-retrieval-thresholds">
-                          <summary>阈值</summary>
-                          <div>{retrievalEffortThresholdText(askRetrievalEffort)}</div>
-                        </details>
+                      <span className="ask-retrieval-effort">
+                        {/* 与深度报告的「研究深度」共用 EffortPicker：同一套档名理应是同一个控件。
+                            popover 只给该档一句说明，不再铺开每档的阈值数字。 */}
+                        <EffortPicker
+                          chipLabel="档位"
+                          title="检索档位"
+                          options={ASK_RETRIEVAL_EFFORT_OPTIONS}
+                          value={askRetrievalEffort}
+                          onChange={(id) => setAskRetrievalEffort(id as AskRetrievalEffortId)}
+                          disabled={asking || intentChecking || sessionLoading || Boolean(askIntentReview)}
+                          compact
+                        />
                       </span>
                     )}
                     {groupOf(askMode) === "strict" && !kgAvailable && (
