@@ -466,6 +466,83 @@ def test_source_profiles_apply_the_documented_field_semantics(repo):
             payload["total_members"]) == (1, 4, 7)
 
 
+def test_source_profiles_drop_hidden_sources_but_keep_orphan_references(repo):
+    """两类**长得很像、处置必须相反**的来源,一条测试同时钉住。
+
+      · 合成来源(`source_type IN ('memory','knowhow')`)→ **排除**。产品其余各处一律
+        把它们当隐藏源;它们的 `title` 是用户内容(knowhow 的是表名、Memory 的是那条
+        记忆的抬头),而且天生只连自己那一小片,会把「最不连通的来源」这张榜的头部占满。
+      · 孤儿来源(`source_id` 在 `sources` 里没有对应行,历史清理会留下)→ **保留**,
+        并在读侧标 `source_missing`。那是本视图**有意**的诊断能力。
+
+    ⚠ 一条测试同时断两边是刻意的:这两件事由**同一个谓词**决定,而最容易犯的错正是
+    「修好一边、顺手把另一边弄坏」—— 把 `NOT EXISTS` 写成 `JOIN sources` 或
+    `LEFT JOIN … WHERE s.source_type NOT IN (…)`(NULL 让谓词为 NULL)就会把孤儿一起
+    吞掉,而那两种写法对「排除合成来源」这一半是完全正确的。分成两条测试的话,
+    先跑的那条会绿,读的人不一定注意到另一条在报什么。
+
+    账本 payload 的 `sources` 一并断:排除发生在预计算,所以 `len(profiles)` 与读侧的
+    分页 `total` 必须还是同一个口径 —— 只在读侧过滤的修法会让这两个数字分岔。
+    """
+    notebook_id = _seed(repo)
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO sources "
+            "(id, notebook_id, title, source_type, status, parse_status, "
+            " created_at, updated_at) "
+            "VALUES (?,?,?,?, 'extracted', 'parsed', '2026-01-01', '2026-01-01')",
+            [
+                ("src-knowhow", notebook_id, "季度奖金核算口径", "knowhow"),
+                ("src-memory", notebook_id, "老板不喜欢周一开会", "memory"),
+            ],
+        )
+        # 隐藏合成来源的对象:形态与 src-c 那条一模一样(可用、有来源、不在图里),
+        # 唯一的差别就是来源类型 —— 所以排除只可能来自类型谓词。
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, status, payload, evidence, source_id, "
+            " created_at, updated_at) "
+            "VALUES (?,?, 'claim', 'approved', ?, '[]', ?, "
+            "        '2026-01-01', '2026-01-01')",
+            [
+                ("ko-knowhow", notebook_id, '{"name":"KH"}', "src-knowhow"),
+                ("ko-memory", notebook_id, '{"name":"MEM"}', "src-memory"),
+                # 孤儿:src-deleted 在 sources 里根本没有行。
+                ("ko-orphan", notebook_id, '{"name":"ORPH"}', "src-deleted"),
+            ],
+        )
+    repo.rebuild_communities(notebook_id, force=True)
+
+    profiles = _profiles(repo, notebook_id)
+    assert "src-knowhow" not in profiles, (
+        "knowhow 投影的来源进了来源画像 —— 它的标题是用户的表名"
+    )
+    assert "src-memory" not in profiles, "Memory 的合成来源进了来源画像"
+    # 孤儿必须还在,而且带完整数据(1 个可用对象、不在图里)。
+    assert profiles["src-deleted"] == (1, 0, "", 0.0, 0, 0.0), (
+        "孤儿来源被一起排除了 —— 一个有意的诊断信号变成了静默丢弃"
+    )
+    assert set(profiles) == {"src-a", "src-b", "src-c", "src-deleted"}
+
+    payload = _artifacts(repo, notebook_id)[ARTIFACT_SOURCE_PROFILES]["payload"]
+    assert payload["sources"] == 4
+
+    # 读侧:孤儿要能与「有来源但没标题」分得开。
+    with repo._connect() as db:
+        total, rows = repo._runtime.unified_kg.kg_source_profile_page(
+            db, notebook_id, limit=50, offset=0
+        )
+    by_id = {row["source_id"]: row for row in rows}
+    assert total == 4 and set(by_id) == set(profiles)
+    assert by_id["src-deleted"]["source_missing"] is True
+    assert by_id["src-deleted"]["title"] == ""
+    assert by_id["src-a"]["source_missing"] is False
+    # 泄漏面的直接断言:隐藏来源的标题一个字都不能出现在响应里。
+    assert not {row["title"] for row in rows} & {
+        "季度奖金核算口径", "老板不喜欢周一开会"
+    }
+
+
 def test_statistic_snapshots_round_trip_the_query_layer_payloads(repo):
     notebook_id = _seed(repo)
     repo.rebuild_communities(notebook_id)

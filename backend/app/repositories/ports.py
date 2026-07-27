@@ -1077,6 +1077,14 @@ class UnifiedKgStorePort(Protocol):
     # 预计算路径上;返回游标,调用方**流式**折叠(Python 侧内存 O(来源数),不是
     # O(分组数)——库内的分组临时结构不在此列,见实现的 docstring)。
     #
+    # ⚠ 它的口径里有两条**排除**,两侧逐字一致:`source_id=''`(共享空来源,算进去就是
+    # 伪造一个「空来源」的画像),以及隐藏合成来源 `source_type IN ('memory','knowhow')`
+    # (产品其余各处一律当隐藏源,它们的标题是用户内容)。第二条必须写成
+    # `NOT EXISTS (... AND s.source_type IN (...))` —— **孤儿引用**(source_id 指向已删
+    # 来源)要留下,读侧靠 `kg_source_profile_page` 的 `source_missing` 把它报出来。
+    # 写成 `JOIN sources` 或 `LEFT JOIN ... WHERE s.source_type NOT IN (...)` 都会把
+    # 孤儿一起吞掉,把一个有意的诊断信号变成静默丢弃。
+    #
     # ⚠ 三张产物表**都没有 level 维度**:`community_seq` 本身不分 level,一次预计算产出
     # 的永远是一套自洽的产物,它描述的 level 记在账本 payload 里。三张表统一按 notebook
     # 整表重写,删除口径因此只有一个。

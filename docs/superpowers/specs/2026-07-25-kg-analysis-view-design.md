@@ -286,6 +286,31 @@ kg_analysis_artifacts(notebook_id, kind, kg_mutation_seq, payload, created_at)
 - 对象只算 `USABLE_STATUSES`；被排除的量单独报，不凭空消失。
 - 边只算 `review_status != 'rejected'`，且**两端都必须是本 notebook 的可用对象**。
 - 任何抽样都必须标注；跨来源统计量（收敛率）走全库合并簇，不抽样。
+- **来源画像只算用户可见来源**：`source_type IN ('memory','knowhow')` 的隐藏合成来源
+  整体排除，与 `list_sources` / 文档数量上限 / 投影 / H3 体检同一条口径。两条理由：
+  它们天生只连自己那一小片，`mainstream_share` 恒接近 0，会把「与主体板块最不连通的
+  来源」这张榜的头部占满，真正需要用户处理的孤立文档被挤到后面；更硬的是它们的
+  `title` 是**内容**（knowhow 投影的标题就是用户的表名、Memory 的就是那条记忆的抬头），
+  产品其余各处都不显示，只有这里会连标题一起发给 notebook 的任何读者——与下面
+  「knowhow 的自定义类型名不进返回载荷」是同一条决定。
+
+  排除做在**预计算**（`source_community_counts` 的那一次扫描）而不是读侧：产物表
+  `kg_source_profiles` 会被分享拷贝、`merge_dbs` 与快照校验带走，留在表里等于要求每个
+  下游各自记得再过滤一次；而且账本 `sources`（`len(profiles)`）与读侧 `total` 会分岔
+  成两个口径。实测增量（本机 `nb-b37185f4ae`，暖态）86 → 95 ms：规划器把这条相关子
+  查询排在两次 LEFT JOIN 之前，被排除的行连那两次索引探查都不付。
+
+  ⚠ **判据是「来源存在且类型隐藏」，不是「join 不到就排除」。** `source_id` 没有外键，
+  历史清理会留下**孤儿引用**，而把孤儿报出来（读侧的 `source_missing`）是本视图**有意**
+  的诊断能力。所以两侧都写 `NOT EXISTS (… AND s.source_type IN ('memory','knowhow'))`
+  ——它对孤儿天然为真；换成 `JOIN sources` 或 `LEFT JOIN … WHERE s.source_type NOT IN (…)`
+  （NULL 使谓词为 NULL）都会把孤儿一起吞掉，把诊断信号变成静默丢弃。合成来源「排除」
+  与孤儿来源「保留且标 `source_missing`」各有守卫，两个后端各一份。
+
+  新鲜度契约不变（账本 seq 仍是 `kg_mutation_seq`），所以改动之前建好的产物要等下一次
+  预计算才会去掉那些行。三张产物表由 `_migration_34` 引入、与本特性同批，尚未进过任何
+  已部署库，受影响的只有跑过本分支的开发库；任何一次 KG 变更后的 `rebuild_communities`
+  会整表重写、自然愈合。
 
 两个口径决策（T1 评审后定，2026-07-25；D1 于同日修订为「按类型分组」）：
 

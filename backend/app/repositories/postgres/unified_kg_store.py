@@ -1431,7 +1431,17 @@ class UnifiedKgStore:
         分组仍然发生在库内,调用方流式消费,Python 侧内存是 O(来源数)。
 
         口径与 SQLite 侧逐字一致:对象只算 `USABLE_STATUSES`;`source_id=''` 的对象
-        整体排除(它们共享同一个空 source_id,算进去等于凭空造一个「空来源」的画像)。
+        整体排除(它们共享同一个空 source_id,算进去等于凭空造一个「空来源」的画像);
+        隐藏合成来源(`source_type IN ('memory','knowhow')`)整体排除 —— 完整理由(排行
+        被扭曲 + 内部标题泄漏 + 为什么排在预计算而不是读侧)见 SQLite 侧的 docstring。
+
+        ⚠ 与那边同款,判据是 `NOT EXISTS`(「来源存在且类型隐藏」)而不是「join 不到就
+        排除」:孤儿引用(`source_id` 指向已删来源)必须**留下**并在读侧标 `source_missing`,
+        那是本视图有意的诊断能力。PG 会把相关 `NOT EXISTS` 提升成 anti-join(hash 还是
+        nested-loop 由统计决定 —— 这里**不**断言某一种,本机测试库量级太小,拿它的
+        `EXPLAIN` 当生产计划的证据是自欺);`sources` 那侧走主键。
+        NULL 语义与 SQLite 一致 —— 在 NULL 上翻车的是 `NOT IN`(孤儿的 `s.source_type`
+        为 NULL 时整个谓词变 NULL、行被静默滤掉),`NOT EXISTS` 不会。
         """
         placeholders = ",".join("%s" for _ in USABLE_STATUSES)
         return db.execute(
@@ -1450,6 +1460,9 @@ class UnifiedKgStore:
             WHERE o.notebook_id = %s
               AND o.status IN ({placeholders})
               AND o.source_id != ''
+              AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id = o.source_id
+                              AND s.notebook_id = o.notebook_id
+                              AND s.source_type IN ('memory','knowhow'))
             GROUP BY o.source_id, cm.community_id
             """,
             (int(level), notebook_id, *USABLE_STATUSES),

@@ -3014,6 +3014,75 @@ def test_source_community_counts_match_on_postgres(knowledge_harness):
     assert all(source == "source-golden" for source, _community in counts)
 
 
+def test_source_counts_drop_hidden_sources_but_keep_orphans_on_postgres(
+    knowledge_harness,
+):
+    """来源画像的可见性口径,逐字比对返回值。
+
+      · `source_type IN ('memory','knowhow')` 的合成来源 → **排除**(它们的 `title`
+        是用户内容:knowhow 投影的是表名、Memory 的是那条记忆的抬头,而产品其余各处
+        一律不显示它们)。
+      · **孤儿来源**(`source_id` 在 `sources` 里没有对应行)→ **保留**,读侧靠
+        `source_missing` 报出来。这是本视图有意的诊断能力。
+
+    ⚠ 两半必须一起断:同一个谓词决定这两件事,而把 `NOT EXISTS` 写成 `JOIN sources`
+    或 `LEFT JOIN … WHERE s.source_type NOT IN (…)`(孤儿的 `s.source_type` 是 NULL,
+    `NULL NOT IN (…)` 为 NULL → 整行被滤掉)对「排除合成
+    来源」这一半完全正确、却会把孤儿一起吞掉。
+
+    ⚠ 孤儿的证人**必须自己造**:`source-golden` 看着像孤儿,其实 `_seed_catalog` 给它
+    建了一行 `source_type='file'` 的真来源 —— 拿它当孤儿,移动变异(改成 `JOIN sources`)
+    照样全绿,这一半就是个空守卫。移动变异实测过这一条:第一版正是这么写的、真的没报红。
+    所以下面显式塞一个 `source-deleted`(只有对象、没有 `sources` 行)。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    placeholder = "%s"
+    stamp = normalize_timestamp(NOW)
+    with knowledge_harness.database.write() as connection:
+        for source_id, title, source_type in (
+            ("source-visible", "公开的 PDF", "pdf"),
+            ("source-memory", "老板不喜欢周一开会", "memory"),
+            ("source-knowhow", "季度奖金核算口径", "knowhow"),
+        ):
+            connection.execute(
+                "INSERT INTO sources (id, notebook_id, title, source_type, "
+                " created_at, updated_at) "
+                f"VALUES ({placeholder}, {placeholder}, {placeholder}, "
+                f"        {placeholder}, {placeholder}, {placeholder})",
+                (source_id, ANALYSIS_NB, title, source_type, stamp, stamp),
+            )
+        # 四个对象形态完全相同(可用、挂来源、不在任何板块里),唯一的差别是来源那一侧
+        # —— 所以留下/排除只可能来自来源可见性谓词本身。`source-deleted` 刻意**没有**
+        # `sources` 行:它就是那个孤儿证人。
+        knowledge_harness.knowledge.insert_object_chunk(
+            connection,
+            [
+                (f"ko-an-vis-{index}", ANALYSIS_NB, "claim", "approved",
+                 json.dumps({"name": object_id}), "[]", object_id, NOW, NOW)
+                for index, object_id in enumerate(
+                    ("source-visible", "source-memory", "source-knowhow",
+                     "source-deleted")
+                )
+            ],
+        )
+
+    counts = _analysis_source_counts(knowledge_harness)
+
+    assert ("source-memory", None) not in counts, "Memory 的合成来源进了来源画像"
+    assert ("source-knowhow", None) not in counts, "knowhow 投影的来源进了来源画像"
+    assert counts[("source-visible", None)] == 1
+    assert counts[("source-deleted", None)] == 1, (
+        "孤儿来源被一起排除了 —— 一个有意的诊断信号变成了静默丢弃"
+    )
+    assert counts == {
+        ("source-golden", None): 7,
+        ("source-golden", "cm-big"): 7,
+        ("source-golden", "cm-small"): 1,
+        ("source-visible", None): 1,
+        ("source-deleted", None): 1,
+    }
+
+
 def test_precomputed_artifacts_round_trip_identically_on_postgres(
     knowledge_harness,
 ):

@@ -1432,11 +1432,45 @@ class UnifiedKgStore:
         (晋升 / Memory→KG 写路径刻意写空来源)整体排除 —— 它们共享同一个空 source_id,
         算进去等于凭空造一个「空来源」的画像。
 
+        ⚠ **隐藏合成来源(`source_type IN ('memory','knowhow')`)整体排除**,与
+        `list_sources` / 文档计数 / 投影 / H3 体检同一条口径(仓库里那条
+        `NOT EXISTS (... AND s.source_type IN ('memory','knowhow'))` 的复用)。理由两条,
+        后一条更硬:
+          1. 排行会被扭曲 —— Memory 与 knowhow 投影天生只连自己那一小片,`mainstream_share`
+             恒接近 0,于是「与主体板块最不连通的来源」这张榜的头部会被产品从不显示的
+             内部行占满,真正需要用户处理的孤立文档被挤到后面;
+          2. **它们的 `title` 是内容,不是元数据** —— knowhow 投影的来源标题就是用户的表名、
+             Memory 的就是那条记忆的抬头。产品其余各处都把这两类当隐藏来源,只有这里会把
+             它们连标题一起发给 notebook 的任何读者。这与 §3.5 里「knowhow 的自定义类型名
+             不进返回载荷、查询层不制造泄漏面」是同一条决定。
+
+        ⚠ **排除判据是「来源存在且类型隐藏」,不是「join 不到就排除」。** `source_id` 没有
+        外键,历史清理会留下指向已删来源的**孤儿引用**(见 `_migration_32`),而把孤儿报出来
+        (读侧的 `source_missing`)是本视图**有意**的诊断能力。`NOT EXISTS` 这个形态对孤儿
+        天然为真 —— 它们照常进画像;换成 `JOIN sources` 或
+        `LEFT JOIN ... WHERE s.source_type NOT IN (...)`(NULL 使谓词为 NULL)都会把孤儿
+        一起吞掉,把一个诊断信号变成静默丢弃。两类各有守卫钉住。
+
+        为什么排在这里而不是读侧(`kg_source_profile_page`):产物表就不该存这些行。
+        `kg_source_profiles` 会被分享拷贝、`merge_dbs` 合并与快照校验带走,留在表里等于
+        每个下游各自记得再过滤一次;而且账本 payload 的 `sources`(= `len(profiles)`)
+        与读侧的 `total` 会分岔成两个口径。
+
+        ⚠ 排除**不改变**新鲜度契约:账本 seq 仍是 `kg_mutation_seq`,所以本次改动之前
+        建好的产物里那些行要等下一次预计算才会消失。三张产物表由 `_migration_34` 引入
+        (与本特性同批,尚未进过任何已部署库),所以受影响的只有跑过本分支的开发库;
+        任何一次 KG 变更后的 `rebuild_communities` 会整表重写、自然愈合。
+
         ⚠ **重活**:本 notebook 的 `knowledge_objects` 全扫 + 每行两次索引探查
         (`idx_clusters_member` → `idx_commmem_nb_can`)+ 一个分组临时 B 树。与
         `community_graph_rows` 同量级,同样只能待在预计算路径上。本机真实库
         (4.17 万对象 / 4.17 万簇行 / 1217 个板块)实测 342 ms;不要把它线性外推到
         437GB 的生产库 —— 那里是冷态随机 IO 支配,见 ports.py 只读聚合段头的说明。
+        隐藏来源谓词的增量实测(同库 nb-b37185f4ae,每次全新连接连跑三趟、取 OS 页缓存
+        已暖的那两趟)是 86 → 95 ms(+10%):规划器把这条相关子查询排在两次 LEFT JOIN
+        **之前**(`EXPLAIN QUERY PLAN` 里 `CORRELATED SCALAR SUBQUERY` 那一行在 c/cm 之上),
+        走 `sources` 的主键索引 `sqlite_autoindex_sources_1`,被排除的行连那两次探查都不付。
+        这是一次量级参考而不是生产承诺 —— 同上,生产是冷态随机 IO 支配。
         """
         placeholders = ",".join("?" for _ in USABLE_STATUSES)
         return db.execute(
@@ -1455,6 +1489,9 @@ class UnifiedKgStore:
             WHERE o.notebook_id = ?
               AND o.status IN ({placeholders})
               AND o.source_id != ''
+              AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id = o.source_id
+                              AND s.notebook_id = o.notebook_id
+                              AND s.source_type IN ('memory','knowhow'))
             GROUP BY o.source_id, cm.community_id
             """,
             (int(level), notebook_id, *USABLE_STATUSES),
