@@ -52,7 +52,11 @@ from app.repositories.postgres.search import (
     mention_scan_matches as search_mention_scan_matches,
     prepare_mention_scan,
 )
-from app.services.kg_analysis_precompute import batched, check_artifact_payloads
+from app.services.kg_analysis_precompute import (
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
+    batched,
+    check_artifact_payloads,
+)
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
@@ -773,6 +777,28 @@ class UnifiedKgStore:
                 "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
                 "VALUES (%s,%s,%s,%s,%s,%s)",
                 [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0)) for m in members])
+
+    @staticmethod
+    def discard_board_dependent_kg_analysis_artifacts(
+        db: Any, notebook_id: str
+    ) -> None:
+        """作废依赖板块划分的两份 KG 分析产物 —— 与 SQLite 侧逐条对应(见那边的
+        docstring 与 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)。
+
+        `kind = ANY(%s)` 是 PostgreSQL 侧的等价写法(SQLite 那边是展开的 `IN (?,?)`),
+        语义相同:只删这两个 kind 的账本行,三条统计快照原样留着。
+        """
+        db.execute(
+            "DELETE FROM kg_community_edges WHERE notebook_id=%s", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_source_profiles WHERE notebook_id=%s", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_analysis_artifacts "
+            "WHERE notebook_id=%s AND kind = ANY(%s)",
+            (notebook_id, list(BOARD_DEPENDENT_ARTIFACT_KINDS)),
+        )
 
     @staticmethod
     def set_community_seq(db: Any, notebook_id: str, seq: int) -> None:

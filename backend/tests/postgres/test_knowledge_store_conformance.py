@@ -28,6 +28,7 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
     MAINSTREAM_COVERAGE,
 )
 from app.services.knowledge_contracts import (
@@ -3078,6 +3079,61 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
     assert {seq for seq, _payload in ledger.values()} == {41}
     for kind, expected in payloads.items():
         assert ledger[kind][1] == json.loads(json.dumps(expected)), kind
+
+
+def test_discarding_board_dependent_artifacts_on_postgres(
+    knowledge_harness,
+):
+    """板块重铸时作废依赖板块的两份产物 —— 必须删掉**恰好那一批**行。
+
+    PostgreSQL 侧用 `kind = ANY(%s)` 而不是逐值展开,所以「删对了哪些行」不能靠
+    读代码断言,只能靠这条对同一批夹具比对
+    删除前后的行。少删一份 = 报告继续画已经不存在的板块;多删一份 = 平白丢掉一份
+    与板块无关、仍然可读的陈旧统计快照。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
+    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 41,
+            [("cm-big", "cm-small", 7)],
+            [("source-golden", 12, 9, "cm-big", 0.75, 2, 0.5)],
+            payloads, NOW,
+        )
+
+    placeholder = "%s"
+
+    def counts() -> dict:
+        with knowledge_harness.database.connect() as connection:
+            return {
+                "edges": int(connection.execute(
+                    "SELECT COUNT(*) AS n FROM kg_community_edges "
+                    f"WHERE notebook_id={placeholder}", (ANALYSIS_NB,)
+                ).fetchone()["n"]),
+                "profiles": int(connection.execute(
+                    "SELECT COUNT(*) AS n FROM kg_source_profiles "
+                    f"WHERE notebook_id={placeholder}", (ANALYSIS_NB,)
+                ).fetchone()["n"]),
+                "ledger": sorted(
+                    row["kind"] for row in connection.execute(
+                        "SELECT kind FROM kg_analysis_artifacts "
+                        f"WHERE notebook_id={placeholder}", (ANALYSIS_NB,)
+                    ).fetchall()
+                ),
+            }
+
+    assert counts() == {"edges": 1, "profiles": 1, "ledger": sorted(ARTIFACT_KINDS)}
+
+    with knowledge_harness.database.write() as connection:
+        unified.discard_board_dependent_kg_analysis_artifacts(connection, ANALYSIS_NB)
+
+    assert counts() == {
+        "edges": 0,
+        "profiles": 0,
+        "ledger": sorted(set(ARTIFACT_KINDS) - set(BOARD_DEPENDENT_ARTIFACT_KINDS)),
+    }
 
 
 def test_replace_kg_analysis_artifacts_rejects_unknown_kinds_on_postgres(

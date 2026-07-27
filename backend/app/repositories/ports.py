@@ -929,6 +929,13 @@ class UnifiedKgStorePort(Protocol):
     def replace_canonical_relations(db: object, notebook_id: str, rows: object, seq: int) -> None: ...
     @staticmethod
     def replace_communities(db: object, notebook_id: str, level: int, kept: object, names: object, deg: object, now: str) -> None: ...
+    # ⚠ 必须与 `replace_communities` 在**同一个写事务**里调:板块 id 被重铸的那一刻,
+    # `kg_community_edges` / `kg_source_profiles` 的每一行都成了悬空引用,而 T3 的
+    # 记忆化签名(state 的 seq + 账本行的 seq/created_at)在 `force=True` 的同 seq
+    # 重铸上一个字段都不会变。理由与「为什么只作废这两份」见
+    # `app.services.kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+    @staticmethod
+    def discard_board_dependent_kg_analysis_artifacts(db: object, notebook_id: str) -> None: ...
     @staticmethod
     def replace_mention_bridge(db: object, notebook_id: str, edges: object, comention_rows: object, seq: int) -> None: ...
     @staticmethod

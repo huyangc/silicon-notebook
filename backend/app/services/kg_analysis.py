@@ -451,10 +451,17 @@ class KgAnalysisService:
         created_at)。``created_at`` 必须进签名:一次 ``force=True`` 的重建会在**同一个**
         `kg_mutation_seq` 上重铸板块 id 并重写产物,只看 seq 的话缓存不会失效。
 
-        残留窗口(如实说明):force 重建之后**预计算恰好失败**(那条路径的异常被
-        `rebuild_communities` 刻意吞掉)时,板块表已经换了一套 id 而账本一行没动 ——
-        此时缓存会继续给出上一套板块,直到被 LRU 挤掉或进程重启。这不是新增的失真:
-        同一个 seq 上的两次 force 重建本来就共用一个戳,账本的表达能力到此为止。
+        ⚠ **签名里为什么没有「板块世代」这一项,以及为什么不需要。** 板块 id 只由
+        `replace_communities` 重铸,而写侧在**同一个事务**里作废依赖板块的两份账本行
+        (见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)。板块一换,账本
+        必变、签名必变 —— 包括「force 重建成功、随后的预计算恰好失败」那一档:那正是
+        评审报出来的窗口,而它此前**不是**一个瞬时窗口而是永久的(账本一行没动、seq
+        也没变,缓存会一直吐上一套板块,直到 LRU 淘汰或进程重启,而本方法自称读的是
+        live 快照)。
+
+        为什么世代只能由**写侧推**、不能由读侧拉:任何从 `communities` 现算的世代标记
+        都是 O(板块数) 的读(生产 88 580 个板块,而 `communities` 上没有 size 索引),
+        那恰恰就是这份缓存要省掉的那笔钱 —— 把它放进签名等于每次请求都付一遍。
         """
         self._reject_inside_write_transaction("KG 分析总览")
         with self._database.connect() as db:

@@ -3249,8 +3249,8 @@ class KnowledgeLifecycleService:
         ⚠ **两个独立的新鲜度闸,别把它们合成一个。** 社区图与 KG 分析产物是两份产物,
         可以各自陈旧:
 
-        · 社区图闸(历史行为):`community_seq == kg_mutation_seq` 且社区非空 → 不重跑
-          Louvain、不重写成员表。
+        · 社区图闸(历史行为):`community_seq == kg_mutation_seq` → 不重跑 Louvain、
+          不重写成员表。
         · 分析账本闸:`kg_analysis_artifacts` 齐全且每一行的戳都等于同一个 seq。
 
         只有**两个闸都过**才是真正的 no-op。图新鲜而账本不新鲜时走「只补账本」路径:
@@ -3264,24 +3264,40 @@ class KnowledgeLifecycleService:
         唯一的恢复手段是 `force=True`,而那是 836 万边全量 join + Louvain + 重写 171 万
         成员行,正是设计 §3.2 说本工具不该让用户付的那笔钱。同一个机制还会让「预计算
         失败」变成**永久**失败:失败后账本是空的,而社区图闸照样短路。
+
+        ⚠ **「建过」的标记是 seq 对齐,不是「板块数 > 0」。** 全部连通块都小于
+        `community_min_size` 的库**合法地**就是零板块 —— 那不是「没建成」。拿板块数当
+        建成标记会让这类库的两个闸都永远过不去:每一次「刷新图谱」都要重跑 canonical
+        边图 + 三条全表统计快照(生产量级见 `_precompute_kg_analysis`),而结果永远是
+        同一个零。`community_seq` 默认 -1、`kg_mutation_seq` 恒 >= 0,所以「从没建过」
+        照样判得出来;而 `communities` 只被 `replace_communities` 删改、它又恒在
+        `set_community_seq` **之前**提交,所以 seq 对齐 ⟹ 板块确实按那个 seq 写过。
+
+        同理,`has_boards` 必须传**实际**的板块数而不是硬写 True:零板块的库不写
+        来源画像(设计 §3.3 的 S4 —— 那张表单独看是在说「所有来源都关联稀疏」),
+        硬写 True 等于宣布这类库的账本永远不完整。判据与写入口
+        `check_artifact_payloads` 的复核**同一条**(都是板块个数),两边不会分岔。
         """
         self.get_notebook(notebook_id)
         if not self.settings.community_layer_enabled:
             return 0
-        # 版本闸(增量):社区已按当前 kg_mutation_seq 建过且非空 → 不重建图(除非 force)。
+        # 版本闸(增量):社区已按当前 kg_mutation_seq 建过 → 不重建图(除非 force)。
         # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
         # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
+        # ⚠ 判据里**没有**板块数:零板块是合法终态,理由见 docstring 那段。
         with self._connect() as _db:
             _st = self.unified_kg.state_row(_db, notebook_id)
             _cnt = self.unified_kg.communities_count(_db, notebook_id, level)
             _ledger = self.unified_kg.kg_analysis_artifact_seqs(_db, notebook_id)
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
+        _boards = int(_cnt["c"]) if _cnt else 0
         graph_fresh = bool(
-            not force and _st is not None and _st["community_seq"] == _seq
-            and _cnt and _cnt["c"] > 0
+            not force and _st is not None and int(_st["community_seq"]) == _seq
         )
-        if graph_fresh and analysis_ledger_is_current(_ledger, _seq, has_boards=True):
-            return int(_cnt["c"])
+        if graph_fresh and analysis_ledger_is_current(
+            _ledger, _seq, has_boards=_boards > 0
+        ):
+            return _boards
         # 社区检测后端:igraph(整数边表 + C 核,10^6–10^7 边内存/耗时有界)优先;
         # 缺失(未装)才回退 networkx(纯 Python dict-of-dicts,大库会 OOM)。
         try:
@@ -3298,7 +3314,7 @@ class KnowledgeLifecycleService:
                 and self.scale_artifacts.load(notebook_id, allow_stale=True) is None):
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
-            return int(_cnt["c"]) if graph_fresh else 0
+            return _boards if graph_fresh else 0
         # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
         # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
         # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
@@ -3372,6 +3388,17 @@ class KnowledgeLifecycleService:
                 self.unified_kg.replace_communities(
                     db, notebook_id, level, kept_rows, names, deg, now
                 )
+                # ⚠ 上一行**重铸了板块 id**,依赖板块划分的两份分析产物(跨板块边 /
+                # 来源画像)此刻整表变成悬空引用 —— 必须在**同一个事务**里作废,不能
+                # 挪到下面的预计算里去顺手覆盖:预计算是「重活 + 可能失败」的一段,
+                # 中间任何一次失败、取消或崩溃都会把悬空产物留在库里,而 T3 的记忆化
+                # 签名对「同 seq 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐
+                # 上一套板块 id,直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
+                # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
+                # 理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+                self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                    db, notebook_id
+                )
             # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
             with self._write() as db:
                 self.unified_kg.set_community_seq(db, notebook_id, _seq)
@@ -3380,9 +3407,14 @@ class KnowledgeLifecycleService:
         # 为什么**不**让它的失败冒泡:这三张表是只读报告的派生产物,而 rebuild_communities
         # 是 rebuild_unified_kg 与「刷新图谱」的核心路径。让一份辅助报告的失败去掀翻
         # 437GB 生产库的图重建,爆炸半径不成比例。而**吞掉它是安全的**,因为产物自带
-        # `kg_mutation_seq` 戳:失败时上一轮的产物原样留着、戳还是它自己那个旧值,T3
+        # `kg_mutation_seq` 戳:失败时上一轮的产物留在原地、戳还是它自己那个旧值,T3
         # 会如实报「落后 N 次变更」并给出整理入口 —— 不是静默降级,是显式陈旧 + 事件。
         # 反过来若让它冒泡,社区已经建好且 seq 已记,异常只会让调用方以为整个重建失败。
+        #
+        # ⚠ 「留在原地」只对**与板块无关**的三条统计快照成立。图真的被重建过时,依赖
+        # 板块的那两份已经在重铸事务里作废了(见上面 `replace_communities` 旁的说明)——
+        # 它们**必须**走,留着就是指向不存在板块 id 的悬空产物。此时 T3 报的是「缺失」
+        # 而不是「陈旧」,那是更诚实的一档,不是退化。
         #
         # 失败**会自愈**:上面的分析账本闸只看账本齐不齐、戳对不对,所以下一次
         # `rebuild_communities`(哪怕 KG 一动没动、哪怕不带 force)会走「只补账本」

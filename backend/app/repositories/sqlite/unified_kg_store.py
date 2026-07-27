@@ -36,7 +36,11 @@ from app.repositories.kg_analysis_payloads import (
 )
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
-from app.services.kg_analysis_precompute import batched, check_artifact_payloads
+from app.services.kg_analysis_precompute import (
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
+    batched,
+    check_artifact_payloads,
+)
 from app.services.knowledge_contracts import (
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
@@ -722,6 +726,32 @@ class UnifiedKgStore:
                 "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
                 "VALUES (?,?,?,?,?,?)",
                 [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0)) for m in members])
+
+    @staticmethod
+    def discard_board_dependent_kg_analysis_artifacts(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> None:
+        """作废依赖板块划分的两份 KG 分析产物 —— 必须与 `replace_communities`
+        **同一个写事务**(理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)。
+
+        明细行与账本行都删:读侧判「这份产物在不在」只看账本行,但明细表是被
+        **单独查询**的(`kg_community_edges_top` / `kg_source_profile_page` 在总览与
+        /sources 里无条件跑),只删账本会让悬空的板块 id 照样回到载荷里。
+
+        另三份统计快照与板块无关,刻意不动 —— 见那个常量的说明。
+        """
+        db.execute(
+            "DELETE FROM kg_community_edges WHERE notebook_id=?", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_source_profiles WHERE notebook_id=?", (notebook_id,)
+        )
+        placeholders = ",".join("?" * len(BOARD_DEPENDENT_ARTIFACT_KINDS))
+        db.execute(
+            "DELETE FROM kg_analysis_artifacts "
+            f"WHERE notebook_id=? AND kind IN ({placeholders})",
+            (notebook_id, *BOARD_DEPENDENT_ARTIFACT_KINDS),
+        )
 
     @staticmethod
     def set_community_seq(db: sqlite3.Connection, notebook_id: str, seq: int) -> None:

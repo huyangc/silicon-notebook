@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 
 import pytest
@@ -564,21 +565,23 @@ def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, mon
     )
 
 
-def test_all_three_product_tables_are_written_in_one_transaction(repo, monkeypatch):
-    """设计 §3.3 的**结构性**证据:三张产物表必须落在同一个写事务里。
+BOARD_TABLE = "communities"
 
-    下面的 `test_precompute_is_all_or_nothing` 证明「整体失败会整体回滚」,但它抓不到
-    「拆成两个事务、第一个已提交、第二个才炸」—— 那种形态下异常仍在第二个 `with` 内,
-    第二个事务照样回滚,而**第一个已经落库了**。所以这里直接钉住形态本身:整个
-    rebuild 期间,只有**一个**写事务碰过这三张表,而且它把三张全碰了。
+# ⚠ 表名**不能**用裸子串匹配:trace 回调拿到的是参数已展开的 SQL,而账本 payload 里
+# 恰好有一个 `"communities"` 字段(板块个数)—— 于是落库事务会被误判成板块重铸事务,
+# 两类混成一类、断言全空。只认 FROM / INTO / UPDATE 后面的那个标识符。
+_DML_TABLE = re.compile(r"\b(?:FROM|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_]*)", re.I)
 
-    ⚠ 这条**只**管产物表的写。它对「重活被搬进写事务」是瞎的(那三条查询不碰产物表),
-    那一档由上面两条守卫负责。
+
+def _trace_product_table_transactions(repo, monkeypatch) -> list:
+    """把每个写事务**写过**的表名记下来,供下面两条形态守卫共用。
+
+    返回一个 list,每个元素是**一个写事务**碰过的表名集合(按开启顺序)。
     """
-    notebook_id = _seed(repo)
     database = repo._runtime.database
     original_write = database.write
     per_transaction: list[set] = []
+    watched = {*PRODUCT_TABLES, BOARD_TABLE}
 
     @contextmanager
     def tracing_write(**kwargs):
@@ -587,9 +590,7 @@ def test_all_three_product_tables_are_written_in_one_transaction(repo, monkeypat
             per_transaction.append(touched)
 
             def trace(statement: str) -> None:
-                for table in PRODUCT_TABLES:
-                    if table in statement:
-                        touched.add(table)
+                touched.update(watched.intersection(_DML_TABLE.findall(statement)))
 
             db.set_trace_callback(trace)
             try:
@@ -598,27 +599,104 @@ def test_all_three_product_tables_are_written_in_one_transaction(repo, monkeypat
                 db.set_trace_callback(None)
 
     monkeypatch.setattr(database, "write", tracing_write)
+    return per_transaction
+
+
+def test_all_three_product_tables_are_written_in_one_transaction(repo, monkeypatch):
+    """设计 §3.3 的**结构性**证据:三张产物表必须落在同一个写事务里。
+
+    下面的 `test_precompute_is_all_or_nothing` 证明「整体失败会整体回滚」,但它抓不到
+    「拆成两个事务、第一个已提交、第二个才炸」—— 那种形态下异常仍在第二个 `with` 内,
+    第二个事务照样回滚,而**第一个已经落库了**。所以这里直接钉住形态本身:整个
+    rebuild 期间,只有**一个**写事务**落库**产物,而且它把三张表全碰了。
+
+    ⚠ 碰产物表的写事务现在有**两个**,不是一个:板块重铸那一个也会碰(它同事务作废
+    依赖板块的两份产物,见 `discard_board_dependent_kg_analysis_artifacts`)。两者靠
+    「有没有同时碰 `communities`」区分 —— 落库事务绝不碰板块表,重铸事务必碰。
+    把落库拆成两个事务、或者把作废挪出重铸事务,这条都会报红。
+
+    ⚠ 这条**只**管产物表的写。它对「重活被搬进写事务」是瞎的(那三条查询不碰产物表),
+    那一档由上面两条守卫负责。
+    """
+    notebook_id = _seed(repo)
+    per_transaction = _trace_product_table_transactions(repo, monkeypatch)
     repo.rebuild_communities(notebook_id)
 
-    touching = [touched for touched in per_transaction if touched]
-    assert len(touching) == 1, (
-        f"产物表被 {len(touching)} 个写事务碰过 —— 一次预计算必须是原子的"
+    products = set(PRODUCT_TABLES)
+    touching = [touched for touched in per_transaction if touched & products]
+    persisting = [touched for touched in touching if BOARD_TABLE not in touched]
+    assert len(persisting) == 1, (
+        f"产物被 {len(persisting)} 个写事务落库 —— 一次预计算必须是原子的:{touching}"
     )
-    assert touching[0] == set(PRODUCT_TABLES)
+    assert persisting[0] == products
+    # 另一类只能是板块重铸那一个,而且它必须把两张明细表 + 账本一起作废。
+    minting = [touched for touched in touching if BOARD_TABLE in touched]
+    assert len(minting) == 1, f"碰产物表的写事务不止两类:{touching}"
+    assert minting[0] == products | {BOARD_TABLE}
+
+
+def test_reminting_boards_discards_the_board_dependent_products_in_the_same_transaction(
+    repo, monkeypatch
+):
+    """P2:板块 id 一被重铸,依赖板块的两份产物必须**同事务**作废。
+
+    为什么必须同事务、而不是「反正预计算马上就整批重写了」:预计算是一段重活,中间
+    可能失败、被取消、或者进程崩。任何一种都会把**悬空**的产物留在库里 —— 明细行指着
+    已经不存在的板块 id,而 T3 的记忆化签名(state 的 seq + 账本行的 seq/created_at)
+    对「同一个 `kg_mutation_seq` 上的 force 重铸」一个字段都不会变,已预热的缓存会
+    **无限期**继续吐上一套板块。
+
+    这条钉的是**形态**(作废与重铸同事务),不是结果 —— 结果由
+    `test_a_failed_precompute_after_a_force_rebuild_stops_serving_the_old_boards` 钉。
+    把 `discard_board_dependent_kg_analysis_artifacts` 挪进 `_precompute_kg_analysis`
+    的落库事务里(一个看起来更「整洁」的位置),这条会当场报红。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    # KG 变动 → 下一次调用真的重建图(而不是走「只补账本」)。
+    repo.store_kg(notebook_id, "src-d", [_claim("Q")], [])
+
+    per_transaction = _trace_product_table_transactions(repo, monkeypatch)
+    store = repo._runtime.unified_kg
+    # 预计算整段失败:如果作废被挪进了落库事务,它会跟着一起回滚。
+    monkeypatch.setattr(
+        store, "cluster_size_histogram",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    repo.rebuild_communities(notebook_id)
+
+    minting = [t for t in per_transaction if BOARD_TABLE in t]
+    assert len(minting) == 1, f"板块重铸不在恰好一个写事务里:{per_transaction}"
+    assert minting[0] == set(PRODUCT_TABLES) | {BOARD_TABLE}, (
+        "板块重铸事务没有同时作废依赖板块的产物"
+    )
+    # 落库失败了,所以库里剩下的必须是「作废已生效」的状态。
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}
+    assert set(_artifacts(repo, notebook_id)) == {
+        ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
+        ARTIFACT_RELATION_PROVENANCE,
+    }, "与板块无关的三条统计快照被连坐删掉了 —— 它们仍是可读的陈旧快照"
 
 
 def test_precompute_is_all_or_nothing(repo, monkeypatch):
     """设计 §3.3:一次预计算要么整批可见、要么完全不可见。
 
-    先成功产出一批,再让第二批在**写完之后**炸 —— 三张表必须原样停在第一批,
-    不允许出现「跨板块边是新的、来源画像是旧的」这种隐蔽矛盾。
+    先成功产出一批,再让第二批在**写完之后**炸 —— 落库事务必须整个回滚,不允许出现
+    「跨板块边是新的、来源画像还是旧的」这种隐蔽矛盾。
+
+    ⚠ 判据里的「旧的」在两张明细表上是**空**,不是上一批的行:force 重建已经在重铸
+    板块的那一刻把依赖板块的产物作废了(见
+    `test_reminting_boards_discards_the_board_dependent_products_in_the_same_transaction`)。
+    这不削弱本条 —— 恰恰相反:落库若被拆成两个事务、第一个已提交,`kg_community_edges`
+    就会是**非空**,这条立刻报红。与板块无关的三条统计快照仍必须原样停在第一批的戳上。
     """
     notebook_id = _seed(repo)
     repo.rebuild_communities(notebook_id)
-    first_edges = _edges(repo, notebook_id)
-    first_profiles = _profiles(repo, notebook_id)
     first_artifacts = _artifacts(repo, notebook_id)
-    assert first_edges and first_profiles and first_artifacts
+    assert _edges(repo, notebook_id) and _profiles(repo, notebook_id)
+    assert set(first_artifacts) == set(ARTIFACT_KINDS)
+    first_seq = {entry["seq"] for entry in first_artifacts.values()}
 
     # KG 变动 → seq 闸不再短路
     repo.store_kg(notebook_id, "src-d", [_claim("Q")], [])
@@ -632,13 +710,58 @@ def test_precompute_is_all_or_nothing(repo, monkeypatch):
     monkeypatch.setattr(store, "replace_kg_analysis_artifacts", explode)
     repo.rebuild_communities(notebook_id, force=True)
 
-    assert _edges(repo, notebook_id) == first_edges
-    assert _profiles(repo, notebook_id) == first_profiles
-    # 版本戳也必须停在第一批:否则报告会宣称自己是新的。
-    assert {entry["seq"] for entry in _artifacts(repo, notebook_id).values()} == {
-        entry["seq"] for entry in first_artifacts.values()
-    }
+    # 落库整段回滚 —— 半份产物一行都不许留下。
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}
     assert "src-d" not in _profiles(repo, notebook_id)
+    survivors = _artifacts(repo, notebook_id)
+    assert set(survivors) == {
+        ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
+        ARTIFACT_RELATION_PROVENANCE,
+    }
+    # 版本戳也必须停在第一批:否则报告会宣称自己是新的。
+    assert {entry["seq"] for entry in survivors.values()} == first_seq
+
+
+def test_a_failed_precompute_after_a_force_rebuild_stops_serving_the_old_boards(
+    repo, monkeypatch
+):
+    """P2 的**结果**守卫:force 重建成功 + 预计算失败,报告不得再吐上一套板块。
+
+    这是评审报的那个窗口:板块 id 与成员都换了,而缓存签名(state 的全部 seq/dirty +
+    账本每行的 seq/created_at)一个字段都没变 —— `force=True` 在**同一个**
+    `kg_mutation_seq` 上重铸,账本又因为预计算失败而原封不动。已预热的缓存会
+    **无限期**返回上一套板块,直到 LRU 淘汰或进程重启,而端点自称读的是 live 快照。
+
+    ⚠ 必须先 `overview()` 预热一次,否则测的是「冷缓存」——那本来就不会错。
+    """
+    from app.services.kg_analysis import KgAnalysisService
+
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    service = KgAnalysisService(
+        database=repo._runtime.database,
+        unified_kg=repo._runtime.unified_kg,
+        now=lambda: "2026-01-03T00:00:00",
+    )
+    warmed = sorted(
+        board["id"] for board in service.overview(notebook_id).boards.payload["communities"]
+    )
+    assert warmed == sorted(_boards(repo, notebook_id))
+
+    monkeypatch.setattr(
+        repo._runtime.unified_kg, "source_community_counts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    repo.rebuild_communities(notebook_id, force=True)
+    monkeypatch.undo()
+
+    live = sorted(_boards(repo, notebook_id))
+    assert live != warmed, "force 重建没有重铸板块 id —— 本条的前提不成立"
+    served = sorted(
+        board["id"] for board in service.overview(notebook_id).boards.payload["communities"]
+    )
+    assert served == live, f"缓存吐出了已经不存在的板块:{served} != {live}"
 
 
 def test_precompute_failure_is_reported_and_does_not_break_the_rebuild(repo, monkeypatch):
@@ -858,6 +981,128 @@ def test_a_library_without_boards_writes_no_source_profile_product(repo):
     # 三条统计快照与板块无关,照常产出(形状完整,不是缺一块)。
     assert "by_object_type" in artifacts[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]
     assert "buckets" in artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"]
+
+
+# ------------------------------------------------- 两个闸的对称性(三个方向)
+# 这道闸是**对称的**:放松一边就会紧另一边。它当初是为了修 B1(「已部署库永不回填」)
+# 才加的;后来又发现它把「零板块」误判成「没建成」,让那类库每次刷新都重跑全部重活。
+# 三个方向必须**同时**钉住,只测一头的守卫会在下一次调参时静默失效。
+
+_HEAVY_WORK = (
+    "community_graph_rows",        # canonical 边图:生产 836 万边的一次 join
+    "cluster_size_histogram",      # 三条全表统计快照
+    "largest_clusters",
+    "relation_provenance_counts",
+)
+
+
+def _spy_heavy_work(repo, monkeypatch) -> list:
+    """记录整趟 rebuild 里真正跑过的重活(闸有没有短路,看这个列表空不空)。"""
+    store = repo._runtime.unified_kg
+    calls: list[str] = []
+    for name in _HEAVY_WORK:
+        monkeypatch.setattr(
+            store, name,
+            (lambda n, original: lambda *a, **k: (
+                calls.append(n), original(*a, **k)
+            )[1])(name, getattr(store, name)),
+        )
+    return calls
+
+
+def _no_board_notebook(repo) -> str:
+    """对象有、关系没有 —— 所有连通块都小于 `community_min_size`,合法的零板块库。"""
+    notebook = repo.create_notebook(NotebookCreate(name="no-boards"))
+    repo.settings.community_min_size = 3
+    _add_sources(repo, notebook.id, "src-a")
+    repo.store_kg(notebook.id, "src-a", [_claim(n) for n in ("A", "B", "C")], [])
+    return notebook.id
+
+
+def test_a_zero_board_library_short_circuits_instead_of_recomputing_forever(
+    repo, monkeypatch
+):
+    """方向一(零板块短路):板块数 0 是**合法终态**,不是「没建成」。
+
+    拿板块数当「建过」的标记,这类库的两个闸就永远过不去:每一次「刷新图谱」都要重跑
+    canonical 边图 + 三条全表统计快照,而结果永远是同一个零。生产量级上那是一次
+    「分钟到小时」的空转(437 GB / 836 万边)。
+
+    `has_boards` 同样必须传实际值:零板块的库合法地不写来源画像(S4),硬写 True 等于
+    宣布这类库的账本永远不完整 —— 同一个空转,换一个入口。
+    """
+    notebook_id = _no_board_notebook(repo)
+    assert repo.rebuild_communities(notebook_id) == 0
+    before = _artifacts(repo, notebook_id)
+    assert set(before) == set(ARTIFACT_KINDS) - {ARTIFACT_SOURCE_PROFILES}
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id) == 0        # 刻意不带 force
+    assert calls == [], f"零板块库又跑了一遍重活:{calls}"
+    # 账本一行都没被重写(created_at 会变)。
+    assert _artifacts(repo, notebook_id) == before
+
+
+def test_a_stale_ledger_with_boards_still_backfills(repo, monkeypatch):
+    """方向二(B1 回填):有板块 + 账本陈旧 → 必须真的补,不得被闸吞掉。
+
+    这是这道闸最初要修的那件事(生产 base 库上线前就已 `community_seq ==
+    kg_mutation_seq`)。方向一的修法**不得**让它复发,所以两条并排放。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2
+    _wipe_ledger(repo, notebook_id)
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id) == 2        # 刻意不带 force
+    assert sorted(set(calls)) == sorted(_HEAVY_WORK), f"账本陈旧却没补:{calls}"
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+
+
+def test_boards_with_a_missing_source_profile_row_still_backfill(repo, monkeypatch):
+    """`has_boards` 必须来自**实际板块数**,不得从账本自己推导。
+
+    从账本推(「来源画像行在不在」)是**循环判据**:这一行一丢,反而会被读成「这个库
+    一个板块都没有,所以它合法缺席」,于是永远不补 —— 一个看起来完全合理、却让缺席
+    自我合理化的实现。这条把判据的来源钉死在库里的板块数上。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM kg_analysis_artifacts WHERE notebook_id=? AND kind=?",
+            (notebook_id, ARTIFACT_SOURCE_PROFILES),
+        )
+        db.execute(
+            "DELETE FROM kg_source_profiles WHERE notebook_id=?", (notebook_id,)
+        )
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id) == 2        # 刻意不带 force
+    assert calls, "有板块却把来源画像的缺席判成合法 —— 它永远补不回来了"
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+    assert _profiles(repo, notebook_id)
+
+
+def test_a_never_built_library_really_builds(repo, monkeypatch):
+    """方向三(从未建过):`community_seq == -1` 必须真正构建,不许被当成「零板块」短路。
+
+    这是把「建过」的标记从板块数换成 seq 之后唯一的风险点。列默认 -1、
+    `kg_mutation_seq` 恒 >= 0,两者永远不等 —— 这条把那个前提钉住。
+    """
+    notebook_id = _seed(repo)
+    with repo._connect() as db:
+        state = db.execute(
+            "SELECT community_seq, kg_mutation_seq FROM unified_kg_state "
+            "WHERE notebook_id=?", (notebook_id,)).fetchone()
+    assert int(state["community_seq"]) == -1
+    assert int(state["kg_mutation_seq"]) >= 0
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id) == 2
+    assert sorted(set(calls)) == sorted(_HEAVY_WORK), f"从没建过却短路了:{calls}"
+    assert _boards(repo, notebook_id)
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
 
 
 def test_deleting_the_notebook_takes_the_artifacts_with_it(repo):

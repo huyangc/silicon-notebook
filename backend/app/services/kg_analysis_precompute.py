@@ -97,6 +97,23 @@ _ARTIFACT_KINDS = frozenset(ARTIFACT_KINDS)
 OPTIONAL_ARTIFACT_KINDS = frozenset({ARTIFACT_SOURCE_PROFILES})
 REQUIRED_ARTIFACT_KINDS = _ARTIFACT_KINDS - OPTIONAL_ARTIFACT_KINDS
 
+# 依赖**板块划分**的两份产物 —— 它们的明细行(`kg_community_edges` /
+# `kg_source_profiles`)直接存 `community_id`。
+#
+# ⚠ `replace_communities` 会**重铸板块 id**(`_new_id("cm")`),所以板块一被重写,
+# 这两份的每一行立刻变成悬空引用。它们必须与重铸**同事务**作废,否则:
+#   · 报告会把已经不存在的板块画进俯瞰图、列进来源画像的「最集中板块」;
+#   · T3 的记忆化签名(state 的 seq + 账本行的 seq/created_at)一个字段都不会变 ——
+#     `force=True` 在**同一个** `kg_mutation_seq` 上重铸板块、而随后的预计算又恰好
+#     失败时,已预热的缓存会**无限期**继续吐上一套板块,直到 LRU 淘汰或进程重启。
+#     作废账本行同时也就动了签名,这是这份缓存唯一 O(1) 的失效手段:签名里放不下
+#     「板块世代」——任何从 `communities` 现算的世代标记都是 O(板块数) 的读,而那正是
+#     这份缓存要省掉的那笔钱(生产 88 580 个板块)。
+#
+# 另三份(三条统计快照)与板块划分**无关**,刻意不在此列:作废它们只会平白丢掉一份
+# 仍然可读、只是「落后 N 次变更」的快照。
+BOARD_DEPENDENT_ARTIFACT_KINDS = (ARTIFACT_COMMUNITY_EDGES, ARTIFACT_SOURCE_PROFILES)
+
 
 def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
     """账本写入口的守卫:**多写**与**少写**都硬失败。

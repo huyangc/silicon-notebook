@@ -84,6 +84,7 @@ LIFECYCLE_STORE_CALLS = {
         "cluster_fold_rows",
         "cluster_input_facts",
         "communities_count",
+        "discard_board_dependent_kg_analysis_artifacts",
         "community_graph_rows",
         "community_member_ids",
         "community_reports",
