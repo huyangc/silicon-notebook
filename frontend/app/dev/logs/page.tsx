@@ -189,14 +189,14 @@ export default function LogsPage() {
       setDetail(null);
       setDetailLoading(true);
       try {
-        setDetail(await fetchRecord(channel, rec.id, date || undefined, rec.seq));
+        setDetail(await fetchRecord(channel, rec.id, date || undefined, rec.seq, owner || undefined));
       } catch (e) {
         setError(toUserMessage(e, "日志加载失败，请重试"));
       } finally {
         setDetailLoading(false);
       }
     },
-    [date],
+    [date, owner],
   );
 
   const facets = stats?.facets;

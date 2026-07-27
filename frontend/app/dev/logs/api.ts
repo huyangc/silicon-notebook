@@ -41,10 +41,12 @@ export function fetchRecord(
   id: string,
   date?: string,
   seq?: number,
+  owner?: string,
 ): Promise<FullRecord> {
   const qs = new URLSearchParams();
   if (date) qs.set("date", date);
   if (seq !== undefined && seq !== null) qs.set("seq", String(seq));
+  if (owner) qs.set("owner", owner);
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return get<FullRecord>(`/debug/logs/${channel}/${encodeURIComponent(id)}${suffix}`);
 }
