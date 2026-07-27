@@ -159,6 +159,50 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
     return fut
 
 
+def _resolve_tracked_job(
+    completion: cf.Future,
+    fn: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    if not completion.set_running_or_notify_cancel():
+        return
+    try:
+        result = fn(*args, **kwargs)
+    except BaseException as exc:
+        completion.set_exception(exc)
+    else:
+        completion.set_result(result)
+
+
+def submit_tracked_job(
+    accepted: set[cf.Future],
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> cf.Future:
+    """Expose a completion token before the job pool can accept the task.
+
+    This closes the signal window between ``submit_job`` enqueueing a callable
+    and returning its executor Future. Cleanup can cancel a queued token (the
+    wrapper then skips the callable) or wait for a token already claimed by a
+    running wrapper.
+    """
+    completion: cf.Future = cf.Future()
+    accepted.add(completion)
+    try:
+        submit_job(_resolve_tracked_job, completion, fn, args, kwargs)
+    except BaseException:
+        # If submission itself is interrupted before the wrapper is accepted,
+        # no executor will ever advance this bare Future to
+        # CANCELLED_AND_NOTIFIED. Mark it cancelled here; callers must only
+        # wait for tokens whose cancel() reports that work is already running.
+        completion.cancel()
+        raise
+    return completion
+
+
 def stats() -> dict:
     """Live pool utilization. Reads globals only (no _ensure) — returns zeros
     before the pool is built, and never contends with pool (re)build."""

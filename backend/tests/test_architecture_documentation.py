@@ -343,12 +343,22 @@ def test_backend_specific_retrieval_limits_and_selectable_architecture_are_quali
 def test_batch_ingest_backend_boundary_and_postgres_extension_prerequisite_are_documented():
     _assert_phrases(
         {
-            "README.md": "`scripts/batch_ingest.py` mutation phases are SQLite-only",
-            "README_zh.md": "`scripts/batch_ingest.py` 的变更阶段仅支持 SQLite",
-            "AGENTS.md": "`batch_ingest` mutation phases are SQLite-only",
-            "CLAUDE.md": "`batch_ingest` mutation phases are SQLite-only",
-            "architecture.md": "`batch_ingest` 的 mutation phase 仅支持 SQLite",
-            "packaging/DEPLOY.md": "`batch_ingest.py` 的变更阶段仅支持 SQLite",
+            "README.md": "supports SQLite and PostgreSQL for `ingest`",
+            "README_zh.md": "同时支持 SQLite 与 PostgreSQL",
+            "AGENTS.md": "support both formal backends through the central factory",
+            "CLAUDE.md": "同时支持 SQLite/PostgreSQL",
+            "architecture.md": "mutation phase 支持 SQLite 与 PostgreSQL",
+            "packaging/DEPLOY.md": "支持 SQLite 与 PostgreSQL",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "`--confirm-service-stopped`",
+            "README_zh.md": "`--confirm-service-stopped`",
+            "AGENTS.md": "`--confirm-service-stopped`",
+            "CLAUDE.md": "`--confirm-service-stopped`",
+            "architecture.md": "`--confirm-service-stopped`",
+            "packaging/DEPLOY.md": "`--confirm-service-stopped`",
         }
     )
     _assert_phrases(

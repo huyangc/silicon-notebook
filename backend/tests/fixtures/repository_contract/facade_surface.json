@@ -129,37 +129,7 @@
       },
       {
         "kind": "import",
-        "path": "backend/app/scripts/backfill_relation_embeddings.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/scripts/build_kg.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
         "path": "backend/app/scripts/gen_recall_gold.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/scripts/recluster_kg.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/scripts/reembed_kg.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>",
         "target": "app.services.sqlite_repository:SQLiteRepository"
       },
@@ -168,12 +138,6 @@
         "path": "backend/tests/test_replay_retrieval.py",
         "scope": "<module>.test_record_run_requires_retrieval_query_embedding",
         "target": "SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "scripts/backfill_kg_embeddings.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
       },
       {
         "kind": "import",
@@ -189,25 +153,7 @@
       },
       {
         "kind": "import",
-        "path": "scripts/build_chunks.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "scripts/denoise_reextract_nb.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
         "path": "scripts/kg_product_smoke.py",
-        "scope": "<module>",
-        "target": "app.services.sqlite_repository:SQLiteRepository"
-      },
-      {
-        "kind": "import",
-        "path": "scripts/reextract_notebook.py",
         "scope": "<module>",
         "target": "app.services.sqlite_repository:SQLiteRepository"
       },
@@ -4153,12 +4099,6 @@
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.maintenance",
         "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "scripts/backfill_kg_embeddings.py",
-        "scope": "<module>.main",
-        "target": "_runtime"
       }
     ],
     "kind": "instance_attribute",
@@ -4551,12 +4491,6 @@
         "kind": "attribute",
         "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_paper_metadata",
-        "target": "backfill_paper_metadata"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_metadata",
         "target": "backfill_paper_metadata"
       }
     ],
@@ -6000,6 +5934,12 @@
       },
       {
         "kind": "attribute",
+        "path": "scripts/denoise_reextract_nb.py",
+        "scope": "<module>.main",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/replay_retrieval.py",
         "scope": "<module>.record_run",
         "target": "get_notebook"
@@ -6483,12 +6423,6 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/services/reextract.py",
-        "scope": "<module>.reextract_notebook",
-        "target": "list_sources"
-      },
-      {
-        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.main",
         "target": "list_sources"
@@ -6586,6 +6520,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._require_notebook_owner",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._resolve_owner_profile",
         "target": "maintenance"
       },
@@ -6634,6 +6574,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_metadata",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_metadata._one",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_reparse",
         "target": "maintenance"
       },
@@ -6647,6 +6599,12 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.maybe_sweep_orphan_assets._sweep",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/reextract.py",
+        "scope": "<module>.reextract_notebook",
         "target": "maintenance"
       },
       {
@@ -6701,6 +6659,12 @@
         "kind": "attribute",
         "path": "scripts/denoise_reextract_nb.py",
         "scope": "<module>.main",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/denoise_reextract_nb.py",
+        "scope": "<module>.main._extract",
         "target": "maintenance"
       },
       {
@@ -7399,7 +7363,7 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_no_signal_conversion_on_paths_that_do_not_drain",
+        "scope": "<module>.test_non_durable_paths_keep_default_termination_signals",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7509,7 +7473,7 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_no_signal_conversion_on_paths_that_do_not_drain",
+        "scope": "<module>.test_non_durable_paths_keep_default_termination_signals",
         "target": "rebuild_unified_kg"
       },
       {
@@ -8910,6 +8874,12 @@
         "target": "upload_sources"
       },
       {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_ingest_repeated_interrupt_cannot_escape_worker_drain",
+        "target": "upload_sources"
+      },
+      {
         "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.check_kg_store_ask_and_conversations",
@@ -8930,7 +8900,16 @@
     ],
     "kind": "method",
     "owner": "SourceIngestionService",
-    "patch_targets": [],
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_ingest_repeated_interrupt_cannot_escape_worker_drain",
+        "target": "upload_sources"
+      }
+    ],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'List[UploadedSourceSummary]'"
   },

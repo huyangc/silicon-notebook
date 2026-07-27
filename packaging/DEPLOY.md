@@ -211,9 +211,12 @@ forward-shadow 实现分别对应 `docs/superpowers/plans/2026-07-22-postgresql-
 
 ### F. 离线 batch ingest 边界
 
-`batch_ingest.py` 的变更阶段仅支持 SQLite。若 active `DATABASE_URL` 是 PostgreSQL，
-CLI 会在构造 SQLite repository 前返回状态码 `2`，且错误不打印 URL/密码。PostgreSQL
-请使用正常应用/API 上传与 KG/reindex 流程；不要把 SQLite maintenance 命令指向 PG。
+`batch_ingest.py` 的 `ingest` / `kg` / `index` / `all` / `embed` / `metadata` /
+`reparse` / `backfill-source-index` 支持 SQLite 与 PostgreSQL。PostgreSQL 直连维护前必须
+停止 API 与全部后台 writer，并显式传 `--confirm-service-stopped`；该 flag 不会自行停服。
+共享 opener 会在构造 repository 前完成确认/能力检查，再以独立非池化 session 持有
+database-wide advisory lock，命令结束时释放并关闭 repository。在线维护仍走正常应用/API。
+`vectors-to-blob` 只用于 SQLite 旧文本向量，PostgreSQL 已使用 `bytea`，会在连接前拒绝。
 `--dry-run` 只扫描文件系统，不构造 repository，因此两种配置都可使用。
 
 ## 排障

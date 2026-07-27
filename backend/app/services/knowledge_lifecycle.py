@@ -40,7 +40,7 @@ import hashlib
 import json
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
@@ -70,6 +70,8 @@ INTERNAL_KG_BUILD_ERROR_MESSAGE = (
 INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
     "本次分析被中断；已完成内容已保留，可继续分析未完成内容。"
 )
+
+_SOURCE_BUILD_PAGE_SIZE = 500
 
 
 try:
@@ -837,29 +839,48 @@ class KnowledgeLifecycleService:
                     job_id,
                 )
 
-    def _kg_target_state(
+    def _kg_target_pages(
         self, notebook_id: str, mode: str
-    ) -> Tuple[List[str], List[str], List[str]]:
-        with self._connect() as db:
-            source_ids, kgful = self.knowledge.source_build_rows(db, notebook_id)
-            parsed = self.knowledge.sources_with_elements(db, notebook_id)
-        if mode == "rebuild":
-            targets = sorted(sid for sid in source_ids if sid in parsed)
+    ) -> Iterator[Tuple[List[str], List[str], List[str]]]:
+        """Yield deterministic bounded inventory pages for a durable KG job."""
+        after_id = ""
+        while True:
+            with self._connect() as db:
+                rows = self.knowledge.source_build_state_page(
+                    db,
+                    notebook_id,
+                    after_id,
+                    _SOURCE_BUILD_PAGE_SIZE,
+                )
+            if not rows:
+                return
+            targets: List[str] = []
             skipped: List[str] = []
-            skipped_no_elements = sorted(
-                sid for sid in source_ids if sid not in parsed
+            skipped_no_elements: List[str] = []
+            for row in rows:
+                source_id = str(row["id"])
+                has_kg = bool(row["has_kg"])
+                has_elements = bool(row["has_elements"])
+                if mode == "rebuild":
+                    (targets if has_elements else skipped_no_elements).append(source_id)
+                elif has_kg:
+                    skipped.append(source_id)
+                elif has_elements:
+                    targets.append(source_id)
+                else:
+                    skipped_no_elements.append(source_id)
+            yield targets, skipped, skipped_no_elements
+            after_id = str(rows[-1]["id"])
+            if len(rows) < _SOURCE_BUILD_PAGE_SIZE:
+                return
+
+    def _kg_target_count(self, notebook_id: str, mode: str) -> int:
+        return sum(
+            len(targets)
+            for targets, _skipped, _missing in self._kg_target_pages(
+                notebook_id, mode
             )
-        else:
-            targets = sorted(
-                sid for sid in source_ids if sid not in kgful and sid in parsed
-            )
-            skipped = sorted(kgful)
-            skipped_no_elements = sorted(
-                sid
-                for sid in source_ids
-                if sid not in kgful and sid not in parsed
-            )
-        return targets, skipped, skipped_no_elements
+        )
 
     def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict:
         if mode not in {"incremental", "rebuild"}:
@@ -867,9 +888,7 @@ class KnowledgeLifecycleService:
         self.get_notebook(notebook_id)
         if not self.model_clients.configured("kg_extract"):
             raise RuntimeError("LLM not configured; cannot build KG")
-        targets, _skipped, _skipped_no_elements = self._kg_target_state(
-            notebook_id, mode
-        )
+        target_count = self._kg_target_count(notebook_id, mode)
         # create_job 先 INSERT 再 get(job_id) 返回。信号落在「已提交、尚未返回」之间时
         # job 根本没被赋值,连下面那层守卫都进不去,行就永久留在 running。这里按
         # notebook 找回它——但只在**新出现**且仍 running 的行上动手:调用前后比对最新行
@@ -882,7 +901,7 @@ class KnowledgeLifecycleService:
                 notebook_id,
                 self._current_user_id(),
                 mode,
-                len(targets),
+                target_count,
             )
         except (KeyboardInterrupt, SystemExit):
             stranded = self.kg_build_jobs.latest(notebook_id)
@@ -995,8 +1014,22 @@ class KnowledgeLifecycleService:
         # 不短,中断落在这里时已提交的 worker 同样必须被取消并排空。故用增量填充的
         # dict 而非推导式——清理路径要能看到「提交到一半」的那部分。
         futures: dict = {}
+        accepted: set = set()
         processed = set()
         progress_index = 0
+
+        def _cancel_and_drain_accepted() -> None:
+            # A completion token is registered before submit_job accepts its
+            # wrapper.  A token cancelled in that pre-accept window is a bare
+            # Future in CANCELLED (not CANCELLED_AND_NOTIFIED), and
+            # concurrent.futures.wait() would block on it forever.  Only a
+            # token whose cancel() fails can already be running/finished and
+            # therefore needs draining.
+            running_or_done = [
+                pending for pending in accepted if not pending.cancel()
+            ]
+            if running_or_done:
+                _cf.wait(running_or_done)
 
         def _record_result(future) -> KgBuildAborted | None:
             nonlocal progress_index
@@ -1031,18 +1064,17 @@ class KnowledgeLifecycleService:
 
         try:
             for source_id in targets:
-                futures[
-                    _kg_scheduler.submit_job(_extract_one, source_id)
-                ] = source_id
+                future = _kg_scheduler.submit_tracked_job(
+                    accepted, _extract_one, source_id
+                )
+                futures[future] = source_id
             for future in _cf.as_completed(futures):
                 abort = _record_result(future)
                 if abort is None:
                     continue
                 if on_abort is not None:
                     on_abort(abort)
-                for pending in futures:
-                    pending.cancel()
-                _cf.wait(futures)
+                _cancel_and_drain_accepted()
                 for drained in futures:
                     if drained is future:
                         continue
@@ -1068,9 +1100,7 @@ class KnowledgeLifecycleService:
                     ),
                     notify=False,
                 )
-                for pending in futures:
-                    pending.cancel()
-                _cf.wait(futures)
+                _cancel_and_drain_accepted()
 
             self._absorbing_repeated_termination(job_id, _stop_and_drain)
             # 刻意不像熔断分支那样 _record_result(排空结果):中断是不可恢复的收尾,
@@ -1188,24 +1218,52 @@ class KnowledgeLifecycleService:
             if mode == "rebuild":
                 probe_kg_model(controlled_client)
                 self.delete_notebook_kg(notebook_id)
-            targets, skipped, skipped_no_elements = self._kg_target_state(
-                notebook_id, "incremental"
-            )
-            if mode != "rebuild" and targets:
+            total_targets = int(job["total_sources"])
+            if mode != "rebuild" and total_targets:
                 probe_kg_model(controlled_client)
-            self._warn_skipped_sources(skipped_no_elements)
             self.kg_build_jobs.set_stage(job_id, "extracting")
-            result = self._extract_targets(
-                notebook_id,
-                targets,
-                skipped,
-                skipped_no_elements,
-                job_id,
-                control,
-                controlled_clients,
-                progress,
-                _mark_stopping,
-            )
+            result = {
+                "built": [],
+                "failed": [],
+                "skipped": [],
+                "skipped_no_elements": [],
+            }
+            processed = 0
+            for targets, skipped, skipped_no_elements in self._kg_target_pages(
+                notebook_id, "incremental"
+            ):
+                self._warn_skipped_sources(skipped_no_elements)
+
+                def _page_progress(
+                    index: int,
+                    _page_total: int,
+                    source_id: str,
+                    succeeded: bool,
+                    *,
+                    _offset: int = processed,
+                ) -> None:
+                    if progress is not None:
+                        progress(
+                            _offset + index,
+                            total_targets,
+                            source_id,
+                            succeeded,
+                        )
+
+                page_result = self._extract_targets(
+                    notebook_id,
+                    targets,
+                    skipped,
+                    skipped_no_elements,
+                    job_id,
+                    control,
+                    controlled_clients,
+                    _page_progress if progress is not None else None,
+                    _mark_stopping,
+                )
+                for key in result:
+                    result[key].extend(page_result[key])
+                processed += len(targets)
             self._run_success_side_effects(notebook_id, result)
             self.kg_build_jobs.finish(job_id, "succeeded")
             self._emit_kg_build_event(

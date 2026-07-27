@@ -5,13 +5,14 @@ import signal
 import threading
 import time
 import pytest
+from concurrent.futures import Future
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Mapping
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user, set_request_user, reset_request_user
-from app.repositories.ports import KgBuildAlreadyRunning
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.services import batch_ingest as bi
@@ -52,7 +53,14 @@ def repo(tmp_path, monkeypatch):
         },
     )
     r = SQLiteRepository(Settings(model_services_config=""), model_provider=provider)
-    monkeypatch.setattr(bi, "SQLiteRepository", lambda settings: r)
+
+    @contextmanager
+    def _open_test_repository(_settings, **_kwargs):
+        yield r
+
+    monkeypatch.setattr(
+        bi, "open_maintenance_cli_repository", _open_test_repository
+    )
     return r
 
 
@@ -345,24 +353,23 @@ def test_main_interrupt_exits_cleanly_with_shell_convention(
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
 
-def test_no_signal_conversion_on_paths_that_do_not_drain(
+def test_non_durable_paths_keep_default_termination_signals(
     repo, monkeypatch, capsys
 ):
-    """codex 评审 P1 的回归护栏:`--limit`/`--retry-partial` 分支自己起池且不排空,
-    也不建持久任务行。若把 SIGTERM 转成 KeyboardInterrupt,main() 会返回 130 而
-    ThreadPoolExecutor 的 atexit join 仍按住进程、worker 继续调模型写库——等于拿掉
-    了运维用 kill 停批处理的能力。这些路径必须保持 SIGTERM 默认处置。"""
+    """非 durable 分支不接管 SIGTERM/SIGHUP；Ctrl-C 的 future drain 另行验证。"""
     nb_id = bi.ensure_notebook(repo, None, "nb")
     bind_chat_client(repo, "kg_extract", _StubKgChatClient())
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     observed = {}
 
-    def _source_ids(_notebook_id):
+    def _target_page(_notebook_id, **_kwargs):
         observed["sigterm"] = signal.getsignal(signal.SIGTERM)
         observed["sighup"] = signal.getsignal(signal.SIGHUP)
         return []
 
-    monkeypatch.setattr(repo.maintenance, "source_ids", _source_ids)
+    monkeypatch.setattr(
+        repo.maintenance, "kg_target_source_rows_page", _target_page
+    )
     monkeypatch.setattr(
         repo, "rebuild_unified_kg",
         lambda nb, progress=None, force=False, fresh=False: 0,
@@ -376,6 +383,195 @@ def test_no_signal_conversion_on_paths_that_do_not_drain(
     assert rc == 0
     assert observed["sigterm"] is signal.SIG_DFL
     assert observed["sighup"] is signal.SIG_DFL
+
+
+def test_limited_kg_interrupt_cancels_and_drains_accepted_workers(
+    repo, monkeypatch
+):
+    """Ctrl-C 后不能先释放 PG advisory lock 再让后台 worker 继续写库。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    bind_chat_client(repo, "kg_extract", _StubKgChatClient())
+    accepted: Future[object] = Future()
+    tracked = []
+
+    monkeypatch.setattr(
+        repo.maintenance,
+        "kg_target_source_rows_page",
+        lambda *_args, **_kwargs: [{"source_id": "src-one", "is_partial": False}],
+    )
+    def _submit(_wrapper, completion, *_args, **_kwargs):
+        tracked.append(completion)
+        return accepted
+
+    monkeypatch.setattr("app.services.kg.scheduler.submit_job", _submit)
+
+    def _interrupt(_futures):
+        raise KeyboardInterrupt("ctrl-c")
+        yield  # pragma: no cover - keep this a generator like as_completed
+
+    monkeypatch.setattr(bi, "as_completed", _interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        bi.run_kg(repo, nb_id, limit=1, no_rebuild=True)
+
+    assert len(tracked) == 1 and tracked[0].cancelled()
+
+
+def test_cancel_and_drain_absorbs_repeated_interrupt_during_cancellation():
+    """A second Ctrl-C inside the cleanup window must not release DB ownership."""
+    class InterruptOnceFuture:
+        def __init__(self):
+            self.calls = 0
+
+        def cancel(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise KeyboardInterrupt("second ctrl-c")
+            return True
+
+    future = InterruptOnceFuture()
+    bi._cancel_and_drain_futures([future])
+    assert future.calls == 2
+
+
+def test_tracked_submission_is_drainable_if_submit_interrupts_after_acceptance():
+    accepted: set[Future[object]] = set()
+    started = threading.Event()
+    release = threading.Event()
+    threads = []
+
+    def _work():
+        started.set()
+        assert release.wait(timeout=5)
+        return "done"
+
+    def _submit(wrapper, *args):
+        worker = threading.Thread(target=wrapper, args=args)
+        threads.append(worker)
+        worker.start()
+        assert started.wait(timeout=5)
+        raise KeyboardInterrupt("accepted before submit returned")
+
+    with pytest.raises(KeyboardInterrupt):
+        bi._submit_tracked_future(_submit, accepted, _work)
+
+    assert len(accepted) == 1
+    completion = next(iter(accepted))
+    assert completion.running()
+    release.set()
+    bi._cancel_and_drain_futures(accepted)
+    for worker in threads:
+        worker.join(timeout=5)
+    assert completion.result() == "done"
+
+
+def test_run_ingest_repeated_interrupt_cannot_escape_worker_drain(
+    repo, tmp_path, monkeypatch
+):
+    path = tmp_path / "blocked.md"
+    path.write_text("# blocked", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+    returned = threading.Event()
+    real_submit_tracked = bi._submit_tracked_future
+    real_wait = bi.wait
+    waits = 0
+
+    def _upload(*_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        returned.set()
+        return []
+
+    class _InterruptingResult:
+        def result(self):
+            assert started.wait(timeout=5)
+            raise KeyboardInterrupt("first ctrl-c while ingest waits")
+
+    def _submit(*args, **kwargs):
+        real_submit_tracked(*args, **kwargs)
+        return _InterruptingResult()
+
+    def _wait(futures, *args, **kwargs):
+        nonlocal waits
+        waits += 1
+        if waits == 1:
+            release.set()
+            raise KeyboardInterrupt("second ctrl-c during ingest drain")
+        return real_wait(futures, *args, **kwargs)
+
+    monkeypatch.setattr(repo, "upload_sources", _upload)
+    monkeypatch.setattr(bi, "_submit_tracked_future", _submit)
+    monkeypatch.setattr(bi, "wait", _wait)
+
+    with pytest.raises(KeyboardInterrupt):
+        bi.run_ingest(repo, "nb-unused", [path], workers=1)
+
+    assert returned.is_set()
+    assert waits >= 2
+
+
+def test_limited_kg_interrupt_during_submission_drains_already_accepted_worker(
+    repo, monkeypatch
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-submit-interrupt")
+    bind_chat_client(repo, "kg_extract", _StubKgChatClient())
+    accepted: Future[object] = Future()
+    tracked = []
+    calls = 0
+
+    monkeypatch.setattr(
+        repo.maintenance,
+        "kg_target_source_rows_page",
+        lambda *_args, **_kwargs: [
+            {"source_id": "src-one", "is_partial": False},
+            {"source_id": "src-two", "is_partial": False},
+        ],
+    )
+
+    def _submit(_wrapper, completion, *_args, **_kwargs):
+        nonlocal calls
+        tracked.append(completion)
+        calls += 1
+        if calls == 1:
+            return accepted
+        raise KeyboardInterrupt("ctrl-c while submitting")
+
+    monkeypatch.setattr("app.services.kg.scheduler.submit_job", _submit)
+
+    with pytest.raises(KeyboardInterrupt):
+        bi.run_kg(repo, nb_id, limit=2, no_rebuild=True)
+
+    assert len(tracked) == 2 and all(future.cancelled() for future in tracked)
+
+
+def test_reparse_interrupt_during_submission_drains_already_accepted_worker(
+    repo, monkeypatch
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-reparse-submit-interrupt")
+    accepted: Future[object] = Future()
+    tracked = []
+    calls = 0
+    monkeypatch.setattr(
+        repo.maintenance,
+        "source_ids_missing_elements_page",
+        lambda *_args, **_kwargs: ["src-one", "src-two"],
+    )
+
+    def _submit(_wrapper, completion, *_args, **_kwargs):
+        nonlocal calls
+        tracked.append(completion)
+        calls += 1
+        if calls == 1:
+            return accepted
+        raise KeyboardInterrupt("ctrl-c while submitting")
+
+    monkeypatch.setattr("app.services.kg.scheduler.submit_job", _submit)
+
+    with pytest.raises(KeyboardInterrupt):
+        bi.run_reparse(repo, nb_id, limit=2, no_rebuild=True)
+
+    assert len(tracked) == 2 and all(future.cancelled() for future in tracked)
 
 
 def test_main_interrupt_after_a_committed_build_still_reports_130(
@@ -446,7 +642,11 @@ def test_main_dry_run_lists_files(repo, tmp_path, capsys):
     assert "dry-run" in out and "3 files" in out
 
 
-def test_main_postgres_mutation_fails_before_sqlite_repository(monkeypatch, capsys):
+def test_main_postgres_mutation_requires_stopped_service_confirmation_before_open(
+    monkeypatch, capsys
+):
+    from app.services import maintenance_cli
+
     secret_url = (
         "postgresql://batch-user:do-not-leak@db.example.test:5432/"
         "silicon_notebook?sslmode=require"
@@ -454,32 +654,35 @@ def test_main_postgres_mutation_fails_before_sqlite_repository(monkeypatch, caps
     monkeypatch.setenv("DATABASE_URL", secret_url)
     constructed = False
 
-    def _unexpected_sqlite_repository(_settings):
+    def _unexpected_repository(_settings):
         nonlocal constructed
         constructed = True
-        raise AssertionError("PostgreSQL batch mutation must not construct SQLiteRepository")
+        raise AssertionError("PostgreSQL mutation must not open a repository")
 
-    monkeypatch.setattr(bi, "SQLiteRepository", _unexpected_sqlite_repository)
+    monkeypatch.setattr(
+        maintenance_cli, "create_repository", _unexpected_repository
+    )
 
     rc = bi.main(["index", "--notebook-id", "nb-existing"])
 
     captured = capsys.readouterr()
     assert rc == 2
     assert constructed is False
-    assert "SQLite-only" in captured.err
-    assert "app/API" in captured.err
-    assert "KG/reindex" in captured.err
+    assert "--confirm-service-stopped" in captured.err
+    assert "PostgreSQL" in captured.err
     combined_output = captured.out + captured.err
     assert secret_url not in combined_output
     assert "do-not-leak" not in combined_output
 
 
-def test_arg_parser_help_classifies_batch_ingest_as_sqlite_only(capsys):
+def test_arg_parser_help_documents_dual_backend_safety_gate(capsys):
     with pytest.raises(SystemExit) as exc_info:
         bi.main(["--help"])
 
     assert exc_info.value.code == 0
-    assert "SQLite-only" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "SQLite/PostgreSQL" in output
+    assert "--confirm-service-stopped" in output
 
 
 def test_main_postgres_dry_run_remains_filesystem_only(
@@ -491,10 +694,14 @@ def test_main_postgres_dry_run_remains_filesystem_only(
         "postgresql://batch-user:do-not-leak@db.example.test:5432/silicon_notebook",
     )
 
-    def _unexpected_sqlite_repository(_settings):
-        raise AssertionError("dry-run must not construct SQLiteRepository")
+    @contextmanager
+    def _unexpected_repository(_settings, **_kwargs):
+        raise AssertionError("dry-run must not open a repository")
+        yield  # pragma: no cover
 
-    monkeypatch.setattr(bi, "SQLiteRepository", _unexpected_sqlite_repository)
+    monkeypatch.setattr(
+        bi, "open_maintenance_cli_repository", _unexpected_repository
+    )
 
     rc = bi.main(["ingest", "--input-dir", str(d), "--dry-run"])
 
@@ -543,12 +750,19 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     now = "2026-01-01T00:00:00"
     with repo._write() as db:
         for i in range(3):
+            source_id = f"src-lim-{i}"
             db.execute(
                 "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
                 "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (f"src-lim-{i}", nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
+                (source_id, nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
                  0, f"h{i}", "", "", "parsed", now, now))
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-lim-{i}", source_id, "paragraph", "L1", "text", "{}", now),
+            )
     extracted_calls = []
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted_calls.append(sid))
     monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
@@ -586,11 +800,12 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
     peak = 0
     targets = [f"src-{i}" for i in range(6)]
 
+    def _targets_page(_notebook_id, *, after_id="", limit=500, **_kwargs):
+        rows = [sid for sid in targets if sid > after_id][:limit]
+        return [{"source_id": sid, "is_partial": False} for sid in rows]
+
     monkeypatch.setattr(
-        repo.maintenance, "source_ids", lambda notebook_id: targets
-    )
-    monkeypatch.setattr(
-        repo.maintenance, "kg_covered_source_ids", lambda notebook_id: set()
+        repo.maintenance, "kg_target_source_rows_page", _targets_page
     )
     repo._runtime.models.chat_clients = {
         **repo._runtime.models.chat_clients,
@@ -620,22 +835,16 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
 
 def test_run_kg_retry_partial_adds_safe_repair_targets(repo, monkeypatch):
     nb_id = bi.ensure_notebook(repo, None, "nb-retry-partial")
-    targets = ["src-missing", "src-partial", "src-complete"]
-    monkeypatch.setattr(repo.maintenance, "source_ids", lambda _nb: targets)
+    targets = [
+        {"source_id": "src-missing", "is_partial": False},
+        {"source_id": "src-partial", "is_partial": True},
+    ]
+
+    def _targets_page(_notebook_id, *, after_id="", limit=500, **_kwargs):
+        return [row for row in targets if row["source_id"] > after_id][:limit]
+
     monkeypatch.setattr(
-        repo.maintenance,
-        "kg_covered_source_ids",
-        lambda _nb: {"src-partial", "src-complete"},
-    )
-    monkeypatch.setattr(
-        repo.maintenance,
-        "partial_kg_source_ids",
-        lambda _nb: {"src-partial"},
-    )
-    monkeypatch.setattr(
-        repo.maintenance,
-        "sources_with_elements",
-        lambda _nb: set(targets),
+        repo.maintenance, "kg_target_source_rows_page", _targets_page
     )
     monkeypatch.setattr(repo.maintenance, "set_source_status", lambda *a, **k: None)
     seen = []
@@ -701,6 +910,47 @@ def test_partial_kg_source_ids_uses_latest_run_and_requires_existing_graph(repo)
         "src-partial",
         "src-retry-empty",
     }
+
+
+def test_bounded_source_inventories_exclude_hidden_projection_sources(repo):
+    nb_id = bi.ensure_notebook(repo, None, "nb-hidden-inventory")
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        for sid, source_type, has_elements in (
+            ("src-doc-empty", "document", False),
+            ("src-doc-ready", "document", True),
+            ("src-knowhow", "knowhow", True),
+            ("src-memory", "memory", True),
+        ):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, nb_id, sid, source_type, f"{sid}.md", "", 0, f"hash-{sid}",
+                 "", "", "parsed", now, now),
+            )
+            if has_elements:
+                db.execute(
+                    "INSERT INTO source_elements (id,source_id,element_type,"
+                    "location_label,text,metadata,created_at) "
+                    "VALUES (?,?,'paragraph','L1','text','{}',?)",
+                    (f"el-{sid}", sid, now),
+                )
+
+    assert repo.maintenance.user_source_ids_page(nb_id) == [
+        "src-doc-empty",
+        "src-doc-ready",
+    ]
+    assert repo.maintenance.source_ids_missing_elements_page(nb_id) == [
+        "src-doc-empty"
+    ]
+    assert repo.maintenance.kg_target_source_rows_page(nb_id) == [
+        {"source_id": "src-doc-ready", "is_partial": False}
+    ]
+    other_nb = bi.ensure_notebook(repo, None, "nb-other")
+    assert repo.maintenance.source_is_user_visible(nb_id, "src-doc-ready")
+    assert not repo.maintenance.source_is_user_visible(other_nb, "src-doc-ready")
+    assert not repo.maintenance.source_is_user_visible(nb_id, "src-knowhow")
 
 
 def test_run_kg_rejects_retry_partial_with_rebuild_only(repo):
@@ -866,6 +1116,29 @@ def test_main_existing_notebook_owner_context_resets_on_failure(
         "user_id": owner.id,
     }
     assert get_request_user() is None
+
+
+def test_main_rejects_explicit_wrong_notebook_owner(repo, capsys):
+    owner = repo.create_user("f00123456", "pw123456")
+    wrong = repo.create_user("g00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook_id = bi.ensure_notebook(repo, None, "Owned by F")
+    finally:
+        reset_request_user(token)
+
+    rc = bi.main([
+        "reparse",
+        "--notebook-id",
+        notebook_id,
+        "--owner",
+        wrong.username,
+        "--allow-no-embed",
+        "--no-rebuild",
+    ])
+
+    assert rc == 2
+    assert "notebook owner mismatch" in capsys.readouterr().err
 
 
 def test_main_omitted_owner_preserves_active_user_context(
@@ -2057,6 +2330,22 @@ def test_run_backfill_source_index_is_idempotent(repo):
     assert count == 1
 
 
+def test_clear_source_index_unpublishes_fast_path_until_backfill_finishes(repo):
+    """A crash after clearing must leave the reverse index explicitly unready."""
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    _seed_node_with_evidence(repo, nb_id, "ko-1", ["src-a"])
+    bi.run_backfill_source_index(repo, nb_id, all_notebooks=False)
+
+    assert repo.maintenance.clear_source_index(nb_id) == 1
+
+    with repo._connect() as db:
+        assert not repo._source_index_backfilled(db, nb_id)
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()["c"] == 0
+
+
 def test_run_backfill_source_index_requires_notebook_id_or_all(repo):
     with pytest.raises(ValueError):
         bi.run_backfill_source_index(repo, None, all_notebooks=False)
@@ -2445,6 +2734,62 @@ def test_metadata_phase_backfills(repo, monkeypatch, capsys):
     assert rc2 == 0
     out2 = capsys.readouterr().out
     assert '"total": 0' in out2
+
+
+def test_metadata_dispatch_passes_resolved_default_concurrency(repo, monkeypatch):
+    seen = {}
+
+    def _run_metadata(_repo, _args, workers=None):
+        seen["workers"] = workers
+        return 0
+
+    monkeypatch.setattr(bi, "run_metadata", _run_metadata)
+    args = SimpleNamespace(phase="metadata")
+    effective = bi.EffectiveConcurrency(workers=11, workers_source="env")
+
+    assert bi._dispatch_main(args, repo, effective) == 0
+    assert seen == {"workers": 11}
+
+def test_metadata_interrupt_during_submission_drains_accepted_worker(
+    monkeypatch,
+):
+    accepted: Future[object] = Future()
+    tracked = []
+    calls = 0
+
+    class _Pool:
+        def __init__(self, max_workers):
+            assert max_workers == 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def submit(self, _wrapper, completion, *_args, **_kwargs):
+            nonlocal calls
+            tracked.append(completion)
+            calls += 1
+            if calls == 1:
+                return accepted
+            raise KeyboardInterrupt("ctrl-c while submitting metadata")
+
+    maintenance = SimpleNamespace(
+        paper_metadata_source_ids_page=lambda *_args, **_kwargs: ["src-one", "src-two"],
+        ensure_paper_metadata_source=lambda *_args, **_kwargs: "stored",
+    )
+    fake_repo = SimpleNamespace(
+        configured=lambda workload: workload == "paper_metadata",
+        maintenance=maintenance,
+    )
+    args = SimpleNamespace(notebook_id="nb", force=False, workers=None)
+    monkeypatch.setattr(bi, "ThreadPoolExecutor", _Pool)
+
+    with pytest.raises(KeyboardInterrupt):
+        bi.run_metadata(fake_repo, args, workers=2)
+
+    assert len(tracked) == 2 and all(future.cancelled() for future in tracked)
 
 
 def test_metadata_phase_does_not_require_embedding_provider(

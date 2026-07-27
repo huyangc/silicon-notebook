@@ -606,8 +606,7 @@ def _capture_run_control(repo, monkeypatch, client):
 def test_interrupt_while_still_submitting_drains_what_was_submitted(
     repo, monkeypatch
 ):
-    """中断可能落在「还在提交 job」的窗口里(大库要提交几十万个,这段不短)。那时
-    已提交的 worker 同样必须被取消并排空,不能因为提交循环没跑完就漏掉(评审 P1)。"""
+    """任务已入池、submit_job 尚未把 executor Future 返回时也必须可排空。"""
     notebook, _source_ids = _seed_three_parsed_sources(repo)
     client = _BlockUntilAbortedKgClient()
     bind_chat_client(repo, "kg_extract", client)
@@ -615,15 +614,12 @@ def test_interrupt_while_still_submitting_drains_what_was_submitted(
     kg_scheduler.configure(window_workers=2, job_workers=3)
     _capture_run_control(repo, monkeypatch, client)
     real_submit = kg_scheduler.submit_job
-    submits = {"n": 0}
-
     def _submit(fn, /, *args, **kwargs):
-        submits["n"] += 1
-        if submits["n"] == 1:
-            return real_submit(fn, *args, **kwargs)
-        # 第一个来源真的进到模型调用之后,模拟信号落在提交循环中间。
+        # real_submit 已接受任务，故 wrapper token 会被 worker 认领；但用中断
+        # 代替 executor Future 的正常返回，精确覆盖 enqueue→return 的缝隙。
+        real_submit(fn, *args, **kwargs)
         client.blocked_started.wait(10)
-        raise KeyboardInterrupt("ctrl-c while submitting")
+        raise KeyboardInterrupt("ctrl-c after accept before submit returned")
 
     monkeypatch.setattr(kg_scheduler, "submit_job", _submit)
     job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
@@ -636,6 +632,33 @@ def test_interrupt_while_still_submitting_drains_what_was_submitted(
         "提交期间被中断时,已提交的在飞来源没有被排空"
     )
     assert repo._runtime.kg_build_jobs.get(job["id"])["status"] == "failed"
+
+
+def test_interrupt_before_executor_accept_does_not_wait_on_bare_token(
+    repo, monkeypatch
+):
+    """提交尚未入池时的裸 token 只能 cancel，不能交给 Future.wait。"""
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    kg_scheduler.reset()
+    kg_scheduler.configure(window_workers=2, job_workers=3)
+
+    def _interrupt_before_accept(fn, /, *args, **kwargs):
+        raise KeyboardInterrupt("ctrl-c before executor accepted the wrapper")
+
+    def _must_not_wait(futures, *args, **kwargs):
+        raise AssertionError("a pre-accept cancelled token must not be waited")
+
+    monkeypatch.setattr(kg_scheduler, "submit_job", _interrupt_before_accept)
+    monkeypatch.setattr(concurrent.futures, "wait", _must_not_wait)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KeyboardInterrupt):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "worker_interrupted"
 
 
 def test_interrupt_after_the_insert_but_before_create_job_returns_settles(

@@ -1,5 +1,5 @@
 # backend/app/services/batch_ingest.py
-"""SQLite-only 离线批量摄取(目录 → notebook → source/chunk(+embed) → KG → 概念簇)。
+"""双后端离线批量摄取(目录 → notebook → source/chunk(+embed) → KG → 概念簇)。
 
 复用现有管线,不重写解析/分块/抽取。两阶段:
   ingest  upload_sources(同步 parse+chunk+系统调度 embedding) → 收尾补缺失向量
@@ -16,22 +16,34 @@ import signal
 import sys
 import threading
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.core.config import Settings
-from app.core.database_url import database_identity
-from app.core.request_context import set_request_user, reset_request_user
+from app.core.request_context import (
+    get_request_user,
+    reset_request_user,
+    set_request_user,
+)
 from app.models.notebooks import NotebookCreate, NotebookSummary
 from app.models.sources import SourceSummary
 from app.models.identity import UserProfile
-from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.maintenance_cli import (
+    MaintenanceCliError,
+    open_maintenance_cli_repository,
+)
 from app.repositories.ports import (
+    BatchMaintenancePort,
     ExtractionProgress,
     IndexStageProgress,
     KGBuildResult,
@@ -39,13 +51,82 @@ from app.repositories.ports import (
     RebuildProgress,
     RepositoryRow,
     ScaleBuildManifest,
-    SQLiteMaintenancePort,
     SourceScheduler,
 )
 
 SUPPORTED_EXTS = {".md", ".markdown", ".pdf"}
 
+# Legacy SQLite physical-format repair only.  Kept here rather than importing
+# the SQLite adapter so selecting PostgreSQL never imports or constructs SQLite
+# maintenance state.
+_VECTOR_TABLES = (
+    ("chunk_embeddings", "chunk_id"),
+    ("knowledge_embeddings", "object_id"),
+    ("element_embeddings", "element_id"),
+    ("relation_embeddings", "relation_id"),
+)
+_EMBED_PAGE_ROWS = 500
+
 LogFn = Callable[[dict[str, object]], None]
+
+
+def _cancel_and_drain_futures(futures: Iterable[Future[object]]) -> None:
+    """Keep offline DB ownership until every accepted worker has stopped.
+
+    Pending work is cancelled; already-running work cannot be interrupted safely,
+    so it is drained before the PostgreSQL advisory lock/repository is released.
+    Repeated Ctrl-C is absorbed during this narrow safety boundary. SIGTERM/SIGHUP
+    keep their default process-level behavior on these non-durable batch paths.
+    """
+    accepted = set(futures)
+    while True:
+        try:
+            # ``Future.cancel()`` before ``wait()`` can leave a bare Future in
+            # CANCELLED (not CANCELLED_AND_NOTIFIED). Wait only for work that
+            # could not be cancelled because it is already running/done.
+            pending = {future for future in accepted if not future.cancel()}
+            while pending:
+                _done, pending = wait(pending)
+            return
+        except (KeyboardInterrupt, SystemExit):
+            continue
+
+
+def _resolve_tracked_future(
+    completion: Future[object],
+    function: Callable[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> None:
+    """Run accepted work only after atomically claiming its visible token."""
+    if not completion.set_running_or_notify_cancel():
+        return
+    try:
+        result = function(*args, **kwargs)
+    except BaseException as exc:
+        completion.set_exception(exc)
+    else:
+        completion.set_result(result)
+
+
+def _submit_tracked_future(
+    submit: Callable[..., object],
+    accepted: set[Future[object]],
+    function: Callable[..., object],
+    *args: object,
+    **kwargs: object,
+) -> Future[object]:
+    """Register a drainable token before an executor can accept the task.
+
+    A signal may arrive after ``Executor.submit`` enqueues work but before it
+    returns its own Future. The pre-registered completion token closes that
+    gap: cancellation makes a queued wrapper skip the write, while a wrapper
+    that already claimed the token must finish before cleanup can return.
+    """
+    completion: Future[object] = Future()
+    accepted.add(completion)
+    submit(_resolve_tracked_future, completion, function, args, kwargs)
+    return completion
 
 
 class BatchIngestRepository(Protocol):
@@ -53,7 +134,7 @@ class BatchIngestRepository(Protocol):
 
     settings: Settings
     storage_dir: Path
-    maintenance: SQLiteMaintenancePort
+    maintenance: BatchMaintenancePort
 
     def configured(self, workload_id: str) -> bool: ...
     def current_user(self) -> UserProfile: ...
@@ -239,6 +320,21 @@ def _resolve_owner_profile(
     return profile
 
 
+def _require_notebook_owner(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+    batch_user: UserProfile,
+) -> None:
+    actual = repo.maintenance.resolve_notebook_owner_profile(notebook_id)
+    if actual is None:
+        raise MaintenanceCliError(f"notebook not found or has no owner: {notebook_id}")
+    if actual.id != batch_user.id:
+        raise MaintenanceCliError(
+            f"notebook owner mismatch: {notebook_id} belongs to {actual.username or actual.id}; "
+            f"selected owner is {batch_user.username or batch_user.id}"
+        )
+
+
 def ensure_notebook(
     repo: BatchIngestRepository,
     notebook_id: Optional[str],
@@ -285,6 +381,7 @@ def run_ingest(
     # test_run_ingest_releases_the_claim_when_the_claimant_fails 钉住。
     claimed: set[str] = set()
     claim_lock = threading.Lock()
+    active_user = get_request_user()
 
     def _one(path: Path) -> tuple[str, Path, str | None]:
         digest: str | None = None
@@ -313,12 +410,45 @@ def run_ingest(
                     claimed.discard(digest)
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
+    def _one_with_user(path: Path) -> tuple[str, Path, str | None]:
+        # ThreadPoolExecutor does not propagate ContextVar values.  Carry the
+        # selected batch owner explicitly so PostgreSQL owner isolation and
+        # model/log attribution do not silently fall back to the seeded admin.
+        token = set_request_user(active_user)
+        try:
+            return _one(path)
+        finally:
+            reset_request_user(token)
+
     total = len(files)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for i, (status, path, err) in enumerate(pool.map(_one, files), 1):
-            counts[status] += 1
-            log({"phase": "ingest", "path": str(path), "status": status, "error": err})
-            print(f"[ingest {i}/{total}] {Path(path).name}: {status}", flush=True)
+        accepted: set[Future[object]] = set()
+        futures: list[Future[object]] = []
+        try:
+            for path in files:
+                futures.append(
+                    _submit_tracked_future(
+                        pool.submit, accepted, _one_with_user, path
+                    )
+                )
+            # Preserve the historical input-order progress/log contract even
+            # though the producer work itself runs concurrently.
+            for i, future in enumerate(futures, 1):
+                status, path, err = future.result()
+                counts[status] += 1
+                log({
+                    "phase": "ingest",
+                    "path": str(path),
+                    "status": status,
+                    "error": err,
+                })
+                print(
+                    f"[ingest {i}/{total}] {Path(path).name}: {status}",
+                    flush=True,
+                )
+        except BaseException:
+            _cancel_and_drain_futures(accepted)
+            raise
 
     counts["sources_embedded"] = backfill_chunk_embeddings(
         repo, notebook_id, missing_only=True
@@ -342,25 +472,39 @@ def backfill_chunk_embeddings(
         return 0
     mnt = repo.maintenance
     if missing_only:
-        rows = mnt.missing_chunk_embedding_rows(notebook_id)
-        items = [{"_oid": r["id"], "payload": {"text": r["text"]}} for r in rows]
-        if not items:
+        total = 0
+        after_id = ""
+        while rows := mnt.missing_chunk_embedding_page(
+            notebook_id, after_id=after_id, limit=_EMBED_PAGE_ROWS
+        ):
+            items = [
+                {"_oid": r["id"], "payload": {"text": r["text"]}}
+                for r in rows
+            ]
+            mnt.embed_chunks_batch(notebook_id, items)
+            total += len(items)
+            after_id = str(rows[-1]["id"])
+            print(f"[embed] 已补 chunk 向量:{total}", flush=True)
+        if total == 0:
             print("[embed] 无缺失 chunk 向量,跳过", flush=True)
             return 0
-        print(f"[embed] 补缺失 chunk 向量:{len(items)} 个", flush=True)
-        mnt.embed_chunks_batch(notebook_id, items)
-        return len(items)
+        return total
 
     done = 0
-    sids = mnt.source_ids(notebook_id)
-    n = len(sids)
-    for i, sid in enumerate(sids, 1):
-        try:
-            mnt.embed_chunks_for_source(sid)
-            done += 1
-            print(f"[embed {i}/{n}] {sid}", flush=True)
-        except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
-            print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
+    scanned = 0
+    after_id = ""
+    while sids := mnt.user_source_ids_page(
+        notebook_id, after_id=after_id, limit=_EMBED_PAGE_ROWS
+    ):
+        for sid in sids:
+            scanned += 1
+            try:
+                mnt.embed_chunks_for_source(sid)
+                done += 1
+                print(f"[embed {scanned}] {sid}", flush=True)
+            except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
+                print(f"[embed {scanned}] {sid} ✗(留人工重跑)", flush=True)
+        after_id = sids[-1]
     return done
 
 
@@ -373,30 +517,33 @@ def backfill_element_embeddings(
     与 chunk/节点两侧并列的第三条补齐路径:此前 element 侧只有「整源重跑」一条路,
     写了一半的源(部分 element 有向量、部分没有)没有任何增量修法。
 
-    已知边界(codex 第 5/6/8 轮 P2,经权衡后本 PR 不修):待补行的**文本**是一次
-    fetchall 全读进内存的,大库上这部分内存与待补文本总量成正比。之所以不在这里改:
-    chunk 侧的 missing_chunk_embedding_rows 是**完全同构**的既有实现,只把 element 侧
-    改成分页会让两侧行为不一致、给后续维护埋坑;要治应两侧一起改成 keyset 分页,
-    作为独立改动提。本 PR 已把**向量**侧的内存做了分页——向量才是 GB 级的大头
-    (几十万 element × 1024 维 float),文本通常小一到两个数量级。
-    保留行为(向量确实分页落库)由
-    test_backfill_element_embeddings_persists_before_all_embedding_finishes 钉住。
-    element_embeddings 走 INSERT OR REPLACE upsert,只补缺失不会动同源已有的向量。"""
+    文本和向量都按稳定 id keyset 分页；每页落库后再读取下一页，所以峰值内存有界，
+    中断后重跑会从仍缺向量的行重新开始。upsert 只补缺失，不改变已有向量。"""
     if not repo.configured("source_element_embedding"):
         return 0
     mnt = repo.maintenance
-    rows = mnt.missing_element_embedding_rows(notebook_id)
-    if not rows:
+    total = 0
+    after_id = ""
+    while rows := mnt.missing_element_embedding_page(
+        notebook_id, after_id=after_id, limit=_EMBED_PAGE_ROWS
+    ):
+        total += mnt.embed_elements_batch(
+            notebook_id,
+            [
+                {
+                    "element_id": r["id"],
+                    "source_id": r["source_id"],
+                    "text": r["text"],
+                }
+                for r in rows
+            ],
+        )
+        after_id = str(rows[-1]["id"])
+        print(f"[embed] 已补 element 向量:{total}", flush=True)
+    if total == 0:
         print("[embed] 无缺失 element 向量,跳过", flush=True)
         return 0
-    print(f"[embed] 补缺失 element 向量:{len(rows)} 个", flush=True)
-    return mnt.embed_elements_batch(
-        notebook_id,
-        [
-            {"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]}
-            for r in rows
-        ],
-    )
+    return total
 
 
 def run_kg(repo: BatchIngestRepository, notebook_id: str,
@@ -460,14 +607,11 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                             reporter.total = n
                             print(f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True)
                         # 只在这一条路径上把 SIGTERM/SIGHUP 转成 KeyboardInterrupt:
-                        # 唯有它建持久任务行(kg_build_jobs),也唯有它在中断时会取消
-                        # 并排空在飞抽取。装宽了反而有害——本函数下面的 limit/
-                        # retry_partial 分支以及 run_all/run_reparse/run_ingest 都各自
-                        # 用池且不排空,把 SIGTERM 转成异常只会让 main() 返回 130 后卡在
-                        # ThreadPoolExecutor 的 atexit join 里,worker 继续调模型写库,
-                        # 等于拿掉了运维用 kill 停批处理的能力(它们本来就没有需要收尾的
-                        # 持久状态)。Ctrl-C 在各阶段的行为不受此影响:SIGINT 本来就抛
-                        # KeyboardInterrupt。
+                        # 唯有它建持久任务行(kg_build_jobs),并由 durable build 协议取消
+                        # 和排空在飞抽取。limit/retry_partial 以及 run_all/run_reparse
+                        # 不建持久任务行，仍保留 SIGTERM/SIGHUP 的默认进程级终止；它们
+                        # 只在 Python 已收到 Ctrl-C/其它 BaseException 时排空已接受的
+                        # future，确保 PostgreSQL advisory lock 不会先于 worker 释放。
                         saved_signals = _install_termination_signals()
                         try:
                             out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
@@ -480,29 +624,9 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                 if not llm_ok:
                     raise RuntimeError(
                         "kg_extract workload 未绑定系统模型服务")
-                all_sids = mnt.source_ids(notebook_id)
-                kgful = mnt.kg_covered_source_ids(notebook_id)
-                partial = (
-                    mnt.partial_kg_source_ids(notebook_id)
-                    if retry_partial else set()
-                )
-                parsed = (
-                    mnt.sources_with_elements(notebook_id)
-                    if retry_partial else set(all_sids)
-                )
-                partial &= parsed
-                targets = [
-                    s for s in all_sids
-                    if s in parsed and (s not in kgful or s in partial)
-                ]
-                if limit is not None:
-                    targets = targets[:max(0, limit)]
-                n_targets = len(targets)
-
                 def _extract_one(
-                    sid: str,
+                    sid: str, preserve_existing: bool,
                 ) -> tuple[str, bool, Exception | None]:
-                    preserve_existing = sid in partial
                     try:
                         mnt.set_source_status(sid, "extracting")
                         if preserve_existing:
@@ -519,33 +643,72 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                         )
                         return sid, preserve_existing, exc
 
-                with _PoolReporter(report_interval, total=n_targets, log=log) as reporter:
-                    futures = {
-                        submit_job(_extract_one, sid): sid for sid in targets
-                    }
-                    for i, future in enumerate(as_completed(futures), 1):
-                        sid, was_partial, error = future.result()
-                        if error is None:
-                            res["extracted"] += 1
-                            if was_partial:
-                                res["partial_retried"] += 1
-                            log({
-                                "phase": "kg",
-                                "source_id": sid,
-                                "status": "extracted",
-                                "progress": f"{i}/{n_targets}",
-                            })
-                        else:
-                            res["failed"] += 1
-                            if was_partial:
-                                res["partial_failed_preserved"] += 1
-                            log({
-                                "phase": "kg",
-                                "source_id": sid,
-                                "status": "failed",
-                                "error": str(error),
-                            })
-                        reporter.done = i
+                max_targets = max(0, limit) if limit is not None else None
+                processed = 0
+                after_id = ""
+                with _PoolReporter(
+                    report_interval, total=max_targets or 0, log=log
+                ) as reporter:
+                    while max_targets is None or processed < max_targets:
+                        page_limit = _EMBED_PAGE_ROWS
+                        if max_targets is not None:
+                            page_limit = min(page_limit, max_targets - processed)
+                        rows = mnt.kg_target_source_rows_page(
+                            notebook_id,
+                            after_id=after_id,
+                            limit=page_limit,
+                            retry_partial=retry_partial,
+                        )
+                        if not rows:
+                            break
+                        after_id = str(rows[-1]["source_id"])
+                        reporter.total = (
+                            max_targets
+                            if max_targets is not None
+                            else processed + len(rows)
+                        )
+                        futures = {}
+                        accepted: set[Future[object]] = set()
+                        try:
+                            for row in rows:
+                                future = _submit_tracked_future(
+                                    submit_job,
+                                    accepted,
+                                    _extract_one,
+                                    str(row["source_id"]),
+                                    bool(row["is_partial"]),
+                                )
+                                futures[future] = str(row["source_id"])
+                            for page_i, future in enumerate(as_completed(futures), 1):
+                                i = processed + page_i
+                                sid, was_partial, error = future.result()
+                                if error is None:
+                                    res["extracted"] += 1
+                                    if was_partial:
+                                        res["partial_retried"] += 1
+                                    log({
+                                        "phase": "kg",
+                                        "source_id": sid,
+                                        "status": "extracted",
+                                        "progress": str(i),
+                                    })
+                                else:
+                                    res["failed"] += 1
+                                    if was_partial:
+                                        res["partial_failed_preserved"] += 1
+                                    log({
+                                        "phase": "kg",
+                                        "source_id": sid,
+                                        "status": "failed",
+                                        "error": str(error),
+                                    })
+                                reporter.done = i
+                        except BaseException:
+                            _cancel_and_drain_futures(accepted)
+                            raise
+                        processed += len(rows)
+                        if len(rows) < page_limit:
+                            break
 
         # ── no_rebuild:抽取后直接返回,不做 rebuild/scale-index ───────────────
         if no_rebuild:
@@ -617,8 +780,6 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
         # parse_status 看似前进、却没有 source_elements 的源(上次 parse 中断/未落地),
         # 若只走 extract_source 补抽,build_records 的接地校验没有 element 可对照 →
         # LLM 抽出的节点被整源丢弃 → objects=0,且重跑多少次都修不好(每次都空抽)。
-        kgful = repo.maintenance.kg_covered_source_ids(notebook_id)
-        parsed = repo.maintenance.sources_with_elements(notebook_id)
         new_files: List[Path] = []
         resume_sids: List[str] = []
         reparse_sids: List[str] = []
@@ -626,9 +787,10 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
             sid = source_id_by_hash(repo, notebook_id, sha256_bytes(p.read_bytes()))
             if sid is None:
                 new_files.append(p)
-            elif sid in kgful:
+            elif repo.maintenance.source_has_kg(sid):
                 pass                      # 已有 KG → 跳过(幂等,既不新建也不重抽)
-            elif sid in parsed:           # 已 parse(有 elements)、缺 KG → 只需补抽
+            elif repo.maintenance.source_has_elements(sid):
+                # 已 parse(有 elements)、缺 KG → 只需补抽
                 resume_sids.append(sid)
             else:                         # 已存在但无 elements → 必须重新 parse(否则空抽)
                 reparse_sids.append(sid)
@@ -638,37 +800,51 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
 
         # ── 提交并发 job、收集 futures ───────────────────────────────────────────
         futs = {}
+        accepted: set[Future[object]] = set()
 
         def _sched(sid: str) -> None:
-            futs[submit_job(repo.process_source, sid)] = sid
-
-        if new_files:
-            repo.upload_sources(
-                notebook_id,
-                [UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
-                 for p in new_files],
-                scheduler=_sched,                 # 每个新 source 作为 process_source job 并发
+            future = _submit_tracked_future(
+                submit_job, accepted, repo.process_source, sid
             )
-        for sid in reparse_sids:
-            futs[submit_job(repo.process_source, sid)] = sid   # 重新 parse 补 elements(+extract)
-        for sid in resume_sids:
-            futs[submit_job(repo.extract_source, sid)] = sid   # 只补抽 KG,不 embed
+            futs[future] = sid
 
-        # ── 等待全部 job,逐个打印进度、统计 producer/source 业务池 ──────
-        total = len(futs)
-        with _PoolReporter(report_interval, total=total, log=log) as reporter:
-            for i, fut in enumerate(as_completed(futs), 1):
-                sid = futs[fut]
-                try:
-                    fut.result()
-                    res["extracted"] += 1
-                    print(f"[pipeline {i}/{total}] {sid} ✓", flush=True)
-                    log({"phase": "all", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
-                except Exception as exc:   # noqa: BLE001 — 单 source 失败隔离
-                    res["failed"] += 1
-                    print(f"[pipeline {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
-                    log({"phase": "all", "source_id": sid, "status": "failed", "error": str(exc)})
-                reporter.done = i
+        try:
+            if new_files:
+                repo.upload_sources(
+                    notebook_id,
+                    [UploadedSourceFile(file_name=p.name, content_type="", content=p.read_bytes())
+                     for p in new_files],
+                    scheduler=_sched,             # 每个新 source 作为 process_source job 并发
+                )
+            for sid in reparse_sids:
+                future = _submit_tracked_future(
+                    submit_job, accepted, repo.process_source, sid
+                )
+                futs[future] = sid  # 补 elements(+extract)
+            for sid in resume_sids:
+                future = _submit_tracked_future(
+                    submit_job, accepted, repo.extract_source, sid
+                )
+                futs[future] = sid  # 只补抽 KG,不 embed
+
+            # ── 等待全部 job,逐个打印进度、统计 producer/source 业务池 ──────
+            total = len(futs)
+            with _PoolReporter(report_interval, total=total, log=log) as reporter:
+                for i, fut in enumerate(as_completed(futs), 1):
+                    sid = futs[fut]
+                    try:
+                        fut.result()
+                        res["extracted"] += 1
+                        print(f"[pipeline {i}/{total}] {sid} ✓", flush=True)
+                        log({"phase": "all", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
+                    except Exception as exc:   # noqa: BLE001 — 单 source 失败隔离
+                        res["failed"] += 1
+                        print(f"[pipeline {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
+                        log({"phase": "all", "source_id": sid, "status": "failed", "error": str(exc)})
+                    reporter.done = i
+        except BaseException:
+            _cancel_and_drain_futures(accepted)
+            raise
 
         # ── 末尾一次(有 LLM:概念描述/merge-review)→ 同样开 pool 自报 ───────────
         print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
@@ -725,30 +901,72 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
     res = {"reparsed": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
     try:
         mnt = repo.maintenance
-        parsed = mnt.sources_with_elements(notebook_id)
-        targets = [s for s in mnt.source_ids(notebook_id) if s not in parsed]
-        if limit is not None:
-            targets = targets[:max(0, limit)]
-        res["targets"] = len(targets)
-        if not targets:
+        max_targets = max(0, limit) if limit is not None else None
+        processed = 0
+        after_id = ""
+        with _PoolReporter(
+            report_interval, total=max_targets or 0, log=log
+        ) as reporter:
+            while max_targets is None or processed < max_targets:
+                page_limit = _EMBED_PAGE_ROWS
+                if max_targets is not None:
+                    page_limit = min(page_limit, max_targets - processed)
+                targets = mnt.source_ids_missing_elements_page(
+                    notebook_id, after_id=after_id, limit=page_limit
+                )
+                if not targets:
+                    break
+                after_id = targets[-1]
+                reporter.total = (
+                    max_targets
+                    if max_targets is not None
+                    else processed + len(targets)
+                )
+                futs = {}
+                accepted: set[Future[object]] = set()
+                try:
+                    for sid in targets:
+                        future = _submit_tracked_future(
+                            submit_job, accepted, repo.process_source, sid
+                        )
+                        futs[future] = sid
+                    for page_i, fut in enumerate(as_completed(futs), 1):
+                        i = processed + page_i
+                        sid = futs[fut]
+                        try:
+                            fut.result()
+                            res["reparsed"] += 1
+                            print(f"[reparse {i}] {sid} ✓", flush=True)
+                            log({
+                                "phase": "reparse",
+                                "source_id": sid,
+                                "status": "ok",
+                                "progress": str(i),
+                            })
+                        except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                            res["failed"] += 1
+                            print(
+                                f"[reparse {i}] {sid} ✗ {type(exc).__name__}: {exc}",
+                                flush=True,
+                            )
+                            log({
+                                "phase": "reparse",
+                                "source_id": sid,
+                                "status": "failed",
+                                "error": str(exc),
+                            })
+                        reporter.done = i
+                except BaseException:
+                    _cancel_and_drain_futures(accepted)
+                    raise
+                processed += len(targets)
+                if len(targets) < page_limit:
+                    break
+
+        res["targets"] = processed
+        if processed == 0:
             print("reparse: 无缺 elements 的源,跳过", flush=True)
             return res
-
-        futs = {submit_job(repo.process_source, sid): sid for sid in targets}
-        total = len(futs)
-        with _PoolReporter(report_interval, total=total, log=log) as reporter:
-            for i, fut in enumerate(as_completed(futs), 1):
-                sid = futs[fut]
-                try:
-                    fut.result()
-                    res["reparsed"] += 1
-                    print(f"[reparse {i}/{total}] {sid} ✓", flush=True)
-                    log({"phase": "reparse", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
-                except Exception as exc:   # noqa: BLE001 — 单源失败隔离
-                    res["failed"] += 1
-                    print(f"[reparse {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
-                    log({"phase": "reparse", "source_id": sid, "status": "failed", "error": str(exc)})
-                reporter.done = i
 
         if no_rebuild:
             return res
@@ -1089,7 +1307,7 @@ def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional
     return {"notebooks": results, "objects": total_objects, "rows": total_rows}
 
 
-def run_metadata(repo, args) -> int:
+def run_metadata(repo, args, workers: int | None = None) -> int:
     """phase=metadata:补抽 notebook 内缺论文元数据的源(幂等可续跑;--force 重抽)。
     只作用于已解析的 academic_paper 源;原始 PDF 缺失也可跑(读 DB 内 elements)。"""
     if not repo.configured("paper_metadata"):
@@ -1101,12 +1319,50 @@ def run_metadata(repo, args) -> int:
               file=sys.stderr)
         return 2
 
-    def _progress(done: int, total: int, source_id: str, status: str) -> None:
-        print(f"[meta {done}/{total}] {source_id} {status}", flush=True)
+    counts: dict[str, int] = {"total": 0}
+    after_id = ""
+    active_user = get_request_user()
 
-    counts = repo.backfill_paper_metadata(
-        args.notebook_id, force=args.force, progress=_progress
-    )
+    def _one(source_id: str) -> tuple[str, str]:
+        token = set_request_user(active_user)
+        try:
+            return source_id, repo.maintenance.ensure_paper_metadata_source(
+                source_id, force=args.force
+            )
+        finally:
+            reset_request_user(token)
+
+    workers = max(1, workers if workers is not None else (args.workers or 1))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        while source_ids := repo.maintenance.paper_metadata_source_ids_page(
+            args.notebook_id,
+            after_id=after_id,
+            limit=_EMBED_PAGE_ROWS,
+            include_existing=args.force,
+        ):
+            futures = []
+            accepted: set[Future[object]] = set()
+            try:
+                for source_id in source_ids:
+                    futures.append(
+                        _submit_tracked_future(
+                            pool.submit, accepted, _one, source_id
+                        )
+                    )
+                for future in as_completed(futures):
+                    source_id, status = future.result()
+                    counts["total"] += 1
+                    counts[status] = counts.get(status, 0) + 1
+                    print(
+                        f"[meta {counts['total']}] {source_id} {status}",
+                        flush=True,
+                    )
+            except BaseException:
+                _cancel_and_drain_futures(accepted)
+                raise
+            after_id = source_ids[-1]
+            if len(source_ids) < _EMBED_PAGE_ROWS:
+                break
     print(f"[meta done] {json.dumps(counts, ensure_ascii=False)}", flush=True)
     return 0
 
@@ -1131,7 +1387,7 @@ def _make_logger(manifest_path: Optional[Path]) -> LogFn:
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest",
-        description="SQLite-only 离线批量摄取目录 → 项目 KG/向量库",
+        description="离线批量摄取目录 → 项目 KG/向量库(SQLite/PostgreSQL)",
     )
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
                                       "backfill-source-index", "metadata", "reparse"])
@@ -1172,6 +1428,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="每 N 秒自报 producer/source 业务线程池占用;0 关闭。"
                         "all/kg/reparse 阶段生效")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
+    p.add_argument(
+        "--confirm-service-stopped",
+        action="store_true",
+        help="PostgreSQL 直连变更必填:确认 API 与后台 writer 已停止",
+    )
     return p
 
 
@@ -1217,7 +1478,7 @@ def _dispatch_main(
             f"concurrency: source={effective.workers}({effective.workers_source})",
             flush=True,
         )
-        return run_metadata(repo, args)
+        return run_metadata(repo, args, effective.workers)
 
     # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
     allow_no_embed = args.allow_no_embed and args.phase != "embed"
@@ -1503,37 +1764,44 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
-    if database_identity(settings.database_url).scheme != "sqlite":
-        print(
-            "error: batch_ingest mutation phases are SQLite-only. "
-            "For PostgreSQL, use the normal app/API upload and KG/reindex flows.",
-            file=sys.stderr,
-        )
-        return 2
-
-    repo = SQLiteRepository(settings)
-    batch_user = (
-        _resolve_owner_profile(repo, args.owner)
-        if args.owner is not None
-        else repo.current_user()
-    )
-    user_token = set_request_user(batch_user)
-    # 终止信号的转换**不**在这里全局安装(见 run_kg 里 build_notebook_kg 那一处的说明:
-    # 只有会排空的路径才配得上它)。这里只负责把中断收成干净的输出与 shell 惯例退出码。
     try:
-        return _dispatch_main(args, repo, effective)
-    except KgBuildAlreadyRunning as exc:
-        _report_kg_build_already_running(
-            repo, str(exc).strip() or (args.notebook_id or "")
-        )
+        # Preflight (including the SQLite-only vector repair capability) is
+        # owned by the shared helper and happens before repository construction.
+        with open_maintenance_cli_repository(
+            settings,
+            confirm_service_stopped=args.confirm_service_stopped,
+            capability=(
+                "sqlite-vector" if args.phase == "vectors-to-blob" else "portable"
+            ),
+        ) as opened:
+            repo = opened  # structural BatchIngestRepository surface
+            batch_user = (
+                _resolve_owner_profile(repo, args.owner)
+                if args.owner is not None
+                else repo.current_user()
+            )
+            if args.notebook_id:
+                _require_notebook_owner(repo, args.notebook_id, batch_user)
+            user_token = set_request_user(batch_user)
+            # 终止信号的转换**不**在这里全局安装(见 run_kg 里 build_notebook_kg 那一处的说明:
+            # 只有会排空的路径才配得上它)。这里只负责把中断收成干净的输出与 shell 惯例退出码。
+            try:
+                return _dispatch_main(args, repo, effective)
+            except KgBuildAlreadyRunning as exc:
+                _report_kg_build_already_running(
+                    repo, str(exc).strip() or (args.notebook_id or "")
+                )
+                return 2
+            finally:
+                reset_request_user(user_token)
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         # 收尾已在被中断的那层各自完成(kg 会把 job 落成「已中断」终态);
-        # 这里只负责不要用 traceback 糊住终端,并给出 shell 惯例的 130。
+        # 这里只负责不要用 traceback 糊住终端,并给出 shell 惯例退出码 130。
         print(
             "\n已中断。已完成的内容都已保留，可重跑同一命令继续未完成部分。",
             file=sys.stderr,
         )
         return 130
-    finally:
-        reset_request_user(user_token)
