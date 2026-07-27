@@ -541,3 +541,67 @@ def test_delete_notebook_kg_clears_kg_but_keeps_elements(repo):
         assert db.execute("SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)).fetchone()["c"] == 0
         assert db.execute("SELECT COUNT(*) c FROM source_elements WHERE source_id='src-x'").fetchone()["c"] == 1
     assert counts["knowledge_objects"] == 1
+
+
+def test_delete_notebook_kg_preserves_memory_projection_artifacts(repo):
+    """A document rebuild must not erase confirmed Memory's derived KG rows."""
+    from app.services.sqlite_repository import _now
+
+    nb = repo.create_notebook(NotebookCreate(name="memory-preserve"))
+    now = _now()
+    with repo._connect() as db:
+        for source_id, source_type in (("src-doc", "markdown"), ("src-mem", "memory")):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+                "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source_id, nb.id, source_id, source_type, "extracted", "parsed", "", "", 0,
+                 source_id, "", "", now, now),
+            )
+        for object_id, source_id in (("ko-doc", "src-doc"), ("ko-mem", "src-mem")):
+            db.execute(
+                "INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
+                "evidence,source_candidate_id,source_id,created_at,updated_at) "
+                "VALUES (?,?,?,'approved','','{}','[]',NULL,?,?,?)",
+                (object_id, nb.id, "concept", source_id, now, now),
+            )
+            db.execute(
+                "INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
+                "VALUES (?,?,?,?)", (object_id, nb.id, "[0.1,0.2]", now),
+            )
+            db.execute(
+                "INSERT INTO kg_objects_fts (object_id,notebook_id,name) VALUES (?,?,?)",
+                (object_id, nb.id, object_id),
+            )
+            db.execute(
+                "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+                "VALUES (?,?,?)", (object_id, source_id, nb.id),
+            )
+            db.execute(
+                "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
+                "target_object_id,edge_type,evidence,created_at) VALUES (?,?,?,?,?,?,'[]',?)",
+                (f"rel-{source_id}", nb.id, source_id, object_id, object_id, "relates_to", now),
+            )
+            db.execute(
+                "INSERT INTO extraction_runs (id,notebook_id,source_id,run_type,status,"
+                "error_message,created_at,updated_at) VALUES (?,?,?,'kg','completed','',?,?)",
+                (f"run-{source_id}", nb.id, source_id, now, now),
+            )
+
+    repo.delete_notebook_kg(nb.id)
+
+    with repo._connect() as db:
+        for table, id_column, kept, removed in (
+            ("knowledge_objects", "id", "ko-mem", "ko-doc"),
+            ("knowledge_embeddings", "object_id", "ko-mem", "ko-doc"),
+            ("kg_objects_fts", "object_id", "ko-mem", "ko-doc"),
+            ("knowledge_object_sources", "object_id", "ko-mem", "ko-doc"),
+            ("knowledge_relations", "id", "rel-src-mem", "rel-src-doc"),
+            ("extraction_runs", "id", "run-src-mem", "run-src-doc"),
+        ):
+            assert db.execute(
+                f"SELECT COUNT(*) c FROM {table} WHERE {id_column}=?", (kept,)
+            ).fetchone()["c"] == 1
+            assert db.execute(
+                f"SELECT COUNT(*) c FROM {table} WHERE {id_column}=?", (removed,)
+            ).fetchone()["c"] == 0

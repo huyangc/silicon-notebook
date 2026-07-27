@@ -37,41 +37,61 @@ class KnowledgeStore:
     # ------------------------------------------------ lifecycle projections
     @staticmethod
     def delete_notebook_graph_rows(db: sqlite3.Connection, notebook_id: str) -> dict[str, int]:
-        """Wipe a notebook's KG artefacts for a full rebuild — but PRESERVE the
-        deterministic knowhow-table projection (case/procedure/tool objects and
-        their edges under a ``source_type='knowhow'`` hidden source). Those rows
-        are KnowhowProjector's zero-LLM output, not extraction output: a KG
-        rebuild must neither delete them (row-scoped reprojection, not this
-        wipe, owns their lifecycle — and the knowhow table stays marked synced)
-        nor free the hidden source to be re-extracted by the LLM (see
-        ``source_build_rows``). ``knowledge_objects.source_id`` is NOT NULL
-        DEFAULT '' so a plain ``NOT IN`` excludes knowhow while still deleting
-        ordinary ('' or real-source) rows; ``knowledge_relations.source_id`` is
-        nullable, so that guard also keeps NULL-source (non-knowhow) rows
-        deletable. The remaining tables never hold knowhow rows (the projector
-        writes no embeddings/clusters/extraction_runs and no kg_objects_fts for
-        its objects), so they wipe whole."""
+        """Wipe user-document KG while preserving hidden projection lifecycles.
+
+        Memory extraction is owned by confirmation/edit, and Knowhow projection
+        is deterministic zero-LLM output. A document rebuild must not delete
+        either source's objects/relations; Memory embeddings, extraction runs,
+        and FTS rows are preserved with them. Notebook-wide derived cluster/state
+        tables are rebuilt from the surviving plus newly extracted objects.
+        """
         counts: dict[str, int] = {}
-        knowhow_sources = "SELECT id FROM sources WHERE source_type = 'knowhow'"
         cur = db.execute(
-            f"DELETE FROM knowledge_objects WHERE notebook_id = ? "
-            f"AND source_id NOT IN ({knowhow_sources})",
-            (notebook_id,),
+            "DELETE FROM knowledge_objects WHERE notebook_id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_objects.source_id "
+            "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
         )
         counts["knowledge_objects"] = cur.rowcount
         cur = db.execute(
-            f"DELETE FROM knowledge_relations WHERE notebook_id = ? "
-            f"AND (source_id IS NULL OR source_id NOT IN ({knowhow_sources}))",
-            (notebook_id,),
+            "DELETE FROM knowledge_object_sources WHERE notebook_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.notebook_id=? AND ko.id=knowledge_object_sources.object_id)",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_object_sources"] = cur.rowcount
+        cur = db.execute(
+            "DELETE FROM knowledge_relations WHERE notebook_id = ? "
+            "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_relations.source_id "
+            "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
         )
         counts["knowledge_relations"] = cur.rowcount
         for table in (
-            "concept_clusters", "concept_merge_candidates", "knowledge_embeddings",
-            "extraction_runs", "unified_kg_state",
+            "concept_clusters", "concept_merge_candidates", "unified_kg_state",
         ):
             cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
             counts[table] = cur.rowcount
-        cur = db.execute("DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,))
+        cur = db.execute(
+            "DELETE FROM knowledge_embeddings WHERE notebook_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.notebook_id=? AND ko.id=knowledge_embeddings.object_id)",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_embeddings"] = cur.rowcount
+        cur = db.execute(
+            "DELETE FROM extraction_runs WHERE notebook_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=extraction_runs.source_id "
+            "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
+        )
+        counts["extraction_runs"] = cur.rowcount
+        cur = db.execute(
+            "DELETE FROM kg_objects_fts WHERE notebook_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.notebook_id=? AND ko.id=kg_objects_fts.object_id)",
+            (notebook_id, notebook_id),
+        )
         counts["kg_objects_fts"] = cur.rowcount
         return counts
 
@@ -153,8 +173,9 @@ class KnowledgeStore:
     @staticmethod
     def source_build_rows(db: sqlite3.Connection, notebook_id: str):
         """Sources eligible for LLM KG extraction (build/rebuild) plus the
-        subset that already has KG objects. Excludes ``source_type='knowhow'``
-        hidden sources: their KG objects are KnowhowProjector's deterministic
+        subset that already has KG objects. Excludes hidden Memory/Knowhow
+        projection sources: Memory owns its explicit confirmation-time KG
+        lifecycle, while Knowhow objects are the projector's deterministic
         zero-LLM output, so a knowhow hidden source (whose KOs a rebuild wipe
         deliberately preserves — see ``delete_notebook_graph_rows``) must never
         be handed to the extraction pipeline as a target, and even a knowhow
@@ -164,7 +185,7 @@ class KnowledgeStore:
         source_ids = [
             row["id"] for row in db.execute(
                 "SELECT id FROM sources WHERE notebook_id = ? "
-                "AND source_type != 'knowhow'", (notebook_id,)
+                "AND source_type NOT IN ('memory','knowhow')", (notebook_id,)
             ).fetchall()
         ]
         kg_source_ids = {
@@ -180,6 +201,27 @@ class KnowledgeStore:
             ).fetchall()
         }
         return source_ids, kg_source_ids
+
+    @staticmethod
+    def source_build_state_page(
+        db: sqlite3.Connection, notebook_id: str, after_id: str, limit: int
+    ):
+        """Bounded source state for durable full-notebook extraction."""
+        return db.execute(
+            "SELECT s.id,"
+            "EXISTS(SELECT 1 FROM source_elements e WHERE e.source_id=s.id) "
+            "AS has_elements,"
+            "EXISTS(SELECT 1 FROM knowledge_objects ko "
+            " WHERE ko.notebook_id=? AND ko.source_id=s.id AND ko.source_id!='' "
+            " AND COALESCE((SELECT er.status FROM extraction_runs er "
+            "  WHERE er.source_id=s.id AND er.run_type='kg' "
+            "  ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'completed')"
+            " ='completed') AS has_kg "
+            "FROM sources s WHERE s.notebook_id=? AND s.id>? "
+            "AND s.source_type NOT IN ('memory','knowhow') "
+            "ORDER BY s.id LIMIT ?",
+            (notebook_id, notebook_id, after_id, max(1, int(limit))),
+        ).fetchall()
 
     @staticmethod
     def sources_with_elements(db: sqlite3.Connection, notebook_id: str) -> set:

@@ -226,7 +226,7 @@ WantedBy=multi-user.target
   流量指向影子库，也不得通过切换 `DATABASE_URL` 走捷径恢复；保留证据并评审故障后，才能
   丢弃/恢复 PostgreSQL 影子或开启新 run。
 
-`scripts/batch_ingest.py` 的变更阶段仍只支持 SQLite；影子期间必须继续指向 active SQLite。
+SQLite-active 影子期间，`scripts/batch_ingest.py` 必须继续指向 active SQLite，绝不能对 shadow target 执行。正式切换完成后，它可以在下文“离线批量摄取”所述的停服确认与 advisory lock 边界内操作 active PostgreSQL。
 
 Authority 交换和 PostgreSQL→SQLite 回滚机制属于单独的
 [正式 cutover/rollback 计划](./superpowers/plans/2026-07-22-postgresql-cutover-and-rollback.md)；
@@ -386,8 +386,8 @@ python scripts/migrate_sqlite_to_postgres.py \
 - 第一次 PG 业务写入之后，直接改 URL 会丢这次及后续写入。仓库没有 reverse importer 或
   dual-write log；必须再次停写，在外部完成 PostgreSQL→SQLite 对账（包括 storage 副作用），
   验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。
-- 开发时反复切 URL 只是选择两条彼此独立的历史，任何一边都不会自动同步。选择 PostgreSQL 时
-  不得运行 SQLite-only maintenance 或 `scripts/batch_ingest.py` 的变更阶段。
+- 开发时反复切 URL 只是选择两条彼此独立的历史，任何一边都不会自动同步。不得对 PostgreSQL
+  运行 SQLite-only maintenance，也不得在应用/后台 writer 仍在线时执行直连批处理写入。
 
 ## 用 MinerU 解析 PDF
 
@@ -475,6 +475,8 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 ### 离线批量摄取(目录 → KG)
 
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页。在线维护仍应走应用/API，`--dry-run` 不打开 repository。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
+
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
 
@@ -522,13 +524,13 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 `backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。它不调用模型，且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
 
-`metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按源逐行打印（`[meta <done>/<total>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
+`metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按已完成源逐行打印（`[meta <done>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
 `reparse` 子命令修复一类历史存量:某些源已建、`parse_status` 看似前进,却没有 `source_elements`(上次 parse 中断或未落地)。KG 抽取有一道零-LLM 接地校验——每个 LLM 抽出的节点必须把引文匹配回该源的某个 element,否则丢弃;一个源若没有任何 element,抽出的节点会被**整源丢光**,导致 `knowledge_objects` 一行不增(抽了等于白抽),且直接重抽永远补不出。旧版 `all` 的续跑分流曾用「有没有 KG」当「是否已 parse」,把这类无-elements 源当成「已 parse、缺 KG」直接送去抽取,正是踩中此坑(该分流已修正,新导入不再遇到)。本命令对该 notebook 内所有缺 `source_elements` 的源重新跑 `process_source`(parse → 生成 elements),收尾一次 KG rebuild;有 elements 的源自动跳过(幂等、可中断重跑)。`--limit N` 只处理前 N 个;`--no-rebuild` 跳过收尾聚类(分批场景)。必须给 `--notebook-id`。
 
 `kg --retry-partial` 修复的是另一种状态：来源仍有 KG 对象，但最近一次 KG 抽取记录为 `windows_failed>0`。普通增量 `kg` 会把“已完成且已有对象”的来源视为已覆盖，不会自动重跑；显式加此参数后，它们会与正常缺 KG 来源一起进入目标集合。部分来源重试期间，旧对象和关系仍保持可读；若任一窗口再次失败或新结果为空，批处理会把本次尝试计为失败/未完整且旧图不变，只有“零失败窗口且非空”的新结果才会在一个事务内替换该来源的图。`--limit N` 限制“缺失 + 部分”合并后的目标数，`--no-rebuild` 可用于分批，末尾 rebuild/index 行为不变。它不是解析修复；没有 `source_elements` 的来源仍应使用 `reparse`。
 
-**中断 `kg` 运行，以及「同一知识库同时只允许一个分析」的守卫。** 同一个知识库同时只能有一个进行中的分析任务（持久任务表上的条件唯一索引）。正常结束的运行——成功、模型失败、Ctrl-C、`kill`（SIGTERM）——都会把任务行落到终态，因此重跑同一条命令即可继续未完成部分。Ctrl-C/SIGTERM 会合作式停掉在飞的模型窗口，并**等它们返回之后**才释放这个知识库，因此命令最多可能要等一次模型超时才退出——这个等待是刻意的：守卫在任务落终态那一刻就放开，仍在写入的工作线程绝不能活得比它久。它不会做的是继续为排队中的来源消耗模型额度。之后知识库里这次分析显示为已中断，已抽取的内容全部保留。`nohup` 运行不受影响：已被设为忽略的 SIGHUP 保持忽略，SSH 掉线不会杀掉批处理。信号处理只覆盖持有任务行的整库抽取：`kg --limit`/`--retry-partial`、`all`、`reparse`、`ingest` 没有需要收尾的持久状态，`kill` 对它们仍是立即终止（Ctrl-C 在各阶段的行为与一直以来相同）。
+**中断 `kg` 运行，以及「同一知识库同时只允许一个分析」的守卫。** 同一个知识库同时只能有一个进行中的分析任务（持久任务表上的条件唯一索引）。正常结束的运行——成功、模型失败、Ctrl-C、`kill`（SIGTERM）——都会把任务行落到终态，因此重跑同一条命令即可继续未完成部分。Ctrl-C/SIGTERM 会合作式停掉在飞的模型窗口，并**等它们返回之后**才释放这个知识库，因此命令最多可能要等一次模型超时才退出——这个等待是刻意的：守卫在任务落终态那一刻就放开，仍在写入的工作线程绝不能活得比它久。它不会做的是继续为排队中的来源消耗模型额度。之后知识库里这次分析显示为已中断，已抽取的内容全部保留。`nohup` 运行不受影响：已被设为忽略的 SIGHUP 保持忽略，SSH 掉线不会杀掉批处理。信号转换只覆盖持有任务行的整库抽取；`kg --limit`/`--retry-partial`、`all`、`reparse`、`ingest`、`metadata` 保持 SIGTERM/SIGHUP 的默认立即终止，但收到 Ctrl-C/SystemExit 时会先取消排队 future、排空已接受任务，再释放离线维护锁和 repository。
 
 只有无法捕获的终止（`kill -9`、被 OOM 杀、掉电、机器重启）才会把任务行留在「进行中」。离线命令刻意不代为清理——它无法判断那一行是否属于一个仍在运行的后端——而是打印现存任务（阶段、完成/总数、最后更新时间）并以状态码 2 退出，而不是抛出数据库错误。若「最后更新」已长时间停滞，说明这行是残留：**重启后端服务即可清理**（启动时会把上一进程留下的进行中任务，连同搁浅的解析与投影一起落到终态）。若它确实还在运行（另一个 `batch_ingest` 进程，或网页端发起的分析），等它结束后重跑即可。
 

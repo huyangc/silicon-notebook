@@ -46,8 +46,7 @@ LIFECYCLE_STORE_CALLS = {
         "notebook_tier_row",
         "object_meta_rows_for_notebook",
         "relink_rows",
-        "source_build_rows",
-        "sources_with_elements",
+        "source_build_state_page",
         "unified_graph_rows",
     },
     "governance_store": {

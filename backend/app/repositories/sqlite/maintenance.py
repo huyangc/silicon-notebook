@@ -17,6 +17,7 @@ the inspector receives only a database path.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import sqlite3
 import threading
@@ -74,6 +75,10 @@ class SQLiteMaintenanceAdapter:
         # iteration" — which the caller swallows, silently burning that
         # notebook's throttle slot and delaying its cleanup.
         self._orphan_marks_lock = threading.Lock()
+
+    def offline_maintenance_lock(self):
+        """SQLite already serializes writes through its database write lock."""
+        return nullcontext()
 
     # -- SQLiteMaintenancePort ------------------------------------------------
 
@@ -232,9 +237,142 @@ class SQLiteMaintenanceAdapter:
             return [
                 r["id"]
                 for r in db.execute(
-                    "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)
+                    "SELECT id FROM sources WHERE notebook_id=? ORDER BY id",
+                    (notebook_id,),
                 ).fetchall()
             ]
+
+    def source_ids_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[str]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            return [
+                str(row["id"])
+                for row in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=? AND id>? "
+                    "ORDER BY id LIMIT ?",
+                    (notebook_id, after_id, int(limit)),
+                ).fetchall()
+            ]
+
+    def user_source_ids_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[str]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM sources WHERE notebook_id=? AND id>? "
+                "AND source_type NOT IN ('memory','knowhow') "
+                "ORDER BY id LIMIT ?",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def user_source_title_rows_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[dict]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT id,title FROM sources WHERE notebook_id=? AND id>? "
+                "AND source_type NOT IN ('memory','knowhow') "
+                "ORDER BY id LIMIT ?",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def source_has_kg(self, source_id: str) -> bool:
+        with self._runtime.database.connect() as db:
+            return bool(
+                db.execute(
+                    "SELECT EXISTS(SELECT 1 FROM knowledge_objects "
+                    "WHERE source_id=? AND source_id!='') AS found",
+                    (source_id,),
+                ).fetchone()["found"]
+            )
+
+    def source_has_elements(self, source_id: str) -> bool:
+        with self._runtime.database.connect() as db:
+            return bool(
+                db.execute(
+                    "SELECT EXISTS(SELECT 1 FROM source_elements "
+                    "WHERE source_id=?) AS found",
+                    (source_id,),
+                ).fetchone()["found"]
+            )
+
+    def source_is_user_visible(self, notebook_id: str, source_id: str) -> bool:
+        with self._runtime.database.connect() as db:
+            return bool(
+                db.execute(
+                    "SELECT EXISTS(SELECT 1 FROM sources WHERE id=? "
+                    "AND notebook_id=? "
+                    "AND source_type NOT IN ('memory','knowhow')) AS found",
+                    (source_id, notebook_id),
+                ).fetchone()["found"]
+            )
+
+    def source_ids_missing_elements_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[str]:
+        """User-imported source repair targets; hidden projections are excluded."""
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id FROM sources s WHERE s.notebook_id=? AND s.id>? "
+                "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND NOT EXISTS (SELECT 1 FROM source_elements e "
+                "WHERE e.source_id=s.id) ORDER BY s.id LIMIT ?",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def kg_target_source_rows_page(
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        retry_partial: bool = False,
+    ) -> list[dict]:
+        """Bounded eligible extraction targets in deterministic id order."""
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "WITH candidates AS ("
+                " SELECT s.id,EXISTS(SELECT 1 FROM knowledge_objects ko "
+                " WHERE ko.notebook_id=? AND ko.source_id=s.id "
+                " AND ko.source_id!='') AS has_kg,"
+                " COALESCE((SELECT ("
+                "  er.error_message GLOB '*windows_failed=[1-9]*/*'"
+                "  OR instr(er.error_message,'retry_incomplete=1')>0"
+                " ) FROM extraction_runs er WHERE er.source_id=s.id "
+                " AND er.run_type='kg' ORDER BY er.created_at DESC,er.rowid DESC "
+                " LIMIT 1),0)"
+                " AS is_partial FROM sources s WHERE s.notebook_id=? "
+                " AND s.source_type NOT IN ('memory','knowhow') AND s.id>? "
+                " AND EXISTS (SELECT 1 FROM source_elements pe "
+                " WHERE pe.source_id=s.id)"
+                ") SELECT id AS source_id,(has_kg AND is_partial) AS is_partial "
+                "FROM candidates "
+                "WHERE NOT has_kg"
+                + (" OR is_partial" if retry_partial else "")
+                + " ORDER BY id LIMIT ?",
+                (notebook_id, notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [
+            {
+                "source_id": str(row["source_id"]),
+                "is_partial": bool(row["is_partial"]),
+            }
+            for row in rows
+        ]
 
     def source_title_rows(self, notebook_id: str) -> list[dict]:
         with self._runtime.database.connect() as db:
@@ -249,7 +387,8 @@ class SQLiteMaintenanceAdapter:
     def set_sources_doc_type(self, notebook_id: str, doc_type: str) -> None:
         with self._runtime.database.write() as db:
             db.execute(
-                "UPDATE sources SET doc_type=? WHERE notebook_id=?",
+                "UPDATE sources SET doc_type=? WHERE notebook_id=? "
+                "AND source_type NOT IN ('memory','knowhow')",
                 (doc_type, notebook_id),
             )
 
@@ -285,7 +424,7 @@ class SQLiteMaintenanceAdapter:
                     ") "
                     "SELECT l.source_id FROM latest l "
                     "JOIN sources s ON s.id=l.source_id "
-                    "WHERE l.rn=1 AND s.source_type!='knowhow' "
+                    "WHERE l.rn=1 AND s.source_type NOT IN ('memory','knowhow') "
                     "AND ("
                     "  l.error_message GLOB '*windows_failed=[1-9]*/*' "
                     "  OR instr(l.error_message, 'retry_incomplete=1') > 0"
@@ -318,6 +457,9 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.connect() as db:
             return db.execute(
                 "SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
+                "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND EXISTS (SELECT 1 FROM source_elements pe "
+                "WHERE pe.source_id=s.id) "
                 "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
                 "WHERE k.source_id=s.id AND k.source_id!='' "
                 "AND COALESCE(("
@@ -327,6 +469,40 @@ class SQLiteMaintenanceAdapter:
                 "), 'completed')='completed')",
                 (notebook_id,),
             ).fetchone()["c"]
+
+    def paper_metadata_source_ids_page(
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        include_existing: bool = False,
+    ) -> list[str]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        existing = (
+            "" if include_existing else
+            " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id=s.id)"
+        )
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id FROM sources s WHERE s.notebook_id=? AND s.id>? "
+                "AND s.source_type NOT IN ('memory','knowhow') "
+                "AND s.doc_type IN ('','academic_paper') "
+                "AND s.parse_status IN ('parsed','extracting','extracted')"
+                + existing
+                + " ORDER BY s.id LIMIT ?",
+                (notebook_id, after_id, int(limit)),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
+
+    def ensure_paper_metadata_source(
+        self, source_id: str, *, force: bool = False
+    ) -> str:
+        source = self._runtime.source_store.get_source(source_id)
+        return self._runtime.source_ingestion.ensure_paper_metadata(
+            source, force=force
+        )
 
     def run_extraction(
         self,
@@ -515,6 +691,45 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             ]
 
+    def missing_chunk_embedding_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[dict]:
+        """One stable keyset page for bounded offline vector repair."""
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            return [
+                dict(r)
+                for r in db.execute(
+                    "SELECT c.id, c.source_id, c.text FROM chunks c "
+                    "WHERE c.notebook_id=? AND c.id>? "
+                    "AND NOT EXISTS (SELECT 1 FROM chunk_embeddings e "
+                    "WHERE e.chunk_id=c.id) ORDER BY c.id LIMIT ?",
+                    (notebook_id, after_id, int(limit)),
+                ).fetchall()
+            ]
+
+    def missing_element_embedding_page(
+        self, notebook_id: str, *, after_id: str = "", limit: int = 500
+    ) -> list[dict]:
+        """One stable keyset page for bounded offline element-vector repair."""
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._runtime.database.connect() as db:
+            return [
+                dict(r)
+                for r in db.execute(
+                    "SELECT e.id, e.source_id, e.text FROM source_elements e "
+                    "JOIN sources s ON s.id=e.source_id "
+                    "WHERE s.notebook_id=? AND e.id>? "
+                    "AND s.source_type NOT IN ('memory', 'knowhow') "
+                    "AND TRIM(e.text, ?) != '' "
+                    "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
+                    "WHERE v.element_id=e.id) ORDER BY e.id LIMIT ?",
+                    (notebook_id, after_id, PY_WHITESPACE, int(limit)),
+                ).fetchall()
+            ]
+
     def missing_chunk_vector_source_ids(self, notebook_id: str) -> list[str]:
         """有缺 chunk 向量的 **DISTINCT source_id**(不取正文)——体检 backfill 的轻量源发现
         (codex 第2轮 P1:大库上别把每行全文物化进内存仅为收 id,会 GB 级/OOM)。判据与
@@ -613,22 +828,66 @@ class SQLiteMaintenanceAdapter:
             {"id": r["id"], "payload": json.loads(r["payload"] or "{}")} for r in rows
         ]
 
-    def backfill_node_embeddings(self, notebook_id: str, progress=None) -> int:
-        """Embed every non-deprecated knowledge object missing a vector
-        (idempotent); returns the number of objects scanned."""
+    def knowledge_object_payload_page(
+        self,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = 500,
+        include_deprecated: bool = False,
+    ) -> list[dict]:
+        """Bounded keyset view for large-library maintenance callers."""
+        status = "" if include_deprecated else " AND status!='deprecated'"
         with self._runtime.database.connect() as db:
-            objects = [
-                {"id": r["id"], "payload": json.loads(r["payload"] or "{}")}
-                for r in db.execute(
-                    "SELECT id, payload FROM knowledge_objects "
-                    "WHERE notebook_id=? AND status!='deprecated'",
-                    (notebook_id,),
+            rows = db.execute(
+                "SELECT id,payload FROM knowledge_objects "
+                "WHERE notebook_id=? AND id>?"
+                + status
+                + " ORDER BY id LIMIT ?",
+                (notebook_id, after_id, max(1, int(limit))),
+            ).fetchall()
+        return [
+            {"id": r["id"], "payload": json.loads(r["payload"] or "{}")} for r in rows
+        ]
+
+    def backfill_node_embeddings(self, notebook_id: str, progress=None) -> int:
+        """Embed missing object vectors in bounded pages without holding DB."""
+        with self._runtime.database.connect() as db:
+            total = int(db.execute(
+                "SELECT COUNT(*) c FROM knowledge_objects "
+                "WHERE notebook_id=? AND status!='deprecated'",
+                (notebook_id,),
+            ).fetchone()["c"])
+        after_id = ""
+        scanned = 0
+        while True:
+            with self._runtime.database.connect() as db:
+                rows = db.execute(
+                    "SELECT o.id,o.payload,(e.object_id IS NOT NULL) AS embedded "
+                    "FROM knowledge_objects o LEFT JOIN knowledge_embeddings e "
+                    "ON e.object_id=o.id "
+                    "WHERE o.notebook_id=? AND o.status!='deprecated' "
+                    "AND o.id>? ORDER BY o.id LIMIT 500",
+                    (notebook_id, after_id),
                 ).fetchall()
+            if not rows:
+                break
+            after_id = str(rows[-1]["id"])
+            scanned += len(rows)
+            missing = [
+                {"_oid": str(row["id"]), "payload": json.loads(row["payload"] or "{}")}
+                for row in rows
+                if not row["embedded"]
             ]
-            self._runtime.source_embedding.backfill_knowledge_embeddings(
-                db, notebook_id, objects, progress=progress
-            )
-        return len(objects)
+            if missing:
+                self._runtime.source_embedding.embed_objects_batch(
+                    notebook_id, missing
+                )
+            if progress:
+                progress(scanned, total)
+            if len(rows) < 500:
+                break
+        return scanned
 
     def node_embedding_counts(self, notebook_id: str) -> tuple:
         with self._runtime.database.connect() as db:
@@ -844,6 +1103,14 @@ class SQLiteMaintenanceAdapter:
             db.execute(
                 "DELETE FROM knowledge_object_sources WHERE notebook_id=?",
                 (notebook_id,),
+            )
+            # The reverse index is incomplete from this point until the final
+            # marker write.  Reset the fast-path flag in the same transaction
+            # so an interrupted CLI can never publish a partial index.
+            db.execute(
+                "UPDATE unified_kg_state SET source_index_backfilled=0, "
+                "updated_at=? WHERE notebook_id=?",
+                (self._runtime.seams.now(), notebook_id),
             )
             return db.execute(
                 "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=?",

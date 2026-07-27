@@ -1,12 +1,12 @@
 def test_reextract_notebook_loops_all_sources_in_order():
     from app.services.reextract import reextract_notebook
 
-    class _Summary:
-        def __init__(self, sid): self.id = sid
-
     class FakeRepo:
-        def __init__(self): self.extracted = []
-        def list_sources(self, notebook_id): return [_Summary("s1"), _Summary("s2")]
+        def __init__(self):
+            self.extracted = []
+            self.maintenance = self
+        def user_source_ids_page(self, notebook_id, *, after_id="", limit=500):
+            return [sid for sid in ("s1", "s2") if sid > after_id][:limit]
         def extract_source(self, source_id): self.extracted.append(source_id)
 
     repo = FakeRepo()
@@ -18,12 +18,12 @@ def test_reextract_notebook_loops_all_sources_in_order():
 def test_reextract_notebook_continues_on_source_error():
     from app.services.reextract import reextract_notebook
 
-    class _Summary:
-        def __init__(self, sid): self.id = sid
-
     class FakeRepo:
-        def __init__(self): self.extracted = []
-        def list_sources(self, notebook_id): return [_Summary("s1"), _Summary("s2")]
+        def __init__(self):
+            self.extracted = []
+            self.maintenance = self
+        def user_source_ids_page(self, notebook_id, *, after_id="", limit=500):
+            return [sid for sid in ("s1", "s2") if sid > after_id][:limit]
         def extract_source(self, source_id):
             if source_id == "s1":
                 raise RuntimeError("boom")

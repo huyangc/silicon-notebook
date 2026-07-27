@@ -243,6 +243,50 @@ class PostgresDatabase:
             )
 
     @contextmanager
+    def offline_maintenance_session(
+        self,
+    ) -> Iterator[psycopg.Connection[PostgresRow]]:
+        """Open a non-pooled session for the process-wide maintenance lock.
+
+        The command itself still needs normal pooled read/write connections.
+        Keeping its session-level advisory lock in the pool would deadlock a
+        valid ``max_size=1`` deployment, so this lifecycle seam is deliberately
+        separate from :meth:`connect` and always closes the session.
+        """
+        self._ensure_projection_lock_open()
+        connection = None
+        try:
+            connection = self._open_projection_lock_connection()
+            self._restore_session_defaults(connection)
+            connection.execute(
+                "SET application_name = 'silicon-notebook-offline-maintenance'"
+            )
+            connection.commit()
+        except PostgresDatabaseClosedError:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            raise
+        except Exception:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+            raise self._safe_error("offline maintenance session") from None
+
+        assert connection is not None
+        try:
+            yield connection
+        finally:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    @contextmanager
     def _acquire(self) -> Iterator[psycopg.Connection[PostgresRow]]:
         self._ensure_open()
         manager = self._pool.connection(timeout=self._acquire_timeout)

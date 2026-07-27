@@ -13,10 +13,17 @@ def reextract_notebook(repo, notebook_id: str) -> List[str]:
     """Re-extract all sources of `notebook_id`. Returns the source ids that
     completed successfully (in order)."""
     done: List[str] = []
-    for summary in repo.list_sources(notebook_id):
-        try:
-            repo.extract_source(summary.id)
-            done.append(summary.id)
-        except Exception as exc:  # noqa: BLE001 — one bad source must not abort the run
-            print(f"[reextract] source {summary.id} failed: {exc}")
+    after_id = ""
+    while source_ids := repo.maintenance.user_source_ids_page(
+        notebook_id, after_id=after_id, limit=500
+    ):
+        for source_id in source_ids:
+            try:
+                repo.extract_source(source_id)
+                done.append(source_id)
+            except Exception as exc:  # noqa: BLE001 — one bad source must not abort the run
+                print(f"[reextract] source {source_id} failed: {exc}")
+        after_id = source_ids[-1]
+        if len(source_ids) < 500:
+            break
     return done

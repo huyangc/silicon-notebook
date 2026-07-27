@@ -89,21 +89,38 @@ python scripts/migrate_sqlite_to_postgres.py \
 checkpoint),源库重新快照锚点与 schema/清单校验仍执行。CLI 原子替换配置并保存权限受限的回退副本,
 但不会自行停止或重启服务。
 
+### `batch_ingest.py` —— SQLite / PostgreSQL 离线批处理
+
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、
+`backfill-source-index` 会通过统一 factory 使用 `DATABASE_URL` 选中的正式后端。
+PostgreSQL 必须先停 API 与全部后台 writer，再给命令追加
+`--confirm-service-stopped`；该参数不会替你停服务。所有生产维护 wrapper 使用同一
+preflight + database-wide advisory lock，锁竞争会以状态码 2 退出。`--dry-run` 不连接
+数据库。`vectors-to-blob` 只用于 SQLite 旧文本向量；PostgreSQL 已存 `bytea`，会在连接前拒绝。
+
+```bash
+PYTHONPATH=backend python scripts/batch_ingest.py index \
+  --notebook-id nb-xxxx --confirm-service-stopped
+```
+
 ---
 
 ## 二、检索 / chunk 运维
 
 ### `build_chunks.py` —— 为现有 notebook 回填 chunk + 向量
 ```bash
-PYTHONPATH=backend python scripts/build_chunks.py <notebook_id>
+PYTHONPATH=backend python scripts/build_chunks.py <notebook_id> [--confirm-service-stopped]
 ```
 chunk-native 检索的 chunk 是摄取时自动建的;**老 notebook**(chunk-native 上线前导入的)需用本脚本补建 chunk 表 + chunk_embeddings,之后默认 chunk 模式问答才有内容。幂等(重跑覆盖该 notebook 的 chunk)。
 
 ### `backfill_kg_embeddings.py` —— 补全 notebook 的 KG 对象向量
 ```bash
-PYTHONPATH=backend python scripts/backfill_kg_embeddings.py <notebook_id>
+PYTHONPATH=backend python scripts/backfill_kg_embeddings.py <notebook_id> [--confirm-service-stopped]
 ```
 KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用本脚本低并发补齐。
+上述确认参数仅在 PostgreSQL 必需；SQLite 可省略。其他生产维护 wrapper
+（`build_kg`、`recluster_kg`、`reembed_kg`、`backfill_relation_embeddings`、
+`reextract_notebook.py`、`denoise_reextract_nb.py`）遵循同一规则。
 
 ---
 

@@ -174,11 +174,15 @@ ROWID_TOKEN_SITES: dict[str, tuple[str, ...]] = {
     "app.repositories.sqlite.knowledge_store:"
     "KnowledgeStore.source_build_rows": ("extraction_runs",),
     "app.repositories.sqlite.knowledge_store:"
+    "KnowledgeStore.source_build_state_page": ("extraction_runs",),
+    "app.repositories.sqlite.knowledge_store:"
     "KnowledgeStore.source_has_kg": ("extraction_runs",),
     "app.repositories.sqlite.maintenance:"
     "SQLiteMaintenanceAdapter.count_sources_missing_kg": ("extraction_runs",),
     "app.repositories.sqlite.maintenance:"
     "SQLiteMaintenanceAdapter.partial_kg_source_ids": ("extraction_runs",),
+    "app.repositories.sqlite.maintenance:"
+    "SQLiteMaintenanceAdapter.kg_target_source_rows_page": ("extraction_runs",),
     "app.repositories.sqlite.memory_store:MemoryStore.list_memories": ("memory_items",),
     "app.repositories.sqlite.memory_store:"
     "MemoryStore.memory_retrieval_rows": ("memory_items",),

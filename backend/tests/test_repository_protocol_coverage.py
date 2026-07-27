@@ -227,7 +227,13 @@ def test_maintenance_port_covers_every_public_sqlite_adapter_method():
         name for name, value in SQLiteMaintenanceAdapter.__dict__.items()
         if callable(value) and not name.startswith("_")
     }
-    assert adapter_methods <= set(SQLiteMaintenancePort.__dict__)
+    declared_methods = {
+        name
+        for protocol in SQLiteMaintenancePort.__mro__
+        for name, value in protocol.__dict__.items()
+        if callable(value) and not name.startswith("_")
+    }
+    assert adapter_methods <= declared_methods
 
 
 def _parameter_contract(callable_):

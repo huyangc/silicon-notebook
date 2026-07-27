@@ -2,17 +2,32 @@
 对已存在但缺少 relation_embeddings 的笔记本尤其适用(幂等,只补缺失行)。"""
 import sys
 from app.core.config import get_settings
-from app.services.sqlite_repository import SQLiteRepository
+from app.services.maintenance_cli import (
+    MaintenanceCliError,
+    open_maintenance_cli_repository,
+)
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: python -m app.scripts.backfill_relation_embeddings <notebook_id>",
-              file=sys.stderr)
+    args = [arg for arg in sys.argv[1:] if arg != "--confirm-service-stopped"]
+    confirmed = len(args) != len(sys.argv[1:])
+    if len(args) != 1:
+        print(
+            "usage: python -m app.scripts.backfill_relation_embeddings "
+            "<notebook_id> [--confirm-service-stopped]",
+            file=sys.stderr,
+        )
         return 2
-    repo = SQLiteRepository(get_settings())
-    repo.maintenance.backfill_relation_embeddings(sys.argv[1])
-    print(f"[backfill] relation embeddings done for {sys.argv[1]}")
+    settings = get_settings()
+    try:
+        with open_maintenance_cli_repository(
+            settings, confirm_service_stopped=confirmed
+        ) as repo:
+            repo.maintenance.backfill_relation_embeddings(args[0])
+            print(f"[backfill] relation embeddings done for {args[0]}")
+    except MaintenanceCliError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 
