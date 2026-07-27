@@ -120,6 +120,28 @@ test("产物比当前内容还新 → integrity(不是把「数字不可信」�
   assert.equal(alone.length, 1);
   assert.equal(alone[0].severity, "integrity");
   assert.equal(alone[0].label, "比当前内容还新");
+
+  // ⚠ 两条世代线各自都要能**单独**触发 integrity。产物同时盖 kg_mutation_seq 与
+  // cluster_mutation_seq 两个戳;只判其中一条,另一条的损坏就落进 stale 分支 ——
+  // 而 stale 的文案是「重新合并一次即可对齐」,等于把「数字不可信」说成「整理一下就好」。
+  // 这个洞真实发生过:第 5 轮加簇世代时只加了响应字段、没接进分档,而上面那两条断言
+  // 全绿,因为它们只覆盖 seq_behind(codex 第 6 轮评审)。将来再加第三条世代线同理。
+  const clusterOnly = analysisArtifactAnomalies({
+    present: true,
+    freshness: { seq_behind: 0, cluster_seq_behind: -3, stale: true },
+  });
+  assert.equal(clusterOnly.length, 1);
+  assert.equal(clusterOnly[0].severity, "integrity");
+  assert.equal(clusterOnly[0].label, "比当前内容还新");
+
+  // 反向:簇世代正常时不得被这条新分支误升档,仍按 stale 走 retrieval。
+  const clusterFine = analysisArtifactAnomalies({
+    present: true,
+    freshness: { seq_behind: 28, cluster_seq_behind: 3, stale: true },
+  });
+  assert.equal(clusterFine.length, 1);
+  assert.equal(clusterFine[0].severity, "retrieval");
+  assert.equal(clusterFine[0].label, "落后于当前内容");
 });
 
 test("产物落后当前若干次变更 → retrieval(数字没算错,只是描述更早的库状态)", () => {

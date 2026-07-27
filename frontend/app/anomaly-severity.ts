@@ -66,12 +66,24 @@ const ARTIFACT_AHEAD_TOOLTIP = "这份数字标记的版本比当前库还新，
  * 来源画像页三处形状不同的响应都能直接喂进来,分档规则因此只有这一份。
  *
  * ``absence`` 的三个取值是后端内部代号(never_computed / expected / unexpected),
- * 界面词在上面的常量里;``seq_behind`` 不 clamp,负值单独成一档(见 ARTIFACT_AHEAD)。
+ * 界面词在上面的常量里;两个 ``*_behind`` 都不 clamp,负值单独成一档(见 ARTIFACT_AHEAD)。
+ *
+ * ⚠ **两条世代线必须一起判**:产物有 ``kg_mutation_seq`` 与 ``cluster_mutation_seq``
+ * 两个戳,任何一个「比当前还新」都说明库被手工改过(例如恢复/重置了 state 行却留着
+ * 产物),那是 integrity 档。只看其中一条会让另一条的损坏落进 ``stale`` 分支,把
+ * 「数字不可信」显示成「重新合并一次即可对齐」—— 语义正好反转。
+ * 这个洞真实发生过:第 5 轮加簇世代时只加了响应字段、没接进这里,而第 1 轮为
+ * ``seq_behind`` 配的那 9 条 severity 断言全绿,因为它们只覆盖第一条世代线
+ * (codex 第 6 轮评审)。新增第三条世代线时,这里同样要跟着改。
  */
 export function analysisArtifactAnomalies(artifact: {
   present: boolean;
   absence?: string | null;
-  freshness?: { seq_behind?: number | null; stale?: boolean | null } | null;
+  freshness?: {
+    seq_behind?: number | null;
+    cluster_seq_behind?: number | null;
+    stale?: boolean | null;
+  } | null;
 }): Anomaly[] {
   if (!artifact.present) {
     if (artifact.absence === "expected") {
@@ -82,8 +94,11 @@ export function analysisArtifactAnomalies(artifact: {
     }
     return [{ severity: "info", label: ARTIFACT_NEVER_LABEL, tooltip: ARTIFACT_NEVER_TOOLTIP }];
   }
-  const behind = artifact.freshness?.seq_behind ?? null;
-  if (behind !== null && behind < 0) {
+  const behinds = [
+    artifact.freshness?.seq_behind ?? null,
+    artifact.freshness?.cluster_seq_behind ?? null,
+  ];
+  if (behinds.some((behind) => behind !== null && behind < 0)) {
     return [{ severity: "integrity", label: ARTIFACT_AHEAD_LABEL, tooltip: ARTIFACT_AHEAD_TOOLTIP }];
   }
   if (artifact.freshness?.stale) {
