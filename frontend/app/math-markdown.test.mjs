@@ -65,6 +65,15 @@ test("does not treat a fence marker with trailing text as a closing fence", () =
   assert.equal(normalizeMathMarkdown(markdown), markdown);
 });
 
+test("does not rewrite formulas inside blockquote or list fenced code", () => {
+  for (const markdown of [
+    ["> ```md", "> $$E = mc^2$$", "> ```"].join("\n"),
+    ["- ```md", "  $$E = mc^2$$", "  ```"].join("\n"),
+  ]) {
+    assert.equal(normalizeMathMarkdown(markdown), markdown);
+  }
+});
+
 test("promotes display formulas inside blockquote and list containers", () => {
   const markdown = [
     "> $$E = mc^2$$",
@@ -99,6 +108,23 @@ test("does not decode raw n-prefixed LaTeX commands around display math", () => 
   );
   const proseCommand = String.raw`\newcommand{\x}{y} 与 $$E=mc^2$$`;
   assert.equal(normalizeMathMarkdown(proseCommand), proseCommand);
+});
+
+test("recovers an escaped math-only block with aligned rows", () => {
+  const serialized = String.raw`$$\n\\begin{aligned}a&=b\\\\c&=d\\end{aligned}\n$$`;
+  assert.equal(
+    normalizeMathMarkdown(serialized),
+    ["$$", "\\begin{aligned}a&=b\\\\c&=d\\end{aligned}", "$$"].join("\n"),
+  );
+});
+
+test("recovers escaped newlines before container-owned formulas", () => {
+  for (const [serialized, expected] of [
+    [String.raw`Intro\n> $$E=mc^2$$`, ["Intro", "> $$", "> E=mc^2", "> $$"]],
+    [String.raw`Intro\n- $$E=mc^2$$`, ["Intro", "- $$", "  E=mc^2", "  $$"]],
+  ]) {
+    assert.equal(normalizeMathMarkdown(serialized), expected.join("\n"));
+  }
 });
 
 test("unwraps Markdown math delimiters before direct KaTeX rendering", () => {

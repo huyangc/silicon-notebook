@@ -126,3 +126,16 @@ test("额外转义的 aligned 公式保留 LaTeX 换行并正常渲染", () => {
   assert.match(html, /Where the rows differ/);
   assert.doesNotMatch(html, /katex-error/);
 });
+
+test("纯公式及末尾容器公式的额外转义仍恢复为 display KaTeX", () => {
+  for (const answer of [
+    String.raw`$$\n\\begin{aligned}a&=b\\\\c&=d\\end{aligned}\n$$`,
+    String.raw`Intro\n> $$E=mc^2$$`,
+    String.raw`Intro\n- $$E=mc^2$$`,
+  ]) {
+    const html = render(answer, {});
+    assert.match(html, /class="katex-display"/);
+    assert.doesNotMatch(html, /katex-error/);
+    assert.doesNotMatch(html, /\\n/);
+  }
+});

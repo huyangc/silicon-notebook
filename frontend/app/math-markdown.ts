@@ -30,7 +30,7 @@ export function normalizeMathMarkdown(markdown: string): string {
 
   for (const line of lines) {
     if (fence) {
-      const closingFence = line.match(/^ {0,3}(`+|~+)[ \t]*$/);
+      const closingFence = line.match(/^(?:(?: {0,3}>[ \t]?)+)?[ \t]*(`+|~+)[ \t]*$/);
       if (
         closingFence
         && closingFence[1][0] === fence.marker
@@ -42,7 +42,9 @@ export function normalizeMathMarkdown(markdown: string): string {
       continue;
     }
 
-    const openingFence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    const openingFence = line.match(
+      /^(?:(?: {0,3}>[ \t]?)+)? {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/,
+    );
     if (openingFence) {
       const marker = openingFence[1][0] as "`" | "~";
       const validInfoString = marker === "~" || !openingFence[2].includes("`");
@@ -80,11 +82,22 @@ export function normalizeMathMarkdown(markdown: string): string {
 
 function hasEscapedLineBreakOutsideMath(value: string): boolean {
   let displayMath = false;
+  let displayContentStart = -1;
+  let displayHasLeadingBreak = false;
   let slashMath: "[" | "(" | null = null;
+  let slashMathContentStart = -1;
+  let slashMathHasLeadingBreak = false;
 
   for (let index = 0; index < value.length; index += 1) {
     if (!slashMath && value.startsWith("$$", index)) {
       displayMath = !displayMath;
+      if (displayMath) {
+        displayContentStart = index + 2;
+        displayHasLeadingBreak = false;
+      } else {
+        displayContentStart = -1;
+        displayHasLeadingBreak = false;
+      }
       index += 1;
       continue;
     }
@@ -98,15 +111,17 @@ function hasEscapedLineBreakOutsideMath(value: string): boolean {
     // A slash-delimited math wrapper is itself JSON-escaped in this shape.
     if (runLength % 2 === 0 && (next === "[" || next === "(")) {
       slashMath = next;
+      slashMathContentStart = runEnd + 1;
+      slashMathHasLeadingBreak = false;
     } else if (
       runLength % 2 === 0
       && ((slashMath === "[" && next === "]") || (slashMath === "(" && next === ")"))
     ) {
       slashMath = null;
+      slashMathContentStart = -1;
+      slashMathHasLeadingBreak = false;
     } else if (
       runLength % 2 === 1
-      && !displayMath
-      && !slashMath
       && (next === "n" || next === "r")
     ) {
       let separatorEnd = runEnd + 1;
@@ -115,21 +130,36 @@ function hasEscapedLineBreakOutsideMath(value: string): boolean {
       }
       const before = value.slice(0, index).trimEnd();
       const after = value.slice(separatorEnd).trimStart();
+      if (displayMath) {
+        if (value.slice(displayContentStart, index).trim() === "") {
+          displayHasLeadingBreak = true;
+        }
+        if (displayHasLeadingBreak && after.startsWith("$$")) return true;
+      } else if (slashMath) {
+        if (value.slice(slashMathContentStart, index).trim() === "") {
+          slashMathHasLeadingBreak = true;
+        }
+        const closingSlashMath = slashMath === "[" ? /^(?:\\{1,2})\]/ : /^(?:\\{1,2})\)/;
+        if (slashMathHasLeadingBreak && closingSlashMath.test(after)) return true;
+      }
       // Requiring the escaped newline to border a math block distinguishes a
       // serialized paragraph boundary from ordinary prose LaTeX such as
       // `\newcommand` that happens to coexist with a formula later in the text.
-      if (
-        before.endsWith("$$")
-        || after.startsWith("$$")
-        || /\\{1,2}(?:\]|\))$/.test(before)
-        || /^\\{1,2}(?:\[|\()/.test(after)
-      ) {
+      if (!displayMath && !slashMath && (endsWithMathBlock(before) || startsWithMathBlock(after))) {
         return true;
       }
     }
     index = runEnd - 1;
   }
   return false;
+}
+
+function startsWithMathBlock(value: string): boolean {
+  return /^(?:(?: {0,3}>[ \t]?)+)? {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]+)?(?:\$\$|\\{1,2}\[)/.test(value);
+}
+
+function endsWithMathBlock(value: string): boolean {
+  return /(?:\$\$|\\{1,2}\])$/.test(value);
 }
 
 function decodeJsonStringLayer(value: string): string {
