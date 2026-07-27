@@ -1654,8 +1654,21 @@ button.chat-session-card {
   cursor: pointer;
 }
 
+/* 键盘焦点:压掉浏览器默认那圈罩住整条 232px 轨道的方框,但**必须**给出替代指示——
+   把焦点环画在滑块本身。问答那侧原先是一排 button,天然有焦点环;收敛成滑块后若只
+   `outline: none` 就是净退化:键盘用户 Tab 到这里看不出焦点在哪。 */
 .effort-picker-slider-input:focus-visible {
   outline: none;
+}
+
+.effort-picker-slider-input:focus-visible::-webkit-slider-thumb {
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.3);
+}
+
+.effort-picker-slider-input:focus-visible::-moz-range-thumb {
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.3);
 }
 
 .effort-picker-slider-input::-webkit-slider-runnable-track {
