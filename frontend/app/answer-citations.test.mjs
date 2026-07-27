@@ -110,3 +110,19 @@ test("回归:紧邻正文的单行 $$ 功耗公式渲染为可滚动的 display 
   assert.match(html, /href="cite:k20"/);
   assert.doesNotMatch(html, /katex-error/);
 });
+
+test("引用与列表容器中的单行 $$ 公式仍渲染为 display KaTeX", () => {
+  for (const answer of ["> $$E=mc^2$$", "- $$P=VI$$", "1. $$f=ma$$"]) {
+    const html = render(answer, {});
+    assert.match(html, /class="katex-display"/);
+    assert.doesNotMatch(html, /katex-error/);
+  }
+});
+
+test("额外转义的 aligned 公式保留 LaTeX 换行并正常渲染", () => {
+  const answer = String.raw`Intro\n$$\\begin{aligned}a&=b\\\\c&=d\\end{aligned}$$\nWhere the rows differ`;
+  const html = render(answer, {});
+  assert.match(html, /class="katex-display"/);
+  assert.match(html, /Where the rows differ/);
+  assert.doesNotMatch(html, /katex-error/);
+});

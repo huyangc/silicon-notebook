@@ -36,14 +36,69 @@ test("recovers a markdown value returned one JSON-string layer too deep", () => 
   );
 });
 
+test("decodes one escaped layer without breaking aligned rows or English text", () => {
+  const serialized = String.raw`Intro\n$$\\begin{aligned}a&=b\\\\c&=d\\end{aligned}$$\nWhere the rows differ`;
+  assert.equal(
+    normalizeMathMarkdown(serialized),
+    [
+      "Intro",
+      "$$",
+      "\\begin{aligned}a&=b\\\\c&=d\\end{aligned}",
+      "$$",
+      "Where the rows differ",
+    ].join("\n"),
+  );
+});
+
 test("does not rewrite display-looking text inside fenced code", () => {
   const markdown = ["```md", "$$E = mc^2$$", "```"].join("\n");
   assert.equal(normalizeMathMarkdown(markdown), markdown);
 });
 
+test("does not treat a fence marker with trailing text as a closing fence", () => {
+  const markdown = [
+    "````md",
+    "```not-a-close",
+    "$$E = mc^2$$",
+    "````",
+  ].join("\n");
+  assert.equal(normalizeMathMarkdown(markdown), markdown);
+});
+
+test("promotes display formulas inside blockquote and list containers", () => {
+  const markdown = [
+    "> $$E = mc^2$$",
+    "- $$P = VI$$",
+    "1. $$f = ma$$",
+  ].join("\n");
+  assert.equal(
+    normalizeMathMarkdown(markdown),
+    [
+      "> $$",
+      "> E = mc^2",
+      "> $$",
+      "- $$",
+      "  P = VI",
+      "  $$",
+      "1. $$",
+      "   f = ma",
+      "   $$",
+    ].join("\n"),
+  );
+});
+
 test("does not mistake the LaTeX command nabla for an escaped newline", () => {
   const markdown = String.raw`向量 $\nabla f$ 保持原样`;
   assert.equal(normalizeMathMarkdown(markdown), markdown);
+});
+
+test("does not decode raw n-prefixed LaTeX commands around display math", () => {
+  assert.equal(
+    normalizeMathMarkdown(String.raw`$$\nabla f$$`),
+    ["$$", String.raw`\nabla f`, "$$"].join("\n"),
+  );
+  const proseCommand = String.raw`\newcommand{\x}{y} 与 $$E=mc^2$$`;
+  assert.equal(normalizeMathMarkdown(proseCommand), proseCommand);
 });
 
 test("unwraps Markdown math delimiters before direct KaTeX rendering", () => {
