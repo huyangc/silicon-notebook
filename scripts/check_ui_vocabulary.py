@@ -75,6 +75,9 @@ ASCII_TERMS = {
     "KG": re.compile(r"(?<![A-Za-z])KG(?![A-Za-z])"),
     "CSR": re.compile(r"(?<![A-Za-z])CSR(?![A-Za-z])"),
     "ANN": re.compile(r"(?<![A-Za-z])ANN(?![A-Za-z])"),
+    # 档位说明曾长期无人渲染，攒下「不把枚举伪装成大 TopN」这种开发者措辞，直到档位
+    # 控件收敛才第一次上屏。检索取数方式对用户没有意义，界面只讲效果。
+    "TopN": re.compile(r"(?<![A-Za-z])top-?n(?![A-Za-z])", re.IGNORECASE),
     "chunk": re.compile(r"(?<![A-Za-z])chunks?(?![A-Za-z])", re.IGNORECASE),
     "notebook": re.compile(r"(?<![A-Za-z])notebooks?(?![A-Za-z])", re.IGNORECASE),
     "Memory": re.compile(r"(?<![A-Za-z])memory(?![A-Za-z])", re.IGNORECASE),

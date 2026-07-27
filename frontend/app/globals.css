@@ -1510,12 +1510,17 @@ button.chat-session-card {
   flex-shrink: 0;
 }
 
-/* 研究深度:次级 chip 按钮 + 上方弹出的调档 popover。 */
-.report-depth {
+/* ---------------------------------------------------------------------------
+   档位控件(effort-picker.tsx):次级 chip 按钮 + 上方弹出的调档 popover。
+   深度报告的「研究深度」与问答输入行的「检索档位」共用这一套样式,
+   .compact 只压 chip 尺寸(嵌进问答控制行与 .mode-tab 同高),popover 保持一致。
+   --------------------------------------------------------------------------- */
+.effort-picker {
   position: relative;
+  display: inline-flex;
 }
 
-.report-depth-chip {
+.effort-picker-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1531,32 +1536,51 @@ button.chat-session-card {
   white-space: nowrap;
 }
 
-.report-depth-chip:hover:not(:disabled),
-.report-depth-chip.open {
+.effort-picker.compact .effort-picker-chip {
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.effort-picker-chip:hover:not(:disabled),
+.effort-picker-chip.open {
   border-color: #9aa6b7;
   background: #f7f9fc;
 }
 
-.report-depth-chip.open {
+.effort-picker-chip.open {
   border-color: #1d4ed8;
 }
 
-.report-depth-chip:disabled {
+.effort-picker-chip:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
-.report-depth-chip-label {
+/* 下面四条(chip 的 label/value、popover 的 title/current)渲染成 <span>，都刻意写成
+   两个类的后代选择器：控件嵌进问答输入行时会落进 `.chat-input-bar span`（一类+一元素，
+   比单类更具体）的射程，被它的 13px/#667085 压掉蓝色与字号 —— 报告那侧不在射程内，
+   于是「同一个控件」在两处长得不一样。这是本控件被评审抓到的实际回归，不是防御性写法：
+   把任何一条降回单类，问答侧的当前档名就会掉色。同一坑的既有先例见 `.ask-mode-control
+   .chat-hint` 的注释。 */
+.effort-picker .effort-picker-chip-label {
   color: #6b7280;
+  font-size: inherit;
   font-weight: 650;
 }
 
-.report-depth-chip-value {
+.effort-picker.compact .effort-picker-chip-label {
+  font-weight: 500;
+}
+
+.effort-picker .effort-picker-chip-value {
   color: #1d4ed8;
+  font-size: inherit;
   font-weight: 700;
 }
 
-.report-depth-popover {
+.effort-picker-popover {
   position: absolute;
   right: 0;
   bottom: calc(100% + 8px);
@@ -1571,35 +1595,35 @@ button.chat-session-card {
   box-shadow: 0 12px 32px rgba(15, 23, 42, 0.16);
 }
 
-.report-depth-popover-head {
+.effort-picker-popover-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
 }
 
-.report-depth-popover-title {
+.effort-picker .effort-picker-popover-title {
   color: #6b7280;
   font-size: 12px;
   font-weight: 700;
 }
 
-.report-depth-popover-current {
+.effort-picker .effort-picker-popover-current {
   color: #1d4ed8;
   font-size: 13px;
   font-weight: 750;
 }
 
-/* 研究深度滑块(仿 Effort 样式):pill 轨道 + 均布圆点 + 可拖白色滑块。
-   当前档由顶部档名 + 滑块位置传达;拖动 range 更新 depthIdx。 */
-.report-depth-slider {
+/* 档位滑块(仿 Effort 样式):pill 轨道 + 均布圆点 + 可拖白色滑块。
+   当前档由顶部档名 + 滑块位置传达;拖动 range 回调调用方换档。 */
+.effort-picker-slider {
   position: relative;
   height: 30px;
   display: flex;
   align-items: center;
 }
 
-.report-depth-slider-track {
+.effort-picker-slider-track {
   position: absolute;
   inset: 0;
   display: flex;
@@ -1611,14 +1635,14 @@ button.chat-session-card {
   pointer-events: none;
 }
 
-.report-depth-slider-dot {
+.effort-picker-slider-dot {
   width: 5px;
   height: 5px;
   border-radius: 999px;
   background: #c3cad6;
 }
 
-.report-depth-slider-input {
+.effort-picker-slider-input {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -1630,16 +1654,29 @@ button.chat-session-card {
   cursor: pointer;
 }
 
-.report-depth-slider-input:focus-visible {
+/* 键盘焦点:压掉浏览器默认那圈罩住整条 232px 轨道的方框,但**必须**给出替代指示——
+   把焦点环画在滑块本身。问答那侧原先是一排 button,天然有焦点环;收敛成滑块后若只
+   `outline: none` 就是净退化:键盘用户 Tab 到这里看不出焦点在哪。 */
+.effort-picker-slider-input:focus-visible {
   outline: none;
 }
 
-.report-depth-slider-input::-webkit-slider-runnable-track {
+.effort-picker-slider-input:focus-visible::-webkit-slider-thumb {
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.3);
+}
+
+.effort-picker-slider-input:focus-visible::-moz-range-thumb {
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.3);
+}
+
+.effort-picker-slider-input::-webkit-slider-runnable-track {
   height: 30px;
   background: transparent;
 }
 
-.report-depth-slider-input::-webkit-slider-thumb {
+.effort-picker-slider-input::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 30px;
@@ -1652,16 +1689,16 @@ button.chat-session-card {
   cursor: grab;
 }
 
-.report-depth-slider-input:active::-webkit-slider-thumb {
+.effort-picker-slider-input:active::-webkit-slider-thumb {
   cursor: grabbing;
 }
 
-.report-depth-slider-input::-moz-range-track {
+.effort-picker-slider-input::-moz-range-track {
   height: 30px;
   background: transparent;
 }
 
-.report-depth-slider-input::-moz-range-thumb {
+.effort-picker-slider-input::-moz-range-thumb {
   width: 30px;
   height: 24px;
   border-radius: 7px;
@@ -1671,7 +1708,7 @@ button.chat-session-card {
   cursor: grab;
 }
 
-.report-depth-popover-hint {
+.effort-picker-popover-hint {
   margin: 0;
   color: #6b7280;
   font-size: 12px;
@@ -3416,59 +3453,14 @@ button.chat-session-card {
   border-color: #344054;
 }
 
+/* 逐步推理才出现的档位控件在控制行里的落位:与模式标签之间留一道竖分隔。
+   档位控件本身的样式在 .effort-picker(与深度报告的「研究深度」共用)。 */
 .ask-retrieval-effort {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
   padding-left: 7px;
   margin-left: 3px;
   border-left: 1px solid #d9dfeb;
-}
-
-.ask-retrieval-effort-label {
-  color: #667085;
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.ask-retrieval-effort .mode-engine {
-  padding: 4px 7px;
-}
-
-.ask-retrieval-thresholds {
-  position: relative;
-  color: #667085;
-  font-size: 11px;
-}
-
-.ask-retrieval-thresholds summary {
-  cursor: pointer;
-  list-style: none;
-  white-space: nowrap;
-}
-
-.ask-retrieval-thresholds summary::-webkit-details-marker {
-  display: none;
-}
-
-.ask-retrieval-thresholds summary::after {
-  content: "⌄";
-  margin-left: 3px;
-}
-
-.ask-retrieval-thresholds[open] > div {
-  position: absolute;
-  z-index: 20;
-  top: 21px;
-  right: 0;
-  width: min(520px, calc(100vw - 48px));
-  padding: 9px 10px;
-  border: 1px solid #d8dee8;
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 8px 22px rgba(16, 24, 40, 0.14);
-  color: #475569;
-  line-height: 1.5;
 }
 
 .mode-hint {

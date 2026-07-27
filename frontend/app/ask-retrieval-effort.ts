@@ -1,6 +1,8 @@
 // Reasoning Ask 的检索档位单一真源。这里是产品/前端可见的阈值契约；后端
 // app/core/ask_retrieval_policy.py 保持同一套数值，测试同时锁住这两处。
 
+import type { EffortOption } from "./effort-picker";
+
 export type AskRetrievalEffortId =
   | "overview"
   | "standard"
@@ -11,6 +13,12 @@ export type AskRetrievalEffortId =
 export type AskRetrievalEffort = {
   id: AskRetrievalEffortId;
   label: string;
+  /**
+   * 选中该档时档位控件里显示的那句说明——**这是面向用户的界面文案**，不是内部备注。
+   * 它曾长期无人渲染，于是攒下了「不把枚举伪装成大 TopN」这种写给开发者看的措辞，
+   * 直到控件收敛后第一次上屏才暴露。改这里等同于改界面：只写用户能理解的中性描述，
+   * 不带内部黑话，也不在这里陈述实现契约（契约在 docs/product-and-api*.md）。
+   */
   description: string;
   ranked: {
     perQuery: number;
@@ -42,12 +50,24 @@ export const ASK_RETRIEVAL_EFFORTS: readonly AskRetrievalEffort[] = Object.freez
     ranked: { perQuery: 12, finalFloor: 32, finalAspect: 5, finalCap: 64, maxSteps: 32, maxSubqueries: 8, kgContextChars: 12_000, chunkContextChars: 80_000 },
   },
   {
-    id: "exhaustive", label: "穷尽", description: "优先覆盖，不把枚举伪装成大 TopN",
+    id: "exhaustive", label: "穷尽", description: "覆盖优先，用时最长",
     ranked: { perQuery: 16, finalFloor: 40, finalAspect: 6, finalCap: 96, maxSteps: 50, maxSubqueries: 10, kgContextChars: 16_000, chunkContextChars: 120_000 },
   },
 ] as const);
 
 export const DEFAULT_ASK_RETRIEVAL_EFFORT: AskRetrievalEffortId = "standard";
+
+/**
+ * 喂给共享档位控件(effort-picker)的档位表。与深度报告的「研究深度」共用同一个控件,
+ * 所以这里只做投影:id/档名照搬,description 就是控件里给选中档显示的那句说明。
+ */
+export const ASK_RETRIEVAL_EFFORT_OPTIONS: readonly EffortOption[] = Object.freeze(
+  ASK_RETRIEVAL_EFFORTS.map((effort) => ({
+    id: effort.id,
+    label: effort.label,
+    hint: effort.description,
+  })),
+);
 
 /** complete / aggregate / hybrid 的逐页枚举上限；触顶必须回传 explicit_partial。 */
 export const STRUCTURED_ENUMERATION_LIMITS = Object.freeze({
@@ -63,12 +83,6 @@ export const STRUCTURED_ENUMERATION_LIMITS = Object.freeze({
   overflowReason: "explicit_partial",
 });
 
-export function retrievalEffort(id: AskRetrievalEffortId): AskRetrievalEffort {
-  const effort = ASK_RETRIEVAL_EFFORTS.find((item) => item.id === id);
-  if (!effort) throw new Error(`unknown Ask retrieval effort: ${id}`);
-  return effort;
-}
-
 export function retrievalEffortFromTurn(
   turn: { response?: { retrieval_effort?: string } } | undefined,
 ): AskRetrievalEffortId {
@@ -78,14 +92,7 @@ export function retrievalEffortFromTurn(
     : DEFAULT_ASK_RETRIEVAL_EFFORT;
 }
 
-/** 供控件的原生 title：把所有可影响结果量的数字直接给用户看。 */
-export function retrievalEffortThresholdText(id: AskRetrievalEffortId): string {
-  const effort = retrievalEffort(id);
-  const ranked = effort.ranked;
-  const enumeration = STRUCTURED_ENUMERATION_LIMITS;
-  return [
-    `${effort.label}：每条查询取 ${ranked.perQuery} 条；最终证据至少 ${ranked.finalFloor} 条、每个问题方面增加 ${ranked.finalAspect} 条、最多 ${ranked.finalCap} 条；最多 ${ranked.maxSteps} 个推理步骤、${ranked.maxSubqueries} 条首轮子查询；知识图谱（含记忆/推导链）/原文（含结构化预览/来源元素）上下文最多 ${ranked.kgContextChars}/${ranked.chunkContextChars} 字符。`,
-    "模型可在上述上限内提前停止，但不能突破上限；显式“全部”不会因档位较低而缩小枚举范围。",
-    `整表物理行清单/直接计数：每页 ${enumeration.pageRows} 行、最多 ${enumeration.maxPages} 页/${enumeration.maxRows} 行、${enumeration.maxTables} 表/每表 ${enumeration.maxColumns} 列、模型单元格摘录 ${enumeration.cellExcerptChars} 字符、结构化载荷 ${enumeration.payloadChars} 字符；正文及混合分析最多看到 ${enumeration.inlineAnswerRows} 行，结果卡初始显示 ${enumeration.initialVisibleRows} 行。条件筛选、排除重复项、分组目前不声称完整；超过上限明确标记 ${enumeration.overflowReason}。`,
-  ].join(" ");
-}
+// 档位阈值曾以一整段文案铺在界面上（控件 title + 「阈值」折叠块）。产品决定不再向用户
+// 呈现这些数字，档位只用一句说明表达，于是那段拼接文案随控件一起删除。数值契约本身没有
+// 松动：它由上面的 ASK_RETRIEVAL_EFFORTS / STRUCTURED_ENUMERATION_LIMITS 与后端
+// app/core/ask_retrieval_policy.py 逐项锁住。

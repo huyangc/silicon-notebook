@@ -22,6 +22,7 @@ import "katex/dist/katex.min.css";
 import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
+import { EffortPicker, type EffortOption } from "./effort-picker";
 import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
 import { label } from "./vocabulary";
 
@@ -123,12 +124,19 @@ const DEPTHS = [1, 2, 4, 8, 16];
 const DEPTH_LABELS = ["概览", "标准", "深入", "详尽", "穷尽"];
 // 每档一句中性说明(不用快/聪明措辞),popover 里给选中档显示。
 const DEPTH_HINTS = [
-  "最快出稿,覆盖主干要点",
-  "常用档,深度与篇幅平衡",
-  "逐节多轮检索,论证更完整",
-  "更广取证,细节与边角更全",
-  "最充分深挖,覆盖尽可能全面",
+  "最快出稿，覆盖主干要点",
+  "常用档，深度与篇幅平衡",
+  "逐节多轮检索，论证更完整",
+  "更广取证，细节与边角更全",
+  "最充分深挖，覆盖尽可能全面",
 ];
+// 喂给共享档位控件(EffortPicker)的档位表。id 用档位下标:DEPTHS 的取值本身可能重排,
+// 下标才是这里与 depthIdx 之间稳定的那一环。
+const DEPTH_OPTIONS: readonly EffortOption[] = DEPTH_LABELS.map((label, index) => ({
+  id: String(index),
+  label,
+  hint: DEPTH_HINTS[index],
+}));
 
 // 节内进度:phase → 图标类型。完成=对勾,失败=叹号,其余进行中=点动画。
 type SectionPhaseIcon = "done" | "failed" | "active";
@@ -797,8 +805,6 @@ export function ReportsPanel({
   const [copied, setCopied] = useState(false);
   const [question, setQuestion] = useState("");
   const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
-  const [depthOpen, setDepthOpen] = useState(false);
-  const depthRef = useRef<HTMLDivElement | null>(null);
   const [creating, setCreating] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -910,25 +916,6 @@ export function ReportsPanel({
     const timer = window.setTimeout(() => setConfirmDelete(false), 4000);
     return () => window.clearTimeout(timer);
   }, [confirmDelete]);
-
-  // 研究深度 popover:点外部 / Esc 关闭(镜像 page.tsx 的菜单收起写法)。
-  useEffect(() => {
-    if (!depthOpen) return;
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (target instanceof Node && depthRef.current?.contains(target)) return;
-      setDepthOpen(false);
-    }
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") setDepthOpen(false);
-    }
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [depthOpen]);
 
   async function submitCreate() {
     const q = question.trim();
@@ -1245,46 +1232,14 @@ export function ReportsPanel({
         <div className="report-compose-actions">
           <span className="report-compose-hint">后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页</span>
           <div className="report-compose-controls">
-            <div className="report-depth" ref={depthRef}>
-              <button
-                type="button"
-                className={`report-depth-chip${depthOpen ? " open" : ""}`}
-                disabled={creating}
-                aria-haspopup="dialog"
-                aria-expanded={depthOpen}
-                onClick={() => setDepthOpen((open) => !open)}
-              >
-                <span className="report-depth-chip-label">深度</span>
-                <span className="report-depth-chip-value">{DEPTH_LABELS[depthIdx]}</span>
-              </button>
-              {depthOpen && (
-                <div className="report-depth-popover" role="dialog" aria-label="研究深度">
-                  <div className="report-depth-popover-head">
-                    <span className="report-depth-popover-title">研究深度</span>
-                    <span className="report-depth-popover-current">{DEPTH_LABELS[depthIdx]}</span>
-                  </div>
-                  <div className="report-depth-slider">
-                    <div className="report-depth-slider-track" aria-hidden>
-                      {DEPTH_LABELS.map((_, index) => (
-                        <span key={index} className="report-depth-slider-dot" />
-                      ))}
-                    </div>
-                    <input
-                      type="range"
-                      className="report-depth-slider-input"
-                      min={0}
-                      max={DEPTH_LABELS.length - 1}
-                      step={1}
-                      value={depthIdx}
-                      aria-label="研究深度"
-                      aria-valuetext={DEPTH_LABELS[depthIdx]}
-                      onChange={(event) => setDepthIdx(Number(event.target.value))}
-                    />
-                  </div>
-                  <p className="report-depth-popover-hint">{DEPTH_HINTS[depthIdx]}</p>
-                </div>
-              )}
-            </div>
+            <EffortPicker
+              chipLabel="深度"
+              title="研究深度"
+              options={DEPTH_OPTIONS}
+              value={String(depthIdx)}
+              onChange={(id) => setDepthIdx(Number(id))}
+              disabled={creating}
+            />
             <button
               className="button"
               type="button"

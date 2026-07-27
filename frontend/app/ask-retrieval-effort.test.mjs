@@ -6,7 +6,6 @@ import {
   DEFAULT_ASK_RETRIEVAL_EFFORT,
   STRUCTURED_ENUMERATION_LIMITS,
   retrievalEffortFromTurn,
-  retrievalEffortThresholdText,
 } from "./ask-retrieval-effort.ts";
 import { callsIn, findFunction, parseModule } from "./test/semantic-source.mjs";
 
@@ -43,14 +42,10 @@ test("retrieval effort registry pins every ranked and complete-set threshold", (
 });
 
 
-test("historical effort restores safely and the visible threshold copy includes enforced limits", () => {
+test("historical effort restores safely", () => {
   assert.equal(retrievalEffortFromTurn({ response: { retrieval_effort: "exhaustive" } }), "exhaustive");
   assert.equal(retrievalEffortFromTurn({ response: { retrieval_effort: "bad" } }), "standard");
   assert.equal(retrievalEffortFromTurn(undefined), "standard");
-  const copy = retrievalEffortThresholdText("standard");
-  for (const token of ["至少 20", "增加 3", "最多 36", "最多 8 个推理步骤", "5 条首轮子查询", "6000/30000", "25", "50", "1250", "8", "1000", "256000", "100", "20", "explicit_partial"]) {
-    assert.ok(copy.includes(token), `missing threshold ${token}`);
-  }
 });
 
 
