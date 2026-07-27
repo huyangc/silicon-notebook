@@ -127,7 +127,7 @@
 - [x] Run the complete offline gate: `bash scripts/check.sh`.
 - [x] Run the real PostgreSQL lane: `bash scripts/check_postgres.sh` with `TEST_POSTGRES_URL`.
 - [x] Confirm `cd frontend && npm run build` passes (also covered by the full gate).
-- [ ] Run final specification and code-quality review, merge latest `master`, rerun gates, then push and open a PR.
+- [x] Run final specification and code-quality review, merge latest `master`, rerun gates, then push and open a PR.
 
 ## Definition of done
 
