@@ -35,6 +35,10 @@ NOTEBOOK_SCOPED_TABLES = [
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
     "kg_relation_completion_state",
     "kg_cluster_scratch", "kg_canonical_scratch", "kg_conflict_candidates",
+    # v32: KG 质量分析的预计算产物(跨板块边 / 来源画像 / 产物账本)。它们是派生数据,
+    # 但按 notebook 拷贝仍然正确且必要:产物账本带 kg_mutation_seq, 跟着 notebook 走
+    # 就能在合并后的库里如实报出「建于哪个 KG 状态」。
+    "kg_community_edges", "kg_source_profiles", "kg_analysis_artifacts",
     "merge_review_jobs",
     "promotion_candidates", "derived_rule_candidates", "extraction_runs",
     "extraction_candidates", "articles", "article_claims", "conversations",

@@ -319,6 +319,20 @@ class PostgresDatabase:
         with self._acquire() as conn:
             yield conn
 
+    @property
+    def in_write_transaction(self) -> bool:
+        """Whether this execution context is currently inside ``write()``.
+
+        Mirrors ``SqliteDatabase.in_write_transaction`` so a read path that must
+        never run inside a write transaction can enforce that contract at
+        runtime on *both* backends rather than only in a comment. PostgreSQL
+        hands out a different pooled connection per ``connect()``, so a read
+        issued from inside ``write()`` silently observes the pre-commit
+        database — the same silent-staleness failure SQLite has, minus the
+        process-wide write lock.
+        """
+        return _WRITE_ACTIVE.get()
+
     @contextmanager
     def write(
         self, *, isolation_level: str = "read committed"

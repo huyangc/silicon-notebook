@@ -1,4 +1,4 @@
-"""Migration-derived PostgreSQL v11 business-catalog validation."""
+"""Migration-derived PostgreSQL v14 business-catalog validation."""
 
 from __future__ import annotations
 
@@ -524,7 +524,7 @@ def _index_key_tokens(
             (collation_oid,),
         ).fetchone()
         if collation is None or _value(collation, "namespace", 1) != "pg_catalog":
-            raise ValueError("PostgreSQL v11 index collation schema drifted")
+            raise ValueError("PostgreSQL v14 index collation schema drifted")
         name = str(_value(collation, "collname", 0)).replace('"', '""')
         tokens.extend(("collate", f'"{name}"'))
     opclass = conn.execute(
@@ -533,10 +533,10 @@ def _index_key_tokens(
         (opclass_oid,),
     ).fetchone()
     if opclass is None:
-        raise ValueError("PostgreSQL v11 index opclass is missing")
+        raise ValueError("PostgreSQL v14 index opclass is missing")
     if not bool(_value(opclass, "opcdefault", 1)):
         if _value(opclass, "namespace", 2) != "public":
-            raise ValueError("PostgreSQL v11 non-default index opclass schema drifted")
+            raise ValueError("PostgreSQL v14 non-default index opclass schema drifted")
         tokens.append(str(_value(opclass, "opcname", 0)))
     return tuple(tokens)
 
@@ -573,10 +573,10 @@ def _validate_fk_constraint_triggers(
     for row in rows:
         name = _value(row, "conname", 4)
         if not isinstance(name, str) or name not in expected:
-            raise ValueError("PostgreSQL v11 internal trigger contract drifted")
+            raise ValueError("PostgreSQL v14 internal trigger contract drifted")
         grouped.setdefault(name, []).append(row)
     if set(grouped) != set(expected):
-        raise ValueError("PostgreSQL v11 foreign-key trigger set drifted")
+        raise ValueError("PostgreSQL v14 foreign-key trigger set drifted")
     for name, contract in expected.items():
         trigger_rows = grouped[name]
         constraint_oids = {_value(row, "constraint_oid", 3) for row in trigger_rows}
@@ -585,7 +585,7 @@ def _validate_fk_constraint_triggers(
         )
         expected_owners = Counter((contract.table, contract.table))
         if contract.referenced_table is None:
-            raise ValueError("PostgreSQL v11 foreign-key contract is incomplete")
+            raise ValueError("PostgreSQL v14 foreign-key contract is incomplete")
         expected_owners.update((contract.referenced_table, contract.referenced_table))
         if (
             len(trigger_rows) != 4
@@ -601,7 +601,7 @@ def _validate_fk_constraint_triggers(
                 for row in trigger_rows
             )
         ):
-            raise ValueError("PostgreSQL v11 foreign-key trigger contract drifted")
+            raise ValueError("PostgreSQL v14 foreign-key trigger contract drifted")
 
 
 def _validate_identity_sequences(
@@ -631,7 +631,7 @@ def _validate_identity_sequences(
     expected_tables = set(POSTGRES_ROWID_ORDINAL_TABLES)
     actual_tables = {str(_value(row, "table_name", 0)) for row in rows}
     if len(rows) != len(expected_tables) or actual_tables != expected_tables:
-        raise ValueError("PostgreSQL v11 identity sequence set drifted")
+        raise ValueError("PostgreSQL v14 identity sequence set drifted")
     for row in rows:
         if (
             _value(row, "column_name", 1) != "ordinal"
@@ -648,7 +648,7 @@ def _validate_identity_sequences(
             or bool(_value(row, "seqcycle", 14))
             or _value(row, "deptype", 15) != "i"
         ):
-            raise ValueError("PostgreSQL v11 identity sequence contract drifted")
+            raise ValueError("PostgreSQL v14 identity sequence contract drifted")
 
 
 def validate_postgres_v11_catalog(
@@ -670,10 +670,10 @@ def validate_postgres_v11_catalog(
     ).fetchall()
     actual_tables = {str(_value(row, "table_name", 0)) for row in table_rows}
     if actual_tables != set(catalog_tables):
-        raise ValueError("PostgreSQL v11 business table catalog drifted")
+        raise ValueError("PostgreSQL v14 business table catalog drifted")
     for row in table_rows:
         if not _table_semantics_are_exact(row):
-            raise ValueError("PostgreSQL v11 business table semantics drifted")
+            raise ValueError("PostgreSQL v14 business table semantics drifted")
 
     inherited = conn.execute(
         "SELECT 1 FROM pg_inherits i "
@@ -691,7 +691,7 @@ def validate_postgres_v11_catalog(
         ),
     ).fetchone()
     if inherited is not None:
-        raise ValueError("PostgreSQL v11 business table inheritance drifted")
+        raise ValueError("PostgreSQL v14 business table inheritance drifted")
 
     unexpected_trigger = conn.execute(
         "SELECT 1 FROM pg_trigger g JOIN pg_class t ON t.oid=g.tgrelid "
@@ -715,7 +715,7 @@ def validate_postgres_v11_catalog(
         item is not None
         for item in (unexpected_trigger, unexpected_rule, unexpected_policy)
     ):
-        raise ValueError("PostgreSQL v11 business table behavior drifted")
+        raise ValueError("PostgreSQL v14 business table behavior drifted")
 
     column_rows = conn.execute(
         "SELECT table_name,column_name,data_type,is_nullable,is_identity,"
@@ -753,7 +753,7 @@ def validate_postgres_v11_catalog(
     expected_columns = dict(EXPECTED_COLUMNS)
     expected_columns["silicon_schema_migrations"] = EXPECTED_LEDGER_COLUMNS
     if actual_columns != expected_columns:
-        raise ValueError("PostgreSQL v11 column catalog drifted")
+        raise ValueError("PostgreSQL v14 column catalog drifted")
 
     _validate_identity_sequences(
         conn,
@@ -778,7 +778,7 @@ def validate_postgres_v11_catalog(
     expected_constraints = dict(EXPECTED_CONSTRAINTS)
     expected_constraints["silicon_schema_migrations_pkey"] = EXPECTED_LEDGER_CONSTRAINT
     if actual_names != set(expected_constraints):
-        raise ValueError("PostgreSQL v11 constraint catalog drifted")
+        raise ValueError("PostgreSQL v14 constraint catalog drifted")
     for row in rows:
         name = str(_value(row, "conname", 0))
         expected = expected_constraints[name]
@@ -806,7 +806,7 @@ def validate_postgres_v11_catalog(
             or (is_foreign and referenced_schema != business_schema)
             or actual != expected
         ):
-            raise ValueError("PostgreSQL v11 constraint definition drifted")
+            raise ValueError("PostgreSQL v14 constraint definition drifted")
 
     _validate_fk_constraint_triggers(
         conn,
@@ -830,14 +830,14 @@ def validate_postgres_v11_catalog(
         definition.name for definition in replication_guard_specs(manifest)
     }
     if guard_names != expected_guard_names:
-        raise ValueError("PostgreSQL v11 shadow guard contract drifted")
+        raise ValueError("PostgreSQL v14 shadow guard contract drifted")
     actual_names = {str(_value(row, "index_name", 1)) for row in rows}
     if actual_names != set(expected_indexes):
-        raise ValueError("PostgreSQL v11 index catalog drifted")
+        raise ValueError("PostgreSQL v14 index catalog drifted")
     for row in rows:
         name = str(_value(row, "index_name", 1))
         if not _index_flags_are_live(row):
-            raise ValueError("PostgreSQL v11 index is not valid, ready, and live")
+            raise ValueError("PostgreSQL v14 index is not valid, ready, and live")
         expected = expected_indexes[name]
         key_count = int(_value(row, "indnkeyatts", 8))
         raw_options = _value(row, "indoption", 11)
@@ -868,10 +868,10 @@ def validate_postgres_v11_catalog(
             bool(_value(row, "indnullsnotdistinct", 14)),
         )
         if int(_value(row, "indnatts", 9)) != key_count or actual != expected:
-            raise ValueError("PostgreSQL v11 index definition drifted")
+            raise ValueError("PostgreSQL v14 index definition drifted")
 
     extension = conn.execute(
         "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pg_trgm'"
     ).fetchone()
     if extension is None or _value(extension, "nspname", 0) != "public":
-        raise ValueError("PostgreSQL v11 pg_trgm extension contract drifted")
+        raise ValueError("PostgreSQL v14 pg_trgm extension contract drifted")

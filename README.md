@@ -141,7 +141,7 @@ alone starts nothing and never changes the active backend. Changing `DATABASE_UR
 
 While `DATABASE_URL` remains SQLite, the operator can run a guarded, one-way
 SQLite→PostgreSQL shadow: preflight binds and confirms both database identities, `start-forward`
-installs run-scoped capture/guards and copies a consistent 61-table baseline, and one supervised
+installs run-scoped capture/guards and copies a consistent 64-table baseline, and one supervised
 foreground worker continuously applies the retained SQLite change log. `status` exposes redacted
 lag/lease/poison state and `verify --level full` performs a barrier-aware consistency check. The
 worker uses an exclusive database-clock lease, retries transient PostgreSQL failures, stops on a

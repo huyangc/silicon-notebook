@@ -24,10 +24,27 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import sqlite3
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from app.repositories.kg_analysis_payloads import (
+    artifact_ledger_rows as _artifact_ledger_rows,
+    clamp as _clamp,
+    cluster_histogram_payload as _cluster_histogram_payload,
+    community_overview_payload as _community_overview_payload,
+    largest_clusters_payload as _largest_clusters_payload,
+    relation_provenance_payload as _relation_provenance_payload,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
+from app.services.kg_analysis_precompute import batched, check_artifact_payloads
+from app.services.knowledge_contracts import (
+    COMMUNITY_OVERVIEW_MAX,
+    COMMUNITY_TOP_MEMBERS_MAX,
+    KG_COMMUNITY_EDGES_MAX,
+    KG_SOURCE_PAGE_MAX,
+    LARGEST_CLUSTERS_MAX,
+    USABLE_STATUSES,
+)
 
 
 class UnifiedKgStore:
@@ -811,3 +828,687 @@ class UnifiedKgStore:
                 if nm and nm["canonical_name"]:
                     out.append((nm["canonical_name"], int(r["bridge_claims"])))
             return out
+
+    # ------------------------------------------ KG 质量分析(只读聚合,T1)
+    # 承 docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md「T1 只读聚合
+    # 查询层」。四个查询都**自开只读连接**(与上面的 community-peer 原语同形),绝不写库。
+    #
+    # ⚠ 调用契约:**调用方不得持有外层写事务**。这里自开连接(SQLite 侧是本线程复用的
+    # 读连接,PostgreSQL 侧是从池里另取一条),从 write() 里调用会读到提交前的旧数据,
+    # 而且不会响亮失败——它会安静地返回一份过时的报告。T2 起唯一的调用方是
+    # KnowledgeLifecycleService._precompute_kg_analysis,它在两个 `_write()` 之外调用
+    # (预计算把三条统计快照持久化进 kg_analysis_artifacts)。T3 落地 KgAnalysisService
+    # 时要在服务层把这条契约钉成断言(见 ports.py 同段)。
+    #
+    # 口径与产品一致(设计 §3.5,沿用 scripts/kg_quality_audit.py 踩过 9 轮评审的那套):
+    #   · 对象只算 status IN USABLE_STATUSES;
+    #   · 边只算 review_status != 'rejected',且**两端都是本 notebook 的可用对象**——
+    #     knowledge_relations 的两个端点列既没有外键、也没有 notebook 归属约束,历史/
+    #     损坏数据会指向别的库或已 deprecated 的对象,而产品的图/检索按可用节点集建图,
+    #     那种边根本进不去;
+    #   · 被排除的量一律单独返回,不凭空消失。
+    #
+    # 效率:分桶/分组一律发生在 SQL 里,绝不把逐簇/逐边的明细拉进 Python 再聚合
+    # (生产库 concept_clusters 200 万+ 行、knowledge_relations 800 万+ 行),也绝不发
+    # 巨型 IN。所有有界返回都带截断标志。
+    #
+    # ⚠ 与 PostgreSQL 侧的形态分岔(parity 要求语义等价 + 两侧都有守卫,不要求 SQL
+    # 逐字相同):`community_overview` 在 PostgreSQL 上用**一条窗口函数查询**取全部
+    # 板块的代表概念,这里保持**逐板块有界 top-K**。理由见该方法的 docstring。返回值
+    # 的等价性由 tests/postgres/test_knowledge_store_conformance.py 对同一批夹具在
+    # 两个后端各跑一遍、断言同一份期望值来证明。
+
+    def _reject_inside_write_transaction(self, what: str) -> None:
+        """本段的只读聚合**不得**在本线程的写事务内被调用。当场硬失败。
+
+        两个理由,后一个更硬:
+
+        1. 正确性:这些方法用的是本线程复用的**读**连接,而 `SqliteDatabase.write()`
+           每次另开一条**独立**连接。在写事务里调它们,读到的是那个事务提交**之前**的
+           库 —— 一份过时的报告,而且不会有任何报错。
+        2. 可用性:`write()` 拿的是**进程级写锁**(`threading.Lock`)。这三条是全表级
+           重活(生产 200 万簇行 / 836 万边,同形状数据点是冷扫 39 分钟),放进写事务
+           就等于把全库的写入按住一整趟全表扫。
+
+        为什么要一条运行时守卫而不是只写注释:调用契约原来只有注释,而**形状守卫抓不到
+        违规** —— 「哪个写事务碰过产物表」这种断言对这三条查询完全无效,它们一张产物表
+        都不碰,在 SQLite 上还跑在另一条连接上。评审用「把三条调用从 `_write()` 外面
+        搬到里面」的移动变异实测过:25 条测试**全绿**。
+
+        `write_depth` 是 thread-local 的,所以只拦「本线程正持有写事务」;别的线程在写
+        与本次读无关(WAL 允许并发读),不拦。
+        """
+        if self.database.in_write_transaction:
+            raise RuntimeError(
+                f"{what}:全表级只读聚合被放进了写事务里。它会读到提交前的旧数据"
+                "(不报错、静默过时),并且把进程级写锁按住一整趟全表扫"
+                "(生产规模同形状数据点:835 万边冷扫 39 分钟)。"
+                "把它挪到 write() 之外调用。"
+            )
+
+    @contextmanager
+    def _read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        """一次显式只读事务 = 一个 WAL 快照,让**多条语句**看到同一份库。
+
+        Python 的 sqlite3 在 legacy 事务控制下**不会**为 SELECT 开启事务
+        (``in_transaction`` 恒为 False),所以同一个 ``with connect()`` 里连续两条
+        SELECT 会各自取一个快照。并发的 ``rebuild_communities``(DELETE + INSERT
+        同事务)只要在两条语句之间提交,报告就会自相矛盾:先数到 1200 个板块、再一个
+        都取不到(``total=1200, returned=0, truncated=True``),或者某个板块
+        ``{"size": 3, "top_members": []}``。
+
+        ``BEGIN DEFERRED`` 不立刻抢锁:快照在**第一条读语句**时建立,之后整块共享它。
+        只读所以退出时 ``rollback()``(比 commit 更早释放读标记,语义也更诚实)。
+        ``owned`` 守卫:万一被套在别人已开的事务里,就不越权接管它的边界。
+
+        ⚠ 与 PostgreSQL 侧的一处**不对称,如实说明**:PG 的 `_read_snapshot` 还会发
+        ``BEGIN … READ ONLY``,让「绝不写库」由引擎强制;这里**没有**对应的
+        ``PRAGMA query_only``。原因不是疏忽:PG 每次从池里借的是一条**专属**连接,会话
+        级开关随连接归还自动复位;而这里拿到的是**本线程复用的共享读连接**,在它上面
+        翻会话开关就是本模块 ``_Conn`` docstring 反复警告的那类状态泄漏(一旦某条路径
+        没走到 finally,整条线程连接就永久只读了)。SQLite 侧的「只读」因此由测试守卫
+        兜底(tests/test_kg_analysis_queries.py::test_analysis_queries_never_write:
+        语句级 trace + 相关表的行数与内容指纹),不是由引擎兜底。
+        """
+        db = self.database.connect()
+        owned = not db.in_transaction
+        if owned:
+            db.execute("BEGIN DEFERRED")
+        try:
+            yield db
+        finally:
+            if owned and db.in_transaction:
+                db.rollback()
+
+    def cluster_size_histogram(self, notebook_id: str) -> Dict[str, object]:
+        """收敛率的分布面:簇大小分桶直方图,**按 object_type 分组**(A2)。
+
+        ⚠ **重活**,与下面 `largest_clusters` / `relation_provenance_counts` 同级。
+        本 notebook 的 concept_clusters 全扫 + 每行一次 knowledge_objects 主键探查 +
+        (object_type, canonical_id) 的临时 B 树分组。生产库 200 万+ 簇行。代价量级见
+        ports.py 该段头的双后端标注。**不适合挂在在线请求上**,由调用方(T3 按
+        kg_mutation_seq 记忆化的预计算路径)决定何时调。
+
+        ⚠ 内存也不便宜,而且那部分**不在 Python 里**:EXPLAIN QUERY PLAN 显示这条要建
+        **两个** temp B 树(内层按 (object_type, canonical_id) 分组、外层按
+        (object_type, bucket) 分组),内层无条件是本 notebook 的全部簇行(生产约 200 万)。
+        `_connect()` 设了 `PRAGMA temp_store = MEMORY`(mention-alias 那条 TEMP FTS 路径
+        的硬需求),所以这些临时 B 树**不能落盘**。外层那个只有几十行可以忽略,内层那个
+        不行。这里如实记下来,不为它做 SQLite 侧的调优(§3.35:性能调优只投 PostgreSQL,
+        SQLite 侧的标准是正确、有界、不长时间持锁)。
+
+        **一条 SQL 出分组分桶**——先按 (object_type, canonical_id) 分组算成员数,再把
+        成员数映射成固定的 7 档(见 CLUSTER_SIZE_BUCKETS),分桶发生在 SQL 里,Python
+        只负责补零、定序、求合计。逐簇计数绝不进 Python;结果集恒为「类型数 × 8」行。
+
+        为什么按 object_type 分组:`concept_clusters` 同时装 concept / claim / formula /
+        procedure 四类(见 knowledge_lifecycle 的 _TYPE_MERGE),后三类只做精确种子合并、
+        天然几乎全是单元素簇,混在一起算收敛率会被稀释成噪音。分开报,每类各自可读。
+        契约外的类型(knowhow 投影用用户列名建的自定义类型)归进 "other" 组,只报计数
+        与类型个数、**不报类型名**(那是用户的表头,属于内容)。
+
+        刻意**不**复用 concept_clusters_count + distinct_cluster_count:那是对同一批行
+        的另外两趟扫描,而 member_rows / clusters 本来就是同一次 GROUP BY 的两个求和;
+        并且它们没有 USABLE_STATUSES 过滤,复用会把已弃用成员算进收敛率。
+
+        返回(顶层是全类型合计,`by_object_type` 是定长定序的五个分组):
+          member_rows          计入的簇成员行数(成员对象可用)
+          clusters             至少还有一个可用成员的簇数
+          excluded_member_rows 成员对象缺失 / 跨库 / 状态不可用而被排除的簇成员行数
+          empty_clusters       成员全被排除、整簇落空的簇数(单独报,不混进分桶)
+          buckets              [{bucket, clusters, members}] × 7,定长定序
+          by_object_type       [{object_type, object_types, …上面同一组字段}] × 5
+        """
+        self._reject_inside_write_transaction("簇大小直方图")
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"""
+            SELECT object_type, bucket,
+                   COUNT(*) AS n_clusters,
+                   SUM(usable) AS n_members,
+                   SUM(raw - usable) AS n_excluded
+            FROM (
+              SELECT object_type,
+                     CASE
+                       WHEN usable = 0  THEN 'empty'
+                       WHEN usable = 1  THEN '1'
+                       WHEN usable = 2  THEN '2'
+                       WHEN usable = 3  THEN '3'
+                       WHEN usable <= 5  THEN '4-5'
+                       WHEN usable <= 10 THEN '6-10'
+                       WHEN usable <= 50 THEN '11-50'
+                       ELSE '51+' END AS bucket,
+                     usable, raw
+              FROM (
+                SELECT c.object_type AS object_type,
+                       COUNT(*) AS raw,
+                       SUM(CASE WHEN o.id IS NULL THEN 0 ELSE 1 END) AS usable
+                FROM concept_clusters c
+                LEFT JOIN knowledge_objects o
+                       ON o.id = c.member_object_id
+                      AND o.notebook_id = c.notebook_id
+                      AND o.status IN ({placeholders})
+                WHERE c.notebook_id = ?
+                GROUP BY c.object_type, c.canonical_id
+              ) g
+            ) b
+            GROUP BY object_type, bucket
+            """,
+                (*USABLE_STATUSES, notebook_id),
+            ).fetchall()
+        return _cluster_histogram_payload(
+            {
+                (r["object_type"], r["bucket"]): (
+                    int(r["n_clusters"]), int(r["n_members"] or 0), int(r["n_excluded"] or 0)
+                )
+                for r in rows
+            }
+        )
+
+    def largest_clusters(
+        self, notebook_id: str, limit: int = 20
+    ) -> Dict[str, object]:
+        """收敛率的头部:成员最多的 N 个 concept 簇(canonical_name + 成员数)。
+
+        ⚠ **重活,与直方图同量级**——本 notebook 的 concept 簇行全扫 + 主键探查 + 分组,
+        之后**还多一次排序**。LIMIT 只截断输出,不减少扫描与排序的输入。它只扫 concept
+        分片,所以在 claim 占多数的库上绝对耗时可以比直方图低(本机真实库:14 ms vs
+        64 ms),但**单位输入**的代价更高(同规模全 concept 合成数据上两者只差 ~1.7 倍,
+        见 ports.py 该段头的双后端实测表)。总之它不便宜,别把它当廉价查询挂在线上。
+
+        只取 `object_type='concept'`:榜单上冒出整句 claim 当名字没有意义。其他类型的
+        成员行数与簇数由 `cluster_size_histogram` 按类型分组报出——那里本来就要全扫一遍,
+        在这里再扫一遍只为了报两个数字不值当。载荷里的 ``object_type`` 显式声明这个口径。
+
+        ``canonical_name`` 取 **`MIN(NULLIF(...,''))`**,不是裸 `MIN()`:同一个
+        canonical_id 下的 canonical_name **并不保证一致** —— kg_merge.place_new_concepts
+        对新簇用对象自己的 `o.get("name", "")`(空串因此是可达取值),只有落进已有簇时
+        才沿用既有 canon 名。名字不一致在本机库上**实测存在**(nb-a73f16940c 有 16 个
+        canonical_id 挂着多个不同的 canonical_name),裸 `MIN()` 在那里等于「随便挑一个」;
+        一旦其中一个是空串,它在 `MIN()` 下永远排第一,榜首就变成
+        `{"canonical_name": "", "members": N}`。
+
+        如实说明证据强度:空名本身在本机这几个库里**没有**实测到
+        (`SELECT COUNT(*) … WHERE TRIM(canonical_name)=''` 为 0),所以这条是按上面那条
+        代码路径**可达**而防的,不是照着一个观测到的坏数据修的。代价是零(同一次分组
+        聚合里多一个函数调用),收益是把「榜首无名」整类从结构上排除。
+        全组都是空名时 `MIN(NULLIF(...))` 返回 NULL,`COALESCE` 兜回空串。
+
+        ``limit`` 由调用方传,硬 clamp 到 [1, LARGEST_CLUSTERS_MAX] —— 无界返回在 200 万
+        簇的库上就是把整张表搬进内存。多取一行判 ``truncated``,不额外跑 COUNT。
+        """
+        self._reject_inside_write_transaction("最大簇榜单")
+        limit = _clamp(limit, LARGEST_CLUSTERS_MAX)
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"SELECT c.canonical_id AS canonical_id, "
+                f"       COALESCE(MIN(NULLIF(c.canonical_name, '')), '') AS canonical_name, "
+                f"       COUNT(o.id) AS members "
+                f"FROM concept_clusters c "
+                f"JOIN knowledge_objects o ON o.id = c.member_object_id "
+                f"     AND o.notebook_id = c.notebook_id "
+                f"     AND o.status IN ({placeholders}) "
+                f"WHERE c.notebook_id = ? AND c.object_type = 'concept' "
+                f"GROUP BY c.canonical_id "
+                f"ORDER BY members DESC, c.canonical_id ASC LIMIT ?",
+                (*USABLE_STATUSES, notebook_id, limit + 1),
+            ).fetchall()
+        return _largest_clusters_payload(
+            [
+                (r["canonical_id"], r["canonical_name"] or "", int(r["members"]))
+                for r in rows
+            ],
+            limit,
+        )
+
+    def community_overview(
+        self, notebook_id: str, *, level: int = 0, limit: int = 50, top_k: int = 5
+    ) -> Dict[str, object]:
+        """主题板块列表(C1):板块 id / 规模 / 按 centrality 降序的前 K 个代表概念。
+
+        **整块跑在一次显式只读事务里**(`_read_snapshot`):total、板块列表、逐板块成员
+        三段必须看同一份库,否则并发 rebuild_communities 一劈就会出现「有 1200 个板块,
+        一个都没有」这种自相矛盾的载荷。
+
+        代表概念**逐板块**取(`ORDER BY centrality DESC ... LIMIT K`,走
+        idx_commmem_nb_comm + 有界 top-K 排序器)。这里刻意与 PostgreSQL 侧**分岔**:
+        PG 用一条 `ROW_NUMBER() OVER (PARTITION BY …)` 查询,因为它的瓶颈是 limit+2 次
+        网络 round-trip;SQLite 是**同进程文件访问,往返本来就免费**,换成窗口函数只会
+        把成本挪到临时 B 树上。
+
+        这不是推演,是实测(本机真实库 nb-b37185f4ae,1217 个板块):
+
+            limit=50    逐板块 3.0 ms   窗口函数  52.5 ms   (17×)
+            limit=200   逐板块 4.8 ms   窗口函数 193.1 ms   (40×)
+
+        两种写法在该库上返回**逐字相同**的结果(已比对),所以分岔的只是形态、不是语义。
+        `EXPLAIN QUERY PLAN` 说明了原因:窗口函数版会 `MATERIALIZE ranked` 并为窗口的
+        ORDER BY 建临时 B 树,即把选中板块的全部成员行排一遍;逐板块版只有一次
+        `SEARCH … USING INDEX idx_commmem_nb_comm` + 一个有界 top-K 排序器,峰值排序
+        内存是 O(K) 而不是 O(该板块成员数) —— 生产库上单个板块可以有几十万成员。
+        板块数上限因此是代价的唯一旋钮。
+
+        截断绝不静默:返回 ``total`` / ``returned`` / ``truncated``,每个板块另带
+        ``top_members_truncated``(该板块成员数是否超过 K)。
+        """
+        self._reject_inside_write_transaction("主题板块列表")
+        level = int(level)
+        limit = _clamp(limit, COMMUNITY_OVERVIEW_MAX)
+        top_k = _clamp(top_k, COMMUNITY_TOP_MEMBERS_MAX)
+        with self._read_snapshot() as db:
+            total = int(db.execute(
+                "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=? AND level=?",
+                (notebook_id, level)).fetchone()["c"])
+            picked = db.execute(
+                "SELECT id, size FROM communities WHERE notebook_id=? AND level=? "
+                "ORDER BY size DESC, id ASC LIMIT ?",
+                (notebook_id, level, limit)).fetchall()
+            communities = []
+            for row in picked:
+                members = db.execute(
+                    "SELECT canonical_name FROM community_members "
+                    "WHERE notebook_id=? AND level=? AND community_id=? "
+                    "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
+                    (notebook_id, level, row["id"], top_k)).fetchall()
+                communities.append(
+                    (row["id"], int(row["size"]),
+                     [m["canonical_name"] or "" for m in members])
+                )
+        return _community_overview_payload(communities, total, level, limit, top_k)
+
+    def relation_provenance_counts(self, notebook_id: str) -> Dict[str, object]:
+        """边的出处构成 —— ⚠ **重活:本 notebook 的 knowledge_relations 全表扫**。
+
+        生产 base 库 800 万+ 边,每行还要两次 knowledge_objects 主键探查(口径要求两端
+        都是本库可用对象)。**它不适合挂在在线请求上**——由调用方决定何时调(T3 会把它
+        放进按 kg_mutation_seq 记忆化的路径,预计算阶段更合适)。
+
+        ⚠ 代价量级**不要**从本机热态线性外推,也不要写成一个秒数。本机 5.1GB 真实库上
+        5.2 万边:冷跑(全新进程)1165 ms,暖态 217 ms —— 同一条查询差 5 倍,而那还只是
+        生产规模的 0.6%。仓库有同形状的实测数据点:`relation_connected_object_ids`
+        (sqlite/knowledge_store.py)那次事故是 835 万边**冷扫 39 分钟**,而那条查询
+        **没有**每行两次 PK 随机探查。本查询在 SQLite 上应按「与那个 39 分钟数据点同量级
+        或更差」估,**不是秒级**。PostgreSQL 上规划器会选 hash join 并**并行顺扫**(本机
+        实测 2 个 worker,同规模合成数据快约 4.4 倍),量级明显更好但仍是全表级 ——
+        两侧的分列实测数字见 ports.py 该段头。
+
+        只做**一次**扫描、只 COUNT 不取行:LEFT JOIN + 单层 CASE 让同一趟同时产出出处
+        分桶与被排除量(rejected / 端点不可用),不为「不凭空消失」再补第二趟 COUNT。
+        json 解析每行只做一次(先在内层子查询里算出 tag,再在外层分桶),而不是在一串
+        WHEN 里反复 json_extract —— 实测这一项就快 3 倍。
+
+        分桶顺序:``rejected`` 判在最前,所以一条既被否决、端点又不可用的边只计一次
+        (计入 rejected)。``endpoint_unusable`` 合并了「端点不存在 / 跨库 / 状态不可用」
+        三种情况——它们对产品是同一件事:那个端点不在可用节点集里,这条边进不了图。
+        """
+        self._reject_inside_write_transaction("边出处构成")
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        with self.database.connect() as db:
+            rows = db.execute(
+                f"""
+            SELECT bucket, COUNT(*) AS n FROM (
+              SELECT CASE
+                       WHEN rs = 'rejected' THEN 'rejected'
+                       WHEN bad THEN 'endpoint_unusable'
+                       WHEN tag = 'relink:shared-element' THEN 'relink:shared-element'
+                       WHEN tag = 'relink:name-match' THEN 'relink:name-match'
+                       WHEN tag LIKE 'relink:%' THEN 'relink:other'
+                       WHEN COALESCE(tag, '') != '' THEN 'tagged:other'
+                       ELSE 'untagged' END AS bucket
+              FROM (
+                SELECT r.review_status AS rs,
+                       (s.id IS NULL OR t.id IS NULL) AS bad,
+                       CASE WHEN json_valid(r.evidence)
+                            THEN json_extract(r.evidence, '$[0].basis') END AS tag
+                FROM knowledge_relations r
+                LEFT JOIN knowledge_objects s
+                       ON s.id = r.source_object_id
+                      AND s.notebook_id = r.notebook_id
+                      AND s.status IN ({placeholders})
+                LEFT JOIN knowledge_objects t
+                       ON t.id = r.target_object_id
+                      AND t.notebook_id = r.notebook_id
+                      AND t.status IN ({placeholders})
+                WHERE r.notebook_id = ?
+              ) y
+            ) x GROUP BY bucket
+            """,
+                (*USABLE_STATUSES, *USABLE_STATUSES, notebook_id),
+            ).fetchall()
+        return _relation_provenance_payload(
+            {r["bucket"]: int(r["n"]) for r in rows}
+        )
+
+    # ------------------------------ KG 质量分析的预计算产物(T2,写路径)
+    # 承设计 §3.2/§3.3/§3.4。这三张表是 `rebuild_communities` 的派生产物,由那一次
+    # 图构建**顺带**产出;折叠逻辑在后端中性的 `app.services.kg_analysis_precompute`
+    # 里,两侧 store 只负责「一次扫描」与「一次整体重写」。
+    #
+    # ⚠ 与上面的只读聚合段**相反**:这几个方法是 connection-taking 的,骑调用方的事务
+    # 边界(不自开连接)。`replace_kg_analysis_artifacts` 必须和它的账本行落在**同一个
+    # 事务**里 —— 设计 §3.3 的硬要求:一次预计算要么整批可见、要么完全不可见,绝不允许
+    # 出现「跨板块边是新的、来源画像是旧的」这种隐蔽矛盾。
+    #
+    # ⚠ 三张表**都不带 level 维度**。社区层的新鲜度闸 `unified_kg_state.community_seq`
+    # 本身就不分 level,所以「产物建于哪个 level」只能记在账本 payload 里(那里有
+    # `level` 字段),不能靠明细表的列去区分。早先 `kg_community_edges` 带过一个 level
+    # 列而另两张表没有,删除口径因此三处不一致:一次 level=1 的重建会抹掉 level-0 的
+    # 账本、却留下 level-0 的明细行 —— 按「账本存在与否是唯一判据」它们「不存在」,却
+    # 会被 `WHERE level=0` 读出来。现在三张表统一按 notebook 整表重写:一次预计算产出
+    # 的永远是**一套**自洽的产物,描述账本里记着的那个 level。
+
+    @staticmethod
+    def kg_analysis_artifact_seqs(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> Dict[str, int]:
+        """账本现状:``{kind: kg_mutation_seq}``。最多 5 行,点读。
+
+        预计算**自己的**新鲜度闸靠它判定(见 `rebuild_communities` 的 B1 说明):
+        账本齐不齐、戳对不对,与「社区图要不要重建」是两件独立的事。返回原始行让
+        判定留在后端中性的 `kg_analysis_precompute.analysis_ledger_is_current` 里,
+        store 不替它下结论。
+        """
+        return {
+            row["kind"]: int(row["kg_mutation_seq"])
+            for row in db.execute(
+                "SELECT kind, kg_mutation_seq FROM kg_analysis_artifacts "
+                "WHERE notebook_id=?", (notebook_id,),
+            )
+        }
+
+    # ------------------------ KG 质量分析产物的**读**路径(T3,在线请求路径)
+    # 与上面那三条 T1 只读聚合的关键区别:这三个只读**预计算产物表**,代价按行数硬
+    # 有界(账本 ≤5 行;来源画像 ≤ 来源数、一次只取一页;跨板块边 ≤
+    # MAX_PERSISTED_COMMUNITY_EDGES,一次只取 top-N)。所以它们**可以**挂在在线请求上,
+    # 那三条全表重活不行。
+    #
+    # 连接契约:connection-taking,骑调用方(T3 的 KgAnalysisService)的读连接 —— 与
+    # `kg_analysis_artifact_seqs` 同款,不自开连接,故不需要那道
+    # `_reject_inside_write_transaction`(它防的是「自开的另一条连接读到提交前的库」,
+    # 骑调用方连接不存在这个失配)。服务层另有一道同语义的入口断言。
+
+    @staticmethod
+    def kg_analysis_artifact_rows(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> Dict[str, Dict[str, object]]:
+        """账本全文:``{kind: {kg_mutation_seq, payload, created_at}}``。最多 5 行,点读。
+
+        与 `kg_analysis_artifact_seqs` 的分工:那个只给预计算的新鲜度闸用(只要 seq),
+        这个给报告用(还要 payload 与建库时刻)。刻意不把它们合成一个 —— 闸在
+        `rebuild_communities` 的热路径上每次都跑,不该顺带把五份 payload 也读出来。
+
+        **行的存在与否才是「这份产物在不在」的判据**,明细表的行数不是:单一板块的图
+        legitimately 产出 0 条跨板块边。调用方据此区分「缺失」与「为空」。
+
+        payload 的解析与畸形校验在中性的 `kg_analysis_payloads.artifact_ledger_rows` 里
+        (SQLite 存 JSON 文本、PostgreSQL 存 jsonb,上层拿到的形状必须一致)。
+        """
+        return _artifact_ledger_rows(
+            (row["kind"], row["kg_mutation_seq"], row["payload"], row["created_at"])
+            for row in db.execute(
+                "SELECT kind, kg_mutation_seq, payload, created_at "
+                "FROM kg_analysis_artifacts WHERE notebook_id=? ORDER BY kind",
+                (notebook_id,),
+            )
+        )
+
+    @staticmethod
+    def kg_community_edges_top(
+        db: sqlite3.Connection, notebook_id: str, limit: int = 200
+    ) -> List[Tuple[str, str, int]]:
+        """跨板块边的 **top-N**(按 weight 降序),给板块俯瞰图用。
+
+        代价有界**靠的是行数上限而不是索引**,如实说明:主键是
+        ``(notebook_id, src, dst)``,没有 ``weight`` 上的索引,所以这条是「本 notebook
+        的行做一次范围扫 + 一个有界 top-N 排序器」。它可以挂在线上的理由是那次范围扫
+        的输入被 T2 的 `MAX_PERSISTED_COMMUNITY_EDGES` 硬钉在 20 万行以内 —— 与那三条
+        T1 全表重活(200 万簇行 / 836 万边)差一到两个数量级,而且是窄行、走主键前缀。
+        真机上若这一条成为瓶颈,正解是加 ``(notebook_id, weight)`` 索引(要一次迁移),
+        不是在这里放宽上限。
+
+        ``limit`` 硬 clamp 到 [1, KG_COMMUNITY_EDGES_MAX]。**不多取一行判截断**:截断
+        与否由账本里的 ``edges``(库里存了多少行)与这里的返回条数一比就知道,而账本
+        本来就要读 —— 多取一行反而会让「返回 N 条」这个数字不再等于调用方要的 N。
+        排序键补 ``src, dst`` 让并列 weight 的取法确定(两个后端逐字一致)。
+        """
+        limit = _clamp(limit, KG_COMMUNITY_EDGES_MAX)
+        return [
+            (row["src_community_id"], row["dst_community_id"], int(row["weight"]))
+            for row in db.execute(
+                "SELECT src_community_id, dst_community_id, weight "
+                "FROM kg_community_edges WHERE notebook_id=? "
+                "ORDER BY weight DESC, src_community_id ASC, dst_community_id ASC "
+                "LIMIT ?",
+                (notebook_id, limit),
+            )
+        ]
+
+    @staticmethod
+    def kg_source_profile_page(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        ascending: bool = True,
+    ) -> "Tuple[int, List[Dict[str, object]]]":
+        """来源画像的**一页**,外加该 notebook 的总行数 → ``(total, rows)``。
+
+        生产 base 库有 48 836 个来源,一次全返回既是几 MB 的 payload、也没人读得完,
+        所以分页是硬要求。排序键是 ``mainstream_share``(升序 = 与主体板块最不连通的
+        排前面,正是「哪些来源不属于这里」这个问题的答案),走
+        ``idx_kg_source_profiles_nb_mainstream``。
+
+        ⚠ 并列消歧 ``source_id ASC`` 是**分页正确性**的一部分,不是洁癖:
+        ``mainstream_share`` 上并列极多(混杂库里一大片恰好 0.0),没有这个次级键,
+        两页之间会重复/漏掉行,而且两个后端还会各给一种顺序。代价是次级键不在索引里,
+        SQLite 会对**并列组**补一次排序(``USE TEMP B-TREE FOR LAST TERM OF ORDER BY``)
+        —— 上界是本表的全部行数(= 来源数),窄行,可接受。
+
+        ``sources`` 的 LEFT JOIN 只发生在**已分页的 ≤200 行**上(子查询带 LIMIT,
+        SQLite 不会把它拍平进 join),所以是至多 200 次主键点查。``source_id`` 没有外键
+        (历史清理会留下指向已删 source 的引用,见 `_migration_32` 的说明),所以
+        ``source_missing`` 显式报出来:标题为空到底是「这个来源没标题」还是「这个来源
+        已经不在了」,读报告的人有权知道。
+
+        ``total`` 单独 COUNT(*) 而**不**复用账本 payload 里的 ``sources``:分页要的是
+        这张表此刻的真实行数。两者由写事务保证一致(明细与账本同批重写),但让分页去
+        依赖另一张表的一个数字,只会在它们万一不一致时给出一份分不出页的报告。
+        COUNT 走主键前缀,行数 ≤ 来源数,便宜。
+        """
+        limit = _clamp(limit, KG_SOURCE_PAGE_MAX)
+        offset = max(0, int(offset))
+        direction = "ASC" if ascending else "DESC"
+        total = int(db.execute(
+            "SELECT COUNT(*) AS c FROM kg_source_profiles WHERE notebook_id=?",
+            (notebook_id,)).fetchone()["c"])
+        rows = db.execute(
+            f"""
+            SELECT p.source_id AS source_id,
+                   p.n_objects AS n_objects,
+                   p.n_graph_objects AS n_graph_objects,
+                   p.top_community_id AS top_community_id,
+                   p.top_share AS top_share,
+                   p.community_spread AS community_spread,
+                   p.mainstream_share AS mainstream_share,
+                   s.title AS title,
+                   CASE WHEN s.id IS NULL THEN 1 ELSE 0 END AS source_missing
+            FROM (
+              SELECT notebook_id, source_id, n_objects, n_graph_objects,
+                     top_community_id, top_share, community_spread, mainstream_share
+              FROM kg_source_profiles
+              WHERE notebook_id = ?
+              ORDER BY mainstream_share {direction}, source_id ASC
+              LIMIT ? OFFSET ?
+            ) p
+            LEFT JOIN sources s
+                   ON s.id = p.source_id AND s.notebook_id = p.notebook_id
+            ORDER BY p.mainstream_share {direction}, p.source_id ASC
+            """,
+            (notebook_id, limit, offset),
+        ).fetchall()
+        return total, [
+            {
+                "source_id": row["source_id"],
+                "title": row["title"] or "",
+                "source_missing": bool(row["source_missing"]),
+                "n_objects": int(row["n_objects"]),
+                "n_graph_objects": int(row["n_graph_objects"]),
+                "top_community_id": row["top_community_id"] or "",
+                "top_share": float(row["top_share"]),
+                "community_spread": int(row["community_spread"]),
+                "mainstream_share": float(row["mainstream_share"]),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def source_community_counts(db: sqlite3.Connection, notebook_id: str, level: int):
+        """来源画像的**唯一一次扫描**:``(source_id, community_id, n)`` 的库内分组游标。
+
+        LEFT JOIN 而不是 INNER JOIN:``community_id IS NULL`` 的那一组是「该来源里没进
+        任何主题板块的对象」,它必须计入 `n_objects` 却不能进分母。用 INNER JOIN 就得
+        再扫一遍 `knowledge_objects` 才能拿到总数 —— 在 878 万对象的库上那是白扫一趟。
+
+        ``COALESCE(c.canonical_id, o.id)`` 与 `community_graph_rows` 的 canonical 口径
+        **逐字一致**:没有 cluster_map 行的对象就是它自己的 canonical。社区正是建在那个
+        口径的图上,这里换成裸 `c.canonical_id` 会把「未聚类但进了板块」的对象整片判成
+        「没进任何板块」—— 报告会凭空多出一批 mainstream_share=0 的「关联稀疏来源」。
+
+        ⚠ 前提:同一 level 下 `community_members` 是一个**划分**(每个 canonical 至多一
+        行)。这由唯一的写者保证 —— `replace_communities` 照 Louvain 的 membership 整表
+        重写,而 membership 就是划分。若这条被破坏,命中多行的对象会被重复计数(n_objects
+        与 n_graph_objects 同步膨胀,比例仍自洽)。这里刻意**不**加 DISTINCT 去防:那要么
+        是一次额外去重排序、要么是两侧分岔的窗口函数,为一个由写者保证的不变式付这个代价
+        不值。
+
+        分组发生在库内,调用方**流式**消费(`SourceProfileFolder` 每来源一个累加器),
+        所以 **Python 侧**内存是 O(来源数) 而不是 O(分组数)。红线「绝不把百万行拉进
+        Python 聚合」在这里的兑现方式就是这一条:游标逐行进、逐行被消化掉。
+
+        ⚠ **但别把它读成「进程内存 O(来源数)」。** 这条走 `USE TEMP B-TREE FOR GROUP BY`,
+        而 `_connect()` 设了 `PRAGMA temp_store = MEMORY`(见 database.py;那是
+        mention-alias 那条 TEMP FTS 路径的硬需求,它靠这条做到零 WAL 写入、不占写锁),
+        所以这个临时 B 树**不能落盘**:进程仍要扛下 O(分组数 = 来源数 × 该来源触及的板块
+        数) 的库内临时结构。省掉的是 Python 那一份,不是全部。
+        §3.35「性能调优只投 PostgreSQL」在这里的边界是:SQLite 侧只保证正确、有界、不长
+        时间持锁,这份库内临时开销如实记在这里,不假装它不存在。
+
+        口径与 T1 的只读聚合一致:对象只算 `USABLE_STATUSES`;`source_id=''` 的对象
+        (晋升 / Memory→KG 写路径刻意写空来源)整体排除 —— 它们共享同一个空 source_id,
+        算进去等于凭空造一个「空来源」的画像。
+
+        ⚠ **重活**:本 notebook 的 `knowledge_objects` 全扫 + 每行两次索引探查
+        (`idx_clusters_member` → `idx_commmem_nb_can`)+ 一个分组临时 B 树。与
+        `community_graph_rows` 同量级,同样只能待在预计算路径上。本机真实库
+        (4.17 万对象 / 4.17 万簇行 / 1217 个板块)实测 342 ms;不要把它线性外推到
+        437GB 的生产库 —— 那里是冷态随机 IO 支配,见 ports.py 只读聚合段头的说明。
+        """
+        placeholders = ",".join("?" for _ in USABLE_STATUSES)
+        return db.execute(
+            f"""
+            SELECT o.source_id AS source_id,
+                   cm.community_id AS community_id,
+                   COUNT(*) AS n
+            FROM knowledge_objects o
+            LEFT JOIN concept_clusters c
+                   ON c.notebook_id = o.notebook_id
+                  AND c.member_object_id = o.id
+            LEFT JOIN community_members cm
+                   ON cm.notebook_id = o.notebook_id
+                  AND cm.canonical_id = COALESCE(c.canonical_id, o.id)
+                  AND cm.level = ?
+            WHERE o.notebook_id = ?
+              AND o.status IN ({placeholders})
+              AND o.source_id != ''
+            GROUP BY o.source_id, cm.community_id
+            """,
+            (int(level), notebook_id, *USABLE_STATUSES),
+        )
+
+    @staticmethod
+    def replace_kg_analysis_artifacts(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        kg_mutation_seq: int,
+        edges: "Iterable[Tuple[str, str, int]]",
+        profiles: "Iterable[Tuple[str, int, int, str, float, int, float]]",
+        payloads: Dict[str, dict],
+        now: str,
+    ) -> None:
+        """整批重写一个 notebook 的三张产物表 —— **必须由调用方包在一个写事务里**。
+
+        设计 §3.3:「半份产物比没有产物更危险」。DELETE + INSERT 全部发生在调用方的
+        `_write()` 事务内,所以一次预计算对读者是原子的:要么看到整批新产物,要么看到
+        整批旧产物,不存在「跨板块边已更新、来源画像还是上一轮」这种自相矛盾的组合。
+
+        账本(`kg_analysis_artifacts`)按 notebook **整表**重写,不是按 kind upsert:
+        upsert 会让一次失败的预计算留下「三条统计快照是新的、两张明细的账本行是旧的」
+        —— 正是本方法要消灭的那种状态。账本行的 `kg_mutation_seq` 全部取同一个值,
+        由调用方传入(= 本轮 rebuild 的目标 seq,与 `community_seq` 同一个数)。
+
+        三张表**统一按 notebook 整表删**(没有 level 维度,理由见本段段头)。
+
+        `edges` / `profiles` 只按**可迭代**消费,分批喂 `executemany`:落库这一刻
+        `rebuild_communities` 的栈帧上还压着 `ew`(生产 836 万 int-tuple 键 dict),
+        再为落库多物化一份同基数的列表就是在峰值上叠峰值(#340/#342/#347/#351/#352/
+        #354 那条 OOM 轨道盯的同一时刻)。`edges` 本身已被
+        `CrossCommunityEdgeFolder.top_edges` 截到硬上限,这里不再拷第二份。
+
+        账本 payload 走 `allow_nan=False`:NaN/Inf 不是合法 JSON,写进去读回来就是一个
+        不可解析的 payload。今天的口径里除不出 NaN(分母为 0 时显式落 0.0),这是**入口
+        对称性** —— PostgreSQL 侧 `_json_document` 本来就拒它,两侧都拒才不会出现
+        「同一份 payload 一侧写得进、一侧写不进」。
+        """
+        check_artifact_payloads(payloads)
+        db.execute(
+            "DELETE FROM kg_community_edges WHERE notebook_id=?", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_source_profiles WHERE notebook_id=?", (notebook_id,)
+        )
+        db.execute(
+            "DELETE FROM kg_analysis_artifacts WHERE notebook_id=?", (notebook_id,)
+        )
+        for batch in batched(
+            (
+                (notebook_id, src, dst, int(weight))
+                for src, dst, weight in edges
+            ),
+            1000,
+        ):
+            db.executemany(
+                "INSERT INTO kg_community_edges "
+                "(notebook_id, src_community_id, dst_community_id, weight) "
+                "VALUES (?,?,?,?)",
+                batch,
+            )
+        for batch in batched(
+            (
+                (notebook_id, source_id, int(n_objects), int(n_graph_objects),
+                 top_community_id, float(top_share), int(spread),
+                 float(mainstream_share))
+                for (source_id, n_objects, n_graph_objects, top_community_id,
+                     top_share, spread, mainstream_share) in profiles
+            ),
+            1000,
+        ):
+            db.executemany(
+                "INSERT INTO kg_source_profiles "
+                "(notebook_id, source_id, n_objects, n_graph_objects, "
+                " top_community_id, top_share, community_spread, mainstream_share) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                batch,
+            )
+        db.executemany(
+            "INSERT INTO kg_analysis_artifacts "
+            "(notebook_id, kind, kg_mutation_seq, payload, created_at) "
+            "VALUES (?,?,?,?,?)",
+            [
+                (notebook_id, kind, int(kg_mutation_seq),
+                 json.dumps(payloads[kind], ensure_ascii=False, allow_nan=False), now)
+                for kind in sorted(payloads)
+            ],
+        )

@@ -6738,6 +6738,492 @@ button.chat-session-card {
   font-style: normal;
 }
 
+/* --- 图谱分析(只读诊断报告,kg-analysis-view.tsx)---------------------------
+   排版原则:每一块都是「标题 + 异常小字 + 新鲜度一行」的同一骨架,数字列右对齐、
+   等宽数字,长文本一律省略号截断——同类控件成列对齐,不做粗糙堆叠。 */
+.kg-analysis-card {
+  width: min(1000px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+
+.kg-analysis-card > .source-modal-header {
+  flex: 0 0 auto;
+}
+
+/* 标题栏右侧动作组:刷新 + 关闭,成组右对齐、与标题顶端对齐(同 model-service)。 */
+.kg-analysis-header-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.kg-analysis-body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 24px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.kg-analysis-block {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+  padding: 14px 16px;
+}
+
+.kg-analysis-state {
+  background: #fbfcff;
+}
+
+.kg-analysis-block-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.kg-analysis-block-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kg-analysis-block-title h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.kg-analysis-anomalies {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 逐指标新鲜度:口径 · 建于哪次变更 · 落后多少。每一块都有,不是页顶一条横幅。 */
+.kg-analysis-freshness {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.kg-analysis-basis {
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: #4a5568;
+}
+
+.kg-analysis-hint,
+.kg-analysis-note,
+.kg-analysis-empty,
+.kg-analysis-absent {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.kg-analysis-note {
+  margin-top: 10px;
+}
+
+.kg-analysis-empty,
+.kg-analysis-absent {
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--soft);
+}
+
+/* 「缺失」与「为空」必须看得出不同:缺席那条额外带一句解释,单独成行。 */
+.kg-analysis-absent-note {
+  display: block;
+  margin-top: 2px;
+  color: #7a8494;
+}
+
+.kg-analysis-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.kg-analysis-state-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 18px;
+}
+
+.kg-analysis-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kg-analysis-stat-key {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.kg-analysis-stat-value {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-analysis-stat-sub {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 数据清单:五行恒在(缺席的也在),名称列定宽以便新鲜度成列对齐。 */
+.kg-analysis-ledger {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kg-analysis-ledger-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid #e7ecf4;
+  border-radius: 8px;
+  background: #fcfdff;
+}
+
+.kg-analysis-ledger-name {
+  font-size: 12.5px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-analysis-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--soft);
+}
+
+.kg-analysis-seg {
+  display: block;
+  height: 100%;
+}
+
+.kg-analysis-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+/* 四类的颜色沿用 KG_TYPE_STYLE(图谱里同一类节点的颜色),「其他」用中性灰。 */
+.kg-analysis-seg-concept { background: #2f80ed; }
+.kg-analysis-seg-claim { background: #16a085; }
+.kg-analysis-seg-formula { background: #a855f7; }
+.kg-analysis-seg-procedure { background: #f59e0b; }
+.kg-analysis-seg-other { background: #94a3b8; }
+
+.kg-analysis-legend {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kg-analysis-legend li {
+  display: grid;
+  grid-template-columns: 10px minmax(96px, 150px) minmax(0, 1fr) 64px auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.kg-analysis-legend-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-analysis-legend-value,
+.kg-analysis-legend-extra {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-analysis-legend-share {
+  text-align: right;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.kg-analysis-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.kg-analysis-table th,
+.kg-analysis-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #eef1f6;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kg-analysis-table thead th {
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+}
+
+.kg-analysis-table th:first-child,
+.kg-analysis-table td:first-child {
+  text-align: left;
+}
+
+.kg-analysis-table tbody th {
+  font-weight: 600;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kg-analysis-table-total th,
+.kg-analysis-table-total td {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
+  font-weight: 750;
+}
+
+/* 来源表列多,窄屏要能横向滚动。⚠ 不能给 <table> 直接加 display:block ——那会让它
+   退化成块盒、内部再生成一个收缩到内容宽度的匿名表格盒,width:100% 随之失效、表格
+   不再撑满卡片。所以滚动条挂在外层容器上。 */
+.kg-analysis-table-scroll {
+  overflow-x: auto;
+}
+
+.kg-analysis-source-title {
+  display: inline-block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.kg-analysis-boards {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kg-analysis-board-row {
+  display: grid;
+  grid-template-columns: 44px minmax(120px, 168px) minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-bottom: 1px solid #f1f4f9;
+  font-size: 12.5px;
+}
+
+.kg-analysis-board-rank {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.kg-analysis-board-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kg-analysis-board-members {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 俯瞰图:确定性圆环布局,长尾汇总节点在圆心且用虚线圈出以示「这不是一个板块」。
+ *
+ * ⚠ `display:block` + `margin-inline:auto` 是**必需的**,不是装饰:
+ * viewBox 是 640×400(固有比例 1.6),卡片内容宽约 920px,`width:100%` + `height:auto`
+ * 算出的高是 575px > `max-height:380px` —— 按 CSS2.1 §10.4 的约束冲突表,超 max-height
+ * 时**宽度回退**成 380×1.6 = 608px。缺这两行的话,608px 的图框会左贴边挂在 920px 的块
+ * 里、右侧留约 310px 空白,而同块其它元素都是满宽;`<svg>` 默认还是 inline,底下另有一条
+ * 基线间隙。这里刻意**保留** 380px 的高度上限(诊断面板不该为一张俯瞰图花 575px,下面
+ * 那串覆盖率说明会被顶到屏外),改为把回退后的图框居中。 */
+.kg-analysis-map {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 380px;
+  margin-inline: auto;
+  border: 1px solid #eef1f6;
+  border-radius: 10px;
+  background: #fbfcff;
+}
+
+.kg-analysis-map-edge {
+  stroke: #b9c6da;
+  stroke-opacity: 0.75;
+  stroke-linecap: round;
+}
+
+.kg-analysis-map-board circle {
+  fill: #2f80ed;
+  fill-opacity: 0.72;
+  stroke: #1555a8;
+  stroke-width: 1;
+}
+
+.kg-analysis-map-tail circle {
+  fill: #94a3b8;
+  fill-opacity: 0.4;
+  stroke: #64748b;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.kg-analysis-coverage {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+
+.kg-analysis-coverage strong {
+  color: var(--ink);
+}
+
+.kg-analysis-order {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.kg-analysis-order .sort-button.active {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.kg-analysis-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.kg-analysis-pager-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .kg-analysis-body {
+    padding: 12px 14px 18px;
+  }
+
+  .kg-analysis-ledger-row,
+  .kg-analysis-board-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  /* 窄屏图例:四个子元素**全部显式定位**。
+   *
+   * ⚠ 只给 value/extra 定列(`grid-column: 2 / -1`)是不够的,而且错得很难看:按 Grid
+   * §8.5 的稀疏自动放置,dot→r1c1、name→r1c2 后游标停在 c3,value 的显式列起点 2 < 3
+   * 于是换行到 r2c2-3、游标越过行尾;紧跟其后的 share 在 r2 已无位置,被推到 **r3c1
+   * ——那条 10px 轨道**。而 `.kg-analysis-legend-share` 是 `text-align:right` 且没有
+   * overflow 处理,「31.0%」会从 10px 的盒子里向左溢出到卡片内边距之外。
+   * 所以这里把行列都钉死:第 1 行是「圆点 · 类型名 · 占比」,数量与「其他」的类型数
+   * 各占独立一行。 */
+  .kg-analysis-legend li {
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+  }
+
+  .kg-analysis-legend .kg-analysis-dot {
+    grid-area: 1 / 1;
+  }
+
+  .kg-analysis-legend-name {
+    grid-area: 1 / 2;
+  }
+
+  .kg-analysis-legend-share {
+    grid-area: 1 / 3;
+  }
+
+  .kg-analysis-legend-value {
+    grid-area: 2 / 2 / auto / -1;
+  }
+
+  .kg-analysis-legend-extra {
+    grid-area: 3 / 2 / auto / -1;
+  }
+}
+
 @media (max-width: 1120px) {
   .kg-view-body {
     grid-template-columns: 220px minmax(360px, 1fr) 300px;

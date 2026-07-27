@@ -51,6 +51,20 @@ from app.repositories.ports import (
     KnowledgeStorePort,
     UnifiedKgStorePort,
 )
+from app.services.kg_analysis_precompute import (
+    ARTIFACT_CLUSTER_HISTOGRAM,
+    ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_LARGEST_CLUSTERS,
+    ARTIFACT_RELATION_PROVENANCE,
+    ARTIFACT_SOURCE_PROFILES,
+    MAINSTREAM_COVERAGE,
+    MAX_PERSISTED_COMMUNITY_EDGES,
+    PRECOMPUTED_LARGEST_CLUSTERS,
+    SourceProfileFolder,
+    analysis_ledger_is_current,
+    fold_cross_community_edges,
+    head_community_ids,
+)
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
@@ -3230,19 +3244,43 @@ class KnowledgeLifecycleService:
 
         为何喂 canonical 图:裸 knowledge_relations 逐篇封闭(每篇的同名实体是不同
         object_id)→ 社区不跨文档。经 cluster_map 把两端映射到 canonical_id 后,不同
-        文档里同一 canonical 天然合并,社区才跨文档(对比/广度题需要的"兄弟"结构)。"""
+        文档里同一 canonical 天然合并,社区才跨文档(对比/广度题需要的"兄弟"结构)。
+
+        ⚠ **两个独立的新鲜度闸,别把它们合成一个。** 社区图与 KG 分析产物是两份产物,
+        可以各自陈旧:
+
+        · 社区图闸(历史行为):`community_seq == kg_mutation_seq` 且社区非空 → 不重跑
+          Louvain、不重写成员表。
+        · 分析账本闸:`kg_analysis_artifacts` 齐全且每一行的戳都等于同一个 seq。
+
+        只有**两个闸都过**才是真正的 no-op。图新鲜而账本不新鲜时走「只补账本」路径:
+        重建 canonical 边图并沿用库里**已有**的板块划分,跳过 Louvain、跳过
+        `replace_communities`(那是 171 万成员行的整表重写)、也不重新铸板块 id。
+
+        为什么必须这样(评审 B1):生产 base 库在本特性上线**之前**就已经建好社区且
+        `community_seq == kg_mutation_seq`。如果分析产物跟着社区图闸走,那么部署之后
+        任何一次非 force 的 `rebuild_communities` 都会在闸上直接返回,
+        `kg_analysis_artifacts` **永远是空的** —— 用户打开视图只看得到「产物缺失」,
+        唯一的恢复手段是 `force=True`,而那是 836 万边全量 join + Louvain + 重写 171 万
+        成员行,正是设计 §3.2 说本工具不该让用户付的那笔钱。同一个机制还会让「预计算
+        失败」变成**永久**失败:失败后账本是空的,而社区图闸照样短路。
+        """
         self.get_notebook(notebook_id)
         if not self.settings.community_layer_enabled:
             return 0
-        # 版本闸(增量):社区已按当前 kg_mutation_seq 建过且非空 → 跳过(除非 force)。
+        # 版本闸(增量):社区已按当前 kg_mutation_seq 建过且非空 → 不重建图(除非 force)。
         # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
         # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
         with self._connect() as _db:
             _st = self.unified_kg.state_row(_db, notebook_id)
             _cnt = self.unified_kg.communities_count(_db, notebook_id, level)
+            _ledger = self.unified_kg.kg_analysis_artifact_seqs(_db, notebook_id)
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
-        if (not force and _st is not None and _st["community_seq"] == _seq
-                and _cnt and _cnt["c"] > 0):
+        graph_fresh = bool(
+            not force and _st is not None and _st["community_seq"] == _seq
+            and _cnt and _cnt["c"] > 0
+        )
+        if graph_fresh and analysis_ledger_is_current(_ledger, _seq, has_boards=True):
             return int(_cnt["c"])
         # 社区检测后端:igraph(整数边表 + C 核,10^6–10^7 边内存/耗时有界)优先;
         # 缺失(未装)才回退 networkx(纯 Python dict-of-dicts,大库会 OOM)。
@@ -3252,12 +3290,15 @@ class KnowledgeLifecycleService:
             _ig = None
         # 大库守卫:仅在 networkx 回退(无 igraph)时才拒 scale-tier 无 CSR(避免 OOM)。
         # igraph 路径整数边表 + C 核,10^7 边安全,无需 CSR、不拒。
+        # 只补账本时同样要过这道守卫:那条路径不跑 Louvain,但仍然要把 canonical 边图
+        # 拉进内存,拒的理由(内存)一样成立。区别只在返回值 —— 社区还在,如实返回它的
+        # 数量,不能因为一份辅助报告没补上就谎报「一个社区都没有」。
         if (_ig is None
                 and not self.notebook_copy_stats(notebook_id)["copyable"]
                 and self.scale_artifacts.load(notebook_id, allow_stale=True) is None):
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
-            return 0
+            return int(_cnt["c"]) if graph_fresh else 0
         # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
         # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
         # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
@@ -3277,54 +3318,225 @@ class KnowledgeLifecycleService:
         for _c, _i in can2idx.items():
             idx2can[_i] = _c
         n_nodes = len(can2idx)
-        # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
-        comms: "List[List[str]]" = []
-        deg: "Dict[str, float]" = {}
-        if n_nodes:
-            edge_list = list(ew.keys())
-            if _ig is not None:
-                import random as _random
-                _random.seed(42)
-                try:
-                    _ig.set_random_number_generator(_random)   # 确定性(seed=42)
-                except Exception:
-                    pass
-                G = _ig.Graph(n=n_nodes, edges=edge_list)
-                G.es["weight"] = list(ew.values())
-                membership = G.community_multilevel(weights="weight").membership
-                degs = G.degree()
-                buckets: "Dict[int, List[str]]" = {}
-                for _i, _m in enumerate(membership):
-                    buckets.setdefault(_m, []).append(idx2can[_i])
-                    deg[idx2can[_i]] = float(degs[_i])
-                comms = list(buckets.values())
-            else:
-                import networkx as nx
-                from networkx.algorithms.community import louvain_communities
-                g = nx.Graph()
-                for (_a, _b), _w in ew.items():
-                    g.add_edge(_a, _b, weight=_w)
-                comms = [[idx2can[_i] for _i in c]
-                         for c in louvain_communities(g, weight="weight", seed=42)]
-                for _i, _d in g.degree():
-                    deg[idx2can[_i]] = float(_d)
-        now = self._now()
-        min_size = self.settings.community_min_size
-        # Policy (min-size filter + id minting + member ordering) stays here;
-        # the store owns the two-table full rewrite.
-        kept_rows = [(self._new_id("cm"), sorted(comm))
-                     for comm in comms if len(comm) >= min_size]
-        kept = len(kept_rows)
-        with self._write() as db:
-            self.unified_kg.replace_communities(
-                db, notebook_id, level, kept_rows, names, deg, now
+        if graph_fresh:
+            # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是 Louvain 那次
+            # 写下的 canonical 列表),Louvain / centrality / 两表重写全部跳过。
+            with self._connect() as db:
+                kept_rows = [
+                    (row["id"], json.loads(row["member_ids"] or "[]"))
+                    for row in self.unified_kg.community_rows_for_summary(
+                        db, notebook_id, level
+                    )
+                ]
+            kept = len(kept_rows)
+        else:
+            # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
+            comms: "List[List[str]]" = []
+            deg: "Dict[str, float]" = {}
+            if n_nodes:
+                edge_list = list(ew.keys())
+                if _ig is not None:
+                    import random as _random
+                    _random.seed(42)
+                    try:
+                        _ig.set_random_number_generator(_random)   # 确定性(seed=42)
+                    except Exception:
+                        pass
+                    G = _ig.Graph(n=n_nodes, edges=edge_list)
+                    G.es["weight"] = list(ew.values())
+                    membership = G.community_multilevel(weights="weight").membership
+                    degs = G.degree()
+                    buckets: "Dict[int, List[str]]" = {}
+                    for _i, _m in enumerate(membership):
+                        buckets.setdefault(_m, []).append(idx2can[_i])
+                        deg[idx2can[_i]] = float(degs[_i])
+                    comms = list(buckets.values())
+                else:
+                    import networkx as nx
+                    from networkx.algorithms.community import louvain_communities
+                    g = nx.Graph()
+                    for (_a, _b), _w in ew.items():
+                        g.add_edge(_a, _b, weight=_w)
+                    comms = [[idx2can[_i] for _i in c]
+                             for c in louvain_communities(g, weight="weight", seed=42)]
+                    for _i, _d in g.degree():
+                        deg[idx2can[_i]] = float(_d)
+            now = self._now()
+            min_size = self.settings.community_min_size
+            # Policy (min-size filter + id minting + member ordering) stays here;
+            # the store owns the two-table full rewrite.
+            kept_rows = [(self._new_id("cm"), sorted(comm))
+                         for comm in comms if len(comm) >= min_size]
+            kept = len(kept_rows)
+            with self._write() as db:
+                self.unified_kg.replace_communities(
+                    db, notebook_id, level, kept_rows, names, deg, now
+                )
+            # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
+            with self._write() as db:
+                self.unified_kg.set_community_seq(db, notebook_id, _seq)
+        # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带产出。
+        #
+        # 为什么**不**让它的失败冒泡:这三张表是只读报告的派生产物,而 rebuild_communities
+        # 是 rebuild_unified_kg 与「刷新图谱」的核心路径。让一份辅助报告的失败去掀翻
+        # 437GB 生产库的图重建,爆炸半径不成比例。而**吞掉它是安全的**,因为产物自带
+        # `kg_mutation_seq` 戳:失败时上一轮的产物原样留着、戳还是它自己那个旧值,T3
+        # 会如实报「落后 N 次变更」并给出整理入口 —— 不是静默降级,是显式陈旧 + 事件。
+        # 反过来若让它冒泡,社区已经建好且 seq 已记,异常只会让调用方以为整个重建失败。
+        #
+        # 失败**会自愈**:上面的分析账本闸只看账本齐不齐、戳对不对,所以下一次
+        # `rebuild_communities`(哪怕 KG 一动没动、哪怕不带 force)会走「只补账本」
+        # 路径重试。这正是把两个闸分开的第二个理由。
+        #
+        # ⚠ 取消**不算**失败,必须放行:`KgBuildAborted` 是用户要停,吞掉它会让中止
+        # 看起来成功了。KeyboardInterrupt / SystemExit 属 BaseException,天然不被
+        # `except Exception` 捕获。
+        try:
+            self._precompute_kg_analysis(
+                notebook_id, level, _seq, kept_rows, ew, can2idx
             )
-        # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
-        with self._write() as db:
-            self.unified_kg.set_community_seq(db, notebook_id, _seq)
+        except KgBuildAborted:
+            raise
+        except Exception as exc:
+            self.event_log.emit({
+                "kind": "kg_analysis_precompute_failed",
+                "notebook_id": notebook_id, "level": level, "seq": _seq,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        if graph_fresh:
+            # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
+            # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
+            self.event_log.emit({
+                "kind": "kg_analysis_backfilled", "notebook_id": notebook_id,
+                "level": level, "seq": _seq, "communities": kept,
+            })
+            return kept
         self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
                              "level": level, "communities": kept, "nodes": n_nodes})
         return kept
+
+    def _precompute_kg_analysis(
+        self,
+        notebook_id: str,
+        level: int,
+        seq: int,
+        kept_rows: "List[Tuple[str, List[str]]]",
+        edge_weights: "Dict[tuple, int]",
+        can2idx: "Dict[str, int]",
+    ) -> None:
+        """把 KG 质量分析的产物在**这一次**图构建里算出来并整批落库(设计 §3.2)。
+
+        为什么挂在这里而不是端点上:五份里有三份是**全表级重活**(簇大小直方图 / 最大簇
+        榜单 / 边出处构成,见 ports.py 只读聚合段头的双后端实测),生产库 200 万簇行 /
+        800 万边,冷态与 `relation_connected_object_ids` 那次 39 分钟事故同量级。它们
+        绝不能挂在在线请求上。另两份(跨板块边 / 来源画像)则是这次构建的边际成本:
+          · 跨板块边:`ew` 已经在手,按 membership 折叠一遍,近似免费;
+          · 来源画像:新增一次 `knowledge_objects` 扫描,与 `community_graph_rows`
+            同量级 —— 是新增开销,但与社区构建同批,不给在线请求付。
+
+        一个板块都没有时**整份跳过来源画像**(不写账本行、不写明细行,连那次扫描都不做):
+        没有板块就没有「主体」,每个来源的 mainstream_share 都会是 0.0,而那张表单独看
+        是在说「所有来源都关联稀疏」。理由与守卫见 `kg_analysis_precompute.
+        OPTIONAL_ARTIFACT_KINDS` / `check_artifact_payloads`。
+
+        新鲜度(设计 §3.3):全部产物写同一个 `seq`(= 本轮 rebuild 的目标
+        `kg_mutation_seq`,与 `community_seq` 同一个数),账本因此能逐份回答「我建于
+        哪个 KG 状态」。生产上「产物严重落后于当前 KG」是常态而非边缘情况,所以这个戳
+        是产品需求,不是审计装饰。
+
+        ⚠ **这个戳保证的是「都属于同一轮预计算」,不是「都读到了同一份 KG 快照」。**
+        本方法里有四个以上互不同步的读点(跨板块边用的 `ew` 建于 rebuild 的图扫描、
+        来源画像自开一条读连接、三条统计快照各自再自开一条),一次并发的 `store_kg`
+        插在中间,直方图就会反映一个比跨板块边更新的 KG。落库事务保证的是**可见性
+        原子**(要么整批可见、要么整批不可见),不是**内容原子**。
+        两个后端各自的实际保证:
+          · PostgreSQL:每条快照查询自己是一次 `REPEATABLE READ` 只读事务(多语句的
+            `community_overview` 内部一致),但**跨查询之间没有共享快照** —— 池化连接
+            拿不到跨方法的事务边界。
+          · SQLite:`community_overview` 用 `BEGIN DEFERRED` 起 WAL 快照;三条重活查询
+            走本线程复用的读连接、**自动提交**,即每条语句各取一个快照。
+        刻意不去把 SQLite 侧四条读包进一个外层事务:那会做出一个 PostgreSQL 侧**无法
+        对等**的保证(池化连接),而 parity 红线要的是语义等价;服务层也不许判 dialect。
+        与其承诺一个只有一侧成立的强一致,不如把实际保证写清楚,让 T3/T4 知道哪些数字
+        可以并排放、哪些不能。
+
+        原子性(设计 §3.3):全部落库发生在**一个** `_write()` 事务里。半份产物比没有
+        产物更危险 —— 「跨板块边是新的、来源画像是旧的」会让报告里的数字互相矛盾,而且
+        矛盾得毫无线索。
+
+        ⚠ **三条统计快照与来源画像扫描必须在 `_write()` 之外取。** 两个理由,后一个
+        更硬:
+          1. 它们自开只读连接(见 ports.py 的调用契约),在写事务里调会读到提交前的
+             旧数据,而且**不会响亮失败**;
+          2. `SqliteDatabase.write()` 拿的是**进程级写锁**。把这几条全表重活挪进写事务,
+             那把锁会被按住整整一趟全表扫 —— 同形状的数据点是 835 万边冷扫 39 分钟,
+             期间全库任何写入(摄取、问答落库、投影)全部排队。
+        这条不再只是注释:SQLite 侧的读方法自己会检查线程的 `write_depth` 并当场硬失败
+        (见 `sqlite/unified_kg_store.py::_reject_inside_write_transaction`),
+        `tests/test_kg_analysis_precompute.py` 另有一条按调用时刻记录 `write_depth`
+        的语义守卫 —— 形状守卫(「哪个写事务碰过产物表」)抓不到这类移动,因为这三条
+        查询一张产物表都不碰。
+        """
+        sizes = [(cid, len(members)) for cid, members in kept_rows]
+        # 节点下标 -> community_id。**刻意不是** canonical -> community_id 的 dict:
+        # 那会在 `ew` 还占着大头的这一刻凭空多一份同基数(生产 ~171 万)的 str->str
+        # 映射。`can2idx` 已经在手,按下标存只是一个指针数组。
+        community_of_index: "List[Optional[str]]" = [None] * len(can2idx)
+        for cid, members in kept_rows:
+            for member in members:
+                index = can2idx.get(member)
+                if index is not None:
+                    community_of_index[index] = cid
+        folder = fold_cross_community_edges(edge_weights, community_of_index)
+        del community_of_index
+        head, head_members, total_members = head_community_ids(sizes)
+
+        # 有界物化,唯一的一份:`top_edges` 内部是 O(limit) 的堆,不排整张表;
+        # store 直接按批消费这个列表,不再拷第二份。
+        edges = folder.top_edges(MAX_PERSISTED_COMMUNITY_EDGES)
+        payloads = {
+            ARTIFACT_COMMUNITY_EDGES: {
+                "level": int(level),
+                "edges": len(edges),                    # 落库行数
+                "edges_total": folder.total_edges,      # 截断前的板块对总数
+                "truncated": len(edges) < folder.total_edges,
+                "edge_limit": MAX_PERSISTED_COMMUNITY_EDGES,
+                # 图统计量:全部跨板块边权,**不**随落库上限变化。
+                "cross_weight": folder.cross_weight,
+                "intra_weight": folder.intra_weight,
+                "communities": len(sizes),
+            },
+            ARTIFACT_CLUSTER_HISTOGRAM: self.unified_kg.cluster_size_histogram(
+                notebook_id
+            ),
+            ARTIFACT_LARGEST_CLUSTERS: self.unified_kg.largest_clusters(
+                notebook_id, PRECOMPUTED_LARGEST_CLUSTERS
+            ),
+            ARTIFACT_RELATION_PROVENANCE: self.unified_kg.relation_provenance_counts(
+                notebook_id
+            ),
+        }
+        profiles: "List[tuple]" = []
+        if total_members:
+            source_folder = SourceProfileFolder(head)
+            with self._connect() as db:
+                for row in self.unified_kg.source_community_counts(
+                    db, notebook_id, level
+                ):
+                    source_folder.add(row["source_id"], row["community_id"], row["n"])
+            profiles = source_folder.rows()
+            payloads[ARTIFACT_SOURCE_PROFILES] = {
+                "level": int(level),
+                "sources": len(profiles),
+                "mainstream_coverage": MAINSTREAM_COVERAGE,
+                "head_communities": len(head),
+                "head_members": head_members,
+                "total_members": total_members,
+            }
+        with self._write() as db:
+            self.unified_kg.replace_kg_analysis_artifacts(
+                db, notebook_id, seq, edges, profiles, payloads, self._now()
+            )
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
         """Member-id lists of each detected community (for summaries / global search)."""

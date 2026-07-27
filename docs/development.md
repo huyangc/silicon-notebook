@@ -13,8 +13,8 @@ This document preserves the contributor-facing architecture summary, verificatio
 - Built-in KG relations are governed by one typed registry in `backend/app/services/kg/edge_schema.py`. Core extraction is fail-closed; graph/PPR/canonical/relation and Ask evidence-context consumers filter invalid historical core pairs while preserving known edges attached to administrator-defined extension types. `EDGE_SCHEMA_VERSION` participates in scale/PPR artifact identities. Optional completion advances mode-specific persistent source-generation keyset pages, prioritizes anchors through indexed contract-valid relation `EXISTS`, and uses only bounded same-source FTS/ANN candidates plus section/pair/batch/character rails. Each job hydrates only its bounded objects and their capped evidence IDs; unfinished watermarks re-enqueue and startup recovers current pending generations. A mode change atomically publishes the newly active mode's recoverable cursor before retiring the old cursor as `stale`. Proposal and verification run outside database transactions; a short final write rechecks generation/ownership/existence, persists the exact server excerpt seen by the verifier, and inserts idempotently. Invalid zero rails fail closed without advancing. Retrieval origin is represented as accumulated producer support records; selection never reconstructs provenance from scores.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 35. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v35 and remains readable. Those migrations
+The current schema version is 36. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v36 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -41,13 +41,19 @@ SQLite v33 adds covering `(notebook_id, source_object_id/target_object_id, id)`
 relation indexes for stable, bounded lexical-relation keyset recall. SQLite v34
 adds the indexed `kg_relation_completion_state` source-generation watermark and
 the `(source_id,id)` object keyset index. SQLite v35 adds the browser-captured
-`ask_jobs.asked_at` instant for reconnecting to in-flight questions.
-PostgreSQL migration v13 is the paired
+`ask_jobs.asked_at` instant for reconnecting to in-flight questions. SQLite v36
+adds the three KG-quality-analysis precompute product tables
+(kg_community_edges, kg_source_profiles and the kg_analysis_artifacts product
+ledger); rebuild_communities rewrites all three wholesale in one transaction and
+stamps every ledger row with the kg_mutation_seq it was built at. None of the
+three carries a level column: the community layer's freshness gate is not
+level-scoped, so the level a product set describes is recorded in the ledger
+payload instead. PostgreSQL migration v14 is the paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
 schema, revision CAS, and two independently committed reports for the four
-logical-key guards across the exact 61-table epoch-1 manifest. It also includes
+logical-key guards across the exact 64-table epoch-1 manifest. It also includes
 run-bound atomic SQLite snapshots and bounded resumable baseline COPY: each
 batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
@@ -88,10 +94,10 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v13 graph has a branch-counted bound of exactly 9 row slots and no
+the fixed v14 graph has a branch-counted bound of exactly 9 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG13 catalog plans cover all
-83 unique surfaces using NULL; deterministic candidates scoped by indexable
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG14 catalog plans cover all
+86 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an
 indexable bigint MIN/MAX fast path choosing min−1/max+1 and scanning the first

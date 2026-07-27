@@ -391,6 +391,19 @@ class SqliteDatabase:
             self._local.conn = conn
         return conn
 
+    @property
+    def in_write_transaction(self) -> bool:
+        """本线程此刻是否处在 ``write()`` 块内(含嵌套)。
+
+        给「这条读路径绝不能在写事务里跑」这类调用契约当**运行时**守卫用,而不是只写
+        在注释里。为什么必须是 thread-local 的 ``write_depth`` 而不是连接上的
+        ``in_transaction``:``write()`` 每次另开一条独立连接,所以本线程复用的**读**
+        连接在写事务期间 ``in_transaction`` 仍是 False —— 用它判等于没判。
+
+        只读一个 thread-local 属性,没有锁、没有 IO,可以放在热路径上。
+        """
+        return getattr(self._local, "write_depth", 0) > 0
+
     def close_local(self) -> None:
         """关闭并清除**当前线程**的复用连接。用于:
         - 需靠 close 清理临时表的路径(如 mention-alias DF 扫描);

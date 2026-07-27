@@ -3191,7 +3191,37 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.kg_analysis",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.kg_cluster_size_histogram",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.kg_community_overview",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.kg_largest_clusters",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.kg_neighbors",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.kg_relation_provenance_counts",
         "target": "_runtime"
       },
       {
@@ -5963,6 +5993,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
+  "kg_analysis": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.kg_analysis_service",
+        "target": "kg_analysis"
+      }
+    ],
+    "kind": "property",
+    "owner": "KgAnalysisService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self)"
+  },
   "kg_neighbors": {
     "consumers": [
       {
@@ -6786,6 +6831,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/test_kg_analysis_precompute.py",
+        "scope": "<module>.test_refused_large_graph_build_writes_no_artifacts",
+        "target": "notebook_copy_stats"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_rebuild_communities.py",
         "scope": "<module>.test_large_no_index_builds_with_igraph",
         "target": "notebook_copy_stats"
@@ -6800,6 +6851,14 @@
     "kind": "method",
     "owner": "ScaleArtifactRuntime",
     "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_kg_analysis_precompute.py",
+        "scope": "<module>.test_refused_large_graph_build_writes_no_artifacts",
+        "target": "notebook_copy_stats"
+      },
       {
         "base": "repo",
         "compatibility": "test-only",

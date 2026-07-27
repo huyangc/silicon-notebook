@@ -1,0 +1,870 @@
+"""KG 质量分析预计算产物(T2)的回归门。
+
+承 `docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md` §3.2/§3.3/§3.4。
+
+分两层:
+  · 纯折叠(head_community_ids / fold_cross_community_edges / SourceProfileFolder)
+    不起库直接钉边界与并列消歧;
+  · 端到端跑真 `rebuild_communities`,钉三张产物表的内容、账本的版本戳、
+    「一次预计算原子可见」、以及每一条降级路径都**缺失**而不是写半份。
+
+双后端一致性(同一批夹具在 SQLite / PostgreSQL 上产出同一份产物)在
+`tests/postgres/test_knowledge_store_conformance.py` 里,那边有真 PostgreSQL 泳道。
+"""
+from __future__ import annotations
+
+import json
+from contextlib import contextmanager
+
+import pytest
+
+from app.core.config import Settings
+from app.models.schemas import NotebookCreate
+from app.services.embedding import FakeEmbedder
+from app.services.kg_analysis_precompute import (
+    ARTIFACT_CLUSTER_HISTOGRAM,
+    ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_KINDS,
+    ARTIFACT_LARGEST_CLUSTERS,
+    ARTIFACT_RELATION_PROVENANCE,
+    ARTIFACT_SOURCE_PROFILES,
+    MAINSTREAM_COVERAGE,
+    MAX_PERSISTED_COMMUNITY_EDGES,
+    CrossCommunityEdgeFolder,
+    SourceProfileFolder,
+    analysis_ledger_is_current,
+    check_artifact_payloads,
+    fold_cross_community_edges,
+    head_community_ids,
+)
+from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_all_embedding_clients
+
+
+# --------------------------------------------------------------- 纯折叠
+
+
+def test_mainstream_coverage_threshold_is_a_named_half():
+    """阈值必须是具名常量:它随产物写进账本,日后改口径旧产物才不会被误读。"""
+    assert MAINSTREAM_COVERAGE == 0.5
+
+
+def test_head_community_ids_keeps_the_board_that_crosses_the_threshold():
+    # 6+3+1 = 10,阈值 5.0。最大板块 6 >= 5.0 → 头部只有它。
+    head, covered, total = head_community_ids([("b", 3), ("a", 6), ("c", 1)])
+    assert (head, covered, total) == (frozenset({"a"}), 6, 10)
+
+
+def test_head_community_ids_covers_at_least_half_on_an_exact_tie():
+    """两个等大板块:第一个恰好覆盖 50%。
+
+    `>` 而不是 `>=` 的写法会在这一档返回空集(严格大于才收),而空的头部集合会让
+    **每一个**来源的 mainstream_share 都变成 0.0 —— 报告会宣称整库都是关联稀疏来源。
+    """
+    head, covered, total = head_community_ids([("a", 4), ("b", 4)])
+    assert head == frozenset({"a"})
+    assert covered / total >= MAINSTREAM_COVERAGE
+
+
+def test_head_community_ids_breaks_size_ties_by_id_not_by_input_order():
+    # 3 个等大板块(5 each,总 15,阈值 7.5):累积到第二个才越过阈值,所以头部是
+    # 字典序最小的两个。输入顺序绝不能影响结果 —— kept_rows 的顺序来自 Louvain。
+    forward = head_community_ids([("z", 5), ("a", 5), ("m", 5)])[0]
+    backward = head_community_ids([("m", 5), ("a", 5), ("z", 5)])[0]
+    assert forward == backward == frozenset({"a", "m"})
+
+
+def test_head_community_ids_is_empty_without_members():
+    assert head_community_ids([]) == (frozenset(), 0, 0)
+    assert head_community_ids([("a", 0), ("b", 0)]) == (frozenset(), 0, 0)
+
+
+def test_fold_cross_community_edges_normalizes_direction_and_splits_intra():
+    # community_of_index[i] = 节点下标 i 的板块(刻意是按下标的 list,不是 str->str dict)
+    folder = fold_cross_community_edges(
+        {
+            (0, 1): 2,   # cm-b <-> cm-a
+            (3, 2): 5,   # cm-b <-> cm-a,反向 —— 必须折进同一个键
+            (1, 2): 7,   # cm-a 内部
+            (0, 3): 4,   # cm-b 内部
+        },
+        ["cm-b", "cm-a", "cm-a", "cm-b"],
+    )
+    assert folder.top_edges(10) == [("cm-a", "cm-b", 7)]
+    assert (folder.intra_weight, folder.cross_weight) == (11, 7)
+
+
+def test_fold_cross_community_edges_skips_canonicals_outside_kept_boards():
+    """min-size 过滤掉的板块成员在 `communities` 里根本不存在,折进去就是悬空引用。"""
+    folder = fold_cross_community_edges(
+        {(0, 1): 3, (0, 2): 9},
+        ["cm-a", "cm-b", None],   # 下标 2 的节点落选
+    )
+    assert folder.top_edges(10) == [("cm-a", "cm-b", 3)]
+    assert (folder.intra_weight, folder.cross_weight) == (0, 3)
+
+
+def test_cross_edge_folder_truncates_by_weight_and_reports_the_total():
+    """明细表有硬上界(生产上跨板块边数没有任何结构性约束),截断绝不静默。"""
+    folder = CrossCommunityEdgeFolder()
+    folder.add("cm-a", "cm-b", 1)
+    folder.add("cm-a", "cm-c", 9)
+    folder.add("cm-b", "cm-c", 5)
+    assert folder.total_edges == 3
+    assert folder.cross_weight == 15
+    # 按 weight 降序取,不是按 id 序 —— 俯瞰图要的是最重的那些边。
+    assert folder.top_edges(2) == [("cm-a", "cm-c", 9), ("cm-b", "cm-c", 5)]
+    assert folder.top_edges(0) == []
+
+
+def test_cross_edge_folder_breaks_weight_ties_deterministically():
+    """并列必须按 (src, dst) 升序 —— dict 的迭代顺序不能泄漏进产物。"""
+    forward = CrossCommunityEdgeFolder()
+    for pair in (("cm-z", "cm-y"), ("cm-a", "cm-b"), ("cm-m", "cm-n")):
+        forward.add(pair[0], pair[1], 4)
+    backward = CrossCommunityEdgeFolder()
+    for pair in (("cm-m", "cm-n"), ("cm-a", "cm-b"), ("cm-z", "cm-y")):
+        backward.add(pair[0], pair[1], 4)
+    assert forward.top_edges(2) == backward.top_edges(2) == [
+        ("cm-a", "cm-b", 4), ("cm-m", "cm-n", 4),
+    ]
+
+
+def test_cross_edge_folder_row_stream_matches_the_preaggregated_fold():
+    """两条喂入路径(整数边权 dict / 逐行 weight=1)必须给出逐字相同的产物。
+
+    只补账本那条路径按行喂,全量重建那条路径喂 `ew`。`ew` 只是「同一对 canonical 出现
+    了几次」的预聚合,所以两者对每个板块对的合计恒等 —— 这条把它钉住。
+    """
+    index_map = ["cm-a", "cm-a", "cm-b", "cm-c"]
+    edge_weights = {(0, 2): 2, (1, 2): 1, (2, 3): 4, (0, 1): 3}
+    pre_aggregated = fold_cross_community_edges(edge_weights, index_map)
+
+    streamed = CrossCommunityEdgeFolder()
+    for (left, right), weight in edge_weights.items():
+        for _ in range(weight):          # 同一对 canonical 出现 weight 次
+            streamed.add(index_map[left], index_map[right], 1)
+
+    assert streamed.top_edges(10) == pre_aggregated.top_edges(10)
+    assert streamed.intra_weight == pre_aggregated.intra_weight
+    assert streamed.cross_weight == pre_aggregated.cross_weight
+
+
+def test_source_profile_folder_computes_the_four_documented_quantities():
+    folder = SourceProfileFolder(frozenset({"cm-main"}))
+    folder.add("src", "cm-main", 6)
+    folder.add("src", "cm-side", 2)
+    folder.add("src", None, 4)          # 没进任何板块的对象
+    (source_id, n_objects, n_graph_objects, top, top_share, spread,
+     mainstream) = folder.rows()[0]
+    assert source_id == "src"
+    assert n_objects == 12              # 6 + 2 + 4,含没进板块的
+    assert n_graph_objects == 8         # 只有进了板块的进分母
+    assert (top, top_share) == ("cm-main", 0.75)
+    assert spread == 2                  # NULL 组不算一个板块
+    assert mainstream == 0.75
+
+
+def test_source_profile_folder_breaks_top_board_ties_by_id_regardless_of_order():
+    """GROUP BY 的行到达顺序在两个后端上都未定义 —— 并列必须按 id 消歧。
+
+    没有这条,同一份数据在 SQLite 与 PostgreSQL 上可以给出不同的 top_community_id,
+    而两边都「没错」;parity 会以最难查的方式碎掉。
+    """
+    forward = SourceProfileFolder(frozenset())
+    for community_id in ("cm-z", "cm-a", "cm-m"):
+        forward.add("src", community_id, 4)
+    backward = SourceProfileFolder(frozenset())
+    for community_id in ("cm-m", "cm-a", "cm-z"):
+        backward.add("src", community_id, 4)
+    assert forward.rows()[0][3] == backward.rows()[0][3] == "cm-a"
+
+
+def test_source_profile_folder_reports_a_fully_unboarded_source():
+    """一个对象都没进板块的来源是最强的「关联稀疏」信号,必须出现在结果里而不是消失。"""
+    folder = SourceProfileFolder(frozenset({"cm-main"}))
+    folder.add("src", None, 3)
+    assert folder.rows() == [("src", 3, 0, "", 0.0, 0, 0.0)]
+
+
+def test_source_profile_rows_are_source_id_ordered():
+    folder = SourceProfileFolder(frozenset())
+    for source_id in ("src-c", "src-a", "src-b"):
+        folder.add(source_id, "cm", 1)
+    assert [row[0] for row in folder.rows()] == ["src-a", "src-b", "src-c"]
+
+
+def _full_payloads(**overrides) -> dict:
+    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
+    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads.update(overrides)
+    return payloads
+
+
+def test_check_artifact_payloads_rejects_unknown_kinds():
+    check_artifact_payloads(_full_payloads())
+    with pytest.raises(ValueError, match="契约外的 kind"):
+        check_artifact_payloads(_full_payloads(board_edges={}))
+
+
+def test_check_artifact_payloads_rejects_a_missing_kind():
+    """账本是整批重写的:少写一行,下游读到的是「从来没算过」,而且不会有任何报错。"""
+    for kind in (ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
+                 ARTIFACT_RELATION_PROVENANCE, ARTIFACT_COMMUNITY_EDGES):
+        payloads = _full_payloads()
+        payloads.pop(kind)
+        with pytest.raises(ValueError, match="缺少必需的 kind"):
+            check_artifact_payloads(payloads)
+
+
+def test_check_artifact_payloads_allows_absent_profiles_only_without_boards():
+    empty = _full_payloads()
+    empty.pop(ARTIFACT_SOURCE_PROFILES)
+    empty[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 0}
+    check_artifact_payloads(empty)                      # 零板块:合法缺席
+
+    with_boards = _full_payloads()
+    with_boards.pop(ARTIFACT_SOURCE_PROFILES)
+    with pytest.raises(ValueError, match="才允许缺席"):
+        check_artifact_payloads(with_boards)            # 有板块却缺席 = 漏写
+
+
+def test_analysis_ledger_is_current_requires_every_kind_at_the_same_seq():
+    full = {kind: 7 for kind in ARTIFACT_KINDS}
+    assert analysis_ledger_is_current(full, 7, has_boards=True)
+    assert not analysis_ledger_is_current({}, 7, has_boards=True)
+    assert not analysis_ledger_is_current(full, 8, has_boards=True)
+    partial = dict(full)
+    partial.pop(ARTIFACT_RELATION_PROVENANCE)
+    assert not analysis_ledger_is_current(partial, 7, has_boards=True)
+    # 一行落后 = 整份不新鲜(否则「补一半」会被判成齐了)
+    mixed = dict(full)
+    mixed[ARTIFACT_LARGEST_CLUSTERS] = 6
+    assert not analysis_ledger_is_current(mixed, 7, has_boards=True)
+
+
+def test_analysis_ledger_without_boards_does_not_require_source_profiles():
+    """零板块的库合法地没有来源画像;要求它存在会让这类库每次调用都重跑全部重活。"""
+    without_profiles = {
+        kind: 7 for kind in ARTIFACT_KINDS if kind != ARTIFACT_SOURCE_PROFILES
+    }
+    assert analysis_ledger_is_current(without_profiles, 7, has_boards=False)
+    assert not analysis_ledger_is_current(without_profiles, 7, has_boards=True)
+
+
+# ------------------------------------------------------------- 端到端
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repository = SQLiteRepository(Settings())
+    bind_all_embedding_clients(repository, FakeEmbedder(dim=16))
+    return repository
+
+
+def _claim(local_id: str) -> dict:
+    return {"local_id": local_id, "object_type": "claim",
+            "payload": {"name": local_id, "section_path": "1"}, "evidence": []}
+
+
+def _rel(source: str, target: str) -> dict:
+    return {"source_local_id": source, "target_local_id": target,
+            "edge_type": "supports", "evidence": []}
+
+
+def _add_sources(repo, notebook_id: str, *source_ids: str) -> None:
+    """`knowledge_relations.source_id` 有外键指向 sources,所以夹具必须建真来源行。"""
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO sources "
+            "(id, notebook_id, title, source_type, status, parse_status, "
+            " created_at, updated_at) "
+            "VALUES (?,?,?, 'markdown', 'extracted', 'parsed', "
+            "        '2026-01-01', '2026-01-01')",
+            [(sid, notebook_id, sid) for sid in source_ids],
+        )
+
+
+def _seed(repo) -> str:
+    """两个不等大的板块 + 一条跨板块边 + 三种「不该进画像」的对象。
+
+    板块大小刻意不同(4 vs 3):头部板块集合的阈值是总成员的 50%,等大时哪个板块进头部
+    取决于 id 的字典序,而 id 是随机铸的 —— 断言会变成掷骰子。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.settings.community_min_size = 3
+    _add_sources(repo, notebook.id, "src-a", "src-b", "src-c", "src-d")
+    # 大板块(4 个节点)全部来自 src-a
+    repo.store_kg(
+        notebook.id, "src-a",
+        [_claim(name) for name in ("A", "B", "C", "G")],
+        [_rel("A", "B"), _rel("B", "C"), _rel("A", "C"),
+         _rel("C", "G"), _rel("A", "G")],
+    )
+    # 小板块(3 个节点)全部来自 src-b
+    repo.store_kg(
+        notebook.id, "src-b",
+        [_claim(name) for name in ("D", "E", "F")],
+        [_rel("D", "E"), _rel("E", "F"), _rel("D", "F")],
+    )
+    # 孤立对象:有来源、但不在图里 → n_graph_objects=0 的极端关联稀疏来源
+    repo.store_kg(notebook.id, "src-c", [_claim("Z")], [])
+    # 不挂来源的对象:共享同一个空 source_id,绝不能被算成一个「空来源」
+    repo.store_kg(notebook.id, None, [_claim("N")], [])
+    # 一条跨板块边(C 属大板块、D 属小板块)。store_kg 的 local_id 只在单次调用内有效,
+    # 所以这条边直接按库内 id 写。
+    with repo._connect() as db:
+        ids = {
+            json.loads(row["payload"])["name"]: row["id"]
+            for row in db.execute(
+                "SELECT id, payload FROM knowledge_objects WHERE notebook_id=?",
+                (notebook.id,),
+            )
+        }
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_relations "
+            "(id, notebook_id, source_id, source_object_id, target_object_id, "
+            " edge_type, evidence, created_at) "
+            "VALUES ('rel-cross',?, 'src-a', ?, ?, 'supports', '[]', '2026-01-01')",
+            (notebook.id, ids["C"], ids["D"]),
+        )
+        # 一个 deprecated 对象:口径要求它不进 n_objects。
+        db.execute(
+            "UPDATE knowledge_objects SET status='deprecated' WHERE id=?",
+            (ids["Z"],),
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, status, payload, evidence, source_id, "
+            " created_at, updated_at) "
+            "VALUES ('ko-live-c', ?, 'claim', 'approved', '{\"name\":\"Z2\"}', '[]', "
+            "        'src-c', '2026-01-01', '2026-01-01')",
+            (notebook.id,),
+        )
+    return notebook.id
+
+
+def _artifacts(repo, notebook_id: str) -> dict:
+    with repo._connect() as db:
+        return {
+            row["kind"]: {
+                "seq": int(row["kg_mutation_seq"]),
+                "payload": json.loads(row["payload"]),
+                "created_at": row["created_at"],
+            }
+            for row in db.execute(
+                "SELECT kind, kg_mutation_seq, payload, created_at "
+                "FROM kg_analysis_artifacts WHERE notebook_id=?", (notebook_id,),
+            )
+        }
+
+
+def _edges(repo, notebook_id: str) -> list:
+    with repo._connect() as db:
+        return [
+            (row["src_community_id"], row["dst_community_id"], int(row["weight"]))
+            for row in db.execute(
+                "SELECT src_community_id, dst_community_id, weight "
+                "FROM kg_community_edges WHERE notebook_id=? "
+                "ORDER BY src_community_id, dst_community_id", (notebook_id,),
+            )
+        ]
+
+
+def _profiles(repo, notebook_id: str) -> dict:
+    with repo._connect() as db:
+        return {
+            row["source_id"]: (
+                int(row["n_objects"]), int(row["n_graph_objects"]),
+                row["top_community_id"], float(row["top_share"]),
+                int(row["community_spread"]), float(row["mainstream_share"]),
+            )
+            for row in db.execute(
+                "SELECT * FROM kg_source_profiles WHERE notebook_id=?", (notebook_id,)
+            )
+        }
+
+
+def _boards(repo, notebook_id: str) -> dict:
+    with repo._connect() as db:
+        return {
+            row["id"]: int(row["size"])
+            for row in db.execute(
+                "SELECT id, size FROM communities WHERE notebook_id=? AND level=0",
+                (notebook_id,),
+            )
+        }
+
+
+def test_rebuild_writes_every_artifact_kind_under_one_version_stamp(repo):
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2
+
+    artifacts = _artifacts(repo, notebook_id)
+    assert set(artifacts) == set(ARTIFACT_KINDS)
+    with repo._connect() as db:
+        state = db.execute(
+            "SELECT kg_mutation_seq, community_seq FROM unified_kg_state "
+            "WHERE notebook_id=?", (notebook_id,)).fetchone()
+    # 设计 §3.3:每一份产物都要能自证建于哪个 kg_mutation_seq,而且五份必须同一批。
+    assert {entry["seq"] for entry in artifacts.values()} == {
+        int(state["kg_mutation_seq"])
+    }
+    assert int(state["community_seq"]) == int(state["kg_mutation_seq"])
+
+
+def test_cross_board_edges_fold_the_one_bridge(repo):
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+
+    boards = _boards(repo, notebook_id)
+    assert sorted(boards.values()) == [3, 4]
+    big = next(cid for cid, size in boards.items() if size == 4)
+    small = next(cid for cid, size in boards.items() if size == 3)
+    expected = (min(big, small), max(big, small), 1)
+    assert _edges(repo, notebook_id) == [expected]
+
+    payload = _artifacts(repo, notebook_id)[ARTIFACT_COMMUNITY_EDGES]["payload"]
+    assert payload["edges"] == 1
+    assert payload["edges_total"] == 1
+    assert payload["truncated"] is False
+    assert payload["edge_limit"] == MAX_PERSISTED_COMMUNITY_EDGES
+    assert payload["cross_weight"] == 1
+    assert payload["communities"] == 2
+    # 板块内边:大板块 5 条 + 小板块 3 条。
+    assert payload["intra_weight"] == 8
+
+
+def test_source_profiles_apply_the_documented_field_semantics(repo):
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+
+    boards = _boards(repo, notebook_id)
+    big = next(cid for cid, size in boards.items() if size == 4)
+    small = next(cid for cid, size in boards.items() if size == 3)
+    profiles = _profiles(repo, notebook_id)
+
+    # 不挂来源的对象绝不能凝成一个「空来源」的画像。
+    assert set(profiles) == {"src-a", "src-b", "src-c"}
+    # src-a:4 个对象全在大板块。
+    assert profiles["src-a"] == (4, 4, big, 1.0, 1, 1.0)
+    # src-b:3 个对象全在小板块 —— 头部集合只有大板块(4/7 >= 50%),所以它的
+    # mainstream_share 是 0.0。这正是「关联稀疏的来源」要暴露的形态。
+    assert profiles["src-b"] == (3, 3, small, 1.0, 1, 0.0)
+    # src-c:一个 deprecated(不计)+ 一个可用但不在图里的对象。
+    assert profiles["src-c"] == (1, 0, "", 0.0, 0, 0.0)
+
+    payload = _artifacts(repo, notebook_id)[ARTIFACT_SOURCE_PROFILES]["payload"]
+    assert payload["sources"] == 3
+    assert payload["mainstream_coverage"] == MAINSTREAM_COVERAGE
+    assert (payload["head_communities"], payload["head_members"],
+            payload["total_members"]) == (1, 4, 7)
+
+
+def test_statistic_snapshots_round_trip_the_query_layer_payloads(repo):
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    artifacts = _artifacts(repo, notebook_id)
+    store = repo._runtime.unified_kg
+
+    assert artifacts[ARTIFACT_CLUSTER_HISTOGRAM]["payload"] == json.loads(
+        json.dumps(store.cluster_size_histogram(notebook_id))
+    )
+    assert artifacts[ARTIFACT_LARGEST_CLUSTERS]["payload"] == json.loads(
+        json.dumps(store.largest_clusters(notebook_id, 20))
+    )
+    assert artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"] == json.loads(
+        json.dumps(store.relation_provenance_counts(notebook_id))
+    )
+    # 载荷结构必须仍能按类型分组还原(T1 的分组直方图)。
+    groups = artifacts[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]["by_object_type"]
+    assert [group["object_type"] for group in groups] == [
+        "concept", "claim", "formula", "procedure", "other"
+    ]
+
+
+def test_a_single_board_still_gets_an_edge_ledger_row(repo):
+    """空产物与缺失产物必须可区分:0 条跨板块边照样要有账本行。"""
+    notebook = repo.create_notebook(NotebookCreate(name="one-board"))
+    repo.settings.community_min_size = 3
+    _add_sources(repo, notebook.id, "src-a")
+    repo.store_kg(
+        notebook.id, "src-a", [_claim(n) for n in ("A", "B", "C")],
+        [_rel("A", "B"), _rel("B", "C"), _rel("A", "C")],
+    )
+    assert repo.rebuild_communities(notebook.id) == 1
+    assert _edges(repo, notebook.id) == []
+    ledger = _artifacts(repo, notebook.id)
+    assert ledger[ARTIFACT_COMMUNITY_EDGES]["payload"]["edges"] == 0
+    assert ledger[ARTIFACT_COMMUNITY_EDGES]["seq"] >= 1
+
+
+PRODUCT_TABLES = ("kg_community_edges", "kg_source_profiles", "kg_analysis_artifacts")
+
+
+ANALYSIS_SNAPSHOTS = (
+    "cluster_size_histogram", "largest_clusters", "relation_provenance_counts",
+)
+
+
+def test_analysis_snapshots_refuse_to_run_inside_a_write_transaction(repo):
+    """把全表级只读聚合放进写事务里必须**当场炸**,不是静默读到旧数据。
+
+    两个危害:读的是提交前的库(过时报告,零报错),以及 `SqliteDatabase.write()` 的
+    **进程级写锁**会被按住一整趟全表扫(同形状数据点:835 万边冷扫 39 分钟,期间全库
+    写入排队)。
+    """
+    notebook_id = _seed(repo)
+    store = repo._runtime.unified_kg
+    with repo._write():
+        for name in ANALYSIS_SNAPSHOTS:
+            with pytest.raises(RuntimeError, match="写事务"):
+                getattr(store, name)(notebook_id)
+        with pytest.raises(RuntimeError, match="写事务"):
+            store.community_overview(notebook_id)
+
+
+def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, monkeypatch):
+    """**语义**守卫:三条全表重活被调用的那一刻,本线程的写深度必须是 0。
+
+    为什么不能只靠下面那条形状守卫(「哪个写事务碰过产物表」):这三条查询一张产物表
+    都不碰,在 SQLite 上还跑在**另一条**连接上,所以把它们从 `_write()` 外面搬到里面
+    时,那条断言完全看不见 —— 评审实测过这个移动变异,25 条测试全绿。这里改成直接记录
+    调用时刻的 `write_depth`,移动变异会当场把它顶成 1。
+    """
+    notebook_id = _seed(repo)
+    database = repo._runtime.database
+    store = repo._runtime.unified_kg
+    depths: dict[str, list[int]] = {}
+
+    def instrument(name):
+        original = getattr(store, name)
+
+        def wrapper(*args, **kwargs):
+            depths.setdefault(name, []).append(
+                getattr(database._local, "write_depth", 0)
+            )
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, wrapper)
+
+    for name in (*ANALYSIS_SNAPSHOTS, "source_community_counts"):
+        instrument(name)
+    repo.rebuild_communities(notebook_id)
+
+    assert set(depths) == {*ANALYSIS_SNAPSHOTS, "source_community_counts"}, (
+        f"仪器没装上或有查询没被调用:{sorted(depths)}"
+    )
+    assert all(depth == 0 for calls in depths.values() for depth in calls), (
+        f"全表级重活在写事务内被调用(write_depth != 0):{depths}"
+    )
+
+
+def test_all_three_product_tables_are_written_in_one_transaction(repo, monkeypatch):
+    """设计 §3.3 的**结构性**证据:三张产物表必须落在同一个写事务里。
+
+    下面的 `test_precompute_is_all_or_nothing` 证明「整体失败会整体回滚」,但它抓不到
+    「拆成两个事务、第一个已提交、第二个才炸」—— 那种形态下异常仍在第二个 `with` 内,
+    第二个事务照样回滚,而**第一个已经落库了**。所以这里直接钉住形态本身:整个
+    rebuild 期间,只有**一个**写事务碰过这三张表,而且它把三张全碰了。
+
+    ⚠ 这条**只**管产物表的写。它对「重活被搬进写事务」是瞎的(那三条查询不碰产物表),
+    那一档由上面两条守卫负责。
+    """
+    notebook_id = _seed(repo)
+    database = repo._runtime.database
+    original_write = database.write
+    per_transaction: list[set] = []
+
+    @contextmanager
+    def tracing_write(**kwargs):
+        with original_write(**kwargs) as db:
+            touched: set = set()
+            per_transaction.append(touched)
+
+            def trace(statement: str) -> None:
+                for table in PRODUCT_TABLES:
+                    if table in statement:
+                        touched.add(table)
+
+            db.set_trace_callback(trace)
+            try:
+                yield db
+            finally:
+                db.set_trace_callback(None)
+
+    monkeypatch.setattr(database, "write", tracing_write)
+    repo.rebuild_communities(notebook_id)
+
+    touching = [touched for touched in per_transaction if touched]
+    assert len(touching) == 1, (
+        f"产物表被 {len(touching)} 个写事务碰过 —— 一次预计算必须是原子的"
+    )
+    assert touching[0] == set(PRODUCT_TABLES)
+
+
+def test_precompute_is_all_or_nothing(repo, monkeypatch):
+    """设计 §3.3:一次预计算要么整批可见、要么完全不可见。
+
+    先成功产出一批,再让第二批在**写完之后**炸 —— 三张表必须原样停在第一批,
+    不允许出现「跨板块边是新的、来源画像是旧的」这种隐蔽矛盾。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    first_edges = _edges(repo, notebook_id)
+    first_profiles = _profiles(repo, notebook_id)
+    first_artifacts = _artifacts(repo, notebook_id)
+    assert first_edges and first_profiles and first_artifacts
+
+    # KG 变动 → seq 闸不再短路
+    repo.store_kg(notebook_id, "src-d", [_claim("Q")], [])
+    store = repo._runtime.unified_kg
+    original = store.replace_kg_analysis_artifacts
+
+    def explode(db, *args, **kwargs):
+        original(db, *args, **kwargs)          # 先真的写进去
+        raise RuntimeError("injected artifact write failure")
+
+    monkeypatch.setattr(store, "replace_kg_analysis_artifacts", explode)
+    repo.rebuild_communities(notebook_id, force=True)
+
+    assert _edges(repo, notebook_id) == first_edges
+    assert _profiles(repo, notebook_id) == first_profiles
+    # 版本戳也必须停在第一批:否则报告会宣称自己是新的。
+    assert {entry["seq"] for entry in _artifacts(repo, notebook_id).values()} == {
+        entry["seq"] for entry in first_artifacts.values()
+    }
+    assert "src-d" not in _profiles(repo, notebook_id)
+
+
+def test_precompute_failure_is_reported_and_does_not_break_the_rebuild(repo, monkeypatch):
+    notebook_id = _seed(repo)
+    store = repo._runtime.unified_kg
+    monkeypatch.setattr(
+        store, "source_community_counts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    emitted = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit", emitted.append)
+
+    # 核心路径不受影响:社区照建、返回值照常。
+    assert repo.rebuild_communities(notebook_id) == 2
+    kinds = [event["kind"] for event in emitted]
+    assert "kg_analysis_precompute_failed" in kinds
+    assert "communities_rebuilt" in kinds
+    failure = next(e for e in emitted if e["kind"] == "kg_analysis_precompute_failed")
+    assert "RuntimeError" in failure["error"]
+    # 产物缺失,不是半份。
+    assert _artifacts(repo, notebook_id) == {}
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}
+
+
+def test_precompute_does_not_swallow_a_user_abort(repo, monkeypatch):
+    """取消不是失败:`KgBuildAborted` 必须冒泡,否则「中止」看起来像成功了。"""
+    from app.services.kg.run_control import KgBuildAborted, KgBuildFailure
+
+    notebook_id = _seed(repo)
+    store = repo._runtime.unified_kg
+    aborted = KgBuildAborted(KgBuildFailure(code="cancelled", user_message="已中止"))
+
+    def abort(*args, **kwargs):
+        raise aborted
+
+    monkeypatch.setattr(store, "source_community_counts", abort)
+    with pytest.raises(KgBuildAborted):
+        repo.rebuild_communities(notebook_id)
+
+
+def test_disabled_community_layer_writes_no_artifacts(repo):
+    notebook_id = _seed(repo)
+    repo.settings.community_layer_enabled = False
+    assert repo.rebuild_communities(notebook_id) == 0
+    assert _artifacts(repo, notebook_id) == {}
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}
+
+
+def test_refused_large_graph_build_writes_no_artifacts(repo, monkeypatch):
+    """大库守卫拒建社区时,产物必须**缺失**,而不是写出一份没有板块的画像。"""
+    import sys
+
+    notebook_id = _seed(repo)
+    monkeypatch.setitem(sys.modules, "igraph", None)   # networkx 回退
+    monkeypatch.setattr(repo, "notebook_copy_stats", lambda _nb: {"copyable": False})
+    monkeypatch.setattr(
+        repo._runtime.scale_artifacts, "load", lambda _nb, allow_stale=False: None
+    )
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    assert repo.rebuild_communities(notebook_id) == 0
+    assert any(e.get("kind") == "community_build_refused" for e in events)
+    assert _artifacts(repo, notebook_id) == {}
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}
+
+
+def test_version_gate_does_not_recompute_when_the_kg_is_unchanged(repo, monkeypatch):
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    created_at = {
+        kind: entry["created_at"]
+        for kind, entry in _artifacts(repo, notebook_id).items()
+    }
+    calls = []
+    store = repo._runtime.unified_kg
+    original = store.source_community_counts
+    monkeypatch.setattr(
+        store, "source_community_counts",
+        lambda *args, **kwargs: (calls.append(args), original(*args, **kwargs))[1],
+    )
+    repo.rebuild_communities(notebook_id)
+    assert calls == []
+    assert {
+        kind: entry["created_at"]
+        for kind, entry in _artifacts(repo, notebook_id).items()
+    } == created_at
+
+
+def test_replace_artifacts_consumes_edges_and_profiles_as_one_shot_iterators(repo):
+    """落库入口按**可迭代**消费,不得要求 Sequence(len / 下标 / 二次遍历)。
+
+    契约意义:落库这一刻 `rebuild_communities` 的栈帧上还压着整张 `ew`,store 再把行
+    物化成一份完整列表就是在峰值上叠峰值。一次性迭代器能跑通,就说明它没有回头再读一遍。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="stream"))
+    _add_sources(repo, notebook.id, "src-a")
+    store = repo._runtime.unified_kg
+    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
+    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 1}
+    edges = iter([("cm-a", "cm-b", 3)])
+    profiles = iter([("src-a", 5, 4, "cm-a", 1.0, 1, 1.0)])
+    with repo._write() as db:
+        store.replace_kg_analysis_artifacts(
+            db, notebook.id, 9, edges, profiles, payloads, "2026-01-01T00:00:00"
+        )
+    assert next(edges, None) is None and next(profiles, None) is None
+    assert _edges(repo, notebook.id) == [("cm-a", "cm-b", 3)]
+    assert set(_profiles(repo, notebook.id)) == {"src-a"}
+
+
+def _wipe_ledger(repo, notebook_id: str) -> None:
+    """把产物抹成「本特性上线前」的样子:社区图完好、账本一片空白。"""
+    with repo._write() as db:
+        db.execute("DELETE FROM kg_analysis_artifacts WHERE notebook_id=?", (notebook_id,))
+        db.execute("DELETE FROM kg_community_edges WHERE notebook_id=?", (notebook_id,))
+        db.execute("DELETE FROM kg_source_profiles WHERE notebook_id=?", (notebook_id,))
+
+
+def test_aligned_communities_with_an_empty_ledger_still_get_backfilled(repo):
+    """B1:社区已按当前 seq 建好、账本为空时,**非 force** 的调用必须补出账本。
+
+    这正是生产 base 库的形态:它在本特性上线**之前**就已经 rebuild 过,
+    `community_seq == kg_mutation_seq`。若预计算跟着社区图的闸走,部署之后任何非 force
+    调用都会在闸上直接返回,账本永远是空的 —— 用户只看得到「产物缺失」,唯一恢复手段是
+    force 全量重建(836 万边 join + Louvain + 重写 171 万成员行)。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2
+    expected_edges = _edges(repo, notebook_id)
+    expected_profiles = _profiles(repo, notebook_id)
+    boards_before = _boards(repo, notebook_id)
+    _wipe_ledger(repo, notebook_id)
+    assert _artifacts(repo, notebook_id) == {}
+
+    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+
+    artifacts = _artifacts(repo, notebook_id)
+    assert set(artifacts) == set(ARTIFACT_KINDS)
+    with repo._connect() as db:
+        state = db.execute(
+            "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,)).fetchone()
+    assert {entry["seq"] for entry in artifacts.values()} == {
+        int(state["kg_mutation_seq"])
+    }
+    # 补账本**不得**动社区图:板块 id 与规模必须原样(重铸 id 会让既有引用全部失效)。
+    assert _boards(repo, notebook_id) == boards_before
+    # 两条喂入路径产出逐字相同的产物。
+    assert _edges(repo, notebook_id) == expected_edges
+    assert _profiles(repo, notebook_id) == expected_profiles
+
+
+def test_backfill_does_not_rerun_louvain_or_rewrite_the_membership_tables(repo, monkeypatch):
+    """补账本必须跳过整个重建:不重跑 Louvain、不整表重写 communities/community_members。
+
+    这一条是 B1 的**成本**主张,不是它的正确性主张 —— 没有它,「给预计算一个自己的闸」
+    可以被实现成「闸没过就整个重来」,那和 force=True 一样贵。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    _wipe_ledger(repo, notebook_id)
+
+    store = repo._runtime.unified_kg
+    calls: list[str] = []
+    for name in ("replace_communities", "set_community_seq"):
+        monkeypatch.setattr(
+            store, name,
+            (lambda n: lambda *a, **k: calls.append(n))(name),
+        )
+    events: list[dict] = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
+
+    assert repo.rebuild_communities(notebook_id) == 2
+    assert calls == [], f"补账本却重写了社区表:{calls}"
+    kinds = [event["kind"] for event in events]
+    # 事件必须如实说「只补了账本」,不能伪装成一次图重建。
+    assert "kg_analysis_backfilled" in kinds
+    assert "communities_rebuilt" not in kinds
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+
+
+def test_a_failed_precompute_heals_on_the_next_plain_rebuild(repo, monkeypatch):
+    """预计算失败后**不需要** force 才能自愈:下一次普通调用就会补上。"""
+    notebook_id = _seed(repo)
+    store = repo._runtime.unified_kg
+    monkeypatch.setattr(
+        store, "source_community_counts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert repo.rebuild_communities(notebook_id) == 2
+    assert _artifacts(repo, notebook_id) == {}
+
+    monkeypatch.undo()
+    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+
+
+def test_a_library_without_boards_writes_no_source_profile_product(repo):
+    """S4:一个板块都没有时,来源画像必须**缺失**,而不是写一张全 0 的表。
+
+    对象有、关系没有的库算不出任何「主体板块」,每个来源的 mainstream_share 都会是 0.0。
+    明细表单独看是在说「所有来源都关联稀疏」—— 一句谎话。产物缺失是诚实的。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="no-boards"))
+    repo.settings.community_min_size = 3
+    _add_sources(repo, notebook.id, "src-a")
+    repo.store_kg(notebook.id, "src-a", [_claim(n) for n in ("A", "B", "C")], [])
+
+    assert repo.rebuild_communities(notebook.id) == 0
+    artifacts = _artifacts(repo, notebook.id)
+    assert set(artifacts) == set(ARTIFACT_KINDS) - {ARTIFACT_SOURCE_PROFILES}
+    assert _profiles(repo, notebook.id) == {}
+    assert artifacts[ARTIFACT_COMMUNITY_EDGES]["payload"]["communities"] == 0
+    # 三条统计快照与板块无关,照常产出(形状完整,不是缺一块)。
+    assert "by_object_type" in artifacts[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]
+    assert "buckets" in artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"]
+
+
+def test_deleting_the_notebook_takes_the_artifacts_with_it(repo):
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    assert _artifacts(repo, notebook_id)
+    repo.delete_notebook(notebook_id)
+    assert _artifacts(repo, notebook_id) == {}
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}

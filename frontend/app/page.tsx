@@ -30,6 +30,7 @@ import {
   openKnowhowNavigation,
 } from "./knowhow-navigation";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
+import { KgAnalysisView } from "./kg-analysis-view";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import { withoutDecidedMerge } from "./kg-merge-model";
 import {
@@ -868,6 +869,9 @@ export default function Home() {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
+  // 「图谱分析」只读报告(kg-analysis-view.tsx)。渲染在知识图谱视图内部,所以关掉
+  // 图谱视图时它自动跟着卸载,不必再维护一条「父关了子也要关」的联动。
+  const [kgAnalysisOpen, setKgAnalysisOpen] = useState(false);
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -6437,6 +6441,17 @@ export default function Home() {
           <div className="kg-view-header">
             <div><h2>知识图谱</h2><p>Object 级知识图谱：Concept / Claim / Formula / Procedure 同屏展示。节点名称、类型形状和边标签直接画在主视图中。</p></div>
             <div className="kg-view-header-actions">
+              {/* 「图谱分析」= 只读诊断报告(对象构成 / 合并收敛 / 主题板块 / 板块俯瞰图 /
+                  关联稀疏的来源)。后端两个端点走 require_notebook_read,只读成员也能看,
+                  所以这里不做 admin 门控;面板本身不含任何写动作。 */}
+              <button
+                type="button"
+                className="sort-button kg-schema-button"
+                onClick={() => setKgAnalysisOpen(true)}
+                title="查看这个知识库的构成、合并收敛与主题板块分布"
+              >
+                <BarChart3 size={16} /> 图谱分析
+              </button>
               {/* 「图谱 Schema」= 原顶层导航「内容类型」,已并入本视图(仍 admin 门控):
                   定义要从来源中分析出的知识对象类型与字段。打开的是既有 SchemaManager
                   弹窗(utility-modal z:60 > kg-view z:50,正确叠在本视图之上)。 */}
@@ -6768,6 +6783,9 @@ export default function Home() {
               </div>
             </aside>
           </div>
+          {kgAnalysisOpen && currentNotebookId && (
+            <KgAnalysisView notebookId={currentNotebookId} onClose={() => setKgAnalysisOpen(false)} />
+          )}
         </section>
       )}
 

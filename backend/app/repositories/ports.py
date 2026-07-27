@@ -966,6 +966,180 @@ class UnifiedKgStorePort(Protocol):
     def checkpoint_clear(self, notebook_id: str) -> None: ...
     def checkpoint_load(self, notebook_id: str, input_version: str, stage: str) -> dict[str, dict]: ...
     def checkpoint_put_current(self, notebook_id: str, input_version: str, stage: str, rows: list[tuple[str, dict]]) -> None: ...
+    # ---------------------------------------- KG 质量分析的只读聚合(T1)
+    # 与上面的 community-peer 原语同形:**自开只读连接**,绝不写库。
+    #
+    # ⚠ 调用契约(T2 起的唯一调用方是 KnowledgeLifecycleService._precompute_kg_analysis,
+    # 它在写事务之外调用):**调用方不得持有外层写事务**。
+    # 实现两侧都自开连接——SQLite 侧是本线程复用的读连接,PostgreSQL 侧是**从池里另取
+    # 一条**。从 `write()` 里调用会读到该事务提交前的旧数据,而且**不会响亮失败**:它
+    # 会安静地返回一份过时的报告;SQLite 上还额外把**进程级写锁**按住一整趟全表扫。
+    #
+    # 这条契约**不再只是注释**:两侧实现的头一行都调
+    # `_reject_inside_write_transaction()`,读 `database.in_write_transaction`
+    # (SQLite = thread-local write_depth,PostgreSQL = _WRITE_ACTIVE ContextVar)并当场
+    # 硬失败。必须是运行时守卫而不是形状断言:这几条查询一张产物表都不碰、在 SQLite 上
+    # 还跑在另一条连接上,所以「哪个写事务碰过产物表」那类形状守卫对它们完全无效 ——
+    # 评审用「把三条调用搬进 `_write()`」的移动变异实测过,25 条测试全绿。
+    #
+    # ⚠ **三条都是全表级的重活,一条都不能挂在在线请求路径上。** 别只盯着最后一条,
+    # 也别以为 `largest_clusters` 因为有 LIMIT 就便宜 —— 三者**同一量级**:
+    #   · cluster_size_histogram      本 notebook 的 concept_clusters 全扫 + 每行一次
+    #                                 knowledge_objects 匹配 + 分组聚合(生产 200 万+ 簇行)
+    #   · largest_clusters            同形状的扫描 + 分组,**之后还多一次排序**;LIMIT
+    #                                 只截断输出,不减少扫描/排序的输入。它只扫 concept
+    #                                 分片,所以在 claim 占多数的库上**绝对**耗时可以低于
+    #                                 直方图,但**单位输入**的代价更高。总之不便宜。
+    #   · relation_provenance_counts  knowledge_relations 全扫 + 两个端点匹配(生产 800 万+ 边)
+    #
+    # 代价量级**按后端分开标**,同一条查询在两侧可以差好几倍,别用一个数字盖住。
+    # 本机实测(同一批合成数据:30 万对象 / 30 万簇行 / 60 万边,均为热态;
+    # PostgreSQL 16 本机实例,SQLite 为同规模临时库):
+    #
+    #     查询                          SQLite      PostgreSQL 16
+    #     cluster_size_histogram        300 ms      197 ms   (Hash Left Join + HashAggregate)
+    #     largest_clusters(20)          178 ms      152 ms   (Hash Join + HashAgg + top-N heapsort)
+    #     relation_provenance_counts   1039 ms      234 ms   (Parallel Hash Left Join ×2,2 worker)
+    #
+    #   · SQLite     nested-loop + 每行随机 PK 探查,没有并行。**热态读数不可线性外推**:
+    #                同一批查询在本机 5.1GB 真实库上冷跑(全新进程、页缓存全冷)是
+    #                直方图 1024 ms / 边出处 1165 ms,而暖态只要 64 ms / 217 ms —— 差
+    #                6~16 倍,而那还只是 4.2 万簇行 / 5.2 万边。仓库有同形状的实测事故:
+    #                relation_connected_object_ids 在 835 万边上**冷扫 39 分钟**,而那条
+    #                查询还**没有**每行两次探查。437GB 的生产库上,这三条应按
+    #                「与那个 39 分钟数据点同量级或更差」估,不要留任何秒级外推数字。
+    #   · PostgreSQL 规划器对这三个形态都选 hash join;边出处那条还并行顺扫(实测 2 个
+    #                worker),所以比 SQLite 快约 1.5×(簇查询)到 4.4×(边查询)。量级
+    #                明显更好,但**仍是全表级**,冷态同样受随机 IO 支配 —— 依旧属于预计算。
+    #                实测计划里两条簇查询的 HashAggregate 已经溢出到磁盘(Planned
+    #                Partitions 4 / Disk Usage ~7MB @30 万行),规模再上去会放大。
+    #                边查询的外层原本还落一次 external merge sort(规划器对那个巨大的
+    #                CASE 表达式估不出基数),T2 已把它换成固定的 `count(*) FILTER` 单行
+    #                聚合 —— CASE 保留(分桶语义是有序互斥的,拆成独立谓词必错),只砍掉
+    #                外层 GROUP BY,那次排序整个消失。SQLite 侧刻意保持 GROUP BY 形态,
+    #                好让「SQL 冒出契约外的桶名就炸」那条绊线至少在一个后端上原生活着;
+    #                PG 侧用同一趟扫描里的一个 `min(bucket) FILTER (WHERE NOT …)` 把同一
+    #                条绊线补回来。理由与守卫见两侧 `relation_provenance_counts` 的
+    #                docstring(§3.35:允许形态分岔,但必须写明理由 + 两侧都有守卫)。
+    #
+    # ⚠ **`cluster_size_histogram` 与 `largest_clusters` 刻意不合并成一趟扫描 —— 量过的
+    # 取舍,不是「T1 恰好写成两个方法」的副产品。**
+    # 两者确实高度重叠:都是「扫 concept_clusters + 每行一次 knowledge_objects 主键探查 +
+    # 按 canonical 分组」,榜单的输入是直方图内层分组的严格子集(只 concept),只多要一个
+    # `canonical_name`。把 `MIN(NULLIF(canonical_name,''))` 加进直方图的内层分组,一趟就能
+    # 导出两份产物。实测(本机真实库 nb-b37185f4ae,41713 簇行 / 37340 个 canonical;
+    # 每次全新进程 = 全新 SQLite 页缓存,OS 页缓存仍暖,所以这是节省的**下界**):
+    #
+    #     现状(两趟)  直方图 79.5 / 70.0 / 62.8 + 榜单 12.5 / 12.3 / 11.9 = 92.0 / 82.3 / 74.7 ms
+    #     合并(一趟)  物化 69.7 / 62.9 / 61.3 + 6.4 / 6.0 / 6.0 + 1.2 / 1.0 / 1.0 = 77.2 / 69.9 / 68.2 ms
+    #     暖态(同连接三取最小)  62.5 vs 61.3 ms(nb-b37185f4ae)、53.3 vs **54.0** ms(nb-012fb94249)
+    #     两种写法的榜单前 20 逐字相同(已比对)。
+    #
+    # 结论:**不合并。** 冷进程下省 8~16%、暖态是个平局(有一个库反而更慢),而代价是把
+    # 内层分组物化成 O(簇数) 行的临时表:实测 37340 行 +8.8 MB RSS ≈ 236 B/行,线性外推到
+    # 生产的约 200 万簇行是**约 470 MB**,而 SQLite 侧 `temp_store = MEMORY` 意味着它**不能
+    # 落盘**。用 470 MB 不可落盘的常驻内存,去买五份产物里两份的 8~16% —— 而整个预计算的
+    # 大头是 `relation_provenance_counts`(836 万边)与 `source_community_counts`(878 万
+    # 对象)—— 在 #340/#342/#347/#351/#352/#354 那条 OOM 轨道盯着的同一个库上是明确的负收益。
+    # 效率红线要求「新增前先问能不能合并」,这就是问过之后的答案:问了、量了、不合并。
+    # (日后 SQLite 退役、只剩 PostgreSQL 时值得重估:PG 的 HashAggregate 本来就会溢盘,
+    # 没有「不可落盘」这一条,取舍会翻过来。)
+    #
+    # 生产将迁移到 PostgreSQL,性能设计以 PG 为一等目标;两侧的 SQL 形态因此允许分岔
+    # (`community_overview` 已经分了:PG 一条窗口函数,SQLite 逐板块有界 top-K)。
+    # parity 要求的是**语义等价 + 两侧都有守卫**,不是 SQL 逐字相同。
+    def cluster_size_histogram(self, notebook_id: str) -> dict[str, object]: ...
+    def largest_clusters(self, notebook_id: str, limit: int = 20) -> dict[str, object]: ...
+    def community_overview(
+        self, notebook_id: str, *, level: int = 0, limit: int = 50, top_k: int = 5
+    ) -> dict[str, object]: ...
+    def relation_provenance_counts(self, notebook_id: str) -> dict[str, object]: ...
+    # ---------------------------------------- KG 质量分析的预计算产物(T2)
+    # 与上面的只读聚合**相反**:这两个是 connection-taking 的,骑调用方
+    # (KnowledgeLifecycleService.rebuild_communities)的事务边界。
+    #
+    # ⚠ `replace_kg_analysis_artifacts` 必须整个跑在**一个写事务**里(设计 §3.3):
+    # 一次预计算要么整批可见、要么完全不可见。允许「跨板块边是新的、来源画像是旧的」
+    # 这种组合的话,报告里的数字会互相矛盾,而且矛盾得很隐蔽 —— 用户没有任何线索。
+    # 账本行(`kg_analysis_artifacts`)带 `kg_mutation_seq`,让**每一份**产物自证建于
+    # 哪个 KG 状态;它的**存在与否**才是「这份产物在不在」的判据,明细表的行数不是
+    # (单一板块的图 legitimately 产出 0 条跨板块边)。
+    #
+    # ⚠ `source_community_counts` 是**重活**:本 notebook 的 knowledge_objects 全扫 +
+    # 每行两次索引探查 + 一个分组聚合,与 `community_graph_rows` 同量级。它只能待在
+    # 预计算路径上;返回游标,调用方**流式**折叠(Python 侧内存 O(来源数),不是
+    # O(分组数)——库内的分组临时结构不在此列,见实现的 docstring)。
+    #
+    # ⚠ 三张产物表**都没有 level 维度**:`community_seq` 本身不分 level,一次预计算产出
+    # 的永远是一套自洽的产物,它描述的 level 记在账本 payload 里。三张表统一按 notebook
+    # 整表重写,删除口径因此只有一个。
+    #
+    # ⚠ `kg_analysis_artifact_seqs` 是预计算**自己的**新鲜度闸的输入(见
+    # `rebuild_communities`:社区图与分析账本是两份可以各自陈旧的产物)。store 只返回
+    # 原始 `{kind: seq}`,是否新鲜由后端中性的 `analysis_ledger_is_current` 判。
+    #
+    # ⚠ `edges` / `profiles` 按**可迭代**声明,实现必须分批消费、不得再物化一份完整
+    # 列表:落库这一刻 `rebuild_communities` 的栈帧上还压着整张 `ew`。
+    @staticmethod
+    def kg_analysis_artifact_seqs(db: object, notebook_id: str) -> dict[str, int]: ...
+    @staticmethod
+    def source_community_counts(db: object, notebook_id: str, level: int) -> object: ...
+    @staticmethod
+    def replace_kg_analysis_artifacts(
+        db: object,
+        notebook_id: str,
+        kg_mutation_seq: int,
+        edges: object,
+        profiles: object,
+        payloads: object,
+        now: str,
+    ) -> None: ...
+    # -------------------------- KG 质量分析产物的**读**路径(T3,在线请求路径)
+    # 这三个是唯一**可以**挂在在线请求上的 KG 分析读:它们只碰预计算产物表,代价按
+    # 行数硬有界,与上面那三条 T1 全表重活(200 万簇行 / 836 万边)差一到两个数量级。
+    #
+    #   · kg_analysis_artifact_rows  账本全文,每 notebook ≤5 行,复合主键点读。
+    #                                返回 `{kind: {kg_mutation_seq, payload, created_at}}`。
+    #                                与 `kg_analysis_artifact_seqs` 分工:那个只喂预计算
+    #                                的新鲜度闸(热路径,只要 seq),这个喂报告(要 payload)。
+    #   · kg_community_edges_top     跨板块边 top-N。**没有 weight 索引**(主键是
+    #                                (notebook_id, src, dst)),所以是本 notebook 分片
+    #                                的一次范围扫 + 有界 top-N 排序器 —— 有界靠的是 T2
+    #                                的 `MAX_PERSISTED_COMMUNITY_EDGES`(20 万行硬上限),
+    #                                不是索引。真机若成为瓶颈,正解是加
+    #                                (notebook_id, weight) 索引(一次迁移),不是放宽上限。
+    #   · kg_source_profile_page     来源画像的一页 + 总行数。生产 48 836 个来源,一次
+    #                                全返回既是几 MB payload 也没人读得完,所以分页是
+    #                                硬要求。排序键 `mainstream_share` 走
+    #                                idx_kg_source_profiles_nb_mainstream,并列消歧
+    #                                `source_id ASC` 是**分页正确性**的一部分(混杂库里
+    #                                一大片恰好 0.0,没有次级键就会跨页重复/漏行,而且
+    #                                两个后端各给一种顺序)。
+    #
+    # 连接契约:三个都是 connection-taking,骑调用方(T3 的 KgAnalysisService)的**读**
+    # 连接,故不需要上面那道 `_reject_inside_write_transaction`(它防的是「自开的另一条
+    # 连接读到提交前的库」,骑调用方连接不存在这个失配)。服务层入口另有一道同语义断言。
+    #
+    # 上限:`limit` 两侧都硬 clamp(KG_COMMUNITY_EDGES_MAX / KG_SOURCE_PAGE_MAX),
+    # `offset` 收到 [0, ∞)(它天然被表的行数兜住)。截断绝不静默 —— 调用方拿返回条数
+    # 与账本里的 `edges` / 这里的 `total` 一比即可,不需要多取一行来判。
+    @staticmethod
+    def kg_analysis_artifact_rows(
+        db: object, notebook_id: str
+    ) -> dict[str, dict[str, object]]: ...
+    @staticmethod
+    def kg_community_edges_top(
+        db: object, notebook_id: str, limit: int = 200
+    ) -> list[tuple[str, str, int]]: ...
+    @staticmethod
+    def kg_source_profile_page(
+        db: object,
+        notebook_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        ascending: bool = True,
+    ) -> "tuple[int, list[dict[str, object]]]": ...
 
 
 class CommunityQueryPort(Protocol):

@@ -34,6 +34,82 @@ const PAPER_META_MISSING_TOOLTIP = "论文作者/机构等信息尚未补全";
 const PAPER_META_NOT_PAPER_LABEL = "非论文";
 const PAPER_META_NOT_PAPER_TOOLTIP = "该来源非学术论文，无需补全";
 
+// —— 图谱分析报告的产物异常(kg-analysis-view spec §3.3)————————————————
+// 分档判据同上,按「后果」不按「原因」:
+//   · 账本非空却少了一份产物 / 在场产物不是同一轮算的 / 产物比当前库还新
+//     —— 报告里的数字互相不可比,读者据此下的结论会是错的 → integrity。
+//   · 产物落后当前若干次变更 —— 数字本身没算错,只是描述的是更早的库状态,
+//     重新整理一次即可对齐 → retrieval。
+//   · 从没算过 / 合法缺席(零板块的库不出来源画像)—— 预期态,不是异常 → info。
+// 这一档的存在理由见设计 §3.3 的真实教训:有人拿一份陈旧产物推出了关于图结构的
+// 重大结论,随后才得知该库尚未整理,整个推断作废。所以陈旧必须**逐份**标注出来,
+// 而不是在报告顶部挂一条横幅。
+const ARTIFACT_MISSING_LABEL = "本该有却缺失";
+const ARTIFACT_MISSING_TOOLTIP = "同一轮里其它数据都在，唯独这一份没写下来。这一格的数字暂时无法与同屏其它数字互相印证。";
+
+const ARTIFACT_NEVER_LABEL = "尚未生成";
+const ARTIFACT_NEVER_TOOLTIP = "这个知识库还没算过这份数据。它不是「算出来是 0」，是根本没算过。";
+
+const ARTIFACT_EXPECTED_LABEL = "本次无需生成";
+const ARTIFACT_EXPECTED_TOOLTIP = "一个主题板块都没有时，这份数据没有可说的内容，因此刻意不生成——而不是写一张全 0 的表。";
+
+const ARTIFACT_STALE_LABEL = "落后于当前内容";
+const ARTIFACT_STALE_TOOLTIP = "这份数字描述的是更早的库内容，之后又有过改动。重新合并一次即可对齐。";
+
+const ARTIFACT_AHEAD_LABEL = "比当前内容还新";
+const ARTIFACT_AHEAD_TOOLTIP = "这份数字标记的版本比当前库还新，正常写入不会产生这种状态。";
+
+/**
+ * 一份预计算产物(或它的缺席)要展示的异常小字。
+ *
+ * 入参刻意是**结构形状**而不是具体响应类型:总览里的五份产物、跨板块关联、
+ * 来源画像页三处形状不同的响应都能直接喂进来,分档规则因此只有这一份。
+ *
+ * ``absence`` 的三个取值是后端内部代号(never_computed / expected / unexpected),
+ * 界面词在上面的常量里;``seq_behind`` 不 clamp,负值单独成一档(见 ARTIFACT_AHEAD)。
+ */
+export function analysisArtifactAnomalies(artifact: {
+  present: boolean;
+  absence?: string | null;
+  freshness?: { seq_behind?: number | null; stale?: boolean | null } | null;
+}): Anomaly[] {
+  if (!artifact.present) {
+    if (artifact.absence === "expected") {
+      return [{ severity: "info", label: ARTIFACT_EXPECTED_LABEL, tooltip: ARTIFACT_EXPECTED_TOOLTIP }];
+    }
+    if (artifact.absence === "unexpected") {
+      return [{ severity: "integrity", label: ARTIFACT_MISSING_LABEL, tooltip: ARTIFACT_MISSING_TOOLTIP }];
+    }
+    return [{ severity: "info", label: ARTIFACT_NEVER_LABEL, tooltip: ARTIFACT_NEVER_TOOLTIP }];
+  }
+  const behind = artifact.freshness?.seq_behind ?? null;
+  if (behind !== null && behind < 0) {
+    return [{ severity: "integrity", label: ARTIFACT_AHEAD_LABEL, tooltip: ARTIFACT_AHEAD_TOOLTIP }];
+  }
+  if (artifact.freshness?.stale) {
+    return [{ severity: "retrieval", label: ARTIFACT_STALE_LABEL, tooltip: ARTIFACT_STALE_TOOLTIP }];
+  }
+  return [];
+}
+
+const LEDGER_MIXED_LABEL = "数字口径不一致";
+const LEDGER_MIXED_TOOLTIP = "这份报告里的数据不是同一轮算出来的，彼此之间不可直接相除或比较。";
+
+/** 在场的产物不是同一轮算的 —— 整份报告级别的异常(正常写入不可能产生)。 */
+export function analysisLedgerAnomalies(report: { ledger_consistent: boolean }): Anomaly[] {
+  if (report.ledger_consistent) return [];
+  return [{ severity: "integrity", label: LEDGER_MIXED_LABEL, tooltip: LEDGER_MIXED_TOOLTIP }];
+}
+
+const SOURCE_GONE_LABEL = "来源已不存在";
+const SOURCE_GONE_TOOLTIP = "这一行引用的来源已经从库里删掉了；下次重新合并后这一行会消失。";
+
+/** 来源画像里指向已删除来源的那一行(标题为空到底是「没标题」还是「已删除」)。 */
+export function analysisSourceRowAnomalies(row: { source_missing: boolean }): Anomaly[] {
+  if (!row.source_missing) return [];
+  return [{ severity: "info", label: SOURCE_GONE_LABEL, tooltip: SOURCE_GONE_TOOLTIP }];
+}
+
 // severity 之间的展示优先级:integrity 排最前,info 排最后。同档内保持映射表
 // 里各条目原本被 push 的顺序(稳定排序)。
 const SEVERITY_RANK: Record<AnomalySeverity, number> = {

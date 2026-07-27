@@ -310,6 +310,7 @@ def user_error(status_code: int, message: str) -> HTTPException:
 
 from app.services.content_overview import ContentOverviewService  # noqa: E402
 from app.services.checkup import CheckupService  # noqa: E402
+from app.services.kg_analysis import KgAnalysisService  # noqa: E402
 
 
 def content_overview_service() -> ContentOverviewService:
@@ -322,6 +323,13 @@ def checkup_service() -> CheckupService:
     maintenance 的 COUNT + sqlite QueryStore,不能落在中性 repository_runtime(neutrality 守卫禁其
     import sqlite/postgres)。facade 是 lru_cache 单例 → checkup 也是单例,H7/H8 进程内缓存跨请求存活。"""
     return repository().checkup  # type: ignore[attr-defined]
+
+
+def kg_analysis_service() -> KgAnalysisService:
+    """KG 质量分析报告 service(T3)。构造在**中性 runtime** 里(它只吃 database +
+    unified_kg 两个 seam,不 import 任何后端),facade 只是一跳委托。facade 是 lru_cache
+    单例 → 这个 service 也是单例,按 seq 记忆化的板块列表缓存因此跨请求存活。"""
+    return repository().kg_analysis  # type: ignore[attr-defined]
 
 
 def shutdown_repository_if_initialized() -> None:

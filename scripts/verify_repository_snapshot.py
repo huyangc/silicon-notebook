@@ -2337,6 +2337,61 @@ MIGRATION_MANIFEST[(34, 35)] = {
     "views": {},
 }
 
+# v36: the three KG-quality-analysis precompute product tables plus the one
+# explicit index the source-profile read path needs (the other two tables are
+# read by their primary-key prefix).  Same cascade as every other v30/v31 hop:
+# broadcast onto every prior hop key rebased to v36, then register the explicit
+# (35, 36) single hop.  SQL text matches sqlite_master storage verbatim (SQLite
+# strips "IF NOT EXISTS" and keeps the source indentation).
+KG_ANALYSIS_TABLES = {
+    "kg_community_edges": """CREATE TABLE kg_community_edges (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  src_community_id TEXT NOT NULL,
+                  dst_community_id TEXT NOT NULL,
+                  weight INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY (notebook_id, src_community_id, dst_community_id)
+                )""",
+    "kg_source_profiles": """CREATE TABLE kg_source_profiles (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL,
+                  n_objects INTEGER NOT NULL DEFAULT 0,
+                  n_graph_objects INTEGER NOT NULL DEFAULT 0,
+                  top_community_id TEXT NOT NULL DEFAULT '',
+                  top_share REAL NOT NULL DEFAULT 0,
+                  community_spread INTEGER NOT NULL DEFAULT 0,
+                  mainstream_share REAL NOT NULL DEFAULT 0,
+                  PRIMARY KEY (notebook_id, source_id)
+                )""",
+    "kg_analysis_artifacts": """CREATE TABLE kg_analysis_artifacts (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL,
+                  kg_mutation_seq INTEGER NOT NULL DEFAULT -1,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, kind)
+                )""",
+}
+KG_ANALYSIS_INDEXES = {
+    "idx_kg_source_profiles_nb_mainstream":
+        "CREATE INDEX idx_kg_source_profiles_nb_mainstream\n"
+        "                  ON kg_source_profiles(notebook_id, mainstream_share)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 36, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_ANALYSIS_TABLES},
+        "indexes": {**manifest["indexes"], **KG_ANALYSIS_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(35, 36)] = {
+    "tables": KG_ANALYSIS_TABLES,
+    "columns": {},
+    "indexes": KG_ANALYSIS_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

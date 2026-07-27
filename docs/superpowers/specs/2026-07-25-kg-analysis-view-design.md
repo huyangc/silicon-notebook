@@ -1,0 +1,325 @@
+# 知识图谱质量分析视图 — 设计
+
+2026-07-25。承「KG 抽取质量调研」轨道：生产 base 库 878 万有效对象，随机抽样
+暴露出**语料混杂**（模拟 IC 库里出现光遗传学质粒名、原子物理术语、法语论文标题），
+而现有工具无法回答「这个库覆盖哪些领域、每个领域多大、哪些来源不属于这里」。
+
+## 一、要解决的问题
+
+三个问题，按优先级：
+
+1. **语料是不是混杂的？** 库里有哪些主题板块，各占多大比例。
+2. **不属于本领域的内容从哪来？** 哪些来源与主体板块几乎不连通。
+3. **跨文档重复到底多少？** 抽样口径答不了（来源间统计量在 0.4% 抽样下失真），
+   必须走全库的合并簇。
+
+## 二、范围
+
+**完整功能列表全部实现**（2026-07-25 用户决定），分四批交付，每批一个 PR。
+
+**明确不做**：治理动作（删除/隔离）。本视图只读出报告，处置走既有治理路径。
+
+### 批次路线图
+
+| 批 | 主题 | 功能 | 为什么是这个顺序 |
+|---|---|---|---|
+| **1** | 地基 + 领域地图 | A1 类型构成、A2 收敛率、C1 主题板块地图、C2 关联稀疏来源、E1 板块俯瞰图 | 建立查询层 / 产物表 / 预计算 / service / 端点 / 前端视图骨架 —— 后三批全部挂在它上面。同时直接回答眼下最要紧的「语料是否混杂」 |
+| **2** | 分布与结构 | A3 来源规模分布、A4 增长曲线、D1 度数分布、D2 连通分量、D3 边类型分布、D4 板块结构指标、E2 分布图表 | 数据大多能在批 1 的那次预计算里顺带产出，边际成本最低；E2 的图表组件后两批复用 |
+| **3** | 质量与噪声 | B1 探针分布+下钻、B2 无名/坏 payload、B3 完整性灰色地带、B4 边出处构成、B5 claim 原子性、C3 来源×噪声率、C4 概念下钻、E3 下钻链路 | 最贵（要读 payload 逐个跑探针），且需要先把 `scripts/kg_quality_audit.py`（#364，已合入 master）的判据抽成**共享模块**，让 CLI 与视图同源 —— 口径漂移正是 #364 反复被评审打回的那类问题 |
+| **4** | 快照与追踪 | F1 质量快照、F2 快照对比、E4 力导向图按板块/噪声着色 | 快照要先有稳定的指标集才有意义，必须排在指标定型之后 |
+
+### 与 #364 的关系
+
+`scripts/kg_quality_audit.py` 已随 #364 合入 master。它踩过 9 轮评审，沉淀了一套
+**必须继承**的口径与诚实性约束：
+
+- 只算 `USABLE_STATUSES` 的对象；边只算非 rejected 且**两端都是本 notebook 可用对象**。
+- 冗余行 = 总行数 − 唯一名数（只有 c−1 行是冗余，不是 sum(c)）。
+- 无名 / payload 异常的行照样进分母，单独报数，绝不静默剔除。
+- 跨来源统计量（收敛率、文档频次）在抽样下系统性失真，要么全量要么不出。
+- 触顶截断留下的是库内顺序前缀而非随机样本，必须显式披露偏差。
+
+批 3 把这些判据抽成共享模块，CLI 与视图共用，**不重写一份**。批 1 的 A2 用全库
+合并簇算收敛率，从根上消除 CLI 那条抽样路径的失真。
+
+## 二·五、规模基准（设计的硬输入）
+
+本工具是**生产 DFX 诊断工具**。所有实现按已知最大 KG 的规模设计与验证，不按本机小库：
+
+| 维度 | 生产 base 库实测（2026-07-25） |
+|---|---|
+| 有效知识对象 | **8,783,591**（claim 68.6% / concept 24.0% / formula 5.6% / procedure 1.8%） |
+| 关系边 | ~8.36 M |
+| 来源 | **48,836** |
+| 库体积 | **437 GB** |
+| canonical 簇行 | ~2 M（`concept_clusters`） |
+
+由此固化的三条设计约束：
+
+1. **任何 per-object / per-edge 的全量遍历都是分钟级起步**，冷态受随机 IO 支配，
+   量级参照仓库已有的 835 万边冷扫 39 分钟事故。这类操作只能进预计算，不进请求路径。
+2. **绝不发巨型 `IN`**（撞 SQLite 变量上限，有过部署机冻结事故），绝不把百万行拉进
+   Python 再聚合，绝不一次性物化全量边表或对象表。
+3. **不对数据形态做假设**。板块可能是 1 千个也可能是 10 万个、分布可能均匀也可能是
+   一个巨核 + 长尾。呈现层必须自适应（top-N + 长尾聚合 + 显式覆盖率），而不是依赖
+   「板块数量在某个区间」这类前提 —— 那种前提在真库上随时会破。
+
+## 三、关键设计
+
+### 3.1 复用休眠资产，不新建图算法
+
+`communities` / `community_members` 已经存在且默认开启：Louvain 跑在 **canonical
+概念图**上（关系两端经 `cluster_map` 映射，所以社区天然跨文档），`seed=42`
+确定性，igraph 优先，已存 `centrality`。`concept_clusters` 提供合并簇。
+
+本特性**不引入任何新的图算法**，只是把这些资产聚合出来并给出可视化出口。
+
+> **订正（T1 评审）**：本节初稿写过「`concept_clusters_count` / `distinct_cluster_count`
+> 已是现成的 O(1) 查询」，两处都错。`COUNT(DISTINCT canonical_id)` 在 200 万行上不是
+> O(1)；更要紧的是这两个方法**没有 `USABLE_STATUSES` 过滤**，复用它们会把已弃用成员
+> 算进收敛率、直接违反 §3.5 的口径。收敛率必须自己按口径重算，不得复用。
+
+### 3.2 效率：挂到既有的一次图构建上，绝不新起全图扫描
+
+`rebuild_communities` 内部已经把全部关系映射到 canonical 并累加了整数边权
+（`ew`）与 `membership`。两个新产物**在那次构建里顺带算出**：
+
+- **跨板块边** = 把 `ew` 按 `membership` 折叠。相对已有工作量近似免费。
+- **来源画像** = 需要 `knowledge_objects → concept_clusters → community_members`
+  的一次 join。这是新增扫描，但与社区构建同批、同一个 `kg_mutation_seq` 版本闸，
+  不给在线请求付这个代价。
+
+在线端点只读预计算产物 + 几个廉价计数，**不做全表扫**。
+
+**T1 评审补记 —— 三条全表重活，同一量级，都必须进预计算，不得挂在请求路径上**：
+
+| 查询 | 形态 | SQLite | PostgreSQL 16 |
+|---|---|---|---|
+| `cluster_size_histogram` | 全扫 + 每行一次对象匹配 + 分组聚合 | 300 ms | 197 ms（Hash Left Join + HashAggregate，已溢盘） |
+| `largest_clusters(20)` | 同形状扫描分组，**之后还多一次排序**（LIMIT 只截断输出） | 178 ms | 152 ms（Hash Join + HashAgg + top-N heapsort） |
+| `relation_provenance_counts` | 全扫 + 两个端点匹配 | 1 039 ms | 234 ms（**Parallel** Hash Left Join ×2，2 worker） |
+
+数字是本机同一批合成数据（30 万对象 / 30 万簇行 / 60 万边）的**热态**实测，仅用于比较
+两个后端的**相对**量级：PG 在簇查询上快约 1.5×、在边查询上快约 4.4×（后者来自并行顺扫）。
+
+**别把热态数字线性外推成生产耗时。** 第三条的冷态代价曾被外推成「约 40 秒」，那个数字
+站不住：外推基于 5.2 万边全部命中页缓存的读数，而 437 GB 库上一行都不在缓存里。同一条
+查询在本机 5.1 GB 真实库上（5.2 万边）冷跑 1 165 ms、暖态 217 ms——差 5 倍，而那还只是
+生产规模的 0.6 %。仓库有同形状的实测数据点：`relation_connected_object_ids` 那次事故是
+835 万边**冷扫 39 分钟**，而那条查询**没有**每行两次 PK 探测。SQLite 侧冷态应按
+「与那个 39 分钟数据点同量级或更差」估；PG 侧明显更好但仍是全表级，冷态一样受随机 IO
+支配。**不要在任何注释里留诱人的秒数。**
+
+另两点从实测计划里读出来的、T2/T3 要接手的事：
+
+- 两条簇查询的 PG `HashAggregate` 在 30 万行就已溢出到磁盘（Planned Partitions 4，
+  Disk Usage ~7 MB），规模上去会放大。
+- `relation_provenance_counts` 的外层在 PG 上目前走 `GroupAggregate` + 一次
+  `external merge sort`——规划器对那个巨大的 CASE 表达式估不出基数（以为有 60 万个
+  分组）。把它挪进预计算时，这里还有一次「让分组走 HashAggregate」的优化空间。
+
+推论：A2 收敛率虽然是批 1 特性，它的两条查询也必须走预计算，不能因为「只是个卡片」
+就放进在线路径。
+
+### 3.3 新鲜度 —— 逐指标标注，不是整体挂个横幅
+
+沿用社区层已有的 `unified_kg_state.community_seq` 版本闸语义：产物与社区同批产出、
+同批失效。产物缺失或过期时**明确提示并给出整理入口**，绝不静默出一份陈旧或空白的报告。
+
+**要求升级（2026-07-25，有真实教训）**：仅在报告整体挂一个「可能过期」的横幅**不够**。
+
+事件经过：在生产 base 库上查到 `communities` 有 88,580 个板块、最大 31,998、平均 19.3，
+据此推出「约 75–80% 的 canonical 没进社区，图散成一地」这样一个关于图结构的重大结论 ——
+随后得知**该库尚未 rebuild**，社区可能建于一个早得多、小得多的 KG 状态。整个推断作废。
+
+如果拿着数据的人会这样误读，读报告的人只会更容易。所以：
+
+- **每个来自预计算产物的数字，都要带上它建于哪个 `kg_mutation_seq`、落后当前多少。**
+- 尤其危险的是**同屏混排实时数字与快照数字**：簇大小直方图是实时 `USABLE` 口径，
+  板块规模来自上次社区重建的快照。两者并列而不标注来源，读者没有任何线索分辨。
+
+`unified_kg_state` 已经存了判定所需的全部字段：`kg_mutation_seq`（当前）、
+`community_seq` / `cluster_mutation_seq` / `canonical_rel_seq`（各产物建于何时）、
+`dirty`、`last_rebuild_at`、以及上次 rebuild 时的 `object_count` / `cluster_count`
+（与当前真实计数一比即可量化陈旧程度）。T3 的端点必须把这些透出，T4 必须渲染出来。
+
+**T2 评审后的两条硬要求（2026-07-25）**：
+
+- **预计算必须有自己的新鲜度闸，不能跟社区图共用一个。** 生产 base 库在本特性上线
+  **之前**就已经 rebuild 过，`community_seq == kg_mutation_seq`。若产物跟着社区图的闸走，
+  部署之后任何一次非 force 的 `rebuild_communities` 都会在闸上直接返回，账本永远是空的：
+  用户只看得到「产物缺失」，唯一恢复手段是 `force=True`，也就是 §3.2 明说不该让用户付的
+  那笔钱。判据必须是「账本缺失 / 账本 seq ≠ 当前 `community_seq`」，而不是「图要不要重建」。
+  这一条同时让「预计算失败」可以自愈 —— 否则失败之后账本永远是空的、闸永远短路。
+  图新鲜而账本不新鲜时走「只补账本」：重建 canonical 边图并沿用库里**已有**的板块划分，
+  跳过 Louvain、跳过成员表整表重写、不重铸板块 id。
+
+- **零板块的库不写来源画像。** 对象有、关系没有的库算不出「主体板块」，每个来源的
+  `mainstream_share` 都会是 0.0；那张表单独看是在说「所有来源都关联稀疏」。账本里的
+  `head_communities: 0` 分辨得出来，但明细表会被单独查询、单独渲染。所以这一档让产物
+  **真的缺失**（不写账本行、不写明细行），而不是写一张全 0 的表再要求下游先读账本。
+  缺失是诚实的，全 0 不是。这是账本里**唯一**允许缺席的一份，写入口的守卫会复核
+  「确实一个板块都没有」，其余四份少写一行一律硬失败。
+
+**边界（这是 DFX 诊断工具，不是产品引导）**：本视图的职责到「如实标注」为止 ——
+标出版本戳、落后量、以及每个数字的口径来源。**不做**折叠/置灰/催促整理这类替读者
+做判断的产品行为，也不为「整理要跑多久」承担期望管理。看报告的是知道自己在看什么的人。
+
+### 3.35 后端定位：PostgreSQL 一等，SQLite 兼容层
+
+产品决策（2026-07-25）：**生产环境近期迁移到 PostgreSQL，SQLite 迁移完成后不再用于
+生产。**本特性据此定位：
+
+- **双后端 parity 仍是硬门，不因此松动**：两侧都必须实现、都必须有守卫、语义必须等价。
+  只做一侧会直接撞架构守卫，也违反「SQLite remains the shipped default」。
+- **但 parity 要求的是语义等价，不是 SQL 逐字相同，更不是性能相同。** 允许两侧查询
+  形态分岔，条件是：docstring 写明为什么分岔，且双后端一致性测试真的比对返回值。
+- **性能调优只投 PostgreSQL**。SQLite 侧的标准是「正确、有界、不 OOM、不长时间持锁」，
+  不为它做预计算调优。
+
+PG 上可用而 SQLite 没有对等物的手段，按与本特性的相关度排序：
+
+| 手段 | 解决什么 | T1 兑现情况 |
+|---|---|---|
+| hash join + 并行顺扫 | `relation_provenance_counts` 在 SQLite 上是 nested loop + 每行两次 PK 探测；PG 规划器改选 hash join | ✅ 实测生效：2 个 worker，同规模快 4.4× |
+| 窗口函数 | `community_overview` 的 limit+2 次 round-trip（PG 上是真成本，SQLite 进程内无所谓） | ✅ PG 改为一条 `ROW_NUMBER() OVER (PARTITION BY …)`（限制在已选 ≤200 个板块上）；SQLite 保持逐板块有界 top-K——那边换窗口函数实测**慢 17~40 倍** |
+| `REPEATABLE READ` | 快照一致性（§3.3、T1 评审 M2） | ✅ PG 侧 `BEGIN … READ ONLY` + REPEATABLE READ；SQLite 侧 `BEGIN DEFERRED` 起 WAL 快照 |
+| `FILTER (WHERE …)` | 分桶聚合，比 CASE 链更清晰 |
+| BRIN 索引 | 800 万边表按 notebook 的范围扫描，空间开销极小 |
+
+**刻意不用物化视图**：SQLite 无对等物，用它会把「形态分岔」升级成「结构性分岔」
+（一侧有对象、一侧没有），parity 守卫无从比对。预计算产物用普通表，两侧同构。
+
+**迁移覆盖：已由既有守卫自动兜住，但连带改动比表面多。**
+
+核查结论（2026-07-25）：迁移 CLI **不维护自己的表清单** —— `app/migration/sqlite_to_postgres.py`
+从 `POSTGRES_BUSINESS_TABLES`（`postgres/schema_manifest.py`）枚举，并与
+`_sqlite_business_tables` 对账。所以只要新表进了 manifest，迁移覆盖是自动的；
+漏进 manifest 则由 `tests/postgres/test_schema_parity.py::test_fresh_sqlite_v31_matches_reviewed_postgres_contract`
+报红（它拿全新 SQLite 库比对已评审的 PG 契约）。**不需要额外去改迁移 CLI。**
+
+但 T2 的连带改动比「加两张表」多：
+
+1. SQLite `_migration_32` + `SCHEMA_VERSION` 31 → 32（**追加**，不得塞进已封版的旧迁移）
+2. PostgreSQL 打包迁移 `000N` + MANIFEST bump
+3. 两张表加进 `POSTGRES_BUSINESS_TABLES`
+4. ⚠ **上面那个测试的名字里钉着 `v31`**，且仓库里散布着大量 `migrate() == N` 形式的
+   断言 —— 历史上有过「漏改 68 处、只有 CI 抓到」的先例。bump 版本号必须全仓搜一遍，
+   不能只改看得见的那几处。
+
+### 3.4 存储
+
+两张新表（SQLite 迁移 `_migration_32` + `SCHEMA_VERSION` 32，PostgreSQL 侧同批
+打包迁移并 bump MANIFEST —— 两个后端 parity 是红线）：
+
+```
+kg_community_edges(notebook_id, src_community_id, dst_community_id, weight)
+kg_source_profiles(notebook_id, source_id, n_objects, n_graph_objects,
+                   top_community_id, top_share, community_spread, mainstream_share)
+kg_analysis_artifacts(notebook_id, kind, kg_mutation_seq, payload, created_at)
+```
+
+**T2 评审后的三处订正（2026-07-25）**:
+
+1. **字段叫 `n_graph_objects`,不叫 `n_concepts`。** 语义一字未改 —— 它是「该来源落进
+   主题板块的对象数」,四类对象都算,不是 `object_type='concept'` 的对象数。原名与口径
+   正相反,名字必须说实话。
+2. **明细表都不带 `level` 列。** `community_seq` 本身不分 level,一次预计算产出的永远是
+   一套自洽的产物;它描述的 level 记在账本 payload 里。给三张表里的一张单独加 level,
+   删除口径就会三处不一致(level=1 的重建抹掉 level-0 账本、却留下 level-0 明细行)。
+3. **`kg_community_edges` 有硬性行数上限**(按 weight 降序截断,常量
+   `MAX_PERSISTED_COMMUNITY_EDGES`)。跨板块边数没有任何结构性约束,本机三个样本
+   (边/节点比 1.4、每板块跨边数 0 → 0.75 → 0.41 不单调)撑不起「生产上也是 1%」的外推;
+   俯瞰图本来只画 top-N,无界明细表在 437GB 库上是纯风险。截断绝不静默:账本记
+   `edges` / `edges_total` / `truncated` / `edge_limit`。
+
+`outlier_score` 的定义必须是**确定性、零 LLM、可解释**的：来源的概念落在主体板块
+（按全库规模排序的头部板块集合）之外的比例，配合 `community_spread`（该来源概念
+散布的板块数）。判据写进代码注释，不做成不可解释的打分。
+
+### 3.5 口径必须与产品一致
+
+沿用 `kg_quality_audit.py` 已经踩过 9 轮评审的那套口径：
+
+- 对象只算 `USABLE_STATUSES`；被排除的量单独报，不凭空消失。
+- 边只算 `review_status != 'rejected'`，且**两端都必须是本 notebook 的可用对象**。
+- 任何抽样都必须标注；跨来源统计量（收敛率）走全库合并簇，不抽样。
+
+两个口径决策（T1 评审后定，2026-07-25；D1 于同日修订为「按类型分组」）：
+
+- **簇大小分布按 `object_type` 分组返回，四类都要；`largest_clusters` 仍只取
+  `concept`。** `concept_clusters` 同时装 concept / claim / formula / procedure 四类
+  （本机库实测取值就是这四个，与 `extraction_profiles.OBJECT_TYPE_LABELS` 一致），
+  后三类只做精确种子合并、天然几乎全是单元素簇，混在一起算一份收敛率会被稀释成噪音。
+  所以直方图**每类各返回一份**（成员行数 / 簇数 / 空簇数 / 7 个桶），另加**一份全类型
+  合计**方便看总量。最大簇榜单仍只算 concept（整句 claim 当名字上榜没有意义），载荷里
+  用 `object_type` 显式声明这个口径；其他类型的计数由直方图报出，不在榜单查询里重扫。
+
+  本机 base 库 `nb-b37185f4ae` 上这个决策的效果（改前 = 四类混算一份）：
+
+  | | member_rows | clusters | 收敛率 |
+  |---|---|---|---|
+  | 改前（混算） | 41 713 | 37 340 | **10.48 %** |
+  | 改后 · concept | 9 400 | 6 487 | **30.99 %** |
+  | 改后 · claim | 29 126 | 27 779 | 4.62 % |
+  | 改后 · formula | 2 038 | 1 929 | 5.35 % |
+  | 改后 · procedure | 1 149 | 1 145 | 0.35 % |
+
+  concept 的真实收敛率是 31 %，被 claim（占 70 % 行数）稀释成了 10 %——差 3 倍。
+
+  出现这四类之外的 `object_type` 时（knowhow 投影用**用户的列名**建自定义类型，本机
+  `knowledge_objects` 里真实出现过「周几」「根因分析动作」这类值），归进一个显式的
+  「其他」分组并报出**类型个数**；⚠ **类型名不进返回载荷**——那是用户的表头、属于内容，
+  脱敏由上层决定，查询层不制造泄漏面。
+- **簇大小分桶的顶档叫 `51+` 而不是 `50+`。** 实际语义是 `>50`（恰好 50 归入
+  `11-50`），而桶名会直接上屏给用户。
+
+另有一处**同一报告内两种口径并存**必须在响应里说清：簇大小直方图是实时 `USABLE`
+口径，而板块的 `size` 读的是上一次社区重建的快照（可能含已全部弃用的成员）。
+不说清用户会拿两个数字对不上。
+
+## 四、界面词
+
+新增词条（须同步进 `AGENTS.md` 界面词汇表 + `check_ui_vocabulary.py` 是硬门）：
+
+| 内部词 | 界面词 |
+|---|---|
+| community / 社区 | 主题板块 |
+| canonical 簇 / cluster | 合并后的知识对象 |
+| outlier source | 关联稀疏的来源 |
+| centrality | 核心度 |
+| modularity / membership | （不上屏） |
+
+「节点」「边」在图谱技术上下文里本就放行（见词汇表「刻意保留、不要误杀」），
+板块俯瞰图沿用。
+
+## 五、批 1 的任务分解（子代理逐任务）
+
+| # | 任务 | 交付 |
+|---|---|---|
+| T1 | 只读聚合查询层 | ports + sqlite/postgres store + facade + ownership_manifest 登记；簇大小分布、板块列表+代表概念、边出处构成 |
+| T2 | 预计算与迁移 | `_migration_32` 双后端；在 `rebuild_communities` 内顺带产出跨板块边与来源画像 |
+| T3 | service + 端点 | `KgAnalysisService`（照 `checkup` 模式：只读、不 import facade、按 seq 记忆化）；`GET /notebooks/{id}/kg-analysis`、`GET .../kg-analysis/sources` |
+| T4 | 前端视图 | 知识图谱视图头部新入口；板块俯瞰图 + 收敛率卡片 + 关联稀疏来源表；界面词映射 |
+| T5 | 文档同步 | README ×2、AGENTS、CLAUDE、architecture、词汇表 |
+
+每个任务完成后跑规格评审 + 代码质量评审，再推进下一个。
+
+批 2–4 的任务分解在各自批次开工前细化 —— 批 1 会暴露真实的数据形态（板块数量与
+大小分布、预计算耗时），那些数字会改变后续批次的取舍，现在写死是空想。
+
+## 六、待生产库验证的前提
+
+本设计假定生产 base 库**已经建好社区**。需要在生产库上确认（只读）：
+
+```sql
+SELECT COUNT(*) FROM communities WHERE notebook_id='nb-4ad4ba7939';
+SELECT size, COUNT(*) FROM communities WHERE notebook_id='nb-4ad4ba7939'
+  GROUP BY size ORDER BY size DESC LIMIT 20;
+```
+
+若社区数为 0（大库守卫拒过，或 `community_layer_enabled` 被关），C1/C2/E1 全部落空，
+需先跑一次社区构建。若社区数量极大而普遍很小（碎片化），「板块地图」的可读性需要
+分层（level>0）或按规模截断 + 明确声明截断量。
+
+实现对这两种情况都必须**明确降级并提示**，不得出一张空图或一张几万个点的图。

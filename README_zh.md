@@ -140,7 +140,7 @@ CLI 使用的 PostgreSQL 目标；单独设置它不会启动任何任务，也�
 
 在 `DATABASE_URL` 仍指向 SQLite 时，运维人员可以运行受保护的单向
 SQLite→PostgreSQL 影子同步：preflight 绑定并确认两端数据库身份，`start-forward` 安装
-run-scoped capture/guard 并复制一致的 61 表 baseline，随后由一个受监督的前台 worker
+run-scoped capture/guard 并复制一致的 64 表 baseline，随后由一个受监督的前台 worker
 持续应用 SQLite change log。`status` 提供脱敏的 lag/lease/poison 状态，
 `verify --level full` 执行 barrier-aware 一致性校验。worker 使用数据库时钟的排他 lease，
 对 PostgreSQL 瞬态失败重试，确定性 poison 会 fail-stop；清理策略至少保留已验证进度之后

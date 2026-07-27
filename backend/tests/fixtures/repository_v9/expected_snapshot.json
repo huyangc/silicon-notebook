@@ -1232,6 +1232,11 @@
         "type": "index"
       },
       {
+        "name": "idx_kg_source_profiles_nb_mainstream",
+        "sql_sha256": "763b739c36d1375a31dbccc46580ae29d157c850f0a7b76256f78b0a28d28a8a",
+        "type": "index"
+      },
+      {
         "name": "idx_knowhow_cell_code_row",
         "sql_sha256": "3e0d3d7b8b2da455b201f938d9c602dc97e17aa38fdd60a01f8a72e5649d2a0f",
         "type": "index"
@@ -1647,6 +1652,11 @@
         "type": "table"
       },
       {
+        "name": "kg_analysis_artifacts",
+        "sql_sha256": "bff130d694527e6765309396df790f562fcb896d033a0bb7fd6e5028ffa7a069",
+        "type": "table"
+      },
+      {
         "name": "kg_build_jobs",
         "sql_sha256": "b3a53939a3bb75d8387891e998b125eccea586be4937a872efd4be021ed40788",
         "type": "table"
@@ -1659,6 +1669,11 @@
       {
         "name": "kg_cluster_scratch",
         "sql_sha256": "99d623abe3512d8074f90faea3ba34e41af1042e09da59e2c8fe4432a08e7e0c",
+        "type": "table"
+      },
+      {
+        "name": "kg_community_edges",
+        "sql_sha256": "67a61967a7d57abb96c93cae063e4f692b20d542a58b16331b800202be5ead2b",
         "type": "table"
       },
       {
@@ -1704,6 +1719,11 @@
       {
         "name": "kg_relation_completion_state",
         "sql_sha256": "942068821933bb8fdcc4fe1e60c2ef90fc715668dccd156975daa701bc429604",
+        "type": "table"
+      },
+      {
+        "name": "kg_source_profiles",
+        "sql_sha256": "8fa091f5714688df621cc81935d999156feab2545cfec166206e55354f5f14a1",
         "type": "table"
       },
       {
@@ -1927,6 +1947,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 35
+    "user_version": 36
   }
 }

@@ -89,6 +89,10 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("kg", "conflicts", "pending"),
     ("kg", "conflicts", None, "confirm"),
     ("kg", "conflicts", None, "reject"),
+    # KG 质量分析视图(T3)的两个只读端点。路径里没有任何用户内容(第二段是固定的
+    # 字面量,分页/上限走查询串),所以整条路径可以原样进诊断快照,不必打 {redacted}。
+    ("kg-analysis",),
+    ("kg-analysis", "sources"),
     ("reports",),
     ("reports", "export"),
     ("reports", None),

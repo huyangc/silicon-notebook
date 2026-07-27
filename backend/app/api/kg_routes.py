@@ -1,9 +1,11 @@
-from typing import List, Optional
+from dataclasses import asdict
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     get_current_user,
+    kg_analysis_service,
     repository,
     require_notebook_access,
     require_notebook_read,
@@ -21,8 +23,15 @@ from app.models.kg import (
     ScaleIndexStatus,
     UnifiedKgStatus,
 )
+from app.models.kg_analysis import KgAnalysisResponse, SourceProfilePageResponse
 from app.repositories.ports import KgBuildAlreadyRunning
 from app.services import background_jobs
+from app.services.knowledge_contracts import (
+    COMMUNITY_OVERVIEW_MAX,
+    COMMUNITY_TOP_MEMBERS_MAX,
+    KG_COMMUNITY_EDGES_MAX,
+    KG_SOURCE_PAGE_MAX,
+)
 
 
 router = APIRouter()
@@ -400,3 +409,69 @@ def merge_review_job(notebook_id: str) -> MergeReviewJob:
         return MergeReviewJob(**repository().merge_review_job_status(notebook_id))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+# ---------------------------------------------------------------------------
+# KG 质量分析视图(T3)。两个端点都是**纯只读**:只读 T2 落库的预计算产物 + 板块表,
+# 一次都不跑那三条全表重活(生产库 200 万簇行 / 836 万边)。`require_notebook_read`
+# 守卫(只读成员也能看,与 /checkup、/analytics 一致);响应里全是内部代号,界面词
+# 由 T4 的前端映射。
+
+
+@router.get(
+    "/notebooks/{notebook_id}/kg-analysis",
+    response_model=KgAnalysisResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def kg_analysis_overview(
+    notebook_id: str,
+    boards: int = Query(50, ge=1, le=COMMUNITY_OVERVIEW_MAX),
+    top_members: int = Query(5, ge=1, le=COMMUNITY_TOP_MEMBERS_MAX),
+    edges: int = Query(200, ge=1, le=KG_COMMUNITY_EDGES_MAX),
+) -> KgAnalysisResponse:
+    """KG 质量分析总览:状态 + 五份预计算产物 + 主题板块列表 + 跨板块边 top-N。
+
+    三个上限都在这里声明(FastAPI 直接 422 掉越界值),service 与 store 各自还会再
+    clamp 一次 —— 纵深而不是重复:越界在这一层是**用户输入错误**(响亮拒绝),在下面
+    两层是**不变式**(任何调用方都不可能拿到无界返回)。
+
+    ``level`` **刻意不是参数**:三张产物表都没有 level 维度,让调用方指定只会造出
+    「板块列表是 level 1、跨板块边是 level 0」这种自相矛盾的报告。service 从账本里
+    读出产物描述的那个 level 并回报在 ``level`` 字段上。
+    """
+    return KgAnalysisResponse(
+        **asdict(
+            kg_analysis_service().overview(
+                notebook_id,
+                board_limit=boards,
+                top_members=top_members,
+                edge_limit=edges,
+            )
+        )
+    )
+
+
+@router.get(
+    "/notebooks/{notebook_id}/kg-analysis/sources",
+    response_model=SourceProfilePageResponse,
+    dependencies=[Depends(require_notebook_read)],
+)
+def kg_analysis_sources(
+    notebook_id: str,
+    limit: int = Query(50, ge=1, le=KG_SOURCE_PAGE_MAX),
+    offset: int = Query(0, ge=0),
+    order: Literal["sparse", "connected"] = Query("sparse"),
+) -> SourceProfilePageResponse:
+    """来源画像的一页(默认「与主体板块最不连通」在前)。
+
+    **必须分页**:生产 base 库有 48 836 个来源,一次全返回既是几 MB payload 也没人
+    读得完。排序在库内走 ``idx_kg_source_profiles_nb_mainstream``,并列按 source_id
+    消歧(没有它,两页之间会重复/漏行,而且两个后端各给一种顺序)。
+    """
+    return SourceProfilePageResponse(
+        **asdict(
+            kg_analysis_service().source_profiles(
+                notebook_id, limit=limit, offset=offset, order=order
+            )
+        )
+    )
