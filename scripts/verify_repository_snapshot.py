@@ -2392,6 +2392,28 @@ MIGRATION_MANIFEST[(35, 36)] = {
     "views": {},
 }
 
+# v37: indexed per-source, per-element-type keyset order for bounded
+# collection enumeration (formula/table/image/code_block listings).
+SOURCE_ELEMENT_TYPE_INDEX = {
+    "idx_source_elements_source_type":
+        """CREATE INDEX idx_source_elements_source_type
+                  ON source_elements(source_id, element_type, created_at, id)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 37, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **SOURCE_ELEMENT_TYPE_INDEX},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(36, 37)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": SOURCE_ELEMENT_TYPE_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

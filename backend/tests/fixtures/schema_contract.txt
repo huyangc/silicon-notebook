@@ -628,6 +628,7 @@ idx_source_authors_nb
 idx_source_authors_source
 idx_source_elements_source
 idx_source_elements_source_created
+idx_source_elements_source_type
 idx_source_paper_meta_nb
 idx_sources_memory_id
 idx_sources_nb_parse_status

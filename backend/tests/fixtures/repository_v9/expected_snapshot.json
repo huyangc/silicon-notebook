@@ -1473,6 +1473,11 @@
         "type": "index"
       },
       {
+        "name": "idx_source_elements_source_type",
+        "sql_sha256": "06470d736236f9e2c0f392dd2a4bc062ba258c12578f696ca225c4ec227120a7",
+        "type": "index"
+      },
+      {
         "name": "idx_source_paper_meta_nb",
         "sql_sha256": "abb231c48578b560f95e890b45ae80a7ee5de30a54ecec7c42d88d316373f91c",
         "type": "index"
@@ -1948,6 +1953,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 36
+    "user_version": 37
   }
 }

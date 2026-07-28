@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 14
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 15
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -52,10 +52,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 14
-    assert migrator.migrate() == 14
-    assert migrator.current_version() == 14
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 14
+    assert migrator.migrate() == 15
+    assert migrator.migrate() == 15
+    assert migrator.current_version() == 15
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 15
 
 
 @pytest.mark.postgres_integration
@@ -63,7 +63,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 14
+    assert migrator.migrate() == 15
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -146,7 +146,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 14
+        assert PostgresMigrator(databases[1]).migrate() == 15
     finally:
         for database in databases:
             database.close()
@@ -182,6 +182,7 @@ def test_packaged_index_migration_phases_are_exact():
         (12, "relation_completion_state"),
         (13, "ask_job_asked_at"),
         (14, "kg_analysis_precompute"),
+        (15, "source_element_type_index"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -262,6 +263,11 @@ def test_packaged_index_migration_phases_are_exact():
     # backs a declared primary key with its own index.
     v14_indexes = index_declarations(14)
     assert v14_indexes == [(False, "idx_kg_source_profiles_nb_mainstream")]
+
+    # Migration 15 installs the per-source, per-element-type keyset ordering
+    # backing bounded collection enumeration (formula/table/image/code_block).
+    v37_index = index_declarations(15)
+    assert v37_index == [(False, "idx_source_elements_source_type")]
 
 
 def test_initial_migration_guards_utf8_before_business_ddl():
