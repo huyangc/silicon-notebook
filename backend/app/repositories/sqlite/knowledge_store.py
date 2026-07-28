@@ -943,6 +943,49 @@ class KnowledgeStore:
 
     # --------------------------------------------------------------- list
     @staticmethod
+    def knowledge_object_page_rows(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        statuses: Sequence[str],
+        after: tuple[object, str] | None,
+        limit: int,
+    ) -> "List[sqlite3.Row]":
+        """One keyset page of usable objects of one type — the enumeration
+        twin of ``list_knowledge_page``'s OFFSET paging.
+
+        OFFSET is fine for a UI page jump but wrong for enumeration: page N
+        costs O(N·page) and a concurrent insert shifts every later page.  The
+        keyset rides ``idx_knowledge_objects_nb_type_created``
+        (notebook_id, object_type, created_at, id) with a row-value comparison
+        so each page is O(limit) and stable under inserts.
+
+        ``statuses`` is applied in SQL and comes from the caller (the executor
+        passes the same tuple the counting path uses).  Empty statuses return
+        nothing rather than everything: "no usable status" is a meaningful,
+        empty answer, whereas dropping the predicate would leak deprecated
+        objects into a list whose total was computed without them.
+        """
+        values = [str(value) for value in statuses if value]
+        if not values:
+            return []
+        marks = ",".join("?" for _ in values)
+        params: List[object] = [notebook_id, object_type, *values]
+        clause = ""
+        if after is not None:
+            clause = "AND (created_at, id) > (?, ?) "
+            params.extend([after[0], after[1]])
+        params.append(max(1, int(limit)))
+        return db.execute(
+            "SELECT id, object_type, payload, evidence, status, created_at "
+            "FROM knowledge_objects "
+            "WHERE notebook_id = ? AND object_type = ? "
+            f"AND status IN ({marks}) {clause}"
+            "ORDER BY created_at, id LIMIT ?",
+            params,
+        ).fetchall()
+
+    @staticmethod
     def list_knowledge_page(
         db: sqlite3.Connection,
         notebook_id: str,

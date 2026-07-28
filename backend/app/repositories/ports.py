@@ -679,6 +679,54 @@ class SourceStorePort(Protocol):
         simply do not appear in the result.
         """
         ...
+    def element_page_rows(
+        self,
+        db: object,
+        source_id: str,
+        element_type: str,
+        after: tuple[object, str] | None,
+        limit: int,
+    ) -> list[Any]:
+        """One keyset page of ONE source's elements of ONE type, ordered by
+        ``(created_at, id)`` ascending and bounded by ``limit``.
+
+        ``after`` is the ``(created_at, id)`` pair of the last row the caller
+        consumed, or ``None`` for the first page; ``created_at`` must be the
+        value THIS store handed back (SQLite text / PostgreSQL ``datetime``),
+        never a reformatted one — the cursor is opaque and process-local for
+        exactly that reason (see ``app.services.collection_enumeration``).
+
+        Index path is part of the contract: ``idx_source_elements_source_type``
+        (source_id, element_type, created_at, id) makes this an equality seek
+        on the first two columns plus a range on the rest, so the page cost is
+        O(limit) regardless of how many prose elements the source holds and no
+        ORDER BY sort is materialized.  Rows carry id / source_id /
+        element_type / location_label / text / created_at / asset_id.
+
+        ``asset_id`` is projected out of ``metadata`` IN SQL, never by
+        selecting the column and picking a key in Python: a table element's
+        metadata holds its full rendered HTML, so selecting it would move
+        megabytes across a page of tables to read one short id.  The row is
+        visited either way; what the projection saves is transfer and memory.
+        """
+        ...
+    def source_display_rows(
+        self, db: object, source_ids: Sequence[str]
+    ) -> list[Any]:
+        """``id / notebook_id / title / file_name / is_paper / paper_title``
+        for the given sources, on the CALLER's connection.
+
+        ``notebook_id`` rides along because an explicitly requested source has
+        to be proven in-scope, and doing that here is one primary-key read
+        instead of re-listing every notebook's sources to look for the id.
+
+        A bounded primary-key lookup (plus the 1:1 ``source_paper_meta``
+        outer join) used to label enumerated items.  The twin of
+        ``source_metadata``, which opens its own connection and hydrates
+        summary/doc_type as well; enumeration needs neither, and taking the
+        caller's connection keeps a whole scope on one connection.
+        """
+        ...
     def source_from_row(self, db: object, row: object, *, paper_meta: object = SOURCE_PAPER_META_UNSET) -> SourceSummary: ...
     def sources_from_rows(self, db: object, rows: list[object]) -> list[SourceSummary]: ...
     def extraction_warning(self, db: object, source_id: str) -> str | None: ...
@@ -819,6 +867,33 @@ class KnowledgeStorePort(Protocol):
     def insert_completion_relations(connection: object, rows: object) -> int: ...
     @staticmethod
     def neighbor_relation_rows(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
+    @staticmethod
+    def knowledge_object_page_rows(
+        db: object,
+        notebook_id: str,
+        object_type: str,
+        statuses: Sequence[str],
+        after: tuple[object, str] | None,
+        limit: int,
+    ) -> list[Any]:
+        """One keyset page of one notebook's knowledge objects of ONE type,
+        ordered by ``(created_at, id)`` ascending and bounded by ``limit``.
+
+        ``statuses`` is the caller's usability predicate and stays IN THE
+        QUERY: the enumeration executor passes exactly the tuple the counting
+        path uses, so "the map says 89" and "the list has 89" cannot drift
+        apart.  ``after`` is the opaque ``(created_at, id)`` pair of the last
+        consumed row (see ``element_page_rows``).
+
+        Index path: ``idx_knowledge_objects_nb_type_created``
+        (notebook_id, object_type, created_at, id) — equality on the first two
+        columns, range on the rest, no sort.  ``status`` is not in that index
+        and is applied as a residual filter on the visited rows, which is
+        bounded by ``limit`` plus however many unusable objects are
+        interleaved.  Rows carry id / object_type / payload / evidence /
+        status / created_at.
+        """
+        ...
     @staticmethod
     def notebook_tier_row(db: object, notebook_id: str) -> Any: ...
     @staticmethod

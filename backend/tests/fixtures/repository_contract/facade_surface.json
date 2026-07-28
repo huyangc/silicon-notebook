@@ -2771,6 +2771,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.collection_enumeration",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.concept_detail",
         "target": "_runtime"
       },

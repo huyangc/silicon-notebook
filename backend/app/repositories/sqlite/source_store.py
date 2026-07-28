@@ -283,6 +283,74 @@ class SourceStore:
                 out.append((row["source_id"], row["element_type"], int(row["c"])))
         return out
 
+    # --------------------------------------- typed-collection enumeration
+    def element_page_rows(
+        self,
+        db: sqlite3.Connection,
+        source_id: str,
+        element_type: str,
+        after: tuple[object, str] | None,
+        limit: int,
+    ) -> List[sqlite3.Row]:
+        """One keyset page of ``(source_id, element_type)`` ordered by
+        ``(created_at, id)``.
+
+        The row-value comparison is deliberate: SQLite optimizes
+        ``(a, b) > (?, ?)`` against a multi-column index (since 3.15), so this
+        stays an index range seek on ``idx_source_elements_source_type``.  The
+        equivalent ``created_at > ? OR (created_at = ? AND id > ?)`` spelling
+        does NOT — it degrades into a scan of the whole (source, type) range
+        on every page, which is exactly the cost this cursor exists to avoid.
+
+        ``after`` carries values this adapter returned earlier; nothing is
+        reparsed or reformatted, so a cursor round trip cannot skip or repeat
+        a row through a timestamp-formatting difference.
+
+        ``asset_id`` is projected with JSON1 ``json_extract`` rather than by
+        selecting ``metadata``: an image needs its short asset id, while a
+        table's metadata carries the whole rendered HTML that this listing
+        deliberately does not transfer.
+        """
+        params: List[object] = [source_id, element_type]
+        clause = ""
+        if after is not None:
+            clause = "AND (created_at, id) > (?, ?) "
+            params.extend([after[0], after[1]])
+        params.append(max(1, int(limit)))
+        return db.execute(
+            "SELECT id, source_id, element_type, location_label, text, created_at, "
+            "json_extract(metadata, '$.asset_id') AS asset_id "
+            "FROM source_elements WHERE source_id = ? AND element_type = ? "
+            f"{clause}"
+            "ORDER BY created_at, id LIMIT ?",
+            params,
+        ).fetchall()
+
+    def source_display_rows(
+        self, db: sqlite3.Connection, source_ids: Sequence[str]
+    ) -> List[sqlite3.Row]:
+        """Labels for enumerated items, on the caller's connection.
+
+        ``source_paper_meta`` is joined here rather than queried separately so
+        a grounded paper title costs no extra round trip; the join side is 1:1
+        on the source primary key.
+        """
+        ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
+        if not ids:
+            return []
+        out: List[sqlite3.Row] = []
+        for offset in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[offset:offset + self.IN_CHUNK]
+            marks = ",".join("?" for _ in batch)
+            out.extend(db.execute(
+                "SELECT s.id, s.notebook_id, s.title, s.file_name, "
+                "m.is_paper, m.paper_title "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id = s.id "
+                f"WHERE s.id IN ({marks})",
+                batch,
+            ).fetchall())
+        return out
+
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:

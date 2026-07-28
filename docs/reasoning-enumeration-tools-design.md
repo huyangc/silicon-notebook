@@ -105,8 +105,14 @@
 - `enumerate_kg_objects(scope, object_type)`：走现成 `(notebook_id, object_type,
   created_at, id)` 索引；item 含 object_id / name / section_path / 有界来源引用。
 - **一次动作在预算内自动翻页**：直到游标耗尽或触及 `enum_rows_per_run` / `enum_pages_per_run`
-  / `structured_payload_chars`(256k 复用) 任一上限。模型不感知 cursor；同一集合重复请求时，
+  / `structured_payload_chars`(256k 复用) 任一上限。**页预算只计同一源的第 2 页及之后**（真正
+  的额外往返；源访问次数由行预算天然约束）。模型不感知 cursor；同一集合重复请求时，
   若上次因预算截断且本 run 预算有余则从内部续游标，否则 skip(already_enumerated)。
+- **游标携带作用域身份**：cursor 必须带开场指纹（元素=作用域 (source,变更信号) 指纹；
+  KG=参与 notebook 的 kg_mutation_seq 向量）与累计 returned；续跑先比对，作用域已变→
+  `concurrent_change`，绝不静默从头重跑；分母校验在链末端按累计 returned 生效。合同不变式：
+  `complete=false ⟹ cursor 非空`，唯一例外 `truncated_reason=concurrent_change`。显式
+  `source_id` 请求直接对该源发索引分页查询，不得做「不在计划⇒零」推断（首解析窗口保护）。
 - complete 判定：作用域游标耗尽 && 作用域指纹（源集合+变更信号 / kg_mutation_seq）首尾一致；
   否则 complete=false + `explicit_partial`（复用 `EXPLICIT_PARTIAL_OVERFLOW`）+
   truncated_reason（budget/payload/concurrent_change）。total 来自 2.2 缓存，取不到则省略。
@@ -153,8 +159,9 @@
 ### 2.6 前端
 
 - `workspace-model.ts` 增类型；`answer-panel.tsx` 增清单结果卡：按来源分组；formula →
-  `FormulaView`(KaTeX)、table → metadata.table_html（沿用来源详情 ElementBody 路径）、image →
-  AuthedImage、code_block → 代码块；KG 对象用 kg-type-mark 现有标签。完整/部分徽章与
+  `FormulaView`(KaTeX)、table → **text 摘录 + 跳转来源查看完整表格**（table_html 无界且截断
+  即碎，不进传输 item）、image → AuthedImage（item 携带有界 asset_id）、code_block → 代码块；
+  KG 对象用 kg-type-mark 现有标签。完整/部分徽章与
   explicit_partial 提示复用 Knowhow 卡样式；初始 20 行 + 客户端翻页。
 - 面向用户文案：「公式清单 / 表格清单 / 图片清单 / 代码块清单 / 概念清单 / 论断清单 /
   过程清单」「已全部列出 / 部分结果」——过词汇守卫。
@@ -166,8 +173,9 @@
 - 文档：docs/product-and-api*.md 契约表新增 enum_* 与工具说明；AGENTS.md「Architecture
   Baseline」与 CLAUDE.md 红线补「集合枚举工具」条目——并修订两处现有红线句
   「当前只有 Knowhow 支持完整枚举，其他对象集合仍是相关性结果」（PR-2 落地后不再成立，
-  fangan 同款表述在 fangan_done.md 记账）；architecture.md 补 collection_catalog 运行时
-  组件与两个新端口；README 中英一句能力入口。
+  fangan 同款表述在 fangan_done.md 记账）；architecture.md 补 collection_catalog /
+  collection_enumeration 运行时组件与全部新端口（T2 两个 + T3 三个）；首解析 under-count
+  窗口的披露口径一并写入；README 中英一句能力入口。
 - 测试：scripted fake chat client 驱动 reflect 返回 enumerate 动作，断言自动翻页/预算/
   complete/partial/取消/双后端 parity；离线测试钉「工具可达性与合同」，模型是否选用属真机评测
   （部署机手动对照）。
