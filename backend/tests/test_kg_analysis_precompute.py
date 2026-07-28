@@ -1789,10 +1789,11 @@ def test_a_library_without_boards_writes_no_source_profile_product(repo):
     assert "buckets" in artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"]
 
 
-# ------------------------------------------------- 两个闸的对称性(三个方向)
+# ------------------------------------------------- 两个闸的对称性(四个方向)
 # 这道闸是**对称的**:放松一边就会紧另一边。它当初是为了修 B1(「已部署库永不回填」)
-# 才加的;后来又发现它把「零板块」误判成「没建成」,让那类库每次刷新都重跑全部重活。
-# 三个方向必须**同时**钉住,只测一头的守卫会在下一次调参时静默失效。
+# 才加的;后来又发现它把「零板块」误判成「没建成」,让那类库每次刷新都重跑全部重活;
+# 再后来又发现那次修复顺手吞掉了「请求的 level 从没建过」(方向四)。四个方向必须
+# **同时**钉住,只测一头的守卫会在下一次调参时静默失效。
 
 _HEAVY_WORK = (
     "community_graph_rows",        # canonical 边图:生产 836 万边的一次 join
@@ -1909,6 +1910,77 @@ def test_a_never_built_library_really_builds(repo, monkeypatch):
     assert sorted(set(calls)) == sorted(_HEAVY_WORK), f"从没建过却短路了:{calls}"
     assert _boards(repo, notebook_id)
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+
+
+def _boards_at(repo, notebook_id: str, level: int) -> dict:
+    """按 level 查板块行 —— `_boards` 写死 level=0,方向四要比对的正是另一层。"""
+    with repo._connect() as db:
+        return {
+            row["id"]: int(row["size"])
+            for row in db.execute(
+                "SELECT id, size FROM communities WHERE notebook_id=? AND level=?",
+                (notebook_id, level),
+            )
+        }
+
+
+def test_a_never_built_level_really_builds_even_when_the_default_level_is_aligned(
+    repo, monkeypatch
+):
+    """方向四(请求的 level 没建过):不分 level 的账目替它说不了话。
+
+    `community_seq` 与 `kg_analysis_artifacts` 都没有 level 维度(设计 §3.4 订正 2
+    刻意去掉的)。方向一把「建过」的标记从**按 level 查的**板块数换成 seq 对齐 —— 于是
+    默认层建完之后,一次非 force 的 `rebuild_communities(..., level=1)`(库里一行
+    level-1 都没有)会满足闸、直接返回 0 而**根本不建那一层**;被它取代的旧判据反倒
+    建得出来。这是方向一那次修复的回归,codex 第 11 轮 P2-1。
+
+    补法只落在闸上:默认层照旧信 seq(零板块是合法终态,方向一),其它层退回唯一存在
+    的按层证据 `communities_count(level) > 0`。产物表**不**加回 level 维度。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2            # 默认层建好
+    with repo._connect() as db:
+        state = db.execute(
+            "SELECT community_seq, kg_mutation_seq FROM unified_kg_state "
+            "WHERE notebook_id=?", (notebook_id,)).fetchone()
+    # 前提:闸的另外两项证据都已经「齐全且对齐」—— 短路的条件全部成立,只差 level。
+    assert int(state["community_seq"]) == int(state["kg_mutation_seq"])
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+    assert _boards_at(repo, notebook_id, 1) == {}, "前提不成立:level 1 已经有行了"
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id, level=1) == 2   # 刻意不带 force
+    # 短路的表现是「一件重活都没跑、返回 0」。这里不要求跑满 `_HEAVY_WORK`:KG 世代
+    # 一动没动,`relation_provenance` 的载荷按设计被复用而不重扫关系表(那条成本主张
+    # 由 `test_a_merge_only_backfill_does_not_rescan_the_relation_table` 单独钉)。
+    assert "community_graph_rows" in calls, (
+        f"请求的 level 一行都没有,却被不分 level 的账目判成「建过」:{calls}"
+    )
+    assert _boards_at(repo, notebook_id, 1), "level 1 一行都没写出来"
+    # 默认层不受连坐:`replace_communities` 按 level 删,它的行必须还在。
+    assert _boards_at(repo, notebook_id, 0)
+
+
+def test_the_gate_reads_the_same_default_level_the_callers_do():
+    """方向四的判据引用 `DEFAULT_COMMUNITY_LEVEL`,它必须**就是**签名的默认值。
+
+    两者一漂,「默认层」在闸里和在调用方那里就是两个不同的数:默认调用会掉进「非默认
+    层」那一支,零板块库重新变成每次刷新都重跑全部重活 —— 方向一原地复发,而方向一
+    自己的守卫(它不传 level)照样全绿。
+    """
+    import inspect
+
+    from app.services.knowledge_lifecycle import (
+        DEFAULT_COMMUNITY_LEVEL,
+        KnowledgeLifecycleService,
+    )
+    from app.services.repository_facade import RepositoryFacade
+
+    for target in (KnowledgeLifecycleService.rebuild_communities,
+                   RepositoryFacade.rebuild_communities):
+        default = inspect.signature(target).parameters["level"].default
+        assert default == DEFAULT_COMMUNITY_LEVEL, target.__qualname__
 
 
 def test_deleting_the_notebook_takes_the_artifacts_with_it(repo):

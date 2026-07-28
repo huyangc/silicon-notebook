@@ -571,6 +571,57 @@ test("主体板块口径不与来源画像的缺席同屏打脸：这一页没�
   expect(within(block).queryByText(/12 主题板块/)).not.toBeInTheDocument();
 });
 
+// --------------------------------------------------- 换库时笔记本作用域的复位
+//
+// 与 kg-analysis-view-toggle.test.mjs 那条是同一类缺陷的另一半:那边钉的是「卸载不等于
+// 复位」(开关活在父组件上),这边钉的是「组件不卸载时,状态也得跟着 scope 走」。
+// `notebookId` 变了而组件仍挂载,effect 要到**提交之后**才跑,所以复位必须在渲染期发生。
+
+test("换库时上一个库的报告与分页位置当场清空，不会先渲染一帧旧数字", async () => {
+  const { rerender } = render(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);
+  await screen.findByRole("heading", { name: "对象构成", level: 3 });
+  // 先把分页推到第二页 —— 越界请求就是这么来的。
+  fireEvent.click(within(blockByTitle("关联稀疏的来源")).getByRole("button", { name: /下一页/ }));
+  expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenLastCalledWith("nb-1", {
+    limit: 20,
+    offset: 20,
+    order: "sparse",
+  });
+
+  // 新库的两个请求都挂着不返回:这一帧屏上只能有加载态,不能有 nb-1 的任何数字。
+  vi.mocked(fetchKgAnalysis).mockReturnValue(new Promise(() => {}));
+  vi.mocked(fetchKgAnalysisSources).mockReturnValue(new Promise(() => {}));
+  rerender(<KgAnalysisView notebookId="nb-2" onClose={() => undefined} />);
+
+  expect(screen.queryByRole("heading", { name: "对象构成", level: 3 })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "主题板块", level: 3 })).not.toBeInTheDocument();
+  expect(screen.queryByText(/共 48,836 来源/)).not.toBeInTheDocument();
+  expect(screen.getByText("正在读取报告…")).toBeInTheDocument();
+  // 分页位置归零 —— 而且是**当场**归零。断言写成「新库总共只被问过这一次、且是第 0 页」
+  // 才拦得住移动变异:把复位挪进一个 useEffect 里,新库仍会先被问一次第 20 页(越界),
+  // 只是随后又补问了第 0 页;只断「最后一次是第 0 页」的话那种写法照样全绿。
+  const asked = vi.mocked(fetchKgAnalysisSources).mock.calls.filter(([id]) => id === "nb-2");
+  expect(asked).toEqual([["nb-2", { limit: 20, offset: 0, order: "sparse" }]]);
+});
+
+test("同一个库重新渲染不清空报告——复位跟着 notebookId 走，不是每次渲染都来一遍", async () => {
+  // 反向守卫:把条件写成恒真(或干脆无条件复位)会让每次父组件重渲都闪一次加载态、
+  // 并把用户的分页位置抹掉。这条钉住「只有 scope 真的变了才复位」。
+  const { rerender } = render(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);
+  await screen.findByRole("heading", { name: "对象构成", level: 3 });
+  fireEvent.click(within(blockByTitle("关联稀疏的来源")).getByRole("button", { name: /下一页/ }));
+
+  rerender(<KgAnalysisView notebookId="nb-1" onClose={() => undefined} />);
+
+  expect(screen.getByRole("heading", { name: "对象构成", level: 3 })).toBeInTheDocument();
+  expect(screen.queryByText("正在读取报告…")).not.toBeInTheDocument();
+  expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenLastCalledWith("nb-1", {
+    limit: 20,
+    offset: 20,
+    order: "sparse",
+  });
+});
+
 test("主题板块陈旧时挂同一档黄色徽标，不是唯一一块只有灰色小字的", async () => {
   // 设计 §3.3 记的那次真实事故(据 88 580 个板块推出「图散成一地」,随后才得知库未整理)
   // 说的正是这一块数据。同一份 community_seq=100 / 落后 28,「本报告用到的数据」和

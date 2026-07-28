@@ -92,6 +92,13 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 
 _SOURCE_BUILD_PAGE_SIZE = 500
 
+# `rebuild_communities` 的默认层,也是仓库里**唯一**被写过的层(所有调用点都传 0)。
+# 它单独取个名字是因为新鲜度闸要引用它:`unified_kg_state.community_seq` 与
+# `kg_analysis_artifacts` 都**不分 level**,那份账目只替这一层说话(见闸里的方向四)。
+# ⚠ 与 `rebuild_communities(level=...)` 的签名默认值必须一致,由
+# `test_kg_analysis_precompute` 的方向四守卫钉住。
+DEFAULT_COMMUNITY_LEVEL = 0
+
 
 try:
     import orjson as _orjson
@@ -3279,6 +3286,18 @@ class KnowledgeLifecycleService:
         照样判得出来;而 `communities` 只被 `replace_communities` 删改、它又恒在
         `set_community_seq` **之前**提交,所以 seq 对齐 ⟹ 板块确实按那个 seq 写过。
 
+        ⚠ **但 seq 这个标记不分 level,所以它只替默认层说话**(codex 第 11 轮 P2)。
+        `community_seq` 与 `kg_analysis_artifacts` 都没有 level 维度(第 7 轮刻意去掉的,
+        理由见设计 §3.4 订正 2:一次预计算产出的永远是一套自洽的产物,它描述的 level 记在
+        账本 payload 里)。于是 level 0 对齐之后,一次非 force 的 `rebuild_communities(
+        ..., level=1)`——库里一行 level-1 都没有——会满足这个闸、直接返回 0 而**根本不建
+        那一层**。被 seq 取代之前的 `板块数 > 0` 是按 level 查的,反倒建得出来。
+        补法是给闸补上第四个方向:默认层照旧信 seq(它是唯一被写过的层,零板块合法),
+        其它层退回唯一存在的按层证据 `communities_count(level) > 0`。
+        **不**给产物表加回 level 维度 —— 那正是第 7 轮删掉的东西。
+        代价只落在休眠路径上:非默认层若真的建成零板块,它每次都会重建;而那一层今天
+        没有任何调用点,拿一列 schema 去换它不值。
+
         同理,`has_boards` 必须传**实际**的板块数而不是硬写 True:零板块的库不写
         来源画像(设计 §3.3 的 S4 —— 那张表单独看是在说「所有来源都关联稀疏」),
         硬写 True 等于宣布这类库的账本永远不完整。判据与写入口
@@ -3308,7 +3327,8 @@ class KnowledgeLifecycleService:
         # 版本闸(增量):社区已按当前 kg_mutation_seq 建过 → 不重建图(除非 force)。
         # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
         # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
-        # ⚠ 判据里**没有**板块数:零板块是合法终态,理由见 docstring 那段。
+        # ⚠ 默认层的判据里**没有**板块数:零板块是合法终态,理由见 docstring 那段。
+        # 非默认层反过来 —— 那份不分 level 的账目替它说不了话,见下面的方向四。
         # 账本读的是**整行**(含 payload)而不是只读 seq:簇世代盖在 payload 里(刻意
         # 不加列,见 `kg_analysis_precompute.CLUSTER_SEQ_PAYLOAD_KEY`),闸拿不到 payload
         # 就判不出簇是否漂过。这也是同一次读同时喂给下面 `_precompute_kg_analysis` 的
@@ -3320,8 +3340,16 @@ class KnowledgeLifecycleService:
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
         _cseq = int(_st["cluster_mutation_seq"]) if _st else 0
         _boards = int(_cnt["c"]) if _cnt else 0
+        # 方向四(请求的 level 没建过):`community_seq` 与账本都**不分 level**,所以
+        # 它们只替 `DEFAULT_COMMUNITY_LEVEL` 说话 —— 那是仓库里唯一被写过的层。
+        # 对其它层,库里仅存的按层证据就是 `communities_count(level)` 本身,所以退回
+        # 「这一层有行才算建过」(也正是方向一改动之前的判据)。少了这一句,level 0
+        # 对齐之后一次 `rebuild_communities(..., level=1)` 会满足闸、直接返回 0 而
+        # **根本不建那一层**。
+        _level_built = level == DEFAULT_COMMUNITY_LEVEL or _boards > 0
         graph_fresh = bool(
             not force and _st is not None and int(_st["community_seq"]) == _seq
+            and _level_built
         )
         if graph_fresh and analysis_ledger_is_current(
             _ledger, _seq, _cseq, has_boards=_boards > 0

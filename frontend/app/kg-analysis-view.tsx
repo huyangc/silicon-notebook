@@ -173,6 +173,37 @@ export function KgAnalysisView({
   const [order, setOrder] = useState<KgSourceOrder>("sparse");
   const [offset, setOffset] = useState(0);
 
+  // 换库时清掉**笔记本作用域**的那几份 state。
+  //
+  // ⚠ 必须在渲染期做,不能只交给下面的 effect:effect 在提交之后才跑,中间那一帧会拿
+  // 上一个库的 `report` / `sources` 渲染出一份**完整的报告**(渲染只在 `report` 为
+  // null 时才显示加载态),读者看到的是别的库的数字却没有任何标注 —— 正是本视图存在的
+  // 理由的反面。`offset` 更实际:上一个库翻到第 40 页,新库可能只有 3 条,不归零就会
+  // 替它请求一个越界的页。这是 React 文档里「prop 变了要调状态」的写法,setState 会让
+  // 本次渲染的输出被丢弃、立刻用新 state 重渲,子组件与 DOM 都不会见到旧值。
+  //
+  // 刻意**不**复位的三项(它们不是笔记本作用域的):
+  //   · `order` —— 排序偏好,两个取值对任何库都合法,跟着人走比跟着库走更合理;
+  //   · `reloadToken` —— 单调计数器,只当 effect 依赖用,归零反而会漏掉一次重取;
+  //   · 弹窗位置(`FloatingModalCard` 的 storageKey)—— 窗口几何,与库无关。
+  //
+  // 两份 error 与两个 loading 也在这里清,但它们**不是**同一档缺陷:下面的 effect 本来
+  // 就会在自己开头清掉,所以它们最多陈旧一帧(而 `report` / `sources` / `offset` 是
+  // effect 根本不碰的,会一直陈旧到新请求返回)。这里一并清是顺手把那一帧也去掉 ——
+  // 一帧的差别在 React Testing Library 里观察不到(`act` 会把 effect 一起冲掉),所以
+  // 这四个字段**没有**独立守卫,别照着它们再写一条恒绿的测试。
+  const [shownNotebook, setShownNotebook] = useState(notebookId);
+  if (shownNotebook !== notebookId) {
+    setShownNotebook(notebookId);
+    setReport(null);
+    setReportError("");
+    setLoading(true);
+    setSources(null);
+    setSourcesError("");
+    setSourcesLoading(true);
+    setOffset(0);
+  }
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
