@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assignmentsIn,
   callsIn,
   comparisonsIn,
   findFunction,
@@ -115,6 +116,36 @@ test("提交被可用性守卫拦下时草稿退回,而不是无声丢弃", () =
     assert.ok(callsIn(body).includes("setQuestion"), `${fn} 未退回草稿`);
     assert.ok(callsIn(body).includes("clearPendingTurn"), `${fn} 未收起在途 turn`);
   }
+  // 草稿槽是全局共享的,而清理发生在 `await executeAsk` 之后。期间用户可能已切
+  // 会话(那会把 flow 置回 idle、放行新一轮预检),旧 run 返回时若无条件清理,就会
+  // 抹掉**新一轮**的草稿,新一轮再取消就无从退回(codex 第 9 轮 P2)。
+  // 不变式:这两个函数里**不得**裸清草稿槽,一律经 releaseIntentDraft(令牌) 释放。
+  // 只断言「至少有一处认令牌」不够 —— runAsk 有两处清理(await 之后、catch 之中),
+  // 删掉其中一处时另一处仍能让守卫变绿(实测打空过)。收敛成一个释放口之后,
+  // 「有没有漏认令牌」退化成「有没有裸赋值」,machine-checkable。
+  // ⚠ assignmentsIn 保留字面量引号(与 comparisonsIn 的 right 不同,后者给去引号的
+  //   .text)——按 `""` 比对会永远匹配不到,守卫就成了摆设。
+  for (const fn of ["runAsk", "confirmAskIntent"]) {
+    const body = findFunction(page, fn);
+    assert.deepEqual(
+      assignmentsIn(body).filter(
+        (item) => item.target.startsWith("askIntentDraft") && item.value === '""',
+      ),
+      [], `${fn} 裸清了草稿槽,必须改走 releaseIntentDraft(draftToken)`,
+    );
+    assert.ok(
+      callsIn(body).includes("releaseIntentDraft"),
+      `${fn} 没有经 releaseIntentDraft 释放草稿槽`,
+    );
+  }
+  // 释放口本身必须认令牌,否则上面的收敛就是空的。
+  assert.deepEqual(
+    comparisonsIn(findFunction(page, "releaseIntentDraft"))
+      .filter((item) => item.left.includes("askIntentDraftOwnerRef.current"))
+      .map((item) => [item.operator, item.right]),
+    [["!==", "token"]],
+  );
+
   // 拒收路径必须 return 而不是继续往下跑 —— 否则调用方拿到的返回值再准也没用。
   // (返回的是不是 false 这一层静态守卫钉不住;`Promise<boolean>` 的返回类型让
   //  裸 `return;` 直接过不了 tsc,而「拒收后返回 true」只能靠评审与上面这条

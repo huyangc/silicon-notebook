@@ -1557,8 +1557,14 @@ export default function Home() {
   // pendingTrace:提交时要把这段前缀原样交给 executeAsk,闭包里读 state 会拿到旧值。
   const askIntentTraceRef = useRef<ReasoningTraceStep[]>([]);
   // 理解阶段会清空输入框(问题改以在途 turn 的形式先显示出来)。这里留一份草稿,
-  // 供「停止」「返回修改」「预检失败」三条留在原地的路径原样还给输入框。
+  // 供「停止」「返回修改」「预检失败」「提交被守卫拦下」几条留在原地的路径原样
+  // 还给输入框。
   const askIntentDraftRef = useRef("");
+  // 上面那个草稿槽是全局共享的,而清理发生在 `await executeAsk` 之后 —— 期间用户
+  // 完全可能切会话(那会把 flow 置回 idle、放行新一轮 preview)。没有归属令牌的话,
+  // 旧 run 返回时会把**新一轮**的草稿抹掉,新一轮再取消就无从退回。令牌只由发起
+  // 那一轮持有,谁持有谁才有权清理。
+  const askIntentDraftOwnerRef = useRef<object | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
   const askJobIdRef = useRef<string | null>(null);
@@ -2995,9 +3001,21 @@ export default function Home() {
     askIntentFlowRef.current = "idle";
     askIntentTraceRef.current = [];
     askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
     setIntentChecking(false);
     // 只收自己那半边:真正在跑的 ask 有自己的在途 turn,不能被理解阶段的收尾误清。
     if (wasIntentPhase) clearPendingTurn();
+  }
+
+  // 释放草稿槽,并回报本轮是否真的持有它。清理点分散在 `await executeAsk` 之后与
+  // catch 之中,逐点手写条件极易漏一处 —— 第 9 轮那个「旧 run 抹掉新一轮草稿」的
+  // 竞态就是这么来的。统一收敛到这里,守卫据此禁止在 runAsk/confirmAskIntent 里
+  // 裸清草稿槽。
+  function releaseIntentDraft(token: object): boolean {
+    if (askIntentDraftOwnerRef.current !== token) return false;
+    askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
+    return true;
   }
 
   async function runAsk(nextQuestion = question) {
@@ -3029,7 +3047,9 @@ export default function Home() {
     // 理解阶段就把问题挂上会话流,并以轨迹的第一步显示「正在理解问题」——
     // 用户在这段(一次不读语料的模型调用)看到的是同一条轨迹在推进,而不是
     // 一条与轨迹无关的灰色提示条,也不用猜检索到底开始了没有。
+    const draftToken = {};
     askIntentDraftRef.current = q;
+    askIntentDraftOwnerRef.current = draftToken;
     askIntentTraceRef.current = [intentUnderstandingStep()];
     setQuestion("");
     setPendingQuestion(q);
@@ -3082,8 +3102,9 @@ export default function Home() {
         ),
         handOffIntentTrace(askIntentTraceRef.current),
       );
-      askIntentDraftRef.current = "";
-      if (!started) {
+      // 只有仍持有草稿槽的那一轮才有权清理:期间用户可能已经切会话并开了新一轮
+      // 预检,那份草稿不归本轮处置(codex 第 9 轮 P2)。
+      if (releaseIntentDraft(draftToken) && !started) {
         setQuestion(q);
         askIntentTraceRef.current = [];
         clearPendingTurn();
@@ -3092,9 +3113,11 @@ export default function Home() {
       if (!isAbortError(error)) reportError(error);
       // 预检失败/被中止:收起在途 turn 并把草稿还给输入框。别人已经接管(切库、
       // 切会话)时 ref 已不是本 controller,由接管方负责清理,这里不越权。
-      if (askIntentAbortRef.current === controller) {
-        setQuestion(askIntentDraftRef.current || q);
-        askIntentDraftRef.current = "";
+      // 同上,草稿槽的归属也要认令牌:抛错前若已切会话并开了新一轮预检,那份草稿
+      // 不归本轮处置。
+      const draft = askIntentDraftRef.current;
+      if (askIntentAbortRef.current === controller && releaseIntentDraft(draftToken)) {
+        setQuestion(draft || q);
         askIntentTraceRef.current = [];
         clearPendingTurn();
       }
@@ -3246,6 +3269,9 @@ export default function Home() {
   async function confirmAskIntent(confirmation: AskIntentConfirmation) {
     const review = askIntentReview;
     if (!review || askIntentFlowRef.current !== "review") return;
+    // 定稿这一轮接手草稿槽的归属(预检那一轮的令牌到此为止)。
+    const draftToken = askIntentDraftOwnerRef.current ?? {};
+    askIntentDraftOwnerRef.current = draftToken;
     if (
       review.notebookId !== currentNotebookId
       || review.conversationId !== conversationId
@@ -3253,7 +3279,7 @@ export default function Home() {
     ) {
       setAskIntentReview(null);
       askIntentTraceRef.current = [];
-      askIntentDraftRef.current = "";
+      releaseIntentDraft(draftToken);
       clearPendingTurn();
       setToast("问题上下文已经变化，请重新提交");
       return;
@@ -3267,12 +3293,12 @@ export default function Home() {
     ];
     askIntentTraceRef.current = traceSeed;
     try {
-      // 同 runAsk:草稿留到 executeAsk 真的接下这次运行为止。
+      // 同 runAsk:草稿留到 executeAsk 真的接下这次运行为止,且只有仍持有草稿槽的
+      // 那一轮才有权清理(codex 第 9 轮 P2)。
       const started = await executeAsk(
         review.question, "reasoning", confirmation, handOffIntentTrace(traceSeed),
       );
-      askIntentDraftRef.current = "";
-      if (!started) {
+      if (releaseIntentDraft(draftToken) && !started) {
         setQuestion(review.question);
         askIntentTraceRef.current = [];
         clearPendingTurn();
@@ -3288,6 +3314,7 @@ export default function Home() {
     // 用户要回去改问题:把草稿还给输入框,并收起理解阶段的在途 turn。
     setQuestion(askIntentDraftRef.current || askIntentReview?.question || "");
     askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
     askIntentTraceRef.current = [];
     clearPendingTurn();
     setToast("已返回修改问题");
