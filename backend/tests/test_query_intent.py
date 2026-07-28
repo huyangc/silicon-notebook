@@ -191,6 +191,8 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
         "kg_context_chars",
         "chunk_context_chars",
         "answer_element_items",
+        "enum_pages_per_run",
+        "enum_rows_per_run",
     )
     for field in increasing_fields:
         values = [getattr(row, field) for row in limits]
@@ -210,6 +212,12 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
         assert row.cell_excerpt_chars == 1_000
         assert row.structured_payload_chars == 256_000
         assert row.inline_answer_rows == 100
+        # 页大小是往返批量,不随档位变(与 structured_page_size 同口径)。
+        assert row.enum_page_size == 50
+        # 三个 enum 字段互相自洽:每 run 行数 = 页大小 × 每 run 额外页数。run()
+        # 正是靠这条恒等式用「扫过的行数 ÷ 页大小」给额外翻页计费,改坏一个数就
+        # 会让两个池不再同时耗尽。
+        assert row.enum_page_size * row.enum_pages_per_run == row.enum_rows_per_run
         assert row.overflow_semantics == "explicit_partial"
     assert limits[0].structured_max_rows >= 100
     assert [row.ranked_per_query_take for row in limits] == [4, 8, 8, 12, 16]
@@ -221,6 +229,9 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
     assert [row.kg_context_chars for row in limits] == [4_000, 6_000, 8_000, 12_000, 16_000]
     assert [row.chunk_context_chars for row in limits] == [12_000, 30_000, 50_000, 80_000, 120_000]
     assert [row.answer_element_items for row in limits] == [4, 6, 8, 12, 16]
+    assert [row.enum_page_size for row in limits] == [50, 50, 50, 50, 50]
+    assert [row.enum_pages_per_run for row in limits] == [2, 4, 6, 8, 12]
+    assert [row.enum_rows_per_run for row in limits] == [100, 200, 300, 400, 600]
 
 
 def test_generic_reasoning_question_requires_clarification_before_retrieval():

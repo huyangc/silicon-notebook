@@ -44,12 +44,14 @@ def expand_query(client, question: str, history: str = "", *,
                  corpus_langs: Optional[List[str]] = None,
                  cancel_event: CancelEvent = None,
                  fail_closed: bool = False,
-                 system_instruction: str = "") -> ExpandedQuery:
+                 system_instruction: str = "",
+                 collection_map: str = "") -> ExpandedQuery:
     """一次 LLM 调用:问题(任意语言)→ 同语言规范改写 + 1..max_subqueries 个具体子查询
     (保持问题本身的语言)。keywords 按 corpus_langs 双语化(供纯词法 FTS/KG 名匹配),
     sub_queries 单语言(多语向量 embedder 一次即跨语,无需二次嵌入)。
     want_types=True 时每个子查询附 KG types/prefer(供 reasoning)。
-    任何失败/未配置/空 → 回退 [normalize_terms(question)] 单子查询。始终 >=1。"""
+    任何失败/未配置/空 → 回退 [normalize_terms(question)] 单子查询。始终 >=1。
+    collection_map:逐步推理的类型化集合计数行(纯数字、无原文),空串=不注入。"""
     from app.services.prompts import expand_query_prompt, EXPAND_SCHEMA_HINT
     fallback = ExpandedQuery(query=question,
                              sub_queries=[SubQuerySpec(query=normalize_terms(question))])
@@ -69,6 +71,7 @@ def expand_query(client, question: str, history: str = "", *,
                 want_types,
                 max_subqueries=max_subqueries,
                 corpus_langs=corpus_langs,
+                collection_map=collection_map,
             ),
         }]
         if system_instruction:

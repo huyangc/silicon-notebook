@@ -136,8 +136,14 @@
 - run() 新增 elif 分支（镜像 search_elements 形态）：无效 kind/object_type → fail-open skip
   （fail_closed 下抛错）；预算耗尽 → skip(enumeration_budget)；结果累积到独立 `enumerations`
   列表（不混入 elements/chunks），并计入 no_progress/stale 账目；每页间 raise_if_cancelled。
-- trace：`enumerate` 步（前端 chip 已存在），summary 形如「枚举公式清单: 返回 X 条(共 Y)」，
-  detail 含 returned/scanned_rows/total/complete/truncated_reason。
+- trace：`enumerate` 步（前端 chip 已存在），summary 形如「枚举公式清单: 累计 X 条/共 Y」，
+  detail 含 collection/kind/returned/returned_total/scanned/total/complete/truncated_reason/
+  has_more——**刻意不用 Knowhow enumerate 步的 `scanned_rows`/`known_total_rows` 键**（那是
+  表行口径，复用会渲染成「12/0 行」）；前端按新键名单独适配（T6）。集合标签两张映射（元素/
+  知识对象）全域不重名。
+- 页预算计费：执行器在结果对象（非用户面 coverage）回传 `extra_pages`（同源第 2 页起的真实
+  额外往返数），run 级按它精确扣减——不做 `scanned // page_size` 上界折算（在
+  rows==size×pages 恒等式下上界折算使页池要么形同虚设、要么在载荷截断时错误提前截断）。
 - 新档位字段（`AskRetrievalLimits`）：`enum_page_size`=50（各档相同，transport 批量而非答案
   top-N，口径同 structured_page_size）；`enum_pages_per_run` 2/4/6/8/12；`enum_rows_per_run`
   100/200/300/400/600。
@@ -170,7 +176,9 @@
 ### 2.7 守卫、文档与评测
 
 - 架构守卫默认模式重生成（AskResponse 变化）+ facade allowlist。
-- 文档：docs/product-and-api*.md 契约表新增 enum_* 与工具说明；AGENTS.md「Architecture
+- 文档：docs/product-and-api*.md 契约表新增 enum_* 与工具说明；`.env.example` 与
+  docs/deployment-and-configuration*.md 登记 `REASONING_ENUM_TOOLS_ENABLED`（对照
+  KNOWHOW_KG_NODE_RETRIEVAL_ENABLED 先例三处齐改）；AGENTS.md「Architecture
   Baseline」与 CLAUDE.md 红线补「集合枚举工具」条目——并修订两处现有红线句
   「当前只有 Knowhow 支持完整枚举，其他对象集合仍是相关性结果」（PR-2 落地后不再成立，
   fangan 同款表述在 fangan_done.md 记账）；architecture.md 补 collection_catalog /

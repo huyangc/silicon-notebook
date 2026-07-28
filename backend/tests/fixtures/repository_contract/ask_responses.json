@@ -496,6 +496,8 @@
             "detail": {
               "chains": 0,
               "elements": 0,
+              "enumerated_items": 0,
+              "enumerations": 0,
               "kg": 1,
               "top_n": 20
             },
@@ -507,6 +509,7 @@
             "detail": {
               "anchors": 1,
               "citations": 1,
+              "enumerated_collections": 0,
               "evidence_level": "grounded",
               "included_chunks": 0,
               "included_elements": 0,
@@ -669,6 +672,8 @@
             "detail": {
               "chains": 0,
               "elements": 0,
+              "enumerated_items": 0,
+              "enumerations": 0,
               "kg": 1,
               "top_n": 20
             },
@@ -680,6 +685,7 @@
             "detail": {
               "anchors": 1,
               "citations": 1,
+              "enumerated_collections": 0,
               "evidence_level": "grounded",
               "included_chunks": 0,
               "included_elements": 0,

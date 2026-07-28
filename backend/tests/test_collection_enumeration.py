@@ -229,6 +229,52 @@ def test_enumeration_spans_many_pages_within_one_call(repo):
     assert _element_ids(result) == _sql_element_ids(repo, [notebook.id], "formula")
 
 
+def test_extra_pages_counts_only_round_trips_past_the_first_page(repo):
+    """``extra_pages`` = 非首页往返数,与 ``max_pages`` 约束的是同一件事。
+
+    调用方(逐步推理)用它给 run 级页预算据实计费,所以它的语义必须钉死:每个源
+    的**第一页免费**(那不是「额外」往返,是看见这个源的唯一办法),第 2 页起才计。
+    没有它,调用方只能按「扫过行数 ÷ 页大小」折算上界,把一次实际发生的额外往返
+    记成两次。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_source(repo, notebook.id, "s-a", [("formula", 3)])
+
+    one_page = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget(page_size=25)
+    )
+    assert one_page.coverage.returned == 3
+    assert one_page.extra_pages == 0        # 单页取尽:零额外往返
+
+    paged = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget(page_size=1)
+    )
+    assert paged.coverage.returned == 3
+    assert paged.extra_pages == 2           # 第 1 页免费,第 2、3 页各计一次
+
+    # 每个源各自的第一页都免费:两个源各一条公式 → 一次额外往返都没有,
+    # 尽管扫过的行数与上面「翻了两页」的场景相同。
+    _add_source(repo, notebook.id, "s-b", [("formula", 1)])
+    _add_source(repo, notebook.id, "s-c", [("formula", 1)])
+    spread = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget(page_size=1), source_id="s-b"
+    )
+    assert spread.coverage.returned == 1 and spread.extra_pages == 0
+
+
+def test_kg_object_enumeration_reports_extra_pages(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(3):
+        _add_kg_object(repo, notebook.id, f"ko-{index}", "concept")
+
+    assert _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(page_size=25)
+    ).extra_pages == 0
+    assert _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(page_size=1)
+    ).extra_pages == 2
+
+
 def test_sources_without_the_kind_are_never_queried(repo, monkeypatch):
     """效率契约:只有地图计数 >0 的源才会被翻页。几万源的挂载库里,
     没有公式的那些源必须一条查询都不发。"""

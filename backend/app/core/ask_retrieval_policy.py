@@ -71,7 +71,20 @@ class AskRetrievalLimits:
     direct source elements (formulas/tables/images/etc.) the final synthesis
     prompt may include; they are chosen by retrieval relevance descending, not
     insertion order, and still consume the shared ``chunk_context_chars``
-    budget. On any hard ceiling the executor must return explicit coverage
+    budget.
+
+    Typed-collection enumeration (the reasoning ``enumerate_*`` tools) is
+    budgeted per RUN, not per action: ``enum_rows_per_run`` is the total number
+    of listed items one reasoning run may retrieve across every collection it
+    touches, and ``enum_pages_per_run`` the total number of EXTRA page round
+    trips on top of the first page of each visited source.  ``enum_page_size``
+    is a transport batch like ``structured_page_size`` — identical at every
+    effort, because a page size is a round-trip shape, not an answer width.
+    The three are consistent by construction:
+    ``enum_rows_per_run == enum_page_size * enum_pages_per_run``, which is what
+    lets a caller charge extra pages conservatively from rows scanned.
+
+    On any hard ceiling the executor must return explicit coverage
     (scanned/known total) with ``complete=false``; it must never label the
     partial result "all".
     """
@@ -93,47 +106,59 @@ class AskRetrievalLimits:
     kg_context_chars: int
     chunk_context_chars: int
     answer_element_items: int
+    enum_page_size: int
+    enum_pages_per_run: int
+    enum_rows_per_run: int
     overflow_semantics: Literal["explicit_partial"] = EXPLICIT_PARTIAL_OVERFLOW
 
 # Threshold table (counts are intentionally literal and reviewable here):
 #
-# effort       take floor/aspect/cap steps/subq  KG ctx  chunk ctx  elem items
-# overview       4     8/2/12          4/2       4k       12k          4
-# standard       8    20/3/36          8/5       6k       30k          6
-# deep           8    24/4/48         16/6       8k       50k          8
-# thorough      12    32/5/64         32/8      12k       80k         12
-# exhaustive    16    40/6/96        50/10      16k      120k         16
+# effort       take floor/aspect/cap steps/subq  KG ctx  chunk ctx  elem items  enum pages/rows
+# overview       4     8/2/12          4/2       4k       12k          4           2/100
+# standard       8    20/3/36          8/5       6k       30k          6           4/200
+# deep           8    24/4/48         16/6       8k       50k          8           6/300
+# thorough      12    32/5/64         32/8      12k       80k         12           8/400
+# exhaustive    16    40/6/96        50/10      16k      120k         16          12/600
 #
 # Every profile also uses page=25, max_pages=50, max_rows=1,250, max_tables=8,
 # max_columns=8, cell_excerpt=1,000 chars, structured_payload=256,000 chars,
-# and inline_answer_rows=100.  These are shared completeness/transport safety
-# rails, not effort-dependent relevance limits.
+# inline_answer_rows=100, and enum_page_size=50.  These are shared
+# completeness/transport safety rails, not effort-dependent relevance limits.
 # ``answer_element_items`` is the cap on direct source elements (formulas,
 # tables, images, ...) admitted into the final synthesis prompt, chosen by
 # relevance descending; it does not change ``chunk_context_chars``.
+# ``enum_pages_per_run`` / ``enum_rows_per_run`` are per-RUN pools shared by
+# every ``enumerate_*`` action of one reasoning run: effort buys a longer list,
+# never a wider page, and the pool is what makes the cost of "list them all"
+# a property of the selected effort rather than of the corpus.
 # Enumeration limits do not shrink in overview mode: "all" still means all up
 # to the shared safety cap.  The exhaustive profile spends more reasoning effort
 # on that bounded set; it does not convert enumeration into a larger top-N.
 _ASK_RETRIEVAL_LIMITS: dict[RetrievalEffort, AskRetrievalLimits] = {
     "overview": AskRetrievalLimits(
         4, 8, 2, 12, 4, 2,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000, 4
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000, 4,
+        50, 2, 100
     ),
     "standard": AskRetrievalLimits(
         8, 20, 3, 36, 8, 5,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000, 6
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000, 6,
+        50, 4, 200
     ),
     "deep": AskRetrievalLimits(
         8, 24, 4, 48, 16, 6,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000, 8
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000, 8,
+        50, 6, 300
     ),
     "thorough": AskRetrievalLimits(
         12, 32, 5, 64, 32, 8,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000, 12
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000, 12,
+        50, 8, 400
     ),
     "exhaustive": AskRetrievalLimits(
         16, 40, 6, 96, 50, 10,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000, 16
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000, 16,
+        50, 12, 600
     ),
 }
 ASK_RETRIEVAL_LIMITS: Mapping[RetrievalEffort, AskRetrievalLimits] = (
