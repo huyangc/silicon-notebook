@@ -1071,7 +1071,7 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
     old_turn = store.prepare_turn(
@@ -1205,7 +1205,7 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
     request = AskRequest(question="race final save", mode="chunk")
@@ -1332,7 +1332,7 @@ def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     report = PostgresReportStore(
         postgres_database,
@@ -1529,7 +1529,7 @@ def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1663,7 +1663,7 @@ def test_postgres_memory_search_filters_scope_before_candidate_limit(
     from psycopg.types.json import Jsonb
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1748,7 +1748,7 @@ def test_postgres_memory_search_total_is_exact_beyond_candidate_page(
     from psycopg.types.json import Jsonb
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1890,7 +1890,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -2007,7 +2007,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -2124,7 +2124,7 @@ def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -2239,7 +2239,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
 
     def make_projector():
