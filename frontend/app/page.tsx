@@ -2,11 +2,12 @@
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
-import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import type { ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
+import { FormulaView } from "./formula-view";
+import { KgEvidenceBody } from "./kg-evidence-body";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
@@ -120,7 +121,6 @@ import {
 } from "./model-services.ts";
 import { FloatingModalCard } from "./floating-modal-card";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
-import { unwrapStandaloneLatex } from "./math-markdown";
 import {
   ModelTestCoordinator,
   acceptModelServiceStatusSnapshot,
@@ -6804,24 +6804,6 @@ function SearchHits({ hits, compact }: { hits: SearchHit[]; compact: boolean }) 
   );
 }
 
-function FormulaView({ latex }: { latex: string }) {
-  let html = "";
-  const normalized = unwrapStandaloneLatex(latex);
-  try {
-    html = katex.renderToString(normalized, {
-      throwOnError: true,
-      strict: "ignore",
-      displayMode: true,
-    });
-  } catch {
-    html = "";
-  }
-  if (!html) {
-    return <pre className="element-formula-raw">{latex}</pre>;
-  }
-  return <div className="element-formula" dangerouslySetInnerHTML={{ __html: html }} />;
-}
-
 // Keep only static table markup; drop scripts/styles and any event handlers.
 function sanitizeTableHtml(html: string): string {
   const withoutBlocks = html.replace(/<\/?(script|style)[^>]*>/gi, "");
@@ -6907,11 +6889,6 @@ function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
   );
 }
 
-function kgEvidenceBody(text?: string | null) {
-  const value = (text ?? "").trim();
-  return value || "暂无原文片段";
-}
-
 function kgConfidenceLabel(confidence?: number) {
   if (typeof confidence !== "number" || !Number.isFinite(confidence)) return "";
   const normalized = confidence > 1 ? confidence : confidence * 100;
@@ -6939,7 +6916,10 @@ function KgEvidenceCard({ evidence, index }: { evidence: EvidenceItem; index: nu
           )}
         </div>
       </div>
-      <p className="kg-evidence-body">{kgEvidenceBody(evidence.element_text || evidence.quoted_span)}</p>
+      <KgEvidenceBody
+        elementType={evidence.element_type}
+        text={evidence.element_text || evidence.quoted_span}
+      />
     </article>
   );
 }
@@ -6965,7 +6945,10 @@ function KgOccurrenceCard({ occurrence, index }: { occurrence: KgOccurrence; ind
           )}
         </div>
       </div>
-      <p className="kg-evidence-body">{kgEvidenceBody(occurrence.element_text || occurrence.quoted_span)}</p>
+      <KgEvidenceBody
+        elementType={occurrence.element_type}
+        text={occurrence.element_text || occurrence.quoted_span}
+      />
     </article>
   );
 }
@@ -6980,7 +6963,7 @@ function KgProcedureStepCard({ step, index }: { step: KgProcedureStep; index: nu
           <div className="kg-evidence-meta"><span>流程步骤</span></div>
         </div>
       </div>
-      <p className="kg-evidence-body">{kgEvidenceBody(step.element_text)}</p>
+      <KgEvidenceBody text={step.element_text} />
     </article>
   );
 }
