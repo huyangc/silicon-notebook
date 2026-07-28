@@ -105,6 +105,26 @@ def _norm_query(q: str) -> str:
     return " ".join(str(q).split()).casefold()
 
 
+def merge_element_hits(elements: list, found: list) -> list:
+    """把一批 search_elements 结果合并进累计列表,返回真正新增的元素。
+
+    去重按 element_id;同一元素被后续查询以更高分再次命中时**就地保留最高分**
+    ——合成阶段按分数降序裁 answer_element_items,若只保留首个(可能偏低的)
+    查询专属分,弱查询先到会把强命中挤出上限(codex PR#391 round-2 P2)。
+    跨查询分数只是大致可比,取 max 是保守选择:绝不让重复命中降低既有分。"""
+    by_id = {e.element_id: e for e in elements}
+    added = []
+    for e in found:
+        prev = by_id.get(e.element_id)
+        if prev is None:
+            by_id[e.element_id] = e
+            added.append(e)
+        elif e.score > prev.score:
+            prev.score = e.score
+    elements.extend(added)
+    return added
+
+
 def effective_top_n(
     settings,
     explicit: "Optional[int]",
@@ -768,11 +788,9 @@ class ReasoningRetriever:
                 else:
                     elements_searches += 1
                     eq = decision.elements_query or question
-                    seen_el = {e.element_id for e in elements}
-                    els = [e for e in self.search_elements(notebook_id, eq)
-                           if e.element_id not in seen_el]
+                    found = self.search_elements(notebook_id, eq)
                     raise_if_cancelled(self.cancel_event)
-                    elements.extend(els)
+                    els = merge_element_hits(elements, found)
                     record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
                                      detail={"query": eq, "found": len(els)}))
@@ -1003,8 +1021,15 @@ class ReasoningRetriever:
             top_hits = top_hits[:top_n]
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
+        # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由
+        # ask_service._answer_reasoning 的按预算截断后回传,写进 synthesis 步的
+        # included_kg/included_chunks/included_elements。措辞刻意区分"候选"与
+        # "采用",避免系统性高估模型实际看到的证据。summary 不带数字:数字由
+        # detail(kg/elements)承载,前端 reasoning-trace.ts 会把 detail 渲染成
+        # "N 个知识对象 / M 段原文"紧邻显示,summary 再带一遍会逐字重复;这也
+        # 避开在 summary 里出现"KG"这类界面词汇表禁用的内部黑话。
         record(TraceStep(step_type="answer",
-                         summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
+                         summary="合成候选",
                          detail=answer_detail))
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,

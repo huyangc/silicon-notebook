@@ -76,7 +76,7 @@ def test_answer_reasoning_refines_when_enabled(repo):
     bind_chat_client(repo, "ask_answer", answer_client)
     repo.settings.kg_query_refine_enabled = True
     nb, hits = _seed_hit(repo)
-    answer, grounded, anchors = repo._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._answer_reasoning(
         nb.id, "how does cascode affect output resistance?", hits, [], ""
     )
     assert refine_client.refine_calls == 1
@@ -96,7 +96,7 @@ def test_answer_reasoning_no_refine_when_disabled(repo):
     bind_chat_client(repo, "ask_answer", answer_client)
     repo.settings.kg_query_refine_enabled = False  # default is now True; disable explicitly
     nb, hits = _seed_hit(repo)
-    answer, grounded, anchors = repo._answer_reasoning(nb.id, "q?", hits, [], "")
+    answer, grounded, anchors, _counts = repo._answer_reasoning(nb.id, "q?", hits, [], "")
     assert refine_client.refine_calls == 0
     assert answer_client.refine_calls == 0
     assert answer_client.answer_calls == 1

@@ -67,9 +67,13 @@ class AskRetrievalLimits:
     ``inline_answer_rows`` bounds only the inline prose/list preview.  Neither
     limit may silently reduce collection completeness.  A single structured cell
     contributes at most ``cell_excerpt_chars`` to model context; the authoritative
-    cell remains addressable by id.  On any hard ceiling the executor must return
-    explicit coverage (scanned/known total) with ``complete=false``; it must never
-    label the partial result "all".
+    cell remains addressable by id.  ``answer_element_items`` bounds how many
+    direct source elements (formulas/tables/images/etc.) the final synthesis
+    prompt may include; they are chosen by retrieval relevance descending, not
+    insertion order, and still consume the shared ``chunk_context_chars``
+    budget. On any hard ceiling the executor must return explicit coverage
+    (scanned/known total) with ``complete=false``; it must never label the
+    partial result "all".
     """
 
     ranked_per_query_take: int
@@ -88,44 +92,48 @@ class AskRetrievalLimits:
     inline_answer_rows: int
     kg_context_chars: int
     chunk_context_chars: int
+    answer_element_items: int
     overflow_semantics: Literal["explicit_partial"] = EXPLICIT_PARTIAL_OVERFLOW
 
 # Threshold table (counts are intentionally literal and reviewable here):
 #
-# effort       take floor/aspect/cap steps/subq  KG ctx  chunk ctx
-# overview       4     8/2/12          4/2       4k       12k
-# standard       8    20/3/36          8/5       6k       30k
-# deep           8    24/4/48         16/6       8k       50k
-# thorough      12    32/5/64         32/8      12k       80k
-# exhaustive    16    40/6/96        50/10      16k      120k
+# effort       take floor/aspect/cap steps/subq  KG ctx  chunk ctx  elem items
+# overview       4     8/2/12          4/2       4k       12k          4
+# standard       8    20/3/36          8/5       6k       30k          6
+# deep           8    24/4/48         16/6       8k       50k          8
+# thorough      12    32/5/64         32/8      12k       80k         12
+# exhaustive    16    40/6/96        50/10      16k      120k         16
 #
 # Every profile also uses page=25, max_pages=50, max_rows=1,250, max_tables=8,
 # max_columns=8, cell_excerpt=1,000 chars, structured_payload=256,000 chars,
 # and inline_answer_rows=100.  These are shared completeness/transport safety
 # rails, not effort-dependent relevance limits.
+# ``answer_element_items`` is the cap on direct source elements (formulas,
+# tables, images, ...) admitted into the final synthesis prompt, chosen by
+# relevance descending; it does not change ``chunk_context_chars``.
 # Enumeration limits do not shrink in overview mode: "all" still means all up
 # to the shared safety cap.  The exhaustive profile spends more reasoning effort
 # on that bounded set; it does not convert enumeration into a larger top-N.
 _ASK_RETRIEVAL_LIMITS: dict[RetrievalEffort, AskRetrievalLimits] = {
     "overview": AskRetrievalLimits(
         4, 8, 2, 12, 4, 2,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000, 4
     ),
     "standard": AskRetrievalLimits(
         8, 20, 3, 36, 8, 5,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000, 6
     ),
     "deep": AskRetrievalLimits(
         8, 24, 4, 48, 16, 6,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000, 8
     ),
     "thorough": AskRetrievalLimits(
         12, 32, 5, 64, 32, 8,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000, 12
     ),
     "exhaustive": AskRetrievalLimits(
         16, 40, 6, 96, 50, 10,
-        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000
+        25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000, 16
     ),
 }
 ASK_RETRIEVAL_LIMITS: Mapping[RetrievalEffort, AskRetrievalLimits] = (

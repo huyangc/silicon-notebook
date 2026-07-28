@@ -490,13 +490,16 @@
             },
             "duration_ms": 8,
             "step_type": "answer",
-            "summary": "合成: 采用 1 个KG候选 + 0 段原文"
+            "summary": "合成候选"
           },
           {
             "detail": {
               "anchors": 1,
               "citations": 1,
-              "evidence_level": "grounded"
+              "evidence_level": "grounded",
+              "included_chunks": 0,
+              "included_elements": 0,
+              "included_kg": 1
             },
             "duration_ms": 5,
             "step_type": "synthesis",
@@ -659,13 +662,16 @@
             },
             "duration_ms": 8,
             "step_type": "answer",
-            "summary": "合成: 采用 1 个KG候选 + 0 段原文"
+            "summary": "合成候选"
           },
           {
             "detail": {
               "anchors": 1,
               "citations": 1,
-              "evidence_level": "grounded"
+              "evidence_level": "grounded",
+              "included_chunks": 0,
+              "included_elements": 0,
+              "included_kg": 1
             },
             "duration_ms": 5,
             "step_type": "synthesis",

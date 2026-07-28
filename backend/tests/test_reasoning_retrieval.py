@@ -173,6 +173,34 @@ def test_reflect_prompt_checks_coverage_aspect_by_aspect():
     assert "multi-layer derivation" in p
 
 
+def test_answer_prompt_requires_full_enumeration_for_list_questions():
+    """规则 11(PR-1 止血):枚举/列举类问题必须把每个不同的匹配条目逐条列出、
+    各自挂 [k],不得抽样/合并;证据可能不覆盖全集时须明确说明。"""
+    from app.services.prompts import answer_prompt
+    p = answer_prompt("q", "ctx")
+    assert "list EVERY distinct matching item" in p
+    assert "do NOT sample, merge similar ones together" in p
+    # 披露必须是无条件形态(you MUST state …),旧的条件式措辞("If the evidence
+    # may not cover … say the list may be incomplete")同样含 "may be
+    # incomplete" 子串,只断言它会假绿。
+    assert "Unless a coverage line" in p
+    assert "you MUST state that the list may be incomplete" in p
+    # hybrid Knowhow 的 structured_prompt_block 注入的行没有 kN id(不在
+    # id_map 里):对它们强挂 [k] 是不可满足合同(codex PR#391 P2),必须豁免
+    # 且禁止捏造不存在的 [k]。
+    assert "list them WITHOUT [k] markers" in p
+    assert "never invent a [k] id that does not exist" in p
+
+
+def test_reflect_prompt_forbids_claiming_full_retrieval():
+    """PR-1 止血:reflect 的 reason 不得声称"所有/全部 X 已检索到"——相关性检索
+    无法证明完整性,只能陈述实际找到了什么、还缺什么。"""
+    from app.services.prompts import reflect_prompt
+    p = reflect_prompt("q", "s")
+    assert "NEVER claim that 'all/every X have been retrieved'" in p
+    assert "cannot prove completeness" in p
+
+
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
@@ -615,7 +643,7 @@ def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
     llm = _ChainAnswerLLM()
     bind_chat_client(rrepo, "ask_answer", llm)
     rrepo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors = rrepo._answer_reasoning(
+    answer, grounded, anchors, _counts = rrepo._answer_reasoning(
         nb.id, "derive", chain_result.nodes, [], "",
         chains=chain_result.inferences)
     assert grounded is True
@@ -1537,3 +1565,27 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
     assert called["peers"] == 0                     # base 为 None → 根本不调 community_peers
     assert any(t.step_type == "expand_community" for t in res.trace)
+
+
+def test_merge_element_hits_keeps_max_score_across_queries():
+    """codex PR#391 round-2: 同一元素被多次 search_elements 命中时保留最高分——
+    合成阶段按分数裁 answer_element_items,只留首个(可能偏低的)查询分会把
+    强命中挤出上限;更低分的重复命中也不得降低既有分。"""
+    from app.services.reasoning_retrieval import merge_element_hits
+    from app.services.retrieval import RetrievedElement
+
+    def el(eid, score):
+        return RetrievedElement(
+            element_id=eid, source_id="s", source_title="S",
+            location_label="p", element_type="paragraph", text=eid, score=score)
+
+    elements = [el("a", 0.3), el("b", 0.5)]
+    added = merge_element_hits(
+        elements, [el("a", 0.9), el("c", 0.4), el("a", 0.1)])
+    assert [e.element_id for e in added] == ["c"]      # 只有 c 是真正新增
+    assert len(elements) == 3
+    scores = {e.element_id: e.score for e in elements}
+    assert scores["a"] == 0.9                          # 高分覆盖首个低分
+    assert scores["b"] == 0.5
+    merge_element_hits(elements, [el("b", 0.2)])
+    assert {e.element_id: e.score for e in elements}["b"] == 0.5

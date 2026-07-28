@@ -316,17 +316,17 @@ What the Ask panel *shows* is a separate, UI-only layer owned by the front-end r
 
 ### Reasoning effort and complete collection requests
 
-The grade is picked in the Ask composer through the same graded-effort control as a deep report's research depth — one shared component, so the two never drift apart: a chip carrying the current grade name, opening a slider popover that shows that grade plus one neutral sentence about it. The interface deliberately exposes only the grade name and that sentence; the exact ceilings live in this table (mirrored by `frontend/app/ask-retrieval-effort.ts` and `backend/app/core/ask_retrieval_policy.py`) rather than being printed onto the control.
+The grade is picked in the Ask composer through the same graded-effort control as a deep report's research depth — one shared component, so the two never drift apart: a chip carrying the current grade name, opening a slider popover that shows that grade plus one neutral sentence about it. The interface deliberately exposes only the grade name and that sentence; the exact ceilings live in this table (mirrored by `frontend/app/ask-retrieval-effort.ts` and `backend/app/core/ask_retrieval_policy.py`) rather than being printed onto the control. `answer_element_items` is the one exception to that mirror: it is a backend-only field with no frontend consumer, since it only shapes the final synthesis prompt server-side.
 
-Reasoning Ask accepts the stable `retrieval_effort` ids below; the default is `standard`. The model may stop before a ceiling when evidence is sufficient, but it may not raise a ceiling. “Final floor/aspect/cap” means `min(cap, max(floor, aspect × executed query count))`. The context values are hard evidence-character ceilings: the source partition contains structured preview, chunks, and direct source elements; the KG partition contains KG objects/relations, confirmed Memory, and query-time chains. Their combined evidence block cannot exceed the sum of the two values.
+Reasoning Ask accepts the stable `retrieval_effort` ids below; the default is `standard`. The model may stop before a ceiling when evidence is sufficient, but it may not raise a ceiling. “Final floor/aspect/cap” means `min(cap, max(floor, aspect × executed query count))`. The context values are hard evidence-character ceilings: the source partition contains structured preview, chunks, and direct source elements; the KG partition contains KG objects/relations, confirmed Memory, and query-time chains. Their combined evidence block cannot exceed the sum of the two values. `answer_element_items` bounds how many direct source elements (formulas, tables, images, …) the final synthesis prompt admits; they are chosen by retrieval relevance descending, not insertion order, and still consume the shared chunk-context budget above.
 
-| Effort id | UI label | Per-query ranked take | Final floor / aspect / cap | Max reasoning steps / initial subqueries | KG / chunk context characters |
-|---|---|---:|---:|---:|---:|
-| `overview` | 概览 | 4 | 8 / 2 / 12 | 4 / 2 | 4,000 / 12,000 |
-| `standard` | 标准 | 8 | 20 / 3 / 36 | 8 / 5 | 6,000 / 30,000 |
-| `deep` | 深入 | 8 | 24 / 4 / 48 | 16 / 6 | 8,000 / 50,000 |
-| `thorough` | 详尽 | 12 | 32 / 5 / 64 | 32 / 8 | 12,000 / 80,000 |
-| `exhaustive` | 穷尽 | 16 | 40 / 6 / 96 | 50 / 10 | 16,000 / 120,000 |
+| Effort id | UI label | Per-query ranked take | Final floor / aspect / cap | Max reasoning steps / initial subqueries | KG / chunk context characters | Direct source elements in synthesis |
+|---|---|---:|---:|---:|---:|---:|
+| `overview` | 概览 | 4 | 8 / 2 / 12 | 4 / 2 | 4,000 / 12,000 | 4 |
+| `standard` | 标准 | 8 | 20 / 3 / 36 | 8 / 5 | 6,000 / 30,000 | 6 |
+| `deep` | 深入 | 8 | 24 / 4 / 48 | 16 / 6 | 8,000 / 50,000 | 8 |
+| `thorough` | 详尽 | 12 | 32 / 5 / 64 | 32 / 8 | 12,000 / 80,000 | 12 |
+| `exhaustive` | 穷尽 | 16 | 40 / 6 / 96 | 50 / 10 | 16,000 / 120,000 | 16 |
 
 Candidate generation does not grow with effort; deployment settings control it independently. `CHUNK_RECALL` defaults to **200** and separately bounds each indexed Chunk/KG ANN and lexical window (at most 400 identities before deduplication at the default). `RELATION_RECALL` defaults to **200** and separately bounds Relation ANN and the total lexically expanded relation-id window (at most 400 before deduplication at the default); source and target directions still receive reserved shares inside that lexical total. Changing either deployment setting changes the effective candidate window, so the UI does not present those defaults as request-level hard ceilings.
 

@@ -805,16 +805,22 @@ class AskService:
         answer_client=None,
         kg_context_chars: int | None = None,
         chunk_context_chars: int | None = None,
+        element_items: int = 6,
         structured_block: str = "",
+        counts_sink: dict | None = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
         chain segment k1001+ (mirrors _answer_mix's keying), with final synthesis
         still handled by ``ask_answer``. Otherwise KG-only (legacy).
         Direct ``SourceElement`` passages use the isolated k4001+ namespace and
-        are first-class citations rather than unbound prompt decoration. Context refinement uses
-        ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
-        (answer, llm_grounded, anchors)."""
+        are first-class citations rather than unbound prompt decoration; at most
+        ``element_items`` are admitted, chosen by retrieval relevance descending
+        (tie-break ``element_id``) rather than insertion order. Context refinement
+        uses ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
+        (answer, llm_grounded, anchors, counts) where ``counts`` reports how many
+        KG/chunk/element entries actually entered the prompt (``included_kg``/
+        ``included_chunks``/``included_elements``)."""
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
@@ -848,10 +854,17 @@ class AskService:
             )
 
         # Direct source elements share the Chunk/source partition instead of
-        # bypassing its advertised hard ceiling.
+        # bypassing its advertised hard ceiling. Admit the top `element_items`
+        # by retrieval relevance descending (tie-break element_id) rather than
+        # whatever order the retriever happened to collect them in — an
+        # insertion-order slice silently drops the most relevant elements
+        # whenever the retriever collects more than the cap.
         if elements and len(source_context) < chunk_budget:
+            ranked_elements = sorted(
+                elements, key=lambda e: (-float(e.score or 0.0), e.element_id)
+            )[:element_items]
             element_block, element_id_map = self.evidence_context.element_context(
-                elements[:6], notebook_id=notebook_id,
+                ranked_elements, notebook_id=notebook_id,
                 id_offset=self._ELEMENT_KEY_BASE,
                 budget_chars=max(0, chunk_budget - len(source_context)),
             )
@@ -870,6 +883,10 @@ class AskService:
         )
         if kg_context == "(none)":
             kg_context, kg_map = "", {}
+        # Captured before Memory/derived-chain blocks merge into kg_map so
+        # "included_kg" reports KG objects/relations only, not those other
+        # evidence categories.
+        included_kg = len(kg_map)
         if memory_hits and len(kg_context) < effective_kg_budget:
             memory_block, memory_map = self.memory_retriever.context(
                 memory_hits, id_offset=self._MEMORY_KEY_BASE
@@ -900,6 +917,39 @@ class AskService:
             budget_chars=total_context_budget,
         )
         context_block = context_block[:total_context_budget]
+        # Partition the merged *source* map (structured preview + chunks +
+        # elements) by numeric key range rather than trusting chunk_id_map /
+        # element_id_map's sizes from before the append: _bounded_context_append
+        # can drop an entire block (remaining budget <= prefix) or filter it
+        # down to only the ids whose "k<n>:" line actually survived truncation
+        # — counting before that step over-reports what really entered the
+        # prompt. Elements live in the isolated k4001+ (_ELEMENT_KEY_BASE)
+        # namespace; everything else in source_map here is a chunk. A hybrid-
+        # scope request CAN pass structured_block together with chunks, but the
+        # structured preview is appended with an empty id map and contributes
+        # no keys, so every low-range key counted here is a surviving chunk
+        # line — no ambiguity.
+        included_elements = 0
+        for key in source_map:
+            try:
+                key_num = int(key[1:])
+            except (TypeError, ValueError):
+                continue
+            if key_num >= self._ELEMENT_KEY_BASE:
+                included_elements += 1
+        included_chunks = len(source_map) - included_elements
+        counts = {
+            "included_kg": included_kg,
+            "included_chunks": included_chunks,
+            "included_elements": included_elements,
+        }
+        # Fill the sink BEFORE the model call: when the answer client raises
+        # or returns malformed JSON, the synthesis trace must still report the
+        # evidence that really was assembled and sent, not zeros
+        # (codex PR#391 round-2).
+        if counts_sink is not None:
+            counts_sink.clear()
+            counts_sink.update(counts)
         raw = answer_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -915,7 +965,7 @@ class AskService:
         answer = str(data.get("answer", "")).strip()
         llm_grounded = bool(data.get("grounded", False))
         anchors = self._parse_answer_anchors(answer, id_map)
-        return answer, llm_grounded, anchors
+        return answer, llm_grounded, anchors, counts
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
@@ -1655,6 +1705,11 @@ class AskService:
             synth_failed = False
             synthesis_ran = False
             synthesis_started = time.perf_counter()
+            # _answer_reasoning returns a 4th `counts` element (included_kg/
+            # chunks/elements); _answer_with_retry's synth() contract is shared
+            # with other answer paths and stays a 3-tuple, so this closure
+            # captures counts as a side effect instead of widening that contract.
+            reasoning_counts: dict = {}
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
             structured_block = ""
@@ -1666,18 +1721,25 @@ class AskService:
                     cell_excerpt_chars=limits.cell_excerpt_chars,
                     budget_chars=limits.chunk_context_chars,
                 )
+            def _synth_reasoning():
+                # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
+                # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
+                ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
+                    notebook_id, research_question, top_hits, elements, history,
+                    cancel_event=cancel_event, chunks=chunks, chains=chains,
+                    memory_hits=memory_hits, answer_client=answer_client,
+                    kg_context_chars=limits.kg_context_chars,
+                    chunk_context_chars=limits.chunk_context_chars,
+                    element_items=limits.answer_element_items,
+                    structured_block=structured_block,
+                    counts_sink=reasoning_counts)
+                return ans, llm_grounded_, anchors_
             if answer_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits
                     or structured_batch is not None):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
-                    lambda: self._answer_reasoning(
-                        notebook_id, research_question, top_hits, elements, history,
-                        cancel_event=cancel_event, chunks=chunks, chains=chains,
-                        memory_hits=memory_hits, answer_client=answer_client,
-                        kg_context_chars=limits.kg_context_chars,
-                        chunk_context_chars=limits.chunk_context_chars,
-                        structured_block=structured_block),
+                    _synth_reasoning,
                     getattr(answer_client, "model", ""),
                     service="ask_answer",
                 )
@@ -1752,6 +1814,12 @@ class AskService:
                         "citations": len(citations),
                         "anchors": len(anchors),
                         "evidence_level": evidence_level,
+                        # Actual counts that entered the synthesis prompt (post
+                        # per-partition budget truncation), distinct from the
+                        # earlier "answer" step's pre-truncation candidate pool.
+                        "included_kg": reasoning_counts.get("included_kg", 0),
+                        "included_chunks": reasoning_counts.get("included_chunks", 0),
+                        "included_elements": reasoning_counts.get("included_elements", 0),
                     },
                     duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
                 )
