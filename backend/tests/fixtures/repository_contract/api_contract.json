@@ -1018,7 +1018,21 @@
             },
             "result_sets": {
               "items": {
-                "$ref": "#/components/schemas/StructuredKnowhowResult"
+                "discriminator": {
+                  "mapping": {
+                    "collection": "#/components/schemas/TypedCollectionResult",
+                    "knowhow": "#/components/schemas/StructuredKnowhowResult"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/StructuredKnowhowResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TypedCollectionResult"
+                  }
+                ]
               },
               "title": "Result Sets",
               "type": "array"
@@ -7444,6 +7458,186 @@
             "summary"
           ],
           "title": "TraceStep",
+          "type": "object"
+        },
+        "TypedCollectionCoverage": {
+          "description": "Coverage proof for one enumerated element or knowledge-object list:\nhow many rows were returned against the collection's known size, and\nwhether the listing is complete or was cut short. ``total=None`` means\nthe collection's overall size could not be determined — display this as\nan unknown denominator, never as zero.",
+          "properties": {
+            "complete": {
+              "default": false,
+              "title": "Complete",
+              "type": "boolean"
+            },
+            "overflow_semantics": {
+              "default": "",
+              "maxLength": 40,
+              "title": "Overflow Semantics",
+              "type": "string"
+            },
+            "returned_total": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Returned Total",
+              "type": "integer"
+            },
+            "total": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Total"
+            },
+            "truncated_reason": {
+              "default": "",
+              "maxLength": 80,
+              "title": "Truncated Reason",
+              "type": "string"
+            }
+          },
+          "title": "TypedCollectionCoverage",
+          "type": "object"
+        },
+        "TypedCollectionItem": {
+          "description": "One row of an enumerated source-element or knowledge-object list.\nElement rows populate ``source_id``/``source_title``/``element_type``/\n``location_label``/``text``/``asset_id``; knowledge-object rows populate\n``name``/``section_path``/``evidence_element_ids`` instead.",
+          "properties": {
+            "asset_id": {
+              "default": "",
+              "title": "Asset Id",
+              "type": "string"
+            },
+            "element_type": {
+              "default": "",
+              "title": "Element Type",
+              "type": "string"
+            },
+            "evidence_element_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 3,
+              "title": "Evidence Element Ids",
+              "type": "array"
+            },
+            "item_id": {
+              "title": "Item Id",
+              "type": "string"
+            },
+            "location_label": {
+              "default": "",
+              "title": "Location Label",
+              "type": "string"
+            },
+            "name": {
+              "default": "",
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "section_path": {
+              "default": "",
+              "title": "Section Path",
+              "type": "string"
+            },
+            "source_id": {
+              "default": "",
+              "title": "Source Id",
+              "type": "string"
+            },
+            "source_title": {
+              "default": "",
+              "title": "Source Title",
+              "type": "string"
+            },
+            "text": {
+              "default": "",
+              "title": "Text",
+              "type": "string"
+            },
+            "tier": {
+              "default": "personal",
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id"
+          ],
+          "title": "TypedCollectionItem",
+          "type": "object"
+        },
+        "TypedCollectionResult": {
+          "description": "One enumerated element or knowledge-object collection, kept alongside\nranked evidence in the response rather than folded into it. Its\n``coverage`` — not its position in a relevance ranking — is the\nauthority on whether the list is complete.",
+          "properties": {
+            "collection": {
+              "enum": [
+                "elements",
+                "kg_objects"
+              ],
+              "title": "Collection",
+              "type": "string"
+            },
+            "coverage": {
+              "$ref": "#/components/schemas/TypedCollectionCoverage"
+            },
+            "element_kind": {
+              "default": "",
+              "title": "Element Kind",
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/TypedCollectionItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "kind": {
+              "const": "collection",
+              "default": "collection",
+              "title": "Kind",
+              "type": "string"
+            },
+            "object_type": {
+              "default": "",
+              "title": "Object Type",
+              "type": "string"
+            },
+            "source_id": {
+              "default": "",
+              "title": "Source Id",
+              "type": "string"
+            },
+            "synthesis_complete": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Synthesis Complete"
+            },
+            "synthesis_rows": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Synthesis Rows",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "collection",
+            "coverage"
+          ],
+          "title": "TypedCollectionResult",
           "type": "object"
         },
         "UnifiedKgStatus": {

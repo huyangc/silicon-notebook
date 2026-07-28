@@ -998,7 +998,8 @@ class AskService:
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         if completeness_unavailable:
             msg = (
-                "当前精确完整枚举仅支持 Knowhow 整表物理行清单与直接行计数；"
+                "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
+                "以及元素清单（公式/表格/图片/代码块）与知识对象清单；"
                 "本次请求不能视为全部结果。\n\n"
                 + msg
             )
@@ -1647,7 +1648,8 @@ class AskService:
                 conclusion=(
                     (f"{coverage_prefix}\n\n" if coverage_prefix else "")
                     + (
-                        "当前精确完整枚举仅支持 Knowhow 整表物理行清单与直接行计数；"
+                        "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
+                        "以及元素清单（公式/表格/图片/代码块）与知识对象清单；"
                         "本次请求不能视为全部结果。\n\n"
                         if completeness_unavailable else ""
                     )
@@ -1773,6 +1775,64 @@ class AskService:
                     cell_excerpt_chars=limits.cell_excerpt_chars,
                     budget_chars=limits.chunk_context_chars,
                 )
+            # 类型化集合清单(T4 产出的 enumerations)映射成 AskResponse.result_sets
+            # 行 + 合成证据块(T5)。映射与 prompt 块拼接放在**同一个** try 里:两者
+            # 失败都只应让清单这一整份"锦上添花"的产出消失,不该出现"卡片有了
+            # 但块裸抛穿整轮 Ask"或"块建起来了但卡片已经在别的异常里被清空"的
+            # 一半状态(codex 评审实测复现过后一种)。`enumerations` 在上面的 broad
+            # except 分支里可能已经被清空过一次,这里的 try 只防映射/渲染本身再
+            # 出岔子。
+            typed_collection_result_sets: list = []
+            enumeration_block_dropped = False
+            if enumerations:
+                try:
+                    from app.services.collection_enumeration_answer import (
+                        apply_synthesis_preview_counts,
+                        enumeration_prompt_block,
+                        typed_collection_results,
+                    )
+                    typed_collection_result_sets = typed_collection_results(
+                        enumerations
+                    )
+                    if answer_client.configured:
+                        from app.services.collection_enumeration_answer import (
+                            enumeration_sub_budget,
+                        )
+                        # 枚举块在后:与既有 knowhow structured_block 拼接,整体
+                        # 仍经 structured_block 这一个参数进 _answer_reasoning,
+                        # 装配位保持在 source 分区最前(语义不变,见该函数 843
+                        # 行起)。子预算三层夹(见 enumeration_sub_budget 的
+                        # docstring):减去 knowhow 已占字符 + 两者之间 "\n\n"
+                        # 拼接符本身的 2 个字符,再夹到 chunk_context_chars 的
+                        # 一半,防止模型"顺便列出所有表格"把另一半问题
+                        # (chunks/elements)的证据预算整个挤空。
+                        enum_budget_chars = enumeration_sub_budget(
+                            chunk_context_chars=limits.chunk_context_chars,
+                            structured_block_len=len(structured_block),
+                        )
+                        preview = enumeration_prompt_block(
+                            enumerations,
+                            inline_rows=limits.inline_answer_rows,
+                            budget_chars=enum_budget_chars,
+                        )
+                        apply_synthesis_preview_counts(
+                            typed_collection_result_sets, preview.shown_rows
+                        )
+                        if preview.text:
+                            structured_block = (
+                                f"{structured_block}\n\n{preview.text}"
+                                if structured_block else preview.text
+                            )
+                        else:
+                            # 预算把连块头都挤没了(极端场景,如 knowhow 已经吃满
+                            # chunk_context_chars 的绝大部分):清单结果卡仍然
+                            # 存在(上面 typed_collection_result_sets 不受影响),
+                            # 只是这一轮没能把它塞进合成证据——这条轨迹detail是
+                            # 唯一挂点(trace 已闭合,不能另起一条独立 trace 步)。
+                            enumeration_block_dropped = True
+                except Exception:
+                    typed_collection_result_sets = []
+                    enumeration_block_dropped = False
             def _synth_reasoning():
                 # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
                 # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
@@ -1788,7 +1848,7 @@ class AskService:
                 return ans, llm_grounded_, anchors_
             if answer_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits
-                    or structured_batch is not None):
+                    or structured_batch is not None or enumerations):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     _synth_reasoning,
@@ -1876,6 +1936,11 @@ class AskService:
                         # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
                         # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
                         "enumerated_collections": len(enumerations),
+                        # 枚举块因预算太紧(连块头都放不下)被整体挤出合成证据;
+                        # 结果卡不受影响(typed_collection_result_sets 仍然完整),
+                        # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
+                        # 挂点。
+                        "enumeration_block_dropped": enumeration_block_dropped,
                     },
                     duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
                 )
@@ -1901,9 +1966,28 @@ class AskService:
                     "The notebook does not yet contain approved knowledge that matches "
                     "this question. Upload and review sources to build coverage.")
 
-            if completeness_unavailable:
+            # 抑制免责声明须是确定性规则,不是"有任何一张卡就消音":
+            # ①result_scope=="aggregate"(如"库里有多少种公式"这类去重/种类计数)
+            # 从不抑制——枚举工具只会精确统计"表里的物理条目数",证明不了模型
+            # 自己在归并去重后的种类数,红线要求这类问题必须回退到相关性检索并
+            # 保留警告,哪怕模型顺手枚举出了一张卡。
+            # ②卡有但 returned_total==0(例如枚举了一个空集合)同样不算「已产出
+            # 清单结果」——0 条清单不能替这道题的「全部结果」背书,警告必须留着。
+            # 只有非 aggregate 且至少一张卡的 coverage.returned_total>0 时才抑制;
+            # 这时每张卡自己的 coverage 徽章已经承担「完整/部分」的披露,重复声明
+            # 反而会让「明明列出了公式清单」的回答开头显得像在道歉。
+            has_nonempty_collection_result = any(
+                row.coverage.returned_total > 0
+                for row in typed_collection_result_sets
+            )
+            suppress_completeness_warning = (
+                intent_contract.result_scope != "aggregate"
+                and has_nonempty_collection_result
+            )
+            if completeness_unavailable and not suppress_completeness_warning:
                 warning = (
-                    "当前精确完整枚举仅支持 Knowhow 整表物理行清单与直接行计数；"
+                    "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
+                    "以及元素清单（公式/表格/图片/代码块）与知识对象清单；"
                     "条件筛选、去重、分组或其他集合请求本次仍来自相关性检索，"
                     "不能视为全部结果。"
                 )
@@ -1935,7 +2019,14 @@ class AskService:
                 reasoning_trace=trace or None,
                 intent=intent_contract,
                 retrieval_effort=payload.retrieval_effort,
-                result_sets=(structured_batch.result_sets if structured_batch else []),
+                # Knowhow 的整表批(kind="knowhow")在前,本轮类型化集合清单
+                # (kind="collection")在后——顺序与 result_sets 判别 union 的
+                # 追加顺序一致(见 app.models.ask.AskResponse.result_sets),T6
+                # 按 kind 分派渲染,不依赖顺序本身携带语义。
+                result_sets=(
+                    (structured_batch.result_sets if structured_batch else [])
+                    + typed_collection_result_sets
+                ),
                 result_coverage=(
                     structured_batch.coverage() if structured_batch else None
                 ),

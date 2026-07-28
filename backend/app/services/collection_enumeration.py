@@ -111,6 +111,10 @@ DEFAULT_EXCERPT_CHARS = 1_000
 # is a reference for the UI to resolve on demand, not payload: hydrating the
 # quoted spans of every listed object would multiply the response by the size
 # of the corpus it points at.
+# Mirrored (as a literal, not an import — app.models must not import
+# app.services) by app.models.ask.TypedCollectionItem.evidence_element_ids's
+# max_length=3; kept in sync by
+# test_typed_collection_result_sets.py::test_max_evidence_refs_parity_between_executor_and_wire_model.
 MAX_EVIDENCE_REFS = 3
 
 # Upper bound on one batched label lookup.  A walk can visit at most

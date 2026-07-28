@@ -157,10 +157,18 @@
   `[Enumeration coverage: formula, returned 12/12, complete]`）。
 - `AskResponse.result_sets` 泛化为 kind 判别 union：现有 `StructuredKnowhowResult
   (kind="knowhow")` + 新 `TypedCollectionResult(kind="collection")`
-  {collection:"elements"|"kg_objects", element_kind/object_type, items, coverage:
-  StructuredResultCoverage}。旧持久化数据（kind="knowhow"）解析兼容，补反序列化测试。
-- `completeness_unavailable` 免责文案更新：本轮已产生清单结果卡时不再前置（coverage 徽章承担
-  披露）；未产生时保留但措辞提及元素/对象清单能力。
+  {collection:"elements"|"kg_objects", element_kind/object_type, source_id, items,
+  coverage: **TypedCollectionCoverage**（returned_total + Optional total（None=分母未知，
+  禁止渲染 /0）+ complete + truncated_reason + overflow_semantics），并携带
+  `synthesis_rows`/`synthesis_complete`（进入合成预览的行数——「枚举完整、分析部分」两轨
+  分开披露，对齐 Knowhow batch 既有语义）。旧持久化数据（kind="knowhow"）解析兼容，
+  未知 kind 有意 fail-loud；补反序列化测试。
+- 枚举块预算：上限 `chunk_context_chars // 2`（为 chunks/elements 保底），prompt 条目行
+  text 截 200 字符（卡片/transport 仍用执行器 1000 字符摘录），块头预留优先保活，条目行
+  单行化且不得出现可与引用正则冲突的 `[数字]` 形状。
+- `completeness_unavailable` 免责文案更新：仅当 `result_scope != "aggregate"` 且存在
+  `returned_total > 0` 的清单结果时不再前置（coverage 徽章承担披露）；aggregate（计数/
+  去重）与空清单场景保留警告；三处文案（长版+两处早退短版）统一提及元素/知识对象清单能力。
 
 ### 2.6 前端
 

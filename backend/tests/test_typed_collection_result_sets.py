@@ -1,0 +1,869 @@
+"""逐步推理接入类型化集合枚举工具(PR-2 T5)。
+
+覆盖响应契约与合成集成的接入面:``AskResponse.result_sets`` 的 kind 判别 union
+(新旧混合反序列化)、``enumeration_prompt_block`` 的覆盖措辞 + previewed 回填 +
+预算三层夹截断、``typed_collection_results`` 的 outcome→wire 映射,以及端到端
+(reflect 产出枚举 → result_sets 含 TypedCollectionResult 且合成 prompt 携带
+枚举块 → completeness_unavailable 按确定性规则条件化)。执行器/接入面本身的
+合同分别在 ``test_collection_enumeration`` / ``test_reasoning_enumeration_tools``
+——这里只测 T5 新增的响应契约与合成拼接。
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app.core.ask_retrieval_policy import ask_retrieval_limits
+from app.core.config import Settings
+from app.models.ask import (
+    AskIntentConfirmation,
+    AskResponse,
+    QueryIntentContract,
+    StructuredKnowhowResult,
+    StructuredResultCoverage,
+    TypedCollectionCoverage,
+    TypedCollectionItem,
+    TypedCollectionResult,
+)
+from app.models.schemas import AskRequest, NotebookCreate
+from app.services.collection_enumeration import (
+    MAX_EVIDENCE_REFS,
+    ElementItem,
+    EnumerationCoverage,
+    KgObjectItem,
+)
+from app.services.collection_enumeration_answer import (
+    apply_synthesis_preview_counts,
+    enumeration_prompt_block,
+    enumeration_sub_budget,
+    typed_collection_results,
+)
+from app.services.embedding import FakeEmbedder
+from app.services.reasoning_retrieval import CollectionEnumerationOutcome
+from app.services.sqlite_repository import SQLiteRepository
+from app.services.structured_retrieval import (
+    StructuredEnumeration,
+    structured_prompt_block,
+)
+from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
+
+NOW = "2026-07-28T00:00:00+08:00"
+
+
+# --------------------------------------------------------------------- 构件
+
+def _coverage(**overrides) -> EnumerationCoverage:
+    base = dict(
+        returned=0, returned_total=0, scanned=0, total=None, has_more=False,
+        complete=False, truncated_reason="", overflow_semantics="",
+    )
+    base.update(overrides)
+    return EnumerationCoverage(**base)
+
+
+def _element_item(**overrides) -> ElementItem:
+    base = dict(
+        element_id="el-1", source_id="s1", source_title="论文一",
+        element_type="formula", location_label="p1", text="公式1",
+        asset_id="", notebook_id="nb", tier="personal",
+    )
+    base.update(overrides)
+    return ElementItem(**base)
+
+
+def _kg_item(**overrides) -> KgObjectItem:
+    base = dict(
+        object_id="k-1", object_type="concept", name="版图设计要点",
+        section_path="1", notebook_id="nb", tier="personal",
+        evidence_element_ids=(),
+    )
+    base.update(overrides)
+    return KgObjectItem(**base)
+
+
+def _outcome(**overrides) -> CollectionEnumerationOutcome:
+    base = dict(collection="elements", kind="formula", source_id="",
+                items=[_element_item()], coverage=_coverage())
+    base.update(overrides)
+    return CollectionEnumerationOutcome(**base)
+
+
+# ------------------------------------------------------- typed_collection_results
+
+def test_element_outcome_maps_onto_typed_collection_result():
+    outcome = _outcome(
+        items=[_element_item(element_id="el-1", asset_id="a1")],
+        coverage=_coverage(returned=3, returned_total=3, scanned=3, total=3,
+                           complete=True),
+    )
+    [result] = typed_collection_results([outcome])
+    assert result.kind == "collection"
+    assert result.collection == "elements"
+    assert result.element_kind == "formula"
+    assert result.object_type == ""
+    assert result.source_id == ""
+    assert [item.item_id for item in result.items] == ["el-1"]
+    assert result.items[0].asset_id == "a1"
+    assert result.items[0].source_title == "论文一"
+    assert result.coverage.returned_total == 3
+    assert result.coverage.total == 3
+    assert result.coverage.complete is True
+    # 未经 apply_synthesis_preview_counts 之前:默认值表示"未尝试合成预览"。
+    assert result.synthesis_rows == 0
+    assert result.synthesis_complete is None
+
+
+def test_kg_object_outcome_maps_object_type_not_element_kind():
+    outcome = _outcome(
+        collection="kg_objects", kind="concept", source_id="",
+        items=[_kg_item(evidence_element_ids=("el-1", "el-2"))],
+        coverage=_coverage(returned_total=1, total=None, complete=True),
+    )
+    [result] = typed_collection_results([outcome])
+    assert result.collection == "kg_objects"
+    assert result.object_type == "concept"
+    assert result.element_kind == ""
+    assert result.items[0].name == "版图设计要点"
+    assert result.items[0].section_path == "1"
+    assert list(result.items[0].evidence_element_ids) == ["el-1", "el-2"]
+    # total=None 必须原样带出,不能被 Optional[int] 之外的机制悄悄归零。
+    assert result.coverage.total is None
+
+
+def test_source_scoped_outcome_carries_source_id():
+    outcome = _outcome(source_id="s1")
+    [result] = typed_collection_results([outcome])
+    assert result.source_id == "s1"
+
+
+def test_evidence_element_ids_truncated_to_max_evidence_refs_even_if_executor_widens():
+    outcome = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item(evidence_element_ids=("a", "b", "c", "d", "e"))],
+        coverage=_coverage(returned_total=1, complete=True),
+    )
+    [result] = typed_collection_results([outcome])
+    assert len(result.items[0].evidence_element_ids) == MAX_EVIDENCE_REFS
+
+
+def test_evidence_element_ids_bounded_to_three_at_the_model_layer():
+    with pytest.raises(Exception):
+        TypedCollectionItem(item_id="k1", notebook_id="nb", tier="personal",
+                            evidence_element_ids=["a", "b", "c", "d"])
+
+
+def test_max_evidence_refs_parity_between_executor_and_wire_model():
+    """两侧各留反向注释指向对方(collection_enumeration.MAX_EVIDENCE_REFS 与
+    TypedCollectionItem.evidence_element_ids 的 max_length);这条测试是唯一
+    钉住两者不漂移的地方——两侧都不导入对方(models 不许 import services),
+    所以只能在这里用字面量交叉断言。"""
+    assert MAX_EVIDENCE_REFS == 3
+    TypedCollectionItem(item_id="x", evidence_element_ids=["a", "b", "c"])
+    with pytest.raises(Exception):
+        TypedCollectionItem(
+            item_id="x", evidence_element_ids=["a", "b", "c", "d"][:MAX_EVIDENCE_REFS + 1]
+        )
+
+
+# ---------------------------------------------------- apply_synthesis_preview_counts
+
+def test_apply_synthesis_preview_counts_marks_complete_when_shown_equals_listed():
+    outcome = _outcome(coverage=_coverage(returned_total=3, total=3, complete=True))
+    [result] = typed_collection_results([outcome])
+    apply_synthesis_preview_counts([result], [3])
+    assert result.synthesis_rows == 3
+    assert result.synthesis_complete is True
+
+
+def test_apply_synthesis_preview_counts_marks_incomplete_when_shown_is_partial():
+    outcome = _outcome(coverage=_coverage(returned_total=300, total=300, complete=True))
+    [result] = typed_collection_results([outcome])
+    apply_synthesis_preview_counts([result], [100])
+    assert result.synthesis_rows == 100
+    assert result.synthesis_complete is False
+
+
+# --------------------------------------------------------- enumeration_sub_budget
+
+def test_sub_budget_reserves_knowhow_length_and_its_joiner():
+    # chunk_context_chars=1000, knowhow block already 500 chars: available
+    # should be 1000 - 500 - 2(joiner) = 498, further halved to 500 by the
+    # third layer -> min(498, 500) = 498.
+    assert enumeration_sub_budget(
+        chunk_context_chars=1000, structured_block_len=500
+    ) == 498
+
+
+def test_sub_budget_omits_joiner_when_no_knowhow_block():
+    assert enumeration_sub_budget(
+        chunk_context_chars=1000, structured_block_len=0
+    ) == 500  # half-cap binds here, not the (absent) knowhow reservation
+
+
+def test_sub_budget_never_lets_combined_length_exceed_chunk_context_chars():
+    """The +2 overflow this guards against: a Knowhow block and an
+    enumeration block each sized exactly to their own ceiling must still fit
+    together with the "\\n\\n" joiner between them."""
+    chunk_context_chars = 1000
+    structured_block = "x" * 700
+    budget = enumeration_sub_budget(
+        chunk_context_chars=chunk_context_chars,
+        structured_block_len=len(structured_block),
+    )
+    enum_block = "y" * budget
+    combined = f"{structured_block}\n\n{enum_block}"
+    assert len(combined) <= chunk_context_chars
+
+
+def test_sub_budget_caps_at_half_even_with_no_knowhow_consumption():
+    assert enumeration_sub_budget(
+        chunk_context_chars=30_000, structured_block_len=0
+    ) == 15_000
+
+
+def test_mixed_knowhow_and_enumeration_block_keeps_the_enum_header_and_stays_bounded():
+    """混合场景:同一轮既有 Knowhow 结构化预览又有类型化集合枚举——按 ask_service
+    的真实拼接顺序(先建 knowhow 的 structured_block,再用
+    enumeration_sub_budget 算枚举子预算,最后拼接)重放,断言枚举块的块头仍然
+    保住,且两块合计不超过 chunk_context_chars。"""
+    limits = ask_retrieval_limits("standard")
+    batch = StructuredEnumeration(
+        result_sets=[StructuredKnowhowResult(
+            table_id="t1", title="方法表",
+            coverage=StructuredResultCoverage(
+                total_rows=3, scanned_rows=3, returned_rows=3, complete=True,
+            ),
+        )],
+        known_total_rows=3, scanned_rows=3, returned_rows=3, complete=True,
+    )
+    structured_block = structured_prompt_block(
+        batch, inline_rows=limits.inline_answer_rows,
+        cell_excerpt_chars=limits.cell_excerpt_chars,
+        budget_chars=limits.chunk_context_chars,
+    )
+    assert structured_block  # sanity: a modest, realistic knowhow block
+
+    outcome = _outcome(
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    enum_budget = enumeration_sub_budget(
+        chunk_context_chars=limits.chunk_context_chars,
+        structured_block_len=len(structured_block),
+    )
+    preview = enumeration_prompt_block(
+        [outcome], inline_rows=limits.inline_answer_rows, budget_chars=enum_budget)
+
+    assert "[Enumeration: formula elements" in preview.text
+    combined = f"{structured_block}\n\n{preview.text}"
+    assert len(combined) <= limits.chunk_context_chars
+
+
+# ------------------------------------------------------- enumeration_prompt_block
+
+def test_empty_outcomes_returns_empty_preview():
+    preview = enumeration_prompt_block([], inline_rows=100, budget_chars=10_000)
+    assert preview.text == ""
+    assert preview.shown_rows == []
+
+
+def test_complete_header_reports_previewed_count():
+    items = [_element_item(element_id=f"el-{i}") for i in range(3)]
+    outcome = _outcome(
+        items=items,
+        coverage=_coverage(returned=3, returned_total=3, scanned=3, total=3,
+                           complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "[Enumeration: formula elements, listed 3/3, complete, previewed 3]" in preview.text
+    assert "- 论文一 · p1: 公式1" in preview.text
+    assert preview.shown_rows == [3]
+
+
+def test_partial_header_reports_budget_reason_and_previewed():
+    outcome = _outcome(
+        coverage=_coverage(returned=200, returned_total=200, scanned=200,
+                           total=900, complete=False, truncated_reason="budget"))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert (
+        "[Enumeration: formula elements, listed 200/900, "
+        "partial: run budget, previewed 1]"
+    ) in preview.text
+    assert preview.shown_rows == [1]
+
+
+def test_payload_reason_gets_its_own_label():
+    outcome = _outcome(
+        coverage=_coverage(returned=1, returned_total=1, scanned=1, total=50,
+                           complete=False, truncated_reason="payload"))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "partial: payload limit" in preview.text
+
+
+def test_denominator_unknown_never_renders_as_slash_zero():
+    outcome = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item()],
+        coverage=_coverage(returned=51, returned_total=51, scanned=51,
+                           total=None, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "/0" not in preview.text
+    assert "/None" not in preview.text
+
+
+def test_denominator_unknown_complete_still_states_complete():
+    """卡片徽章「已全部列出」不能与 prompt 措辞「分母未知」自相矛盾——complete
+    必须显式出现,不能被"分母未知"这条分支吞掉(规则 11 的强制披露仍要求模型
+    知道这份清单其实已经列全了)。"""
+    outcome = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item()],
+        coverage=_coverage(returned=51, returned_total=51, scanned=51,
+                           total=None, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "listed 51, complete, denominator unknown" in preview.text
+
+
+def test_denominator_unknown_partial_keeps_the_truncation_reason():
+    outcome = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item()],
+        coverage=_coverage(returned=10, returned_total=10, scanned=10,
+                           total=None, complete=False, truncated_reason="budget"))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "partial: run budget, denominator unknown" in preview.text
+    assert "/0" not in preview.text
+
+
+def test_concurrent_change_is_interrupted_not_generic_partial():
+    outcome = _outcome(
+        coverage=_coverage(returned=40, returned_total=40, scanned=40,
+                           total=None, complete=False,
+                           truncated_reason="concurrent_change"))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert (
+        "[Enumeration: formula elements, listed 40, "
+        "INTERRUPTED by concurrent change — completeness unknown, previewed 1]"
+    ) in preview.text
+    assert "partial" not in preview.text
+
+
+def test_source_scoped_outcome_states_single_source_scope():
+    outcome = _outcome(
+        source_id="s1", items=[_element_item(source_title="论文一")],
+        coverage=_coverage(returned=1, returned_total=1, scanned=1, total=1,
+                           complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "[scope: single source 论文一]" in preview.text
+
+
+def test_kg_object_item_line_has_no_bracket_at_all():
+    outcome = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item(section_path="")],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "- 版图设计要点 · —" in preview.text
+
+
+def test_item_line_never_contains_a_bare_bracketed_number():
+    """一个常见的 section_path 就是纯数字("1"、"2.3");条目行如果照旧把它包在
+    `[...]` 里,前端引用正则会把 `- [1] name` 渲染成可点的假引用 chip。"""
+    outcome = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item(section_path="1")],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "[1]" not in preview.text
+    assert "- 版图设计要点 · 1" in preview.text
+
+
+def test_element_item_line_uses_dot_and_colon_not_brackets():
+    outcome = _outcome(items=[_element_item(source_title="论文一", location_label="p3",
+                                             text="公式3")])
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    assert "- 论文一 · p3: 公式3" in preview.text
+    assert "[论文一" not in preview.text
+
+
+def test_multiline_element_text_collapses_onto_one_preview_line():
+    outcome = _outcome(items=[_element_item(
+        text="第一行\n第二行\n\n第三行   有多余空白")])
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    item_lines = [line for line in preview.text.splitlines() if line.startswith("- ")]
+    assert len(item_lines) == 1
+    assert "第一行 第二行 第三行 有多余空白" in item_lines[0]
+
+
+def test_element_text_clamped_to_prompt_line_excerpt_chars():
+    long_text = "字" * 500
+    outcome = _outcome(items=[_element_item(text=long_text)])
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=100_000)
+    item_line = next(l for l in preview.text.splitlines() if l.startswith("- "))
+    # 200 是 prompt 行摘录常量;传输/结果卡仍由执行器的 1000 字符摘录负责,
+    # 这里只钉 prompt 行本身足够短。
+    assert len(item_line) < 260
+
+
+def test_inline_rows_cap_is_shared_across_outcomes_and_reports_omitted_count():
+    many_items = [_element_item(element_id=f"el-{i}") for i in range(5)]
+    outcome = _outcome(
+        items=many_items,
+        coverage=_coverage(returned=5, returned_total=5, scanned=5, total=5,
+                           complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=2, budget_chars=10_000)
+    item_lines = [line for line in preview.text.splitlines() if line.startswith("- ")]
+    assert len(item_lines) == 2       # capped at inline_rows, not the full 5
+    assert "(+3 more rows in the result card)" in preview.text
+    assert preview.shown_rows == [2]
+
+
+def test_budget_chars_never_exceeded_even_with_many_rows():
+    many_items = [_element_item(element_id=f"el-{i}") for i in range(50)]
+    outcome = _outcome(
+        items=many_items,
+        coverage=_coverage(returned=50, returned_total=50, scanned=50, total=50,
+                           complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=80)
+    assert len(preview.text) <= 80
+
+
+def test_header_survives_when_budget_only_fits_the_header():
+    """预算再小也先放块头:够放块头(previewed 0)但放不下任何条目时,块头本身
+    仍必须出现,而不是把整块一起省略。"""
+    outcome = _outcome(
+        items=[_element_item(text="很长很长很长很长很长很长很长很长的一段话" * 5)],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    # 用 shown=0 时的块头长度(不含条目行)作为探针,而不是按行号切——指令行与
+    # 块头之间那道 "\n\n" 分隔本身会在 splitlines() 里多出一个空行,按下标取
+    # 极易错位(已实测踩过一次)。直接用零行版本重新构造整段前缀,量出精确长度。
+    zero_row_preview = enumeration_prompt_block(
+        [outcome], inline_rows=0, budget_chars=10_000
+    )
+    assert "previewed 0" in zero_row_preview.text
+    bare_prefix_len = len(zero_row_preview.text)
+    preview = enumeration_prompt_block(
+        [outcome], inline_rows=100, budget_chars=bare_prefix_len + 10
+    )
+    assert "previewed 0" in preview.text
+    assert preview.shown_rows == [0]
+
+
+def test_whole_block_empty_when_budget_cannot_even_fit_one_header():
+    outcome = _outcome(
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=1)
+    assert preview.text == ""
+    assert preview.shown_rows == [0]
+
+
+def test_multiple_outcomes_each_get_their_own_header_in_order():
+    formula_outcome = _outcome(kind="formula")
+    kg_outcome = _outcome(
+        collection="kg_objects", kind="concept", items=[_kg_item()],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    preview = enumeration_prompt_block(
+        [formula_outcome, kg_outcome], inline_rows=100, budget_chars=10_000)
+    formula_idx = preview.text.index("[Enumeration: formula elements")
+    kg_idx = preview.text.index("[Enumeration: concept objects")
+    assert formula_idx < kg_idx
+    assert preview.shown_rows == [1, 1]
+
+
+def test_instruction_line_present_and_explains_previewed_vs_listed():
+    outcome = _outcome(
+        coverage=_coverage(returned=3, returned_total=3, total=3, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
+    # Content unique to the ONE-TIME instruction sentence, not to any
+    # per-outcome coverage header (both mention "previewed"/"listed", so
+    # checking for those words alone would pass even without this line —
+    # "result card" only appears in the instruction sentence).
+    first_line = preview.text.splitlines()[0]
+    assert "result card" in first_line
+    assert "previewed" in first_line and "listed" in first_line
+    # And it appears exactly once, ahead of every outcome header.
+    assert preview.text.count("result card, not this preview") == 1
+    header_idx = preview.text.index("[Enumeration: formula elements")
+    instruction_idx = preview.text.index("result card, not this preview")
+    assert instruction_idx < header_idx
+
+
+# --------------------------------------------------------- result_sets union
+
+def _knowhow_result(**overrides) -> dict:
+    base = dict(
+        kind="knowhow", table_id="t1", title="T", columns=[], rows=[],
+        coverage=dict(total_rows=5, scanned_rows=5, returned_rows=5,
+                      complete=True, truncated_reason="", overflow_semantics=""),
+    )
+    base.update(overrides)
+    return base
+
+
+def _collection_result(**overrides) -> dict:
+    base = dict(
+        kind="collection", collection="elements", element_kind="formula",
+        object_type="", source_id="", items=[],
+        coverage=dict(returned_total=3, total=3, complete=True,
+                      truncated_reason="", overflow_semantics=""),
+    )
+    base.update(overrides)
+    return base
+
+
+def test_pure_knowhow_result_sets_round_trip():
+    resp = AskResponse(conclusion="x", result_sets=[_knowhow_result()])
+    assert isinstance(resp.result_sets[0], StructuredKnowhowResult)
+    blob = json.loads(resp.model_dump_json())
+    restored = AskResponse(**blob)
+    assert isinstance(restored.result_sets[0], StructuredKnowhowResult)
+    assert restored.result_sets[0].table_id == "t1"
+
+
+def test_mixed_knowhow_and_collection_result_sets_round_trip():
+    resp = AskResponse(
+        conclusion="x",
+        result_sets=[_knowhow_result(), _collection_result()],
+    )
+    assert [row.kind for row in resp.result_sets] == ["knowhow", "collection"]
+    blob = json.loads(resp.model_dump_json())
+    restored = AskResponse(**blob)
+    assert isinstance(restored.result_sets[0], StructuredKnowhowResult)
+    assert isinstance(restored.result_sets[1], TypedCollectionResult)
+    assert restored.result_sets[1].collection == "elements"
+    assert restored.result_sets[1].coverage.total == 3
+
+
+def test_legacy_result_set_dict_missing_kind_defaults_to_knowhow():
+    """旧持久化数据的防御性后备:``kind`` 字段自 result_sets 引入之日起就有默认值
+    (#371),所以真实缺口未被观察到过,但一条手搓/历史 payload 若真的缺了这把
+    key,仍必须落回 knowhow(union 存在之前唯一的形状),而不是判别失败。"""
+    legacy = _knowhow_result()
+    del legacy["kind"]
+    resp = AskResponse(conclusion="x", result_sets=[legacy])
+    assert isinstance(resp.result_sets[0], StructuredKnowhowResult)
+    assert resp.result_sets[0].table_id == "t1"
+
+
+def test_legacy_mixed_with_explicit_collection_kind_still_routes_correctly():
+    legacy = _knowhow_result()
+    del legacy["kind"]
+    resp = AskResponse(
+        conclusion="x", result_sets=[legacy, _collection_result()],
+    )
+    assert isinstance(resp.result_sets[0], StructuredKnowhowResult)
+    assert isinstance(resp.result_sets[1], TypedCollectionResult)
+
+
+def test_unknown_kind_fails_loudly_instead_of_silently_defaulting():
+    """before-validator 只兜"缺失/假值"的 kind——一个显式但未知的 kind 值必须
+    fail-loud(discriminator 查表失败报 ValidationError),不能被悄悄当成
+    knowhow 处理:那会把一份陌生形状的数据错误地解析成物理行批次。这份 payload
+    刻意带全 StructuredKnowhowResult 的必填字段(table_id/title/coverage)——
+    如果 before-validator 曾经把未知 kind 悄悄改写成 "knowhow"(而不只是兜
+    缺失值),这份数据反而会构造成功,测试就该抓住"构造成功"这个假阴性,而
+    不只是抓"抛没抛异常"(缺字段本身就会抛,那不能证明 kind 校验起了作用)。
+    """
+    with pytest.raises(Exception):
+        AskResponse(conclusion="x", result_sets=[{
+            "kind": "mystery", "table_id": "t1", "title": "T",
+            "coverage": {"total_rows": 0, "scanned_rows": 0, "returned_rows": 0,
+                         "complete": True, "truncated_reason": "",
+                         "overflow_semantics": ""},
+        }])
+
+
+def test_typed_collection_coverage_is_not_reused_from_structured_result_coverage():
+    # 独立模型的存在性断言:total=None 是 TypedCollectionCoverage 的合法态,
+    # StructuredResultCoverage 的 total_rows 却默认 0——混用会让"分母未知"
+    # 与"总行数为 0"无法区分。
+    coverage = TypedCollectionCoverage(returned_total=5, total=None, complete=True)
+    assert coverage.total is None
+    with pytest.raises(Exception):
+        StructuredResultCoverage(total_rows=None)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------- 端到端(ask_reasoning)
+
+class _SeqLLM:
+    """plan 固定;reflect 按序列返回;evidence_refine 返回空;answer 固定并录制
+    发给它的 prompt 正文(供断言枚举块的存在与相对位置)。"""
+
+    configured = True
+
+    def __init__(self, plan, reflects, answer):
+        self._plan = plan
+        self._reflects = list(reflects)
+        self._answer = answer
+        self.answer_prompts: list[str] = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        content = messages[-1]["content"]
+        if "sub_queries" in schema_hint:
+            return json.dumps(self._plan)
+        if "next_action" in schema_hint:
+            return json.dumps(
+                self._reflects.pop(0) if self._reflects
+                else {"next_action": "answer", "sufficient": True}
+            )
+        if '"relevant"' in schema_hint:
+            return json.dumps({"relevant": []})
+        self.answer_prompts.append(content)
+        return json.dumps(self._answer)
+
+
+@pytest.fixture
+def arepo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "16")
+    # 与 test_reasoning_enumeration_tools 的 repo 同款隔离:本机 .env 里的真实
+    # 推理端点会让这些 run 打真实网络。
+    for key in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
+                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL",
+                "REASONING_LLM_MODEL"):
+        monkeypatch.setenv(key, "")
+    instance = SQLiteRepository(Settings())
+    bind_all_embedding_clients(instance, FakeEmbedder(dim=16))
+    instance.settings.graph_ppr_enabled = False
+    return instance
+
+
+def _bind_reasoning(repo, client):
+    bind_chat_client(repo, "reasoning_agent", client)
+    bind_chat_client(repo, "evidence_refine", client)
+    bind_chat_client(repo, "ask_answer", client)
+
+
+def _seed(repo, *, formulas=3, with_kg=True):
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    if with_kg:
+        repo.store_kg(notebook.id, None, [
+            {"local_id": "C1", "object_type": "claim",
+             "payload": {"name": "版图设计要点", "section_path": "1"}, "evidence": []},
+        ], [])
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted", NOW, NOW),
+        )
+        for index in range(1, formulas + 1):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-{index:03d}", "s1", "formula", f"p{index}",
+                 f"公式 {index}", "{}", NOW),
+            )
+    repo.collection_catalog.invalidate()
+    return notebook
+
+
+def _enumerate_action(kind="formula", **extra):
+    request = {"kind": kind}
+    request.update(extra)
+    return {"next_action": "enumerate_elements", "enumerate": request,
+            "reason": "列出公式"}
+
+
+def test_enumerate_action_populates_result_sets_and_reaches_synthesis(arepo):
+    nb = _seed(arepo, formulas=3)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "版图设计要点如下 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert len(collection_rows) == 1
+    row = collection_rows[0]
+    assert row.collection == "elements" and row.element_kind == "formula"
+    assert row.coverage.complete is True
+    assert row.coverage.returned_total == 3 and row.coverage.total == 3
+    assert len(row.items) == 3
+    # previewed 全部 3 条(未截断)→ synthesis 也认为完整。
+    assert row.synthesis_rows == 3
+    assert row.synthesis_complete is True
+
+    assert llm.answer_prompts, "answer synthesis must have run"
+    prompt = llm.answer_prompts[-1]
+    assert "[Enumeration: formula elements, listed 3/3, complete, previewed 3]" in prompt
+    # 装配位在 source 分区最前:枚举块必须先于本轮唯一的 KG 证据(claim 名称)
+    # 出现在喂给合成模型的证据块里,而不是被塞进 KG 分区之后。
+    enum_idx = prompt.index("[Enumeration: formula elements")
+    kg_idx = prompt.index("版图设计要点")
+    assert enum_idx < kg_idx
+
+
+def test_prompt_block_failure_clears_the_result_cards_too_and_does_not_crash_ask(
+    arepo, monkeypatch
+):
+    """映射与 enumeration_prompt_block 必须共用同一个 try:块渲染炸了,不能只
+    清空块、留下一份看起来完整却没有 synthesis 支持的结果卡(此前的分离 try
+    会让这一半状态发生,评审实测复现过"块裸抛穿整轮 Ask")。这里让
+    enumeration_prompt_block 本身抛错,断言(a)Ask 请求整体仍然成功返回、
+    (b)result_sets 里完全没有 collection 行——两者必须同时发生,不能只满足
+    其中一个。"""
+    import app.services.collection_enumeration_answer as cea
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cea, "enumeration_prompt_block", _boom)
+    nb = _seed(arepo, formulas=3)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "答案 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert resp.answer_id  # Ask 整体没有因为块渲染异常而崩溃
+    assert not any(row.kind == "collection" for row in resp.result_sets)
+
+
+def test_enumerate_only_run_with_no_other_evidence_still_reaches_synthesis(arepo):
+    """无 top_hits/chunks/elements/memory 时,仅有枚举结果也必须真的触发合成
+    (``or enumerations`` 那条守卫),不能落回"该 notebook 尚无匹配知识"的
+    确定性兜底文案。``has_kg`` 门要求笔记本里存在 KG(否则整轮在
+    ReasoningRetriever 跑之前就早退,连枚举动作都不会发生),但只要有一个 KG
+    对象存在,FakeEmbedder 的余弦相似度就从不真正为零——plan 子查询显式限定
+    ``types=["formula"]``(笔记本里只有一个 "claim")才能让检索**按类型硬性
+    过滤**到真正的零命中,而不是"不相关但仍打分"。"""
+    nb = _seed(arepo, formulas=2, with_kg=True)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点", "types": ["formula"]}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "仅根据清单作答。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert not resp.related_knowledge  # top_hits 确实是空的,不是巧合
+    assert llm.answer_prompts, "synthesis must actually run"
+    assert resp.answer == "仅根据清单作答。"
+    assert resp.llm_mode != "deterministic"
+    assert any(row.kind == "collection" for row in resp.result_sets)
+
+
+def _completeness_required_payload(question: str, *, result_scope: str = "complete") -> AskRequest:
+    contract = QueryIntentContract(
+        objective=question, resolved_question=question,
+        completeness_required=True, result_scope=result_scope,
+    )
+    return AskRequest(
+        question=question, mode="reasoning",
+        intent=AskIntentConfirmation(contract=contract, resolved_question=question),
+    )
+
+
+def test_completeness_unavailable_suppressed_for_nonaggregate_nonempty_card(arepo):
+    """规则①非 aggregate + 非空清单卡 → 抑制。notebook 无 knowhow 表 →
+    completeness_required 直接落 completeness_unavailable=True
+    (is_knowhow_enumeration_query 对空表恒 False)。本轮 reflect 确实枚举出了
+    非空元素清单,免责声明必须让位给 coverage 徽章。"""
+    nb = _seed(arepo, formulas=2)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "已列出公式 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, _completeness_required_payload("库里有哪些公式", result_scope="complete")
+    )
+
+    assert any(row.kind == "collection" for row in resp.result_sets)
+    assert "当前精确完整枚举支持" not in resp.conclusion
+    assert "当前精确完整枚举支持" not in resp.answer
+
+
+def test_completeness_unavailable_kept_for_aggregate_scope_even_with_a_card(arepo):
+    """规则②aggregate(去重/种类计数,如"库里有多少种公式")永不抑制——枚举
+    工具只能精确统计物理条目数,证明不了模型自己归并去重后的种类数,红线要求
+    这类问题必须回退到相关性检索并保留警告,哪怕模型顺手枚举出了一张非空卡。"""
+    nb = _seed(arepo, formulas=2)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "共两种公式 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, _completeness_required_payload("库里有多少种公式", result_scope="aggregate")
+    )
+
+    assert any(row.kind == "collection" for row in resp.result_sets)
+    assert "当前精确完整枚举支持" in resp.conclusion
+
+
+def test_completeness_unavailable_kept_when_card_is_empty(arepo):
+    """规则③0 条清单不能替这道题背书——枚举了一个空集合(returned_total==0)
+    时,警告仍必须保留,不能被"有卡就抑制"误伤。"""
+    nb = _seed(arepo, formulas=0)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(kind="table"),
+                  {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "没有找到表格。", "grounded": False},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, _completeness_required_payload("库里有哪些表格", result_scope="complete")
+    )
+
+    collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
+    # 空集合仍然算一次枚举(0 条也是诚实的清单结果),只是不足以背书完整性。
+    assert collection_rows and collection_rows[0].coverage.returned_total == 0
+    assert "当前精确完整枚举支持" in resp.conclusion
+
+
+def test_completeness_unavailable_shown_without_enumeration(arepo):
+    """同样的 completeness_required=True 笔记本,但本轮 reflect 从未调用枚举
+    动作(直接 answer)——没有清单结果卡背书,免责声明必须出现,且措辞提到
+    新增的元素/知识对象清单能力(不再说成「仅支持 Knowhow」)。"""
+    nb = _seed(arepo, formulas=2)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "简单回答 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, _completeness_required_payload("库里有哪些公式"))
+
+    assert not any(row.kind == "collection" for row in resp.result_sets)
+    assert "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数" in resp.conclusion
+    assert "元素清单" in resp.conclusion and "知识对象清单" in resp.conclusion
+
+
+def test_enumeration_block_shares_chunk_budget_with_knowhow_and_stays_bounded(arepo):
+    """枚举块子预算三层夹的端到端确认:即便本轮同时产生了 knowhow 结构化预览,
+    合成 prompt 里枚举块仍至少保住块头,且不会把 chunk_context_chars 撑爆。"""
+    nb = _seed(arepo, formulas=5)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "已列出 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert llm.answer_prompts
+    prompt = llm.answer_prompts[-1]
+    assert "[Enumeration: formula elements" in prompt
+    limits = ask_retrieval_limits("standard")
+    # 粗略上界:枚举块本身不可能超过它自己的子预算上限(chunk_context_chars 的
+    # 一半),真正的总量守卫在下面的单元测试(test_budget_chars_never_exceeded)
+    # 已经钉过,这里只确认端到端接线没有把它撑爆到荒谬的量级。
+    assert len(prompt) < limits.chunk_context_chars * 4
