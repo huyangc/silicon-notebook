@@ -74,7 +74,7 @@ test("follow_chain detail omits unavailable metrics and clamps trust percentages
 // memory/synthesis 是后来补进轨迹的两段:一段是私有记忆参与了作答,另一段是
 // 答案真的写出来了(整轮里通常最长的一段,此前完全不在轨迹里)。
 test("记忆与作答两步有自己的短标签,detail 不落到通用「候选」口径", () => {
-  const memory = { step_type: "memory", summary: "参考了 3 条你的记忆", detail: { count: 3 } };
+  const memory = { step_type: "memory", summary: "找到 3 条相关记忆", detail: { count: 3 } };
   assert.equal(getReasoningTraceSummary([memory], true).latestLabel, "记忆");
   // 通用分支会把 count 读成「N 个候选」—— 记忆数的不是候选。
   assert.equal(getTraceStepDetail(memory), "3 条记忆");

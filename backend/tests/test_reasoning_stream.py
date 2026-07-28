@@ -253,6 +253,9 @@ def test_reasoning_trace_covers_understanding_memory_and_synthesis(tmp_path, mon
     # 记忆那一步是「embedding + 向量扫描」在轨迹里的唯一交代;不计时等于把这段
     # 从「覆盖整轮」的总耗时里悄悄漏掉。
     assert isinstance(steps[2]["duration_ms"], int)
+    # 只声称召回,不声称被答案采纳:合成未必发生(模型未配/离线确定性模式),
+    # 说「参考了 N 条」就是假账(codex 第 4 轮 P2)。
+    assert steps[2]["summary"] == "找到 1 条相关记忆"
 
     synthesis = steps[-1]
     assert synthesis["step_type"] == "synthesis", kinds

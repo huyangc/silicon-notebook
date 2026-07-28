@@ -1438,19 +1438,24 @@ class AskService:
         memory_hits = self._memory_hits(
             user_id, notebook_id, research_question
         )
-        if memory_hits:
-            # Memory silently shapes the answer; a run that leaned on it should
-            # say so.  Only when something was actually recalled — "recalled 0"
-            # is noise in every notebook without memories.  The duration covers
-            # the embedding round trip plus the vector scan above: this step is
-            # the trace's only account of that work, so leaving it untimed would
-            # drop it from a total this change advertises as covering the run.
-            checked_pre_trace(TraceStep(
-                step_type="memory",
-                summary=f"参考了 {len(memory_hits)} 条你的记忆",
-                detail={"count": len(memory_hits)},
-                duration_ms=round((time.perf_counter() - memory_started) * 1000),
-            ))
+        # The duration covers the embedding round trip plus the vector scan
+        # above: this step is the trace's only account of that work, so leaving
+        # it untimed would drop it from a total advertised as covering the run.
+        memory_ms = round((time.perf_counter() - memory_started) * 1000)
+
+        def record_memory_step() -> None:
+            """记录本轮召回到的私有记忆(0 命中不记 —— 那在没有记忆的笔记本里全是噪声)。
+
+            措辞只声称**召回**,不声称被答案采纳:合成未必会发生(模型未配置、
+            或注册表为空的离线确定性模式),那时说「参考了 N 条」就是假账。调用点
+            也刻意排在短路返回之后,让根本没产生答案的那几轮干脆不提记忆。"""
+            if memory_hits:
+                checked_pre_trace(TraceStep(
+                    step_type="memory",
+                    summary=f"找到 {len(memory_hits)} 条相关记忆",
+                    detail={"count": len(memory_hits)},
+                    duration_ms=memory_ms,
+                ))
 
         if self._primary_llm_unconfigured():
             if structured_batch is not None:
@@ -1556,6 +1561,10 @@ class AskService:
         try:
             # intent already streamed above (before memory retrieval); stream_intent
             # stays idempotent because the structured branch may emit it earlier.
+            # 记忆那一步排在这里:上面每一条短路返回都不会产出答案,在它们之前记
+            # 就等于给一次没发生的作答留下「用过你的记忆」的痕迹。
+            record_memory_step()
+
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
                 if on_trace:
