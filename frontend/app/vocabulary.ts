@@ -22,17 +22,36 @@ export const PARSE_STATUS: Record<string, string> = {
   "metadata-only": "仅元数据", // source_ingestion.py:274 真实会写入
 };
 
-// 取值真源:structural_markdown.py 写入 source_elements 的 element_type。
-// heading/paragraph/table/code_block/text/list_item/image + parsers 侧的 formula。
+// source_elements.element_type 的取值真源有三类产出方,合起来才是全集:
+//   backend/app/services/parsers.py —— 各格式解析器(table_row / page_text /
+//     slide_text / speaker_notes / heading / paragraph)与 MinerU 映射
+//     (heading / paragraph / table / formula / image);
+//   backend/app/services/structural_markdown.py —— Markdown 块类型
+//     (heading / paragraph / table / code_block / list_item / image),经 parsers.py
+//     的 parse_markdown_text 原样写入;
+//   backend/app/services/knowhow/projection.py —— Knowhow 投影固定写 knowhow_cell。
+// 刻意不含 text:它从来没有产出方。parsers.py:32 传的 "text" 是 parser_name(进
+// metadata),structural_markdown.py 里的 "text" 是 markdown-it 的行内 token 类型,
+// 两者都不是 element_type。留着只会让人误以为后端会写这个值。
 export const ELEMENT_TYPE: Record<string, string> = {
   heading: "标题",
   paragraph: "正文",
+  // pypdf 兜底(无 MinerU)时的 PDF 段落。与 paragraph 同标签是有意的——对用户是
+  // 同一件东西,差别只在哪个解析器产出(先例见下方 CHECKUP_ISSUE 的 H4/H5)。
+  page_text: "正文",
   table: "表格",
+  table_row: "表格行", // CSV 行、XLSX 行、DOCX 表格行
   formula: "公式",
   code_block: "代码",
-  text: "正文",
   list_item: "列表项",
   image: "图片",
+  slide_text: "幻灯片文本", // PPTX 无 MinerU 时的兜底
+  speaker_notes: "演讲者备注",
+  // 历史遗留:MinerU 映射的初版产出过这个值,PR#280 起改产 image。已部署库里未重新
+  // 解析过的旧来源仍可能是它,所以保留翻译。
+  image_caption: "图片说明",
+  // 非文件解析器产出:Knowhow 投影(backend/app/services/knowhow/projection.py)
+  // 写入隐藏来源 source_elements 的行。
   knowhow_cell: "经验表单元格",
 };
 

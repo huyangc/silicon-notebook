@@ -64,6 +64,25 @@ test("内容块类型:已知值译对，未知值退中性兜底", () => {
   assert.equal(label(ELEMENT_TYPE, "some_future_block", "内容"), "内容");
 });
 
+// 补齐后端真实写入但此前漏译的取值(会退到「内容」而丢掉类型信息)。
+// 只钉住这些已知键的映射不被删/改;后端**新增**取值仍测不到——那要上面注释说的
+// 跨栈守卫(归 PR B),别误以为这条已封住完整性缺口。
+test("内容块类型:已知的解析器取值各自译对", () => {
+  assert.equal(label(ELEMENT_TYPE, "table_row", "内容"), "表格行");
+  assert.equal(label(ELEMENT_TYPE, "page_text", "内容"), "正文");
+  assert.equal(label(ELEMENT_TYPE, "slide_text", "内容"), "幻灯片文本");
+  assert.equal(label(ELEMENT_TYPE, "speaker_notes", "内容"), "演讲者备注");
+  assert.equal(label(ELEMENT_TYPE, "image_caption", "内容"), "图片说明");
+  assert.equal(label(ELEMENT_TYPE, "knowhow_cell", "内容"), "经验表单元格");
+});
+
+// "text" 从来没有产出方(parsers.py:32 的 "text" 是 parser_name,structural_markdown
+// 里的是行内 token 类型),已从表里删掉——这里钉住它确实走兜底,防止有人凭直觉加回。
+test("内容块类型不含无产出方的 text", () => {
+  assert.equal(label(ELEMENT_TYPE, "text", "内容"), "内容");
+  assert.ok(!Object.hasOwn(ELEMENT_TYPE, "text"), "text 没有后端产出方,不该在表里");
+});
+
 // KNOWLEDGE_STATUS 是本 PR 唯一一处有独立锚点的枚举：workspace-model.ts 的
 // KNOWLEDGE_STATUS_OPTIONS 是后端知识条目状态的真实取值来源(与 KNOWLEDGE_STATUS
 // 映射表是两份独立维护的列表)。从这个锚点取值断言，才能真的发现「映射表漏了
