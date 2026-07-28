@@ -2,7 +2,7 @@
 //
 // 背景(实际发生过的遮挡,不是假想):`.chat-turn-nav` 导航的是 `.chat-body` 里的
 // 轮次,却曾用 `position: absolute; top: 50%` 对着**整个** `.chat-panel` 居中。
-// 面板下方会长出很高的兄弟——问题理解的确认卡 `.ask-intent-review` 最高占 58vh
+// 面板下方会长出很高的兄弟——问题理解的确认卡 `.intent-card` 最高占 58vh
 // ——卡片一出现就把对话区压扁,导轨仍停在面板中央,浮出的提问卡(`right: 26px`,
 // 最宽 288px)正好压住确认卡右上角那排 chip。
 //
@@ -80,7 +80,8 @@ test("提问导航锚在对话区那一行,不对整个面板居中", () => {
 test("确认卡确实高到会压到面板中线,遮挡不是假想", () => {
   // 这条钉住上面那个背景仍然成立:确认卡一旦不再是「很高的兄弟」,
   // 锚定守卫的理由就该重写,而不是留着一条没人记得为什么的断言。
-  assert.match(declaration(".ask-intent-review", "max-height") ?? "", /58vh/);
+  // 高度上限在共用的 .intent-card 上(逐步推理与深度报告同一张卡)。
+  assert.match(declaration(".intent-card", "max-height") ?? "", /58vh/);
 });
 
 

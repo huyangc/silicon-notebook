@@ -2285,16 +2285,16 @@ button.chat-session-card {
   color: #1d4ed8;
 }
 
-/* ---- 问题理解确认(status==='intent_ready') ---- */
-.report-intent-review {
+/* ---- 问题理解确认卡（逐步推理与深度报告共用同一套外观） ----
+   这张卡片的职责只有一个:让人签核系统的理解——改问题、补空白、然后放行。所以它
+   分成两层。「待你确认」放要动手的东西(问题本身 + 拦住这次运行的澄清项),
+   「系统的理解」是只读读出,可折叠。签核脊(左侧竖线上的刻度)记录还差几项:
+   未答是琥珀空心编号,答完变蓝底对勾。确认/返回按钮钉在卡头,不必翻到底部才找得到。 */
+.intent-card {
   display: grid;
-  gap: 14px;
-}
-
-.ask-intent-review {
-  max-height: min(58vh, 620px);
+  align-content: start;
   margin: 10px 18px 0;
-  padding: 15px;
+  max-height: min(58vh, 620px);
   overflow-y: auto;
   border: 1px solid #dce4f2;
   border-radius: 13px;
@@ -2302,74 +2302,89 @@ button.chat-session-card {
   box-shadow: 0 8px 24px rgba(45, 62, 94, 0.08);
 }
 
-.report-intent-review-head,
-.report-intent-actions {
+.intent-card-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
-  flex-wrap: wrap;
+  gap: 16px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid #e7ecf6;
+  background: #fbfcff;
 }
 
-.report-intent-review-head h3 {
-  margin: 0 0 4px;
+.intent-card-head h3 {
+  margin: 0 0 3px;
   color: #1f2430;
-  font-size: 16px;
+  font-size: 15px;
 }
 
-.report-intent-review-head p,
-.report-intent-actions > span {
+.intent-card-head p {
   margin: 0;
   color: #5b6371;
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.55;
 }
 
-.report-intent-meta,
-.report-clarification-options {
+.intent-card-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  flex: none;
 }
 
-.report-intent-meta span,
-.report-clarification-options button {
-  border: 1px solid #d8e0f0;
-  border-radius: 999px;
-  padding: 3px 9px;
-  background: #f5f8fe;
-  color: #365aa8;
+/* ---- 待你确认 ---- */
+.intent-card-zone {
+  padding: 13px 16px 0;
+}
+
+.intent-card-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  color: #1f2430;
   font-size: 12px;
+  font-weight: 700;
 }
 
-.report-clarification-options button {
-  cursor: pointer;
+.intent-card-eyebrow em {
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
 }
 
-.report-clarification-options button.selected {
-  border-color: #537bd1;
-  background: #e8effd;
-  color: #23478f;
+.intent-card-eyebrow em.todo {
+  border: 1px solid var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning);
 }
 
-.report-intent-question,
-.report-clarification-card {
+.intent-card-eyebrow em.done {
+  border: 1px solid #bfe0d1;
+  background: #eaf6f0;
+  color: var(--green);
+}
+
+.intent-card-question {
   display: grid;
-  gap: 7px;
+  gap: 6px;
+  margin-bottom: 15px;
 }
 
-.report-intent-question > span,
-.report-intent-block > strong,
-.report-intent-details strong,
-.report-intent-assumptions > strong {
+.intent-card-question > span {
   color: #334155;
   font-size: 12px;
   font-weight: 700;
 }
 
-.report-intent-question textarea,
-.report-clarification-card textarea {
+.intent-card textarea {
   width: 100%;
+  box-sizing: border-box;
   resize: vertical;
   padding: 9px 10px;
   border: 1px solid #d8dee8;
@@ -2381,102 +2396,251 @@ button.chat-session-card {
   line-height: 1.55;
 }
 
-.report-intent-question textarea:focus,
-.report-clarification-card textarea:focus {
+.intent-card textarea:focus {
   outline: none;
   border-color: #7aa0ef;
   box-shadow: 0 0 0 3px rgba(122, 160, 239, 0.18);
 }
 
-.report-clarification-list {
+/* ---- 签核脊 ---- */
+.intent-card-asks {
   display: grid;
-  gap: 10px;
 }
 
-.report-clarification-card {
-  padding: 12px;
-  border: 1px solid #e3c985;
-  border-radius: 11px;
-  background: #fffaf0;
+.intent-card-ask {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding: 0 0 15px 32px;
 }
 
-.report-clarification-title {
-  color: #3f3a2c;
-  font-size: 13px;
+.intent-card-ask::before {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 6px;
+  bottom: 0;
+  width: 2px;
+  border-radius: 2px;
+  background: #dde4ef;
+}
+
+.intent-card-ask:last-child::before {
+  display: none;
+}
+
+.intent-card-mark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--warning-solid);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--warning);
+  font-size: 11px;
   font-weight: 700;
+  line-height: 1;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
-.report-clarification-title em {
-  margin-left: 7px;
-  color: #b45309;
-  font-size: 11px;
-  font-style: normal;
+.intent-card-ask.answered .intent-card-mark {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
 }
 
-.report-clarification-card small,
-.report-intent-assumptions small {
-  color: #77684a;
-  font-size: 11px;
+.intent-card-ask-question {
+  padding-top: 1px;
+  color: #1f2430;
+  font-size: 13px;
+  font-weight: 600;
   line-height: 1.5;
 }
 
-.report-intent-block,
-.report-intent-assumptions {
-  padding: 10px 12px;
-  border-left: 3px solid #6d8fd8;
-  border-radius: 7px;
-  background: #f5f8fe;
+.intent-card-ask-question em {
+  margin-left: 7px;
+  border: 1px solid var(--warning-border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
 }
 
-.report-intent-block ul,
-.report-intent-assumptions ul,
-.report-intent-details ul {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  color: #475569;
+.intent-card-ask small {
+  color: #5b6371;
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.55;
 }
 
-.report-intent-details {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.report-intent-details > div {
-  min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid #e2e6ee;
-  border-radius: 9px;
-  background: #fafbfd;
-}
-
-.report-intent-details p {
-  margin: 6px 0 0;
-  color: #475569;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.report-intent-actions {
-  align-items: center;
-  padding-top: 3px;
-}
-
-.report-intent-actions .button {
-  display: inline-flex;
-  align-items: center;
+.intent-card-options {
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
+.intent-card-options button {
+  border: 1px solid #d8e0f0;
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: #f5f8fe;
+  color: #365aa8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.intent-card-options button.selected {
+  border-color: #537bd1;
+  background: #e8effd;
+  color: #23478f;
+}
+
+/* ---- 系统的理解（只读读出） ---- */
+.intent-card-readout {
+  border-top: 1px solid #e7ecf6;
+  margin-top: 9px;
+}
+
+.intent-card-readout > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 16px;
+  list-style: none;
+  color: #1f2430;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.intent-card-readout > summary::-webkit-details-marker {
+  display: none;
+}
+
+.intent-card-readout > summary svg {
+  flex: none;
+  color: #8c9ab0;
+  transition: transform 0.12s ease;
+}
+
+.intent-card-readout[open] > summary svg {
+  transform: rotate(90deg);
+}
+
+.intent-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.intent-card-tags span {
+  border: 1px solid #dfe6f3;
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #f3f6fd;
+  color: #48566f;
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.intent-card-rows {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 2px 16px 14px;
+}
+
+.intent-card-row {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+
+.intent-card-row > dt {
+  color: #5b6371;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.intent-card-row > dd {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.intent-card-row ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.intent-card-row .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.intent-card-row .chips span {
+  border: 1px solid #e2e8f4;
+  border-radius: 6px;
+  padding: 1px 7px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.intent-card-note {
+  margin: 0;
+  padding: 0 16px 13px;
+  color: #5b6371;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.intent-card-readonly {
+  margin: 0;
+  padding: 12px 16px;
+  color: #5b6371;
+  font-size: 12px;
+}
+
 @media (max-width: 720px) {
-  .report-intent-details {
+  .intent-card {
+    margin: 10px 10px 0;
+  }
+
+  /* 窄屏把按钮放到标题下面整行,别和标题挤成两列。 */
+  .intent-card-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .intent-card-actions > .button {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .intent-card-row {
     grid-template-columns: 1fr;
+    gap: 3px;
   }
 }
 
-/* ---- 大纲编辑器(status==='outline_ready') ---- */
+@media (prefers-reduced-motion: reduce) {
+  .intent-card-mark,
+  .intent-card-readout > summary svg {
+    transition: none;
+  }
+}
 .report-outline-editor {
   display: grid;
   gap: 14px;

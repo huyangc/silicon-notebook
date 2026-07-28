@@ -65,7 +65,8 @@ test("blocks retrieval planning until required clarification is answered", async
   );
 
   expect(screen.getByText("这一步只理解你的问题，不读取语料。确认后才会检索并规划大纲。")).toBeVisible();
-  expect(screen.getByText("理解置信度 42%")).toBeVisible();
+  // 置信度移到「系统的理解」摘要行的标签里,前缀「理解」由所在区块承担。
+  expect(screen.getByText("置信度 42%")).toBeVisible();
   const submit = screen.getByRole("button", { name: "提交补充并开始规划" });
   expect(submit).toBeDisabled();
 

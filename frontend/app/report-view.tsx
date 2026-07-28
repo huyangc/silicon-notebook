@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, Copy, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -393,121 +393,144 @@ export function IntentReview({
     }
   }
 
+  const answered = (id: string) => Boolean((answers[id] || "").trim());
+  const pending = ambiguities.filter(
+    (item) => item.required !== false && !answered(item.id),
+  ).length;
+  // 与逐步推理那张卡共用 .intent-card 外观:同一个「签核系统的理解」交互,
+  // 不该在两个页面长成两个样子。内容口径各自保留(这边是研究问题/规划)。
   const detailGroups = [
+    ["必须回答", (understanding.mandatory_topics || []).map((item) => item.question)],
     ["研究对象", understanding.entities || []],
     ["比较维度", understanding.comparison_axes || []],
     ["约束条件", understanding.constraints || []],
     ["不纳入范围", understanding.excluded_topics || []],
+    ["成立前提", understanding.assumptions || []],
+    ["期望输出", understanding.expected_output ? [understanding.expected_output] : []],
   ] as const;
+  const asChips = new Set(["研究对象", "比较维度", "不纳入范围"]);
 
   return (
-    <div className="report-intent-review">
-      <div className="report-intent-review-head">
+    <div className="intent-card">
+      <div className="intent-card-head">
         <div>
           <h3>{understanding.needs_clarification ? "补充问题信息" : "确认问题理解"}</h3>
           <p>这一步只理解你的问题，不读取语料。确认后才会检索并规划大纲。</p>
         </div>
-        <div className="report-intent-meta">
-          <span>{INTENT_TYPE_LABELS[understanding.intent_type || ""] || "综合研究"}</span>
-          {confidence !== null && <span>理解置信度 {confidence}%</span>}
-        </div>
-      </div>
-
-      <label className="report-intent-question">
-        <span>确认后的研究问题</span>
-        <textarea
-          rows={3}
-          value={resolvedQuestion}
-          disabled={busy || readOnly}
-          onChange={(event) => setResolvedQuestion(event.target.value)}
-        />
-      </label>
-
-      {ambiguities.length > 0 && (
-        <div className="report-clarification-list">
-          {ambiguities.map((item, index) => (
-            <div className="report-clarification-card" key={item.id}>
-              <span className="report-clarification-title">
-                {index + 1}. {item.question}
-                {item.required !== false && <em>必填</em>}
-              </span>
-              {item.reason && <small>{item.reason}</small>}
-              {item.options && item.options.length > 0 && (
-                <span className="report-clarification-options">
-                  {item.options.map((option) => (
-                    <button
-                      type="button"
-                      key={option}
-                      disabled={busy || readOnly}
-                      aria-pressed={(answers[item.id] || "") === option}
-                      className={(answers[item.id] || "") === option ? "selected" : ""}
-                      onClick={() => setAnswers((current) => ({ ...current, [item.id]: option }))}
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </span>
+        {!readOnly && (
+          <div className="intent-card-actions">
+            <button className="button" type="button" disabled={busy || missingRequired} onClick={() => void confirm()}>
+              <Check size={15} />
+              {busy ? (
+                <span>提交中…</span>
+              ) : ambiguities.length > 0 ? (
+                <span>提交补充并开始规划</span>
+              ) : (
+                <span>确认理解并开始规划</span>
               )}
-              <textarea
-                aria-label={`${item.question}的补充答案`}
-                rows={2}
-                value={answers[item.id] || ""}
-                disabled={busy || readOnly}
-                placeholder="补充你的答案"
-                onChange={(event) => setAnswers((current) => ({
-                  ...current,
-                  [item.id]: event.target.value,
-                }))}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {understanding.mandatory_topics && understanding.mandatory_topics.length > 0 && (
-        <div className="report-intent-block">
-          <strong>报告必须回答</strong>
-          <ul>{understanding.mandatory_topics.map((item) => <li key={item.id}>{item.question}</li>)}</ul>
-        </div>
-      )}
-
-      <div className="report-intent-details">
-        {detailGroups.map(([title, values]) => values.length > 0 && (
-          <div key={title}>
-            <strong>{title}</strong>
-            <ul>{values.map((value) => <li key={value}>{value}</li>)}</ul>
+            </button>
           </div>
-        ))}
-        {understanding.expected_output && (
-          <div><strong>期望输出</strong><p>{understanding.expected_output}</p></div>
         )}
       </div>
 
-      {understanding.assumptions && understanding.assumptions.length > 0 && (
-        <div className="report-intent-assumptions">
-          <strong>系统暂定假设</strong>
-          <ul>{understanding.assumptions.map((item) => <li key={item}>{item}</li>)}</ul>
-          <small>如果假设不合适，请直接修改上面的研究问题或在澄清答案中说明。</small>
+      {readOnly ? (
+        <p className="intent-card-readonly">该报告正在等待所有者确认问题理解。</p>
+      ) : (
+        <div className="intent-card-zone">
+          <p className="intent-card-eyebrow">
+            待你确认
+            {pending > 0 && <em className="todo">还差 {pending} 项</em>}
+            {pending === 0 && ambiguities.length > 0 && <em className="done">已补齐</em>}
+          </p>
+
+          <label className="intent-card-question">
+            <span>确认后的研究问题</span>
+            <textarea
+              rows={2}
+              value={resolvedQuestion}
+              disabled={busy}
+              onChange={(event) => setResolvedQuestion(event.target.value)}
+            />
+          </label>
+
+          <div className="intent-card-asks">
+            {ambiguities.map((item, index) => (
+              <div
+                className={`intent-card-ask${answered(item.id) ? " answered" : ""}`}
+                key={item.id}
+              >
+                <span className="intent-card-mark" aria-hidden="true">
+                  {answered(item.id) ? <Check size={12} /> : index + 1}
+                </span>
+                <span className="intent-card-ask-question">
+                  {item.question}
+                  {item.required !== false && <em>必填</em>}
+                </span>
+                {item.reason && <small>{item.reason}</small>}
+                {item.options && item.options.length > 0 && (
+                  <span className="intent-card-options">
+                    {item.options.map((option) => (
+                      <button
+                        type="button"
+                        key={option}
+                        disabled={busy}
+                        aria-pressed={(answers[item.id] || "") === option}
+                        className={(answers[item.id] || "") === option ? "selected" : ""}
+                        onClick={() => setAnswers((current) => ({ ...current, [item.id]: option }))}
+                      >
+                        {option}
+                      </button>
+                    ))}
+                  </span>
+                )}
+                <textarea
+                  aria-label={`${item.question}的补充答案`}
+                  rows={2}
+                  value={answers[item.id] || ""}
+                  disabled={busy}
+                  placeholder="补充你的答案"
+                  onChange={(event) => setAnswers((current) => ({
+                    ...current,
+                    [item.id]: event.target.value,
+                  }))}
+                />
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
-      {readOnly ? (
-        <p className="tool-hint">该报告正在等待所有者确认问题理解。</p>
-      ) : (
-        <div className="report-intent-actions">
-          <span>{missingRequired ? "请补齐必填问题后继续" : "确认后才会读取知识库和来源"}</span>
-          <button className="button" type="button" disabled={busy || missingRequired} onClick={() => void confirm()}>
-            <Check size={15} />
-            {busy ? (
-              <span>提交中…</span>
-            ) : ambiguities.length > 0 ? (
-              <span>提交补充并开始规划</span>
-            ) : (
-              <span>确认理解并开始规划</span>
-            )}
-          </button>
-        </div>
-      )}
+      <details className="intent-card-readout" open>
+        <summary>
+          <ChevronRight size={14} />
+          系统的理解
+          <span className="intent-card-tags">
+            <span>{INTENT_TYPE_LABELS[understanding.intent_type || ""] || "综合研究"}</span>
+            {confidence !== null && <span>置信度 {confidence}%</span>}
+          </span>
+        </summary>
+        <dl className="intent-card-rows">
+          {detailGroups.map(([title, values]) => values.length > 0 && (
+            <div className="intent-card-row" key={title}>
+              <dt>{title}</dt>
+              <dd>
+                {asChips.has(title) ? (
+                  <span className="chips">
+                    {values.map((value) => <span key={value}>{value}</span>)}
+                  </span>
+                ) : values.length === 1 ? values[0] : (
+                  <ul>{values.map((value) => <li key={value}>{value}</li>)}</ul>
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+        {(understanding.assumptions || []).length > 0 && !readOnly && (
+          <p className="intent-card-note">
+            假设不合适的话，直接改上面的研究问题，或在澄清答案里说明。
+          </p>
+        )}
+      </details>
     </div>
   );
 }
