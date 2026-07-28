@@ -47,7 +47,7 @@ test("问题理解阶段在轨迹面板里渲染,并与后端步骤同列", asyn
         intentUnderstoodStep(contract, 1500),
         { step_type: "start", summary: "启动检索", detail: { mode: "reasoning" } },
         { step_type: "memory", summary: "找到 2 条相关记忆", detail: { count: 2 }, duration_ms: 120 },
-        { step_type: "synthesis", summary: "已生成答案，引用 4 处证据",
+        { step_type: "synthesis", summary: "已生成答案，引用 2 处证据",
           detail: { citations: 4, anchors: 2, evidence_level: "grounded" }, duration_ms: 8000 },
       ]}
     />,
@@ -66,7 +66,7 @@ test("问题理解阶段在轨迹面板里渲染,并与后端步骤同列", asyn
   expect(labels[2]).toContain("记忆");
   expect(labels[2]).toContain("2 条记忆");     // 不是通用的「2 个候选」
   expect(labels[3]).toContain("作答");
-  expect(labels[3]).toContain("4 处引用");
+  expect(labels[3]).toContain("2 处引用");     // anchors=2,不是 citations=4
 });
 
 

@@ -86,8 +86,10 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";
   }
   if (step.step_type === "synthesis") {
-    // detail 里还有 anchors/evidence_level 供排查,但不上屏:那是内部口径。
-    return typeof detail.citations === "number" ? `${detail.citations} 处引用` : "";
+    // 用 anchors(模型真正绑上的 [k])而不是 citations —— 后者是「每条检索到的
+    // 证据一张卡」,零绑定的回答上会读成「10 处引用」。citations/evidence_level
+    // 仍留在 detail 里供排查,但不上屏:那是内部口径。
+    return typeof detail.anchors === "number" ? `${detail.anchors} 处引用` : "";
   }
   if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {
     return `${detail.scanned_rows}/${Number(detail.known_total_rows ?? 0)} 行`;

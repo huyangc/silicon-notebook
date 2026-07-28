@@ -1448,7 +1448,17 @@ class AskService:
 
             措辞只声称**召回**,不声称被答案采纳:合成未必会发生(模型未配置、
             或注册表为空的离线确定性模式),那时说「参考了 N 条」就是假账。调用点
-            也刻意排在短路返回之后,让根本没产生答案的那几轮干脆不提记忆。"""
+            也刻意排在短路返回之后,让根本没产生答案的那几轮干脆不提记忆。
+
+            刻意**不**改成「只在记忆真被模型绑成锚点时才记」(codex 第 7 轮 P2 的
+            建议),两个理由:
+            1. 那会把这一步推到答案合成之后才发出,实时轨迹里它就不再出现在事情
+               真正发生的位置 —— 而这一步携带的正是召回本身的耗时。
+            2. 记忆进了 prompt 却没被引用是常态,按锚点过滤会变成**漏报**:
+               轨迹会说没查过记忆,而实际上查了、也喂给了模型。
+            轨迹记录的是引擎做过什么,不是答案归因了什么;归因由答案里的 [k] 引用
+            承担。反向护栏见 test_reasoning_stream.py 的
+            test_memory_step_reports_recall_not_attribution。"""
             if memory_hits:
                 checked_pre_trace(TraceStep(
                     step_type="memory",
@@ -1710,7 +1720,11 @@ class AskService:
                 synthesis_step = TraceStep(
                     step_type="synthesis",
                     summary=(
-                        f"已生成答案，引用 {len(citations)} 处证据"
+                        # anchors 才是模型真正绑上的 [k];citations 是「每条检索到
+                        # 的证据一张卡」,模型一个锚点都没吐出来时它还会被当兜底
+                        # 列表展示(见 evidence_context.citations_from 的注释)。
+                        # 拿它当引用数,会在零绑定的回答上写出「引用 10 处证据」。
+                        f"已生成答案，引用 {len(anchors)} 处证据"
                         if answer else "答案合成未产出内容"
                     ),
                     detail={

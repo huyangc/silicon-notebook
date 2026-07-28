@@ -260,13 +260,101 @@ def test_reasoning_trace_covers_understanding_memory_and_synthesis(tmp_path, mon
     synthesis = steps[-1]
     assert synthesis["step_type"] == "synthesis", kinds
     assert isinstance(synthesis["duration_ms"], int)
-    assert synthesis["detail"]["citations"] >= 0
+    # 引用数取模型真正绑上的 anchors,不取 citations —— 后者是「每条检索到的证据
+    # 一张卡」,零绑定的回答上会写成「引用 10 处证据」(codex 第 7 轮 P2)。
+    assert synthesis["detail"]["anchors"] == len(
+        events[-1]["response"]["anchors"]
+    )
+    assert synthesis["summary"] == (
+        f"已生成答案，引用 {synthesis['detail']['anchors']} 处证据"
+    )
 
     # 重开会话回放的是持久化轨迹,这三段同样要在里面。
     persisted = [row["step_type"] for row in events[-1]["response"]["reasoning_trace"]]
     assert persisted[0] == "intent"
     assert "memory" in persisted
     assert persisted[-1] == "synthesis"
+
+
+def test_memory_step_reports_recall_not_attribution(tmp_path, monkeypatch):
+    """反向护栏:记忆步记的是「引擎召回了什么」,不是「答案归因了什么」。
+
+    codex 第 7 轮 P2 建议改成「只在记忆真被模型绑成锚点时才记」,已驳回:
+    1. 那会把这一步推到答案合成之后,而它携带的正是召回本身的耗时,实时轨迹里
+       就不再出现在事情真正发生的位置;
+    2. 记忆进了 prompt 却没被引用是常态,按锚点过滤会变成漏报 —— 轨迹会说没查过
+       记忆,而实际上查了、也喂给了模型。
+    归因由答案里的 [k] 引用承担。这条用例钉住这个取舍:记忆确实被召回、但答案
+    一个记忆锚点都没绑时,记忆步照样在,且措辞不得声称被采用。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "")
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+
+    from app.core.config import get_settings
+    from app.api import ask_routes
+    from app.main import create_app
+    from app.models.memory import MemoryHit
+    from app.services.memory_retrieval import MemoryRetriever
+
+    get_settings.cache_clear()
+    ask_routes.repository.cache_clear()
+    monkeypatch.setattr(
+        MemoryRetriever, "notebook_memory_hits",
+        lambda self, user_id, notebook_id, query, limit=8: [
+            MemoryHit(memory_id="m1", title="签核偏好", text="先跑静态时序",
+                      status="confirmed", authority=3, score=0.42),
+        ],
+    )
+
+    client = TestClient(create_app())
+    notebook_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.core.config import get_settings as _gs
+    from app.services.embedding import FakeEmbedder
+    repo = ask_routes.repository()
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=_gs().embed_dim))
+    llm = _ReasoningLLM()
+    bind_chat_client(repo, "reasoning_agent", llm)
+    bind_chat_client(repo, "ask_answer", llm)
+    repo.store_kg(notebook_id, None, [
+        {"local_id": "K1", "object_type": "concept",
+         "payload": {"name": "RTL到GDSII流程概述"}, "evidence": []}
+    ], [])
+
+    contract = client.post(
+        f"/api/notebooks/{notebook_id}/ask/intent",
+        json={"question": "RTL到GDSII流程"},
+    ).json()
+    response = client.post(
+        f"/api/notebooks/{notebook_id}/ask/stream",
+        json={
+            "question": "RTL到GDSII流程",
+            "mode": "reasoning",
+            "intent": {
+                "contract": contract,
+                "resolved_question": contract["resolved_question"],
+                "answers": [],
+            },
+        },
+    )
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    final = events[-1]["response"]
+    memory = next(
+        row for row in final["reasoning_trace"] if row["step_type"] == "memory"
+    )
+    # _ReasoningLLM 只吐 [k1],绑不到那条记忆 —— 记忆步仍须存在(它记的是召回)。
+    assert not [
+        anchor for anchor in final["anchors"] if anchor.get("object_type") == "memory"
+    ]
+    assert memory["detail"]["count"] == 1
+    # 措辞不得声称被采用:这几个词一出现,记录就从「召回」滑成了「归因」。
+    for claimed in ("参考", "采用", "使用", "用了", "依据"):
+        assert claimed not in memory["summary"], memory["summary"]
 
 
 def test_reasoning_trace_omits_memory_step_without_hits(tmp_path, monkeypatch):

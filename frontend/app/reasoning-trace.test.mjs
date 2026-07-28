@@ -85,7 +85,12 @@ test("记忆与作答两步有自己的短标签,detail 不落到通用「候选
     detail: { citations: 12, anchors: 5, evidence_level: "grounded" },
   };
   assert.equal(getReasoningTraceSummary([synthesis], false).latestLabel, "作答");
-  assert.equal(getTraceStepDetail(synthesis), "12 处引用");
+  // 取 anchors(模型真正绑上的 [k]),不取 citations —— 后者是「每条检索到的证据
+  // 一张卡」,零绑定的回答上会读成「12 处引用」。
+  assert.equal(getTraceStepDetail(synthesis), "5 处引用");
+  assert.equal(
+    getTraceStepDetail({ ...synthesis, detail: { citations: 12 } }), "",
+  );
 });
 
 test("答案合成的耗时进入轨迹总耗时(此前整段不计,总耗时系统性偏低)", () => {
