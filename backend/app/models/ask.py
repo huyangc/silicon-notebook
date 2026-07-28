@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -304,6 +304,90 @@ class StructuredKnowhowResult(BaseModel):
     coverage: StructuredResultCoverage
 
 
+# Deliberately NOT a reuse of ``StructuredResultCoverage``: that model's
+# ``total_rows`` defaults to ``0``, which cannot express "denominator
+# unknown" (see ``EnumerationCoverage.total`` in
+# ``app.services.collection_enumeration`` — ``None`` means the map could not
+# establish a count, NOT zero). A renderer that defaulted an absent total to
+# ``0`` would print "N/0" for exactly the large-base-library case this field
+# exists to cover honestly instead.
+class TypedCollectionCoverage(BaseModel):
+    """Coverage proof for one enumerated element or knowledge-object list:
+    how many rows were returned against the collection's known size, and
+    whether the listing is complete or was cut short. ``total=None`` means
+    the collection's overall size could not be determined — display this as
+    an unknown denominator, never as zero."""
+
+    returned_total: int = Field(default=0, ge=0)
+    total: Optional[int] = None
+    complete: bool = False
+    truncated_reason: str = Field(default="", max_length=80)
+    overflow_semantics: str = Field(default="", max_length=40)
+
+
+# One model, two uses, with each arm's fields left at their zero value when
+# not applicable (design choice): the two dataclasses this mirrors —
+# ``ElementItem`` and ``KgObjectItem`` in
+# ``app.services.collection_enumeration`` — share ``notebook_id``/``tier``
+# and are otherwise disjoint, but a shared wire shape lets ``collection``
+# alone tell a consumer which arm is populated, rather than needing a second
+# per-field union just to read one of two possible attribute sets.
+class TypedCollectionItem(BaseModel):
+    """One row of an enumerated source-element or knowledge-object list.
+    Element rows populate ``source_id``/``source_title``/``element_type``/
+    ``location_label``/``text``/``asset_id``; knowledge-object rows populate
+    ``name``/``section_path``/``evidence_element_ids`` instead."""
+
+    item_id: str
+    # element-only (``collection == "elements"``); mirrors ``ElementItem``.
+    source_id: str = ""
+    source_title: str = ""
+    element_type: str = ""
+    location_label: str = ""
+    text: str = ""
+    asset_id: str = ""
+    # kg_object-only (``collection == "kg_objects"``); mirrors ``KgObjectItem``.
+    name: str = ""
+    section_path: str = ""
+    # Bounded to MAX_EVIDENCE_REFS=3 in app.services.collection_enumeration
+    # (that constant carries a reverse-pointing comment back to this field).
+    # Duplicated as a literal rather than imported: app.models must not import
+    # app.services (layering — models sit below services). Kept in sync by
+    # test_typed_collection_result_sets.py::
+    # test_max_evidence_refs_parity_between_executor_and_wire_model.
+    evidence_element_ids: List[str] = Field(default_factory=list, max_length=3)
+    # shared
+    notebook_id: str = ""
+    tier: str = "personal"
+
+
+# Kept outside ranked evidence top-N for the same reason as
+# StructuredKnowhowResult: its ``coverage``, not its position in a relevance
+# ranking, is the authority on complete/partial.
+class TypedCollectionResult(BaseModel):
+    """One enumerated element or knowledge-object collection, kept alongside
+    ranked evidence in the response rather than folded into it. Its
+    ``coverage`` — not its position in a relevance ranking — is the
+    authority on whether the list is complete."""
+
+    kind: Literal["collection"] = "collection"
+    collection: Literal["elements", "kg_objects"]
+    element_kind: str = ""     # non-empty when collection == "elements"
+    object_type: str = ""      # non-empty when collection == "kg_objects"
+    source_id: str = ""        # non-empty when scoped to a single source
+    items: List[TypedCollectionItem] = Field(default_factory=list)
+    coverage: TypedCollectionCoverage
+    # Rows that actually entered the answer-synthesis prompt preview (bounded
+    # separately from ``coverage.returned_total`` by inline-row/character
+    # budgets — see ``enumeration_prompt_block``), and whether that preview
+    # covered the whole listed set. Mirrors ``StructuredBatchCoverage``'s
+    # synthesis_rows/synthesis_complete split between "what was enumerated"
+    # and "what the model actually saw". ``None`` means no synthesis preview
+    # was attempted at all (model unconfigured, or synthesis never ran).
+    synthesis_rows: int = Field(default=0, ge=0)
+    synthesis_complete: Optional[bool] = None
+
+
 class StructuredBatchCoverage(BaseModel):
     """Collection-level coverage, distinct from each selected table's status."""
 
@@ -353,9 +437,20 @@ class AskResponse(BaseModel):
     # sets are persisted with the turn.  ``result_sets`` are not relevance
     # evidence: their coverage object is the authority for complete/partial.
     retrieval_effort: RetrievalEffort = DEFAULT_RETRIEVAL_EFFORT
-    result_sets: List[StructuredKnowhowResult] = Field(
-        default_factory=list, exclude_if=lambda value: not value
-    )
+    # kind-discriminated union (PR-2 T5): Knowhow's whole-table batches
+    # (kind="knowhow") and typed element/KG-object enumerations
+    # (kind="collection") both live here, appended in that order by the
+    # reasoning handler. ``kind`` has carried a non-empty default since the
+    # commit that introduced ``result_sets`` (#371), so every persisted turn
+    # already has it; ``_default_legacy_result_kind`` below is a defensive
+    # backstop for any hand-built/legacy payload that does not, not evidence
+    # that one has ever been observed.
+    result_sets: List[
+        Annotated[
+            Union[StructuredKnowhowResult, TypedCollectionResult],
+            Field(discriminator="kind"),
+        ]
+    ] = Field(default_factory=list, exclude_if=lambda value: not value)
     result_coverage: Optional[StructuredBatchCoverage] = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -366,6 +461,29 @@ class AskResponse(BaseModel):
     # 徽章覆盖那种最终一致态)。
     index_required: bool = False
     model_errors: List[ModelError] = Field(default_factory=list)
+
+    @field_validator("result_sets", mode="before")
+    @classmethod
+    def _default_legacy_result_kind(cls, value: object) -> object:
+        """Backfill a missing/falsy ``kind`` to ``"knowhow"`` on raw dict
+        entries before the discriminated union routes them.
+
+        ``result_sets`` was always ``List[StructuredKnowhowResult]`` before
+        this union existed, and ``kind`` has defaulted to ``"knowhow"`` since
+        that field's introduction, so a real gap has not been observed. This
+        exists purely so a row that somehow lacks the key (a hand-built
+        fixture, an external caller, a future migration) still resolves to
+        the only kind that ever existed prior to PR-2, instead of a
+        discriminator-tag lookup error.
+        """
+        if not isinstance(value, list):
+            return value
+        normalized = []
+        for entry in value:
+            if isinstance(entry, dict) and not entry.get("kind"):
+                entry = {**entry, "kind": "knowhow"}
+            normalized.append(entry)
+        return normalized
 
 
 class ConversationRenameRequest(BaseModel):
