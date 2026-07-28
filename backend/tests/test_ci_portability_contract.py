@@ -47,3 +47,25 @@ def test_ci_harness_tests_do_not_embed_absolute_paths() -> None:
 
 def test_pytest_controller_matplotlib_import_is_declared() -> None:
     assert "matplotlib" in _declared_requirement_names()
+
+
+def test_mcp_requirement_keeps_an_upper_bound() -> None:
+    """`mcp` 必须保留 `<2` 上界。
+
+    2026-07-28 的真实中断:约束曾是无上界的 `mcp>=1.26.0`,mcp 2.0.0 发布后 CI
+    立刻装到它,而 2.x 移走了 `mcp.server.fastmcp` —— master 与所有 PR 的 CI 同时
+    以 `ModuleNotFoundError` 失败,本地却因装着 1.x 而全绿。
+
+    这条守卫不是给所有依赖泛化上界(仓库里 25 条 `>=` 都无上界,那是另一个策略
+    问题),只钉住这一个已被证明会断的:`backend/app/api/mcp_server.py` 直接 import
+    的 `mcp.server.fastmcp` / `mcp.server.auth.*` / `mcp.server.transport_security`
+    都是 1.x 的 server API。要升到 2.x,得先迁移那些 import,再来动这条。
+    """
+    line = next(
+        raw.partition("#")[0].strip()
+        for raw in REQUIREMENTS.read_text(encoding="utf-8").splitlines()
+        if raw.partition("#")[0].strip().lower().startswith("mcp")
+    )
+    assert "<2" in line.replace(" ", ""), (
+        f"mcp 约束丢了上界:{line!r} —— mcp 2.x 没有 mcp.server.fastmcp"
+    )
