@@ -1723,7 +1723,14 @@ class KnowledgeLifecycleService:
                 edges.append({"source_object_id": edge_s, "target_object_id": edge_t,
                               "edge_type": et})
             edges = self._annotate_edge_support(notebook_id, edges)
-            return {"nodes": nodes, "edges": edges, "focus_id": focus_id}
+            return {
+                "nodes": nodes,
+                "edges": edges,
+                "focus_id": focus_id,
+                # The graph renders the folded canonical id, while object
+                # context is stored on the cited raw knowledge-object row.
+                "focus_object_id": object_id,
+            }
         # The legacy DB fallback materialises the complete concept-cluster map.
         # It remains acceptable for a small notebook, but must never run while a
         # large notebook's compact viz artifact is being built or repaired.
@@ -1734,10 +1741,12 @@ class KnowledgeLifecycleService:
                 "nodes": [],
                 "edges": [],
                 "focus_id": focus_id,
+                "focus_object_id": object_id,
                 "locating_unavailable": True,
             }
         result = self._kg_neighbors_db(notebook_id, focus_id, cap)
         result["focus_id"] = focus_id
+        result["focus_object_id"] = object_id
         return result
 
     def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:

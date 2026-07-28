@@ -589,6 +589,8 @@ export type KgNeighborsResp = {
   edges: UnifiedEdge[];
   /** Canonical graph id for a raw cited concept id. */
   focus_id?: string;
+  /** Raw knowledge-object id used for context when focus_id is synthetic. */
+  focus_object_id?: string;
   /** The large-notebook viz artifact is not ready, so bounded focus is unavailable. */
   locating_unavailable?: boolean;
   /** Participant that owns the resolved node; reads remain authorized by the active notebook. */

@@ -7,6 +7,7 @@ import type {
 
 export type KgFocusPlan = {
   focusId: string | null;
+  contextObjectId: string | null;
   expandedNodes: UnifiedConceptNode[];
   expandedEdges: UnifiedEdge[];
 };
@@ -29,7 +30,7 @@ export function prepareKgFocus(
   neighborhood?: KgNeighborsResp | null,
 ): KgFocusPlan {
   if (!targetNodeId) {
-    return { focusId: null, expandedNodes: [], expandedEdges: [] };
+    return { focusId: null, contextObjectId: null, expandedNodes: [], expandedEdges: [] };
   }
 
   const coreNodeIds = new Set(core.nodes.map((node) => node.id));
@@ -40,6 +41,9 @@ export function prepareKgFocus(
     && (coreNodeIds.has(resolvedFocusId) || neighborhoodNodeIds.has(resolvedFocusId));
   return {
     focusId: canFocus ? resolvedFocusId : null,
+    contextObjectId: canFocus
+      ? (neighborhood?.focus_object_id || targetNodeId)
+      : null,
     expandedNodes: (neighborhood?.nodes ?? []).filter((node) => !coreNodeIds.has(node.id)),
     expandedEdges: (neighborhood?.edges ?? []).filter((edge) => !coreEdgeKeys.has(edgeKey(edge))),
   };

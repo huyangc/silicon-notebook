@@ -681,12 +681,26 @@ class TestApiUnauthorizedWrite:
         assert mounted.status_code == 200
 
         source_id = repo_api._test_insert_object(
-            base["id"], "claim", {"name": "Base source claim"}
+            base["id"], "concept", {"name": "Base source concept"}
         )
         target_id = repo_api._test_insert_object(
             base["id"], "claim", {"name": "Base target claim"}
         )
         with repo_api._write() as db:
+            db.execute(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    "cc-base-focus",
+                    base["id"],
+                    "K-base-focus",
+                    source_id,
+                    "Base source concept",
+                    "concept",
+                    "2026-07-28T00:00:00Z",
+                ),
+            )
             db.execute(
                 "INSERT INTO knowledge_relations "
                 "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
@@ -717,8 +731,10 @@ class TestApiUnauthorizedWrite:
         )
         assert proxied.status_code == 200
         assert proxied.json()["source_notebook_id"] == base["id"]
+        assert proxied.json()["focus_id"] == "K-base-focus"
+        assert proxied.json()["focus_object_id"] == source_id
         assert {node["id"] for node in proxied.json()["nodes"]} == {
-            source_id,
+            "K-base-focus",
             target_id,
         }
 
@@ -730,7 +746,7 @@ class TestApiUnauthorizedWrite:
         assert inferred.json()["source_notebook_id"] == base["id"]
 
         context = client.get(
-            f"/api/notebooks/{active['id']}/objects/{source_id}/context",
+            f"/api/notebooks/{active['id']}/objects/{proxied.json()['focus_object_id']}/context",
             headers=c["u1"],
             params={"source_notebook_id": base["id"]},
         )

@@ -1582,6 +1582,7 @@ export default function Home() {
   const kgBuildRequestEpochRef = useRef(0);
   const kgOpenRequestRef = useRef(0);
   const kgNodeNotebookRef = useRef<Map<string, string>>(new Map());
+  const kgNodeContextObjectRef = useRef<Map<string, string>>(new Map());
   const askRunEpochRef = useRef(0);
   const sessionListRequestRef = useRef(0);
   const latestSessionListRef = useRef<{
@@ -3865,6 +3866,11 @@ export default function Home() {
         if (focus.focusId) nodeNotebookIds.set(focus.focusId, resolvedSourceNotebookId);
       }
       kgNodeNotebookRef.current = nodeNotebookIds;
+      const nodeContextObjectIds = new Map<string, string>();
+      if (focus.focusId && focus.contextObjectId) {
+        nodeContextObjectIds.set(focus.focusId, focus.contextObjectId);
+      }
+      kgNodeContextObjectRef.current = nodeContextObjectIds;
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
       setKgExpandedNodes(focus.expandedNodes);
       setKgExpandedEdges(focus.expandedEdges);
@@ -4014,6 +4020,19 @@ export default function Home() {
         nodeNotebookId,
       );
       resolvedNodeNotebookId = neighbors.source_notebook_id || nodeNotebookId;
+      if (
+        neighbors.focus_id
+        && neighbors.focus_object_id
+        && (
+          !kgNodeContextObjectRef.current.has(neighbors.focus_id)
+          || neighbors.focus_object_id !== neighbors.focus_id
+        )
+      ) {
+        kgNodeContextObjectRef.current.set(
+          neighbors.focus_id,
+          neighbors.focus_object_id,
+        );
+      }
       if (neighbors.nodes.length > 0 || neighbors.edges.length > 0) {
         for (const node of neighbors.nodes) {
           if (!kgNodeNotebookRef.current.has(node.id)) {
@@ -4035,7 +4054,8 @@ export default function Home() {
     const node = uGraphMerged?.nodes.find((item) => item.id === nodeId);
     if (node?.object_type !== "concept") setConceptDetail(null);
     else { try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId, resolvedNodeNotebookId)); } catch (err) { setConceptDetail(null); reportError(err); } }
-    try { setNodeCtx(await fetchNodeContext(currentNotebookId, nodeId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
+    const contextObjectId = kgNodeContextObjectRef.current.get(nodeId) || nodeId;
+    try { setNodeCtx(await fetchNodeContext(currentNotebookId, contextObjectId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
   }
 
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {

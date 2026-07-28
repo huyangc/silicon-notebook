@@ -13,6 +13,7 @@ test("引用目标不在核心图时，把定向邻域叠加进视图并定位�
     "ko-raw-concept",
     {
       focus_id: "K-canonical-concept",
+      focus_object_id: "ko-raw-concept",
       nodes: [
         { id: "K-canonical-concept", object_type: "concept", payload: { name: "Target" } },
         { id: "hub", object_type: "concept", payload: { name: "Hub" } },
@@ -28,6 +29,7 @@ test("引用目标不在核心图时，把定向邻域叠加进视图并定位�
   );
 
   assert.equal(plan.focusId, "K-canonical-concept");
+  assert.equal(plan.contextObjectId, "ko-raw-concept");
   assert.deepEqual(plan.expandedNodes.map((node) => node.id), ["K-canonical-concept"]);
   assert.equal(plan.expandedEdges.length, 1);
 });
@@ -55,6 +57,7 @@ test("目标已在核心图时不重复叠加节点或边", () => {
   );
 
   assert.equal(plan.focusId, "target");
+  assert.equal(plan.contextObjectId, "target");
   assert.deepEqual(plan.expandedNodes, []);
   assert.deepEqual(plan.expandedEdges, []);
 });
@@ -70,6 +73,7 @@ test("邻域请求失败且 raw id 不在核心图时，不留下永远无法消
   );
 
   assert.equal(plan.focusId, null);
+  assert.equal(plan.contextObjectId, null);
   assert.deepEqual(plan.expandedNodes, []);
   assert.deepEqual(plan.expandedEdges, []);
 });
