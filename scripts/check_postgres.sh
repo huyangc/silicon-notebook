@@ -29,8 +29,6 @@ export MINERU_MODE="off" MINERU_API_TOKEN=""
 
 # The Python launcher owns URL parsing, database_status/redact_database_url
 # diagnostics, password-free pytest URLs, and the `-m postgres_integration`
-# selection. It runs adapter/conformance tests first, then the complete shadow
-# E2E alone and serially. Keeping conninfo parsing out of shell prevents
-# accidental echoing.
+# selection. Keeping conninfo parsing out of shell prevents accidental echoing.
 cd "$ROOT_DIR/backend"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m tests.postgres.lane

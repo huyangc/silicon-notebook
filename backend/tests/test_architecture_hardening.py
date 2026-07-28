@@ -295,7 +295,6 @@ vector = repository.embedder.embed_query("q")
 
 def test_settings_accept_field_names_even_when_fields_have_validation_aliases(tmp_path):
     settings = _settings(tmp_path)
-    assert settings.sqlite_path == str(tmp_path / "t.db")
     assert settings.storage_dir == str(tmp_path / "storage")
 
 
@@ -413,19 +412,3 @@ def test_session_resolution_does_not_write_on_every_request(tmp_path):
             "SELECT last_seen_at, expires_at FROM auth_sessions WHERE token=?", (token,)
         ).fetchone()
     assert tuple(after) == tuple(before)
-
-
-def test_facade_composition_is_flat_and_static(tmp_path):
-    """The compatibility wrapper has one neutral facade base and no mixins."""
-    from app.services.repository_facade import RepositoryFacade
-
-    assert SQLiteRepository.__mro__ == (
-        SQLiteRepository,
-        RepositoryFacade,
-        object,
-    )
-    assert "__getattr__" not in SQLiteRepository.__dict__
-    assert "__getattribute__" not in SQLiteRepository.__dict__
-
-    repo = SQLiteRepository(_settings(tmp_path))
-    assert repo._runtime.settings is repo.settings

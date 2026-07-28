@@ -4,7 +4,6 @@ from contextlib import contextmanager
 
 from app.core.audit_actor import session_audit_principal
 from app.models.identity import UserProfile
-from app.repositories.sqlite.identity_store import IdentityStore
 from app.services.knowhow.audit import project_change, resolve_audit_labels
 
 
@@ -51,19 +50,6 @@ class _Database:
     @contextmanager
     def connect(self):
         yield self.connection
-
-
-def test_sqlite_audit_resolution_is_capped_and_chunked_at_200():
-    database = _Database()
-    store = IdentityStore(database, settings=object())
-
-    assert store.audit_labels_for_user_ids(
-        [f"user-{index}" for index in range(700)]
-    ) == {}
-
-    sizes = [len(params) for _statement, params in database.connection.calls]
-    assert sizes == [200, 200, 112]
-    assert all("WHERE id IN" in statement for statement, _ in database.connection.calls)
 
 
 class _ResolverRepo:

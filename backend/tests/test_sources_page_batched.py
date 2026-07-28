@@ -135,59 +135,6 @@ def test_extraction_warning_tie_break_matches_per_row(repo):
         f"batched tie-break diverged from per-row oracle (per_row_winner={per_row_winner})")
 
 
-def test_list_sources_page_batches_lookups_not_n_plus_1(repo, monkeypatch):
-    """A page of N sources must issue exactly 3 lookup queries total (source_
-    elements GROUP BY, knowledge_objects DISTINCT, extraction_runs ordered
-    scan) — not 3*N. Spy on the runtime SqliteDatabase.connect seam."""
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    for i in range(20):
-        _seed_source(repo, nb.id, f"s{i}", f"Doc {i}", f"2026-01-{i + 1:02d}T00:00:00")
-        _add_elements(repo, f"s{i}", 1)
-        _add_kg_object(repo, nb.id, f"s{i}")
-        _add_extraction_run(repo, nb.id, f"s{i}", f"r{i}", f"2026-01-{i + 1:02d}T01:00:00")
-
-    # list_sources_page's leading self.get_notebook(notebook_id) call issues
-    # its own knowledge_objects/source_elements queries (kg_ready /
-    # kg_pending_sources — unrelated to this item's batching); warm nothing
-    # (no cache) but note it in the isolation below instead of asserting on
-    # its query count, which is orthogonal to the C5 N+1 fix under test.
-    calls = {"source_elements": 0, "knowledge_objects": 0, "extraction_runs": 0}
-    orig_connect = repo._runtime.database.connect
-
-    class _SpyConn:
-        def __init__(self, inner):
-            self._inner = inner
-
-        def execute(self, sql, *a, **kw):
-            # Only count the _sources_from_rows batched shapes (each has a
-            # GROUP BY / DISTINCT / ORDER BY source_id — distinct from
-            # get_notebook's unrelated EXISTS/COUNT-with-subquery shapes).
-            if "FROM source_elements" in sql and "GROUP BY source_id" in sql:
-                calls["source_elements"] += 1
-            elif "FROM knowledge_objects" in sql and "SELECT DISTINCT" in sql:
-                calls["knowledge_objects"] += 1
-            elif "FROM extraction_runs" in sql and "ORDER BY source_id" in sql:
-                calls["extraction_runs"] += 1
-            return self._inner.execute(sql, *a, **kw)
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-        def __enter__(self):
-            self._inner.__enter__()
-            return self
-
-        def __exit__(self, *exc):
-            return self._inner.__exit__(*exc)
-
-    monkeypatch.setattr(repo._runtime.database, "connect", lambda: _SpyConn(orig_connect()))
-    page = repo.list_sources_page(nb.id, offset=0, limit=20)
-    assert len(page.items) == 20
-    assert calls["source_elements"] == 1, calls
-    assert calls["knowledge_objects"] == 1, calls
-    assert calls["extraction_runs"] == 1, calls
-
-
 def test_sources_from_rows_empty_list_short_circuits(repo):
     with repo._connect() as db:
         assert repo._sources_from_rows(db, []) == []

@@ -20,7 +20,7 @@ from app.core.config import Settings, get_settings
 from app.core.request_context import set_request_user
 from app.models.identity import UserProfile
 from app.models.notebooks import NotebookCreate
-from app.services.sqlite_repository import SCHEMA_VERSION, SQLiteRepository
+from app.services.sqlite_repository import SQLiteRepository
 
 
 @pytest.fixture(autouse=True)
@@ -53,50 +53,6 @@ def _insert(repo: SQLiteRepository, notebook_id: str, sid: str, source_type: str
         status="uploaded", parse_status="uploaded", file_name="f", file_path="",
         file_size=0, file_hash="", summary="", doc_type="",
     )
-
-
-def test_fresh_db_has_app_settings_table_and_upload_limit_column(tmp_path):
-    repo = _repo(tmp_path)
-    assert SCHEMA_VERSION == 33
-    with repo._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 33
-        assert db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'"
-        ).fetchone() is not None
-        cols = {r["name"]: r for r in db.execute("PRAGMA table_info(app_settings)").fetchall()}
-        assert set(cols) == {"key", "value", "updated_at"}
-        assert cols["key"]["pk"] == 1
-        assert cols["value"]["notnull"] == 1
-        assert cols["updated_at"]["notnull"] == 1
-        up_cols = [r["name"] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()]
-        assert "upload_document_limit" in up_cols
-        # 追加落在末尾(与已部署库 ALTER 落位一致,防列序漂移)。
-        assert up_cols[-1] == "upload_document_limit"
-
-
-def test_deployed_v26_db_backfills_app_settings_and_upload_limit(tmp_path):
-    """已部署到 v26 的库(缺 app_settings 表 + upload_document_limit 列)重新加载时
-    必须由 _migration_27 补建/补列 —— 版本闸对已部署库短路 _migration_1,新表/新列
-    只能靠追加迁移到达。"""
-    settings = Settings(
-        database_url=f"sqlite:///{tmp_path}/v26.db",
-        storage_dir=str(tmp_path / "storage"),
-        _env_file=None, event_log_enabled=False, llm_log_enabled=False,
-    )
-    repo0 = SQLiteRepository(settings)
-    with repo0._write() as db:
-        db.execute("DROP TABLE app_settings")
-        db.execute("ALTER TABLE user_profiles DROP COLUMN upload_document_limit")
-        db.execute("PRAGMA user_version = 26")
-
-    repo1 = SQLiteRepository(settings)
-    with repo1._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 33
-        assert db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_settings'"
-        ).fetchone() is not None
-        up_cols = [r["name"] for r in db.execute("PRAGMA table_info(user_profiles)").fetchall()]
-        assert up_cols[-1] == "upload_document_limit"
 
 
 def test_visible_document_count_excludes_memory_and_knowhow(tmp_path):

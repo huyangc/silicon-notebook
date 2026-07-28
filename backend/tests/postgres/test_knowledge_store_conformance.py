@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +11,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from app.core.config import Settings
 from app.models.knowledge import KnowledgeUpdate
 from app.repositories.postgres.embedding_store import EmbeddingStore as PostgresEmbeddingStore
 from app.repositories.postgres.governance_store import GovernanceStore as PostgresGovernanceStore
@@ -22,14 +20,6 @@ from app.repositories.postgres.index_projection_store import (
 from app.repositories.postgres.knowledge_store import KnowledgeStore as PostgresKnowledgeStore
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore as PostgresUnifiedKgStore
-from app.repositories.sqlite.embedding_store import EmbeddingStore as SqliteEmbeddingStore
-from app.repositories.sqlite.governance_store import GovernanceStore as SqliteGovernanceStore
-from app.repositories.sqlite.index_projection_store import (
-    IndexProjectionStore as SqliteIndexProjectionStore,
-)
-from app.repositories.sqlite.knowledge_store import KnowledgeStore as SqliteKnowledgeStore
-from app.repositories.sqlite.query_store import QueryStore as SqliteQueryStore
-from app.repositories.sqlite.unified_kg_store import UnifiedKgStore as SqliteUnifiedKgStore
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.ask_service import knowledge_record
 from app.services.repository_runtime import RepositoryCompatibilitySeams
@@ -41,42 +31,7 @@ from app.services.vector_index import encode_vector
 NOW = "2026-07-22T00:00:00+00:00"
 
 
-def _public_callables(cls: type) -> dict[str, object]:
-    return {
-        name: inspect.getattr_static(cls, name)
-        for name in cls.__dict__
-        if not name.startswith("_") and callable(getattr(cls, name))
-    }
-
-
-def _signature_shape(method) -> tuple:
-    signature = inspect.signature(method)
-    return tuple(
-        (parameter.name, parameter.kind, parameter.default)
-        for parameter in signature.parameters.values()
-    )
-
-
-@pytest.mark.parametrize(
-    ("sqlite_cls", "postgres_cls"),
-    (
-        (SqliteEmbeddingStore, PostgresEmbeddingStore),
-        (SqliteKnowledgeStore, PostgresKnowledgeStore),
-        (SqliteGovernanceStore, PostgresGovernanceStore),
-        (SqliteIndexProjectionStore, PostgresIndexProjectionStore),
-        (SqliteQueryStore, PostgresQueryStore),
-        (SqliteUnifiedKgStore, PostgresUnifiedKgStore),
-    ),
-)
-def test_postgres_knowledge_store_surfaces_cover_sqlite(sqlite_cls, postgres_cls):
-    sqlite_methods = _public_callables(sqlite_cls)
-    postgres_methods = _public_callables(postgres_cls)
-    assert sqlite_methods.keys() <= postgres_methods.keys()
-    for name in sqlite_methods.keys() & postgres_methods.keys():
-        assert type(sqlite_methods[name]) is type(postgres_methods[name])
-        assert _signature_shape(getattr(sqlite_cls, name)) == _signature_shape(
-            getattr(postgres_cls, name)
-        )
+pytestmark = pytest.mark.postgres_integration
 
 
 def _seams() -> RepositoryCompatibilitySeams:
@@ -97,74 +52,40 @@ def _seams() -> RepositoryCompatibilitySeams:
     )
 
 
-def _seed_catalog(database, backend: str) -> None:
-    if backend == "postgres":
-        user_sql = (
-            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
-            "username,password_hash,password_salt,password_iterations) "
-            "VALUES (%s,%s,%s,%s,'active',%s,%s,%s,'','',0)"
-        )
-        user_values = (
-            "user-golden",
-            "golden@example.test",
-            "Golden",
-            "admin",
-            NOW,
-            NOW,
-            "g00123456",
-        )
-        notebook_sql = (
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) VALUES (%s,%s,'','thermal','ready',%s,%s,%s,%s)"
-        )
-        source_sql = (
-            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
-            "file_name,summary,created_at,updated_at) "
-            "VALUES (%s,%s,%s,'file','ready','ready',%s,%s,%s,%s)"
-        )
-        values = lambda *items: items
-    else:
-        user_sql = (
-            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
-            "username,password_hash,password_salt,password_iterations) "
-            "VALUES (?,?,?,?, 'active',?,?,?,?,?,?)"
-        )
-        notebook_sql = (
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) VALUES (?,?,'','thermal','ready',?,?,?,?)"
-        )
-        source_sql = (
-            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
-            "file_name,summary,created_at,updated_at) "
-            "VALUES (?,?,?,'file','ready','ready',?,?,?,?)"
-        )
-        user_values = (
-            "user-golden",
-            "golden@example.test",
-            "Golden",
-            "admin",
-            NOW,
-            NOW,
-            "g00123456",
-            "",
-            "",
-            0,
-        )
-        values = lambda *items: items
-
+def _seed_catalog(database) -> None:
+    user_sql = (
+        "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+        "username,password_hash,password_salt,password_iterations) "
+        "VALUES (%s,%s,%s,%s,'active',%s,%s,%s,'','',0)"
+    )
+    user_values = (
+        "user-golden",
+        "golden@example.test",
+        "Golden",
+        "admin",
+        NOW,
+        NOW,
+        "g00123456",
+    )
+    notebook_sql = (
+        "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+        "created_at,updated_at,tier) VALUES (%s,%s,'','thermal','ready',%s,%s,%s,%s)"
+    )
+    source_sql = (
+        "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+        "file_name,summary,created_at,updated_at) "
+        "VALUES (%s,%s,%s,'file','ready','ready',%s,%s,%s,%s)"
+    )
     with database.write() as connection:
-        connection.execute(
-            user_sql,
-            values(*user_values),
-        )
+        connection.execute(user_sql, user_values)
         for notebook_id, tier in (("nb-personal", "personal"), ("nb-base", "base")):
             connection.execute(
                 notebook_sql,
-                values(notebook_id, notebook_id, "user-golden", NOW, NOW, tier),
+                (notebook_id, notebook_id, "user-golden", NOW, NOW, tier),
             )
         connection.execute(
             source_sql,
-            values(
+            (
                 "source-golden",
                 "nb-personal",
                 "Thermal handbook 热设计手册",
@@ -178,50 +99,24 @@ def _seed_catalog(database, backend: str) -> None:
 
 @dataclass
 class KnowledgeHarness:
-    backend: str
     database: object
     knowledge: object
     governance: object
     embedding: object
 
 
-@pytest.fixture(
-    params=("sqlite", pytest.param("postgres", marks=pytest.mark.postgres_integration))
-)
-def knowledge_harness(request, tmp_path) -> KnowledgeHarness:
+@pytest.fixture
+def knowledge_harness(postgres_database) -> KnowledgeHarness:
     seams = _seams()
-    if request.param == "sqlite":
-        from app.repositories.sqlite.database import SqliteDatabase
-        from app.repositories.sqlite.migrations import SqliteMigrator
-
-        settings = Settings(database_url=f"sqlite:///{tmp_path / 'knowledge-golden.db'}")
-        database = SqliteDatabase(settings, tmp_path)
-        SqliteMigrator(database, settings).initialize()
-        _seed_catalog(database, "sqlite")
-        harness = KnowledgeHarness(
-            backend="sqlite",
-            database=database,
-            knowledge=SqliteKnowledgeStore(database, seams),
-            governance=SqliteGovernanceStore(database, seams),
-            embedding=SqliteEmbeddingStore(write=database.write),
-        )
-        try:
-            yield harness
-        finally:
-            database.close_local()
-        return
-
-    database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 11
-    _seed_catalog(database, "postgres")
+    assert PostgresMigrator(postgres_database).migrate() == 11
+    _seed_catalog(postgres_database)
     yield KnowledgeHarness(
-        backend="postgres",
-        database=database,
-        knowledge=PostgresKnowledgeStore(database, seams),
-        governance=PostgresGovernanceStore(database, seams),
-        embedding=PostgresEmbeddingStore(write=database.write),
+        database=postgres_database,
+        knowledge=PostgresKnowledgeStore(postgres_database, seams),
+        governance=PostgresGovernanceStore(postgres_database, seams),
+        embedding=PostgresEmbeddingStore(write=postgres_database.write),
     )
 
 
@@ -279,7 +174,7 @@ def test_usable_status_filter_and_insertion_order_match_golden(knowledge_harness
     assert {item["evidence"][0].source_id for item in objects} == {"source-golden"}
 
 
-def test_merge_candidate_batches_preserve_sqlite_rowid_ordinal(knowledge_harness):
+def test_merge_candidate_batches_preserve_persisted_ordinal(knowledge_harness):
     with knowledge_harness.database.write() as connection:
         for index in range(4):
             knowledge_harness.governance.insert_merge_candidate(
@@ -306,14 +201,10 @@ def test_merge_candidate_batches_preserve_sqlite_rowid_ordinal(knowledge_harness
     ]
 
 
-def test_community_graph_excludes_rejected_bridges_on_both_backends(
+def test_community_graph_excludes_rejected_bridges_on_postgres(
     knowledge_harness,
 ):
-    unified = (
-        PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-        if knowledge_harness.backend == "postgres"
-        else SqliteUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-    )
+    unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
     object_ids = ["ko-community-a", "ko-community-b", "ko-community-c", "ko-community-d"]
     objects = [
         (
@@ -368,10 +259,8 @@ def test_community_graph_excludes_rejected_bridges_on_both_backends(
         unified.replace_cluster_rows_streamed(
             connection, "nb-personal", "claim", cluster_rows
         )
-        placeholder = "%s" if knowledge_harness.backend == "postgres" else "?"
         connection.execute(
-            "UPDATE knowledge_relations SET review_status='rejected' WHERE id="
-            + placeholder,
+            "UPDATE knowledge_relations SET review_status='rejected' WHERE id=%s",
             ("rel-community-rejected",),
         )
         names, graph_rows = unified.community_graph_rows(connection, "nb-personal")
@@ -430,16 +319,10 @@ def test_mount_order_and_equal_score_relation_federation_are_id_stable(
     notebook_sql = (
         "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
         "created_at,updated_at,tier) VALUES (%s,%s,'','thermal','ready',%s,%s,%s,'base')"
-        if knowledge_harness.backend == "postgres"
-        else "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-        "created_at,updated_at,tier) VALUES (?,?,'','thermal','ready',?,?,?,'base')"
     )
     mount_sql = (
         "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,created_by) "
         "VALUES (%s,%s,%s,%s)"
-        if knowledge_harness.backend == "postgres"
-        else "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,created_by) "
-        "VALUES (?,?,?,?)"
     )
     with knowledge_harness.database.write() as connection:
         for notebook_id in ("nb-duplicate-z", "nb-duplicate-a"):
@@ -455,18 +338,10 @@ def test_mount_order_and_equal_score_relation_federation_are_id_stable(
         mounted = knowledge_harness.governance.mounted_public_base_ids(
             connection, "nb-personal"
         )
-        query_store = (
-            PostgresQueryStore(knowledge_harness.database)
-            if knowledge_harness.backend == "postgres"
-            else SqliteQueryStore(knowledge_harness.database)
-        )
+        query_store = PostgresQueryStore(knowledge_harness.database)
         summary_rows = query_store.mounted_bases_row(connection, "nb-personal")
 
-    unified = (
-        PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-        if knowledge_harness.backend == "postgres"
-        else SqliteUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-    )
+    unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
     community_mounted = unified.mounted_base_ids("nb-personal")
     expected_bases = ["nb-duplicate-a", "nb-duplicate-z"]
     assert mounted == expected_bases
@@ -491,11 +366,7 @@ def test_mount_order_and_equal_score_relation_federation_are_id_stable(
 
 
 def test_unified_kg_equal_rank_top_k_reads_use_id_tie_breaks(knowledge_harness):
-    unified = (
-        PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-        if knowledge_harness.backend == "postgres"
-        else SqliteUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
-    )
+    unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
     cluster_rows = [
         (
             f"cluster-tie-{index}",
@@ -518,7 +389,7 @@ def test_unified_kg_equal_rank_top_k_reads_use_id_tie_breaks(knowledge_harness):
             1,
         )
     ]
-    ph = "%s" if knowledge_harness.backend == "postgres" else "?"
+    ph = "%s"
     with knowledge_harness.database.write() as connection:
         unified.replace_cluster_rows_streamed(
             connection, "nb-personal", "concept", cluster_rows
@@ -563,7 +434,7 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresEmbeddingStore(write=postgres_database.write)
     expected = np.asarray([0.125, -1.5, 3.25, 0.0], dtype=np.float32)
     store.replace_knowledge_vectors(
@@ -608,7 +479,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     valid = (
         "ko-json-null",
@@ -646,11 +517,11 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 
 
 @pytest.mark.postgres_integration
-def test_postgres_raw_graph_rows_keep_sqlite_json_text_contract(postgres_database):
+def test_postgres_raw_graph_rows_keep_repository_json_text_contract(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
         (
@@ -713,11 +584,11 @@ def test_postgres_raw_graph_rows_keep_sqlite_json_text_contract(postgres_databas
 
 
 @pytest.mark.postgres_integration
-def test_postgres_retrieve_neighbors_consumes_sqlite_compatible_rows(postgres_database):
+def test_postgres_retrieve_neighbors_consumes_repository_rows(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     objects = [
         (
@@ -763,7 +634,7 @@ def test_postgres_retrieve_neighbors_consumes_sqlite_compatible_rows(postgres_da
     assert hits[0].last_reviewed == ""
 
 
-def test_retrieve_neighbors_excludes_rejected_relations_on_both_backends(
+def test_retrieve_neighbors_excludes_rejected_relations_on_postgres(
     knowledge_harness,
 ):
     objects = [
@@ -811,7 +682,7 @@ def test_retrieve_neighbors_excludes_rejected_relations_on_both_backends(
     ) == []
 
 
-def test_relation_connected_probe_returns_only_candidate_ids_on_both_backends(
+def test_relation_connected_probe_returns_only_candidate_ids_on_postgres(
     knowledge_harness,
 ):
     object_ids = ["ko-probe-hub", "ko-probe-isolated"] + [
@@ -869,7 +740,7 @@ def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
         (
@@ -924,7 +795,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     query = "crowdout exact thermal phrase"
     rows = [
@@ -968,7 +839,7 @@ def test_postgres_fts_recalls_independent_term_from_long_query(postgres_database
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     with postgres_database.write() as connection:
         store.insert_object_chunk(connection, [(
@@ -998,7 +869,7 @@ def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     with postgres_database.write() as connection:
         store.insert_merge_candidate(
@@ -1066,11 +937,10 @@ def test_cluster_append_dedupes_repeated_member_within_one_input(
             NOW,
         )
 
-    placeholder = "%s" if knowledge_harness.backend == "postgres" else "?"
     with knowledge_harness.database.connect() as connection:
         rows = connection.execute(
             "SELECT canonical_id,member_object_id FROM concept_clusters "
-            f"WHERE notebook_id={placeholder} AND object_type={placeholder}",
+            "WHERE notebook_id=%s AND object_type=%s",
             ("nb-personal", "concept"),
         ).fetchall()
 
@@ -1091,7 +961,7 @@ def test_postgres_concurrent_cluster_appends_are_member_idempotent(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     first_reached = threading.Event()
     second_reached = threading.Event()
@@ -1177,7 +1047,7 @@ def test_postgres_concurrent_cluster_replacements_publish_one_complete_final_set
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     with postgres_database.write() as connection:
         connection.execute(
@@ -1295,7 +1165,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     promoted_element = f"promotion-{promotion_kind}"
@@ -1474,7 +1344,7 @@ def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_databa
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -1567,7 +1437,7 @@ def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_databas
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     row = (
@@ -1641,7 +1511,7 @@ def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_databas
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     row = (
@@ -1721,7 +1591,7 @@ def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_databa
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     source = (
@@ -1847,7 +1717,7 @@ def test_postgres_graph_build_order_and_equal_confidence_fanout_are_physical_ord
     from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     unified = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     target_ids = [f"ko-fanout-target-{index:02d}" for index in reversed(range(10))]
@@ -2011,7 +1881,7 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-order-z", "ko-order-a", "ko-order-m"]
     rows = [
@@ -2108,16 +1978,11 @@ class _ProjectionConnection:
         raise AssertionError(statement)
 
 
-@pytest.mark.parametrize(
-    "store_cls", (SqliteIndexProjectionStore, PostgresIndexProjectionStore)
-)
-def test_projection_membership_artifact_order_ignores_map_and_set_iteration(
-    store_cls,
-):
+def test_projection_membership_artifact_order_ignores_map_and_set_iteration():
     connection = _ProjectionConnection()
 
     def build(ent_chunk_map):
-        projection = store_cls(
+        projection = PostgresIndexProjectionStore(
             SimpleNamespace(ppr_variant_edge_weight=0.35),
             connect=lambda: nullcontext(connection),
             in_batches=lambda values: [list(values)],
@@ -2194,7 +2059,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-follow-start", "ko-follow-a", "ko-follow-m", "ko-follow-z"]
     objects = [
@@ -2262,7 +2127,7 @@ def test_postgres_query_store_multi_notebook_count_placeholders(postgres_databas
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     rows = PostgresQueryStore(postgres_database).list_user_notebooks("user-golden")
     assert {row["id"] for row in rows} == {"nb-base", "nb-personal"}
     assert {row["id"]: row["sources"] for row in rows} == {
@@ -2278,7 +2143,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     with postgres_database.write() as connection:
         for answer_id, question, created_at in (
             ("answer-repeat-old", "repeat question", "2026-07-20T00:00:00+00:00"),
@@ -2313,7 +2178,7 @@ def test_postgres_unified_kg_temp_search_and_checkpoint_json(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     claims = (
         ("claim-en", "thermal design method"),
@@ -2354,7 +2219,7 @@ def test_concurrent_equivalent_promotions_serialize_base_dedup(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     source_objects = [

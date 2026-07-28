@@ -1,12 +1,11 @@
-"""回归：相对路径 Settings 字段（storage_dir / database_url 的 sqlite 路径部分 /
-env_file）必须锚定到仓库根，与进程启动时的 CWD 无关。
+"""回归：相对路径 Settings 字段（storage_dir / env_file）必须锚定到仓库根，
+与进程启动时的 CWD 无关。
 
 背景（第三次「双 .local」生产事故）：`npm run dev` 经 scripts/dev.sh cd 进
 backend/ 再起 uvicorn，CLI 从仓库根跑 —— 同一套相对默认值 `.local/...` 在两种
 启动方式下解析到两个不同目录，导致 CLI 建好的索引服务端看不到。修复：
 Settings 用 model_validator(mode="after") 统一把相对路径重写为仓库根锚定的
-绝对路径，绝对 env 覆盖原样尊重；非 SQLite URL 可以被安全地解析，直到后续
-repository factory 阶段才会选择对应后端。
+绝对路径，绝对 env 覆盖原样尊重；PostgreSQL URL 在配置阶段完成标准化。
 """
 import os
 
@@ -31,31 +30,6 @@ class TestCwdIndependence:
         assert s.storage_dir == str(_ROOT_DIR / ".local" / "storage")
         assert os.path.isabs(s.storage_dir)
 
-    def test_default_database_url_anchored_to_repo_root(self, tmp_path, monkeypatch):
-        _clear_path_env(monkeypatch)
-        monkeypatch.chdir(tmp_path)
-        s = Settings()
-        expected = f"sqlite:///{_ROOT_DIR / '.local' / 'silicon_notebook.db'}"
-        assert s.database_url == expected
-        assert s.sqlite_path == str(_ROOT_DIR / ".local" / "silicon_notebook.db")
-
-    def test_cwd_in_backend_dir_gives_same_result_as_repo_root(self, monkeypatch):
-        """cd backend/ 再构造（模拟 npm run dev 的 scripts/dev.sh 行为）与从仓库根
-        构造（模拟离线 CLI）结果必须一致 —— 这正是本修复要消灭的分裂点。"""
-        _clear_path_env(monkeypatch)
-        monkeypatch.chdir(_ROOT_DIR)
-        from_root = Settings()
-
-        _clear_path_env(monkeypatch)
-        monkeypatch.chdir(_ROOT_DIR / "backend")
-        from_backend = Settings()
-
-        assert from_root.storage_dir == from_backend.storage_dir
-        assert from_root.database_url == from_backend.database_url
-        assert os.path.isabs(from_root.storage_dir)
-        assert os.path.isabs(from_backend.storage_dir)
-
-
 class TestAbsoluteEnvOverridesRespectedVerbatim:
     """绝对路径 env 覆盖必须原样尊重，不重锚（否则会打破所有把数据放绝对
     tmp_path 的既有测试和真实绝对路径部署）。"""
@@ -65,24 +39,6 @@ class TestAbsoluteEnvOverridesRespectedVerbatim:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         s = Settings()
         assert s.storage_dir == "/tmp/x"
-
-    def test_absolute_sqlite_url_four_slashes_untouched(self, monkeypatch):
-        monkeypatch.setenv("DATABASE_URL", "sqlite:////tmp/y.db")
-        monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        assert s.database_url == "sqlite:////tmp/y.db"
-        assert s.sqlite_path == "/tmp/y.db"
-
-    def test_absolute_sqlite_url_with_tmp_path(self, tmp_path, monkeypatch):
-        """既有测试的主流模式：DATABASE_URL=sqlite:///{tmp_path}/t.db（tmp_path
-        本身是绝对路径，三斜杠+绝对路径部分）。"""
-        db_file = tmp_path / "t.db"
-        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_file}")
-        monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        assert s.database_url == f"sqlite:///{db_file}"
-        assert s.sqlite_path == str(db_file)
-
 
 class TestRelativeEnvValuesAlsoAnchored:
     """相对 env 值（非绝对路径的显式覆盖）与默认值同规则锚定到仓库根 ——
@@ -94,56 +50,20 @@ class TestRelativeEnvValuesAlsoAnchored:
         s = Settings()
         assert s.storage_dir == str(_ROOT_DIR / ".local" / "custom_storage")
 
-    def test_relative_sqlite_url_env_anchored(self, monkeypatch):
-        monkeypatch.setenv("DATABASE_URL", "sqlite:///.local/foo.db")
-        monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        expected = f"sqlite:///{_ROOT_DIR / '.local' / 'foo.db'}"
-        assert s.database_url == expected
-        assert s.sqlite_path == str(_ROOT_DIR / ".local" / "foo.db")
-
-    def test_relative_sqlite_url_without_local_prefix_anchored(self, monkeypatch):
-        monkeypatch.setenv("DATABASE_URL", "sqlite:///some/nested/db.sqlite3")
-        monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        expected = f"sqlite:///{_ROOT_DIR / 'some' / 'nested' / 'db.sqlite3'}"
-        assert s.database_url == expected
-
-
 class TestDatabaseUrlSchemes:
-    """配置阶段只验证 URL；SQLite runtime 仍只能请求 SQLite 路径。"""
+    """配置阶段验证并标准化 PostgreSQL URL。"""
 
-    def test_postgres_url_is_normalized_and_sqlite_path_fails_clearly(self, monkeypatch):
+    def test_postgres_url_is_normalized(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@host:5432/db")
         monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
         s = Settings()
         assert s.database_url == "postgresql://user:pass@host:5432/db"
-        with pytest.raises(ValueError, match="not a SQLite"):
-            _ = s.sqlite_path
 
     def test_mysql_url_rejected(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "mysql://user:pass@host/db")
         monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
         with pytest.raises(ValueError, match="unsupported database URL scheme"):
             Settings()
-
-
-class TestSqlitePathPropertySlashForms:
-    """sqlite_path 属性（现有 L~411）解析 sqlite:/// 前缀的行为矩阵，覆盖
-    三斜杠+相对、三斜杠+绝对(即事实上四斜杠开头)两种拼写。"""
-
-    def test_three_slash_relative_becomes_absolute_after_anchor(self, monkeypatch):
-        monkeypatch.setenv("DATABASE_URL", "sqlite:///.local/silicon_notebook.db")
-        monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        assert s.sqlite_path == str(_ROOT_DIR / ".local" / "silicon_notebook.db")
-
-    def test_four_slash_absolute_preserved(self, monkeypatch):
-        monkeypatch.setenv("DATABASE_URL", "sqlite:////abs/path/db.sqlite")
-        monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        s = Settings()
-        assert s.sqlite_path == "/abs/path/db.sqlite"
-
 
 class TestEnvFileAnchored:
     """model_config.env_file 必须是仓库根下的绝对路径，不依赖 CWD 是否恰好

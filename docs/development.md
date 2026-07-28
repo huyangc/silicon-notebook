@@ -203,6 +203,9 @@ auxiliary encoding/locale targets, and runs `bash scripts/check_postgres.sh` wit
 only the `postgres_integration` marker. Local verification uses an installed
 PostgreSQL 16 service and an explicit `TEST_POSTGRES_URL`; `scripts/check.sh`
 must never start or contact PostgreSQL.
+The lane covers direct PostgreSQL behavior only; retired tests for the SQLite
+backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and
+cross-backend parity are not active coverage.
 
 CI portability is part of the gate contract: every filesystem, data, and
 dependency path used by a CI-executed test is repository-relative and

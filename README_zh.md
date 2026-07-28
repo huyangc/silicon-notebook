@@ -90,6 +90,8 @@ bash scripts/check.sh
 
 `scripts/check.sh` 是完整的离线本地门：后端测试、smoke/契约检查、前端测试与类型检查，以及生产前端构建。
 
+数据库专项覆盖现在只面向直接 PostgreSQL 后端；已退役的 SQLite 后端实现专项测试、SQLite→PostgreSQL 导入/正向 shadow 测试和跨后端 parity 测试不再属于当前测试套件。
+
 ## 产品流程
 
 1. 新建笔记本。系统立即打开 `Untitled notebook`，不会预先要求填写元数据。

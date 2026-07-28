@@ -3,13 +3,12 @@
 All five task suites live here. Each suite is gated independently; the full
 `pytest -q` must stay green (no regression to single-notebook ask()).
 """
-import json
 import pytest
 
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
-from app.models.schemas import NotebookCreate, AskRequest
+from app.models.schemas import NotebookCreate
 from tests.model_testkit import bind_all_embedding_clients
 
 
@@ -60,20 +59,6 @@ class TestTask1:
         assert repo.get_notebook(other.id).base_kg_available is False
         # base 自己没挂任何东西 → 空
         assert repo.get_notebook(base.id).base_notebooks == []
-
-    def test_tier_is_idempotent_on_existing_db(self, tmp_path, monkeypatch):
-        """Running _migrate() twice on a DB that already has the tier column
-        must not raise (PRAGMA guard prevents duplicate ALTER TABLE)."""
-        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-        monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-        repo1 = SQLiteRepository(Settings())
-        nb = repo1.create_notebook(NotebookCreate(name="nb"))
-        repo1.mark_notebook_base(nb.id)
-        # Second repo init on same DB must not raise.
-        repo2 = SQLiteRepository(Settings())
-        assert repo2.get_notebook(nb.id).tier == "base"
-
 
 class TestTask2:
     def _seed_two_notebooks(self, repo):
@@ -224,4 +209,3 @@ class TestTask5:
         }
         anchors = repo._parse_answer_anchors("Oxide BV [k1].", id_map)
         assert anchors[0].tier == "personal"
-

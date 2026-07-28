@@ -52,17 +52,6 @@ def _seed_graph(repo) -> str:
 
 # ── Schema migration ──────────────────────────────────────────────────────────
 
-def test_review_status_column_exists(repo):
-    """knowledge_relations must have a review_status column after migration."""
-    nb_id = _seed_graph(repo)
-    with repo._connect() as db:
-        cols = [r["name"] for r in db.execute(
-            "PRAGMA table_info(knowledge_relations)").fetchall()]
-    assert "review_status" in cols
-
-
-# ── review_queue ──────────────────────────────────────────────────────────────
-
 def test_review_queue_returns_list(repo):
     nb_id = _seed_graph(repo)
     q = repo.review_queue(nb_id)

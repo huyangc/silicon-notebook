@@ -10,9 +10,9 @@ from app.repositories.ports import (
     RetrievalPort,
 )
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
-from app.repositories.sqlite.migrations import SCHEMA_VERSION
+from app.services.repository_facade import RepositoryFacade
 from app.services import report_engine, report_execution, repository_runtime
-from tests import test_repository_facade_contract as facade_contract
+from tests.architecture import facade_contract
 from tests.architecture.repository_callers import collect_caller_contract
 from tests.test_repository_protocol_coverage import protocol_calls
 
@@ -83,89 +83,6 @@ def _assert_ordered(section: str, phrases: tuple[str, ...]) -> None:
     )
 
 
-def test_postgres_shadow_bootstrap_orders_v2_before_replication_guards():
-    """PG business tables must exist before target guard indexes are installed."""
-    forward = _between(
-        "docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md",
-        "- [ ] **Step 3: Implement `start-forward` orchestration**",
-        "- [ ] **Step 4: Implement `scripts/shadow.sh`",
-    )
-    _assert_ordered(
-        forward,
-        (
-            "strictly read-only UTF8/identity/emptiness preflight",
-            "prepares PostgreSQL at COPY-ready v2",
-            "commits the SQLite and PostgreSQL guard/install interfaces",
-            "two-report CAS",
-            "creates the snapshot",
-            "copies/resumes the baseline",
-        ),
-    )
-
-    design = _between(
-        "docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md",
-        "## 6. 初始全量基线",
-        "## 7. 增量复制与 checkpoint",
-    )
-    _assert_ordered(
-        design,
-        (
-            "1. `preflight`",
-            "2. 通过正式 checksummed migrator",
-            "3. 分别提交 SQLite 与 PostgreSQL",
-            "CAS 开启正向 capture",
-            "4. 使用 SQLite backup API",
-            "6. 按 manifest FK 拓扑使用流式批次和 PostgreSQL `COPY`",
-        ),
-    )
-
-
-def test_repository_backend_selection_documentation_matches_the_direct_runtime():
-    _assert_phrases(
-        {
-            "README.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
-            "README_zh.md": "DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。",
-            "AGENTS.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
-            "CLAUDE.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
-            "architecture.md": "DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.",
-            "README_zh.md": "SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。",
-            "AGENTS.md": "SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.",
-            "CLAUDE.md": "SQLite and PostgreSQL are both available direct backends; SQLite remains the shipped default.",
-            "architecture.md": "SQLite 和 PostgreSQL 都是可直接启动的后端；发行默认值仍是 SQLite。",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "Exactly one active repository backend is selected centrally from `DATABASE_URL`.",
-            "README_zh.md": "运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。",
-            "AGENTS.md": "Exactly one active repository backend is selected centrally from `DATABASE_URL`.",
-            "CLAUDE.md": "Exactly one active repository backend is selected centrally from `DATABASE_URL`.",
-            "architecture.md": "运行时只有一个 active repository 后端，由 `DATABASE_URL` 集中选择。",
-        }
-    )
-    for name in (
-        "README.md",
-        "README_zh.md",
-        "AGENTS.md",
-        "CLAUDE.md",
-        "architecture.md",
-        "packaging/DEPLOY.md",
-    ):
-        assert "SHADOW_DATABASE_URL" in _read(name)
-        text = _read(name)
-        assert "DATABASE_URL" in text
-        assert "bytea" in text
-        assert "pgvector" in text
-        assert "--workers 1" in text
-    assert "does not copy, migrate, or synchronize existing data" in _read("README.md")
-    assert "不会复制、迁移或同步既有数据" in _read("README_zh.md")
-
-
 def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritative():
     offline = _read("scripts/check.sh")
     assert "check_postgres.sh" not in offline
@@ -202,8 +119,6 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
         "target.sanitized_url",
         '"--tb=short"',
         '"--maxfail=1"',
-        "_shadow_e2e_command",
-        '"tests/postgres/shadow/test_forward_e2e.py"',
     ):
         assert phrase in launcher
     assert "datlocale" in catalog_helpers
@@ -243,167 +158,6 @@ def _module_imports(path: Path) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             imports.add(node.module)
     return imports
-
-
-def test_shadow_database_pairing_is_confined_to_the_migration_composition_root():
-    offenders: list[str] = []
-    for path in sorted((ROOT / "backend/app").rglob("*.py")):
-        relative = path.relative_to(ROOT).as_posix()
-        imports = _module_imports(path)
-        imports_sqlite_database = any(
-            module == "app.repositories.sqlite.database" for module in imports
-        )
-        imports_postgres_database = any(
-            module == "app.repositories.postgres.database" for module in imports
-        )
-        if imports_sqlite_database and imports_postgres_database and not relative.startswith(
-            "backend/app/migration/shadow/"
-        ):
-            offenders.append(relative)
-    assert offenders == []
-
-
-def test_shadow_configuration_and_calls_cannot_escape_operator_boundaries():
-    allowed_config = {
-        "backend/app/core/config.py",
-        "backend/app/migration/database_activation.py",
-        "backend/app/migration/shadow/cli.py",
-    }
-    config_offenders: list[str] = []
-    call_offenders: list[str] = []
-    for path in sorted((ROOT / "backend/app").rglob("*.py")):
-        relative = path.relative_to(ROOT).as_posix()
-        source = path.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=relative)
-        if relative not in allowed_config:
-            for node in ast.walk(tree):
-                if (
-                    isinstance(node, ast.Attribute)
-                    and node.attr == "shadow_database_url"
-                ) or (
-                    isinstance(node, ast.Constant)
-                    and node.value == "SHADOW_DATABASE_URL"
-                ):
-                    config_offenders.append(f"{relative}:{node.lineno}")
-        if relative.startswith(
-            ("backend/app/services/", "backend/app/repositories/", "backend/app/api/")
-        ) and any(module.startswith("app.migration.shadow") for module in _module_imports(path)):
-            call_offenders.append(relative)
-    assert config_offenders == []
-    assert call_offenders == []
-
-
-def test_shadow_cli_entry_is_thin_and_manifest_validation_remains_total():
-    entry = ROOT / "scripts/shadow_sqlite_to_postgres.py"
-    tree = ast.parse(entry.read_text(encoding="utf-8"), filename=str(entry))
-    imports = [node for node in tree.body if isinstance(node, ast.ImportFrom)]
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    assert len(imports) == 1
-    assert imports[0].module == "app.migration.shadow.cli"
-    assert [alias.name for alias in imports[0].names] == ["main"]
-    assert functions == []
-
-    from app.migration.shadow.manifest import MANIFEST, validate_manifest
-
-    validate_manifest(MANIFEST)
-    assert len(MANIFEST.replicated_names) == 60
-
-
-def test_quick_start_describes_sqlite_as_the_default_not_the_only_backend():
-    english = _read("README.md")
-    chinese = _read("README_zh.md")
-    normalized_english = " ".join(english.split())
-    assert "shipped-default SQLite quick start" in normalized_english
-    assert "accessible PostgreSQL server" in normalized_english
-    assert "migrates the selected datastore" in normalized_english
-    assert "发行默认的 SQLite 快速启动" in chinese
-    assert "可访问的 PostgreSQL 服务" in chinese
-    assert "迁移当前选中的数据存储" in chinese
-    assert "over\na local SQLite database. It requires" not in english
-    assert "creates the SQLite\nschema" not in english
-    assert "数据落在本地 SQLite" not in chinese
-    assert "自建 SQLite 表结构" not in chinese
-
-
-def test_backend_specific_retrieval_limits_and_selectable_architecture_are_qualified():
-    readme = _read("README.md")
-    readme_zh = _read("README_zh.md")
-    architecture = _read("architecture.md")
-    assert "On the shipped SQLite default" in readme
-    assert "PostgreSQL backend uses `pg_trgm`/`ILIKE`" in readme
-    assert "在发行默认的 SQLite 后端上" in readme_zh
-    assert "PostgreSQL 后端改用 `pg_trgm`/`ILIKE`" in readme_zh
-    assert (
-        "repository backend 由 `DATABASE_URL` 在 SQLite 与 PostgreSQL 之间选择"
-        in architecture
-    )
-    assert "FastAPI + SQLite + Next.js" not in architecture
-
-
-def test_batch_ingest_backend_boundary_and_postgres_extension_prerequisite_are_documented():
-    _assert_phrases(
-        {
-            "README.md": "supports SQLite and PostgreSQL for `ingest`",
-            "README_zh.md": "同时支持 SQLite 与 PostgreSQL",
-            "AGENTS.md": "support both formal backends through the central factory",
-            "CLAUDE.md": "同时支持 SQLite/PostgreSQL",
-            "architecture.md": "mutation phase 支持 SQLite 与 PostgreSQL",
-            "packaging/DEPLOY.md": "支持 SQLite 与 PostgreSQL",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "`--confirm-service-stopped`",
-            "README_zh.md": "`--confirm-service-stopped`",
-            "AGENTS.md": "`--confirm-service-stopped`",
-            "CLAUDE.md": "`--confirm-service-stopped`",
-            "architecture.md": "`--confirm-service-stopped`",
-            "packaging/DEPLOY.md": "`--confirm-service-stopped`",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "`pg_trgm` must be installed in the `public` schema",
-            "README_zh.md": "`pg_trgm` 必须安装在 `public` schema",
-            "packaging/DEPLOY.md": "`pg_trgm` 必须安装在 `public` schema",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "`pg_trgm | public` means the prerequisite is ready",
-            "README_zh.md": "`pg_trgm | public` 表示前置条件已就绪",
-            "packaging/DEPLOY.md": "`pg_trgm | public` 表示前置条件已就绪",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": (
-                "If the query returns no row, the first migration automatically attempts "
-                "`CREATE EXTENSION pg_trgm`"
-            ),
-            "README_zh.md": (
-                "若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`"
-            ),
-            "packaging/DEPLOY.md": (
-                "若查询无行，首次 migration 会自动尝试 `CREATE EXTENSION pg_trgm`"
-            ),
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "an existing `pg_trgm` in any other schema fails closed",
-            "README_zh.md": "既有 `pg_trgm` 位于其他 schema 时会 fail closed",
-            "packaging/DEPLOY.md": "既有 `pg_trgm` 位于其他 schema 时会 fail closed",
-        }
-    )
-    for name in (
-        "README.md",
-        "README_zh.md",
-        "packaging/DEPLOY.md",
-    ):
-        text = _read(name)
-        assert "FROM pg_extension e" in text
-        assert "JOIN pg_namespace n" in text
 
 
 def test_root_readmes_are_entrypoints_for_complete_language_doc_bundles():
@@ -909,26 +663,7 @@ def test_architecture_document_keeps_other_current_runtime_boundaries():
     assert "不直接返回 `AskResponse`" in architecture
 
 
-def test_repository_documentation_matches_composed_runtime_and_v9_compatibility():
-    """Docs describe the neutral facade, narrow SQLite wrapper and guards."""
-    _assert_phrases(
-        {
-            "README.md":
-                "`RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle",
-            "README_zh.md": "`RepositoryFacade` 是注入 `RepositoryRuntime` bundle 之上的后端中立 facade",
-            "AGENTS.md": "`RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle",
-            "architecture.md": "不再通过 mixin 继承复用实现",
-            "fangan_done.md": "组合式 `RepositoryRuntime` 之上的兼容 facade",
-        }
-    )
-    _assert_phrases(
-        {
-            "README.md": "factory/wrapper → facade → runtime → services → stores",
-            "README_zh.md": "factory/wrapper → facade → runtime → services → stores",
-            "AGENTS.md": "factory/wrapper → facade → runtime → services → stores",
-            "architecture.md": "factory/wrapper → facade → runtime → application services → stores",
-        }
-    )
+def test_repository_v9_compatibility_guards_remain_documented():
     for name in LIVE_REFERENCE_DOCS + ("fangan_done.md",):
         text = _read(name)
         assert "verify_repository_snapshot.py" in text, (
@@ -942,14 +677,6 @@ def test_repository_documentation_matches_composed_runtime_and_v9_compatibility(
         ), (
             f"{name} must document the frozen schema-v9 compatibility guard"
         )
-        # Retired descriptions of the mixin-inheritance stage must not read
-        # as current architecture anywhere in the live reference docs.
-        assert "The facade inherits both implementations" not in text
-        assert "facade 通过继承复用两者" not in text
-        assert "cohesive SQLite domains should be extracted incrementally" not in text
-        assert "identity/sharing mixin 是迁移接缝" not in text
-        assert "仍混合 persistence 与业务编排" not in text
-        assert "已拆为 mixin 接缝" not in text
 
 
 def test_completed_repository_boundary_claims_are_source_guarded():
@@ -967,11 +694,9 @@ def test_completed_repository_boundary_claims_are_source_guarded():
         for entries in caller_contract.values()
         for entry in entries
     )
-    assert facade_contract.facade_body_violations(
-        facade_contract.RepositoryFacade
-    ) == []
+    assert facade_contract.facade_body_violations(RepositoryFacade) == []
     assert facade_contract.manifest_delegate_mismatches(
-        facade_contract.RepositoryFacade, OWNER_BY_MEMBER
+        RepositoryFacade, OWNER_BY_MEMBER
     ) == []
 
     assert protocol_calls("RetrievalPort") - set(RetrievalPort.__dict__) == set()
@@ -1131,28 +856,6 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
             ),
         }
     )
-
-
-def test_live_schema_docs_follow_executable_version():
-    english_version = f"The current schema version is {SCHEMA_VERSION}."
-    chinese_version = f"当前 schema 版本为 {SCHEMA_VERSION}。"
-    migration_span = f"v10–v{SCHEMA_VERSION}"
-
-    for name in ("README.md", "AGENTS.md"):
-        text = _read(name)
-        assert english_version in text
-        assert re.findall(
-            r"The current schema version is (\d+)\.", text
-        ) == [str(SCHEMA_VERSION)]
-        assert migration_span in text
-
-    for name in ("README_zh.md", "architecture.md"):
-        text = _read(name)
-        assert chinese_version in text
-        assert re.findall(
-            r"当前 schema 版本为 (\d+)[。]", text
-        ) == [str(SCHEMA_VERSION)]
-        assert migration_span in text
 
 
 def test_repository_composition_history_keeps_v10_baseline():

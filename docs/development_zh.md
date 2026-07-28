@@ -68,6 +68,8 @@ PostgreSQL 覆盖与离线 full gate 明确分离。`postgres-integration` job �
 创建最小权限与辅助 encoding/locale 目标，并通过 `bash scripts/check_postgres.sh` 只运行
 `postgres_integration` marker。本地使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL`；
 `scripts/check.sh` 不得启动或连接 PostgreSQL。
+该泳道只覆盖直接 PostgreSQL 行为；已退役的 SQLite 后端实现专项测试、
+SQLite→PostgreSQL 导入/正向 shadow 测试与跨后端 parity 测试不属于当前覆盖。
 
 CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
 路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置

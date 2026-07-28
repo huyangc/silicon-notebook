@@ -30,7 +30,7 @@ import zipfile
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Iterator, Mapping, Sequence
 from unittest import mock
 
 
@@ -180,23 +180,6 @@ def _artifact_manifest(root: Path, path: Path) -> dict[str, object]:
         "size": path.stat().st_size,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }
-
-
-def collect_sqlite_repository_public_callables() -> dict[str, str]:
-    """Freeze the consumer-visible callable signatures on the compatibility wrapper."""
-    surface: dict[str, str] = {}
-    for name in sorted(dir(SQLiteRepository)):
-        if name.startswith("_"):
-            continue
-        member = inspect.getattr_static(SQLiteRepository, name)
-        target = member.fget if isinstance(member, property) else member
-        if not callable(target):
-            continue
-        try:
-            surface[name] = str(inspect.signature(target))
-        except (TypeError, ValueError):
-            continue
-    return surface
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -452,7 +435,7 @@ def collect_facade_surface(
     from app.services.ask_modes import ASK_MODES
     from app.services.repository_facade import RepositoryFacade
     from app.services.sqlite_repository import SQLiteRepository
-    from tests.test_repository_facade_contract import facade_delegate_evidence
+    from tests.architecture.facade_contract import facade_delegate_evidence
 
     class_members: dict[str, object] = {}
     for cls in reversed(SQLiteRepository.__mro__[:-1]):
@@ -984,7 +967,6 @@ def _deterministic_runtime() -> Iterator[None]:
     from app.services import embedding
     from app.services import model_provider
     from app.services import rerank_client
-    from app.services import repository_facade
     from app.services import sqlite_identity
     from app.services import sqlite_notebook_sharing
     from app.services import sqlite_repository
@@ -2788,10 +2770,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Living characterization contracts: re-blessed against the current runtime.
     _write_phase_contracts(contract_dir)
-    _write_json(
-        contract_dir / "sqlite_repository_public_callables.json",
-        collect_sqlite_repository_public_callables(),
-    )
     generate_ask_goldens(contract_dir / "ask_responses.json")
     generate_api_contract(contract_dir / "api_contract.json")
 

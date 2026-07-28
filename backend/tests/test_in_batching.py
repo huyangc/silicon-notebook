@@ -66,34 +66,3 @@ def test_delta_sites_equivalent_when_batched(repo, monkeypatch):
     assert sorted(small["gather"][0]) == sorted(big["gather"][0])   # node_ids
     assert sorted(small["gather"][2]) == sorted(big["gather"][2])   # chunk_ids
     assert small["index_delta"]["delta_chunks"] == 5
-
-
-def test_knowledge_store_compat_reads_late_bound_facade_chunk_size(
-    repo, monkeypatch
-):
-    nb = repo.create_notebook(NotebookCreate(name="n"))
-    object_ids = [
-        _insert_source_with_object(repo, nb.id, i)[2]
-        for i in range(5)
-    ]
-    requested = list(reversed(object_ids)) + [object_ids[-1]]
-    with repo._connect() as db:
-        expected = repo._knowledge_objects(
-            db, nb.id, "claim", id_filter=requested
-        )
-
-    monkeypatch.setattr(SQLiteRepository, "_IN_CHUNK", 2)
-    statements = []
-    with repo._connect() as db:
-        db.set_trace_callback(statements.append)
-        actual = repo._knowledge_objects(
-            db, nb.id, "claim", id_filter=requested
-        )
-
-    bounded_queries = [
-        statement
-        for statement in statements
-        if "FROM knowledge_objects" in statement and " id IN (" in statement
-    ]
-    assert len(bounded_queries) == 3
-    assert actual == expected

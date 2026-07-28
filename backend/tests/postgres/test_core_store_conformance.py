@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.core.config import Settings
 from app.models.notebooks import NotebookCreate, NotebookUpdate, SharedByMeItem
 from app.repositories.ports import ChunkWrite, SourceElementWrite
 from app.repositories.postgres.chunk_store import ChunkStore as PostgresChunkStore
@@ -24,31 +23,20 @@ from app.repositories.postgres.notebook_store import NotebookStore as PostgresNo
 from app.repositories.postgres.model_status_store import (
     ModelStatusStore as PostgresModelStatusStore,
 )
-from app.repositories.postgres.schema_manifest import POSTGRES_ROWID_ORDINAL_TABLES
 from app.repositories.postgres.sharing_store import SharingStore as PostgresSharingStore
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
-from app.repositories.sqlite.chunk_store import ChunkStore as SqliteChunkStore
-from app.repositories.sqlite.identity_store import IdentityStore as SqliteIdentityStore
-from app.repositories.sqlite.kg_build_job_store import (
-    KgBuildAlreadyRunning as SqliteKgBuildAlreadyRunning,
-    KgBuildJobStore as SqliteKgBuildJobStore,
-)
-from app.repositories.sqlite.notebook_store import NotebookStore as SqliteNotebookStore
-from app.repositories.sqlite.model_status_store import (
-    ModelStatusStore as SqliteModelStatusStore,
-)
-from app.repositories.sqlite.sharing_store import SharingStore as SqliteSharingStore
-from app.repositories.sqlite.source_store import SourceStore as SqliteSourceStore
 from app.services.notebook_catalog import NotebookSummaryQuery
-from app.services import repository_facade, sqlite_notebook_sharing
+from app.services import repository_facade
 
 
 NOW = "2026-07-22T10:00:00+00:00"
 
 
+pytestmark = pytest.mark.postgres_integration
+
+
 @dataclass
 class CoreStores:
-    backend: str
     database: Any
     identity: Any
     model_status: Any
@@ -70,52 +58,12 @@ def _new_id_factory():
     return new_id
 
 
-@pytest.fixture(
-    params=(
-        "sqlite",
-        pytest.param("postgres", marks=pytest.mark.postgres_integration),
-    )
-)
-def core_stores(request, tmp_path) -> CoreStores:
-    backend = request.param
+@pytest.fixture
+def core_stores(request) -> CoreStores:
     new_id = _new_id_factory()
 
     def now() -> str:
         return NOW
-
-
-    if backend == "sqlite":
-        from app.repositories.sqlite.database import SqliteDatabase
-        from app.repositories.sqlite.migrations import SqliteMigrator
-
-        settings = Settings(
-            database_url=f"sqlite:///{tmp_path / 'core-conformance.db'}",
-            storage_dir=str(tmp_path / "storage"),
-        )
-        database = SqliteDatabase(settings, tmp_path)
-        SqliteMigrator(database, settings).initialize()
-        stores = CoreStores(
-            backend=backend,
-            database=database,
-            identity=SqliteIdentityStore(database, settings),
-            model_status=SqliteModelStatusStore(database),
-            notebooks=SqliteNotebookStore(database, new_id=new_id, now=now),
-            sharing=SqliteSharingStore(
-                database,
-                settings,
-                now=now,
-                insert_row=SqliteSharingStore.insert_row_values,
-            ),
-            sources=SqliteSourceStore(database, now=now),
-            chunks=SqliteChunkStore(database),
-            jobs=SqliteKgBuildJobStore(database, new_id=new_id, now=now),
-            already_running=SqliteKgBuildAlreadyRunning,
-        )
-        try:
-            yield stores
-        finally:
-            database.close_local()
-        return
 
     postgres_database = request.getfixturevalue("postgres_database")
     postgres_settings = request.getfixturevalue("postgres_settings")
@@ -123,7 +71,6 @@ def core_stores(request, tmp_path) -> CoreStores:
 
     assert PostgresMigrator(postgres_database).migrate() == 11
     yield CoreStores(
-        backend=backend,
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
         model_status=PostgresModelStatusStore(postgres_database),
@@ -141,36 +88,26 @@ def core_stores(request, tmp_path) -> CoreStores:
     )
 
 
-def _public_methods(cls: type) -> set[str]:
-    return {
-        name
-        for name, value in cls.__dict__.items()
-        if not name.startswith("_") and callable(value)
-    }
-
-
 def _write_sql(
     stores: CoreStores,
-    sqlite_sql: str,
     postgres_sql: str,
     params: tuple[object, ...] = (),
 ) -> None:
     with stores.database.write() as connection:
         connection.execute(
-            postgres_sql if stores.backend == "postgres" else sqlite_sql,
+            postgres_sql,
             params,
         )
 
 
 def _fetch_one(
     stores: CoreStores,
-    sqlite_sql: str,
     postgres_sql: str,
     params: tuple[object, ...] = (),
 ):
     with stores.database.connect() as connection:
         return connection.execute(
-            postgres_sql if stores.backend == "postgres" else sqlite_sql,
+            postgres_sql,
             params,
         ).fetchone()
 
@@ -221,7 +158,7 @@ class _EmptySummaryQueries:
 
 
 def test_canonical_repository_clocks_emit_offset_aware_iso():
-    for clock in (repository_facade._now, sqlite_notebook_sharing._now):
+    for clock in (repository_facade._now,):
         value = datetime.fromisoformat(clock())
         assert value.utcoffset() is not None
 
@@ -235,28 +172,12 @@ def test_canonical_repository_clocks_preserve_dst_fold_offset(monkeypatch):
             return datetime(2026, 11, 1, 1, 30, fold=1)
 
     monkeypatch.setattr(repository_facade, "datetime", FoldOneClock)
-    monkeypatch.setattr(sqlite_notebook_sharing, "datetime", FoldOneClock)
     with _process_timezone(local_zone.key):
         values = [
             datetime.fromisoformat(clock())
-            for clock in (repository_facade._now, sqlite_notebook_sharing._now)
+            for clock in (repository_facade._now,)
         ]
     assert {value.utcoffset() for value in values} == {timedelta(hours=-8)}
-
-
-@pytest.mark.parametrize(
-    ("sqlite_cls", "postgres_cls"),
-    (
-        (SqliteIdentityStore, PostgresIdentityStore),
-        (SqliteNotebookStore, PostgresNotebookStore),
-        (SqliteSharingStore, PostgresSharingStore),
-        (SqliteSourceStore, PostgresSourceStore),
-        (SqliteChunkStore, PostgresChunkStore),
-        (SqliteKgBuildJobStore, PostgresKgBuildJobStore),
-    ),
-)
-def test_postgres_store_public_surfaces_cover_sqlite(sqlite_cls, postgres_cls):
-    assert _public_methods(sqlite_cls) <= _public_methods(postgres_cls)
 
 
 def test_identity_username_password_and_session_semantics(core_stores: CoreStores):
@@ -279,14 +200,12 @@ def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
     expired = core_stores.identity.create_session(user.id)
     _write_sql(
         core_stores,
-        "UPDATE auth_sessions SET expires_at=? WHERE token=?",
         "UPDATE auth_sessions SET expires_at=%s WHERE token=%s",
         ("2000-01-01T00:00:00+00:00", expired),
     )
     assert core_stores.identity.resolve_session(expired) is None
     assert _fetch_one(
         core_stores,
-        "SELECT 1 FROM auth_sessions WHERE token=?",
         "SELECT 1 FROM auth_sessions WHERE token=%s",
         (expired,),
     ) is None
@@ -295,14 +214,12 @@ def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
     old_seen = "2000-01-01T00:00:00+00:00"
     _write_sql(
         core_stores,
-        "UPDATE auth_sessions SET last_seen_at=?,expires_at=? WHERE token=?",
         "UPDATE auth_sessions SET last_seen_at=%s,expires_at=%s WHERE token=%s",
         (old_seen, "2099-01-01T00:00:00+00:00", active),
     )
     assert core_stores.identity.resolve_session(active).id == user.id
     touched = _fetch_one(
         core_stores,
-        "SELECT last_seen_at FROM auth_sessions WHERE token=?",
         "SELECT last_seen_at FROM auth_sessions WHERE token=%s",
         (active,),
     )
@@ -705,13 +622,8 @@ def test_replace_mounts_reuses_one_batch_timestamp(core_stores: CoreStores):
 
     with core_stores.database.connect() as connection:
         rows = connection.execute(
-            (
-                "SELECT created_at FROM notebook_bases WHERE notebook_id=%s "
-                'ORDER BY base_notebook_id COLLATE "C"'
-                if core_stores.backend == "postgres"
-                else "SELECT created_at FROM notebook_bases WHERE notebook_id=? "
-                "ORDER BY base_notebook_id"
-            ),
+            "SELECT created_at FROM notebook_bases WHERE notebook_id=%s "
+            'ORDER BY base_notebook_id COLLATE "C"',
             (active_id,),
         ).fetchall()
     assert calls == ["2026-07-22T10:00:00+00:00"]
@@ -753,153 +665,6 @@ def test_notebook_raw_rows_feed_neutral_summary_json_lists(
     # so it cannot accidentally cross the raw-row summary boundary.
     shared_rows = core_stores.sharing.list_shared_by_owner(owner.id)
     assert set(shared_rows[0].keys()) == {"id", "name", "share_token"}
-
-
-def test_copy_snapshot_reinsertion_preserves_all_copied_ordinal_table_order(
-    core_stores: CoreStores,
-):
-    owner = core_stores.identity.create_user("t00123456", "password-19")
-    source_notebook_id = core_stores.notebooks.create_row(
-        NotebookCreate(name="Ordinal source"), owner.id
-    )
-    destination_notebook_id = core_stores.notebooks.create_row(
-        NotebookCreate(name="Ordinal destination"), owner.id
-    )
-    for source_id, notebook_id in (
-        ("src-ordinal-source", source_notebook_id),
-        ("src-ordinal-destination", destination_notebook_id),
-    ):
-        core_stores.sources.insert_source(
-            source_id=source_id,
-            notebook_id=notebook_id,
-            title=source_id,
-            source_type="markdown",
-            status="parsed",
-            parse_status="parsed",
-            file_name=f"{source_id}.md",
-            file_path=f"uploads/{source_id}.md",
-            file_size=1,
-            file_hash=source_id,
-            summary="",
-            doc_type="",
-        )
-
-    # Physical/insertion and id order is a,z. The explicit observable order is
-    # then reversed to z,a, reproducing imported PostgreSQL rows whose heap
-    # order does not match their historical SQLite rowid/ordinal order.
-    with core_stores.database.write() as connection:
-        core_stores.sources.replace_elements(
-            connection,
-            "src-ordinal-source",
-            [
-                SourceElementWrite("el-a", "paragraph", "a", "a", {"rank": 2}),
-                SourceElementWrite("el-z", "paragraph", "z", "z", {"rank": 1}),
-            ],
-            created_at=NOW,
-        )
-    core_stores.chunks.replace_source_chunks(
-        "src-ordinal-source",
-        source_notebook_id,
-        [
-            ChunkWrite("chunk-a", "a", "a", ("el-a",)),
-            ChunkWrite("chunk-z", "z", "z", ("el-z",)),
-        ],
-        created_at=NOW,
-    )
-    for object_id, rank in (("ko-a", 2), ("ko-z", 1)):
-        _write_sql(
-            core_stores,
-            "INSERT INTO knowledge_objects"
-            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
-            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            "INSERT INTO knowledge_objects"
-            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
-            "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
-            (
-                object_id,
-                source_notebook_id,
-                "concept",
-                "approved",
-                owner.id,
-                f'{{"name":"{object_id}","rank":{rank}}}',
-                "[]",
-                "src-ordinal-source",
-                NOW,
-                NOW,
-            ),
-        )
-
-    for table, a_id, z_id in (
-        ("source_elements", "el-a", "el-z"),
-        ("chunks", "chunk-a", "chunk-z"),
-        ("knowledge_objects", "ko-a", "ko-z"),
-    ):
-        _write_sql(
-            core_stores,
-            f"UPDATE {table} SET rowid=? WHERE id=?",
-            f"UPDATE {table} SET ordinal=%s WHERE id=%s",
-            (800_001, a_id),
-        )
-        _write_sql(
-            core_stores,
-            f"UPDATE {table} SET rowid=? WHERE id=?",
-            f"UPDATE {table} SET ordinal=%s WHERE id=%s",
-            (800_000, z_id),
-        )
-
-    snapshot = core_stores.sharing.snapshot_copy_rows(source_notebook_id)
-    expected_source_ids = {
-        "source_elements": ["el-z", "el-a"],
-        "chunks": ["chunk-z", "chunk-a"],
-        "knowledge_objects": ["ko-z", "ko-a"],
-    }
-    assert set(POSTGRES_ROWID_ORDINAL_TABLES) & set(snapshot) == set(
-        expected_source_ids
-    )
-    for table, expected_ids in expected_source_ids.items():
-        assert [row["id"] for row in snapshot[table]] == expected_ids
-
-    element_map = {old: f"copy-{old}" for old in expected_source_ids["source_elements"]}
-    for table in ("source_elements", "chunks", "knowledge_objects"):
-        copied_rows = []
-        for row in snapshot[table]:
-            copied = dict(row)
-            copied["id"] = f"copy-{row['id']}"
-            if table == "source_elements":
-                copied["source_id"] = "src-ordinal-destination"
-            elif table == "chunks":
-                copied["notebook_id"] = destination_notebook_id
-                copied["source_id"] = "src-ordinal-destination"
-                copied["element_ids"] = (
-                    f'["{element_map["el-z"]}"]'
-                    if row["id"] == "chunk-z"
-                    else f'["{element_map["el-a"]}"]'
-                )
-            else:
-                copied["notebook_id"] = destination_notebook_id
-                copied["source_id"] = "src-ordinal-destination"
-            copied_rows.append(copied)
-        core_stores.sharing.insert_copy_rows(table, copied_rows, chunk_size=100)
-
-    for table, expected_ids in expected_source_ids.items():
-        where_column = "source_id" if table == "source_elements" else "notebook_id"
-        where_value = (
-            "src-ordinal-destination"
-            if table == "source_elements"
-            else destination_notebook_id
-        )
-        with core_stores.database.connect() as connection:
-            rows = connection.execute(
-                (
-                    f"SELECT id FROM {table} WHERE {where_column}=%s ORDER BY ordinal"
-                    if core_stores.backend == "postgres"
-                    else f"SELECT id FROM {table} WHERE {where_column}=? ORDER BY rowid"
-                ),
-                (where_value,),
-            ).fetchall()
-        assert [row["id"] for row in rows] == [
-            f"copy-{old_id}" for old_id in expected_ids
-        ]
 
 
 def test_copy_snapshot_excludes_backend_ordinals_and_serializes_json(
@@ -1012,7 +777,6 @@ def test_source_visibility_physical_count_and_delete_cascade(core_stores: CoreSt
     ]
     physical = _fetch_one(
         core_stores,
-        "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=?",
         "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s",
         (notebook_id,),
     )
@@ -1035,19 +799,17 @@ def test_source_visibility_physical_count_and_delete_cascade(core_stores: CoreSt
         core_stores.sources.delete_source_row(connection, "src-visible")
     assert _fetch_one(
         core_stores,
-        "SELECT 1 FROM source_elements WHERE id=?",
         "SELECT 1 FROM source_elements WHERE id=%s",
         ("el-delete",),
     ) is None
     assert _fetch_one(
         core_stores,
-        "SELECT 1 FROM chunks WHERE id=?",
         "SELECT 1 FROM chunks WHERE id=%s",
         ("chunk-delete",),
     ) is None
 
 
-def test_latest_extraction_run_uses_rowid_or_ordinal_tie_break(
+def test_latest_extraction_run_uses_ordinal_tie_break(
     core_stores: CoreStores,
 ):
     owner = core_stores.identity.create_user("l00123456", "password-11")
@@ -1072,9 +834,6 @@ def test_latest_extraction_run_uses_rowid_or_ordinal_tie_break(
     ):
         _write_sql(
             core_stores,
-            "INSERT INTO extraction_runs"
-            "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
             "INSERT INTO extraction_runs"
             "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -1253,11 +1012,9 @@ def test_notebook_delete_returns_paths_and_removes_orphan_embeddings(
         summary="",
         doc_type="",
     )
-    vector: object = b"\x00\x01" if core_stores.backend == "postgres" else "[1.0]"
+    vector: object = b"\x00\x01"
     _write_sql(
         core_stores,
-        "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
-        "VALUES (?,?,?,?)",
         "INSERT INTO knowledge_embeddings(object_id,notebook_id,vector,created_at) "
         "VALUES (%s,%s,%s,%s)",
         ("ko-delete", notebook_id, vector, NOW),
@@ -1267,13 +1024,11 @@ def test_notebook_delete_returns_paths_and_removes_orphan_embeddings(
     ]
     assert _fetch_one(
         core_stores,
-        "SELECT 1 FROM notebooks WHERE id=?",
         "SELECT 1 FROM notebooks WHERE id=%s",
         (notebook_id,),
     ) is None
     assert _fetch_one(
         core_stores,
-        "SELECT 1 FROM knowledge_embeddings WHERE object_id=?",
         "SELECT 1 FROM knowledge_embeddings WHERE object_id=%s",
         ("ko-delete",),
     ) is None

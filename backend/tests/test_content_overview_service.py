@@ -1,8 +1,5 @@
 from app.services.knowhow.api import cell_content_hash
 from app.services.content_overview import ContentOverviewService
-from app.models.memory import MemoryWrite
-from app.models.schemas import NotebookCreate
-from app.services.sqlite_repository import SQLiteRepository
 
 
 class FakeMemoryStore:
@@ -113,57 +110,3 @@ def test_content_overview_limits_recent_tables_and_returns_typed_empty_sections(
     assert empty.memory.recent == []
     assert empty.knowhow.table_count == 0
     assert empty.knowhow.recent_tables == []
-
-
-def test_memory_overview_is_notebook_and_viewer_scoped_with_two_selects(tmp_path):
-    from app.core.config import Settings
-
-    repo = SQLiteRepository(Settings(
-        database_url=f"sqlite:///{tmp_path}/content-overview.db",
-        storage_dir=str(tmp_path / "storage"),
-    ))
-    notebook_id = repo.create_notebook(NotebookCreate(name="Current")).id
-    other_notebook_id = repo.create_notebook(NotebookCreate(name="Other")).id
-    store = repo._runtime.memory_store
-    viewer_id = repo.create_user("a00123456", "password").id
-    other_user_id = repo.create_user("b00123456", "password").id
-
-    def insert(memory_id, user_id, target_notebook_id, status, updated_at):
-        store.insert_memory(MemoryWrite(
-            id=memory_id,
-            notebook_id=target_notebook_id,
-            created_by=user_id,
-            origin="ask_answer",
-            status=status,
-            title=memory_id,
-            content_md="body",
-            tags=[],
-            created_at=updated_at,
-            updated_at=updated_at,
-        ))
-
-    insert("confirmed-1", viewer_id, notebook_id, "confirmed", "2026-07-20T01:00:00+00:00")
-    insert("confirmed-2", viewer_id, notebook_id, "confirmed", "2026-07-20T02:00:00+00:00")
-    insert("candidate", viewer_id, notebook_id, "candidate", "2026-07-20T03:00:00+00:00")
-    insert("rejected", viewer_id, notebook_id, "rejected", "2026-07-20T04:00:00+00:00")
-    insert("deprecated", viewer_id, other_notebook_id, "deprecated", "2026-07-20T05:00:00+00:00")
-    insert("foreign", other_user_id, notebook_id, "confirmed", "2026-07-20T06:00:00+00:00")
-
-    statements = []
-    with store.database.connect() as db:
-        db.set_trace_callback(statements.append)
-        result = store.notebook_content_overview(viewer_id, notebook_id)
-        db.set_trace_callback(None)
-
-    assert result["total"] == 4
-    assert result["confirmed"] == 2
-    assert result["candidate"] == 1
-    assert [item["id"] for item in result["recent"]] == [
-        "candidate", "confirmed-2", "confirmed-1",
-    ]
-    memory_selects = [
-        sql for sql in statements
-        if sql.lstrip().upper().startswith("SELECT")
-        and "memory_items" in sql
-    ]
-    assert len(memory_selects) == 2
