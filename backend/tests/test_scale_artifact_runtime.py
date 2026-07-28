@@ -390,6 +390,105 @@ def test_daemon_start_failures_rearm_all_runtime_markers(repo, monkeypatch):
     assert scale.scheduler_started is False
 
 
+def test_manual_now_supersedes_existing_idle_queue_atomically(repo, monkeypatch):
+    """A queued auto-build must not reappear after a manual immediate build."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (notebook.id,))
+
+    launched = []
+    monkeypatch.setattr(
+        scale,
+        "_start_daemon",
+        lambda name, target: launched.append((name, target)),
+    )
+
+    assert scale.trigger(notebook.id, when="idle", mode="auto")["status"] == "queued"
+    assert scale.idle_queue[notebook.id] == "auto"
+
+    result = scale.trigger(notebook.id, when="now", mode="full")
+
+    assert result["status"] == "building"
+    assert notebook.id in scale.building
+    assert notebook.id not in scale.idle_queue
+    assert scale.status(notebook.id)["state"] == "building"
+    assert [name for name, _target in launched].count(f"scaleidx-{notebook.id}") == 1
+
+    # A genuinely newer follow-up remains queued behind the claimed build.
+    assert scale.trigger(notebook.id, when="idle", mode="fold")["status"] == "queued"
+    assert scale.idle_queue[notebook.id] == "fold"
+    assert scale.status(notebook.id)["state"] == "building"
+
+
+def test_manual_now_restores_displaced_idle_request_if_worker_cannot_start(
+    repo, monkeypatch
+):
+    """A thread-launch failure must not silently lose the older safe fallback."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    scale.idle_queue[notebook.id] = "fold"
+    monkeypatch.setattr(
+        scale,
+        "_start_daemon",
+        lambda *_: (_ for _ in ()).throw(RuntimeError("thread start failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        scale._run_scale_op(notebook.id, "full", supersede_idle=True)
+
+    assert notebook.id not in scale.building
+    assert scale.idle_queue[notebook.id] == "fold"
+
+
+def test_idle_tick_keeps_follow_up_for_notebook_that_is_still_building(
+    repo, monkeypatch
+):
+    """A scheduler tick must not consume work queued behind an active build."""
+    notebook = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    scale.building.add(notebook.id)
+    scale.idle_queue[notebook.id] = "fold"
+    launched = []
+    monkeypatch.setattr(
+        scale,
+        "_start_daemon",
+        lambda name, target: launched.append((name, target)),
+    )
+
+    scale._process_idle_queue(force=True)
+
+    assert scale.idle_queue[notebook.id] == "fold"
+    assert launched == []
+
+
+def test_idle_tick_restores_failed_item_and_continues_with_remaining_queue(
+    repo, monkeypatch
+):
+    """One launch failure must neither drop itself nor starve later entries."""
+    first = _seed(repo)
+    second = _seed(repo)
+    scale = repo._runtime.scale_artifacts
+    scale.idle_queue[first.id] = "fold"
+    scale.idle_queue[second.id] = "full"
+    launched = []
+
+    def start(name, target):
+        if name == f"scaleidx-{first.id}":
+            raise RuntimeError("thread start failed")
+        launched.append((name, target))
+
+    monkeypatch.setattr(scale, "_start_daemon", start)
+
+    scale._process_idle_queue(force=True)
+
+    assert scale.idle_queue[first.id] == "fold"
+    assert first.id not in scale.building
+    assert second.id not in scale.idle_queue
+    assert second.id in scale.building
+    assert [name for name, _target in launched] == [f"scaleidx-{second.id}"]
+
+
 # ---------------------------------------------------------------------------
 # Task 4 delegation tests: ScaleArtifactRuntime holds ZERO notebook-metadata
 # SQL — `self.projections` (== repo._runtime.index_projections) owns the three

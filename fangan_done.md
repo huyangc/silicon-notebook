@@ -214,6 +214,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **配置**：`config.py` + `.env.example` 新增 `EVENT_LOG_ENABLED` / `EVENT_LOG_DIR` / `SLOW_REQUEST_MS`（沿用既有 `LLM_LOG_*`）。
 - **验证**：`scripts/smoke_backend.py` 新增 `check_event_logging`（JSONL 可解析、禁用不写、写失败不抛）与 `check_pipeline_event_logging`（管线阶段事件产出 + `error_message` bug 回归）；`scripts/check.sh` 纳入 `event_logging.py` 编译。
 - **慢因诊断脚本**：`scripts/diag_slow.py` 保持只读/脱敏，新增 strict reasoning / PPR 路径审计，基于 DB 聚合与 scale-index manifest 输出 indexed-core 覆盖率、chunk/relation ANN 状态、delta 策略与跨 base 可能触发 active 全量向量加载的风险，用于部署机上定位大库 reasoning 卡顿。
+- **检索索引调度与问答提示收敛（§16）**：手动立即构建会原子覆盖同 notebook 先前的低峰排队项，避免构建完成后又回到「空闲时建」；已有构建的真正后续任务、认领后新加入的 idle 项仍保留，worker 启动失败会恢复旧排队。idle scheduler 逐项认领，忙碌项不出队且单项启动失败不影响其余项。排队态在看板与旧回答提示中提供立即执行入口；前端以实时 `ScaleIndexStatus.exists` 覆盖回答生成时持久化的 `index_required` 快照，并在有界轮询停止后由 `index_done` 刷新当前 notebook，索引发布后历史回答中的降级提示同步消失。后端调度回归、前端纯逻辑/组件测试、`scripts/check.sh` 与 production build 已验证通过。
 
 ## 19. 历史新增（dev 分支，方案 §6/§7/§16，部分已被 KG-native 主线替代）
 
