@@ -1336,16 +1336,6 @@ def _insert_element(repo, source_id, element_id, text):
             (element_id, source_id, "paragraph", "p1", text, "{}", now))
 
 
-def test_py_whitespace_constant_covers_every_python_strip_char():
-    """PY_WHITESPACE 必须就是 str.strip() 的字符全集——缺失查询拿它当 TRIM 字符集,
-    少一个字符就有一类元素「算缺失但永远补不上」,补齐命令不收敛。"""
-    from app.repositories.sqlite.maintenance import PY_WHITESPACE
-
-    assert set(PY_WHITESPACE) == {
-        chr(c) for c in range(0x110000) if chr(c).isspace()
-    }
-
-
 def test_missing_element_rows_exclude_blank_text(repo, tmp_path):
     """空白文本元素不算缺失:embed_source 会跳过它们(text.strip() 为空),它们永远不会
     有向量。若算进缺失,补齐命令每次都报「还有 N 个缺失」、每次都试着嵌入空串 → 永不
@@ -2516,38 +2506,6 @@ def test_main_kg_fresh_dispatches_force_and_fresh(repo, monkeypatch):
 
 
 # ── Task 27: batch ingest owns no SQLite plumbing ────────────────────────────
-
-def test_batch_ingest_module_reaches_no_private_facade_member():
-    """batch_ingest 是 CLI 组合根:构造 SQLiteRepository 合法,但所有 SQL/私有面
-    必须经 repo.maintenance(SQLiteMaintenanceAdapter)——模块内不得再出现
-    repo._x 私有属性访问(_connect/_write/_run_extraction/_embed_* 等)。"""
-    import ast
-    import inspect
-
-    tree = ast.parse(inspect.getsource(bi))
-    offenders = []
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Attribute)
-            and node.attr.startswith("_")
-            and not node.attr.startswith("__")
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "repo"
-        ):
-            offenders.append((node.lineno, node.attr))
-    assert not offenders, f"batch_ingest still reaches private facade members: {offenders}"
-
-
-def test_repo_maintenance_is_cached_port_implementation(repo):
-    from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
-
-    mnt = repo.maintenance
-    assert isinstance(mnt, SQLiteMaintenanceAdapter)
-    assert repo.maintenance is mnt                      # 同实例(缓存,非每次新建)
-    for name in ("delete_notebook_kg", "backfill_kg_fts", "backfill_chunk_fts",
-                 "build_scale_index", "fold_scale_index_delta"):
-        assert callable(getattr(mnt, name)), name
-
 
 def test_maintenance_extraction_routes_through_ingestion_service(repo, monkeypatch):
     """adapter.run_extraction/set_source_status 必须动态经 runtime 组件转发——

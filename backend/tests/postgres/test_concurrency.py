@@ -1325,7 +1325,7 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
     )
     governance_store = GovernanceStore(postgres_database, seams)
     service = KnowledgeGovernanceService(
-        settings=Settings(database_url="sqlite:///unused.db"),
+        settings=Settings(database_url="postgresql://unused/unused"),
         event_log=None,
         governance_store=governance_store,
         knowledge=KnowledgeStore(postgres_database, seams),

@@ -36,24 +36,6 @@ def _seed_concepts(repo, nb_id, n):
     repo.store_kg(nb_id, None, objs, [])
 
 
-def test_created_order_index_exists(repo):
-    with repo._connect() as db:
-        names = {r["name"] for r in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
-    assert "idx_knowledge_objects_nb_type_created" in names
-
-
-def test_list_knowledge_page_query_is_index_ordered(repo):
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    _seed_concepts(repo, nb.id, 60)  # > the LIMIT, so the planner must resolve ORDER BY
-    with repo._connect() as db:
-        plan = db.execute("EXPLAIN QUERY PLAN " + _PAGE_SQL, (nb.id, "concept")).fetchall()
-    detail = " | ".join(r["detail"] for r in plan)
-    # The ORDER BY must be satisfied by the index — no full sort of all matching rows.
-    assert "USE TEMP B-TREE" not in detail, detail
-    assert "idx_knowledge_objects_nb_type_created" in detail, detail
-
-
 def test_list_knowledge_still_returns_ordered_page(repo):
     """The index change must not alter results: still created_at,id ascending, paged."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))

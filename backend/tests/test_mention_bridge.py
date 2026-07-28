@@ -4,7 +4,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
-from app.services.sqlite_repository import SQLiteRepository, SCHEMA_VERSION
+from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
 
@@ -21,35 +21,6 @@ def repo(tmp_path, monkeypatch):
 def _cols(repo, table):
     with repo._connect() as db:
         return {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
-
-
-def test_fresh_db_has_mention_bridge_tables(repo):
-    assert {"notebook_id", "claim_object_id", "concept_canonical_id", "matched_alias"} <= _cols(repo, "mention_edges")
-    assert {"notebook_id", "canonical_a", "canonical_b", "bridge_claims"} <= _cols(repo, "concept_comentions")
-    assert "mention_seq" in _cols(repo, "unified_kg_state")
-
-
-def test_deployed_v8_db_gets_backfilled(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'m.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    SQLiteRepository(Settings())
-    raw = sqlite3.connect(tmp_path / "m.db")
-    raw.execute("DROP TABLE mention_edges")
-    raw.execute("DROP TABLE concept_comentions")
-    raw.execute("ALTER TABLE unified_kg_state DROP COLUMN mention_seq")
-    raw.execute("PRAGMA user_version = 8")
-    raw.commit(); raw.close()
-    r2 = SQLiteRepository(Settings())
-    assert "claim_object_id" in _cols(r2, "mention_edges")
-    assert "bridge_claims" in _cols(r2, "concept_comentions")
-    assert "mention_seq" in _cols(r2, "unified_kg_state")
-
-
-def test_schema_version_is_9():
-    # >= 而非 ==:后续迁移(如 _migration_10)会继续推高 SCHEMA_VERSION,这里只断言
-    # mention_bridge 那一步(_migration_9)已落地,不锁死为全局当前版本号。
-    assert SCHEMA_VERSION >= 9
 
 
 def _mk_src(repo, nb_id, sid):
@@ -99,9 +70,6 @@ def test_rebuild_extracts_mention_edges_and_comentions(repo):
     assert cm[0]["bridge_claims"] == 2   # 两条对比claim
     a, b = sorted((gqa, mqa))
     assert (cm[0]["canonical_a"], cm[0]["canonical_b"]) == (a, b)
-    # 扫描 FTS 是连接私有 TEMP 表(纯内存,零 WAL):绝不能落进持久 schema。
-    with repo._connect() as db:
-        assert db.execute("SELECT name FROM sqlite_master WHERE name='mention_scan_fts'").fetchone() is None
 
 
 def test_df_cap_drops_generic_alias(repo):

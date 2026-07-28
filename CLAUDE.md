@@ -28,6 +28,7 @@
 ### 硬门
 
 - 完整本地门是 `bash scripts/check.sh`（后端 pytest + 语法/契约/harness + 前端 test/typecheck/build 三条并发泳道）。CI 只是它的只读包装，不要在 workflow 里另起测试根。
+- 数据库专项门只覆盖直接 PostgreSQL 后端；已退役的 SQLite 后端实现专项测试、SQLite→PostgreSQL 导入/正向 shadow 测试与跨后端 parity 测试不得重新加入当前套件。
 - **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v33；PostgreSQL checksummed schema 为 v11，两侧都包含关系端点 + id 的稳定 keyset 覆盖索引。
 - **界面词汇**：面向用户的文案只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG`/`schema` 这类内部黑话。真源是 `AGENTS.md`「界面词汇表」，`scripts/check_ui_vocabulary.py` 是硬门。**唯一放行的英文界面词是「图谱 Schema」**（图谱对象类型/字段管理，原「内容类型」，现从知识图谱视图头部进入）——守卫的 `SANCTIONED_UI` 只放行这一个复合短语（带 CJK 前置断言，不吞「知识图谱」尾字），裸 `schema`/`Schema` 仍拦。
 - **错误文案**：deny by default，信任按**出处**判定而非文本形状。后端中文用户文案必须走 `backend/app/api/deps.py` 的 `user_error()`（打 `X-User-Message` 头），前端翻译只在 `frontend/app/errors.ts`。

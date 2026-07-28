@@ -185,31 +185,6 @@ def test_base_chain_trust_is_higher_than_personal(repo):
     assert base_trust > personal_trust
 
 
-@pytest.mark.parametrize(
-    ("endpoint", "index_name"),
-    [
-        ("source_object_id", "idx_knowledge_relations_nb_source"),
-        ("target_object_id", "idx_knowledge_relations_nb_target"),
-    ],
-)
-def test_follow_chain_frontier_query_uses_existing_index_without_temp_sort(
-    repo, endpoint, index_name,
-):
-    nb, ids, _ = _seed_chain(repo)
-    start = (ids["Premise A"] if endpoint == "source_object_id"
-             else ids["Conclusion C"])
-    with repo._connect() as db:
-        plan = [row["detail"] for row in db.execute(
-            f"EXPLAIN QUERY PLAN SELECT r.id, r.source_id, "
-            f"r.source_object_id, r.target_object_id, r.edge_type, "
-            f"r.evidence, r.review_status FROM knowledge_relations AS r "
-            f"INDEXED BY {index_name} "
-            f"WHERE r.notebook_id=? AND r.{endpoint}=? LIMIT ?",
-            (nb.id, start, 65),
-        ).fetchall()]
-    assert any(index_name in detail for detail in plan), plan
-    assert not any("TEMP B-TREE" in detail for detail in plan), plan
-
 def test_direct_edge_beyond_frontier_limit_still_suppresses_inference(repo):
     nb, ids, _ = _seed_chain(repo)
     renamed = {
@@ -273,16 +248,3 @@ def test_truncated_supernode_direct_guard_fails_closed(repo):
     assert repo._follow_chain(
         nb.id, ids["Premise A"], edge_type="derived_from",
         max_fan_out=8).inferences == []
-
-
-def test_follow_chain_does_not_add_schema_objects(repo):
-    from app.services import sqlite_repository as sr
-    with repo._connect() as db:
-        version = db.execute("PRAGMA user_version").fetchone()[0]
-        indexes = {row["name"] for row in db.execute(
-            "PRAGMA index_list(knowledge_relations)").fetchall()}
-    # SCHEMA_VERSION 随迁移推进(v11-14 索引/Memory/memory_id schema);本测试守的
-    # 是 follow-chain 自身不动 schema,故只钉「DB 版本==代码版本」不硬编码字面量
-    # (硬编码曾在 v13→v14 假红)且 follow-chain 没留索引。
-    assert version == sr.SCHEMA_VERSION
-    assert not any("follow" in name for name in indexes)

@@ -372,12 +372,6 @@
         "path": "backend/tests/test_in_batching.py",
         "scope": "<module>.test_delta_sites_equivalent_when_batched",
         "target": "_IN_CHUNK"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_in_batching.py",
-        "scope": "<module>.test_knowledge_store_compat_reads_late_bound_facade_chunk_size",
-        "target": "_IN_CHUNK"
       }
     ],
     "kind": "constant",
@@ -389,14 +383,6 @@
         "kind": "patch",
         "path": "backend/tests/test_in_batching.py",
         "scope": "<module>.test_delta_sites_equivalent_when_batched",
-        "target": "_IN_CHUNK"
-      },
-      {
-        "base": "SQLiteRepository",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_in_batching.py",
-        "scope": "<module>.test_knowledge_store_compat_reads_late_bound_facade_chunk_size",
         "target": "_IN_CHUNK"
       }
     ],
@@ -1263,20 +1249,8 @@
       },
       {
         "kind": "patch",
-        "path": "backend/tests/test_knowhow_history_roundtrip.py",
-        "scope": "<module>._advancing_clock",
-        "target": "_now"
-      },
-      {
-        "kind": "patch",
         "path": "backend/tests/test_rebuild_cache.py",
         "scope": "<module>._freeze_now",
-        "target": "_now"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_repository_runtime.py",
-        "scope": "<module>.test_runtime_seams_are_late_bound",
         "target": "_now"
       }
     ],
@@ -1290,24 +1264,8 @@
         "base": "repo_mod",
         "compatibility": "production-compatible",
         "kind": "patch",
-        "path": "backend/tests/test_knowhow_history_roundtrip.py",
-        "scope": "<module>._advancing_clock",
-        "target": "_now"
-      },
-      {
-        "base": "repo_mod",
-        "compatibility": "production-compatible",
-        "kind": "patch",
         "path": "backend/tests/test_rebuild_cache.py",
         "scope": "<module>._freeze_now",
-        "target": "_now"
-      },
-      {
-        "base": "sqlite_repository",
-        "compatibility": "production-compatible",
-        "kind": "patch",
-        "path": "backend/tests/test_repository_runtime.py",
-        "scope": "<module>.test_runtime_seams_are_late_bound",
         "target": "_now"
       }
     ],
@@ -4129,26 +4087,11 @@
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__.<lambda>",
         "target": "_source_ids_from_evidence"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_source_reverse_index.py",
-        "scope": "<module>.test_second_lookup_uses_sql_only_no_full_evidence_scan",
-        "target": "_source_ids_from_evidence"
       }
     ],
     "kind": "private_wrapper",
     "owner": "KnowledgeStore",
-    "patch_targets": [
-      {
-        "base": "SQLiteRepository",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_source_reverse_index.py",
-        "scope": "<module>.test_second_lookup_uses_sql_only_no_full_evidence_scan",
-        "target": "_source_ids_from_evidence"
-      }
-    ],
+    "patch_targets": [],
     "scope": "facade",
     "signature": "(evidence_json: 'Optional[str]') -> 'set'"
   },
@@ -4204,68 +4147,11 @@
         "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.__init__.<lambda>",
         "target": "_write"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_embedding_store_component.py",
-        "scope": "<module>._counting_write",
-        "target": "_write"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_embedding_store_component.py",
-        "scope": "<module>.test_write_seat_late_binding_observes_post_construction_patch",
-        "target": "_write"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_repository_phase_contracts.py",
-        "scope": "<module>._trace_writes",
-        "target": "_write"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_sqlite_write_optimization.py",
-        "scope": "<module>.test_embed_objects_batch_writes_in_one_transaction",
-        "target": "_write"
       }
     ],
     "kind": "private_wrapper",
     "owner": "SqliteDatabase",
-    "patch_targets": [
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_embedding_store_component.py",
-        "scope": "<module>._counting_write",
-        "target": "_write"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_embedding_store_component.py",
-        "scope": "<module>.test_write_seat_late_binding_observes_post_construction_patch",
-        "target": "_write"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_repository_phase_contracts.py",
-        "scope": "<module>._trace_writes",
-        "target": "_write"
-      },
-      {
-        "base": "embed_repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_sqlite_write_optimization.py",
-        "scope": "<module>.test_embed_objects_batch_writes_in_one_transaction",
-        "target": "_write"
-      }
-    ],
+    "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"
   },
@@ -8700,12 +8586,6 @@
   "update_knowhow_cells_bulk_guarded": {
     "consumers": [
       {
-        "kind": "patch",
-        "path": "backend/tests/test_backfill_knowhow_md.py",
-        "scope": "<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value",
-        "target": "update_knowhow_cells_bulk_guarded"
-      },
-      {
         "kind": "attribute",
         "path": "scripts/backfill_knowhow_md.py",
         "scope": "<module>.apply_reviewed_plan",
@@ -8714,16 +8594,7 @@
     ],
     "kind": "method",
     "owner": "KnowhowStore",
-    "patch_targets": [
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_backfill_knowhow_md.py",
-        "scope": "<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value",
-        "target": "update_knowhow_cells_bulk_guarded"
-      }
-    ],
+    "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', updates: 'list', actor: 'str' = '', origin: 'str' = 'user') -> 'dict'"
   },

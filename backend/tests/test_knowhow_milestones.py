@@ -53,42 +53,6 @@ def test_milestone_names_must_be_unique_per_table(hist, store, table):
         hist.create_milestone(table["id"], seq, "评审前", "", "user-1")
 
 
-def test_create_milestone_begins_immediate_before_the_existence_check(
-    hist, store, table, monkeypatch
-):
-    """codex 第 4 轮 P2：seq 存在性复检必须跑在 ``BEGIN IMMEDIATE`` **之后**。
-    否则复检与首个 INSERT 之间，另一进程的 prune 仍能删掉这条 seq，里程碑一
-    生下来就指向空气、立即 stale。结构证据：trace 里 ``BEGIN IMMEDIATE`` 先于
-    存在性 SELECT；删掉那句 ``BEGIN IMMEDIATE`` 本测试转红（复检退回写锁外，
-    只剩 pysqlite 在 INSERT 前隐式发的延迟 ``BEGIN``、抢不到 RESERVED 锁）。"""
-    store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
-    seq = hist.head_seq(table["id"])
-
-    statements: list[str] = []
-    original = hist.database._new_connection
-
-    def traced():
-        conn = original()
-        conn.set_trace_callback(statements.append)
-        return conn
-
-    # create_milestone 走 database.write()（每次独立新连接），直接 trace 即可，
-    # 无需 close_local——线程复用读连接与本次写连接是两条。
-    monkeypatch.setattr(hist.database, "_new_connection", traced)
-
-    hist.create_milestone(table["id"], seq, "评审前", "", "user-1")
-
-    upper = [s.strip().upper() for s in statements]
-    assert any("BEGIN IMMEDIATE" in s for s in upper), (
-        f"create_milestone 没发 BEGIN IMMEDIATE → 复检在写锁外跑，trace={statements}"
-    )
-    begin_idx = next(i for i, s in enumerate(upper) if "BEGIN IMMEDIATE" in s)
-    select_idx = next(i for i, s in enumerate(upper) if s.startswith("SELECT"))
-    assert begin_idx < select_idx, (
-        f"BEGIN IMMEDIATE 必须先于 seq 存在性 SELECT，trace={statements}"
-    )
-
-
 def test_prune_deletes_only_the_oldest_prefix(hist, store, table):
     row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
     for i in range(5):

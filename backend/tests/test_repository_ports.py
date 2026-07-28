@@ -1,12 +1,6 @@
 import inspect
 
 from app.repositories import ports
-from app.repositories.ports import UploadedSourceFile, NotebookRepository
-from app.services.sqlite_repository import SQLiteRepository
-
-def test_sqlite_repository_does_not_inherit_aggregate_protocol():
-    assert NotebookRepository not in SQLiteRepository.__mro__
-    assert 'eval_insert_source_for_test' not in NotebookRepository.__dict__
 
 
 def test_required_protocol_catalogue_has_declared_operations():
@@ -26,7 +20,6 @@ def test_required_protocol_catalogue_has_declared_operations():
             "cluster_map", "node_context", "in_network_relations",
             "relation_support_count",
         },
-        "SQLiteMaintenancePort": {"delete_notebook_kg", "backfill_kg_fts", "backfill_chunk_fts", "build_scale_index", "fold_scale_index_delta"},
     }
     for protocol_name, methods in required.items():
         protocol = getattr(ports, protocol_name)

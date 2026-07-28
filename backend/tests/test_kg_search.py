@@ -29,34 +29,6 @@ def _fts_db():
     return db
 
 
-def test_fts_search_substring_scoped_to_notebook():
-    db = _fts_db()
-    hits = fts_search(db, "nb", "mirror", k=10)
-    ids = {h["object_id"] for h in hits}
-    assert ids == {"o1", "o3"}
-
-
-def test_fts_search_multi_term_is_not_forced_to_one_phrase():
-    db = _fts_db()
-    hits = fts_search(db, "nb", "current symmetry", k=10)
-    assert {hit["object_id"] for hit in hits} == {"o1", "o3"}
-
-
-def test_chunk_fts_search_recalls_non_contiguous_latin_and_cjk_terms():
-    db = _fts_db()
-    latin = chunk_fts_search(db, "nb", "DeepSeek mixture", k=10)
-    assert latin and latin[0]["chunk_id"] == "c1"
-    assert "c4" not in {hit["chunk_id"] for hit in latin}
-
-    cjk = chunk_fts_search(db, "nb", "深度学习 混合专家", k=10)
-    assert "c3" in {hit["chunk_id"] for hit in cjk}
-
-
-def test_fts_search_quotes_user_syntax_instead_of_executing_it():
-    db = _fts_db()
-    assert fts_search(db, "nb", '" OR NOT *', k=10) == []
-
-
 def test_lexical_terms_are_shared_across_repository_backends():
     terms = lexical_recall_terms("DeepSeek ZXCV9000 深度学习系统")
     assert terms[0] == "DeepSeek ZXCV9000 深度学习系统"

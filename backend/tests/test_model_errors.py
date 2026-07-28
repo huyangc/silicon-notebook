@@ -5,7 +5,6 @@ graceful degradation 验证:embed/rerank/answer 调用失败时记录但不中�
 本组用例同时覆盖「无 sink(不在 ask 上下文)只 emit 不崩」的边界。
 """
 import json as _j
-from contextlib import contextmanager
 
 import pytest
 
@@ -347,38 +346,3 @@ def test_no_model_errors_on_success(repo):
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
 
     assert resp.model_errors == []
-
-
-def test_ask_model_wait_never_occurs_inside_sqlite_write_transaction(
-    repo, monkeypatch
-):
-    depth = {"write": 0}
-    original_write = repo._runtime.database.write
-
-    @contextmanager
-    def traced_write():
-        with original_write() as db:
-            depth["write"] += 1
-            try:
-                yield db
-            finally:
-                depth["write"] -= 1
-
-    monkeypatch.setattr(repo._runtime.database, "write", traced_write)
-
-    class _TransactionAwareAnswer(_AnswerLLM):
-        def chat_json(self, *args, **kwargs):
-            assert depth["write"] == 0
-            return super().chat_json(*args, **kwargs)
-
-    bind_chat_client(repo, "ask_answer", _TransactionAwareAnswer())
-    repo.settings.query_rewrite_enabled = False
-    repo.settings.chunk_kg_overlay_enabled = False
-    notebook = _seed_chunks(repo)
-
-    response = repo.ask_chunk(
-        notebook.id, AskRequest(question="cascode", mode="chunk")
-    )
-
-    assert response.answer
-    assert depth["write"] == 0

@@ -261,12 +261,9 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
     assert relations == []
 
 
-def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database):
+def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
-    from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 11
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 33
     assert len(PostgresMigrator(postgres_database).migrations) == 11
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2

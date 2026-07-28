@@ -143,7 +143,7 @@ jobs:
               )
           PY
 
-      - name: Run PostgreSQL adapter and forward-shadow E2E gate
+      - name: Run PostgreSQL adapter integration gate
         env:
           PYTHON_BIN: python
           POSTGRES_CI_AUXILIARY_TARGETS_REQUIRED: "1"

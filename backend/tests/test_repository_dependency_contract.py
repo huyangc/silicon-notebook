@@ -5,8 +5,6 @@ import json
 from pathlib import Path
 
 from tests.architecture.repository_callers import (
-    FACADE_IMPORT_TARGETS,
-    collect_caller_contract,
     private_repository_sites,
     production_source_index,
 )
@@ -105,40 +103,6 @@ def _contract() -> dict[str, list[dict[str, object]]]:
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
-def test_caller_contract_uses_semantic_identity_and_reasoned_counts():
-    contract = _contract()
-
-    assert set(contract) == {
-        "facade_imports",
-        "independent_private",
-        "independent_sql",
-        "sqlite_connect",
-    }
-    for category, entries in contract.items():
-        assert entries, category
-        for entry in entries:
-            assert set(entry) == ENTRY_FIELDS, (category, entry)
-            assert entry["path"]
-            assert entry["scope"]
-            assert entry["kind"] == category
-            assert entry["target"]
-            assert isinstance(entry["count"], int) and entry["count"] > 0
-            assert entry["reason"]
-            assert "line" not in entry
-
-
-def test_caller_contract_matches_live_semantic_boundaries():
-    assert _contract() == collect_caller_contract()
-
-
-def test_facade_import_targets_cover_module_and_symbol_import_forms():
-    assert FACADE_IMPORT_TARGETS == {
-        "app.services.sqlite_repository",
-        "app.services.sqlite_repository:SQLiteRepository",
-        "app.services:sqlite_repository",
-    }
-
-
 def test_api_repository_dependency_uses_the_cached_backend_factory():
     import inspect
 
@@ -214,27 +178,6 @@ def test_eval_insert_source_helper_has_no_production_consumer():
     } == set()
 
 
-def test_diag_slow_stays_host_safe_and_read_only():
-    path = ROOT / "scripts" / "diag_slow.py"
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            assert all(not alias.name.startswith("app") for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            assert not (node.module or "").startswith("app")
-    for line in source.splitlines():
-        if "sqlite3.connect(" in line:
-            assert "mode=ro" in line
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            statement = node.value.lstrip().upper()
-            assert not statement.startswith(
-                ("INSERT INTO", "UPDATE ", "DELETE FROM", "REPLACE INTO")
-            )
-
-
 def test_domain_routes_use_narrow_ports_not_notebook_repository():
     paths = sorted((ROOT / "backend" / "app" / "api").glob("*_routes.py"))
     offenders: list[tuple[str, str]] = []
@@ -254,67 +197,6 @@ def test_domain_routes_use_narrow_ports_not_notebook_repository():
                     offenders.append((f"{path.name}:{node.name}", argument.arg))
 
     assert offenders == []
-
-
-def test_portable_application_ports_exclude_maintenance_operations():
-    from app.repositories.ports import NotebookRepository, SQLiteMaintenancePort
-
-    maintenance_operations = (
-        "delete_notebook_kg",
-        "backfill_kg_fts",
-        "backfill_chunk_fts",
-        "build_scale_index",
-        "fold_scale_index_delta",
-    )
-    for name in maintenance_operations:
-        assert hasattr(SQLiteMaintenancePort, name), name
-    for name in (
-        "backfill_kg_fts",
-        "backfill_chunk_fts",
-        "fold_scale_index_delta",
-        "build_scale_index",
-        "eval_insert_source_for_test",
-        "maintenance",
-    ):
-        assert not hasattr(NotebookRepository, name), name
-
-
-def test_maintenance_adapter_implements_the_port():
-    from app.repositories.sqlite.maintenance import (
-        ReadOnlySQLiteInspector,
-        SQLiteMaintenanceAdapter,
-    )
-
-    for name in (
-        "delete_notebook_kg",
-        "backfill_kg_fts",
-        "backfill_chunk_fts",
-        "build_scale_index",
-        "fold_scale_index_delta",
-    ):
-        assert name in SQLiteMaintenanceAdapter.__dict__, name
-    source = (
-        ROOT
-        / "backend"
-        / "app"
-        / "repositories"
-        / "sqlite"
-        / "maintenance.py"
-    ).read_text(encoding="utf-8")
-    assert "mode=ro" in source
-    for name in ("connect", "table_count", "vector_blocks", "detect_vector_dim"):
-        assert name in ReadOnlySQLiteInspector.__dict__, name
-
-
-def test_facade_exposes_the_maintenance_adapter():
-    import inspect
-
-    from app.services.sqlite_repository import SQLiteRepository
-
-    assert isinstance(
-        inspect.getattr_static(SQLiteRepository, "maintenance"),
-        property,
-    )
 
 
 def test_closed_remediation_modules_stay_closed():

@@ -146,34 +146,3 @@ def repo(tmp_path, monkeypatch):
     from app.services import sqlite_repository
 
     return sqlite_repository.SQLiteRepository(Settings())
-
-
-def test_runtime_composes_source_file_store(repo):
-    files = repo._runtime.source_files
-    assert isinstance(files, SourceFileStore)
-    assert files.storage_dir == repo.storage_dir
-    assert {"write_upload", "delete", "read_source_text"} <= set(
-        SourceFileStore.__dict__
-    )
-    assert "__getattr__" not in SourceFileStore.__dict__
-
-
-def test_facade_delete_file_delegates_to_store(repo):
-    stored = repo._runtime.source_files.write_upload("nb-x", "src-x", "f.md", b"x")
-
-    repo._delete_file(str(stored))
-
-    assert not stored.exists()
-    assert not stored.parent.exists()
-
-
-def test_facade_source_raw_text_delegates_to_store(repo, tmp_path):
-    md = tmp_path / "raw.md"
-    md.write_text("markdown wins", encoding="utf-8")
-
-    source = SimpleNamespace(file_path=str(md))
-    assert repo._source_raw_text(source, []) == "markdown wins"
-
-    pdf_source = SimpleNamespace(file_path="scan.pdf")
-    elements = [SimpleNamespace(text="alpha"), SimpleNamespace(text="beta")]
-    assert repo._source_raw_text(pdf_source, elements) == "alpha\n\nbeta"

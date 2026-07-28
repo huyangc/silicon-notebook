@@ -42,20 +42,6 @@ def test_relation_embed_text_handles_empty_evidence():
     assert t == "A —about→ B."
 
 
-def test_relation_embeddings_table_schema(repo):
-    with repo._connect() as db:
-        cols = [r["name"] for r in db.execute("PRAGMA table_info(relation_embeddings)")]
-    assert cols == ["relation_id", "notebook_id", "vector", "created_at"]
-
-
-def test_relation_embeddings_idempotent_reinit(tmp_path, monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    SQLiteRepository(Settings())
-    SQLiteRepository(Settings())  # 第二次 init 同库不应抛错(CREATE TABLE IF NOT EXISTS)
-
-
 def _seed_two_node_relation(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     objects = [

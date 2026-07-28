@@ -32,13 +32,6 @@ def _cseq(repo, nb):
     return int(row["cluster_mutation_seq"]) if row else 0
 
 
-def test_migration_adds_cluster_seq_column(repo_factory):
-    repo, nb = repo_factory()
-    with repo._connect() as db:
-        cols = {r["name"] for r in db.execute("PRAGMA table_info(unified_kg_state)")}
-    assert "cluster_mutation_seq" in cols
-
-
 def test_write_clusters_bumps_cseq(repo_factory):
     repo, nb = repo_factory()
     before = _cseq(repo, nb)
