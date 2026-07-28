@@ -1624,12 +1624,24 @@ class KnowledgeLifecycleService:
         Fast path: persisted viz graph → viz_neighbors → hydrate names/edge_types
         (same node/edge shape as unified_graph). Fallback (no index): a bounded
         1-hop query over knowledge_relations, folding endpoints via cluster_map so
-        the shape matches the unified graph the frontend already renders."""
+        the shape matches the unified graph the frontend already renders.
+
+        Ask anchors carry raw knowledge-object ids, while the visual graph folds
+        Concepts to canonical K-* ids. Resolve just this one requested id through
+        the indexed cluster table before either path; never load the full cluster
+        map on the indexed path."""
         self.get_notebook(notebook_id)
+        focus_id = object_id
+        with self._connect() as db:
+            fold_rows = self.unified_kg.cluster_fold_rows(
+                db, notebook_id, [object_id]
+            )
+        if fold_rows:
+            focus_id = fold_rows[0]["canonical_id"]
         idx = self.scale_artifacts.viz_index(notebook_id)
         if idx is not None and getattr(idx, "viz_ids", None) is not None:
             from app.services.kg.scale_index import viz_neighbors
-            nb = viz_neighbors(self._viz_dict(idx), object_id, cap)
+            nb = viz_neighbors(self._viz_dict(idx), focus_id, cap)
             name_by_id = {n: nm for n, nm in zip(idx.viz_ids, idx.viz_names or [])}
             type_by_id = {n: t for n, t in zip(idx.viz_ids, idx.viz_types or [])}
             nbr_ids = {n["id"] for n in nb["nodes"]}
@@ -1645,8 +1657,10 @@ class KnowledgeLifecycleService:
                 et = et_map.get((s, t)) or et_map.get((t, s)) or "related"
                 edges.append({"source_object_id": s, "target_object_id": t, "edge_type": et})
             edges = self._annotate_edge_support(notebook_id, edges)
-            return {"nodes": nodes, "edges": edges}
-        return self._kg_neighbors_db(notebook_id, object_id, cap)
+            return {"nodes": nodes, "edges": edges, "focus_id": focus_id}
+        result = self._kg_neighbors_db(notebook_id, focus_id, cap)
+        result["focus_id"] = focus_id
+        return result
 
     def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:
         """DB fallback for kg_neighbors: bounded 1-hop over knowledge_relations,

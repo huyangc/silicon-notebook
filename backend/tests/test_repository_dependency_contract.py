@@ -72,6 +72,7 @@ LIFECYCLE_STORE_CALLS = {
         "clear_scratch_run",
         "cluster_description_rows",
         "cluster_evidence_rows",
+        "cluster_fold_rows",
         "cluster_input_facts",
         "communities_count",
         "community_graph_rows",

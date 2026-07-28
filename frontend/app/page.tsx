@@ -113,6 +113,7 @@ import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerM
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
+import { prepareKgFocus } from "./kg-focus";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -3821,18 +3822,29 @@ export default function Home() {
     setKgExpandedNodes([]); setKgExpandedEdges([]);
     setKgSelectedTypes([]);
     setKgLimit(KG_RANGE_DEFAULT);                 // 每次打开从核心范围起，避免一上来渲染全量
-    setPendingKgFocusId(targetNodeId ?? null);
     try {
-      const [g, pend, status] = await Promise.all([
+      const [g, [pend, status]] = await Promise.all([
         fetchUnifiedGraph(notebookId, KG_RANGE_DEFAULT),
-        fetchPendingMerges(notebookId),
-        fetchUnifiedKgStatus(notebookId),
+        Promise.all([
+          fetchPendingMerges(notebookId),
+          fetchUnifiedKgStatus(notebookId),
+        ]),
       ]);
+      // 引用携带的是原始 knowledge_object id，而图中 Concept 可能已经折叠为
+      // canonical K-* id；同时大库核心图只含高连接度节点。定向拉一跳邻域既把
+      // 核心范围外的目标补进来，也由后端返回真正应选中的 canonical id。
+      const neighborhood = targetNodeId
+        ? await fetchKgNeighbors(notebookId, targetNodeId).catch(() => null)
+        : null;
       if (
         activeNotebookIdRef.current !== notebookId
         || workspaceEpochRef.current !== workspaceEpoch
       ) return;
+      const focus = prepareKgFocus(g, targetNodeId, neighborhood);
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
+      setKgExpandedNodes(focus.expandedNodes);
+      setKgExpandedEdges(focus.expandedEdges);
+      setPendingKgFocusId(focus.focusId);
       setVizBuilding(Boolean(g.viz_building));
     } catch (err) { reportError(err); }
   }

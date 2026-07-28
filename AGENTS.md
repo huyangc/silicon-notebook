@@ -103,6 +103,7 @@ Inside a notebook:
   - Prompt chips should run useful first-version questions derived from the notebook's imported source titles/summaries when available; the menu should expose a real clear/reset action.
 - Knowledge Graph opens as a full-screen workspace overlay.
   - On open: fetch the current graph data and `GET /unified-kg/status`; show a refresh button when the graph is dirty. Do not trigger an automatic rebuild on open.
+  - Opening the graph from an Ask knowledge-object citation must select and center the cited node, even when that node is outside the bounded high-degree core. Fetch its bounded one-hop neighborhood and merge it into the view; a raw cited Concept id must be resolved through bounded `cluster_fold_rows` to the canonical graph id returned as `focus_id`, never through a full cluster-map materialization.
   - Use the object-level unified graph so Concept / Claim / Formula / Procedure nodes can appear together; do not fall back to a concept-only graph when object-level relationships exist.
   - The main canvas should show node names, type-specific node marks, and relationship labels on edges.
   - Provide multi-select type filters for dense graphs. Selecting a node from either the canvas or the overview should focus/highlight that node and update the selected-node relation/source details.

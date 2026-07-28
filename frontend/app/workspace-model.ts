@@ -582,4 +582,9 @@ export type FgNode = {
 export type FgLink = { source: string | FgNode; target: string | FgNode; label: string; sourceCount?: number };
 export type KgSearchHit = { object_id: string; name: string; object_type: string; score: number; match: string };
 export type KgSearchResp = { query: string; hits: KgSearchHit[] };
-export type KgNeighborsResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
+export type KgNeighborsResp = {
+  nodes: UnifiedConceptNode[];
+  edges: UnifiedEdge[];
+  /** Canonical graph id for a raw cited concept id. */
+  focus_id?: string;
+};
