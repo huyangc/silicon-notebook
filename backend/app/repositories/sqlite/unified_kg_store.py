@@ -952,6 +952,27 @@ class UnifiedKgStore:
             if owned and db.in_transaction:
                 db.rollback()
 
+    @contextmanager
+    def read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        """**给外部调用方**的多语句共享快照 —— 与 `community_overview` 内部用的是同一
+        个机制(`_read_snapshot`),只是把它开成一个可以骑的连接。
+
+        为什么必须公开而不是让调用方自己 `database.connect()`(codex 第 8 轮 P2):
+        T3 的 `/sources` 一趟要发**四条**语句(state 行、账本、来源画像的 COUNT、那一页
+        的 SELECT),而 `connect()` 给的是**自动提交**的读连接 —— 每条语句各取一个快照。
+        并发的预计算(`replace_kg_analysis_artifacts` 整批重写)只要提交在中间,新写入的
+        画像行就会被盖上**上一代**账本的世代戳,`total` 与 `rows` 也可以互相对不上。
+
+        ⚠ 与 PostgreSQL 侧的同名方法**语义等价、实现分岔**(§3.35 允许):那边是
+        `BEGIN … READ ONLY` + REPEATABLE READ,这边是 `BEGIN DEFERRED` 起 WAL 快照,
+        且**刻意不设** `PRAGMA query_only` —— 这条是本线程复用的共享读连接,翻会话级
+        开关会泄漏状态(完整理由见 `_read_snapshot`)。参数表**刻意为空**:调用方是
+        后端中性的 service,不该知道「要不要 REPEATABLE READ」这种方言细节,该由哪一侧
+        怎么兑现由 store 自己决定。
+        """
+        with self._read_snapshot() as db:
+            yield db
+
     def cluster_size_histogram(self, notebook_id: str) -> Dict[str, object]:
         """收敛率的分布面:簇大小分桶直方图,**按 object_type 分组**(A2)。
 

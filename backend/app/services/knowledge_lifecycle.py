@@ -3456,13 +3456,20 @@ class KnowledgeLifecycleService:
         # ⚠ 取消**不算**失败,必须放行:`KgBuildAborted` 是用户要停,吞掉它会让中止
         # 看起来成功了。KeyboardInterrupt / SystemExit 属 BaseException,天然不被
         # `except Exception` 捕获。
+        # ⚠ 失败**不冒泡,但也绝不谎报成功**(codex 第 8 轮 P2)。这两件事此前被混成
+        # 一件:异常被记进 `kg_analysis_precompute_failed`,紧接着照样 emit
+        # `kg_analysis_backfilled` —— 同一次执行里失败事件与成功事件并存,而账本其实
+        # 仍然不完整。运维监控与任何事件消费方都会被误导(「补过了」与「补失败了」是
+        # 相反的运维动作)。不掀翻 rebuild_communities 的决定不变(爆炸半径论证见下),
+        # 变的只是那条成功事件的前提。
+        analysis_done = True
         try:
             self._precompute_kg_analysis(
                 notebook_id, level, _seq, _cseq, kept_rows, ew, can2idx,
                 # `force` 是「用户明确要求重算」——它上面不省钱,见
                 # `reusable_artifact_payloads` 的最后一段。
                 reusable=({} if force
-                          else reusable_artifact_payloads(_ledger, _seq)),
+                          else reusable_artifact_payloads(_ledger, _seq, _cseq)),
                 # 板块划分是这一轮**刚跑出来**的,还是库里现成的?依赖板块的两份产物
                 # 据此决定盖不盖簇世代的戳(见 `stamp_cluster_seq`):补账本那条路径
                 # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
@@ -3472,6 +3479,7 @@ class KnowledgeLifecycleService:
         except KgBuildAborted:
             raise
         except Exception as exc:
+            analysis_done = False
             self.event_log.emit({
                 "kind": "kg_analysis_precompute_failed",
                 "notebook_id": notebook_id, "level": level, "seq": _seq,
@@ -3480,10 +3488,17 @@ class KnowledgeLifecycleService:
         if graph_fresh:
             # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
             # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
-            self.event_log.emit({
-                "kind": "kg_analysis_backfilled", "notebook_id": notebook_id,
-                "level": level, "seq": _seq, "communities": kept,
-            })
+            #
+            # ⚠ 只在预计算**真的完成**时发:这条路径除了补账本什么都没做,预计算一失败
+            # 这一趟就等于什么都没发生,发一条「补齐了」是纯粹的谎报。失败那一档已经有
+            # 自己的事件(上面 `kg_analysis_precompute_failed`),不是静默。
+            # 返回值不受影响:社区还在库里,如实返回它的数量 —— 一份辅助报告没补上,
+            # 不能表现成「一个板块都没有」。
+            if analysis_done:
+                self.event_log.emit({
+                    "kind": "kg_analysis_backfilled", "notebook_id": notebook_id,
+                    "level": level, "seq": _seq, "communities": kept,
+                })
             return kept
         self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
                              "level": level, "communities": kept, "nodes": n_nodes})

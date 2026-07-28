@@ -594,6 +594,87 @@ def test_boards_never_built_report_null_not_a_lag(repo):
         None, None, None)
 
 
+def test_boards_report_unknown_merge_generation_after_a_cluster_only_write(repo):
+    """codex 第 8 轮 P2:纯合并写入之后,板块那一格**不许**说「与当前一致」。
+
+    簇写路径刻意不动 `kg_mutation_seq`,所以合并单独动过之后 `community_seq` 与
+    `kg_mutation_seq` 仍然相等 —— 只比 KG 世代的旧判据据此把这一格判成 stale=False,
+    而板块划分的簇世代戳**根本建立不起来**。同一屏上依赖板块的两份产物(第 7 轮修复后)
+    已经如实报「对不上合并进度」,板块本身却说「与当前一致」:一份能同时说出这两句话的
+    报告本身就不可信,而这正是本视图存在的理由的反面。
+    """
+    with repo._write() as db:
+        _state(db, seq=10, community_seq=10)
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_mutation_seq=11 WHERE notebook_id=?",
+            (NB,),
+        )
+        _community(db, "cm-1", [("K1", 1.0)])
+        # 「只补账本」那一轮的账本:板块划分是库里现成的 → 依赖板块的两份显式记「无从判断」
+        _seed_complete_ledger(db, seq=10, cluster_seq=11, partition_rebuilt=False)
+
+    overview = _service(repo).overview(NB)
+    boards = overview.boards.freshness
+
+    # 前提事实:KG 世代确实一动没动 —— 旧判据正是据此说「与当前一致」的。
+    assert (boards.built_at_seq, boards.seq_behind) == (10, 0)
+    assert boards.stale is None, "板块的合并世代无从判断,不能报成「与当前一致」"
+    assert boards.built_at_cluster_seq is None
+    assert boards.cluster_seq_behind is None
+    # 同屏的那两份产物说的是同一句话 —— 这一条才是「不自相矛盾」本身。
+    for kind in BOARD_DEPENDENT_ARTIFACT_KINDS:
+        assert _artifact_of(overview, kind).freshness.stale is None, kind
+
+
+def test_boards_and_the_board_dependent_products_answer_the_merge_question_alike(repo):
+    """「这套板块划分建在哪一代合并结果上」是**一件事**,同屏不许有两个答案。
+
+    第 8 轮报的就是这个形状:两处各判一遍,然后分岔。判据合流之后,板块那一格与依赖
+    板块的两份产物拿的是**同一个** `built_at_cluster_seq`(`board_partition_cluster_seq`
+    从账本读)、走**同一个** `_generation_verdict`,所以三个字段必须逐个相等。
+
+    ⚠ 三种结论都要出现过,否则这条守卫只是在比对一个恒定值(本 PR 已经因此出过 16 个
+    空守卫)。
+    """
+    verdicts = set()
+    for cluster_now, stamped_cluster, partition_rebuilt in (
+        (10, 10, True),      # 全量重建那一轮:世代知道,且对齐
+        (11, 10, True),      # 之后又合并过:世代知道,明确落后
+        (11, 11, False),     # 只补账本:世代无从判断
+    ):
+        with repo._write() as db:
+            for table in ("kg_analysis_artifacts", "unified_kg_state",
+                          "communities", "community_members"):
+                db.execute(f"DELETE FROM {table} WHERE notebook_id=?", (NB,))
+            _state(db, seq=10, community_seq=10)
+            db.execute(
+                "UPDATE unified_kg_state SET cluster_mutation_seq=? WHERE notebook_id=?",
+                (cluster_now, NB),
+            )
+            _community(db, "cm-1", [("K1", 1.0)])
+            _seed_complete_ledger(db, seq=10, cluster_seq=stamped_cluster,
+                                  partition_rebuilt=partition_rebuilt)
+
+        boards = _service(repo).overview(NB).boards.freshness
+        overview = _service(repo).overview(NB)
+        for kind in BOARD_DEPENDENT_ARTIFACT_KINDS:
+            product = _artifact_of(overview, kind).freshness
+            assert (
+                boards.built_at_cluster_seq,
+                boards.cluster_seq_behind,
+                boards.stale,
+            ) == (
+                product.built_at_cluster_seq,
+                product.cluster_seq_behind,
+                product.stale,
+            ), (
+                f"板块与 {kind} 对同一件事给出了不同答案"
+                f"(cluster_now={cluster_now}, stamped={stamped_cluster})"
+            )
+        verdicts.add(boards.stale)
+    assert verdicts == {False, True, None}, f"没覆盖到三种结论:{verdicts}"
+
+
 def test_state_exposes_the_last_rebuild_scale_snapshot(repo):
     """§3.3 点名要透出的那组:当前 seq、各产物 seq、dirty、上次 rebuild 的时刻与规模。
     读者拿它与当前真实计数一比就能量化陈旧程度。"""
@@ -1207,6 +1288,95 @@ def test_source_page_absence_matches_the_overview(repo):
 def test_source_page_rejects_an_unknown_order(repo):
     with pytest.raises(ValueError, match="order"):
         _service(repo).source_profiles(NB, order="whatever")
+
+
+# ------------------------------------------------------------------ 共享快照
+# 两个端点各自的多条读必须看**同一份库**。裸 `connect()` 在两个后端上都是「每条语句
+# 各取一个快照」(SQLite 自动提交 / PostgreSQL READ COMMITTED),而并发的预计算是把
+# 三张产物表**整批重写** —— 提交劈在两次读之间,响应就会把两代库拼成一份。
+#
+# 下面两条把「并发提交」用一条**独立连接的真写事务**钉死在两次读的正中间,所以不靠
+# 时序碰运气:判据是确定的,修复前必红、修复后必绿。
+
+
+def _commit_from_another_connection(repo, mutate) -> None:
+    """在读的正中间提交一次真写事务(独立连接,与读连接不共享快照)。"""
+    with repo._write() as write_db:
+        mutate(write_db)
+
+
+def test_the_sources_page_reads_one_shared_snapshot(repo, monkeypatch):
+    """codex 第 8 轮 P2:`/sources` 的四次读(state / 账本 / COUNT / 一页)看同一份库。
+
+    没有共享快照时,并发预计算提交在中间会让 ``total`` 与 ``rows`` 对不上 —— 一份
+    「有 N 个来源、这一页却是别的世代」的分页,读者无从分辨是并发还是数据坏了。
+    """
+    with repo._write() as db:
+        _state(db)
+        _seed_complete_ledger(db)
+        _profile(db, "s-1", mainstream=0.1)
+
+    store = repo._runtime.unified_kg
+    read_ledger = store.kg_analysis_artifact_rows
+
+    def ledger_then_a_concurrent_precompute(db, notebook_id):
+        ledger = read_ledger(db, notebook_id)
+        _commit_from_another_connection(repo, lambda write_db: [
+            write_db.execute(
+                "DELETE FROM kg_source_profiles WHERE notebook_id=?", (NB,)),
+            *[_profile(write_db, f"s-new-{index}", mainstream=0.9)
+              for index in range(3)],
+        ])
+        return ledger
+
+    monkeypatch.setattr(
+        store, "kg_analysis_artifact_rows", ledger_then_a_concurrent_precompute
+    )
+    page = _service(repo).source_profiles(NB)
+
+    assert (page.total, [row["source_id"] for row in page.rows]) == (1, ["s-1"]), (
+        f"COUNT 与那一页看到了不同世代的库:total={page.total}, "
+        f"rows={[row['source_id'] for row in page.rows]}"
+    )
+
+
+def test_the_overview_reads_the_state_row_and_the_ledger_from_one_snapshot(
+    repo, monkeypatch
+):
+    """state 行与账本必须来自同一份库,否则板块那一格会凭空报一个**假异常**。
+
+    板块的合并世代取自账本的 ``built_at_cluster_seq``,落后量却是拿 state 的
+    ``cluster_mutation_seq`` 减出来的。两次读劈在一次并发预计算的两侧,减出来就是负数
+    —— 而负数在本契约里的含义是「账本比库还新 = 库被手工改过」。凭空报一个假异常比
+    不报更糟:这个视图的全部价值就是让读者能相信自己看到的标注。
+    """
+    with repo._write() as db:
+        _state(db, seq=10, community_seq=10)
+        _community(db, "cm-1", [("K1", 1.0)])
+        _seed_complete_ledger(db, seq=10, cluster_seq=10)
+
+    store = repo._runtime.unified_kg
+    read_state = store.state_row
+
+    def state_then_a_concurrent_precompute(db, notebook_id):
+        row = read_state(db, notebook_id)
+        _commit_from_another_connection(repo, lambda write_db: (
+            write_db.execute(
+                "UPDATE unified_kg_state SET cluster_mutation_seq=11 "
+                "WHERE notebook_id=?", (NB,)),
+            write_db.execute(
+                "DELETE FROM kg_analysis_artifacts WHERE notebook_id=?", (NB,)),
+            _seed_complete_ledger(write_db, seq=10, cluster_seq=11),
+        ))
+        return row
+
+    monkeypatch.setattr(store, "state_row", state_then_a_concurrent_precompute)
+    boards = _service(repo).overview(NB).boards.freshness
+
+    assert (boards.built_at_cluster_seq, boards.cluster_seq_behind) == (10, 0), (
+        "state 行与账本来自两代库:板块那一格报出了一个凭空的落后量"
+    )
+    assert boards.stale is False
 
 
 # ---------------------------------------------------------------- 记忆化

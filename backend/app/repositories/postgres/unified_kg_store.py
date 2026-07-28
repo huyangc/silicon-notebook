@@ -985,6 +985,24 @@ class UnifiedKgStore:
                 db.isolation_level = IsolationLevel.REPEATABLE_READ
             yield db
 
+    @contextmanager
+    def read_snapshot(self) -> Iterator[Any]:
+        """**给外部调用方**的多语句共享快照 —— `_read_snapshot(repeatable=True)`。
+
+        与 SQLite 侧同名方法**语义等价**(那边是 `BEGIN DEFERRED` 起的 WAL 快照),
+        存在的理由也逐字相同(codex 第 8 轮 P2):T3 的 `/sources` 一趟发四条语句,
+        而 PostgreSQL 的 READ COMMITTED 是**每条语句**取一次快照 —— 并发的预计算提交在
+        中间,新写入的画像行就会被盖上上一代账本的世代戳,`total` 与 `rows` 也可以互相
+        对不上。REPEATABLE READ 把快照提到事务级,整块共享同一份库;`read_only=True`
+        让「绝不写库」由引擎强制(这一条 SQLite 侧兑现不了,见那边的说明)。
+
+        参数表**刻意为空**:调用方是后端中性的 service,不该知道「要不要 REPEATABLE
+        READ」这种方言细节。内部单语句查询继续直接用 `_read_snapshot()`——那里多一层
+        事务级快照只会白白拖住 xmin horizon。
+        """
+        with self._read_snapshot(repeatable=True) as db:
+            yield db
+
     def cluster_size_histogram(self, notebook_id: str) -> Dict[str, object]:
         """收敛率的分布面:簇大小分桶直方图,**按 object_type 分组**(A2)。
         分组分桶在 SQL 里完成,Python 只补零、定序、求合计。

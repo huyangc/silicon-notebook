@@ -1134,9 +1134,19 @@ class UnifiedKgStorePort(Protocol):
     # 连接,故不需要上面那道 `_reject_inside_write_transaction`(它防的是「自开的另一条
     # 连接读到提交前的库」,骑调用方连接不存在这个失配)。服务层入口另有一道同语义断言。
     #
+    # ⚠ 调用方骑的那条连接必须由 `read_snapshot()` 开 —— 一个**多语句共享快照**,而不是
+    # 裸 `database.connect()`。`/sources` 一趟要发四条语句(state 行 + 账本 + COUNT +
+    # 一页),而两个后端的默认读都是**每条语句各取一个快照**(SQLite 自动提交 /
+    # PostgreSQL READ COMMITTED)。并发的预计算整批重写产物表时只要提交在中间,新写入的
+    # 画像行就会被盖上**上一代**账本的世代戳,`total` 与 `rows` 也可以互相对不上
+    # (codex 第 8 轮 P2)。两侧兑现方式不同(`BEGIN DEFERRED` 的 WAL 快照 /
+    # `BEGIN … READ ONLY` + REPEATABLE READ),语义等价;**参数表刻意为空**,方言细节
+    # 不外泄给后端中性的 service。
+    #
     # 上限:`limit` 两侧都硬 clamp(KG_COMMUNITY_EDGES_MAX / KG_SOURCE_PAGE_MAX),
     # `offset` 收到 [0, ∞)(它天然被表的行数兜住)。截断绝不静默 —— 调用方拿返回条数
     # 与账本里的 `edges` / 这里的 `total` 一比即可,不需要多取一行来判。
+    def read_snapshot(self) -> object: ...
     @staticmethod
     def kg_analysis_artifact_rows(
         db: object, notebook_id: str

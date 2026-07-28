@@ -86,6 +86,8 @@ from app.services.kg_analysis_precompute import (
     OPTIONAL_ARTIFACT_KINDS,
     artifact_cluster_seq,
     artifact_is_current,
+    board_partition_cluster_seq,
+    board_partition_is_current,
     required_artifact_kinds,
 )
 from app.services.knowledge_contracts import (
@@ -347,8 +349,10 @@ class KgState:
 class BoardOverview:
     """主题板块列表 —— **实时读** `communities` 表,而那张表本身是上次社区重建的快照。
 
-    所以它的新鲜度戳是 ``unified_kg_state.community_seq``(板块建于哪个 KG 状态),
-    不是账本里的任何一个 seq。
+    所以它 KG 世代那条线的戳是 ``unified_kg_state.community_seq``(板块建于哪个 KG
+    状态),不是账本里的任何一个 seq;而**合并世代**那条线走账本里依赖板块的产物记下的
+    ``built_at_cluster_seq``(= 板块划分建在哪一代合并结果上),判据与那两份产物共用 ——
+    见 `_community_freshness`。
     """
 
     freshness: Freshness
@@ -425,6 +429,8 @@ class KgAnalysisService:
     - ``unified_kg``:后端相关的 **UnifiedKgStore 实例**。本 service 只调它的**有界读**
       (`state_row` / `kg_analysis_artifact_rows` / `kg_community_edges_top` /
       `kg_source_profile_page` / `community_overview`),**绝不**调那四条全表重活。
+      多语句的那两处骑它的 `read_snapshot()`(后端中性的多语句共享快照,参数表为空 ——
+      两侧怎么兑现是 store 的事)。
     - ``now``:时钟 seam。
     """
 
@@ -503,7 +509,12 @@ class KgAnalysisService:
         那恰恰就是这份缓存要省掉的那笔钱 —— 把它放进签名等于每次请求都付一遍。
         """
         self._reject_inside_write_transaction("KG 分析总览")
-        with self._database.connect() as db:
+        # ⚠ 共享快照,不是裸 `connect()`:state 行与账本**必须来自同一份库**。板块那一格
+        # 的合并世代取自账本的 `built_at_cluster_seq`,落后量却是拿 state 的
+        # `cluster_mutation_seq` 减出来的(见 `_community_freshness`)—— 两次读劈开在
+        # 一次并发预计算的两侧,减出来就是个负数,而负数在本契约里是「库被手工改过」
+        # 的异常信号。凭空报一个假异常比不报更糟。
+        with self._unified_kg.read_snapshot() as db:
             state_row = self._unified_kg.state_row(db, notebook_id)
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
         state = _state_view(state_row)
@@ -543,7 +554,7 @@ class KgAnalysisService:
             state=state,
             artifacts=artifacts,
             boards=BoardOverview(
-                freshness=_community_freshness(state),
+                freshness=_community_freshness(state, ledger),
                 units=dict(BOARD_UNITS),
                 payload=boards_payload,
             ),
@@ -584,7 +595,14 @@ class KgAnalysisService:
         offset = max(0, int(offset))
         total = 0
         rows: List[Dict[str, Any]] = []
-        with self._database.connect() as db:
+        # ⚠ **四条语句,一个快照**(codex 第 8 轮 P2)。裸 `connect()` 在两个后端上都是
+        # 「每条语句各取一个快照」(SQLite 自动提交 / PostgreSQL READ COMMITTED),而这
+        # 一趟要读 state 行、账本、画像表的 COUNT 与那一页。并发的预计算是**整批重写**
+        # 三张产物表:提交劈在中间,新写入的画像行就会被这一份响应盖上**上一代**账本的
+        # 世代戳(`freshness` 与 `summary` 都取自那一行),`total` 与 `rows` 也可以互相
+        # 对不上 —— 一份「有 48 836 个来源、这一页却是空的」的分页,读者无从分辨是并发
+        # 还是数据坏了。方言细节留在 store 里(见 `read_snapshot`),本 service 不判后端。
+        with self._unified_kg.read_snapshot() as db:
             state_row = self._unified_kg.state_row(db, notebook_id)
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
             if _detail_rows_are_readable(ARTIFACT_SOURCE_PROFILES, ledger):
@@ -833,19 +851,31 @@ def _artifact_freshness(
     )
 
 
-def _community_freshness(state: KgState) -> Freshness:
-    """板块列表的新鲜度:它读的是 `communities` 表,戳是 `community_seq`。
+def _community_freshness(
+    state: KgState, ledger: Dict[str, Dict[str, Any]]
+) -> Freshness:
+    """板块列表的新鲜度 —— **两条世代线**,与产物那几份同一套判据。
 
-    ``community_seq == -1`` = 从没建过社区 → 与产物缺席同一种表达(三个 None),
+    KG 世代那条线的戳是 `community_seq`(板块建于哪个 KG 状态,而不是账本里的任何一个
+    seq)。``community_seq == -1`` = 从没建过社区 → 与产物缺席同一种表达(三个 None),
     而不是谎报「落后 N 次」。
 
-    ⚠ **已知缺口,如实记在这里。** 板块划分本身是在 canonical 图上跑出来的,合并结果
-    一变它同样陈旧;但 `communities` / `unified_kg_state` 里**没有地方**记「这批板块建
-    在哪一代合并结果上」,所以这一格的 ``built_at_cluster_seq`` / ``cluster_seq_behind``
-    只能是 None(契约里的「无从判断」),而不是一个编出来的 0。补它要给
-    `unified_kg_state` 加一列 = 追加迁移 + bump `SCHEMA_VERSION`,不在本次修复范围内。
-    真正让板块跟上合并结果的是 `rebuild_unified_kg` 收尾那次 `force=True` 的
-    `rebuild_communities`。
+    ⚠ **合并世代那条线不能省,省掉就是谎报「与当前一致」**(codex 第 8 轮 P2)。
+    簇写路径刻意不动 `kg_mutation_seq`,所以纯合并写入之后 `community_seq` 与
+    `kg_mutation_seq` 仍然相等 —— 旧判据(只比 KG 世代)据此把这一格判成
+    ``stale=False``,而同一屏上依赖板块的两份产物已经如实报「对不上合并进度」。
+    一份能同时说出这两句话的报告本身就不可信。
+
+    板块划分的合并世代由 `board_partition_cluster_seq` 从**账本**读(那不是「拿产物的
+    属性冒充板块的属性」:第 7 轮起那个戳记的就是板块划分建在哪一代合并结果上,而板块
+    一被重铸,那两行就在同事务里作废 —— 完整理由见该函数)。判据 `board_partition_is_current`
+    与产物侧共用 `_generation_verdict` / `_cluster_generation_verdict`,所以这一格与依赖
+    板块的那两份产物**不可能**再给出互相矛盾的说法。
+
+    ⚠ 仍然存在的缺口(需要一列,本次不做):板块划分自己那张表里没有这个戳,账本被
+    「只补账本」那一轮覆盖之后,上一轮记下的整数世代就没了 —— 那一档如实报「无从判断」
+    (``stale=None``),不编一个 0。真正让板块跟上合并结果的仍是 `rebuild_unified_kg`
+    收尾那次 `force=True` 的 `rebuild_communities`。
     """
     if state.community_seq < 0:
         return Freshness(
@@ -854,12 +884,24 @@ def _community_freshness(state: KgState) -> Freshness:
             seq_behind=None,
             stale=None,
         )
-    behind = state.kg_mutation_seq - state.community_seq
+    built_cluster = board_partition_cluster_seq(ledger)
+    current = board_partition_is_current(
+        ledger,
+        state.community_seq,
+        seq=state.kg_mutation_seq,
+        cluster_seq=state.cluster_mutation_seq,
+    )
     return Freshness(
         basis=BASIS_COMMUNITY_SNAPSHOT,
         built_at_seq=state.community_seq,
-        seq_behind=behind,
-        stale=behind != 0,
+        # 不 clamp,理由与 `_artifact_freshness` 同:比当前还新是异常信号,不是 0。
+        seq_behind=state.kg_mutation_seq - state.community_seq,
+        stale=(None if current is None else not current),
+        built_at_cluster_seq=built_cluster,
+        cluster_seq_behind=(
+            None if built_cluster is None
+            else state.cluster_mutation_seq - built_cluster
+        ),
     )
 
 

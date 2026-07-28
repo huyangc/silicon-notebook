@@ -267,6 +267,46 @@ def artifact_cluster_seq_is_unknown(
     )
 
 
+def _cluster_generation_verdict(
+    kind: str, payload: Mapping[str, object], cluster_seq: int
+) -> Optional[bool]:
+    """**合并世代那条线**单独的裁决(三值),给下面的核心当一个输入。
+
+    ``True`` = 建在当前这一代合并结果上,或这个 kind 压根没有这条线
+    (`relation_provenance` —— 它的 SQL 一个字都没提 `concept_clusters`);
+    ``False`` = 明确落后,**或者**戳漏盖 / 被改坏(见 `artifact_cluster_seq`:判不出来
+    就当它不新鲜,闸会补跑、读侧报陈旧);
+    ``None`` = **显式**记着「无从判断」(依赖板块的两份由「只补账本」那条路径产出,
+    板块划分建在哪一代合并结果上没有地方记,见 `stamp_cluster_seq`)。
+    """
+    if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
+        return True
+    built_cluster_seq = artifact_cluster_seq(kind, payload)
+    if built_cluster_seq is None:
+        return None if artifact_cluster_seq_is_unknown(kind, payload) else False
+    return built_cluster_seq == int(cluster_seq)
+
+
+def _generation_verdict(
+    built_seq: int, seq: int, cluster: Optional[bool]
+) -> Optional[bool]:
+    """两条世代线的**三值合取** —— 全特性唯一的新鲜度判据核心。
+
+    KG 世代那条线在这里比(它永远判得出来:两边都是整数);合并世代那条线由调用方
+    先裁决好传进来(可能是「无从判断」)。合取是 Kleene 的:任一条为假即假,否则有
+    未知即未知,都真才真。
+
+    ⚠ **三个消费方共用它,一个字都不许在别处重写**:产物(`artifact_is_current`)、
+    板块划分(`board_partition_is_current`)、以及它们各自的写侧闸与读侧落后量。
+    本 PR 已经因为「同一件事在两处各判一遍、然后分岔」被抓过三次(第 3 轮
+    `_ledger_state` 与写侧 required 集合、第 6 轮分档漏判新维度、第 8 轮板块那一格
+    仍在用只看 KG 世代的旧判据),所以判据落在这一个函数里。
+    """
+    if int(built_seq) != int(seq):
+        return False
+    return None if cluster is None else bool(cluster)
+
+
 def artifact_is_current(
     kind: str,
     built_seq: int,
@@ -296,18 +336,75 @@ def artifact_is_current(
     与簇无关的 kind 只看 KG 世代;依赖簇的 kind 两个世代都要对齐,而**漏盖戳(键不在
     或值被改坏)仍然等于不新鲜**(见 `artifact_cluster_seq`)。
     """
-    if int(built_seq) != int(seq):
-        return False
-    if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
-        return True
-    built_cluster_seq = artifact_cluster_seq(kind, payload)
-    if built_cluster_seq is None:
-        return None if artifact_cluster_seq_is_unknown(kind, payload) else False
-    return built_cluster_seq == int(cluster_seq)
+    return _generation_verdict(
+        built_seq, seq, _cluster_generation_verdict(kind, payload, cluster_seq)
+    )
+
+
+def board_partition_cluster_seq(
+    ledger: Mapping[str, Mapping[str, object]]
+) -> Optional[int]:
+    """**板块划分**建在哪一代合并结果上;``None`` = 无从判断。
+
+    ⚠ 记录点不是 `communities` / `unified_kg_state`(那里确实没有这一列 —— 设计 §3.3
+    的已知缺口),而是**依赖板块的产物账本**里的 `built_at_cluster_seq`:第 7 轮起那个
+    戳记的就是「板块划分建在哪一代合并结果上」,不是「折叠时读到的 cluster_map 是哪一
+    代」(见 `stamp_cluster_seq` 的 ``partition_rebuilt`` 那段)。
+
+    读它是**合法的**,而不是拿一份产物的属性去冒充另一件东西的属性:
+      · `replace_communities` 重铸板块 id 的**同一个事务**里就作废这两行
+        (`BOARD_DEPENDENT_ARTIFACT_KINDS`),所以「行在」⟹「它描述的正是当前这套划分」;
+      · 那一轮划分是现算的(``partition_rebuilt=True``)就记整数,是沿用库里现成的
+        (只补账本)就显式记 ``None``。
+
+    账本行缺席(从没算过 / 重铸后预计算失败)同样是 ``None``:那时确实没有任何证据。
+    """
+    entry = ledger.get(ARTIFACT_COMMUNITY_EDGES)
+    if entry is None:
+        return None
+    return artifact_cluster_seq(
+        ARTIFACT_COMMUNITY_EDGES, entry["payload"]        # type: ignore[arg-type]
+    )
+
+
+def board_partition_is_current(
+    ledger: Mapping[str, Mapping[str, object]],
+    built_seq: int,
+    *,
+    seq: int,
+    cluster_seq: int,
+) -> Optional[bool]:
+    """**板块划分**是不是建在当前的 (KG 世代, 簇世代) 上 —— 与产物**同一套**判据。
+
+    ``built_seq`` 是 `unified_kg_state.community_seq`(板块建于哪个 KG 状态);合并世代
+    那条线由 `board_partition_cluster_seq` 的那个记录点回答,裁决走与产物逐字相同的
+    `_cluster_generation_verdict`,合取走同一个 `_generation_verdict`。
+
+    ⚠ **为什么必须共用而不是在读侧另写一份**(codex 第 8 轮 P2):簇写路径刻意不动
+    `kg_mutation_seq`,所以纯合并写入之后 `community_seq` 与 `kg_mutation_seq` 仍然
+    相等 —— 只比 KG 世代的旧判据据此报「与当前一致」,而同一屏上依赖板块的两份产物
+    (第 7 轮修复后)已经如实报「对不上合并进度」。同一件事(这套板块划分建在哪一代
+    合并结果上)在两处各判一遍,然后分岔成两句互相矛盾的话,而这正是本视图存在的
+    理由的反面。判据合流之后,那两份产物与板块那一格拿的是**同一个** `built_at_cluster_seq`,
+    结构上不可能再分岔。
+    """
+    return _generation_verdict(
+        built_seq,
+        seq,
+        (
+            None
+            if (entry := ledger.get(ARTIFACT_COMMUNITY_EDGES)) is None
+            else _cluster_generation_verdict(
+                ARTIFACT_COMMUNITY_EDGES,
+                entry["payload"],                         # type: ignore[arg-type]
+                cluster_seq,
+            )
+        ),
+    )
 
 
 def reusable_artifact_payloads(
-    ledger: Mapping[str, Mapping[str, object]], seq: int
+    ledger: Mapping[str, Mapping[str, object]], seq: int, cluster_seq: int
 ) -> Dict[str, dict]:
     """账本里**可以原样搬到这一轮**的 payload —— 只可能是与簇无关的那几份。
 
@@ -325,12 +422,26 @@ def reusable_artifact_payloads(
     ⚠ **`force=True` 不复用**(由调用方决定不传本函数的结果)。`force` 是「用户明确
     要求重算」,是抽取口径改了、代码修了之后唯一的人工恢复手段;在它上面省这一趟,
     等于宣布一份按旧代码算出的载荷只要 KG 没变就永远换不掉。省下的那点钱远不值。
+
+    ⚠ **「这一份还是当前的吗」也走 `artifact_is_current`,不在这里手抄一遍**。这里曾经
+    内联 `int(entry["kg_mutation_seq"]) == int(seq)`;对与簇无关的 kind 而言那**恰好**
+    等价(它们没有第二条世代线),但「恰好等价的第二份判据」正是本 PR 反复被打回的那个
+    形态 —— 第 3 轮、第 6 轮、第 8 轮各发作过一次,而且每次都是从「现在明明一样」开始的。
+    两个筛选条件因此分工明确:``kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS`` 是**策略**
+    (只有与簇无关的载荷才允许原样搬),`artifact_is_current(...) is True` 是**判据**
+    (它是不是建在当前世代上),判据只此一处。
     """
     return {
         kind: dict(entry["payload"])                # type: ignore[arg-type]
         for kind, entry in ledger.items()
         if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS
-        and int(entry["kg_mutation_seq"]) == int(seq)  # type: ignore[arg-type]
+        and artifact_is_current(
+            kind,
+            int(entry["kg_mutation_seq"]),          # type: ignore[arg-type]
+            entry["payload"],                       # type: ignore[arg-type]
+            seq=seq,
+            cluster_seq=cluster_seq,
+        ) is True
     }
 
 

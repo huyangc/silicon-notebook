@@ -426,11 +426,21 @@ def test_analysis_ledger_without_boards_does_not_require_source_profiles():
 
 
 def test_reusable_payloads_only_carry_cluster_independent_kinds_at_the_same_seq():
-    """复用只覆盖与簇无关、且 KG 世代未动的那几份 —— 判据与闸赖以成立的是同一条。"""
+    """复用只覆盖与簇无关、且 KG 世代未动的那几份 —— 判据与闸赖以成立的是同一条。
+
+    ⚠ 判据走的是共享的 `artifact_is_current`,不是内联的 `seq ==`(第 8 轮把最后一处
+    内联抄写也收了回去)。所以簇世代**单独**动过时复用照旧成立:与簇无关的那份没有第
+    二条世代线,那才是它值得复用的全部理由。
+    """
     ledger = _ledger({kind: 7 for kind in ARTIFACT_KINDS}, cluster_seq=3)
-    assert set(reusable_artifact_payloads(ledger, 7)) == {ARTIFACT_RELATION_PROVENANCE}
+    assert set(reusable_artifact_payloads(ledger, 7, 3)) == {
+        ARTIFACT_RELATION_PROVENANCE}
+    # 簇世代动了、KG 世代没动:纯合并写入的形态,与簇无关的那份仍然可复用
+    # (它一个字都没提 concept_clusters)——否则每次补账本都要白扫一趟关系表。
+    assert set(reusable_artifact_payloads(ledger, 7, 4)) == {
+        ARTIFACT_RELATION_PROVENANCE}
     # KG 世代动了 → 输入可能变了 → 一份都不复用。
-    assert reusable_artifact_payloads(ledger, 8) == {}
+    assert reusable_artifact_payloads(ledger, 8, 3) == {}
 
 
 # ------------------------------------------------------------- 端到端
@@ -1463,6 +1473,51 @@ def test_backfill_does_not_rerun_louvain_or_rewrite_the_membership_tables(repo, 
     assert "kg_analysis_backfilled" in kinds
     assert "communities_rebuilt" not in kinds
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+
+
+def test_a_failed_backfill_does_not_emit_the_success_event(repo, monkeypatch):
+    """codex 第 8 轮 P2:预计算失败的那一趟**不许**再发「补齐了」。
+
+    修复之前,补账本路径上的失败会在**同一次执行**里留下两条互相矛盾的事件:
+    `kg_analysis_precompute_failed` 与 `kg_analysis_backfilled` —— 而账本其实仍然不
+    完整。运维监控与任何事件消费方拿到的是相反的两个结论,对应的运维动作也相反。
+    这条路径除了补账本什么都没做:预计算一失败,这一趟就等于什么都没发生。
+
+    ⚠ **三件事必须一起钉住**,少一件这条守卫就能被错误的实现满足:
+      1. 成功事件没了 —— 本条要修的那句谎话;
+      2. 失败事件还在 —— 不是把两条都吞掉换个清静(那是静默失败,更糟);
+      3. 失败**不冒泡**、返回值仍是库里真实的板块数 —— T2 的爆炸半径决定不变
+         (一份辅助报告的失败不该掀翻 437 GB 生产库的图重建),而且社区还在库里,
+         报「一个板块都没有」同样是谎话。
+    成功那一侧由 `test_backfill_does_not_rerun_louvain_or_rewrite_the_membership_tables`
+    钉着(它断言正常补账本**必须**发这条事件),所以「干脆永远不发」也过不去。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    boards_before = _boards(repo, notebook_id)
+    _wipe_ledger(repo, notebook_id)        # 图新鲜、账本空 → 下一次走「只补账本」
+
+    store = repo._runtime.unified_kg
+    monkeypatch.setattr(
+        store, "source_community_counts",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
+
+    assert repo.rebuild_communities(notebook_id) == 2   # 不冒泡,返回真实板块数
+
+    kinds = [event["kind"] for event in events]
+    assert "kg_analysis_backfilled" not in kinds, (
+        f"预计算失败了却仍然发了成功事件:{kinds}"
+    )
+    assert "kg_analysis_precompute_failed" in kinds, (
+        f"失败被吞成了静默,一条事件都没留下:{kinds}"
+    )
+    # 账本确实没补上 —— 事件说的是实话,不是「补上了但事件漏发」。
+    assert _artifacts(repo, notebook_id) == {}
+    # 社区图一动没动:失败的是那份辅助报告,不是图重建。
+    assert _boards(repo, notebook_id) == boards_before
 
 
 def test_a_failed_precompute_heals_on_the_next_plain_rebuild(repo, monkeypatch):

@@ -2926,6 +2926,42 @@ def test_analysis_reads_run_read_only_on_postgres(postgres_database):
 
 
 @pytest.mark.postgres_integration
+def test_public_read_snapshot_is_the_multi_statement_variant(postgres_database):
+    """codex 第 8 轮 P2 的 **PG 侧**守卫:公开的 `read_snapshot()` 必须是多语句共享快照。
+
+    T3 的 `/sources` 一趟发四条语句(state 行 / 账本 / COUNT / 一页),它骑的就是这条
+    连接。PG 的 READ COMMITTED 是**每条语句**取一次快照,所以只要这里退化成
+    `_read_snapshot()`(不带 repeatable),并发的预计算提交在中间就会把两代库拼进同一份
+    响应 —— 而且**不会有任何报错**。
+
+    参数表必须为空:调用方是后端中性的 service,「要不要 REPEATABLE READ」这种方言细节
+    由 store 自己决定(SQLite 侧对等物是 `BEGIN DEFERRED` 起的 WAL 快照,那边刻意不设
+    `PRAGMA query_only` —— 线程共享读连接翻会话开关会状态泄漏)。
+    """
+    import inspect
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    PostgresMigrator(postgres_database).migrate()
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+
+    assert list(inspect.signature(store.read_snapshot).parameters) == [], (
+        "read_snapshot 的参数表必须为空 —— 方言细节不外泄给后端中性的 service"
+    )
+    with store.read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT current_setting('transaction_read_only') AS ro, "
+            "current_setting('transaction_isolation') AS iso"
+        ).fetchone()
+        # 只读由引擎强制(这一条 SQLite 侧兑现不了,如实分岔)。
+        assert row["ro"] == "on"
+        # 关键:事务级快照,不是语句级 —— 少了它这道守卫就等于没改。
+        assert row["iso"] == "repeatable read", (
+            "read_snapshot 退化成了单语句快照:/sources 的四条读会各看一份库"
+        )
+
+
+@pytest.mark.postgres_integration
 def test_community_overview_reads_one_repeatable_read_snapshot(postgres_database):
     """并发 rebuild_communities 在报告生成中途提交,载荷不得自相矛盾。
 
