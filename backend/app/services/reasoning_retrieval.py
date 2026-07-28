@@ -1003,8 +1003,15 @@ class ReasoningRetriever:
             top_hits = top_hits[:top_n]
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
+        # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由
+        # ask_service._answer_reasoning 的按预算截断后回传,写进 synthesis 步的
+        # included_kg/included_chunks/included_elements。措辞刻意区分"候选"与
+        # "采用",避免系统性高估模型实际看到的证据。summary 不带数字:数字由
+        # detail(kg/elements)承载,前端 reasoning-trace.ts 会把 detail 渲染成
+        # "N 个知识对象 / M 段原文"紧邻显示,summary 再带一遍会逐字重复;这也
+        # 避开在 summary 里出现"KG"这类界面词汇表禁用的内部黑话。
         record(TraceStep(step_type="answer",
-                         summary=f"合成: 采用 {len(top_hits)} 个KG候选 + {len(elements)} 段原文",
+                         summary="合成候选",
                          detail=answer_detail))
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,

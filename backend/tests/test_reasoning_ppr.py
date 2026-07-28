@@ -200,7 +200,7 @@ def test_answer_reasoning_mixes_chunks_as_citable(repo):
             return json.dumps({"answer": "跨文档证据 [k1].", "grounded": True})
     bind_chat_client(repo, "ask_answer", _Echo())
 
-    answer, grounded, anchors = repo._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._answer_reasoning(
         nb.id, "对比 MoE", hits, [], chunks=chunks)
     assert anchors and anchors[0].object_type == "chunk"   # k1 = chunk 段一等引用
 
@@ -216,7 +216,7 @@ def test_answer_reasoning_empty_chunks_unchanged(repo):
             return json.dumps({"answer": "KG 证据 [k1].", "grounded": True})
     bind_chat_client(repo, "ask_answer", _Echo())
 
-    answer, grounded, anchors = repo._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
+    answer, grounded, anchors, _counts = repo._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
     assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
 
 
@@ -241,7 +241,7 @@ def test_answer_reasoning_makes_direct_source_element_citable(repo):
     llm = _Echo()
     bind_chat_client(repo, "ask_answer", llm)
     repo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors = repo._answer_reasoning(
+    answer, grounded, anchors, _counts = repo._answer_reasoning(
         nb.id, "如何路由", [], [element], chunks=None,
     )
     assert "[Direct source elements]" in llm.prompt
@@ -289,6 +289,198 @@ def test_answer_reasoning_final_evidence_respects_combined_hard_budget(
     )
 
     assert len(llm.prompt) <= 220
+
+
+def test_answer_reasoning_admits_top_elements_by_relevance_desc(repo, monkeypatch):
+    """PR-1 止血(元素装配保真):不再是插入序 elements[:6] 的裸切——装配前按
+    RetrievedElement.score 降序排序(tie-break element_id),只取前 element_items 条。
+    构造乱序且超过 cap 的元素列表,monkeypatch element_context 捕获实际入参,断言
+    恰好是排序后的 top-N,而不是原始插入序的前 N 个。"""
+    from app.services.retrieval import RetrievedElement
+
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    # 刻意乱序 + 与 element_id 字母序不一致,防止「巧合排对」的假绿。
+    # el-a/el-b 同分 0.9,靠 element_id tie-break 排定次序;el-b 在插入序中排在
+    # el-a 之前——若实现退化成"只按 score 的稳定排序"(即去掉 element_id
+    # tie-break),稳定排序会保留插入序,tied 组会输出 el-b 先于 el-a,与本用例
+    # 断言的 el-a 先于 el-b 冲突,从而真正检出「tie-break 被删」这个变异
+    # (此前 el-a 恰好也排在插入序更前,tie-break 有没有都巧合得到同一结果,
+    # 是假绿;这里刻意让两者分歧)。
+    elements = [
+        RetrievedElement(element_id="el-c", source_id="s", source_title="S",
+                         location_label="p1", element_type="paragraph", text="C", score=0.5),
+        RetrievedElement(element_id="el-b", source_id="s", source_title="S",
+                         location_label="p1", element_type="paragraph", text="B", score=0.9),
+        RetrievedElement(element_id="el-f", source_id="s", source_title="S",
+                         location_label="p1", element_type="paragraph", text="F", score=0.1),
+        RetrievedElement(element_id="el-a", source_id="s", source_title="S",
+                         location_label="p1", element_type="paragraph", text="A", score=0.9),
+        RetrievedElement(element_id="el-d", source_id="s", source_title="S",
+                         location_label="p1", element_type="paragraph", text="D", score=0.3),
+        RetrievedElement(element_id="el-e", source_id="s", source_title="S",
+                         location_label="p1", element_type="paragraph", text="E", score=0.7),
+    ]
+
+    ask = repo._runtime.ask_service()
+    real_element_context = ask.evidence_context.element_context
+    captured: dict = {}
+
+    def _capture(elements_arg, **kwargs):
+        captured["elements"] = list(elements_arg)
+        return real_element_context(elements_arg, **kwargs)
+
+    monkeypatch.setattr(ask.evidence_context, "element_context", _capture)
+
+    class _Echo:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            return json.dumps({"answer": "ok", "grounded": False})
+    bind_chat_client(repo, "ask_answer", _Echo())
+    repo.settings.kg_query_refine_enabled = False
+
+    ask._answer_reasoning(nb.id, "q", [], elements, "", chunks=None, element_items=3)
+
+    got_ids = [e.element_id for e in captured["elements"]]
+    assert got_ids == ["el-a", "el-b", "el-e"]   # top-3 by score desc, tie-break element_id
+
+
+def test_answer_reasoning_reports_actual_included_counts(repo):
+    """PR-1 code-quality-review 修复: _answer_reasoning 第 4 个返回值必须精确
+    反映"真正进入 prompt"的计数,且在有非空 memory_hits/chains/超 cap
+    elements 同时存在时,included_kg 只统计 KG 对象,不被 memory/chains 污染;
+    included_elements 必须等于 element_items(严格小于候选池)。
+
+    两段场景合成一个用例(而非机械按行号切):
+    - 场景 1 验证 KG 去重(< 候选池)与 elements 超 cap 截断(< 候选池)在
+      memory_hits/chains 都非空时仍然精确;chunk 预算充裕,chunks 全部进入
+      (精确等于候选池,不是"恰好又和候选池数字相同"的巧合断言，而是本场景
+      故意不挤压 chunk 预算的直接推论)。
+    - 场景 2 单独针对 included_chunks 的"map 大小 → 幸存数"口径 bug 做回归:
+      6 个 1 字符 chunk + chunk_context_chars=30——内层 chunk_context 记账
+      会把 5 条收进 chunk_id_map,append 阶段再加 19 字符标题重截断后只有
+      2 行 "kN:" 幸存;pre-append 口径报 5,幸存口径必须报 2,两种口径在此
+      数据下强可区分(改回 len(chunk_id_map) 必红)。
+      **没有与场景 1 合并**是刻意的:"至少一个 chunk 被挤出"与"chunk 分区
+      仍能为 elements 真正渲染一行"在当前实现下互斥。机制有两支:①字符级
+      重截断分支下,已接受内容距满预算至多一个 "kN: " 前缀宽度,加 19 字符
+      标题后剩余归零;②整块丢弃分支(remaining <= prefix)下 source_context
+      不变长,剩余最多约 21 字符——此时 elements 守卫虽然放行,但
+      element_context 单行最短前缀(k4001: [source-element][tier] …)约 40
+      字符,一行都渲染不出。已用穷举脚本(chunk 数 2..8、长度 1..80 多档、
+      预算 20..400、含非空前置 source_context)验证 34146 种组合零反例。
+      ⚠边界:该互斥的安全裕度只有约 19 字符(21 vs 40),依赖元素行前缀不被
+      精简;谁把元素行前缀缩到 22 字符以下,这个"不可能"就失效,届时应把
+      场景 2 升级为联合断言。
+    """
+    from app.services.retrieval import RetrievedChunk, RetrievedElement
+    from app.models.memory import MemoryHit
+    from app.services.kg.follow_chain import ChainHop, InferredChain
+
+    class _Echo:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            return json.dumps({"answer": "ok [k1].", "grounded": True})
+
+    # --- 场景 1: KG 去重 + elements 超 cap,memory_hits/chains 非空 ---
+    nb = _seed_two_doc_moe(repo)
+    hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:2]
+    chunks = repo._ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts")
+    assert hits and chunks
+    assert len(hits) == 2   # 候选池;下方断言 included_kg(1) < 2
+
+    # 5 个候选 element,element_items=2 → 必须严格小于候选池 5。
+    elements = [
+        RetrievedElement(
+            element_id=f"el-{i}", source_id="src-A", source_title="DeepSeek paper",
+            location_label="Arch", element_type="paragraph",
+            text=f"Routed experts variant {i}.", score=0.9 - i * 0.1,
+        )
+        for i in range(5)
+    ]
+
+    memory_hits = [MemoryHit(
+        memory_id="mem-1", title="Confirmed MoE note",
+        text="Routing keeps expert load balanced.",
+        status="confirmed", authority=3, score=0.8, provenance={},
+    )]
+
+    hop1 = ChainHop(
+        relation_id="rel-1", notebook_id=nb.id, tier="personal",
+        source_object_id="A", target_object_id="B", edge_type="derived_from",
+        source_name="A", target_name="B",
+        evidence=[{"quote": "A derives B", "location_label": "p1"}], trust=0.9,
+    )
+    hop2 = ChainHop(
+        relation_id="rel-2", notebook_id=nb.id, tier="personal",
+        source_object_id="B", target_object_id="C", edge_type="derived_from",
+        source_name="B", target_name="C",
+        evidence=[{"quote": "B derives C", "location_label": "p2"}], trust=0.9,
+    )
+    chains = [InferredChain(
+        source_object_id="A", via_object_id="B", target_object_id="C",
+        source_name="A", via_name="B", target_name="C",
+        inferred_edge_type="derived_from", hops=(hop1, hop2),
+        chain_trust=0.9, notebook_id=nb.id, tier="personal", query_relevance=0.8,
+    )]
+
+    bind_chat_client(repo, "ask_answer", _Echo())
+    repo.settings.kg_query_refine_enabled = False
+
+    ask = repo._runtime.ask_service()
+    answer, grounded, anchors, counts = ask._answer_reasoning(
+        nb.id, "对比 MoE", hits, elements, "",
+        chunks=chunks, chains=chains, memory_hits=memory_hits, element_items=2,
+    )
+    assert counts["included_kg"] == 1
+    assert counts["included_kg"] < len(hits)                 # 1 < 2
+    assert counts["included_elements"] == 2
+    assert counts["included_elements"] < len(elements)       # 2 < 5
+    # chunk 预算充裕(未挤压),chunks 应全部进入——精确值,不是巧合。
+    assert counts["included_chunks"] == len(chunks)
+
+    # --- 场景 2: 窄 chunk 预算下,included_chunks 取 append 后幸存数而非
+    # pre-append 的 chunk_id_map 大小(内层记账收 5 条,标题重截断后仅 2 行
+    # "kN:" 幸存;len(chunk_id_map) 口径会报 5) ---
+    narrow_chunks = [
+        RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="S",
+                       section_path=f"p{i}", text="A", relevance=0.9 - i * 0.1)
+        for i in range(6)
+    ]
+    _, _, _, narrow_counts = ask._answer_reasoning(
+        nb.id, "q2", [], [], "", chunks=narrow_chunks, chunk_context_chars=30,
+    )
+    assert narrow_counts["included_chunks"] == 2
+    assert narrow_counts["included_chunks"] < len(narrow_chunks)   # 2 < 6
+    assert narrow_counts["included_elements"] == 0
+
+
+def test_ask_reasoning_wires_effort_element_items_into_answer_reasoning(repo, monkeypatch):
+    """PR-1 code-quality-review 修复(接线守卫): ask_reasoning 必须把按
+    retrieval_effort 解析出的 limits.answer_element_items 传给
+    _answer_reasoning 的 element_items 形参——不能让默认值 6 悄悄生效。
+    用 overview 档(answer_element_items=4,见 ask_retrieval_policy.py)驱动
+    一次真实 ask_reasoning,monkeypatch _answer_reasoning 捕获调用 kwargs。"""
+    nb = _seed_two_doc_moe(repo)
+    ask = repo._runtime.ask_service()
+    real_answer_reasoning = ask._answer_reasoning
+    captured: dict = {}
+
+    def _capture(*args, **kwargs):
+        captured["element_items"] = kwargs.get("element_items")
+        return real_answer_reasoning(*args, **kwargs)
+
+    monkeypatch.setattr(ask, "_answer_reasoning", _capture)
+    llm = _AnswerOnlyLLM()
+    bind_chat_client(repo, "ask_answer", llm)
+    bind_chat_client(repo, "reasoning_agent", llm)
+
+    resp = repo.ask(nb.id, AskRequest(
+        question="DeepSeek-V3 MoE 相比其他模型", mode="reasoning",
+        retrieval_effort="overview",
+    ))
+    assert resp.mode == "reasoning"
+    assert "element_items" in captured, "_answer_reasoning must have been called"
+    assert captured["element_items"] == 4
 
 
 def test_reasoning_ask_seed_grounds_in_cross_doc_chunk_end_to_end(repo):

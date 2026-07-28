@@ -181,4 +181,5 @@ def test_answer_prompt_rule_numbers_are_unique_and_sequential():
     prompt = answer_prompt("question", "(none)")
     numbers = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", prompt)]
 
-    assert numbers == list(range(1, 11))
+    # PR-1 止血追加规则 11(枚举/列举类问题必须逐条列出全部匹配项)。
+    assert numbers == list(range(1, 12))

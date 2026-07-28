@@ -88,7 +88,10 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   if (step.step_type === "synthesis") {
     // 用 anchors(模型真正绑上的 [k])而不是 citations —— 后者是「每条检索到的
     // 证据一张卡」,零绑定的回答上会读成「10 处引用」。citations/evidence_level
-    // 仍留在 detail 里供排查,但不上屏:那是内部口径。
+    // 仍留在 detail 里供排查,但不上屏:那是内部口径。included_kg/
+    // included_chunks/included_elements 同理:PR-1 止血加的诊断字段,记录真正
+    // 进入合成 prompt 的计数(区别于更早 answer 步的候选池计数),同样只供排查
+    // 不上屏,不在此处渲染。
     return typeof detail.anchors === "number" ? `${detail.anchors} 处引用` : "";
   }
   if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {

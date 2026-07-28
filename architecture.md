@@ -231,15 +231,15 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 
-`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
+`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定；`answer_element_items` 是这条镜像关系的例外——它只控制最终合成 prompt 里直接来源元素（公式/表格/图片等）的纳入条数上限，是后端专有字段，前端没有消费者，也不在 `ask-retrieval-effort.ts` 里重复。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
 
-| id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 |
-|---|---:|---:|---:|---:|
-| `overview` | 4 | 8/2/12 | 4/2 | 4,000/12,000 |
-| `standard` | 8 | 20/3/36 | 8/5 | 6,000/30,000 |
-| `deep` | 8 | 24/4/48 | 16/6 | 8,000/50,000 |
-| `thorough` | 12 | 32/5/64 | 32/8 | 12,000/80,000 |
-| `exhaustive` | 16 | 40/6/96 | 50/10 | 16,000/120,000 |
+| id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 | 合成纳入的直接来源元素 |
+|---|---:|---:|---:|---:|---:|
+| `overview` | 4 | 8/2/12 | 4/2 | 4,000/12,000 | 4 |
+| `standard` | 8 | 20/3/36 | 8/5 | 6,000/30,000 | 6 |
+| `deep` | 8 | 24/4/48 | 16/6 | 8,000/50,000 | 8 |
+| `thorough` | 12 | 32/5/64 | 32/8 | 12,000/80,000 | 12 |
+| `exhaustive` | 16 | 40/6/96 | 50/10 | 16,000/120,000 | 16 |
 
 候选召回不随档位变化，而由部署参数独立控制：`CHUNK_RECALL` 默认 200，分别约束 Chunk/KG 的 ANN 与词法候选窗（默认去重前最多 400）；`RELATION_RECALL` 默认 200，分别约束 Relation ANN 和词法端点扩出的关系总窗（默认去重前最多 400，词法总窗内仍为 source/target 两个方向预留份额）。调整这两个部署值会改变候选窗，界面不把默认值伪装成请求级硬上限。档位只表达“允许多少轮判断与最终证据”。
 

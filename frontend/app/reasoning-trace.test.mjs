@@ -11,13 +11,13 @@ test("summarizes the latest reasoning step for a collapsed trace row", () => {
   const steps = [
     { step_type: "plan", summary: "规划了 1 个子查询", detail: { sub_queries: [{ query: "Engram" }] } },
     { step_type: "retrieve", summary: "初检索得到 8 个候选节点", detail: { count: 8 } },
-    { step_type: "answer", summary: "合成: 采用 9 个KG候选 + 0 段原文", detail: { kg: 9, elements: 0 } },
+    { step_type: "answer", summary: "合成候选", detail: { kg: 9, elements: 0 } },
   ];
 
   assert.deepEqual(getReasoningTraceSummary(steps, true), {
     title: "Agent 推理中",
     latestLabel: "合成",
-    latestSummary: "合成: 采用 9 个KG候选 + 0 段原文",
+    latestSummary: "合成候选",
     latestDetail: "9 个知识对象 / 0 段原文",
     stepCountLabel: "3 步",
     totalLabel: "",

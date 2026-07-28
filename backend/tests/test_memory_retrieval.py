@@ -228,7 +228,7 @@ def test_reasoning_synthesis_projects_confirmed_memory_as_first_class_anchor(mem
         data.alice.id, data.notebook.id, "timing closure", 8
     )
 
-    answer, grounded, anchors = data.repo._runtime.ask_service()._answer_reasoning(
+    answer, grounded, anchors, _counts = data.repo._runtime.ask_service()._answer_reasoning(
         data.notebook.id,
         "timing closure",
         [],

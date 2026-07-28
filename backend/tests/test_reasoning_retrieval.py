@@ -173,6 +173,29 @@ def test_reflect_prompt_checks_coverage_aspect_by_aspect():
     assert "multi-layer derivation" in p
 
 
+def test_answer_prompt_requires_full_enumeration_for_list_questions():
+    """规则 11(PR-1 止血):枚举/列举类问题必须把每个不同的匹配条目逐条列出、
+    各自挂 [k],不得抽样/合并;证据可能不覆盖全集时须明确说明。"""
+    from app.services.prompts import answer_prompt
+    p = answer_prompt("q", "ctx")
+    assert "list EVERY distinct matching item" in p
+    assert "do NOT sample, merge similar ones together" in p
+    # 披露必须是无条件形态(you MUST state …),旧的条件式措辞("If the evidence
+    # may not cover … say the list may be incomplete")同样含 "may be
+    # incomplete" 子串,只断言它会假绿。
+    assert "Unless a coverage line" in p
+    assert "you MUST state that the list may be incomplete" in p
+
+
+def test_reflect_prompt_forbids_claiming_full_retrieval():
+    """PR-1 止血:reflect 的 reason 不得声称"所有/全部 X 已检索到"——相关性检索
+    无法证明完整性,只能陈述实际找到了什么、还缺什么。"""
+    from app.services.prompts import reflect_prompt
+    p = reflect_prompt("q", "s")
+    assert "NEVER claim that 'all/every X have been retrieved'" in p
+    assert "cannot prove completeness" in p
+
+
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
@@ -615,7 +638,7 @@ def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
     llm = _ChainAnswerLLM()
     bind_chat_client(rrepo, "ask_answer", llm)
     rrepo.settings.kg_query_refine_enabled = False
-    answer, grounded, anchors = rrepo._answer_reasoning(
+    answer, grounded, anchors, _counts = rrepo._answer_reasoning(
         nb.id, "derive", chain_result.nodes, [], "",
         chains=chain_result.inferences)
     assert grounded is True

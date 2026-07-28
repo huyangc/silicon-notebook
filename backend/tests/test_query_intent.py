@@ -190,6 +190,7 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
         "max_initial_subqueries",
         "kg_context_chars",
         "chunk_context_chars",
+        "answer_element_items",
     )
     for field in increasing_fields:
         values = [getattr(row, field) for row in limits]
@@ -219,6 +220,7 @@ def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
     assert [row.max_initial_subqueries for row in limits] == [2, 5, 6, 8, 10]
     assert [row.kg_context_chars for row in limits] == [4_000, 6_000, 8_000, 12_000, 16_000]
     assert [row.chunk_context_chars for row in limits] == [12_000, 30_000, 50_000, 80_000, 120_000]
+    assert [row.answer_element_items for row in limits] == [4, 6, 8, 12, 16]
 
 
 def test_generic_reasoning_question_requires_clarification_before_retrieval():
