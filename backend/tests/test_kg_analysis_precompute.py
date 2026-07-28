@@ -1242,6 +1242,54 @@ def test_the_membership_is_released_before_the_three_statistic_snapshots(
     )
 
 
+def test_the_detection_leftovers_are_released_before_the_precompute(repo, monkeypatch):
+    """社区检测的中间结果不得活着跨进预计算(codex 第 14 轮 P2)。
+
+    `kept_rows` 建好之后,`comms` 与 `idx2can` 装的是**同一批 canonical 字符串的另一份
+    引用**(生产 ~171 万条),`g` 是 networkx 兜底那条路上的整张图。它们此前一直活到函数
+    返回 —— 也就是活着跨过预计算里那四趟全表扫,把两个内存峰值叠在一起。
+
+    ⚠ 与隔壁 `test_the_membership_is_released_before_the_three_statistic_snapshots`
+    是同一条不变式的两半,但**观察方式必须不同**:`can2idx` 是传进 `_compute_kg_analysis`
+    的实参、可以直接看,而 `idx2can` / `comms` 是 `rebuild_communities` 的局部变量,
+    调用方拿不到。所以这里读调用方栈帧的 locals —— 释放发生在预计算**之前**,
+    在预计算入口看一眼就够,不必逐条查询去查。
+
+    这条挡两种形态:删掉释放,以及把释放**挪到**预计算之后 —— 后者 `grep` 找得到
+    `idx2can.clear()`、看着还在,实际一点用没有。移动变异实测过:不加这条守卫时全绿。
+    """
+    import sys
+
+    notebook_id = _seed(repo)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original_compute = lifecycle._compute_kg_analysis
+    seen: list = []
+
+    def spying_compute(*args, **kwargs):
+        caller = sys._getframe(1)
+        assert caller.f_code.co_name == "rebuild_communities", (
+            f"仪器装错了帧:{caller.f_code.co_name}"
+        )
+        loc = caller.f_locals
+        seen.append({
+            "idx2can": len(loc.get("idx2can") or ()),
+            "comms_present": "comms" in loc,
+            "g_present": "g" in loc,
+        })
+        return original_compute(*args, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_compute_kg_analysis", spying_compute)
+    repo.rebuild_communities(notebook_id)
+
+    assert seen, "仪器没装上:_compute_kg_analysis 一次都没被调用"
+    assert seen[-1]["idx2can"] == 0, (
+        f"idx2can 活着跨进了预计算(还有 {seen[-1]['idx2can']} 条):"
+        "生产 ~171 万条 canonical 字符串会与预计算自己的峰值叠在一起"
+    )
+    assert not seen[-1]["comms_present"], "comms 活着跨进了预计算"
+    assert not seen[-1]["g_present"], "networkx 的整张图活着跨进了预计算"
+
+
 # 折叠结果**不得**跨过的那几条:三条全表统计快照 + 来源画像那次全表扫。
 _SCANS_AFTER_THE_FOLD = (*ANALYSIS_SNAPSHOTS, "source_canonical_rows")
 

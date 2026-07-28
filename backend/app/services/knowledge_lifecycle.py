@@ -3459,12 +3459,26 @@ class KnowledgeLifecycleService:
                              for c in louvain_communities(g, weight="weight", seed=42)]
                     for _i, _d in g.degree():
                         deg[idx2can[_i]] = float(_d)
+                    # 与 igraph 分支那句 `del G, …` 同一条不变式:图的全部产出已经抄进
+                    # `comms` / `deg`,而 networkx 的 dict-of-dicts 比 igraph 的 C 结构
+                    # 更占地方。不放掉它就会一路跨过下面预计算的四趟全表扫。
+                    del g
             min_size = self.settings.community_min_size
             # Policy (min-size filter + id minting + member ordering) stays here;
             # the store owns the two-table full rewrite.
             kept_rows = [(self._new_id("cm"), sorted(comm))
                          for comm in comms if len(comm) >= min_size]
             kept = len(kept_rows)
+            del comms
+        # ⚠ 社区检测的中间结果到此为止(codex 第 14 轮 P2)。`kept_rows` 已经把要发布的
+        # 内容全抄走了,而 `comms` / `idx2can` 装的是**同一批 canonical 字符串的另一份
+        # 引用**、`g`(networkx 兜底)是整张图。它们此前一直活到函数返回,也就是活着跨过
+        # 下面**新增的**那四趟全表扫(来源画像 + 三条统计快照),把两个内存峰值叠在一起;
+        # 生产 171 万 canonical 的量级下这不是可忽略的常数。
+        # 这与 `_compute_kg_analysis` 内部「`can2idx` / `community_of_index` 用完即放」
+        # 是同一条不变式的两半 —— 那半由「membership 不得活着跨过三条统计快照」守着。
+        # `can2idx` 本身**不能**在这里清:`SourceBoardCounter` 还要用它做 canonical→下标。
+        idx2can.clear()
         # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带**算出来**,
         # 与板块划分一起在下面那**一个**写事务里发布(codex 第 13 轮 P1)。
         #

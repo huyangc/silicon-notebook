@@ -3151,6 +3151,43 @@ def test_source_canonical_rows_match_on_postgres(knowledge_harness):
     assert all(source == "source-golden" for source, _canonical in counts)
 
 
+def test_source_canonical_rows_do_not_buffer_the_whole_result_on_postgres(
+    knowledge_harness,
+):
+    """PG 侧这条查询必须走服务端流式游标,不能退回 `db.execute()`(codex 第 14 轮 P1)。
+
+    背景:自第 13 轮原子发布起,这条查询返回的是**逐对象**一行(去掉了 GROUP BY,
+    因为板块那一刻还没落库),行数 = 可用对象数,生产约 878 万。psycopg3 的普通游标在
+    `execute()` 返回时就把整个结果集收进了 libpq 的 `PGresult` —— 那是 C 层缓冲,
+    `tracemalloc` 看不见,只有 RSS 能。
+
+    本机真实 PG 库(`silicon_notebook_local_pg16_live`,93,127 行)独立子进程实测:
+
+        execute(客户端缓冲)   RSS +12.3 / +12.3 MB   ≈132 B/行
+        cursor().stream()     RSS + 0.4 / + 0.2 MB   与行数无关
+
+    ⚠ **这条守卫的强度边界,如实写明**:它断言的是「返回的不是那个已知会全量缓冲的
+    游标对象」,**不是**「内存有界」。真正的内存证据在上面那组实测里(以及 PG 侧
+    `source_canonical_rows` 的 docstring),不在这条断言里。之所以不写成内存断言:
+    合成夹具只有十几行,任何 RSS 阈值都会被测试进程自身的噪声淹没,那样的守卫看着更强、
+    实际是空的 —— 本 PR 已经因为这种守卫吃过 19 次亏。
+    这条能挡住的是**退回 `db.execute()`** 这个具体回归形态,那也正是第 14 轮踩到的那个。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    import psycopg
+
+    with knowledge_harness.database.connect() as connection:
+        rows = unified.source_canonical_rows(connection, ANALYSIS_NB)
+        assert not isinstance(rows, psycopg.Cursor), (
+            "source_canonical_rows 退回了 psycopg 的普通游标 —— 它在 execute() 返回时"
+            "就把整个结果集收进了 libpq 缓冲(生产 878 万行)。必须走 cursor().stream()。"
+        )
+        # 真的能取到数据,不是拿一个空生成器换绿。
+        assert sum(1 for _ in rows) == 14
+
+
 def test_source_counts_drop_hidden_sources_but_keep_orphans_on_postgres(
     knowledge_harness,
 ):

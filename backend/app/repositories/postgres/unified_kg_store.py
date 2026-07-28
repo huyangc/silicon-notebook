@@ -1480,9 +1480,30 @@ class UnifiedKgStore:
         `EXPLAIN` 当生产计划的证据是自欺);`sources` 那侧走主键。
         NULL 语义与 SQLite 一致 —— 在 NULL 上翻车的是 `NOT IN`(孤儿的 `s.source_type`
         为 NULL 时整个谓词变 NULL、行被静默滤掉),`NOT EXISTS` 不会。
+
+        ⚠ **必须走 `cursor().stream()`,不能用 `db.execute()`**(codex 第 14 轮 P1)。
+        psycopg3 的普通游标在 `execute()` 返回时就把**整个结果集**收进了 libpq 的
+        `PGresult`——那是 C 层缓冲,`tracemalloc` 看不见它,只有 RSS 能。而本方法自第 13 轮
+        原子发布起返回的是**逐对象**一行(去掉了 GROUP BY,因为板块那一刻还没落库),
+        行数 = 可用对象数。
+
+        本机真实 PG 库(`silicon_notebook_local_pg16_live`,93,127 行)独立子进程实测,
+        每形态跑两遍:
+
+            execute(客户端缓冲)   RSS +12.3 / +12.3 MB   ≈132 B/行
+            cursor().stream()     RSS + 0.4 / + 0.2 MB   与行数无关
+
+        ⚠ 那 132 B/行**不能**线性外推成生产结论(生产 878 万对象,是这里的 ~94 倍;
+        本机也没有生产规模的 PG 库)。它证明的是**形态**:`execute` 随行数线性增长、
+        `stream` 不增长。这正是「有界内存」在 PG 侧唯一站得住的形态。
+
+        `stream()` 用 libpq 的单行模式,不需要 named cursor、不需要显式事务;
+        游标从连接继承 `dict_row`,所以调用方按键取值的写法两侧一致。
+        代价:整个迭代期间占住这条连接(调用方本就把循环包在一个 `_connect()` 里),
+        且不能在 pipeline 模式下用(本仓库不用 pipeline)。
         """
         placeholders = ",".join("%s" for _ in USABLE_STATUSES)
-        return db.execute(
+        return db.cursor().stream(
             f"""
             SELECT o.source_id AS source_id,
                    COALESCE(c.canonical_id, o.id) AS canonical_id
