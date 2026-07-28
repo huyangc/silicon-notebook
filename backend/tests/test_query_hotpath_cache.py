@@ -564,15 +564,15 @@ def _seed_centrality_graph(repo, n_extra_chain=0):
          "evidence": [{"file": "f1", "char_start": 0, "char_end": 10,
                        "line_start": 1, "line_end": 1, "quote": "alpha defines beta"}]},
         {"source_local_id": "F1", "target_local_id": "P1", "edge_type": "used_in", "evidence": []},
-        {"source_local_id": "C1", "target_local_id": "P1", "edge_type": "used_in", "evidence": []},
+        {"source_local_id": "C1", "target_local_id": "P1", "edge_type": "depends_on", "evidence": []},
     ]
     for i in range(n_extra_chain):
-        objects.append({"local_id": f"X{i}", "object_type": "Concept",
+        objects.append({"local_id": f"X{i}", "object_type": "Procedure",
                         "payload": {"name": f"chain{i}"}, "evidence": []})
     prev = "P1"
     for i in range(n_extra_chain):
         relations.append({"source_local_id": prev, "target_local_id": f"X{i}",
-                          "edge_type": "supports", "evidence": []})
+                          "edge_type": "precedes", "evidence": []})
         prev = f"X{i}"
     repo.store_kg(nb.id, None, objects, relations)
     return nb.id
@@ -615,7 +615,7 @@ def test_edge_centrality_map_recomputes_after_kg_mutation(repo):
                    {"local_id": "C3b", "object_type": "Concept",
                     "payload": {"name": "Concept Extra B"}, "evidence": []}],
                   [{"source_local_id": "C3a", "target_local_id": "C3b",
-                    "edge_type": "supports", "evidence": []}])
+                    "edge_type": "kind_of", "evidence": []}])
     after = repo._edge_centrality_map(nb_id)
     assert after != before
     assert len(after) == 4  # 3 original + 1 new edge
@@ -917,7 +917,10 @@ def test_edge_centrality_bounded_load_equals_old_post_hoc_cut(repo, monkeypatch)
     top_ids = set(n for n, _ in sorted(
         degree.items(), key=lambda kv: (-kv[1], kv[0]))[:max_nodes])
 
-    node_dict = {oid: {"type": "", "name": ""} for oid in top_ids}
+    node_dict = {
+        oid: {"type": node_types[oid], "name": node_names[oid]}
+        for oid in top_ids
+    }
     bounded_rels = [r for r in rels
                     if r["source_object_id"] in top_ids and r["target_object_id"] in top_ids]
     G, idx_to_oid, oid_to_idx = build_rx_graph(node_dict, bounded_rels)

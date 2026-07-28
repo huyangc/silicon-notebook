@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional, Sequence, Set
+from typing import Dict, FrozenSet, List, Literal, Optional, Sequence, Set
 
 from app.models.common import Evidence
 
@@ -75,6 +75,7 @@ class RetrievedRelation:
     relevance: float = 0.0
     notebook_id: str = ""
     tier: str = "personal"
+    review_status: str = "pending"
 
 
 # KG node-type authority weights: claim/formula are primary knowledge carriers;
@@ -460,6 +461,7 @@ def score_relations(
             evidence=rel.get("evidence", []),
             score=relevance * rank_mult,
             relevance=relevance,
+            review_status=str(rel.get("review_status") or "pending"),
         ))
     scored.sort(key=lambda it: it.score, reverse=True)
     return scored
@@ -598,6 +600,154 @@ def score_elements(
     return scored[:limit]
 
 
+@dataclass(frozen=True)
+class RetrievalSupport:
+    """One producer's immutable support for a retrieved chunk.
+
+    ``score`` belongs to that producer and never replaces the chunk's fused
+    relevance.  ``support_id`` is a real object/relation/chunk id when one is
+    known; PPR intentionally leaves it empty rather than inventing a relation.
+    """
+
+    origin: Literal["semantic", "lexical", "kg_source", "ppr", "relation"]
+    support_kind: Literal["chunk", "object", "relation", "ppr"]
+    support_id: str = ""
+    score: Optional[float] = None
+    review_status_snapshot: str = ""
+
+
+_REVIEW_STRICTNESS = {"": 0, "verified": 1, "pending": 2, "rejected": 3}
+
+
+def merge_retrieval_supports(*groups: Sequence[RetrievalSupport]) -> tuple[RetrievalSupport, ...]:
+    merged: Dict[tuple[str, str, str], RetrievalSupport] = {}
+    order: List[tuple[str, str, str]] = []
+    for group in groups:
+        for support in group:
+            key = (support.origin, support.support_kind, support.support_id)
+            current = merged.get(key)
+            if current is None:
+                merged[key] = support
+                order.append(key)
+                continue
+            scores = [value for value in (current.score, support.score) if value is not None]
+            review = max(
+                (current.review_status_snapshot, support.review_status_snapshot),
+                key=lambda value: _REVIEW_STRICTNESS.get(value, 2),
+            )
+            merged[key] = RetrievalSupport(
+                origin=current.origin,
+                support_kind=current.support_kind,
+                support_id=current.support_id,
+                score=max(scores) if scores else None,
+                review_status_snapshot=review,
+            )
+    return tuple(merged[key] for key in order)
+
+
+def add_chunk_supports(
+    chunks: Sequence["RetrievedChunk"],
+    supports_by_chunk: Dict[str, Sequence[RetrievalSupport]],
+) -> List["RetrievedChunk"]:
+    for chunk in chunks:
+        chunk.retrieval_supports = merge_retrieval_supports(
+            chunk.retrieval_supports, supports_by_chunk.get(chunk.chunk_id, ())
+        )
+    return list(chunks)
+
+
+def is_graph_only_chunk(chunk: "RetrievedChunk") -> bool:
+    origins = {support.origin for support in chunk.retrieval_supports}
+    return bool(origins & {"kg_source", "ppr", "relation"}) and not bool(
+        origins & {"semantic", "lexical"}
+    )
+
+
+def select_with_graph_reserve(
+    ranked: Sequence["RetrievedChunk"],
+    max_tokens: int,
+    *,
+    reserve: int = 1,
+    min_graph_score: float = RELEVANCE_FLOOR,
+) -> List["RetrievedChunk"]:
+    """Token truncation with a bounded reserve for genuinely graph-only hits.
+
+    The historical global-first oversize rule is preserved exactly: if the
+    highest-ranked chunk alone exceeds the budget it remains the sole result.
+    Reserve candidates may evict only lower-ranked direct candidates; they do
+    not create a second oversize exception.
+    """
+    ranked = list(ranked)
+    selected = truncate_by_tokens(ranked, lambda chunk: chunk.text, max_tokens)
+    if reserve <= 0 or not ranked or not selected:
+        return selected
+    first_tokens = est_tokens(selected[0].text)
+    if first_tokens > max_tokens:
+        return selected
+    already = sum(1 for chunk in selected if is_graph_only_chunk(chunk))
+    need = max(0, reserve - already)
+    if need == 0:
+        return selected
+
+    selected_ids = {chunk.chunk_id for chunk in selected}
+    eligible = []
+    for position, chunk in enumerate(ranked):
+        if (
+            chunk.chunk_id in selected_ids
+            or not is_graph_only_chunk(chunk)
+            or not chunk.element_ids
+        ):
+            continue
+        if any(
+            support.origin == "relation"
+            and support.review_status_snapshot == "rejected"
+            for support in chunk.retrieval_supports
+        ):
+            continue
+        graph_supports = [
+            support for support in chunk.retrieval_supports
+            if support.origin in {"kg_source", "ppr", "relation"}
+            and support.review_status_snapshot != "rejected"
+        ]
+        best = max(
+            (support.score for support in graph_supports if support.score is not None),
+            default=chunk.relevance,
+        )
+        if graph_supports and best >= min_graph_score:
+            eligible.append((position, chunk))
+
+    positions = {chunk.chunk_id: index for index, chunk in enumerate(ranked)}
+    inserted = 0
+    for _position, candidate in eligible:
+        if inserted >= need:
+            break
+        candidate_tokens = est_tokens(candidate.text)
+        if candidate_tokens > max_tokens:
+            continue
+        trial = list(selected)
+        used = sum(est_tokens(chunk.text) for chunk in trial)
+        removable = sorted(
+            (
+                chunk for chunk in trial[1:]
+                if not is_graph_only_chunk(chunk)
+            ),
+            key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)),
+            reverse=True,
+        )
+        while used + candidate_tokens > max_tokens and removable:
+            victim = removable.pop(0)
+            trial.remove(victim)
+            used -= est_tokens(victim.text)
+        if used + candidate_tokens > max_tokens:
+            continue
+        trial.append(candidate)
+        trial.sort(key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)))
+        selected = trial
+        selected_ids.add(candidate.chunk_id)
+        inserted += 1
+    return selected
+
+
 @dataclass
 class RetrievedChunk:
     chunk_id: str
@@ -615,6 +765,7 @@ class RetrievedChunk:
     # single-notebook chunk path (_retrieve_chunks, _kg_source_chunks, etc.)
     # leaves this unset and callers fall back to the ask's own notebook_id.
     notebook_id: str = ""
+    retrieval_supports: tuple[RetrievalSupport, ...] = field(default=(), compare=False)
 
     @property
     def object_id(self) -> str:

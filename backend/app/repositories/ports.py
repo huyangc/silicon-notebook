@@ -717,6 +717,8 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def embedding_rows_for_objects(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
     @staticmethod
+    def fts_search(db: object, notebook_id: str, q: str, k: int = 30) -> list[dict]: ...
+    @staticmethod
     def incremental_object_rows(db: object, notebook_id: str, source_id: str, object_type: str, *, exclude_source: bool = False) -> list[Any]: ...
     @staticmethod
     def insert_kg_fts_rows(connection: object, rows: object) -> None: ...
@@ -726,6 +728,58 @@ class KnowledgeStorePort(Protocol):
     def insert_object_source_rows(connection: object, rows: object) -> None: ...
     @staticmethod
     def insert_relation_chunk(connection: object, rows: object) -> None: ...
+    @staticmethod
+    def completion_generation_is_current(
+        connection: object, notebook_id: str, source_id: str, run_id: str
+    ) -> bool: ...
+    @staticmethod
+    def completion_validate_scope(
+        connection: object, notebook_id: str, source_id: str, run_id: str,
+        object_ids: Sequence[str], element_ids: Sequence[str]
+    ) -> bool: ...
+    @staticmethod
+    def completion_existing_keys(
+        connection: object, notebook_id: str, object_ids: Sequence[str]
+    ) -> set[tuple[str, str, str]]: ...
+    @staticmethod
+    def completion_page(
+        connection: object, notebook_id: str, source_id: str, run_id: str,
+        mode: str, schema_version: int, reasoning_edge_types: Sequence[str],
+        edge_contract_rows: Sequence[tuple[str, str, str]],
+        known_edge_types: Sequence[str], core_node_types: Sequence[str],
+        limit: int, now: str
+    ) -> dict: ...
+    @staticmethod
+    def completion_candidate_rows(
+        connection: object, notebook_id: str, source_id: str,
+        object_ids: Sequence[str]
+    ) -> list[Any]: ...
+    @staticmethod
+    def completion_element_rows(
+        connection: object, source_id: str, element_ids: Sequence[str]
+    ) -> list[Any]: ...
+    @staticmethod
+    def completion_pending_states(
+        connection: object, after_source_id: str, after_mode: str, limit: int
+    ) -> list[Any]: ...
+    @staticmethod
+    def completion_mark_state_stale(
+        connection: object, notebook_id: str, source_id: str,
+        run_id: str, mode: str, now: str
+    ) -> bool: ...
+    @staticmethod
+    def completion_transition_mode_state(
+        connection: object, notebook_id: str, source_id: str, run_id: str,
+        old_mode: str, new_mode: str, schema_version: int, now: str
+    ) -> bool: ...
+    @staticmethod
+    def completion_advance_state(
+        connection: object, notebook_id: str, source_id: str, run_id: str,
+        mode: str, schema_version: int, expected_cursor: str,
+        next_cursor: str, status: str, now: str
+    ) -> bool: ...
+    @staticmethod
+    def insert_completion_relations(connection: object, rows: object) -> int: ...
     @staticmethod
     def neighbor_relation_rows(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
     @staticmethod

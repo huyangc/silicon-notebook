@@ -336,7 +336,33 @@ SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storag
 RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
 REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社区兄弟）保底席位（默认 3）
 REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
+CHUNK_GRAPH_RESERVE        # 为已过相关度门槛的纯图路径 chunk 预留席位（默认 0；评测后可设 1）
 ```
+
+**有界 KG 关系补全：**这是默认严格关闭的部署实验。它按来源代次绑定的持久
+`(source_id,id)` keyset 水位逐页推进，每页只做索引化关系检查和有界的同源 FTS/ANN 候选，
+绝不全扫整本书或整个 notebook。`shadow` 仅记录 proposal / verifier 聚合统计而不写库；`write`
+把通过双阶段校验的关系以 `pending` 写入。两个启用模式仍必须命中 notebook allowlist 或稳定哈希灰度。每次调用只 hydrate 当前有界页中受限的证据 ID；pending 水位会另行重新入队，进程重启后由启动恢复再次调度当前来源代次。水位按模式隔离：两个启用模式互切时会在同一事务内先发布新模式的可恢复游标，再把旧 pending 游标标为 `stale`；切到 `off` 时只标旧游标且不排替代任务。
+
+```text
+KG_RELATION_COMPLETION_MODE              # off（默认）| shadow | write
+KG_RELATION_COMPLETION_NOTEBOOK_ALLOWLIST # 逗号分隔 notebook id；* 匹配全部
+KG_RELATION_COMPLETION_ROLLOUT_PERCENT    # 未命中 allowlist 的稳定灰度（默认 0）
+KG_RELATION_COMPLETION_MAX_OBJECTS        # 每个 keyset 页的 anchor 上限（默认 160）
+KG_RELATION_COMPLETION_MAX_PAIRS          # 下发的有向候选对上限（默认 120）
+KG_RELATION_COMPLETION_SECTION_QUOTA      # 每个来源 section 的候选上限（默认 24）
+KG_RELATION_COMPLETION_BATCH_PAIRS        # 每个 proposer/verifier batch 的候选数（默认 24）
+KG_RELATION_COMPLETION_MAX_BATCHES        # 每轮最多模型 batch 数（默认 4）
+KG_RELATION_COMPLETION_EXCERPT_CHARS      # 每个候选证据摘录字符上限（默认 800）
+KG_RELATION_COMPLETION_MAX_PAGES_PER_RUN  # 每次调用最多 keyset 页数（默认 4）
+KG_RELATION_COMPLETION_NEIGHBOR_TOP_K      # 每个 anchor 的 FTS/ANN 邻居数（默认 8）
+KG_RELATION_COMPLETION_CANDIDATE_OVERFETCH # 候选 ID hydration 总上限（默认 64）
+KG_RELATION_COMPLETION_BATCH_CHARS         # 每个模型 batch 的序列化字符上限（默认 48000）
+```
+
+该阶段复用已有 `kg_extract` proposer 与 `kg_refine` verifier workload。最后一个短事务会复核
+source/run 代次仍是当前值，并确认所有对象与证据元素仍归属该来源，然后保存 verifier 看到的同一段服务端 excerpt，因此 reparse/delete 竞态写入零行。上述数值护栏均必须为正数（batch 字符至少 512）；非法配置无法启动，运行时零值也会 fail-closed 且不推进水位。上线应先用显式 allowlist + `shadow`，观察 `kg_relation_completion` 聚合事件，再只把选中的
+notebook 切到 `write`；聚合事件名为 `kg_relation_completion_done`。
 
 **可伸缩检索索引：** 规模大到不可拷贝的 notebook（与 notebook 拷贝/分享判定同一阈值——
 字节数或 chunk+node 行数超过配置上限）会自动构建/刷新检索索引，无需手动点按钮或跑 CLI：

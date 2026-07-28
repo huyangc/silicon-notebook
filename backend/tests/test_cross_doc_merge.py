@@ -127,7 +127,7 @@ def test_answer_context_shows_base_relations(repo):
          "payload": {"name": "cascode", "section_path": "1"}, "evidence": []},
         {"local_id": "Y", "object_type": "concept",
          "payload": {"name": "gain", "section_path": "1"}, "evidence": []},
-    ], [{"source_local_id": "X", "target_local_id": "Y", "edge_type": "supports", "evidence": []}])
+        ], [{"source_local_id": "X", "target_local_id": "Y", "edge_type": "depends_on", "evidence": []}])
     repo.rebuild_unified_kg(base.id)
     per = repo.create_notebook(NotebookCreate(name="per"))
     repo.replace_notebook_bases(per.id, [base.id], "user-local")
@@ -138,7 +138,7 @@ def test_answer_context_shows_base_relations(repo):
                                payload={"name": r["nm"]}, evidence=[], notebook_id=base.id)
             for r in rows]
     block, id_map = repo._answer_context(per.id, hits)   # active=per, 命中全在 base
-    assert "relations:" in block and "supports" in block   # 旧行为:base 边不可见
+    assert "relations:" in block and "depends_on" in block   # 旧行为:base 边不可见
 
 
 def test_unified_graph_object_level_no_dangling_after_merge(repo):

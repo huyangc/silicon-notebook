@@ -2272,6 +2272,45 @@ MIGRATION_MANIFEST[(32, 33)] = {
     "views": {},
 }
 
+# v34: resumable relation completion keeps a generation-bound keyset cursor
+# and pages source objects through the matching covering index.
+RELATION_COMPLETION_TABLES = {
+    "kg_relation_completion_state": """CREATE TABLE kg_relation_completion_state (
+                  notebook_id TEXT NOT NULL,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  mode TEXT NOT NULL,
+                  next_object_id TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  schema_version INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(source_id, source_generation, mode)
+                )""",
+}
+RELATION_COMPLETION_INDEXES = {
+    "idx_knowledge_objects_source_id":
+        """CREATE INDEX idx_knowledge_objects_source_id
+                  ON knowledge_objects(source_id, id)""",
+    "idx_kg_relation_completion_state_nb_status":
+        """CREATE INDEX idx_kg_relation_completion_state_nb_status
+                  ON kg_relation_completion_state(notebook_id, status, updated_at)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 34, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **RELATION_COMPLETION_TABLES},
+        "indexes": {**manifest["indexes"], **RELATION_COMPLETION_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(33, 34)] = {
+    "tables": RELATION_COMPLETION_TABLES,
+    "columns": {},
+    "indexes": RELATION_COMPLETION_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

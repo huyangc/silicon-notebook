@@ -154,7 +154,7 @@ def _seed_graph(repo):
          "payload": {"name": "布局布线步骤", "section_path": "2"}, "evidence": []},
     ], [
         {"source_local_id": "C1", "target_local_id": "P1",
-         "edge_type": "relates", "evidence": []},
+         "edge_type": "depends_on", "evidence": []},
     ])
     return nb
 

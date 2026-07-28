@@ -211,6 +211,14 @@ kg_rebuild_checkpoint.stage|TEXT|1|None|3
 kg_rebuild_checkpoint.item_key|TEXT|1|None|4
 kg_rebuild_checkpoint.payload|TEXT|1|None|0
 kg_rebuild_checkpoint.created_at|TEXT|1|None|0
+kg_relation_completion_state.notebook_id|TEXT|1|None|0
+kg_relation_completion_state.source_id|TEXT|1|None|1
+kg_relation_completion_state.source_generation|TEXT|1|None|2
+kg_relation_completion_state.mode|TEXT|1|None|3
+kg_relation_completion_state.next_object_id|TEXT|1|''|0
+kg_relation_completion_state.status|TEXT|1|'pending'|0
+kg_relation_completion_state.schema_version|INTEGER|1|None|0
+kg_relation_completion_state.updated_at|TEXT|1|None|0
 knowhow_cell_code.id|TEXT|0|None|1
 knowhow_cell_code.row_id|TEXT|1|None|0
 knowhow_cell_code.column_id|TEXT|1|None|0
@@ -570,6 +578,7 @@ idx_kg_build_jobs_nb_created
 idx_kg_build_jobs_one_running
 idx_kg_canonical_scratch_nb_run_seed
 idx_kg_cluster_scratch_nb_run
+idx_kg_relation_completion_state_nb_status
 idx_knowhow_cell_code_row
 idx_knowhow_cells_column_normalized_anchor_row
 idx_knowhow_cells_row
@@ -585,6 +594,7 @@ idx_knowledge_objects_nb_type_created
 idx_knowledge_objects_nb_type_status
 idx_knowledge_objects_nb_updated
 idx_knowledge_objects_source
+idx_knowledge_objects_source_id
 idx_knowledge_relations_nb_created
 idx_knowledge_relations_nb_review
 idx_knowledge_relations_nb_source

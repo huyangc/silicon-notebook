@@ -69,8 +69,8 @@ def test_retrieve_relations_scored_keyword_path(repo):
         {"local_id": "c", "object_type": "concept", "payload": {"name": "Current Mirror"}, "evidence": []},
     ]
     relations = [
-        {"source_local_id": "a", "target_local_id": "b", "edge_type": "derived_from", "evidence": []},
-        {"source_local_id": "c", "target_local_id": "b", "edge_type": "about", "evidence": []},
+        {"source_local_id": "a", "target_local_id": "b", "edge_type": "kind_of", "evidence": []},
+        {"source_local_id": "c", "target_local_id": "b", "edge_type": "part_of", "evidence": []},
     ]
     repo.store_kg(nb.id, None, objects, relations)
     hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "regulated cascode")
@@ -111,12 +111,12 @@ def test_federated_retrieve_relations_spans_base(repo):
 # 场景，test_mix_overlay.py 的 fixture 就是 embedder_configured=False 但手动
 # 挂了 FakeEmbedder，relation_embeddings 永远不会被填，只能靠关键词命中)。
 
-def _mk_relation(nb_local_ids, src, tgt, edge_type="about"):
+def _mk_relation(nb_local_ids, src, tgt, edge_type="kind_of"):
     return {"source_local_id": src, "target_local_id": tgt, "edge_type": edge_type, "evidence": []}
 
 
 def _seed_many_relations(repo, nb_id, n_pairs):
-    """n_pairs 个 concept 对，每对一条 edge_type='about' 关系，payload 名字各异
+    """n_pairs 个 concept 对，每对一条合法 kind_of 关系，payload 名字各异
     以便关键词/语义都有可区分信号。"""
     objects = []
     relations = []
@@ -208,7 +208,7 @@ def test_retrieve_relations_scored_no_embedder_keeps_keyword_path(repo_no_embedd
         {"local_id": "a", "object_type": "concept", "payload": {"name": "Regulated Cascode"}, "evidence": []},
         {"local_id": "b", "object_type": "concept", "payload": {"name": "Cascode"}, "evidence": []},
     ]
-    relations = [{"source_local_id": "a", "target_local_id": "b", "edge_type": "derived_from", "evidence": []}]
+    relations = [{"source_local_id": "a", "target_local_id": "b", "edge_type": "kind_of", "evidence": []}]
     repo.store_kg(nb.id, None, objects, relations)
     with repo._connect() as db:
         rel_ids, _ = repo.retrieval.candidates._vector_matrix(db, nb.id, "relation_embeddings", "relation_id")
@@ -278,6 +278,20 @@ def test_relations_with_names_relation_ids_chunks_large_lists(repo, monkeypatch)
         bounded = repo.retrieval.candidates._relations_with_names(db, nb.id, relation_ids=ids)
     assert {r["id"] for r in bounded} == set(ids)
     assert len(bounded) == len(ids)
+
+
+def test_relations_with_names_excludes_historical_invalid_pairs(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": "a", "object_type": "concept", "payload": {"name": "A"}, "evidence": []},
+        {"local_id": "b", "object_type": "concept", "payload": {"name": "B"}, "evidence": []},
+    ], [
+        {"source_local_id": "a", "target_local_id": "b", "edge_type": "kind_of", "evidence": []},
+        {"source_local_id": "a", "target_local_id": "b", "edge_type": "about", "evidence": []},
+    ])
+    with repo._connect() as db:
+        rows = repo.retrieval.candidates._relations_with_names(db, nb.id)
+    assert [row["edge_type"] for row in rows] == ["kind_of"]
 
 
 def test_mix_retrieve_overlay_equivalent_with_relations(repo):

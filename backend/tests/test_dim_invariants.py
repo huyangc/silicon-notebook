@@ -22,6 +22,7 @@ _ALLOWED_DECODE_FUNCS = {
     # 四旁路(相似度,必接 truncate_vec):
     "incremental_fuse_source", "_tier2_bridge_candidates_ann",
     "resolve_notebook_conflicts", "_stream_seed_reps", "_gather_elements",
+    "complete_relations_for_source",
     # 死代码(无调用者;复活须接 truncate_vec —— 见 docstring 标注):
     "_knowledge_vectors",
 }
@@ -29,6 +30,7 @@ _ALLOWED_DECODE_FUNCS = {
 _MUST_TRUNCATE = {
     "incremental_fuse_source", "_tier2_bridge_candidates_ann",
     "resolve_notebook_conflicts", "_stream_seed_reps", "_gather_elements",
+    "complete_relations_for_source",
 }
 
 

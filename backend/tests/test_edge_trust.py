@@ -76,12 +76,30 @@ def test_type_validity_used_in_wrong():
     assert type_validity_score(_rel("used_in", "Claim", "Procedure"), node_types) == 0.0
 
 
-def test_type_validity_unconstrained_edge_passes():
-    """depends_on / precedes have no type constraint → always 1.0."""
+def test_type_validity_reasoning_edges_follow_exact_matrix():
     from app.services.kg.edge_trust import type_validity_score
     node_types = {"src": "Concept", "tgt": "Claim"}
     assert type_validity_score(_rel("depends_on", "Concept", "Claim"), node_types) == 1.0
-    assert type_validity_score(_rel("precedes", "Formula", "Claim"), node_types) == 1.0
+    assert type_validity_score(_rel("precedes", "Formula", "Claim"), node_types) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("edge_type", "source_type", "target_type"),
+    [
+        ("supports", "Concept", "Claim"),
+        ("derived_from", "Claim", "Formula"),
+        ("contrasts_with", "Claim", "Formula"),
+        ("used_in", "Concept", "Procedure"),
+        ("precedes", "Procedure", "Procedure"),
+    ],
+)
+def test_prompt_legal_pairs_are_trust_legal(edge_type, source_type, target_type):
+    from app.services.kg.edge_trust import type_validity_score
+
+    node_types = {"src": source_type, "tgt": target_type}
+    assert type_validity_score(
+        _rel(edge_type, source_type, target_type), node_types
+    ) == 1.0
 
 
 def test_type_validity_unknown_edge_type_fails():

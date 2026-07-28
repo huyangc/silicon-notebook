@@ -251,8 +251,9 @@ def test_retrieve_relations_ann_matches_full_matrix_oracle(repo):
     objs = [{"local_id": f"o{i}", "object_type": "concept",
              "payload": {"name": f"entity {i}", "section_path": ""}, "evidence": []}
             for i in range(6)]
+    edge_types = ["part_of", "composed_of", "kind_of", "contrasts_with", "depends_on"]
     rels = [{"source_local_id": f"o{i}", "target_local_id": f"o{i+1}",
-             "edge_type": f"relates_{i}", "evidence": []} for i in range(5)]
+             "edge_type": edge_types[i], "evidence": []} for i in range(5)]
     repo.store_kg(nb.id, None, objs, rels)
     repo.rebuild_unified_kg(nb.id)
     rel_ids = _backfill_relation_vector(repo, nb.id)
@@ -261,11 +262,11 @@ def test_retrieve_relations_ann_matches_full_matrix_oracle(repo):
     from app.services.vector_index import top_k_sims
     with repo._connect() as db:
         ids, mat = repo._vector_matrix(db, nb.id, "relation_embeddings", "relation_id")
-    qv = repo._embed_query("relates_2")
+    qv = repo._embed_query("kind_of")
     oracle = dict(top_k_sims(qv, ids, mat, len(ids)))
     oracle_top = max(oracle.items(), key=lambda kv: kv[1])[0]
 
-    hits = repo._retrieve_relations_scored(nb.id, "relates_2")
+    hits = repo._retrieve_relations_scored(nb.id, "kind_of")
     assert hits
     top_hit_ids = {h.relation_id for h in hits[:3]}
     assert oracle_top in top_hit_ids or len(rel_ids) <= 3
@@ -294,9 +295,9 @@ def test_relation_ann_unions_bounded_lexical_endpoint_candidates(repo, monkeypat
          "payload": {"name": "timing sink", "section_path": ""}, "evidence": []},
     ], [
         {"source_local_id": "a", "target_local_id": "b",
-         "edge_type": "supports", "evidence": []},
+         "edge_type": "kind_of", "evidence": []},
         {"source_local_id": "c", "target_local_id": "d",
-         "edge_type": "drives", "evidence": []},
+         "edge_type": "part_of", "evidence": []},
     ])
     repo.rebuild_unified_kg(nb.id)
     _backfill_relation_vector(repo, nb.id)
@@ -446,13 +447,13 @@ def test_retrieve_relations_ann_plus_delta_finds_post_watermark_relation(repo, m
         db.execute(
             "INSERT INTO knowledge_relations (id,notebook_id,source_object_id,target_object_id,"
             "edge_type,evidence,source_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("rel-delta", nb.id, "c", "d", "bandgap_uses_reference", "[]", "s2", now))
-        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["bandgap_uses_reference"])[0]
+            ("rel-delta", nb.id, "c", "d", "kind_of", "[]", "s2", now))
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["kind_of"])[0]
         db.execute(
             "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             ("rel-delta", nb.id, json.dumps(v), now))
 
-    hits = repo._retrieve_relations_scored(nb.id, "bandgap_uses_reference")
+    hits = repo._retrieve_relations_scored(nb.id, "bandgap reference")
     assert any(h.relation_id == "rel-delta" for h in hits)
 
 

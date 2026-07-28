@@ -33,6 +33,7 @@ NOTEBOOK_SCOPED_TABLES = [
     "concept_clusters", "concept_comentions", "concept_merge_candidates",
     "canonical_relations", "communities", "community_members", "mention_edges",
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
+    "kg_relation_completion_state",
     "kg_cluster_scratch", "kg_canonical_scratch", "kg_conflict_candidates",
     "merge_review_jobs",
     "promotion_candidates", "derived_rule_candidates", "extraction_runs",
@@ -95,7 +96,10 @@ SKIP_SECONDARY_TABLES = [
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)
-KG_STATE_TABLES = ["kg_rebuild_checkpoint", "unified_kg_state", "kg_cluster_scratch"]
+KG_STATE_TABLES = [
+    "kg_rebuild_checkpoint", "kg_relation_completion_state",
+    "unified_kg_state", "kg_cluster_scratch",
+]
 
 FTS_SHADOW_SUFFIXES = ("_data", "_idx", "_docsize", "_config", "_content")
 

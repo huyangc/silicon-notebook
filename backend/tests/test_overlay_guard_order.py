@@ -78,7 +78,7 @@ def test_large_notebook_skips_seed_retrieval_entirely(repo, monkeypatch):
 
     result = repo._chunk_kg_overlay(nb.id, "cascode output resistance", "", id_offset=5)
 
-    assert result == ("", {}, [])
+    assert result == ("", {}, [], {})
     assert node_calls["n"] == 0, "large notebook must NOT call federated_retrieve"
     assert rel_calls["n"] == 0, "large notebook must NOT call federated_retrieve_relations"
     refusal = [e for e in events if e.get("kind") == "graph_walk_refused"]
@@ -98,13 +98,15 @@ def test_small_notebook_keeps_legacy_seed_retrieval(repo, monkeypatch):
     rel_calls = _spy(repo, monkeypatch, "federated_retrieve_relations")
     events = _capture_events(repo, monkeypatch)
 
-    block, id_map, hits = repo._chunk_kg_overlay(nb.id, "cascode output resistance", "", id_offset=5)
+    block, id_map, hits, supports = repo._chunk_kg_overlay(
+        nb.id, "cascode output resistance", "", id_offset=5
+    )
 
     assert node_calls["n"] == 1
     assert rel_calls["n"] == 1
     assert isinstance(block, str) and id_map
     assert all(hasattr(h, "relevance") for h in hits)
+    assert isinstance(supports, dict)
     refusal = [e for e in events if e.get("kind") == "graph_walk_refused"]
     assert len(refusal) == 0
-
 

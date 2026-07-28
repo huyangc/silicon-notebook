@@ -390,7 +390,46 @@ SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local
 RETRIEVAL_TOP_N         # reasoning/report synthesis evidence-budget floor (default 20)
 REASONING_TOP_N_PER_QUERY  # adaptive budget: seats reserved per aspect/sub-query (default 3)
 REASONING_TOP_N_CAP        # adaptive budget cap; comparison Qs scale by #aspects (default 36)
+CHUNK_GRAPH_RESERVE        # seats for graph-only chunks already above the relevance floor (default 0; set 1 after evaluation)
 ```
+
+**Bounded KG relation completion:** this post-extraction stage is a deployment
+experiment and is strictly disabled by default. It advances persistent, generation-bound
+`(source_id,id)` keyset pages and uses only indexed per-candidate relation checks plus
+bounded same-source FTS/ANN candidates; it never full-scans the notebook or book.
+`shadow` records aggregate proposal/verification statistics but writes nothing. `write`
+inserts verified relations as `pending`. Both active modes still require the notebook
+allowlist or stable hash rollout gate. Each invocation hydrates only the bounded page's
+capped evidence IDs. A pending watermark re-enqueues as another bounded job; after a
+process restart, startup schedules current pending source generations again.
+Watermarks are mode-specific: changing between active modes atomically publishes
+the new recoverable cursor before marking the old pending cursor `stale`; switching
+to `off` marks the old cursor stale and schedules no replacement work.
+
+```text
+KG_RELATION_COMPLETION_MODE              # off (default) | shadow | write
+KG_RELATION_COMPLETION_NOTEBOOK_ALLOWLIST # comma-separated notebook ids; * matches all
+KG_RELATION_COMPLETION_ROLLOUT_PERCENT    # stable rollout for non-allowlisted notebooks (default 0)
+KG_RELATION_COMPLETION_MAX_OBJECTS        # anchors per keyset page (default 160)
+KG_RELATION_COMPLETION_MAX_PAIRS          # issued directed candidate pairs (default 120)
+KG_RELATION_COMPLETION_SECTION_QUOTA      # source-section candidate cap (default 24)
+KG_RELATION_COMPLETION_BATCH_PAIRS        # candidates per proposer/verifier batch (default 24)
+KG_RELATION_COMPLETION_MAX_BATCHES        # maximum model batches per run (default 4)
+KG_RELATION_COMPLETION_EXCERPT_CHARS      # maximum characters per candidate excerpt (default 800)
+KG_RELATION_COMPLETION_MAX_PAGES_PER_RUN  # bounded keyset pages per invocation (default 4)
+KG_RELATION_COMPLETION_NEIGHBOR_TOP_K      # FTS/ANN neighbors per anchor (default 8)
+KG_RELATION_COMPLETION_CANDIDATE_OVERFETCH # total candidate-id hydration cap (default 64)
+KG_RELATION_COMPLETION_BATCH_CHARS         # serialized candidate characters per batch (default 48000)
+```
+
+The stage reuses the existing `kg_extract` proposer and `kg_refine` verifier workload
+bindings. A final short transaction rechecks that the source/run generation is still
+current and every object/evidence element still belongs to it, then persists the exact
+server excerpt seen by the verifier; reparse/delete races therefore insert nothing.
+All numeric rails shown above must be positive (batch characters at least 512); invalid
+values fail settings validation, and runtime zero rails fail closed without moving a
+watermark. Start with an explicit allowlist in `shadow`, inspect
+`kg_relation_completion_done` aggregate events, then move selected notebooks to `write`.
 
 **Scalable-retrieval index:** notebooks large enough to be non-copyable (the same size
 threshold used to gate notebook copy/sharing — bytes or chunk+node count over the

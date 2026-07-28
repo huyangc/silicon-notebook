@@ -320,6 +320,7 @@ class IndexProjectionStore:
           kg_node_ids       : list[str]  — KG object ids (for idf / n_kg_nodes)
           membership_counts : dict[str,int] — {object_id: len(chunks)} for IDF
         """
+        from app.services.kg.edge_schema import is_queryable_edge_pair
         from app.services.kg.ppr import variant_edge_pairs, emb_synonym_edges
         import numpy as np
 
@@ -355,11 +356,17 @@ class IndexProjectionStore:
                     }
             for src_clause, src_params in clauses:
                 for r in db.execute(
-                        f"SELECT source_object_id, target_object_id FROM knowledge_relations "
+                        f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
                         f"WHERE notebook_id=? AND review_status!='rejected'{src_clause} "
                         f"ORDER BY id",
                         (notebook_id, *src_params)).fetchall():
-                    relations.append(dict(r))
+                    relation = dict(r)
+                    source = kg_nodes.get(relation["source_object_id"])
+                    target = kg_nodes.get(relation["target_object_id"])
+                    if source and target and is_queryable_edge_pair(
+                        relation["edge_type"], source["type"], target["type"]
+                    ):
+                        relations.append(relation)
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT id FROM chunks WHERE notebook_id=?{src_clause} ORDER BY rowid, id",

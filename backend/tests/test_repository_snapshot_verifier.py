@@ -70,6 +70,12 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
     return database, storage
 
 
+def _rollback_v34(db: sqlite3.Connection) -> None:
+    """Remove the v34 table/index pair before forging an older deployment."""
+    db.execute("DROP TABLE kg_relation_completion_state")
+    db.execute("DROP INDEX idx_knowledge_objects_source_id")
+
+
 def _storage_stat(storage: Path) -> list[tuple[str, int, int]]:
     return sorted(
         (
@@ -396,6 +402,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_33(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
         rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_32
@@ -460,6 +467,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_33(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
         rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_32
@@ -519,6 +527,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_33(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
         rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_32
@@ -561,6 +570,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_33(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
         rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_32
@@ -616,6 +626,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_33(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
         rollback.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_32
@@ -666,6 +677,7 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v34(rollback)
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_source_id")
         rollback.execute("DROP INDEX idx_knowledge_relations_nb_target_id")
         rollback.execute("PRAGMA user_version = 32")
@@ -674,6 +686,25 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 32
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        _rollback_v34(rollback)
+        rollback.execute("PRAGMA user_version = 33")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 33
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
 
@@ -733,6 +764,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
     upgraded.close_local()
     db = sqlite3.connect(database)
     try:
+        _rollback_v34(db)
         db.execute("DROP INDEX idx_knowledge_relations_nb_source_id")  # _migration_33
         db.execute("DROP INDEX idx_knowledge_relations_nb_target_id")  # _migration_33
         db.execute("ALTER TABLE reports DROP COLUMN understanding_json")  # _migration_32

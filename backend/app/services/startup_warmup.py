@@ -320,6 +320,25 @@ def run_startup(lease: object | None) -> object | None:
             preload_summary = preload(progress=_index_progress)
         if not _mark_lifecycle_ready(lease, repo):
             return None
+        source_ingestion = getattr(
+            getattr(repo, "_runtime", None), "source_ingestion", None
+        )
+        resume_completion = getattr(
+            source_ingestion, "resume_pending_relation_completions", None
+        )
+        if callable(resume_completion):
+            try:
+                resumed = int(resume_completion() or 0)
+            except Exception:
+                logger.exception(
+                    "startup: pending relation-completion scheduling failed"
+                )
+            else:
+                if resumed:
+                    logger.info(
+                        "startup: scheduled %d pending relation-completion source(s)",
+                        resumed,
+                    )
         logger.info(
             "startup: READY — %d notebook(s) warmed; %d scale index(es), "
             "%d ANN handle(s), %d PPR core(s) preloaded",

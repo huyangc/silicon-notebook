@@ -17,6 +17,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional, Sequence
 
+from app.services.kg.edge_schema import (
+    EDGE_SPECS,
+    TRANSITIVE_EDGE_TYPES as REGISTERED_TRANSITIVE_EDGE_TYPES,
+    is_valid_edge_pair,
+)
 
 # Only relations with a well-understood transitive interpretation are enabled
 # in v1.  The tuple shape leaves room for safe mixed-type composition rules in
@@ -29,15 +34,18 @@ TRANSITIVE_COMPOSITIONS = {
     ("part_of", "part_of"): "part_of",
 }
 TRANSITIVE_EDGE_TYPES = frozenset(result for result in TRANSITIVE_COMPOSITIONS.values())
+if TRANSITIVE_EDGE_TYPES != REGISTERED_TRANSITIVE_EDGE_TYPES:
+    raise AssertionError("follow_chain compositions drifted from edge_schema")
 
-# Database object types are lower-case.  Normalisation in ``_node_type`` also
-# accepts the title-cased type spelling used by the extraction models.
+# Compatibility view used by callers/tests. Pair legality is authoritative and
+# checked per hop below; this set alone must never validate a mixed-type edge.
 EDGE_NODE_TYPES = {
-    "derived_from": frozenset({"claim", "formula"}),
-    "kind_of": frozenset({"concept"}),
-    "prerequisite_of": frozenset({"concept", "claim"}),
-    "precedes": frozenset({"procedure", "claim", "formula"}),
-    "part_of": frozenset({"concept"}),
+    edge_type: frozenset(
+        node_type
+        for pair in EDGE_SPECS[edge_type].allowed_pairs
+        for node_type in pair
+    )
+    for edge_type in TRANSITIVE_EDGE_TYPES
 }
 
 USABLE_NODE_STATUSES = frozenset({
@@ -505,9 +513,14 @@ def compose_two_hop_paths(
                        for node in (source_node, via_node, target_node)):
                 continue
 
-            allowed_types = EDGE_NODE_TYPES[inferred_type]
-            if any(_node_type(node) not in allowed_types
-                   for node in (source_node, via_node, target_node)):
+            source_type = _node_type(source_node)
+            via_type = _node_type(via_node)
+            target_type = _node_type(target_node)
+            if not is_valid_edge_pair(first_type, source_type, via_type):
+                continue
+            if not is_valid_edge_pair(second_type, via_type, target_type):
+                continue
+            if not is_valid_edge_pair(inferred_type, source_type, target_type):
                 continue
 
             first_hop = _make_hop(first, source_node, via_node)

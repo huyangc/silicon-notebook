@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=33, postgres_version=11, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=34, postgres_version=12, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -382,48 +382,55 @@ _TABLES = (
         "timestamptz",
         path_columns=("file_path",),
     ),
-    _table("chunks", ("id",), ReplicationKeyKind.DECLARED_PK, 50, "jsonb+timestamptz"),
+    _table(
+        "kg_relation_completion_state",
+        ("source_id", "source_generation", "mode"),
+        ReplicationKeyKind.DECLARED_PK,
+        50,
+        "timestamptz",
+    ),
+    _table("chunks", ("id",), ReplicationKeyKind.DECLARED_PK, 51, "jsonb+timestamptz"),
     _table(
         "chunk_embeddings",
         ("chunk_id",),
         ReplicationKeyKind.DECLARED_PK,
-        51,
+        52,
         "bytea+timestamptz",
         blob_columns=("vector",),
     ),
     _table(
-        "extraction_runs", ("id",), ReplicationKeyKind.DECLARED_PK, 52, "timestamptz"
+        "extraction_runs", ("id",), ReplicationKeyKind.DECLARED_PK, 53, "timestamptz"
     ),
     _table(
         "knowledge_relations",
         ("id",),
         ReplicationKeyKind.DECLARED_PK,
-        53,
+        54,
         "jsonb+timestamptz",
     ),
     _table(
         "relation_embeddings",
         ("relation_id",),
         ReplicationKeyKind.DECLARED_PK,
-        54,
+        55,
         "bytea+timestamptz",
         blob_columns=("vector",),
     ),
     _table(
-        "source_authors", ("id",), ReplicationKeyKind.DECLARED_PK, 55, "timestamptz"
+        "source_authors", ("id",), ReplicationKeyKind.DECLARED_PK, 56, "timestamptz"
     ),
     _table(
         "source_elements",
         ("id",),
         ReplicationKeyKind.DECLARED_PK,
-        56,
+        57,
         "jsonb+timestamptz",
     ),
     _table(
         "element_embeddings",
         ("element_id",),
         ReplicationKeyKind.DECLARED_PK,
-        57,
+        58,
         "bytea+timestamptz",
         blob_columns=("vector",),
     ),
@@ -431,43 +438,43 @@ _TABLES = (
         "source_paper_meta",
         ("source_id",),
         ReplicationKeyKind.DECLARED_PK,
-        58,
+        59,
         "jsonb+timestamptz",
     ),
     _table(
         "unified_kg_state",
         ("notebook_id",),
         ReplicationKeyKind.DECLARED_PK,
-        59,
+        60,
         "timestamptz",
     ),
     _table(
         "user_profiles",
         ("id",),
         ReplicationKeyKind.DECLARED_PK,
-        60,
+        61,
         "jsonb+timestamptz",
     ),
-    TableSpec("chunks_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 61),
+    TableSpec("chunks_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 62),
     TableSpec(
-        "kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 62
+        "kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 63
     ),
     TableSpec(
-        "memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 63
+        "memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 64
     ),
     TableSpec(
         "shadow_change_log",
         TableClass.SHADOW_INTERNAL,
         (),
         ReplicationKeyKind.DECLARED_PK,
-        64,
+        65,
     ),
     TableSpec(
         "shadow_capture_control",
         TableClass.SHADOW_INTERNAL,
         (),
         ReplicationKeyKind.DECLARED_PK,
-        65,
+        66,
     ),
 )
 
