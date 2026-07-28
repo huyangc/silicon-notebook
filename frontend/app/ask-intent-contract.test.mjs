@@ -119,6 +119,21 @@ test("提交被可用性守卫拦下时草稿退回,而不是无声丢弃", () =
   // (返回的是不是 false 这一层静态守卫钉不住;`Promise<boolean>` 的返回类型让
   //  裸 `return;` 直接过不了 tsc,而「拒收后返回 true」只能靠评审与上面这条
   //  调用方守卫兜住。)
+  // 收尾只能按流程状态判断自己该不该收在途 turn。用「草稿 ref 还非空」当阶段
+  // 标记会误伤真正在跑的 ask:新会话第一轮的 started 回调 setConversationId 会
+  // 触发切库/切会话那个 effect,而草稿要留到 executeAsk 确认接下为止 ——
+  // 于是整轮生成期间问题气泡和轨迹一起消失(codex 第 6 轮 P2)。
+  const phase = variableInitializersIn(findFunction(page, "abortIntentPreview"))
+    .find((item) => item.name === "wasIntentPhase");
+  assert.ok(phase, "abortIntentPreview 的阶段判据不见了");
+  assert.match(phase.initializer, /askIntentFlowRef/);
+  assert.doesNotMatch(phase.initializer, /askIntentDraftRef/);
+  // 两个理解阶段都要覆盖:preview 是预检在途,review 是等用户补充澄清 ——
+  // 漏掉 review,用户在确认卡片上切库/切会话时在途 turn 会残留在新会话里。
+  for (const stage of ["preview", "review"]) {
+    assert.match(phase.initializer, new RegExp(`"${stage}"`), `阶段判据漏了 ${stage}`);
+  }
+
   const rejections = ifBranchesIn(findFunction(page, "executeAsk"))
     .filter((branch) => /isAskBlocked|requiresKg/.test(branch.condition));
   assert.equal(rejections.length, 2, "executeAsk 的两道可用性守卫不见了");

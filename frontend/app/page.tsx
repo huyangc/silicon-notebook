@@ -2984,7 +2984,12 @@ export default function Home() {
   // intentChecking 会让占位态永久卡住(runAsk 的 finally 按 controller 身份认领,
   // 别人抢先置空 ref 后它就不再代劳),此后 Ask 输入区一直禁用、runAsk 直接早退。
   function abortIntentPreview() {
-    const wasIntentPhase = Boolean(askIntentDraftRef.current);
+    // 阶段判据必须是流程状态,不能是「草稿 ref 还非空」:草稿要留到 executeAsk
+    // 确认接下这次运行为止,而新会话第一轮的 started 回调会 setConversationId、
+    // 触发上面那个 effect —— 用草稿当标记就会在整轮生成期间把问题气泡和轨迹
+    // 一起清掉。submitting 之后已经不是理解阶段,那时的在途 turn 归 executeAsk。
+    const wasIntentPhase = askIntentFlowRef.current === "preview"
+      || askIntentFlowRef.current === "review";
     askIntentAbortRef.current?.abort();
     askIntentAbortRef.current = null;
     askIntentFlowRef.current = "idle";
