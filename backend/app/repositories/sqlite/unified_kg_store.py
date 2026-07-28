@@ -868,9 +868,10 @@ class UnifiedKgStore:
     # ⚠ 调用契约:**调用方不得持有外层写事务**。这里自开连接(SQLite 侧是本线程复用的
     # 读连接,PostgreSQL 侧是从池里另取一条),从 write() 里调用会读到提交前的旧数据,
     # 而且不会响亮失败——它会安静地返回一份过时的报告。T2 起唯一的调用方是
-    # KnowledgeLifecycleService._precompute_kg_analysis,它在两个 `_write()` 之外调用
-    # (预计算把三条统计快照持久化进 kg_analysis_artifacts)。T3 落地 KgAnalysisService
-    # 时要在服务层把这条契约钉成断言(见 ports.py 同段)。
+    # KnowledgeLifecycleService._compute_kg_analysis,它整个跑在**发布写事务之外**
+    # (原子发布之后,板块与三条统计快照由同一个 `_write()` 一起写出去 —— 计算却必须
+    # 全部发生在它之前)。T3 落地 KgAnalysisService 时要在服务层把这条契约钉成断言
+    # (见 ports.py 同段)。
     #
     # 口径与产品一致(设计 §3.5,沿用 scripts/kg_quality_audit.py 踩过 9 轮评审的那套):
     #   · 对象只算 status IN USABLE_STATUSES;
@@ -1435,36 +1436,35 @@ class UnifiedKgStore:
         ]
 
     @staticmethod
-    def source_community_counts(db: sqlite3.Connection, notebook_id: str, level: int):
-        """来源画像的**唯一一次扫描**:``(source_id, community_id, n)`` 的库内分组游标。
+    def source_canonical_rows(db: sqlite3.Connection, notebook_id: str):
+        """来源画像的**唯一一次扫描**:``(source_id, canonical_id)`` 的逐对象游标。
 
-        LEFT JOIN 而不是 INNER JOIN:``community_id IS NULL`` 的那一组是「该来源里没进
-        任何主题板块的对象」,它必须计入 `n_objects` 却不能进分母。用 INNER JOIN 就得
-        再扫一遍 `knowledge_objects` 才能拿到总数 —— 在 878 万对象的库上那是白扫一趟。
+        ⚠ **这里刻意没有 `community_members`,也没有 GROUP BY**(codex 第 13 轮 P1 的
+        原子发布)。板块与全部分析产物必须在**同一个**写事务里一次出现,所以产物得能在
+        板块落库**之前**算出来 —— 而那一刻板块划分只存在于内存里(`community_of_index`)。
+        canonical → 板块 这一跳因此交给 `kg_analysis_precompute.SourceBoardCounter`,
+        这条查询只负责把「可用对象的 (来源, canonical)」如实吐出来。结果与旧形态
+        (``LEFT JOIN community_members … GROUP BY source_id, community_id``)**逐字
+        相同**:同一 level 下 `community_members` 是一个划分(唯一的写者
+        `replace_communities` 照 Louvain 的 membership 整表重写),而内存里的
+        `community_of_index` 就是那份 membership。
 
         ``COALESCE(c.canonical_id, o.id)`` 与 `community_graph_rows` 的 canonical 口径
         **逐字一致**:没有 cluster_map 行的对象就是它自己的 canonical。社区正是建在那个
         口径的图上,这里换成裸 `c.canonical_id` 会把「未聚类但进了板块」的对象整片判成
         「没进任何板块」—— 报告会凭空多出一批 mainstream_share=0 的「关联稀疏来源」。
+        canonical 没进任何板块的那些行同样要吐出来:它们必须计入 `n_objects` 却不能进
+        分母(旧形态里那是 LEFT JOIN 的 NULL 组)。
 
-        ⚠ 前提:同一 level 下 `community_members` 是一个**划分**(每个 canonical 至多一
-        行)。这由唯一的写者保证 —— `replace_communities` 照 Louvain 的 membership 整表
-        重写,而 membership 就是划分。若这条被破坏,命中多行的对象会被重复计数(n_objects
-        与 n_graph_objects 同步膨胀,比例仍自洽)。这里刻意**不**加 DISTINCT 去防:那要么
-        是一次额外去重排序、要么是两侧分岔的窗口函数,为一个由写者保证的不变式付这个代价
-        不值。
+        **游标逐行进、逐行被消化掉**(`SourceBoardCounter.add` 只留两个 int32),所以
+        红线「绝不把百万行拉进 Python 聚合」照旧成立。
 
-        分组发生在库内,调用方**流式**消费(`SourceProfileFolder` 每来源一个累加器),
-        所以 **Python 侧**内存是 O(来源数) 而不是 O(分组数)。红线「绝不把百万行拉进
-        Python 聚合」在这里的兑现方式就是这一条:游标逐行进、逐行被消化掉。
-
-        ⚠ **但别把它读成「进程内存 O(来源数)」。** 这条走 `USE TEMP B-TREE FOR GROUP BY`,
+        ⚠ 与被它取代的那条相比,库内临时结构**少了一份**:旧形态的
+        ``GROUP BY o.source_id, cm.community_id`` 走 `USE TEMP B-TREE FOR GROUP BY`,
         而 `_connect()` 设了 `PRAGMA temp_store = MEMORY`(见 database.py;那是
-        mention-alias 那条 TEMP FTS 路径的硬需求,它靠这条做到零 WAL 写入、不占写锁),
-        所以这个临时 B 树**不能落盘**:进程仍要扛下 O(分组数 = 来源数 × 该来源触及的板块
-        数) 的库内临时结构。省掉的是 Python 那一份,不是全部。
-        §3.35「性能调优只投 PostgreSQL」在这里的边界是:SQLite 侧只保证正确、有界、不长
-        时间持锁,这份库内临时开销如实记在这里,不假装它不存在。
+        mention-alias 那条 TEMP FTS 路径的硬需求),所以那棵按**全部输入行**排序的临时
+        B 树也落在进程内存里。这条一个 GROUP BY 都没有,还少一次 `community_members`
+        的索引探查。本机真实库 nb-b37185f4ae(4.17 万对象)暖态实测 90 ms → 66 ms。
 
         口径与 T1 的只读聚合一致:对象只算 `USABLE_STATUSES`;`source_id=''` 的对象
         (晋升 / Memory→KG 写路径刻意写空来源)整体排除 —— 它们共享同一个空 source_id,
@@ -1499,40 +1499,28 @@ class UnifiedKgStore:
         (与本特性同批,尚未进过任何已部署库),所以受影响的只有跑过本分支的开发库;
         任何一次 KG 变更后的 `rebuild_communities` 会整表重写、自然愈合。
 
-        ⚠ **重活**:本 notebook 的 `knowledge_objects` 全扫 + 每行两次索引探查
-        (`idx_clusters_member` → `idx_commmem_nb_can`)+ 一个分组临时 B 树。与
-        `community_graph_rows` 同量级,同样只能待在预计算路径上。本机真实库
-        (4.17 万对象 / 4.17 万簇行 / 1217 个板块)实测 342 ms;不要把它线性外推到
-        437GB 的生产库 —— 那里是冷态随机 IO 支配,见 ports.py 只读聚合段头的说明。
-        隐藏来源谓词的增量实测(同库 nb-b37185f4ae,每次全新连接连跑三趟、取 OS 页缓存
-        已暖的那两趟)是 86 → 95 ms(+10%):规划器把这条相关子查询排在两次 LEFT JOIN
-        **之前**(`EXPLAIN QUERY PLAN` 里 `CORRELATED SCALAR SUBQUERY` 那一行在 c/cm 之上),
-        走 `sources` 的主键索引 `sqlite_autoindex_sources_1`,被排除的行连那两次探查都不付。
-        这是一次量级参考而不是生产承诺 —— 同上,生产是冷态随机 IO 支配。
+        ⚠ **重活**:本 notebook 的 `knowledge_objects` 全扫 + 每行一次索引探查
+        (`idx_clusters_member`)。与 `community_graph_rows` 同量级,同样只能待在预计算
+        路径上。不要把上面那个毫秒数线性外推到 437GB 的生产库 —— 那里是冷态随机 IO
+        支配,见 ports.py 只读聚合段头的说明。
         """
         placeholders = ",".join("?" for _ in USABLE_STATUSES)
         return db.execute(
             f"""
             SELECT o.source_id AS source_id,
-                   cm.community_id AS community_id,
-                   COUNT(*) AS n
+                   COALESCE(c.canonical_id, o.id) AS canonical_id
             FROM knowledge_objects o
             LEFT JOIN concept_clusters c
                    ON c.notebook_id = o.notebook_id
                   AND c.member_object_id = o.id
-            LEFT JOIN community_members cm
-                   ON cm.notebook_id = o.notebook_id
-                  AND cm.canonical_id = COALESCE(c.canonical_id, o.id)
-                  AND cm.level = ?
             WHERE o.notebook_id = ?
               AND o.status IN ({placeholders})
               AND o.source_id != ''
               AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id = o.source_id
                               AND s.notebook_id = o.notebook_id
                               AND s.source_type IN ('memory','knowhow'))
-            GROUP BY o.source_id, cm.community_id
             """,
-            (int(level), notebook_id, *USABLE_STATUSES),
+            (notebook_id, *USABLE_STATUSES),
         )
 
     @staticmethod
@@ -1562,7 +1550,7 @@ class UnifiedKgStore:
         `CrossCommunityEdgeFold.top_edges` 截到硬上限(20 万行)并整份压在调用方栈帧上,
         再为落库多物化一份完整列表就是在峰值上叠峰值(#340/#342/#347/#351/#352/#354
         那条 OOM 轨道盯的同一时刻)。折叠结果自己已在取完 top-N 之后当场释放,不跨到
-        这里(见 `_precompute_kg_analysis` 的 `del folder`)。
+        这里(见 `_compute_kg_analysis` 的 `del folder`)。
 
         账本 payload 走 `allow_nan=False`:NaN/Inf 不是合法 JSON,写进去读回来就是一个
         不可解析的 payload。今天的口径里除不出 NaN(分母为 0 时显式落 0.0),这是**入口

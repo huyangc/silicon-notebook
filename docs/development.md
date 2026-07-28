@@ -44,8 +44,11 @@ the `(source_id,id)` object keyset index. SQLite v35 adds the browser-captured
 `ask_jobs.asked_at` instant for reconnecting to in-flight questions. SQLite v36
 adds the three KG-quality-analysis precompute product tables
 (kg_community_edges, kg_source_profiles and the kg_analysis_artifacts product
-ledger); rebuild_communities rewrites all three wholesale in one transaction and
-stamps every ledger row with the kg_mutation_seq it was built at. None of the
+ledger); rebuild_communities rewrites all three wholesale and stamps every ledger
+row with the kg_mutation_seq it was built at. Publication is atomic across the
+community layer too: the board partition, its community_seq stamp and all three
+product tables commit in one write transaction, while every full-table read that
+feeds them stays outside it (the SQLite write lock is process-wide). None of the
 three carries a level column: the community layer's freshness gate is not
 level-scoped, so the level a product set describes is recorded in the ledger
 payload instead. PostgreSQL migration v14 is the paired

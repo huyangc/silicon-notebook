@@ -3106,36 +3106,49 @@ def _wipe_communities(database) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _analysis_source_counts(harness, level: int = 0) -> dict:
+def _analysis_source_counts(harness) -> dict:
+    """把 `source_canonical_rows` 的游标折成 ``{(source_id, canonical_id): 行数}``。
+
+    ⚠ 这条查询**逐对象**返回,不再在库内分组(codex 第 13 轮 P1 的原子发布:板块这一刻
+    还没落库,SQL 没有 `community_members` 可 join)。canonical → 板块 那一跳与按板块的
+    计数由 `kg_analysis_precompute.SourceBoardCounter` 在内存里做,所以这里比对的是
+    **查询层的返回值本身**。
+    """
     unified = _analysis_unified_store(harness)
+    counts: dict = {}
     with harness.database.connect() as connection:
-        return {
-            (row["source_id"], row["community_id"]): int(row["n"])
-            for row in unified.source_community_counts(connection, ANALYSIS_NB, level)
-        }
+        for row in unified.source_canonical_rows(connection, ANALYSIS_NB):
+            key = (row["source_id"], row["canonical_id"])
+            counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
-def test_source_community_counts_match_on_postgres(knowledge_harness):
+def test_source_canonical_rows_match_on_postgres(knowledge_harness):
     _seed_analysis_fixture(knowledge_harness)
 
-    # 夹具里 ANALYSIS_NB 的 14 个可用对象都挂 source-golden。
-    #   cm-big   ← canonical-quad(q1..q4)+ canonical-blank(b1,b2)+ canonical-solo = 7
-    #   cm-small ← canonical-solo = 1
-    #   NULL 组  ← claim×3 / formula / procedure / 两个自定义类型 = 7(它们的 canonical
-    #             不在任何板块里,只抬 n_objects、不进分母 —— 这一组必须存在,
-    #             INNER JOIN 会把它整片吞掉)
-    # 合计 15 > 14:`canonical-solo` 在这份**合成**夹具里同时挂在两个板块下,所以
-    # ko-an-solo 被两条 community_members 行各计一次。生产不会出现 —— Louvain 的
-    # membership 是一个划分,`replace_communities` 照它整表重写。这里刻意保留这个形态,
-    # 因为它同时证明了两个后端在「同一对象命中多条成员行」上的行为逐字一致。
+    # 夹具里 ANALYSIS_NB 的 14 个可用对象都挂 source-golden,合计必须**恰好 14 行**
+    # —— 不多不少。旧形态(join `community_members` 再分组)在这份合成夹具上会数出 15:
+    # `canonical-solo` 同时挂在两个板块下,ko-an-solo 因此被两条成员行各计一次。生产
+    # 不会出现(Louvain 的 membership 是一个划分,`replace_communities` 照它整表重写),
+    # 而新形态**结构上**不可能重复计数 —— 每个对象只出一行,板块由内存里的划分决定。
     counts = _analysis_source_counts(knowledge_harness)
     assert counts == {
-        ("source-golden", None): 7,
-        ("source-golden", "cm-big"): 7,
-        ("source-golden", "cm-small"): 1,
+        # concept:进了板块的三个 canonical
+        ("source-golden", "canonical-quad"): 4,
+        ("source-golden", "canonical-blank"): 2,
+        ("source-golden", "canonical-solo"): 1,
+        # 不在任何板块里的那些 —— 它们必须照样返回(只抬 n_objects、不进分母);
+        # 旧形态里这是 LEFT JOIN 的 NULL 组,INNER JOIN 会把它整片吞掉。
+        ("source-golden", "KL-pair"): 2,
+        ("source-golden", "KL-solo"): 1,
+        ("source-golden", "KF-solo"): 1,
+        ("source-golden", "KP-solo"): 1,
+        ("source-golden", "KX-a"): 1,
+        ("source-golden", "KX-b"): 1,
     }
+    assert sum(counts.values()) == 14
     # 别的 notebook 的对象绝不能混进来(归属谓词的证人)。
-    assert all(source == "source-golden" for source, _community in counts)
+    assert all(source == "source-golden" for source, _canonical in counts)
 
 
 def test_source_counts_drop_hidden_sources_but_keep_orphans_on_postgres(
@@ -3191,20 +3204,17 @@ def test_source_counts_drop_hidden_sources_but_keep_orphans_on_postgres(
         )
 
     counts = _analysis_source_counts(knowledge_harness)
+    sources = {source for source, _canonical in counts}
 
-    assert ("source-memory", None) not in counts, "Memory 的合成来源进了来源画像"
-    assert ("source-knowhow", None) not in counts, "knowhow 投影的来源进了来源画像"
-    assert counts[("source-visible", None)] == 1
-    assert counts[("source-deleted", None)] == 1, (
+    assert "source-memory" not in sources, "Memory 的合成来源进了来源画像"
+    assert "source-knowhow" not in sources, "knowhow 投影的来源进了来源画像"
+    # 四个新对象都没有 cluster 行,所以 canonical 就是 object_id 本身(COALESCE 的
+    # 另一半 —— 换成裸 `c.canonical_id` 这四行会整片变成 NULL)。
+    assert counts[("source-visible", "ko-an-vis-0")] == 1
+    assert counts[("source-deleted", "ko-an-vis-3")] == 1, (
         "孤儿来源被一起排除了 —— 一个有意的诊断信号变成了静默丢弃"
     )
-    assert counts == {
-        ("source-golden", None): 7,
-        ("source-golden", "cm-big"): 7,
-        ("source-golden", "cm-small"): 1,
-        ("source-visible", None): 1,
-        ("source-deleted", None): 1,
-    }
+    assert sources == {"source-golden", "source-visible", "source-deleted"}
 
 
 def test_precomputed_artifacts_round_trip_identically_on_postgres(

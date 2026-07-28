@@ -250,7 +250,7 @@ class _SpyStore:
         "cluster_size_histogram",
         "largest_clusters",
         "relation_provenance_counts",
-        "source_community_counts",
+        "source_canonical_rows",
     )
 
     def __init__(self, inner) -> None:
@@ -1239,7 +1239,7 @@ def test_both_backends_keep_the_tie_break_on_the_outer_order_by(relative_path, t
     backend_root = Path(__file__).resolve().parents[1]
     source = (backend_root / relative_path).read_text(encoding="utf-8")
     start = source.index("def kg_source_profile_page(")
-    end = source.index("def source_community_counts(", start)
+    end = source.index("def source_canonical_rows(", start)
     body = source[start:end]
 
     inner = f"ORDER BY mainstream_share {{direction}}, {tie_break}"

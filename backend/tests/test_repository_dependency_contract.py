@@ -107,7 +107,7 @@ LIFECYCLE_STORE_CALLS = {
         "replace_communities",
         "replace_kg_analysis_artifacts",
         "replace_mention_bridge",
-        "source_community_counts",
+        "source_canonical_rows",
         "scratch_vector_rows",
         "seed_payload_rows",
         "set_community_seq",

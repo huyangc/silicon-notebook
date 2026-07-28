@@ -62,6 +62,7 @@ from app.services.kg_analysis_precompute import (
     PRECOMPUTED_LARGEST_CLUSTERS,
     CanonicalEdgeTable,
     CanonicalEdgeTableBuilder,
+    SourceBoardCounter,
     SourceProfileFolder,
     analysis_ledger_is_current,
     fold_cross_community_edges,
@@ -3281,10 +3282,10 @@ class KnowledgeLifecycleService:
         ⚠ **「建过」的标记是 seq 对齐,不是「板块数 > 0」。** 全部连通块都小于
         `community_min_size` 的库**合法地**就是零板块 —— 那不是「没建成」。拿板块数当
         建成标记会让这类库的两个闸都永远过不去:每一次「刷新图谱」都要重跑 canonical
-        边图 + 三条全表统计快照(生产量级见 `_precompute_kg_analysis`),而结果永远是
+        边图 + 三条全表统计快照(生产量级见 `_compute_kg_analysis`),而结果永远是
         同一个零。`community_seq` 默认 -1、`kg_mutation_seq` 恒 >= 0,所以「从没建过」
-        照样判得出来;而 `communities` 只被 `replace_communities` 删改、它又恒在
-        `set_community_seq` **之前**提交,所以 seq 对齐 ⟹ 板块确实按那个 seq 写过。
+        照样判得出来;而 `communities` 只被 `replace_communities` 删改、它又与
+        `set_community_seq` **同事务**提交,所以 seq 对齐 ⟺ 板块确实按那个 seq 写过。
 
         ⚠ **但 seq 这个标记不分 level,所以它只替默认层说话**(codex 第 11 轮 P2)。
         `community_seq` 与 `kg_analysis_artifacts` 都没有 level 维度(第 7 轮刻意去掉的,
@@ -3331,7 +3332,7 @@ class KnowledgeLifecycleService:
         # 非默认层反过来 —— 那份不分 level 的账目替它说不了话,见下面的方向四。
         # 账本读的是**整行**(含 payload)而不是只读 seq:簇世代盖在 payload 里(刻意
         # 不加列,见 `kg_analysis_precompute.CLUSTER_SEQ_PAYLOAD_KEY`),闸拿不到 payload
-        # 就判不出簇是否漂过。这也是同一次读同时喂给下面 `_precompute_kg_analysis` 的
+        # 就判不出簇是否漂过。这也是同一次读同时喂给下面 `_compute_kg_analysis` 的
         # 复用判断 —— 账本只读一遍,闸与复用不可能读到两份不同的账本。
         with self._connect() as _db:
             _st = self.unified_kg.state_row(_db, notebook_id)
@@ -3458,44 +3459,35 @@ class KnowledgeLifecycleService:
                              for c in louvain_communities(g, weight="weight", seed=42)]
                     for _i, _d in g.degree():
                         deg[idx2can[_i]] = float(_d)
-            now = self._now()
             min_size = self.settings.community_min_size
             # Policy (min-size filter + id minting + member ordering) stays here;
             # the store owns the two-table full rewrite.
             kept_rows = [(self._new_id("cm"), sorted(comm))
                          for comm in comms if len(comm) >= min_size]
             kept = len(kept_rows)
-            with self._write() as db:
-                self.unified_kg.replace_communities(
-                    db, notebook_id, level, kept_rows, names, deg, now
-                )
-                # ⚠ 上一行**重铸了板块 id**,依赖板块划分的两份分析产物(跨板块边 /
-                # 来源画像)此刻整表变成悬空引用 —— 必须在**同一个事务**里作废,不能
-                # 挪到下面的预计算里去顺手覆盖:预计算是「重活 + 可能失败」的一段,
-                # 中间任何一次失败、取消或崩溃都会把悬空产物留在库里,而 T3 的记忆化
-                # 签名对「同 seq 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐
-                # 上一套板块 id,直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
-                # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧的
-                #  `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
-                # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
-                # 理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
-                self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
-                    db, notebook_id
-                )
-            # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,下次仍重建)。
-            with self._write() as db:
-                self.unified_kg.set_community_seq(db, notebook_id, _seq)
-        # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带产出。
+        # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带**算出来**,
+        # 与板块划分一起在下面那**一个**写事务里发布(codex 第 13 轮 P1)。
         #
-        # 为什么**不**让它的失败冒泡:这三张表是只读报告的派生产物,而 rebuild_communities
+        # ⚠ **计算全部在写事务之外**,这条是硬约束不是风格:五份产物里有四份是全表级
+        # 重活(生产 878 万对象 / 836 万边),而 `SqliteDatabase.write()` 拿的是**进程级
+        # 写锁**——把它们挪进写事务就等于把全库写入按住一整趟全表扫(同形状数据点:
+        # 835 万边冷扫 39 分钟)。两侧 store 的只读方法自己会检查线程写深度并当场硬失败
+        # (`_reject_inside_write_transaction`),`tests/test_kg_analysis_precompute.py`
+        # 另有按调用时刻记 `write_depth` 的语义守卫。
+        #
+        # 为什么**不**让计算的失败冒泡:这三张表是只读报告的派生产物,而 rebuild_communities
         # 是 rebuild_unified_kg 与「刷新图谱」的核心路径。让一份辅助报告的失败去掀翻
         # 437GB 生产库的图重建,爆炸半径不成比例。而**吞掉它是安全的**,因为产物自带
         # `kg_mutation_seq` 戳:失败时上一轮的产物留在原地、戳还是它自己那个旧值,T3
         # 会如实报「落后 N 次变更」并给出整理入口 —— 不是静默降级,是显式陈旧 + 事件。
-        # 反过来若让它冒泡,社区已经建好且 seq 已记,异常只会让调用方以为整个重建失败。
+        # 反过来若让它冒泡,板块本来该照常发布,异常只会让调用方以为整个重建失败。
+        #
+        # ⚠ 这条豁免只覆盖**计算**。下面那个发布事务本身失败照旧冒泡 —— 它就是板块自己
+        # 的写事务(`replace_communities` 的失败一向冒泡),而且原子之后「事务失败」的
+        # 含义是**这一趟什么都没发生**:吞掉它再返回 `kept` 就是谎报一次并不存在的重建。
         #
         # ⚠ 「留在原地」只对**与板块无关**的三条统计快照成立。图真的被重建过时,依赖
-        # 板块的那两份已经在重铸事务里作废了(见上面 `replace_communities` 旁的说明)——
+        # 板块的那两份在同一个发布事务里作废(见下面 `discard_...` 旁的说明)——
         # 它们**必须**走,留着就是指向不存在板块 id 的悬空产物。此时 T3 报的是「缺失」
         # 而不是「陈旧」,那是更诚实的一档,不是退化。
         #
@@ -3510,12 +3502,11 @@ class KnowledgeLifecycleService:
         # 一件:异常被记进 `kg_analysis_precompute_failed`,紧接着照样 emit
         # `kg_analysis_backfilled` —— 同一次执行里失败事件与成功事件并存,而账本其实
         # 仍然不完整。运维监控与任何事件消费方都会被误导(「补过了」与「补失败了」是
-        # 相反的运维动作)。不掀翻 rebuild_communities 的决定不变(爆炸半径论证见下),
-        # 变的只是那条成功事件的前提。
-        analysis_done = True
+        # 相反的运维动作)。变的只是那条成功事件的前提。
+        analysis: "Optional[Tuple[list, list, Dict[str, dict]]]" = None
         try:
-            self._precompute_kg_analysis(
-                notebook_id, level, _seq, _cseq, kept_rows, edge_table, can2idx,
+            analysis = self._compute_kg_analysis(
+                notebook_id, level, _cseq, kept_rows, edge_table, can2idx,
                 # `force` 是「用户明确要求重算」——它上面不省钱,见
                 # `reusable_artifact_payloads` 的最后一段。
                 reusable=({} if force
@@ -3529,12 +3520,58 @@ class KnowledgeLifecycleService:
         except KgBuildAborted:
             raise
         except Exception as exc:
-            analysis_done = False
             self.event_log.emit({
                 "kind": "kg_analysis_precompute_failed",
                 "notebook_id": notebook_id, "level": level, "seq": _seq,
                 "error": f"{type(exc).__name__}: {exc}",
             })
+        analysis_done = analysis is not None
+        # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
+        #
+        # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
+        # (878 万对象 / 836 万边)上并发的 `/kg-analysis` 因此会读到「新板块 + 旧账本」:
+        # 板块 id 已经换了一整套,而三条统计快照还停在上一个 seq、依赖板块的两份已被作废
+        # 但还没写回。报告同屏混着两代库,而本视图存在的全部理由就是「每个数字都能说出
+        # 自己建于何时」。把重活挪进事务不是选项(见上面那段写锁的说明),所以改成
+        # **先在事务外把全部产物算完,再一次性发布**。
+        #
+        # 这个事务只做便宜的写:两表整表重写(成员行数级)+ 一次 UPDATE + 三张产物表的
+        # 整批重写。它一个 SELECT 重活都不发。
+        #
+        # ⚠ 没东西可写就**不开事务**:图新鲜 + 预计算失败那一档,这一趟确实什么都没发生,
+        # 而 `_write()` 拿的是进程级写锁 —— 为一个空事务去抢它是纯浪费。
+        if not graph_fresh or analysis is not None:
+            now = self._now()
+            with self._write() as db:
+                if not graph_fresh:
+                    self.unified_kg.replace_communities(
+                        db, notebook_id, level, kept_rows, names, deg, now
+                    )
+                    # ⚠ 上一行**重铸了板块 id**,依赖板块划分的两份分析产物(跨板块边 /
+                    # 来源画像)此刻整表变成悬空引用 —— 必须与重铸**同事务**作废。预计算
+                    # 失败时下面那次整批重写不会发生,而板块照旧发布:少了这一句,库里就
+                    # 会留下指向已不存在板块 id 的悬空产物,而 T3 的记忆化签名对「同 seq
+                    # 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐上一套板块 id,
+                    # 直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
+                    # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧
+                    #  的 `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
+                    # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
+                    # 理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+                    # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
+                    # **失败**那一档,而那一档没有别的东西替它守。
+                    self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                        db, notebook_id
+                    )
+                    # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,
+                    # 下次仍重建)。⚠ 它必须与 `replace_communities` **同事务**:分开
+                    # 提交会留下「板块已换、seq 还是旧的」的窗口,而闸正是拿 seq 判
+                    # 「建过没有」。
+                    self.unified_kg.set_community_seq(db, notebook_id, _seq)
+                if analysis is not None:
+                    _edges, _profiles, _payloads = analysis
+                    self.unified_kg.replace_kg_analysis_artifacts(
+                        db, notebook_id, _seq, _edges, _profiles, _payloads, now
+                    )
         if graph_fresh:
             # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
             # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
@@ -3554,11 +3591,10 @@ class KnowledgeLifecycleService:
                              "level": level, "communities": kept, "nodes": n_nodes})
         return kept
 
-    def _precompute_kg_analysis(
+    def _compute_kg_analysis(
         self,
         notebook_id: str,
         level: int,
-        seq: int,
         cluster_seq: int,
         kept_rows: "List[Tuple[str, List[str]]]",
         edge_table: "CanonicalEdgeTable",
@@ -3566,8 +3602,8 @@ class KnowledgeLifecycleService:
         *,
         reusable: "Optional[Dict[str, dict]]" = None,
         partition_rebuilt: bool,
-    ) -> None:
-        """把 KG 质量分析的产物在**这一次**图构建里算出来并整批落库(设计 §3.2)。
+    ) -> "Tuple[list, list, Dict[str, dict]]":
+        """把 KG 质量分析的产物在**这一次**图构建里算出来(设计 §3.2)。**不落库。**
 
         为什么挂在这里而不是端点上:五份里有三份是**全表级重活**(簇大小直方图 / 最大簇
         榜单 / 边出处构成,见 ports.py 只读聚合段头的双后端实测),生产库 200 万簇行 /
@@ -3582,10 +3618,10 @@ class KnowledgeLifecycleService:
         是在说「所有来源都关联稀疏」。理由与守卫见 `kg_analysis_precompute.
         OPTIONAL_ARTIFACT_KINDS` / `check_artifact_payloads`。
 
-        新鲜度(设计 §3.3):全部产物写同一个 `seq`(= 本轮 rebuild 的目标
-        `kg_mutation_seq`,与 `community_seq` 同一个数),账本因此能逐份回答「我建于
-        哪个 KG 状态」。生产上「产物严重落后于当前 KG」是常态而非边缘情况,所以这个戳
-        是产品需求,不是审计装饰。
+        新鲜度(设计 §3.3):全部产物写同一个 KG 世代(= 本轮 rebuild 的目标
+        `kg_mutation_seq`,与 `community_seq` 同一个数,由发布方一次性盖上),账本因此
+        能逐份回答「我建于哪个 KG 状态」。生产上「产物严重落后于当前 KG」是常态而非边缘
+        情况,所以这个戳是产品需求,不是审计装饰。
 
         ⚠ **两个世代,不是一个。** 依赖合并结果的四份还要盖 `cluster_seq`
         (= `unified_kg_state.cluster_mutation_seq`),因为簇的写路径刻意不动
@@ -3608,7 +3644,7 @@ class KnowledgeLifecycleService:
         ⚠ **这个戳保证的是「都属于同一轮预计算」,不是「都读到了同一份 KG 快照」。**
         本方法里有四个以上互不同步的读点(跨板块边用的边表建于 rebuild 的图扫描、
         来源画像自开一条读连接、三条统计快照各自再自开一条),一次并发的 `store_kg`
-        插在中间,直方图就会反映一个比跨板块边更新的 KG。落库事务保证的是**可见性
+        插在中间,直方图就会反映一个比跨板块边更新的 KG。发布事务保证的是**可见性
         原子**(要么整批可见、要么整批不可见),不是**内容原子**。
         两个后端各自的实际保证:
           · PostgreSQL:每条快照查询自己是一次 `REPEATABLE READ` 只读事务(多语句的
@@ -3621,14 +3657,15 @@ class KnowledgeLifecycleService:
         与其承诺一个只有一侧成立的强一致,不如把实际保证写清楚,让 T3/T4 知道哪些数字
         可以并排放、哪些不能。
 
-        原子性(设计 §3.3):全部落库发生在**一个** `_write()` 事务里。半份产物比没有
-        产物更危险 —— 「跨板块边是新的、来源画像是旧的」会让报告里的数字互相矛盾,而且
-        矛盾得毫无线索。
+        ⚠ **本方法一个字节都不写库**(codex 第 13 轮 P1 的原子发布)。它返回
+        ``(edges, profiles, payloads)``,由 `rebuild_communities` 在**板块自己的那个**
+        写事务里一起发布 —— 板块与全部产物因此对读者是同一个瞬间出现的,不再有
+        「新板块 + 旧账本」这个生产上分钟级的窗口。半份产物比没有产物更危险,而「新板块
+        配旧产物」比半份还糟:报告同屏混着两代库,一个标注都没有。
 
-        ⚠ **三条统计快照与来源画像扫描必须在 `_write()` 之外取。** 两个理由,后一个
-        更硬:
-          1. 它们自开只读连接(见 ports.py 的调用契约),在写事务里调会读到提交前的
-             旧数据,而且**不会响亮失败**;
+        ⚠ **正因为如此,本方法里的重活绝不能被挪进那个写事务。** 两个理由,后一个更硬:
+          1. 三条统计快照自开只读连接(见 ports.py 的调用契约),在写事务里调会读到提交
+             前的旧数据,而且**不会响亮失败**;
           2. `SqliteDatabase.write()` 拿的是**进程级写锁**。把这几条全表重活挪进写事务,
              那把锁会被按住整整一趟全表扫 —— 同形状的数据点是 835 万边冷扫 39 分钟,
              期间全库任何写入(摄取、问答落库、投影)全部排队。
@@ -3636,18 +3673,28 @@ class KnowledgeLifecycleService:
         (见 `sqlite/unified_kg_store.py::_reject_inside_write_transaction`),
         `tests/test_kg_analysis_precompute.py` 另有一条按调用时刻记录 `write_depth`
         的语义守卫 —— 形状守卫(「哪个写事务碰过产物表」)抓不到这类移动,因为这三条
-        查询一张产物表都不碰。
+        查询一张产物表都不碰。原子发布让「顺手把计算搬进那个事务」看起来更整洁了,
+        所以那两道守卫比以前更要紧,不是更不要紧。
         """
         sizes = [(cid, len(members)) for cid, members in kept_rows]
         # 节点下标 -> community_id。**刻意不是** canonical -> community_id 的 dict:
         # 那会在边表还占着大头的这一刻凭空多一份同基数(生产 ~171 万)的 str->str
         # 映射。`can2idx` 已经在手,按下标存只是一个指针数组。
+        #
+        # ⚠ 补账本那条路径上 `kept_rows` 读自库里现成的划分,它的成员可能**不在**本轮的
+        # `can2idx` 里(合并把某个 canonical 的边全变成了自环,它就不再是图上的节点)。
+        # 旧的来源画像 SQL 靠 join `community_members` 照样能给它定位,所以这里给它们
+        # 补一个下标 —— 少了这一句,那些对象会被静默判成「没进任何板块」,与旧口径分岔。
+        # 全量重建那一路 `kept_rows` 的成员全部来自图节点,这个循环一次也不会扩容。
         community_of_index: "List[Optional[str]]" = [None] * len(can2idx)
         for cid, members in kept_rows:
             for member in members:
                 index = can2idx.get(member)
-                if index is not None:
-                    community_of_index[index] = cid
+                if index is None:
+                    index = len(can2idx)
+                    can2idx[member] = index
+                    community_of_index.append(None)
+                community_of_index[index] = cid
         # ⚠ 这一步**释放** `edge_table`(= 调用方的 `edge_table`),不是遍历它:折叠
         # 出来的板块对数在最坏情况下与边表同量级(生产 836 万条),两份同时驻留就是在
         # 437 GB 库的峰值时刻再叠一个峰值。落库上限(`MAX_PERSISTED_COMMUNITY_EDGES`)
@@ -3656,7 +3703,6 @@ class KnowledgeLifecycleService:
         # 调用方 `rebuild_communities` 传下来的实参,那个栈帧的局部名在本方法执行期间
         # 一直活着,本方法 `del` 自己的形参一个字节也放不掉。
         folder = fold_cross_community_edges(edge_table, community_of_index)
-        del community_of_index
         head, head_members, total_members = head_community_ids(sizes)
 
         # 有界物化,唯一的一份:`top_edges` 的返回长度有硬上限,store 直接按批消费这个
@@ -3674,36 +3720,36 @@ class KnowledgeLifecycleService:
             "communities": len(sizes),
         }
         # ⚠ **折叠结果到此为止,必须当场整个放掉**(codex 第 9 轮 P1-2)。它已经把要
-        # 落库的东西交出来了(上面那个 payload + 有界的 `edges`),而紧接着的三条查询
-        # (簇大小直方图 / 边出处构成 / 来源画像扫描)每一条都是全表重活,自己就要在
-        # 库内分配 O(分组数) 的临时结构 —— 生产 200 万簇行、836 万边。让折叠结果跨过
-        # 它们,就是把两个峰值叠在同一时刻,而这三条根本不需要它。
+        # 落库的东西交出来了(上面那个 payload + 有界的 `edges`),而紧接着的四条查询
+        # (来源画像扫描 / 簇大小直方图 / 最大簇榜单 / 边出处构成)每一条都是全表重活,
+        # 自己就要分配 O(分组数) 的临时结构 —— 生产 200 万簇行、836 万边。让折叠结果跨过
+        # 它们,就是把两个峰值叠在同一时刻,而这四条根本不需要它。
         del folder
-        payloads = {
+        payloads: "Dict[str, dict]" = {
             ARTIFACT_COMMUNITY_EDGES: community_edges_payload,
-            ARTIFACT_CLUSTER_HISTOGRAM: self.unified_kg.cluster_size_histogram(
-                notebook_id
-            ),
-            ARTIFACT_LARGEST_CLUSTERS: self.unified_kg.largest_clusters(
-                notebook_id, PRECOMPUTED_LARGEST_CLUSTERS
-            ),
         }
-        # 与簇无关的那份:上一轮的账本行还在同一个 `seq` 上就直接搬过来,不重扫 836 万
-        # 边(判据、不变式与「force 不复用」的理由见 `reusable_artifact_payloads`)。
-        reused = (reusable or {}).get(ARTIFACT_RELATION_PROVENANCE)
-        payloads[ARTIFACT_RELATION_PROVENANCE] = (
-            reused if reused is not None
-            else self.unified_kg.relation_provenance_counts(notebook_id)
-        )
+        # 来源画像**排在三条统计快照之前**,不是随手排的:它是唯一还需要 membership
+        # (`community_of_index` + `can2idx`)的一份。算完就把这两份一起放掉,三条统计
+        # 快照因此跑在一个更低的水位上 —— 生产 ~171 万 canonical,`can2idx` 那个
+        # str->int 的 dict 是几百 MB 量级。
+        #
+        # ⚠ 板块映射为什么在 Python 侧做:板块划分这一刻**还没落库**(原子发布,codex
+        # 第 13 轮 P1),SQL 没有 `community_members` 可 join。`SourceBoardCounter` 拿
+        # 内存里的 membership 做同一跳,结果与旧 SQL 逐字相同(同 level 下
+        # `community_members` 是一个划分,而它就是那份 membership),而且每行只留两个
+        # int32,库内反而少了一棵 GROUP BY 的临时 B 树。
         profiles: "List[tuple]" = []
         if total_members:
-            source_folder = SourceProfileFolder(head)
+            counter = SourceBoardCounter(can2idx, community_of_index)
             with self._connect() as db:
-                for row in self.unified_kg.source_community_counts(
-                    db, notebook_id, level
-                ):
-                    source_folder.add(row["source_id"], row["community_id"], row["n"])
+                for row in self.unified_kg.source_canonical_rows(db, notebook_id):
+                    counter.add(row["source_id"], row["canonical_id"])
+            source_folder = SourceProfileFolder(head)
+            for source_id, community_id, count in counter.drain():
+                source_folder.add(source_id, community_id, count)
+            del counter
             profiles = source_folder.rows()
+            del source_folder
             payloads[ARTIFACT_SOURCE_PROFILES] = {
                 "level": int(level),
                 "sources": len(profiles),
@@ -3712,14 +3758,32 @@ class KnowledgeLifecycleService:
                 "head_members": head_members,
                 "total_members": total_members,
             }
-        with self._write() as db:
-            self.unified_kg.replace_kg_analysis_artifacts(
-                db, notebook_id, seq, edges, profiles,
-                stamp_cluster_seq(
-                    payloads, cluster_seq, partition_rebuilt=partition_rebuilt
-                ),
-                self._now(),
-            )
+        # ⚠ membership 到此为止。`can2idx` 是**调用方**(`rebuild_communities`)的局部
+        # 变量,它那个栈帧的名字在本方法执行期间一直活着,`del` 自己的形参一个字节也放
+        # 不掉 —— 与 `CanonicalEdgeTable.release()` 是同一条契约,所以由持有者的内容被
+        # 就地清空来兑现。调用方在本方法返回之后不得再用它(今天也没有任何使用点)。
+        del community_of_index
+        can2idx.clear()
+        payloads[ARTIFACT_CLUSTER_HISTOGRAM] = self.unified_kg.cluster_size_histogram(
+            notebook_id
+        )
+        payloads[ARTIFACT_LARGEST_CLUSTERS] = self.unified_kg.largest_clusters(
+            notebook_id, PRECOMPUTED_LARGEST_CLUSTERS
+        )
+        # 与簇无关的那份:上一轮的账本行还在同一个 `seq` 上就直接搬过来,不重扫 836 万
+        # 边(判据、不变式与「force 不复用」的理由见 `reusable_artifact_payloads`)。
+        reused = (reusable or {}).get(ARTIFACT_RELATION_PROVENANCE)
+        payloads[ARTIFACT_RELATION_PROVENANCE] = (
+            reused if reused is not None
+            else self.unified_kg.relation_provenance_counts(notebook_id)
+        )
+        return (
+            edges,
+            profiles,
+            stamp_cluster_seq(
+                payloads, cluster_seq, partition_rebuilt=partition_rebuilt
+            ),
+        )
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:
         """Member-id lists of each detected community (for summaries / global search)."""

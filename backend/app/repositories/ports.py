@@ -976,8 +976,8 @@ class UnifiedKgStorePort(Protocol):
     # ---------------------------------------- KG 质量分析的只读聚合(T1)
     # 与上面的 community-peer 原语同形:**自开只读连接**,绝不写库。
     #
-    # ⚠ 调用契约(T2 起的唯一调用方是 KnowledgeLifecycleService._precompute_kg_analysis,
-    # 它在写事务之外调用):**调用方不得持有外层写事务**。
+    # ⚠ 调用契约(T2 起的唯一调用方是 KnowledgeLifecycleService._compute_kg_analysis,
+    # 它整个跑在发布写事务之外):**调用方不得持有外层写事务**。
     # 实现两侧都自开连接——SQLite 侧是本线程复用的读连接,PostgreSQL 侧是**从池里另取
     # 一条**。从 `write()` 里调用会读到该事务提交前的旧数据,而且**不会响亮失败**:它
     # 会安静地返回一份过时的报告;SQLite 上还额外把**进程级写锁**按住一整趟全表扫。
@@ -1081,17 +1081,22 @@ class UnifiedKgStorePort(Protocol):
     # 与上面的只读聚合**相反**:这两个是 connection-taking 的,骑调用方
     # (KnowledgeLifecycleService.rebuild_communities)的事务边界。
     #
-    # ⚠ `replace_kg_analysis_artifacts` 必须整个跑在**一个写事务**里(设计 §3.3):
+    # ⚠ `replace_kg_analysis_artifacts` 必须整个跑在**一个写事务**里(设计 §3.3);
+    # 而且从 codex 第 13 轮起,那个事务同时是**板块自己的**发布事务:板块与全部产物
+    # 一起可见,不再有「新板块 + 旧账本」的中间态(生产上那是分钟级的窗口)。
     # 一次预计算要么整批可见、要么完全不可见。允许「跨板块边是新的、来源画像是旧的」
     # 这种组合的话,报告里的数字会互相矛盾,而且矛盾得很隐蔽 —— 用户没有任何线索。
     # 账本行(`kg_analysis_artifacts`)带 `kg_mutation_seq`,让**每一份**产物自证建于
     # 哪个 KG 状态;它的**存在与否**才是「这份产物在不在」的判据,明细表的行数不是
     # (单一板块的图 legitimately 产出 0 条跨板块边)。
     #
-    # ⚠ `source_community_counts` 是**重活**:本 notebook 的 knowledge_objects 全扫 +
-    # 每行两次索引探查 + 一个分组聚合,与 `community_graph_rows` 同量级。它只能待在
-    # 预计算路径上;返回游标,调用方**流式**折叠(Python 侧内存 O(来源数),不是
-    # O(分组数)——库内的分组临时结构不在此列,见实现的 docstring)。
+    # ⚠ `source_canonical_rows` 是**重活**:本 notebook 的 knowledge_objects 全扫 +
+    # 每行一次索引探查,与 `community_graph_rows` 同量级。它只能待在预计算路径上;
+    # 返回游标,调用方**流式**折叠。
+    # 它**刻意不 join `community_members`、也不 GROUP BY**:原子发布要求产物在板块
+    # 落库**之前**就算得出来,而那一刻板块划分只在内存里。canonical → 板块 这一跳因此
+    # 由 `kg_analysis_precompute.SourceBoardCounter` 做(结果与旧形态逐字相同 ——
+    # 同 level 下 `community_members` 是一个划分,而内存里的 membership 就是它)。
     #
     # ⚠ 它的口径里有两条**排除**,两侧逐字一致:`source_id=''`(共享空来源,算进去就是
     # 伪造一个「空来源」的画像),以及隐藏合成来源 `source_type IN ('memory','knowhow')`
@@ -1107,10 +1112,10 @@ class UnifiedKgStorePort(Protocol):
     #
     # ⚠ `edges` / `profiles` 按**可迭代**声明,实现必须分批消费、不得再物化一份完整
     # 列表:`edges` 是一份最多 20 万行的有界物化,落库这一刻它整个压在栈帧上。
-    # (折叠结果本身已在取完 top-N 之后当场释放,见 `_precompute_kg_analysis` 的
+    # (折叠结果本身已在取完 top-N 之后当场释放,见 `_compute_kg_analysis` 的
     # `del folder` —— 那是 codex 第 9 轮 P1-2 的修法;这里说的是 `edges` 那一份。)
     @staticmethod
-    def source_community_counts(db: object, notebook_id: str, level: int) -> object: ...
+    def source_canonical_rows(db: object, notebook_id: str) -> object: ...
     @staticmethod
     def replace_kg_analysis_artifacts(
         db: object,

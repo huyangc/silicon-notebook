@@ -672,7 +672,7 @@ class CanonicalEdgeTable:
         """把三个数组换成空数组 —— 调用方栈帧上的那个引用因此不再钉住 GB 级缓冲。
 
         ⚠ 这是**必须**的,不是礼貌:`rebuild_communities` 把本对象作为**实参**传给
-        `_precompute_kg_analysis`,调用方的局部名在整个调用期间都活着,被调用方
+        `_compute_kg_analysis`,调用方的局部名在整个调用期间都活着,被调用方
         `del` 自己那个形参一个字节也放不掉。唯一能在调用进行中放掉的办法,就是让
         持有者自己把引用换掉。语义上等价于旧模型里 `drain` 的「搬空 `ew`」。
         """
@@ -1048,19 +1048,185 @@ def fold_cross_community_edges(
     return folded
 
 
+class SourceBoardCounter:
+    """把 ``(source_id, canonical_id)`` 的库内游标折成 ``(source_id, 板块 id, n)`` 三元组。
+
+    **为什么这一步存在(原子发布,codex 第 13 轮 P1)**:来源画像原本由一条
+    ``… LEFT JOIN community_members …  GROUP BY source_id, community_id`` 的 SQL 直接
+    算出来 —— 那要求板块**已经写进库**。而原子发布要求板块与全部产物在**同一个**写事务
+    里一次出现,于是产物必须能在板块落库**之前**算出来。板块划分这一刻只在内存里
+    (`kept_rows` / `community_of_index`),所以「canonical → 板块」这一跳只能在 Python
+    侧做,SQL 退到只 join `concept_clusters`(canonical 口径与 `community_graph_rows`
+    逐字一致)。
+
+    **结果与那条 SQL 逐字相同**,因为同一 level 下 `community_members` 是一个**划分**
+    (每个 canonical 至多一行,由唯一的写者 `replace_communities` 照 Louvain 的
+    membership 整表重写保证),而 `community_of_index` 就是那份 membership 本身。
+    换句话说:换掉的是「谁来做 canonical→板块 这一跳」,不是口径。
+    (⚠ 唯一不等价的形态是被破坏的不变式 —— 同一 canonical 命中多条成员行时旧 SQL 会
+    重复计数。新模型结构上不可能重复计数,那是修好,不是漂移。)
+
+    **内存**:每行只落两个 int32(来源序号 + 板块序号),攒在分块缓冲里,聚合是一次
+    原地排序 + 分组计数(与 `CanonicalEdgeTableBuilder` 同一个套路,设计 §3.32)。
+    生产 878 万对象 ≈ 70 MB 的列 + 一次 int64 复合键(70 MB),用完即释放;
+    **没有任何按行计数的 Python 容器**,红线「绝不把百万行拉进 Python 聚合」照旧成立。
+
+    ⚠ 与它取代的那条 SQL 相比,库内临时结构反而**少了一份**:旧形态的
+    ``GROUP BY source_id, community_id`` 走 `USE TEMP B-TREE FOR GROUP BY`,而
+    `PRAGMA temp_store = MEMORY`(见 `repositories/sqlite/database.py`)让那棵按**全部
+    输入行**排序的临时 B 树也落在进程内存里。新的 SQL 一个 GROUP BY 都没有,那份临时
+    结构整个消失,换成上面这份可预测的列式缓冲。本机真实库实测(nb-b37185f4ae,4.17 万
+    对象)这条查询 90 ms → 66 ms。
+
+    ⚠ 板块序号按**首次出现序**分配,不是按 id 排序 —— 这不影响任何结果:三元组交给
+    `SourceProfileFolder`,它的并列消歧比的是 ``community_id`` **字符串**本身
+    (见那里的说明),与序号无关。别把这里的序号误当成 `fold_cross_community_edges`
+    里那套「必须按 id 排序」的板块序号:那边的 `np.minimum`/`np.maximum` 无向归一要求
+    整数序等于字典序,这边没有任何比较发生在序号上。
+    """
+
+    # 与 `CanonicalEdgeTableBuilder` 同一个块大小,理由相同。
+    _CHUNK = 1 << 16
+
+    __slots__ = (
+        "_can2idx", "_board_ids", "_rank_of_index", "_source_ids", "_source_rank",
+        "_full", "_src", "_brd", "_fill", "_rows", "_drained",
+    )
+
+    def __init__(
+        self,
+        can2idx: Mapping[str, int],
+        community_of_index: Sequence[Optional[str]],
+    ) -> None:
+        board_ids: List[str] = []
+        rank_of: Dict[str, int] = {}
+        # 节点下标 → 板块序号(-1 = 不属于任何保留下来的板块)。**刻意是按下标的 list**,
+        # 不是 canonical→板块 的 dict:`can2idx` 已经在手,再造一份同基数(生产
+        # ~171 万条)的 str 键映射就是凭空多几百 MB —— 与 `fold_cross_community_edges`
+        # 那一条是同一个决定。
+        rank_of_index: List[int] = [-1] * len(community_of_index)
+        for index, community_id in enumerate(community_of_index):
+            if community_id is None:
+                continue
+            rank = rank_of.get(community_id)
+            if rank is None:
+                rank = len(board_ids)
+                rank_of[community_id] = rank
+                board_ids.append(community_id)
+            rank_of_index[index] = rank
+        self._can2idx = can2idx
+        self._board_ids = board_ids
+        self._rank_of_index = rank_of_index
+        self._source_ids: List[str] = []
+        self._source_rank: Dict[str, int] = {}
+        self._full: List[List["np.ndarray"]] = []
+        self._src = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+        self._brd = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+        self._fill = 0
+        self._rows = 0
+        self._drained = False
+
+    def add(self, source_id: str, canonical_id: str) -> None:
+        """喂一个可用对象的 ``(来源, canonical)``。板块映射当场做掉,只存两个 int32。"""
+        index = self._can2idx.get(canonical_id)
+        board = -1 if index is None else self._rank_of_index[index]
+        source = self._source_rank.get(source_id)
+        if source is None:
+            source = len(self._source_ids)
+            self._source_rank[source_id] = source
+            self._source_ids.append(source_id)
+        if self._fill == self._CHUNK:
+            self._full.append([self._src, self._brd])
+            self._src = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+            self._brd = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+            self._fill = 0
+        self._src[self._fill] = source
+        self._brd[self._fill] = board
+        self._fill += 1
+        self._rows += 1
+
+    def drain(self) -> Iterator[Tuple[str, Optional[str], int]]:
+        """按 ``(source_id, 板块 id 或 None, 计数)`` 逐组产出,产出即释放输入。
+
+        ⚠ **一次性**:攒下的块在聚合时被消化掉,再调一次只会拿到空结果 —— 而空结果在
+        这条路径上意味着「这个库一个对象都没有」,一个静默的假答案。
+        """
+        if self._drained:
+            raise RuntimeError(
+                "SourceBoardCounter.drain 只能调一次:攒下的块已经被消化掉,"
+                "再折一次只会拿到空结果 —— 而空结果意味着「一个对象都没有」"
+            )
+        self._drained = True
+        total = int(self._rows)
+        src = self._drain_column(0)
+        brd = self._drain_column(1)
+        if total == 0:
+            return
+        # 复合键 = 来源序号 × (板块数 + 1) + (板块序号 + 1)。+1 把「没进板块」的 -1
+        # 抬成 0,键因此恒为非负;上界 = 来源数 × 板块数,生产 4.8 万 × 8.9 万 ≈ 4.3e9,
+        # 离 int64 有九个数量级余量。
+        stride = len(self._board_ids) + 1
+        key = src.astype(np.int64)
+        del src
+        key *= stride
+        key += brd
+        key += 1
+        del brd
+        key.sort()                      # 原地排序:不再多一份下标数组
+        starts = _group_starts(key)
+        # 取组键之后**立刻**放掉整条 key(生产 878 万行 × 8 字节):它比分组结果大一个
+        # 数量级,而下面一行只需要分组结果。
+        keys = key[starts]
+        del key
+        counts = np.diff(starts, append=total)
+        del starts
+        source_ids, board_ids = self._source_ids, self._board_ids
+        # ⚠ **分块 `tolist()`,不是整条。** `ndarray.tolist()` 给每个元素造一个 Python
+        # int 对象:分组数与「来源数 × 该来源触及的板块数」同量级(生产百万级),整条
+        # 转出来就是几百 MB 的 Python 对象凭空多出来,而这份数据的全部用途是被下游逐条
+        # 消化掉。分块转的峰值是一块;按元素取(`int(keys[i])`)则每次都要造一个 numpy
+        # 标量,慢一个数量级。本机 200 万行实测:整条转 tracemalloc 峰值 110 MB,
+        # 分块转 26 MB。
+        for at in range(0, int(keys.size), self._CHUNK):
+            block_keys = keys[at:at + self._CHUNK].tolist()
+            block_counts = counts[at:at + self._CHUNK].tolist()
+            for group_key, count in zip(block_keys, block_counts):
+                board = group_key % stride - 1
+                yield (
+                    source_ids[group_key // stride],
+                    None if board < 0 else board_ids[board],
+                    count,
+                )
+
+    def _drain_column(self, column: int) -> "np.ndarray":
+        """把某一列的全部块拷进一条连续数组,**拷完一块就放掉一块**(同
+        `CanonicalEdgeTableBuilder._drain_column`,理由相同)。"""
+        tail = (self._src if column == 0 else self._brd)[: self._fill]
+        joined = np.empty(self._rows, dtype=EDGE_INDEX_DTYPE)
+        at = 0
+        for pair in self._full:
+            chunk = pair[column]
+            joined[at:at + chunk.size] = chunk
+            pair[column] = _EMPTY_INDEX_COLUMN
+            at += chunk.size
+        joined[at:at + tail.size] = tail
+        if column == 0:
+            self._src = _EMPTY_INDEX_COLUMN
+        else:
+            self._brd = _EMPTY_INDEX_COLUMN
+        return joined
+
+
 class SourceProfileFolder:
-    """把 ``(source_id, community_id, n)`` 的库内分组结果**流式**折成每来源一行。
+    """把 ``(source_id, community_id, n)`` 的分组结果**流式**折成每来源一行。
 
     为什么是流式:分组结果的行数是「来源数 × 该来源触及的板块数」(本机真实库
     84 个来源 × 平均 26 = 2183 行;生产 4.8 万来源可以到百万级)。累加器只按**来源**
-    开条目,所以 **Python 侧**内存是 O(来源数) 而不是 O(分组数) —— 每来源的板块计数在
-    `add` 里当场消化掉,从不落成 dict。红线「绝不把百万行拉进 Python 聚合」因此成立。
+    开条目,所以内存是 O(来源数) 而不是 O(分组数) —— 每来源的板块计数在 `add` 里当场
+    消化掉,从不落成 dict。红线「绝不把百万行拉进 Python 聚合」因此成立。
 
-    ⚠ **但「进程内存 O(来源数)」是假的,别这么读。** 分组发生在库内,而 SQLite 侧
-    `PRAGMA temp_store = MEMORY`(见 `repositories/sqlite/database.py`)意味着那个
-    `USE TEMP B-TREE FOR GROUP BY` 的临时 B 树**不能落盘**:进程还要额外扛下
-    O(分组数) 的库内临时结构。这里省掉的是 Python 那一份,不是全部。同一段说明也适用于
-    `cluster_size_histogram`(它有**两个** temp B 树,内层无条件约 200 万行)。
+    ⚠ 分组本身现在发生在 `SourceBoardCounter`(原子发布之后板块还没落库,SQL 做不了
+    这一跳),那一步的有界性由它自己的列式缓冲负责,见那边的说明。
 
     字段口径(设计给定):
       n_objects        该来源的可用对象总数(含没进任何板块的)

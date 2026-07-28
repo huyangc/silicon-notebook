@@ -221,7 +221,8 @@ swap）**刻意不动** `kg_mutation_seq`，变化信号独立在 `cluster_mutat
 - **哪几份受影响，依据是那条查询读没读 `concept_clusters`**（不是「感觉上相关」）：
   簇大小直方图与最大簇榜单直接 `FROM concept_clusters`；跨板块边的输入 `ew` 经
   `community_graph_rows` 的 `LEFT JOIN concept_clusters cs/ct` 把边两端映射到 canonical；
-  来源画像经 `source_community_counts` 的 `COALESCE(c.canonical_id, o.id)`。
+  来源画像经 `source_canonical_rows` 的 `COALESCE(c.canonical_id, o.id)`（第 13 轮起
+  那条 SQL 不再 join `community_members`，canonical → 板块 改由内存 membership 做）。
   **`relation_provenance` 不在此列**：它的 SQL 只有 `knowledge_relations` 全扫 + 两次端点
   探查，一个字都没提 `concept_clusters`。它同时是五份里最贵的一份（生产 836 万边、每行
   两次随机 PK 探查），所以纯合并触发的补账本**复用**上一轮的载荷而不是重算 —— 依据与闸
@@ -315,6 +316,73 @@ swap）**刻意不动** `kg_mutation_seq`，变化信号独立在 `cluster_mutat
   ⚠ 守卫必须对**移动变异**敏感：「每条读各开一个 `read_snapshot()`」看起来对，却和没改
   一样坏——实测两种变异都报红。
   ⚠ **这一轮只包了 overview 的前两条读，另两条留在快照外**——第 12 轮 P2 补完，见下。
+
+**批 1 上 codex 第 13 轮评审后的订正（2026-07-28）—— 发布必须是原子的，不是「窗口小一点」**：
+
+前十二轮把**读**侧的一致性做到了位（`read_snapshot()` 让一次响应只看一份库），但**写**
+侧一直是三个事务：板块 + 作废 → 版本戳 → 分析产物，中间隔着**整段预计算**。生产
+（878 万对象 / 836 万边）上那是**分钟级**的窗口，期间并发的 `/kg-analysis` 读到的是
+「新板块 + 旧账本」——板块 id 已经换了一整套，三条统计快照还停在上一个 `kg_mutation_seq`，
+依赖板块的两份已被作废但还没写回。读侧的快照保证了「这一份响应内部自洽」，可它自洽地
+描述了一个**库从来没有整体处于过**的状态。修前实测（三个事务）：预计算进行中读到的板块
+是新一代的，账本只剩三条 seq=2 的统计快照，而 state 的 seq 已经是 3。
+
+- **改法是把计算与发布彻底切开**：事务外算完**全部**产物，事务内一次性写
+  `communities` + `community_members` + `community_seq` + 账本 + 两张明细表。
+  `_precompute_kg_analysis` 因此更名 `_compute_kg_analysis` —— 它一个字节都不写库，
+  返回 `(edges, profiles, payloads)`。
+- **⚠ 重活绝不能顺手挪进那个事务。** 这是第 7 轮 B2 的红线：`SqliteDatabase.write()`
+  拿的是**进程级 `threading.Lock`**，把分钟级全表扫放进去会锁死整个进程。原子发布让
+  「反正都要写，不如在事务里算完」看起来更整洁了，所以两侧 store 头部那道
+  `_reject_inside_write_transaction` 与按调用时刻记 `write_depth` 的语义守卫比以前更
+  要紧。移动变异实测:把 `_compute_kg_analysis` 整段挪进发布事务 → 27 条测试报红，
+  运行时闸当场抛「全表级只读聚合被放进了写事务里」。
+- **主要障碍是来源画像。** 它原本走
+  `… LEFT JOIN community_members … GROUP BY source_id, community_id`，而原子发布下那张表
+  **还没写**。改法是让 SQL 退到只 join `concept_clusters`（`source_canonical_rows`，
+  逐对象返回 `(source_id, canonical_id)`，**连 GROUP BY 都不要**），canonical → 板块
+  这一跳交给内存里的 membership（`kg_analysis_precompute.SourceBoardCounter`：每行只落
+  两个 int32，一次原地排序 + 分组计数，与 §3.32 给边表定的列式套路同源）。
+  结果**逐字不变**：同一 level 下 `community_members` 是一个**划分**（唯一的写者
+  `replace_communities` 照 Louvain 的 membership 整表重写），而内存里的
+  `community_of_index` 就是那份 membership。真实库 `.local/silicon_notebook.db`（只读）
+  三个 notebook 的 91 条画像行改前/改后**逐字相同**。
+- **不 GROUP BY 是有意的，不是偷懒**：按 `(source_id, canonical_id)` 分组在真实库上
+  只把 41 713 行压成 40 170 行（0.96 行/对象），却要为此付一棵按**全部输入行**排序的
+  临时 B 树——而 `PRAGMA temp_store = MEMORY` 让它也落在进程内存里。去掉之后库内那份
+  临时结构整个消失，还少一次 `community_members` 的索引探查（真实库暖态 90 → 66 ms）。
+- **代价与它为什么可接受**：Python 侧从「每个 (来源, 板块) 分组一行」变成「每个可用
+  对象一行」，生产估算约 120 万 → 878 万次循环。同一个方法本来就在逐行流式消费
+  `community_graph_rows`（生产 836 万行），量级相同、有先例。本机 200 万行实测（真实
+  形态的合成库、同一会话内交错取中位）：耗时 4.2 s → 10.4 s，**进程峰值 RSS 基本持平**
+  （204 → 208 MB，SQLite 交还的 GROUP BY 临时结构抵掉了新增的列式缓冲），Python 侧
+  tracemalloc 峰值 4.4 → 37.2 MB。
+  ⚠ `drain()` 必须**分块** `tolist()`：整条转会给每个分组造一个 Python int 对象，
+  实测 tracemalloc 峰值 110 MB vs 分块 26 MB。
+- **membership 的存活期与它的补偿。** `can2idx` 与 `community_of_index` 现在必须活到
+  来源画像折完（第 9 轮刚做的「用完立即释放」在 `community_of_index` 上被推迟了）。
+  补偿是把来源画像排到三条统计快照**之前**，折完立刻 `del community_of_index` +
+  `can2idx.clear()` —— 那三条自己要分配 O(分组数) 的临时结构，让 membership 跨过它们
+  就是又叠一个峰值。生产规模实测占用：`can2idx`（171 万条 str→int）**109.4 MB**、
+  `community_of_index` **15.2 MB**、`SourceBoardCounter` 构造 **17.4 MB**。所以延长存活
+  的代价是 32.6 MB，而换来的是三条全表扫跑在一个**低 142 MB** 的水位上 —— 净改善。
+- **失败语义分成两档，刻意不同**：
+  · **计算**失败（派生报告的重活）照旧被吞掉 —— 板块正常发布、`kg_analysis_precompute_failed`
+    事件照发、返回值仍是真实板块数，爆炸半径论证不变；那一档发布事务仍会作废依赖板块
+    的两份产物（否则留下悬空明细行 + 一份追不住板块重铸的签名）。
+  · **发布事务**失败**冒泡**。原子之后「事务失败」的含义是**这一趟什么都没发生**，
+    吞掉它再返回板块数就是谎报一次并不存在的重建；`replace_communities` 的失败一向
+    冒泡，这一档与它同级。
+- **backfill 路径不需要改成原子的，它本来就是**：那条路径不重铸板块、不动
+  `community_seq`，只写账本与两张明细表，而那三张表一直在同一个事务里。反向护栏
+  （`test_the_backfill_transaction_publishes_products_without_touching_the_boards`）钉住
+  它**不许**顺手把板块也重写 —— 那会把 171 万成员行的整表重写强加到一条存在的全部理由
+  就是避免那笔钱的路径上。
+- **已知残留（不是本轮引入，本轮也没扩大）**：两次并发的 `rebuild_communities` 之间仍
+  可能撕裂 —— 补账本那一趟在事务外读板块、在事务内写产物，期间另一次 force 重建可以把
+  板块换掉。这与板块自身在两次调用间被换掉是同一类问题，不是本次三事务窗口那种**自伤**；
+  修它要么给板块划分加一个世代列（= 追加迁移 + bump `SCHEMA_VERSION`），要么在
+  notebook 级串行化整个重建，两者都超出本次范围。
 
 **批 1 上 codex 第 12 轮评审后的订正（2026-07-28）—— 第 8 轮那条修复自己留下的半截**：
 
@@ -574,7 +642,7 @@ kg_analysis_artifacts(notebook_id, kind, kg_mutation_seq, payload, created_at)
   产品其余各处都不显示，只有这里会连标题一起发给 notebook 的任何读者——与下面
   「knowhow 的自定义类型名不进返回载荷」是同一条决定。
 
-  排除做在**预计算**（`source_community_counts` 的那一次扫描）而不是读侧：产物表
+  排除做在**预计算**（`source_canonical_rows` 的那一次扫描）而不是读侧：产物表
   `kg_source_profiles` 会被分享拷贝、`merge_dbs` 与快照校验带走，留在表里等于要求每个
   下游各自记得再过滤一次；而且账本 `sources`（`len(profiles)`）与读侧 `total` 会分岔
   成两个口径。实测增量（本机 `nb-b37185f4ae`，暖态）86 → 95 ms：规划器把这条相关子

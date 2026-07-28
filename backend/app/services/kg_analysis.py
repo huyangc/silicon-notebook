@@ -20,7 +20,7 @@
 「835 万边冷扫 39 分钟」同量级),它们已经被 T2 在 `rebuild_communities` 那一批里算完
 并落进 `kg_analysis_artifacts` 账本。本 service **只读账本 + 明细表**,一次都不调
 `unified_kg.cluster_size_histogram` / `largest_clusters` / `relation_provenance_counts` /
-`source_community_counts`(`tests/test_kg_analysis_service.py` 有一条 spy 守卫钉住这点)。
+`source_canonical_rows`(`tests/test_kg_analysis_service.py` 有一条 spy 守卫钉住这点)。
 
 请求路径上真正跑的 SQL 只有五条,全部按行数有界:
   · `state_row`                  单行主键点读

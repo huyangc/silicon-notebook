@@ -934,8 +934,8 @@ class UnifiedKgStore:
     #
     # ⚠ 调用契约:**调用方不得持有外层写事务**。这里从池里另取一条连接,从 write()
     # 里调用会读到提交前的旧数据,而且不会响亮失败——它会安静地返回一份过时的报告。
-    # T2 起唯一的调用方是 KnowledgeLifecycleService._precompute_kg_analysis,它在两个
-    # `_write()` 之外调用;T3 落地 KgAnalysisService 时要在服务层配断言(见 ports.py)。
+    # T2 起唯一的调用方是 KnowledgeLifecycleService._compute_kg_analysis,它整个跑在
+    # 发布写事务之外;T3 落地 KgAnalysisService 时要在服务层配断言(见 ports.py)。
     #
     # 口径(设计 §3.5):对象只算 USABLE_STATUSES;边只算 review_status != 'rejected'
     # 且两端都是本 notebook 的可用对象;被排除的量单独返回,不凭空消失。
@@ -1450,21 +1450,23 @@ class UnifiedKgStore:
         ]
 
     @staticmethod
-    def source_community_counts(db: Any, notebook_id: str, level: int):
-        """来源画像的**唯一一次扫描**:``(source_id, community_id, n)`` 的库内分组游标。
+    def source_canonical_rows(db: Any, notebook_id: str):
+        """来源画像的**唯一一次扫描**:``(source_id, canonical_id)`` 的逐对象游标。
 
-        LEFT JOIN 而不是 INNER JOIN:``community_id IS NULL`` 的那一组是「该来源里没进
-        任何主题板块的对象」,它必须计入 `n_objects` 却不能进分母。用 INNER JOIN 就得
-        再扫一遍 `knowledge_objects` 才能拿到总数。
+        ⚠ **刻意没有 `community_members`,也没有 GROUP BY**(codex 第 13 轮 P1 的原子
+        发布):板块与全部产物要在同一个写事务里一次出现,所以产物必须能在板块落库**之前**
+        算出来,而那一刻板块划分只在内存里。canonical → 板块 这一跳交给
+        `kg_analysis_precompute.SourceBoardCounter`。完整理由与「为什么结果逐字不变」
+        见 SQLite 侧的 docstring。
 
         ``COALESCE(c.canonical_id, o.id)`` 与 `community_graph_rows` 的 canonical 口径
         逐字一致:没有 cluster_map 行的对象就是它自己的 canonical(社区正是建在那个口径
         的图上)。SQLite 侧同款。
 
-        PostgreSQL 上规划器对这个形态选 hash join + HashAggregate(分组键是两个普通
-        列,基数估得准 —— 与 T1 那条 `relation_provenance_counts` 不同,那里的巨大 CASE
-        表达式让规划器误判成 60 万个分组、退化成 GroupAggregate + external merge sort)。
-        分组仍然发生在库内,调用方流式消费,Python 侧内存是 O(来源数)。
+        PostgreSQL 上这条退成一次 `knowledge_objects` 的顺扫 + 一次到 `concept_clusters`
+        的 hash/nested-loop left join,**不再有** HashAggregate —— 旧形态那一步在 30 万行
+        的实测计划里就已经溢盘(见 §3.2 的 T1 实测表)。分组改由调用方在列式缓冲里做,
+        Python 侧每行只留两个 int32。
 
         口径与 SQLite 侧逐字一致:对象只算 `USABLE_STATUSES`;`source_id=''` 的对象
         整体排除(它们共享同一个空 source_id,算进去等于凭空造一个「空来源」的画像);
@@ -1483,25 +1485,19 @@ class UnifiedKgStore:
         return db.execute(
             f"""
             SELECT o.source_id AS source_id,
-                   cm.community_id AS community_id,
-                   COUNT(*) AS n
+                   COALESCE(c.canonical_id, o.id) AS canonical_id
             FROM knowledge_objects o
             LEFT JOIN concept_clusters c
                    ON c.notebook_id = o.notebook_id
                   AND c.member_object_id = o.id
-            LEFT JOIN community_members cm
-                   ON cm.notebook_id = o.notebook_id
-                  AND cm.canonical_id = COALESCE(c.canonical_id, o.id)
-                  AND cm.level = %s
             WHERE o.notebook_id = %s
               AND o.status IN ({placeholders})
               AND o.source_id != ''
               AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id = o.source_id
                               AND s.notebook_id = o.notebook_id
                               AND s.source_type IN ('memory','knowhow'))
-            GROUP BY o.source_id, cm.community_id
             """,
-            (int(level), notebook_id, *USABLE_STATUSES),
+            (notebook_id, *USABLE_STATUSES),
         )
 
     @staticmethod
