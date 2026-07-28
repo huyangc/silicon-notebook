@@ -279,6 +279,48 @@ def test_usable_status_filter_and_insertion_order_match_golden(knowledge_harness
     assert {item["evidence"][0].source_id for item in objects} == {"source-golden"}
 
 
+def test_formula_evidence_enrichment_matches_across_backends(knowledge_harness):
+    formula = r"C _ {l} = 2 \sigma (\tilde {C} _ {l}).\tag{7}"
+    placeholders = "%s" if knowledge_harness.backend == "postgres" else "?"
+    values = (
+        "element-formula",
+        "source-golden",
+        "formula",
+        "eq. 7",
+        formula,
+        NOW,
+    )
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO source_elements"
+            "(id,source_id,element_type,location_label,text,created_at) "
+            f"VALUES ({','.join([placeholders] * len(values))})",
+            values,
+        )
+
+    stored_evidence = {
+        "source_id": "source-golden",
+        "source_title": "2606.19348v1.pdf",
+        "element_id": "element-formula",
+        "element_type": "paragraph",
+        "location_label": "old location",
+        "quoted_span": formula,
+        "confidence": 0.98,
+    }
+    with knowledge_harness.database.connect() as connection:
+        enriched = knowledge_harness.knowledge._enrich_evidence(
+            connection,
+            [stored_evidence],
+        )[0]
+
+    assert enriched == {
+        **stored_evidence,
+        "element_type": "formula",
+        "location_label": "eq. 7",
+        "element_text": formula,
+    }
+
+
 def test_merge_candidate_batches_preserve_sqlite_rowid_ordinal(knowledge_harness):
     with knowledge_harness.database.write() as connection:
         for index in range(4):

@@ -98,3 +98,55 @@ def test_concept_detail_includes_element_text(repo):
     cid = list(repo.cluster_map(nb.id).values())[0]
     d = repo.concept_detail(nb.id, cid)
     assert any("conditional memory module" in (e.get("element_text") or "") for e in d["evidence"])
+
+
+def test_formula_evidence_metadata_survives_context_enrichment(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    formula = r"C _ {l} = 2 \sigma (\tilde {C} _ {l}).\tag{7}"
+    sid, eids = _src_with_elements(repo, nb.id, [formula])
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE source_elements SET element_type='formula', location_label='eq. 7' WHERE id=?",
+            (eids[0],),
+        )
+
+    evidence = {
+        "source_id": sid,
+        "source_title": "2606.19348v1.pdf",
+        "element_id": eids[0],
+        # Persisted metadata can be stale; SourceElement is authoritative.
+        "element_type": "paragraph",
+        "location_label": "old location",
+        "quoted_span": formula,
+        "confidence": 0.98,
+    }
+    repo.store_kg(
+        nb.id,
+        sid,
+        [{
+            "local_id": "f",
+            "object_type": "formula",
+            "payload": {"name": formula, "section_path": "2"},
+            "evidence": [evidence],
+        }],
+        [],
+    )
+    with repo._connect() as db:
+        object_id = db.execute(
+            "SELECT id FROM knowledge_objects WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()["id"]
+
+    occurrence = repo.node_context(nb.id, object_id)["occurrences"][0]
+    assert occurrence == {
+        **evidence,
+        "element_type": "formula",
+        "location_label": "eq. 7",
+        "element_text": formula,
+    }
+
+    repo.rebuild_unified_kg(nb.id)
+    canonical_id = repo.cluster_map(nb.id)[object_id]
+    detail_evidence = repo.concept_detail(nb.id, canonical_id)["evidence"][0]
+    assert detail_evidence["element_type"] == "formula"
+    assert detail_evidence["element_text"] == formula
