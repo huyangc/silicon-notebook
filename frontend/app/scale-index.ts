@@ -98,6 +98,65 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
 export const UNINDEXED_SCOPE_HINT =
   "未索引部分不参与检索与推理（段落、知识对象、关联、图谱）；点「更新索引」或等待自动收进后可见";
 
+// index_required is persisted with an answer and therefore describes the
+// retrieval state at answer time.  A live notebook status is authoritative
+// once an index has since been published; otherwise every historical answer
+// would keep showing the degraded banner after a successful build.
+export function shouldShowIndexRequiredBanner(
+  answerIndexRequired: boolean | undefined,
+  scaleStatus: Pick<ScaleIndexStatus, "exists"> | null | undefined,
+): boolean {
+  return Boolean(answerIndexRequired && !scaleStatus?.exists);
+}
+
+// The pending-action stream is the durable completion signal after the
+// foreground 20-minute polling window has ended.  Refresh only the active
+// notebook: completion events for other notebooks must not overwrite its
+// live retrieval status.
+export function shouldRefreshScaleIndexFromDone(
+  event: { notebook_id: string; kind?: string } | null | undefined,
+  activeNotebookId: string | null | undefined,
+): boolean {
+  return Boolean(
+    event?.kind === "index_done"
+      && activeNotebookId
+      && event.notebook_id === activeNotebookId,
+  );
+}
+
+// doneItems retains every SSE completion event, unlike the single toast value
+// that React may overwrite when several messages are batched in one render.
+// Items are newest-first, so the first active-notebook index event is the one
+// whose publication should wake the live status refresh.
+export function latestScaleIndexDoneForNotebook<T extends {
+  notebook_id: string;
+  kind?: string;
+}>(
+  events: readonly T[],
+  activeNotebookId: string | null | undefined,
+): T | null {
+  return events.find((event) =>
+    shouldRefreshScaleIndexFromDone(event, activeNotebookId)
+  ) ?? null;
+}
+
+export function latestScaleIndexDoneKey(
+  events: readonly { notebook_id: string; kind?: string; ts: number }[],
+  activeNotebookId: string | null | undefined,
+): string {
+  const event = latestScaleIndexDoneForNotebook(events, activeNotebookId);
+  return event ? `${event.notebook_id}:${event.ts}` : "";
+}
+
+// A queued operation is still replaceable by an explicit immediate request.
+// Choose the same exact mode that the non-busy primary action would use.
+export function queuedScaleIndexImmediateOp(s: ScaleIndexStatus): ScaleIndexOp {
+  if (!s.exists) return "build";
+  return (s.has_unindexed_content ?? (s.unindexed_sources ?? 0) > 0)
+    ? "update"
+    : "rebuild";
+}
+
 // 每个动作的确认文案 —— 描述具体精确,并诚实说明 update 会在何种条件下自动转全量。
 export function scaleIndexOpConfirm(op: ScaleIndexOp, s: ScaleIndexStatus): string {
   if (op === "build") {

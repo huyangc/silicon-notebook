@@ -709,10 +709,42 @@ class ScaleArtifactRuntime:
             pass
         return mode
 
-    def _run_scale_op(self, notebook_id: str, mode: str) -> None:
+    def _run_scale_op(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        supersede_idle: bool = False,
+        claim_idle: bool = False,
+    ) -> bool:
+        """Claim and launch one scale-index operation.
+
+        A manual ``when=now`` request supersedes an older off-peak request for
+        the same notebook.  Removing that idle entry and claiming ``building``
+        happen under the same lock so the status endpoint can never fall back
+        to a stale ``queued`` state after the immediate build finishes.
+
+        The scheduler uses ``claim_idle`` to consume only an operation it can
+        start.  A notebook that is already building keeps its queued follow-up,
+        and the queued mode is read while holding the claim lock so an updated
+        request cannot be replaced by an older scheduler snapshot.
+
+        An idle request created *after* a claim is deliberately preserved:
+        it may represent content committed while the current generation is
+        building.  Likewise, an already-running build keeps its queued
+        follow-up because this call did not actually start a replacement.
+        """
+        removed_idle_mode = None
         with self.building_lock:
             if notebook_id in self.building:
-                return
+                return False
+            if claim_idle:
+                removed_idle_mode = self.idle_queue.pop(notebook_id, None)
+                if removed_idle_mode is None:
+                    return False
+                mode = removed_idle_mode
+            elif supersede_idle:
+                removed_idle_mode = self.idle_queue.pop(notebook_id, None)
             self.building.add(notebook_id)
         # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
         # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
@@ -748,7 +780,13 @@ class ScaleArtifactRuntime:
         except Exception:
             with self.building_lock:
                 self.building.discard(notebook_id)
+                # Starting the immediate worker failed before it could do any
+                # work.  Restore the displaced off-peak request unless a newer
+                # request was queued in the meantime.
+                if removed_idle_mode is not None:
+                    self.idle_queue.setdefault(notebook_id, removed_idle_mode)
             raise
+        return True
 
     def _process_idle_queue(self, force: bool = False) -> None:
         if not force:
@@ -763,10 +801,20 @@ class ScaleArtifactRuntime:
             if not in_window:
                 return
         with self.building_lock:
-            queued = dict(self.idle_queue)
-            self.idle_queue.clear()
-        for notebook_id, mode in queued.items():
-            self._run_scale_op(notebook_id, mode)
+            queued_notebook_ids = list(self.idle_queue)
+        for notebook_id in queued_notebook_ids:
+            try:
+                # Claim each entry independently.  Busy notebooks stay queued,
+                # and one daemon-start failure restores that entry without
+                # preventing the remaining notebooks from being considered.
+                self._run_scale_op(notebook_id, "auto", claim_idle=True)
+            except Exception:  # noqa: BLE001 - one item must not drain the tick
+                try:
+                    self.event_log.logger.exception(
+                        "scale scheduler item failed for %s", notebook_id
+                    )
+                except Exception:
+                    pass
 
     def _ensure_scheduler(self) -> None:
         with self.building_lock:
@@ -809,12 +857,15 @@ class ScaleArtifactRuntime:
                 self.idle_queue[notebook_id] = mode
             self._ensure_scheduler()
             return {"status": "queued", "notebook_id": notebook_id}
-        with self.building_lock:
-            already_building = notebook_id in self.building
-        if already_building:
-            return {"status": "already_building", "notebook_id": notebook_id}
-        self._run_scale_op(notebook_id, mode)
-        return {"status": "building", "notebook_id": notebook_id}
+        started = self._run_scale_op(
+            notebook_id,
+            mode,
+            supersede_idle=True,
+        )
+        return {
+            "status": "building" if started else "already_building",
+            "notebook_id": notebook_id,
+        }
 
     def cancel(self, notebook_id: str) -> dict:
         self.get_notebook(notebook_id)

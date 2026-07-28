@@ -66,7 +66,7 @@ import {
   type NotebookRef,
 } from "./notebook-bases";
 import {
-  describeScaleIndex, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
+  describeScaleIndex, latestScaleIndexDoneKey, queuedScaleIndexImmediateOp, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
   type ScaleIndexOp, type ScaleIndexStatus,
 } from "./scale-index";
 import {
@@ -870,6 +870,7 @@ export default function Home() {
   const [relinkingKg, setRelinkingKg] = useState(false);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
+  const scaleIndexDoneRequestRef = useRef(0);
   const [cancelingScaleIndex, setCancelingScaleIndex] = useState(false);
   // 「索引与构建」面板(看板弹窗)的三系统聚合状态——openAnalytics 打开时经 fetchIndexStatus
   // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
@@ -886,6 +887,34 @@ export default function Home() {
   const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
+  const latestScaleIndexDoneEventKey = latestScaleIndexDoneKey(
+    pending.doneItems,
+    currentNotebookId,
+  );
+  // Notebook switches invalidate an event-driven refresh even if the next
+  // notebook has no completion item.  Dismissing an item does not increment
+  // this generation, so it cannot cancel an already-started authoritative GET.
+  useEffect(() => {
+    scaleIndexDoneRequestRef.current += 1;
+  }, [currentNotebookId]);
+  // The foreground status poll intentionally stops after 20 minutes, but an
+  // off-peak queue or a very large build may finish later.  The pending-action
+  // SSE completion event is therefore the authoritative wake-up: re-fetch the
+  // active notebook's live scale status so historical index_required banners
+  // disappear without requiring navigation or a page refresh.
+  useEffect(() => {
+    if (!latestScaleIndexDoneEventKey || !currentNotebookId) return;
+    const nb = currentNotebookId;
+    const request = ++scaleIndexDoneRequestRef.current;
+    fetchScaleIndexStatus(nb).then((status) => {
+      if (
+        activeNotebookIdRef.current !== nb
+        || scaleIndexDoneRequestRef.current !== request
+      ) return;
+      setScaleIndexStatus(status);
+      setBuildingScaleIndex(shouldResumeScaleIndex(status));
+    }).catch(() => {});
+  }, [latestScaleIndexDoneEventKey, currentNotebookId]);
   // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
   // (完整重抽/重新合并/构建-更新-全量重建)执行前一律经此弹窗,与「删除来源」「删除
   // 会话」等既有破坏性操作共用同一套 setInfoModal 定制样式弹窗(向上统一,而非退到
@@ -1266,6 +1295,13 @@ export default function Home() {
   // Kick off a scale-index rebuild; the effect above then polls until it's ready.
   const startScaleIndexRebuild = async (nb: string, when: "now" | "idle" = "now", mode: "auto" | "fold" | "full" = "auto") => {
     setBuildingScaleIndex(true);
+    if (when === "now") {
+      // queued → now is an explicit upgrade. Reflect the claim immediately so
+      // the still-queued server snapshot cannot leave a duplicate-submit gap.
+      setScaleIndexStatus((current) => current
+        ? { ...current, building: true, state: "building" }
+        : current);
+    }
     try {
       await rebuildScaleIndex(nb, when, mode);
       if (when === "idle") {
@@ -1277,14 +1313,19 @@ export default function Home() {
           ? "已开始更新检索索引（增量收录新增来源，后台进行）；完成后自动更新"
           : "已开始构建检索索引（后台进行，可能数分钟）；完成后自动更新");
       }
-    } catch (e) { reportError(e); setBuildingScaleIndex(false); }
+    } catch (e) {
+      reportError(e);
+      setBuildingScaleIndex(false);
+      fetchScaleIndexStatus(nb).then((s) => setScaleIndexStatus(s)).catch(() => {});
+    }
   };
   // 「检索索引」三个精确动作 —— 各自弹确认(描述具体精确)后立即后台执行:
   //   build  未构建/建议 → 从零构建(full)    update 已过期 → 增量收录新增源(fold)
   //   rebuild 已建成     → 删除现有索引从头全量重建(full)。与 tier 解耦,大库亦可建。
   const runScaleIndexOp = (op: ScaleIndexOp, onStarted?: () => void) => {
     const s = scaleIndexStatus;
-    if (!currentNotebookId || buildingScaleIndex || !s || s.building || s.state === "queued") return;
+    const queuedUpgrade = s?.state === "queued" && !s.building;
+    if (!currentNotebookId || !s || s.building || (buildingScaleIndex && !queuedUpgrade)) return;
     const nb = currentNotebookId;
     // onStarted 只在**确认弹窗点确定后**跑(放进 onConfirm 内)——H8 修复 CTA 用它 arm
     // checkup 轮询;取消确认/早退守卫命中时都不 arm,免得空转 10min(评审)。
@@ -4783,6 +4824,7 @@ export default function Home() {
                             notebookNames={notebookNames}
                             onBuildScaleIndex={() => runScaleIndexOp("build")}
                             buildingScaleIndex={buildingScaleIndex}
+                            scaleIndexStatus={scaleIndexStatus}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
                             onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
@@ -5834,6 +5876,9 @@ export default function Home() {
                     // 6s 才刷新一次,点击构建/更新/全量重建的瞬间先靠本地 buildingScaleIndex 立即
                     // 切到「取消」态,避免残留可点的旧按钮。
                     const busy = buildingScaleIndex || v.state === "building" || v.state === "queued";
+                    const queuedImmediateOp = v.state === "queued"
+                      ? queuedScaleIndexImmediateOp(s)
+                      : null;
                     const tsSuffix = s.last_built_at ? ` · 上次 ${formatRelativeTime(s.last_built_at)}` : "";
                     const color = v.tone === "warn" ? "var(--color-warn, #b97a00)" : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
                     const desc = v.tone === "muted" ? "内容较少，直接搜索已够快，无需索引"
@@ -5865,7 +5910,24 @@ export default function Home() {
                         </div>
                         {!isReader && (
                           <div className="index-ctas">
-                            {busy ? (
+                            {v.state === "queued" && !s.building ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="index-cta primary"
+                                  onClick={() => runScaleIndexOp(queuedImmediateOp!)}
+                                >
+                                  {queuedImmediateOp === "build"
+                                    ? "立即构建"
+                                    : queuedImmediateOp === "update"
+                                      ? "立即更新"
+                                      : "立即重建"}
+                                </button>
+                                <button type="button" className="index-cta" disabled={cancelingScaleIndex} onClick={handleCancelScaleIndex}>
+                                  {cancelingScaleIndex ? "取消中…" : "取消"}
+                                </button>
+                              </>
+                            ) : busy ? (
                               <button type="button" className="index-cta" disabled={cancelingScaleIndex} onClick={handleCancelScaleIndex}>
                                 {cancelingScaleIndex ? "取消中…" : "取消"}
                               </button>

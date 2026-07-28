@@ -45,6 +45,7 @@ import {
 import {
   STRUCTURED_ENUMERATION_LIMITS,
 } from "./ask-retrieval-effort";
+import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-index";
 import type { AskResponse, KnowhowBatchCoverage, KnowhowResultSet } from "./workspace-model";
 import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
@@ -564,6 +565,7 @@ export function AnswerView({
   notebookNames,
   onBuildScaleIndex,
   buildingScaleIndex,
+  scaleIndexStatus,
   onSaveMemory,
   memorySaved,
   onTestModel,
@@ -584,6 +586,7 @@ export function AnswerView({
   notebookNames: Record<string, string>;
   onBuildScaleIndex: (notebookId: string) => void;
   buildingScaleIndex: boolean;
+  scaleIndexStatus?: Pick<ScaleIndexStatus, "exists" | "building" | "state"> | null;
   onSaveMemory: (answerId: string) => void;
   memorySaved: boolean;
   onTestModel?: (serviceId: string) => Promise<ModelServiceStatusItem | null>;
@@ -597,6 +600,8 @@ export function AnswerView({
     rect: DOMRect;
   } | null>(null);
   const answerText = answer.answer || answer.conclusion || "";
+  const scaleIndexQueued = scaleIndexStatus?.state === "queued"
+    && !scaleIndexStatus.building;
   const references = useMemo(
     () => buildAnswerReferences(answerText, answer.anchors, answer.citations),
     [answerText, answer.anchors, answer.citations]
@@ -625,7 +630,7 @@ export function AnswerView({
           testingAllModels={testingAllModels}
         />
       )}
-      {answer.index_required && (
+      {shouldShowIndexRequiredBanner(answer.index_required, scaleIndexStatus) && (
         <div className="answer-index-degraded" title="内容较多时检索会走索引；尚未建立索引时结果会受限">
           <AlertTriangle size={14} aria-hidden="true" />
           <span>此笔记本内容较多，尚未建立索引，当前检索能力受限。</span>
@@ -633,10 +638,10 @@ export function AnswerView({
             type="button"
             className="mode-engine"
             style={{ marginLeft: 6 }}
-            disabled={buildingScaleIndex}
+            disabled={buildingScaleIndex && !scaleIndexQueued}
             onClick={() => { if (notebookId) onBuildScaleIndex(notebookId); }}
           >
-            {buildingScaleIndex ? "构建中…" : "构建索引"}
+            {scaleIndexQueued ? "立即构建" : buildingScaleIndex ? "构建中…" : "构建索引"}
           </button>
         </div>
       )}
