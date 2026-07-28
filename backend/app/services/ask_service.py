@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -920,8 +921,14 @@ class AskService:
                                      intent: QueryIntentContract | None = None,
                                      retrieval_query: str = "",
                                      retrieval_effort: RetrievalEffort = "standard",
-                                     completeness_unavailable: bool = False) -> AskResponse:
-        """系统模型已启用但漏绑问答工作负载时的统一短路响应。"""
+                                     completeness_unavailable: bool = False,
+                                     reasoning_trace: "list[TraceStep] | None" = None,
+                                     ) -> AskResponse:
+        """系统模型已启用但漏绑问答工作负载时的统一短路响应。
+
+        ``reasoning_trace`` 带上调用方**已经推送给客户端**的那几步:短路响应一旦
+        作为 final 事件替换掉在途 turn,不带轨迹就等于把用户刚看着走过的几步
+        当场抹掉,历史里也留不下。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         if completeness_unavailable:
             msg = (
@@ -932,7 +939,8 @@ class AskService:
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=retrieval_query or question, llm_mode="deterministic",
-            intent=intent, retrieval_effort=retrieval_effort)
+            intent=intent, retrieval_effort=retrieval_effort,
+            reasoning_trace=reasoning_trace or None)
         response.mode = mode
         response.model_errors = [
             ModelError(stage="answer", model="", message="missing_config")
@@ -957,7 +965,6 @@ class AskService:
     ) -> AskResponse:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
         引用绑回 chunk。KG 不参与(严格推理走 ask_reasoning)。"""
-        import time
         ask_started = time.perf_counter()
 
         def ask_stage(name: str, started: float, **extra) -> None:
@@ -1288,6 +1295,13 @@ class AskService:
                     topic.question for topic in intent_contract.mandatory_topics
                 ],
             },
+            # The understanding phase runs entirely in ``/ask/intent``, before
+            # this durable job exists, so the server cannot time it.  The UI
+            # reports what it measured; without it the replayed trace would
+            # silently drop that whole phase from the run's total.
+            duration_ms=(
+                payload.intent.understanding_ms if payload.intent is not None else None
+            ),
         )
         pre_trace: list[TraceStep] = [intent_step]
         intent_streamed = False
@@ -1303,6 +1317,15 @@ class AskService:
             pre_trace.append(step)
             if on_trace:
                 on_trace(step)
+
+        def streamed_pre_trace() -> "list[TraceStep] | None":
+            """短路返回要带上的轨迹:客户端已经看到的那几步。
+
+            有 `on_trace` 就说明 intent(以及命中时的 memory)已经推送出去了 ——
+            final 事件不带它们,就是在替换在途 turn 的同一刻把用户刚看着走过的
+            轨迹抹掉,历史里也留不下。没有流消费者的直调则保持原状:空轨迹仍然
+            表示「agentic loop 没跑」。"""
+            return pre_trace if on_trace is not None else None
 
         structured_batch = None
         completeness_unavailable = False
@@ -1406,9 +1429,54 @@ class AskService:
             )
             return response
 
+        # Stream the intent step BEFORE memory retrieval.  Memory hits cost an
+        # embedding round trip plus a vector scan, and until this step lands the
+        # UI has nothing after the synthetic "start" — the reader is left
+        # watching an empty trace through work that is already under way.
+        stream_intent()
+        memory_started = time.perf_counter()
         memory_hits = self._memory_hits(
             user_id, notebook_id, research_question
         )
+        # The duration covers the embedding round trip plus the vector scan
+        # above: this step is the trace's only account of that work, so leaving
+        # it untimed would drop it from a total advertised as covering the run.
+        memory_ms = round((time.perf_counter() - memory_started) * 1000)
+
+        def record_memory_step() -> None:
+            """记录本轮召回到的私有记忆(0 命中不记 —— 那在没有记忆的笔记本里全是噪声)。
+
+            措辞只声称**召回**,不声称被答案采纳:合成未必会发生(模型未配置、
+            或注册表为空的离线确定性模式),那时说「参考了 N 条」就是假账。调用点
+            也刻意排在短路返回之后,让根本没产生答案的那几轮干脆不提记忆。
+
+            刻意**不**改成「只在记忆真被模型绑成锚点时才记」(codex 第 7 轮 P2 的
+            建议),两个理由:
+            1. 那会把这一步推到答案合成之后才发出,实时轨迹里它就不再出现在事情
+               真正发生的位置 —— 而这一步携带的正是召回本身的耗时。
+            2. 记忆进了 prompt 却没被引用是常态,按锚点过滤会变成**漏报**:
+               轨迹会说没查过记忆,而实际上查了、也喂给了模型。
+            轨迹记录的是引擎做过什么,不是答案归因了什么;归因由答案里的 [k] 引用
+            承担。反向护栏见 test_reasoning_stream.py 的
+            test_memory_step_reports_recall_not_attribution。"""
+            if memory_hits:
+                checked_pre_trace(TraceStep(
+                    step_type="memory",
+                    summary=f"找到 {len(memory_hits)} 条相关记忆",
+                    detail={"count": len(memory_hits)},
+                    duration_ms=memory_ms,
+                ))
+            else:
+                # 零命中也要记一步:候选查询与 embedding 调用照样发生了,把
+                # memory_ms 丢掉,「轨迹覆盖整轮」这句就不成立(codex 第 10 轮 P2)。
+                # 用 skip 而不是 memory —— 「记忆」这个标签只在真的找到东西时出现,
+                # 与 test_memory_step_reports_recall_not_attribution 的口径一致;
+                # 检索器本来就用 skip 记录跳过的工作,这里沿用同一套词汇。
+                checked_pre_trace(TraceStep(
+                    step_type="skip",
+                    summary="未找到相关记忆",
+                    duration_ms=memory_ms,
+                ))
 
         if self._primary_llm_unconfigured():
             if structured_batch is not None:
@@ -1452,7 +1520,8 @@ class AskService:
                 user_id=user_id, job_id=job_id, intent=intent_contract,
                 retrieval_query=research_question,
                 retrieval_effort=payload.retrieval_effort,
-                completeness_unavailable=completeness_unavailable)
+                completeness_unavailable=completeness_unavailable,
+                reasoning_trace=streamed_pre_trace())
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1494,7 +1563,10 @@ class AskService:
                 result_coverage=(
                     structured_batch.coverage() if structured_batch else None
                 ),
-                reasoning_trace=(pre_trace if structured_batch is not None else None))
+                reasoning_trace=(
+                    pre_trace
+                    if structured_batch is not None else streamed_pre_trace()
+                ))
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
@@ -1508,7 +1580,12 @@ class AskService:
         # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
         _emb_token = _ASK_EMBED_CACHE.set({})
         try:
-            stream_intent()
+            # intent already streamed above (before memory retrieval); stream_intent
+            # stays idempotent because the structured branch may emit it earlier.
+            # 记忆那一步排在这里:上面每一条短路返回都不会产出答案,在它们之前记
+            # 就等于给一次没发生的作答留下「用过你的记忆」的痕迹。
+            record_memory_step()
+
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
                 if on_trace:
@@ -1566,6 +1643,8 @@ class AskService:
 
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
+            synthesis_ran = False
+            synthesis_started = time.perf_counter()
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
             structured_block = ""
@@ -1593,6 +1672,7 @@ class AskService:
                     service="ask_answer",
                 )
                 synth_failed = not _ok
+                synthesis_ran = True
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
@@ -1641,6 +1721,33 @@ class AskService:
                 evidence_pool, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
             grounded = evidence_level == "grounded"
+
+            if synthesis_ran:
+                # The retriever's own last step reports which evidence it ADOPTED;
+                # writing the answer (and assembling its citations) happens out
+                # here and used to be invisible.  Without this step the trace
+                # stalls on "合成" for the whole generation call and the trace
+                # total silently omits it — usually the largest slice of a run.
+                synthesis_step = TraceStep(
+                    step_type="synthesis",
+                    summary=(
+                        # anchors 才是模型真正绑上的 [k];citations 是「每条检索到
+                        # 的证据一张卡」,模型一个锚点都没吐出来时它还会被当兜底
+                        # 列表展示(见 evidence_context.citations_from 的注释)。
+                        # 拿它当引用数,会在零绑定的回答上写出「引用 10 处证据」。
+                        f"已生成答案，引用 {len(anchors)} 处证据"
+                        if answer else "答案合成未产出内容"
+                    ),
+                    detail={
+                        "citations": len(citations),
+                        "anchors": len(anchors),
+                        "evidence_level": evidence_level,
+                    },
+                    duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
+                )
+                trace.append(synthesis_step)
+                if on_trace:
+                    on_trace(synthesis_step)
 
             if answer:
                 conclusion = _MARKER_GROUP_RE.sub("", answer).strip()

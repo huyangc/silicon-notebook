@@ -54,7 +54,10 @@ def test_reasoning_ask_returns_trace_and_evidence_level(arepo):
         answer={"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True}))
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert resp.reasoning_trace and resp.reasoning_trace[0].step_type == "intent"
-    assert resp.reasoning_trace[1].step_type == "plan"
+    # 断言 plan 在 intent 之后出现,而不是紧邻:两者之间还有 Memory 召回那一步
+    # (命中记 memory,零命中记带耗时的 skip)。「紧邻」是偶然相邻,不是合同。
+    kinds = [step.step_type for step in resp.reasoning_trace]
+    assert "plan" in kinds and kinds.index("plan") > kinds.index("intent")
     assert ("chat", "reasoning_agent") in arepo._runtime.models.calls
     assert ("chat", "evidence_refine") in arepo._runtime.models.calls
     assert ("chat", "ask_answer") in arepo._runtime.models.calls
@@ -218,6 +221,8 @@ def test_reasoning_service_streams_trace_with_explicit_user_id(arepo):
         nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"),
         user_id=arepo.current_user().id, on_trace=steps.append)
     assert steps and steps[0].step_type == "intent"     # 意图确认先于任何检索
-    assert steps[1].step_type == "plan"                 # on_trace 逐步可见
+    # on_trace 逐步可见。同上:plan 在 intent 之后,中间隔着 Memory 召回那一步。
+    streamed = [step.step_type for step in steps]
+    assert "plan" in streamed and streamed.index("plan") > streamed.index("intent")
     assert resp.mode == "reasoning" and resp.answer_id  # 引擎收口照存答案
     assert arepo.get_conversation(resp.conversation_id).turn_count == 1

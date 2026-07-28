@@ -279,6 +279,55 @@ def test_strict_blocked_when_no_kg_no_base(repo):
     assert resp.reasoning_trace is None       # did NOT run the agentic loop
 
 
+def test_strict_no_kg_keeps_the_trace_it_already_streamed(repo):
+    """有流消费者时,短路响应必须带上已经推送出去的那几步。
+
+    否则 final 事件替换在途 turn 的同一刻,用户刚看着走过的「理解」步就被抹掉,
+    重开会话的历史里也留不下(codex 第 2 轮 P2)。没有 on_trace 的直调仍保持
+    上面那条的语义:空轨迹 = agentic loop 没跑。"""
+    _configure_ask(repo)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    streamed = []
+    resp = repo.ask_reasoning(
+        nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
+    )
+    assert resp.kg_required is True
+    assert [step.step_type for step in streamed] == ["intent"]
+    assert [step.step_type for step in (resp.reasoning_trace or [])] == ["intent"]
+
+
+def test_short_circuit_run_never_claims_memory_was_used(repo, monkeypatch):
+    """没产出答案的那几轮不得留下记忆痕迹(codex 第 4 轮 P2)。
+
+    记忆步排在所有短路返回之后。若排在前面,「未配模型」这类根本没发生合成的
+    轮次也会持久化一条记忆记录,读起来就像私有记忆参与了一个并不存在的答案。"""
+    from app.models.memory import MemoryHit
+    from app.services.memory_retrieval import MemoryRetriever
+
+    _configure_ask(repo)
+    monkeypatch.setattr(
+        MemoryRetriever, "notebook_memory_hits",
+        lambda self, user_id, notebook_id, query, limit=8: [
+            MemoryHit(memory_id="m1", title="t", text="t", status="confirmed",
+                      authority=3, score=0.5),
+        ],
+    )
+    # 「运维配了系统模型服务,却漏绑 ask_answer」—— 那条短路的判据就是它。
+    monkeypatch.setattr(
+        type(repo._runtime.models), "primary_unconfigured", lambda self: True,
+    )
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    streamed = []
+    resp = repo.ask_reasoning(
+        nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
+    )
+    assert resp.llm_mode == "deterministic"          # 确实走了短路,没有合成
+    assert "memory" not in [step.step_type for step in streamed]
+    assert "memory" not in [step.step_type for step in (resp.reasoning_trace or [])]
+    # 已经推给客户端的 intent 步仍然要留在 final 里(第 2 轮 P2 的那条不能回退)。
+    assert [step.step_type for step in (resp.reasoning_trace or [])] == ["intent"]
+
+
 def test_strict_allowed_when_base_has_kg(repo):
     _configure_ask(repo)
     base = repo.create_notebook(NotebookCreate(name="base"))

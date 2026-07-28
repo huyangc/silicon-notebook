@@ -143,6 +143,11 @@ class AskIntentConfirmation(BaseModel):
     contract: QueryIntentContract
     resolved_question: str = Field(min_length=1, max_length=4000)
     answers: List[QueryIntentAnswer] = Field(default_factory=list, max_length=8)
+    # Wall-clock of the understanding phase, measured by the client: it runs in
+    # /ask/intent, before any durable job exists, so the server cannot time it.
+    # Reported back only so the persisted trace keeps that phase; it never feeds
+    # retrieval. Bounded so a bad client cannot inflate a run's reported total.
+    understanding_ms: Optional[int] = Field(default=None, ge=0, le=3_600_000)
 
 
 class AskRequest(BaseModel):

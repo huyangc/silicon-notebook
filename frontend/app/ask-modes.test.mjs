@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   ASK_MODES, DEFAULT_ASK_MODE, ASK_MODE_GROUPS,
   askModeIds, askModeLabels, groupOf, groupLabel, modeLabel,
-  defaultModeForGroup, requiresKg, canUseMode, modeFromTurn,
+  defaultModeForGroup, requiresKg, canUseMode, modeFromTurn, streamsTrace,
 } from "./ask-modes.ts";
 import {
   appSourceModules,
@@ -40,6 +40,18 @@ test("kg gating", () => {
   assert.equal(canUseMode("chunk", false), true);     // 通用问答无需 KG
   assert.equal(canUseMode("reasoning", false), false);
   assert.equal(canUseMode("graph", true), true);
+});
+
+// 后端 ask_modes.py 的 streaming 决定跑的过程中有没有轨迹步骤流下来。按分组判断
+// 会把关联追溯也挂上实时轨迹面板,用户从提交到最终答案只看得到「等待后端事件…」。
+// 跨栈的一致性由 scripts/check_ask_modes_contract.py 锁死,这里锁的是前端语义。
+test("实时轨迹面板按引擎是否流轨迹判断,分组替代不了它", () => {
+  assert.equal(streamsTrace("reasoning"), true);
+  assert.equal(streamsTrace("graph"), false);
+  assert.equal(streamsTrace("chunk"), false);
+  // 同一分组里两种都有 → 用分组判断必然误判其中一个。
+  assert.equal(groupOf("reasoning"), groupOf("graph"));
+  assert.notEqual(streamsTrace("reasoning"), streamsTrace("graph"));
 });
 
 test("restore mode from a prior turn (exact engine, safe fallback)", () => {

@@ -11,16 +11,23 @@ export interface AskModeDef {
   label: string;
   desc: string;
   requiresKg: boolean;
+  // 该引擎跑的过程中是否流式推送轨迹步骤(镜像后端 ask_modes.py 的 streaming;
+  // 由 scripts/check_ask_modes_contract.py 锁同步)。不流式的引擎不能渲染实时
+  // 轨迹面板 —— 那会让用户从提交一直盯着「等待后端事件…」直到最终答案落地。
+  streamsTrace: boolean;
   groupDefault?: boolean; // 组内默认引擎
 }
 
 export const ASK_MODES: AskModeDef[] = [
   { id: "chunk", group: "general", label: "通用问答",
-    desc: "默认。大范围检索原文，适合综述、对比、找事实。", requiresKg: false, groupDefault: true },
+    desc: "默认。大范围检索原文，适合综述、对比、找事实。",
+    requiresKg: false, streamsTrace: false, groupDefault: true },
   { id: "reasoning", group: "strict", label: "逐步推理",
-    desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。", requiresKg: true, groupDefault: true },
+    desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。",
+    requiresKg: true, streamsTrace: true, groupDefault: true },
   { id: "graph", group: "strict", label: "关联追溯",
-    desc: "顺着资料之间的关联往外找，列出牵连到的内容；适合理清一件事的来龙去脉。", requiresKg: true },
+    desc: "顺着资料之间的关联往外找，列出牵连到的内容；适合理清一件事的来龙去脉。",
+    requiresKg: true, streamsTrace: false },
 ];
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";
@@ -74,6 +81,12 @@ export function defaultModeForGroup(group: AskModeGroup): AskModeId {
 
 export function requiresKg(id: AskModeId): boolean {
   return defOf(id).requiresKg;
+}
+
+// 该引擎跑的过程中会不会有轨迹步骤流下来 —— 决定「生成中」占位是渲染实时轨迹
+// 面板还是普通的等待文案。按分组判断是错的:深入分析组里只有逐步推理是流式的。
+export function streamsTrace(id: AskModeId): boolean {
+  return defOf(id).streamsTrace;
 }
 
 export function canUseMode(id: AskModeId, kgReady: boolean): boolean {

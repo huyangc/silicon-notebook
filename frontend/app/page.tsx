@@ -35,6 +35,7 @@ import { withoutDecidedMerge } from "./kg-merge-model";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
   groupOf, groupLabel, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
+  streamsTrace,
 } from "./ask-modes";
 import {
   ASK_RETRIEVAL_EFFORT_OPTIONS,
@@ -137,6 +138,15 @@ import {
   type AskIntentConfirmation,
   type QueryIntentContract,
 } from "./ask-intent-model";
+import {
+  elapsedMs,
+  handOffIntentTrace,
+  intentClarifyStep,
+  intentConfirmedStep,
+  intentUnderstandingStep,
+  intentUnderstoodStep,
+  replaceLastIntentStep,
+} from "./ask-intent-trace";
 import { isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
@@ -729,6 +739,7 @@ export default function Home() {
     conversationId: string | null;
     question: string;
     contract: QueryIntentContract;
+    understandingMs: number;
   } | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
@@ -1541,6 +1552,19 @@ export default function Home() {
   const askAbortRef = useRef<AbortController | null>(null);
   const askIntentAbortRef = useRef<AbortController | null>(null);
   const askIntentFlowRef = useRef<"idle" | "preview" | "review" | "submitting">("idle");
+  // 问题理解阶段合成的轨迹前缀(理解中→已理解/待澄清→已确认)。它先于持久 job
+  // 存在,后端无从产出,所以由前端拼在后端流下来的步骤之前。用 ref 而不是只读
+  // pendingTrace:提交时要把这段前缀原样交给 executeAsk,闭包里读 state 会拿到旧值。
+  const askIntentTraceRef = useRef<ReasoningTraceStep[]>([]);
+  // 理解阶段会清空输入框(问题改以在途 turn 的形式先显示出来)。这里留一份草稿,
+  // 供「停止」「返回修改」「预检失败」「提交被守卫拦下」几条留在原地的路径原样
+  // 还给输入框。
+  const askIntentDraftRef = useRef("");
+  // 上面那个草稿槽是全局共享的,而清理发生在 `await executeAsk` 之后 —— 期间用户
+  // 完全可能切会话(那会把 flow 置回 idle、放行新一轮 preview)。没有归属令牌的话,
+  // 旧 run 返回时会把**新一轮**的草稿抹掉,新一轮再取消就无从退回。令牌只由发起
+  // 那一轮持有,谁持有谁才有权清理。
+  const askIntentDraftOwnerRef = useRef<object | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const memorySessionAbortRef = useRef(new AbortController());
   const askJobIdRef = useRef<string | null>(null);
@@ -1568,10 +1592,7 @@ export default function Home() {
   // boolean：切会话后可能又启动新 run，取消意图不能串台。
   const cancelRequestedControllersRef = useRef<Set<AbortController>>(new Set());
   useEffect(() => {
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
-    setIntentChecking(false);
+    abortIntentPreview();
     setAskIntentReview(null);
   }, [currentNotebookId, conversationId, askMode]);
   // 重开会话接回在途 ask job:reconnectJob 驱动轮询 effect,seen 记已渲染步数(防重复追加);
@@ -2045,6 +2066,13 @@ export default function Home() {
   // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
   const askBlocked = isAskBlocked(currentNotebook);
   const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
+  // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)、等用户补充澄清、以及
+  // 真正在跑的 ask 都算。在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方
+  // 落;只看 asking 会让用户在整段问题理解里对着空会话等待。
+  // 待澄清也必须算在内:预检返回后 intentChecking 就复位了,若不认 askIntentReview,
+  // 轨迹会恰好在「等待你补充」这一步上消失(空会话还会退回欢迎页),而下方的确认
+  // 卡片仍然摆在那里 —— 这正是本次改动要消除的那种割裂。
+  const askInFlight = asking || intentChecking || Boolean(askIntentReview);
   // ask_available 是 get_notebook 的快照;在别的页签/覆盖层增删证据不会刷新它。以下把它
   // 在"重新看到问答框"时与后端对齐,且**双向**——证据增则解禁、证据减则重新禁用(codex
   // PR#334 第5轮 P1:此前只在被禁时重拉,漏了 true→false)。来源增删这条路已各自覆盖
@@ -2455,9 +2483,7 @@ export default function Home() {
     setSessionLoading(true);
     try {
       askRunEpochRef.current += 1;
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
+    abortIntentPreview();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -2581,9 +2607,7 @@ export default function Home() {
     closeKnowhow();
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
+    abortIntentPreview();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
@@ -2954,6 +2978,46 @@ export default function Home() {
     setToast("来源已删除");
   }
 
+  // 收起在途 turn(问题气泡 + 轨迹面板)。
+  function clearPendingTurn() {
+    setPendingQuestion("");
+    setPendingMode(DEFAULT_ASK_MODE);
+    setPendingTrace([]);
+  }
+
+  // 问题理解阶段的统一收尾:中止在途预检、退出「理解中」占位态、收起在途 turn。
+  // 切库/切会话/新建会话/登出都必须走这里 —— 只 abort controller 而不复位
+  // intentChecking 会让占位态永久卡住(runAsk 的 finally 按 controller 身份认领,
+  // 别人抢先置空 ref 后它就不再代劳),此后 Ask 输入区一直禁用、runAsk 直接早退。
+  function abortIntentPreview() {
+    // 阶段判据必须是流程状态,不能是「草稿 ref 还非空」:草稿要留到 executeAsk
+    // 确认接下这次运行为止,而新会话第一轮的 started 回调会 setConversationId、
+    // 触发上面那个 effect —— 用草稿当标记就会在整轮生成期间把问题气泡和轨迹
+    // 一起清掉。submitting 之后已经不是理解阶段,那时的在途 turn 归 executeAsk。
+    const wasIntentPhase = askIntentFlowRef.current === "preview"
+      || askIntentFlowRef.current === "review";
+    askIntentAbortRef.current?.abort();
+    askIntentAbortRef.current = null;
+    askIntentFlowRef.current = "idle";
+    askIntentTraceRef.current = [];
+    askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
+    setIntentChecking(false);
+    // 只收自己那半边:真正在跑的 ask 有自己的在途 turn,不能被理解阶段的收尾误清。
+    if (wasIntentPhase) clearPendingTurn();
+  }
+
+  // 释放草稿槽,并回报本轮是否真的持有它。清理点分散在 `await executeAsk` 之后与
+  // catch 之中,逐点手写条件极易漏一处 —— 第 9 轮那个「旧 run 抹掉新一轮草稿」的
+  // 竞态就是这么来的。统一收敛到这里,守卫据此禁止在 runAsk/confirmAskIntent 里
+  // 裸清草稿槽。
+  function releaseIntentDraft(token: object): boolean {
+    if (askIntentDraftOwnerRef.current !== token) return false;
+    askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
+    return true;
+  }
+
   async function runAsk(nextQuestion = question) {
     if (
       !currentNotebookId || asking || intentChecking || sessionLoading
@@ -2980,7 +3044,19 @@ export default function Home() {
     const controller = new AbortController();
     askIntentFlowRef.current = "preview";
     askIntentAbortRef.current = controller;
+    // 理解阶段就把问题挂上会话流,并以轨迹的第一步显示「正在理解问题」——
+    // 用户在这段(一次不读语料的模型调用)看到的是同一条轨迹在推进,而不是
+    // 一条与轨迹无关的灰色提示条,也不用猜检索到底开始了没有。
+    const draftToken = {};
+    askIntentDraftRef.current = q;
+    askIntentDraftOwnerRef.current = draftToken;
+    askIntentTraceRef.current = [intentUnderstandingStep()];
+    setQuestion("");
+    setPendingQuestion(q);
+    setPendingMode("reasoning");
+    setPendingTrace(askIntentTraceRef.current);
     setIntentChecking(true);
+    const understandingStartedAt = Date.now();
     try {
       const contract = await previewAskIntent(
         notebookId, q, conversationIdAtStart, controller.signal,
@@ -2992,27 +3068,59 @@ export default function Home() {
         || activeConversationIdRef.current !== conversationIdAtStart
         || activeAskModeRef.current !== "reasoning"
       ) return;
+      const understandingMs = elapsedMs(understandingStartedAt, Date.now());
       if (contract.needs_clarification) {
+        askIntentTraceRef.current = replaceLastIntentStep(
+          askIntentTraceRef.current, intentClarifyStep(contract, understandingMs),
+        );
+        setPendingTrace(askIntentTraceRef.current);
         askIntentFlowRef.current = "review";
         setAskIntentReview({
           notebookId,
           conversationId: conversationIdAtStart,
           question: q,
           contract,
+          understandingMs,
         });
         setToast("问题存在会改变检索方向的歧义，请先补充确认");
         return;
       }
+      askIntentTraceRef.current = replaceLastIntentStep(
+        askIntentTraceRef.current, intentUnderstoodStep(contract, understandingMs),
+      );
       askIntentAbortRef.current = null;
       setIntentChecking(false);
       askIntentFlowRef.current = "submitting";
-      await executeAsk(
+      // 草稿留到 executeAsk 真的接下这次运行为止:理解跑完的这段时间里证据/图谱
+      // 状态可能已经变化,被它的可用性守卫拦下时输入框已空、在途 turn 也已隐藏,
+      // 不退回就等于把用户打的问题悄悄吞掉。
+      const started = await executeAsk(
         q,
         "reasoning",
-        buildAskIntentConfirmation(contract, contract.resolved_question, {}),
+        buildAskIntentConfirmation(
+          contract, contract.resolved_question, {}, understandingMs,
+        ),
+        handOffIntentTrace(askIntentTraceRef.current),
       );
+      // 只有仍持有草稿槽的那一轮才有权清理:期间用户可能已经切会话并开了新一轮
+      // 预检,那份草稿不归本轮处置(codex 第 9 轮 P2)。
+      if (releaseIntentDraft(draftToken) && !started) {
+        setQuestion(q);
+        askIntentTraceRef.current = [];
+        clearPendingTurn();
+      }
     } catch (error) {
       if (!isAbortError(error)) reportError(error);
+      // 预检失败/被中止:收起在途 turn 并把草稿还给输入框。别人已经接管(切库、
+      // 切会话)时 ref 已不是本 controller,由接管方负责清理,这里不越权。
+      // 同上,草稿槽的归属也要认令牌:抛错前若已切会话并开了新一轮预检,那份草稿
+      // 不归本轮处置。
+      const draft = askIntentDraftRef.current;
+      if (askIntentAbortRef.current === controller && releaseIntentDraft(draftToken)) {
+        setQuestion(draft || q);
+        askIntentTraceRef.current = [];
+        clearPendingTurn();
+      }
     } finally {
       if (askIntentAbortRef.current === controller) {
         askIntentAbortRef.current = null;
@@ -3028,19 +3136,25 @@ export default function Home() {
     nextQuestion: string,
     selectedMode: AskModeId,
     intent?: AskIntentConfirmation,
-  ) {
-    if (!currentNotebookId) return;
-    if (asking || sessionLoading) return;
+    // 理解阶段合成的轨迹前缀。后端流下来的步骤追加在它后面,用户看到的是一条
+    // 从「理解问题」一路走到「作答」的连续轨迹,而不是从中途冒出来的半截。
+    traceSeed: ReasoningTraceStep[] = [],
+    // 返回「本次运行有没有被真正接下」。下面这几道守卫可能在问题理解跑完之后
+    // 才拦下来(那段时间里证据/图谱状态会变),调用方要据此把草稿退回输入框 ——
+    // 否则输入框已清空、在途 turn 也已隐藏,用户的问题就此无声消失。
+  ): Promise<boolean> {
+    if (!currentNotebookId) return false;
+    if (asking || sessionLoading) return false;
     const q = nextQuestion.trim();
-    if (!q) return;
+    if (!q) return false;
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
     if (isAskBlocked(currentNotebook)) {
       setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
-      return;
+      return false;
     }
     if (requiresKg(selectedMode) && !kgAvailable) {
       setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
-      return;
+      return false;
     }
     const notebookId = currentNotebookId;
     const conversationIdAtStart = conversationId;
@@ -3059,7 +3173,7 @@ export default function Home() {
     setQuestion("");
     setPendingQuestion(q);
     setPendingMode(selectedMode);
-    setPendingTrace([]);
+    setPendingTrace(traceSeed);
     setAsking(true);
     const controller = new AbortController();
     // Bind this controller to a not-yet-started run. A job id from a detached
@@ -3117,14 +3231,14 @@ export default function Home() {
       );
       if (!ownsRun()) {
         await refreshActiveSessions(notebookId).catch(() => {});
-        return;
+        return true;
       }
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
       if (!ownsRun()) {
         await refreshActiveSessions(notebookId).catch(() => {});
-        return;
+        return true;
       }
       setQuestion(q);
       if (startedConversationId !== conversationIdAtStart) {
@@ -3132,7 +3246,7 @@ export default function Home() {
       }
       if (isAbortError(error)) {
         setToast("已中断回答");
-        return;
+        return true;
       }
       reportError(error);
     } finally {
@@ -3140,32 +3254,55 @@ export default function Home() {
         if (askAbortRef.current === controller) askAbortRef.current = null;
         askJobIdRef.current = null;
         askNotebookIdRef.current = null;
-        setPendingQuestion("");
-        setPendingMode(DEFAULT_ASK_MODE);
-        setPendingTrace([]);
+        askIntentTraceRef.current = [];
+        clearPendingTurn();
         setAsking(false);
       }
       cancelRequestedControllersRef.current.delete(controller);
     }
     if (ownsRun()) await loadSessions(notebookId);
+    // 走到这里本次运行已经被接下(不论最终成功、失败还是被中断)——那几条路径都
+    // 自己处理过草稿,调用方不该再退回一次。
+    return true;
   }
 
   async function confirmAskIntent(confirmation: AskIntentConfirmation) {
     const review = askIntentReview;
     if (!review || askIntentFlowRef.current !== "review") return;
+    // 定稿这一轮接手草稿槽的归属(预检那一轮的令牌到此为止)。
+    const draftToken = askIntentDraftOwnerRef.current ?? {};
+    askIntentDraftOwnerRef.current = draftToken;
     if (
       review.notebookId !== currentNotebookId
       || review.conversationId !== conversationId
       || askMode !== "reasoning"
     ) {
       setAskIntentReview(null);
+      askIntentTraceRef.current = [];
+      releaseIntentDraft(draftToken);
+      clearPendingTurn();
       setToast("问题上下文已经变化，请重新提交");
       return;
     }
     askIntentFlowRef.current = "submitting";
     setAskIntentReview(null);
+    // 定稿也是理解阶段的一步:让轨迹如实记下最终问题与用户补充了几条说明。
+    const traceSeed = [
+      ...askIntentTraceRef.current,
+      intentConfirmedStep(confirmation.resolved_question, confirmation.answers.length),
+    ];
+    askIntentTraceRef.current = traceSeed;
     try {
-      await executeAsk(review.question, "reasoning", confirmation);
+      // 同 runAsk:草稿留到 executeAsk 真的接下这次运行为止,且只有仍持有草稿槽的
+      // 那一轮才有权清理(codex 第 9 轮 P2)。
+      const started = await executeAsk(
+        review.question, "reasoning", confirmation, handOffIntentTrace(traceSeed),
+      );
+      if (releaseIntentDraft(draftToken) && !started) {
+        setQuestion(review.question);
+        askIntentTraceRef.current = [];
+        clearPendingTurn();
+      }
     } finally {
       askIntentFlowRef.current = "idle";
     }
@@ -3174,15 +3311,20 @@ export default function Home() {
   function cancelAskIntentReview() {
     askIntentFlowRef.current = "idle";
     setAskIntentReview(null);
+    // 用户要回去改问题:把草稿还给输入框,并收起理解阶段的在途 turn。
+    setQuestion(askIntentDraftRef.current || askIntentReview?.question || "");
+    askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
+    askIntentTraceRef.current = [];
+    clearPendingTurn();
     setToast("已返回修改问题");
   }
 
   function abortAsk() {
     if (intentChecking) {
-      askIntentAbortRef.current?.abort();
-      askIntentAbortRef.current = null;
-      askIntentFlowRef.current = "idle";
-      setIntentChecking(false);
+      const draft = askIntentDraftRef.current;
+      abortIntentPreview();
+      if (draft) setQuestion(draft);   // 停在理解阶段:原样退回草稿,不丢用户输入
       setToast("已取消问题理解");
       return;
     }
@@ -3318,9 +3460,7 @@ export default function Home() {
   async function openSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
+    abortIntentPreview();
     setSessionLoading(true);
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
@@ -3340,9 +3480,7 @@ export default function Home() {
   function startNewSession() {
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
+    abortIntentPreview();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setAsking(false);
@@ -4118,9 +4256,7 @@ export default function Home() {
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
-    askIntentAbortRef.current?.abort();
-    askIntentAbortRef.current = null;
-    askIntentFlowRef.current = "idle";
+    abortIntentPreview();
     askAbortRef.current?.abort();
     memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
@@ -4886,8 +5022,8 @@ export default function Home() {
                   </div>
                 </div>
               )}
-              <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || asking ? "answer-mode" : ""}`}>
-                {chatMode === "ask" && (turns.length === 0 && !asking ? (
+              <div ref={chatBodyRef} className={`chat-body ${chatMode !== "ask" || turns.length > 0 || askInFlight ? "answer-mode" : ""}`}>
+                {chatMode === "ask" && (turns.length === 0 && !askInFlight ? (
                   <div className="welcome">
                     <div className="wave">👋</div>
                     <h2>{welcomeCopy.title}</h2>
@@ -4927,11 +5063,14 @@ export default function Home() {
                         </div>
                       </div>
                     ))}
-                    {asking && (
+                    {askInFlight && (
                       <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
                         {pendingQuestion && <div className="chat-user">{pendingQuestion}</div>}
                         <div className="chat-assistant chat-thinking">
-                          {groupOf(pendingMode) === "strict" ? (
+                          {/* 按引擎是否流式推轨迹判断,不按分组:深入分析组里只有
+                              逐步推理会流轨迹,关联追溯挂上去只会让用户从头到尾
+                              盯着一句「等待后端事件…」。 */}
+                          {streamsTrace(pendingMode) ? (
                             <ReasoningTracePanel steps={pendingTrace} live />
                           ) : "思考中…"}
                         </div>
@@ -4993,14 +5132,12 @@ export default function Home() {
               </div>
               {chatMode === "ask" && (
                 <>
-                  {intentChecking && (
-                    <div className="ask-intent-checking" role="status">
-                      正在理解问题，尚未读取资料或开始检索…
-                    </div>
-                  )}
+                  {/* 问题理解阶段不再另起一条灰色提示 —— 它已经是上方在途 turn
+                      里轨迹的第一步,同一条轨迹从理解一路走到作答。 */}
                   {askIntentReview && (
                     <AskIntentReview
                       contract={askIntentReview.contract}
+                      understandingMs={askIntentReview.understandingMs}
                       onConfirm={(confirmation) => confirmAskIntent(confirmation)}
                       onCancel={cancelAskIntentReview}
                     />
