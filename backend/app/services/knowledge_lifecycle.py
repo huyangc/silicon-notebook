@@ -1646,18 +1646,38 @@ class KnowledgeLifecycleService:
             type_by_id = {n: t for n, t in zip(idx.viz_ids, idx.viz_types or [])}
             nbr_ids = {n["id"] for n in nb["nodes"]}
             nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in nbr_ids]
-            # edge_type: look up from the persisted folded edge list (either
-            # direction); default 'related' if not found (e.g. hub/membership).
+            # viz_neighbors exposes an undirected adjacency as focus -> neighbour,
+            # but the rendered relation is directed. Recover the persisted
+            # orientation so opening a target reached by an incoming edge does
+            # not manufacture a second, reversed relation in the overlay.
             et_map = {}
             for s, t, et in (idx.viz_edges or []):
                 et_map[(s, t)] = et
             edges = []
             for e in nb["edges"]:
                 s, t = e["source"], e["target"]
-                et = et_map.get((s, t)) or et_map.get((t, s)) or "related"
-                edges.append({"source_object_id": s, "target_object_id": t, "edge_type": et})
+                if (s, t) in et_map:
+                    edge_s, edge_t, et = s, t, et_map[(s, t)]
+                elif (t, s) in et_map:
+                    edge_s, edge_t, et = t, s, et_map[(t, s)]
+                else:
+                    edge_s, edge_t, et = s, t, "related"
+                edges.append({"source_object_id": edge_s, "target_object_id": edge_t,
+                              "edge_type": et})
             edges = self._annotate_edge_support(notebook_id, edges)
             return {"nodes": nodes, "edges": edges, "focus_id": focus_id}
+        # The legacy DB fallback materialises the complete concept-cluster map.
+        # It remains acceptable for a small notebook, but must never run while a
+        # large notebook's compact viz artifact is being built or repaired.
+        with self._connect() as db:
+            object_count = self.knowledge.active_object_count(db, notebook_id)
+        if int(object_count) > self.settings.viz_sync_build_max_objects:
+            return {
+                "nodes": [],
+                "edges": [],
+                "focus_id": focus_id,
+                "locating_unavailable": True,
+            }
         result = self._kg_neighbors_db(notebook_id, focus_id, cap)
         result["focus_id"] = focus_id
         return result
@@ -1683,7 +1703,6 @@ class KnowledgeLifecycleService:
             s, t = canon(r["source_object_id"]), canon(r["target_object_id"])
             if s == t:
                 continue
-            # orient relative to the queried folded node
             if s == object_id:
                 other = t
             elif t == object_id:
@@ -1694,7 +1713,7 @@ class KnowledgeLifecycleService:
                 continue
             seen.add(other)
             nbr_ids.add(other)
-            edges.append({"source_object_id": object_id, "target_object_id": other,
+            edges.append({"source_object_id": s, "target_object_id": t,
                           "edge_type": r["edge_type"]})
         # Include the queried node itself only when it's a known canonical id or
         # has neighbours; unknown / non-canonical ids that produced no edges are

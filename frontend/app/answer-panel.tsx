@@ -243,7 +243,7 @@ function SelectedReferenceDetail({
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，供引用徽章把 notebook_id 解成人类可读的库名。 */
   notebookNames: Record<string, string>;
-  onOpenKnowledgeGraph: (objectId?: string) => void;
+  onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
   /** Task 12（引用跳转）：命中 knowhow 格子的引用才出现「在表格中查看」按钮。 */
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
 }) {
@@ -293,7 +293,10 @@ function SelectedReferenceDetail({
         )}
         <button
           type="button"
-          onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
+          onClick={() => onOpenKnowledgeGraph(
+            reference.anchor?.object_id,
+            sourceNotebookId || undefined,
+          )}
           disabled={!canLocateInGraph}
           title={
             // 用「知识对象」而非「概念」:引用锚定的是 object_id,其 object_type 可以是
@@ -340,7 +343,7 @@ function CitationPopover({
   notebookNames: Record<string, string>;
   anchorRect: DOMRect;
   onClose: () => void;
-  onOpenKnowledgeGraph: (objectId?: string) => void;
+  onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -576,7 +579,7 @@ export function AnswerView({
   answer: AskResponse;
   feedbackSent: string;
   onFeedback: (rating: "useful" | "not_useful") => void;
-  onOpenKnowledgeGraph: (objectId?: string) => void;
+  onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
   /** Task 12（引用跳转）：命中 knowhow 格子的引用点「在表格中查看」时调用，
    * page.tsx 据此打开 Knowhow 面板并定位到该表该行的抽屉。 */
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
@@ -693,9 +696,9 @@ export function AnswerView({
           // 点击跳转后若不关闭这张卡片，它会一直浮在新打开的视图上方挡住内容
           // （真机 QA 反馈）。复用与 onClose 完全相同的收起路径
           // （setCitePopover(null)），不为此新开一套状态。
-          onOpenKnowledgeGraph={(objectId) => {
+          onOpenKnowledgeGraph={(objectId, sourceNotebookId) => {
             setCitePopover(null);
-            onOpenKnowledgeGraph(objectId);
+            onOpenKnowledgeGraph(objectId, sourceNotebookId);
           }}
           onOpenKnowhowRow={(tableId, rowId) => {
             setCitePopover(null);

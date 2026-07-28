@@ -301,6 +301,7 @@ export type AnswerAnchor = {
   source_title: string;
   location_label: string;
   tier?: string;
+  notebook_id?: string;
 };
 
 export type Citation = {
@@ -310,6 +311,7 @@ export type Citation = {
   location_label: string;
   quoted_span: string;
   tier?: string;
+  notebook_id?: string;
 };
 
 /** 可验证的 Knowhow 行枚举。`cells` 的键是 column id；点击行可打开权威完整单元格。 */
@@ -587,4 +589,6 @@ export type KgNeighborsResp = {
   edges: UnifiedEdge[];
   /** Canonical graph id for a raw cited concept id. */
   focus_id?: string;
+  /** The large-notebook viz artifact is not ready, so bounded focus is unavailable. */
+  locating_unavailable?: boolean;
 };

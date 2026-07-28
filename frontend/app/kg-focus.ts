@@ -34,8 +34,12 @@ export function prepareKgFocus(
 
   const coreNodeIds = new Set(core.nodes.map((node) => node.id));
   const coreEdgeKeys = new Set(core.edges.map(edgeKey));
+  const resolvedFocusId = neighborhood?.focus_id || targetNodeId;
+  const neighborhoodNodeIds = new Set((neighborhood?.nodes ?? []).map((node) => node.id));
+  const canFocus = !neighborhood?.locating_unavailable
+    && (coreNodeIds.has(resolvedFocusId) || neighborhoodNodeIds.has(resolvedFocusId));
   return {
-    focusId: neighborhood?.focus_id || targetNodeId,
+    focusId: canFocus ? resolvedFocusId : null,
     expandedNodes: (neighborhood?.nodes ?? []).filter((node) => !coreNodeIds.has(node.id)),
     expandedEdges: (neighborhood?.edges ?? []).filter((edge) => !coreEdgeKeys.has(edgeKey(edge))),
   };

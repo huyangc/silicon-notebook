@@ -268,3 +268,6 @@ def test_search_hit_folded_to_canonical_id_and_neighbors_nonempty(repo_with_embe
     raw_nbr = repo_with_embed.kg_neighbors(nb.id, raw_member, cap=10)
     assert raw_nbr["focus_id"] == hit["object_id"]
     assert hit["object_id"] in {node["id"] for node in raw_nbr["nodes"]}
+    assert any(edge["target_object_id"] == hit["object_id"] for edge in raw_nbr["edges"]), (
+        "An incoming persisted edge must keep its direction when the target is focused"
+    )

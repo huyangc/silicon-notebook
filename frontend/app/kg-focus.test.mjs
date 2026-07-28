@@ -58,3 +58,46 @@ test("目标已在核心图时不重复叠加节点或边", () => {
   assert.deepEqual(plan.expandedNodes, []);
   assert.deepEqual(plan.expandedEdges, []);
 });
+
+test("邻域请求失败且 raw id 不在核心图时，不留下永远无法消费的 pending focus", () => {
+  const plan = prepareKgFocus(
+    {
+      nodes: [{ id: "K-core", object_type: "concept", payload: { name: "Core" } }],
+      edges: [],
+    },
+    "ko-raw-concept",
+    null,
+  );
+
+  assert.equal(plan.focusId, null);
+  assert.deepEqual(plan.expandedNodes, []);
+  assert.deepEqual(plan.expandedEdges, []);
+});
+
+test("大库 viz 尚未就绪时显式保持不可定位", () => {
+  const plan = prepareKgFocus(
+    { nodes: [], edges: [], viz_building: true },
+    "ko-raw-concept",
+    {
+      focus_id: "K-canonical-concept",
+      nodes: [],
+      edges: [],
+      locating_unavailable: true,
+    },
+  );
+
+  assert.equal(plan.focusId, null);
+});
+
+test("邻域请求失败但目标本来就在核心图时仍可直接定位", () => {
+  const plan = prepareKgFocus(
+    {
+      nodes: [{ id: "claim-1", object_type: "claim", payload: { name: "Claim" } }],
+      edges: [],
+    },
+    "claim-1",
+    null,
+  );
+
+  assert.equal(plan.focusId, "claim-1");
+});
