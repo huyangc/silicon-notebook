@@ -30,11 +30,15 @@ const RESULT_SCOPE_LABELS: Record<QueryIntentContract["result_scope"], string> =
 export function AskIntentReview({
   contract,
   busy = false,
+  understandingMs,
   onConfirm,
   onCancel,
 }: {
   contract: QueryIntentContract;
   busy?: boolean;
+  // 产出这份合同花掉的墙钟时间,原样带进确认里 —— 用户在这张卡片上思考的时间
+  // 不属于系统耗时,所以只透传理解阶段的那一段。
+  understandingMs?: number;
   onConfirm: (confirmation: AskIntentConfirmation) => void | Promise<void>;
   onCancel: () => void;
 }) {
@@ -146,7 +150,7 @@ export function AskIntentReview({
           className="button"
           disabled={busy || missingRequired || !resolvedQuestion.trim()}
           onClick={() => void onConfirm(buildAskIntentConfirmation(
-            contract, resolvedQuestion, answers,
+            contract, resolvedQuestion, answers, understandingMs,
           ))}
         >
           <Check size={15} /> {busy ? "提交中…" : "确认并开始检索"}

@@ -71,6 +71,32 @@ test("follow_chain detail omits unavailable metrics and clamps trust percentages
   );
 });
 
+// memory/synthesis 是后来补进轨迹的两段:一段是私有记忆参与了作答,另一段是
+// 答案真的写出来了(整轮里通常最长的一段,此前完全不在轨迹里)。
+test("记忆与作答两步有自己的短标签,detail 不落到通用「候选」口径", () => {
+  const memory = { step_type: "memory", summary: "参考了 3 条你的记忆", detail: { count: 3 } };
+  assert.equal(getReasoningTraceSummary([memory], true).latestLabel, "记忆");
+  // 通用分支会把 count 读成「N 个候选」—— 记忆数的不是候选。
+  assert.equal(getTraceStepDetail(memory), "3 条记忆");
+
+  const synthesis = {
+    step_type: "synthesis",
+    summary: "已生成答案，引用 12 处证据",
+    detail: { citations: 12, anchors: 5, evidence_level: "grounded" },
+  };
+  assert.equal(getReasoningTraceSummary([synthesis], false).latestLabel, "作答");
+  assert.equal(getTraceStepDetail(synthesis), "12 处引用");
+});
+
+test("答案合成的耗时进入轨迹总耗时(此前整段不计,总耗时系统性偏低)", () => {
+  const steps = [
+    { step_type: "intent", summary: "已理解问题", detail: {}, duration_ms: 1500 },
+    { step_type: "answer", summary: "合成", detail: { kg: 9 }, duration_ms: 500 },
+    { step_type: "synthesis", summary: "已生成答案", detail: { citations: 2 }, duration_ms: 8000 },
+  ];
+  assert.equal(getReasoningTraceSummary(steps, false).totalLabel, "10.0s");
+});
+
 test("sums per-step durations into a total label for the collapsed row", () => {
   const steps = [
     { step_type: "plan", summary: "规划", detail: {}, duration_ms: 1200 },

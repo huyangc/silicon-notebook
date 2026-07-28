@@ -711,6 +711,19 @@
               "minLength": 1,
               "title": "Resolved Question",
               "type": "string"
+            },
+            "understanding_ms": {
+              "anyOf": [
+                {
+                  "maximum": 3600000.0,
+                  "minimum": 0.0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Understanding Ms"
             }
           },
           "required": [

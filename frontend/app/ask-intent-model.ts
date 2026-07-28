@@ -37,6 +37,9 @@ export type AskIntentConfirmation = {
   contract: QueryIntentContract;
   resolved_question: string;
   answers: { id: string; answer: string }[];
+  // 问题理解阶段的墙钟耗时。它整段发生在持久 job 之前,后端无从测量;回传后写进
+  // 持久轨迹的 intent 步,重开会话回放时总耗时才不会凭空少掉这一段。
+  understanding_ms?: number;
 };
 
 export function missingRequiredIntentAnswers(
@@ -52,6 +55,7 @@ export function buildAskIntentConfirmation(
   contract: QueryIntentContract,
   resolvedQuestion: string,
   answers: Record<string, string>,
+  understandingMs?: number,
 ): AskIntentConfirmation {
   return {
     contract,
@@ -59,5 +63,9 @@ export function buildAskIntentConfirmation(
     answers: contract.ambiguities
       .map((item) => ({ id: item.id, answer: (answers[item.id] || "").trim() }))
       .filter((item) => item.answer),
+    // 只在真的量到时才带上;缺省让后端保持 duration 未知,而不是记一个假的 0。
+    ...(typeof understandingMs === "number" && understandingMs >= 0
+      ? { understanding_ms: Math.round(understandingMs) }
+      : {}),
   };
 }

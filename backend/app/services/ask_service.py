@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -957,7 +958,6 @@ class AskService:
     ) -> AskResponse:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
         引用绑回 chunk。KG 不参与(严格推理走 ask_reasoning)。"""
-        import time
         ask_started = time.perf_counter()
 
         def ask_stage(name: str, started: float, **extra) -> None:
@@ -1288,6 +1288,13 @@ class AskService:
                     topic.question for topic in intent_contract.mandatory_topics
                 ],
             },
+            # The understanding phase runs entirely in ``/ask/intent``, before
+            # this durable job exists, so the server cannot time it.  The UI
+            # reports what it measured; without it the replayed trace would
+            # silently drop that whole phase from the run's total.
+            duration_ms=(
+                payload.intent.understanding_ms if payload.intent is not None else None
+            ),
         )
         pre_trace: list[TraceStep] = [intent_step]
         intent_streamed = False
@@ -1406,9 +1413,23 @@ class AskService:
             )
             return response
 
+        # Stream the intent step BEFORE memory retrieval.  Memory hits cost an
+        # embedding round trip plus a vector scan, and until this step lands the
+        # UI has nothing after the synthetic "start" — the reader is left
+        # watching an empty trace through work that is already under way.
+        stream_intent()
         memory_hits = self._memory_hits(
             user_id, notebook_id, research_question
         )
+        if memory_hits:
+            # Memory silently shapes the answer; a run that leaned on it should
+            # say so.  Only when something was actually recalled — "recalled 0"
+            # is noise in every notebook without memories.
+            checked_pre_trace(TraceStep(
+                step_type="memory",
+                summary=f"参考了 {len(memory_hits)} 条你的记忆",
+                detail={"count": len(memory_hits)},
+            ))
 
         if self._primary_llm_unconfigured():
             if structured_batch is not None:
@@ -1508,7 +1529,8 @@ class AskService:
         # 但等价性回放验证只覆盖了 reasoning——留作后续 fast-follow。
         _emb_token = _ASK_EMBED_CACHE.set({})
         try:
-            stream_intent()
+            # intent already streamed above (before memory retrieval); stream_intent
+            # stays idempotent because the structured branch may emit it earlier.
             def checked_trace(step):
                 raise_if_cancelled(cancel_event)
                 if on_trace:
@@ -1566,6 +1588,8 @@ class AskService:
 
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
+            synthesis_ran = False
+            synthesis_started = time.perf_counter()
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
             structured_block = ""
@@ -1593,6 +1617,7 @@ class AskService:
                     service="ask_answer",
                 )
                 synth_failed = not _ok
+                synthesis_ran = True
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
@@ -1641,6 +1666,29 @@ class AskService:
                 evidence_pool, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
             grounded = evidence_level == "grounded"
+
+            if synthesis_ran:
+                # The retriever's own last step reports which evidence it ADOPTED;
+                # writing the answer (and assembling its citations) happens out
+                # here and used to be invisible.  Without this step the trace
+                # stalls on "合成" for the whole generation call and the trace
+                # total silently omits it — usually the largest slice of a run.
+                synthesis_step = TraceStep(
+                    step_type="synthesis",
+                    summary=(
+                        f"已生成答案，引用 {len(citations)} 处证据"
+                        if answer else "答案合成未产出内容"
+                    ),
+                    detail={
+                        "citations": len(citations),
+                        "anchors": len(anchors),
+                        "evidence_level": evidence_level,
+                    },
+                    duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
+                )
+                trace.append(synthesis_step)
+                if on_trace:
+                    on_trace(synthesis_step)
 
             if answer:
                 conclusion = _MARKER_GROUP_RE.sub("", answer).strip()

@@ -4,6 +4,7 @@ import { label } from "./vocabulary.ts";
 export const TRACE_STEP_LABELS: Record<string, string> = {
   start: "启动",
   intent: "理解",
+  memory: "记忆",
   plan: "规划",
   retrieve: "检索",
   enumerate: "枚举",
@@ -14,6 +15,9 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   follow_chain: "推导",
   fallback: "原文",
   answer: "合成",
+  // answer = 检索器决定作答并报告采用了哪些证据;synthesis = 答案真的写出来了。
+  // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
+  synthesis: "作答",
   skip: "跳过",
 };
 
@@ -75,6 +79,15 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   }
   if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
     return `${detail.sub_queries.length} 个子查询`;
+  }
+  // memory/synthesis 必须先于下面按 detail 形状的通用分支:两者的 count/anchors
+  // 数的都不是「候选」,落到通用分支会给出一个读起来对、其实错位的数。
+  if (step.step_type === "memory") {
+    return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";
+  }
+  if (step.step_type === "synthesis") {
+    // detail 里还有 anchors/evidence_level 供排查,但不上屏:那是内部口径。
+    return typeof detail.citations === "number" ? `${detail.citations} 处引用` : "";
   }
   if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {
     return `${detail.scanned_rows}/${Number(detail.known_total_rows ?? 0)} 行`;
