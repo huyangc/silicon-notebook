@@ -18,7 +18,8 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v32 persists the Deep Report question-understanding review contract.
 # v33 adds stable relation endpoint keyset indexes for bounded lexical recall.
 # v34 adds bounded relation-completion paging state and its source keyset index.
-SCHEMA_VERSION = 34
+# v35 persists the browser submission instant on in-flight Ask jobs.
+SCHEMA_VERSION = 35
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1809,6 +1810,15 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_kg_relation_completion_state_nb_status
                   ON kg_relation_completion_state(notebook_id, status, updated_at);
                 """
+            )
+
+    def _migration_35(self) -> None:
+        """Keep the browser-captured Ask instant available while a durable job
+        is still running. Completed turns continue to carry the same value in
+        the existing answer payload JSON."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "ask_jobs", "asked_at", "TEXT NOT NULL DEFAULT ''"
             )
 
     def _recover_interrupted_jobs(self) -> None:

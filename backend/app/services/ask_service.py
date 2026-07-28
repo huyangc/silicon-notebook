@@ -571,11 +571,13 @@ class AskService:
         *,
         user_id: str,
         job_id: str = "",
+        asked_at: str = "",
     ) -> str:
         # 所有 ask handler 的唯一收口:在持久化/返回前给 response 打大库无索引提示位。
         # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
         # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
         response.index_required = self._needs_index(notebook_id)
+        response.asked_at = asked_at or response.asked_at
         if not job_id:
             return self.ask_state.save_answer(
                 notebook_id, conversation_id, question, response, user_id
@@ -918,6 +920,7 @@ class AskService:
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
                                      *, user_id: str, job_id: str = "",
+                                     asked_at: str = "",
                                      intent: QueryIntentContract | None = None,
                                      retrieval_query: str = "",
                                      retrieval_effort: RetrievalEffort = "standard",
@@ -947,7 +950,7 @@ class AskService:
         ]
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id)
+            user_id=user_id, job_id=job_id, asked_at=asked_at)
         return response
 
     # ------------------------------------------------------------------
@@ -1223,7 +1226,7 @@ class AskService:
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id)
+            user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
         ask_stage("total", ask_started)
         return response
 
@@ -1431,7 +1434,7 @@ class AskService:
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id,
-                user_id=user_id, job_id=job_id,
+                user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
             )
             return response
 
@@ -1518,12 +1521,13 @@ class AskService:
                 response.mode = "reasoning"
                 response.answer_id = self._save_answer(
                     notebook_id, question, response, conversation_id,
-                    user_id=user_id, job_id=job_id,
+                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
                 )
                 return response
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning",
-                user_id=user_id, job_id=job_id, intent=intent_contract,
+                user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
+                intent=intent_contract,
                 retrieval_query=research_question,
                 retrieval_effort=payload.retrieval_effort,
                 completeness_unavailable=completeness_unavailable,
@@ -1577,7 +1581,7 @@ class AskService:
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id,
-                user_id=user_id, job_id=job_id)
+                user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
             return response
 
         _err_sink: list = []
@@ -1820,7 +1824,7 @@ class AskService:
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id)
+            user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
         return response
 
     # ------------------------------------------------------------------
@@ -1871,7 +1875,7 @@ class AskService:
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "graph",
-                user_id=user_id, job_id=job_id)
+                user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1887,7 +1891,7 @@ class AskService:
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
                 notebook_id, question, response, conversation_id,
-                user_id=user_id, job_id=job_id)
+                user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
             return response
 
         _err_sink: list = []
@@ -1948,7 +1952,7 @@ class AskService:
                 raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
                     notebook_id, question, response, conversation_id,
-                    user_id=user_id, job_id=job_id)
+                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
                 return response
 
             # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
@@ -2049,7 +2053,7 @@ class AskService:
                     raise_if_cancelled(cancel_event)
                     resp.answer_id = self._save_answer(
                         notebook_id, question, resp, conversation_id,
-                        user_id=user_id, job_id=job_id)
+                        user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
                     return resp
 
             # 大库守卫(与 PPR 检索的 Fix 1 同一「大」定义):下方
@@ -2083,7 +2087,7 @@ class AskService:
                 raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
                     notebook_id, question, response, conversation_id,
-                    user_id=user_id, job_id=job_id)
+                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
                 return response
 
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
@@ -2225,7 +2229,7 @@ class AskService:
                 resp.model_errors = [ModelError(**e) for e in _err_sink]
                 resp.answer_id = self._save_answer(
                     notebook_id, question, resp, conversation_id,
-                    user_id=user_id, job_id=job_id)
+                    user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
                 return resp
 
             # Synthesise the answer through the existing LLM + grounding path.
@@ -2336,5 +2340,5 @@ class AskService:
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id,
-            user_id=user_id, job_id=job_id)
+            user_id=user_id, job_id=job_id, asked_at=payload.asked_at)
         return response

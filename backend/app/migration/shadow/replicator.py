@@ -593,13 +593,13 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
                 strategy = _ParkStrategy.LEAF_DELETE
             if strategy is None:
                 raise ValueError(
-                    f"PostgreSQL v12 unique surface is not safely parkable: {name}"
+                    f"PostgreSQL v13 unique surface is not safely parkable: {name}"
                 )
         result[name] = _UniqueSurface(
             name, table, columns, strategy, park_column, predicate
         )
     if len(result) != len(raw):
-        raise ValueError("PostgreSQL v12 unique surface names are ambiguous")
+        raise ValueError("PostgreSQL v13 unique surface names are ambiguous")
     return result
 
 

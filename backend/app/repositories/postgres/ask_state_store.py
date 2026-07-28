@@ -165,10 +165,10 @@ class AskStateStore:
             payload.conversation_id = conversation_id
             db.execute(
                 "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
-                "status,trace_json,answer_id,error,created_at,updated_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s)",
+                "asked_at,status,trace_json,answer_id,error,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s)",
                 (job_id, notebook_id, conversation_id, user_id, mode,
-                 question[:200], jsonb([]), now, now))
+                 question[:200], payload.asked_at, jsonb([]), now, now))
         return job_id, conversation_id
 
     def finish_job(
@@ -472,7 +472,7 @@ class AskStateStore:
                 (conversation_id,),
             ).fetchall()
             job = db.execute(
-                "SELECT id, question, mode FROM ask_jobs "
+                "SELECT id, question, asked_at, mode FROM ask_jobs "
                 "WHERE conversation_id=%s AND status='running' "
                 "ORDER BY created_at DESC, id COLLATE \"C\" DESC LIMIT 1",
                 (conversation_id,),
@@ -486,14 +486,20 @@ class AskStateStore:
                     answer_id=row["id"],
                     question=row["question"],
                     response=AskResponse(**payload),
+                    asked_at=str(payload.get("asked_at") or ""),
                     created_at=iso_timestamp(row["created_at"]),
                 )
             )
         used_reasoning = bool(turns[-1].response.reasoning_trace) if turns else False
         active_job = None
         if job is not None:
-            active_job = ActiveAskJob(job_id=job["id"], question=job["question"] or "",
-                                      mode=job["mode"] or "", trace=job_trace)
+            active_job = ActiveAskJob(
+                job_id=job["id"],
+                question=job["question"] or "",
+                asked_at=job["asked_at"] or "",
+                mode=job["mode"] or "",
+                trace=job_trace,
+            )
         return ConversationDetail(
             id=conv["id"],
             notebook_id=conv["notebook_id"],

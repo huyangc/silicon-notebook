@@ -100,12 +100,18 @@ def test_ask_job_detail_missing_raises(repo):
 
 
 def test_get_conversation_exposes_running_active_job(repo):
-    _, job_id, conv_id = _begin(repo)
+    nb = repo.create_notebook(NotebookCreate(name="t"))
+    asked_at = "2026-07-28T09:05:12.345+08:00"
+    payload = AskRequest(question="Q?", mode="reasoning", asked_at=asked_at)
+    job_id, conv_id = repo.begin_ask_job(
+        nb.id, payload, "reasoning", threading.Event()
+    )
     repo.append_ask_trace(job_id, {"step_type": "plan", "summary": "s", "detail": {}})
     detail = repo.get_conversation(conv_id)
     assert detail.active_job is not None
     assert detail.active_job.job_id == job_id
     assert detail.active_job.question == "Q?"
+    assert detail.active_job.asked_at == asked_at
     assert len(detail.active_job.trace) == 1
 
 

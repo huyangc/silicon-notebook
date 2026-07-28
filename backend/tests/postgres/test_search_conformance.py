@@ -258,7 +258,7 @@ def search_harness(postgres_database) -> SearchHarness:
     from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
-    assert PostgresMigrator(postgres_database).migrate() == 12
+    assert PostgresMigrator(postgres_database).migrate() == 13
     seams = RepositoryCompatibilitySeams(
         new_id=lambda prefix: f"{prefix}-unused",
         now=lambda: NOW,
@@ -326,7 +326,7 @@ def test_zh_en_search_quality_and_citation_identity(
 def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 12
+    assert PostgresMigrator(postgres_database).migrate() == 13
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "

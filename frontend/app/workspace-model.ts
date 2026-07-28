@@ -352,6 +352,7 @@ export type KnowhowBatchCoverage = {
 
 export type AskResponse = {
   answer_id: string;
+  asked_at?: string;
   conversation_id: string;
   conclusion: string;
   answer: string;
@@ -385,7 +386,7 @@ export type AskResponse = {
   index_required?: boolean;
 };
 
-export type ChatTurn = { question: string; response: AskResponse };
+export type ChatTurn = { question: string; response: AskResponse; askedAt?: string };
 export type ConversationSummary = {
   id: string;
   title: string;
@@ -400,8 +401,20 @@ export type ConversationDetail = {
   updated_at: string;
   turn_count: number;
   used_reasoning?: boolean;
-  turns: { answer_id: string; question: string; response: AskResponse; created_at: string }[];
-  active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
+  turns: {
+    answer_id: string;
+    question: string;
+    response: AskResponse;
+    asked_at: string;
+    created_at: string;
+  }[];
+  active_job?: {
+    job_id: string;
+    question: string;
+    asked_at: string;
+    mode: string;
+    trace: ReasoningTraceStep[];
+  };
 };
 
 export type ChatMode = "ask" | "rules" | "reports" | "memory";

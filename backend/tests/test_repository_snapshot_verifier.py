@@ -71,7 +71,8 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _rollback_v34(db: sqlite3.Connection) -> None:
-    """Remove the v34 table/index pair before forging an older deployment."""
+    """Remove the v34-v35 additions before forging an older deployment."""
+    db.execute("ALTER TABLE ask_jobs DROP COLUMN asked_at")
     db.execute("DROP TABLE kg_relation_completion_state")
     db.execute("DROP INDEX idx_knowledge_objects_source_id")
 
