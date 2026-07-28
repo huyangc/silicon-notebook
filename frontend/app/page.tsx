@@ -1248,6 +1248,14 @@ export default function Home() {
   // 每 8s 重拉一次 checkup,直到健康(healthy)或到期即停——不做无界轮询(承效率约束:
   // 体检含 H8 磁盘探针,只在用户显式修复的窗口内刷新)。
   useEffect(() => {
+    // 过期但没归零的时间戳必须在这里显式清掉(codex 第 1 轮 P2)。场景:修复挂起期间用户
+    // 把看板关了,过了 10 分钟窗口才重开——下面那行会因「已过期」早退,不装 interval,
+    // 于是再没有任何东西会把时间戳清零,上面那条兜底 effect 也就永远不会重跑,
+    // repairingFix 里那条记录把按钮**无限期**锁在「修复中…」。归零后由兜底 effect 接手。
+    if (checkupRepairPollUntil > 0 && checkupRepairPollUntil <= Date.now()) {
+      setCheckupRepairPollUntil(0);
+      return;
+    }
     if (!analytics || !currentNotebookId || checkupRepairPollUntil <= Date.now()) return;
     const nb = currentNotebookId;
     let cancelled = false;
@@ -5713,20 +5721,32 @@ export default function Home() {
                     {groups.map((g) => {
                       const titles = g.sample.map(titleOf).filter(Boolean).slice(0, 6);
                       // 「这一组的修复还在后台跑」= 触发时记下的 count 与当前 count 仍相同。
-                      // 轮询一看到 count 变了(修复见效)就自动恢复可点;extract_kg 走的是既有
-                      // KG 构建,直接复用它自己的忙碌位 buildingKg(那条路不改 checkup count)。
+                      // 轮询一看到 count 变了(修复见效)就自动恢复可点。
+                      //
+                      // extract_kg 是例外:它**只**看 buildingKg,不进 repairingFix(见下方
+                      // runFix 里的理由)。这里第一个条件对它恒为 false(从没写过那个键),
+                      // 忙碌态完全由 buildingKg 表达——那个位失败时会被 startKgBuild 清掉。
                       const repairing = repairingFix[g.key] === g.count
                         || (g.fix === "extract_kg" && buildingKg);
                       const runFix = async () => {
                         const nb = currentNotebookId;
                         if (!nb || repairing) return;
+                        // extract_kg **只**认 buildingKg,不另记 repairingFix(codex 第 1 轮 P2)。
+                        // startKgBuild 是 fire-and-forget:同步置 buildingKg,POST 失败时自己在
+                        // 异步回调里清掉,但**不回传受理结果**。若这里也记一份 repairingFix,
+                        // 那份记录在建图请求被拒时没人清得掉(count 没变、buildingKg 已归位),
+                        // 按钮会一直锁到轮询窗口结束。少记一份 = 少一个解不开的锁。
+                        if (g.fix === "extract_kg") {
+                          startKgBuild(nb);
+                          bumpCheckupRepairPoll();
+                          return;
+                        }
                         // 先乐观置忙碌位(POST 在飞的这段也不能再点),未受理/报错再撤销。
                         setRepairingFix((previous) => ({ ...previous, [g.key]: g.count }));
                         let started = false;
                         try {
                           if (g.fix === "reparse") started = await runReparse(nb, g.sample);
                           else if (g.fix === "backfill_vectors") started = await runBackfillVectors(nb);
-                          else if (g.fix === "extract_kg") { startKgBuild(nb); bumpCheckupRepairPoll(); started = true; }
                         } finally {
                           if (!started) {
                             setRepairingFix((previous) => {
