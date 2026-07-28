@@ -301,6 +301,7 @@ export type AnswerAnchor = {
   source_title: string;
   location_label: string;
   tier?: string;
+  notebook_id?: string;
 };
 
 export type Citation = {
@@ -310,6 +311,7 @@ export type Citation = {
   location_label: string;
   quoted_span: string;
   tier?: string;
+  notebook_id?: string;
 };
 
 /** 可验证的 Knowhow 行枚举。`cells` 的键是 column id；点击行可打开权威完整单元格。 */
@@ -582,4 +584,15 @@ export type FgNode = {
 export type FgLink = { source: string | FgNode; target: string | FgNode; label: string; sourceCount?: number };
 export type KgSearchHit = { object_id: string; name: string; object_type: string; score: number; match: string };
 export type KgSearchResp = { query: string; hits: KgSearchHit[] };
-export type KgNeighborsResp = { nodes: UnifiedConceptNode[]; edges: UnifiedEdge[] };
+export type KgNeighborsResp = {
+  nodes: UnifiedConceptNode[];
+  edges: UnifiedEdge[];
+  /** Canonical graph id for a raw cited concept id. */
+  focus_id?: string;
+  /** Raw knowledge-object id used for context when focus_id is synthetic. */
+  focus_object_id?: string;
+  /** The large-notebook viz artifact is not ready, so bounded focus is unavailable. */
+  locating_unavailable?: boolean;
+  /** Participant that owns the resolved node; reads remain authorized by the active notebook. */
+  source_notebook_id?: string;
+};

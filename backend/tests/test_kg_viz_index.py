@@ -72,6 +72,26 @@ def test_unified_graph_large_nb_returns_building_placeholder(repo, monkeypatch):
     _wait_until_not_building(repo, nb.id)
 
 
+def test_kg_neighbors_large_nb_without_viz_never_materializes_cluster_map(repo, monkeypatch):
+    """Citation focus during a large viz build must stay bounded and report that
+    location is temporarily unavailable instead of loading every cluster member."""
+    nb = _star(repo)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(
+        lifecycle,
+        "cluster_map",
+        lambda _nb: (_ for _ in ()).throw(AssertionError("full cluster map loaded")),
+    )
+
+    result = repo.kg_neighbors(nb.id, "missing-raw-citation")
+
+    assert result["locating_unavailable"] is True
+    assert result["nodes"] == []
+    assert result["edges"] == []
+
+
 def test_unified_graph_building_then_ready(repo, monkeypatch):
     nb = _star(repo)
     _clear_viz(repo, nb.id)

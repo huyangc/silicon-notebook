@@ -257,3 +257,17 @@ def test_search_hit_folded_to_canonical_id_and_neighbors_nonempty(repo_with_embe
         f"Fix 1 FAILED: kg_neighbors(canonical_id={hit['object_id']!r}) returned empty nodes. "
         "Click-to-expand is broken even after Fix 1 — check viz graph / scale index."
     )
+
+    # Ask citations retain the raw knowledge-object id. The indexed visual graph
+    # stores the folded canonical id, so citation deep links must resolve the raw
+    # member without loading the full cluster map and tell the UI which id to focus.
+    raw_member = next(
+        member for member, canonical in cmap.items()
+        if canonical == hit["object_id"]
+    )
+    raw_nbr = repo_with_embed.kg_neighbors(nb.id, raw_member, cap=10)
+    assert raw_nbr["focus_id"] == hit["object_id"]
+    assert hit["object_id"] in {node["id"] for node in raw_nbr["nodes"]}
+    assert any(edge["target_object_id"] == hit["object_id"] for edge in raw_nbr["edges"]), (
+        "An incoming persisted edge must keep its direction when the target is focused"
+    )

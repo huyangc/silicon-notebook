@@ -73,6 +73,8 @@ def build_rx_graph(
         }
         if meta.get("tier"):
             payload["tier"] = meta["tier"]
+        if meta.get("notebook_id"):
+            payload["notebook_id"] = meta["notebook_id"]
         if tag_kind:
             payload["kind"] = "entity"
         # gate ii (T3): thread a single-row knowhow cell KO's table_id/rows so
@@ -338,6 +340,12 @@ def render_subgraph_context(
             "source_title": "",
             "location_label": "",
             "tier": node_tier,
+            # Active personal anchors preserve the established empty-id wire
+            # convention; mounted base nodes retain their real participant id
+            # so citation focus can resolve under the active notebook's auth.
+            "notebook_id": (
+                node.get("notebook_id", "") if node_tier == "base" else ""
+            ),
             "knowhow": knowhow,
         }
         oid_to_key[oid] = key

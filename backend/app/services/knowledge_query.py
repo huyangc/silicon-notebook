@@ -37,6 +37,8 @@ class KnowledgeQueryService:
         schemas,
         snapshots,
         notebook_languages: Callable[[], dict],
+        participant_notebook_ids: Callable[[str], list[str]] = lambda notebook_id: [notebook_id],
+        node_context_reader: Callable[[str, str], dict] = lambda _notebook_id, _object_id: {},
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
         queries=None,
@@ -54,6 +56,8 @@ class KnowledgeQueryService:
         self.schemas = schemas
         self.snapshots = snapshots
         self.notebook_languages = notebook_languages
+        self.participant_notebook_ids = participant_notebook_ids
+        self.node_context_reader = node_context_reader
         self.memory_retriever = memory_retriever
         self.current_user_id = current_user_id
         self.queries = queries
@@ -346,8 +350,27 @@ class KnowledgeQueryService:
             )
         return result
 
-    def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
-        self.catalog.get_notebook(notebook_id)
+    def _participant_source(
+        self, active_notebook_id: str, source_notebook_id: str
+    ) -> str:
+        self.catalog.get_notebook(active_notebook_id)
+        if not source_notebook_id:
+            return active_notebook_id
+        if source_notebook_id not in self.participant_notebook_ids(active_notebook_id):
+            raise KeyError(source_notebook_id)
+        return source_notebook_id
+
+    def concept_detail(
+        self,
+        notebook_id: str,
+        canonical_id: str,
+        *,
+        source_notebook_id: str = "",
+    ) -> dict:
+        source_id = self._participant_source(notebook_id, source_notebook_id)
+        return self._concept_detail(source_id, canonical_id)
+
+    def _concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
         with self.database.connect() as db:
             cluster_rows, name = self.knowledge.concept_cluster_detail_rows(
                 db, notebook_id, canonical_id
@@ -400,6 +423,16 @@ class KnowledgeQueryService:
             "attached": attached,
             "evidence": evidence,
         }
+
+    def node_context(
+        self,
+        notebook_id: str,
+        object_id: str,
+        *,
+        source_notebook_id: str = "",
+    ) -> dict:
+        source_id = self._participant_source(notebook_id, source_notebook_id)
+        return self.node_context_reader(source_id, object_id)
 
     def insert_test_object(
         self, notebook_id: str, object_type: str, payload: dict, source_id: str = ""

@@ -164,6 +164,7 @@ class KnowledgeLifecycleService:
         relations_for_notebook: Callable[[str], List[dict]],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
+        participant_notebook_ids: Callable[[str], List[str]],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
@@ -211,6 +212,7 @@ class KnowledgeLifecycleService:
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
+        self.participant_notebook_ids = participant_notebook_ids
         self._invalidate_knowledge_counts = invalidate_knowledge_counts
 
     # ------------------------------------------------------------------
@@ -1618,35 +1620,134 @@ class KnowledgeLifecycleService:
             "truncated": len(nodes) < total_nodes,
         }
 
-    def kg_neighbors(self, notebook_id: str, object_id: str, cap: int = 50) -> dict:
+    def _participant_source_notebook(
+        self,
+        active_notebook_id: str,
+        object_id: str,
+        source_notebook_id: str,
+    ) -> str:
+        """Resolve one globally unique raw object inside the active federation.
+
+        The request is authorized against ``active_notebook_id`` by the route;
+        mounted public bases are data participants, not notebook members, so the
+        browser must not access them directly. Every probe is an indexed lookup
+        for exactly one object id and the participant list is already bounded by
+        the notebook's explicit mounts.
+        """
+        participants = self.participant_notebook_ids(active_notebook_id)
+        if not participants:
+            return active_notebook_id
+        hint = source_notebook_id if source_notebook_id in participants else ""
+        ordered = ([hint] if hint else []) + [
+            notebook_id for notebook_id in participants if notebook_id != hint
+        ]
+        with self._connect() as db:
+            for notebook_id in ordered:
+                if self.knowledge.object_meta_rows_for_notebook(
+                    db, notebook_id, [object_id]
+                ):
+                    return notebook_id
+                if self.unified_kg.cluster_fold_rows(
+                    db, notebook_id, [object_id]
+                ):
+                    return notebook_id
+        # A canonical K-* id is synthetic and therefore has no object row. Its
+        # source hint came from a previously resolved neighborhood response; use
+        # it only after all raw-id probes miss.
+        return hint or active_notebook_id
+
+    def kg_neighbors(
+        self,
+        notebook_id: str,
+        object_id: str,
+        cap: int = 50,
+        *,
+        source_notebook_id: str = "",
+    ) -> dict:
         """1-hop neighborhood of `object_id` (≤cap) in the folded concept graph.
 
         Fast path: persisted viz graph → viz_neighbors → hydrate names/edge_types
         (same node/edge shape as unified_graph). Fallback (no index): a bounded
         1-hop query over knowledge_relations, folding endpoints via cluster_map so
-        the shape matches the unified graph the frontend already renders."""
+        the shape matches the unified graph the frontend already renders.
+
+        Ask anchors carry raw knowledge-object ids, while the visual graph folds
+        Concepts to canonical K-* ids. Resolve just this one requested id through
+        the indexed cluster table before either path; never load the full cluster
+        map on the indexed path."""
         self.get_notebook(notebook_id)
+        source_id = notebook_id
+        if source_notebook_id:
+            source_id = self._participant_source_notebook(
+                notebook_id, object_id, source_notebook_id
+            )
+        result = self._kg_neighbors_unchecked(source_id, object_id, cap)
+        result["source_notebook_id"] = source_id
+        return result
+
+    def _kg_neighbors_unchecked(
+        self, notebook_id: str, object_id: str, cap: int
+    ) -> dict:
+        """Participant-authorized neighbor read; caller already checked scope."""
+        focus_id = object_id
+        with self._connect() as db:
+            fold_rows = self.unified_kg.cluster_fold_rows(
+                db, notebook_id, [object_id]
+            )
+        if fold_rows:
+            focus_id = fold_rows[0]["canonical_id"]
         idx = self.scale_artifacts.viz_index(notebook_id)
         if idx is not None and getattr(idx, "viz_ids", None) is not None:
             from app.services.kg.scale_index import viz_neighbors
-            nb = viz_neighbors(self._viz_dict(idx), object_id, cap)
+            nb = viz_neighbors(self._viz_dict(idx), focus_id, cap)
             name_by_id = {n: nm for n, nm in zip(idx.viz_ids, idx.viz_names or [])}
             type_by_id = {n: t for n, t in zip(idx.viz_ids, idx.viz_types or [])}
             nbr_ids = {n["id"] for n in nb["nodes"]}
             nodes = [self._viz_node(idx, fid, name_by_id, type_by_id) for fid in nbr_ids]
-            # edge_type: look up from the persisted folded edge list (either
-            # direction); default 'related' if not found (e.g. hub/membership).
+            # viz_neighbors exposes an undirected adjacency as focus -> neighbour,
+            # but the rendered relation is directed. Recover the persisted
+            # orientation so opening a target reached by an incoming edge does
+            # not manufacture a second, reversed relation in the overlay.
             et_map = {}
             for s, t, et in (idx.viz_edges or []):
                 et_map[(s, t)] = et
             edges = []
             for e in nb["edges"]:
                 s, t = e["source"], e["target"]
-                et = et_map.get((s, t)) or et_map.get((t, s)) or "related"
-                edges.append({"source_object_id": s, "target_object_id": t, "edge_type": et})
+                if (s, t) in et_map:
+                    edge_s, edge_t, et = s, t, et_map[(s, t)]
+                elif (t, s) in et_map:
+                    edge_s, edge_t, et = t, s, et_map[(t, s)]
+                else:
+                    edge_s, edge_t, et = s, t, "related"
+                edges.append({"source_object_id": edge_s, "target_object_id": edge_t,
+                              "edge_type": et})
             edges = self._annotate_edge_support(notebook_id, edges)
-            return {"nodes": nodes, "edges": edges}
-        return self._kg_neighbors_db(notebook_id, object_id, cap)
+            return {
+                "nodes": nodes,
+                "edges": edges,
+                "focus_id": focus_id,
+                # The graph renders the folded canonical id, while object
+                # context is stored on the cited raw knowledge-object row.
+                "focus_object_id": object_id,
+            }
+        # The legacy DB fallback materialises the complete concept-cluster map.
+        # It remains acceptable for a small notebook, but must never run while a
+        # large notebook's compact viz artifact is being built or repaired.
+        with self._connect() as db:
+            object_count = self.knowledge.active_object_count(db, notebook_id)
+        if int(object_count) > self.settings.viz_sync_build_max_objects:
+            return {
+                "nodes": [],
+                "edges": [],
+                "focus_id": focus_id,
+                "focus_object_id": object_id,
+                "locating_unavailable": True,
+            }
+        result = self._kg_neighbors_db(notebook_id, focus_id, cap)
+        result["focus_id"] = focus_id
+        result["focus_object_id"] = object_id
+        return result
 
     def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:
         """DB fallback for kg_neighbors: bounded 1-hop over knowledge_relations,
@@ -1669,7 +1770,6 @@ class KnowledgeLifecycleService:
             s, t = canon(r["source_object_id"]), canon(r["target_object_id"])
             if s == t:
                 continue
-            # orient relative to the queried folded node
             if s == object_id:
                 other = t
             elif t == object_id:
@@ -1680,7 +1780,7 @@ class KnowledgeLifecycleService:
                 continue
             seen.add(other)
             nbr_ids.add(other)
-            edges.append({"source_object_id": object_id, "target_object_id": other,
+            edges.append({"source_object_id": s, "target_object_id": t,
                           "edge_type": r["edge_type"]})
         # Include the queried node itself only when it's a known canonical id or
         # has neighbours; unknown / non-canonical ids that produced no edges are

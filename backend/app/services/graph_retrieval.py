@@ -183,6 +183,7 @@ class GraphRetrievalService(_RetrievalState):
                             "type": r["object_type"],
                             "name": p.get("name", ""),
                             "tier": tier_map.get(nb_id, "personal"),
+                            "notebook_id": nb_id,
                         }
                         # A single knowhow cell KO carries table_id+rows in its
                         # payload (KnowhowProjector._ko_object_row §④). Thread the

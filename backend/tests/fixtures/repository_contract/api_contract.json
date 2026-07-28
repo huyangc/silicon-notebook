@@ -10462,6 +10462,16 @@
                 "title": "Canonical Id",
                 "type": "string"
               }
+            },
+            {
+              "in": "query",
+              "name": "source_notebook_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Source Notebook Id",
+                "type": "string"
+              }
             }
           ],
           "responses": {
@@ -13459,6 +13469,16 @@
                 "title": "Object Id",
                 "type": "string"
               }
+            },
+            {
+              "in": "query",
+              "name": "source_notebook_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Source Notebook Id",
+                "type": "string"
+              }
             }
           ],
           "responses": {
@@ -13518,6 +13538,16 @@
                 "minimum": 1,
                 "title": "Cap",
                 "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "source_notebook_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Source Notebook Id",
+                "type": "string"
               }
             }
           ],

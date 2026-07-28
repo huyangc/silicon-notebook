@@ -113,6 +113,7 @@ import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerM
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
+import { prepareKgFocus } from "./kg-focus";
 import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -1579,6 +1580,9 @@ export default function Home() {
   activeAskModeRef.current = askMode;
   const workspaceEpochRef = useRef(0);
   const kgBuildRequestEpochRef = useRef(0);
+  const kgOpenRequestRef = useRef(0);
+  const kgNodeNotebookRef = useRef<Map<string, string>>(new Map());
+  const kgNodeContextObjectRef = useRef<Map<string, string>>(new Map());
   const askRunEpochRef = useRef(0);
   const sessionListRequestRef = useRef(0);
   const latestSessionListRef = useRef<{
@@ -3812,8 +3816,10 @@ export default function Home() {
   async function openKgView(
     targetNodeId?: string,
     notebookId: string | null = currentNotebookId,
+    sourceNotebookId: string | null = notebookId,
   ) {
     if (!notebookId) return;
+    const requestId = ++kgOpenRequestRef.current;
     const workspaceEpoch = workspaceEpochRef.current;
     setKgViewOpen(true);
     setSelectedKgNodeId(null); setConceptDetail(null); setNodeCtx(null);
@@ -3821,19 +3827,60 @@ export default function Home() {
     setKgExpandedNodes([]); setKgExpandedEdges([]);
     setKgSelectedTypes([]);
     setKgLimit(KG_RANGE_DEFAULT);                 // 每次打开从核心范围起，避免一上来渲染全量
-    setPendingKgFocusId(targetNodeId ?? null);
     try {
-      const [g, pend, status] = await Promise.all([
+      const [g, [pend, status]] = await Promise.all([
         fetchUnifiedGraph(notebookId, KG_RANGE_DEFAULT),
-        fetchPendingMerges(notebookId),
-        fetchUnifiedKgStatus(notebookId),
+        Promise.all([
+          fetchPendingMerges(notebookId),
+          fetchUnifiedKgStatus(notebookId),
+        ]),
       ]);
+      // 引用携带的是原始 knowledge_object id，而图中 Concept 可能已经折叠为
+      // canonical K-* id；同时大库核心图只含高连接度节点。定向拉一跳邻域既把
+      // 核心范围外的目标补进来，也由后端返回真正应选中的 canonical id。
+      let neighborhood: KgNeighborsResp | null = null;
+      if (targetNodeId) {
+        try {
+          neighborhood = await fetchKgNeighbors(
+            notebookId,
+            targetNodeId,
+            50,
+            sourceNotebookId || notebookId,
+          );
+        } catch { /* 核心图仍可展示；下面按 focus 是否可达给出定位提示。 */ }
+      }
       if (
-        activeNotebookIdRef.current !== notebookId
+        requestId !== kgOpenRequestRef.current
+        || activeNotebookIdRef.current !== notebookId
         || workspaceEpochRef.current !== workspaceEpoch
       ) return;
+      const focus = prepareKgFocus(g, targetNodeId, neighborhood);
+      const nodeNotebookIds = new Map<string, string>();
+      const resolvedSourceNotebookId = neighborhood?.source_notebook_id
+        || sourceNotebookId
+        || notebookId;
+      if (targetNodeId) {
+        for (const node of neighborhood?.nodes ?? []) {
+          nodeNotebookIds.set(node.id, resolvedSourceNotebookId);
+        }
+        if (focus.focusId) nodeNotebookIds.set(focus.focusId, resolvedSourceNotebookId);
+      }
+      kgNodeNotebookRef.current = nodeNotebookIds;
+      const nodeContextObjectIds = new Map<string, string>();
+      if (focus.focusId && focus.contextObjectId) {
+        nodeContextObjectIds.set(focus.focusId, focus.contextObjectId);
+      }
+      kgNodeContextObjectRef.current = nodeContextObjectIds;
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
+      setKgExpandedNodes(focus.expandedNodes);
+      setKgExpandedEdges(focus.expandedEdges);
+      setPendingKgFocusId(focus.focusId);
       setVizBuilding(Boolean(g.viz_building));
+      if (targetNodeId && neighborhood?.locating_unavailable) {
+        setToast("图谱索引正在构建，暂时无法定位该引用节点；完成后请重试");
+      } else if (targetNodeId && !focus.focusId) {
+        setToast("知识图谱已打开，但引用节点定位失败，请重试");
+      }
     } catch (err) { reportError(err); }
   }
 
@@ -3956,16 +4003,42 @@ export default function Home() {
 
   async function selectKgNode(nodeId: string) {
     if (!currentNotebookId) return;
+    const nodeNotebookId = kgNodeNotebookRef.current.get(nodeId) || currentNotebookId;
     setSelectedKgNodeId(nodeId);
     setNodeCtx(null);
     focusKgGraphNode(nodeId);
     window.setTimeout(() => {
       kgDetailRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     }, 0);
+    let resolvedNodeNotebookId = nodeNotebookId;
     // 逐跳展开：拉取邻居节点/边并合并进视图（去重由 uGraphMerged 处理）。
     try {
-      const neighbors = await fetchKgNeighbors(currentNotebookId, nodeId);
+      const neighbors = await fetchKgNeighbors(
+        currentNotebookId,
+        nodeId,
+        50,
+        nodeNotebookId,
+      );
+      resolvedNodeNotebookId = neighbors.source_notebook_id || nodeNotebookId;
+      if (
+        neighbors.focus_id
+        && neighbors.focus_object_id
+        && (
+          !kgNodeContextObjectRef.current.has(neighbors.focus_id)
+          || neighbors.focus_object_id !== neighbors.focus_id
+        )
+      ) {
+        kgNodeContextObjectRef.current.set(
+          neighbors.focus_id,
+          neighbors.focus_object_id,
+        );
+      }
       if (neighbors.nodes.length > 0 || neighbors.edges.length > 0) {
+        for (const node of neighbors.nodes) {
+          if (!kgNodeNotebookRef.current.has(node.id)) {
+            kgNodeNotebookRef.current.set(node.id, resolvedNodeNotebookId);
+          }
+        }
         setKgExpandedNodes((prev) => {
           const existing = new Set(prev.map((n) => n.id));
           const fresh = neighbors.nodes.filter((n) => !existing.has(n.id));
@@ -3980,8 +4053,9 @@ export default function Home() {
     } catch { /* 邻居展开 best-effort，不阻断主流程 */ }
     const node = uGraphMerged?.nodes.find((item) => item.id === nodeId);
     if (node?.object_type !== "concept") setConceptDetail(null);
-    else { try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId)); } catch (err) { setConceptDetail(null); reportError(err); } }
-    try { setNodeCtx(await fetchNodeContext(currentNotebookId, nodeId)); } catch { /* node context best-effort */ }
+    else { try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId, resolvedNodeNotebookId)); } catch (err) { setConceptDetail(null); reportError(err); } }
+    const contextObjectId = kgNodeContextObjectRef.current.get(nodeId) || nodeId;
+    try { setNodeCtx(await fetchNodeContext(currentNotebookId, contextObjectId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
   }
 
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
@@ -5046,7 +5120,11 @@ export default function Home() {
                             answer={turn.response}
                             feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
                             onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
-                            onOpenKnowledgeGraph={(objectId) => openKgView(objectId)}
+                            onOpenKnowledgeGraph={(objectId, sourceNotebookId) => openKgView(
+                              objectId,
+                              currentNotebookId,
+                              sourceNotebookId || currentNotebookId,
+                            )}
                             onOpenKnowhowRow={openKnowhowAt}
                             notebookId={currentNotebookId}
                             notebookNames={notebookNames}

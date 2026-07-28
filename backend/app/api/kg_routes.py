@@ -220,17 +220,33 @@ def get_pending_merges(notebook_id: str) -> list:
 
 
 @router.get("/notebooks/{notebook_id}/concepts/{canonical_id}/detail", dependencies=[Depends(require_notebook_read)])
-def get_concept_detail(notebook_id: str, canonical_id: str) -> dict:
+def get_concept_detail(
+    notebook_id: str,
+    canonical_id: str,
+    source_notebook_id: str = Query(""),
+) -> dict:
     try:
-        return repository().concept_detail(notebook_id, canonical_id)
+        return repository().concept_detail(
+            notebook_id,
+            canonical_id,
+            source_notebook_id=source_notebook_id or notebook_id,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Concept not found")
 
 
 @router.get("/notebooks/{notebook_id}/objects/{object_id}/context", dependencies=[Depends(require_notebook_read)])
-def object_context(notebook_id: str, object_id: str):
+def object_context(
+    notebook_id: str,
+    object_id: str,
+    source_notebook_id: str = Query(""),
+):
     try:
-        return repository().node_context(notebook_id, object_id)
+        return repository().node_context(
+            notebook_id,
+            object_id,
+            source_notebook_id=source_notebook_id or notebook_id,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Object not found")
 
@@ -240,10 +256,16 @@ def object_neighbors(
     notebook_id: str,
     object_id: str,
     cap: int = Query(50, ge=1, description="最多返回的 1-hop 邻居数"),
+    source_notebook_id: str = Query(""),
 ) -> dict:
     """折叠图中某节点的 1-hop 邻域(有界);与 unified-kg 同形(nodes/edges)。"""
     try:
-        return repository().kg_neighbors(notebook_id, object_id, cap=cap)
+        return repository().kg_neighbors(
+            notebook_id,
+            object_id,
+            cap=cap,
+            source_notebook_id=source_notebook_id or notebook_id,
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

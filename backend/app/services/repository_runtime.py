@@ -857,6 +857,10 @@ class RepositoryRuntime:
             schemas=self.schema_registry,
             snapshots=self.retrieval_snapshots,
             notebook_languages=lambda: self.notebook_languages,
+            participant_notebook_ids=self.notebook_store.participant_notebook_ids,
+            node_context_reader=lambda notebook_id, object_id: self.knowledge.node_context(
+                notebook_id, object_id, check_access=False
+            ),
             memory_retriever=self.memory_retriever,
             current_user_id=lambda: self.identity.current_user().id,
             queries=self.queries,
@@ -983,6 +987,7 @@ class RepositoryRuntime:
             relations_for_notebook=relations_for_notebook,
             notebook_copy_stats=notebook_copy_stats,
             note_model_error=note_model_error,
+            participant_notebook_ids=self.notebook_store.participant_notebook_ids,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
