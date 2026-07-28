@@ -274,7 +274,7 @@ _POSTGRES_MIGRATIONS = load_migrations(
 _PROGRESS_INTEGER_FIELDS = {
     "baseline_seq": None,
     "applied_seq": None,
-    "tables_complete": 60,
+    "tables_complete": 63,
     "rows_copied": None,
     "bytes_copied": None,
     "migration_version": MANIFEST.schema_pair.postgres_version,

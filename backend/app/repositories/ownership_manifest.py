@@ -895,7 +895,12 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.is_member', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.issue_agent_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.join_shared', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_analysis', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_cluster_size_histogram', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_community_overview', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_largest_clusters', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_neighbors', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_relation_provenance_counts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kg_search', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.kick_all_members', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.knowhow_cell_history', kind='attribute', target='_runtime'),
@@ -1935,6 +1940,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='kg_analysis',
+        owner='KgAnalysisService',
+        kind='property',
+        consumers=(
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.kg_analysis_service', kind='attribute', target='kg_analysis'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='kg_neighbors',
         owner='KnowledgeLifecycleService',
         kind='method',
@@ -2293,10 +2308,12 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='notebook_copy_stats'),
+            ConsumerSite(path='backend/tests/test_kg_analysis_precompute.py', scope='<module>.test_refused_large_graph_build_writes_no_artifacts', kind='patch', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_builds_with_igraph', kind='patch', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_refuses_without_igraph', kind='patch', target='notebook_copy_stats'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_kg_analysis_precompute.py', scope='<module>.test_refused_large_graph_build_writes_no_artifacts', kind='patch', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_builds_with_igraph', kind='patch', target='notebook_copy_stats'),
             ConsumerSite(path='backend/tests/test_rebuild_communities.py', scope='<module>.test_large_no_index_refuses_without_igraph', kind='patch', target='notebook_copy_stats'),
         ),

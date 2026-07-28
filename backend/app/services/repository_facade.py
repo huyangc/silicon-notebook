@@ -993,6 +993,56 @@ class RepositoryFacade:
             notebook_id, input_version, stage, rows
         )
 
+    # KG 质量分析的只读聚合(T1) — UnifiedKgStore owns the reads; one-hop delegates.
+    # 口径与产品一致(对象 USABLE_STATUSES;边 review_status != 'rejected' 且两端都是
+    # 本 notebook 的可用对象),被排除的量随载荷单独返回。
+    #
+    # ⚠ **下面三条全是全表级的重活,而且是同一量级**(第四条 kg_community_overview 是
+    # 有界读,便宜)。别只给最后一条打警告,也别因为 largest_clusters 带 LIMIT 就当它便宜
+    # ——它在同形状的全扫分组之后还多一次排序,LIMIT 只截断输出。按后端分列的实测数字
+    # (SQLite / PostgreSQL 各自的量级与计划形状)在 repositories/ports.py 该段头,那是真源。
+    # 调用方(T3 的 KgAnalysisService)必须把它们放进按 kg_mutation_seq 记忆化的预计算
+    # 路径,不得挂在在线请求上;并且**不得持有外层写事务**(store 自开连接,PG 侧会从
+    # 池里另取一条,在 write() 里调用会安静地读到提交前的旧数据)。
+    def kg_cluster_size_histogram(self, notebook_id: str) -> Dict[str, object]:
+        """合并簇的大小分桶直方图,按 object_type 分组 + 全类型合计(收敛率分布面)。
+        分组分桶在 SQL 里完成。⚠ **重活**:全扫 + 每行一次对象匹配 + 分组聚合。"""
+        return self._runtime.unified_kg.cluster_size_histogram(notebook_id)
+
+    def kg_largest_clusters(self, notebook_id: str, limit: int = 20) -> Dict[str, object]:
+        """成员最多的 N 个 concept 簇;limit 有硬上限,返回带 truncated。
+        ⚠ **重活,与直方图同量级**:同形状的全扫分组之后还多一次排序,LIMIT 只截断
+        输出、不减少扫描与排序的输入。"""
+        return self._runtime.unified_kg.largest_clusters(notebook_id, limit)
+
+    def kg_community_overview(self, notebook_id: str, *, level: int = 0,
+                              limit: int = 50, top_k: int = 5) -> Dict[str, object]:
+        """主题板块列表 + 每个板块按 centrality 降序的前 K 个代表概念;
+        板块数与 K 都有硬上限,返回带 total/returned/truncated,绝不静默截断。
+        整块跑在一次显式只读快照事务里(并发 rebuild 不会劈出自相矛盾的数字)。"""
+        return self._runtime.unified_kg.community_overview(
+            notebook_id, level=level, limit=limit, top_k=top_k
+        )
+
+    def kg_relation_provenance_counts(self, notebook_id: str) -> Dict[str, object]:
+        """边的出处构成(relink 补出来的 vs 未标注)。⚠ **重活:全表扫**——生产库
+        800 万+ 边,每行还要匹配两个端点,不适合挂在线请求上。"""
+        return self._runtime.unified_kg.relation_provenance_counts(notebook_id)
+
+    @property
+    def kg_analysis(self):
+        """KG 质量分析报告的只读装配 service(T3)——one-hop 委托到中性 runtime 上的
+        那**一个**实例。
+
+        为什么是 runtime 而不是像 ``checkup`` 那样每个后端 facade 各构一份:它只吃
+        database + unified_kg 两个 seam,自己不 import 任何后端,所以中性 runtime 装得下
+        (checkup 装不下 —— 它依赖 sqlite/postgres 各自的 maintenance adapter)。
+        单例的意义是那份按 seq 记忆化的板块列表/跨板块边缓存要跨请求存活。
+
+        ⚠ 与上面四条的关系:本 service **只读预计算产物**,一次都不调那三条全表重活。
+        """
+        return self._runtime.kg_analysis
+
 
 
 

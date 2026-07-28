@@ -35,6 +35,7 @@ RUNTIME_COMPONENT_OWNERS = {
     "graph_retrieval": "GraphRetrievalService",
     "identity": "IdentityStore",
     "index_projections": "IndexProjectionStore",
+    "kg_analysis": "KgAnalysisService",
     "kg_mutations": "KgMutationCoordinator",
     "knowhow_history_store": "KnowhowHistoryStore",
     "knowhow_store": "KnowhowStore",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from app.models.knowledge import KnowledgeUpdate
+from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.postgres.embedding_store import EmbeddingStore as PostgresEmbeddingStore
 from app.repositories.postgres.governance_store import GovernanceStore as PostgresGovernanceStore
 from app.repositories.postgres.index_projection_store import (
@@ -20,7 +21,25 @@ from app.repositories.postgres.index_projection_store import (
 from app.repositories.postgres.knowledge_store import KnowledgeStore as PostgresKnowledgeStore
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore as PostgresUnifiedKgStore
-from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.kg_analysis_precompute import (
+    ARTIFACT_CLUSTER_HISTOGRAM,
+    ARTIFACT_COMMUNITY_EDGES,
+    ARTIFACT_KINDS,
+    ARTIFACT_LARGEST_CLUSTERS,
+    ARTIFACT_RELATION_PROVENANCE,
+    ARTIFACT_SOURCE_PROFILES,
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_DEPENDENT_ARTIFACT_KINDS,
+    CLUSTER_SEQ_PAYLOAD_KEY,
+    MAINSTREAM_COVERAGE,
+    artifact_cluster_seq_is_unknown,
+    stamp_cluster_seq,
+)
+from app.services.knowledge_contracts import (
+    KG_COMMUNITY_EDGES_MAX,
+    KG_SOURCE_PAGE_MAX,
+    USABLE_STATUSES,
+)
 from app.services.ask_service import knowledge_record
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services.retrieval import RetrievedKnowledge, RetrievedRelation
@@ -110,7 +129,7 @@ def knowledge_harness(postgres_database) -> KnowledgeHarness:
     seams = _seams()
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     yield KnowledgeHarness(
         database=postgres_database,
@@ -474,7 +493,7 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresEmbeddingStore(write=postgres_database.write)
     expected = np.asarray([0.125, -1.5, 3.25, 0.0], dtype=np.float32)
@@ -519,7 +538,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     valid = (
@@ -561,7 +580,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 def test_postgres_raw_graph_rows_keep_repository_json_text_contract(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -628,7 +647,7 @@ def test_postgres_raw_graph_rows_keep_repository_json_text_contract(postgres_dat
 def test_postgres_retrieve_neighbors_consumes_repository_rows(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     objects = [
@@ -780,7 +799,7 @@ def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -835,7 +854,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     query = "crowdout exact thermal phrase"
@@ -879,7 +898,7 @@ def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
 def test_postgres_fts_recalls_independent_term_from_long_query(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     with postgres_database.write() as connection:
@@ -909,7 +928,7 @@ def test_postgres_fts_recalls_independent_term_from_long_query(postgres_database
 def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     with postgres_database.write() as connection:
@@ -1001,7 +1020,7 @@ def test_postgres_concurrent_cluster_appends_are_member_idempotent(
     """Two real transactions must not both pass the append membership check."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     first_reached = threading.Event()
@@ -1087,7 +1106,7 @@ def test_postgres_concurrent_cluster_replacements_publish_one_complete_final_set
     """A later replacement must erase, not mix with, the prior complete set."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     with postgres_database.write() as connection:
@@ -1205,7 +1224,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1384,7 +1403,7 @@ def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
 def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1477,7 +1496,7 @@ def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_databa
 def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1551,7 +1570,7 @@ def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_databas
 def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1631,7 +1650,7 @@ def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_databas
 def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1757,7 +1776,7 @@ def test_postgres_graph_build_order_and_equal_confidence_fanout_are_physical_ord
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     unified = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
@@ -1921,7 +1940,7 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-order-z", "ko-order-a", "ko-order-m"]
@@ -2099,7 +2118,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-follow-start", "ko-follow-a", "ko-follow-m", "ko-follow-z"]
@@ -2167,7 +2186,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 def test_postgres_query_store_multi_notebook_count_placeholders(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     rows = PostgresQueryStore(postgres_database).list_user_notebooks("user-golden")
     assert {row["id"] for row in rows} == {"nb-base", "nb-personal"}
@@ -2183,7 +2202,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     with postgres_database.write() as connection:
         for answer_id, question, created_at in (
@@ -2218,7 +2237,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 def test_postgres_unified_kg_temp_search_and_checkpoint_json(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     claims = (
@@ -2259,7 +2278,7 @@ def test_concurrent_equivalent_promotions_serialize_base_dedup(
     from app.repositories.postgres import governance_store as governance_module
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 13
+    assert PostgresMigrator(postgres_database).migrate() == 14
     _seed_catalog(postgres_database)
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -2386,3 +2405,1411 @@ def test_federation_base_tie_break_is_knowledge_only(monkeypatch):
         "nb-personal", "thermal"
     )
     assert [hit.tier for hit in relation_hits] == ["personal", "base"]
+
+
+# ---------------------------------------------------------------------------
+# KG 质量分析只读聚合(T1)的双后端一致性
+#
+# 两侧各写各的方言 SQL(占位符、jsonb 算子、COLLATE),`community_overview` 的**查询
+# 形态还刻意分了岔**(PG 一条窗口函数,SQLite 逐板块有界 top-K)。载荷形状由
+# app.repositories.kg_analysis_payloads 的中性装配函数保证。这里对**同一批夹具数据**
+# 在两个后端各跑一遍、断言同一份期望值 —— parity 因此是被证明的,不是被声称的。
+#
+# 夹具必须让**每一条口径分支都在 PostgreSQL 上真正被执行到**。初版夹具做不到:它只有
+# 单 notebook 的简单数据,把 PG 侧四处 notebook 归属约束全删光仍然 53 passed(同样的
+# 变异打 SQLite 侧立刻 2 failed)。所以这里补齐:
+#   · 跨 notebook 的簇成员对象与跨 notebook 的边端点(归属约束的唯一证人);
+#   · 一个成员全被排除的空簇(`empty` 分支);
+#   · 一条**既被否决、端点又不可用**的边(`rejected` / `endpoint_unusable` 的
+#     CASE 分支顺序);
+#   · 落在 `4-5` / `2` / `1` 三档的簇(桶边界);
+#   · level > 0 的板块记录(level 归属);
+#   · concept 之外的三类 + 两个契约外的自定义类型(D1 的分组与「其他」组);
+#   · 一个 canonical_name 为空串的成员(`MIN(NULLIF(...))` 的空名劫持)。
+#
+# 顺带钉住只有真 PostgreSQL 才暴露的坑:LIKE 里的 `%` 必须写成 `%%`(psycopg 的参数
+# 展开)、jsonb 的 `-> 0 ->> 'basis'` 取值、`SUM()` 返回 Decimal 需要 int() 收口、
+# `GROUP BY` 必须含 `object_type`(PG 不允许 bare column)、窗口函数 CTE 的 LEFT JOIN。
+# ---------------------------------------------------------------------------
+
+ANALYSIS_NB = "nb-personal"
+FOREIGN_NB = "nb-base"
+
+
+def _analysis_unified_store(harness):
+    return PostgresUnifiedKgStore(harness.database, now=lambda: NOW)
+
+
+def _analysis_payloads(
+    *, cluster_seq: int = 0, partition_rebuilt: bool = True, **overrides
+) -> dict:
+    """一批合法的账本 payload,簇世代照生产路径经 `stamp_cluster_seq` 盖上。
+
+    夹具刻意**不手抄**那个 key —— 分类(哪几份依赖合并结果)一旦改了,夹具跟着改,
+    不会出现「守卫按新分类查、夹具还按旧分类拼」这种两侧各自自洽却对不上的局面。
+
+    ``partition_rebuilt=False`` 拼「只补账本」那一轮的形状:依赖板块的两份显式记
+    「板块划分建在哪一代合并结果上无从判断」(值是 None,键仍在)。
+    """
+    payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
+    payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
+    payloads.update(overrides)
+    return stamp_cluster_seq(
+        payloads, cluster_seq, partition_rebuilt=partition_rebuilt
+    )
+
+
+def _analysis_object(object_id: str, *, notebook: str = ANALYSIS_NB,
+                     status: str = "approved", object_type: str = "concept") -> tuple:
+    return (
+        object_id,
+        notebook,
+        object_type,
+        status,
+        json.dumps({"name": object_id}),
+        "[]",
+        "source-golden",
+        NOW,
+        NOW,
+    )
+
+
+def _analysis_cluster(index: int, canonical: str, object_id: str, *,
+                      object_type: str = "concept", name: str | None = None) -> tuple:
+    return (
+        f"cluster-an-{object_type}-{index}",
+        ANALYSIS_NB,
+        canonical,
+        object_id,
+        canonical if name is None else name,
+        object_type,
+        "",
+        "",
+        NOW,
+    )
+
+
+# 契约外的 object_type。knowhow 投影用**用户的列名**建自定义类型,本机库里真实出现过
+# 这类值;它们必须归进「其他」组、只报计数,类型名不得进载荷。
+CUSTOM_TYPE_A = "根因分析动作"
+CUSTOM_TYPE_B = "周几"
+
+
+def _seed_analysis_fixture(harness) -> None:
+    unified = _analysis_unified_store(harness)
+    objects = [
+        # concept:4 个可用(canonical-quad → "4-5" 档)
+        *[_analysis_object(f"ko-an-q{i}") for i in range(1, 5)],
+        # concept:2 个可用(canonical-blank → "2" 档,其中一个 canonical_name 是空串)
+        _analysis_object("ko-an-b1"),
+        _analysis_object("ko-an-b2"),
+        # concept:1 个可用(canonical-solo → "1" 档)
+        _analysis_object("ko-an-solo"),
+        # concept:deprecated(canonical-dead 的唯一成员 → 整簇落空 → "empty")
+        _analysis_object("ko-an-dead", status="deprecated"),
+        # **别的 notebook** 的对象:canonical-foreign 的成员 / rel-an-foreign 的端点。
+        # 这是「归属约束」的唯一证人 —— 没有它,把 o.notebook_id = c.notebook_id 删掉
+        # 也测不出来。
+        _analysis_object("ko-an-foreign", notebook=FOREIGN_NB),
+        # 非 concept 三类
+        _analysis_object("ko-an-l1", object_type="claim"),
+        _analysis_object("ko-an-l2", object_type="claim"),
+        _analysis_object("ko-an-l3", object_type="claim"),
+        _analysis_object("ko-an-f1", object_type="formula"),
+        _analysis_object("ko-an-p1", object_type="procedure"),
+        # 契约外的两个自定义类型
+        _analysis_object("ko-an-x1", object_type=CUSTOM_TYPE_A),
+        _analysis_object("ko-an-x2", object_type=CUSTOM_TYPE_B),
+    ]
+    concept_clusters = [
+        *[_analysis_cluster(i, "canonical-quad", f"ko-an-q{i}") for i in range(1, 5)],
+        # 空名成员:裸 MIN() 会让空串劫持榜首,MIN(NULLIF(...)) 才拿到 "zeta board"。
+        _analysis_cluster(5, "canonical-blank", "ko-an-b1", name=""),
+        _analysis_cluster(6, "canonical-blank", "ko-an-b2", name="zeta board"),
+        _analysis_cluster(7, "canonical-solo", "ko-an-solo"),
+        _analysis_cluster(8, "canonical-dead", "ko-an-dead"),
+        # 成员对象属于别的 notebook → 不是本库的可用成员 → 整簇落空。
+        _analysis_cluster(9, "canonical-foreign", "ko-an-foreign"),
+        # 成员对象根本不存在(损坏数据)→ 同样落空。
+        _analysis_cluster(10, "canonical-ghost", "ko-an-nowhere"),
+    ]
+    claim_clusters = [
+        _analysis_cluster(1, "KL-pair", "ko-an-l1", object_type="claim"),
+        _analysis_cluster(2, "KL-pair", "ko-an-l2", object_type="claim"),
+        _analysis_cluster(3, "KL-solo", "ko-an-l3", object_type="claim"),
+    ]
+    relations = [
+        (relation_id, ANALYSIS_NB, "source-golden", source, target, "about",
+         evidence, NOW)
+        for relation_id, source, target, evidence in (
+            ("rel-an-shared", "ko-an-q1", "ko-an-q2",
+             json.dumps([{"basis": "relink:shared-element", "quote": ""}])),
+            ("rel-an-name", "ko-an-q2", "ko-an-q3",
+             json.dumps([{"basis": "relink:name-match", "quote": ""}])),
+            # LIKE 'relink:%%' 分支 —— psycopg 的 `%` 转义只有真 PG 才会炸。
+            ("rel-an-other", "ko-an-q3", "ko-an-q4",
+             json.dumps([{"basis": "relink:future-rule", "quote": ""}])),
+            ("rel-an-tagged", "ko-an-q4", "ko-an-q1",
+             json.dumps([{"basis": "delegation", "quote": ""}])),
+            # knowhow 投影写的 about 边:evidence='[]' → untagged。
+            ("rel-an-untagged", "ko-an-q1", "ko-an-q3", "[]"),
+            # evidence[0] 是标量,取 basis 必须安全返回 NULL 而不是报错。
+            ("rel-an-scalar", "ko-an-q2", "ko-an-q4", json.dumps([42])),
+            # 端点 deprecated → 不在可用节点集里,这条边进不了图。
+            ("rel-an-dead", "ko-an-q1", "ko-an-dead", "[]"),
+            # 端点不存在(损坏数据)同样排除。
+            ("rel-an-ghost", "ko-an-q1", "ko-an-nowhere", "[]"),
+            # 端点属于**别的 notebook** —— 边归属约束的唯一证人。
+            ("rel-an-foreign", "ko-an-q1", "ko-an-foreign", "[]"),
+            # 反向:源端点跨库。
+            ("rel-an-foreign-src", "ko-an-foreign", "ko-an-q1", "[]"),
+            # 只是被否决(端点都好):计入 rejected。
+            ("rel-an-rejected", "ko-an-q1", "ko-an-q2", "[]"),
+            # **既被否决、端点又不可用**:CASE 顺序要求它只计一次(rejected)。
+            ("rel-an-rejected-ghost", "ko-an-q1", "ko-an-nowhere", "[]"),
+        )
+    ]
+    with harness.database.write() as connection:
+        harness.knowledge.insert_object_chunk(connection, objects)
+        harness.knowledge.insert_relation_chunk(connection, relations)
+        unified.replace_cluster_rows_streamed(
+            connection, ANALYSIS_NB, "concept", concept_clusters
+        )
+        unified.replace_cluster_rows_streamed(
+            connection, ANALYSIS_NB, "claim", claim_clusters
+        )
+        unified.replace_cluster_rows_streamed(
+            connection, ANALYSIS_NB, "formula",
+            [_analysis_cluster(1, "KF-solo", "ko-an-f1", object_type="formula")],
+        )
+        unified.replace_cluster_rows_streamed(
+            connection, ANALYSIS_NB, "procedure",
+            [_analysis_cluster(1, "KP-solo", "ko-an-p1", object_type="procedure")],
+        )
+        unified.replace_cluster_rows_streamed(
+            connection, ANALYSIS_NB, CUSTOM_TYPE_A,
+            [_analysis_cluster(1, "KX-a", "ko-an-x1", object_type=CUSTOM_TYPE_A)],
+        )
+        unified.replace_cluster_rows_streamed(
+            connection, ANALYSIS_NB, CUSTOM_TYPE_B,
+            [_analysis_cluster(1, "KX-b", "ko-an-x2", object_type=CUSTOM_TYPE_B)],
+        )
+        unified.replace_communities(
+            connection,
+            ANALYSIS_NB,
+            0,
+            [
+                ("cm-big", ["canonical-blank", "canonical-quad", "canonical-solo"]),
+                ("cm-small", ["canonical-solo"]),
+            ],
+            {
+                "canonical-quad": "Quad board anchor",
+                "canonical-solo": "Solo concept",
+                "canonical-blank": "Blank-name concept",
+            },
+            {"canonical-quad": 0.2, "canonical-solo": 0.9, "canonical-blank": 0.5},
+            NOW,
+        )
+        # level > 0:板块查询按 level 归属,没有这条记录那个谓词从未被执行到。
+        unified.replace_communities(
+            connection,
+            ANALYSIS_NB,
+            1,
+            [("cm-l1", ["canonical-quad"])],
+            {"canonical-quad": "Level one board"},
+            {"canonical-quad": 1.0},
+            NOW,
+        )
+        # 别的 notebook 也有板块:板块查询的 notebook 归属谓词的证人。
+        unified.replace_communities(
+            connection,
+            FOREIGN_NB,
+            0,
+            [("cm-foreign", ["canonical-elsewhere"])],
+            {"canonical-elsewhere": "Elsewhere board"},
+            {"canonical-elsewhere": 1.0},
+            NOW,
+        )
+        placeholder = "%s"
+        # 一个**没有任何成员行**的板块(损坏/半写数据)。PG 侧的窗口函数写法用
+        # LEFT JOIN 才留得住它;换成 INNER JOIN 它会静默消失 —— 这正是最容易出分歧
+        # 的一处,必须有证人。
+        connection.execute(
+            "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
+            f"VALUES ('cm-orphan', {placeholder}, 0, "
+            + "%s::jsonb"
+            + f", 2, {placeholder})",
+            (ANALYSIS_NB, json.dumps(["k-x", "k-y"]),
+             normalize_timestamp(NOW)),
+        )
+        connection.execute(
+            "UPDATE knowledge_relations SET review_status='rejected' WHERE id IN "
+            f"({placeholder}, {placeholder})",
+            ("rel-an-rejected", "rel-an-rejected-ghost"),
+        )
+        # 别的 notebook 的边:边查询的 notebook 归属谓词的证人。
+        harness.knowledge.insert_relation_chunk(
+            connection,
+            [("rel-an-elsewhere", FOREIGN_NB, "source-golden",
+              "ko-an-foreign", "ko-an-foreign", "about", "[]", NOW)],
+        )
+
+
+def _group_of(histogram, object_type: str) -> dict:
+    return next(
+        row for row in histogram["by_object_type"]
+        if row["object_type"] == object_type
+    )
+
+
+def test_cluster_convergence_aggregates_match_on_postgres(knowledge_harness):
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    histogram = unified.cluster_size_histogram(ANALYSIS_NB)
+
+    # 全类型合计:concept 4+2+1=7、claim 2+1=3、formula 1、procedure 1、自定义 1+1=2
+    assert histogram["member_rows"] == 14
+    assert histogram["clusters"] == 9
+    # concept 侧被排除的成员行:deprecated 1 + 跨 notebook 1 + 不存在 1
+    assert histogram["excluded_member_rows"] == 3
+    assert histogram["empty_clusters"] == 3
+    assert histogram["empty_cluster_member_rows"] == 3
+    assert [(row["bucket"], row["clusters"], row["members"])
+            for row in histogram["buckets"]] == [
+        ("1", 6, 6), ("2", 2, 4), ("3", 0, 0),
+        ("4-5", 1, 4), ("6-10", 0, 0), ("11-50", 0, 0), ("51+", 0, 0),
+    ]
+
+    concept = _group_of(histogram, "concept")
+    assert concept["member_rows"] == 7
+    assert concept["clusters"] == 3
+    assert concept["excluded_member_rows"] == 3
+    assert concept["empty_clusters"] == 3
+    assert concept["object_types"] == 1
+    assert [(row["bucket"], row["clusters"], row["members"])
+            for row in concept["buckets"]] == [
+        ("1", 1, 1), ("2", 1, 2), ("3", 0, 0),
+        ("4-5", 1, 4), ("6-10", 0, 0), ("11-50", 0, 0), ("51+", 0, 0),
+    ]
+
+    claim = _group_of(histogram, "claim")
+    assert (claim["member_rows"], claim["clusters"]) == (3, 2)
+    assert _group_of(histogram, "formula")["clusters"] == 1
+    assert _group_of(histogram, "procedure")["clusters"] == 1
+
+    other = _group_of(histogram, "other")
+    assert (other["member_rows"], other["clusters"], other["object_types"]) == (2, 2, 2)
+    # 自定义类型名是用户内容,绝不能出现在这个查询层的返回里。
+    serialized = json.dumps(histogram, ensure_ascii=False)
+    assert CUSTOM_TYPE_A not in serialized
+    assert CUSTOM_TYPE_B not in serialized
+
+
+def test_largest_clusters_match_on_postgres(knowledge_harness):
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    assert unified.largest_clusters(ANALYSIS_NB, 10) == {
+        "object_type": "concept",
+        "limit": 10,
+        "truncated": False,
+        "clusters": [
+            {"canonical_id": "canonical-quad",
+             "canonical_name": "canonical-quad", "members": 4},
+            # 空名成员不得劫持榜首:MIN(NULLIF(canonical_name,'')) 拿到 "zeta board"。
+            {"canonical_id": "canonical-blank",
+             "canonical_name": "zeta board", "members": 2},
+            {"canonical_id": "canonical-solo",
+             "canonical_name": "canonical-solo", "members": 1},
+        ],
+    }
+    # 榜单只有 concept:claim 的 KL-pair(2 个成员)绝不能挤进来。
+    assert "KL-pair" not in [
+        row["canonical_id"]
+        for row in unified.largest_clusters(ANALYSIS_NB, 10)["clusters"]
+    ]
+
+    assert unified.largest_clusters(ANALYSIS_NB, 1)["truncated"] is True
+    # 边界档:恰好等于上限时**没有**被截断(`>` 写成 `>=` 只有这一档抓得住)。
+    exactly = unified.largest_clusters(ANALYSIS_NB, 3)
+    assert len(exactly["clusters"]) == 3
+    assert exactly["truncated"] is False
+
+
+def test_community_overview_matches_on_postgres(knowledge_harness):
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    assert unified.community_overview(ANALYSIS_NB, limit=10, top_k=2) == {
+        "level": 0,
+        "total": 3,
+        "returned": 3,
+        "truncated": False,
+        "limit": 10,
+        "top_members_limit": 2,
+        "communities": [
+            {
+                "id": "cm-big",
+                "size": 3,
+                # centrality 降序:solo(0.9) > blank(0.5) > quad(0.2)
+                "top_members": ["Solo concept", "Blank-name concept"],
+                "top_members_truncated": True,
+            },
+            {
+                # 成员行缺失的板块照样出现(PG 侧靠窗口函数外的 LEFT JOIN),
+                # top_members 为空 + truncated 说明「还有 size 个没给出来」。
+                "id": "cm-orphan",
+                "size": 2,
+                "top_members": [],
+                "top_members_truncated": True,
+            },
+            {
+                "id": "cm-small",
+                "size": 1,
+                "top_members": ["Solo concept"],
+                "top_members_truncated": False,
+            },
+        ],
+    }
+
+    capped = unified.community_overview(ANALYSIS_NB, limit=1, top_k=5)
+    assert capped["total"] == 3
+    assert capped["returned"] == 1
+    assert capped["truncated"] is True
+
+    # level > 0 是独立的一层,不与 level 0 混。
+    assert unified.community_overview(ANALYSIS_NB, level=1, limit=10, top_k=5) == {
+        "level": 1,
+        "total": 1,
+        "returned": 1,
+        "truncated": False,
+        "limit": 10,
+        "top_members_limit": 5,
+        "communities": [
+            {"id": "cm-l1", "size": 1,
+             "top_members": ["Level one board"], "top_members_truncated": False},
+        ],
+    }
+
+    # 别的 notebook 的板块不得漏进来(反过来也一样)。
+    foreign = unified.community_overview(FOREIGN_NB, limit=10, top_k=5)
+    assert [row["id"] for row in foreign["communities"]] == ["cm-foreign"]
+
+
+def test_relation_provenance_counts_match_on_postgres(knowledge_harness):
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    assert unified.relation_provenance_counts(ANALYSIS_NB) == {
+        "counted": 6,
+        "relink": 3,
+        "buckets": {
+            "relink:shared-element": 1,
+            "relink:name-match": 1,
+            "relink:other": 1,
+            "tagged:other": 1,
+            "untagged": 2,          # evidence='[]' 与 evidence=[42] 都归未标注
+        },
+        # 端点不可用 4 条:deprecated / 不存在 / 跨库(正反各一)。
+        # rejected 2 条,其中一条端点也不可用 —— CASE 顺序保证它只计一次。
+        "excluded": {"rejected": 2, "endpoint_unusable": 4},
+        "total_rows": 12,
+    }
+
+    # 别的 notebook 的边不得漏进来。
+    assert unified.relation_provenance_counts(FOREIGN_NB)["total_rows"] == 1
+
+
+def test_analysis_payload_shapes_are_identical_across_backends(knowledge_harness):
+    """形状 parity:两侧返回同一套 key、同一个定长定序的分组/分桶轴。
+
+    值的一致由上面四条(同一批夹具、同一份期望值、两个后端各跑一遍)证明;这条钉的是
+    「即使某侧将来改了 SQL 形态(community_overview 已经分岔了),对上层暴露的坐标轴
+    也不许换」。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    histogram = unified.cluster_size_histogram(ANALYSIS_NB)
+    assert set(histogram) == {
+        "member_rows", "clusters", "excluded_member_rows", "empty_clusters",
+        "empty_cluster_member_rows", "buckets", "by_object_type",
+    }
+    assert [row["object_type"] for row in histogram["by_object_type"]] == [
+        "concept", "claim", "formula", "procedure", "other",
+    ]
+    for row in histogram["by_object_type"]:
+        assert [bucket["bucket"] for bucket in row["buckets"]] == [
+            "1", "2", "3", "4-5", "6-10", "11-50", "51+",
+        ]
+
+    assert set(unified.largest_clusters(ANALYSIS_NB, 5)) == {
+        "object_type", "limit", "truncated", "clusters",
+    }
+    assert set(unified.community_overview(ANALYSIS_NB)) == {
+        "level", "total", "returned", "truncated", "limit",
+        "top_members_limit", "communities",
+    }
+    assert set(unified.relation_provenance_counts(ANALYSIS_NB)) == {
+        "counted", "relink", "buckets", "excluded", "total_rows",
+    }
+
+
+def test_analysis_reads_never_write_on_either_backend(knowledge_harness):
+    """只读:四个查询跑完,相关表的行数与内容指纹一个字节都不许变。
+
+    PostgreSQL 侧还有第二道:`_read_snapshot` 让 psycopg 发 `BEGIN … READ ONLY`,
+    引擎会直接拒绝写(那道由 test_analysis_reads_run_read_only_on_postgres 钉)。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    tables = (
+        "knowledge_objects", "knowledge_relations",
+        "concept_clusters", "communities", "community_members",
+    )
+
+    def snapshot() -> dict:
+        out = {}
+        with knowledge_harness.database.connect() as connection:
+            for table in tables:
+                row = connection.execute(
+                    f"SELECT COUNT(*) AS n, "
+                    f"COALESCE(MIN(id), '') AS lo, COALESCE(MAX(id), '') AS hi "
+                    f"FROM {table}"
+                    if table != "community_members" else
+                    f"SELECT COUNT(*) AS n, "
+                    f"COALESCE(MIN(canonical_id), '') AS lo, "
+                    f"COALESCE(MAX(canonical_id), '') AS hi FROM {table}"
+                ).fetchone()
+                out[table] = (int(row["n"]), row["lo"], row["hi"])
+        return out
+
+    before = snapshot()
+    unified.cluster_size_histogram(ANALYSIS_NB)
+    unified.largest_clusters(ANALYSIS_NB, 5)
+    unified.community_overview(ANALYSIS_NB)
+    unified.relation_provenance_counts(ANALYSIS_NB)
+    assert snapshot() == before
+
+
+@pytest.mark.postgres_integration
+def test_analysis_reads_run_read_only_on_postgres(postgres_database):
+    """PG 侧的只读契约由**引擎**强制:`_read_snapshot` 发 `BEGIN … READ ONLY`,
+    快照版还叠 REPEATABLE READ。这里直接问事务自己的 GUC,而不是相信注释。"""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    PostgresMigrator(postgres_database).migrate()
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+
+    with store._read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT current_setting('transaction_read_only') AS ro, "
+            "current_setting('transaction_isolation') AS iso"
+        ).fetchone()
+        assert row["ro"] == "on"
+        with pytest.raises(Exception):
+            connection.execute(
+                "INSERT INTO notebooks(id,name,purpose,primary_domain,status,"
+                "created_by,created_at,updated_at,tier) "
+                "VALUES ('nb-should-not-exist','x','','t','ready',NULL,%s,%s,'personal')",
+                (NOW, NOW),
+            )
+
+    with store._read_snapshot(repeatable=True) as connection:
+        row = connection.execute(
+            "SELECT current_setting('transaction_read_only') AS ro, "
+            "current_setting('transaction_isolation') AS iso"
+        ).fetchone()
+        assert row["ro"] == "on"
+        assert row["iso"] == "repeatable read"
+
+
+@pytest.mark.postgres_integration
+def test_public_read_snapshot_is_the_multi_statement_variant(postgres_database):
+    """codex 第 8 轮 P2 的 **PG 侧**守卫:公开的 `read_snapshot()` 必须是多语句共享快照。
+
+    T3 的 `/sources` 一趟发四条语句(state 行 / 账本 / COUNT / 一页),它骑的就是这条
+    连接。PG 的 READ COMMITTED 是**每条语句**取一次快照,所以只要这里退化成
+    `_read_snapshot()`(不带 repeatable),并发的预计算提交在中间就会把两代库拼进同一份
+    响应 —— 而且**不会有任何报错**。
+
+    参数表必须为空:调用方是后端中性的 service,「要不要 REPEATABLE READ」这种方言细节
+    由 store 自己决定(SQLite 侧对等物是 `BEGIN DEFERRED` 起的 WAL 快照,那边刻意不设
+    `PRAGMA query_only` —— 线程共享读连接翻会话开关会状态泄漏)。
+    """
+    import inspect
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    PostgresMigrator(postgres_database).migrate()
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+
+    assert list(inspect.signature(store.read_snapshot).parameters) == [], (
+        "read_snapshot 的参数表必须为空 —— 方言细节不外泄给后端中性的 service"
+    )
+    with store.read_snapshot() as connection:
+        row = connection.execute(
+            "SELECT current_setting('transaction_read_only') AS ro, "
+            "current_setting('transaction_isolation') AS iso"
+        ).fetchone()
+        # 只读由引擎强制(这一条 SQLite 侧兑现不了,如实分岔)。
+        assert row["ro"] == "on"
+        # 关键:事务级快照,不是语句级 —— 少了它这道守卫就等于没改。
+        assert row["iso"] == "repeatable read", (
+            "read_snapshot 退化成了单语句快照:/sources 的四条读会各看一份库"
+        )
+
+
+@pytest.mark.postgres_integration
+def test_community_overview_reads_one_repeatable_read_snapshot(postgres_database):
+    """并发 rebuild_communities 在报告生成中途提交,载荷不得自相矛盾。
+
+    PostgreSQL 的 READ COMMITTED 是**每条语句**取一次快照,所以「先数到 N 个板块、
+    再一个都取不到」在 PG 上是真实可复现的:这里在第一条语句(COUNT)之后,用**另一条
+    连接**提交一次整表删除(rebuild 的 DELETE 阶段),断言载荷仍然自洽。
+    """
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    PostgresMigrator(postgres_database).migrate()
+    _seed_catalog(postgres_database)
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+    with postgres_database.write() as connection:
+        store.replace_communities(
+            connection, ANALYSIS_NB, 0,
+            [("cm-a", ["k-a", "k-b"]), ("cm-b", ["k-c"])],
+            {"k-a": "Alpha", "k-b": "Beta", "k-c": "Gamma"},
+            {"k-a": 0.9, "k-b": 0.5, "k-c": 0.7},
+            NOW,
+        )
+
+    fired: list[str] = []
+    original_connect = postgres_database.connect
+
+    @contextmanager
+    def spying_connect():
+        with original_connect() as connection:
+            original_execute = connection.execute
+
+            def spying_execute(sql, params=None, **kwargs):
+                cursor = original_execute(sql, params, **kwargs)
+                if "FROM communities" in str(sql) and not fired:
+                    fired.append(str(sql))
+                    worker = threading.Thread(target=_wipe_communities,
+                                              args=(postgres_database,))
+                    worker.start()
+                    worker.join(timeout=30)
+                    assert not worker.is_alive(), "并发写者被读事务卡死了"
+                return cursor
+
+            connection.execute = spying_execute
+            try:
+                yield connection
+            finally:
+                del connection.execute
+
+    postgres_database.connect = spying_connect
+    try:
+        payload = store.community_overview(ANALYSIS_NB, limit=10, top_k=5)
+    finally:
+        postgres_database.connect = original_connect
+
+    assert fired, "探针没打中:第一条语句不是对 communities 的读"
+    assert payload["total"] == 2
+    assert payload["returned"] == 2, (
+        "板块明细落在了删除之后的快照上 —— total/returned 自相矛盾"
+    )
+    assert [row["id"] for row in payload["communities"]] == ["cm-a", "cm-b"]
+    assert payload["communities"][0]["top_members"] == ["Alpha", "Beta"]
+
+
+@pytest.mark.postgres_integration
+def test_board_list_and_board_edges_share_the_caller_snapshot(postgres_database):
+    """codex 第 12 轮 P2 的 **PG 侧**守卫:板块列表与跨板块边骑调用方的**同一个**快照。
+
+    这条与上面那条的分工:上面测的是 `community_overview` 自己开的快照(它内部两条
+    语句),这条测的是 `community_overview_on` —— connection-taking 的那半,骑**调用方**
+    的 `read_snapshot()`,和后面那条跨板块边读共享它。T3 的总览就是这个形状。
+
+    PG 的 READ COMMITTED 是**每条语句**一个快照,所以「板块列表读在前、边读在后,并发
+    重建提交在中间」在这里是真实可复现的:响应会把**旧板块**配上**新边**,而俯瞰图照着
+    edges 画连线 —— 画出来的每一条两端都指向这份响应里根本不存在的板块。
+    """
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    PostgresMigrator(postgres_database).migrate()
+    _seed_catalog(postgres_database)
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+    with postgres_database.write() as connection:
+        store.replace_communities(
+            connection, ANALYSIS_NB, 0,
+            [("cm-a", ["k-a"]), ("cm-b", ["k-b"])],
+            {"k-a": "Alpha", "k-b": "Beta"}, {"k-a": 0.9, "k-b": 0.5}, NOW,
+        )
+        store.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 12, [("cm-a", "cm-b", 30)], [],
+            _analysis_payloads(), NOW,
+        )
+
+    with store.read_snapshot() as connection:
+        payload = store.community_overview_on(
+            connection, ANALYSIS_NB, limit=10, top_k=5
+        )
+        # 板块列表读完之后、边读之前,另一条连接把板块与边整批换成新一代。
+        worker = threading.Thread(
+            target=_recast_boards_and_edges, args=(postgres_database,)
+        )
+        worker.start()
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "并发写者被读事务卡死了"
+        edges = store.kg_community_edges_top(connection, ANALYSIS_NB, 200)
+
+    boards = {row["id"] for row in payload["communities"]}
+    assert boards == {"cm-a", "cm-b"}, "板块列表本身就没落在快照上,这条白测了"
+    dangling = [
+        edge for edge in edges if edge[0] not in boards or edge[1] not in boards
+    ]
+    assert dangling == [], (
+        f"俯瞰图上出现了悬空连线:板块列表是 {sorted(boards)},边却指向 {dangling}"
+    )
+    assert edges == [("cm-a", "cm-b", 30)]
+
+
+def _recast_boards_and_edges(database) -> None:
+    store = PostgresUnifiedKgStore(database, now=lambda: NOW)
+    with database.write() as connection:
+        store.replace_communities(
+            connection, ANALYSIS_NB, 0, [("cm-x", ["k-a"])],
+            {"k-a": "Alpha"}, {"k-a": 0.9}, NOW,
+        )
+        store.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 13, [("cm-x", "cm-y", 99)], [],
+            _analysis_payloads(), NOW,
+        )
+
+
+def _wipe_communities(database) -> None:
+    with database.write() as connection:
+        connection.execute("DELETE FROM community_members")
+        connection.execute("DELETE FROM communities")
+
+
+# ---------------------------------------------------------------------------
+# KG 质量分析预计算产物(T2)的双后端一致性
+#
+# 写路径两侧**没有形态分岔**(单条 hash-aggregate 分组 + 整批重写),所以这里要证明的
+# 不是「分岔仍然等价」,而是「同一批夹具在两个后端上产出逐字相同的产物行」。
+#
+# 只有真 PostgreSQL 才暴露的坑,这里都踩过:`COUNT(*)` 回 int 而 `SUM` 回 Decimal、
+# jsonb 参数必须过 `jsonb()`、`COALESCE(c.canonical_id, o.id)` 在 LEFT JOIN 条件里的
+# NULL 语义、以及 `GROUP BY` 里的 NULL 组(没进任何板块的对象)在两个后端上的分组行为。
+# ---------------------------------------------------------------------------
+
+
+def _analysis_source_counts(harness) -> dict:
+    """把 `source_canonical_rows` 的游标折成 ``{(source_id, canonical_id): 行数}``。
+
+    ⚠ 这条查询**逐对象**返回,不再在库内分组(codex 第 13 轮 P1 的原子发布:板块这一刻
+    还没落库,SQL 没有 `community_members` 可 join)。canonical → 板块 那一跳与按板块的
+    计数由 `kg_analysis_precompute.SourceBoardCounter` 在内存里做,所以这里比对的是
+    **查询层的返回值本身**。
+    """
+    unified = _analysis_unified_store(harness)
+    counts: dict = {}
+    with harness.database.connect() as connection:
+        for row in unified.source_canonical_rows(connection, ANALYSIS_NB):
+            key = (row["source_id"], row["canonical_id"])
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def test_source_canonical_rows_match_on_postgres(knowledge_harness):
+    _seed_analysis_fixture(knowledge_harness)
+
+    # 夹具里 ANALYSIS_NB 的 14 个可用对象都挂 source-golden,合计必须**恰好 14 行**
+    # —— 不多不少。旧形态(join `community_members` 再分组)在这份合成夹具上会数出 15:
+    # `canonical-solo` 同时挂在两个板块下,ko-an-solo 因此被两条成员行各计一次。生产
+    # 不会出现(Louvain 的 membership 是一个划分,`replace_communities` 照它整表重写),
+    # 而新形态**结构上**不可能重复计数 —— 每个对象只出一行,板块由内存里的划分决定。
+    counts = _analysis_source_counts(knowledge_harness)
+    assert counts == {
+        # concept:进了板块的三个 canonical
+        ("source-golden", "canonical-quad"): 4,
+        ("source-golden", "canonical-blank"): 2,
+        ("source-golden", "canonical-solo"): 1,
+        # 不在任何板块里的那些 —— 它们必须照样返回(只抬 n_objects、不进分母);
+        # 旧形态里这是 LEFT JOIN 的 NULL 组,INNER JOIN 会把它整片吞掉。
+        ("source-golden", "KL-pair"): 2,
+        ("source-golden", "KL-solo"): 1,
+        ("source-golden", "KF-solo"): 1,
+        ("source-golden", "KP-solo"): 1,
+        ("source-golden", "KX-a"): 1,
+        ("source-golden", "KX-b"): 1,
+    }
+    assert sum(counts.values()) == 14
+    # 别的 notebook 的对象绝不能混进来(归属谓词的证人)。
+    assert all(source == "source-golden" for source, _canonical in counts)
+
+
+def test_source_canonical_rows_do_not_buffer_the_whole_result_on_postgres(
+    knowledge_harness,
+):
+    """PG 侧这条查询必须走服务端流式游标,不能退回 `db.execute()`(codex 第 14 轮 P1)。
+
+    背景:自第 13 轮原子发布起,这条查询返回的是**逐对象**一行(去掉了 GROUP BY,
+    因为板块那一刻还没落库),行数 = 可用对象数,生产约 878 万。psycopg3 的普通游标在
+    `execute()` 返回时就把整个结果集收进了 libpq 的 `PGresult` —— 那是 C 层缓冲,
+    `tracemalloc` 看不见,只有 RSS 能。
+
+    本机真实 PG 库(`silicon_notebook_local_pg16_live`,93,127 行)独立子进程实测:
+
+        execute(客户端缓冲)   RSS +12.3 / +12.3 MB   ≈132 B/行
+        cursor().stream()     RSS + 0.4 / + 0.2 MB   与行数无关
+
+    ⚠ **这条守卫的强度边界,如实写明**:它断言的是「返回的不是那个已知会全量缓冲的
+    游标对象」,**不是**「内存有界」。真正的内存证据在上面那组实测里(以及 PG 侧
+    `source_canonical_rows` 的 docstring),不在这条断言里。之所以不写成内存断言:
+    合成夹具只有十几行,任何 RSS 阈值都会被测试进程自身的噪声淹没,那样的守卫看着更强、
+    实际是空的 —— 本 PR 已经因为这种守卫吃过 19 次亏。
+    这条能挡住的是**退回 `db.execute()`** 这个具体回归形态,那也正是第 14 轮踩到的那个。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    import psycopg
+
+    with knowledge_harness.database.connect() as connection:
+        rows = unified.source_canonical_rows(connection, ANALYSIS_NB)
+        assert not isinstance(rows, psycopg.Cursor), (
+            "source_canonical_rows 退回了 psycopg 的普通游标 —— 它在 execute() 返回时"
+            "就把整个结果集收进了 libpq 缓冲(生产 878 万行)。必须走 cursor().stream()。"
+        )
+        # 真的能取到数据,不是拿一个空生成器换绿。
+        assert sum(1 for _ in rows) == 14
+
+
+def test_source_counts_drop_hidden_sources_but_keep_orphans_on_postgres(
+    knowledge_harness,
+):
+    """来源画像的可见性口径,逐字比对返回值。
+
+      · `source_type IN ('memory','knowhow')` 的合成来源 → **排除**(它们的 `title`
+        是用户内容:knowhow 投影的是表名、Memory 的是那条记忆的抬头,而产品其余各处
+        一律不显示它们)。
+      · **孤儿来源**(`source_id` 在 `sources` 里没有对应行)→ **保留**,读侧靠
+        `source_missing` 报出来。这是本视图有意的诊断能力。
+
+    ⚠ 两半必须一起断:同一个谓词决定这两件事,而把 `NOT EXISTS` 写成 `JOIN sources`
+    或 `LEFT JOIN … WHERE s.source_type NOT IN (…)`(孤儿的 `s.source_type` 是 NULL,
+    `NULL NOT IN (…)` 为 NULL → 整行被滤掉)对「排除合成
+    来源」这一半完全正确、却会把孤儿一起吞掉。
+
+    ⚠ 孤儿的证人**必须自己造**:`source-golden` 看着像孤儿,其实 `_seed_catalog` 给它
+    建了一行 `source_type='file'` 的真来源 —— 拿它当孤儿,移动变异(改成 `JOIN sources`)
+    照样全绿,这一半就是个空守卫。移动变异实测过这一条:第一版正是这么写的、真的没报红。
+    所以下面显式塞一个 `source-deleted`(只有对象、没有 `sources` 行)。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    placeholder = "%s"
+    stamp = normalize_timestamp(NOW)
+    with knowledge_harness.database.write() as connection:
+        for source_id, title, source_type in (
+            ("source-visible", "公开的 PDF", "pdf"),
+            ("source-memory", "老板不喜欢周一开会", "memory"),
+            ("source-knowhow", "季度奖金核算口径", "knowhow"),
+        ):
+            connection.execute(
+                "INSERT INTO sources (id, notebook_id, title, source_type, "
+                " created_at, updated_at) "
+                f"VALUES ({placeholder}, {placeholder}, {placeholder}, "
+                f"        {placeholder}, {placeholder}, {placeholder})",
+                (source_id, ANALYSIS_NB, title, source_type, stamp, stamp),
+            )
+        # 四个对象形态完全相同(可用、挂来源、不在任何板块里),唯一的差别是来源那一侧
+        # —— 所以留下/排除只可能来自来源可见性谓词本身。`source-deleted` 刻意**没有**
+        # `sources` 行:它就是那个孤儿证人。
+        knowledge_harness.knowledge.insert_object_chunk(
+            connection,
+            [
+                (f"ko-an-vis-{index}", ANALYSIS_NB, "claim", "approved",
+                 json.dumps({"name": object_id}), "[]", object_id, NOW, NOW)
+                for index, object_id in enumerate(
+                    ("source-visible", "source-memory", "source-knowhow",
+                     "source-deleted")
+                )
+            ],
+        )
+
+    counts = _analysis_source_counts(knowledge_harness)
+    sources = {source for source, _canonical in counts}
+
+    assert "source-memory" not in sources, "Memory 的合成来源进了来源画像"
+    assert "source-knowhow" not in sources, "knowhow 投影的来源进了来源画像"
+    # 四个新对象都没有 cluster 行,所以 canonical 就是 object_id 本身(COALESCE 的
+    # 另一半 —— 换成裸 `c.canonical_id` 这四行会整片变成 NULL)。
+    assert counts[("source-visible", "ko-an-vis-0")] == 1
+    assert counts[("source-deleted", "ko-an-vis-3")] == 1, (
+        "孤儿来源被一起排除了 —— 一个有意的诊断信号变成了静默丢弃"
+    )
+    assert sources == {"source-golden", "source-visible", "source-deleted"}
+
+
+def test_precomputed_artifacts_round_trip_identically_on_postgres(
+    knowledge_harness,
+):
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    edges = [("cm-big", "cm-small", 7)]
+    profiles = [("source-golden", 12, 9, "cm-big", 0.75, 2, 0.5)]
+    payloads = stamp_cluster_seq({
+        ARTIFACT_COMMUNITY_EDGES: {"level": 0, "edges": 1, "edges_total": 1,
+                                   "truncated": False, "edge_limit": 200000,
+                                   "cross_weight": 7, "intra_weight": 3,
+                                   "communities": 2},
+        ARTIFACT_SOURCE_PROFILES: {"level": 0, "sources": 1,
+                                   "mainstream_coverage": MAINSTREAM_COVERAGE,
+                                   "head_communities": 1, "head_members": 3,
+                                   "total_members": 4},
+        ARTIFACT_CLUSTER_HISTOGRAM: unified.cluster_size_histogram(ANALYSIS_NB),
+        ARTIFACT_LARGEST_CLUSTERS: unified.largest_clusters(ANALYSIS_NB, 20),
+        ARTIFACT_RELATION_PROVENANCE: unified.relation_provenance_counts(ANALYSIS_NB),
+    }, 19, partition_rebuilt=True)
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 41, edges, profiles, payloads, NOW
+        )
+
+    placeholder = "%s"
+    with knowledge_harness.database.connect() as connection:
+        stored_edges = [
+            (row["src_community_id"], row["dst_community_id"], int(row["weight"]))
+            for row in connection.execute(
+                "SELECT src_community_id, dst_community_id, weight "
+                f"FROM kg_community_edges WHERE notebook_id={placeholder} "
+                "ORDER BY src_community_id, dst_community_id", (ANALYSIS_NB,)
+            ).fetchall()
+        ]
+        stored_profiles = [
+            (row["source_id"], int(row["n_objects"]), int(row["n_graph_objects"]),
+             row["top_community_id"], float(row["top_share"]),
+             int(row["community_spread"]), float(row["mainstream_share"]))
+            for row in connection.execute(
+                "SELECT source_id, n_objects, n_graph_objects, top_community_id, "
+                "       top_share, community_spread, mainstream_share "
+                f"FROM kg_source_profiles WHERE notebook_id={placeholder} "
+                "ORDER BY source_id", (ANALYSIS_NB,)
+            ).fetchall()
+        ]
+        ledger_rows = connection.execute(
+            "SELECT kind, kg_mutation_seq, payload FROM kg_analysis_artifacts "
+            f"WHERE notebook_id={placeholder} ORDER BY kind", (ANALYSIS_NB,)
+        ).fetchall()
+
+    assert stored_edges == edges
+    assert stored_profiles == profiles
+    ledger = {
+        row["kind"]: (
+            int(row["kg_mutation_seq"]),
+            row["payload"] if isinstance(row["payload"], dict)
+            else json.loads(row["payload"]),
+        )
+        for row in ledger_rows
+    }
+    assert set(ledger) == set(ARTIFACT_KINDS)
+    assert {seq for seq, _payload in ledger.values()} == {41}
+    for kind, expected in payloads.items():
+        assert ledger[kind][1] == json.loads(json.dumps(expected)), kind
+
+
+def test_discarding_board_dependent_artifacts_on_postgres(
+    knowledge_harness,
+):
+    """板块重铸时作废依赖板块的两份产物 —— 必须删掉**恰好那一批**行。
+
+    PostgreSQL 侧用 `kind = ANY(%s)` 而不是逐值展开,所以「删对了哪些行」不能靠
+    读代码断言,只能靠这条对同一批夹具比对
+    删除前后的行。少删一份 = 报告继续画已经不存在的板块;多删一份 = 平白丢掉一份
+    与板块无关、仍然可读的陈旧统计快照。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    payloads = _analysis_payloads()
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 41,
+            [("cm-big", "cm-small", 7)],
+            [("source-golden", 12, 9, "cm-big", 0.75, 2, 0.5)],
+            payloads, NOW,
+        )
+
+    placeholder = "%s"
+
+    def counts() -> dict:
+        with knowledge_harness.database.connect() as connection:
+            return {
+                "edges": int(connection.execute(
+                    "SELECT COUNT(*) AS n FROM kg_community_edges "
+                    f"WHERE notebook_id={placeholder}", (ANALYSIS_NB,)
+                ).fetchone()["n"]),
+                "profiles": int(connection.execute(
+                    "SELECT COUNT(*) AS n FROM kg_source_profiles "
+                    f"WHERE notebook_id={placeholder}", (ANALYSIS_NB,)
+                ).fetchone()["n"]),
+                "ledger": sorted(
+                    row["kind"] for row in connection.execute(
+                        "SELECT kind FROM kg_analysis_artifacts "
+                        f"WHERE notebook_id={placeholder}", (ANALYSIS_NB,)
+                    ).fetchall()
+                ),
+            }
+
+    assert counts() == {"edges": 1, "profiles": 1, "ledger": sorted(ARTIFACT_KINDS)}
+
+    with knowledge_harness.database.write() as connection:
+        unified.discard_board_dependent_kg_analysis_artifacts(connection, ANALYSIS_NB)
+
+    assert counts() == {
+        "edges": 0,
+        "profiles": 0,
+        "ledger": sorted(set(ARTIFACT_KINDS) - set(BOARD_DEPENDENT_ARTIFACT_KINDS)),
+    }
+
+
+def test_replace_kg_analysis_artifacts_rejects_unknown_kinds_on_postgres(
+    knowledge_harness,
+):
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    with pytest.raises(ValueError, match="契约外的 kind"):
+        with knowledge_harness.database.write() as connection:
+            unified.replace_kg_analysis_artifacts(
+                connection, ANALYSIS_NB, 1, [], [], {"board_edges": {}}, NOW
+            )
+
+
+def test_replace_kg_analysis_artifacts_rejects_a_missing_kind_on_postgres(
+    knowledge_harness,
+):
+    """账本整批重写:少写一行 = 下游读成「从来没算过」,两侧都必须硬失败。"""
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    payloads = _analysis_payloads()
+    payloads.pop(ARTIFACT_CLUSTER_HISTOGRAM)
+    with pytest.raises(ValueError, match="缺少必需的 kind"):
+        with knowledge_harness.database.write() as connection:
+            unified.replace_kg_analysis_artifacts(
+                connection, ANALYSIS_NB, 1, [], [], payloads, NOW
+            )
+
+
+def test_analysis_snapshots_refuse_a_write_transaction_on_postgres(
+    knowledge_harness,
+):
+    """全表级只读聚合在写事务里必须当场炸 —— 两个后端都要有这条守卫(§3.35)。
+
+    PostgreSQL 上的危害是从池里另借的连接读到提交前的库(静默过时);SQLite 上还额外
+    把进程级写锁按住一整趟全表扫。形状守卫抓不到这类违规:这几条查询一张产物表都不碰。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    with knowledge_harness.database.write():
+        for call in (
+            lambda: unified.cluster_size_histogram(ANALYSIS_NB),
+            lambda: unified.largest_clusters(ANALYSIS_NB, 20),
+            lambda: unified.community_overview(ANALYSIS_NB),
+            lambda: unified.relation_provenance_counts(ANALYSIS_NB),
+        ):
+            with pytest.raises(RuntimeError, match="写事务"):
+                call()
+
+
+def test_replace_kg_analysis_artifacts_polices_the_cluster_stamp_on_postgres(
+    knowledge_harness,
+):
+    """簇世代的戳:依赖合并结果的四份必须有、不依赖的那份必须没有 —— 硬失败。
+
+    这道守卫读的正是 `payload` 列(PostgreSQL 上是 jsonb)。一次参数适配的差错
+    就会让守卫在生产后端上静默失效 —— 而它失效的表现是「这个库的预计算永远重跑」,
+    没有任何报错。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+        payloads = _analysis_payloads()
+        payloads[kind] = {
+            key: value for key, value in payloads[kind].items()
+            if key != CLUSTER_SEQ_PAYLOAD_KEY
+        }
+        with pytest.raises(ValueError, match="payload 必须带"):
+            with knowledge_harness.database.write() as connection:
+                unified.replace_kg_analysis_artifacts(
+                    connection, ANALYSIS_NB, 1, [], [], payloads, NOW
+                )
+
+    extra = _analysis_payloads()
+    extra[ARTIFACT_RELATION_PROVENANCE] = dict(
+        extra[ARTIFACT_RELATION_PROVENANCE], **{CLUSTER_SEQ_PAYLOAD_KEY: 3}
+    )
+    with pytest.raises(ValueError, match="不依赖合并结果"):
+        with knowledge_harness.database.write() as connection:
+            unified.replace_kg_analysis_artifacts(
+                connection, ANALYSIS_NB, 1, [], [], extra, NOW
+            )
+
+
+def test_the_cluster_stamp_round_trips_identically_on_postgres(knowledge_harness):
+    """簇世代写进 payload、再读回来必须是 **int**。
+
+    这是「刻意不加列」那个决定的证人:世代存在 JSON 里(PostgreSQL 上是 jsonb)。
+    读回字符串 `"77"` 而不是 `77`,新鲜度判据就会恒判「不新鲜」——预计算永远重跑,
+    而且不报错。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 77, [], [],
+            _analysis_payloads(cluster_seq=19), NOW,
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        rows = unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
+
+    assert set(rows) == set(ARTIFACT_KINDS)
+    for kind, entry in rows.items():
+        assert entry["kg_mutation_seq"] == 77, kind
+        stamp = entry["payload"].get(CLUSTER_SEQ_PAYLOAD_KEY)
+        if kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
+            assert stamp == 19 and isinstance(stamp, int), kind
+        else:
+            assert stamp is None, kind
+
+    # 「只补账本」那一轮:依赖板块的两份**显式**记 None(板块划分建在哪一代无从判断,
+    # codex 第 7 轮 P2)。它必须以「键在、值为 null」的形状原样回来 —— 一侧把键吞掉、
+    # 另一侧留着,判据就会在两个后端上给出不同答案:一边报「无从判断」(闸放行),
+    # 一边报「漏盖」(闸每次都判它不新鲜 → 这个库的预计算永远重跑,而且不报错)。
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 78, [], [],
+            _analysis_payloads(cluster_seq=19, partition_rebuilt=False), NOW,
+        )
+    with knowledge_harness.database.connect() as connection:
+        backfilled = unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
+
+    for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
+        payload = backfilled[kind]["payload"]
+        assert CLUSTER_SEQ_PAYLOAD_KEY in payload, kind
+        assert payload[CLUSTER_SEQ_PAYLOAD_KEY] is None, kind
+        assert artifact_cluster_seq_is_unknown(kind, payload), kind
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS
+                       - set(BOARD_DEPENDENT_ARTIFACT_KINDS)):
+        assert backfilled[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == 19, kind
+
+
+# ------------------------------------------------- KG 分析产物的读路径(T3)
+# 这三条是**唯一**可以挂在在线请求上的 KG 分析读(只碰预计算产物表,代价按行数硬
+# 有界)。它们在两个后端上必须给出逐字相同的行、相同的排序、相同的 clamp —— 尤其是
+# 并列消歧:没有次级键,同一份数据在 SQLite 与 PostgreSQL 上会给出不同的顺序,而两边
+# 都「没错」,分页会以最难查的方式碎掉。
+
+
+def _seed_analysis_ledger(harness, *, seq: int = 55) -> dict:
+    unified = _analysis_unified_store(harness)
+    payloads = _analysis_payloads(**{ARTIFACT_COMMUNITY_EDGES: {
+        "level": 0, "edges": 3, "edges_total": 9, "truncated": True,
+        "edge_limit": 3, "cross_weight": 40, "intra_weight": 5, "communities": 4,
+    }})
+    with harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, seq, [], [], payloads, NOW
+        )
+    return payloads
+
+
+def test_kg_analysis_artifact_rows_match_on_postgres(knowledge_harness):
+    """账本全文(payload + 建库时刻)在两侧读回同一形状。
+
+    ⚠ `payload` 列两侧类型不同:SQLite 是 JSON **文本**,PostgreSQL 是 jsonb(psycopg
+    直接给 dict)。中性的 `artifact_ledger_rows` 负责把两者收成同一个 dict —— 这条就是
+    那次收口的证人。`created_at` 两侧表示法不同(timestamptz → ISO 文本 vs 原样字符串),
+    所以只断言它非空,不逐字比。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    with knowledge_harness.database.connect() as connection:
+        assert unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB) == {}
+
+    payloads = _seed_analysis_ledger(knowledge_harness, seq=55)
+    with knowledge_harness.database.connect() as connection:
+        rows = unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
+
+    assert set(rows) == set(ARTIFACT_KINDS)
+    for kind, entry in rows.items():
+        assert entry["kg_mutation_seq"] == 55, kind
+        assert entry["payload"] == json.loads(json.dumps(payloads[kind])), kind
+        assert entry["created_at"], kind
+
+
+def test_kg_analysis_artifact_rows_reject_a_malformed_payload_on_postgres(
+    knowledge_harness,
+):
+    """行在、内容读不出来:既不是「缺失」也不是「为空」,两侧都必须硬失败。"""
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    placeholder = "%s"
+    payload_expr = "%s::jsonb"
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO kg_analysis_artifacts "
+            "(notebook_id, kind, kg_mutation_seq, payload, created_at) "
+            f"VALUES ({placeholder}, {placeholder}, 1, {payload_expr}, {placeholder})",
+            (ANALYSIS_NB, ARTIFACT_CLUSTER_HISTOGRAM, json.dumps([1, 2, 3]),
+             normalize_timestamp(NOW)),
+        )
+    with knowledge_harness.database.connect() as connection:
+        with pytest.raises(ValueError, match="payload 不是对象"):
+            unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
+
+
+def test_kg_community_edges_top_matches_on_postgres(knowledge_harness):
+    """跨板块边 top-N:weight 降序,**并列按 (src, dst) 升序**。
+
+    并列消歧不是洁癖:板块 id 是随机铸的,没有次级键时两个后端的行到达顺序不同,
+    俯瞰图会在同一份数据上画出两张不同的图。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    edges = [
+        ("cm-a", "cm-b", 9),
+        ("cm-a", "cm-c", 4),      # 与下面一条 weight 并列 → 靠 (src,dst) 定序
+        ("cm-b", "cm-c", 4),
+        ("cm-c", "cm-d", 1),
+    ]
+    payloads = _analysis_payloads(**{
+        ARTIFACT_COMMUNITY_EDGES: {"level": 0, "communities": 4}})
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 12, edges, [], payloads, NOW
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        top3 = unified.kg_community_edges_top(connection, ANALYSIS_NB, 3)
+        clamped = unified.kg_community_edges_top(connection, ANALYSIS_NB, 10**9)
+
+    assert top3 == [("cm-a", "cm-b", 9), ("cm-a", "cm-c", 4), ("cm-b", "cm-c", 4)]
+    assert clamped == sorted(edges, key=lambda e: (-e[2], e[0], e[1]))
+
+
+def test_kg_source_profile_page_matches_on_postgres(knowledge_harness):
+    """来源画像分页:mainstream_share 升/降序 + source_id 并列消歧 + 孤儿来源标记。
+
+    夹具刻意让三条并列在 `mainstream_share = 0.0` 上 —— 混杂库里那一片就是这个形态,
+    也正是没有次级键时跨页重复/漏行的触发条件。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    # ⚠ **倒序插入**(d → a):按 src-a..src-d 升序插入时堆顺序恰好等于目标顺序,
+    # 并列消歧一点功都不做 —— 删掉 SQL 里的 `source_id COLLATE "C" ASC` 照样全绿
+    # (评审实测)。倒序让堆顺序与目标顺序相反,次级键这才变成载重件。
+    profiles = [
+        ("src-d", 40, 32, "cm-big", 0.8, 4, 0.9),
+        ("src-c", 30, 24, "cm-small", 0.7, 1, 0.0),
+        ("src-b", 20, 16, "cm-big", 0.6, 3, 0.0),
+        ("src-a", 10, 8, "cm-big", 0.5, 2, 0.0),
+    ]
+    payloads = _analysis_payloads()
+    placeholder = "%s"
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 13, [], profiles, payloads, NOW
+        )
+        # 只给 src-b 建来源行:其余三条是孤儿引用(source_id 没有外键,历史清理会留下
+        # 这种行)。标题为空到底是「没标题」还是「已删除」,必须分得开。
+        connection.execute(
+            "INSERT INTO sources (id, notebook_id, title, source_type, "
+            " created_at, updated_at) "
+            f"VALUES ({placeholder}, {placeholder}, {placeholder}, 'file', "
+            f"        {placeholder}, {placeholder})",
+            ("src-b", ANALYSIS_NB, "Golden source",
+             normalize_timestamp(NOW),
+             normalize_timestamp(NOW)),
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        total, page1 = unified.kg_source_profile_page(
+            connection, ANALYSIS_NB, limit=2, offset=0
+        )
+        _total2, page2 = unified.kg_source_profile_page(
+            connection, ANALYSIS_NB, limit=2, offset=2
+        )
+        _total3, descending = unified.kg_source_profile_page(
+            connection, ANALYSIS_NB, limit=4, offset=0, ascending=False
+        )
+
+    assert total == 4
+    assert [row["source_id"] for row in page1] == ["src-a", "src-b"]
+    assert [row["source_id"] for row in page2] == ["src-c", "src-d"]
+    assert [row["source_id"] for row in descending][0] == "src-d"
+    assert page1[0] == {
+        "source_id": "src-a", "title": "", "source_missing": True,
+        "n_objects": 10, "n_graph_objects": 8, "top_community_id": "cm-big",
+        "top_share": 0.5, "community_spread": 2, "mainstream_share": 0.0,
+    }
+    assert page1[1]["title"] == "Golden source"
+    assert page1[1]["source_missing"] is False
+
+
+def test_kg_community_edges_top_is_clamped_on_postgres(knowledge_harness):
+    """store 侧的 clamp **本身**是载重件,不是注释。
+
+    ⚠ 上面那条只塞 4 条边,`_clamp(limit, KG_COMMUNITY_EDGES_MAX)` 在 2000 上永远不
+    生效 —— 删掉它照样全绿(评审实测)。设计把 store clamp 定为纵深防御的一层
+    (「任何调用方都不可能拿到无界返回」),批 2–4 里任何直接调 store 的新调用方
+    传一个 `limit=10**9` 就会兑现那个上限。所以这里塞**超过上限**的边并断返回条数。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    over = KG_COMMUNITY_EDGES_MAX + 5
+    # weight 全部互不相同,排序结果与并列消歧无关 —— 这条只测「有界」这一件事。
+    edges = [("cm-src", f"cm-{i:06d}", over - i) for i in range(over)]
+    payloads = _analysis_payloads()
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 14, edges, [], payloads, NOW
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        clamped = unified.kg_community_edges_top(connection, ANALYSIS_NB, 10**9)
+        asked = unified.kg_community_edges_top(connection, ANALYSIS_NB, 7)
+
+    assert len(clamped) == KG_COMMUNITY_EDGES_MAX
+    assert [weight for _s, _d, weight in clamped] == sorted(
+        (weight for _s, _d, weight in clamped), reverse=True)
+    # 上限之下照常按调用方给的数返回(clamp 不是「一律返回上限」)。
+    assert len(asked) == 7
+
+
+def test_kg_source_profile_page_is_clamped_and_stable_on_ties_on_postgres(
+    knowledge_harness,
+):
+    """来源画像分页的两条不变式一起钉:**有界** + **并列组内跨页不重不漏**。
+
+    ⚠ 与上面那条同理,4 行的夹具让 `_clamp(limit, KG_SOURCE_PAGE_MAX)` 永不生效。
+    并列消歧同样如此:这里让全部行并列在 `mainstream_share = 0.0`(混杂库里那一片
+    就是这个形态)、并按 **source_id 倒序插入**,堆顺序与目标顺序相反,
+    `source_id COLLATE "C" ASC` 这才是载重件。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    over = KG_SOURCE_PAGE_MAX + 3
+    ids = [f"src-{i:05d}" for i in range(over)]
+    profiles = [
+        (source_id, 10, 8, "cm-big", 0.5, 2, 0.0) for source_id in reversed(ids)
+    ]
+    payloads = _analysis_payloads()
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 15, [], profiles, payloads, NOW
+        )
+
+    with knowledge_harness.database.connect() as connection:
+        total, clamped = unified.kg_source_profile_page(
+            connection, ANALYSIS_NB, limit=10**9, offset=0
+        )
+        pages = [
+            unified.kg_source_profile_page(
+                connection, ANALYSIS_NB, limit=50, offset=offset
+            )[1]
+            for offset in range(0, over, 50)
+        ]
+
+    assert total == over
+    assert len(clamped) == KG_SOURCE_PAGE_MAX
+    # 有界之外还得是**头部**那一页,不是随便 200 行。
+    assert [row["source_id"] for row in clamped] == ids[:KG_SOURCE_PAGE_MAX]
+
+    seen = [row["source_id"] for page in pages for row in page]
+    assert seen == ids, "并列组内翻页必须既不重复也不漏行,且顺序两个后端一致"
+
+
+def test_board_partition_still_holds_tracks_the_committed_partition_on_both_backends(
+    knowledge_harness,
+):
+    """发布前那道复核的**后端中性行为**(codex 第 16 轮 P2)。
+
+    判据是「`kept_rows` 里任意一个板块 id 还在吗」:`replace_communities` 对
+    `(notebook_id, level)` 是整表删再插、新 id 128 bit 新铸,所以「还在」⟺「期间没有
+    任何一次 replace 提交过」。这条把那句蕴含关系的两端都钉住,并且顺带钉住两个归属
+    谓词 —— 少了 `notebook_id` 或 `level`,别的库/别的层的板块会替当前这一套背书,
+    复核当场变成永远放行。
+
+    刻意在 `write()` 里调:这就是它**唯一**的调用契约(发布事务内),PG 侧的
+    `FOR SHARE` 也只有在事务里才有意义。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    with knowledge_harness.database.write() as connection:
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-big") is True
+        # 归属谓词的两个证人:别的 notebook 的板块、别的 level 的板块都不算数。
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-foreign") is False
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-l1") is False
+
+    # 一次已提交的整表重铸(= 抢占者干的事)。
+    with knowledge_harness.database.write() as connection:
+        unified.replace_communities(
+            connection, ANALYSIS_NB, 0, [("cm-recast", ["canonical-quad"])],
+            {"canonical-quad": "Recast board"}, {"canonical-quad": 1.0}, NOW,
+        )
+
+    with knowledge_harness.database.write() as connection:
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-big") is False
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-recast") is True
+
+
+def test_the_board_revalidation_blocks_a_concurrent_board_replacement(
+    knowledge_harness,
+):
+    """PG 侧 `FOR SHARE` 的**行为**守卫 —— 不是「SQL 里有那几个字」。
+
+    `PostgresDatabase.write()` 是 READ COMMITTED、**没有**进程级锁(SQLite 那侧有一把
+    `threading.Lock`,同进程两个写事务根本不可能交错)。所以这一侧裸 SELECT 只是一次
+    瞬时读:并发的 `replace_communities` 完全可以在我们「查完」与「插完」之间提交,
+    复核照样放行,写出去的仍是悬空产物。行锁把这个窗口关掉。
+
+    ⚠ 判据用 `lock_timeout` 而**不是** sleep:锁真的被持有时超时是**确定性**的
+    (250 ms 到点必抛 `LockNotAvailable`),不是靠两个线程赛跑。
+    ⚠ **对照组是这条测试自带的变异证明**:同一条 DELETE 在读事务结束之后必须立刻成功。
+    没有它,「DELETE 因为别的原因失败」也能让上半段全绿;把 `FOR SHARE` 删掉则上半段
+    当场报红(M3 变异实测)。
+    ⚠ 两条连接各自从 harness 取:`write()` 有 `NestedPostgresWriteError` 的单飞守卫
+    (ContextVar),套在同一个 `write()` 里会先撞那个守卫,根本测不到锁。
+    """
+    import psycopg
+
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    def delete_the_boards() -> str:
+        with knowledge_harness.database.write() as connection:
+            connection.execute("SET LOCAL lock_timeout = '250ms'")
+            connection.execute(
+                "DELETE FROM communities WHERE notebook_id=%s AND level=%s",
+                (ANALYSIS_NB, 0),
+            )
+        return "deleted"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with knowledge_harness.database.write() as connection:
+            assert unified.board_partition_still_holds(
+                connection, ANALYSIS_NB, 0, "cm-big") is True
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                executor.submit(delete_the_boards).result(timeout=30)
+        # 对照组:share 锁随复核所在的那个事务结束而释放,同一条 DELETE 立刻成功。
+        assert executor.submit(delete_the_boards).result(timeout=30) == "deleted"

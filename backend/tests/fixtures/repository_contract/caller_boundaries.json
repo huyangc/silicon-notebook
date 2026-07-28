@@ -1016,7 +1016,7 @@
       "count": 3,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/postgres_catalog.py",
-      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v11 business catalog before copying and checkpoint publication",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v14 business catalog before copying and checkpoint publication",
       "scope": "<module>._index_key_tokens",
       "target": "conn.execute"
     },
@@ -1024,7 +1024,7 @@
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/postgres_catalog.py",
-      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v11 business catalog before copying and checkpoint publication",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v14 business catalog before copying and checkpoint publication",
       "scope": "<module>._validate_fk_constraint_triggers",
       "target": "conn.execute"
     },
@@ -1032,7 +1032,7 @@
       "count": 1,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/postgres_catalog.py",
-      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v11 business catalog before copying and checkpoint publication",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v14 business catalog before copying and checkpoint publication",
       "scope": "<module>._validate_identity_sequences",
       "target": "conn.execute"
     },
@@ -1040,7 +1040,7 @@
       "count": 9,
       "kind": "independent_sql",
       "path": "backend/app/migration/shadow/postgres_catalog.py",
-      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v11 business catalog before copying and checkpoint publication",
+      "reason": "forward-shadow baseline COPY validates the exact migration-derived PostgreSQL v14 business catalog before copying and checkpoint publication",
       "scope": "<module>.validate_postgres_v11_catalog",
       "target": "conn.execute"
     },

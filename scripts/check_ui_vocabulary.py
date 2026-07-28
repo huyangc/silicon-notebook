@@ -83,6 +83,18 @@ ASCII_TERMS = {
     "Memory": re.compile(r"(?<![A-Za-z])memory(?![A-Za-z])", re.IGNORECASE),
     "schema": re.compile(r"(?<![A-Za-z])schemas?(?![A-Za-z])", re.IGNORECASE),
     "deprecated": re.compile(r"(?<![A-Za-z])deprecated(?![A-Za-z])", re.IGNORECASE),
+    # —— 图谱质量分析视图（批 1）新增。这些挡的是**中文文案里夹带英文黑话**;裸标识符
+    # (`const canonicalId`) 不在扫描面内——本守卫只在含中文的单元里匹配,且先剥注释/
+    # 标识符/插值。
+    #
+    # `canonical` 是**补一个既有缺口**,不只是本特性的需要:CLAUDE.md 与 AGENTS.md 一直
+    # 把它与 projection/tier/chunk/KG/schema 并列为黑话,ASCII_TERMS 却从来没有它,
+    # 直到本特性往词表加行、触发「词表 ⊇ 守卫覆盖」自检才暴露。
+    "canonical": re.compile(r"(?<![A-Za-z])canonical(?![A-Za-z])", re.IGNORECASE),
+    "cluster": re.compile(r"(?<![A-Za-z])clusters?(?![A-Za-z])", re.IGNORECASE),
+    "community": re.compile(r"(?<![A-Za-z])communit(?:y|ies)(?![A-Za-z])", re.IGNORECASE),
+    "outlier": re.compile(r"(?<![A-Za-z])outliers?(?![A-Za-z])", re.IGNORECASE),
+    "centrality": re.compile(r"(?<![A-Za-z])centrality(?![A-Za-z])", re.IGNORECASE),
 }
 
 # CJK jargon. Regex (not plain substring) so the ambiguous rows can carry their
@@ -120,6 +132,13 @@ CJK_TERMS = {
     "预审": re.compile(r"预审"),
     "去重": re.compile(r"去重"),
     "晋升": re.compile(r"晋升"),
+    # —— 图谱质量分析视图（批 1）。界面词是「主题板块」。
+    # 「社区」是这四个新词条里**唯一**真正会被误写进中文文案的:图算法里叫社区,
+    # 顺手就写成「社区规模」。本产品语境下没有「用户社区」这种正当用法,故直接收。
+    # 「簇」只收**复合形态**「canonical 簇 / 概念簇 / 合并簇」:裸「簇」在中文里罕见,
+    # 但真要出现(如某天写「簇状图」)不该被这条规则误杀,与「边」那行同一个道理。
+    "社区": re.compile(r"社区"),
+    "概念簇": re.compile(r"(?:canonical|概念|合并)\s*簇"),
 }
 
 CJK = re.compile(r"[一-鿿]")

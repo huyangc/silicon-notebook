@@ -17,6 +17,7 @@ from app.repositories.ports import (
     SharingStorePort,
 )
 from app.repositories.source_files import SourceFileStore
+from app.services.kg_analysis import KgAnalysisService
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
@@ -170,6 +171,18 @@ class RepositoryRuntime:
         self.knowledge = bundle.knowledge
         self.governance = bundle.governance
         self.unified_kg = bundle.unified_kg
+        # KG 质量分析报告的只读装配(T3)。**后端中性**:它只吃 database + unified_kg
+        # 两个 seam(两者都是后端相关的实例,由上面的 bundle 给),自己不 import 任何
+        # 后端 —— 所以它落在这个中性 runtime 里,而不是像 checkup 那样落在两个 facade
+        # 各一份(checkup 依赖 sqlite/postgres 各自的 maintenance adapter,neutrality
+        # 守卫禁止 runtime import 它们)。
+        # 构造是 eager 且 seam-free 的(只存引用);进程内的记忆化因此跟着 runtime 单例
+        # 跨请求存活 —— 那正是它存在的意义(大库上板块列表要排 8.8 万行)。
+        self.kg_analysis = KgAnalysisService(
+            database=self.database,
+            unified_kg=self.unified_kg,
+            now=seams.now,
+        )
         # Task 22: Ask/answer/conversation/job/trace persistence shares the ONE
         # database boundary.  Identity is explicit (user_id per call — the
         # store never reads request ContextVars) and the seams dataclass is

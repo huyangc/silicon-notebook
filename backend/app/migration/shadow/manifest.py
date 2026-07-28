@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=35, postgres_version=13, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=36, postgres_version=14, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -455,26 +455,51 @@ _TABLES = (
         61,
         "jsonb+timestamptz",
     ),
-    TableSpec("chunks_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 62),
+    # SQLite v36 / PostgreSQL v14: the KG-quality-analysis precompute products.
+    # All three hang off notebooks (copy rank 15), so any rank after it is safe;
+    # they are ranked last among the replicated tables because nothing else
+    # references them.
+    _table(
+        "kg_analysis_artifacts",
+        ("notebook_id", "kind"),
+        ReplicationKeyKind.DECLARED_PK,
+        62,
+        "jsonb+timestamptz",
+    ),
+    _table(
+        "kg_community_edges",
+        ("notebook_id", "src_community_id", "dst_community_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        63,
+        "identity",
+    ),
+    _table(
+        "kg_source_profiles",
+        ("notebook_id", "source_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        64,
+        "identity",
+    ),
+    TableSpec("chunks_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 65),
     TableSpec(
-        "kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 63
+        "kg_objects_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 66
     ),
     TableSpec(
-        "memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 64
+        "memory_items_fts", TableClass.REBUILT, (), ReplicationKeyKind.DECLARED_PK, 67
     ),
     TableSpec(
         "shadow_change_log",
         TableClass.SHADOW_INTERNAL,
         (),
         ReplicationKeyKind.DECLARED_PK,
-        65,
+        68,
     ),
     TableSpec(
         "shadow_capture_control",
         TableClass.SHADOW_INTERNAL,
         (),
         ReplicationKeyKind.DECLARED_PK,
-        66,
+        69,
     ),
 )
 
@@ -668,7 +693,7 @@ def validate_sqlite_schema(
     expected_pair: SchemaPair,
     validate_rows: bool = True,
 ) -> SchemaValidationReport:
-    """Validate the frozen SQLite v33 schema and, by default, its key rows.
+    """Validate the frozen SQLite v34 schema and, by default, its key rows.
 
     ``validate_rows=False`` is reserved for short live-source fences that must
     validate catalog/control identity without scanning every business table

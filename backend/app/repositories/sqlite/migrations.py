@@ -19,7 +19,10 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v33 adds stable relation endpoint keyset indexes for bounded lexical recall.
 # v34 adds bounded relation-completion paging state and its source keyset index.
 # v35 persists the browser submission instant on in-flight Ask jobs.
-SCHEMA_VERSION = 35
+# v36 adds the three KG-quality-analysis precompute products (cross-board
+# edges, per-source board profiles, statistic snapshots) — all derived, all
+# rewritten wholesale by rebuild_communities under the community_seq gate.
+SCHEMA_VERSION = 36
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1819,6 +1822,82 @@ class SqliteMigrator:
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "ask_jobs", "asked_at", "TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _migration_36(self) -> None:
+        """KG 质量分析的三张预计算产物表(设计 §3.4)。
+
+        全部是**派生数据**:由 `rebuild_communities` 在社区构建那一批里**一次事务**
+        整体重写。没有任何写路径会增量改它们,所以不需要 `updated_at` / 冲突消解语义
+        —— 一次 DELETE + 一批 INSERT 就是它们的全部生命周期。
+
+        `kg_analysis_artifacts` 是**产物账本**(设计 §3.3「逐指标标注新鲜度」):每一份
+        产物在这里恰好一行,带上它建于哪个 `kg_mutation_seq`。为什么必须有它,而不是只
+        靠外部反查 `unified_kg_state`:
+          · 生产 base 库上出现过「communities 有 88580 个板块、但库尚未 rebuild」导致
+            重大误读的真实事故 —— 产物严重落后于当前 KG 在生产里是**常态**,不是边缘
+            情况。T3 要按**每一份产物**标注落后多少,而不是在整份报告上挂一条笼统横幅。
+          · **空产物与缺失产物必须可区分**:单一板块的图 legitimately 产出 0 条跨板块边,
+            没有账本行就无法把它和「从来没算过」分开。账本行的**存在与否**才是「这份
+            产物在不在」的唯一判据,行数不是。
+        三条统计快照(簇大小直方图 / 最大簇榜单 / 边出处构成)的 payload 就是产物本身;
+        两张明细表的账本行 payload 只放汇总与口径参数(阈值、头部板块数、level)。
+
+        ⚠ **三张表都没有 `level` 列**,这是刻意的。社区层的新鲜度闸
+        `unified_kg_state.community_seq` 本身就不分 level,所以一次预计算产出的永远是
+        **一套**自洽的产物,它描述的 level 记在账本 payload 的 `level` 字段里。给
+        `kg_community_edges` 单独带一个 level 列而另两张表没有,只会让删除口径三处不
+        一致:一次 level=1 的重建会抹掉 level-0 的账本、却留下 level-0 的明细行 ——
+        按「账本存在与否是唯一判据」它们「不存在」,却仍会被 `WHERE level=0` 读出来。
+
+        `notebook_id` 的外键与 `communities` / `concept_clusters` 同款
+        (ON DELETE CASCADE):删库时派生产物必须一起走,不能留成孤儿报告。
+        `source_id` **刻意不加外键**:`knowledge_objects.source_id` 本来就没有外键
+        (见 kg_quality_audit 的孤儿来源统计——历史清理会留下指向已删 source 的引用),
+        加了外键会让预计算在这种存量库上直接写不进去。
+
+        主键按查询形态定:
+          · kg_community_edges 按 notebook_id 整体读 → 主键前缀即索引,
+            同时把「一对板块只能有一行」这条折叠不变式钉死在库里。
+          · kg_source_profiles 按 notebook_id 整体读、按 mainstream_share 升序取
+            「关联稀疏」的头部来源 → 主键 (notebook_id, source_id) 保证每源一行,
+            另加 (notebook_id, mainstream_share) 索引给升序扫描用。
+          · kg_analysis_artifacts 按 (notebook_id, kind) 点读 → 复合主键即索引。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS kg_community_edges (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  src_community_id TEXT NOT NULL,
+                  dst_community_id TEXT NOT NULL,
+                  weight INTEGER NOT NULL DEFAULT 0,
+                  PRIMARY KEY (notebook_id, src_community_id, dst_community_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS kg_source_profiles (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  source_id TEXT NOT NULL,
+                  n_objects INTEGER NOT NULL DEFAULT 0,
+                  n_graph_objects INTEGER NOT NULL DEFAULT 0,
+                  top_community_id TEXT NOT NULL DEFAULT '',
+                  top_share REAL NOT NULL DEFAULT 0,
+                  community_spread INTEGER NOT NULL DEFAULT 0,
+                  mainstream_share REAL NOT NULL DEFAULT 0,
+                  PRIMARY KEY (notebook_id, source_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_source_profiles_nb_mainstream
+                  ON kg_source_profiles(notebook_id, mainstream_share);
+
+                CREATE TABLE IF NOT EXISTS kg_analysis_artifacts (
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  kind TEXT NOT NULL,
+                  kg_mutation_seq INTEGER NOT NULL DEFAULT -1,
+                  payload TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (notebook_id, kind)
+                );
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

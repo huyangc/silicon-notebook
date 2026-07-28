@@ -71,7 +71,17 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _rollback_v34(db: sqlite3.Connection) -> None:
-    """Remove the v34-v35 additions before forging an older deployment."""
+    """Remove the v34-v36 additions before forging an older deployment.
+
+    A faithful pre-v34 shape lacks everything EVERY later migration adds, not
+    just v34's: leaving _migration_36's tables behind would make the replay
+    observe no addition for them and fail closed as manifest-addition-missing.
+    Roll back newest-first; DROP TABLE takes
+    idx_kg_source_profiles_nb_mainstream with it.
+    """
+    db.execute("DROP TABLE kg_analysis_artifacts")             # _migration_36
+    db.execute("DROP TABLE kg_community_edges")                # _migration_36
+    db.execute("DROP TABLE kg_source_profiles")                # _migration_36
     db.execute("ALTER TABLE ask_jobs DROP COLUMN asked_at")
     db.execute("DROP TABLE kg_relation_completion_state")
     db.execute("DROP INDEX idx_knowledge_objects_source_id")
@@ -346,7 +356,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_33(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -458,7 +468,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_33(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_to_33(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -518,7 +528,7 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
-def test_deployed_v21_database_verifies_through_migrations_22_to_33(tmp_path):
+def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -561,7 +571,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_33(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v22_database_verifies_through_migrations_23_to_33(tmp_path):
+def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -613,7 +623,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_33(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_through_migrations_24_to_33(tmp_path):
+def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
     """A v23 database (has model_service_status + populated model_settings,
     missing _migration_24's kg_canonical_scratch, _migration_25's system
     model-service scrub, and _migration_26's knowhow-history tables) must

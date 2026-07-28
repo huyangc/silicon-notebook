@@ -698,6 +698,70 @@
           "title": "AnswerMemoryLinksResponse",
           "type": "object"
         },
+        "ArtifactView": {
+          "description": "账本里的一份预计算产物(或它的缺席)。\n\n``payload`` 是产物本身(三条统计快照)或它的汇总与口径参数(两张明细表的账本行);\n形状随 ``kind`` 变,故声明成自由 dict。``optional`` 标出「这一份允许合法缺席吗」\n—— 只有 ``source_profiles`` 是 true。",
+          "properties": {
+            "absence": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Absence"
+            },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "freshness": {
+              "$ref": "#/components/schemas/Freshness"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "optional": {
+              "title": "Optional",
+              "type": "boolean"
+            },
+            "payload": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Payload"
+            },
+            "present": {
+              "title": "Present",
+              "type": "boolean"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "present",
+            "optional",
+            "freshness",
+            "units"
+          ],
+          "title": "ArtifactView",
+          "type": "object"
+        },
         "AskIntentConfirmation": {
           "properties": {
             "answers": {
@@ -1016,6 +1080,141 @@
             "user"
           ],
           "title": "AuthResult",
+          "type": "object"
+        },
+        "BoardEdge": {
+          "properties": {
+            "dst": {
+              "title": "Dst",
+              "type": "string"
+            },
+            "src": {
+              "title": "Src",
+              "type": "string"
+            },
+            "weight": {
+              "title": "Weight",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "src",
+            "dst",
+            "weight"
+          ],
+          "title": "BoardEdge",
+          "type": "object"
+        },
+        "BoardEdgeView": {
+          "description": "跨板块边的 top-N + **两级截断**的显式披露。\n\n· 落库级(预计算):``stored`` 落库行数 / ``stored_total`` 截断前的板块对总数 /\n  ``stored_truncated`` / ``edge_limit``。\n· 请求级(本次):``returned`` ≤ ``limit``;``weight_coverage`` = 返回边权 ÷\n  ``cross_weight``(全部跨板块边权,图统计量,不随任何一级上限变化)。\n  一条跨板块边都没有时 ``weight_coverage`` 是 null 而不是 0 —— 后者会被读成\n  「这张图画漏了」。",
+          "properties": {
+            "cross_weight": {
+              "title": "Cross Weight",
+              "type": "integer"
+            },
+            "edge_limit": {
+              "title": "Edge Limit",
+              "type": "integer"
+            },
+            "edges": {
+              "items": {
+                "$ref": "#/components/schemas/BoardEdge"
+              },
+              "title": "Edges",
+              "type": "array"
+            },
+            "freshness": {
+              "$ref": "#/components/schemas/Freshness"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "present": {
+              "title": "Present",
+              "type": "boolean"
+            },
+            "returned": {
+              "title": "Returned",
+              "type": "integer"
+            },
+            "returned_weight": {
+              "title": "Returned Weight",
+              "type": "integer"
+            },
+            "stored": {
+              "title": "Stored",
+              "type": "integer"
+            },
+            "stored_total": {
+              "title": "Stored Total",
+              "type": "integer"
+            },
+            "stored_truncated": {
+              "title": "Stored Truncated",
+              "type": "boolean"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            },
+            "weight_coverage": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Weight Coverage"
+            }
+          },
+          "required": [
+            "present",
+            "freshness",
+            "limit",
+            "returned",
+            "returned_weight",
+            "stored",
+            "stored_total",
+            "stored_truncated",
+            "edge_limit",
+            "cross_weight",
+            "units",
+            "edges"
+          ],
+          "title": "BoardEdgeView",
+          "type": "object"
+        },
+        "BoardOverview": {
+          "description": "主题板块列表。**实时读**板块表,而那张表本身是上次社区重建的快照 —— 所以它的\n戳是 ``community_seq``,不是账本里的任何一个 seq。\n\n``payload``:``{level, total, returned, truncated, limit, top_members_limit,\ncommunities: [{id, size, top_members, top_members_truncated}]}``。",
+          "properties": {
+            "freshness": {
+              "$ref": "#/components/schemas/Freshness"
+            },
+            "payload": {
+              "additionalProperties": true,
+              "title": "Payload",
+              "type": "object"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            }
+          },
+          "required": [
+            "freshness",
+            "units",
+            "payload"
+          ],
+          "title": "BoardOverview",
           "type": "object"
         },
         "Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post": {
@@ -1840,6 +2039,75 @@
           "title": "FeedbackResponse",
           "type": "object"
         },
+        "Freshness": {
+          "description": "一份产物的新鲜度 + 口径来源。\n\n``built_at_seq`` 是它建于哪个 ``kg_mutation_seq``;``seq_behind`` = 当前 seq 减去它\n(**不 clamp 到 0**:负值意味着账本比当前还新,是库被手工改过的信号,压成 0 等于\n把异常藏起来)。产物缺席 / 社区从没建过时三个都是 null,不是 0 —— 0 会被读成\n「刚刚建好」。\n\n``built_at_cluster_seq`` / ``cluster_seq_behind`` 是**合并结果**那条世代线\n(``cluster_mutation_seq``),必须独立于 KG 世代:合并的写路径刻意不动\n``kg_mutation_seq``,所以只看前一条的话,一次纯合并之后簇大小直方图与最大簇榜单\n已经陈旧、报告却会说「与当前一致」。两个字段为 null 有三种情形:这份产物与合并\n结果无关(``relation_provenance`` —— 它的查询只读关系表);它缺席 / 没盖这个戳;\n或者它是**依赖主题板块**的那两份、而这一轮只补了账本 —— 那时板块划分是库里现成的,\n建在哪一代合并结果上没有地方记,产物因此是混合世代的,只能如实报「无从判断」。\n\n``stale`` 是两条线的**三值**合取:任一条明确落后即 true;两条都对齐即 false;\n没有明确落后但有一条无从判断即 **null**(上面第三种情形,以及产物缺席)。\nnull 不等于 false —— 把「无从判断」显示成「与当前一致」正是这个视图存在的理由的\n反面;消费方拿 ``present`` 分辨「缺席」与「在场但世代无从判断」。",
+          "properties": {
+            "basis": {
+              "title": "Basis",
+              "type": "string"
+            },
+            "built_at_cluster_seq": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Built At Cluster Seq"
+            },
+            "built_at_seq": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Built At Seq"
+            },
+            "cluster_seq_behind": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cluster Seq Behind"
+            },
+            "seq_behind": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Seq Behind"
+            },
+            "stale": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stale"
+            }
+          },
+          "required": [
+            "basis"
+          ],
+          "title": "Freshness",
+          "type": "object"
+        },
         "HTTPValidationError": {
           "properties": {
             "detail": {
@@ -1851,6 +2119,60 @@
             }
           },
           "title": "HTTPValidationError",
+          "type": "object"
+        },
+        "KgAnalysisResponse": {
+          "description": "总览。``artifacts`` **恒为五条、恒定顺序**,缺席的那几份也在里面(带 absence),\n这样「少了一份产物」不会表现成「少了一张卡片、没有任何提示」。\n\n``ledger_consistent=false`` = 在场的产物不是同一轮预计算的(正常写路径不可能产生,\n只可能是库被手工改过);此时报告里的数字互相不可比。",
+          "properties": {
+            "artifacts": {
+              "items": {
+                "$ref": "#/components/schemas/ArtifactView"
+              },
+              "title": "Artifacts",
+              "type": "array"
+            },
+            "board_edges": {
+              "$ref": "#/components/schemas/BoardEdgeView"
+            },
+            "boards": {
+              "$ref": "#/components/schemas/BoardOverview"
+            },
+            "generated_at": {
+              "title": "Generated At",
+              "type": "string"
+            },
+            "ledger_consistent": {
+              "title": "Ledger Consistent",
+              "type": "boolean"
+            },
+            "ledger_state": {
+              "title": "Ledger State",
+              "type": "string"
+            },
+            "level": {
+              "title": "Level",
+              "type": "integer"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/components/schemas/KgState"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "generated_at",
+            "level",
+            "ledger_state",
+            "ledger_consistent",
+            "state",
+            "artifacts",
+            "boards",
+            "board_edges"
+          ],
+          "title": "KgAnalysisResponse",
           "type": "object"
         },
         "KgBuildJobStatus": {
@@ -1978,6 +2300,57 @@
             "hits"
           ],
           "title": "KgSearchResponse",
+          "type": "object"
+        },
+        "KgState": {
+          "description": "``unified_kg_state`` —— 全部新鲜度判断的参照系。\n\n``present=false`` = 这个 notebook 连状态行都没有(从没写过 KG)。\n``community_seq = -1`` = 从没建过社区。",
+          "properties": {
+            "canonical_rel_seq": {
+              "title": "Canonical Rel Seq",
+              "type": "integer"
+            },
+            "cluster_mutation_seq": {
+              "title": "Cluster Mutation Seq",
+              "type": "integer"
+            },
+            "community_seq": {
+              "title": "Community Seq",
+              "type": "integer"
+            },
+            "dirty": {
+              "title": "Dirty",
+              "type": "boolean"
+            },
+            "kg_mutation_seq": {
+              "title": "Kg Mutation Seq",
+              "type": "integer"
+            },
+            "last_rebuild": {
+              "$ref": "#/components/schemas/LastRebuild"
+            },
+            "present": {
+              "title": "Present",
+              "type": "boolean"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            }
+          },
+          "required": [
+            "present",
+            "kg_mutation_seq",
+            "community_seq",
+            "cluster_mutation_seq",
+            "canonical_rel_seq",
+            "dirty",
+            "last_rebuild",
+            "units"
+          ],
+          "title": "KgState",
           "type": "object"
         },
         "KnowhowAgentColumn": {
@@ -3579,6 +3952,48 @@
             }
           },
           "title": "KnowledgeUpdate",
+          "type": "object"
+        },
+        "LastRebuild": {
+          "description": "上一次 unified-KG 重建时的规模快照 —— 与当前真实计数一比即可量化陈旧程度。\n\n⚠ ``object_count`` 数的是「非 deprecated」的对象。今天它与本报告的 USABLE 口径\n恰好相等(deprecated 是唯一的非可用状态),但那是状态词表的巧合而不是同一条判据。",
+          "properties": {
+            "at": {
+              "default": "",
+              "title": "At",
+              "type": "string"
+            },
+            "basis": {
+              "title": "Basis",
+              "type": "string"
+            },
+            "cluster_count": {
+              "title": "Cluster Count",
+              "type": "integer"
+            },
+            "object_count": {
+              "title": "Object Count",
+              "type": "integer"
+            },
+            "relation_count": {
+              "title": "Relation Count",
+              "type": "integer"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            }
+          },
+          "required": [
+            "basis",
+            "object_count",
+            "relation_count",
+            "cluster_count",
+            "units"
+          ],
+          "title": "LastRebuild",
           "type": "object"
         },
         "MemoryBulkDeleteRequest": {
@@ -6493,6 +6908,162 @@
             "files"
           ],
           "title": "SourceImportRequest",
+          "type": "object"
+        },
+        "SourceProfilePageResponse": {
+          "description": "来源画像的一页。\n\n``order``:``sparse`` = 与主体板块最不连通的排前面(「哪些来源不属于这里」的答案),\n``connected`` = 反向。``total`` 是该 notebook 的全部画像行数,``has_more`` 让分页\n不必靠 ``returned < limit`` 猜。``summary`` 是账本行的 payload(口径参数:覆盖阈值、\n头部板块数、head/total 成员数),产物缺席时为 null。",
+          "properties": {
+            "absence": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Absence"
+            },
+            "freshness": {
+              "$ref": "#/components/schemas/Freshness"
+            },
+            "generated_at": {
+              "title": "Generated At",
+              "type": "string"
+            },
+            "has_more": {
+              "title": "Has More",
+              "type": "boolean"
+            },
+            "kg_mutation_seq": {
+              "title": "Kg Mutation Seq",
+              "type": "integer"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "order": {
+              "title": "Order",
+              "type": "string"
+            },
+            "present": {
+              "title": "Present",
+              "type": "boolean"
+            },
+            "returned": {
+              "title": "Returned",
+              "type": "integer"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/SourceProfileRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            },
+            "summary": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Summary"
+            },
+            "total": {
+              "title": "Total",
+              "type": "integer"
+            },
+            "units": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Units",
+              "type": "object"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "generated_at",
+            "present",
+            "freshness",
+            "kg_mutation_seq",
+            "order",
+            "limit",
+            "offset",
+            "total",
+            "returned",
+            "has_more",
+            "units",
+            "rows"
+          ],
+          "title": "SourceProfilePageResponse",
+          "type": "object"
+        },
+        "SourceProfileRow": {
+          "description": "一个来源的板块画像。\n\n``n_graph_objects`` 是**落进主题板块**的对象数(四类对象都算,不是\n``object_type='concept'`` 的对象数),它是 ``top_share`` / ``mainstream_share``\n的分母。``source_missing`` = 这个 source_id 在来源表里已经不在了(``source_id``\n没有外键,历史清理会留下孤儿引用)——标题为空到底是「没标题」还是「已删除」,\n读报告的人有权分辨。",
+          "properties": {
+            "community_spread": {
+              "title": "Community Spread",
+              "type": "integer"
+            },
+            "mainstream_share": {
+              "title": "Mainstream Share",
+              "type": "number"
+            },
+            "n_graph_objects": {
+              "title": "N Graph Objects",
+              "type": "integer"
+            },
+            "n_objects": {
+              "title": "N Objects",
+              "type": "integer"
+            },
+            "source_id": {
+              "title": "Source Id",
+              "type": "string"
+            },
+            "source_missing": {
+              "default": false,
+              "title": "Source Missing",
+              "type": "boolean"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            },
+            "top_community_id": {
+              "default": "",
+              "title": "Top Community Id",
+              "type": "string"
+            },
+            "top_share": {
+              "title": "Top Share",
+              "type": "number"
+            }
+          },
+          "required": [
+            "source_id",
+            "n_objects",
+            "n_graph_objects",
+            "top_share",
+            "community_spread",
+            "mainstream_share"
+          ],
+          "title": "SourceProfileRow",
           "type": "object"
         },
         "SourceSummary": {
@@ -10798,6 +11369,159 @@
             }
           },
           "summary": "Index Status"
+        }
+      },
+      "/api/notebooks/{notebook_id}/kg-analysis": {
+        "get": {
+          "description": "KG 质量分析总览:状态 + 五份预计算产物 + 主题板块列表 + 跨板块边 top-N。\n\n三个上限都在这里声明(FastAPI 直接 422 掉越界值),service 与 store 各自还会再\nclamp 一次 —— 纵深而不是重复:越界在这一层是**用户输入错误**(响亮拒绝),在下面\n两层是**不变式**(任何调用方都不可能拿到无界返回)。\n\n``level`` **刻意不是参数**:三张产物表都没有 level 维度,让调用方指定只会造出\n「板块列表是 level 1、跨板块边是 level 0」这种自相矛盾的报告。service 从账本里\n读出产物描述的那个 level 并回报在 ``level`` 字段上。",
+          "operationId": "kg_analysis_overview_api_notebooks__notebook_id__kg_analysis_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "boards",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Boards",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "top_members",
+              "required": false,
+              "schema": {
+                "default": 5,
+                "maximum": 20,
+                "minimum": 1,
+                "title": "Top Members",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "edges",
+              "required": false,
+              "schema": {
+                "default": 200,
+                "maximum": 2000,
+                "minimum": 1,
+                "title": "Edges",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KgAnalysisResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Kg Analysis Overview"
+        }
+      },
+      "/api/notebooks/{notebook_id}/kg-analysis/sources": {
+        "get": {
+          "description": "来源画像的一页(默认「与主体板块最不连通」在前)。\n\n**必须分页**:生产 base 库有 48 836 个来源,一次全返回既是几 MB payload 也没人\n读得完。排序在库内走 ``idx_kg_source_profiles_nb_mainstream``,并列按 source_id\n消歧(没有它,两页之间会重复/漏行,而且两个后端各给一种顺序)。",
+          "operationId": "kg_analysis_sources_api_notebooks__notebook_id__kg_analysis_sources_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "order",
+              "required": false,
+              "schema": {
+                "default": "sparse",
+                "enum": [
+                  "sparse",
+                  "connected"
+                ],
+                "title": "Order",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SourceProfilePageResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Kg Analysis Sources"
         }
       },
       "/api/notebooks/{notebook_id}/kg/build": {
