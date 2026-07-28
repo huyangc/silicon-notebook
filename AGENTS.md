@@ -105,6 +105,7 @@ Inside a notebook:
   - The main canvas should show node names, type-specific node marks, and relationship labels on edges.
   - Provide multi-select type filters for dense graphs. Selecting a node from either the canvas or the overview should focus/highlight that node and update the selected-node relation/source details.
   - Keep node type color/shape marks consistent between the canvas, node overview, selected-node detail, and related-node sections. In the detail panel, label evidence/source excerpts as `出处`, render them as structured evidence cards with separate source metadata and wrapped excerpt text, hide raw `section_path`, and show concept-mounted objects as `相关节点` grouped by type.
+  - Knowledge Graph evidence and occurrence cards must render `element_type=formula` excerpts through the shared block KaTeX view. Keep wide equations locally scrollable, malformed LaTeX visibly readable as raw text, and non-formula excerpts as ordinary text.
   - The side panel should provide a type-grouped node overview (Concept, Claim, Formula, Procedure, plus future types) and selected-node relation/evidence details.
 - Do not show a fixed right-column Studio sidebar in the primary notebook workspace.
   - Keep the source column + four-tab (`问答 (Ask) | 知识库 (Knowledge) | 记忆 (Memory) | 深度报告 (Deep Report)`) main column as the two-column workspace.
