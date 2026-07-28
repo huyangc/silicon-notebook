@@ -15,7 +15,7 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
 - Free-form knowhow tables with Markdown cells, column- or row-oriented spreadsheet import with actionable validation, bounded batch-reformat review, readable audit actors, content-aware stable columns, reasoning-backed library-wide empty-cell completion suggestions, deterministic projection whose cell knowledge objects enter graph/reasoning retrieval by default, history, milestones, and isolated code attachments with immediate save attribution.
 - Intent-first two-stage deep reports with corpus-blind question clarification, an atomically frozen confirmation contract before retrieval, bounded exact-element recovery for large libraries, editable coverage-aware outlines, paper-title-aware citations, verified grounding, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
-- Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls.
+- Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls, including a paginated, sortable user-usage table.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
 - Retrieval candidates retain all producer provenance (semantic, lexical, PPR, KG source, or community); mixed chunk/graph selection can reserve a bounded graph-only seat without increasing the answer budget.
 
@@ -90,6 +90,8 @@ bash scripts/check.sh
 ```
 
 `scripts/check.sh` is the complete offline local gate: backend tests, smoke/contract checks, frontend tests and type checking, and the production frontend build.
+
+Codex-only execution note: run `scripts/check.sh` outside the Codex sandbox on the first attempt because lifecycle tests bind loopback ports and manage subprocesses. GitHub network operations (`git fetch`, `git push`, and `gh auth/repo/pr`) must likewise request outside-sandbox execution directly instead of first failing inside the sandbox; ordinary local read-only Git inspection stays sandboxed.
 
 Database-specific coverage now targets the direct PostgreSQL backend. Retired tests for the SQLite backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and cross-backend parity are no longer part of the active suite.
 

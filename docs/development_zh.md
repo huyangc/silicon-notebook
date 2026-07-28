@@ -39,6 +39,8 @@ bash scripts/check.sh
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 
+仅对 Codex：完整门禁第一次运行就必须申请沙箱外执行。后端生命周期测试需要绑定 loopback 端口并管理子进程，先在沙箱内运行只会产生无效噪音，不能作为有价值的探测步骤。GitHub 网络操作（`git fetch`、`git push`、`gh auth/repo/pr`）也必须直接申请沙箱外执行；本地只读 Git 检查仍留在沙箱内。本规则不适用于 Claude Code。
+
 ```bash
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
