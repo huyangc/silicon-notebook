@@ -1242,6 +1242,22 @@ export default function Home() {
     if (checkupRepairPollUntil > 0) return;
     setRepairingFix((previous) => (Object.keys(previous).length === 0 ? previous : {}));
   }, [checkupRepairPollUntil]);
+  // 体检结果一变,就把**已经不在结果里**的分组的忙碌位摘掉。这条同时干两件事:
+  //   ① group-gone 的正常解除路径 —— 组没了 = 那一轮修复见效(卡片也随之卸载)。
+  //   ② 防止旧条目被后来的新问题继承(codex 第 4 轮 P2)。没有这一步,条目只会在
+  //      轮询窗口结束时才清:H4 修好后若窗口仍因别的项(比如 H2)开着,期间新上传
+  //      又造出缺向量、H4 重新出现,那条陈旧条目会把新卡片直接锁死——而此刻根本
+  //      没有 backfill job 在跑。按「当前还活着的分组键」收敛即可,不必引入代次号。
+  useEffect(() => {
+    const alive = new Set(sourceHealthGroups(checkup).map((g) => g.key));
+    setRepairingFix((previous) => {
+      const keys = Object.keys(previous);
+      if (keys.every((key) => alive.has(key))) return previous;  // 无变化时保持引用,不触发重渲染
+      const next: Record<string, RepairRelease> = {};
+      for (const key of keys) if (alive.has(key)) next[key] = previous[key];
+      return next;
+    });
+  }, [checkup]);
   // 体检修复触发后的有界轮询:reparse/backfill(乃至 H6/H7/H8 的既有构建入口)都是
   // 后台 job,点完不会立即反映到 count。看板开着且 checkupRepairPollUntil 未到期时,
   // 每 8s 重拉一次 checkup,直到健康(healthy)或到期即停——不做无界轮询(承效率约束:
