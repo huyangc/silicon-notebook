@@ -9,6 +9,7 @@ import {
   intentUnderstoodStep,
   replaceLastIntentStep,
 } from "./ask-intent-trace.ts";
+import { buildAskIntentConfirmation } from "./ask-intent-model.ts";
 import { TRACE_STEP_LABELS, getTraceStepDetail } from "./reasoning-trace.ts";
 
 
@@ -102,6 +103,28 @@ test("替换只动最后一步 —— 轨迹不留「正在理解」的残影", 
   );
   // 空轨迹也不能抛/不能丢掉替换进来的那一步。
   assert.deepEqual(replaceLastIntentStep([], resolved), [resolved]);
+});
+
+
+// 一个展示用的耗时字段没有资格否掉用户已经确认的提问:浏览器休眠/机器挂起都能
+// 让这个计时轻易跨过后端的一小时上限,原样上送就是 422(codex 第 1 轮 P3)。
+test("超限的理解耗时被夹到后端上限,而不是让整次提问 422", () => {
+  const contract = {
+    objective: "", resolved_question: "q", intent_type: "explain",
+    result_scope: "ranked", completeness_required: false, entities: [],
+    mandatory_topics: [], comparison_axes: [], constraints: [], excluded_topics: [],
+    expected_output: "", assumptions: [], ambiguities: [], confidence: 1,
+    needs_clarification: false, confirmed: false,
+  };
+  assert.equal(
+    buildAskIntentConfirmation(contract, "q", {}, 9_999_999).understanding_ms,
+    3_600_000,
+  );
+  assert.equal(
+    buildAskIntentConfirmation(contract, "q", {}, 1234.6).understanding_ms, 1235,
+  );
+  // 没量到就不带这个字段,而不是记一个假的 0。
+  assert.equal("understanding_ms" in buildAskIntentConfirmation(contract, "q", {}), false);
 });
 
 

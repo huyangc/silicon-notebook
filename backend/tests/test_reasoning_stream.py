@@ -250,6 +250,9 @@ def test_reasoning_trace_covers_understanding_memory_and_synthesis(tmp_path, mon
     assert kinds[:3] == ["start", "intent", "memory"], kinds
     assert steps[1]["duration_ms"] == 1500        # 客户端量到的理解耗时被采信
     assert steps[2]["detail"]["count"] == 1
+    # 记忆那一步是「embedding + 向量扫描」在轨迹里的唯一交代;不计时等于把这段
+    # 从「覆盖整轮」的总耗时里悄悄漏掉。
+    assert isinstance(steps[2]["duration_ms"], int)
 
     synthesis = steps[-1]
     assert synthesis["step_type"] == "synthesis", kinds

@@ -9,6 +9,7 @@ import {
   jsxTextValues,
   parseModule,
   stringLiterals,
+  variableInitializersIn,
 } from "./test/semantic-source.mjs";
 
 
@@ -68,6 +69,18 @@ test("在途占位按引擎是否流轨迹渲染(关联追溯不再空等后端�
     comparisonsIn(page).filter((item) => item.left.includes("groupOf(pendingMode)")),
     [],
   );
+});
+
+
+// 预检一返回 intentChecking 就复位,但确认卡片还摆在下面等用户补充。若在途判据
+// 不认 askIntentReview,轨迹会恰好在「等待你补充」这一步上消失、空会话还退回欢迎页
+// (codex 第 1 轮 P2)。
+test("待澄清期间在途轨迹不消失", () => {
+  const inFlight = variableInitializersIn(page)
+    .find((item) => item.name === "askInFlight");
+  assert.ok(inFlight, "askInFlight 没了 —— 在途判据被改写,这条守卫需要重写");
+  assert.match(inFlight.initializer, /intentChecking/);
+  assert.match(inFlight.initializer, /askIntentReview/);
 });
 
 

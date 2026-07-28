@@ -1418,17 +1418,22 @@ class AskService:
         # UI has nothing after the synthetic "start" — the reader is left
         # watching an empty trace through work that is already under way.
         stream_intent()
+        memory_started = time.perf_counter()
         memory_hits = self._memory_hits(
             user_id, notebook_id, research_question
         )
         if memory_hits:
             # Memory silently shapes the answer; a run that leaned on it should
             # say so.  Only when something was actually recalled — "recalled 0"
-            # is noise in every notebook without memories.
+            # is noise in every notebook without memories.  The duration covers
+            # the embedding round trip plus the vector scan above: this step is
+            # the trace's only account of that work, so leaving it untimed would
+            # drop it from a total this change advertises as covering the run.
             checked_pre_trace(TraceStep(
                 step_type="memory",
                 summary=f"参考了 {len(memory_hits)} 条你的记忆",
                 detail={"count": len(memory_hits)},
+                duration_ms=round((time.perf_counter() - memory_started) * 1000),
             ))
 
         if self._primary_llm_unconfigured():

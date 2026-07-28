@@ -2059,10 +2059,13 @@ export default function Home() {
   // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
   const askBlocked = isAskBlocked(currentNotebook);
   const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
-  // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)和真正在跑的 ask 都算。
-  // 在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方落;只看 asking 会让
-  // 用户在整段问题理解里对着空会话等待。
-  const askInFlight = asking || intentChecking;
+  // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)、等用户补充澄清、以及
+  // 真正在跑的 ask 都算。在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方
+  // 落;只看 asking 会让用户在整段问题理解里对着空会话等待。
+  // 待澄清也必须算在内:预检返回后 intentChecking 就复位了,若不认 askIntentReview,
+  // 轨迹会恰好在「等待你补充」这一步上消失(空会话还会退回欢迎页),而下方的确认
+  // 卡片仍然摆在那里 —— 这正是本次改动要消除的那种割裂。
+  const askInFlight = asking || intentChecking || Boolean(askIntentReview);
   // ask_available 是 get_notebook 的快照;在别的页签/覆盖层增删证据不会刷新它。以下把它
   // 在"重新看到问答框"时与后端对齐,且**双向**——证据增则解禁、证据减则重新禁用(codex
   // PR#334 第5轮 P1:此前只在被禁时重拉,漏了 true→false)。来源增删这条路已各自覆盖

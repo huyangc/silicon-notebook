@@ -51,6 +51,12 @@ export function missingRequiredIntentAnswers(
   );
 }
 
+// 镜像后端 AskIntentConfirmation.understanding_ms 的上限(models/ask.py 的 le)。
+// 超限必须在这里夹住而不是原样上送:后端会 422,整个已确认的提问就此打不出去 ——
+// 一个「这次理解花了多久」的展示字段没有资格否掉用户的提问。浏览器休眠、机器
+// 挂起都能轻易让这个计时跨过一小时。
+const UNDERSTANDING_MS_LIMIT = 3_600_000;
+
 export function buildAskIntentConfirmation(
   contract: QueryIntentContract,
   resolvedQuestion: string,
@@ -65,7 +71,11 @@ export function buildAskIntentConfirmation(
       .filter((item) => item.answer),
     // 只在真的量到时才带上;缺省让后端保持 duration 未知,而不是记一个假的 0。
     ...(typeof understandingMs === "number" && understandingMs >= 0
-      ? { understanding_ms: Math.round(understandingMs) }
+      ? {
+        understanding_ms: Math.min(
+          Math.round(understandingMs), UNDERSTANDING_MS_LIMIT,
+        ),
+      }
       : {}),
   };
 }
