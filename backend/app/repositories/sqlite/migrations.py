@@ -22,7 +22,9 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # v36 adds the three KG-quality-analysis precompute products (cross-board
 # edges, per-source board profiles, statistic snapshots) — all derived, all
 # rewritten wholesale by rebuild_communities under the community_seq gate.
-SCHEMA_VERSION = 36
+# v37 adds the indexed (source_id, element_type, created_at, id) keyset order
+# on source_elements for bounded, per-type collection enumeration.
+SCHEMA_VERSION = 37
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1897,6 +1899,17 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   PRIMARY KEY (notebook_id, kind)
                 );
+                """
+            )
+
+    def _migration_37(self) -> None:
+        """Indexed per-source, per-element-type keyset order for bounded
+        collection enumeration (formula/table/image/code_block listings)."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_source_elements_source_type
+                  ON source_elements(source_id, element_type, created_at, id);
                 """
             )
 

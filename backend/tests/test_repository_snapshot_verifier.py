@@ -71,7 +71,7 @@ def _copy_fixture(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _rollback_v34(db: sqlite3.Connection) -> None:
-    """Remove the v34-v36 additions before forging an older deployment.
+    """Remove the v34-v37 additions before forging an older deployment.
 
     A faithful pre-v34 shape lacks everything EVERY later migration adds, not
     just v34's: leaving _migration_36's tables behind would make the replay
@@ -79,6 +79,7 @@ def _rollback_v34(db: sqlite3.Connection) -> None:
     Roll back newest-first; DROP TABLE takes
     idx_kg_source_profiles_nb_mainstream with it.
     """
+    db.execute("DROP INDEX idx_source_elements_source_type")   # _migration_37
     db.execute("DROP TABLE kg_analysis_artifacts")             # _migration_36
     db.execute("DROP TABLE kg_community_edges")                # _migration_36
     db.execute("DROP TABLE kg_source_profiles")                # _migration_36
@@ -716,6 +717,30 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 33
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.changed_tables == []
+
+
+def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
+    """A deployed v36 database is missing only _migration_37's new index (both
+    asked_at and the three KG-analysis precompute tables already landed at v35
+    and v36). Rolling back the full v34-v37 helper would also strip those, which
+    a genuine v36 deployment still has, so this test drops exactly
+    _migration_37's addition instead of reusing `_rollback_v34`."""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP INDEX idx_source_elements_source_type")  # _migration_37
+        rollback.execute("PRAGMA user_version = 36")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 36
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
 

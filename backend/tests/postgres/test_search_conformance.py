@@ -301,7 +301,7 @@ def search_harness(postgres_database) -> SearchHarness:
     from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
-    assert PostgresMigrator(postgres_database).migrate() == 14
+    assert PostgresMigrator(postgres_database).migrate() == 15
     seams = RepositoryCompatibilitySeams(
         new_id=lambda prefix: f"{prefix}-unused",
         now=lambda: NOW,
@@ -422,7 +422,7 @@ def test_like_metacharacters_do_not_widen_the_candidate_probe(search_harness):
 def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 14
+    assert PostgresMigrator(postgres_database).migrate() == 15
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
@@ -617,7 +617,7 @@ def test_exact_chunk_probe_is_planner_usable_on_the_trigram_index(postgres_datab
     """Bounded is not enough — the probe must ride `idx_chunks_text_trgm`."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 14
+    assert PostgresMigrator(postgres_database).migrate() == 15
     with postgres_database.connect() as connection:
         connection.execute("SET LOCAL enable_seqscan=off")
         plan_rows = connection.execute(
