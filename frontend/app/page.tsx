@@ -140,6 +140,7 @@ import {
 } from "./ask-intent-model";
 import {
   elapsedMs,
+  handOffIntentTrace,
   intentClarifyStep,
   intentConfirmedStep,
   intentUnderstandingStep,
@@ -3072,7 +3073,7 @@ export default function Home() {
         buildAskIntentConfirmation(
           contract, contract.resolved_question, {}, understandingMs,
         ),
-        askIntentTraceRef.current,
+        handOffIntentTrace(askIntentTraceRef.current),
       );
     } catch (error) {
       if (!isAbortError(error)) reportError(error);
@@ -3248,7 +3249,9 @@ export default function Home() {
     askIntentTraceRef.current = traceSeed;
     askIntentDraftRef.current = "";
     try {
-      await executeAsk(review.question, "reasoning", confirmation, traceSeed);
+      await executeAsk(
+        review.question, "reasoning", confirmation, handOffIntentTrace(traceSeed),
+      );
     } finally {
       askIntentFlowRef.current = "idle";
     }

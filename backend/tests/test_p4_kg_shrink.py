@@ -279,6 +279,23 @@ def test_strict_blocked_when_no_kg_no_base(repo):
     assert resp.reasoning_trace is None       # did NOT run the agentic loop
 
 
+def test_strict_no_kg_keeps_the_trace_it_already_streamed(repo):
+    """有流消费者时,短路响应必须带上已经推送出去的那几步。
+
+    否则 final 事件替换在途 turn 的同一刻,用户刚看着走过的「理解」步就被抹掉,
+    重开会话的历史里也留不下(codex 第 2 轮 P2)。没有 on_trace 的直调仍保持
+    上面那条的语义:空轨迹 = agentic loop 没跑。"""
+    _configure_ask(repo)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    streamed = []
+    resp = repo.ask_reasoning(
+        nb.id, AskRequest(question="q", mode="reasoning"), streamed.append,
+    )
+    assert resp.kg_required is True
+    assert [step.step_type for step in streamed] == ["intent"]
+    assert [step.step_type for step in (resp.reasoning_trace or [])] == ["intent"]
+
+
 def test_strict_allowed_when_base_has_kg(repo):
     _configure_ask(repo)
     base = repo.create_notebook(NotebookCreate(name="base"))

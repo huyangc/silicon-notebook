@@ -319,6 +319,10 @@ def test_reasoning_trace_omits_memory_step_without_hits(tmp_path, monkeypatch):
     kinds = [event["step"]["step_type"] for event in events if event["event"] == "progress"]
     assert "memory" not in kinds
     assert kinds[:2] == ["start", "intent"]
+    # 已经推送过的步骤必须出现在 final 里,否则 final 一替换在途 turn 就把用户
+    # 刚看着走过的轨迹当场抹掉,历史里也留不下(codex 第 2 轮 P2)。
+    assert [row["step_type"] for row in events[-1]["response"]["reasoning_trace"]][0] \
+        == "intent"
     # 未回传 understanding_ms 时不能编一个 0 出来冒充「理解只花了 0ms」。
     intent = next(
         event["step"] for event in events

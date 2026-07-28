@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   elapsedMs,
+  handOffIntentTrace,
   intentClarifyStep,
   intentConfirmedStep,
   intentUnderstandingStep,
@@ -125,6 +126,26 @@ test("超限的理解耗时被夹到后端上限,而不是让整次提问 422", 
   );
   // 没量到就不带这个字段,而不是记一个假的 0。
   assert.equal("understanding_ms" in buildAskIntentConfirmation(contract, "q", {}), false);
+});
+
+
+// 同一段理解时间会在实时面板里出现两次:合成步一次,后端 intent 步(取自回传的
+// understanding_ms)又一次。面板总耗时是逐步求和,两处都留就算了两遍
+// (codex 第 2 轮 P2)。持久那份归后端,所以摘掉合成步的。
+test("前缀交给 executeAsk 前摘掉耗时,实时总耗时不把理解算两遍", () => {
+  const seed = [
+    intentUnderstoodStep(contract(), 1500),
+    intentConfirmedStep("q", 0),
+  ];
+  const handed = handOffIntentTrace(seed);
+  assert.deepEqual(handed.map((step) => step.duration_ms), [undefined, undefined]);
+  // 只摘耗时,步骤本身与文案原样保留。
+  assert.deepEqual(
+    handed.map((step) => [step.step_type, step.summary]),
+    seed.map((step) => [step.step_type, step.summary]),
+  );
+  // 独自显示时(还没进整条轨迹)仍要带耗时,否则理解阶段自己就没有耗时可看。
+  assert.equal(seed[0].duration_ms, 1500);
 });
 
 

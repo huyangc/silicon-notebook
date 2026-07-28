@@ -48,6 +48,14 @@ test("问题理解阶段进入同一条轨迹,而不是另起一条提示", () =
   assert.ok(runAskCalls.includes("setPendingTrace"));
   // 用户定稿也记一步。
   assert.ok(callsIn(findFunction(page, "confirmAskIntent")).includes("intentConfirmedStep"));
+  // 前缀必须经 handOffIntentTrace 摘掉耗时再交给 executeAsk,否则后端 intent 步
+  // 会把同一段理解时间再算一遍(codex 第 2 轮 P2)。
+  for (const fn of ["runAsk", "confirmAskIntent"]) {
+    assert.ok(
+      callsIn(findFunction(page, fn)).includes("handOffIntentTrace"),
+      `${fn} 直接把带耗时的前缀交给了 executeAsk`,
+    );
+  }
   // 旧的独立提示条不得复活 —— 两套并存等于又把理解阶段挪出轨迹。
   // 两种取值都要扫:直接写在 JSX 里的文案是 JsxText 而非 StringLiteral,
   // 只扫 stringLiterals 的话把提示条原样贴回去也照样绿(实测过)。

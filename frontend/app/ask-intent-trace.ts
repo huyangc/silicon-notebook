@@ -74,3 +74,15 @@ export function replaceLastIntentStep(
 ): ReasoningTraceStep[] {
   return [...steps.slice(0, -1), resolved];
 }
+
+/** 交给 executeAsk 之前把这段前缀的耗时摘掉。
+ *
+ * 同一段理解时间在实时面板里会出现两次:这里的合成步一次,后端 `intent` 步
+ * (取自回传的 `understanding_ms`)又一次。面板的总耗时是逐步求和,两处都留就
+ * 把这一段算了两遍。后端那一步是持久化、可回放的那一份,所以由它保留耗时;
+ * 合成步在理解阶段独自显示时仍带耗时,只在拼进整条轨迹前摘掉。 */
+export function handOffIntentTrace(
+  steps: ReasoningTraceStep[],
+): ReasoningTraceStep[] {
+  return steps.map(({ duration_ms: _dropped, ...step }) => step);
+}

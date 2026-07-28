@@ -921,8 +921,14 @@ class AskService:
                                      intent: QueryIntentContract | None = None,
                                      retrieval_query: str = "",
                                      retrieval_effort: RetrievalEffort = "standard",
-                                     completeness_unavailable: bool = False) -> AskResponse:
-        """系统模型已启用但漏绑问答工作负载时的统一短路响应。"""
+                                     completeness_unavailable: bool = False,
+                                     reasoning_trace: "list[TraceStep] | None" = None,
+                                     ) -> AskResponse:
+        """系统模型已启用但漏绑问答工作负载时的统一短路响应。
+
+        ``reasoning_trace`` 带上调用方**已经推送给客户端**的那几步:短路响应一旦
+        作为 final 事件替换掉在途 turn,不带轨迹就等于把用户刚看着走过的几步
+        当场抹掉,历史里也留不下。"""
         msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         if completeness_unavailable:
             msg = (
@@ -933,7 +939,8 @@ class AskService:
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=retrieval_query or question, llm_mode="deterministic",
-            intent=intent, retrieval_effort=retrieval_effort)
+            intent=intent, retrieval_effort=retrieval_effort,
+            reasoning_trace=reasoning_trace or None)
         response.mode = mode
         response.model_errors = [
             ModelError(stage="answer", model="", message="missing_config")
@@ -1311,6 +1318,15 @@ class AskService:
             if on_trace:
                 on_trace(step)
 
+        def streamed_pre_trace() -> "list[TraceStep] | None":
+            """短路返回要带上的轨迹:客户端已经看到的那几步。
+
+            有 `on_trace` 就说明 intent(以及命中时的 memory)已经推送出去了 ——
+            final 事件不带它们,就是在替换在途 turn 的同一刻把用户刚看着走过的
+            轨迹抹掉,历史里也留不下。没有流消费者的直调则保持原状:空轨迹仍然
+            表示「agentic loop 没跑」。"""
+            return pre_trace if on_trace is not None else None
+
         structured_batch = None
         completeness_unavailable = False
         if intent_contract.completeness_required and self.knowhow_store is not None:
@@ -1478,7 +1494,8 @@ class AskService:
                 user_id=user_id, job_id=job_id, intent=intent_contract,
                 retrieval_query=research_question,
                 retrieval_effort=payload.retrieval_effort,
-                completeness_unavailable=completeness_unavailable)
+                completeness_unavailable=completeness_unavailable,
+                reasoning_trace=streamed_pre_trace())
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1520,7 +1537,10 @@ class AskService:
                 result_coverage=(
                     structured_batch.coverage() if structured_batch else None
                 ),
-                reasoning_trace=(pre_trace if structured_batch is not None else None))
+                reasoning_trace=(
+                    pre_trace
+                    if structured_batch is not None else streamed_pre_trace()
+                ))
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
