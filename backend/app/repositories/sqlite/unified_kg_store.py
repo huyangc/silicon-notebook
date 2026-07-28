@@ -1119,11 +1119,46 @@ class UnifiedKgStore:
     def community_overview(
         self, notebook_id: str, *, level: int = 0, limit: int = 50, top_k: int = 5
     ) -> Dict[str, object]:
+        """主题板块列表(C1)的**自开快照**入口 —— 给手上没有读连接的调用方用。
+
+        查询本体在 `community_overview_on`(connection-taking)。这里只多做两件事:
+        一道 `_reject_inside_write_transaction`(自开连接才需要,骑别人连接不需要),
+        以及开一个多语句共享快照 —— total、板块列表、逐板块成员三段必须看同一份库,
+        否则并发 rebuild_communities 一劈就会出现「有 1200 个板块,一个都没有」这种
+        自相矛盾的载荷。
+
+        ⚠ **一次调用只开一个快照**:两件事不能拆成两个 `with`,也不能让调用方为每条读
+        各开一个 —— 那和没有快照一样坏(codex 第 8/12 轮 P2)。
+        """
+        self._reject_inside_write_transaction("主题板块列表")
+        with self._read_snapshot() as db:
+            return self.community_overview_on(
+                db, notebook_id, level=level, limit=limit, top_k=top_k
+            )
+
+    @staticmethod
+    def community_overview_on(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        *,
+        level: int = 0,
+        limit: int = 50,
+        top_k: int = 5,
+    ) -> Dict[str, object]:
         """主题板块列表(C1):板块 id / 规模 / 按 centrality 降序的前 K 个代表概念。
 
-        **整块跑在一次显式只读事务里**(`_read_snapshot`):total、板块列表、逐板块成员
-        三段必须看同一份库,否则并发 rebuild_communities 一劈就会出现「有 1200 个板块,
-        一个都没有」这种自相矛盾的载荷。
+        **connection-taking**:骑调用方的读连接,不自开连接。存在的理由是 T3 的总览
+        (`KgAnalysisService.overview`)一趟要读 state 行、账本、板块列表、跨板块边**四
+        样**,它们必须来自**同一份库** —— 板块列表自开一个快照的话,并发的社区重建提交
+        在中间就会把「上一代的新鲜度戳」与「新一代的板块 id」拼进同一份响应,俯瞰图照
+        着这两样画出来的连线是悬空的(codex 第 12 轮 P2)。自开快照的调用方走上面那个
+        同名入口。
+
+        本方法自己也是**多条语句**(COUNT + 板块列表 + 逐板块成员),所以调用方给的必须
+        是 `read_snapshot()` 开出来的连接而不是裸 `connect()`;两侧的 `read_snapshot`
+        各自兑现这件事。**不**在这里补一道 `_reject_inside_write_transaction`:骑调用方
+        连接不存在「自开的另一条连接读到提交前的库」这个失配,服务层入口另有一道同语义
+        断言;而 staticmethod 也够不到 `self.database`。
 
         代表概念**逐板块**取(`ORDER BY centrality DESC ... LIMIT K`,走
         idx_commmem_nb_comm + 有界 top-K 排序器)。这里刻意与 PostgreSQL 侧**分岔**:
@@ -1146,29 +1181,27 @@ class UnifiedKgStore:
         截断绝不静默:返回 ``total`` / ``returned`` / ``truncated``,每个板块另带
         ``top_members_truncated``(该板块成员数是否超过 K)。
         """
-        self._reject_inside_write_transaction("主题板块列表")
         level = int(level)
         limit = _clamp(limit, COMMUNITY_OVERVIEW_MAX)
         top_k = _clamp(top_k, COMMUNITY_TOP_MEMBERS_MAX)
-        with self._read_snapshot() as db:
-            total = int(db.execute(
-                "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=? AND level=?",
-                (notebook_id, level)).fetchone()["c"])
-            picked = db.execute(
-                "SELECT id, size FROM communities WHERE notebook_id=? AND level=? "
-                "ORDER BY size DESC, id ASC LIMIT ?",
-                (notebook_id, level, limit)).fetchall()
-            communities = []
-            for row in picked:
-                members = db.execute(
-                    "SELECT canonical_name FROM community_members "
-                    "WHERE notebook_id=? AND level=? AND community_id=? "
-                    "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
-                    (notebook_id, level, row["id"], top_k)).fetchall()
-                communities.append(
-                    (row["id"], int(row["size"]),
-                     [m["canonical_name"] or "" for m in members])
-                )
+        total = int(db.execute(
+            "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=? AND level=?",
+            (notebook_id, level)).fetchone()["c"])
+        picked = db.execute(
+            "SELECT id, size FROM communities WHERE notebook_id=? AND level=? "
+            "ORDER BY size DESC, id ASC LIMIT ?",
+            (notebook_id, level, limit)).fetchall()
+        communities = []
+        for row in picked:
+            members = db.execute(
+                "SELECT canonical_name FROM community_members "
+                "WHERE notebook_id=? AND level=? AND community_id=? "
+                "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
+                (notebook_id, level, row["id"], top_k)).fetchall()
+            communities.append(
+                (row["id"], int(row["size"]),
+                 [m["canonical_name"] or "" for m in members])
+            )
         return _community_overview_payload(communities, total, level, limit, top_k)
 
     def relation_provenance_counts(self, notebook_id: str) -> Dict[str, object]:

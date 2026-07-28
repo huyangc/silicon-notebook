@@ -1379,6 +1379,135 @@ def test_the_overview_reads_the_state_row_and_the_ledger_from_one_snapshot(
     assert boards.stale is False
 
 
+def test_the_overview_reads_the_boards_from_the_snapshot_that_stamped_them(
+    repo, monkeypatch
+):
+    """codex 第 12 轮 P2 的前一半:板块列表必须与新鲜度元数据来自**同一份库**。
+
+    并发的社区重建是「整批重铸板块 id」。state 行与账本读在前、板块列表读在后,响应就
+    会把**上一代的新鲜度戳**(``built_at_cluster_seq`` / ``stale``)盖在**新一代的板块
+    id** 上 —— 读者看到的每一条标注都是在描述另一套板块,而这个视图的全部价值就是让人
+    能相信自己看到的标注。
+
+    探针放在账本读之后:那时快照(如果真开了)已经建立,重建提交在它之后,所以「板块
+    列表落在了新一代」这件事只可能来自「板块列表没骑那个快照」。
+    """
+    with repo._write() as db:
+        _state(db, seq=10, community_seq=10)
+        _community(db, "cm-old", [("K1", 1.0)])
+        _seed_complete_ledger(db, seq=10, created_at="2026-01-02T00:00:00")
+
+    store = repo._runtime.unified_kg
+    read_ledger = store.kg_analysis_artifact_rows
+
+    def ledger_then_a_concurrent_board_recast(db, notebook_id):
+        ledger = read_ledger(db, notebook_id)
+        _commit_from_another_connection(repo, lambda write_db: (
+            write_db.execute(
+                "DELETE FROM community_members WHERE notebook_id=?", (NB,)),
+            write_db.execute("DELETE FROM communities WHERE notebook_id=?", (NB,)),
+            _community(write_db, "cm-new", [("K1", 1.0)]),
+            write_db.execute(
+                "DELETE FROM kg_analysis_artifacts WHERE notebook_id=?", (NB,)),
+            _seed_complete_ledger(
+                write_db, seq=10, created_at="2026-01-02T09:00:00"),
+        ))
+        return ledger
+
+    monkeypatch.setattr(
+        store, "kg_analysis_artifact_rows", ledger_then_a_concurrent_board_recast
+    )
+    overview = _service(repo).overview(NB)
+
+    assert [c["id"] for c in overview.boards.payload["communities"]] == ["cm-old"], (
+        "板块列表落在了重铸之后的库上,而新鲜度戳还是重铸之前那一代的 —— "
+        "一份被盖了错世代戳的板块列表"
+    )
+    # 戳本身:上面那条断言之所以是「必须 cm-old」而不是「必须 cm-new」,就是因为这一份
+    # 元数据已经在快照里定死了,板块列表只能配它这一代。
+    assert overview.boards.freshness.built_at_cluster_seq == 10
+
+
+def test_the_overview_reads_the_board_edges_from_the_same_snapshot_as_the_boards(
+    repo, monkeypatch
+):
+    """codex 第 12 轮 P2 的后一半:跨板块边必须与板块列表来自**同一份库**。
+
+    俯瞰图**照着 edges 画连线**,端点是板块 id。板块列表读在前、边读在后,并发重铸提交
+    在中间,画出来的就是一整幅悬空连线 —— 每一条的两端都指向这份响应里根本不存在的板块。
+
+    探针放在板块列表读之后,所以「边落在了新一代」只可能来自「边没骑板块列表那个快照」。
+    """
+    with repo._write() as db:
+        _state(db)
+        _community(db, "cm-a", [("K1", 1.0)])
+        _community(db, "cm-b", [("K2", 1.0)])
+        _seed_complete_ledger(db)
+        _edge(db, "cm-a", "cm-b", 30)
+
+    store = repo._runtime.unified_kg
+    read_boards = store.community_overview_on
+
+    def boards_then_a_concurrent_board_recast(db, notebook_id, **bounds):
+        payload = read_boards(db, notebook_id, **bounds)
+        _commit_from_another_connection(repo, lambda write_db: (
+            write_db.execute(
+                "DELETE FROM kg_community_edges WHERE notebook_id=?", (NB,)),
+            _edge(write_db, "cm-x", "cm-y", 99),
+        ))
+        return payload
+
+    monkeypatch.setattr(
+        store, "community_overview_on", boards_then_a_concurrent_board_recast
+    )
+    view = _service(repo).overview(NB)
+
+    boards = {c["id"] for c in view.boards.payload["communities"]}
+    dangling = [
+        edge for edge in view.board_edges.edges
+        if edge["src"] not in boards or edge["dst"] not in boards
+    ]
+    assert dangling == [], (
+        f"俯瞰图上出现了悬空连线:板块列表是 {sorted(boards)},边却指向 {dangling}"
+    )
+    assert [
+        (edge["src"], edge["dst"], edge["weight"]) for edge in view.board_edges.edges
+    ] == [("cm-a", "cm-b", 30)]
+
+
+def test_each_endpoint_opens_exactly_one_shared_snapshot(repo):
+    """一趟**一个**快照 —— 「每条读各开一个 `read_snapshot()`」和不开一样坏。
+
+    强度如实说明,这条与上面几条互补、不能互相替代:
+      · 它不依赖探针位置,所以「每条读各开一个」这一形态在这里是直接可数的;
+      · 但它只看**本 service 开了几个**。store 自己在方法内部开的那种(自开快照的
+        `community_overview`)在这里数不到 —— 那一档由上面两条行为守卫兜。
+    """
+    with repo._write() as db:
+        _state(db)
+        _community(db, "cm-1", [("K1", 1.0)])
+        _seed_complete_ledger(db)
+        _edge(db, "cm-1", "cm-2", 20)
+        _profile(db, "s-1", mainstream=0.1)
+
+    spy = _SpyStore(repo._runtime.unified_kg)
+    service = _service(repo, store=spy)
+
+    service.overview(NB)
+    assert spy.calls.count("read_snapshot") == 1, (
+        f"总览的四条读没共用一个快照:{spy.calls}"
+    )
+    assert spy.calls.count("community_overview_on") == 1, (
+        "板块列表没经 connection-taking 入口读进来(压根没读,或者走了自开快照的那个"
+        "同名方法)—— 上面那个 1 是空数出来的"
+    )
+
+    service.source_profiles(NB)
+    assert spy.calls.count("read_snapshot") == 2, (
+        f"/sources 的四条读没共用一个快照:{spy.calls}"
+    )
+
+
 # ---------------------------------------------------------------- 记忆化
 
 
@@ -1393,7 +1522,7 @@ def test_overview_reuses_the_expensive_reads_while_the_signature_holds(repo):
     service.overview(NB)
     service.overview(NB)
 
-    assert spy.calls.count("community_overview") == 1
+    assert spy.calls.count("community_overview_on") == 1
     assert spy.calls.count("kg_community_edges_top") == 1
     assert spy.calls.count("state_row") == 2          # 签名每次现读
 
@@ -1422,7 +1551,7 @@ def test_overview_cache_invalidates_when_the_ledger_is_rewritten_at_the_same_seq
 
     assert [c["id"] for c in first.boards.payload["communities"]] == ["cm-old"]
     assert [c["id"] for c in second.boards.payload["communities"]] == ["cm-new"]
-    assert spy.calls.count("community_overview") == 2
+    assert spy.calls.count("community_overview_on") == 2
 
 
 @pytest.mark.parametrize("seed_stat_snapshots", [False, True], ids=["empty", "partial"])
@@ -1494,7 +1623,7 @@ def test_overview_still_caches_while_one_board_dependent_row_survives(repo):
     service.overview(NB)
 
     assert first.ledger_state == LEDGER_PARTIAL, "夹具没落在 partial 档,这条就白测了"
-    assert spy.calls.count("community_overview") == 1
+    assert spy.calls.count("community_overview_on") == 1
 
 
 def test_overview_cache_is_keyed_on_the_request_bounds(repo):

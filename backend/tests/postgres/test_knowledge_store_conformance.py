@@ -3023,6 +3023,71 @@ def test_community_overview_reads_one_repeatable_read_snapshot(postgres_database
     assert payload["communities"][0]["top_members"] == ["Alpha", "Beta"]
 
 
+@pytest.mark.postgres_integration
+def test_board_list_and_board_edges_share_the_caller_snapshot(postgres_database):
+    """codex 第 12 轮 P2 的 **PG 侧**守卫:板块列表与跨板块边骑调用方的**同一个**快照。
+
+    这条与上面那条的分工:上面测的是 `community_overview` 自己开的快照(它内部两条
+    语句),这条测的是 `community_overview_on` —— connection-taking 的那半,骑**调用方**
+    的 `read_snapshot()`,和后面那条跨板块边读共享它。T3 的总览就是这个形状。
+
+    PG 的 READ COMMITTED 是**每条语句**一个快照,所以「板块列表读在前、边读在后,并发
+    重建提交在中间」在这里是真实可复现的:响应会把**旧板块**配上**新边**,而俯瞰图照着
+    edges 画连线 —— 画出来的每一条两端都指向这份响应里根本不存在的板块。
+    """
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    PostgresMigrator(postgres_database).migrate()
+    _seed_catalog(postgres_database)
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+    with postgres_database.write() as connection:
+        store.replace_communities(
+            connection, ANALYSIS_NB, 0,
+            [("cm-a", ["k-a"]), ("cm-b", ["k-b"])],
+            {"k-a": "Alpha", "k-b": "Beta"}, {"k-a": 0.9, "k-b": 0.5}, NOW,
+        )
+        store.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 12, [("cm-a", "cm-b", 30)], [],
+            _analysis_payloads(), NOW,
+        )
+
+    with store.read_snapshot() as connection:
+        payload = store.community_overview_on(
+            connection, ANALYSIS_NB, limit=10, top_k=5
+        )
+        # 板块列表读完之后、边读之前,另一条连接把板块与边整批换成新一代。
+        worker = threading.Thread(
+            target=_recast_boards_and_edges, args=(postgres_database,)
+        )
+        worker.start()
+        worker.join(timeout=30)
+        assert not worker.is_alive(), "并发写者被读事务卡死了"
+        edges = store.kg_community_edges_top(connection, ANALYSIS_NB, 200)
+
+    boards = {row["id"] for row in payload["communities"]}
+    assert boards == {"cm-a", "cm-b"}, "板块列表本身就没落在快照上,这条白测了"
+    dangling = [
+        edge for edge in edges if edge[0] not in boards or edge[1] not in boards
+    ]
+    assert dangling == [], (
+        f"俯瞰图上出现了悬空连线:板块列表是 {sorted(boards)},边却指向 {dangling}"
+    )
+    assert edges == [("cm-a", "cm-b", 30)]
+
+
+def _recast_boards_and_edges(database) -> None:
+    store = PostgresUnifiedKgStore(database, now=lambda: NOW)
+    with database.write() as connection:
+        store.replace_communities(
+            connection, ANALYSIS_NB, 0, [("cm-x", ["k-a"])],
+            {"k-a": "Alpha"}, {"k-a": 0.9}, NOW,
+        )
+        store.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 13, [("cm-x", "cm-y", 99)], [],
+            _analysis_payloads(), NOW,
+        )
+
+
 def _wipe_communities(database) -> None:
     with database.write() as connection:
         connection.execute("DELETE FROM community_members")

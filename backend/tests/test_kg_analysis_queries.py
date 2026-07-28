@@ -984,6 +984,9 @@ def test_both_backend_stores_declare_the_same_analysis_surface():
         "cluster_size_histogram",
         "largest_clusters",
         "community_overview",
+        # ⚠ connection-taking 的那半必须一起钉:查询本体住在它里面,只钉自开入口的话
+        # 一侧把 SQL 改成另一种语义、另一侧不动,这条守卫看不见(codex 第 12 轮 P2)。
+        "community_overview_on",
         "relation_provenance_counts",
     ):
         assert name in SqliteUnifiedKgStore.__dict__, name
@@ -996,15 +999,31 @@ def test_both_backend_stores_declare_the_same_analysis_surface():
 
 
 def inspect_signature(cls, name):
+    """两侧比对用的签名 —— **只把 `db` 的标注摘掉**,其余逐字比。
+
+    connection-taking 的方法第一个参数是那一侧的连接类型(`sqlite3.Connection` 对
+    `Any`),两侧本来就该不同:那是 connection-taking 的应有形态,不是漂移。逐字比会
+    让这条 parity 守卫变成「不许有 connection-taking 方法」。摘掉的**只有它的标注**,
+    参数名/位置/种类/默认值与其余全部参数的标注照比。
+    """
     import inspect
 
-    return str(inspect.signature(getattr(cls, name)))
+    signature = inspect.signature(getattr(cls, name))
+    parameters = [
+        parameter.replace(annotation=inspect.Parameter.empty)
+        if parameter.name == "db" else parameter
+        for parameter in signature.parameters.values()
+    ]
+    return str(signature.replace(parameters=parameters))
 
 
 _ANALYSIS_METHODS = (
     "cluster_size_histogram",
     "largest_clusters",
     "community_overview",
+    # 板块列表的 SQL 在 `_on` 里(自开快照的 `community_overview` 只剩守卫 + 开快照),
+    # 漏了它这条嗅探守卫就只在看一个两行的包装。
+    "community_overview_on",
     "relation_provenance_counts",
     "_read_snapshot",
 )

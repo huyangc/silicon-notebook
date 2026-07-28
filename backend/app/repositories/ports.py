@@ -1057,8 +1057,24 @@ class UnifiedKgStorePort(Protocol):
     # parity 要求的是**语义等价 + 两侧都有守卫**,不是 SQL 逐字相同。
     def cluster_size_histogram(self, notebook_id: str) -> dict[str, object]: ...
     def largest_clusters(self, notebook_id: str, limit: int = 20) -> dict[str, object]: ...
+    # ⚠ `community_overview` 有**两个**入口,刻意的:
+    #   · `community_overview`      自开一个多语句共享快照(手上没有读连接的调用方用);
+    #   · `community_overview_on`   connection-taking,骑调用方的快照。
+    # 后者是给 T3 的总览用的:那一趟要读 state 行、账本、板块列表、跨板块边**四样**,
+    # 板块列表自开快照的话,并发的社区重建提交在中间就会把「上一代的新鲜度戳」与
+    # 「新一代的板块 id」拼进同一份响应(codex 第 12 轮 P2)。查询本体只有一份,住在
+    # `_on` 里;自开入口只负责那道 `_reject_inside_write_transaction` 与开快照。
     def community_overview(
         self, notebook_id: str, *, level: int = 0, limit: int = 50, top_k: int = 5
+    ) -> dict[str, object]: ...
+    @staticmethod
+    def community_overview_on(
+        db: object,
+        notebook_id: str,
+        *,
+        level: int = 0,
+        limit: int = 50,
+        top_k: int = 5,
     ) -> dict[str, object]: ...
     def relation_provenance_counts(self, notebook_id: str) -> dict[str, object]: ...
     # ---------------------------------------- KG 质量分析的预计算产物(T2)
@@ -1135,13 +1151,18 @@ class UnifiedKgStorePort(Protocol):
     # 连接读到提交前的库」,骑调用方连接不存在这个失配)。服务层入口另有一道同语义断言。
     #
     # ⚠ 调用方骑的那条连接必须由 `read_snapshot()` 开 —— 一个**多语句共享快照**,而不是
-    # 裸 `database.connect()`。`/sources` 一趟要发四条语句(state 行 + 账本 + COUNT +
-    # 一页),而两个后端的默认读都是**每条语句各取一个快照**(SQLite 自动提交 /
-    # PostgreSQL READ COMMITTED)。并发的预计算整批重写产物表时只要提交在中间,新写入的
-    # 画像行就会被盖上**上一代**账本的世代戳,`total` 与 `rows` 也可以互相对不上
-    # (codex 第 8 轮 P2)。两侧兑现方式不同(`BEGIN DEFERRED` 的 WAL 快照 /
-    # `BEGIN … READ ONLY` + REPEATABLE READ),语义等价;**参数表刻意为空**,方言细节
-    # 不外泄给后端中性的 service。
+    # 裸 `database.connect()`,而且**一趟只开一个**(每条读各开一个 = 和没开一样)。
+    # 两个端点都是多条读:
+    #   · `/sources`   state 行 + 账本 + COUNT + 一页(codex 第 8 轮 P2);
+    #   · 总览          state 行 + 账本 + 板块列表(`community_overview_on`)+ 跨板块边
+    #                  (codex 第 12 轮 P2)。
+    # 两个后端的默认读都是**每条语句各取一个快照**(SQLite 自动提交 / PostgreSQL
+    # READ COMMITTED)。并发的预计算整批重写产物表、社区重建整批重铸板块 id,只要提交在
+    # 中间:`/sources` 会把新写入的画像行盖上**上一代**账本的世代戳、`total` 与 `rows`
+    # 互相对不上;总览会把「上一代的新鲜度戳」配上「新一代的板块 id」,或者把旧板块配上
+    # 新边 —— 俯瞰图照着画出来的连线是悬空的,而那份数据还盖着另一个世代的戳。
+    # 两侧兑现方式不同(`BEGIN DEFERRED` 的 WAL 快照 / `BEGIN … READ ONLY` +
+    # REPEATABLE READ),语义等价;**参数表刻意为空**,方言细节不外泄给后端中性的 service。
     #
     # 上限:`limit` 两侧都硬 clamp(KG_COMMUNITY_EDGES_MAX / KG_SOURCE_PAGE_MAX),
     # `offset` 收到 [0, ∞)(它天然被表的行数兜住)。截断绝不静默 —— 调用方拿返回条数

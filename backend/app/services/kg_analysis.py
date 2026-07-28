@@ -26,16 +26,16 @@
   · `state_row`                  单行主键点读
   · `kg_analysis_artifact_rows`  ≤5 行复合主键点读
   · `kg_community_edges_top`     ≤20 万行(T2 硬上限)的分片扫 + 有界 top-N
-  · `community_overview`         COUNT + `ORDER BY size DESC LIMIT ≤200` + ≤200 次有界 top-K
+  · `community_overview_on`      COUNT + `ORDER BY size DESC LIMIT ≤200` + ≤200 次有界 top-K
   · `kg_source_profile_page`     COUNT + 一页 ≤200 行 + ≤200 次主键点查(仅 /sources)
 
 后两条里读**明细表**的那两条(`kg_community_edges_top` / `kg_source_profile_page`)还带
 一道账本闸:账本行不在就整条跳过(见 `_detail_rows_are_readable`)。这不是性能优化而是
 正确性 —— 无条件查会让同一份响应既说「这份产物不在」又把明细行发出去。
 
-**随库规模线性增长的有两条,不是一条**(别把这句读成「只有 community_overview 要留意」):
+**随库规模线性增长的有两条,不是一条**(别把这句读成「只有板块列表要留意」):
 
-  · `community_overview` —— 板块数没有结构性上限,而 `communities` 上**没有 size 索引**,
+  · `community_overview_on` —— 板块数没有结构性上限,而 `communities` 上**没有 size 索引**,
     所以 `ORDER BY size DESC LIMIT 200` 要排该 notebook 的全部板块行。它因此进了下面的
     记忆化:签名不变就不再跑。
   · `kg_source_profile_page` —— 两处随来源数增长:`COUNT(*)` 是 O(来源数)(走主键前缀,
@@ -424,14 +424,16 @@ class KgAnalysisService:
 
     collaborators 全部是窄 seam,便于单测直接构造(无需给 facade 打桩):
 
-    - ``database``:一个读快照来源。后端相关(sqlite/postgres 各自的 database),由构造
-      方注入,本 service 只当它是「能 connect() 出读连接、并能回答 in_write_transaction
-      的东西」。
+    - ``database``:**只当写事务的问询对象**。后端相关(sqlite/postgres 各自的
+      database),由构造方注入,本 service 只读它的 ``in_write_transaction``(入口守卫用)。
+      读连接一条都不从这里开 —— 全部经 ``unified_kg.read_snapshot()``,见下条。
     - ``unified_kg``:后端相关的 **UnifiedKgStore 实例**。本 service 只调它的**有界读**
       (`state_row` / `kg_analysis_artifact_rows` / `kg_community_edges_top` /
-      `kg_source_profile_page` / `community_overview`),**绝不**调那四条全表重活。
-      多语句的那两处骑它的 `read_snapshot()`(后端中性的多语句共享快照,参数表为空 ——
-      两侧怎么兑现是 store 的事)。
+      `kg_source_profile_page` / `community_overview_on`),**绝不**调那四条全表重活。
+      五条读全是 connection-taking 的,两个端点各骑**一个** `read_snapshot()`(后端中性
+      的多语句共享快照,参数表为空 —— 两侧怎么兑现是 store 的事)。板块列表因此走
+      `community_overview_on` 而不是自开快照的 `community_overview`:后者会在这一趟里
+      另起一份库。
     - ``now``:时钟 seam。
     """
 
@@ -454,9 +456,10 @@ class KgAnalysisService:
     def _reject_inside_write_transaction(self, what: str) -> None:
         """本 service 的读**不得**在调用方的写事务内跑。当场硬失败。
 
-        ``unified_kg.community_overview`` 自己也有一道同名守卫(它自开连接),但本
-        service 的其余四条读是 connection-taking 的、骑本方法开的读连接 —— 那道守卫
-        对它们不生效。而危害是一样的:
+        本 service 的五条读**全部**是 connection-taking 的、骑 `read_snapshot()` 开出来
+        的那条读连接(板块列表走 `community_overview_on`,不是那个自开快照的同名方法),
+        所以 store 侧那道只装在自开连接入口上的同名守卫对它们一条都不生效 —— 这道必须
+        在本 service 的入口自己有。而危害是一样的:
 
         1. 正确性:SQLite 的 `write()` 每次另开一条独立连接、PostgreSQL 每次从池里另借
            一条,所以在写事务里读到的是那个事务**提交前**的库 —— 一份过时的报告,而且
@@ -510,45 +513,54 @@ class KgAnalysisService:
         `_signature_tracks_board_recasts`。
         """
         self._reject_inside_write_transaction("KG 分析总览")
-        # ⚠ 共享快照,不是裸 `connect()`:state 行与账本**必须来自同一份库**。板块那一格
-        # 的合并世代取自账本的 `built_at_cluster_seq`,落后量却是拿 state 的
-        # `cluster_mutation_seq` 减出来的(见 `_community_freshness`)—— 两次读劈开在
-        # 一次并发预计算的两侧,减出来就是个负数,而负数在本契约里是「库被手工改过」
-        # 的异常信号。凭空报一个假异常比不报更糟。
+        # ⚠ **四条读,一个快照**(codex 第 8 轮 P2 定的形,第 12 轮 P2 补完)。裸
+        # `connect()` 在两个后端上都是「每条语句各取一个快照」(SQLite 自动提交 /
+        # PostgreSQL READ COMMITTED),而**为每条读各开一个 `read_snapshot()` 与这个一样
+        # 坏** —— 快照要能跨读共享才有意义。这一趟并发的写有两种,各自会拼出一种谎:
+        #
+        #   · 预计算整批重写产物表:板块那一格的合并世代取自账本的
+        #     `built_at_cluster_seq`,落后量却是拿 state 的 `cluster_mutation_seq` 减出来
+        #     的(见 `_community_freshness`)—— 两次读劈在提交两侧,减出来是个负数,而负数
+        #     在本契约里是「库被手工改过」的异常信号。凭空报一个假异常比不报更糟。
+        #   · 社区重建整批重铸板块 id:账本/state 读在前、板块列表读在后,响应就会把
+        #     **上一代的新鲜度戳**盖在**新一代的板块 id** 上;板块列表读在前、跨板块边读
+        #     在后,就是**旧板块配新边** —— 俯瞰图照着 edges 画连线,画出来的是悬空线。
+        #
+        # 方言细节留在 store 里(见 `read_snapshot`),本 service 不判后端。
         with self._unified_kg.read_snapshot() as db:
             state_row = self._unified_kg.state_row(db, notebook_id)
             ledger = self._unified_kg.kg_analysis_artifact_rows(db, notebook_id)
-        state = _state_view(state_row)
-        level = _ledger_level(ledger)
-        artifacts = _artifact_views(
-            ledger, state.kg_mutation_seq, state.cluster_mutation_seq
-        )
-        signature = _signature(state, ledger)
-        key = (notebook_id, level, int(board_limit), int(top_members), int(edge_limit))
-        cached = self._cache_get(key, signature)
-        if cached is None:
-            # ⚠ 顺序:板块列表先取(它自开只读快照),再开一条读连接取边。刻意**不**把
-            # 两者套进同一个 connect():SQLite 上那是同一条线程复用连接(没差),但
-            # PostgreSQL 上会变成嵌套借池连接。跨查询本来就没有共享快照(T2 的
-            # `_precompute_kg_analysis` 已如实记过这一点),所以套起来买不到一致性。
-            boards_payload = self._unified_kg.community_overview(
-                notebook_id, level=level, limit=board_limit, top_k=top_members
+            state = _state_view(state_row)
+            level = _ledger_level(ledger)
+            signature = _signature(state, ledger)
+            key = (
+                notebook_id, level,
+                int(board_limit), int(top_members), int(edge_limit),
             )
-            # ⚠ 明细表**只在账本行在场时**才查(见 `_detail_rows_are_readable`)。
-            # 账本说这份产物不在,却把明细表里的行画进俯瞰图,就是同屏既说「缺失」
-            # 又把它的边画出来 —— 而那些行按定义是悬空的。顺带也省掉这次扫描。
-            edge_rows: List[Tuple[str, str, int]] = []
-            if _detail_rows_are_readable(ARTIFACT_COMMUNITY_EDGES, ledger):
-                with self._database.connect() as db:
+            cached = self._cache_get(key, signature)
+            if cached is None:
+                # 骑上面那条快照的 connection-taking 入口(`community_overview` 那个自开
+                # 快照的同名方法在这里是错的 —— 它会另起一份库)。
+                boards_payload = self._unified_kg.community_overview_on(
+                    db, notebook_id, level=level, limit=board_limit, top_k=top_members
+                )
+                # ⚠ 明细表**只在账本行在场时**才查(见 `_detail_rows_are_readable`)。
+                # 账本说这份产物不在,却把明细表里的行画进俯瞰图,就是同屏既说「缺失」
+                # 又把它的边画出来 —— 而那些行按定义是悬空的。顺带也省掉这次扫描。
+                edge_rows: List[Tuple[str, str, int]] = []
+                if _detail_rows_are_readable(ARTIFACT_COMMUNITY_EDGES, ledger):
                     edge_rows = self._unified_kg.kg_community_edges_top(
                         db, notebook_id, edge_limit
                     )
-            cached = (boards_payload, edge_rows)
-            # ⚠ 只在「板块一被重铸,签名必然跟着动」成立时才写缓存。不成立的那一档
-            # (账本里一行依赖板块的产物都没有 → 同事务作废是 no-op)写进去就是一份
-            # 会无限期说谎的缓存,完整理由见 `_signature_tracks_board_recasts`。
-            if _signature_tracks_board_recasts(ledger):
-                self._cache_put(key, signature, cached)
+                cached = (boards_payload, edge_rows)
+                # ⚠ 只在「板块一被重铸,签名必然跟着动」成立时才写缓存。不成立的那一档
+                # (账本里一行依赖板块的产物都没有 → 同事务作废是 no-op)写进去就是一份
+                # 会无限期说谎的缓存,完整理由见 `_signature_tracks_board_recasts`。
+                if _signature_tracks_board_recasts(ledger):
+                    self._cache_put(key, signature, cached)
+        artifacts = _artifact_views(
+            ledger, state.kg_mutation_seq, state.cluster_mutation_seq
+        )
         boards_payload, edge_rows = cached
         return KgAnalysisOverview(
             notebook_id=notebook_id,

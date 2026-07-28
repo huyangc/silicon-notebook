@@ -1111,11 +1111,47 @@ class UnifiedKgStore:
     def community_overview(
         self, notebook_id: str, *, level: int = 0, limit: int = 50, top_k: int = 5
     ) -> Dict[str, object]:
+        """主题板块列表(C1)的**自开快照**入口 —— 给手上没有读连接的调用方用。
+
+        查询本体在 `community_overview_on`(connection-taking)。这里只多做两件事:
+        一道 `_reject_inside_write_transaction`(自开连接才需要,骑别人连接不需要),
+        以及开一次 REPEATABLE READ 只读事务 —— total 与板块明细必须看同一份库,否则
+        并发 rebuild_communities 一劈就会出现「有 1200 个板块,一个都没有」这种自相
+        矛盾的载荷(READ COMMITTED 每条语句各取一次快照)。
+
+        ⚠ **一次调用只开一个快照**:两件事不能拆成两个 `with`,也不能让调用方为每条读
+        各开一个 —— 那和没有快照一样坏,而且在 PG 上每个 `with` 还各借一条池连接
+        (codex 第 8/12 轮 P2)。
+        """
+        self._reject_inside_write_transaction("主题板块列表")
+        with self._read_snapshot(repeatable=True) as db:
+            return self.community_overview_on(
+                db, notebook_id, level=level, limit=limit, top_k=top_k
+            )
+
+    @staticmethod
+    def community_overview_on(
+        db: Any,
+        notebook_id: str,
+        *,
+        level: int = 0,
+        limit: int = 50,
+        top_k: int = 5,
+    ) -> Dict[str, object]:
         """主题板块列表(C1):板块 id / 规模 / 按 centrality 降序的前 K 个代表概念。
 
-        **两条语句,跑在一次 REPEATABLE READ 只读事务里**(`_read_snapshot`):total 与
-        板块明细必须看同一份库,否则并发 rebuild_communities 一劈就会出现「有 1200 个
-        板块,一个都没有」这种自相矛盾的载荷(READ COMMITTED 每条语句各取一次快照)。
+        **connection-taking**:骑调用方的读连接,不自开连接。存在的理由是 T3 的总览
+        (`KgAnalysisService.overview`)一趟要读 state 行、账本、板块列表、跨板块边**四
+        样**,它们必须来自**同一份库** —— 板块列表自开一个快照的话,并发的社区重建提交
+        在中间就会把「上一代的新鲜度戳」与「新一代的板块 id」拼进同一份响应,俯瞰图照
+        着这两样画出来的连线是悬空的(codex 第 12 轮 P2)。自开快照的调用方走上面那个
+        同名入口。
+
+        本方法自己也是**两条语句**,所以调用方给的必须是 `read_snapshot()` 开出来的连接
+        (REPEATABLE READ)而不是裸 `connect()`(READ COMMITTED 每条语句各取一次快照)。
+        **不**在这里补一道 `_reject_inside_write_transaction`:骑调用方连接不存在「另借
+        一条池连接读到提交前的库」这个失配,服务层入口另有一道同语义断言;而 staticmethod
+        也够不到 `self.database`。
 
         ⚠ 与 SQLite 侧**形态分岔**,理由是两侧的瓶颈不同:
           · SQLite 是同进程文件访问,逐板块 `ORDER BY centrality DESC LIMIT K` 的往返
@@ -1136,39 +1172,37 @@ class UnifiedKgStore:
         截断绝不静默:返回 ``total`` / ``returned`` / ``truncated``,每个板块另带
         ``top_members_truncated``(该板块成员数是否超过 K)。
         """
-        self._reject_inside_write_transaction("主题板块列表")
         level = int(level)
         limit = _clamp(limit, COMMUNITY_OVERVIEW_MAX)
         top_k = _clamp(top_k, COMMUNITY_TOP_MEMBERS_MAX)
-        with self._read_snapshot(repeatable=True) as db:
-            total = int(db.execute(
-                "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=%s AND level=%s",
-                (notebook_id, level)).fetchone()["c"])
-            rows = db.execute(
-                """
-                WITH picked AS (
-                  SELECT id, size FROM communities
-                  WHERE notebook_id=%s AND level=%s
-                  ORDER BY size DESC, id COLLATE "C" ASC LIMIT %s
-                ), ranked AS (
-                  SELECT m.community_id AS community_id,
-                         m.canonical_name AS canonical_name,
-                         ROW_NUMBER() OVER (
-                           PARTITION BY m.community_id
-                           ORDER BY m.centrality DESC, m.canonical_id COLLATE "C" ASC
-                         ) AS rn
-                  FROM community_members m
-                  WHERE m.notebook_id=%s AND m.level=%s
-                    AND m.community_id IN (SELECT id FROM picked)
-                )
-                SELECT p.id AS id, p.size AS size,
-                       r.canonical_name AS canonical_name, r.rn AS rn
-                FROM picked p
-                LEFT JOIN ranked r ON r.community_id = p.id AND r.rn <= %s
-                ORDER BY p.size DESC, p.id COLLATE "C" ASC, r.rn ASC
-                """,
-                (notebook_id, level, limit, notebook_id, level, top_k),
-            ).fetchall()
+        total = int(db.execute(
+            "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=%s AND level=%s",
+            (notebook_id, level)).fetchone()["c"])
+        rows = db.execute(
+            """
+            WITH picked AS (
+              SELECT id, size FROM communities
+              WHERE notebook_id=%s AND level=%s
+              ORDER BY size DESC, id COLLATE "C" ASC LIMIT %s
+            ), ranked AS (
+              SELECT m.community_id AS community_id,
+                     m.canonical_name AS canonical_name,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY m.community_id
+                       ORDER BY m.centrality DESC, m.canonical_id COLLATE "C" ASC
+                     ) AS rn
+              FROM community_members m
+              WHERE m.notebook_id=%s AND m.level=%s
+                AND m.community_id IN (SELECT id FROM picked)
+            )
+            SELECT p.id AS id, p.size AS size,
+                   r.canonical_name AS canonical_name, r.rn AS rn
+            FROM picked p
+            LEFT JOIN ranked r ON r.community_id = p.id AND r.rn <= %s
+            ORDER BY p.size DESC, p.id COLLATE "C" ASC, r.rn ASC
+            """,
+            (notebook_id, level, limit, notebook_id, level, top_k),
+        ).fetchall()
         communities: List[Tuple[str, int, List[str]]] = []
         for row in rows:
             if not communities or communities[-1][0] != row["id"]:
