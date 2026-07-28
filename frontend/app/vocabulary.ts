@@ -120,6 +120,18 @@ export const CHECKUP_FIX: Record<string, string> = {
   rebuild_index: "重建索引",
 };
 
+// 同一批修复动作**已触发、后台执行中**时的按钮文案。修复都是后台 job(点完到
+// count 下降之间有一段真空期),按钮必须在这段时间里禁用并改文案,否则用户会反复
+// 点、每点一次就再排一份同样的活。文案按各自动作的语义写,不是笼统的「处理中」
+// ——「补齐向量」变「补齐中…」、「重新解析」变「解析中…」,让用户知道在等什么。
+export const CHECKUP_FIX_BUSY: Record<string, string> = {
+  reparse: "解析中…",
+  backfill_vectors: "补齐中…",
+  extract_kg: "分析中…",
+  fold_index: "更新中…",
+  rebuild_index: "重建中…",
+};
+
 /**
  * 严格查表：命中返回映射值，未命中返回 `fallback`——永远不会是 `value` 本身。
  *
