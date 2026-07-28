@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -106,7 +106,7 @@ import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from 
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
-import { sourceHealthGroups, checkupCount, checkupAlertSignature } from "./checkup-view";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -220,7 +220,7 @@ import {
   type UnifiedKgStatus,
 } from "./workspace-model";
 import { resolveDocumentCapacity } from "./document-limit";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -762,6 +762,9 @@ export default function Home() {
   const [createDesc, setCreateDesc] = useState("");
   const [docTypeOptions, setDocTypeOptions] = useState<Array<{ id: string; label: string }>>([]);
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
+  // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
+  // 内容哈希在同 notebook 内去重,重复提交不会建出重复来源,但会白传一遍并再跑一次解析。
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [stagedDocTypes, setStagedDocTypes] = useState<string[]>([]);
   // 与 stagedDocTypes 同序等长：用户是否**手动**动过这一项的类型下拉框。auto-detect
   // 自动回填不置位（那是系统建议、非用户表态）；上传时据此发 doc_type_explicit，让后端
@@ -777,6 +780,10 @@ export default function Home() {
     stagedDocTypeTouchedRef.current = stagedDocTypeTouched;
   }, [stagedDocTypeTouched]);
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
+  // 来源详情的「重新解析」是**同步等完**的整篇重解析(走 MinerU/解析器,大 PDF 可能数分钟),
+  // 不是后台 job——期间图标按钮必须禁用并换成转圈,否则用户只看到一个毫无反应的按钮、
+  // 反复点就会把同一篇重复解析若干遍。
+  const [reparsingSource, setReparsingSource] = useState(false);
   const [sourceElements, setSourceElements] = useState<SourceElement[]>([]);
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   const [toast, setToast] = useState("");
@@ -881,6 +888,11 @@ export default function Home() {
   // 修复触发后短暂轮询 checkup 到此刻(反映 count 下降):reparse/backfill 是后台 job、
   // 无 build 忙碌位,不走三系统聚合 poll,故用这个有界窗口驱动一条专门的 checkup 轮询。
   const [checkupRepairPollUntil, setCheckupRepairPollUntil] = useState(0);
+  // 已触发、后台仍在跑的体检修复:分组 key → 解除条件。解除条件按**修复的形状**分两种
+  // (reparse 逐轮修一批 / backfill_vectors 一次修全库),规则与判定都在 checkup-view.ts
+  // 的 repairRelease / isRepairing,那里也记着一条刻意保留的取舍——改之前先读那段注释。
+  // 有界轮询窗口结束 / 切库是两种共用的兜底,保证按钮不会永久卡死。
+  const [repairingFix, setRepairingFix] = useState<Record<string, RepairRelease>>({});
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
@@ -1245,17 +1257,49 @@ export default function Home() {
   useEffect(() => {
     setCheckup(null);
     setCheckupRepairPollUntil(0);
+    setRepairingFix({});  // 忙碌位是 per-notebook 的,跟体检结果一起清
     const nb = currentNotebookId;
     if (!nb) return;
     void fetchCheckup(nb).then((c) => {
       if (activeNotebookIdRef.current === nb) setCheckup(c);
     }).catch(() => {});
   }, [currentNotebookId]);
+  // 修复忙碌位的兜底解除:有界轮询窗口一关(健康即停 / 10 分钟到期),就不再有任何东西
+  // 能把「修复中…」改回来了——按证据解除(count 变了)是主路径,见 repairingFix 声明处;
+  // 这条兜底保证按钮永不会因为轮询提前结束而卡在禁用态。
+  useEffect(() => {
+    if (checkupRepairPollUntil > 0) return;
+    setRepairingFix((previous) => (Object.keys(previous).length === 0 ? previous : {}));
+  }, [checkupRepairPollUntil]);
+  // 体检结果一变,就把**已经不在结果里**的分组的忙碌位摘掉。这条同时干两件事:
+  //   ① group-gone 的正常解除路径 —— 组没了 = 那一轮修复见效(卡片也随之卸载)。
+  //   ② 防止旧条目被后来的新问题继承(codex 第 4 轮 P2)。没有这一步,条目只会在
+  //      轮询窗口结束时才清:H4 修好后若窗口仍因别的项(比如 H2)开着,期间新上传
+  //      又造出缺向量、H4 重新出现,那条陈旧条目会把新卡片直接锁死——而此刻根本
+  //      没有 backfill job 在跑。按「当前还活着的分组键」收敛即可,不必引入代次号。
+  useEffect(() => {
+    const alive = new Set(sourceHealthGroups(checkup).map((g) => g.key));
+    setRepairingFix((previous) => {
+      const keys = Object.keys(previous);
+      if (keys.every((key) => alive.has(key))) return previous;  // 无变化时保持引用,不触发重渲染
+      const next: Record<string, RepairRelease> = {};
+      for (const key of keys) if (alive.has(key)) next[key] = previous[key];
+      return next;
+    });
+  }, [checkup]);
   // 体检修复触发后的有界轮询:reparse/backfill(乃至 H6/H7/H8 的既有构建入口)都是
   // 后台 job,点完不会立即反映到 count。看板开着且 checkupRepairPollUntil 未到期时,
   // 每 8s 重拉一次 checkup,直到健康(healthy)或到期即停——不做无界轮询(承效率约束:
   // 体检含 H8 磁盘探针,只在用户显式修复的窗口内刷新)。
   useEffect(() => {
+    // 过期但没归零的时间戳必须在这里显式清掉(codex 第 1 轮 P2)。场景:修复挂起期间用户
+    // 把看板关了,过了 10 分钟窗口才重开——下面那行会因「已过期」早退,不装 interval,
+    // 于是再没有任何东西会把时间戳清零,上面那条兜底 effect 也就永远不会重跑,
+    // repairingFix 里那条记录把按钮**无限期**锁在「修复中…」。归零后由兜底 effect 接手。
+    if (checkupRepairPollUntil > 0 && checkupRepairPollUntil <= Date.now()) {
+      setCheckupRepairPollUntil(0);
+      return;
+    }
     if (!analytics || !currentNotebookId || checkupRepairPollUntil <= Date.now()) return;
     const nb = currentNotebookId;
     let cancelled = false;
@@ -1378,34 +1422,55 @@ export default function Home() {
   const bumpCheckupRepairPoll = () => setCheckupRepairPollUntil(Date.now() + 10 * 60 * 1000);
   // H2/H3 修复:批量重新解析命中项样本(source_ids 来自 checkup.sample,后端按 notebook
   // 作用域过滤)。样本有上界(≤20),命中更多时逐轮修复、每轮 count 下降。
-  const runReparse = async (nb: string, sourceIds: string[]) => {
-    if (sourceIds.length === 0) return;
+  //
+  // 返回值 = 「后台真的在跑了吗」,给按钮的忙碌态用:只有 true 才把这一组标成修复中并
+  // 禁用按钮。未受理/报错必须回 false,否则按钮会锁在「解析中…」而后台其实什么都没干。
+  const runReparse = async (nb: string, sourceIds: string[]): Promise<boolean> => {
+    if (sourceIds.length === 0) return false;
     try {
       const r = await reparseSources(nb, sourceIds);
+      // 一篇都没排上是**合法**结果:样本是体检那一刻的快照,期间来源可能已被删除,或
+      // 后端按类型排除(memory/knowhow 合成源)。此时既不能说「已开始重新解析 0 篇」,
+      // 也不能 arm 轮询/置忙碌位——后台根本没活在跑,按钮会白锁到窗口结束(codex 第 2
+      // 轮 P2)。只重拉体检与来源列表把陈旧的 count 拨正。
+      if (r.scheduled.length === 0) {
+        setToast("这些来源已不在或无需重新解析；已刷新状态");
+        reloadCheckup(nb);
+        loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+        return false;
+      }
       setToast(`已开始重新解析 ${r.scheduled.length} 篇来源；完成后会自动更新`);
       bumpCheckupRepairPoll();
       reloadCheckup(nb);
       // 让来源列表的状态标签也及时反映(分析中/已就绪)。
       loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
-    } catch (e) { reportError(e); }
+      return true;
+    } catch (e) { reportError(e); return false; }
   };
   // H4/H5 修复:后台补齐该 notebook 缺失的检索向量(只补缺失、幂等)。
-  const runBackfillVectors = async (nb: string) => {
+  const runBackfillVectors = async (nb: string): Promise<boolean> => {
     try {
       const r = await backfillVectors(nb);
       if (!r.accepted) {
         // 后端未配嵌入服务 → 不受理(codex):提示配置、**不** arm 轮询——否则空转 10min、
-        // 而缺向量永远补不上、H4/H5 清不掉。
+        // 而缺向量永远补不上、H4/H5 清不掉。同理不置忙碌位:按钮要立刻能再点。
         setToast("未配置嵌入服务，无法补齐检索向量");
-        return;
+        return false;
       }
       setToast("已开始补齐检索向量；完成后会自动更新");
       bumpCheckupRepairPoll();
       reloadCheckup(nb);
-    } catch (e) { reportError(e); }
+      return true;
+    } catch (e) { reportError(e); return false; }
   };
   const [kgReviewBusy, setKgReviewBusy] = useState(false);
+  // 正在处理的单条待确认合并(候选 id + 这次点的是合并还是拒绝)。decideMerge 落决定后会
+  // 顺带跑一次 rebuildUnifiedKg + 重拉整张图,是这一列里最贵的一步;不锁住的话用户在
+  // 若干行上连点就会并发排出若干次全量概念合并重建。整列一起禁用(不只是被点的那行)。
+  const [decidingMerge, setDecidingMerge] = useState<{ id: string; confirm: boolean } | null>(null);
   const [reviewAllJob, setReviewAllJob] = useState<MergeReviewJob | null>(null);
+  // 「全部自动判重」的 POST 在飞(还没拿到 job)。见 reviewAllMerges 里的注释。
+  const [reviewAllStarting, setReviewAllStarting] = useState(false);
   const [reviewAllRunning, setReviewAllRunning] = useState(false);
   // 切库/刷新：先查后端预审 job 真相，仍 running 就把进度接回（后端 job 不因前端刷新而停），
   // 否则才清空。避免「后台在跑、前端却显示未运行」。
@@ -2734,6 +2799,16 @@ export default function Home() {
   }
 
   async function confirmUpload() {
+    if (!currentNotebookId || stagedFiles.length === 0 || uploadBusy) return;
+    setUploadBusy(true);
+    try {
+      await confirmUploadInner();
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  async function confirmUploadInner() {
     if (!currentNotebookId || stagedFiles.length === 0) return;
     const formData = new FormData();
     stagedFiles.forEach((file) => formData.append("files", file));
@@ -2824,9 +2899,18 @@ export default function Home() {
   }
 
   async function reparseSource() {
-    if (!sourceDetail) return;
+    if (!sourceDetail || reparsingSource) return;
     const notebookId = currentNotebookId ?? sourceDetail.notebook_id;
-    const updated = await parseSource(sourceDetail.id);
+    setReparsingSource(true);
+    try {
+      await reparseSourceInner(sourceDetail.id, notebookId);
+    } finally {
+      setReparsingSource(false);
+    }
+  }
+
+  async function reparseSourceInner(sourceId: string, notebookId: string | null) {
+    const updated = await parseSource(sourceId);
     setSources((previous) => previous.map((source) => source.id === updated.id ? updated : source));
     await openSourceDetail(updated);
     await loadNotebookCollection();
@@ -3704,13 +3788,19 @@ export default function Home() {
   }
 
   async function reviewAllMerges() {
-    if (!currentNotebookId) return;
+    if (!currentNotebookId || reviewAllStarting) return;
     const nb = currentNotebookId;
+    // 忙碌位必须在 await **之前**置(对齐 reviewPendingMerges 的 setKgReviewBusy):
+    // 按钮原本只看 reviewAllJob?.status,而那个要等 POST 回来才写,中间这段窗口按钮
+    // 仍可点、点几下就排几个全量预审 job。不复用 reviewAllRunning 是为了不让轮询
+    // effect 去追一个还不存在的 job。
+    setReviewAllStarting(true);
     try {
       await reviewAllMergesRequest(nb);
       setReviewAllJob({ status: "running", total: pendingMerges.length, done: 0, error: "" });
       setReviewAllRunning(true);
     } catch (err) { reportError(err); }
+    finally { setReviewAllStarting(false); }
   }
 
   function focusKgGraphNode(nodeId: string) {
@@ -3757,7 +3847,8 @@ export default function Home() {
   }
 
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
-    if (!currentNotebookId) return;
+    if (!currentNotebookId || decidingMerge) return;
+    setDecidingMerge({ id: candidate.id, confirm });
     try {
       if (confirm) await confirmMerge(currentNotebookId, candidate.id);
       else await rejectMerge(currentNotebookId, candidate.id);
@@ -3771,6 +3862,7 @@ export default function Home() {
       else setConceptDetail(null);
       if (!selected) setNodeCtx(null);
     } catch (err) { reportError(err); }
+    finally { setDecidingMerge(null); }
   }
 
   async function induceSchemas() {
@@ -5347,8 +5439,8 @@ export default function Home() {
                   ))}
                 </div>
                 <div className="tag-row">
-                  <button className="new-pill" disabled={docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>上传 {stagedFiles.length} 个文件</button>
-                  <button className="sort-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
+                  <button className="new-pill" disabled={uploadBusy || docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>{uploadBusy ? "上传中…" : `上传 ${stagedFiles.length} 个文件`}</button>
+                  <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
                 </div>
               </div>
             )}
@@ -5550,10 +5642,18 @@ export default function Home() {
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 <div className="source-detail-actions">
-                  <button className="icon-button subtle-icon" onClick={() => reparseSource().catch(reportError)} title="重新解析">
-                    <ExternalLink size={23} />
+                  <button
+                    className="icon-button subtle-icon"
+                    disabled={reparsingSource}
+                    onClick={() => reparseSource().catch(reportError)}
+                    title={reparsingSource ? "重新解析中…" : "重新解析"}
+                    aria-label={reparsingSource ? "重新解析中…" : "重新解析"}
+                  >
+                    {reparsingSource
+                      ? <Loader2 size={23} className="busy-spin" aria-hidden="true" />
+                      : <ExternalLink size={23} />}
                   </button>
-                  <button className="icon-button subtle-icon danger-icon" onClick={() => confirmDeleteSource(sourceDetail)} title="删除来源">
+                  <button className="icon-button subtle-icon danger-icon" disabled={reparsingSource} onClick={() => confirmDeleteSource(sourceDetail)} title="删除来源">
                     <Trash2 size={20} />
                   </button>
                 </div>
@@ -5687,12 +5787,41 @@ export default function Home() {
                     <p className="tool-hint">部分来源需要处理：</p>
                     {groups.map((g) => {
                       const titles = g.sample.map(titleOf).filter(Boolean).slice(0, 6);
-                      const runFix = () => {
+                      // 「这一组的修复还在后台跑」——判定规则在 checkup-view.ts::isRepairing。
+                      //
+                      // extract_kg 是例外:它**只**看 buildingKg,不进 repairingFix(见下方
+                      // runFix 里的理由)。isRepairing 对它恒为 false(从没写过那个键),
+                      // 忙碌态完全由 buildingKg 表达——那个位失败时会被 startKgBuild 清掉。
+                      const repairing = isRepairing(repairingFix[g.key], g.count)
+                        || (g.fix === "extract_kg" && buildingKg);
+                      const runFix = async () => {
                         const nb = currentNotebookId;
-                        if (!nb) return;
-                        if (g.fix === "reparse") void runReparse(nb, g.sample);
-                        else if (g.fix === "backfill_vectors") void runBackfillVectors(nb);
-                        else if (g.fix === "extract_kg") { startKgBuild(nb); bumpCheckupRepairPoll(); }
+                        if (!nb || repairing) return;
+                        // extract_kg **只**认 buildingKg,不另记 repairingFix(codex 第 1 轮 P2)。
+                        // startKgBuild 是 fire-and-forget:同步置 buildingKg,POST 失败时自己在
+                        // 异步回调里清掉,但**不回传受理结果**。若这里也记一份 repairingFix,
+                        // 那份记录在建图请求被拒时没人清得掉(count 没变、buildingKg 已归位),
+                        // 按钮会一直锁到轮询窗口结束。少记一份 = 少一个解不开的锁。
+                        if (g.fix === "extract_kg") {
+                          startKgBuild(nb);
+                          bumpCheckupRepairPoll();
+                          return;
+                        }
+                        // 先乐观置忙碌位(POST 在飞的这段也不能再点),未受理/报错再撤销。
+                        setRepairingFix((previous) => ({ ...previous, [g.key]: repairRelease(g.fix, g.count) }));
+                        let started = false;
+                        try {
+                          if (g.fix === "reparse") started = await runReparse(nb, g.sample);
+                          else if (g.fix === "backfill_vectors") started = await runBackfillVectors(nb);
+                        } finally {
+                          if (!started) {
+                            setRepairingFix((previous) => {
+                              const next = { ...previous };
+                              delete next[g.key];
+                              return next;
+                            });
+                          }
+                        }
                       };
                       return (
                         <div className="index-card index-tone-warn" key={g.key}>
@@ -5708,8 +5837,15 @@ export default function Home() {
                           </div>
                           {!isReader && (
                             <div className="index-ctas">
-                              <button type="button" className="index-cta primary" onClick={runFix}>
-                                {label(CHECKUP_FIX, g.fix, "处理")}
+                              <button
+                                type="button"
+                                className="index-cta primary"
+                                disabled={repairing}
+                                onClick={() => { void runFix(); }}
+                              >
+                                {repairing
+                                  ? label(CHECKUP_FIX_BUSY, g.fix, "处理中…")
+                                  : label(CHECKUP_FIX, g.fix, "处理")}
                               </button>
                             </div>
                           )}
@@ -5810,7 +5946,17 @@ export default function Home() {
                             )}
                             {kg.ready && kg.pending_sources === 0 && (
                               <>
-                                <button type="button" className="index-cta" onClick={relinkFromKgView}>补上关联</button>
+                                {/* 补连是**同步等完**的(relinkFromKgView 里 await),而上面那个 busy
+                                    只看 KG 构建、不含 relinkingKg——所以这里必须自己带忙碌位。
+                                    与知识图谱视图侧栏的同一动作(disabled + 「补连中…」)保持一致。 */}
+                                <button
+                                  type="button"
+                                  className="index-cta"
+                                  disabled={relinkingKg}
+                                  onClick={relinkFromKgView}
+                                >
+                                  {relinkingKg ? "补连中…" : "补上关联"}
+                                </button>
                               </>
                             )}
                           </div>
@@ -5850,7 +5996,14 @@ export default function Home() {
                       告警 +「重建索引」(复用既有全量重建 runScaleIndexOp("rebuild")),避免与「最新」并列
                       自相矛盾。H7 索引过期不另设:下方正常态本就按 scale_index.state 渲染「已过期 → 更新
                       索引」(与 H7 同源),重复一遍反成冗余控件。*/}
-                  {checkupCount(checkup, "H8") > 0 ? (
+                  {checkupCount(checkup, "H8") > 0 ? (() => {
+                    // H8 这一格不像下面的正常态那样「忙碌时整排 CTA 换成取消」——它常驻显示
+                    // 告警,所以按钮得自己带忙碌位,否则点完重建后按钮外观毫无变化,用户会一直
+                    // 点(runScaleIndexOp 内部虽有早退守卫拦住重复提交,但界面上看不出来)。
+                    const rebuilding = buildingScaleIndex
+                      || indexStatus.scale_index.building
+                      || indexStatus.scale_index.state === "queued";
+                    return (
                     <div className="index-card index-tone-error">
                       <span className="index-ic" aria-hidden="true"><AlertTriangle size={19} /></span>
                       <div className="index-main">
@@ -5863,13 +6016,15 @@ export default function Home() {
                       {!isReader && (
                         <div className="index-ctas">
                           <button type="button" className="index-cta primary"
+                                  disabled={rebuilding}
                                   onClick={() => runScaleIndexOp("rebuild", bumpCheckupRepairPoll)}>
-                            重建索引
+                            {rebuilding ? "重建中…" : "重建索引"}
                           </button>
                         </div>
                       )}
                     </div>
-                  ) : (() => {
+                    );
+                  })() : (() => {
                     const s = indexStatus.scale_index;
                     const v = describeScaleIndex(s);
                     // 本地忙碌位兜底(与知识图谱/概念合并两行一致):server-derived state 靠聚合轮询
@@ -6191,18 +6346,26 @@ export default function Home() {
                 <button
                   className="ghost-button"
                   onClick={reviewAllMerges}
-                  disabled={!pendingMerges.length || reviewAllJob?.status === "running"}
+                  disabled={!pendingMerges.length || reviewAllStarting || reviewAllJob?.status === "running"}
                 >
                   {reviewAllJob?.status === "running"
                     ? `全部判重中… ${reviewAllJob.done}/${reviewAllJob.total}`
-                    : "全部自动判重"}
+                    : reviewAllStarting
+                      ? "全部判重中…"
+                      : "全部自动判重"}
                 </button>
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
                     <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
                     <span className="kg-merge-actions">
-                      <button onClick={() => decideMerge(m, true)}>合并</button>
-                      <button onClick={() => decideMerge(m, false)}>拒绝</button>
+                      {/* 落决定会连带跑一次全量概念合并重建 + 重拉整张图,是这一列里最贵的
+                          一步。任一行在处理中就把整列锁住,只有被点的那颗改文案。 */}
+                      <button disabled={decidingMerge !== null} onClick={() => decideMerge(m, true)}>
+                        {decidingMerge?.id === m.id && decidingMerge.confirm ? "合并中…" : "合并"}
+                      </button>
+                      <button disabled={decidingMerge !== null} onClick={() => decideMerge(m, false)}>
+                        {decidingMerge?.id === m.id && !decidingMerge.confirm ? "分开中…" : "拒绝"}
+                      </button>
                     </span>
                   </div>
                 ))}
@@ -7067,8 +7230,11 @@ function KnowledgeBrowser({
   onStatusFilter: (value: string) => void;
   onStatus: (id: string, status: string) => void;
   onOwner: (id: string, owner: string) => void;
-  onFindDuplicates: () => void;
-  onMerge: (sourceId: string, intoId: string) => void;
+  // 返回 Promise:面板据此在扫描期间禁用「查重」并改文案(全库规范名归一化比对,大库不是
+  // 瞬时的)。父层的 `() => findDuplicates(kind).catch(reportError)` 本就返回 Promise。
+  onFindDuplicates: () => void | Promise<void>;
+  // 同上,返回 Promise 供面板做「合并中…」的忙碌态。
+  onMerge: (sourceId: string, intoId: string) => void | Promise<void>;
   reload: () => void;
   tier?: string;
   onPropose?: (id: string) => void;
@@ -7079,7 +7245,21 @@ function KnowledgeBrowser({
   readOnly?: boolean;
 }) {
   const [ctx, setCtx] = useState<Record<string, NodeContext>>({});
+  const [dupBusy, setDupBusy] = useState(false);
+  // 正在合并的重复条目 id。onMerge 会连着重拉知识列表、类型统计并**重跑一次查重**,
+  // 是这个面板里最慢的一步;不锁住的话在几个重复组上连点会并发排出若干次全量重扫。
+  const [mergingId, setMergingId] = useState<string | null>(null);
   useEffect(() => { setCtx({}); }, [kind]);
+  const runFindDuplicates = async () => {
+    if (dupBusy) return;
+    setDupBusy(true);
+    try { await onFindDuplicates(); } finally { setDupBusy(false); }
+  };
+  const runMerge = async (sourceId: string, intoId: string) => {
+    if (mergingId) return;
+    setMergingId(sourceId);
+    try { await onMerge(sourceId, intoId); } finally { setMergingId(null); }
+  };
   const statuses = ["all", ...KNOWLEDGE_STATUS_OPTIONS];
   // Build tabs purely from the dynamic /knowledge-types response.
   const tabs: Array<{ key: string; label: string; count?: number }> = types.map((t) => ({
@@ -7106,7 +7286,11 @@ function KnowledgeBrowser({
           {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
-        {!readOnly && <button className="sort-button" onClick={onFindDuplicates}>查重</button>}
+        {!readOnly && (
+          <button className="sort-button" disabled={dupBusy} onClick={() => { void runFindDuplicates(); }}>
+            {dupBusy ? "查重中…" : "查重"}
+          </button>
+        )}
       </div>
       {duplicates !== null && (
         <div className="knowledge-panel">
@@ -7120,8 +7304,12 @@ function KnowledgeBrowser({
                 <div className="dup-member" key={member.id}>
                   <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{label(KNOWLEDGE_STATUS, member.status, "其他")}</span></span>
                   {!readOnly && memberIndex > 0 && (
-                    <button className="sort-button" onClick={() => onMerge(member.id, group.members[0].id)}>
-                      合并到第 1 条
+                    <button
+                      className="sort-button"
+                      disabled={mergingId !== null}
+                      onClick={() => { void runMerge(member.id, group.members[0].id); }}
+                    >
+                      {mergingId === member.id ? "合并中…" : "合并到第 1 条"}
                     </button>
                   )}
                 </div>

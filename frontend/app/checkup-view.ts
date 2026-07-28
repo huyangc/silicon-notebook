@@ -72,6 +72,52 @@ export function sourceHealthGroups(checkup: CheckupResponse | null): SourceHealt
   return [...byLabel.values()];
 }
 
+/**
+ * 已触发、后台仍在跑的修复该**何时**恢复可点。修复都是后台 job,POST 返回 ≠ 修好,
+ * 中间这段真空期按钮必须禁用(后端 backfill-vectors / reparse 都没有单飞守卫,
+ * 重复提交会真的重复干活),但解除条件不能一刀切——两类修复的形状不同。
+ */
+export type RepairRelease =
+  // 一轮只修一批:reparse 的样本有上界(≤20 篇),命中更多时本来就是逐轮修复、每轮
+  // count 下降。count 一变就恢复可点,让用户接着修下一批。
+  | { release: "count-changed"; count: number }
+  // 一次修全库:backfill_vectors 是 notebook 级、幂等。它的 count **不能**当完成信号
+  // ——看板 H4/H5 的口径排除活跃租约(backend/app/services/checkup.py 里 H4/H5 那两条
+  // 的注释:正在嵌入的源不算缺向量,否则「甚至触发并发 backfill 重复模型调用」),
+  // 于是 job 逐源补齐的过程中 count 就一路递减,拿它解锁会在 job 还剩大半时放行,
+  // 又能排一次全库补齐——正好是后端注释点名要防的那件事。只有该组彻底消失才解除。
+  | { release: "group-gone" };
+
+/**
+ * 按修复动作决定解除条件。`count` 是触发那一刻该组的命中数。
+ *
+ * ⚠ 已知取舍(codex 第 3 轮 P2,**刻意保留**):backfill job 若因嵌入服务不可用而每源
+ * 都失败,H4/H5 不会归零(后端逐源 `except Exception: pass`、且 backfill **没有**任何
+ * 持久 job 状态——kg_build_jobs / ask_jobs / merge_review_jobs 都有,唯独它没有),
+ * 于是按钮会被锁到有界轮询窗口结束(≤10 分钟)或用户切库/重开看板为止,即便此刻已
+ * 没有 job 在跑。这是有意的:反方向(提前放行)会重新打开「并发全库补齐 = 重复付费
+ * 模型调用」那道口子,而补齐失败的成因几乎都是嵌入服务不可用——立刻重试也还是失败,
+ * 等待的代价远低于重复调用。真正的修法是给 backfill 加持久 job 状态(新表 + 迁移 +
+ * PG 对等),那是独立特性,不在「按钮点完不能再点」这个改动的范围内。
+ * 改这里之前请先读完上面这段,并把 checkup-view.test.mjs 里钉住该取舍的用例一并处理。
+ */
+export function repairRelease(fix: string, count: number): RepairRelease {
+  return fix === "backfill_vectors"
+    ? { release: "group-gone" }
+    : { release: "count-changed", count };
+}
+
+/**
+ * 这一组现在是否仍显示「修复中…」。`entry` 为 undefined 表示没有在跑的修复。
+ * `currentCount` 是本次渲染时该组的最新命中数。
+ */
+export function isRepairing(entry: RepairRelease | undefined, currentCount: number): boolean {
+  if (!entry) return false;
+  // group-gone:只要这一组还在(还渲染得出这张卡),就还在修复中。
+  if (entry.release === "group-gone") return true;
+  return entry.count === currentCount;
+}
+
 /** 某个体检项的命中计数(未命中/无该项时 0)。H7/H8 由 page.tsx 用它判定索引可信度。 */
 export function checkupCount(checkup: CheckupResponse | null, code: string): number {
   if (!checkup) return 0;
