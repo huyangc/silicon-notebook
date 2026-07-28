@@ -1466,6 +1466,17 @@ class AskService:
                     detail={"count": len(memory_hits)},
                     duration_ms=memory_ms,
                 ))
+            else:
+                # 零命中也要记一步:候选查询与 embedding 调用照样发生了,把
+                # memory_ms 丢掉,「轨迹覆盖整轮」这句就不成立(codex 第 10 轮 P2)。
+                # 用 skip 而不是 memory —— 「记忆」这个标签只在真的找到东西时出现,
+                # 与 test_memory_step_reports_recall_not_attribution 的口径一致;
+                # 检索器本来就用 skip 记录跳过的工作,这里沿用同一套词汇。
+                checked_pre_trace(TraceStep(
+                    step_type="skip",
+                    summary="未找到相关记忆",
+                    duration_ms=memory_ms,
+                ))
 
         if self._primary_llm_unconfigured():
             if structured_batch is not None:

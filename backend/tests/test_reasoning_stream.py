@@ -358,7 +358,11 @@ def test_memory_step_reports_recall_not_attribution(tmp_path, monkeypatch):
 
 
 def test_reasoning_trace_omits_memory_step_without_hits(tmp_path, monkeypatch):
-    """没命中记忆就不记这一步 —— 「参考了 0 条记忆」在绝大多数笔记本里都是噪声。"""
+    """没命中就不打「记忆」标签 —— 那个标签只在真的找到东西时出现。
+
+    但那段耗时不能跟着一起消失:候选查询与 embedding 调用照样发生了,丢掉它
+    「轨迹覆盖整轮」就不成立(codex 第 10 轮 P2)。所以改记一条 skip 步,沿用检索器
+    记录跳过工作的同一套词汇。"""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
@@ -409,7 +413,14 @@ def test_reasoning_trace_omits_memory_step_without_hits(tmp_path, monkeypatch):
     events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
     kinds = [event["step"]["step_type"] for event in events if event["event"] == "progress"]
     assert "memory" not in kinds
-    assert kinds[:2] == ["start", "intent"]
+    assert kinds[:3] == ["start", "intent", "skip"]
+    # 零命中那一步仍须带上真实耗时,否则「覆盖整轮」的总耗时会系统性偏低。
+    skipped = [
+        event["step"] for event in events
+        if event["event"] == "progress" and event["step"]["step_type"] == "skip"
+    ][0]
+    assert skipped["summary"] == "未找到相关记忆"
+    assert isinstance(skipped["duration_ms"], int)
     # 已经推送过的步骤必须出现在 final 里,否则 final 一替换在途 turn 就把用户
     # 刚看着走过的轨迹当场抹掉,历史里也留不下(codex 第 2 轮 P2)。
     assert [row["step_type"] for row in events[-1]["response"]["reasoning_trace"]][0] \

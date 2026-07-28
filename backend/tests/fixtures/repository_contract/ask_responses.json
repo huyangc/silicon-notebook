@@ -439,6 +439,12 @@
             "summary": "已按确认后的问题理解开始检索"
           },
           {
+            "detail": {},
+            "duration_ms": 1,
+            "step_type": "skip",
+            "summary": "未找到相关记忆"
+          },
+          {
             "detail": {
               "source": "planner",
               "sub_queries": [
@@ -600,6 +606,12 @@
             "duration_ms": null,
             "step_type": "intent",
             "summary": "已按确认后的问题理解开始检索"
+          },
+          {
+            "detail": {},
+            "duration_ms": 1,
+            "step_type": "skip",
+            "summary": "未找到相关记忆"
           },
           {
             "detail": {
