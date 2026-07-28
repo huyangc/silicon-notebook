@@ -763,12 +763,35 @@ class KnowledgeStore:
         ordinal = {r["id"]: i for i, r in enumerate(order_rows)}
         return texts, ordinal
     def _enrich_evidence(self, db, evidence):
-        texts, _ = self._element_texts(db, [e.get("element_id") for e in evidence])
+        element_ids = list(
+            dict.fromkeys(e.get("element_id") for e in evidence if e.get("element_id"))
+        )
+        details = {}
+        if element_ids:
+            ph = ",".join("?" for _ in element_ids)
+            rows = db.execute(
+                f"SELECT id, source_id, element_type, location_label, text "
+                f"FROM source_elements WHERE id IN ({ph})",
+                element_ids,
+            ).fetchall()
+            details = {row["id"]: row for row in rows}
         out = []
         for e in evidence:
-            out.append({"quoted_span": e.get("quoted_span", ""),
-                        "source_title": e.get("source_title", "") or e.get("source_id", ""),
-                        "element_text": texts.get(e.get("element_id", ""), e.get("quoted_span", ""))})
+            enriched = dict(e)
+            detail = details.get(e.get("element_id", ""))
+            if detail is not None:
+                enriched.update({
+                    "source_id": detail["source_id"],
+                    "element_id": detail["id"],
+                    "element_type": detail["element_type"],
+                    "location_label": detail["location_label"],
+                    "element_text": detail["text"],
+                })
+            else:
+                enriched["element_text"] = e.get("quoted_span", "")
+            enriched["quoted_span"] = e.get("quoted_span", "")
+            enriched["source_title"] = e.get("source_title", "") or enriched.get("source_id", "")
+            out.append(enriched)
         return out
     def node_context(self, notebook_id, object_id):
         self.get_notebook(notebook_id)

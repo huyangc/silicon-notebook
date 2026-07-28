@@ -439,6 +439,23 @@ button {
   font-size: 26px;
 }
 
+/* 长任务按钮点完必须「看得出来点过了」。这两个类都显式写死了 background/color，
+   浏览器默认的 :disabled 变灰对它们完全无效——不给这条规则，即使 JSX 上挂了
+   disabled，按钮看起来也还是可点的。文案改成「解析中…」这类进行态是主信号，
+   这里补上视觉信号。对齐既有的 .index-cta:disabled。 */
+.icon-button:disabled,
+.sort-button:disabled,
+.ghost-button:disabled {
+  opacity: .55;
+  cursor: default;
+}
+
+/* 图标按钮进行态：文字按钮靠改文案表达「在跑」，纯图标按钮没有文案可改，
+   换成转圈图标。复用 startup-spin 这一条既有 keyframes，不另起一套。 */
+.busy-spin {
+  animation: startup-spin .9s linear infinite;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: repeat(2, 44px);
