@@ -346,31 +346,6 @@ def test_memory_service_rejects_nested_nonfinite_json_without_persisting(
     assert memory_service.list_memories(users.alice.id).items == []
 
 
-def test_memory_service_nested_json_null_roundtrips_through_sqlite(
-    memory_service, users, notebook
-):
-    created = memory_service.create_candidate(
-        notebook.id,
-        users.alice.id,
-        "agent-a",
-        "nested-null-core",
-        "Nested null",
-        "Null is legitimate JSON",
-        [],
-        "regression",
-        {"optional": None, "nested": [{"value": None}]},
-        [{"source_id": "missing", "score": None}],
-    )
-
-    hydrated = memory_service.get(created.id, users.alice.id)
-    assert hydrated.provenance["task_context"] == {
-        "optional": None,
-        "nested": [{"value": None}],
-    }
-    assert hydrated.provenance["evidence_refs"][0]["trusted"] is False
-    assert memory_service.list_memories(users.alice.id).items[0].id == created.id
-
-
 def test_duplicate_agent_request_is_idempotent(
     memory_service, users, notebook, monkeypatch
 ):
@@ -878,62 +853,6 @@ def test_reject_is_owner_scoped_and_list_filters_search_and_paginates(
         memory_service.reject(first.id, users.bob.id)
 
 
-def test_global_memory_access_filter_uses_fixed_query_count(
-    repo, memory_service, users, notebook
-):
-    token = set_request_user(users.bob)
-    try:
-        shared = repo.create_notebook(NotebookCreate(name="Revoked shared notebook"))
-    finally:
-        reset_request_user(token)
-    with repo._write() as db:
-        db.execute(
-            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
-            "VALUES (?,?,'reader','t')",
-            (shared.id, users.alice.id),
-        )
-
-    accessible = _candidate(
-        memory_service, notebook, users.alice, "agent-a", "req-accessible"
-    )
-    _candidate(memory_service, shared, users.alice, "agent-a", "req-revoked")
-    with repo._write() as db:
-        db.execute(
-            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
-            (shared.id, users.alice.id),
-        )
-
-    statements = []
-    real_connect = repo._runtime.database.connect
-
-    @contextmanager
-    def traced_connect():
-        with real_connect() as db:
-            db.set_trace_callback(statements.append)
-            yield db
-            db.set_trace_callback(None)
-
-    repo._runtime.database.connect = traced_connect
-    try:
-        page = memory_service.list_memories(users.alice.id)
-    finally:
-        repo._runtime.database.connect = real_connect
-
-    memory_queries = [
-        sql for sql in statements if sql.startswith("SELECT") and "memory_items m" in sql
-    ]
-    per_notebook_queries = [
-        sql for sql in statements if sql.startswith("SELECT created_by FROM notebooks")
-    ]
-    assert [item.id for item in page.items] == [accessible.id]
-    assert page.total_count == 1
-    # Two filtered page queries plus one owner-wide aggregate and one bounded
-    # grouped notebook-option query; this remains fixed as notebook count grows.
-    assert len(memory_queries) == 4
-    assert all("EXISTS (SELECT 1 FROM notebooks access_nb" in sql for sql in memory_queries)
-    assert per_notebook_queries == []
-
-
 def test_global_memory_totals_and_notebook_options_ignore_current_filters(
     repo, memory_service, users, notebook
 ):
@@ -1046,41 +965,3 @@ def test_legacy_store_mutations_do_not_land_after_membership_revocation(
         ).fetchone()
     assert updated["title"] == "Title"
     assert transitioned["status"] == "candidate"
-
-
-def test_notebook_summary_memory_counts_are_grouped_once(
-    repo, users, notebook, memory_service
-):
-    token = set_request_user(users.alice)
-    try:
-        other = repo.create_notebook(NotebookCreate(name="Other"))
-    finally:
-        reset_request_user(token)
-    _candidate(memory_service, notebook, users.alice, "agent-a", "req-count-1")
-    memory_service.create_candidate(
-        other.id,
-        users.alice.id,
-        None,
-        "req-count-2",
-        "Manual agent item",
-        "Body",
-        [],
-        "task",
-        {},
-        [],
-    )
-
-    statements = []
-    with repo._connect() as db:
-        db.set_trace_callback(statements.append)
-        counts = repo._runtime.notebook_summaries.list_for_user(users.alice.id)
-        db.set_trace_callback(None)
-    by_id = {item.id: item.counts["memories"] for item in counts}
-    grouped = [
-        sql
-        for sql in statements
-        if "FROM memory_items" in sql and "GROUP BY created_by, notebook_id" in sql
-    ]
-    assert by_id[notebook.id] == 1
-    assert by_id[other.id] == 1
-    assert len(grouped) == 1

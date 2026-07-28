@@ -2,15 +2,13 @@
 from __future__ import annotations
 
 import ast
-from contextlib import AbstractContextManager
 import inspect
 import json
 import os
 import subprocess
 import sys
-from dataclasses import fields, is_dataclass
 from pathlib import Path
-from typing import get_origin, get_type_hints
+from typing import get_type_hints
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -99,16 +97,6 @@ print(json.dumps(sorted(
     assert json.loads(completed.stdout) == []
 
 
-def test_neutral_database_and_facade_do_not_expose_sqlite_local_connection_cleanup():
-    from app.repositories.ports import RepositoryDatabasePort
-    from app.services.repository_facade import RepositoryFacade
-    from app.services.sqlite_repository import SQLiteRepository
-
-    assert "close_local" not in RepositoryDatabasePort.__dict__
-    assert "close_local" not in RepositoryFacade.__dict__
-    assert "close_local" in SQLiteRepository.__dict__
-
-
 def test_bundle_is_neutral_and_declares_every_store_seat():
     bundle_path = ROOT / NEUTRAL_MODULES[1]
     assert bundle_path.exists()
@@ -146,45 +134,6 @@ def test_persistence_bundle_factory_create_has_a_pinned_public_contract():
         "seams": RepositorySeams,
         "return": PersistenceBundle,
     }
-
-
-def test_ask_turn_result_is_neutral_and_preserves_the_conversation_history_shape():
-    from app.repositories.ports import AskStateStorePort, PreparedAskTurn
-    from app.repositories.sqlite.ask_state_store import AskStateStore
-
-    assert is_dataclass(PreparedAskTurn)
-    assert tuple(field.name for field in fields(PreparedAskTurn)) == (
-        "conversation_id", "history",
-    )
-    assert get_type_hints(AskStateStorePort.prepare_turn)["return"] is PreparedAskTurn
-    assert get_type_hints(AskStateStore.prepare_turn)["return"] is PreparedAskTurn
-    assert get_type_hints(AskStateStorePort.prepare_turn_for_job)["return"] == (
-        PreparedAskTurn | None
-    )
-    assert get_type_hints(AskStateStore.prepare_turn_for_job)["return"] == (
-        PreparedAskTurn | None
-    )
-
-
-def test_mention_alias_scan_is_a_portable_store_operation():
-    from app.repositories.ports import UnifiedKgStorePort
-    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
-
-    assert "mention_alias_candidate_batches" in UnifiedKgStorePort.__dict__
-    port_signature = inspect.signature(UnifiedKgStorePort.mention_alias_candidate_batches)
-    store_signature = inspect.signature(UnifiedKgStore.mention_alias_candidate_batches)
-    assert port_signature.replace(return_annotation=inspect.Signature.empty) == (
-        store_signature.replace(return_annotation=inspect.Signature.empty)
-    )
-    assert get_origin(
-        get_type_hints(UnifiedKgStorePort.mention_alias_candidate_batches)["return"]
-    ) is AbstractContextManager
-    lifecycle_source = (ROOT / "backend/app/services/knowledge_lifecycle.py").read_text(
-        encoding="utf-8"
-    )
-    assert "_close_local" not in lifecycle_source
-    assert ".claim_name_rows(" not in lifecycle_source
-    assert ".mention_scan_matches(" not in lifecycle_source
 
 
 def test_newly_neutral_service_type_hints_resolve_without_backend_names():

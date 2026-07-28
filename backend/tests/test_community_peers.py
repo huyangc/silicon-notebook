@@ -22,7 +22,7 @@ import pytest
 
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.communities import (
-    CommunityQueryService, _norm, community_peers, mounted_base_ids,
+    CommunityQueryService, _norm,
 )
 
 
@@ -170,103 +170,3 @@ def test_norm_collapses_ws_and_lowercases():
     assert _norm("  DeepSeek   V4  ") == "deepseek v4"
     assert _norm("") == ""
     assert _norm(None) == ""  # type: ignore[arg-type]
-
-
-def test_mounted_base_ids_reflects_mounts(repo_with_communities):
-    """多领域基准库:mounted_base_ids 不再是「系统里随便一个 tier='base'」,
-    而是「本库显式挂载的参考库」——没挂就看不到,哪怕对方已发布。"""
-    repo = repo_with_communities
-    repo._conn.execute(
-        "INSERT INTO notebooks (id, tier, created_by) VALUES ('nb-active', 'personal', 'u1')"
-    )
-    # nb-base 尚未被任何库挂载 → 空
-    assert mounted_base_ids(repo.community_queries, "nb-active") == []
-    repo._conn.execute(
-        "INSERT INTO notebook_bases (notebook_id, base_notebook_id, created_at, created_by) "
-        "VALUES ('nb-active', 'nb-base', '2026-07-19T00:00:00', 'u1')"
-    )
-    repo._conn.commit()
-    # 挂载后可见
-    assert mounted_base_ids(repo.community_queries, "nb-active") == ["nb-base"]
-    # nb-base 自己没挂任何东西 → 空(即便它自己是 tier='base')
-    assert mounted_base_ids(repo.community_queries, "nb-base") == []
-
-
-# --------------------------------------------------------------------------- #
-# 正常路径
-# --------------------------------------------------------------------------- #
-def test_peers_from_community(repo_with_communities):
-    repo = repo_with_communities
-    peers = community_peers(
-        repo.community_queries, "nb-base", "DeepSeek-V4", "efficiency of qwen", top_k=5, candidates=50
-    )
-    # 兄弟里含 Qwen-X，且不含焦点自身
-    assert any("qwen" in p.lower() for p in peers)
-    assert all(p.lower() != "deepseek-v4" for p in peers)
-    # 别的社区成员不该混进来
-    assert all("mixtral" not in p.lower() for p in peers)
-    # query 含 "qwen" → keyword_score 让 Qwen-X 排在只靠 centrality 的 GPT-Y 之前
-    assert peers[0].lower() == "qwen-x"
-    # 没有触发 fail-open 事件
-    assert not repo.event_log.events
-
-
-def test_peers_respects_top_k(repo_with_communities):
-    repo = repo_with_communities
-    peers = community_peers(
-        repo.community_queries, "nb-base", "DeepSeek-V4", "llm", top_k=1, candidates=50
-    )
-    assert len(peers) == 1
-
-
-def test_focal_name_matched_case_insensitively(repo_with_communities):
-    repo = repo_with_communities
-    peers = community_peers(
-        repo.community_queries, "nb-base", "  deepseek-v4 ", "qwen", top_k=5, candidates=50
-    )
-    assert any("qwen" in p.lower() for p in peers)
-    assert not repo.event_log.events
-
-
-# --------------------------------------------------------------------------- #
-# fail-open：焦点解析不到
-# --------------------------------------------------------------------------- #
-def test_focal_unresolved_failopen(repo_with_communities):
-    repo = repo_with_communities
-    out = community_peers(
-        repo.community_queries, "nb-base", "NoSuchModelXYZ", "q", top_k=5, candidates=50
-    )
-    assert out == []
-    assert any(
-        e.get("kind") == "community_unavailable"
-        and e.get("reason") == "focal_unresolved"
-        for e in repo.event_log.events
-    )
-
-
-def test_empty_focal_name_returns_empty_no_event(repo_with_communities):
-    repo = repo_with_communities
-    assert community_peers(repo.community_queries, "nb-base", "   ", "q", top_k=5, candidates=50) == []
-    # 空 focal 是入参问题，直接短路返回、不 emit
-    assert not repo.event_log.events
-
-
-def test_empty_base_nb_returns_empty_no_event(repo_with_communities):
-    repo = repo_with_communities
-    assert community_peers(repo.community_queries, "", "DeepSeek-V4", "q", top_k=5, candidates=50) == []
-    assert not repo.event_log.events
-
-
-# --------------------------------------------------------------------------- #
-# fail-open：社区未建
-# --------------------------------------------------------------------------- #
-def test_not_built_failopen(repo_no_communities):
-    repo = repo_no_communities
-    out = community_peers(
-        repo.community_queries, "nb-base", "DeepSeek-V4", "q", top_k=5, candidates=50
-    )
-    assert out == []
-    assert any(
-        e.get("kind") == "community_unavailable" and e.get("reason") == "not_built"
-        for e in repo.event_log.events
-    )

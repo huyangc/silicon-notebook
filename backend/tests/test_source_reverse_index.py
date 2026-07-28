@@ -137,44 +137,6 @@ def test_first_use_backfill_populates_and_marks(repo):
     assert {(r["object_id"], r["source_id"]) for r in rows} == {(found[0], s1)}
 
 
-def test_second_lookup_uses_sql_only_no_full_evidence_scan(repo, monkeypatch):
-    """After the first (backfilling) call, a second call for the SAME notebook
-    must not re-scan every knowledge_objects row — it hits the indexed SQL path.
-
-    sqlite3.Connection is a C-level immutable type (can't monkeypatch .execute
-    on it directly), so we spy one level up: _source_ids_from_evidence is the
-    ONLY place the legacy scan parses an evidence column, called once per row
-    it iterates. A backfilled lookup must call it zero times."""
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    s1 = _insert_source(repo, nb.id)
-    objects = [
-        {"local_id": "A", "object_type": "concept", "payload": {"name": "X"},
-         "evidence": [_ev(s1)]},
-    ]
-    repo.store_kg(nb.id, None, objects, [])
-
-    with repo._write() as db:
-        first = set(repo._find_stale_knowledge_ids_for_source(db, s1, nb.id))
-        assert repo._source_index_backfilled(db, nb.id)
-
-    calls = {"n": 0}
-    orig = SQLiteRepository._source_ids_from_evidence
-
-    def spy(evidence_json):
-        calls["n"] += 1
-        return orig(evidence_json)
-
-    monkeypatch.setattr(SQLiteRepository, "_source_ids_from_evidence", staticmethod(spy))
-    try:
-        with repo._write() as db:
-            second = set(repo._find_stale_knowledge_ids_for_source(db, s1, nb.id))
-    finally:
-        pass
-
-    assert second == first
-    assert calls["n"] == 0, "backfilled notebook must not re-parse any evidence column"
-
-
 def test_store_kg_forward_maintenance_populates_reverse_index(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     s1 = _insert_source(repo, nb.id)

@@ -34,14 +34,6 @@ def repo(tmp_path, monkeypatch):
     r = SQLiteRepository(Settings()); bind_all_embedding_clients(r, FakeEmbedder(dim=16)); bind_chat_client(r, "ask_answer", FakeLLM())
     return r
 
-def test_schema_has_conversations_and_fk(repo):
-    with repo._connect() as db:
-        cols = {row[1] for row in db.execute("PRAGMA table_info(answers)").fetchall()}
-        assert "conversation_id" in cols
-        tbls = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        assert "conversations" in tbls
-
-
 def _seed(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, None, [{"local_id": "C1", "object_type": "concept",

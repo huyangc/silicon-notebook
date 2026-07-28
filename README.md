@@ -90,6 +90,8 @@ bash scripts/check.sh
 
 `scripts/check.sh` is the complete offline local gate: backend tests, smoke/contract checks, frontend tests and type checking, and the production frontend build.
 
+Database-specific coverage now targets the direct PostgreSQL backend. Retired tests for the SQLite backend implementation, SQLite-to-PostgreSQL import/forward-shadow, and cross-backend parity are no longer part of the active suite.
+
 ## Product flow
 
 1. Create a notebook. The app immediately opens an `Untitled notebook`; it does not ask for metadata first.

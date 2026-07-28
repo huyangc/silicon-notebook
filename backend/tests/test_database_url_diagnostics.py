@@ -15,14 +15,12 @@ SECRET_URL = "mysql://redacted-user:redacted-password@db.example/notebook?access
 REDACTED_IDENTITY = "postgresql://db.example:5432/notebook"
 
 
-def test_database_status_is_backend_neutral_and_credential_free(tmp_path):
-    sqlite = database_status(f"sqlite:///{tmp_path / 'db.sqlite'}")
+def test_postgres_database_status_is_credential_free():
     postgres = database_status(
         "postgresql://secret-user:secret-password@db.example:5432/notebook"
         "?access_token=secret"
     )
 
-    assert sqlite == f"database=sqlite path={tmp_path / 'db.sqlite'}"
     assert postgres == "database=postgresql host=db.example:5432 db=notebook"
     assert "secret" not in postgres
 
@@ -48,13 +46,7 @@ def _load_script(module_name: str):
 
 @pytest.mark.parametrize(
     "settings_kwargs",
-    (
-        {"database_url": SECRET_URL},
-        {
-            "database_url": "sqlite:///.local/silicon_notebook.db",
-            "shadow_database_url": SECRET_URL,
-        },
-    ),
+    ({"database_url": SECRET_URL},),
 )
 def test_settings_validation_errors_keep_database_url_secrets_out_of_strings(settings_kwargs):
     with pytest.raises(ValidationError) as captured:

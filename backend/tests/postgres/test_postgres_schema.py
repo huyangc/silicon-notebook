@@ -1,0 +1,257 @@
+from __future__ import annotations
+
+import re
+import shutil
+import threading
+import uuid
+from pathlib import Path
+
+import pytest
+
+from app.core.config import Settings
+from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
+from tests.postgres.conftest import (
+    _database_catalog,
+    _url_with_search_path,
+    _validate_database_catalog,
+)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+MIGRATIONS_PATH = (
+    REPO_ROOT / "backend" / "app" / "repositories" / "postgres" / "migrations"
+)
+TEST_SCHEMA_PATTERN = re.compile(r"^sn_test_[0-9a-f]{32}$")
+
+
+@pytest.mark.postgres_integration
+def test_schema_on_utf8_database_with_non_c_default_collation(
+    postgres_non_c_database,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 11
+    with postgres_non_c_database.connect() as conn:
+        row = conn.execute(
+            "SELECT current_database() AS database, "
+            "current_setting('server_encoding') AS encoding, "
+            "to_jsonb(d) AS catalog FROM pg_database AS d "
+            "WHERE datname=current_database()"
+        ).fetchone()
+    catalog = _database_catalog(row)
+    _validate_database_catalog(catalog, expected="non-c")
+    assert catalog.encoding == "UTF8"
+    assert catalog.provider == "i"
+    assert catalog.provider_locale == "en-US"
+
+
+@pytest.mark.postgres_integration
+def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database):
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.current_version() == 0
+    assert migrator.migrate() == 11
+    assert migrator.migrate() == 11
+    assert migrator.current_version() == 11
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 11
+
+
+@pytest.mark.postgres_integration
+def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_path):
+    from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate() == 11
+
+    copied = tmp_path / "migrations"
+    shutil.copytree(MIGRATIONS_PATH, copied)
+    first = copied / "0001_initial.sql"
+    first.write_text(first.read_text(encoding="utf-8") + "\n-- drift\n", encoding="utf-8")
+    changed = PostgresMigrator(postgres_database, migrations=load_migrations(copied))
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        changed.migrate()
+
+
+@pytest.mark.postgres_integration
+def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
+    import psycopg
+    from psycopg import sql
+
+    from app.repositories.postgres.database import PostgresDatabase
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    schemas = [f"sn_test_{uuid.uuid4().hex}" for _ in range(2)]
+    assert all(TEST_SCHEMA_PATTERN.fullmatch(schema) for schema in schemas)
+    databases = []
+    with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
+        for schema in schemas:
+            conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        for schema in schemas:
+            settings = Settings(
+                database_url=_url_with_search_path(postgres_scope.base_url, schema),
+                postgres_pool_min_size=1,
+                postgres_pool_max_size=1,
+            )
+            databases.append(PostgresDatabase(settings, REPO_ROOT))
+
+        barrier = threading.Barrier(2)
+        versions: list[int] = []
+        failures: list[BaseException] = []
+
+        def migrate(database) -> None:
+            try:
+                barrier.wait(timeout=5)
+                versions.append(PostgresMigrator(database).migrate())
+            except BaseException as exc:  # pragma: no cover - asserted below
+                failures.append(exc)
+
+        workers = [
+            threading.Thread(target=migrate, args=(database,)) for database in databases
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=20)
+        assert not any(worker.is_alive() for worker in workers)
+        assert failures == []
+        assert sorted(versions) == [
+            POSTGRES_SCHEMA_MANIFEST.postgres_version,
+            POSTGRES_SCHEMA_MANIFEST.postgres_version,
+        ]
+
+        with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
+            extension_schema = conn.execute(
+                "SELECT n.nspname FROM pg_extension e "
+                "JOIN pg_namespace n ON n.oid=e.extnamespace "
+                "WHERE e.extname='pg_trgm'"
+            ).fetchone()[0]
+            assert extension_schema == "public"
+            conn.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schemas[0]))
+            )
+
+        with databases[1].connect() as conn:
+            remaining = conn.execute(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname=current_schema() "
+                "AND indexname='idx_chunks_text_trgm'"
+            ).fetchone()
+            extension_schema = conn.execute(
+                "SELECT n.nspname FROM pg_extension e "
+                "JOIN pg_namespace n ON n.oid=e.extnamespace "
+                "WHERE e.extname='pg_trgm'"
+            ).fetchone()["nspname"]
+        assert remaining == {"indexname": "idx_chunks_text_trgm"}
+        assert extension_schema == "public"
+        assert PostgresMigrator(databases[1]).migrate() == 11
+    finally:
+        for database in databases:
+            database.close()
+        with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
+            for schema in schemas:
+                if TEST_SCHEMA_PATTERN.fullmatch(schema) is None:
+                    raise RuntimeError("refusing to drop an unvalidated PostgreSQL schema")
+                exists = conn.execute(
+                    "SELECT 1 FROM pg_namespace WHERE nspname=%s", (schema,)
+                ).fetchone()
+                if exists is not None:
+                    conn.execute(
+                        sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+                    )
+
+
+def test_packaged_index_migration_phases_are_exact():
+    from app.repositories.postgres.migrator import load_migrations
+
+    migrations = {migration.version: migration for migration in load_migrations(MIGRATIONS_PATH)}
+    assert [(version, migrations[version].name) for version in migrations] == [
+        (1, "initial"),
+        (2, "integrity_indexes"),
+        (3, "core_indexes"),
+        (4, "knowledge_indexes"),
+        (5, "memory_knowhow_governance_indexes"),
+        (6, "search_gin"),
+        (7, "cluster_membership_unique"),
+        (8, "master_v28_features"),
+        (9, "sources_file_hash_index"),
+        (10, "report_understanding"),
+        (11, "relation_endpoint_keyset_indexes"),
+    ]
+
+    def index_declarations(version: int) -> list[tuple[bool, str]]:
+        return [
+            (bool(unique), name)
+            for unique, name in re.findall(
+                r"(?mi)^CREATE\s+(UNIQUE\s+)?INDEX\s+([a-z0-9_]+)",
+                migrations[version].sql,
+            )
+        ]
+
+    assert index_declarations(1) == []
+    assert index_declarations(2) == [
+        (True, name)
+        for name in (
+            "idx_kg_build_jobs_one_running",
+            "idx_memory_answer_once",
+            "idx_notebooks_share_token",
+            "idx_promotion_object",
+            "idx_sources_memory_id",
+            "idx_users_username",
+        )
+    ]
+    operational = [
+        declaration
+        for version in (3, 4, 5, 8)
+        for declaration in index_declarations(version)
+    ]
+    assert len(operational) == 76
+    assert not any(unique for unique, _name in operational)
+    gin_names = {
+        "idx_chunks_text_trgm",
+        "idx_knowledge_objects_name_trgm",
+        "idx_memory_items_title_trgm",
+        "idx_memory_items_content_md_trgm",
+        "idx_memory_items_tags_trgm",
+    }
+    gin_declarations = index_declarations(6)
+    assert len(gin_declarations) == 5
+    assert not any(unique for unique, _name in gin_declarations)
+    assert {name for _unique, name in gin_declarations} == gin_names
+    assert all(
+        "USING gin" in line
+        for line in re.findall(r"(?mis)^CREATE INDEX idx_.*?;", migrations[6].sql)
+    )
+    cluster_unique = index_declarations(7)
+    assert cluster_unique == [(True, "uq_clusters_notebook_type_member")]
+
+    # Migration 8 carries canonical scratch plus knowhow history indexes.
+    v28_feature_indexes = index_declarations(8)
+    assert v28_feature_indexes == [
+        (False, "idx_kg_canonical_scratch_nb_run_seed"),
+        (False, "idx_knowhow_changes_table"),
+        (False, "idx_knowhow_milestones_table"),
+    ]
+
+    # Migration 9 installs the notebook/file-hash dedup lookup index.
+    v30_index = index_declarations(9)
+    assert v30_index == [(False, "idx_sources_notebook_file_hash")]
+
+    # Migration 11 installs stable relation-endpoint keyset indexes.
+    v33_indexes = index_declarations(11)
+    assert v33_indexes == [
+        (False, "idx_knowledge_relations_nb_source_id"),
+        (False, "idx_knowledge_relations_nb_target_id"),
+    ]
+
+
+def test_initial_migration_guards_utf8_before_business_ddl():
+    from app.repositories.postgres.migrator import load_migrations
+
+    initial = load_migrations(MIGRATIONS_PATH)[0].sql
+    guard_position = initial.index("current_setting('server_encoding')")
+    first_business_ddl = initial.index("CREATE TABLE agent_access_tokens")
+    assert guard_position < first_business_ddl
+    assert "server_encoding must be UTF8" in initial

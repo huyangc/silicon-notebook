@@ -1,11 +1,9 @@
 """多领域基准库 —— 挂载集合取代全局唯一 base。"""
-import sqlite3
 
 import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
@@ -19,75 +17,6 @@ def repo(tmp_path, monkeypatch):
     r = SQLiteRepository(Settings())
     bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
-
-
-class TestSchema:
-    def test_schema_version_is_33(self):
-        assert SCHEMA_VERSION == 33
-
-    def test_fresh_db_has_notebook_bases(self, repo):
-        with repo._connect() as db:
-            cols = {r[1] for r in db.execute("PRAGMA table_info(notebook_bases)")}
-        assert cols == {"notebook_id", "base_notebook_id", "created_at", "created_by"}
-
-    def test_promotion_candidates_has_target_base_id(self, repo):
-        with repo._connect() as db:
-            cols = {r[1] for r in db.execute("PRAGMA table_info(promotion_candidates)")}
-        assert "target_base_id" in cols
-
-    def test_self_mount_rejected_by_check(self, repo):
-        nb = repo.create_notebook(NotebookCreate(name="a"))
-        with pytest.raises(sqlite3.IntegrityError):
-            with repo._write() as db:
-                db.execute(
-                    "INSERT INTO notebook_bases"
-                    "(notebook_id, base_notebook_id, created_at, created_by)"
-                    " VALUES (?,?,?,?)",
-                    (nb.id, nb.id, "2026-07-18T00:00:00Z", "user-local"),
-                )
-
-    def test_deleting_mounted_notebook_cascades_edge(self, repo):
-        a = repo.create_notebook(NotebookCreate(name="a"))
-        b = repo.create_notebook(NotebookCreate(name="b"))
-        with repo._write() as db:
-            db.execute(
-                "INSERT INTO notebook_bases"
-                "(notebook_id, base_notebook_id, created_at, created_by)"
-                " VALUES (?,?,?,?)",
-                (a.id, b.id, "2026-07-18T00:00:00Z", "user-local"),
-            )
-        repo.delete_notebook(b.id)
-        with repo._connect() as db:
-            left = db.execute(
-                "SELECT COUNT(*) FROM notebook_bases WHERE notebook_id=?", (a.id,)
-            ).fetchone()[0]
-        assert left == 0
-
-    def test_migration_20_backfills_deployed_db(self, tmp_path, monkeypatch):
-        """已部署库(user_version=19)升级后必须建出表 —— baseline 会被版本闸短路。"""
-        db_path = tmp_path / "old.db"
-        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
-        monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
-        monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-        SQLiteRepository(Settings())  # 建到最新
-        with sqlite3.connect(db_path) as raw:  # 人为退回 19 并删表/删列，模拟老库
-            raw.execute("DROP TABLE IF EXISTS notebook_bases")
-            raw.execute("ALTER TABLE promotion_candidates DROP COLUMN target_base_id")
-            raw.execute("PRAGMA user_version = 19")
-        SQLiteRepository(Settings())  # 重新迁移
-        with sqlite3.connect(db_path) as raw:
-            names = {
-                r[0] for r in raw.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            cols = {
-                r[1] for r in raw.execute("PRAGMA table_info(promotion_candidates)")
-            }
-            version = raw.execute("PRAGMA user_version").fetchone()[0]
-        assert "notebook_bases" in names
-        assert "target_base_id" in cols
-        assert version == 33
 
 
 def _mount(repo, notebook_id, base_ids):
@@ -260,32 +189,6 @@ class TestResolve:
         finally:
             reset_request_user(tok)
         assert set(ids) == {a.id, lib.id}, "参与集只取决于 A 的 owner(甲),与发起请求的乙无关"
-
-    def test_mounted_base_ids_subquery_excludes_inactive_edge(self, repo):
-        """MOUNTED_BASE_IDS_SUBQUERY 是给 IN (...) 内联用的 id 子查询——Task 4/5/7
-        都要依赖它,但目前零消费者零覆盖。直接测这个片段本身:混一条失效边
-        (挂载了他人的个人库),断言只有有效挂载边的 id 集合被选出。"""
-        from app.repositories.sqlite.mount_sql import MOUNTED_BASE_IDS_SUBQUERY
-        a = repo.create_notebook(NotebookCreate(name="a"))
-        base = repo.create_notebook(NotebookCreate(name="base"))
-        mine = repo.create_notebook(NotebookCreate(name="mine"))
-        theirs = repo.create_notebook(NotebookCreate(name="theirs"))
-        repo.mark_notebook_base(base.id)
-        other = repo.create_user("a00900007", "pw")  # created_by 有 FK REFERENCES users(id)
-        with repo._write() as db:
-            db.execute(
-                "UPDATE notebooks SET created_by=? WHERE id=?", (other.id, theirs.id)
-            )
-        _mount(repo, a.id, [base.id, mine.id, theirs.id])  # theirs 边存在但会失效
-        with repo._connect() as db:
-            got = {
-                row["id"] for row in db.execute(
-                    f"SELECT id FROM notebooks WHERE id IN ({MOUNTED_BASE_IDS_SUBQUERY})",
-                    (a.id,),
-                )
-            }
-        assert got == {base.id, mine.id}, "失效边(theirs,他人个人库)必须被排除在子查询结果外"
-
 
 class TestKgGate:
     """深入分析可用性门:_any_base_notebook_has_kg 按「本库是否挂载了该 base」判定,

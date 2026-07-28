@@ -28,14 +28,6 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def test_chunks_tables_exist(repo):
-    with repo._connect() as db:
-        cols = {r["name"] for r in db.execute("PRAGMA table_info(chunks)").fetchall()}
-        assert {"id","notebook_id","source_id","text","section_path","element_ids"} <= cols
-        ecols = {r["name"] for r in db.execute("PRAGMA table_info(chunk_embeddings)").fetchall()}
-        assert {"chunk_id","notebook_id","vector"} <= ecols
-
-
 def _seed_source_with_elements(repo, texts):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     import uuid

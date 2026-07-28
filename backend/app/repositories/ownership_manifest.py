@@ -169,11 +169,9 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._in_batches', kind='attribute', target='_IN_CHUNK'),
             ConsumerSite(path='backend/tests/test_in_batching.py', scope='<module>.test_delta_sites_equivalent_when_batched', kind='patch', target='_IN_CHUNK'),
-            ConsumerSite(path='backend/tests/test_in_batching.py', scope='<module>.test_knowledge_store_compat_reads_late_bound_facade_chunk_size', kind='patch', target='_IN_CHUNK'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_in_batching.py', scope='<module>.test_delta_sites_equivalent_when_batched', kind='patch', target='_IN_CHUNK'),
-            ConsumerSite(path='backend/tests/test_in_batching.py', scope='<module>.test_knowledge_store_compat_reads_late_bound_facade_chunk_size', kind='patch', target='_IN_CHUNK'),
         ),
     ),
     SurfaceMember(
@@ -530,14 +528,10 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='_now'),
-            ConsumerSite(path='backend/tests/test_knowhow_history_roundtrip.py', scope='<module>._advancing_clock', kind='patch', target='_now'),
             ConsumerSite(path='backend/tests/test_rebuild_cache.py', scope='<module>._freeze_now', kind='patch', target='_now'),
-            ConsumerSite(path='backend/tests/test_repository_runtime.py', scope='<module>.test_runtime_seams_are_late_bound', kind='patch', target='_now'),
         ),
         patches=(
-            ConsumerSite(path='backend/tests/test_knowhow_history_roundtrip.py', scope='<module>._advancing_clock', kind='patch', target='_now'),
             ConsumerSite(path='backend/tests/test_rebuild_cache.py', scope='<module>._freeze_now', kind='patch', target='_now'),
-            ConsumerSite(path='backend/tests/test_repository_runtime.py', scope='<module>.test_runtime_seams_are_late_bound', kind='patch', target='_now'),
         ),
     ),
     SurfaceMember(
@@ -1066,10 +1060,8 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_source_ids_from_evidence'),
-            ConsumerSite(path='backend/tests/test_source_reverse_index.py', scope='<module>.test_second_lookup_uses_sql_only_no_full_evidence_scan', kind='patch', target='_source_ids_from_evidence'),
         ),
         patches=(
-            ConsumerSite(path='backend/tests/test_source_reverse_index.py', scope='<module>.test_second_lookup_uses_sql_only_no_full_evidence_scan', kind='patch', target='_source_ids_from_evidence'),
         ),
     ),
     SurfaceMember(
@@ -1100,16 +1092,8 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_write'),
-            ConsumerSite(path='backend/tests/test_embedding_store_component.py', scope='<module>._counting_write', kind='patch', target='_write'),
-            ConsumerSite(path='backend/tests/test_embedding_store_component.py', scope='<module>.test_write_seat_late_binding_observes_post_construction_patch', kind='patch', target='_write'),
-            ConsumerSite(path='backend/tests/test_repository_phase_contracts.py', scope='<module>._trace_writes', kind='patch', target='_write'),
-            ConsumerSite(path='backend/tests/test_sqlite_write_optimization.py', scope='<module>.test_embed_objects_batch_writes_in_one_transaction', kind='patch', target='_write'),
         ),
         patches=(
-            ConsumerSite(path='backend/tests/test_embedding_store_component.py', scope='<module>._counting_write', kind='patch', target='_write'),
-            ConsumerSite(path='backend/tests/test_embedding_store_component.py', scope='<module>.test_write_seat_late_binding_observes_post_construction_patch', kind='patch', target='_write'),
-            ConsumerSite(path='backend/tests/test_repository_phase_contracts.py', scope='<module>._trace_writes', kind='patch', target='_write'),
-            ConsumerSite(path='backend/tests/test_sqlite_write_optimization.py', scope='<module>.test_embed_objects_batch_writes_in_one_transaction', kind='patch', target='_write'),
         ),
     ),
     SurfaceMember(
@@ -3011,11 +2995,9 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/tests/test_backfill_knowhow_md.py', scope='<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value', kind='patch', target='update_knowhow_cells_bulk_guarded'),
             ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>.apply_reviewed_plan', kind='attribute', target='update_knowhow_cells_bulk_guarded'),
         ),
         patches=(
-            ConsumerSite(path='backend/tests/test_backfill_knowhow_md.py', scope='<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value', kind='patch', target='update_knowhow_cells_bulk_guarded'),
         ),
     ),
     SurfaceMember(

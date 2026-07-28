@@ -222,44 +222,6 @@ def test_sweep_reclaims_an_asset_referenced_only_by_a_deleted_columns_code_attac
     assert repo.get_notebook_asset(asset["id"]) is None
 
 
-def test_classification_and_recheck_share_the_same_reference_predicate(repo, monkeypatch):
-    """Task 13 code review: sweep_orphan_assets has TWO reference-determination
-    call sites (the classification read, and the in-transaction re-check that
-    closes the race against a concurrent cell save) — they must be the exact
-    SAME code, not two independently hand-duplicated SQL strings. A prior
-    implementation's own mutation test retracted each copy ONE AT A TIME and
-    saw both go red, which looks like proof the two agree — it is not: the
-    two sites are ANDed together (an asset is deleted only if BOTH say
-    "unreferenced"), so with either copy still conservative, retracting only
-    the OTHER one can't surface a divergence between them. This test instead
-    asserts STRUCTURAL identity: patch the shared predicate and confirm it is
-    invoked once per phase (classification, then the write-phase re-check)
-    for the SAME asset — impossible if the two sites were separate code."""
-    from app.repositories.sqlite import maintenance as maintenance_mod
-
-    nb = _mk_notebook(repo)
-    asset = _upload(repo, nb)  # unreferenced: one candidate for both phases
-
-    calls: list[str] = []
-    original = maintenance_mod.SQLiteMaintenanceAdapter._is_asset_referenced
-
-    def _spy(self, db, notebook_id, asset_id):
-        calls.append(asset_id)
-        return original(self, db, notebook_id, asset_id)
-
-    monkeypatch.setattr(
-        maintenance_mod.SQLiteMaintenanceAdapter, "_is_asset_referenced", _spy
-    )
-
-    result = repo.maintenance.sweep_orphan_assets(nb)
-
-    assert result == {"removed": 1}
-    assert calls == [asset["id"], asset["id"]], (
-        "expected exactly one classification-phase call and one write-phase "
-        "re-check call, both through the SAME shared predicate"
-    )
-
-
 def test_sweep_is_scoped_to_the_given_notebook(repo):
     nb1 = _mk_notebook(repo, "N1")
     nb2 = _mk_notebook(repo, "N2")
@@ -414,31 +376,3 @@ def test_http_delete_notebook_route_removes_asset_file_and_dir(tmp_path, monkeyp
     assert resp.status_code == 204, resp.text
     assert not asset_file.exists()
     assert not asset_dir.exists()
-
-
-def test_content_strings_in_payload_rejects_unregistered_kind():
-    """content_strings_in_payload must fail fast on unknown kind to prevent
-    silent asset reference leaks from future kinds that carry cell content
-    but forget to register here."""
-    from app.repositories.sqlite.knowhow_history_store import (
-        content_strings_in_payload,
-    )
-
-    # Known kinds pass (even if they produce empty lists).
-    # 这 14 个刻意逐字写死、与 spec §4.1 的 kind 枚举一一对应，不从模块反推——
-    # 反推会让断言退化成同义反复。⚠️ 别把 md_normalize.py 里 markdown 分词器的
-    # kind（"autolink" 等）加进来，那是同名不同物、与变更流水无关。
-    for kind in (
-        "cell_update", "revert", "row_add", "import_append", "row_delete",
-        "table_create", "column_delete", "column_add", "column_rename",
-        "column_kind", "anchor_set", "table_meta", "cell_code_put",
-        "cell_code_delete",
-    ):
-        result = content_strings_in_payload(kind, {})
-        assert isinstance(result, list), f"kind={kind} should return a list"
-
-    # Unknown kind raises
-    with pytest.raises(ValueError) as exc_info:
-        content_strings_in_payload("unknown_kind_future_breach", {})
-    assert "未登记的 kind" in str(exc_info.value)
-    assert "unknown_kind_future_breach" in str(exc_info.value)

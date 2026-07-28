@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.core.config import Settings
 from app.repositories.ports import ChunkWrite
 from app.repositories.postgres.search import (
     PAYLOAD_NAME_EXPRESSION,
@@ -16,6 +15,9 @@ from app.repositories.postgres.search import (
 
 
 NOW = "2026-07-22T00:00:00+00:00"
+pytestmark = pytest.mark.postgres_integration
+
+
 EXPECTED_IDS = tuple(f"ko-search-{index:02d}" for index in range(10))
 EXPECTED_CHUNK_IDS = tuple(f"chunk-search-{index:02d}" for index in range(10))
 EXPECTED_SOURCE_IDS = {"source-search-a", "source-search-b"}
@@ -67,7 +69,6 @@ def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
 
 @dataclass
 class SearchHarness:
-    backend: str
     database: object
     knowledge: object
     chunks: object
@@ -75,50 +76,28 @@ class SearchHarness:
 
 
 def _seed_catalog(harness: SearchHarness) -> None:
-    if harness.backend == "postgres":
-        from psycopg.types.json import Jsonb
+    from psycopg.types.json import Jsonb
 
-        user_sql = (
-            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
-            "username,password_hash,password_salt,password_iterations) "
-            "VALUES (%s,%s,%s,'admin','active',%s,%s,%s,'','',0)"
-        )
-        notebook_sql = (
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) "
-            "VALUES (%s,%s,'','semiconductor','ready',%s,%s,%s,'personal')"
-        )
-        source_sql = (
-            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
-            "file_name,summary,created_at,updated_at) "
-            "VALUES (%s,%s,%s,'file','ready','ready',%s,%s,%s,%s)"
-        )
-        element_sql = (
-            "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
-            "metadata,created_at) VALUES (%s,%s,'paragraph',%s,%s,%s,%s)"
-        )
-        metadata = Jsonb({"kind": "golden"})
-    else:
-        user_sql = (
-            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
-            "username,password_hash,password_salt,password_iterations) "
-            "VALUES (?,?,?,'admin','active',?,?,?,'','',0)"
-        )
-        notebook_sql = (
-            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
-            "created_at,updated_at,tier) "
-            "VALUES (?,?,'','semiconductor','ready',?,?,?,'personal')"
-        )
-        source_sql = (
-            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
-            "file_name,summary,created_at,updated_at) "
-            "VALUES (?,?,?,'file','ready','ready',?,?,?,?)"
-        )
-        element_sql = (
-            "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
-            "metadata,created_at) VALUES (?,?,'paragraph',?,?,?,?)"
-        )
-        metadata = json.dumps({"kind": "golden"})
+    user_sql = (
+        "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+        "username,password_hash,password_salt,password_iterations) "
+        "VALUES (%s,%s,%s,'admin','active',%s,%s,%s,'','',0)"
+    )
+    notebook_sql = (
+        "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+        "created_at,updated_at,tier) "
+        "VALUES (%s,%s,'','semiconductor','ready',%s,%s,%s,'personal')"
+    )
+    source_sql = (
+        "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+        "file_name,summary,created_at,updated_at) "
+        "VALUES (%s,%s,%s,'file','ready','ready',%s,%s,%s,%s)"
+    )
+    element_sql = (
+        "INSERT INTO source_elements(id,source_id,element_type,location_label,text,"
+        "metadata,created_at) VALUES (%s,%s,'paragraph',%s,%s,%s,%s)"
+    )
+    metadata = Jsonb({"kind": "golden"})
 
     with harness.database.write() as connection:
         connection.execute(
@@ -272,21 +251,13 @@ def _seed_catalog(harness: SearchHarness) -> None:
 
 
 @pytest.fixture
-def search_harnesses(tmp_path, postgres_database) -> tuple[SearchHarness, SearchHarness]:
+def search_harness(postgres_database) -> SearchHarness:
     from app.repositories.postgres.chunk_store import ChunkStore as PostgresChunkStore
     from app.repositories.postgres.knowledge_store import KnowledgeStore as PostgresKnowledgeStore
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
-    from app.repositories.sqlite.chunk_store import ChunkStore as SqliteChunkStore
-    from app.repositories.sqlite.database import SqliteDatabase
-    from app.repositories.sqlite.knowledge_store import KnowledgeStore as SqliteKnowledgeStore
-    from app.repositories.sqlite.migrations import SqliteMigrator
-    from app.repositories.sqlite.query_store import QueryStore as SqliteQueryStore
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
-    settings = Settings(database_url=f"sqlite:///{tmp_path / 'search-golden.db'}")
-    sqlite_database = SqliteDatabase(settings, tmp_path)
-    SqliteMigrator(sqlite_database, settings).initialize()
     assert PostgresMigrator(postgres_database).migrate() == 11
     seams = RepositoryCompatibilitySeams(
         new_id=lambda prefix: f"{prefix}-unused",
@@ -295,97 +266,60 @@ def search_harnesses(tmp_path, postgres_database) -> tuple[SearchHarness, Search
         remap_json_ids=lambda value, _mapping: value,
         in_chunk_size=lambda: 100,
     )
-    sqlite = SearchHarness(
-        backend="sqlite",
-        database=sqlite_database,
-        knowledge=SqliteKnowledgeStore(sqlite_database, seams),
-        chunks=SqliteChunkStore(sqlite_database),
-        queries=SqliteQueryStore(sqlite_database),
-    )
-    postgres = SearchHarness(
-        backend="postgres",
+    harness = SearchHarness(
         database=postgres_database,
         knowledge=PostgresKnowledgeStore(postgres_database, seams),
         chunks=PostgresChunkStore(postgres_database),
         queries=PostgresQueryStore(postgres_database),
     )
-    _seed_catalog(sqlite)
-    _seed_catalog(postgres)
-    try:
-        yield sqlite, postgres
-    finally:
-        sqlite_database.close_local()
+    _seed_catalog(harness)
+    return harness
 
 
 def _recall(ids: list[str], expected: tuple[str, ...]) -> float:
     return len(set(ids) & set(expected)) / len(expected)
 
 
-def _top_overlap(left: list[str], right: list[str], k: int) -> float:
-    return len(set(left[:k]) & set(right[:k])) / k
-
-
 @pytest.mark.postgres_integration
 @pytest.mark.parametrize("query", ("thermal", "热设计"))
-def test_zh_en_search_quality_and_citation_identity_golden(search_harnesses, query):
-    sqlite, postgres = search_harnesses
-    knowledge_ids: dict[str, list[str]] = {}
-    chunk_ids: dict[str, list[str]] = {}
-    for harness in (sqlite, postgres):
-        with harness.database.connect() as connection:
-            knowledge_ids[harness.backend] = [
-                row["object_id"]
-                for row in harness.knowledge.fts_search(
-                    connection, "nb-search", query, 12
-                )
-            ]
-            chunk_ids[harness.backend] = [
-                row["chunk_id"]
-                for row in harness.knowledge.chunk_fts_search(
-                    connection, "nb-search", query, 12
-                )
-            ]
-            objects = harness.knowledge.retrieval_objects(
-                connection,
-                "nb-search",
-                "claim",
-                ("approved", "reviewed", "project_specific", "conflict"),
-                EXPECTED_IDS,
+def test_zh_en_search_quality_and_citation_identity(
+    search_harness, query
+):
+    with search_harness.database.connect() as connection:
+        knowledge_ids = [
+            row["object_id"]
+            for row in search_harness.knowledge.fts_search(
+                connection, "nb-search", query, 12
             )
-        assert {item["id"] for item in objects} == set(EXPECTED_IDS)
-        assert {item["evidence"][0].source_id for item in objects} == EXPECTED_SOURCE_IDS
-        assert {item["evidence"][0].element_id for item in objects} == EXPECTED_ELEMENT_IDS
+        ]
+        chunk_ids = [
+            row["chunk_id"]
+            for row in search_harness.knowledge.chunk_fts_search(
+                connection, "nb-search", query, 12
+            )
+        ]
+        objects = search_harness.knowledge.retrieval_objects(
+            connection,
+            "nb-search",
+            "claim",
+            ("approved", "reviewed", "project_specific", "conflict"),
+            EXPECTED_IDS,
+        )
+    assert {item["id"] for item in objects} == set(EXPECTED_IDS)
+    assert {item["evidence"][0].source_id for item in objects} == EXPECTED_SOURCE_IDS
+    assert {item["evidence"][0].element_id for item in objects} == EXPECTED_ELEMENT_IDS
 
-        notebook_search = harness.queries.search_notebook("nb-search", query)
-        source_ids = {hit.source_id for hit in notebook_search.hits if hit.scope == "Source"}
-        element_ids = {
-            hit.element_id for hit in notebook_search.hits if hit.scope == "Element"
-        }
-        assert source_ids == EXPECTED_SOURCE_IDS
-        assert element_ids == EXPECTED_ELEMENT_IDS
-
-    sqlite_recall = _recall(knowledge_ids["sqlite"], EXPECTED_IDS)
-    postgres_recall = _recall(knowledge_ids["postgres"], EXPECTED_IDS)
-    knowledge_overlap = _top_overlap(
-        knowledge_ids["sqlite"], knowledge_ids["postgres"], 10
-    )
-    sqlite_chunk_recall = _recall(chunk_ids["sqlite"], EXPECTED_CHUNK_IDS)
-    postgres_chunk_recall = _recall(chunk_ids["postgres"], EXPECTED_CHUNK_IDS)
-    chunk_overlap = _top_overlap(chunk_ids["sqlite"], chunk_ids["postgres"], 10)
-    print(
-        "SEARCH_METRICS "
-        f"query={query!r} "
-        f"knowledge_recall12_sqlite={sqlite_recall:.3f} "
-        f"knowledge_recall12_postgres={postgres_recall:.3f} "
-        f"knowledge_top10_overlap={knowledge_overlap:.3f} "
-        f"chunk_recall12_sqlite={sqlite_chunk_recall:.3f} "
-        f"chunk_recall12_postgres={postgres_chunk_recall:.3f} "
-        f"chunk_top10_overlap={chunk_overlap:.3f}"
-    )
-    assert postgres_recall >= sqlite_recall - 0.01
-    assert knowledge_overlap >= 0.90
-    assert postgres_chunk_recall >= sqlite_chunk_recall - 0.01
-    assert chunk_overlap >= 0.90
+    notebook_search = search_harness.queries.search_notebook("nb-search", query)
+    source_ids = {
+        hit.source_id for hit in notebook_search.hits if hit.scope == "Source"
+    }
+    element_ids = {
+        hit.element_id for hit in notebook_search.hits if hit.scope == "Element"
+    }
+    assert source_ids == EXPECTED_SOURCE_IDS
+    assert element_ids == EXPECTED_ELEMENT_IDS
+    assert _recall(knowledge_ids, EXPECTED_IDS) == 1.0
+    assert _recall(chunk_ids, EXPECTED_CHUNK_IDS) == 1.0
 
 
 @pytest.mark.postgres_integration

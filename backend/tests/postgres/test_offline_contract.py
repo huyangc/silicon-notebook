@@ -506,14 +506,12 @@ def test_preflight_and_pytest_share_one_minimal_environment_and_pgpass(
 
     monkeypatch.setattr(postgres_lane, "_run_child", fake_child)
     assert _run_isolated_gate([target]) == 0
-    assert len(calls) == 3
+    assert len(calls) == 2
     preflight_command, preflight_env = calls[0]
     pytest_command, pytest_env = calls[1]
-    shadow_command, shadow_env = calls[2]
     assert preflight_command[-1] == "--preflight"
     assert "pytest" in pytest_command
-    assert "tests/postgres/shadow/test_forward_e2e.py" in shadow_command
-    assert preflight_env is pytest_env is shadow_env
+    assert preflight_env is pytest_env
     assert set(poison).isdisjoint(preflight_env)
     assert preflight_env["TEST_POSTGRES_URL"] == (
         "postgresql://lane_user@db.example:64321/"
@@ -1235,26 +1233,3 @@ def test_gate_validates_auxiliary_url_policy_before_connecting_primary():
     assert "connection or identity check failed" not in output
     assert "sentinel-" not in output
     assert "Traceback" not in output
-
-
-def test_sqlite_default_subprocess_does_not_import_psycopg(tmp_path):
-    env = os.environ.copy()
-    env.pop("TEST_POSTGRES_URL", None)
-    env["PYTHONPATH"] = str(REPO_ROOT / "backend")
-    sqlite_url = f"sqlite:///{tmp_path / 'offline-default.db'}"
-    program = f"""
-import sys
-from app.core.config import Settings
-from app.repositories.factory import create_repository
-repo = create_repository(Settings(database_url={sqlite_url!r}))
-assert not any(name == 'psycopg' or name.startswith('psycopg.') for name in sys.modules)
-"""
-    completed = subprocess.run(
-        [sys.executable, "-c", program],
-        cwd=REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr

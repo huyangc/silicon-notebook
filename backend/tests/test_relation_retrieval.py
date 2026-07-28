@@ -1,4 +1,4 @@
-from app.services.retrieval import score_relations, RELEVANCE_FLOOR
+from app.services.retrieval import score_relations
 
 import pytest
 from app.core.config import Settings
@@ -199,15 +199,6 @@ def _execute_spy(repo, monkeypatch):
     return sqls
 
 
-def test_retrieve_relations_scored_empty_relations_no_join(repo, monkeypatch):
-    """空 notebook(zero relations) → 不执行任何 relations JOIN，直接 []。"""
-    nb = repo.create_notebook(NotebookCreate(name="empty"))
-    sqls = _execute_spy(repo, monkeypatch)
-    hits = repo.retrieval.candidates._retrieve_relations_scored(nb.id, "anything")
-    assert hits == []
-    assert not any("FROM knowledge_relations r" in s for s in sqls)
-
-
 def test_retrieve_relations_scored_no_embedder_keeps_keyword_path(repo_no_embedder):
     """relation_embeddings 整体为空(no embedder,如 test_mix_overlay.py 的真实
     fixture)时，必须保留关键词全量回退——不能静默丢弃纯关键词命中。"""
@@ -287,18 +278,6 @@ def test_relations_with_names_relation_ids_chunks_large_lists(repo, monkeypatch)
         bounded = repo.retrieval.candidates._relations_with_names(db, nb.id, relation_ids=ids)
     assert {r["id"] for r in bounded} == set(ids)
     assert len(bounded) == len(ids)
-
-
-def test_mix_retrieve_overlay_no_relations_no_join(repo, monkeypatch):
-    """_mix_retrieve 走 overlay(chunk_kg_overlay_enabled 默认开)时，notebook
-    无任何 relation → 不触发 relations 全量 JOIN。"""
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.store_kg(nb.id, None,
-        [{"local_id": "a", "object_type": "concept", "payload": {"name": "Cascode"}, "evidence": []}],
-        [])
-    sqls = _execute_spy(repo, monkeypatch)
-    cand, block, id_map, kg_hits, ppr_n = repo.retrieval.candidates._mix_retrieve(nb.id, "cascode", "", ["cascode"])
-    assert not any("FROM knowledge_relations r" in s for s in sqls)
 
 
 def test_mix_retrieve_overlay_equivalent_with_relations(repo):

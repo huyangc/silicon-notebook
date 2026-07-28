@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import json
 import sys
 import threading
@@ -22,13 +21,6 @@ from app.repositories.postgres.knowhow_transfer_store import (
 )
 from app.repositories.postgres.memory_store import MemoryStore as PostgresMemoryStore
 from app.repositories.postgres.report_store import ReportStore as PostgresReportStore
-from app.repositories.sqlite.ask_state_store import AskStateStore as SqliteAskStateStore
-from app.repositories.sqlite.knowhow_store import KnowhowStore as SqliteKnowhowStore
-from app.repositories.sqlite.knowhow_transfer_store import (
-    KnowhowTransferStore as SqliteKnowhowTransferStore,
-)
-from app.repositories.sqlite.memory_store import MemoryStore as SqliteMemoryStore
-from app.repositories.sqlite.report_store import ReportStore as SqliteReportStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 from app.services.ask_service import AskService
@@ -38,40 +30,7 @@ from app.services.cancellation import AskCancelled, raise_if_cancelled
 NOW = "2026-07-23T00:00:00+00:00"
 
 
-def _public_callables(cls: type) -> dict[str, object]:
-    return {
-        name: inspect.getattr_static(cls, name)
-        for name in cls.__dict__
-        if not name.startswith("_") and callable(getattr(cls, name))
-    }
-
-
-def _signature_shape(method) -> tuple:
-    return tuple(
-        (parameter.name, parameter.kind, parameter.default)
-        for parameter in inspect.signature(method).parameters.values()
-    )
-
-
-@pytest.mark.parametrize(
-    ("sqlite_cls", "postgres_cls"),
-    (
-        (SqliteAskStateStore, PostgresAskStateStore),
-        (SqliteReportStore, PostgresReportStore),
-        (SqliteMemoryStore, PostgresMemoryStore),
-        (SqliteKnowhowStore, PostgresKnowhowStore),
-        (SqliteKnowhowTransferStore, PostgresKnowhowTransferStore),
-    ),
-)
-def test_postgres_content_store_surfaces_cover_sqlite(sqlite_cls, postgres_cls):
-    sqlite_methods = _public_callables(sqlite_cls)
-    postgres_methods = _public_callables(postgres_cls)
-    assert sqlite_methods.keys() <= postgres_methods.keys()
-    for name in sqlite_methods.keys() & postgres_methods.keys():
-        assert type(sqlite_methods[name]) is type(postgres_methods[name])
-        assert _signature_shape(getattr(sqlite_cls, name)) == _signature_shape(
-            getattr(postgres_cls, name)
-        )
+pytestmark = pytest.mark.postgres_integration
 
 
 def _knowhow_columns():
@@ -231,7 +190,7 @@ def test_knowhow_asset_delta_allows_preserved_legacy_dead_ref_and_checks_each_ta
     table = store.get_knowhow_table(table_id)
     procedure_id = table["columns"][1]["id"]
     row_a, row_b = [row["id"] for row in table["rows"]]
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     legacy = "asset-legacy-dead"
     missing = "asset-new-dead"
     old_ref = f"![legacy](asset://{legacy})"
@@ -346,8 +305,8 @@ def _seams() -> RepositoryCompatibilitySeams:
     )
 
 
-def _seed_catalog(database, backend: str) -> None:
-    mark = "%s" if backend == "postgres" else "?"
+def _seed_catalog(database) -> None:
+    mark = "%s"
     with database.write() as connection:
         connection.execute(
             "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
@@ -387,7 +346,6 @@ def _seed_catalog(database, backend: str) -> None:
 
 @dataclass
 class ContentHarness:
-    backend: str
     database: object
     ask: object
     report: object
@@ -396,46 +354,15 @@ class ContentHarness:
     transfer: object
 
 
-@pytest.fixture(
-    params=("sqlite", pytest.param("postgres", marks=pytest.mark.postgres_integration))
-)
-def content_harness(request, tmp_path) -> ContentHarness:
+@pytest.fixture
+def content_harness(request) -> ContentHarness:
     seams = _seams()
-    if request.param == "sqlite":
-        from app.repositories.sqlite.database import SqliteDatabase
-        from app.repositories.sqlite.migrations import SqliteMigrator
-
-        settings = Settings(database_url=f"sqlite:///{tmp_path / 'content-golden.db'}")
-        database = SqliteDatabase(settings, tmp_path)
-        SqliteMigrator(database, settings).initialize()
-        _seed_catalog(database, "sqlite")
-        harness = ContentHarness(
-            backend="sqlite",
-            database=database,
-            ask=SqliteAskStateStore(database, seams),
-            report=SqliteReportStore(
-                database,
-                new_id=seams.new_id,
-                now=seams.now,
-                current_user_id=lambda: "user-content",
-            ),
-            memory=SqliteMemoryStore(database, new_id=seams.new_id, now=seams.now),
-            knowhow=SqliteKnowhowStore(database, new_id=seams.new_id, now=seams.now),
-            transfer=SqliteKnowhowTransferStore(database),
-        )
-        try:
-            yield harness
-        finally:
-            database.close_local()
-        return
-
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(database).migrate() == 11
-    _seed_catalog(database, "postgres")
+    _seed_catalog(database)
     yield ContentHarness(
-        backend="postgres",
         database=database,
         ask=PostgresAskStateStore(database, seams),
         report=PostgresReportStore(
@@ -450,8 +377,8 @@ def content_harness(request, tmp_path) -> ContentHarness:
     )
 
 
-def test_knowhow_complete_enumeration_matches_sqlite_contract(content_harness):
-    """Both adapters retain physical rows across bounded complete-set pages."""
+def test_knowhow_complete_enumeration_matches_persisted_contract(content_harness):
+    """The PostgreSQL adapter retains physical rows across bounded complete-set pages."""
     store = content_harness.knowhow
     table_id = store.create_knowhow_table(
         "nb-content", "Enumeration", "", _knowhow_columns(), "user-content"
@@ -527,7 +454,7 @@ def test_knowhow_complete_enumeration_matches_sqlite_contract(content_harness):
     ]
 
 
-def test_ask_and_report_state_shapes_match_sqlite_golden(content_harness):
+def test_ask_and_report_state_shapes_match_persisted_golden(content_harness):
     request = AskRequest(question="What is deterministic state?")
     job_id, conversation_id = content_harness.ask.begin_durable_job(
         "nb-content", request, "chunk", "user-content"
@@ -756,7 +683,7 @@ def test_cancel_before_job_bound_prepare_never_creates_a_replacement_conversatio
     assert content_harness.ask.list_conversations(
         "nb-content", "user-content"
     ) == []
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=" + mark,
@@ -826,10 +753,8 @@ def test_bulk_delete_skips_an_old_conversation_with_a_running_job(content_harnes
     job_id, conversation_id = content_harness.ask.begin_durable_job(
         "nb-content", request, "chunk", "user-content"
     )
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.write() as connection:
-        if content_harness.backend == "sqlite":
-            content_harness.database.begin_guarded_write(connection)
         connection.execute(
             "UPDATE conversations SET updated_at=" + mark + " WHERE id=" + mark,
             ("2000-01-01T00:00:00+00:00", conversation_id),
@@ -894,7 +819,7 @@ def test_explicit_conversation_delete_refuses_running_and_purges_terminal_job_st
         content_harness.ask.get_conversation(terminal_conversation)
     with pytest.raises(KeyError):
         content_harness.ask.ask_job_detail(terminal_job)
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) AS n FROM answers WHERE conversation_id=" + mark,
@@ -939,10 +864,8 @@ def test_bulk_delete_returns_only_actual_ids_and_purges_their_terminal_jobs(
 
     old_job, old_conversation = completed("old terminal")
     fresh_job, fresh_conversation = completed("fresh terminal")
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.write() as connection:
-        if content_harness.backend == "sqlite":
-            content_harness.database.begin_guarded_write(connection)
         connection.execute(
             "UPDATE conversations SET updated_at=" + mark + " WHERE id=" + mark,
             ("2000-01-01T00:00:00+00:00", old_conversation),
@@ -1031,7 +954,7 @@ def test_sync_ask_running_job_protects_conversation_until_atomic_final_save(
     assert detail.active_job is None
     assert "job_id" not in response.model_dump()
     assert content_harness.ask.ask_job_status(captured["job_id"])["status"] == "done"
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.connect() as connection:
         orphan_count = connection.execute(
             "SELECT COUNT(*) AS n FROM answers a LEFT JOIN conversations c "
@@ -1125,7 +1048,7 @@ def test_conversation_bound_answer_save_rejects_a_missing_parent(
             response,
             "user-content",
         )
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.connect() as connection:
         assert connection.execute(
             "SELECT COUNT(*) AS n FROM answers WHERE conversation_id=" + mark,
@@ -1148,7 +1071,7 @@ def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversatio
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
     old_turn = store.prepare_turn(
@@ -1282,7 +1205,7 @@ def test_postgres_final_save_and_explicit_delete_do_not_deadlock_or_orphan(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresAskStateStore(postgres_database, seams)
     request = AskRequest(question="race final save", mode="chunk")
@@ -1409,7 +1332,7 @@ def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     report = PostgresReportStore(
         postgres_database,
@@ -1482,7 +1405,7 @@ def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     assert final["content_md"] == ""
 
 
-def test_knowhow_mutation_and_snapshot_shapes_match_sqlite_golden(content_harness):
+def test_knowhow_mutation_and_snapshot_shapes_match_persisted_golden(content_harness):
     table_id = content_harness.knowhow.create_knowhow_table(
         "nb-content",
         "Thermal table",
@@ -1606,7 +1529,7 @@ def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
     from app.repositories.postgres.migrator import PostgresMigrator
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1669,7 +1592,7 @@ def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
         assert code is None
 
 
-def test_memory_revision_provenance_and_json_null_match_sqlite_golden(content_harness):
+def test_memory_revision_provenance_and_json_null_match_persisted_golden(content_harness):
     write = MemoryWrite(
         id="mem-content",
         notebook_id="nb-content",
@@ -1725,7 +1648,7 @@ def test_memory_rejects_nested_non_finite_json_without_partial_row(content_harne
             write, "user-content", "created"
         )
     with content_harness.database.connect() as connection:
-        mark = "%s" if content_harness.backend == "postgres" else "?"
+        mark = "%s"
         assert connection.execute(
             f"SELECT 1 FROM memory_items WHERE id={mark}", (write.id,)
         ).fetchone() is None
@@ -1740,7 +1663,7 @@ def test_postgres_memory_search_filters_scope_before_candidate_limit(
     from psycopg.types.json import Jsonb
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1825,7 +1748,7 @@ def test_postgres_memory_search_total_is_exact_beyond_candidate_page(
     from psycopg.types.json import Jsonb
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     store = PostgresMemoryStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1913,7 +1836,7 @@ def test_memory_edit_supersedes_pinned_promotion_atomically(content_harness):
     item = content_harness.memory.create_candidate_with_initial_revision(
         write, "user-content", "created"
     )
-    mark = "%s" if content_harness.backend == "postgres" else "?"
+    mark = "%s"
     with content_harness.database.write() as connection:
         connection.execute(
             "INSERT INTO promotion_candidates(id,notebook_id,object_id,object_type,status,"
@@ -1967,7 +1890,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -1977,7 +1900,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
     knowledge = KnowledgeStore(postgres_database, seams)
     vectors = EmbeddingStore(write=postgres_database.write)
     projector = KnowhowProjector(
-        settings=Settings(database_url="sqlite:///unused.db"),
+        settings=Settings(database_url="postgresql://unused/unused"),
         database=postgres_database,
         knowhow=knowhow,
         sources=sources,
@@ -2032,7 +1955,7 @@ def test_postgres_projector_commits_terminal_knowhow_graph(
         ).fetchone()["n"] == 1
 
     # Pin the PG JSONB legacy discovery path and run the scheduled replacement
-    # synchronously. This must never fall back to SQLite's json_extract SQL.
+    # synchronously.
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO knowledge_objects "
@@ -2084,7 +2007,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
@@ -2093,7 +2016,7 @@ def test_postgres_projector_and_delete_leave_no_projection_orphans(
     chunks = ChunkStore(postgres_database)
     knowledge = KnowledgeStore(postgres_database, seams)
     projector = KnowhowProjector(
-        settings=Settings(database_url="sqlite:///unused.db"),
+        settings=Settings(database_url="postgresql://unused/unused"),
         database=postgres_database,
         knowhow=knowhow,
         sources=sources,
@@ -2201,13 +2124,13 @@ def test_postgres_delete_route_cleans_source_created_after_initial_snapshot(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
     knowhow = PostgresKnowhowStore(
         postgres_database, new_id=seams.new_id, now=seams.now
     )
     projector = KnowhowProjector(
-        settings=Settings(database_url="sqlite:///unused.db"),
+        settings=Settings(database_url="postgresql://unused/unused"),
         database=postgres_database,
         knowhow=knowhow,
         sources=SourceStore(postgres_database, now=seams.now),
@@ -2316,7 +2239,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
     from app.services.knowhow.projection import KnowhowProjector
 
     assert PostgresMigrator(postgres_database).migrate() == 11
-    _seed_catalog(postgres_database, "postgres")
+    _seed_catalog(postgres_database)
     seams = _seams()
 
     def make_projector():
@@ -2325,7 +2248,7 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
         )
         source_store = SourceStore(postgres_database, now=seams.now)
         return knowhow_store, KnowhowProjector(
-            settings=Settings(database_url="sqlite:///unused.db"),
+            settings=Settings(database_url="postgresql://unused/unused"),
             database=postgres_database,
             knowhow=knowhow_store,
             sources=source_store,

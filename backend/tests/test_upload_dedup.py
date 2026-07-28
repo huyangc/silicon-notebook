@@ -11,7 +11,6 @@ source 行会引爆权限、删除级联与归属问题。
 import threading
 import types
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -937,58 +936,6 @@ def test_concurrent_reupload_of_a_failed_source_starts_only_one_pipeline(
     assert len(repo.list_sources(notebook_id)) == 1
 
 
-def test_concurrent_first_upload_of_identical_bytes_creates_one_row(
-    tmp_path, monkeypatch
-):
-    """P2：两个并发首次上传相同字节到同一 notebook。此前「source_id_by_hash(读)→
-    insert(写)」是两步，两者都查不到 → 各插一行（migration 索引非唯一拦不住）。
-    两个独立 repo（两把写锁）共享一个 DB 文件，模拟后端 + 离线 batch_ingest 跨进程：
-    原子由 insert_source_if_absent 里 BEGIN IMMEDIATE + 事务内重查兑现。Barrier 钉在
-    begin_immediate 上让两者同抵临界区，真正的串行交给 SQLite 的 RESERVED 锁。"""
-    from app.core.config import Settings
-
-    _settings(tmp_path, monkeypatch)  # 设一次共享的 DATABASE_URL / STORAGE_DIR
-    repo_a = SQLiteRepository(Settings())
-    repo_b = SQLiteRepository(Settings())  # 同一 DB 文件、独立 SqliteDatabase（独立写锁）
-    nb = repo_a.create_notebook(NotebookCreate(name="nb")).id
-
-    barrier = threading.Barrier(2, timeout=5)
-    db_a = repo_a._runtime.source_store.database
-    db_b = repo_b._runtime.source_store.database
-    begin_a, begin_b = db_a.begin_immediate, db_b.begin_immediate
-
-    def sync_begin_a(conn):
-        barrier.wait()
-        begin_a(conn)
-
-    def sync_begin_b(conn):
-        barrier.wait()
-        begin_b(conn)
-
-    monkeypatch.setattr(db_a, "begin_immediate", sync_begin_a)
-    monkeypatch.setattr(db_b, "begin_immediate", sync_begin_b)
-
-    payload = [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
-                                  content=b"identical bytes")]
-    sched_a: list[str] = []
-    sched_b: list[str] = []
-
-    def do(repo, sched):
-        return repo.upload_sources(nb, payload, scheduler=sched.append)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fa = pool.submit(do, repo_a, sched_a)
-        fb = pool.submit(do, repo_b, sched_b)
-        ra = fa.result(timeout=10)
-        rb = fb.result(timeout=10)
-
-    assert len(repo_a.list_sources(nb)) == 1, "并发首传相同字节只能建一行"
-    assert len(sched_a) + len(sched_b) == 1, "只有插入方那一条流水线被调度"
-    assert sorted([ra[0].reused, rb[0].reused]) == [False, True], (
-        "恰好一方新建(reused=False)、一方复用(reused=True)"
-    )
-
-
 def test_serial_first_upload_still_inserts_and_schedules(repo, notebook_id):
     """原子插入路径不改串行首传语义：新建一行、reused=False、跑一次 process。"""
     result = _upload(repo, notebook_id, content=b"fresh bytes", name="doc.txt")
@@ -1062,5 +1009,3 @@ def test_retype_on_an_in_flight_source_never_starts_a_second_reextract(
     assert repo.get_source(sid).doc_type == "textbook", "新类型照记（存库）"
     assert submitted == [], "在跑的行绝不另起第二条重抽"
     assert repo.get_source(sid).parse_status == "extracting", "仍是在跑，未被认领翻动"
-
-

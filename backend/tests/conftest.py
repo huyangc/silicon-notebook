@@ -32,7 +32,6 @@ _ARCHITECTURE_CONTRACT_MODULES = {
     "test_repository_dependency_contract.py",
     "test_repository_monkeypatch_owners.py",
     "test_repository_protocol_coverage.py",
-    "test_repository_surface_contract.py",
     "test_semantic_source.py",
 }
 _GRAPH_INDEX_CONTRACT_MODULES = {
