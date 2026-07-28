@@ -2,12 +2,23 @@
 .usage-page h1 { font-size: 20px; margin-bottom: 16px; }
 .usage-empty { color: var(--muted, #666); }
 .usage-description { margin: 4px 0 14px; color: var(--muted, #666); font-size: 14px; }
+.usage-table-wrap { overflow-x: auto; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .usage-table th, .usage-table td {
   text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border, #e5e7eb);
   white-space: nowrap;
 }
 .usage-table th { color: var(--muted, #666); font-weight: 600; }
+.usage-sort-button {
+  display: inline-flex; align-items: center; gap: 5px; margin: -4px -6px; padding: 4px 6px;
+  border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit;
+  font-weight: inherit; white-space: nowrap; cursor: pointer;
+}
+.usage-sort-button:hover { background: var(--hover, #f3f4f6); color: inherit; }
+.usage-sort-button:focus-visible { outline: 2px solid var(--accent, #2563eb); outline-offset: 1px; }
+.usage-sort-button-active { color: var(--accent, #2563eb); }
+.usage-sort-indicator { width: 10px; color: var(--muted, #9ca3af); font-size: 9px; text-align: center; }
+.usage-sort-button-active .usage-sort-indicator { color: currentColor; }
 .usage-table td a { color: var(--accent, #2563eb); text-decoration: none; }
 .usage-table td a:hover { text-decoration: underline; }
 
@@ -93,6 +104,25 @@
 }
 .usage-limit-tag-custom { background: #eff4ff; color: var(--accent, #2563eb); }
 
+.usage-pagination {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px;
+  margin-top: 14px; color: var(--muted, #666); font-size: 13px;
+}
+.usage-pagination-summary { margin-right: auto; font-variant-numeric: tabular-nums; }
+.usage-page-size-label { display: inline-flex; align-items: center; gap: 6px; }
+.usage-page-size-select {
+  padding: 4px 24px 4px 8px; border: 1px solid var(--border, #d1d5db); border-radius: 6px;
+  background: var(--surface, #fff); color: inherit; font: inherit;
+}
+.usage-pagination-actions { display: inline-flex; gap: 6px; }
+.usage-pagination-actions button {
+  padding: 4px 9px; border: 1px solid var(--border, #d1d5db); border-radius: 6px;
+  background: var(--surface, #fff); color: inherit; font: inherit; cursor: pointer;
+}
+.usage-pagination-actions button:hover:not(:disabled) { background: var(--hover, #f3f4f6); }
+.usage-pagination-actions button:disabled { cursor: not-allowed; opacity: .45; }
+
 @media (max-width: 900px) {
-  .usage-page { overflow-x: auto; }
+  .usage-pagination { justify-content: flex-start; }
+  .usage-pagination-summary { flex-basis: 100%; }
 }

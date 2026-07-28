@@ -22,12 +22,14 @@
 - **全栈对等**：面向用户的后端能力必须在同一次改动里带上前端 UI。不接受只做一侧。
 - **公式渲染**：紧邻正文、独占一行的单行 `$$...$$` 仍按块级公式处理；Ask、报告、Memory、Knowhow 的宽公式只在所属内容块内横向滚动。来源详情、知识对象标题及知识图谱「出处」卡中的 `formula` 元素共用 KaTeX 渲染；直接调用 KaTeX 前先剥除包裹整值的 Markdown 数学定界符，解析失败必须显示原始内容，不能留下空白或仅错误态的可视化。
 - **文档同步**：影响安装、产品行为、架构或开发约束时，`README.md`、`README_zh.md`、`AGENTS.md`、`CLAUDE.md` **四份**一起改，并同步 `docs/` 下负责该主题的中英文权威文档。根 README 只保留精简入口，详细契约不得重新堆回 README。漏掉本文件，Claude Code 侧的规范就会悄悄过期——那正是本文件存在的原因。
+- **用户使用总览**：先对 `/admin/users` 返回的完整用户集合排序，再做前端分页；默认每页 20 条，可切换 20/50/100 条。用户名、角色、注册时间、各类用量、最近活跃和文档上限表头可切换升降序，排序或翻页时清理已隐藏行的临时交互态。
 - 完成 `silicon_notebook_fangan.md` 里定义的特性时，同批更新 `fangan_done.md`。
 - 提交的文档保持通用口径：绝对解释器路径、本机端口占用这类**机器特定细节不进 git**。
 
 ### 硬门
 
 - 完整本地门是 `bash scripts/check.sh`（后端 pytest + 语法/契约/harness + 前端 test/typecheck/build 三条并发泳道）。CI 只是它的只读包装，不要在 workflow 里另起测试根。
+- **仅 Codex 的沙箱规则（Claude Code 不适用）**：Codex 第一次运行 `scripts/check.sh` 就必须申请沙箱外执行，因为后端生命周期测试会绑定 loopback 端口并管理子进程；不得先在沙箱内试错。GitHub 网络操作（`git fetch`、`git push`、`gh auth/repo/pr`）也必须直接申请沙箱外执行；普通本地只读 Git 检查仍在沙箱内完成。
 - 数据库专项门只覆盖直接 PostgreSQL 后端；已退役的 SQLite 后端实现专项测试、SQLite→PostgreSQL 导入/正向 shadow 测试与跨后端 parity 测试不得重新加入当前套件。
 - **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v34；PostgreSQL checksummed schema 为 v12；除关系端点 keyset 覆盖索引外，两侧还包含关系补全的来源代次水位与 `(source_id,id)` 对象索引。
 - **界面词汇**：面向用户的文案只用「界面词」，不得出现 `projection`/`tier`/`canonical`/`chunk`/`KG`/`schema` 这类内部黑话。真源是 `AGENTS.md`「界面词汇表」，`scripts/check_ui_vocabulary.py` 是硬门。**唯一放行的英文界面词是「图谱 Schema」**（图谱对象类型/字段管理，原「内容类型」，现从知识图谱视图头部进入）——守卫的 `SANCTIONED_UI` 只放行这一个复合短语（带 CJK 前置断言，不吞「知识图谱」尾字），裸 `schema`/`Schema` 仍拦。

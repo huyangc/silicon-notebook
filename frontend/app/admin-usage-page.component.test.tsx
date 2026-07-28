@@ -192,3 +192,58 @@ test("管理员行的文档上限显示不限且不可编辑", async () => {
   expect(builtin.getByText("不限")).toBeInTheDocument();
   expect(builtin.queryByRole("button", { name: "编辑" })).toBeNull();
 });
+
+test("用户总览按 20 条分页并支持切换每页数量", async () => {
+  primeCommonMocks();
+  const pagedRows = Array.from({ length: 22 }, (_, index) => ({
+    ...rows[1],
+    id: `user-${index}`,
+    username: `user-${String(index).padStart(2, "0")}`,
+    created_at: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00`,
+  }));
+  mocks.fetchAdminUsers.mockResolvedValue(pagedRows);
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+
+  expect(await screen.findByText("第 1 / 2 页，共 22 位用户")).toBeInTheDocument();
+  expect(screen.getByText("user-00")).toBeInTheDocument();
+  expect(screen.queryByText("user-20")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("第 2 / 2 页，共 22 位用户")).toBeInTheDocument();
+  expect(screen.getByText("user-20")).toBeInTheDocument();
+  expect(screen.queryByText("user-00")).toBeNull();
+
+  await user.selectOptions(screen.getByRole("combobox", { name: "每页用户数" }), "50");
+  expect(await screen.findByText("第 1 / 1 页，共 22 位用户")).toBeInTheDocument();
+  expect(screen.getByText("user-00")).toBeInTheDocument();
+  expect(screen.getByText("user-21")).toBeInTheDocument();
+});
+
+test("点击可排序表头会对完整用户集合切换升降序", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([
+    { ...rows[1], id: "u-a", username: "alpha", notebooks: 3, created_at: "2026-07-01T00:00:00" },
+    { ...rows[1], id: "u-b", username: "beta", notebooks: 1, created_at: "2026-07-02T00:00:00" },
+    { ...rows[1], id: "u-c", username: "gamma", notebooks: 2, created_at: "2026-07-03T00:00:00" },
+  ]);
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  await screen.findByText("alpha");
+  const table = screen.getByRole("table");
+  const sortButton = within(table).getByRole("button", { name: "笔记本" });
+
+  await user.click(sortButton);
+  expect(sortButton.closest("th")).toHaveAttribute("aria-sort", "ascending");
+  expect(within(table).getAllByRole("row").slice(1).map((row) => row.children[1]?.textContent)).toEqual([
+    "beta", "gamma", "alpha",
+  ]);
+
+  await user.click(sortButton);
+  expect(sortButton.closest("th")).toHaveAttribute("aria-sort", "descending");
+  expect(within(table).getAllByRole("row").slice(1).map((row) => row.children[1]?.textContent)).toEqual([
+    "alpha", "gamma", "beta",
+  ]);
+});

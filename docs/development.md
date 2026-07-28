@@ -167,6 +167,13 @@ This is the complete offline local gate. It runs three bounded lanes concurrentl
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
+For Codex only, the full gate must request outside-sandbox execution on its first
+attempt. Its backend lifecycle tests bind loopback ports and manage subprocesses,
+so an initial sandbox run is invalid noise rather than a useful fallback probe.
+Codex must also request outside-sandbox execution directly for GitHub network
+operations (`git fetch`, `git push`, and `gh auth/repo/pr`); local read-only Git
+inspection remains sandboxed. This rule does not apply to Claude Code.
+
 ```bash
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```

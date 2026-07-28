@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
@@ -15,7 +15,14 @@ import {
   type AdminUserRole,
   type AdminUserUsage,
 } from "./api.ts";
-import { formatLastActive, logsDrillHref, parseUploadLimit } from "./format.ts";
+import {
+  formatLastActive,
+  logsDrillHref,
+  parseUploadLimit,
+  sortAdminUsers,
+  type AdminUserSortKey,
+  type SortDirection,
+} from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
 import "./usage.css";
 
@@ -26,6 +33,35 @@ type State =
   | { kind: "ready"; rows: AdminUserUsage[] };
 
 type NotebookCacheEntry = AdminUserNotebook[] | "loading" | "error";
+
+const PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
+
+type SortableHeaderProps = {
+  label: string;
+  sortKey: AdminUserSortKey;
+  activeKey: AdminUserSortKey;
+  direction: SortDirection;
+  onSort: (key: AdminUserSortKey) => void;
+};
+
+function SortableHeader({ label, sortKey, activeKey, direction, onSort }: SortableHeaderProps) {
+  const active = activeKey === sortKey;
+  const ariaSort = active ? (direction === "asc" ? "ascending" : "descending") : "none";
+  return (
+    <th aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={`usage-sort-button${active ? " usage-sort-button-active" : ""}`}
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        <span className="usage-sort-indicator" aria-hidden="true">
+          {active ? (direction === "asc" ? "▲" : "▼") : "↕"}
+        </span>
+      </button>
+    </th>
+  );
+}
 
 export default function AdminUsagePage() {
   const [state, setState] = useState<State>({ kind: "loading" });
@@ -43,6 +79,10 @@ export default function AdminUsagePage() {
   const [limitInput, setLimitInput] = useState("");
   const [limitPendingId, setLimitPendingId] = useState("");
   const [limitNotice, setLimitNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  const [sortKey, setSortKey] = useState<AdminUserSortKey>("created_at");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
 
   useEffect(() => {
     (async () => {
@@ -202,11 +242,42 @@ export default function AdminUsagePage() {
     void submitLimitChange(target, parsed);
   }
 
+  function resetRowInteractions() {
+    setExpanded(null);
+    setConfirmingRole(null);
+    setEditingLimitId("");
+  }
+
+  function changeSort(nextKey: AdminUserSortKey) {
+    if (sortKey === nextKey) {
+      setSortDirection((previous) => previous === "asc" ? "desc" : "asc");
+    } else {
+      setSortKey(nextKey);
+      setSortDirection("asc");
+    }
+    setPage(1);
+    resetRowInteractions();
+  }
+
+  const readyRows = state.kind === "ready" ? state.rows : [];
+  const sortedRows = useMemo(
+    () => sortAdminUsers(readyRows, sortKey, sortDirection),
+    [readyRows, sortKey, sortDirection],
+  );
+  const pageCount = Math.max(1, Math.ceil(sortedRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = sortedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
   if (state.kind === "loading") return <main className="usage-page">加载中…</main>;
   if (state.kind === "forbidden")
     return <main className="usage-page usage-empty">无权限:仅管理员可查看用户使用总览。</main>;
   if (state.kind === "error")
     return <main className="usage-page usage-empty">加载失败:{state.message}</main>;
+
+  function changePage(nextPage: number) {
+    setPage(Math.max(1, Math.min(nextPage, pageCount)));
+    resetRowInteractions();
+  }
 
   return (
     <main className="usage-page">
@@ -244,17 +315,26 @@ export default function AdminUsagePage() {
           {limitNotice.message}
         </div>
       )}
-      <table className="usage-table">
-        <thead>
-          <tr>
-            <th className="usage-expand-col"></th>
-            <th>用户名</th><th>角色</th><th>注册时间</th>
-            <th>笔记本</th><th>来源</th><th>对话</th><th>报告</th>
-            <th>最近活跃</th><th>日志</th><th>文档上限</th><th>权限管理</th>
-          </tr>
-        </thead>
-        <tbody>
-          {state.rows.map((u) => {
+      <div className="usage-table-wrap">
+        <table className="usage-table">
+          <thead>
+            <tr>
+              <th className="usage-expand-col"></th>
+              <SortableHeader label="用户名" sortKey="username" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="角色" sortKey="role" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="注册时间" sortKey="created_at" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="笔记本" sortKey="notebooks" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="来源" sortKey="sources" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="对话" sortKey="conversations" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="报告" sortKey="reports" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <th>日志</th>
+              <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <th>权限管理</th>
+            </tr>
+          </thead>
+          <tbody>
+          {visibleRows.map((u) => {
             const isOpen = expanded === u.id;
             const entry = nbCache[u.id];
             const isOnline = onlineIds.has(u.id);
@@ -421,8 +501,36 @@ export default function AdminUsagePage() {
               </Fragment>
             );
           })}
-        </tbody>
-      </table>
+          </tbody>
+        </table>
+      </div>
+      <nav className="usage-pagination" aria-label="用户列表分页">
+        <span className="usage-pagination-summary">
+          第 {currentPage} / {pageCount} 页，共 {sortedRows.length} 位用户
+        </span>
+        <label className="usage-page-size-label">
+          每页
+          <select
+            className="usage-page-size-select"
+            aria-label="每页用户数"
+            value={pageSize}
+            onChange={(event) => {
+              setPageSize(Number(event.target.value));
+              setPage(1);
+              resetRowInteractions();
+            }}
+          >
+            {PAGE_SIZE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+          </select>
+          条
+        </label>
+        <div className="usage-pagination-actions">
+          <button type="button" disabled={currentPage === 1} onClick={() => changePage(1)}>首页</button>
+          <button type="button" disabled={currentPage === 1} onClick={() => changePage(currentPage - 1)}>上一页</button>
+          <button type="button" disabled={currentPage === pageCount} onClick={() => changePage(currentPage + 1)}>下一页</button>
+          <button type="button" disabled={currentPage === pageCount} onClick={() => changePage(pageCount)}>末页</button>
+        </div>
+      </nav>
     </main>
   );
 }
