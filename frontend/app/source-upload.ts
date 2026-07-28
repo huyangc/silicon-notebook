@@ -1,5 +1,34 @@
 import type { UploadedSource } from "./workspace-model.ts";
 
+export const STAGED_FILE_NAME_MAX_LENGTH = 48;
+
+/** Compact a long staged filename without hiding its extension or final words.
+ *
+ * CSS ellipsis still protects very narrow windows, while this deterministic
+ * middle compaction keeps an unusually long name from consuming the whole row
+ * on wide/resized dialogs. Array.from avoids cutting a surrogate pair in half.
+ * The full value remains available in the element's title attribute.
+ */
+export function compactStagedFileName(
+  fileName: string,
+  maxLength = STAGED_FILE_NAME_MAX_LENGTH,
+): string {
+  const characters = Array.from(fileName);
+  if (characters.length <= maxLength) return fileName;
+  if (maxLength <= 1) return "…";
+  const available = maxLength - 1;
+  const extensionStart = characters.lastIndexOf(".");
+  const extensionLength = extensionStart > 0 && extensionStart < characters.length - 1
+    ? characters.length - extensionStart
+    : 0;
+  const tailLength = Math.min(
+    available,
+    Math.max(1, Math.floor(available / 3), extensionLength),
+  );
+  const headLength = available - tailLength;
+  return `${characters.slice(0, headLength).join("")}…${characters.slice(-tailLength).join("")}`;
+}
+
 /** 上传时每个待上传文件发给后端的两个并列字段：
  *  - ``docType``：界面上的原值（``""`` = 下拉框里的「自动检测」）。
  *  - ``explicit``：用户是否**手动**动过这一项的类型下拉框（``"1"``）还是没动过（``"0"``）。

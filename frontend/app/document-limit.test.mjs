@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveDocumentCapacity } from "./document-limit.ts";
+import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit.ts";
 
 test("未满额:显示指示但不门控", () => {
   const cap = resolveDocumentCapacity({ isAdmin: false, documentLimit: 20, documentCount: 5 });
@@ -48,4 +48,23 @@ test("满额笔记本:用真实总数仍判满额,用过滤计数会误放行", 
 
   const filteredCount = resolveDocumentCapacity({ isAdmin: false, documentLimit: 20, documentCount: 3 });
   assert.equal(filteredCount.atCapacity, false, "过滤子集计数 3 会误放行——所以计数入参绝不能用搜索态的 sourcesTotal");
+});
+
+test("待上传批次超过剩余名额时直接阻止，并说明可传数量和需移除数量", () => {
+  const cap = resolveDocumentCapacity({ isAdmin: false, documentLimit: 20, documentCount: 19 });
+  assert.equal(documentUploadBlockReason(cap, 1), null);
+  assert.equal(
+    documentUploadBlockReason(cap, 3),
+    "当前仅可再上传 1 个文档，已选择 3 个。请移除 2 个文件后再上传。",
+  );
+});
+
+test("已经满额时给出可操作原因；未知上限和管理员不做前端误拦截", () => {
+  const full = resolveDocumentCapacity({ isAdmin: false, documentLimit: 20, documentCount: 20 });
+  assert.match(documentUploadBlockReason(full, 1) ?? "", /已达.*上限.*先删除.*管理员/);
+
+  const unknown = resolveDocumentCapacity({ isAdmin: false, documentLimit: 0, documentCount: 20 });
+  const admin = resolveDocumentCapacity({ isAdmin: true, documentLimit: 20, documentCount: 20 });
+  assert.equal(documentUploadBlockReason(unknown, 99), null);
+  assert.equal(documentUploadBlockReason(admin, 99), null);
 });

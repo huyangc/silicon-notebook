@@ -13,7 +13,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Deployment-owned OpenAI-compatible chat, embedding, and rerank services, with workload bindings and per-service `max_concurrency` declared in one TOML file
 - Deterministic fallbacks when no LLM/embedder is configured — the whole pipeline runs offline
 - Clean start: a fresh database seeds only the local user; no demo notebook or synthetic sources
-- Multipart source upload for PDF, Markdown, DOCX, PPTX, CSV, and XLSX (async through the shared KG job scheduler)
+- Multipart source upload for PDF, Markdown, DOCX, PPTX, CSV, and XLSX (async through the shared KG job scheduler). The add-source dialog middle-compacts overlong staged filenames while retaining the ending/extension and full-name tooltip. It includes the whole staged batch in the effective document-limit check: a batch larger than the remaining allowance is disabled before submission and accompanied by the remaining/excess counts and an actionable remedy.
 - **KG-native ingestion**: structured Markdown parse → greedy-window KG extraction (Concept / Claim / Formula / Procedure) with concurrent embedding → extraction-first status (`extracted` = KG ready, does not wait for embedding)
 - PDF/DOCX/PPTX parsing via MinerU (formulas as LaTeX, tables, layout, embedded images) when configured; pypdf text fallback locally or when MinerU is off
 - MinerU-extracted embedded images are retained and shown inline in the source view; captions and text remain searchable

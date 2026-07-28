@@ -107,7 +107,7 @@ import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
-import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
+import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
@@ -230,7 +230,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { resolveDocumentCapacity } from "./document-limit";
+import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
 import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
@@ -2828,6 +2828,11 @@ export default function Home() {
 
   async function confirmUpload() {
     if (!currentNotebookId || stagedFiles.length === 0 || uploadBusy) return;
+    const blockedReason = documentUploadBlockReason(docCapacity, stagedFiles.length);
+    if (blockedReason) {
+      setToast(blockedReason);
+      return;
+    }
     setUploadBusy(true);
     try {
       await confirmUploadInner();
@@ -4425,6 +4430,7 @@ export default function Home() {
     documentCount: notebookSourceTotal,
   });
   const atDocCapacityHint = "已达该笔记本的文档数量上限，无法继续添加文档。";
+  const stagedUploadBlockedReason = documentUploadBlockReason(docCapacity, stagedFiles.length);
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
     currentUser?.role ?? "",
@@ -5632,7 +5638,7 @@ export default function Home() {
                 <div className="stack">
                   {stagedFiles.map((file, index) => (
                     <div className="staged-file-row" key={`${file.name}-${index}`}>
-                      <span className="staged-file-name" title={file.name}>{file.name}</span>
+                      <span className="staged-file-name" title={file.name}>{compactStagedFileName(file.name)}</span>
                       <select
                         className="staged-file-type"
                         value={stagedDocTypes[index] ?? ""}
@@ -5653,8 +5659,19 @@ export default function Home() {
                     </div>
                   ))}
                 </div>
+                {stagedUploadBlockedReason && (
+                  <p id="staged-upload-blocked-reason" className="source-upload-blocked-hint" role="alert">
+                    {stagedUploadBlockedReason}
+                  </p>
+                )}
                 <div className="tag-row">
-                  <button className="new-pill" disabled={uploadBusy || docCapacity.atCapacity} title={docCapacity.atCapacity ? atDocCapacityHint : undefined} onClick={() => confirmUpload().catch(reportError)}>{uploadBusy ? "上传中…" : `上传 ${stagedFiles.length} 个文件`}</button>
+                  <button
+                    className="new-pill"
+                    disabled={uploadBusy || Boolean(stagedUploadBlockedReason)}
+                    title={stagedUploadBlockedReason ?? undefined}
+                    aria-describedby={stagedUploadBlockedReason ? "staged-upload-blocked-reason" : undefined}
+                    onClick={() => confirmUpload().catch(reportError)}
+                  >{uploadBusy ? "上传中…" : `上传 ${stagedFiles.length} 个文件`}</button>
                   <button className="sort-button" disabled={uploadBusy} onClick={() => { setStagedFiles([]); setStagedDocTypes([]); applyTouchedUpdate(stagedDocTypeTouchedRef, setStagedDocTypeTouched, []); }}>清空</button>
                 </div>
               </div>
