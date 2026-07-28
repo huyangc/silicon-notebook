@@ -3064,10 +3064,12 @@ export default function Home() {
         askIntentTraceRef.current, intentUnderstoodStep(contract, understandingMs),
       );
       askIntentAbortRef.current = null;
-      askIntentDraftRef.current = "";
       setIntentChecking(false);
       askIntentFlowRef.current = "submitting";
-      await executeAsk(
+      // 草稿留到 executeAsk 真的接下这次运行为止:理解跑完的这段时间里证据/图谱
+      // 状态可能已经变化,被它的可用性守卫拦下时输入框已空、在途 turn 也已隐藏,
+      // 不退回就等于把用户打的问题悄悄吞掉。
+      const started = await executeAsk(
         q,
         "reasoning",
         buildAskIntentConfirmation(
@@ -3075,6 +3077,12 @@ export default function Home() {
         ),
         handOffIntentTrace(askIntentTraceRef.current),
       );
+      askIntentDraftRef.current = "";
+      if (!started) {
+        setQuestion(q);
+        askIntentTraceRef.current = [];
+        clearPendingTurn();
+      }
     } catch (error) {
       if (!isAbortError(error)) reportError(error);
       // 预检失败/被中止:收起在途 turn 并把草稿还给输入框。别人已经接管(切库、
@@ -3103,19 +3111,22 @@ export default function Home() {
     // 理解阶段合成的轨迹前缀。后端流下来的步骤追加在它后面,用户看到的是一条
     // 从「理解问题」一路走到「作答」的连续轨迹,而不是从中途冒出来的半截。
     traceSeed: ReasoningTraceStep[] = [],
-  ) {
-    if (!currentNotebookId) return;
-    if (asking || sessionLoading) return;
+    // 返回「本次运行有没有被真正接下」。下面这几道守卫可能在问题理解跑完之后
+    // 才拦下来(那段时间里证据/图谱状态会变),调用方要据此把草稿退回输入框 ——
+    // 否则输入框已清空、在途 turn 也已隐藏,用户的问题就此无声消失。
+  ): Promise<boolean> {
+    if (!currentNotebookId) return false;
+    if (asking || sessionLoading) return false;
     const q = nextQuestion.trim();
-    if (!q) return;
+    if (!q) return false;
     // 硬约束:后端判定无可检索证据时禁止提问(也挡住快捷提问 chip 这条旁路)。
     if (isAskBlocked(currentNotebook)) {
       setToast("请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
-      return;
+      return false;
     }
     if (requiresKg(selectedMode) && !kgAvailable) {
       setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
-      return;
+      return false;
     }
     const notebookId = currentNotebookId;
     const conversationIdAtStart = conversationId;
@@ -3192,14 +3203,14 @@ export default function Home() {
       );
       if (!ownsRun()) {
         await refreshActiveSessions(notebookId).catch(() => {});
-        return;
+        return true;
       }
       setTurns((prev) => [...prev, { question: q, response }]);
       setConversationId(response.conversation_id);
     } catch (error) {
       if (!ownsRun()) {
         await refreshActiveSessions(notebookId).catch(() => {});
-        return;
+        return true;
       }
       setQuestion(q);
       if (startedConversationId !== conversationIdAtStart) {
@@ -3207,7 +3218,7 @@ export default function Home() {
       }
       if (isAbortError(error)) {
         setToast("已中断回答");
-        return;
+        return true;
       }
       reportError(error);
     } finally {
@@ -3222,6 +3233,9 @@ export default function Home() {
       cancelRequestedControllersRef.current.delete(controller);
     }
     if (ownsRun()) await loadSessions(notebookId);
+    // 走到这里本次运行已经被接下(不论最终成功、失败还是被中断)——那几条路径都
+    // 自己处理过草稿,调用方不该再退回一次。
+    return true;
   }
 
   async function confirmAskIntent(confirmation: AskIntentConfirmation) {
@@ -3247,11 +3261,17 @@ export default function Home() {
       intentConfirmedStep(confirmation.resolved_question, confirmation.answers.length),
     ];
     askIntentTraceRef.current = traceSeed;
-    askIntentDraftRef.current = "";
     try {
-      await executeAsk(
+      // 同 runAsk:草稿留到 executeAsk 真的接下这次运行为止。
+      const started = await executeAsk(
         review.question, "reasoning", confirmation, handOffIntentTrace(traceSeed),
       );
+      askIntentDraftRef.current = "";
+      if (!started) {
+        setQuestion(review.question);
+        askIntentTraceRef.current = [];
+        clearPendingTurn();
+      }
     } finally {
       askIntentFlowRef.current = "idle";
     }

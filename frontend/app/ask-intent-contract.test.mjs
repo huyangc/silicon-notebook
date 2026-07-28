@@ -5,6 +5,7 @@ import {
   callsIn,
   comparisonsIn,
   findFunction,
+  ifBranchesIn,
   importsFrom,
   jsxTextValues,
   parseModule,
@@ -99,4 +100,30 @@ test("理解阶段被打断时草稿退回输入框", () => {
     assert.ok(callsIn(findFunction(page, fn)).includes("setQuestion"), `${fn} 未退回草稿`);
   }
   assert.ok(callsIn(findFunction(page, "runAsk")).includes("clearPendingTurn"));
+});
+
+
+// executeAsk 的可用性守卫可能在问题理解跑完之后才拦下来(那段时间里证据/图谱
+// 状态会变)。此时输入框已清空、在途 turn 已隐藏,不看返回值就等于把用户打的
+// 问题悄悄吞掉(codex 第 5 轮 P2)。
+test("提交被可用性守卫拦下时草稿退回,而不是无声丢弃", () => {
+  const guarded = variableInitializersIn(page)
+    .filter((item) => item.name === "started" && item.initializer.includes("executeAsk"));
+  assert.equal(guarded.length, 2, "runAsk / confirmAskIntent 应各据返回值判断是否退回");
+  for (const fn of ["runAsk", "confirmAskIntent"]) {
+    const body = findFunction(page, fn);
+    assert.ok(callsIn(body).includes("setQuestion"), `${fn} 未退回草稿`);
+    assert.ok(callsIn(body).includes("clearPendingTurn"), `${fn} 未收起在途 turn`);
+  }
+  // 拒收路径必须 return 而不是继续往下跑 —— 否则调用方拿到的返回值再准也没用。
+  // (返回的是不是 false 这一层静态守卫钉不住;`Promise<boolean>` 的返回类型让
+  //  裸 `return;` 直接过不了 tsc,而「拒收后返回 true」只能靠评审与上面这条
+  //  调用方守卫兜住。)
+  const rejections = ifBranchesIn(findFunction(page, "executeAsk"))
+    .filter((branch) => /isAskBlocked|requiresKg/.test(branch.condition));
+  assert.equal(rejections.length, 2, "executeAsk 的两道可用性守卫不见了");
+  for (const branch of rejections) {
+    assert.ok(branch.thenReturns, `${branch.condition} 拒收后没有 return`);
+    assert.ok(branch.thenCalls.includes("setToast"), `${branch.condition} 没有告知用户`);
+  }
 });
