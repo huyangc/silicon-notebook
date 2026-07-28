@@ -34,3 +34,26 @@ export function resolveDocumentCapacity(input: {
     count,
   };
 }
+
+/** Return the user-facing reason a staged file upload cannot start.
+ *
+ * The backend owns the final quota decision, but the upload dialog already has
+ * the same effective limit and the notebook's unfiltered visible-document
+ * count.  Include the staged batch in that decision so a 19/20 notebook cannot
+ * present an enabled "upload 2 files" button that is guaranteed to be rejected.
+ */
+export function documentUploadBlockReason(
+  capacity: DocumentCapacity,
+  stagedCount: number,
+): string | null {
+  if (!capacity.show || stagedCount <= 0) return null;
+  const remaining = Math.max(0, capacity.limit - capacity.count);
+  if (remaining === 0) {
+    return "已达该笔记本的文档数量上限，无法继续上传。请先删除部分文档，或联系管理员调整上限。";
+  }
+  if (stagedCount > remaining) {
+    const excess = stagedCount - remaining;
+    return `当前仅可再上传 ${remaining} 个文档，已选择 ${stagedCount} 个。请移除 ${excess} 个文件后再上传。`;
+  }
+  return null;
+}

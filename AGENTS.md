@@ -78,6 +78,7 @@ Inside a notebook:
   - Show how many sources are in the current notebook.
   - Keep source cards compact and readable for long mixed Chinese/English titles and summaries.
   - Source cards should open a source detail preview with element-level parsed text and expose a delete action.
+  - The add-source dialog must keep staged rows stable: compact overlong filenames in the middle while preserving the ending/extension and expose the full name as a tooltip. Its confirmation button must include the staged batch in the effective document-limit check, become visibly disabled when the batch cannot fit, and show an actionable reason; keep comfortable space below the last action row.
   - Source detail element text should wrap within the modal width, including long Markdown paths, LaTeX fragments, and mixed Chinese/English text; keep horizontal scrolling local to tables/formulas rather than the entire detail panel. Direct KaTeX inputs must strip full-value Markdown math delimiters (`$...$`, `$$...$$`, `\\(...\\)`, `\\[...\\]`) first, and malformed input must fall back to visible raw text rather than an empty/error-only visualization.
   - On desktop, source detail uses a conventional close control and supports dragging by the header; keep narrow-screen geometry fixed and the detail body independently scrollable.
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.

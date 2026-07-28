@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  compactStagedFileName,
   summarizeUpload,
   uploadDocTypeFields,
   fillAutoDetectedTypes,
@@ -11,6 +12,24 @@ import {
 } from "./source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
+
+test("compactStagedFileName: 短文件名保持原样，长文件名中间压缩且保留末尾扩展名", () => {
+  assert.equal(compactStagedFileName("short-name.pdf"), "short-name.pdf");
+
+  const original = `silicon-notebook-KG抽取与${"a".repeat(60)}检索方法说明.pdf`;
+  const compacted = compactStagedFileName(original);
+  assert.equal(Array.from(compacted).length, 48);
+  assert.match(compacted, /^silicon-notebook-KG抽取与/);
+  assert.match(compacted, /…/);
+  assert.match(compacted, /检索方法说明\.pdf$/);
+});
+
+test("compactStagedFileName: 不会截断 emoji 等代理对字符", () => {
+  const compacted = compactStagedFileName(`测试${"😀".repeat(20)}文件.pdf`, 12);
+  assert.equal(Array.from(compacted).length, 12);
+  assert.doesNotMatch(compacted, /\uFFFD/);
+  assert.match(compacted, /\.pdf$/);
+});
 
 // ---------------- 追踪「用户是否动过类型下拉框」→ 上传发 per-file doc_type_explicit
 

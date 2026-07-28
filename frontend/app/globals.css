@@ -4822,7 +4822,8 @@ button.chat-session-card {
 .source-action-row {
   display: flex;
   gap: 10px;
-  margin: 0 24px 4px;
+  /* Keep the last action row from visually touching the modal edge. */
+  margin: 0 24px 24px;
 }
 
 .source-action-button {
@@ -4936,13 +4937,20 @@ button.chat-session-card {
 }
 
 .staged-file-name {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
   color: #344255;
+}
+
+.source-upload-blocked-hint {
+  margin: 2px 0 0;
+  color: var(--danger, #b42318);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .staged-file-type {
