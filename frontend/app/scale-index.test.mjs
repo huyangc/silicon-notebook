@@ -1,7 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { describeScaleIndex, SCALE_OP_MODE, scaleIndexOpConfirm } from "./scale-index.ts";
+import {
+  describeScaleIndex,
+  SCALE_OP_MODE,
+  latestScaleIndexDoneKey,
+  latestScaleIndexDoneForNotebook,
+  queuedScaleIndexImmediateOp,
+  scaleIndexOpConfirm,
+  shouldRefreshScaleIndexFromDone,
+  shouldShowIndexRequiredBanner,
+} from "./scale-index.ts";
 import { groupLabel } from "./ask-modes.ts";
 
 const base = {
@@ -79,6 +88,79 @@ test("queued → busy, no ops (even if index exists)", () => {
   const v = describeScaleIndex({ ...base, state: "queued", exists: true });
   assert.equal(v.primaryOp, null);
   assert.equal(v.canRebuild, false);
+});
+
+test("historical index_required banner follows the live published-index state", () => {
+  assert.equal(shouldShowIndexRequiredBanner(true, null), true);
+  assert.equal(shouldShowIndexRequiredBanner(true, { exists: false }), true);
+  assert.equal(shouldShowIndexRequiredBanner(true, { exists: true }), false);
+  assert.equal(shouldShowIndexRequiredBanner(false, { exists: false }), false);
+  assert.equal(shouldShowIndexRequiredBanner(undefined, { exists: false }), false);
+});
+
+test("index_done refreshes only the active notebook after foreground polling ends", () => {
+  assert.equal(shouldRefreshScaleIndexFromDone(
+    { notebook_id: "nb-active", kind: "index_done" },
+    "nb-active",
+  ), true);
+  assert.equal(shouldRefreshScaleIndexFromDone(
+    { notebook_id: "nb-other", kind: "index_done" },
+    "nb-active",
+  ), false);
+  assert.equal(shouldRefreshScaleIndexFromDone(
+    { notebook_id: "nb-active", kind: "paper_meta_done" },
+    "nb-active",
+  ), false);
+  assert.equal(shouldRefreshScaleIndexFromDone(null, "nb-active"), false);
+});
+
+test("batched completion events retain an active index_done that is not the final toast", () => {
+  const activeDone = { notebook_id: "nb-active", kind: "index_done", ts: 1 };
+  const events = [
+    { notebook_id: "nb-other", kind: "paper_meta_done", ts: 3 },
+    { notebook_id: "nb-other", kind: "index_done", ts: 2 },
+    activeDone,
+  ];
+  assert.equal(latestScaleIndexDoneForNotebook(events, "nb-active"), activeDone);
+  assert.equal(latestScaleIndexDoneForNotebook(events, "nb-missing"), null);
+});
+
+test("unrelated completion additions or dismissals keep the active index event key stable", () => {
+  const activeDone = { notebook_id: "nb-active", kind: "index_done", ts: 7 };
+  const initial = [activeDone];
+  const withUnrelated = [
+    { notebook_id: "nb-other", kind: "paper_meta_done", ts: 8 },
+    activeDone,
+  ];
+  assert.equal(latestScaleIndexDoneKey(initial, "nb-active"), "nb-active:7");
+  assert.equal(
+    latestScaleIndexDoneKey(withUnrelated, "nb-active"),
+    "nb-active:7",
+  );
+  assert.equal(
+    latestScaleIndexDoneKey(withUnrelated.slice(1), "nb-active"),
+    "nb-active:7",
+  );
+  // Dismissing the active completion removes the display key.  The page's
+  // request generation deliberately ignores this empty transition so the
+  // already-started authoritative status read may still publish.
+  assert.equal(latestScaleIndexDoneKey([], "nb-active"), "");
+});
+
+test("queued operations can be upgraded to the matching immediate operation", () => {
+  assert.equal(queuedScaleIndexImmediateOp({ ...base, state: "queued" }), "build");
+  assert.equal(queuedScaleIndexImmediateOp({
+    ...base,
+    state: "queued",
+    exists: true,
+    has_unindexed_content: true,
+  }), "update");
+  assert.equal(queuedScaleIndexImmediateOp({
+    ...base,
+    state: "queued",
+    exists: true,
+    has_unindexed_content: false,
+  }), "rebuild");
 });
 
 test("state falls back from flags when absent", () => {
