@@ -1565,3 +1565,27 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
     assert called["peers"] == 0                     # base 为 None → 根本不调 community_peers
     assert any(t.step_type == "expand_community" for t in res.trace)
+
+
+def test_merge_element_hits_keeps_max_score_across_queries():
+    """codex PR#391 round-2: 同一元素被多次 search_elements 命中时保留最高分——
+    合成阶段按分数裁 answer_element_items,只留首个(可能偏低的)查询分会把
+    强命中挤出上限;更低分的重复命中也不得降低既有分。"""
+    from app.services.reasoning_retrieval import merge_element_hits
+    from app.services.retrieval import RetrievedElement
+
+    def el(eid, score):
+        return RetrievedElement(
+            element_id=eid, source_id="s", source_title="S",
+            location_label="p", element_type="paragraph", text=eid, score=score)
+
+    elements = [el("a", 0.3), el("b", 0.5)]
+    added = merge_element_hits(
+        elements, [el("a", 0.9), el("c", 0.4), el("a", 0.1)])
+    assert [e.element_id for e in added] == ["c"]      # 只有 c 是真正新增
+    assert len(elements) == 3
+    scores = {e.element_id: e.score for e in elements}
+    assert scores["a"] == 0.9                          # 高分覆盖首个低分
+    assert scores["b"] == 0.5
+    merge_element_hits(elements, [el("b", 0.2)])
+    assert {e.element_id: e.score for e in elements}["b"] == 0.5

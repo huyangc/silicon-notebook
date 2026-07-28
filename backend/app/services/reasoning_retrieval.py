@@ -105,6 +105,26 @@ def _norm_query(q: str) -> str:
     return " ".join(str(q).split()).casefold()
 
 
+def merge_element_hits(elements: list, found: list) -> list:
+    """把一批 search_elements 结果合并进累计列表,返回真正新增的元素。
+
+    去重按 element_id;同一元素被后续查询以更高分再次命中时**就地保留最高分**
+    ——合成阶段按分数降序裁 answer_element_items,若只保留首个(可能偏低的)
+    查询专属分,弱查询先到会把强命中挤出上限(codex PR#391 round-2 P2)。
+    跨查询分数只是大致可比,取 max 是保守选择:绝不让重复命中降低既有分。"""
+    by_id = {e.element_id: e for e in elements}
+    added = []
+    for e in found:
+        prev = by_id.get(e.element_id)
+        if prev is None:
+            by_id[e.element_id] = e
+            added.append(e)
+        elif e.score > prev.score:
+            prev.score = e.score
+    elements.extend(added)
+    return added
+
+
 def effective_top_n(
     settings,
     explicit: "Optional[int]",
@@ -768,11 +788,9 @@ class ReasoningRetriever:
                 else:
                     elements_searches += 1
                     eq = decision.elements_query or question
-                    seen_el = {e.element_id for e in elements}
-                    els = [e for e in self.search_elements(notebook_id, eq)
-                           if e.element_id not in seen_el]
+                    found = self.search_elements(notebook_id, eq)
                     raise_if_cancelled(self.cancel_event)
-                    elements.extend(els)
+                    els = merge_element_hits(elements, found)
                     record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
                                      detail={"query": eq, "found": len(els)}))

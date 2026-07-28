@@ -514,3 +514,34 @@ def test_chunk_relevance_within_unit_interval(repo):
     bind_chat_client(repo, "reasoning_agent", _AnswerOnlyLLM())
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "MoE 对比")
     assert all(0.0 <= c.relevance <= 1.0 for c in result.chunks)
+
+
+def test_answer_reasoning_fills_counts_sink_before_model_call(repo):
+    """codex PR#391 round-2: 合成模型抛错/吐畸形 JSON 时,counts_sink 必须已带
+    真实装配计数——sink 在 chat_json 之前填充,失败轨迹不得报全零。"""
+    from app.services.retrieval import RetrievedElement
+
+    class _Boom:
+        configured = True
+        def chat_json(self, messages, schema_hint, **kw):
+            raise RuntimeError("synthesis exploded")
+
+    nb = _seed_two_doc_moe(repo)
+    hits = repo._retrieve_scored(nb.id, "Mixture-of-Experts")[:1]
+    assert hits
+    elements = [RetrievedElement(
+        element_id="el-x", source_id="src-A", source_title="DeepSeek paper",
+        location_label="Arch", element_type="paragraph",
+        text="Routed experts.", score=0.9)]
+    bind_chat_client(repo, "ask_answer", _Boom())
+    repo.settings.kg_query_refine_enabled = False
+    ask = repo._runtime.ask_service()
+    sink: dict = {}
+    with pytest.raises(RuntimeError):
+        ask._answer_reasoning(nb.id, "MoE", hits, elements, "",
+                              element_items=2, counts_sink=sink)
+    assert sink == {
+        "included_kg": 1,
+        "included_chunks": 0,
+        "included_elements": 1,
+    }

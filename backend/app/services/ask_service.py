@@ -807,6 +807,7 @@ class AskService:
         chunk_context_chars: int | None = None,
         element_items: int = 6,
         structured_block: str = "",
+        counts_sink: dict | None = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -916,21 +917,6 @@ class AskService:
             budget_chars=total_context_budget,
         )
         context_block = context_block[:total_context_budget]
-        raw = answer_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
-            ANSWER_SCHEMA_HINT,
-            timeout=self.settings.reasoning_timeout_seconds,
-            max_retries=self.settings.reasoning_max_retries,
-            cancel_event=cancel_event,
-            **cap_kwargs(answer_client, "answer_max_tokens"),
-        )
-        raise_if_cancelled(cancel_event)
-        data = json.loads(raw)
-        if not isinstance(data, dict):
-            raise ValueError("answer did not return a JSON object")
-        answer = str(data.get("answer", "")).strip()
-        llm_grounded = bool(data.get("grounded", False))
-        anchors = self._parse_answer_anchors(answer, id_map)
         # Partition the merged *source* map (structured preview + chunks +
         # elements) by numeric key range rather than trusting chunk_id_map /
         # element_id_map's sizes from before the append: _bounded_context_append
@@ -957,6 +943,28 @@ class AskService:
             "included_chunks": included_chunks,
             "included_elements": included_elements,
         }
+        # Fill the sink BEFORE the model call: when the answer client raises
+        # or returns malformed JSON, the synthesis trace must still report the
+        # evidence that really was assembled and sent, not zeros
+        # (codex PR#391 round-2).
+        if counts_sink is not None:
+            counts_sink.clear()
+            counts_sink.update(counts)
+        raw = answer_client.chat_json(
+            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            ANSWER_SCHEMA_HINT,
+            timeout=self.settings.reasoning_timeout_seconds,
+            max_retries=self.settings.reasoning_max_retries,
+            cancel_event=cancel_event,
+            **cap_kwargs(answer_client, "answer_max_tokens"),
+        )
+        raise_if_cancelled(cancel_event)
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("answer did not return a JSON object")
+        answer = str(data.get("answer", "")).strip()
+        llm_grounded = bool(data.get("grounded", False))
+        anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors, counts
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
@@ -1714,16 +1722,17 @@ class AskService:
                     budget_chars=limits.chunk_context_chars,
                 )
             def _synth_reasoning():
-                ans, llm_grounded_, anchors_, counts = self._answer_reasoning(
+                # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
+                # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
+                ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
                     notebook_id, research_question, top_hits, elements, history,
                     cancel_event=cancel_event, chunks=chunks, chains=chains,
                     memory_hits=memory_hits, answer_client=answer_client,
                     kg_context_chars=limits.kg_context_chars,
                     chunk_context_chars=limits.chunk_context_chars,
                     element_items=limits.answer_element_items,
-                    structured_block=structured_block)
-                reasoning_counts.clear()
-                reasoning_counts.update(counts)
+                    structured_block=structured_block,
+                    counts_sink=reasoning_counts)
                 return ans, llm_grounded_, anchors_
             if answer_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits
