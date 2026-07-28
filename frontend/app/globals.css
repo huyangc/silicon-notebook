@@ -3054,21 +3054,32 @@ button.chat-session-card {
 }
 
 /* --- 本次会话提问导航侧栏：右缘一列圆点，指针靠近时 Dock 式鱼眼放大，正对的一条浮出提问 --- */
-/* 导轨钉在 .chat-body 那一行(.chat-panel 的第 2 行),不是对着整个面板居中。
+/* 导轨对准 .chat-body 那一行(.chat-panel 的第 2 行),不是对着整个面板居中。
    它导航的只是对话区,而面板下方会长出很高的兄弟——问题理解的确认卡最高占
    58vh。此前用 `position:absolute; top:50%` 对整个面板居中,卡片一出现就把对话区
    压扁,导轨却仍停在面板中央,浮出的提问卡正好压住卡片右上角。会话抽屉是
-   absolute 浮层不占行,所以对话区恒为第 2 行。 */
+   absolute 浮层不占行,所以对话区恒为第 2 行。
+
+   ⚠ 必须保持 absolute:它一旦成为在流的网格项,就会**占住**第 2 格,把没有显式
+   行号的 .chat-body 挤到下一行、丢掉 minmax(0,1fr),对话区当场塌成内容高度
+   (实测 17px)。absolute 项不参与放置,但带显式网格位置时包含块就是那一行的
+   网格区域 —— 于是既不占格,又精确贴合对话区。
+   ⚠ 结束线 `/ 3` 不能省:只写 `grid-row: 2` 时结束线默认落到网格 padding 边,
+   包含块会一路延伸到面板底部(实测 65..521 而非 65..191),导轨又跑偏。 */
 .chat-turn-nav {
-  grid-row: 2;
-  position: relative;
+  position: absolute;
+  grid-row: 2 / 3;
+  top: 0;
+  bottom: 0;
+  right: 10px;
   z-index: 12;
-  align-self: center;
-  justify-self: end;
-  margin-right: 10px;
   display: flex;
+  align-items: center;
   justify-content: flex-end;
-  max-height: min(66%, 560px);
+  /* 铺满整行后不能再吃掉对话区右缘的点击:容器透明,只有导轨本身接收指针。
+     刻意不用 `> *` —— 那条 (0,1,1) 会压过 .chat-turn-nav-loupe 自己的
+     (0,1,0) `pointer-events: none`,把浮出卡变成可命中,指针一进去就闪。 */
+  pointer-events: none;
 }
 
 .chat-turn-nav-rail {
@@ -3077,8 +3088,11 @@ button.chat-session-card {
   align-items: flex-end;
   gap: 9px;
   padding: 12px 5px;
+  /* 高度上限从容器移到这里:容器现在铺满整个对话区那一行。 */
+  max-height: min(66%, 560px);
   overflow: hidden auto;
   scrollbar-width: none;
+  pointer-events: auto;
 }
 
 .chat-turn-nav-rail::-webkit-scrollbar { width: 0; height: 0; }

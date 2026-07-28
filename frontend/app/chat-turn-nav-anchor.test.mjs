@@ -9,6 +9,13 @@
 // 正确的锚是网格行:`.chat-panel` 的 `grid-template-rows` 第 2 行就是 `.chat-body`
 // (会话抽屉 `.chat-session-popover` 是 absolute 浮层,不占行,所以行号稳定)。
 //
+// ⚠ 这里有两个实测踩过的坑,别凭直觉改回去(用无头 Chrome 量 rect 得到的结论):
+//   · 把导轨写成在流的网格项(position: relative + grid-row: 2)会**占住**那一格,
+//     `.chat-body` 没有显式行号,被自动放置挤到下一行、丢掉 minmax(0,1fr) ——
+//     对话区当场塌成内容高度(实测 17px),有无确认卡都一样。
+//   · 只写 `grid-row: 2` 而不写结束线,abspos 的结束线默认落到网格 padding 边,
+//     包含块从 65 一路到 521(整块面板)而不是 65..191(那一行),导轨仍然跑偏。
+//
 // 为什么不用 jsdom 量位置:jsdom 不做 grid/flex 布局,量出来的 rect 恒为 0,据此
 // 写断言只会得到稳定的假绿。所以静态断言 CSS 声明本身。
 //
@@ -34,14 +41,16 @@ const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const CSS = await readFile(path.join(APP_DIR, "globals.css"), "utf8");
 
 
-/** 取某条选择器的声明块(只支持本文件用到的单选择器形态)。 */
+/** 取某条选择器的声明块(只支持本文件用到的单选择器形态)。
+ *  ⚠ 必须剥掉注释:带注释的声明会让下面的 `(?:^|;)` 锚点失配,`declaration()`
+ *  静默返回 null —— 那是假绿,比没有守卫更糟。 */
 function ruleBody(selector) {
   const at = CSS.indexOf(`\n${selector} {`);
   assert.notEqual(at, -1, `globals.css 里找不到规则 ${selector}`);
   const open = CSS.indexOf("{", at);
   const close = CSS.indexOf("}", open);
   assert.ok(close > open, `${selector} 的声明块没有闭合`);
-  return CSS.slice(open + 1, close);
+  return CSS.slice(open + 1, close).replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
 
@@ -59,20 +68,23 @@ test("提问导航锚在对话区那一行,不对整个面板居中", () => {
     /^64px\s+minmax\(0,\s*1fr\)/,
     "面板行定义变了,导航的 grid-row 锚点需要重新确认",
   );
-  assert.equal(declaration(".chat-turn-nav", "grid-row"), "2");
 
-  // 关键的反向断言:一旦改回对整个面板绝对居中,遮挡立刻复现。
-  assert.notEqual(
-    declaration(".chat-turn-nav", "position"), "absolute",
-    "导轨又脱离了网格行,会重新对整个面板居中",
-  );
-  assert.equal(
-    declaration(".chat-turn-nav", "top"), null,
-    "导轨不该再用 top 定位——它的纵向位置由所在网格行决定",
-  );
+  // ⚠ 必须同时满足三条,缺一条都实测挂过(见文件头):
+  // 1) absolute —— 在流的网格项会占住第 2 格,把没有显式行号的 .chat-body 挤到
+  //    下一行、丢掉 minmax(0,1fr),对话区塌成内容高度;
+  assert.equal(declaration(".chat-turn-nav", "position"), "absolute");
+  // 2) 显式起止行 —— 只写起始行时,abspos 的结束线默认落到网格 padding 边,
+  //    包含块一路延伸到面板底部,导轨又跑偏;
+  assert.match(declaration(".chat-turn-nav", "grid-row") ?? "", /^2\s*\/\s*3$/);
+  // 3) 上下贴合该行 —— 否则包含块虽对,盒子仍不铺满那一行。
+  assert.equal(declaration(".chat-turn-nav", "top"), "0");
+  assert.equal(declaration(".chat-turn-nav", "bottom"), "0");
 
-  // 浮出的提问卡以导轨为定位父(top 由 JS 按 nav 的 rect 算),导轨必须成为定位上下文。
-  assert.equal(declaration(".chat-turn-nav", "position"), "relative");
+  // 铺满整行之后不能吃掉对话区右缘的点击:容器透明,导轨自己接收指针。
+  assert.equal(declaration(".chat-turn-nav", "pointer-events"), "none");
+  assert.equal(declaration(".chat-turn-nav-rail", "pointer-events"), "auto");
+
+  // 浮出的提问卡以导轨为定位父(top 由 JS 按 nav 的 rect 算)。
   assert.equal(declaration(".chat-turn-nav-loupe", "position"), "absolute");
 });
 
