@@ -34,7 +34,7 @@ def _mk_src(repo, nb_id, sid):
 
 
 def _mk_nb_with_relations(repo):
-    """两源:s1/s2 各有 A--supports-->B 的关系(A/B 同名跨源,会折叠到同 canonical);
+    """两源:s1/s2 各有 A--kind_of-->B 的关系(A/B 同名跨源,会折叠到同 canonical);
     另有 s1 内 rejected 边与自环候选。返回 (nb_id, ids)。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     for src, (a, b) in {"s1": ("A1", "B1"), "s2": ("A2", "B2")}.items():
@@ -45,7 +45,7 @@ def _mk_nb_with_relations(repo):
             {"local_id": b, "object_type": "concept",
              "payload": {"name": "gain", "section_path": "1"}, "evidence": []},
         ], [
-            {"source_local_id": a, "target_local_id": b, "edge_type": "supports", "evidence": []},
+            {"source_local_id": a, "target_local_id": b, "edge_type": "kind_of", "evidence": []},
         ])
     repo.rebuild_unified_kg(nb.id)
     return nb
@@ -63,7 +63,7 @@ def test_rebuild_aggregates_cross_source_support(repo):
     assert len(rows) == 1                      # 两源同一逻辑边折叠成一行
     r = rows[0]
     assert r["canonical_src"] == "K-cascode" and r["canonical_tgt"] == "K-gain"
-    assert r["edge_type"] == "supports"
+    assert r["edge_type"] == "kind_of"
     assert r["support_count"] == 2 and r["source_count"] == 2
     import json as _j
     assert 1 <= len(_j.loads(r["sample_relation_ids"])) <= 5
@@ -88,8 +88,8 @@ def test_direction_preserved(repo):
         {"local_id": "Y", "object_type": "concept",
          "payload": {"name": "b", "section_path": "1"}, "evidence": []},
     ], [
-        {"source_local_id": "X", "target_local_id": "Y", "edge_type": "supports", "evidence": []},
-        {"source_local_id": "Y", "target_local_id": "X", "edge_type": "supports", "evidence": []},
+        {"source_local_id": "X", "target_local_id": "Y", "edge_type": "kind_of", "evidence": []},
+        {"source_local_id": "Y", "target_local_id": "X", "edge_type": "kind_of", "evidence": []},
     ])
     repo.rebuild_unified_kg(nb.id)
     assert len(_canon_rows(repo, nb.id)) == 2   # A→B 与 B→A 不合并
@@ -121,7 +121,7 @@ def test_neighbors_edges_carry_support(repo):
 
 
 def test_neighbors_incoming_edge_carries_support(repo):
-    # 表里存 K-cascode --supports--> K-gain;kg_neighbors 把边统一画成
+    # 表里存 K-cascode --kind_of--> K-gain;kg_neighbors 把边统一画成
     # 「查询节点→邻居」,查 TARGET 侧(K-gain)时展示方向与存储方向相反,
     # 注解必须经对称回退仍命中(否则入边永远丢 support/source_count)。
     nb = _mk_nb_with_relations(repo)

@@ -40,7 +40,7 @@ def _seed(repo):
     repo.store_kg(nb.id, None,
         [{"local_id": "a", "object_type": "concept", "payload": {"name": "Regulated Cascode"}, "evidence": []},
          {"local_id": "b", "object_type": "concept", "payload": {"name": "Cascode"}, "evidence": []}],
-        [{"source_local_id": "a", "target_local_id": "b", "edge_type": "derived_from", "evidence": []}])
+        [{"source_local_id": "a", "target_local_id": "b", "edge_type": "kind_of", "evidence": []}])
     return nb
 
 

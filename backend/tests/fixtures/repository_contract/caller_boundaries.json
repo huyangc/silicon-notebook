@@ -1677,6 +1677,22 @@
       "target": "connection.execute"
     },
     {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/audit_kg_edge_contract.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._open_readonly",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/audit_kg_edge_contract.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.audit",
+      "target": "connection.execute"
+    },
+    {
       "count": 4,
       "kind": "independent_sql",
       "path": "scripts/backfill_knowhow_md.py",
@@ -2268,6 +2284,14 @@
       "path": "backend/app/migration/sqlite_to_postgres.py",
       "reason": "owned offline cross-backend snapshot-import boundary",
       "scope": "<module>.prepare_upgraded_snapshot",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/audit_kg_edge_contract.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._open_readonly",
       "target": "sqlite3.connect"
     },
     {

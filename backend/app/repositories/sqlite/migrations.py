@@ -17,7 +17,8 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # triggers remain run-scoped and are installed by migration.shadow.capture.
 # v32 persists the Deep Report question-understanding review contract.
 # v33 adds stable relation endpoint keyset indexes for bounded lexical recall.
-SCHEMA_VERSION = 33
+# v34 adds bounded relation-completion paging state and its source keyset index.
+SCHEMA_VERSION = 34
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1784,6 +1785,29 @@ class SqliteMigrator:
                   ON knowledge_relations(notebook_id, source_object_id, id);
                 CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_target_id
                   ON knowledge_relations(notebook_id, target_object_id, id);
+                """
+            )
+
+    def _migration_34(self) -> None:
+        """Persistent, generation-scoped relation-completion keyset state."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_knowledge_objects_source_id
+                  ON knowledge_objects(source_id, id);
+                CREATE TABLE IF NOT EXISTS kg_relation_completion_state (
+                  notebook_id TEXT NOT NULL,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  source_generation TEXT NOT NULL,
+                  mode TEXT NOT NULL,
+                  next_object_id TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  schema_version INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(source_id, source_generation, mode)
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_relation_completion_state_nb_status
+                  ON kg_relation_completion_state(notebook_id, status, updated_at);
                 """
             )
 

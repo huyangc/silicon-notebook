@@ -68,11 +68,12 @@ def _seed_two_doc_moe(repo, suffix=""):
             db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
                        "VALUES (?,?,?,?,?,?,?)",
                        (sid, nb.id, title, "md", "ready", now, now))
-        for cid, sid, text in [(cA, src_a, "DeepSeek-V3 uses Mixture-of-Experts (MoE) routing."),
-                                (cB, src_b, "GLM also adopts a Mixture-of-Experts (MoE) design.")]:
+        for cid, sid, element_id, text in [
+                (cA, src_a, elA, "DeepSeek-V3 uses Mixture-of-Experts (MoE) routing."),
+                (cB, src_b, elB, "GLM also adopts a Mixture-of-Experts (MoE) design.")]:
             db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                        "VALUES (?,?,?,?,?,?,?)",
-                       (cid, nb.id, sid, text, "Intro", json.dumps([f"el-{cid}"]), now))
+                       (cid, nb.id, sid, text, "Intro", json.dumps([element_id]), now))
         for eid, sid, elid, cid, name in [
             (e1, src_a, elA, cA, "Mixture-of-Experts (MoE)"),
             (e2, src_b, elB, cB, "Mixture-of-Experts (MoE)"),
@@ -345,7 +346,9 @@ def test_chunk_kg_overlay_large_notebook_skips_graph(repo, monkeypatch):
     called = _spy_fed_rx_graph(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    block, id_map, kg_hits = repo.retrieval.candidates._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
+    block, id_map, kg_hits, _supports = repo.retrieval.candidates._chunk_kg_overlay(
+        nb.id, "Mixture of Experts", "MoE", id_offset=1000
+    )
 
     assert called["n"] == 0
     assert (block, id_map, kg_hits) == ("", {}, [])
@@ -360,7 +363,9 @@ def test_chunk_kg_overlay_small_notebook_builds_graph(repo, monkeypatch):
     called = _spy_fed_rx_graph(repo, monkeypatch)
     events = _capture_events(repo, monkeypatch)
 
-    block, id_map, kg_hits = repo.retrieval.candidates._chunk_kg_overlay(nb.id, "Mixture of Experts", "MoE", id_offset=1000)
+    block, id_map, kg_hits, _supports = repo.retrieval.candidates._chunk_kg_overlay(
+        nb.id, "Mixture of Experts", "MoE", id_offset=1000
+    )
 
     assert called["n"] == 1
     assert kg_hits  # 命中种子,真走了 overlay

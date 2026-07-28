@@ -23,7 +23,7 @@ def test_run_recall_reports_relation_metrics(repo):
         {"local_id": "a", "object_type": "concept", "payload": {"name": "Regulated Cascode"}, "evidence": []},
         {"local_id": "b", "object_type": "concept", "payload": {"name": "Cascode"}, "evidence": []},
     ]
-    relations = [{"source_local_id": "a", "target_local_id": "b", "edge_type": "derived_from", "evidence": []}]
+    relations = [{"source_local_id": "a", "target_local_id": "b", "edge_type": "kind_of", "evidence": []}]
     repo.store_kg(nb.id, None, objects, relations)
     with repo._connect() as db:
         rid = db.execute("SELECT id FROM knowledge_relations WHERE notebook_id=?", (nb.id,)).fetchone()["id"]

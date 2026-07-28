@@ -488,6 +488,7 @@ class CandidateRetrievalService(_RetrievalState):
         relation_ids=[...]: 只 JOIN 这些 id(P0-1/2 候选界定 — 热路径调用方先按
         向量 sim 定好候选集,这里只 hydrate 需要打分的那几行文本),chunk 在
         `_IN_CHUNK` 防止超 SQLite 变量数上限;空列表直接返回 []。"""
+        from app.services.kg.edge_schema import is_queryable_edge_pair
         from app.services.retrieval import relation_embed_text, _payload_text
         if relation_ids is not None:
             if not relation_ids:
@@ -497,6 +498,8 @@ class CandidateRetrievalService(_RetrievalState):
         )
         out = []
         for r in rows:
+            if not is_queryable_edge_pair(r["et"], r["st"], r["tt"]):
+                continue
             spans = [e.get("quoted_span", "") for e in json.loads(r["ev"] or "[]")
                      if isinstance(e, dict)]
             src_name = _payload_text(json.loads(r["sp"] or "{}"))[:80]
@@ -1179,6 +1182,7 @@ class CandidateRetrievalService(_RetrievalState):
         # Targeted index hits (idx_knowledge_relations_nb_source/_nb_target)
         # instead of loading every notebook edge: O(neighbours), not O(E).
         neighbour_ids: set = set()
+        from app.services.kg.edge_schema import is_queryable_edge_pair
         with self._connect() as db:
             if direction in ("out", "both"):
                 neighbour_ids.update(
@@ -1186,12 +1190,18 @@ class CandidateRetrievalService(_RetrievalState):
                         db, notebook_id, object_id,
                         endpoint="source_object_id", edge_type=edge_type,
                     )
+                    if is_queryable_edge_pair(
+                        r["edge_type"], r["source_type"], r["target_type"]
+                    )
                 )
             if direction in ("in", "both"):
                 neighbour_ids.update(
                     r["source_object_id"] for r in self.knowledge.neighbor_ids(
                         db, notebook_id, object_id,
                         endpoint="target_object_id", edge_type=edge_type,
+                    )
+                    if is_queryable_edge_pair(
+                        r["edge_type"], r["source_type"], r["target_type"]
                     )
                 )
             if not neighbour_ids:
@@ -1333,7 +1343,9 @@ class CandidateRetrievalService(_RetrievalState):
     def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
         """大召回 chunk 候选。返回 (scored, ids, matrix);后两者供 MMR 取两两余弦
         (matrix 行已 L2 归一化, 点积即余弦)。"""
-        from app.services.retrieval import score_chunks
+        from app.services.retrieval import (
+            RetrievalSupport, add_chunk_supports, score_chunks,
+        )
         from app.services.vector_index import query_sims
         recall = recall or self.settings.chunk_recall
         query_vector = self._embed_query(query)
@@ -1366,6 +1378,17 @@ class CandidateRetrievalService(_RetrievalState):
             ids, mat = self._vector_matrix(db, notebook_id, "chunk_embeddings", "chunk_id")
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        supports = {}
+        for chunk in scored:
+            if chunk_sims is not None and chunk.chunk_id in chunk_sims:
+                supports[chunk.chunk_id] = [RetrievalSupport(
+                    "semantic", "chunk", chunk.chunk_id, chunk_sims[chunk.chunk_id]
+                )]
+            else:
+                supports[chunk.chunk_id] = [RetrievalSupport(
+                    "lexical", "chunk", chunk.chunk_id, chunk.relevance
+                )]
+        add_chunk_supports(scored, supports)
         return scored, ids, mat
     def _retrieve_chunks_fts_degraded(self, notebook_id, query, query_vector,
                                       recall, n_chunks):
@@ -1374,7 +1397,9 @@ class CandidateRetrievalService(_RetrievalState):
         全表、不全量分词、不触发全量向量矩阵加载(与 PR#158「查询恒定成本」取向
         一致)。fail-open:FTS 异常(如旧库缺 chunks_fts)按零候选处理 →
         ([], [], None),事件携带 fts_error 供 diag_slow.py 定位。"""
-        from app.services.retrieval import score_chunks
+        from app.services.retrieval import (
+            RetrievalSupport, add_chunk_supports, score_chunks,
+        )
         from app.services.vector_index import query_sims
         hits, fts_error = [], ""
         try:
@@ -1397,12 +1422,26 @@ class CandidateRetrievalService(_RetrievalState):
         chunks, ids, mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        lexical_ids = {hit["chunk_id"] for hit in hits}
+        add_chunk_supports(scored, {
+            chunk.chunk_id: [
+                *([RetrievalSupport(
+                    "semantic", "chunk", chunk.chunk_id, chunk_sims[chunk.chunk_id]
+                )] if chunk_sims is not None and chunk.chunk_id in chunk_sims else []),
+                *([RetrievalSupport(
+                    "lexical", "chunk", chunk.chunk_id, chunk.relevance
+                )] if chunk.chunk_id in lexical_ids else []),
+            ]
+            for chunk in scored
+        })
         return scored, ids, mat
     def _retrieve_chunks_ann(self, notebook_id, query, query_vector, idx, recall):
         """ANN 候选版 chunk 检索:只对 top-recall 候选打分,避免全表 matmul+重分词。
         返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。"""
         import numpy as np
-        from app.services.retrieval import score_chunks
+        from app.services.retrieval import (
+            RetrievalSupport, add_chunk_supports, score_chunks,
+        )
         from app.services.vector_index import build_matrix, query_sims
         labels = idx.chunk_ann_labels
         if not labels:
@@ -1460,6 +1499,8 @@ class CandidateRetrievalService(_RetrievalState):
                     service="embedding",
                 )
 
+        semantic_ids = set(chunk_sims)
+        lexical_ids = set()
         # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
         try:
             with self._connect() as db:
@@ -1467,6 +1508,7 @@ class CandidateRetrievalService(_RetrievalState):
                     db, notebook_id, query, k=recall)
             for h in lex:
                 cid = h["chunk_id"]
+                lexical_ids.add(cid)
                 if cid not in chunk_sims:
                     cand_ids.append(cid)
                     # Candidate identity and semantic evidence stay separate:
@@ -1478,6 +1520,17 @@ class CandidateRetrievalService(_RetrievalState):
             return [], [], None
         chunks, ids, mat = self._hydrate_chunk_candidates(cand_ids)
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
+        add_chunk_supports(scored, {
+            chunk.chunk_id: [
+                *([RetrievalSupport(
+                    "semantic", "chunk", chunk.chunk_id, chunk_sims[chunk.chunk_id]
+                )] if chunk.chunk_id in semantic_ids else []),
+                *([RetrievalSupport(
+                    "lexical", "chunk", chunk.chunk_id, chunk.relevance
+                )] if chunk.chunk_id in lexical_ids else []),
+            ]
+            for chunk in scored
+        })
         return scored, ids, mat
     def _hydrate_chunk_candidates(self, cand_ids):
         """按候选 id 有界取数:chunk 文本行 + 归一化向量矩阵。候选界定之后的
@@ -1503,6 +1556,7 @@ class CandidateRetrievalService(_RetrievalState):
         """对每个子查询并发跑 _retrieve_chunks;返回 (collected{chunk_id:best}, per_query, ids, mat)。
         ids/mat 取首个非空子查询的矩阵(同 notebook 矩阵一致,用于后续 MMR 兜底)。"""
         from concurrent.futures import ThreadPoolExecutor
+        from app.services.retrieval import merge_retrieval_supports
 
         import contextvars as _cv
         tasks = [(q, _cv.copy_context()) for q in sub_queries]
@@ -1522,8 +1576,17 @@ class CandidateRetrievalService(_RetrievalState):
             per_query.append({c.chunk_id: c for c in scored})
             for c in scored:
                 cur = collected.get(c.chunk_id)
-                if cur is None or c.relevance > cur.relevance:
+                if cur is None:
                     collected[c.chunk_id] = c
+                else:
+                    supports = merge_retrieval_supports(
+                        cur.retrieval_supports, c.retrieval_supports
+                    )
+                    if c.relevance > cur.relevance:
+                        c.retrieval_supports = supports
+                        collected[c.chunk_id] = c
+                    else:
+                        cur.retrieval_supports = supports
             if mat is None and len(qids):
                 ids, mat = qids, qmat
         return collected, per_query, ids, mat
@@ -1538,7 +1601,9 @@ class CandidateRetrievalService(_RetrievalState):
         (dedup by chunk_id), so a chunk that matches only a 2nd-language keyword —
         never the question-language sub_queries — is still retrieved. fail-open:
         FTS/hydrate errors (e.g. legacy lib missing chunks_fts) → []."""
-        from app.services.retrieval import score_chunks
+        from app.services.retrieval import (
+            RetrievalSupport, add_chunk_supports, score_chunks,
+        )
         needle = (keywords or "").strip()
         if not needle:
             return []
@@ -1552,7 +1617,14 @@ class CandidateRetrievalService(_RetrievalState):
             chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])
             # keyword-only score (no query_vector/chunk_sims) — mirrors the ANN∪FTS
             # union where lexical hits get keyword score and semantic 0.
-            return score_chunks(needle, chunks, None, None, limit=recall)
+            scored = score_chunks(needle, chunks, None, None, limit=recall)
+            add_chunk_supports(scored, {
+                chunk.chunk_id: [RetrievalSupport(
+                    "lexical", "chunk", chunk.chunk_id, chunk.relevance
+                )]
+                for chunk in scored
+            })
+            return scored
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
             self._note_model_error("chunk_keyword_union", "", exc)
             return []
@@ -1564,12 +1636,21 @@ class CandidateRetrievalService(_RetrievalState):
         list-shaped candidate set (mix / single-subquery branches)."""
         if not extra:
             return base
-        seen = {c.chunk_id for c in base}
+        from app.services.retrieval import merge_retrieval_supports
+
+        by_id = {c.chunk_id: c for c in base}
+        seen = set(by_id)
         out = list(base)
         for c in extra:
-            if c.chunk_id not in seen:
+            if c.chunk_id in seen:
+                existing = by_id[c.chunk_id]
+                existing.retrieval_supports = merge_retrieval_supports(
+                    existing.retrieval_supports, c.retrieval_supports
+                )
+            else:
                 seen.add(c.chunk_id)
                 out.append(c)
+                by_id[c.chunk_id] = c
         return out
     def _mmr_select_chunks(self, scored, ids, mat, k: int, lambda_: float):
         """对大召回结果做 MMR 多样性精选。沿用归一化矩阵, pair_sim=行点积。"""
@@ -1715,8 +1796,11 @@ class CandidateRetrievalService(_RetrievalState):
                 fused.append(oid)
         return fused
     def _chunk_kg_overlay(self, notebook_id: str, query: str, hl: str, id_offset: int):
-        """种子(节点∪关系端点)→1-hop 子图→渲染。返回 (block, id_map, kg_hits)。
-        kg_hits=种子命中(带 .relevance),供 grounding。无 KG/种子 → ("", {}, [])。
+        """种子(节点∪关系端点)→1-hop 子图→渲染。
+
+        返回 ``(block, id_map, kg_hits, supports_by_object)``；最后一项保留
+        本轮真实 relation id/review snapshot，供 evidence→chunk 映射后继续传到
+        最终 selector。纯节点种子不伪造 relation support。
 
         生产事故修复(2026-07):大库守卫必须在任何检索之前 —— 种子收集本身
         (federated_retrieve + federated_retrieve_relations)不是免费的:后者
@@ -1736,7 +1820,7 @@ class CandidateRetrievalService(_RetrievalState):
                 "reason": "large_notebook",
                 "site": "chunk_kg_overlay",
             })
-            return "", {}, []
+            return "", {}, [], {}
         from app.services.kg.graph_reason import multihop_subgraph, render_subgraph_context
         node_hits = self.federated_retrieve(notebook_id, query)[: self._MIX_NODE_SEEDS]
         rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[: self._MIX_REL_SEEDS]
@@ -1745,16 +1829,41 @@ class CandidateRetrievalService(_RetrievalState):
             seeds.extend((r.source_object_id, r.target_object_id))
         seeds = list(dict.fromkeys(s for s in seeds if s))
         if not seeds:
-            return "", {}, []
+            return "", {}, [], {}
         G, idx_to_oid, oid_to_idx = self._federated_rx_graph(notebook_id)
         if G is None or G.num_nodes() == 0:
-            return "", {}, []
+            return "", {}, [], {}
         subgraph = multihop_subgraph(G, oid_to_idx, idx_to_oid, seed_ids=seeds,
                                      edge_types=None, max_depth=1, max_fan_out=self._MIX_FANOUT)
         if not subgraph:
-            return "", {}, []
+            return "", {}, [], {}
         block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
-        return block, id_map, node_hits
+        from app.services.retrieval import RetrievalSupport, merge_retrieval_supports
+
+        support_by_object = {}
+        for hit in rel_hits:
+            support = RetrievalSupport(
+                "relation", "relation", hit.relation_id, hit.score,
+                hit.review_status,
+            )
+            for oid in (hit.source_object_id, hit.target_object_id):
+                support_by_object[oid] = merge_retrieval_supports(
+                    support_by_object.get(oid, ()), (support,)
+                )
+        for node, edge, src_oid in subgraph:
+            if not edge or not edge.get("rel_id"):
+                continue
+            support = RetrievalSupport(
+                "relation", "relation", str(edge["rel_id"]),
+                float(edge.get("confidence", 0.0)),
+                str(edge.get("review_status") or "pending"),
+            )
+            for oid in (src_oid, node.get("object_id")):
+                if oid:
+                    support_by_object[oid] = merge_retrieval_supports(
+                        support_by_object.get(oid, ()), (support,)
+                    )
+        return block, id_map, node_hits, support_by_object
     def _gather_vector_chunks(self, notebook_id: str, sub_queries: list) -> list:
         """向量 chunk 候选(多子查询合并去重;单查询直接 scored)。返回 List[RetrievedChunk]。"""
         if len(sub_queries) >= 2:
@@ -1776,18 +1885,31 @@ class CandidateRetrievalService(_RetrievalState):
         overlay_on = self.settings.chunk_kg_overlay_enabled and (
             self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg(notebook_id))
         if overlay_on:
-            kg_block, kg_id_map, kg_hits = self._chunk_kg_overlay(
+            kg_block, kg_id_map, kg_hits, support_by_object = self._chunk_kg_overlay(
                 notebook_id, query, hl, id_offset=self._MIX_KG_KEY_BASE)
             kg_chunks = self._kg_source_chunks(
-                notebook_id, [v["object_id"] for v in kg_id_map.values()])
+                notebook_id, [v["object_id"] for v in kg_id_map.values()],
+                support_by_object=support_by_object,
+            )
         # 概念漫游(PPR)第 3 路:gated GRAPH_PPR_ENABLED;无 KG/无 reset → []。
         ppr_chunks = self._ppr_retrieve(notebook_id, query) if self.settings.graph_ppr_enabled else []
-        merged, seen = [], set()
+        from app.services.retrieval import merge_retrieval_supports
+
+        merged, seen, by_id = [], set(), {}
         for i in range(max(len(vector_chunks), len(kg_chunks), len(ppr_chunks))):
             for src in (vector_chunks, kg_chunks, ppr_chunks):
-                if i < len(src) and src[i].chunk_id not in seen:
-                    seen.add(src[i].chunk_id)
-                    merged.append(src[i])
+                if i >= len(src):
+                    continue
+                chunk = src[i]
+                if chunk.chunk_id in seen:
+                    existing = by_id[chunk.chunk_id]
+                    existing.retrieval_supports = merge_retrieval_supports(
+                        existing.retrieval_supports, chunk.retrieval_supports
+                    )
+                    continue
+                seen.add(chunk.chunk_id)
+                by_id[chunk.chunk_id] = chunk
+                merged.append(chunk)
         return merged, kg_block, kg_id_map, kg_hits, len(ppr_chunks)
     def _build_chunk_retrieval_plan(self, notebook_id: str, sub_queries: list) -> ChunkRetrievalPlan:
         """一次读齐 chunk 检索路径的 flag/knob，产出不可变快照（W2.2）。见 ChunkRetrievalPlan。

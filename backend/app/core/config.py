@@ -219,6 +219,47 @@ class Settings(BaseSettings):
     # 信号(共享证据元素 + 概念名命中文本)在**同源内**为 degree-0 节点补边,治 ~22%
     # gleaning/首遍无边的孤立节点。注意 pydantic-settings v2 用 validation_alias 映射环境变量。
     kg_relink_enabled: bool = Field(True, validation_alias="KG_RELINK_ENABLED")
+    # Bounded post-extraction relation completion.  Default is a strict no-op;
+    # shadow/write additionally require notebook allowlist/hash rollout gating.
+    kg_relation_completion_mode: str = Field(
+        "off", validation_alias="KG_RELATION_COMPLETION_MODE"
+    )
+    kg_relation_completion_notebook_allowlist: str = Field(
+        "", validation_alias="KG_RELATION_COMPLETION_NOTEBOOK_ALLOWLIST"
+    )
+    kg_relation_completion_rollout_percent: int = Field(
+        0, ge=0, le=100, validation_alias="KG_RELATION_COMPLETION_ROLLOUT_PERCENT"
+    )
+    kg_relation_completion_max_objects: int = Field(
+        160, gt=0, validation_alias="KG_RELATION_COMPLETION_MAX_OBJECTS"
+    )
+    kg_relation_completion_max_pairs: int = Field(
+        120, gt=0, validation_alias="KG_RELATION_COMPLETION_MAX_PAIRS"
+    )
+    kg_relation_completion_section_quota: int = Field(
+        24, gt=0, validation_alias="KG_RELATION_COMPLETION_SECTION_QUOTA"
+    )
+    kg_relation_completion_batch_pairs: int = Field(
+        24, gt=0, validation_alias="KG_RELATION_COMPLETION_BATCH_PAIRS"
+    )
+    kg_relation_completion_max_batches: int = Field(
+        4, gt=0, validation_alias="KG_RELATION_COMPLETION_MAX_BATCHES"
+    )
+    kg_relation_completion_excerpt_chars: int = Field(
+        800, gt=0, validation_alias="KG_RELATION_COMPLETION_EXCERPT_CHARS"
+    )
+    kg_relation_completion_max_pages_per_run: int = Field(
+        4, gt=0, validation_alias="KG_RELATION_COMPLETION_MAX_PAGES_PER_RUN"
+    )
+    kg_relation_completion_neighbor_top_k: int = Field(
+        8, gt=0, validation_alias="KG_RELATION_COMPLETION_NEIGHBOR_TOP_K"
+    )
+    kg_relation_completion_candidate_overfetch: int = Field(
+        64, gt=0, validation_alias="KG_RELATION_COMPLETION_CANDIDATE_OVERFETCH"
+    )
+    kg_relation_completion_batch_chars: int = Field(
+        48_000, ge=512, validation_alias="KG_RELATION_COMPLETION_BATCH_CHARS"
+    )
     # embedding：每条截断长度、每条 API 批大小、落库分块大小。
     embed_truncate_chars: int = Field(2000, validation_alias="EMBED_TRUNCATE_CHARS")
     embed_batch_size: int = Field(10, validation_alias="EMBED_BATCH_SIZE")
@@ -427,6 +468,10 @@ class Settings(BaseSettings):
     kg_conflict_sim_threshold: float = Field(0.8, validation_alias="KG_CONFLICT_SIM_THRESHOLD")
     # chunk×graph mix: 叠加 KG 子图 block 和源 chunk 进候选池(默认开)。关闭后退化为纯 chunk 检索。
     chunk_kg_overlay_enabled: bool = Field(True, validation_alias="CHUNK_KG_OVERLAY_ENABLED")
+    # Final mix selection reserves this many slots for graph-only chunks when
+    # they clear the existing relevance floor.  It never enlarges the token
+    # budget or changes the historical oversized-first-chunk exception.
+    chunk_graph_reserve: int = Field(0, validation_alias="CHUNK_GRAPH_RESERVE")
     # chunk×graph mix token 预算(照 LightRAG 6000/8000/30000)。
     max_entity_tokens: int = Field(6000, validation_alias="MAX_ENTITY_TOKENS")
     max_relation_tokens: int = Field(8000, validation_alias="MAX_RELATION_TOKENS")

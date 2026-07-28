@@ -51,7 +51,7 @@ def _seed_two_node_relation(repo):
          "payload": {"name": "Cascode"}, "evidence": []},
     ]
     relations = [{"source_local_id": "a", "target_local_id": "b",
-                  "edge_type": "derived_from",
+                  "edge_type": "kind_of",
                   "evidence": [{"quoted_span": "regulated cascode adds a gain stage"}]}]
     repo.store_kg(nb.id, None, objects, relations)
     return nb

@@ -16,9 +16,14 @@ from typing import Dict, List, Optional, Tuple
 
 import rustworkx as rx
 
+from app.services.kg.edge_schema import (
+    DEFAULT_REASONING_EDGE_TYPES,
+    is_queryable_edge_pair,
+)
+
 # Default reasoning edge types (well-populated: derived_from=4160, supports=6068,
 # depends_on=791).  contrasts_with/prerequisite_of are thin; callers may extend.
-DEFAULT_REASONING_EDGES = frozenset({"derived_from", "supports", "depends_on"})
+DEFAULT_REASONING_EDGES = DEFAULT_REASONING_EDGE_TYPES
 
 
 def build_rx_graph(
@@ -94,6 +99,12 @@ def build_rx_graph(
         tgt_oid = rel["target_object_id"]
         if src_oid not in oid_to_idx or tgt_oid not in oid_to_idx:
             continue  # skip dangling edges (object deleted/deprecated)
+        if not is_queryable_edge_pair(
+            rel.get("edge_type"),
+            nodes[src_oid].get("type") or nodes[src_oid].get("object_type"),
+            nodes[tgt_oid].get("type") or nodes[tgt_oid].get("object_type"),
+        ):
+            continue
         ev_raw = rel.get("evidence", [])
         if isinstance(ev_raw, str):
             try:
@@ -115,6 +126,7 @@ def build_rx_graph(
                 "evidence": ev_raw if isinstance(ev_raw, list) else [],
                 "confidence": float(rel.get("confidence", 1.0)),
                 "tier": edge_tier,
+                "review_status": str(rel.get("review_status") or "pending"),
             },
         )
 

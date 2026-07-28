@@ -34,7 +34,7 @@ class Fake:
             # valid ev -> binds to element 0
             {"local_id": "a", "type": "Concept", "name": "analog signal", "ev": 0},
             # out-of-range ev, but name is substring of element 2 -> fallback
-            {"local_id": "b", "type": "Concept", "name": "Engram", "ev": 99},
+            {"local_id": "b", "type": "Claim", "name": "Engram", "ev": 99},
             # out-of-range ev and non-matching name -> dropped
             {"local_id": "c", "type": "Claim", "name": "no such thing here", "ev": 99}],
             "edges": [

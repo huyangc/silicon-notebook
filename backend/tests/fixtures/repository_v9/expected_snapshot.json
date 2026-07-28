@@ -1224,6 +1224,11 @@
         "type": "index"
       },
       {
+        "name": "idx_kg_relation_completion_state_nb_status",
+        "sql_sha256": "c5106909be33ac732fe674a34fe282a0ff760907b98b65759cb7c18f981fd18a",
+        "type": "index"
+      },
+      {
         "name": "idx_knowhow_cell_code_row",
         "sql_sha256": "3e0d3d7b8b2da455b201f938d9c602dc97e17aa38fdd60a01f8a72e5649d2a0f",
         "type": "index"
@@ -1296,6 +1301,11 @@
       {
         "name": "idx_knowledge_objects_source",
         "sql_sha256": "49da7467490c192ce4db609c352fb0bf89eeac3e3ea6ba7282cea57b1725ec9b",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_objects_source_id",
+        "sql_sha256": "3375c3a4d179ab3961fbf84654e71fbfb0d6b00453a7a9d3e5ce359c300924d3",
         "type": "index"
       },
       {
@@ -1689,6 +1699,11 @@
         "type": "table"
       },
       {
+        "name": "kg_relation_completion_state",
+        "sql_sha256": "942068821933bb8fdcc4fe1e60c2ef90fc715668dccd156975daa701bc429604",
+        "type": "table"
+      },
+      {
         "name": "knowhow_cell_code",
         "sql_sha256": "63308fdaacad03332d451cdc2845a846ed39a45c40e63f635730986d4afa560f",
         "type": "table"
@@ -1909,6 +1924,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 33
+    "user_version": 34
   }
 }

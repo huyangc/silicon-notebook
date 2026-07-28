@@ -184,6 +184,19 @@ def test_node_type_contract_is_fail_closed(edge_type, invalid_type):
     assert compose_two_hop_paths(nodes, relations, "A") == []
 
 
+def test_precedes_mixed_endpoint_types_do_not_compose():
+    nodes = {
+        "A": _node("A", "claim"),
+        "B": _node("B", "formula"),
+        "C": _node("C", "claim"),
+    }
+    relations = [
+        _rel("r1", "A", "B", "precedes", quote="A before B"),
+        _rel("r2", "B", "C", "precedes", quote="B before C"),
+    ]
+    assert compose_two_hop_paths(nodes, relations, "A") == []
+
+
 @pytest.mark.parametrize("missing_index", [0, 1])
 def test_every_hop_requires_a_nonempty_quote(missing_index):
     nodes, relations = _chain_fixture()

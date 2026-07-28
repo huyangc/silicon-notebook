@@ -637,13 +637,13 @@ def test_gather_kg_graph_as_arrays_matches_string_path(repo):
         db.execute(
             "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
             "target_object_id,edge_type,evidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("r1", nb.id, "src-A", "e1", "e2", "related_to", "[]", now))
+                ("r1", nb.id, "src-A", "e1", "e2", "kind_of", "[]", now))
         # Duplicate relation (same unordered pair) — first-wins dedup must
         # keep the row processed first (SQLite returns insertion order here).
         db.execute(
             "INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,"
             "target_object_id,edge_type,evidence,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("r2", nb.id, "src-A", "e2", "e1", "related_to", "[]", now))
+                ("r2", nb.id, "src-A", "e2", "e1", "kind_of", "[]", now))
 
     node_ids_s, edges_s, chunk_ids_s, kg_ids_s, mc_s = repo._gather_kg_graph(nb.id)
     node_ids_a, (src_a, tgt_a, w_a), chunk_ids_a, kg_ids_a, mc_a = \

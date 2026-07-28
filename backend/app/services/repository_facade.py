@@ -2951,8 +2951,12 @@ class RepositoryFacade:
     def _elem_chunk_map(self, notebook_id: str) -> Dict[str, list]:
         return self.retrieval.graph._elem_chunk_map(notebook_id)
 
-    def _kg_source_chunks(self, notebook_id: str, object_ids: list) -> list:
-        return self.retrieval.graph._kg_source_chunks(notebook_id, object_ids)
+    def _kg_source_chunks(
+        self, notebook_id: str, object_ids: list, *, support_by_object=None
+    ) -> list:
+        return self.retrieval.graph._kg_source_chunks(
+            notebook_id, object_ids, support_by_object=support_by_object
+        )
 
     def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
         return self.retrieval.graph._ent_chunk_map(notebook_id)

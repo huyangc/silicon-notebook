@@ -14,31 +14,7 @@ import re
 from collections import defaultdict
 from typing import Dict, List
 
-# ── Typed edge constraints (mirrored from extract.py:32-35) ──────────────────
-# Maps edge_type → frozenset of valid (src_type, tgt_type) pairs.
-# None in the frozenset means "unconstrained" (any type allowed).
-# Extract.py prompt text: defines(Claim->Concept), about(Claim|Formula->Concept),
-# supports(Claim|Formula->Claim), derived_from(Formula->Formula),
-# used_in(Formula->Procedure), part_of/composed_of/contrasts_with/kind_of(Concept->Concept),
-# depends_on/prerequisite_of/precedes: unconstrained.
-TYPE_CONSTRAINTS: Dict[str, frozenset] = {
-    "defines":       frozenset({("Claim", "Concept")}),
-    "about":         frozenset({("Claim", "Concept"), ("Formula", "Concept")}),
-    "supports":      frozenset({("Claim", "Claim"), ("Formula", "Claim")}),
-    "derived_from":  frozenset({("Formula", "Formula")}),
-    "used_in":       frozenset({("Formula", "Procedure")}),
-    "part_of":       frozenset({("Concept", "Concept")}),
-    "composed_of":   frozenset({("Concept", "Concept")}),
-    "contrasts_with":frozenset({("Concept", "Concept")}),
-    "kind_of":       frozenset({("Concept", "Concept")}),
-    # Unconstrained: depends_on, prerequisite_of, precedes
-}
-
-VALID_EDGE_TYPES = frozenset({
-    "defines", "part_of", "composed_of", "contrasts_with", "kind_of",
-    "about", "supports", "derived_from", "depends_on", "prerequisite_of",
-    "used_in", "precedes",
-})
+from app.services.kg.edge_schema import is_valid_edge_pair
 
 CORR_CAP = 3  # 3 independent sources → full corroboration score (= 1.0)
 
@@ -70,26 +46,16 @@ def type_validity_score(rel: dict, node_types: Dict[str, str]) -> float:
     """1.0 if the edge_type is known AND the (src, tgt) node-type pair respects the constraint.
 
     node_types: {object_id: object_type} — caller provides the type of each endpoint.
-    Unconstrained edge types (depends_on, prerequisite_of, precedes) always return 1.0
-    provided the edge_type is in VALID_EDGE_TYPES.
+    Endpoint rules come from the authoritative edge_schema registry.
     Returns 0.0 for unknown edge types, missing node types, or type-constraint violations.
     """
-    edge_type = rel.get("edge_type", "")
-    if edge_type not in VALID_EDGE_TYPES:
-        return 0.0
-
     src_oid = rel.get("source_object_id", "")
     tgt_oid = rel.get("target_object_id", "")
     src_type = node_types.get(src_oid)
     tgt_type = node_types.get(tgt_oid)
-    if not src_type or not tgt_type:
-        return 0.0
-
-    constraints = TYPE_CONSTRAINTS.get(edge_type)
-    if constraints is None:
-        # Unconstrained edge type
-        return 1.0
-    return 1.0 if (src_type, tgt_type) in constraints else 0.0
+    return 1.0 if is_valid_edge_pair(
+        rel.get("edge_type", ""), src_type, tgt_type
+    ) else 0.0
 
 
 def corroboration_score_from_count(count: int) -> float:

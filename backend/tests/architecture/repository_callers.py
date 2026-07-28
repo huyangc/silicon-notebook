@@ -76,6 +76,7 @@ SQL_REASON_BY_PATH = {
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/kg_quality_audit.py": "read-only host database diagnostic",
+    "scripts/audit_kg_edge_contract.py": "read-only host database diagnostic",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
     "scripts/verify_repository_snapshot.py": "read-only backup and probe databases",
 }
@@ -155,6 +156,7 @@ SQLITE_CONNECT_REASON_BY_PATH = {
     "scripts/diag_slow.py": "read-only host database diagnostic",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
     "scripts/kg_quality_audit.py": "read-only host database diagnostic",
+    "scripts/audit_kg_edge_contract.py": "read-only host database diagnostic",
     "scripts/merge_dbs.py": "temporary copies used by the offline two-database merge tool",
     "scripts/verify_repository_snapshot.py": "read-only backup and probe databases",
 }

@@ -40,6 +40,7 @@ import hashlib
 import json
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from app.core.config import Settings
@@ -349,6 +350,458 @@ class KnowledgeLifecycleService:
         self._invalidate_unified_cache(notebook_id)
         self._mark_unified_kg_dirty(notebook_id)
         return len(objects), len(db_relations)
+
+    def complete_relations_for_source(
+        self,
+        notebook_id: str,
+        source_id: str,
+        source_title: str,
+        run_id: str,
+        objects: List[dict],
+        relations: List[dict],
+        elements: List[Any],
+        *,
+        expected_mode: str | None = None,
+        cancel_check: Callable[[], None] = lambda: None,
+    ) -> dict:
+        """Run resumable, bounded completion pages for one source generation."""
+        from app.services.kg.edge_schema import EDGE_SPECS, canonical_edge_endpoints
+        from app.services.kg.relation_completion import (
+            COMPLETION_EVIDENCE_PER_OBJECT,
+            COMPLETION_SCHEMA_VERSION,
+            candidate_batches,
+            completion_mode_for_notebook,
+            generate_candidates,
+            propose_batch,
+            stable_relation_id,
+            verify_batch,
+        )
+        from app.services.retrieval import relation_embed_text
+
+        mode = completion_mode_for_notebook(self.settings, notebook_id)
+        if expected_mode is not None and expected_mode != mode:
+            if mode in {"shadow", "write"}:
+                self.transition_relation_completion_mode(
+                    notebook_id, source_id, run_id, expected_mode, mode
+                )
+            else:
+                self.mark_relation_completion_stale(
+                    notebook_id, source_id, run_id, expected_mode
+                )
+            return {
+                "mode": expected_mode,
+                "current_mode": mode,
+                "skip_reason": "mode_changed",
+                "candidates": 0,
+                "proposed": 0,
+                "verified": 0,
+                "inserted": 0,
+            }
+        if mode == "off":
+            return {"mode": "off", "candidates": 0, "proposed": 0, "verified": 0, "inserted": 0}
+        batch_size = max(1, self.settings.kg_relation_completion_batch_pairs)
+        max_batches = max(0, self.settings.kg_relation_completion_max_batches)
+        max_pages = max(1, self.settings.kg_relation_completion_max_pages_per_run)
+        page_size = max(1, self.settings.kg_relation_completion_max_objects)
+        max_pairs = max(0, self.settings.kg_relation_completion_max_pairs)
+        overfetch = max(1, self.settings.kg_relation_completion_candidate_overfetch)
+        neighbor_top_k = max(1, self.settings.kg_relation_completion_neighbor_top_k)
+        batch_chars = max(512, self.settings.kg_relation_completion_batch_chars)
+        proposer = self.model_clients.chat("kg_extract")
+        verifier = self.model_clients.chat("kg_refine")
+        stats = {
+            "mode": mode,
+            "pages": 0, "candidates": 0, "proposed": 0, "verified": 0,
+            "inserted": 0,
+            "model_batches": 0, "lexical_candidates": 0,
+            "ann_candidates": 0, "exhausted": False,
+        }
+        # These positional arguments remain only for source-compatible callers.
+        # Durable, bounded repository rows are the sole completion authority so
+        # restart behavior cannot differ from the initial ingestion process.
+        del objects, relations, elements
+        all_relation_docs = []
+        reasoning_edge_types = tuple(
+            edge_type for edge_type, spec in EDGE_SPECS.items()
+            if spec.category == "reasoning"
+        )
+        edge_contract_rows = tuple(
+            (edge_type, source_type, target_type)
+            for edge_type, spec in EDGE_SPECS.items()
+            for source_type, target_type in sorted(spec.allowed_pairs)
+        )
+        known_edge_types = tuple(EDGE_SPECS)
+        core_node_types = ("concept", "claim", "formula", "procedure")
+
+        def emit_stats() -> None:
+            self.event_log.emit({
+                "kind": "kg_relation_completion_done", "notebook_id": notebook_id,
+                "source_id": source_id, **stats,
+            })
+
+        if max_batches <= 0 or max_pairs <= 0:
+            stats["skip_reason"] = "invalid_limits"
+            emit_stats()
+            return stats
+        if not getattr(proposer, "configured", False) or not getattr(
+            verifier, "configured", False
+        ):
+            stats["skip_reason"] = "model_unavailable"
+            emit_stats()
+            return stats
+
+        def decoded_object(row: Any, score: float = 0.0) -> dict:
+            oid = str(row["id"])
+            payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"] or "{}")
+            evidence = row["evidence"] if isinstance(row["evidence"], list) else json.loads(row["evidence"] or "[]")
+            item = {"local_id": oid, "_oid": oid, "object_type": row["object_type"],
+                    "payload": payload, "evidence": evidence}
+            item["_completion_score"] = max(float(item.get("_completion_score") or 0.0), score)
+            return item
+
+        # Reuse the published KG ANN when available. Missing/stale artifacts are
+        # fail-closed for this path; lexical and explicit page signals remain.
+        ann_index = None
+        ann = None
+        try:
+            ann_index = self.scale_artifacts.load(notebook_id, allow_stale=True)
+            if ann_index is not None and getattr(ann_index, "ann_labels", None):
+                ann = self.scale_artifacts.open_ann(ann_index, "kg")
+        except Exception:
+            ann_index = ann = None
+
+        for _page_number in range(max_pages):
+            if stats["model_batches"] >= max_batches and max_batches > 0:
+                break
+            cancel_check()
+            now = self._now()
+            with self._write() as db:
+                page = self.knowledge.completion_page(
+                    db, notebook_id, source_id, run_id, mode,
+                    COMPLETION_SCHEMA_VERSION, reasoning_edge_types,
+                    edge_contract_rows, known_edge_types, core_node_types,
+                    page_size, now,
+                )
+            if page.get("generation_conflict"):
+                stats["generation_conflict"] = True
+                break
+            if page.get("already_completed"):
+                stats["exhausted"] = True
+                break
+            page_rows = list(page.get("rows") or ())
+            if not page_rows:
+                with self._write() as db:
+                    advanced = self.knowledge.completion_advance_state(
+                        db, notebook_id, source_id, run_id, mode,
+                        COMPLETION_SCHEMA_VERSION, page["cursor"], page["next_cursor"],
+                        "completed", self._now(),
+                    )
+                stats["exhausted"] = bool(advanced)
+                break
+
+            anchors = [decoded_object(row) for row in page_rows]
+            for anchor, row in zip(anchors, page_rows):
+                anchor["_completion_priority"] = (
+                    2 if not bool(row["has_relation"]) else
+                    1 if not bool(row["has_reasoning_relation"]) else 0
+                )
+            anchor_ids = [str(item["_oid"]) for item in anchors]
+            candidate_scores: dict[str, float] = {}
+            lexical_available = False
+            lexical_failed = False
+
+            # Bounded lexical over-fetch, then indexed source-id hydration.
+            for anchor in anchors:
+                if len(candidate_scores) >= overfetch:
+                    break
+                name = str((anchor.get("payload") or {}).get("name") or "").strip()
+                if not name:
+                    continue
+                try:
+                    with self._connect() as db:
+                        hits = self.knowledge.fts_search(
+                            db, notebook_id, name, k=neighbor_top_k
+                        )
+                    lexical_available = True
+                except Exception:
+                    lexical_failed = True
+                    hits = []
+                for hit in hits:
+                    oid = str(hit.get("object_id") or "")
+                    if oid and oid not in anchor_ids:
+                        candidate_scores[oid] = max(
+                            candidate_scores.get(oid, 0.0), 0.25
+                        )
+                    if len(candidate_scores) >= overfetch:
+                        break
+            stats["lexical_candidates"] += len(candidate_scores)
+
+            # Bounded ANN over-fetch. Only anchor vectors and the bounded hit ids
+            # are hydrated; no source/notebook vector scan is permitted.
+            if ann is not None and ann_index is not None and len(candidate_scores) < overfetch:
+                try:
+                    from app.services.vector_index import decode_vector, resolve_runtime_dim, truncate_vec
+                    with self._connect() as db:
+                        vector_rows = self.knowledge.embedding_rows_for_objects(
+                            db, notebook_id, anchor_ids
+                        )
+                    runtime_dim = resolve_runtime_dim(self.settings)
+                    for vector_row in vector_rows:
+                        arr = decode_vector(vector_row["vector"])
+                        if arr is None or arr.size != self.settings.embed_dim:
+                            continue
+                        if runtime_dim:
+                            arr = truncate_vec(arr, runtime_dim)
+                        k = min(neighbor_top_k, len(ann_index.ann_labels))
+                        if k <= 0:
+                            break
+                        ann.set_ef(max(k + 1, 50))
+                        labels, distances = ann.knn_query(arr, k=k)
+                        for label, distance in zip(labels[0], distances[0]):
+                            oid = str(ann_index.ann_labels[int(label)])
+                            if oid not in anchor_ids and not oid.startswith("cluster:"):
+                                candidate_scores[oid] = max(
+                                    candidate_scores.get(oid, 0.0),
+                                    max(0.0, 1.0 - float(distance)),
+                                )
+                            if len(candidate_scores) >= overfetch:
+                                break
+                        if len(candidate_scores) >= overfetch:
+                            break
+                except Exception as exc:
+                    self._note_model_error("relation_completion_ann", "", exc)
+
+            if ann is None and lexical_failed and not lexical_available:
+                stats["skip_reason"] = "ann_fts_unavailable"
+                break
+
+            candidate_ids = list(candidate_scores)[:overfetch]
+            with self._connect() as db:
+                neighbor_rows = self.knowledge.completion_candidate_rows(
+                    db, notebook_id, source_id, candidate_ids
+                )
+            stats["ann_candidates"] += sum(
+                1 for row in neighbor_rows if candidate_scores.get(str(row["id"]), 0.0) > 0.25
+            )
+            combined = list(anchors)
+            seen_ids = set(anchor_ids)
+            for row in neighbor_rows:
+                oid = str(row["id"])
+                if oid not in seen_ids:
+                    seen_ids.add(oid)
+                    combined.append(decoded_object(row, candidate_scores.get(oid, 0.0)))
+
+            # Only hydrate evidence referenced by this bounded object window.
+            # The original parse may contain an entire book; it must not be kept
+            # as completion authority or required for a later resume worker.
+            page_element_ids: list[str] = []
+            for item in combined:
+                bounded_evidence = []
+                seen_element_ids: set[str] = set()
+                for evidence in item.get("evidence") or ():
+                    if not isinstance(evidence, dict):
+                        continue
+                    element_id = str(evidence.get("element_id") or "")
+                    if not element_id or element_id in seen_element_ids:
+                        continue
+                    seen_element_ids.add(element_id)
+                    bounded_evidence.append({**evidence, "element_id": element_id})
+                    page_element_ids.append(element_id)
+                    if len(bounded_evidence) >= COMPLETION_EVIDENCE_PER_OBJECT:
+                        break
+                item["evidence"] = bounded_evidence
+            combined_ids = [str(item["_oid"]) for item in combined]
+            with self._connect() as db:
+                element_rows = self.knowledge.completion_element_rows(
+                    db, source_id, page_element_ids
+                )
+                page_existing = self.knowledge.completion_existing_keys(
+                    db, notebook_id, combined_ids
+                )
+            page_elements = [
+                SimpleNamespace(
+                    id=str(row["id"]), source_id=str(row["source_id"]),
+                    element_type=str(row["element_type"] or ""),
+                    location_label=str(row["location_label"] or ""),
+                    text=str(row["text"] or ""),
+                )
+                for row in element_rows
+            ]
+            element_map = {element.id: element for element in page_elements}
+            page_relations = [
+                {
+                    "source_object_id": source_object_id,
+                    "target_object_id": target_object_id,
+                    "edge_type": edge_type,
+                }
+                for source_object_id, target_object_id, edge_type in page_existing
+            ]
+
+            remaining_batches = max(0, max_batches - stats["model_batches"])
+            pair_cap = min(max_pairs, remaining_batches * batch_size) if max_batches else 0
+            candidates = generate_candidates(
+                combined, page_relations, page_elements, run_id=run_id,
+                max_objects=len(combined), max_pairs=pair_cap,
+                excerpt_chars=max(1, self.settings.kg_relation_completion_excerpt_chars),
+                anchor_ids=anchor_ids,
+                section_quota=max(1, self.settings.kg_relation_completion_section_quota),
+            ) if pair_cap > 0 else []
+            stats["pages"] += 1
+            stats["candidates"] += len(candidates)
+            verified = []
+            for batch in candidate_batches(
+                candidates, pair_limit=batch_size, char_limit=batch_chars,
+                max_batches=remaining_batches,
+            ):
+                cancel_check()
+                proposals = propose_batch(proposer, batch)
+                stats["proposed"] += len(proposals)
+                cancel_check()
+                checked = verify_batch(verifier, proposals)
+                verified.extend(checked)
+                stats["verified"] += len(checked)
+                stats["model_batches"] += 1
+
+            endpoint_ids = sorted({
+                oid for proposal in verified for oid in (
+                    proposal.candidate.source_object_id,
+                    proposal.candidate.target_object_id,
+                )
+            })
+            evidence_ids = sorted({
+                eid for proposal in verified for eid in proposal.evidence_element_ids
+            })
+            scope_ids = endpoint_ids or anchor_ids
+            relation_rows = []
+            relation_docs = []
+            with self._write() as db:
+                if not self.knowledge.completion_validate_scope(
+                    db, notebook_id, source_id, run_id, scope_ids, evidence_ids
+                ):
+                    stats["generation_conflict"] = True
+                    break
+                existing = self.knowledge.completion_existing_keys(
+                    db, notebook_id, endpoint_ids
+                )
+                if mode == "write":
+                    names = {
+                        str(item["_oid"]): str((item.get("payload") or {}).get("name") or "")
+                        for item in combined
+                    }
+                    for proposal in verified:
+                        source_object_id, target_object_id = canonical_edge_endpoints(
+                            proposal.edge_type, proposal.candidate.source_object_id,
+                            proposal.candidate.target_object_id,
+                        )
+                        key = (source_object_id, target_object_id, proposal.edge_type)
+                        reverse = (target_object_id, source_object_id, proposal.edge_type)
+                        if key in existing or (EDGE_SPECS[proposal.edge_type].symmetric and reverse in existing):
+                            continue
+                        evidence = []
+                        excerpt_by_id = {
+                            str(item.get("element_id") or ""): str(item.get("text") or "")
+                            for item in proposal.candidate.excerpts
+                            if isinstance(item, dict)
+                        }
+                        for element_id in proposal.evidence_element_ids:
+                            element = element_map.get(element_id)
+                            if element is None:
+                                continue
+                            # Persist the exact server-issued excerpt that the
+                            # verifier approved.  The hydrated element remains
+                            # the ownership/existence authority, never model text.
+                            quote = excerpt_by_id.get(element_id, "")
+                            if not quote:
+                                continue
+                            evidence.append({
+                                "source_id": source_id, "source_title": source_title,
+                                "element_id": element_id,
+                                "element_type": str(element.element_type or ""),
+                                "location_label": str(element.location_label or ""),
+                                "quote": quote, "quoted_span": quote,
+                                "confidence": proposal.confidence,
+                                "basis": "completion:bounded-llm",
+                                "completion_schema_version": COMPLETION_SCHEMA_VERSION,
+                                "verifier": "kg_refine",
+                            })
+                        if not evidence:
+                            continue
+                        relation_id = stable_relation_id(notebook_id, run_id, proposal)
+                        relation_rows.append((
+                            relation_id, notebook_id, source_id, source_object_id,
+                            target_object_id, proposal.edge_type,
+                            json.dumps(evidence, ensure_ascii=False), self._now(),
+                        ))
+                        relation_docs.append({
+                            "_rid": relation_id, "source_object_id": source_object_id,
+                            "target_object_id": target_object_id,
+                            "edge_type": proposal.edge_type, "evidence": evidence,
+                            "text": relation_embed_text(
+                                names.get(source_object_id, "?"), proposal.edge_type,
+                                names.get(target_object_id, "?"),
+                                [item["quoted_span"] for item in evidence],
+                            ),
+                        })
+                        existing.add(key)
+                    inserted = self.knowledge.insert_completion_relations(db, relation_rows)
+                else:
+                    inserted = 0
+                status = "completed" if page["exhausted"] else "pending"
+                if not self.knowledge.completion_advance_state(
+                    db, notebook_id, source_id, run_id, mode,
+                    COMPLETION_SCHEMA_VERSION, page["cursor"], page["next_cursor"],
+                    status, self._now(),
+                ):
+                    raise RuntimeError("relation completion watermark CAS failed")
+            stats["inserted"] += inserted
+            all_relation_docs.extend(relation_docs)
+            if page["exhausted"]:
+                stats["exhausted"] = True
+                break
+
+        if stats["inserted"]:
+            try:
+                self._embed_relations_batch(notebook_id, all_relation_docs)
+            except Exception:
+                self.event_log.logger.exception(
+                    "completion relation embedding failed for %s", source_id
+                )
+            self._invalidate_unified_cache(notebook_id)
+            self._mark_unified_kg_dirty(notebook_id)
+        emit_stats()
+        return stats
+
+    def pending_relation_completions(
+        self, after_source_id: str = "", after_mode: str = "", limit: int = 100
+    ) -> list[dict]:
+        """Return a bounded startup-resume page without hydrating KG content."""
+        with self._connect() as db:
+            rows = self.knowledge.completion_pending_states(
+                db, after_source_id, after_mode, limit
+            )
+        return [dict(row) for row in rows]
+
+    def mark_relation_completion_stale(
+        self, notebook_id: str, source_id: str, run_id: str, mode: str
+    ) -> bool:
+        """Retire one pending mode-specific cursor without touching other modes."""
+        with self._write() as db:
+            return self.knowledge.completion_mark_state_stale(
+                db, notebook_id, source_id, run_id, mode, self._now()
+            )
+
+    def transition_relation_completion_mode(
+        self, notebook_id: str, source_id: str, run_id: str,
+        old_mode: str, new_mode: str,
+    ) -> bool:
+        """Atomically retain restart recovery across an active-mode change."""
+        from app.services.kg.relation_completion import COMPLETION_SCHEMA_VERSION
+
+        with self._write() as db:
+            return self.knowledge.completion_transition_mode_state(
+                db, notebook_id, source_id, run_id, old_mode, new_mode,
+                COMPLETION_SCHEMA_VERSION, self._now(),
+            )
 
     def relink_notebook_kg(self, notebook_id: str) -> dict:
         """Backfill: reconnect degree-0 KG nodes in an EXISTING notebook.
@@ -2618,6 +3071,8 @@ class KnowledgeLifecycleService:
         seq 闸(同 rebuild_communities):canonical_rel_seq==kg_mutation_seq 且表非空
         → 跳过(force 绕过);重写后把入口捕获的 seq 写回。返回写入行数(跳过时返回
         现有行数)。派生数据,fail-open 由调用方负责。"""
+        from app.services.kg.edge_schema import is_queryable_edge_pair
+
         self.get_notebook(notebook_id)
         with self._connect() as db:
             st = self.unified_kg.state_row(db, notebook_id)
@@ -2629,6 +3084,8 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             cur = self.unified_kg.canonical_relation_seed_rows(db, notebook_id)
             for r in cur:
+                if not is_queryable_edge_pair(r["et"], r["st"], r["tt"]):
+                    continue
                 s, t = r["s"], r["t"]
                 if not s or not t or s == t:
                     continue

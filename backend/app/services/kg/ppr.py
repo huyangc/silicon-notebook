@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 import rustworkx as rx
 
+from app.services.kg.edge_schema import is_queryable_edge_pair
+
 
 def build_ppr_graph(
     kg_nodes: Dict[str, dict],
@@ -75,10 +77,19 @@ def build_ppr_graph(
         G.add_edge(b, a, {"weight": weight})
 
     for rel in relations:
+        if (rel["source_object_id"] not in kg_nodes
+                or rel["target_object_id"] not in kg_nodes):
+            continue
         a = key_to_idx.get(rel["source_object_id"])
         b = key_to_idx.get(rel["target_object_id"])
         if a is None or b is None:
             continue  # dangling
+        if not is_queryable_edge_pair(
+            rel.get("edge_type"),
+            kg_nodes[rel["source_object_id"]].get("type"),
+            kg_nodes[rel["target_object_id"]].get("type"),
+        ):
+            continue
         _edge(a, b, 1.0)
 
     for oid, cid in memberships:

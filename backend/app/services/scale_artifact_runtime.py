@@ -217,6 +217,8 @@ class ScaleArtifactRuntime:
     # ------------------------------ version/read catalog
 
     def version(self, notebook_id: str) -> list:
+        from app.services.kg.edge_schema import EDGE_SCHEMA_VERSION
+
         seq, cseq, settings_tail = self.projections.version_signal(notebook_id)
         cached = self.version_memo.get(notebook_id)
         if (
@@ -243,7 +245,11 @@ class ScaleArtifactRuntime:
                 and cached[2] == settings_tail
             ):
                 return list(cached[3])
-            version = self.projections.version_facts(notebook_id) + list(settings_tail)
+            version = (
+                self.projections.version_facts(notebook_id)
+                + list(settings_tail)
+                + ["edge_schema", EDGE_SCHEMA_VERSION]
+            )
             self.version_memo[notebook_id] = (
                 seq,
                 cseq,

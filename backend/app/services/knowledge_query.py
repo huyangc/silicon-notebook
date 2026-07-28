@@ -299,10 +299,13 @@ class KnowledgeQueryService:
 
         def load() -> Dict[str, float]:
             with self.database.connect() as db:
-                node_ids, relations = self.knowledge.edge_centrality_source_rows(
+                node_rows, relations = self.knowledge.edge_centrality_source_rows(
                     db, notebook_id, self.settings.edge_centrality_max_nodes
                 )
-            nodes = {object_id: {"type": "", "name": ""} for object_id in node_ids}
+            nodes = {
+                row["id"]: {"type": row["object_type"], "name": ""}
+                for row in node_rows
+            }
             graph, _idx_to_oid, _oid_to_idx = build_rx_graph(nodes, relations)
             return compute_edge_centrality(graph)
 

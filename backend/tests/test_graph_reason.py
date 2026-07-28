@@ -40,6 +40,20 @@ def test_build_rx_graph_edge_count():
     assert G.num_edges() == 4
 
 
+def test_build_rx_graph_drops_historical_type_invalid_edges():
+    from app.services.kg.graph_reason import build_rx_graph
+
+    relations = RELATIONS + [{
+        "id": "invalid",
+        "source_object_id": "D",  # Concept cannot precede a Formula
+        "target_object_id": "A",
+        "edge_type": "precedes",
+        "evidence": [],
+    }]
+    graph, _idx_to_oid, _oid_to_idx = build_rx_graph(NODES, relations)
+    assert graph.num_edges() == len(RELATIONS)
+
+
 def test_build_rx_graph_edge_payload():
     from app.services.kg.graph_reason import build_rx_graph
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)

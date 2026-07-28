@@ -144,7 +144,7 @@ def _seed_kg(repo, name="phase kg"):
         [_claim("a", "claim a"), _claim("b", "claim b"), _claim("c", "claim c")],
         [
             {"source_local_id": "a", "target_local_id": "b",
-             "edge_type": "contradicts", "evidence": []},
+             "edge_type": "contrasts_with", "evidence": []},
             {"source_local_id": "b", "target_local_id": "c",
              "edge_type": "supports", "evidence": []},
         ],

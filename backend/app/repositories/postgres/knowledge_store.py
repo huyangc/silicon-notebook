@@ -49,6 +49,7 @@ _GRAPH_RESET_TABLES = frozenset({
     "concept_merge_candidates",
     "knowledge_embeddings",
     "extraction_runs",
+    "kg_relation_completion_state",
     "unified_kg_state",
 })
 
@@ -184,6 +185,22 @@ def _relation_insert_row(row: Sequence[Any]) -> tuple:
         jsonb(_json_document(row[6], expected=list, field="relation evidence")),
         normalize_timestamp(row[7]),
     )
+
+
+def _completion_generation_is_current(
+    connection: Any,
+    notebook_id: str,
+    source_id: str,
+    run_id: str,
+) -> bool:
+    row = connection.execute(
+        "SELECT er.id FROM extraction_runs er JOIN sources s ON s.id=er.source_id "
+        "WHERE er.notebook_id=%s AND er.source_id=%s "
+        "AND s.source_type NOT IN ('memory','knowhow') "
+        "ORDER BY er.created_at DESC, er.id COLLATE \"C\" DESC LIMIT 1",
+        (notebook_id, source_id),
+    ).fetchone()
+    return bool(row and row["id"] == run_id)
 
 
 class KnowledgeStore:
@@ -572,7 +589,8 @@ class KnowledgeStore:
         base_sql = (
             "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
             "r.edge_type AS et, r.evidence AS ev, r.review_status AS review_status, "
-            "so.payload AS sp, tp.payload AS tpl "
+            "so.payload AS sp, tp.payload AS tpl, "
+            "so.object_type AS st, tp.object_type AS tt "
             "FROM knowledge_relations r "
             "JOIN knowledge_objects so ON so.id = r.source_object_id "
             "JOIN knowledge_objects tp ON tp.id = r.target_object_id "
@@ -726,12 +744,14 @@ class KnowledgeStore:
                      *, endpoint: str, edge_type=None):
         if endpoint not in {"source_object_id", "target_object_id"}:
             raise ValueError("invalid relation endpoint")
-        selected = ("target_object_id" if endpoint == "source_object_id"
-                    else "source_object_id")
         statement = sql.SQL(
-            "SELECT {} FROM knowledge_relations "
-            "WHERE notebook_id=%s AND {}=%s AND review_status!='rejected'"
-        ).format(sql.Identifier(selected), sql.Identifier(endpoint))
+            "SELECT r.source_object_id,r.target_object_id,r.edge_type,"
+            "src.object_type AS source_type,tgt.object_type AS target_type "
+            "FROM knowledge_relations AS r "
+            "JOIN knowledge_objects AS src ON src.id=r.source_object_id "
+            "JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
+            "WHERE r.notebook_id=%s AND r.{}=%s AND r.review_status!='rejected'"
+        ).format(sql.Identifier(endpoint))
         if edge_type:
             statement += sql.SQL(" AND edge_type=%s")
         params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
@@ -892,11 +912,14 @@ class KnowledgeStore:
             return []
         ph = ",".join("%s" for _ in ids)
         return db.execute(
-            f"SELECT source_object_id, target_object_id, edge_type "
-            f"FROM knowledge_relations WHERE notebook_id=%s "
-            f"AND review_status!='rejected' "
-            f"AND source_object_id IN ({ph}) "
-            f"AND target_object_id IN ({ph})",
+            f"SELECT r.source_object_id, r.target_object_id, r.edge_type, "
+            f"src.object_type AS source_type, tgt.object_type AS target_type "
+            f"FROM knowledge_relations AS r "
+            f"JOIN knowledge_objects AS src ON src.id=r.source_object_id "
+            f"JOIN knowledge_objects AS tgt ON tgt.id=r.target_object_id "
+            f"WHERE r.notebook_id=%s AND r.review_status!='rejected' "
+            f"AND r.source_object_id IN ({ph}) "
+            f"AND r.target_object_id IN ({ph})",
             [notebook_id, *ids, *ids],
         ).fetchall()
 
@@ -1255,6 +1278,290 @@ class KnowledgeStore:
         )
 
     @staticmethod
+    def completion_generation_is_current(
+        connection: Any, notebook_id: str, source_id: str, run_id: str
+    ) -> bool:
+        return _completion_generation_is_current(
+            connection, notebook_id, source_id, run_id
+        )
+
+    @staticmethod
+    def completion_validate_scope(
+        connection: Any, notebook_id: str, source_id: str, run_id: str,
+        object_ids: Sequence[str], element_ids: Sequence[str]
+    ) -> bool:
+        # Serialize the final generation check + insert with reparse/delete.
+        # begin_extraction_run takes the same source-row lock before publishing a
+        # new generation; DELETE naturally conflicts with this lock as well.
+        locked = connection.execute(
+            "SELECT id FROM sources WHERE id=%s AND notebook_id=%s FOR UPDATE",
+            (source_id, notebook_id),
+        ).fetchone()
+        if locked is None:
+            return False
+        if not _completion_generation_is_current(
+            connection, notebook_id, source_id, run_id
+        ):
+            return False
+        objects = list(dict.fromkeys(object_ids))
+        elements = list(dict.fromkeys(element_ids))
+        if not objects:
+            return False
+        object_count = connection.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s "
+            "AND source_id=%s AND status IN "
+            "('approved','reviewed','project_specific','conflict') AND id=ANY(%s)",
+            (notebook_id, source_id, objects),
+        ).fetchone()["c"]
+        if int(object_count) != len(objects):
+            return False
+        if elements:
+            element_count = connection.execute(
+                "SELECT COUNT(*) AS c FROM source_elements WHERE source_id=%s AND id=ANY(%s)",
+                (source_id, elements),
+            ).fetchone()["c"]
+            if int(element_count) != len(elements):
+                return False
+        return True
+
+    @staticmethod
+    def completion_existing_keys(
+        connection: Any, notebook_id: str, object_ids: Sequence[str]
+    ) -> set[tuple[str, str, str]]:
+        ids = list(dict.fromkeys(object_ids))
+        if not ids:
+            return set()
+        rows = connection.execute(
+            "SELECT source_object_id,target_object_id,edge_type FROM knowledge_relations "
+            "WHERE notebook_id=%s AND source_object_id=ANY(%s) AND target_object_id=ANY(%s)",
+            (notebook_id, ids, ids),
+        ).fetchall()
+        return {(r["source_object_id"], r["target_object_id"], r["edge_type"]) for r in rows}
+
+    @staticmethod
+    def completion_page(
+        connection: Any, notebook_id: str, source_id: str, run_id: str,
+        mode: str, schema_version: int, reasoning_edge_types: Sequence[str],
+        edge_contract_rows: Sequence[tuple[str, str, str]],
+        known_edge_types: Sequence[str], core_node_types: Sequence[str],
+        limit: int, now: str
+    ) -> dict:
+        if not _completion_generation_is_current(
+            connection, notebook_id, source_id, run_id
+        ):
+            return {"rows": [], "cursor": "", "next_cursor": "", "exhausted": False,
+                    "generation_conflict": True}
+        connection.execute(
+            "INSERT INTO kg_relation_completion_state "
+            "(notebook_id,source_id,source_generation,mode,next_object_id,status,"
+            "schema_version,updated_at) VALUES (%s,%s,%s,%s,'','pending',%s,%s) "
+            "ON CONFLICT (source_id,source_generation,mode) DO NOTHING",
+            (notebook_id, source_id, run_id, mode, schema_version,
+             normalize_timestamp(now)),
+        )
+        connection.execute(
+            "UPDATE kg_relation_completion_state SET next_object_id='',status='pending',"
+            "schema_version=%s,updated_at=%s WHERE source_id=%s AND source_generation=%s "
+            "AND mode=%s AND schema_version!=%s",
+            (schema_version, normalize_timestamp(now), source_id, run_id, mode,
+             schema_version),
+        )
+        state = connection.execute(
+            "SELECT next_object_id,status FROM kg_relation_completion_state "
+            "WHERE source_id=%s AND source_generation=%s AND mode=%s",
+            (source_id, run_id, mode),
+        ).fetchone()
+        cursor = str(state["next_object_id"] or "")
+        if state["status"] == "completed":
+            return {"rows": [], "cursor": cursor, "next_cursor": cursor,
+                    "exhausted": True, "already_completed": True}
+        page_limit = max(1, int(limit))
+        reasoning_types = list(dict.fromkeys(reasoning_edge_types))
+        contract_rows = tuple(dict.fromkeys(edge_contract_rows))
+        known_types = list(dict.fromkeys(known_edge_types))
+        core_types = list(dict.fromkeys(core_node_types))
+        if not reasoning_types or not contract_rows or not known_types or not core_types:
+            raise ValueError("completion edge contract must not be empty")
+        pair_sql = " OR ".join(
+            "(r.edge_type=%s AND rs.object_type=%s AND rt.object_type=%s)"
+            for _ in contract_rows
+        )
+        queryable_sql = (
+            f"(({pair_sql}) OR (r.edge_type=ANY(%s) AND "
+            "(NOT (rs.object_type=ANY(%s)) OR NOT (rt.object_type=ANY(%s)))))"
+        )
+        contract_params = tuple(
+            value for row in contract_rows for value in row
+        ) + (known_types, core_types, core_types)
+        rows = connection.execute(
+            "SELECT ko.id,ko.object_type,ko.payload,ko.evidence,ko.status,"
+            "EXISTS(SELECT 1 FROM knowledge_relations r "
+            " JOIN knowledge_objects rs ON rs.id=r.source_object_id "
+            " JOIN knowledge_objects rt ON rt.id=r.target_object_id "
+            " WHERE r.notebook_id=ko.notebook_id AND r.review_status!='rejected' "
+            " AND (r.source_object_id=ko.id OR r.target_object_id=ko.id) "
+            f" AND {queryable_sql}) AS has_relation,"
+            "EXISTS(SELECT 1 FROM knowledge_relations r "
+            " JOIN knowledge_objects rs ON rs.id=r.source_object_id "
+            " JOIN knowledge_objects rt ON rt.id=r.target_object_id "
+            " WHERE r.notebook_id=ko.notebook_id AND r.review_status!='rejected' "
+            " AND (r.source_object_id=ko.id OR r.target_object_id=ko.id) "
+            f" AND r.edge_type=ANY(%s) AND {queryable_sql}) "
+            "AS has_reasoning_relation FROM knowledge_objects ko "
+            "WHERE ko.notebook_id=%s AND ko.source_id=%s AND ko.id>%s "
+            "AND ko.status IN ('approved','reviewed','project_specific','conflict') "
+            "ORDER BY ko.id COLLATE \"C\" LIMIT %s",
+            (*contract_params, reasoning_types, *contract_params,
+             notebook_id, source_id, cursor,
+             page_limit + 1),
+        ).fetchall()
+        page = rows[:page_limit]
+        return {
+            "rows": page,
+            "cursor": cursor,
+            "next_cursor": str(page[-1]["id"]) if page else cursor,
+            "exhausted": len(rows) <= page_limit,
+        }
+
+    @staticmethod
+    def completion_candidate_rows(
+        connection: Any, notebook_id: str, source_id: str,
+        object_ids: Sequence[str]
+    ) -> list:
+        ids = list(dict.fromkeys(object_ids))
+        if not ids:
+            return []
+        return connection.execute(
+            "SELECT id,object_type,payload,evidence,status FROM knowledge_objects "
+            "WHERE notebook_id=%s AND source_id=%s AND id=ANY(%s) "
+            "AND status IN ('approved','reviewed','project_specific','conflict')",
+            (notebook_id, source_id, ids),
+        ).fetchall()
+
+    @staticmethod
+    def completion_element_rows(
+        connection: Any, source_id: str, element_ids: Sequence[str]
+    ) -> list:
+        ids = list(dict.fromkeys(element_ids))
+        if not ids:
+            return []
+        return connection.execute(
+            "SELECT id,source_id,element_type,location_label,text "
+            "FROM source_elements WHERE source_id=%s AND id=ANY(%s)",
+            (source_id, ids),
+        ).fetchall()
+
+    @staticmethod
+    def completion_pending_states(
+        connection: Any, after_source_id: str, after_mode: str, limit: int
+    ) -> list:
+        return connection.execute(
+            "SELECT st.notebook_id,st.source_id,st.source_generation,st.mode,s.title "
+            "FROM kg_relation_completion_state AS st "
+            "JOIN sources AS s ON s.id=st.source_id "
+            "WHERE st.status='pending' AND (st.source_id COLLATE \"C\">%s OR "
+            "(st.source_id=%s AND st.mode COLLATE \"C\">%s)) "
+            "AND st.source_generation=(SELECT er.id FROM extraction_runs AS er "
+            "WHERE er.notebook_id=st.notebook_id AND er.source_id=st.source_id "
+            "ORDER BY er.created_at DESC,er.id COLLATE \"C\" DESC LIMIT 1) "
+            "ORDER BY st.source_id COLLATE \"C\",st.mode COLLATE \"C\" LIMIT %s",
+            (after_source_id, after_source_id, after_mode, max(1, int(limit))),
+        ).fetchall()
+
+    @staticmethod
+    def completion_mark_state_stale(
+        connection: Any, notebook_id: str, source_id: str,
+        run_id: str, mode: str, now: str
+    ) -> bool:
+        cursor = connection.execute(
+            "UPDATE kg_relation_completion_state SET status='stale',updated_at=%s "
+            "WHERE notebook_id=%s AND source_id=%s AND source_generation=%s "
+            "AND mode=%s AND status='pending'",
+            (normalize_timestamp(now), notebook_id, source_id, run_id, mode),
+        )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def completion_transition_mode_state(
+        connection: Any, notebook_id: str, source_id: str, run_id: str,
+        old_mode: str, new_mode: str, schema_version: int, now: str
+    ) -> bool:
+        """Atomically publish the new recoverable cursor before retiring the old."""
+        if new_mode not in {"shadow", "write"}:
+            return False
+        locked = connection.execute(
+            "SELECT id FROM sources WHERE id=%s AND notebook_id=%s FOR UPDATE",
+            (source_id, notebook_id),
+        ).fetchone()
+        if locked is None or not _completion_generation_is_current(
+            connection, notebook_id, source_id, run_id
+        ):
+            return False
+        timestamp = normalize_timestamp(now)
+        connection.execute(
+            "INSERT INTO kg_relation_completion_state "
+            "(notebook_id,source_id,source_generation,mode,next_object_id,status,"
+            "schema_version,updated_at) VALUES (%s,%s,%s,%s,'','pending',%s,%s) "
+            "ON CONFLICT (source_id,source_generation,mode) DO NOTHING",
+            (notebook_id, source_id, run_id, new_mode, schema_version, timestamp),
+        )
+        connection.execute(
+            "UPDATE kg_relation_completion_state SET status='pending',"
+            "next_object_id=CASE WHEN schema_version!=%s THEN '' ELSE next_object_id END,"
+            "schema_version=%s,updated_at=%s WHERE notebook_id=%s AND source_id=%s "
+            "AND source_generation=%s AND mode=%s AND status='stale'",
+            (schema_version, schema_version, timestamp, notebook_id, source_id,
+             run_id, new_mode),
+        )
+        connection.execute(
+            "UPDATE kg_relation_completion_state SET status='stale',updated_at=%s "
+            "WHERE notebook_id=%s AND source_id=%s AND source_generation=%s "
+            "AND mode=%s AND status='pending'",
+            (timestamp, notebook_id, source_id, run_id, old_mode),
+        )
+        return True
+
+    @staticmethod
+    def completion_advance_state(
+        connection: Any, notebook_id: str, source_id: str, run_id: str,
+        mode: str, schema_version: int, expected_cursor: str,
+        next_cursor: str, status: str, now: str
+    ) -> bool:
+        if status not in {"pending", "completed"}:
+            return False
+        locked = connection.execute(
+            "SELECT id FROM sources WHERE id=%s AND notebook_id=%s FOR UPDATE",
+            (source_id, notebook_id),
+        ).fetchone()
+        if locked is None or not _completion_generation_is_current(
+            connection, notebook_id, source_id, run_id
+        ):
+            return False
+        cursor = connection.execute(
+            "UPDATE kg_relation_completion_state SET next_object_id=%s,status=%s,updated_at=%s "
+            "WHERE notebook_id=%s AND source_id=%s AND source_generation=%s AND mode=%s "
+            "AND schema_version=%s AND next_object_id=%s AND status='pending'",
+            (next_cursor, status, normalize_timestamp(now), notebook_id, source_id,
+             run_id, mode, schema_version, expected_cursor),
+        )
+        return cursor.rowcount == 1
+
+    @staticmethod
+    def insert_completion_relations(connection: Any, rows: Sequence[tuple]) -> int:
+        inserted = 0
+        for row in rows:
+            converted = _relation_insert_row(row)
+            cursor = connection.execute(
+                "INSERT INTO knowledge_relations "
+                "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,"
+                "evidence,created_at,review_status) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'pending') "
+                "ON CONFLICT (id) DO NOTHING",
+                converted,
+            )
+            inserted += max(0, int(cursor.rowcount or 0))
+        return inserted
+
+    @staticmethod
     def insert_kg_fts_rows(
         connection: Any, rows: Sequence[tuple]
     ) -> None:
@@ -1526,6 +1833,10 @@ class KnowledgeStore:
         notebook_id: str,
     ) -> None:
         """Delete one source's graph rows without touching its extraction history."""
+        db.execute(
+            "DELETE FROM kg_relation_completion_state WHERE source_id = %s",
+            (source_id,),
+        )
         stale_knowledge_ids = self.stale_object_ids_for_source(db, source_id, notebook_id)
 
         if stale_knowledge_ids:
@@ -1581,6 +1892,15 @@ class KnowledgeStore:
         preserve_existing: bool = False,
     ) -> None:
         """Open a run, optionally retaining the current graph until replacement."""
+        # Same transaction lock as completion_validate_scope/advance_state: a
+        # stale completion cannot pass the generation CAS and commit after this
+        # run becomes current under PostgreSQL READ COMMITTED.
+        connection_row = db.execute(
+            "SELECT id FROM sources WHERE id=%s AND notebook_id=%s FOR UPDATE",
+            (source_id, notebook_id),
+        ).fetchone()
+        if connection_row is None:
+            raise KeyError(source_id)
         if not preserve_existing:
             self.clear_source_extraction_state(
                 db, source_id, notebook_id, clear_embeddings=False
@@ -1920,10 +2240,24 @@ class KnowledgeStore:
                 (notebook_id,),
             ).fetchall()
             obj_rows = db.execute(
-                "SELECT id FROM knowledge_objects WHERE notebook_id = %s",
+                "SELECT id, object_type FROM knowledge_objects WHERE notebook_id = %s",
                 (notebook_id,),
             ).fetchall()
-            node_ids = [row["id"] for row in obj_rows]
+            node_ids = [dict(row) for row in obj_rows]
+
+        if len(degree) > max_nodes:
+            object_types = {
+                row["id"]: row["object_type"]
+                for row in db.execute(
+                    "SELECT id, object_type FROM knowledge_objects "
+                    "WHERE notebook_id = %s AND id = ANY(%s)",
+                    (notebook_id, top_ids),
+                ).fetchall()
+            }
+            node_ids = [
+                {"id": object_id, "object_type": object_types.get(object_id, "")}
+                for object_id in top_ids
+            ]
 
         relations = [{
             "id": row["id"],

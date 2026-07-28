@@ -28,15 +28,18 @@ def _seed(repo):
 
 def test_overlay_block_idmap_hits(repo):
     nb = _seed(repo)
-    block, id_map, hits = repo._chunk_kg_overlay(nb.id, "cascode output resistance", "", id_offset=5)
+    block, id_map, hits, supports = repo._chunk_kg_overlay(
+        nb.id, "cascode output resistance", "", id_offset=5
+    )
     assert isinstance(block, str) and id_map
     assert any(int(k[1:]) >= 6 for k in id_map)          # id_offset=5 → key 从 k6
     assert all(hasattr(h, "relevance") for h in hits)
+    assert isinstance(supports, dict)
 
 
 def test_overlay_empty_no_kg(repo):
     nb = repo.create_notebook(NotebookCreate(name="e"))
-    assert repo._chunk_kg_overlay(nb.id, "x", "", 0) == ("", {}, [])
+    assert repo._chunk_kg_overlay(nb.id, "x", "", 0) == ("", {}, [], {})
 
 
 def test_kg_source_chunks_maps_evidence_to_chunk(repo):
@@ -57,8 +60,16 @@ def test_kg_source_chunks_maps_evidence_to_chunk(repo):
     with repo._connect() as db:
         oid = db.execute("SELECT id FROM knowledge_objects WHERE notebook_id=? AND object_type='concept'",
                          (nb.id,)).fetchone()["id"]
-    chunks = repo._kg_source_chunks(nb.id, [oid])
+    from app.services.retrieval import RetrievalSupport
+    chunks = repo._kg_source_chunks(
+        nb.id, [oid], support_by_object={
+            oid: (RetrievalSupport("relation", "relation", "rel-test", 0.8, "pending"),)
+        },
+    )
     assert any(c.chunk_id == "ck-mix1" for c in chunks)
+    chunk = next(c for c in chunks if c.chunk_id == "ck-mix1")
+    assert any(s.origin == "relation" and s.support_id == "rel-test"
+               for s in chunk.retrieval_supports)
 
 
 def test_kg_source_chunks_empty_inputs(repo):

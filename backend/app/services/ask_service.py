@@ -1071,7 +1071,13 @@ class AskService:
                 kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
                 chunk_budget = max(0, self.settings.max_total_tokens
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
-                selected = truncate_by_tokens(ranked, lambda c: c.text, chunk_budget)
+                from app.services.retrieval import select_with_graph_reserve
+
+                selected = select_with_graph_reserve(
+                    ranked,
+                    chunk_budget,
+                    reserve=max(0, self.settings.chunk_graph_reserve),
+                )
                 ask_stage("mix_rerank", _t, recall=len(candidates),
                           selected=len(selected), kg_nodes=len(kg_id_map),
                           concept_walk=concept_walk_n)
@@ -1952,13 +1958,16 @@ class AskService:
                 ppr_chunks = self.retrieval.ppr_retrieve(notebook_id, question)
                 raise_if_cancelled(cancel_event)
                 if ppr_chunks:
-                    from app.services.retrieval import RetrievedChunk
+                    from app.services.retrieval import RetrievedChunk, RetrievalSupport
                     reports = self.community_reports(
                         notebook_id)[: self.settings.ppr_community_context_top_n]
                     community_chunks = [RetrievedChunk(
                         chunk_id=f"community:{i}", source_id="",
                         source_title="Knowledge base theme", section_path=r["title"],
-                        text=f"{r['title']}. {r['summary']}", element_ids=[], relevance=1.0)
+                        text=f"{r['title']}. {r['summary']}", element_ids=[], relevance=1.0,
+                        retrieval_supports=(RetrievalSupport(
+                            "kg_source", "object", str(r.get("community_id") or ""), 1.0
+                        ),))
                         for i, r in enumerate(reports)]
                     ppr_chunks = community_chunks + ppr_chunks
                     answer, llm_grounded, anchors = "", False, []

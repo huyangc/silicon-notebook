@@ -11,12 +11,13 @@ The current target is a local real-team beta: FastAPI with a selectable SQLite o
 - Structured source ingestion with element-level evidence, formulas, tables, and retained document images when MinerU is configured; formula evidence is typeset in source details and Knowledge Graph source cards, LaTeX stays visible on render failure, and wide display equations scroll inside their owning panel.
 - Grounded multi-turn Ask with compact citations, last-activity conversation history (including in-flight first turns that remain reopenable across immediate session switches), and `chunk`, `reasoning`, and experimental `graph` retrieval modes. Reasoning questions are understood without corpus influence before retrieval; clear intent auto-continues, while direction-changing ambiguity pauses for confirmation and then governs every retrieval stage. The live reasoning trace covers the whole run — from question understanding through answer generation — not just the retrieval stages.
 - User-selectable Reasoning Ask effort (`overview` / `standard` / `deep` / `thorough` / `exhaustive`) controls bounded ranked-retrieval work. Direct whole-table Knowhow lists and physical row/record counts use cursor enumeration with coverage such as `100/100`; conditional, distinct/type counts (for example “how many kinds”), and grouped requests disclose that exact completeness is unsupported, while safety ceilings and bounded hybrid synthesis are reported as partial rather than “all”. The exact limits are listed in the [Product and API reference](./docs/product-and-api.md#reasoning-effort-and-complete-collection-requests).
-- Concept / Claim / Formula / Procedure knowledge extraction, governance, unified graph visualization, citation-to-node deep links (including nodes outside the bounded core view), and personal-to-base promotion.
+- Concept / Claim / Formula / Procedure extraction governed by one typed edge contract, historical-edge filtering, a read-only contract audit, unified graph visualization, citation-to-node deep links (including nodes outside the bounded core view), and personal-to-base promotion. Optional bounded cross-element relation completion uses mode-specific persistent source-generation keyset watermarks plus indexed same-source candidates; unfinished pages resume through bounded jobs and after restart, and a mode change atomically publishes the new recoverable cursor before retiring the old one. The feature remains rollout-gated and disabled by default.
 - Notebook-bound, creator-private Memory with explicit preview/confirmation and scoped external-Agent access over MCP.
 - Free-form knowhow tables with Markdown cells, column- or row-oriented spreadsheet import with actionable validation, bounded batch-reformat review, readable audit actors, content-aware stable columns, reasoning-backed library-wide empty-cell completion suggestions, deterministic projection whose cell knowledge objects enter graph/reasoning retrieval by default, history, milestones, and isolated code attachments with immediate save attribution.
 - Intent-first two-stage deep reports with corpus-blind question clarification, an atomically frozen confirmation contract before retrieval, bounded exact-element recovery for large libraries, editable coverage-aware outlines, paper-title-aware citations, verified grounding, per-section reasoning, live progress, cancellation, and Markdown/ZIP export.
 - Multi-account ownership, public reference libraries, share links, copy/read-only membership, and admin controls.
 - Structured JSONL logs, bounded production diagnostics, offline batch ingestion, replay, migration, and backfill tools.
+- Retrieval candidates retain all producer provenance (semantic, lexical, PPR, KG source, or community); mixed chunk/graph selection can reserve a bounded graph-only seat without increasing the answer budget.
 
 The complete behavior and endpoint contracts live in [Product and API reference](./docs/product-and-api.md).
 
@@ -138,7 +139,7 @@ alone starts nothing and never changes the active backend. Changing `DATABASE_UR
 
 While `DATABASE_URL` remains SQLite, the operator can run a guarded, one-way
 SQLite→PostgreSQL shadow: preflight binds and confirms both database identities, `start-forward`
-installs run-scoped capture/guards and copies a consistent 60-table baseline, and one supervised
+installs run-scoped capture/guards and copies a consistent 61-table baseline, and one supervised
 foreground worker continuously applies the retained SQLite change log. `status` exposes redacted
 lag/lease/poison state and `verify --level full` performs a barrier-aware consistency check. The
 worker uses an exclusive database-clock lease, retries transient PostgreSQL failures, stops on a

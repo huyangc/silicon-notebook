@@ -122,6 +122,25 @@ def test_extract_graph_grounds_nodes():
     assert len(g.edges) == 1              # edge endpoints survived
 
 
+def test_extract_graph_drops_and_reports_invalid_endpoint_pair(caplog):
+    import json
+
+    payload = json.dumps({
+        "nodes": [
+            {"local_id": "a", "type": "Formula", "name": "gain equation", "ev": 0},
+            {"local_id": "b", "type": "Claim", "name": "gain increases", "ev": 0},
+        ],
+        # precedes is same-type only; Formula -> Claim is contract-invalid.
+        "edges": [{"type": "precedes", "source": "a", "target": "b", "ev": 0}],
+    })
+    with caplog.at_level("WARNING", logger="app.services.kg.extract"):
+        graph = kg_ingest.extract_graph(
+            FakeClient(payload), "gain equation; gain increases", "doc.md", "academic"
+        )
+    assert graph.edges == []
+    assert "invalid_endpoint_pair" in caplog.text
+
+
 class _FlakyClient:
     """Raises APIConnectionError for the first `n_fail` distinct windows it sees
     (keyed by prompt text), returns valid JSON for the rest. The KG node evidence

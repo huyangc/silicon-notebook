@@ -230,6 +230,7 @@ class GraphRetrievalService(_RetrievalState):
         concept_clusters share name-derived canonical_ids so a concept in active
         and base bridges naturally).
         返回 (G, key_to_idx, chunk_idx_to_id)。"""
+        from app.services.kg.edge_schema import EDGE_SCHEMA_VERSION
         from app.services.kg.ppr import build_ppr_graph
         with self._connect() as db:
             participants = self.notebooks.participant_ids(db, notebook_id)
@@ -246,7 +247,7 @@ class GraphRetrievalService(_RetrievalState):
         # runtime_dim 入键(T3/R4):emb_synonym 边由向量矩阵派生,切
         # EMBED_RUNTIME_DIM 后旧空间算出的图不能再服役。
         from app.services.vector_index import resolve_runtime_dim
-        version = ("ppr_graph", tuple(version_parts),
+        version = ("ppr_graph", EDGE_SCHEMA_VERSION, tuple(version_parts),
                    self.settings.ppr_variant_edge_weight,
                    self.settings.ppr_emb_synonym_enabled, self.settings.ppr_emb_synonym_threshold,
                    self.settings.ppr_emb_synonym_topk,
@@ -864,7 +865,7 @@ class GraphRetrievalService(_RetrievalState):
         score_map = dict(ranked)
         with self._connect() as db:
             rows = self.chunks.graph_hydrate_rows(db, score_map)
-        from app.services.retrieval import RetrievedChunk
+        from app.services.retrieval import RetrievedChunk, RetrievalSupport
         # combined_chunk_ids (scale_ppr) spans base ⊕ active — a chunk here can
         # belong to a base notebook even though this call is scoped to
         # `notebook_id`. Tag each with its real origin so citation-building can
@@ -874,7 +875,10 @@ class GraphRetrievalService(_RetrievalState):
             section_path=r["section_path"], text=r["text"],
             element_ids=json.loads(r["element_ids"] or "[]"),
             relevance=score_map[r["id"]],
-            notebook_id=r["chunk_notebook_id"]) for r in rows]
+            notebook_id=r["chunk_notebook_id"],
+            retrieval_supports=(RetrievalSupport(
+                "ppr", "ppr", "", score_map[r["id"]]
+            ),)) for r in rows]
         out.sort(key=lambda c: c.relevance, reverse=True)
         return out
     def _ppr_reset_vector(self, notebook_id: str, question: str,
@@ -1189,7 +1193,9 @@ class GraphRetrievalService(_RetrievalState):
             return out
 
         return self._vector_cache.get(f"{notebook_id}:elemchunk", version, _load)
-    def _kg_source_chunks(self, notebook_id: str, object_ids: list) -> list:
+    def _kg_source_chunks(
+        self, notebook_id: str, object_ids: list, *, support_by_object=None
+    ) -> list:
         """KG 对象 evidence 的 element_id → 含该 element 的 chunk(LightRAG 源 chunk)。
         返回 List[RetrievedChunk](relevance 占位 0.3,后续 rerank 重排)。
 
@@ -1202,7 +1208,9 @@ class GraphRetrievalService(_RetrievalState):
         消费方 ask_graph 的 BFS 兜底路径无 rerank,顺序直接决定
         truncate_by_tokens 的截断存活集和引用编号,所以序必须确定(旧实现的
         「chunks 全表扫描序」依赖表物理序,本就不是契约)。"""
-        from app.services.retrieval import RetrievedChunk
+        from app.services.retrieval import (
+            RetrievedChunk, RetrievalSupport, merge_retrieval_supports,
+        )
         if not object_ids:
             return []
         with self._connect() as db:
@@ -1223,11 +1231,22 @@ class GraphRetrievalService(_RetrievalState):
             elem_map = self._elem_chunk_map(notebook_id)
             chunk_ids: list = []
             seen_cid = set()
+            chunk_support_objects: Dict[str, list[str]] = {}
+            object_elements: Dict[str, list[str]] = {}
+            for oid in object_ids:
+                object_elements[oid] = [
+                    e.get("element_id")
+                    for e in json.loads(ev_by_id.get(oid) or "[]")
+                    if isinstance(e, dict) and e.get("element_id")
+                ]
             for el in elem_ids:
                 for cid in elem_map.get(el, ()):
                     if cid not in seen_cid:
                         seen_cid.add(cid)
                         chunk_ids.append(cid)
+                    for oid in object_ids:
+                        if el in object_elements.get(oid, ()):
+                            chunk_support_objects.setdefault(cid, []).append(oid)
             if not chunk_ids:
                 return []
             crows = self.chunks.rows_by_ids(db, chunk_ids)
@@ -1237,10 +1256,20 @@ class GraphRetrievalService(_RetrievalState):
             cr = by_id.get(cid)
             if cr is None:
                 continue
+            supports = tuple(
+                RetrievalSupport("kg_source", "object", oid, 0.3)
+                for oid in dict.fromkeys(chunk_support_objects.get(cid, ()))
+            )
+            if support_by_object:
+                for oid in dict.fromkeys(chunk_support_objects.get(cid, ())):
+                    supports = merge_retrieval_supports(
+                        supports, support_by_object.get(oid, ())
+                    )
             out.append(RetrievedChunk(
                 chunk_id=cr["id"], source_id=cr["source_id"], source_title="",
                 section_path=cr["section_path"], text=cr["text"],
-                element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3))
+                element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3,
+                retrieval_supports=supports))
         return out
     def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
         """{object_id: set(chunk_id)} — KG 实体出现在哪些 chunk 里。
@@ -1281,6 +1310,8 @@ class GraphRetrievalService(_RetrievalState):
         return self._scale_ppr_impl(*args, **kwargs)
 
     def in_network_relations(self, participant_ids, object_ids):
+        from app.services.kg.edge_schema import is_queryable_edge_pair
+
         ids = list(object_ids)
         if len(ids) < 2:
             return []
@@ -1290,7 +1321,13 @@ class GraphRetrievalService(_RetrievalState):
                 rows = self.knowledge.in_network_relation_rows(
                     database, notebook_id, ids,
                 )
-                out.extend({**dict(row), "notebook_id": notebook_id} for row in rows)
+                out.extend(
+                    {**dict(row), "notebook_id": notebook_id}
+                    for row in rows
+                    if is_queryable_edge_pair(
+                        row["edge_type"], row["source_type"], row["target_type"]
+                    )
+                )
         return out
 
     def relation_support_count(self, notebook_id, source_id, edge_type, target_id):

@@ -170,8 +170,11 @@ class UnifiedKgStore:
         return db.execute(
             "SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, "
             "       COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t, "
+            "       so.object_type AS st, tp.object_type AS tt "
             "FROM knowledge_relations kr "
+            "JOIN knowledge_objects so ON so.id=kr.source_object_id "
+            "JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
             "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
             "  AND cs.member_object_id=kr.source_object_id "
             "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "

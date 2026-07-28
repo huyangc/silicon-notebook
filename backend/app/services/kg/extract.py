@@ -4,9 +4,17 @@ only an integer "ev" label per node/edge, and the backend maps it back to that
 source element's exact text/offsets (drop ungroundable nodes). Node types
 constrained to the 4; edges to the vocab."""
 from __future__ import annotations
+import logging
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.core.llm import cap_kwargs
+from app.services.kg.edge_schema import (
+    VALID_EDGE_TYPES,
+    edge_schema_hint,
+    is_valid_edge_pair,
+    render_edge_prompt_rules,
+)
 from app.services.kg.json_utils import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
@@ -14,16 +22,15 @@ from app.services.kg.run_control import KgBuildAborted
 from app.services.prompts import gleaning_prompt, refine_prompt, REFINE_SCHEMA_HINT
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
-EDGE_TYPES = {"defines", "part_of", "composed_of", "contrasts_with", "kind_of",
-              "about", "supports", "derived_from", "depends_on", "prerequisite_of",
-              "used_in", "precedes"}
+EDGE_TYPES = VALID_EDGE_TYPES
+_EDGE_PROMPT_RULES = render_edge_prompt_rules()
+_log = logging.getLogger(__name__)
 
 _KG_SCHEMA_HINT = (
     '{"nodes":[{"local_id":"","type":"Concept|Claim|Formula|Procedure","name":"",'
     '"ev":0,"validity_scope":{"region":[],"assumptions":[],"approximation":"","range":""},'
     '"steps":[{"name":"","ev":0}]}],'
-    '"edges":[{"type":"about|supports|derived_from|depends_on|contrasts_with|'
-    'prerequisite_of|defines|part_of|composed_of|kind_of|used_in|precedes",'
+    f'"edges":[{{"type":"{edge_schema_hint()}",'
     '"source":"<local_id>","target":"<local_id>","ev":0}]}'
 )
 
@@ -220,19 +227,12 @@ Fields (ALL optional; include only what the text explicitly states):
   range: ".."         e.g. "low-frequency" | "f << f_T"
 NEVER invent a scope the text does not state; OMIT validity_scope when none.
 
-EDGES (source->target by local_id). REASONING-BEARING edges are the PRIORITY and
-connect Claims/Formulas/Concepts (not only Concept->Concept):
-- supports (claim/formula/concept -> claim): evidence/argument backing a claim.
-- derived_from (claim/formula -> claim/formula): result follows from another.
-- depends_on (claim/formula/concept -> ...): validity/value depends on target.
-- contrasts_with (claim/formula/concept <-> ...): trade-off / disagreement /
-  contradiction.
-- prerequisite_of (concept/claim -> concept/claim): must hold/be understood first.
+EDGES (source->target by local_id). Use ONLY the endpoint pairs below. Reasoning-
+bearing edges are the priority and may connect Claims/Formulas/Concepts, not only
+Concept->Concept:
+{_EDGE_PROMPT_RULES}
 EXPLICITLY HUNT depends_on, contrasts_with, prerequisite_of — rare and high-value;
 look for "requires", "assuming", "unlike", "trade-off", "valid when", "before".
-Structural edges (secondary): about(claim/formula->concept), defines(claim->
-concept), part_of/composed_of/kind_of(concept->concept), used_in(formula/concept->
-procedure), precedes.
 
 CONNECTIVITY (REQUIRED): every Claim MUST appear in at least one edge — at minimum
 an `about` edge to the Concept it concerns; every Concept SHOULD appear in at least
@@ -449,6 +449,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     data = safe_json(raw)
     nodes: List[Node] = []
     by_local = {}
+    type_by_node_id: Dict[str, str] = {}
     for it in (data.get("nodes") or []):
         if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
             continue
@@ -463,6 +464,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if it["type"] in ("Claim", "Formula"):
             node.validity_scope = _parse_validity_scope(it.get("validity_scope"))
         nodes.append(node)
+        type_by_node_id[nid] = node.type
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     if gleaning_rounds and nodes:
@@ -481,15 +483,38 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         kept_ids = {n.id for n in kept}
         nodes = kept
         by_local = {lid: nid for lid, nid in by_local.items() if nid in kept_ids}
+        type_by_node_id = {
+            node_id: node_type for node_id, node_type in type_by_node_id.items()
+            if node_id in kept_ids
+        }
     edges: List[Edge] = []
+    rejected_edges: Counter[tuple[str, str]] = Counter()
     for it in (data.get("edges") or []):
-        if not isinstance(it, dict) or it.get("type") not in EDGE_TYPES:
+        if not isinstance(it, dict):
+            continue
+        if it.get("type") not in EDGE_TYPES:
+            rejected_edges[(str(it.get("type") or "<missing>"), "unknown_edge_type")] += 1
             continue
         s = by_local.get(str(it.get("source"))); t = by_local.get(str(it.get("target")))
         if not s or not t or s == t:
+            rejected_edges[(it["type"], "missing_or_self_endpoint")] += 1
+            continue
+        if not is_valid_edge_pair(
+            it["type"], type_by_node_id.get(s), type_by_node_id.get(t)
+        ):
+            rejected_edges[(it["type"], "invalid_endpoint_pair")] += 1
             continue
         el = _resolve(elements, it.get("ev"), "")
         ev = [_ev(el)] if el is not None else []
         edges.append(Edge(id=f"E{win_idx}-{len(edges)}", type=it["type"],
                           source_id=s, target_id=t, evidence=ev))
+    if rejected_edges:
+        _log.warning(
+            "kg_edge_contract_rejections window=%s counts=%s",
+            win_idx,
+            sorted(
+                (edge_type, reason, count)
+                for (edge_type, reason), count in rejected_edges.items()
+            ),
+        )
     return nodes, edges

@@ -218,6 +218,11 @@ class SourceIngestionService:
         # 分开(那是 process_source 生命周期 + 分块锁的引用计数,嵌入 worker 晚于它结束);两者的并集
         # 由 _active_source_ids_snapshot 出给体检。同一 _active_sources_lock 守护(都是小 dict)。
         self._embedding_sources: dict[str, int] = {}
+        # Relation-completion pages are durable; this set is only a process-local
+        # single-flight guard for their resumable drain jobs. Startup repopulates
+        # work from the persisted pending rows after a crash/restart.
+        self._relation_completion_scheduled: set[tuple[str, str, str]] = set()
+        self._relation_completion_schedule_lock = threading.Lock()
         # 源级分块串行锁(per-source):同一源的并发 reparse 必须在「换 elements →
         # 建 chunks + 置 marker」这段串行,否则一次 invocation 可能读到 A 代 elements、
         # 另一次把它换成 B 代、第一次再把基于 A 代的 chunks 连同 marker 写回,留下
@@ -1430,6 +1435,125 @@ class SourceIngestionService:
             self.delete_source(source_id, self.pipeline_hooks())
 
     # ----------------------------------------------------------- extraction
+    @staticmethod
+    def _relation_completion_needs_resume(stats: dict) -> bool:
+        return bool(
+            stats.get("mode") in {"shadow", "write"}
+            and not stats.get("exhausted")
+            and not stats.get("generation_conflict")
+            and not stats.get("skip_reason")
+        )
+
+    def _schedule_relation_completion_resume(
+        self, notebook_id: str, source_id: str, source_title: str, run_id: str,
+        expected_mode: str,
+    ) -> bool:
+        """Single-flight one bounded resume invocation; re-enqueue if pending."""
+        from app.services.kg import scheduler as kg_scheduler
+
+        if expected_mode not in {"shadow", "write"}:
+            return False
+        key = (source_id, run_id, expected_mode)
+        with self._relation_completion_schedule_lock:
+            if key in self._relation_completion_scheduled:
+                return False
+            self._relation_completion_scheduled.add(key)
+
+        def _run() -> None:
+            stats: dict | None = None
+            try:
+                stats = self.knowledge_lifecycle.complete_relations_for_source(
+                    notebook_id, source_id, source_title, run_id, [], [], [],
+                    expected_mode=expected_mode,
+                )
+                if stats.get("inserted"):
+                    try:
+                        self.maybe_auto_index(notebook_id)
+                    except Exception:
+                        self.event_log.logger.exception(
+                            "relation completion resume indexing failed for %s",
+                            source_id,
+                        )
+            except Exception:
+                # Keep the durable cursor pending. A later startup or explicit
+                # source run can retry without replaying completed pages.
+                self.event_log.logger.exception(
+                    "relation completion resume failed for %s", source_id
+                )
+            finally:
+                with self._relation_completion_schedule_lock:
+                    self._relation_completion_scheduled.discard(key)
+            if stats is not None and self._relation_completion_needs_resume(stats):
+                self._schedule_relation_completion_resume(
+                    notebook_id, source_id, source_title, run_id, expected_mode
+                )
+            elif stats is not None and stats.get("skip_reason") == "mode_changed":
+                current_mode = str(stats.get("current_mode") or "off")
+                if current_mode in {"shadow", "write"}:
+                    self._schedule_relation_completion_resume(
+                        notebook_id, source_id, source_title, run_id, current_mode
+                    )
+
+        try:
+            kg_scheduler.submit_job(_run)
+        except Exception:
+            with self._relation_completion_schedule_lock:
+                self._relation_completion_scheduled.discard(key)
+            self.event_log.logger.exception(
+                "relation completion resume submission failed for %s", source_id
+            )
+            return False
+        return True
+
+    def resume_pending_relation_completions(self, page_size: int = 100) -> int:
+        """Schedule every current pending source state in bounded metadata pages."""
+        from app.services.kg.relation_completion import completion_mode_for_notebook
+
+        cursor_source = ""
+        cursor_mode = ""
+        scheduled = 0
+        page_size = max(1, int(page_size))
+        while True:
+            rows = self.knowledge_lifecycle.pending_relation_completions(
+                cursor_source, cursor_mode, page_size
+            )
+            if not rows:
+                break
+            for row in rows:
+                notebook_id = str(row["notebook_id"])
+                source_id = str(row["source_id"])
+                source_title = str(row.get("title") or "")
+                run_id = str(row["source_generation"])
+                persisted_mode = str(row["mode"])
+                current_mode = completion_mode_for_notebook(
+                    self.settings, notebook_id
+                )
+                if persisted_mode != current_mode:
+                    if current_mode in {"shadow", "write"}:
+                        transitioned = (
+                            self.knowledge_lifecycle.transition_relation_completion_mode(
+                                notebook_id, source_id, run_id,
+                                persisted_mode, current_mode,
+                            )
+                        )
+                        if transitioned:
+                            scheduled += int(self._schedule_relation_completion_resume(
+                                notebook_id, source_id, source_title, run_id, current_mode
+                            ))
+                    else:
+                        self.knowledge_lifecycle.mark_relation_completion_stale(
+                            notebook_id, source_id, run_id, persisted_mode
+                        )
+                else:
+                    scheduled += int(self._schedule_relation_completion_resume(
+                        notebook_id, source_id, source_title, run_id, persisted_mode
+                    ))
+            cursor_source = str(rows[-1]["source_id"])
+            cursor_mode = str(rows[-1]["mode"])
+            if len(rows) < page_size:
+                break
+        return scheduled
+
     def relink_extra_relations(
         self, objects: List[dict], relations: List[dict], source_id: str
     ) -> List[dict]:
@@ -1594,6 +1718,33 @@ class SourceIngestionService:
                 self.event_log.logger.exception(
                     "incremental_fuse_source failed for %s", source_id
                 )
+            completion_stats = {"mode": "off", "inserted": 0}
+            try:
+                completion_stats = self.knowledge_lifecycle.complete_relations_for_source(
+                    source.notebook_id,
+                    source.id,
+                    source.title,
+                    run_id,
+                    [],
+                    [],
+                    [],
+                    cancel_check=(
+                        control.raise_if_aborted if control is not None else (lambda: None)
+                    ),
+                )
+                if self._relation_completion_needs_resume(completion_stats):
+                    self._schedule_relation_completion_resume(
+                        source.notebook_id, source.id, source.title, run_id,
+                        str(completion_stats["mode"]),
+                    )
+            except KgBuildAborted:
+                raise
+            except Exception:
+                # Completion is an opt-in best-effort stage.  A model/provider
+                # failure must not roll back the already committed source KG.
+                self.event_log.logger.exception(
+                    "relation completion failed for %s", source_id
+                )
             try:
                 self.maybe_auto_index(source.notebook_id)
             except Exception:
@@ -1605,7 +1756,9 @@ class SourceIngestionService:
                 "completed",
                 f"kg objects={n_obj} relations={n_rel} doc_type={kg_doc_type} "
                 f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
-                f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped}",
+                f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped} "
+                f"completion_mode={completion_stats.get('mode', 'off')} "
+                f"completion_inserted={completion_stats.get('inserted', 0)}",
             )
         except KgBuildAborted as exc:
             message = f"{exc.failure.code}: {exc.failure.user_message}"

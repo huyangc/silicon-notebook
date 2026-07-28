@@ -107,7 +107,7 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 内容哈希去重索引 migration，以及 v31 两张 inert shadow capture 内部表，
     # v32 深度报告问题理解契约，以及 v33 relationship endpoint/id keyset
     # 覆盖索引，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 33
+    assert snapshot["schema"]["user_version"] == 34
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]
