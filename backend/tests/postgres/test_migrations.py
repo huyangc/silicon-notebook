@@ -327,7 +327,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_knowledge_relations_nb_source_id" in final_indexes
     assert "idx_knowledge_relations_nb_target_id" in final_indexes
     assert "uq_clusters_notebook_type_member" in final_indexes
-    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
 
 
 def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_database):
