@@ -28,6 +28,7 @@ RUNTIME_COMPONENT_OWNERS = {
     "candidate_retrieval": "CandidateRetrievalService",
     "catalog": "NotebookCatalogService",
     "chunk_store": "ChunkStore",
+    "collection_catalog": "CollectionCatalogService",
     "database": "SqliteDatabase",
     "embedding_store": "EmbeddingStore",
     "evidence_context": "EvidenceContextService",

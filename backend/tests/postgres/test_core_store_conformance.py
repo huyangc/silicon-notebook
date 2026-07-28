@@ -23,6 +23,7 @@ from app.repositories.postgres.notebook_store import NotebookStore as PostgresNo
 from app.repositories.postgres.model_status_store import (
     ModelStatusStore as PostgresModelStatusStore,
 )
+from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
 from app.repositories.postgres.sharing_store import SharingStore as PostgresSharingStore
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
 from app.services.notebook_catalog import NotebookSummaryQuery
@@ -44,6 +45,7 @@ class CoreStores:
     sharing: Any
     sources: Any
     chunks: Any
+    queries: Any
     jobs: Any
     already_running: type[RuntimeError]
 
@@ -83,6 +85,7 @@ def core_stores(request) -> CoreStores:
         ),
         sources=PostgresSourceStore(postgres_database, now=now),
         chunks=PostgresChunkStore(postgres_database),
+        queries=PostgresQueryStore(postgres_database, postgres_settings),
         jobs=PostgresKgBuildJobStore(postgres_database, new_id=new_id, now=now),
         already_running=PostgresKgBuildAlreadyRunning,
     )
@@ -807,6 +810,157 @@ def test_source_visibility_physical_count_and_delete_cascade(core_stores: CoreSt
         "SELECT 1 FROM chunks WHERE id=%s",
         ("chunk-delete",),
     ) is None
+
+
+def test_typed_collection_catalog_primitives_match_sqlite_semantics(
+    core_stores: CoreStores,
+):
+    """``element_type_count_rows`` / ``source_change_signal_rows`` — the two
+    primitives behind ``app.services.collection_catalog``.
+
+    Same contract as the SQLite adapter: counts are grouped per
+    (source, element_type) and restricted to the requested whitelist; signals
+    cover every PHYSICAL source (memory/knowhow synthetic rows included) and
+    move on each of the three columns the element writers touch.
+    """
+    owner = core_stores.identity.create_user("m00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Collections"), owner.id
+    )
+    kinds = ("formula", "table", "image", "code_block")
+    for source_id, source_type in (
+        ("src-collect-a", "markdown"),
+        ("src-collect-b", "markdown"),
+        ("src-collect-hidden", "knowhow"),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash="hash",
+            summary="",
+            doc_type="",
+        )
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-collect-a",
+            (
+                SourceElementWrite("el-ca-1", "formula", "p1", "E=mc^2", {}),
+                SourceElementWrite("el-ca-2", "formula", "p2", "F=ma", {}),
+                SourceElementWrite("el-ca-3", "table", "p3", "<table/>", {}),
+                # Not enumerable: prose dominates by volume and listing it is
+                # meaningless — it must not reach the counts.
+                SourceElementWrite("el-ca-4", "paragraph", "p4", "body", {}),
+                SourceElementWrite("el-ca-5", "page_text", "p5", "body", {}),
+            ),
+            created_at=NOW,
+        )
+        core_stores.sources.replace_elements(
+            connection,
+            "src-collect-b",
+            (SourceElementWrite("el-cb-1", "formula", "p1", "V=IR", {}),),
+            created_at=NOW,
+        )
+        core_stores.sources.replace_elements(
+            connection,
+            "src-collect-hidden",
+            (SourceElementWrite("el-ch-1", "knowhow_cell", "r1c1", "cell", {}),),
+            created_at=NOW,
+        )
+
+    with core_stores.database.connect() as connection:
+        counts = core_stores.sources.element_type_count_rows(
+            connection,
+            ["src-collect-a", "src-collect-b", "src-collect-hidden"],
+            kinds,
+        )
+        assert sorted(counts) == [
+            ("src-collect-a", "formula", 2),
+            ("src-collect-a", "table", 1),
+            ("src-collect-b", "formula", 1),
+        ]
+        # Unknown ids and an empty kind list are answered without a query.
+        assert core_stores.sources.element_type_count_rows(
+            connection, ["src-missing"], kinds
+        ) == []
+        assert core_stores.sources.element_type_count_rows(
+            connection, ["src-collect-a"], []
+        ) == []
+
+        signals = dict(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+    assert set(signals) == {
+        "src-collect-a", "src-collect-b", "src-collect-hidden",
+    }
+    assert all(isinstance(value, str) and value for value in signals.values())
+
+    # updated_at + parse_status move together on every lifecycle transition.
+    core_stores.sources.set_status("src-collect-a", "extracted")
+    with core_stores.database.connect() as connection:
+        after_status = dict(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+    assert after_status["src-collect-a"] != signals["src-collect-a"]
+    assert after_status["src-collect-b"] == signals["src-collect-b"]
+
+    # chunked_at is the third component: a reparse nulls it in the same
+    # transaction as the element swap, so the signal flips atomically with the
+    # new element generation.
+    _write_sql(
+        core_stores,
+        "UPDATE sources SET chunked_at=%s WHERE id=%s",
+        (NOW, "src-collect-b"),
+    )
+    with core_stores.database.connect() as connection:
+        after_chunked = dict(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+    assert after_chunked["src-collect-b"] != signals["src-collect-b"]
+    assert after_chunked["src-collect-a"] == after_status["src-collect-a"]
+
+    # Batch guard: a source list wider than COUNT_IN_CHUNK must be answered
+    # from EVERY batch, not just the first. Real sources sit at both ends with
+    # non-existent ids padding across the boundary.
+    padded = (
+        ["src-collect-a"]
+        + [f"src-pad-{index}" for index in range(1200)]
+        + ["src-collect-b"]
+    )
+    assert len(padded) > core_stores.sources.COUNT_IN_CHUNK
+    with core_stores.database.connect() as connection:
+        spanned = core_stores.sources.element_type_count_rows(
+            connection, padded, kinds
+        )
+    assert sorted(spanned) == [
+        ("src-collect-a", "formula", 2),
+        ("src-collect-a", "table", 1),
+        ("src-collect-b", "formula", 1),
+    ]
+
+    # The Knowhow-table count rides the generic count primitive; the
+    # PostgreSQL adapter allowlists identifiers, so this pins that
+    # knowhow_tables/notebook_id is reachable rather than a 500.
+    with core_stores.database.connect() as connection:
+        assert core_stores.queries.count_rows(
+            connection, "knowhow_tables", "notebook_id", notebook_id
+        ) == 0
+
+    # A deleted source simply drops out of the signal list.
+    with core_stores.database.write() as connection:
+        core_stores.sources.delete_source_row(connection, "src-collect-b")
+    with core_stores.database.connect() as connection:
+        remaining = dict(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+    assert "src-collect-b" not in remaining
 
 
 def test_latest_extraction_run_uses_ordinal_tie_break(

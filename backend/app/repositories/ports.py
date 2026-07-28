@@ -644,6 +644,41 @@ class SourceStorePort(Protocol):
     @staticmethod
     def source_exists_for_update_tx(connection: object, source_id: str) -> bool: ...
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
+    def source_change_signal_rows(
+        self, db: object, notebook_id: str
+    ) -> list[tuple[str, str]]:
+        """``[(source_id, change_signal)]`` for every physical source row.
+
+        ``change_signal`` is an OPAQUE backend-formatted token: equal tokens
+        mean "this source's ``source_elements`` cannot have changed since the
+        token was taken".  Adapters build it from the source row alone so the
+        whole notebook costs ONE query; the collection catalog keys its
+        per-source element-count cache on it (see
+        ``app.services.collection_catalog``).  Never parse it, never compare
+        it across backends or processes — only for equality against a token
+        taken from the same store.
+        """
+        ...
+    def element_type_count_rows(
+        self, db: object, source_ids: Sequence[str], element_types: Sequence[str]
+    ) -> list[tuple[str, str, int]]:
+        """``[(source_id, element_type, count)]`` for the requested sources,
+        restricted to the requested element types.
+
+        Bounded and index-assisted by contract: the query shape is
+        ``WHERE source_id IN (...) AND element_type IN (...)
+        GROUP BY source_id, element_type``, which
+        ``idx_source_elements_source_type`` (source_id, element_type,
+        created_at, id) covers — SQLite resolves it as a covering index search
+        on both key columns.  PostgreSQL's planner keeps the choice (an index
+        or bitmap scan by selectivity); what the contract fixes is that the
+        type restriction stays IN THE QUERY, never a post-filter in Python,
+        so a source's prose elements are never read to count its formulas.
+        Both id lists are deduplicated and batched by the adapter, so callers
+        may pass a whole notebook's source list; types absent from a source
+        simply do not appear in the result.
+        """
+        ...
     def source_from_row(self, db: object, row: object, *, paper_meta: object = SOURCE_PAPER_META_UNSET) -> SourceSummary: ...
     def sources_from_rows(self, db: object, rows: list[object]) -> list[SourceSummary]: ...
     def extraction_warning(self, db: object, source_id: str) -> str | None: ...
@@ -940,6 +975,17 @@ class UnifiedKgStorePort(Protocol):
     def insert_scratch_rows(db: object, rows: object) -> None: ...
     @staticmethod
     def insert_canonical_scratch_rows(db: object, rows: object) -> None: ...
+    @staticmethod
+    def graph_seq_row(db: object, notebook_id: str) -> tuple[int, int, int]:
+        """O(1) single-row ``(kg_mutation_seq, cluster_mutation_seq,
+        mention_seq)``; ``(0, 0, -1)`` when the notebook has no state row.
+
+        Already the version key behind graph/PPR snapshot caching and the
+        collection catalog's KG-count memo — declared here because it is a
+        cross-backend read primitive both adapters implement identically, not
+        a private helper of one of them.
+        """
+        ...
     @staticmethod
     def mention_edges_count(db: object, notebook_id: str) -> int: ...
     @staticmethod

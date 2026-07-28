@@ -113,6 +113,12 @@
 - repository 端口：ports.py 新增有界查询方法 + 双后端 adapter + facade 一跳委托（架构守卫
   allowlist / 默认模式 rebaseline）。禁全表扫描：查询必须命中上述索引形状，测试仿
   `test_indexed_only_principle.py` 风格钉住。
+- **地图/枚举覆盖一致性（T2 评审移交的硬约束）**：执行器枚举的物理源集合必须与集合地图
+  计数的源集合逐字一致（含 Memory 派生合成源）；若未来要排除某类源，两侧必须同步排除并在
+  coverage 行显式披露，否则会出现「地图报 12、枚举只给 8」的假部分。
+- **kind 白名单单一真源**：执行器与 reflect 校验必须 import `collection_catalog` 的
+  `ENUMERABLE_ELEMENT_KINDS` / `ENUMERABLE_KG_OBJECT_TYPES`，禁止再写字面量副本；T3 补一条
+  源码级唯一性守卫（防「再抄一份」变异）。
 
 ### 2.4 reflect 动作接入
 
@@ -157,8 +163,11 @@
 ### 2.7 守卫、文档与评测
 
 - 架构守卫默认模式重生成（AskResponse 变化）+ facade allowlist。
-- 文档四份：docs/product-and-api*.md 契约表新增 enum_* 与工具说明；AGENTS.md「Architecture
-  Baseline」与 CLAUDE.md 红线补「集合枚举工具」条目；README 中英一句能力入口。
+- 文档：docs/product-and-api*.md 契约表新增 enum_* 与工具说明；AGENTS.md「Architecture
+  Baseline」与 CLAUDE.md 红线补「集合枚举工具」条目——并修订两处现有红线句
+  「当前只有 Knowhow 支持完整枚举，其他对象集合仍是相关性结果」（PR-2 落地后不再成立，
+  fangan 同款表述在 fangan_done.md 记账）；architecture.md 补 collection_catalog 运行时
+  组件与两个新端口；README 中英一句能力入口。
 - 测试：scripted fake chat client 驱动 reflect 返回 enumerate 动作，断言自动翻页/预算/
   complete/partial/取消/双后端 parity；离线测试钉「工具可达性与合同」，模型是否选用属真机评测
   （部署机手动对照）。

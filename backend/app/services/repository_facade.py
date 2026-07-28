@@ -2817,6 +2817,16 @@ class RepositoryFacade:
         """Explicit candidate + graph retrieval port with no facade backreference."""
         return self._runtime.retrieval_component
 
+    @property
+    def collection_catalog(self):
+        """Typed-collection counts (the enumeration tools' map layer).
+
+        One hop to the runtime-owned ``CollectionCatalogService`` — it holds
+        the bounded per-source / per-notebook count caches, so every consumer
+        must observe THIS instance rather than construct its own.
+        """
+        return self._runtime.collection_catalog
+
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,

@@ -193,6 +193,80 @@ class SourceStore:
             for row in rows
         ]
 
+    # ------------------------------------------- typed-collection catalog
+    # Backend twin of the SQLite primitives; see that adapter's docstrings for
+    # WHY the signal is (updated_at, parse_status, chunked_at).
+    def source_change_signal_rows(
+        self, connection: Any, notebook_id: str
+    ) -> list[tuple[str, str]]:
+        """``[(source_id, opaque change signal)]`` for physical source rows.
+
+        The token is formatted here rather than in the service so the caller
+        never has to know that PostgreSQL hands back ``datetime`` objects
+        where SQLite hands back ISO text: both backends produce a string that
+        is only ever compared for equality against a token from the same
+        store.
+        """
+        rows = connection.execute(
+            "SELECT id,updated_at,parse_status,chunked_at FROM sources "
+            "WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchall()
+        return [
+            (
+                row["id"],
+                "{}|{}|{}".format(
+                    row["updated_at"] if row["updated_at"] is not None else "",
+                    row["parse_status"] or "",
+                    row["chunked_at"] if row["chunked_at"] is not None else "",
+                ),
+            )
+            for row in rows
+        ]
+
+    # Batch width for the typed-collection count, deliberately narrower than
+    # the class-wide ``IN_CHUNK`` (5 000, tuned for id hydration that returns
+    # one row per id).  This query returns up to len(element_types) rows PER
+    # source, and the planner materializes the whole group before we see it,
+    # so the batch bounds intermediate rows, not just bound parameters.  A
+    # local constant rather than a change to ``IN_CHUNK``: that attribute is
+    # shared with unrelated hydration paths this reasoning does not cover.
+    COUNT_IN_CHUNK = 1024
+
+    def element_type_count_rows(
+        self,
+        connection: Any,
+        source_ids: Sequence[str],
+        element_types: Sequence[str],
+    ) -> list[tuple[str, str, int]]:
+        """``[(source_id, element_type, count)]``, bounded and index-assisted
+        via ``idx_source_elements_source_type``.
+
+        ``= ANY(%s)`` keeps one bound parameter per list (no placeholder
+        explosion).  The planner still chooses the access path — an index scan
+        for a selective batch, a bitmap scan when the batch covers much of the
+        table — and that choice is deliberately NOT part of the contract; what
+        is fixed is that the element-type restriction stays in the query, so
+        a source's prose is never read to count its formulas.
+        """
+        ids = list(dict.fromkeys(value for value in source_ids if value))
+        types = list(dict.fromkeys(value for value in element_types if value))
+        if not ids or not types:
+            return []
+        out: list[tuple[str, str, int]] = []
+        for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
+            batch = ids[offset : offset + self.COUNT_IN_CHUNK]
+            rows = connection.execute(
+                "SELECT source_id,element_type,COUNT(*) AS c FROM source_elements "
+                "WHERE source_id=ANY(%s) AND element_type=ANY(%s) "
+                "GROUP BY source_id,element_type",
+                (batch, types),
+            ).fetchall()
+            out.extend(
+                (row["source_id"], row["element_type"], int(row["c"])) for row in rows
+            )
+        return out
+
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
