@@ -29,6 +29,7 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_SEQ_PAYLOAD_KEY,
     MAINSTREAM_COVERAGE,
@@ -36,6 +37,7 @@ from app.services.kg_analysis_precompute import (
     CrossCommunityEdgeFolder,
     SourceProfileFolder,
     analysis_ledger_is_current,
+    artifact_cluster_seq_is_unknown,
     artifact_is_current,
     check_artifact_payloads,
     fold_cross_community_edges,
@@ -142,19 +144,65 @@ def test_cross_edge_folder_row_stream_matches_the_preaggregated_fold():
 
     只补账本那条路径按行喂,全量重建那条路径喂 `ew`。`ew` 只是「同一对 canonical 出现
     了几次」的预聚合,所以两者对每个板块对的合计恒等 —— 这条把它钉住。
+
+    ⚠ 逐行那一份**必须先喂**:`fold_cross_community_edges` 会把 dict 搬空(见
+    `CrossCommunityEdgeFolder.drain`),先折叠的话下面就没东西可喂了。顺序是被迫的,
+    断言一条没松。
     """
     index_map = ["cm-a", "cm-a", "cm-b", "cm-c"]
     edge_weights = {(0, 2): 2, (1, 2): 1, (2, 3): 4, (0, 1): 3}
-    pre_aggregated = fold_cross_community_edges(edge_weights, index_map)
 
     streamed = CrossCommunityEdgeFolder()
     for (left, right), weight in edge_weights.items():
         for _ in range(weight):          # 同一对 canonical 出现 weight 次
             streamed.add(index_map[left], index_map[right], 1)
 
+    pre_aggregated = fold_cross_community_edges(edge_weights, index_map)
+
     assert streamed.top_edges(10) == pre_aggregated.top_edges(10)
     assert streamed.intra_weight == pre_aggregated.intra_weight
     assert streamed.cross_weight == pre_aggregated.cross_weight
+
+
+def test_the_fold_drains_its_input_instead_of_holding_two_copies():
+    """codex 第 7 轮 P1:聚合**期间**也必须有界,不能只在落库时截断。
+
+    落库上限(`MAX_PERSISTED_COMMUNITY_EDGES`)管的是写出去多少;聚合出来的 `_cross`
+    条目数没有任何结构性上界(只补账本那条路径用的是**另一代**合并结果上算出来的划分,
+    跨板块比例可以任意高),最坏情况与 `ew` 同量级 —— 生产 836 万条、约 1.4 GB。
+    两份同时驻留就是在 437 GB 库的峰值时刻再叠一个峰值。
+
+    所以这里钉的是**过程**而不只是结果:每消化一条,输入就真的少一条。只断言
+    「跑完之后 dict 空了」是不够的 —— 先整个遍历完再 `clear()` 一样能过,而那正是
+    被否掉的那种实现。
+    """
+    index_map = ["cm-a", "cm-b", "cm-c", "cm-a"]
+    edge_weights = {(0, 1): 5, (1, 2): 4, (2, 3): 3, (0, 2): 2, (1, 3): 1}
+    reference = CrossCommunityEdgeFolder()
+    for (left, right), weight in edge_weights.items():
+        reference.add(index_map[left], index_map[right], weight)
+
+    seen: list = []
+
+    class _Probe(list):
+        """记录每次查板块时输入 dict 还剩多少条 —— 折叠只碰它,不碰 dict。"""
+
+        def __getitem__(self, index):
+            seen.append(len(edge_weights))
+            return list.__getitem__(self, index)
+
+    folded = fold_cross_community_edges(edge_weights, _Probe(index_map))
+
+    assert edge_weights == {}, "输入必须被搬空,不是遍历一遍留在原地"
+    # 条目先被 `popitem` 摘走、再查两个端点,所以剩余量是 4,4,3,3,…,0,0 ——
+    # 严格递减。原地遍历(或者「遍历完再 clear」)在这里会是一串恒定的 5。
+    assert seen == [4, 4, 3, 3, 2, 2, 1, 1, 0, 0], seen
+    # 逐字等价:消费顺序(popitem 是 LIFO)不得进入产物。
+    assert folded.top_edges(10) == reference.top_edges(10)
+    assert (folded.intra_weight, folded.cross_weight) == (
+        reference.intra_weight, reference.cross_weight
+    )
+    assert folded.total_edges == reference.total_edges
 
 
 def test_source_profile_folder_computes_the_four_documented_quantities():
@@ -201,21 +249,32 @@ def test_source_profile_rows_are_source_id_ordered():
     assert [row[0] for row in folder.rows()] == ["src-a", "src-b", "src-c"]
 
 
-def _full_payloads(*, cluster_seq: int = 0, **overrides) -> dict:
+def _full_payloads(
+    *, cluster_seq: int = 0, partition_rebuilt: bool = True, **overrides
+) -> dict:
     """一批合法的账本 payload —— 簇世代照生产路径经 `stamp_cluster_seq` 盖上。
 
     夹具刻意**不手抄**那个 key:分类(哪几份依赖合并结果)一旦改了,夹具跟着改,
     不会出现「守卫按新分类查、夹具还按旧分类拼」这种两边各自自洽却对不上的局面。
+
+    ``partition_rebuilt=False`` 拼出「只补账本」那一轮的形状:依赖板块的两份显式记
+    「板块划分建在哪一代合并结果上无从判断」。
     """
     payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
     payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
     payloads.update(overrides)
-    return stamp_cluster_seq(payloads, cluster_seq)
+    return stamp_cluster_seq(
+        payloads, cluster_seq, partition_rebuilt=partition_rebuilt
+    )
 
 
-def _ledger(seqs: dict, *, cluster_seq: int = 0) -> dict:
+def _ledger(seqs: dict, *, cluster_seq: int = 0,
+            partition_rebuilt: bool = True) -> dict:
     """``{kind: kg_seq}`` → `kg_analysis_artifact_rows` 的形状(闸真正吃的那个)。"""
-    stamped = stamp_cluster_seq({kind: {"level": 0} for kind in seqs}, cluster_seq)
+    stamped = stamp_cluster_seq(
+        {kind: {"level": 0} for kind in seqs}, cluster_seq,
+        partition_rebuilt=partition_rebuilt,
+    )
     return {
         kind: {"kg_mutation_seq": seq, "payload": stamped[kind],
                "created_at": "2026-07-27"}
@@ -254,11 +313,16 @@ def test_check_artifact_payloads_allows_absent_profiles_only_without_boards():
 
 
 def test_check_artifact_payloads_demands_the_cluster_stamp_exactly_where_it_belongs():
-    """簇世代的戳:依赖合并结果的四份必须有,不依赖的那份必须没有。
+    """簇世代的戳:依赖合并结果的四份必须有这个**键**,不依赖的那份必须没有。
 
     两个方向都拦是有理由的 —— 漏盖不会报错,只会让这个库的预计算**永远**重跑
     (闸判它不新鲜)、读侧永远报「合并世代未知」;多盖则相反,给一份输入根本没变的
     产物编造一个落后量。两种都是静默的错。
+
+    ⚠ **值分两档**(codex 第 7 轮 P2):两条统计快照当场从 `concept_clusters` 重算,
+    世代永远是知道的,必须是 int;依赖板块的两份可以是 ``None``(板块划分是库里现成
+    的、建在哪一代无从判断)。但「键干脆不写」在任何一档都不许 —— 允许它就把「漏盖」
+    与「盖不出来」揉成同一档,上面那道守卫当场作废。
     """
     for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
         missing = _full_payloads()
@@ -266,13 +330,21 @@ def test_check_artifact_payloads_demands_the_cluster_stamp_exactly_where_it_belo
             key: value for key, value in missing[kind].items()
             if key != CLUSTER_SEQ_PAYLOAD_KEY
         }
-        with pytest.raises(ValueError, match="必须带整数"):
+        with pytest.raises(ValueError, match="payload 必须带"):
             check_artifact_payloads(missing)
-        # 盖了但不是整数,与没盖同档(库被手工改过)。
+        # 盖了但既不是整数也不是 None,与没盖同档(库被手工改过)。
         garbled = _full_payloads()
         garbled[kind] = dict(garbled[kind], **{CLUSTER_SEQ_PAYLOAD_KEY: "7"})
-        with pytest.raises(ValueError, match="必须带整数"):
+        with pytest.raises(ValueError, match="payload 必须带"):
             check_artifact_payloads(garbled)
+        # 显式的「无从判断」只有依赖板块的两份可以用。
+        unknown = _full_payloads()
+        unknown[kind] = dict(unknown[kind], **{CLUSTER_SEQ_PAYLOAD_KEY: None})
+        if kind in BOARD_DEPENDENT_ARTIFACT_KINDS:
+            check_artifact_payloads(unknown)
+        else:
+            with pytest.raises(ValueError, match="payload 必须带"):
+                check_artifact_payloads(unknown)
 
     extra = _full_payloads()
     extra[ARTIFACT_RELATION_PROVENANCE] = dict(
@@ -524,6 +596,66 @@ def test_rebuild_writes_every_artifact_kind_under_one_version_stamp(repo):
         int(state["kg_mutation_seq"])
     }
     assert int(state["community_seq"]) == int(state["kg_mutation_seq"])
+
+
+def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypatch):
+    """codex 第 7 轮 P1 的**真实路径**守卫:折叠那一刻,`ew` 只有一份引用。
+
+    纯折叠层的 `drain` 只有在**没人另外攥着那批 key 元组**时才真的省下内存 ——
+    `list(ew.keys())` 与 `ew` 共享同一批元组对象,那份 Louvain 输入拷贝只要还活在
+    `rebuild_communities` 的栈帧上,「消化一条释放一条」就一个字节都释放不掉。
+    这条守卫按**对象身份**判,不按变量名:换个名字存那份拷贝照样报红。
+
+    refcount 的三份分别是:`ew` 自己的那一条、本函数里的 `sample`、以及
+    `getrefcount` 的实参。多出来的第四份就是那份不该存在的拷贝。
+    """
+    notebook_id = _seed(repo)
+    import sys
+
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    original = lifecycle_module.fold_cross_community_edges
+    observed: list = []
+
+    def _probe(edge_weights, community_of_index):
+        sample = next(iter(edge_weights))
+        observed.append((len(edge_weights), sys.getrefcount(sample)))
+        del sample
+        return original(edge_weights, community_of_index)
+
+    monkeypatch.setattr(lifecycle_module, "fold_cross_community_edges", _probe)
+    assert repo.rebuild_communities(notebook_id) == 2
+
+    assert len(observed) == 1
+    edges, refcount = observed[0]
+    assert edges > 0, "夹具必须真的有边,否则这条守卫是空的"
+    assert refcount == 3, (
+        f"折叠时 `ew` 的 key 元组有 {refcount} 份引用(应为 3):"
+        "Louvain 的输入拷贝还活在栈帧上,drain 因此白做"
+    )
+
+
+def test_the_precompute_leaves_the_edge_graph_drained(repo, monkeypatch):
+    """走真 `rebuild_communities`:`ew` 交给预计算之后必须被搬空。
+
+    纯折叠层那条(`test_the_fold_drains_its_input_instead_of_holding_two_copies`)钉的是
+    折叠器的行为;这一条钉的是**生产调用点真的把 `ew` 交出去了**,而不是先自己拷一份
+    再喂 —— 那样折叠器搬空的就只是拷贝。
+    """
+    notebook_id = _seed(repo)
+    captured: list = []
+    original = repo._runtime.knowledge_lifecycle._precompute_kg_analysis
+
+    def _spy(*args, **kwargs):
+        captured.append(args[5])          # edge_weights(见 _precompute_kg_analysis 签名)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_precompute_kg_analysis", _spy
+    )
+    assert repo.rebuild_communities(notebook_id) == 2
+
+    assert len(captured) == 1 and captured[0] == {}
 
 
 def test_cross_board_edges_fold_the_one_bridge(repo):
@@ -1112,10 +1244,13 @@ def test_a_merge_only_write_makes_the_ledger_stale_and_a_plain_rebuild_heals_it(
     # 两条统计快照的内容真的变了(多了一个 3 成员的簇),不是只换了个戳。
     assert (before[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]["clusters"]
             < after[ARTIFACT_CLUSTER_HISTOGRAM]["payload"]["clusters"])
-    # 依赖合并结果的四份都盖上了当前簇世代;与合并无关的那份仍然不带这个戳。
-    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+    # 两条统计快照当场从 `concept_clusters` 重算,盖上当前簇世代;依赖板块的两份不能
+    # ——它们描述的板块划分是库里现成的,详见下面那条专门的守卫。
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS - set(BOARD_DEPENDENT_ARTIFACT_KINDS)):
         assert after[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
         assert after[kind]["seq"] == kg_seq
+    # 与合并无关的那份仍然不带这个戳。
     assert CLUSTER_SEQ_PAYLOAD_KEY not in after[ARTIFACT_RELATION_PROVENANCE]["payload"]
 
     # 补完之后闸重新短路:再调一次不写任何东西(否则每次打开视图都在重算)。
@@ -1125,6 +1260,82 @@ def test_a_merge_only_write_makes_the_ledger_stale_and_a_plain_rebuild_heals_it(
         kind: entry["created_at"]
         for kind, entry in _artifacts(repo, notebook_id).items()
     } == settled
+
+
+def test_a_backfilled_board_product_never_claims_the_current_merge_generation(repo):
+    """codex 第 7 轮 P2:**混合世代的产物不可能被盖成「当前」**。
+
+    「只补账本」那条路径沿用库里**现成的**板块划分(它跑在上一代合并结果上),而边与
+    来源映射是按**当前** cluster_map 现算的 —— 拼出来的东西是混合世代的。修复之前它还
+    要盖上当前簇世代的戳,于是 API 报「与当前一致」:那比「陈旧但内部自洽」更糟,陈旧
+    至少是诚实的。
+
+    现在这一档显式记 ``None`` = 无从判断:板块划分建在哪一代合并结果上,库里根本没有
+    地方记(设计 §3.3 的已知缺口)。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    fresh = _artifacts(repo, notebook_id)
+    _, cluster_seq_before = _seqs(repo, notebook_id)
+    # 全量重建那一轮:板块刚跑出来,四份都名副其实地盖着当前簇世代。
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS):
+        assert fresh[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq_before
+
+    _merge_only_write(repo, notebook_id)
+    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+    after = _artifacts(repo, notebook_id)
+    _, cluster_seq = _seqs(repo, notebook_id)
+    assert cluster_seq == cluster_seq_before + 1
+
+    for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
+        payload = after[kind]["payload"]
+        # 键必须在(不然「漏盖」与「盖不出来」就分不开了),值必须是 None。
+        assert CLUSTER_SEQ_PAYLOAD_KEY in payload, kind
+        assert payload[CLUSTER_SEQ_PAYLOAD_KEY] is None, kind
+        assert artifact_cluster_seq_is_unknown(kind, payload), kind
+        # 判据的三值:既不是「当前」也不是「落后」。
+        assert artifact_is_current(
+            kind, after[kind]["seq"], payload,
+            seq=after[kind]["seq"], cluster_seq=cluster_seq,
+        ) is None, kind
+
+    # 而且不会因此永远重跑:闸把「无从判断」当作补不出来的那一档,再调一次不写任何东西。
+    settled = {kind: entry["created_at"] for kind, entry in after.items()}
+    repo.rebuild_communities(notebook_id)
+    assert {
+        kind: entry["created_at"]
+        for kind, entry in _artifacts(repo, notebook_id).items()
+    } == settled
+
+    # 反向:板块真的被重建的那一轮(force),戳必须回到名副其实的整数。
+    repo.rebuild_communities(notebook_id, force=True)
+    rebuilt = _artifacts(repo, notebook_id)
+    for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
+        assert rebuilt[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq, kind
+
+
+def test_an_empty_ledger_backfill_also_refuses_to_claim_a_merge_generation(repo):
+    """B1(刚部署、账本一片空白)同样不许盖 —— 那一档**没有任何证据**判断簇世代。
+
+    这条与上一条不是同一件事:上一条有账本可比,能证明簇世代动过;B1 连账本都没有,
+    「簇世代自板块建成以来动没动过」根本无从判断。所以「簇世代变了就重建板块划分」
+    那条路治不了这一档,而「不知道就说不知道」两档都治得了。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2
+    _wipe_ledger(repo, notebook_id)
+
+    assert repo.rebuild_communities(notebook_id) == 2       # 刻意不带 force
+
+    artifacts = _artifacts(repo, notebook_id)
+    assert set(artifacts) == set(ARTIFACT_KINDS)            # B1 照样补得出账本
+    for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
+        assert artifacts[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] is None, kind
+    # 两条统计快照当场重算,世代是知道的 —— 不能被一起拖成「未知」。
+    _, cluster_seq = _seqs(repo, notebook_id)
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS
+                       - set(BOARD_DEPENDENT_ARTIFACT_KINDS)):
+        assert artifacts[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == cluster_seq, kind
 
 
 def test_a_merge_only_backfill_does_not_rescan_the_relation_table(repo, monkeypatch):
@@ -1163,8 +1374,10 @@ def test_a_merge_only_backfill_does_not_rescan_the_relation_table(repo, monkeypa
 def test_replace_artifacts_consumes_edges_and_profiles_as_one_shot_iterators(repo):
     """落库入口按**可迭代**消费,不得要求 Sequence(len / 下标 / 二次遍历)。
 
-    契约意义:落库这一刻 `rebuild_communities` 的栈帧上还压着整张 `ew`,store 再把行
-    物化成一份完整列表就是在峰值上叠峰值。一次性迭代器能跑通,就说明它没有回头再读一遍。
+    契约意义:落库这一刻栈帧上还压着折叠出来的板块对 dict(`ew` 本身已被
+    `CrossCommunityEdgeFolder.drain` 边消费边释放,但换来的那份条目数同样没有结构性
+    上界),store 再把行物化成一份完整列表就是在峰值上叠峰值。一次性迭代器能跑通,
+    就说明它没有回头再读一遍。
     """
     notebook = repo.create_notebook(NotebookCreate(name="stream"))
     _add_sources(repo, notebook.id, "src-a")

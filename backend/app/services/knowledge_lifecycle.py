@@ -3377,7 +3377,6 @@ class KnowledgeLifecycleService:
             comms: "List[List[str]]" = []
             deg: "Dict[str, float]" = {}
             if n_nodes:
-                edge_list = list(ew.keys())
                 if _ig is not None:
                     import random as _random
                     _random.seed(42)
@@ -3385,7 +3384,14 @@ class KnowledgeLifecycleService:
                         _ig.set_random_number_generator(_random)   # 确定性(seed=42)
                     except Exception:
                         pass
-                    G = _ig.Graph(n=n_nodes, edges=edge_list)
+                    # ⚠ 边表**刻意不留局部名**(codex 第 7 轮评审的连带修复)。
+                    # `list(ew.keys())` 与 `ew` 共享**同一批** key 元组对象,一个活着
+                    # 另一个就一个字节都释放不掉 —— 那份拷贝一直活到函数返回的话,
+                    # 下面折叠时 `CrossCommunityEdgeFolder.drain` 的「消化一条释放一条」
+                    # 就完全落空(生产 836 万条、约 1.4 GB 全程钉在栈帧上)。作为临时值
+                    # 传参,igraph 把它拷进 C 结构后这一句就结束、拷贝当场回收。
+                    # 顺带也修掉了 networkx 分支那份从来没被用过的同款拷贝。
+                    G = _ig.Graph(n=n_nodes, edges=list(ew.keys()))
                     G.es["weight"] = list(ew.values())
                     membership = G.community_multilevel(weights="weight").membership
                     degs = G.degree()
@@ -3457,6 +3463,11 @@ class KnowledgeLifecycleService:
                 # `reusable_artifact_payloads` 的最后一段。
                 reusable=({} if force
                           else reusable_artifact_payloads(_ledger, _seq)),
+                # 板块划分是这一轮**刚跑出来**的,还是库里现成的?依赖板块的两份产物
+                # 据此决定盖不盖簇世代的戳(见 `stamp_cluster_seq`):补账本那条路径
+                # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
+                # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
+                partition_rebuilt=not graph_fresh,
             )
         except KgBuildAborted:
             raise
@@ -3489,6 +3500,7 @@ class KnowledgeLifecycleService:
         can2idx: "Dict[str, int]",
         *,
         reusable: "Optional[Dict[str, dict]]" = None,
+        partition_rebuilt: bool,
     ) -> None:
         """把 KG 质量分析的产物在**这一次**图构建里算出来并整批落库(设计 §3.2)。
 
@@ -3515,6 +3527,13 @@ class KnowledgeLifecycleService:
         `kg_mutation_seq`。盖戳由中性的 `stamp_cluster_seq` 统一做(它知道哪四份要盖),
         两侧 store 的 `check_artifact_payloads` 当场复核少盖/多盖 —— 盖与查刻意分在
         不同的函数里,同一个函数里既盖又查的守卫恒真。
+
+        ``partition_rebuilt``:``kept_rows`` 是这一轮 Louvain 刚跑出来的(True),还是
+        从库里读回来的现成划分(False,「只补账本」那条路径)。依赖板块的两份产物据此
+        决定盖不盖那个戳:后一档的板块划分建在哪一代合并结果上**没有地方记**,而边与
+        来源映射是按当前 cluster_map 现算的 —— 产物是混合世代的,只能如实记「无从判断」
+        (codex 第 7 轮 P2,完整理由见 `stamp_cluster_seq`)。它没有默认值,就是要让每
+        一个调用点当场表态:默认成 True 会让新调用点悄悄开始撒谎。
 
         ``reusable``:上一轮账本里**可以原样搬过来**的 payload(只可能是与簇无关的
         `relation_provenance`,判据与理由见 `reusable_artifact_payloads`)。给了就不
@@ -3564,6 +3583,12 @@ class KnowledgeLifecycleService:
                 index = can2idx.get(member)
                 if index is not None:
                     community_of_index[index] = cid
+        # ⚠ 这一步**搬空** `edge_weights`(= 调用方的 `ew`),不是遍历它:聚合出来的
+        # `_cross` 在最坏情况下与 `ew` 同量级(生产 836 万条 / 约 1.4 GB),两份同时
+        # 驻留就是在 437 GB 库的峰值时刻再叠一个峰值。落库上限
+        # (`MAX_PERSISTED_COMMUNITY_EDGES`)管的是**写出去多少**,管不了算的时候占
+        # 多少 —— 那是 codex 第 7 轮评审的 P1。`ew` 在这之后不得再被使用,
+        # `rebuild_communities` 里 Louvain 早已跑完。
         folder = fold_cross_community_edges(edge_weights, community_of_index)
         del community_of_index
         head, head_members, total_members = head_community_ids(sizes)
@@ -3617,7 +3642,10 @@ class KnowledgeLifecycleService:
         with self._write() as db:
             self.unified_kg.replace_kg_analysis_artifacts(
                 db, notebook_id, seq, edges, profiles,
-                stamp_cluster_seq(payloads, cluster_seq), self._now(),
+                stamp_cluster_seq(
+                    payloads, cluster_seq, partition_rebuilt=partition_rebuilt
+                ),
+                self._now(),
             )
 
     def list_communities(self, notebook_id: str, level: int = 0) -> List[List[str]]:

@@ -59,6 +59,14 @@ const ARTIFACT_STALE_TOOLTIP = "这份数字描述的是更早的库内容，之
 const ARTIFACT_AHEAD_LABEL = "比当前内容还新";
 const ARTIFACT_AHEAD_TOOLTIP = "这份数字标记的版本比当前库还新，正常写入不会产生这种状态。";
 
+// 在场,却**说不出**自己建在哪一次合并结果上。依赖主题板块的两份数据由「只补账本」
+// 那条路径产出时就是这一档:板块划分沿用库里现成的(它建在哪一次合并上没有地方记),
+// 而边与来源映射是按当前的合并结果现算的 —— 两截来自不同时候。数字本身没算错,
+// 重新整理一次即可对齐,所以与「落后于当前内容」同档(retrieval)。
+// ⚠ 它**不是**「无异常」:显示成「与当前一致」正是这个视图存在理由的反面。
+const ARTIFACT_UNKNOWN_MERGE_LABEL = "对不上合并进度";
+const ARTIFACT_UNKNOWN_MERGE_TOOLTIP = "这份数字里的主题板块沿用了上一次划分，无法判断它建在哪一次合并上。重新整理一次即可对齐。";
+
 /**
  * 一份预计算产物(或它的缺席)要展示的异常小字。
  *
@@ -80,6 +88,7 @@ export function analysisArtifactAnomalies(artifact: {
   present: boolean;
   absence?: string | null;
   freshness?: {
+    built_at_seq?: number | null;
     seq_behind?: number | null;
     cluster_seq_behind?: number | null;
     stale?: boolean | null;
@@ -103,6 +112,23 @@ export function analysisArtifactAnomalies(artifact: {
   }
   if (artifact.freshness?.stale) {
     return [{ severity: "retrieval", label: ARTIFACT_STALE_LABEL, tooltip: ARTIFACT_STALE_TOOLTIP }];
+  }
+  // ⚠ `stale` 是**三值**的:null = 报不出世代。少了这一条,一份混合世代的数据会一个
+  // 小字都不带地显示成正常 —— 后端第 7 轮刚把「盖成当前」修掉,前端再把它显示成
+  // 「无异常」等于原地复发。
+  //
+  // ⚠ **必须同时看 `built_at_seq`**:主题板块那一块传的是 `present: true` + 板块表
+  // 自己的新鲜度,而「从没建过板块」时那份 freshness 三个字段全是 null(见
+  // kg-analysis-view.tsx 里那段说明)—— 那一档由块内的空态文案负责解释,挂一条
+  // 「对不上合并进度」是在给一个还没建过的东西报异常。建过(`built_at_seq` 是数字)
+  // 而 `stale` 为 null,才是「板块划分沿用了上一次、合并世代无从判断」那一档。
+  const builtAt = artifact.freshness?.built_at_seq ?? null;
+  if (artifact.freshness?.stale === null && builtAt !== null) {
+    return [{
+      severity: "retrieval",
+      label: ARTIFACT_UNKNOWN_MERGE_LABEL,
+      tooltip: ARTIFACT_UNKNOWN_MERGE_TOOLTIP,
+    }];
   }
   return [];
 }

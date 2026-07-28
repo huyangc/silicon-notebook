@@ -271,12 +271,18 @@ class Freshness:
     (``unified_kg_state.cluster_mutation_seq``)。它必须独立报,因为簇的写路径刻意
     不动 ``kg_mutation_seq``:只看 KG 世代的话,一次纯合并写入之后簇大小直方图与最大簇
     榜单已经陈旧,报告却会说「与当前一致」(codex 第 5 轮评审复现)。
-    两个字段在**两种**情况下是 None,而且读者不需要分辨:
+    两个字段在**三种**情况下是 None,前两种读者不需要分辨:
       · 这份产物与合并结果无关(`relation_provenance` —— 它的 SQL 一个字都没提
         `concept_clusters`),没有落后量可报;
-      · 产物缺席,或它压根没盖这个戳(库被手工改过)。
-    ``stale`` 是**两条线的合取**(判据 `artifact_is_current`,与写侧的闸同一个函数):
-    任一条落后即为 True。
+      · 产物缺席,或它压根没盖这个戳(库被手工改过);
+      · 依赖板块的两份由「只补账本」那条路径产出 —— 它们描述的板块划分是库里现成的,
+        建在哪一代合并结果上没有地方记,所以显式记着「无从判断」(见
+        `kg_analysis_precompute.stamp_cluster_seq`)。这一档靠 ``stale is None`` 认。
+
+    ``stale`` 是**两条线的三值合取**(判据 `artifact_is_current`,与写侧的闸同一个
+    函数):任一条明确落后即 True;都对齐即 False;没有明确落后但有一条无从判断即
+    **None** —— 那既不是「与当前一致」也不是「落后 N 代」,替读者选一个就是编。
+    产物缺席时也是 None(靠 `ArtifactView.present` 分辨,消费方本来就要先看它)。
     """
 
     basis: str
@@ -791,6 +797,13 @@ def _artifact_freshness(
     报告 —— 闸说「不用重算」、读侧说「陈旧」,或者反过来(闸短路、读侧报「与当前
     一致」,而那正是 codex 第 5 轮报的那一条)。判据只写一次是这个特性反复被打回的
     那个教训(第 3 轮的 `_ledger_state` 与写侧 required 集合分岔是同一个病)。
+
+    判据是**三值**的,第三值(``None`` = 板块产物由「只补账本」那条路径产出,板块划分
+    建在哪一代合并结果上无从判断)在这里**原样透出去**,不折成 True/False:折成 False
+    就是把一份混合世代的产物说成「与当前一致」(codex 第 7 轮 P2 报的正是这一条),
+    折成 True 又是在没有依据的情况下报一个落后量。此时 ``built_at_cluster_seq`` /
+    ``cluster_seq_behind`` 同样是 None,与 `_community_freshness` 里板块自己那一格
+    (它的合并世代同样无从判断)说的是同一件事、用的是同一种表达。
     """
     if entry is None:
         return Freshness(
@@ -802,15 +815,16 @@ def _artifact_freshness(
     built = int(entry["kg_mutation_seq"])
     payload = entry["payload"]
     built_cluster = artifact_cluster_seq(kind, payload)
+    current = artifact_is_current(
+        kind, built, payload,
+        seq=current_seq, cluster_seq=current_cluster_seq,
+    )
     return Freshness(
         basis=ARTIFACT_BASIS[kind],
         built_at_seq=built,
         # 不 clamp:账本比库还新是「被手工改过」的信号,压成 0 等于藏起异常。
         seq_behind=int(current_seq) - built,
-        stale=not artifact_is_current(
-            kind, built, payload,
-            seq=current_seq, cluster_seq=current_cluster_seq,
-        ),
+        stale=(None if current is None else not current),
         built_at_cluster_seq=built_cluster,
         cluster_seq_behind=(
             None if built_cluster is None

@@ -50,6 +50,7 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     stamp_cluster_seq,
 )
@@ -112,7 +113,8 @@ def _community(db, cid: str, members: list[tuple[str, float]], *, level: int = 0
 
 def _artifact(db, kind: str, payload: dict, *, seq: int = 10,
               created_at: str = "2026-01-02T00:00:00",
-              cluster_seq: "int | None" = None, stamp: bool = True) -> None:
+              cluster_seq: "int | None" = None, stamp: bool = True,
+              partition_rebuilt: bool = True) -> None:
     """写一行账本。默认照生产路径盖簇世代的戳(`stamp_cluster_seq` 知道该盖哪几份)。
 
     ``cluster_seq=None`` → 跟 ``seq`` 走(``_state`` 的两个计数器默认也是同一个数,
@@ -121,7 +123,8 @@ def _artifact(db, kind: str, payload: dict, *, seq: int = 10,
     """
     stamped = (
         stamp_cluster_seq(
-            {kind: payload}, seq if cluster_seq is None else cluster_seq
+            {kind: payload}, seq if cluster_seq is None else cluster_seq,
+            partition_rebuilt=partition_rebuilt,
         )[kind]
         if stamp else payload
     )
@@ -212,8 +215,10 @@ def _profiles_payload(**overrides) -> dict:
 
 
 def _seed_complete_ledger(db, *, seq: int = 10, created_at: str = "2026-01-02T00:00:00",
-                          cluster_seq: "int | None" = None, **edge_overrides) -> None:
-    common = {"seq": seq, "created_at": created_at, "cluster_seq": cluster_seq}
+                          cluster_seq: "int | None" = None,
+                          partition_rebuilt: bool = True, **edge_overrides) -> None:
+    common = {"seq": seq, "created_at": created_at, "cluster_seq": cluster_seq,
+              "partition_rebuilt": partition_rebuilt}
     _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload(), **common)
     _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload(), **common)
     _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload(), **common)
@@ -452,6 +457,45 @@ def test_a_merge_only_drift_is_reported_per_artifact_not_swallowed(repo):
     assert (provenance.built_at_cluster_seq, provenance.cluster_seq_behind) == (None, None)
     assert provenance.stale is False
     assert overview.state.cluster_mutation_seq == 43
+
+
+def test_a_backfilled_board_product_is_reported_as_unknown_not_as_current(repo):
+    """codex 第 7 轮 P2 的**读侧**:混合世代的产物不许显示成「与当前一致」。
+
+    形状是「只补账本」那一轮的产物:板块划分是库里现成的(建在哪一代合并结果上没有
+    地方记),边与来源映射按当前 cluster_map 现算。它既不是当前的、也说不出落后几代
+    ——所以三个字段一起是 None,而**不是** ``stale=False``:后者会让报告理直气壮地说
+    「与当前一致」,正是本视图存在理由的反面。
+    """
+    with repo._write() as db:
+        _state(db, seq=40, community_seq=40)
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_mutation_seq=43 WHERE notebook_id=?",
+            (NB,),
+        )
+        # 两条统计快照当场重算(戳 43),依赖板块的两份记「无从判断」。
+        _seed_complete_ledger(db, seq=40, cluster_seq=43, partition_rebuilt=False)
+
+    overview = _service(repo).overview(NB)
+
+    for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
+        freshness = _artifact_of(overview, kind).freshness
+        assert _artifact_of(overview, kind).present is True, kind
+        assert freshness.seq_behind == 0, kind
+        assert freshness.built_at_cluster_seq is None, kind
+        assert freshness.cluster_seq_behind is None, kind
+        assert freshness.stale is None, kind            # ⚠ 不是 False
+    # 两条统计快照的世代是知道的,不能被一起拖成「未知」。
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS
+                       - set(BOARD_DEPENDENT_ARTIFACT_KINDS)):
+        freshness = _artifact_of(overview, kind).freshness
+        assert freshness.built_at_cluster_seq == 43, kind
+        assert freshness.stale is False, kind
+    # 账本仍然是齐的、仍然自洽 —— 「世代无从判断」不是「产物缺失」。
+    assert overview.ledger_state == LEDGER_COMPLETE
+    assert overview.ledger_consistent is True
+    # 跨板块关联那一格读的是同一份账本行,必须给出同一句话。
+    assert overview.board_edges.freshness.stale is None
 
 
 def test_the_read_side_and_the_precompute_gate_share_one_verdict(repo):
@@ -974,7 +1018,7 @@ def test_source_page_is_ordered_by_mainstream_share_ascending(repo):
     assert page.total == 3 and page.returned == 3 and page.has_more is False
     # summary 就是账本行的 payload 原样(含生产路径盖上的簇世代戳)。
     assert page.summary == stamp_cluster_seq(
-        {ARTIFACT_SOURCE_PROFILES: _profiles_payload()}, 10
+        {ARTIFACT_SOURCE_PROFILES: _profiles_payload()}, 10, partition_rebuilt=True
     )[ARTIFACT_SOURCE_PROFILES]
 
 

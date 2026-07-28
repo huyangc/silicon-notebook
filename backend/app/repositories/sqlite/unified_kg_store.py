@@ -1504,11 +1504,12 @@ class UnifiedKgStore:
 
         三张表**统一按 notebook 整表删**(没有 level 维度,理由见本段段头)。
 
-        `edges` / `profiles` 只按**可迭代**消费,分批喂 `executemany`:落库这一刻
-        `rebuild_communities` 的栈帧上还压着 `ew`(生产 836 万 int-tuple 键 dict),
-        再为落库多物化一份同基数的列表就是在峰值上叠峰值(#340/#342/#347/#351/#352/
-        #354 那条 OOM 轨道盯的同一时刻)。`edges` 本身已被
-        `CrossCommunityEdgeFolder.top_edges` 截到硬上限,这里不再拷第二份。
+        `edges` / `profiles` 只按**可迭代**消费,分批喂 `executemany`:落库这一刻栈帧上
+        还压着折叠出来的 `_cross`(`ew` 已被 `CrossCommunityEdgeFolder.drain` 边消费边
+        释放,但折叠结果的条目数同样没有结构性上界),再为落库多物化一份完整列表就是在
+        峰值上叠峰值(#340/#342/#347/#351/#352/#354 那条 OOM 轨道盯的同一时刻)。
+        `edges` 本身已被 `CrossCommunityEdgeFolder.top_edges` 截到硬上限,这里不再拷
+        第二份。
 
         账本 payload 走 `allow_nan=False`:NaN/Inf 不是合法 JSON,写进去读回来就是一个
         不可解析的 payload。今天的口径里除不出 NaN(分母为 0 时显式落 0.0),这是**入口

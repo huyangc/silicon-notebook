@@ -32,6 +32,7 @@ from app.services.kg_analysis_precompute import (
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_SEQ_PAYLOAD_KEY,
     MAINSTREAM_COVERAGE,
+    artifact_cluster_seq_is_unknown,
     stamp_cluster_seq,
 )
 from app.services.knowledge_contracts import (
@@ -2439,16 +2440,23 @@ def _analysis_unified_store(harness):
     return PostgresUnifiedKgStore(harness.database, now=lambda: NOW)
 
 
-def _analysis_payloads(*, cluster_seq: int = 0, **overrides) -> dict:
+def _analysis_payloads(
+    *, cluster_seq: int = 0, partition_rebuilt: bool = True, **overrides
+) -> dict:
     """一批合法的账本 payload,簇世代照生产路径经 `stamp_cluster_seq` 盖上。
 
     夹具刻意**不手抄**那个 key —— 分类(哪几份依赖合并结果)一旦改了,夹具跟着改,
     不会出现「守卫按新分类查、夹具还按旧分类拼」这种两侧各自自洽却对不上的局面。
+
+    ``partition_rebuilt=False`` 拼「只补账本」那一轮的形状:依赖板块的两份显式记
+    「板块划分建在哪一代合并结果上无从判断」(值是 None,键仍在)。
     """
     payloads = {kind: {"level": 0} for kind in ARTIFACT_KINDS}
     payloads[ARTIFACT_COMMUNITY_EDGES] = {"level": 0, "communities": 2}
     payloads.update(overrides)
-    return stamp_cluster_seq(payloads, cluster_seq)
+    return stamp_cluster_seq(
+        payloads, cluster_seq, partition_rebuilt=partition_rebuilt
+    )
 
 
 def _analysis_object(object_id: str, *, notebook: str = ANALYSIS_NB,
@@ -3117,7 +3125,7 @@ def test_precomputed_artifacts_round_trip_identically_on_postgres(
         ARTIFACT_CLUSTER_HISTOGRAM: unified.cluster_size_histogram(ANALYSIS_NB),
         ARTIFACT_LARGEST_CLUSTERS: unified.largest_clusters(ANALYSIS_NB, 20),
         ARTIFACT_RELATION_PROVENANCE: unified.relation_provenance_counts(ANALYSIS_NB),
-    }, 19)
+    }, 19, partition_rebuilt=True)
     with knowledge_harness.database.write() as connection:
         unified.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 41, edges, profiles, payloads, NOW
@@ -3285,7 +3293,7 @@ def test_replace_kg_analysis_artifacts_polices_the_cluster_stamp_on_postgres(
             key: value for key, value in payloads[kind].items()
             if key != CLUSTER_SEQ_PAYLOAD_KEY
         }
-        with pytest.raises(ValueError, match="必须带整数"):
+        with pytest.raises(ValueError, match="payload 必须带"):
             with knowledge_harness.database.write() as connection:
                 unified.replace_kg_analysis_artifacts(
                     connection, ANALYSIS_NB, 1, [], [], payloads, NOW
@@ -3328,6 +3336,27 @@ def test_the_cluster_stamp_round_trips_identically_on_postgres(knowledge_harness
             assert stamp == 19 and isinstance(stamp, int), kind
         else:
             assert stamp is None, kind
+
+    # 「只补账本」那一轮:依赖板块的两份**显式**记 None(板块划分建在哪一代无从判断,
+    # codex 第 7 轮 P2)。它必须以「键在、值为 null」的形状原样回来 —— 一侧把键吞掉、
+    # 另一侧留着,判据就会在两个后端上给出不同答案:一边报「无从判断」(闸放行),
+    # 一边报「漏盖」(闸每次都判它不新鲜 → 这个库的预计算永远重跑,而且不报错)。
+    with knowledge_harness.database.write() as connection:
+        unified.replace_kg_analysis_artifacts(
+            connection, ANALYSIS_NB, 78, [], [],
+            _analysis_payloads(cluster_seq=19, partition_rebuilt=False), NOW,
+        )
+    with knowledge_harness.database.connect() as connection:
+        backfilled = unified.kg_analysis_artifact_rows(connection, ANALYSIS_NB)
+
+    for kind in sorted(BOARD_DEPENDENT_ARTIFACT_KINDS):
+        payload = backfilled[kind]["payload"]
+        assert CLUSTER_SEQ_PAYLOAD_KEY in payload, kind
+        assert payload[CLUSTER_SEQ_PAYLOAD_KEY] is None, kind
+        assert artifact_cluster_seq_is_unknown(kind, payload), kind
+    for kind in sorted(CLUSTER_DEPENDENT_ARTIFACT_KINDS
+                       - set(BOARD_DEPENDENT_ARTIFACT_KINDS)):
+        assert backfilled[kind]["payload"][CLUSTER_SEQ_PAYLOAD_KEY] == 19, kind
 
 
 # ------------------------------------------------- KG 分析产物的读路径(T3)

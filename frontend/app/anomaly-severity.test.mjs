@@ -161,10 +161,47 @@ test("产物在场且与当前一致 → 空数组", () => {
   );
   // 缺 freshness(seq_behind/stale 都取不到)也不能凭空造一条异常。
   assert.deepEqual(analysisArtifactAnomalies({ present: true }), []);
+  assert.deepEqual(analysisArtifactAnomalies({ present: true, freshness: {} }), []);
+  // ⚠ 主题板块那一块传的是 present:true + 板块表自己的新鲜度,而「从没建过板块」时
+  // 那份 freshness 三个字段全是 null —— 那一档由块内空态文案解释,不许挂异常小字。
+  // 它与下一条(建过、但说不出建在哪次合并上)的差别只在 built_at_seq。
   assert.deepEqual(
-    analysisArtifactAnomalies({ present: true, freshness: { seq_behind: null, stale: null } }),
+    analysisArtifactAnomalies({
+      present: true,
+      freshness: { built_at_seq: null, seq_behind: null, stale: null },
+    }),
     [],
   );
+});
+
+test("产物在场却报不出合并世代 → retrieval,不是「无异常」", () => {
+  // codex 第 7 轮 P2:依赖主题板块的两份数据由「只补账本」那条路径产出时,板块划分
+  // 沿用库里现成的(建在哪一次合并上没有地方记),而边与来源映射按当前合并结果现算
+  // —— 后端因此给 stale=null。这一档在这里必须**出小字**:`stale` 是三值的,而
+  // `if (stale)` 对 null 为假,所以少了这条分支,一份拼了两个时候的数据会一个提示都
+  // 不带地显示成正常 —— 后端刚修掉的那句谎话在前端原地复发。
+  const unknown = analysisArtifactAnomalies({
+    present: true,
+    freshness: { built_at_seq: 128, seq_behind: 0, cluster_seq_behind: null, stale: null },
+  });
+  assert.equal(unknown.length, 1);
+  assert.equal(unknown[0].severity, "retrieval");
+  assert.equal(unknown[0].label, "对不上合并进度");
+
+  // 缺席那一档仍按 absence 走,不会被这条新分支抢走(缺席在函数开头就返回了)。
+  const absent = analysisArtifactAnomalies({
+    present: false, absence: "expected",
+    freshness: { seq_behind: null, stale: null },
+  });
+  assert.equal(absent.length, 1);
+  assert.equal(absent[0].label, "本次无需生成");
+
+  // 明确落后优先:stale=true 时报「落后于当前内容」,不被这条新分支降格。
+  const stale = analysisArtifactAnomalies({
+    present: true,
+    freshness: { seq_behind: 28, stale: true },
+  });
+  assert.equal(stale[0].label, "落后于当前内容");
 });
 
 test("合法缺席(零板块的库不出来源画像)→ info,不是异常", () => {

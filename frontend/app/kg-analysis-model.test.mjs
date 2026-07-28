@@ -181,6 +181,34 @@ test("新鲜度:与合并无关的数据不编造合并世代(边的出处只读
   assert.equal(provenance.behind, "与当前一致");
 });
 
+test("新鲜度:板块数据说不出建在哪次合并上时,绝不显示成「与当前一致」", () => {
+  // 「只补账本」那一轮的形状(codex 第 7 轮 P2):主题板块沿用库里现成的划分,而那批
+  // 划分建在哪一次合并上没有地方记 —— 后端因此给 stale=null。它与上一条(本来就与
+  // 合并无关)的两个 *_cluster_* 字段长得一模一样,只有 stale 分得开;混为一谈,
+  // 一份拼了两个时候的数据就会理直气壮地说「与当前一致」。
+  const unknown = freshnessNote({
+    basis: "community_snapshot",
+    built_at_seq: 128,
+    seq_behind: 0,
+    stale: null,
+    built_at_cluster_seq: null,
+    cluster_seq_behind: null,
+  });
+  assert.equal(unknown.built, "建于变更 #128、合并次数未知");
+  assert.equal(unknown.behind, "无法判断落后多少次合并");
+
+  // 变更那条线同时落后时两句话都要说 —— 未知不吞掉已知。
+  const alsoBehind = freshnessNote({
+    basis: "community_snapshot",
+    built_at_seq: 100,
+    seq_behind: 28,
+    stale: null,
+    built_at_cluster_seq: null,
+    cluster_seq_behind: null,
+  });
+  assert.equal(alsoBehind.behind, "落后 28 次变更 · 无法判断落后多少次合并");
+});
+
 test("口径来源未声明时说「口径未标注」,不假装知道", () => {
   assert.equal(basisLabel("unified_rebuild_snapshot"), "上次整理时的规模");
   assert.equal(basisLabel(""), "口径未标注");

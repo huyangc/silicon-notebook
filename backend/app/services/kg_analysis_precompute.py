@@ -42,7 +42,9 @@
 from __future__ import annotations
 
 import heapq
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple,
+)
 
 
 # 「全库头部板块集合」的覆盖阈值:按 size 降序累积覆盖到该 notebook **50%** canonical
@@ -63,9 +65,14 @@ PRECOMPUTED_LARGEST_CLUSTERS = 20
 # 是 836 万边 / 约 171 万 canonical 成员(边/节点比 ≈ 4.9)。本机三个样本的比值只有
 # 1.4,且「每板块跨边数」在样本里是 0 → 0.75 → 0.41(不单调),**撑不起任何外推**:
 # 那三个点既不能证明生产上是 1%,也不能证明不是 15%。取 5~15% 这档,明细表就是 40~130
-# 万行,而落库那一刻 `cross` dict 与截断后的行列表同时活着,`rebuild_communities` 的
-# 栈帧上还压着 `ew`(836 万 int-tuple 键 dict)。这正是 #340/#342/#347/#351/#352/#354
-# 那条 OOM 轨道盯着的同一个库、同一个峰值时刻。
+# 万行,而落库那一刻 `cross` dict 与截断后的行列表同时活着。这正是
+# #340/#342/#347/#351/#352/#354 那条 OOM 轨道盯着的同一个库、同一个峰值时刻。
+#
+# ⚠ **这个上限只管「写出去多少」,管不了「算的时候占多少」**(codex 第 7 轮评审)。
+# 聚合阶段的 `cross` dict 会长到**全部**跨板块对那么大,而那个规模同样没有结构性上界。
+# 所以有界性是**另一件事**、由另一个机制保证:`CrossCommunityEdgeFolder.drain` 边消费
+# 边释放 `ew`,聚合期间两份结构的条目数之和恒等于 `ew` 的初始条目数(见那段说明)。
+# 两个机制缺一不可,别把其中一个当成另一个的替代。
 #
 # 20 万这个值的依据是**用途**而不是实测分位数(生产上没有可测的数据点,见上):俯瞰图
 # 本来就只画 top-N 个板块与它们之间最重的边,20 万条已经比任何可读的图多两个数量级。
@@ -119,7 +126,12 @@ REQUIRED_ARTIFACT_KINDS = _ARTIFACT_KINDS - OPTIONAL_ARTIFACT_KINDS
 #
 # 另三份(三条统计快照)与板块划分**无关**,刻意不在此列:作废它们只会平白丢掉一份
 # 仍然可读、只是「落后 N 次变更」的快照。
+#
+# ⚠ 这两份的簇世代戳记的是**板块划分建在哪一代合并结果上**,不是「折叠时读到的
+# cluster_map 是哪一代」——两者在「只补账本」那条路径上不是同一个数,而把后者当前者
+# 盖上去,就是 codex 第 7 轮评审的 P2。判据与写法见 `stamp_cluster_seq`。
 BOARD_DEPENDENT_ARTIFACT_KINDS = (ARTIFACT_COMMUNITY_EDGES, ARTIFACT_SOURCE_PROFILES)
+_BOARD_DEPENDENT_ARTIFACT_KINDS = frozenset(BOARD_DEPENDENT_ARTIFACT_KINDS)
 
 # 依赖**簇世代**(`unified_kg_state.cluster_mutation_seq`)的产物。
 #
@@ -166,7 +178,7 @@ CLUSTER_SEQ_PAYLOAD_KEY = "built_at_cluster_seq"
 
 
 def stamp_cluster_seq(
-    payloads: Mapping[str, dict], cluster_seq: int
+    payloads: Mapping[str, dict], cluster_seq: int, *, partition_rebuilt: bool
 ) -> Dict[str, dict]:
     """把簇世代盖进**依赖簇**的那几份 payload,返回新的 payload 表。
 
@@ -176,10 +188,41 @@ def stamp_cluster_seq(
 
     刻意在 service 侧盖、在 store 侧(`check_artifact_payloads`)查:两件事放同一个
     函数里,守卫就恒真了 —— 那正是本 PR 已经抓出 15 个的「空守卫」形态。
+
+    ⚠ **``partition_rebuilt`` 分开了两种「建在哪一代合并结果上」**(codex 第 7 轮评审
+    的 P2)。两条统计快照(簇大小直方图 / 最大簇榜单)当场从 `concept_clusters` 重算,
+    它们的世代**就是** ``cluster_seq``,没有第二种可能。依赖板块的那两份不是:
+
+      · ``partition_rebuilt=True``(全量重建那一轮):板块划分刚在这一代合并结果上跑
+        出来,折叠用的 canonical 边图也是这一代 —— 戳 ``cluster_seq``,名副其实。
+      · ``partition_rebuilt=False``(「只补账本」那条路径):板块划分是**库里现成的**,
+        它建在哪一代合并结果上**没有地方记**(`communities` / `unified_kg_state` 都没有
+        这一列,见设计 §3.3 的已知缺口)。而边与来源映射是按**当前**的 cluster_map 现
+        算的 —— 产物因此是个混合世代的东西。给它盖上当前簇世代,报告就会说「与当前
+        一致」,那比「陈旧但内部自洽」更糟:陈旧至少是诚实的。所以这一档显式记
+        ``None`` = 无从判断。
+
+    为什么是**显式 None** 而不是干脆不写这个键:不写的话「忘了盖」与「盖不出来」在读
+    侧长得一模一样,`check_artifact_payloads` 那道「漏盖必须硬失败」的守卫也就跟着废了。
+    键必须在,值可以是 None —— 两个后端的 JSON / jsonb 都存得下 null。
+
+    为什么不改成「簇世代一变就重建板块划分」(codex 给的另一条路):那与设计
+    §3.3 明写的决定相反(让板块跟上合并结果的是 `rebuild_unified_kg` 收尾那次
+    `force=True`),而且要在**恰恰是为了避免那笔钱才存在**的补账本路径上,付一次
+    生产 836 万边的 Louvain + 171 万成员行重写。更硬的一点:它治不了本条 —— 账本
+    整个为空(刚部署的 B1 形态)时根本没有证据判断簇世代动没动过,那一档只能靠
+    「不知道就说不知道」。
     """
     return {
         kind: (
-            {**payload, CLUSTER_SEQ_PAYLOAD_KEY: int(cluster_seq)}
+            {
+                **payload,
+                CLUSTER_SEQ_PAYLOAD_KEY: (
+                    int(cluster_seq)
+                    if partition_rebuilt or kind not in _BOARD_DEPENDENT_ARTIFACT_KINDS
+                    else None
+                ),
+            }
             if kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS
             else payload
         )
@@ -190,11 +233,13 @@ def stamp_cluster_seq(
 def artifact_cluster_seq(kind: str, payload: Mapping[str, object]) -> Optional[int]:
     """这份产物记下的簇世代;``None`` = 无从判断。
 
-    两种 ``None`` 刻意不区分,因为**下游对它们的处置相同**:
+    三种 ``None``,前两种刻意不区分(**下游对它们的处置相同**):
       · 这个 kind 与簇世代无关(`relation_provenance`)—— 没有落后量可报;
       · 依赖簇却没盖戳(库被手工改过,或者是本次修复**之前**写下的行)—— 判不出
         它建在哪一代合并结果上,那就当它不新鲜:闸会补跑、读侧报「未知」。
-    区分这两种的责任在调用方,它知道 kind(见 `artifact_is_current`)。
+    第三种要区分,由 `artifact_cluster_seq_is_unknown` 单独回答:依赖板块的两份**显式**
+    记下 ``None``(板块划分是库里现成的,建在哪一代无从判断,见 `stamp_cluster_seq`)。
+    它不是「漏盖」,补跑也补不出来,所以闸不能拿它当「要重算」。
     """
     if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
         return None
@@ -205,6 +250,23 @@ def artifact_cluster_seq(kind: str, payload: Mapping[str, object]) -> Optional[i
     return int(value)
 
 
+def artifact_cluster_seq_is_unknown(
+    kind: str, payload: Mapping[str, object]
+) -> bool:
+    """这一份是不是**显式**记着「板块划分建在哪一代合并结果上无从判断」。
+
+    只有依赖板块的两份可能是这一档(`stamp_cluster_seq` 只对它们写 ``None``),而且
+    必须是**键在、值为 None**:键干脆不在是「漏盖」,值是别的类型是「被改坏」——
+    那两种都判不新鲜,而这一档判「无从判断」。三者的差别是这条修复的全部要害,
+    所以判据写在一处、由 `check_artifact_payloads` 在写入口反向封死。
+    """
+    return (
+        kind in _BOARD_DEPENDENT_ARTIFACT_KINDS
+        and CLUSTER_SEQ_PAYLOAD_KEY in payload
+        and payload[CLUSTER_SEQ_PAYLOAD_KEY] is None
+    )
+
+
 def artifact_is_current(
     kind: str,
     built_seq: int,
@@ -212,25 +274,36 @@ def artifact_is_current(
     *,
     seq: int,
     cluster_seq: int,
-) -> bool:
+) -> Optional[bool]:
     """这一份产物是不是建在**当前**的 (KG 世代, 簇世代) 上 —— 唯一的判据函数。
+
+    **三值**:``True`` = 两条世代线都对齐;``False`` = 至少一条明确落后;
+    ``None`` = 没有任何一条明确落后,但有一条**无从判断**(依赖板块的产物由「只补
+    账本」那条路径产出时,板块划分建在哪一代合并结果上没有地方记,见
+    `stamp_cluster_seq`)。三值是 Kleene 合取:任一条为假即假,否则有未知即未知。
 
     ⚠ **写侧的闸与读侧的落后量必须共用它。** 闸判「要不要重算」、读侧判「落后多少」,
     两处一旦各写一份判据就会漂,而漂出来的表现是自相矛盾的报告:闸说新鲜、读侧说陈旧,
     或者反过来。本 PR 第 3 轮评审(`_ledger_state` 与写侧 required 集合分岔)就是同一
-    个病的另一处发作,所以这一次直接把判据收成一个函数:
-      · `analysis_ledger_is_current`(预计算的新鲜度闸)对每一份必需产物调它;
-      · `kg_analysis._artifact_freshness`(报告里的 `stale`)对每一份在场产物调它。
+    个病的另一处发作,所以这一次直接把判据收成一个函数;两个消费方各自把第三值映射成
+    自己那句话,而**映射规则也各只写一处**:
+      · `analysis_ledger_is_current`(预计算的新鲜度闸):``is not False`` —— 未知那一
+        档补跑也补不出来(补账本换不掉库里现成的板块划分),据它重算就是每次调用都白
+        跑一遍全部重活,永不收敛;
+      · `kg_analysis._artifact_freshness`(报告里的 `stale`):``None`` 原样透出去 ——
+        「无从判断」既不是「与当前一致」也不是「落后 N 代」,替读者选一个就是编。
 
-    与簇无关的 kind 只看 KG 世代;依赖簇的 kind 两个世代都要对齐,而且**没盖戳等于
-    不新鲜**(见 `artifact_cluster_seq`)。
+    与簇无关的 kind 只看 KG 世代;依赖簇的 kind 两个世代都要对齐,而**漏盖戳(键不在
+    或值被改坏)仍然等于不新鲜**(见 `artifact_cluster_seq`)。
     """
     if int(built_seq) != int(seq):
         return False
     if kind not in CLUSTER_DEPENDENT_ARTIFACT_KINDS:
         return True
     built_cluster_seq = artifact_cluster_seq(kind, payload)
-    return built_cluster_seq is not None and built_cluster_seq == int(cluster_seq)
+    if built_cluster_seq is None:
+        return None if artifact_cluster_seq_is_unknown(kind, payload) else False
+    return built_cluster_seq == int(cluster_seq)
 
 
 def reusable_artifact_payloads(
@@ -273,11 +346,16 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
     这一条由 `community_edges` 账本里的 ``communities`` 计数当场复核 —— 否则
     「允许缺席」就会变成「随便漏一份也不报错」。
 
-    **簇世代的戳同样是硬要求**:依赖簇的四份必须带一个整数
-    ``built_at_cluster_seq``(由 service 侧的 `stamp_cluster_seq` 盖),不依赖簇的
-    `relation_provenance` 必须**不带**。漏盖的表现极其隐蔽 —— 读侧只会把它报成
-    「合并世代未知」、闸每次都判它不新鲜,于是这个库的预计算**永远**重跑,而没有任何
-    报错;多盖则相反,给一份根本不依赖合并的产物编造一个落后量。两个方向都在这里拦。
+    **簇世代的戳同样是硬要求**:依赖簇的四份必须带 ``built_at_cluster_seq`` 这个键
+    (由 service 侧的 `stamp_cluster_seq` 盖),不依赖簇的 `relation_provenance` 必须
+    **不带**。漏盖的表现极其隐蔽 —— 读侧只会把它报成「合并世代未知」、闸每次都判它不
+    新鲜,于是这个库的预计算**永远**重跑,而没有任何报错;多盖则相反,给一份根本不依赖
+    合并的产物编造一个落后量。两个方向都在这里拦。
+
+    ⚠ 值的类型分两档(codex 第 7 轮 P2):两条统计快照当场从 `concept_clusters` 重算,
+    世代永远是知道的,**必须是 int**;依赖板块的两份可以是 ``None``(= 板块划分是库里
+    现成的、建在哪一代无从判断),但**键必须在** —— 允许「键干脆不写」就等于把「漏盖」
+    和「盖不出来」揉成一档,上面那道守卫当场作废。
     """
     unknown = sorted(set(payloads) - _ARTIFACT_KINDS)
     if unknown:
@@ -302,10 +380,13 @@ def check_artifact_payloads(payloads: Mapping[str, dict]) -> None:
         payload = payloads[kind]
         stamped = CLUSTER_SEQ_PAYLOAD_KEY in payload
         depends = kind in CLUSTER_DEPENDENT_ARTIFACT_KINDS
-        if depends and artifact_cluster_seq(kind, payload) is None:
+        known = artifact_cluster_seq(kind, payload) is not None
+        unknown = artifact_cluster_seq_is_unknown(kind, payload)
+        if depends and not (known or unknown):
             raise ValueError(
-                f"KG 分析产物账本:{kind} 依赖合并结果,payload 必须带整数 "
-                f"{CLUSTER_SEQ_PAYLOAD_KEY}(见 stamp_cluster_seq)。"
+                f"KG 分析产物账本:{kind} 依赖合并结果,payload 必须带 "
+                f"{CLUSTER_SEQ_PAYLOAD_KEY}(见 stamp_cluster_seq):两条统计快照是整数,"
+                "依赖板块的两份可以是 None(板块划分建在哪一代无从判断)但键必须在。"
                 "漏盖不会报错,只会让这个库的预计算永远重跑、读侧永远报「合并世代未知」"
             )
         if not depends and stamped:
@@ -355,6 +436,12 @@ def analysis_ledger_is_current(
       · 「齐不齐」= `required_artifact_kinds`(与写入口、T3 的账本档位同一条);
       · 「戳对不对」= `artifact_is_current`(与 T3 报告里的 `stale` 同一条)。
 
+    ⚠ 判据是三值的,这里只把 ``False`` 当「要补跑」。第三值(``None`` = 依赖板块的
+    产物由补账本路径产出、板块划分建在哪一代无从判断)**补跑也补不出来**:补账本用的
+    还是库里现成的那套划分,再跑一遍只会写出一份同样无从判断的产物。据它重算 = 每次
+    调用都白跑一遍全部重活、永不收敛,而那正是这道闸当初为 B1 加进来时要避免的形态。
+    真正让它变回「有据可查」的是板块被重建的那一轮(KG 变了,或者 `force=True`)。
+
     ``ledger`` 是 `kg_analysis_artifact_rows` 的返回形状
     (``{kind: {kg_mutation_seq, payload, created_at}}``)—— 簇世代盖在 payload 里
     (刻意不加列,见 `CLUSTER_SEQ_PAYLOAD_KEY`),所以闸必须拿到 payload 才判得了。
@@ -368,7 +455,7 @@ def analysis_ledger_is_current(
             entry["payload"],                       # type: ignore[arg-type]
             seq=seq,
             cluster_seq=cluster_seq,
-        )
+        ) is not False
         for kind, entry in ledger.items()
     )
 
@@ -416,9 +503,27 @@ class CrossCommunityEdgeFolder:
         weight=1。`ew` 只是「同一对 canonical 出现了几次」的预聚合,逐行累加与先聚合
         再折叠对每个板块对的合计**恒等**,所以两条路径不会给出不同的产物。
 
-    内存:结果最多和板块**对**数一样大(不是边数)。落库前再按 weight 降序截到
-    ``MAX_PERSISTED_COMMUNITY_EDGES``(`top_edges`,`heapq.nsmallest` 的峰值是 O(limit),
-    不是 O(板块对数))—— 绝不为了排序再造一份完整列表。
+    ⚠ **内存:聚合阶段本身必须有界,落库上限管不了它**(codex 第 7 轮评审)。
+    `_cross` 的条目数没有任何结构性上界 —— Louvain 的目标函数倾向于减少跨社区边,但
+    「倾向」不是保证,而只补账本那条路径用的还是**库里现成的**划分(它建在另一代合并
+    结果上,跨板块比例可以任意高)。最坏情况下 `_cross` 与 `ew` 同量级:生产 836 万条
+    int-tuple 键、约 1.4 GB。两份同时驻留就是在 437 GB 库的峰值时刻再叠一个峰值。
+
+    所以喂入走 `drain`:**每消化一条 `ew` 的条目就释放一条**,聚合期间
+    ``len(ew) + len(_cross)`` 恒 ≤ `ew` 的初始条目数,而且 `_cross` 的条目更便宜
+    (键是两个**已存在**的板块 id 字符串的引用,不像 `ew` 的键那样每条都是一个新分配的
+    int 二元组)。换句话说:折叠**不新增**同量级的结构,只是把 `ew` 就地换成它的折叠结果。
+
+    刻意**不**做 DB 侧聚合:SQLite 的 `PRAGMA temp_store = MEMORY`(见
+    `repositories/sqlite/database.py`)让 GROUP BY 的临时 B 树也落在进程内存里,一分钱
+    没省,还要为 836 万行的临时表按住写锁;而设计 §3.35 给 SQLite 侧定的标准正是
+    「正确、有界、不 OOM、不长时间持锁」。也刻意**不**做分批 + 归并:那需要外部排序的
+    脚手架,而 `total_edges` / `top_edges` 要求**精确**(账本的 `edges_total` 与俯瞰图的
+    边权都不能是近似值),分批只会把复杂度换个地方放。
+
+    落库前再按 weight 降序截到 ``MAX_PERSISTED_COMMUNITY_EDGES``(`top_edges`,
+    `heapq.nsmallest` 的峰值是 O(limit),不是 O(板块对数))—— 绝不为了排序再造一份
+    完整列表。
     """
 
     __slots__ = ("_cross", "_intra", "_cross_weight")
@@ -445,6 +550,31 @@ class CrossCommunityEdgeFolder:
         key = (src, dst) if src <= dst else (dst, src)   # 无向归一
         self._cross[key] = self._cross.get(key, 0) + weight
         self._cross_weight += weight
+
+    def drain(
+        self,
+        edge_weights: MutableMapping[Tuple[int, int], int],
+        community_of_index: Sequence[Optional[str]],
+    ) -> None:
+        """把 ``edge_weights`` **就地搬空**进本累加器 —— 消化一条、释放一条。
+
+        ⚠ **这是破坏性的,而且必须是。** 遍历 + 保留(``for … in ew.items()``)会让
+        整张 `ew`(生产 836 万 int-tuple 键、约 1.4 GB)在 `_cross` 长到同量级的整个
+        过程中一直驻留,峰值就是两者之和。`popitem` 是 dict 上唯一能「边遍历边删」的
+        操作(``for`` 循环里删会 `RuntimeError`),它 O(1)、不触发缩表,取出的键值对
+        一旦被 `add` 消化就立刻可回收。
+
+        结果与遍历版**逐字相同**:每个板块对的合计是整数加法(可交换可结合),而
+        `top_edges` 的排序键 ``(-weight, src, dst)`` 在板块对上是全序(无并列),
+        所以消费顺序不进入产物。`test_cross_edge_folder_row_stream_matches_the_
+        preaggregated_fold` 与两条喂入路径的等价性因此都不受影响。
+
+        调用方(`_precompute_kg_analysis`)在这之后**不得**再用那张 dict;
+        `rebuild_communities` 里 Louvain 早已跑完,`ew` 到这一步的唯一用途就是本次折叠。
+        """
+        while edge_weights:
+            (left, right), weight = edge_weights.popitem()
+            self.add(community_of_index[left], community_of_index[right], weight)
 
     @property
     def intra_weight(self) -> int:
@@ -476,10 +606,14 @@ class CrossCommunityEdgeFolder:
 
 
 def fold_cross_community_edges(
-    edge_weights: Mapping[Tuple[int, int], int],
+    edge_weights: MutableMapping[Tuple[int, int], int],
     community_of_index: Sequence[Optional[str]],
 ) -> CrossCommunityEdgeFolder:
     """把 canonical 整数边图按 membership 折叠成跨板块边。
+
+    ⚠ **`edge_weights` 会被搬空**(见 `CrossCommunityEdgeFolder.drain`):折叠不再是
+    「读一张表、建另一张同量级的表」,而是把 `ew` 就地换成它的折叠结果。调用方在这之后
+    不得再用它。
 
     ``community_of_index[i]`` 是节点下标 ``i`` 的板块 id(不属于任何保留板块则
     ``None``)。**刻意用按下标的 list 而不是 canonical→板块的 dict**:调用方手里已经
@@ -487,14 +621,14 @@ def fold_cross_community_edges(
     还占着 1.4 GB 的那一刻凭空多几百 MB。list 的每个槽只是一个已存在的板块 id 字符串
     的引用,基数再大也只有指针数组本身的开销。
 
-    效率:这是 `rebuild_communities` 已经握在手里的 `ew` 的一次遍历,**不新起任何扫描**。
+    效率:这是 `rebuild_communities` 已经握在手里的 `ew` 的一次**消费**,不新起任何扫描。
     Louvain 的目标函数本来就在最小化跨社区边,所以结果通常远小于 `ew`(本机真实库实测:
-    49109 条唯一边 → 503 对跨板块)——但**那三个本机样本不足以外推到生产**,落库上限
-    因此是硬的,见 `MAX_PERSISTED_COMMUNITY_EDGES`。
+    49109 条唯一边 → 503 对跨板块)——但**那三个本机样本不足以外推到生产**,而且只补
+    账本那条路径用的是库里现成的划分(见 `drain`),所以既不能靠它保证聚合有界(靠
+    `drain`),也不能靠它保证落库有界(靠 `MAX_PERSISTED_COMMUNITY_EDGES`)。
     """
     folder = CrossCommunityEdgeFolder()
-    for (left, right), weight in edge_weights.items():
-        folder.add(community_of_index[left], community_of_index[right], weight)
+    folder.drain(edge_weights, community_of_index)
     return folder
 
 

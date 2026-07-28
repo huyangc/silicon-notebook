@@ -2040,7 +2040,7 @@
           "type": "object"
         },
         "Freshness": {
-          "description": "一份产物的新鲜度 + 口径来源。\n\n``built_at_seq`` 是它建于哪个 ``kg_mutation_seq``;``seq_behind`` = 当前 seq 减去它\n(**不 clamp 到 0**:负值意味着账本比当前还新,是库被手工改过的信号,压成 0 等于\n把异常藏起来)。产物缺席 / 社区从没建过时三个都是 null,不是 0 —— 0 会被读成\n「刚刚建好」。\n\n``built_at_cluster_seq`` / ``cluster_seq_behind`` 是**合并结果**那条世代线\n(``cluster_mutation_seq``),必须独立于 KG 世代:合并的写路径刻意不动\n``kg_mutation_seq``,所以只看前一条的话,一次纯合并之后簇大小直方图与最大簇榜单\n已经陈旧、报告却会说「与当前一致」。两个字段为 null 有两种情形,读者不需要分辨:\n这份产物与合并结果无关(``relation_provenance`` —— 它的查询只读关系表),或者\n它缺席 / 没盖这个戳。\n\n``stale`` 是两条线的合取:任一条落后即为 true。",
+          "description": "一份产物的新鲜度 + 口径来源。\n\n``built_at_seq`` 是它建于哪个 ``kg_mutation_seq``;``seq_behind`` = 当前 seq 减去它\n(**不 clamp 到 0**:负值意味着账本比当前还新,是库被手工改过的信号,压成 0 等于\n把异常藏起来)。产物缺席 / 社区从没建过时三个都是 null,不是 0 —— 0 会被读成\n「刚刚建好」。\n\n``built_at_cluster_seq`` / ``cluster_seq_behind`` 是**合并结果**那条世代线\n(``cluster_mutation_seq``),必须独立于 KG 世代:合并的写路径刻意不动\n``kg_mutation_seq``,所以只看前一条的话,一次纯合并之后簇大小直方图与最大簇榜单\n已经陈旧、报告却会说「与当前一致」。两个字段为 null 有三种情形:这份产物与合并\n结果无关(``relation_provenance`` —— 它的查询只读关系表);它缺席 / 没盖这个戳;\n或者它是**依赖主题板块**的那两份、而这一轮只补了账本 —— 那时板块划分是库里现成的,\n建在哪一代合并结果上没有地方记,产物因此是混合世代的,只能如实报「无从判断」。\n\n``stale`` 是两条线的**三值**合取:任一条明确落后即 true;两条都对齐即 false;\n没有明确落后但有一条无从判断即 **null**(上面第三种情形,以及产物缺席)。\nnull 不等于 false —— 把「无从判断」显示成「与当前一致」正是这个视图存在的理由的\n反面;消费方拿 ``present`` 分辨「缺席」与「在场但世代无从判断」。",
           "properties": {
             "basis": {
               "title": "Basis",

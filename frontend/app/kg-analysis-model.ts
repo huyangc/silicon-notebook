@@ -163,6 +163,10 @@ function driftClause(behind: number | null | undefined, noun: string): string {
  * 条线的话,这一格会理直气壮地说「与当前一致」—— 那正是这个视图存在的理由的反面。
  * 与合并无关的数据(边的出处构成只读关系表)后端给 null,这里就不出那半句,而不是
  * 替它编一个恒为 0 的落后量。
+ *
+ * ⚠ **第三档:在场却报不出合并世代**(`stale === null`)。依赖主题板块的两份数据
+ * 沿用了库里现成的板块划分,而那批划分建在哪一次合并上没有地方记 —— 这一格既不是
+ * 「与当前一致」也说不出「落后几次合并」,只能如实说不知道。
  */
 export function freshnessNote(freshness: KgFreshness | null | undefined): FreshnessNote {
   const basis = basisLabel(freshness?.basis);
@@ -170,17 +174,30 @@ export function freshnessNote(freshness: KgFreshness | null | undefined): Freshn
     return { basis, built: "尚未生成", behind: "" };
   }
   const builtCluster = freshness.built_at_cluster_seq ?? null;
+  // ⚠ 在场(上面已排除缺席)而 `stale === null` = **合并世代无从判断**:依赖主题板块
+  // 的两份数据由「只补账本」那条路径产出时,板块划分沿用库里现成的,而它建在哪一次
+  // 合并上没有地方记。这一档与「这份数据本来就与合并无关」(边的出处构成)长得很像
+  // ——两者的 `built_at_cluster_seq` 都是 null——但说的是两件事:后者没有这条线,
+  // 前者有这条线却读不出来。不分开说,前者就会显示成「与当前一致」,而那正是后端第 7
+  // 轮刚修掉的那句谎话在前端原地复发。
+  const mergeUnknown = freshness.stale === null;
+  const builtChange = `建于变更 #${formatCount(freshness.built_at_seq)}`;
   const built =
-    builtCluster === null
-      ? `建于变更 #${formatCount(freshness.built_at_seq)}`
-      : `建于变更 #${formatCount(freshness.built_at_seq)}、合并 #${formatCount(builtCluster)}`;
+    builtCluster !== null
+      ? `${builtChange}、合并 #${formatCount(builtCluster)}`
+      : mergeUnknown
+        ? `${builtChange}、合并次数未知`
+        : builtChange;
   const seqBehind = freshness.seq_behind ?? null;
   const clusterBehind = freshness.cluster_seq_behind ?? null;
   // 两条线都无从判断时不编一句「与当前一致」——那是替读者下一个我们没有依据的结论。
-  if (seqBehind === null && clusterBehind === null) return { basis, built, behind: "" };
-  const drift = [driftClause(seqBehind, "变更"), driftClause(clusterBehind, "合并")].filter(
-    (clause) => clause !== "",
-  );
+  if (seqBehind === null && clusterBehind === null && !mergeUnknown) {
+    return { basis, built, behind: "" };
+  }
+  const drift = [
+    driftClause(seqBehind, "变更"),
+    mergeUnknown ? "无法判断落后多少次合并" : driftClause(clusterBehind, "合并"),
+  ].filter((clause) => clause !== "");
   return { basis, built, behind: drift.length > 0 ? drift.join(" · ") : "与当前一致" };
 }
 
