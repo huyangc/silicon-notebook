@@ -1090,9 +1090,9 @@ class UnifiedKgStorePort(Protocol):
     # 整表重写,删除口径因此只有一个。
     #
     # ⚠ `edges` / `profiles` 按**可迭代**声明,实现必须分批消费、不得再物化一份完整
-    # 列表:落库这一刻栈帧上还压着折叠出来的 `_cross`(条目数没有结构性上界,最坏与
-    # `ew` 的初始规模同量级 —— `ew` 本身已被 `CrossCommunityEdgeFolder.drain` 边消费
-    # 边释放掉了,但换来的那份还在),`edges` 又是一份最多 20 万行的有界物化。
+    # 列表:`edges` 是一份最多 20 万行的有界物化,落库这一刻它整个压在栈帧上。
+    # (折叠结果本身已在取完 top-N 之后当场释放,见 `_precompute_kg_analysis` 的
+    # `del folder` —— 那是 codex 第 9 轮 P1-2 的修法;这里说的是 `edges` 那一份。)
     @staticmethod
     def source_community_counts(db: object, notebook_id: str, level: int) -> object: ...
     @staticmethod

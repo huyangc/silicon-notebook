@@ -60,6 +60,8 @@ from app.services.kg_analysis_precompute import (
     MAINSTREAM_COVERAGE,
     MAX_PERSISTED_COMMUNITY_EDGES,
     PRECOMPUTED_LARGEST_CLUSTERS,
+    CanonicalEdgeTable,
+    CanonicalEdgeTableBuilder,
     SourceProfileFolder,
     analysis_ledger_is_current,
     fold_cross_community_edges,
@@ -3345,8 +3347,14 @@ class KnowledgeLifecycleService:
         # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
         # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
         # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
+        #
+        # ⚠ 边表是**列式 int32 数组**而不是 `dict[(int, int), int]`(设计 §3.32,
+        # codex 第 2/7/9 轮那三个 P1 的共同根源就是那个 dict 形态)。dict 每条边要一个
+        # 新分配的 int 二元组 + 哈希槽,生产 836 万边约 1.4 GB;而且**折叠它**必然要么
+        # 造第二份同量级 dict、要么依赖不缩哈希表的 `popitem`。三个数组把同一份数据压到
+        # 约 100 MB,折叠是纯向量化。
         can2idx: "Dict[str, int]" = {}
-        ew: "Dict[tuple, int]" = {}
+        edge_builder = CanonicalEdgeTableBuilder()
         with self._connect() as db:
             names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
             for r in graph_rows:
@@ -3355,12 +3363,16 @@ class KnowledgeLifecycleService:
                     continue
                 si = can2idx.setdefault(s, len(can2idx))
                 ti = can2idx.setdefault(t, len(can2idx))
-                key = (si, ti) if si < ti else (ti, si)
-                ew[key] = ew.get(key, 0) + 1
+                edge_builder.add(si, ti)
         idx2can = [""] * len(can2idx)
         for _c, _i in can2idx.items():
             idx2can[_i] = _c
         n_nodes = len(can2idx)
+        # 行序 = 每对 canonical 的**首次出现序**,与被它取代的那张 dict 的插入序逐字
+        # 一致 —— Louvain 对边序敏感,漂了就是已部署库的板块划分全漂(设计 §3.32
+        # 不变量 1)。`build` 里那段说明写了为什么必须是稳定排序。
+        edge_table = edge_builder.build(n_nodes)
+        del edge_builder
         if graph_fresh:
             # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是 Louvain 那次
             # 写下的 canonical 列表),Louvain / centrality / 两表重写全部跳过。
@@ -3384,15 +3396,13 @@ class KnowledgeLifecycleService:
                         _ig.set_random_number_generator(_random)   # 确定性(seed=42)
                     except Exception:
                         pass
-                    # ⚠ 边表**刻意不留局部名**(codex 第 7 轮评审的连带修复)。
-                    # `list(ew.keys())` 与 `ew` 共享**同一批** key 元组对象,一个活着
-                    # 另一个就一个字节都释放不掉 —— 那份拷贝一直活到函数返回的话,
-                    # 下面折叠时 `CrossCommunityEdgeFolder.drain` 的「消化一条释放一条」
-                    # 就完全落空(生产 836 万条、约 1.4 GB 全程钉在栈帧上)。作为临时值
-                    # 传参,igraph 把它拷进 C 结构后这一句就结束、拷贝当场回收。
-                    # 顺带也修掉了 networkx 分支那份从来没被用过的同款拷贝。
-                    G = _ig.Graph(n=n_nodes, edges=list(ew.keys()))
-                    G.es["weight"] = list(ew.values())
+                    # igraph 直接吃 numpy 边数组。`igraph_edges()` 返回的 (M, 2) 数组
+                    # 是**独立缓冲区**(column_stack 是拷贝,不是视图),所以第 7 轮
+                    # 评审抓到的那个别名 —— `list(ew.keys())` 与 `ew` 共享同一批 key
+                    # 元组、一个活着另一个一个字节都放不掉 —— 在数组模型下不存在。
+                    # 仍然写成临时值:igraph 拷进 C 结构后这一句就结束、拷贝当场回收。
+                    G = _ig.Graph(n=n_nodes, edges=edge_table.igraph_edges())
+                    G.es["weight"] = edge_table.weight.tolist()
                     membership = G.community_multilevel(weights="weight").membership
                     degs = G.degree()
                     buckets: "Dict[int, List[str]]" = {}
@@ -3400,11 +3410,21 @@ class KnowledgeLifecycleService:
                         buckets.setdefault(_m, []).append(idx2can[_i])
                         deg[idx2can[_i]] = float(degs[_i])
                     comms = list(buckets.values())
+                    # ⚠ Louvain 的图到此为止,当场放掉。igraph 把整张边表拷进了自己的
+                    # C 结构(生产 836 万边),而它的全部产出(membership / degree)
+                    # 已经抄进 `comms` / `deg`。留着它就会一路跨过下面预计算里的四次
+                    # 全表扫 —— 与折叠结果不释放(codex 第 9 轮 P1-2)是同一类缺陷,
+                    # 只是换了一个持有者。
+                    del G, membership, degs, buckets
                 else:
                     import networkx as nx
                     from networkx.algorithms.community import louvain_communities
                     g = nx.Graph()
-                    for (_a, _b), _w in ew.items():
+                    for _a, _b, _w in zip(
+                        edge_table.src.tolist(),
+                        edge_table.dst.tolist(),
+                        edge_table.weight.tolist(),
+                    ):
                         g.add_edge(_a, _b, weight=_w)
                     comms = [[idx2can[_i] for _i in c]
                              for c in louvain_communities(g, weight="weight", seed=42)]
@@ -3465,7 +3485,7 @@ class KnowledgeLifecycleService:
         analysis_done = True
         try:
             self._precompute_kg_analysis(
-                notebook_id, level, _seq, _cseq, kept_rows, ew, can2idx,
+                notebook_id, level, _seq, _cseq, kept_rows, edge_table, can2idx,
                 # `force` 是「用户明确要求重算」——它上面不省钱,见
                 # `reusable_artifact_payloads` 的最后一段。
                 reusable=({} if force
@@ -3511,7 +3531,7 @@ class KnowledgeLifecycleService:
         seq: int,
         cluster_seq: int,
         kept_rows: "List[Tuple[str, List[str]]]",
-        edge_weights: "Dict[tuple, int]",
+        edge_table: "CanonicalEdgeTable",
         can2idx: "Dict[str, int]",
         *,
         reusable: "Optional[Dict[str, dict]]" = None,
@@ -3523,7 +3543,7 @@ class KnowledgeLifecycleService:
         榜单 / 边出处构成,见 ports.py 只读聚合段头的双后端实测),生产库 200 万簇行 /
         800 万边,冷态与 `relation_connected_object_ids` 那次 39 分钟事故同量级。它们
         绝不能挂在在线请求上。另两份(跨板块边 / 来源画像)则是这次构建的边际成本:
-          · 跨板块边:`ew` 已经在手,按 membership 折叠一遍,近似免费;
+          · 跨板块边:canonical 边表已经在手,按 membership 向量化折叠一遍,近似免费;
           · 来源画像:新增一次 `knowledge_objects` 扫描,与 `community_graph_rows`
             同量级 —— 是新增开销,但与社区构建同批,不给在线请求付。
 
@@ -3556,7 +3576,7 @@ class KnowledgeLifecycleService:
         为空 / 不传 = 全部重算(`force=True` 与首次构建走这条)。
 
         ⚠ **这个戳保证的是「都属于同一轮预计算」,不是「都读到了同一份 KG 快照」。**
-        本方法里有四个以上互不同步的读点(跨板块边用的 `ew` 建于 rebuild 的图扫描、
+        本方法里有四个以上互不同步的读点(跨板块边用的边表建于 rebuild 的图扫描、
         来源画像自开一条读连接、三条统计快照各自再自开一条),一次并发的 `store_kg`
         插在中间,直方图就会反映一个比跨板块边更新的 KG。落库事务保证的是**可见性
         原子**(要么整批可见、要么整批不可见),不是**内容原子**。
@@ -3590,7 +3610,7 @@ class KnowledgeLifecycleService:
         """
         sizes = [(cid, len(members)) for cid, members in kept_rows]
         # 节点下标 -> community_id。**刻意不是** canonical -> community_id 的 dict:
-        # 那会在 `ew` 还占着大头的这一刻凭空多一份同基数(生产 ~171 万)的 str->str
+        # 那会在边表还占着大头的这一刻凭空多一份同基数(生产 ~171 万)的 str->str
         # 映射。`can2idx` 已经在手,按下标存只是一个指针数组。
         community_of_index: "List[Optional[str]]" = [None] * len(can2idx)
         for cid, members in kept_rows:
@@ -3598,31 +3618,39 @@ class KnowledgeLifecycleService:
                 index = can2idx.get(member)
                 if index is not None:
                     community_of_index[index] = cid
-        # ⚠ 这一步**搬空** `edge_weights`(= 调用方的 `ew`),不是遍历它:聚合出来的
-        # `_cross` 在最坏情况下与 `ew` 同量级(生产 836 万条 / 约 1.4 GB),两份同时
-        # 驻留就是在 437 GB 库的峰值时刻再叠一个峰值。落库上限
-        # (`MAX_PERSISTED_COMMUNITY_EDGES`)管的是**写出去多少**,管不了算的时候占
-        # 多少 —— 那是 codex 第 7 轮评审的 P1。`ew` 在这之后不得再被使用,
-        # `rebuild_communities` 里 Louvain 早已跑完。
-        folder = fold_cross_community_edges(edge_weights, community_of_index)
+        # ⚠ 这一步**释放** `edge_table`(= 调用方的 `edge_table`),不是遍历它:折叠
+        # 出来的板块对数在最坏情况下与边表同量级(生产 836 万条),两份同时驻留就是在
+        # 437 GB 库的峰值时刻再叠一个峰值。落库上限(`MAX_PERSISTED_COMMUNITY_EDGES`)
+        # 管的是**写出去多少**,管不了算的时候占多少 —— 那是 codex 第 7 轮评审的 P1。
+        # 释放必须由**持有者自己**做(`CanonicalEdgeTable.release`):`edge_table` 是
+        # 调用方 `rebuild_communities` 传下来的实参,那个栈帧的局部名在本方法执行期间
+        # 一直活着,本方法 `del` 自己的形参一个字节也放不掉。
+        folder = fold_cross_community_edges(edge_table, community_of_index)
         del community_of_index
         head, head_members, total_members = head_community_ids(sizes)
 
-        # 有界物化,唯一的一份:`top_edges` 内部是 O(limit) 的堆,不排整张表;
-        # store 直接按批消费这个列表,不再拷第二份。
+        # 有界物化,唯一的一份:`top_edges` 的返回长度有硬上限,store 直接按批消费这个
+        # 列表,不再拷第二份。
         edges = folder.top_edges(MAX_PERSISTED_COMMUNITY_EDGES)
+        community_edges_payload = {
+            "level": int(level),
+            "edges": len(edges),                    # 落库行数
+            "edges_total": folder.total_edges,      # 截断前的板块对总数
+            "truncated": len(edges) < folder.total_edges,
+            "edge_limit": MAX_PERSISTED_COMMUNITY_EDGES,
+            # 图统计量:全部跨板块边权,**不**随落库上限变化。
+            "cross_weight": folder.cross_weight,
+            "intra_weight": folder.intra_weight,
+            "communities": len(sizes),
+        }
+        # ⚠ **折叠结果到此为止,必须当场整个放掉**(codex 第 9 轮 P1-2)。它已经把要
+        # 落库的东西交出来了(上面那个 payload + 有界的 `edges`),而紧接着的三条查询
+        # (簇大小直方图 / 边出处构成 / 来源画像扫描)每一条都是全表重活,自己就要在
+        # 库内分配 O(分组数) 的临时结构 —— 生产 200 万簇行、836 万边。让折叠结果跨过
+        # 它们,就是把两个峰值叠在同一时刻,而这三条根本不需要它。
+        del folder
         payloads = {
-            ARTIFACT_COMMUNITY_EDGES: {
-                "level": int(level),
-                "edges": len(edges),                    # 落库行数
-                "edges_total": folder.total_edges,      # 截断前的板块对总数
-                "truncated": len(edges) < folder.total_edges,
-                "edge_limit": MAX_PERSISTED_COMMUNITY_EDGES,
-                # 图统计量:全部跨板块边权,**不**随落库上限变化。
-                "cross_weight": folder.cross_weight,
-                "intra_weight": folder.intra_weight,
-                "communities": len(sizes),
-            },
+            ARTIFACT_COMMUNITY_EDGES: community_edges_payload,
             ARTIFACT_CLUSTER_HISTOGRAM: self.unified_kg.cluster_size_histogram(
                 notebook_id
             ),

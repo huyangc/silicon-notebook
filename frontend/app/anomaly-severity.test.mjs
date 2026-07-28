@@ -247,11 +247,22 @@ test("账本不是同一轮算的 → integrity(整份报告级别)", () => {
   assert.equal(anomalies[0].label, "数字口径不一致");
 });
 
-test("来源画像里指向已删来源的那一行 → info(下次整理会自己消失,不是数据坏了)", () => {
+test("来源画像里指向已删来源的那一行 → info(不是数据坏了,但也不会自己消失)", () => {
   assert.deepEqual(analysisSourceRowAnomalies({ source_missing: false }), []);
   const anomalies = analysisSourceRowAnomalies({ source_missing: true });
   assert.equal(anomalies.length, 1);
   // ⚠ 档位是这条断言的重点:改成 integrity 会让一屏几十行历史孤儿引用全变红字。
   assert.equal(anomalies[0].severity, "info");
   assert.equal(anomalies[0].label, "来源已不存在");
+  // ⚠ codex 第 9 轮 P2:文案**不得**承诺「重新整理后这一行会消失」——做不到。后端那次
+  // 扫描是**刻意**保留孤儿 source_id 引用的(不写成 `JOIN sources`),重建板块也不会
+  // 删掉底层知识对象,所以只要那些对象还在,这一行每次重算都照样出现。
+  assert.ok(
+    anomalies[0].tooltip.includes("知识对象还在"),
+    `提示必须说清对象还在库里:${anomalies[0].tooltip}`,
+  );
+  assert.ok(
+    !anomalies[0].tooltip.includes("消失"),
+    `提示不得承诺这一行会自己消失:${anomalies[0].tooltip}`,
+  );
 });

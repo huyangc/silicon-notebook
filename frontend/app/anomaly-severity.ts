@@ -143,7 +143,12 @@ export function analysisLedgerAnomalies(report: { ledger_consistent: boolean }):
 }
 
 const SOURCE_GONE_LABEL = "来源已不存在";
-const SOURCE_GONE_TOOLTIP = "这一行引用的来源已经从库里删掉了；下次重新合并后这一行会消失。";
+// ⚠ 这条文案**不得**承诺「重新整理就会消失」(codex 第 9 轮 P2)。这一行留在报告里是
+// **刻意**的:后端那次扫描专门保留了指向已删来源的孤儿引用(不写成 `JOIN sources`),
+// 为的就是把这类知识对象报出来。重建板块不会删掉底层的知识对象,所以只要那些对象还在，
+// 这一行每次重算都会照样出现。承诺它会自己消失，是让人白等一次整理。
+const SOURCE_GONE_TOOLTIP =
+  "原始来源已经从库里删掉了，但它带进来的知识对象还在。除非把这些对象也清理掉，这一行每次重新整理后都会照常出现。";
 
 /** 来源画像里指向已删除来源的那一行(标题为空到底是「没标题」还是「已删除」)。 */
 export function analysisSourceRowAnomalies(row: { source_missing: boolean }): Anomaly[] {

@@ -3,7 +3,7 @@
 承 `docs/superpowers/specs/2026-07-25-kg-analysis-view-design.md` §3.2/§3.3/§3.4。
 
 为什么单独一个模块:折叠发生在 `KnowledgeLifecycleService.rebuild_communities` 里
-(那里已经握着 canonical 整数边图 `ew` 与 Louvain 的 membership),但它是**纯计算**——
+(那里已经握着 canonical 整数边表与 Louvain 的 membership),但它是**纯计算**——
 不碰连接、不拼 SQL、不判 dialect。抽出来的收益有三个:
 
 1. **两个后端拿到逐字相同的产物行。** store 只负责把这里算出的行落库,
@@ -43,8 +43,19 @@ from __future__ import annotations
 
 import heapq
 from typing import (
-    Dict, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple,
+    Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple,
 )
+
+import numpy as np
+
+# canonical 节点下标与边权的存储类型(设计 §3.32)。int32 是刻意的:节点下标的上界是
+# canonical 成员数(生产 ~171 万),边权的上界是关系行数(生产 836 万),两者都离
+# 2^31 有三个数量级的余量,而 int64 会让整张边表凭空翻一倍。
+EDGE_INDEX_DTYPE = np.int32
+EDGE_WEIGHT_DTYPE = np.int32
+
+# 「这一列已经放掉了」的占位:共享同一个零长数组,不为每次释放再分配一个对象。
+_EMPTY_INDEX_COLUMN = np.empty(0, dtype=EDGE_INDEX_DTYPE)
 
 
 # 「全库头部板块集合」的覆盖阈值:按 size 降序累积覆盖到该 notebook **50%** canonical
@@ -65,14 +76,14 @@ PRECOMPUTED_LARGEST_CLUSTERS = 20
 # 是 836 万边 / 约 171 万 canonical 成员(边/节点比 ≈ 4.9)。本机三个样本的比值只有
 # 1.4,且「每板块跨边数」在样本里是 0 → 0.75 → 0.41(不单调),**撑不起任何外推**:
 # 那三个点既不能证明生产上是 1%,也不能证明不是 15%。取 5~15% 这档,明细表就是 40~130
-# 万行,而落库那一刻 `cross` dict 与截断后的行列表同时活着。这正是
+# 万行,而落库那一刻折叠结果与截断后的行列表同时活着。这正是
 # #340/#342/#347/#351/#352/#354 那条 OOM 轨道盯着的同一个库、同一个峰值时刻。
 #
 # ⚠ **这个上限只管「写出去多少」,管不了「算的时候占多少」**(codex 第 7 轮评审)。
-# 聚合阶段的 `cross` dict 会长到**全部**跨板块对那么大,而那个规模同样没有结构性上界。
-# 所以有界性是**另一件事**、由另一个机制保证:`CrossCommunityEdgeFolder.drain` 边消费
-# 边释放 `ew`,聚合期间两份结构的条目数之和恒等于 `ew` 的初始条目数(见那段说明)。
-# 两个机制缺一不可,别把其中一个当成另一个的替代。
+# 折叠结果的板块对数会长到**全部**跨板块对那么大,而那个规模同样没有结构性上界。
+# 所以有界性是**另一件事**、由另一个机制保证:边表与折叠结果都是列式 int32 数组
+# (设计 §3.32),同样条数下比 dict 小一个多数量级,中间量用完即释放,而且折叠一开始
+# 就把输入边表 `release()` 掉。两个机制缺一不可,别把其中一个当成另一个的替代。
 #
 # 20 万这个值的依据是**用途**而不是实测分位数(生产上没有可测的数据点,见上):俯瞰图
 # 本来就只画 top-N 个板块与它们之间最重的边,20 万条已经比任何可读的图多两个数量级。
@@ -148,7 +159,7 @@ _BOARD_DEPENDENT_ARTIFACT_KINDS = frozenset(BOARD_DEPENDENT_ARTIFACT_KINDS)
 #                              这张表的行;
 #   · largest_clusters        `FROM concept_clusters c JOIN knowledge_objects o …
 #                              WHERE c.object_type='concept' GROUP BY c.canonical_id`;
-#   · community_edges         折叠的输入 `ew` 来自 `community_graph_rows`,那条
+#   · community_edges         折叠的输入边表来自 `community_graph_rows`,那条
 #                              `LEFT JOIN concept_clusters cs/ct` 把每条边的两端映射到
 #                              canonical —— 簇一变,同一批关系折出来的板块对就不同;
 #   · source_profiles         `source_community_counts` 的 `COALESCE(c.canonical_id,
@@ -603,38 +614,291 @@ def head_community_ids(
     return frozenset(head), covered, total
 
 
+class CanonicalEdgeTable:
+    """canonical 整数边图的**列式**表示:三个等长的 numpy 整数数组(设计 §3.32)。
+
+    ``src[i] <= dst[i]``(无向归一),``(src[i], dst[i])`` 两两不同,``weight[i]`` 是
+    这一对 canonical 在 `community_graph_rows` 里出现的次数。行序 = **首次出现序**,
+    与它取代的那张 `dict[(int, int), int]` 的插入序逐字一致 —— 见 `CanonicalEdgeTableBuilder.build`
+    里那段说明,那不是审美问题,Louvain 的输出会随边序变。
+
+    为什么不是 dict(codex 第 2/7/9 轮连续三轮 P1 的共同根源,设计 §3.32):
+    ``dict[(int, int), int]`` 的每条边都要一个新分配的 int 二元组 + 一对 int 对象 +
+    哈希表槽位,生产 836 万边约 1.4 GB;而且**折叠它**必然要么造第二份同量级的 dict、
+    要么依赖 `popitem`(它 O(1) 但**不缩哈希表**,源头照样占着)。三个 int32 数组
+    把同一份数据压到约 100 MB,折叠则是纯向量化、中间量全是数组、用完即 `del`。
+    本机 20 万边实测:dict 峰值 42.5 MB vs 三数组 2.4 MB。
+
+    ⚠ 本对象是**一次性**的:`fold_cross_community_edges` 会在折叠开始时调用
+    `release()` 把三个数组放掉(见那里的说明)。调用方在折叠之后不得再用它。
+    """
+
+    __slots__ = ("src", "dst", "weight", "n_nodes")
+
+    def __init__(
+        self,
+        src: "np.ndarray",
+        dst: "np.ndarray",
+        weight: "np.ndarray",
+        n_nodes: int,
+    ) -> None:
+        self.src = src
+        self.dst = dst
+        self.weight = weight
+        self.n_nodes = int(n_nodes)
+
+    def __len__(self) -> int:
+        """唯一边(= canonical 对)的条数。"""
+        return int(self.src.size)
+
+    def igraph_edges(self) -> "np.ndarray":
+        """igraph `Graph(n=…, edges=…)` 直接吃的 ``(M, 2)`` 整数数组。
+
+        ⚠ 这是一份**拷贝**(`column_stack`),不是视图 —— 但它是**临时值**:按
+        ``_ig.Graph(n=…, edges=table.igraph_edges())`` 这样写,igraph 把它拷进自己的
+        C 结构之后这份就当场回收。第 7 轮评审抓到的 `list(ew.keys())` 别名(那份拷贝
+        与 dict 共享同一批 key 元组、一个活着另一个一个字节都放不掉)在数组模型下**不
+        存在**:column_stack 出来的是独立缓冲区,和 `src`/`dst` 没有任何共享。
+        """
+        return np.column_stack([self.src, self.dst])
+
+    def release(self) -> None:
+        """把三个数组换成空数组 —— 调用方栈帧上的那个引用因此不再钉住 GB 级缓冲。
+
+        ⚠ 这是**必须**的,不是礼貌:`rebuild_communities` 把本对象作为**实参**传给
+        `_precompute_kg_analysis`,调用方的局部名在整个调用期间都活着,被调用方
+        `del` 自己那个形参一个字节也放不掉。唯一能在调用进行中放掉的办法,就是让
+        持有者自己把引用换掉。语义上等价于旧模型里 `drain` 的「搬空 `ew`」。
+        """
+        self.src = np.empty(0, dtype=EDGE_INDEX_DTYPE)
+        self.dst = np.empty(0, dtype=EDGE_INDEX_DTYPE)
+        self.weight = np.empty(0, dtype=EDGE_WEIGHT_DTYPE)
+
+
+class CanonicalEdgeTableBuilder:
+    """按行喂入 canonical 节点下标对,攒出一张 `CanonicalEdgeTable`。
+
+    喂入侧(`rebuild_communities` 的图扫描)本来就是 Python 逐行的,所以这里也逐行收;
+    但收进的是**分块的 int32 缓冲**而不是 Python 容器:8.36 万…836 万条边在 list 里
+    是「指针数组 + 每条一个 int 对象」,在 int32 块里就是 4 字节。块满了换新块,
+    `build` 时逐块拷进一条连续数组、拷完一块放掉一块。
+
+    ⚠ **一次性**:`build` 会把攒下的块全部消化掉,不能建第二次(第二次会拿到一张空表,
+    而空表在这条路径上意味着「这个库一条边都没有」——一个静默的假答案)。
+    """
+
+    # 每块 6.5 万条 = 每块 256 KB × 2 列。块太小则拼接的块数多,块太大则小库(绝大多数
+    # notebook 只有几千条边)白占内存。
+    _CHUNK = 1 << 16
+
+    __slots__ = ("_full", "_src", "_dst", "_fill", "_rows", "_built")
+
+    def __init__(self) -> None:
+        self._full: List[List["np.ndarray"]] = []
+        self._src = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+        self._dst = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+        self._fill = 0
+        self._rows = 0
+        self._built = False
+
+    def add(self, left: int, right: int) -> None:
+        """喂一条边(两个 canonical 节点下标)。方向在这里归一,与旧 dict 键逐字同规则。"""
+        if left > right:
+            left, right = right, left
+        if self._fill == self._CHUNK:
+            self._full.append([self._src, self._dst])
+            self._src = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+            self._dst = np.empty(self._CHUNK, dtype=EDGE_INDEX_DTYPE)
+            self._fill = 0
+        self._src[self._fill] = left
+        self._dst[self._fill] = right
+        self._fill += 1
+        self._rows += 1
+
+    def build(self, n_nodes: int) -> CanonicalEdgeTable:
+        """聚合成唯一边表。**行序 = 首次出现序**,这是本方法唯一难的地方。
+
+        ⚠ **Louvain 对边的输入顺序敏感。** 旧模型喂给 igraph 的是 `list(ew.keys())`,
+        而 Python dict 保持插入顺序 —— 也就是每对 canonical 的**首次出现序**。数组化
+        之后若按排序序或任何别的顺序喂,板块划分会漂:已部署库的 `communities`、
+        `community_seq`、以及一切依赖板块的产物跟着全漂。这不是性能问题,是正确性问题
+        (设计 §3.32 的不变量 1,有真实库的逐字比对)。
+
+        所以聚合是「稳定排序 + 取每组最小原下标 + 按该下标重排」:
+          1. 复合键 ``src * n_nodes + dst``(int64,``n_nodes`` 上界 ~171 万 → 键上界
+             ~2.9e12,离 int64 有六个数量级余量);
+          2. ``argsort(kind="stable")`` —— 稳定是**必需**的:它保证同键组内的原下标
+             递增,于是每组第一个就是该边的首次出现位置;
+          3. 组边界用相邻不等取,组内条数就是权重;
+          4. 按「每组首次出现位置」再排一次,得到首次出现序。
+        """
+        if self._built:
+            raise RuntimeError(
+                "CanonicalEdgeTableBuilder.build 只能调一次:攒下的块已经被消化掉,"
+                "再建一次只会拿到一张空表 —— 而空表在这条路径上意味着「一条边都没有」"
+            )
+        self._built = True
+        n_nodes = int(n_nodes)
+        total = int(self._rows)
+        src_raw = self._drain_column(0)
+        dst_raw = self._drain_column(1)
+        if total == 0:
+            return CanonicalEdgeTable(
+                np.empty(0, dtype=EDGE_INDEX_DTYPE),
+                np.empty(0, dtype=EDGE_INDEX_DTYPE),
+                np.empty(0, dtype=EDGE_WEIGHT_DTYPE),
+                n_nodes,
+            )
+        key = src_raw.astype(np.int64)
+        key *= max(n_nodes, 1)
+        key += dst_raw
+        order = np.argsort(key, kind="stable")
+        sorted_key = key[order]
+        del key
+        starts = _group_starts(sorted_key)
+        del sorted_key
+        counts = np.diff(starts, append=total).astype(EDGE_WEIGHT_DTYPE)
+        first_seen = order[starts]          # stable 排序 ⇒ 组内最小原下标 = 首次出现
+        del order, starts
+        by_first_seen = np.argsort(first_seen)
+        picked = first_seen[by_first_seen]
+        del first_seen
+        table = CanonicalEdgeTable(
+            src_raw[picked], dst_raw[picked], counts[by_first_seen], n_nodes
+        )
+        return table
+
+    def _drain_column(self, column: int) -> "np.ndarray":
+        """把某一列的全部块拷进一条连续数组,**拷完一块就放掉一块**。
+
+        刻意不用 `np.concatenate(parts)`:那要求全部块与结果同时在场(峰值 2M),
+        而逐块拷 + 当场丢引用的峰值是「结果 + 尚未拷完的块」。返回的是**独立缓冲**,
+        不是建表块的视图 —— 视图会让整块 65536 槽的缓冲跟着结果一起活下去。
+        """
+        buffers = self._full
+        tail = (self._src if column == 0 else self._dst)[: self._fill]
+        joined = np.empty(self._rows, dtype=EDGE_INDEX_DTYPE)
+        at = 0
+        for pair in buffers:
+            chunk = pair[column]
+            joined[at:at + chunk.size] = chunk
+            pair[column] = _EMPTY_INDEX_COLUMN     # 这一块到此为止
+            at += chunk.size
+        joined[at:at + tail.size] = tail
+        if column == 0:
+            self._src = _EMPTY_INDEX_COLUMN
+        else:
+            self._dst = _EMPTY_INDEX_COLUMN
+        return joined
+
+
+def _group_starts(sorted_keys: "np.ndarray") -> "np.ndarray":
+    """已排序键数组里每个相等分组的起始下标。空数组 → 空结果。"""
+    size = int(sorted_keys.size)
+    if size == 0:
+        return np.empty(0, dtype=np.intp)
+    is_start = np.empty(size, dtype=bool)
+    is_start[0] = True
+    np.not_equal(sorted_keys[1:], sorted_keys[:-1], out=is_start[1:])
+    starts = np.flatnonzero(is_start)
+    del is_start
+    return starts
+
+
+class CrossCommunityEdgeFold:
+    """向量化折叠的**结果**:跨板块边按板块对聚合后的列式表示(设计 §3.32)。
+
+    每条边的状态全部在 ndarray 里,**没有任何按边计数的 Python 容器** —— 这正是
+    第 2/7/9 轮那三个 P1 想要的东西:折叠不再造第二份同量级的 dict,也不再需要一个
+    「不缩哈希表」的 `popitem` 来假装有界。
+
+    ``_pair_lo`` / ``_pair_hi`` 存的是**板块的整数序号**,而序号是按板块 id 字符串
+    **排序**分配的(见 `fold_cross_community_edges`)。这条不是实现细节,是产物契约:
+    正因为整数序等于字符串字典序,`np.minimum`/`np.maximum` 的无向归一才与旧代码
+    ``(src, dst) if src <= dst else (dst, src)`` 的**字符串**比较逐字同解,`top_edges`
+    的并列消歧也才等价于按 ``(src_id, dst_id)`` 升序。
+
+    数组按 ``(lo, hi)`` 升序排好(聚合的副产品),所以 `top_edges` 只要按 ``-weight``
+    做一次**稳定**排序就等价于旧的 ``key=(-weight, src, dst)`` 全序。
+    """
+
+    __slots__ = (
+        "_board_ids", "_pair_lo", "_pair_hi", "_pair_weight", "_intra", "_cross_weight",
+    )
+
+    def __init__(
+        self,
+        board_ids: Sequence[str],
+        pair_lo: "np.ndarray",
+        pair_hi: "np.ndarray",
+        pair_weight: "np.ndarray",
+        intra_weight: int,
+        cross_weight: int,
+    ) -> None:
+        self._board_ids = board_ids
+        self._pair_lo = pair_lo
+        self._pair_hi = pair_hi
+        self._pair_weight = pair_weight
+        self._intra = int(intra_weight)
+        self._cross_weight = int(cross_weight)
+
+    @property
+    def intra_weight(self) -> int:
+        """两端落在同一板块的边权合计(板块内密度,给账本汇总用)。"""
+        return self._intra
+
+    @property
+    def cross_weight(self) -> int:
+        """**全部**跨板块边权合计——不受落库上限影响。"""
+        return self._cross_weight
+
+    @property
+    def total_edges(self) -> int:
+        """截断**前**的跨板块板块对总数。"""
+        return int(self._pair_weight.size)
+
+    def top_edges(self, limit: int) -> List[Tuple[str, str, int]]:
+        """按 ``(-weight, src, dst)`` 取前 ``limit`` 条,结果已定序。
+
+        与 `CrossCommunityEdgeFolder.top_edges` 逐字等价(那是标量参照实现,
+        `test_cross_edge_folder_row_stream_matches_the_preaggregated_fold` 钉两者相同)。
+        实现不同:那边是 `heapq.nsmallest`,这边是对已按 ``(lo, hi)`` 升序的数组做一次
+        按 ``-weight`` 的**稳定** argsort —— 稳定性就是并列时的 ``(src, dst)`` 升序。
+
+        ⚠ argsort 的下标数组是 O(板块对数) 的临时量(836 万对 ≈ 67 MB)。它比旧模型
+        整份 `_cross` dict(约 1.4 GB)小一个多数量级,而且**只活在本方法内**;返回的
+        列表长度有硬上界,调用方据此流式喂给分批 `executemany`。
+        """
+        limit = max(0, int(limit))
+        size = int(self._pair_weight.size)
+        if limit == 0 or size == 0:
+            return []
+        take = min(limit, size)
+        # weight 恒 >= 1,取负在 int32 内安全(只有 INT32_MIN 取负会溢出)。
+        order = np.argsort(np.negative(self._pair_weight), kind="stable")
+        ids = self._board_ids
+        lo, hi, weight = self._pair_lo, self._pair_hi, self._pair_weight
+        return [
+            (ids[int(lo[i])], ids[int(hi[i])], int(weight[i]))
+            for i in order[:take]
+        ]
+
+
 class CrossCommunityEdgeFolder:
-    """把逐条 canonical 边按 membership 折成**跨板块**边的累加器。
+    """把逐条 canonical 边按 membership 折成跨板块边的**标量参照实现**。
 
-    两条喂入路径共用同一个累加器,所以两条路径产出的 `kg_community_edges` 逐字相同:
+    ⚠ 生产路径**不**走这里:`rebuild_communities` 折的是一张 `CanonicalEdgeTable`,
+    走向量化的 `fold_cross_community_edges` → `CrossCommunityEdgeFold`。本类存在的
+    理由只有一个,而且是硬理由 —— 它是那条向量化实现的**差分对照**:
+    `test_cross_edge_folder_row_stream_matches_the_preaggregated_fold` 拿「逐行喂、
+    每行 weight=1」的本类与「喂预聚合边表」的向量化折叠比对,要求两者的
+    `top_edges` / `intra_weight` / `cross_weight` 逐字相同。
 
-      · 全量重建:`fold_cross_community_edges` 直接遍历 `rebuild_communities` 手里的
-        整数边权 `ew`(这一步不新起任何扫描);
-      · 只补账本(见 `rebuild_communities` 的 B1 说明):按 canonical 逐行喂,每行
-        weight=1。`ew` 只是「同一对 canonical 出现了几次」的预聚合,逐行累加与先聚合
-        再折叠对每个板块对的合计**恒等**,所以两条路径不会给出不同的产物。
+    这条对照在数组化之后**变强了**而不是变弱:数组化之前两条路径共用同一个 `add`,
+    比对基本恒真;现在两边是两份独立实现(dict 累加 vs argsort + reduceat),
+    归一方向、并列消歧、权重合计任何一处写歪都会当场分叉。
 
-    ⚠ **内存:聚合阶段本身必须有界,落库上限管不了它**(codex 第 7 轮评审)。
-    `_cross` 的条目数没有任何结构性上界 —— Louvain 的目标函数倾向于减少跨社区边,但
-    「倾向」不是保证,而只补账本那条路径用的还是**库里现成的**划分(它建在另一代合并
-    结果上,跨板块比例可以任意高)。最坏情况下 `_cross` 与 `ew` 同量级:生产 836 万条
-    int-tuple 键、约 1.4 GB。两份同时驻留就是在 437 GB 库的峰值时刻再叠一个峰值。
-
-    所以喂入走 `drain`:**每消化一条 `ew` 的条目就释放一条**,聚合期间
-    ``len(ew) + len(_cross)`` 恒 ≤ `ew` 的初始条目数,而且 `_cross` 的条目更便宜
-    (键是两个**已存在**的板块 id 字符串的引用,不像 `ew` 的键那样每条都是一个新分配的
-    int 二元组)。换句话说:折叠**不新增**同量级的结构,只是把 `ew` 就地换成它的折叠结果。
-
-    刻意**不**做 DB 侧聚合:SQLite 的 `PRAGMA temp_store = MEMORY`(见
-    `repositories/sqlite/database.py`)让 GROUP BY 的临时 B 树也落在进程内存里,一分钱
-    没省,还要为 836 万行的临时表按住写锁;而设计 §3.35 给 SQLite 侧定的标准正是
-    「正确、有界、不 OOM、不长时间持锁」。也刻意**不**做分批 + 归并:那需要外部排序的
-    脚手架,而 `total_edges` / `top_edges` 要求**精确**(账本的 `edges_total` 与俯瞰图的
-    边权都不能是近似值),分批只会把复杂度换个地方放。
-
-    落库前再按 weight 降序截到 ``MAX_PERSISTED_COMMUNITY_EDGES``(`top_edges`,
-    `heapq.nsmallest` 的峰值是 O(limit),不是 O(板块对数))—— 绝不为了排序再造一份
-    完整列表。
+    ⚠ 所以**不要**因为「生产没人调 `add`」就删掉它 —— 删掉等于把那条差分对照掏空。
     """
 
     __slots__ = ("_cross", "_intra", "_cross_weight")
@@ -661,31 +925,6 @@ class CrossCommunityEdgeFolder:
         key = (src, dst) if src <= dst else (dst, src)   # 无向归一
         self._cross[key] = self._cross.get(key, 0) + weight
         self._cross_weight += weight
-
-    def drain(
-        self,
-        edge_weights: MutableMapping[Tuple[int, int], int],
-        community_of_index: Sequence[Optional[str]],
-    ) -> None:
-        """把 ``edge_weights`` **就地搬空**进本累加器 —— 消化一条、释放一条。
-
-        ⚠ **这是破坏性的,而且必须是。** 遍历 + 保留(``for … in ew.items()``)会让
-        整张 `ew`(生产 836 万 int-tuple 键、约 1.4 GB)在 `_cross` 长到同量级的整个
-        过程中一直驻留,峰值就是两者之和。`popitem` 是 dict 上唯一能「边遍历边删」的
-        操作(``for`` 循环里删会 `RuntimeError`),它 O(1)、不触发缩表,取出的键值对
-        一旦被 `add` 消化就立刻可回收。
-
-        结果与遍历版**逐字相同**:每个板块对的合计是整数加法(可交换可结合),而
-        `top_edges` 的排序键 ``(-weight, src, dst)`` 在板块对上是全序(无并列),
-        所以消费顺序不进入产物。`test_cross_edge_folder_row_stream_matches_the_
-        preaggregated_fold` 与两条喂入路径的等价性因此都不受影响。
-
-        调用方(`_precompute_kg_analysis`)在这之后**不得**再用那张 dict;
-        `rebuild_communities` 里 Louvain 早已跑完,`ew` 到这一步的唯一用途就是本次折叠。
-        """
-        while edge_weights:
-            (left, right), weight = edge_weights.popitem()
-            self.add(community_of_index[left], community_of_index[right], weight)
 
     @property
     def intra_weight(self) -> int:
@@ -717,30 +956,90 @@ class CrossCommunityEdgeFolder:
 
 
 def fold_cross_community_edges(
-    edge_weights: MutableMapping[Tuple[int, int], int],
+    edges: CanonicalEdgeTable,
     community_of_index: Sequence[Optional[str]],
-) -> CrossCommunityEdgeFolder:
-    """把 canonical 整数边图按 membership 折叠成跨板块边。
+) -> CrossCommunityEdgeFold:
+    """把 canonical 整数边表按 membership **向量化**折叠成跨板块边(设计 §3.32)。
 
-    ⚠ **`edge_weights` 会被搬空**(见 `CrossCommunityEdgeFolder.drain`):折叠不再是
-    「读一张表、建另一张同量级的表」,而是把 `ew` 就地换成它的折叠结果。调用方在这之后
-    不得再用它。
+    ⚠ **`edges` 会被释放**(第一步就调 `CanonicalEdgeTable.release`):折叠不是「读一张
+    表、建另一张同量级的表」,而是把边表就地换成它的折叠结果。调用方在这之后不得再用它,
+    这一点与旧模型的「搬空 `ew`」是同一个契约,只是不再依赖那个**不缩哈希表**的
+    `popitem`。
 
     ``community_of_index[i]`` 是节点下标 ``i`` 的板块 id(不属于任何保留板块则
     ``None``)。**刻意用按下标的 list 而不是 canonical→板块的 dict**:调用方手里已经
-    有 `can2idx`,再造一份同基数(生产 ~171 万条)的 `str -> str` dict 就是在 `ew`
-    还占着 1.4 GB 的那一刻凭空多几百 MB。list 的每个槽只是一个已存在的板块 id 字符串
-    的引用,基数再大也只有指针数组本身的开销。
+    有 `can2idx`,再造一份同基数(生产 ~171 万条)的 `str -> str` 映射就是在边表还占着
+    内存的那一刻凭空多几百 MB。
 
-    效率:这是 `rebuild_communities` 已经握在手里的 `ew` 的一次**消费**,不新起任何扫描。
-    Louvain 的目标函数本来就在最小化跨社区边,所以结果通常远小于 `ew`(本机真实库实测:
-    49109 条唯一边 → 503 对跨板块)——但**那三个本机样本不足以外推到生产**,而且只补
-    账本那条路径用的是库里现成的划分(见 `drain`),所以既不能靠它保证聚合有界(靠
-    `drain`),也不能靠它保证落库有界(靠 `MAX_PERSISTED_COMMUNITY_EDGES`)。
+    ⚠ **板块序号按 id 字符串排序分配。** 旧代码的无向归一是
+    ``(src, dst) if src <= dst else (dst, src)`` —— 拿**字符串**比大小。向量化之后
+    比的是整数序号,只有序号按字符串排序分配,`np.minimum`/`np.maximum` 才与它同解;
+    否则同一对板块的 (src, dst) 会左右颠倒,`kg_community_edges` 的每一行都变样。
+
+    ⚠ **中间量全部是数组、且用完即 `del`。** 峰值不再是「边表 + 折叠结果」两份同量级
+    dict(生产各约 1.4 GB),而是几个 int32/int64 列(836 万边合计几百 MB),
+    且随流程逐段回落。折叠结果的条目数**仍然**没有结构性上界(Louvain 的目标函数
+    只是「倾向于」减少跨社区边,而补账本那条路径用的是库里现成的划分),所以落库
+    有界照旧靠 `MAX_PERSISTED_COMMUNITY_EDGES`,两个机制缺一不可。
+
+    刻意**不**做 DB 侧聚合:SQLite 的 `PRAGMA temp_store = MEMORY`(见
+    `repositories/sqlite/database.py`)让 GROUP BY 的临时 B 树也落在进程内存里,一分钱
+    没省,还要为 836 万行的临时表按住写锁;而设计 §3.35 给 SQLite 侧定的标准正是
+    「正确、有界、不 OOM、不长时间持锁」。
     """
-    folder = CrossCommunityEdgeFolder()
-    folder.drain(edge_weights, community_of_index)
-    return folder
+    board_ids = sorted({cid for cid in community_of_index if cid is not None})
+    rank_of = {cid: rank for rank, cid in enumerate(board_ids)}
+    board_of_index = np.full(len(community_of_index), -1, dtype=EDGE_INDEX_DTYPE)
+    for index, community_id in enumerate(community_of_index):
+        if community_id is not None:
+            board_of_index[index] = rank_of[community_id]
+    del rank_of
+    src, dst, weight = edges.src, edges.dst, edges.weight
+    edges.release()
+    left_board = board_of_index[src]
+    del src
+    right_board = board_of_index[dst]
+    del dst, board_of_index
+    joined = (left_board >= 0) & (right_board >= 0)
+    same_board = joined & (left_board == right_board)
+    intra_weight = int(weight[same_board].sum(dtype=np.int64))
+    crossing = joined & ~same_board
+    del joined, same_board
+    left_cross = left_board[crossing]
+    del left_board
+    right_cross = right_board[crossing]
+    del right_board
+    pair_weight = weight[crossing]
+    del weight, crossing
+    cross_weight = int(pair_weight.sum(dtype=np.int64))
+    lo = np.minimum(left_cross, right_cross)
+    hi = np.maximum(left_cross, right_cross)
+    del left_cross, right_cross
+    # 复合键 ``lo * K + hi``:K = 板块数,上界 = canonical 节点数(生产 ~171 万),
+    # 键上界 ~2.9e12,离 int64 有六个数量级余量。排序后同一板块对必然相邻。
+    key = lo.astype(np.int64)
+    key *= max(len(board_ids), 1)
+    key += hi
+    order = np.argsort(key, kind="stable")
+    starts = _group_starts(key[order])
+    del key
+    lo = lo[order]
+    hi = hi[order]
+    pair_weight = pair_weight[order]
+    del order
+    folded = CrossCommunityEdgeFold(
+        board_ids,
+        lo[starts],
+        hi[starts],
+        # ⚠ `dtype=` 不能省:`np.add.reduceat` 与 `np.sum` 同规则,int32 输入默认按
+        # 平台整型(int64)累加,权重列会凭空翻一倍。每组的合计上界是关系行数,int32 够。
+        (np.add.reduceat(pair_weight, starts, dtype=EDGE_WEIGHT_DTYPE) if starts.size
+         else np.empty(0, dtype=EDGE_WEIGHT_DTYPE)),
+        intra_weight,
+        cross_weight,
+    )
+    del lo, hi, pair_weight, starts
+    return folded
 
 
 class SourceProfileFolder:

@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import json
 import re
+import weakref
 from contextlib import contextmanager
 
+import igraph
+import numpy as np
 import pytest
 
 from app.core.config import Settings
@@ -32,8 +35,11 @@ from app.services.kg_analysis_precompute import (
     BOARD_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_SEQ_PAYLOAD_KEY,
+    EDGE_INDEX_DTYPE,
+    EDGE_WEIGHT_DTYPE,
     MAINSTREAM_COVERAGE,
     MAX_PERSISTED_COMMUNITY_EDGES,
+    CanonicalEdgeTableBuilder,
     CrossCommunityEdgeFolder,
     SourceProfileFolder,
     analysis_ledger_is_current,
@@ -88,15 +94,45 @@ def test_head_community_ids_is_empty_without_members():
     assert head_community_ids([("a", 0), ("b", 0)]) == (frozenset(), 0, 0)
 
 
+def _edge_table(pairs: dict, n_nodes: int | None = None):
+    """把「(下标对) -> 权重」的字面量喂成一张 `CanonicalEdgeTable`。
+
+    刻意走真 `CanonicalEdgeTableBuilder`(每对喂 weight 次)而不是直接拼数组:
+    夹具因此同时覆盖建表侧的方向归一与权重聚合。
+    """
+    builder = CanonicalEdgeTableBuilder()
+    for (left, right), weight in pairs.items():
+        for _ in range(weight):
+            builder.add(left, right)
+    if n_nodes is None:
+        n_nodes = 1 + max(
+            (max(pair) for pair in pairs), default=-1
+        )
+    return builder.build(n_nodes)
+
+
+def test_the_edge_table_builder_refuses_to_build_twice():
+    """建表是**一次性**的(块拷完就放掉),第二次必须响亮失败而不是吐一张空表。
+
+    静默的空表在这条路径上是最坏的一种错:它的含义是「这个库一条边都没有」——
+    板块划分会被整个抹平,而没有任何一处报错。
+    """
+    builder = CanonicalEdgeTableBuilder()
+    builder.add(0, 1)
+    assert len(builder.build(2)) == 1
+    with pytest.raises(RuntimeError, match="只能调一次"):
+        builder.build(2)
+
+
 def test_fold_cross_community_edges_normalizes_direction_and_splits_intra():
     # community_of_index[i] = 节点下标 i 的板块(刻意是按下标的 list,不是 str->str dict)
     folder = fold_cross_community_edges(
-        {
+        _edge_table({
             (0, 1): 2,   # cm-b <-> cm-a
             (3, 2): 5,   # cm-b <-> cm-a,反向 —— 必须折进同一个键
             (1, 2): 7,   # cm-a 内部
             (0, 3): 4,   # cm-b 内部
-        },
+        }),
         ["cm-b", "cm-a", "cm-a", "cm-b"],
     )
     assert folder.top_edges(10) == [("cm-a", "cm-b", 7)]
@@ -106,11 +142,65 @@ def test_fold_cross_community_edges_normalizes_direction_and_splits_intra():
 def test_fold_cross_community_edges_skips_canonicals_outside_kept_boards():
     """min-size 过滤掉的板块成员在 `communities` 里根本不存在,折进去就是悬空引用。"""
     folder = fold_cross_community_edges(
-        {(0, 1): 3, (0, 2): 9},
+        _edge_table({(0, 1): 3, (0, 2): 9}),
         ["cm-a", "cm-b", None],   # 下标 2 的节点落选
     )
     assert folder.top_edges(10) == [("cm-a", "cm-b", 3)]
     assert (folder.intra_weight, folder.cross_weight) == (0, 3)
+
+
+def test_fold_normalizes_pair_direction_by_board_id_not_by_node_index():
+    """无向归一必须按**板块 id 字符串**,不是按板块的整数序号(设计 §3.32)。
+
+    旧代码是 `(src, dst) if src <= dst else (dst, src)` —— 拿字符串比大小。向量化之后
+    比的是整数序号,只有序号按 id 字符串排序分配,`np.minimum`/`np.maximum` 才同解。
+    这里刻意让**下标序与 id 字典序相反**:按下标归一会输出 ("cm-z", "cm-a"),
+    `kg_community_edges` 的每一行都会左右颠倒。
+    """
+    folder = fold_cross_community_edges(
+        _edge_table({(0, 1): 3}), ["cm-z", "cm-a"],
+    )
+    assert folder.top_edges(10) == [("cm-a", "cm-z", 3)]
+
+
+def test_edge_table_rows_keep_the_first_appearance_order_of_the_dict_it_replaced():
+    """**设计 §3.32 不变量 1**:数组化后的边序必须与旧 dict 的插入序逐字一致。
+
+    Louvain 对边的输入顺序敏感,而旧模型喂给 igraph 的是 `list(ew.keys())` ——
+    Python dict 保持插入顺序,也就是每对 canonical 的**首次出现序**。数组化后若按
+    排序序(或任何别的顺序)喂,板块划分会漂:已部署库的 `communities`、
+    `community_seq`、一切依赖板块的产物跟着全漂。这不是性能问题,是正确性问题。
+
+    ⚠ 规模刻意不小(几千条、重复率高):首次出现序靠 `argsort(kind="stable")` 保证,
+    而 numpy 的非稳定排序在**小**数组上会退化成插入排序(碰巧也稳定)—— 只用一个
+    四五条边的样例,把 `kind="stable"` 删掉照样绿。
+    """
+    # 手写的小样例先把「排序序 != 首次出现序」这件事说清楚。
+    handmade = [(5, 2), (0, 9), (5, 2), (1, 4), (9, 0), (0, 3)]
+    builder = CanonicalEdgeTableBuilder()
+    for left, right in handmade:
+        builder.add(left, right)
+    table = builder.build(10)
+    assert list(zip(table.src.tolist(), table.dst.tolist())) == [
+        (2, 5), (0, 9), (1, 4), (0, 3),
+    ]
+    assert table.weight.tolist() == [2, 2, 1, 1]
+
+    # 再拿一条确定性的长边流与「旧模型」的 dict 逐字对账。
+    rng = np.random.default_rng(20260728)
+    left = rng.integers(0, 120, size=6000, dtype=np.int64)
+    right = rng.integers(0, 120, size=6000, dtype=np.int64)
+    reference: dict = {}
+    builder = CanonicalEdgeTableBuilder()
+    for a, b in zip(left.tolist(), right.tolist()):
+        if a == b:
+            continue
+        builder.add(a, b)
+        key = (a, b) if a < b else (b, a)
+        reference[key] = reference.get(key, 0) + 1
+    table = builder.build(120)
+    assert list(zip(table.src.tolist(), table.dst.tolist())) == list(reference)
+    assert table.weight.tolist() == list(reference.values())
 
 
 def test_cross_edge_folder_truncates_by_weight_and_reports_the_total():
@@ -145,9 +235,9 @@ def test_cross_edge_folder_row_stream_matches_the_preaggregated_fold():
     只补账本那条路径按行喂,全量重建那条路径喂 `ew`。`ew` 只是「同一对 canonical 出现
     了几次」的预聚合,所以两者对每个板块对的合计恒等 —— 这条把它钉住。
 
-    ⚠ 逐行那一份**必须先喂**:`fold_cross_community_edges` 会把 dict 搬空(见
-    `CrossCommunityEdgeFolder.drain`),先折叠的话下面就没东西可喂了。顺序是被迫的,
-    断言一条没松。
+    ⚠ 这条对照在数组化之后**变强了**:此前两条路径共用同一个 `add`,比对基本恒真;
+    现在一边是标量 dict 累加(`CrossCommunityEdgeFolder`)、另一边是 argsort +
+    `np.add.reduceat` 的向量化实现,归一方向、并列消歧、权重合计任何一处写歪都会分叉。
     """
     index_map = ["cm-a", "cm-a", "cm-b", "cm-c"]
     edge_weights = {(0, 2): 2, (1, 2): 1, (2, 3): 4, (0, 1): 3}
@@ -157,52 +247,98 @@ def test_cross_edge_folder_row_stream_matches_the_preaggregated_fold():
         for _ in range(weight):          # 同一对 canonical 出现 weight 次
             streamed.add(index_map[left], index_map[right], 1)
 
-    pre_aggregated = fold_cross_community_edges(edge_weights, index_map)
+    pre_aggregated = fold_cross_community_edges(_edge_table(edge_weights), index_map)
 
     assert streamed.top_edges(10) == pre_aggregated.top_edges(10)
     assert streamed.intra_weight == pre_aggregated.intra_weight
     assert streamed.cross_weight == pre_aggregated.cross_weight
+    assert streamed.total_edges == pre_aggregated.total_edges
 
 
-def test_the_fold_drains_its_input_instead_of_holding_two_copies():
-    """codex 第 7 轮 P1:聚合**期间**也必须有界,不能只在落库时截断。
+def test_the_fold_is_differentially_identical_to_the_scalar_reference_at_scale():
+    """同一条差分对照,换一个**规模够大、并列够多**的输入再钉一遍。
 
-    落库上限(`MAX_PERSISTED_COMMUNITY_EDGES`)管的是写出去多少;聚合出来的 `_cross`
-    条目数没有任何结构性上界(只补账本那条路径用的是**另一代**合并结果上算出来的划分,
-    跨板块比例可以任意高),最坏情况与 `ew` 同量级 —— 生产 836 万条、约 1.4 GB。
-    两份同时驻留就是在 437 GB 库的峰值时刻再叠一个峰值。
-
-    所以这里钉的是**过程**而不只是结果:每消化一条,输入就真的少一条。只断言
-    「跑完之后 dict 空了」是不够的 —— 先整个遍历完再 `clear()` 一样能过,而那正是
-    被否掉的那种实现。
+    上面那条只有四条边:并列消歧、多板块归一、截断这三处都还没被真正压到。这里用一条
+    确定性的长边流(几千条、几十个板块、大量权重并列),两份实现必须给出逐字相同的
+    `top_edges` / `intra_weight` / `cross_weight` / `total_edges`。
     """
-    index_map = ["cm-a", "cm-b", "cm-c", "cm-a"]
-    edge_weights = {(0, 1): 5, (1, 2): 4, (2, 3): 3, (0, 2): 2, (1, 3): 1}
+    rng = np.random.default_rng(4162)
+    n_nodes = 300
+    left = rng.integers(0, n_nodes, size=8000, dtype=np.int64).tolist()
+    right = rng.integers(0, n_nodes, size=8000, dtype=np.int64).tolist()
+    # 板块 id 的字典序刻意与板块序号错开,归一方向写歪当场分叉。
+    index_map = [
+        None if node % 37 == 0 else f"cm-{(node * 91) % 40:03d}"
+        for node in range(n_nodes)
+    ]
+
+    builder = CanonicalEdgeTableBuilder()
     reference = CrossCommunityEdgeFolder()
-    for (left, right), weight in edge_weights.items():
+    for a, b in zip(left, right):
+        if a == b:
+            continue
+        builder.add(a, b)
+        reference.add(index_map[a], index_map[b], 1)
+
+    folded = fold_cross_community_edges(builder.build(n_nodes), index_map)
+
+    assert folded.total_edges == reference.total_edges > 100
+    assert folded.intra_weight == reference.intra_weight > 0
+    assert folded.cross_weight == reference.cross_weight > 0
+    assert folded.top_edges(1000) == reference.top_edges(1000)
+    assert folded.top_edges(7) == reference.top_edges(7)     # 截断也要同解
+
+
+def test_the_fold_releases_its_input_edge_table():
+    """codex 第 7/9 轮 P1 在新模型下的落点:折叠**释放**输入,不是遍历它留在原地。
+
+    折叠结果的板块对数没有任何结构性上界(补账本那条路径用的是**另一代**合并结果上
+    算出来的划分,跨板块比例可以任意高),最坏与边表同量级 —— 生产 836 万条。两份
+    同时驻留就是在 437 GB 库的峰值时刻再叠一个峰值。
+
+    ⚠ 释放必须由**持有者自己**做(`CanonicalEdgeTable.release`),不能靠被调用方
+    `del` 形参:边表是 `rebuild_communities` 传给 `_precompute_kg_analysis` 的实参,
+    调用方栈帧上的那个名字在整个调用期间都活着。这条断言看的正是**调用方**手里那个
+    对象 —— 被调用方自己 `del` 一遍是过不了的。
+    """
+    table = _edge_table({(0, 1): 5, (1, 2): 4, (2, 3): 3, (0, 2): 2, (1, 3): 1})
+    index_map = ["cm-a", "cm-b", "cm-c", "cm-a"]
+    reference = CrossCommunityEdgeFolder()
+    for (left, right), weight in {
+        (0, 1): 5, (1, 2): 4, (2, 3): 3, (0, 2): 2, (1, 3): 1
+    }.items():
         reference.add(index_map[left], index_map[right], weight)
 
-    seen: list = []
+    folded = fold_cross_community_edges(table, index_map)
 
-    class _Probe(list):
-        """记录每次查板块时输入 dict 还剩多少条 —— 折叠只碰它,不碰 dict。"""
-
-        def __getitem__(self, index):
-            seen.append(len(edge_weights))
-            return list.__getitem__(self, index)
-
-    folded = fold_cross_community_edges(edge_weights, _Probe(index_map))
-
-    assert edge_weights == {}, "输入必须被搬空,不是遍历一遍留在原地"
-    # 条目先被 `popitem` 摘走、再查两个端点,所以剩余量是 4,4,3,3,…,0,0 ——
-    # 严格递减。原地遍历(或者「遍历完再 clear」)在这里会是一串恒定的 5。
-    assert seen == [4, 4, 3, 3, 2, 2, 1, 1, 0, 0], seen
-    # 逐字等价:消费顺序(popitem 是 LIFO)不得进入产物。
+    assert len(table) == 0, "输入边表必须被释放,不是折完还钉在调用方栈帧上"
+    assert (table.src.size, table.dst.size, table.weight.size) == (0, 0, 0)
     assert folded.top_edges(10) == reference.top_edges(10)
     assert (folded.intra_weight, folded.cross_weight) == (
         reference.intra_weight, reference.cross_weight
     )
     assert folded.total_edges == reference.total_edges
+
+
+def test_the_fold_keeps_per_edge_state_in_int32_columns_not_in_a_dict():
+    """设计 §3.32 的**容器形态**本身:每条边的状态只能在列式 ndarray 里。
+
+    第 2/7/9 轮那三个 P1 的共同根源就是 `dict[(int, int), int]` —— 只要它是 dict,
+    折叠就必然要么造第二份同量级结构、要么依赖一个**不缩哈希表**的 `popitem`。所以
+    形态本身要有守卫:退回 dict/list 存边,这条当场红。
+    """
+    folded = fold_cross_community_edges(
+        _edge_table({(0, 1): 3, (1, 2): 2, (0, 2): 1}),
+        ["cm-a", "cm-b", "cm-c"],
+    )
+    columns = (folded._pair_lo, folded._pair_hi, folded._pair_weight)
+    assert all(isinstance(column, np.ndarray) for column in columns), columns
+    assert folded._pair_lo.dtype == folded._pair_hi.dtype == EDGE_INDEX_DTYPE
+    assert folded._pair_weight.dtype == EDGE_WEIGHT_DTYPE
+    assert not any(
+        isinstance(getattr(folded, slot), (dict, set))
+        for slot in folded.__slots__
+    ), "折叠结果里出现了按条目计数的哈希容器"
 
 
 def test_source_profile_folder_computes_the_four_documented_quantities():
@@ -609,15 +745,27 @@ def test_rebuild_writes_every_artifact_kind_under_one_version_stamp(repo):
 
 
 def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypatch):
-    """codex 第 7 轮 P1 的**真实路径**守卫:折叠那一刻,`ew` 只有一份引用。
+    """codex 第 7 轮 P1 的**真实路径**守卫,数组模型下的落点:边表不得有第二份。
 
-    纯折叠层的 `drain` 只有在**没人另外攥着那批 key 元组**时才真的省下内存 ——
-    `list(ew.keys())` 与 `ew` 共享同一批元组对象,那份 Louvain 输入拷贝只要还活在
-    `rebuild_communities` 的栈帧上,「消化一条释放一条」就一个字节都释放不掉。
-    这条守卫按**对象身份**判,不按变量名:换个名字存那份拷贝照样报红。
+    第 7 轮抓到的是 `list(ew.keys())` —— 那份 Louvain 输入拷贝与 `ew` 共享同一批 key
+    元组,只要它还活在 `rebuild_communities` 的栈帧上,「消化一条释放一条」就一个字节
+    都释放不掉。数组化把那个别名结构性地消掉了(`igraph_edges()` 是独立缓冲区的临时
+    值),但**同一类**缺陷换个形态照样能回来:
 
-    refcount 的三份分别是:`ew` 自己的那一条、本函数里的 `sample`、以及
-    `getrefcount` 的实参。多出来的第四份就是那份不该存在的拷贝。
+      · **Louvain 那张 igraph 图**就是今天的「第二份边表」:igraph 把 836 万条边整个
+        拷进了自己的 C 结构,而它的全部产出(membership / degree)在折叠开始前早已被
+        抄成 Python 侧的 comms/deg。它活着跨进折叠,就是原样的第 7 轮缺陷换了个持有者;
+      · 三列若最终指向建表缓冲的**切片视图**,整块 65536 槽的缓冲会跟着活着 ——
+        `base is not None` 当场抓到。⚠ 今天光把 `_drain_column` 的 `.copy()` 删掉是
+        **抓不到**的:`build` 末尾那次 fancy-index 无条件产出新缓冲,视图只活在
+        `build` 里。实测报红的是**组合变异** ——「`_drain_column` 返回视图」+「无重复边
+        时省掉末尾那次拷贝」,而后者恰恰是一个看起来很自然的优化。这条守卫钉的就是
+        那个组合;
+      · 边表对象若被 `rebuild_communities` 另存一份(换个变量名藏起来),refcount
+        会高于基线 —— 按**对象身份**判,不按变量名。
+
+    refcount 的四份:`rebuild_communities` 的局部名、`_precompute_kg_analysis` 的形参、
+    本探针的形参、以及 `getrefcount` 自己的实参。多出来的第五份就是那份不该存在的拷贝。
     """
     notebook_id = _seed(repo)
     import sys
@@ -626,38 +774,57 @@ def test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph(repo, monkeypat
 
     original = lifecycle_module.fold_cross_community_edges
     observed: list = []
+    graph_ref: list = []
+    original_graph_type = igraph.Graph
 
-    def _probe(edge_weights, community_of_index):
-        sample = next(iter(edge_weights))
-        observed.append((len(edge_weights), sys.getrefcount(sample)))
-        del sample
-        return original(edge_weights, community_of_index)
+    def recording_graph(*args, **kwargs):
+        graph = original_graph_type(*args, **kwargs)
+        graph_ref.append(weakref.ref(graph))
+        return graph
 
+    def _probe(edge_table, community_of_index):
+        observed.append((
+            len(edge_table),
+            sys.getrefcount(edge_table),
+            edge_table.src.base, edge_table.dst.base, edge_table.weight.base,
+            bool(graph_ref) and graph_ref[-1]() is not None,
+        ))
+        return original(edge_table, community_of_index)
+
+    monkeypatch.setattr(igraph, "Graph", recording_graph)
     monkeypatch.setattr(lifecycle_module, "fold_cross_community_edges", _probe)
     assert repo.rebuild_communities(notebook_id) == 2
 
     assert len(observed) == 1
-    edges, refcount = observed[0]
+    assert graph_ref, "仪器没装上:Louvain 那张图一次都没被建"
+    edges, refcount, src_base, dst_base, weight_base, graph_alive = observed[0]
     assert edges > 0, "夹具必须真的有边,否则这条守卫是空的"
-    assert refcount == 3, (
-        f"折叠时 `ew` 的 key 元组有 {refcount} 份引用(应为 3):"
-        "Louvain 的输入拷贝还活在栈帧上,drain 因此白做"
+    assert not graph_alive, (
+        "折叠时 Louvain 的 igraph 图还活着 —— 那是边表的第二份拷贝(836 万边),"
+        "它的 membership/degree 早已被抄进 comms/deg"
+    )
+    assert (src_base, dst_base, weight_base) == (None, None, None), (
+        "边表的列是视图,底下那块更大的建表缓冲跟着活着"
+    )
+    assert refcount == 4, (
+        f"折叠时边表有 {refcount} 份引用(应为 4):"
+        "还有一份拷贝活在栈帧上,释放因此白做"
     )
 
 
-def test_the_precompute_leaves_the_edge_graph_drained(repo, monkeypatch):
-    """走真 `rebuild_communities`:`ew` 交给预计算之后必须被搬空。
+def test_the_precompute_leaves_the_edge_graph_released(repo, monkeypatch):
+    """走真 `rebuild_communities`:边表交给预计算之后,**调用方手里那份**必须已被释放。
 
-    纯折叠层那条(`test_the_fold_drains_its_input_instead_of_holding_two_copies`)钉的是
-    折叠器的行为;这一条钉的是**生产调用点真的把 `ew` 交出去了**,而不是先自己拷一份
-    再喂 —— 那样折叠器搬空的就只是拷贝。
+    纯折叠层那条(`test_the_fold_releases_its_input_edge_table`)钉的是折叠器的行为;
+    这一条钉的是**生产调用点真的把边表交出去了**,而不是先自己拷一份再喂 —— 那样
+    折叠释放掉的就只是拷贝,`rebuild_communities` 的栈帧上照旧压着 GB 级的原件。
     """
     notebook_id = _seed(repo)
     captured: list = []
     original = repo._runtime.knowledge_lifecycle._precompute_kg_analysis
 
     def _spy(*args, **kwargs):
-        captured.append(args[5])          # edge_weights(见 _precompute_kg_analysis 签名)
+        captured.append(args[5])          # edge_table(见 _precompute_kg_analysis 签名)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -665,7 +832,11 @@ def test_the_precompute_leaves_the_edge_graph_drained(repo, monkeypatch):
     )
     assert repo.rebuild_communities(notebook_id) == 2
 
-    assert len(captured) == 1 and captured[0] == {}
+    assert len(captured) == 1
+    assert len(captured[0]) == 0
+    assert (captured[0].src.size, captured[0].dst.size, captured[0].weight.size) == (
+        0, 0, 0
+    )
 
 
 def test_cross_board_edges_fold_the_one_bridge(repo):
@@ -897,6 +1068,67 @@ def test_precompute_takes_every_snapshot_outside_any_write_transaction(repo, mon
     )
     assert all(depth == 0 for calls in depths.values() for depth in calls), (
         f"全表级重活在写事务内被调用(write_depth != 0):{depths}"
+    )
+
+
+# 折叠结果**不得**跨过的那几条:三条全表统计快照 + 来源画像那次全表扫。
+_SCANS_AFTER_THE_FOLD = (*ANALYSIS_SNAPSHOTS, "source_community_counts")
+
+
+def test_the_fold_is_released_before_the_full_table_scans_that_follow(repo, monkeypatch):
+    """codex 第 9 轮 P1-2:折叠结果取完 top-N 就必须当场整个放掉。
+
+    它后面紧跟着四次全表扫(簇大小直方图 / 最大簇榜单 / 边出处构成 / 来源画像),
+    每一条自己都要在库内分配 O(分组数) 的临时结构 —— 生产 200 万簇行、836 万边。
+    让折叠结果跨过它们,就是把两个峰值叠在同一时刻,而这四条一个字节都用不到它。
+
+    ⚠ 这是**语义**守卫,形状守卫在这里没用:折叠结果是一个纯 Python 对象,谁都不碰
+    产物表,把 `del folder` 挪到方法末尾(甚至删掉)不会让任何既有断言变色。这里直接
+    对折叠结果挂 weakref,在每条重活被调用的那一刻记它死没死 —— 移动变异(把 `del`
+    挪到三条查询之后)与删除变异都会当场报红。
+    """
+    notebook_id = _seed(repo)
+    alive_at: dict[str, list[bool]] = {}
+    fold_ref: list = []
+
+    from app.services import knowledge_lifecycle as lifecycle_module
+
+    original_fold = lifecycle_module.fold_cross_community_edges
+
+    def spying_fold(*args, **kwargs):
+        folded = original_fold(*args, **kwargs)
+        # 弱引用挂在**权重列**上而不是折叠器对象上:它才是那份按板块对计数的内存,
+        # 而且 ndarray 天然支持 weakref(折叠器带 `__slots__`,挂不上)。
+        # 本闭包自己绝不能留强引用,否则这条守卫恒绿。
+        fold_ref.append(weakref.ref(folded._pair_weight))
+        return folded
+
+    monkeypatch.setattr(
+        lifecycle_module, "fold_cross_community_edges", spying_fold
+    )
+    # (Louvain 那张 igraph 图同样不该跨过这几条,但它由
+    # `test_the_real_rebuild_holds_no_second_copy_of_the_edge_graph` 在更早的时刻
+    # ——折叠开始那一刻——钉住,比这里严格,不在这里重复。)
+    store = repo._runtime.unified_kg
+    for name in _SCANS_AFTER_THE_FOLD:
+        original = getattr(store, name)
+
+        def wrapper(*args, _name=name, _original=original, **kwargs):
+            alive_at.setdefault(_name, []).append(
+                bool(fold_ref) and fold_ref[-1]() is not None
+            )
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, wrapper)
+
+    repo.rebuild_communities(notebook_id)
+
+    assert fold_ref, "仪器没装上:折叠一次都没被调用"
+    assert set(alive_at) == set(_SCANS_AFTER_THE_FOLD), (
+        f"仪器没装上或有查询没被调用:{sorted(alive_at)}"
+    )
+    assert not any(any(calls) for calls in alive_at.values()), (
+        f"折叠结果活着跨过了后续全表扫:{alive_at}"
     )
 
 
