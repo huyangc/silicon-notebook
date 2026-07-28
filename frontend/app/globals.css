@@ -2890,12 +2890,18 @@ button.chat-session-card {
 }
 
 /* --- 本次会话提问导航侧栏：右缘一列圆点，指针靠近时 Dock 式鱼眼放大，正对的一条浮出提问 --- */
+/* 导轨钉在 .chat-body 那一行(.chat-panel 的第 2 行),不是对着整个面板居中。
+   它导航的只是对话区,而面板下方会长出很高的兄弟——问题理解的确认卡最高占
+   58vh。此前用 `position:absolute; top:50%` 对整个面板居中,卡片一出现就把对话区
+   压扁,导轨却仍停在面板中央,浮出的提问卡正好压住卡片右上角。会话抽屉是
+   absolute 浮层不占行,所以对话区恒为第 2 行。 */
 .chat-turn-nav {
-  position: absolute;
+  grid-row: 2;
+  position: relative;
   z-index: 12;
-  top: 50%;
-  right: 10px;
-  transform: translateY(-50%);
+  align-self: center;
+  justify-self: end;
+  margin-right: 10px;
   display: flex;
   justify-content: flex-end;
   max-height: min(66%, 560px);
