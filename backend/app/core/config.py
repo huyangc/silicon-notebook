@@ -426,6 +426,11 @@ class Settings(BaseSettings):
     # 不空转到 reasoning_max_steps; search_elements 累计次数上限(防"每次有新增但永不满足")。
     reasoning_stale_limit: int = Field(3, validation_alias="REASONING_STALE_LIMIT")
     reasoning_max_element_searches: int = Field(5, validation_alias="REASONING_MAX_ELEMENT_SEARCHES")
+    # 逐步推理的类型化集合枚举工具(enumerate_elements / enumerate_kg_objects)总开关。
+    # 关掉即完全回到接入前:reflect 既不提供这两个动作、也不注入集合地图,零额外查询。
+    # 每次调用的成本由档位表的 enum_* 预算(每 run 行数/额外翻页)封死,不是这里。
+    reasoning_enum_tools_enabled: bool = Field(
+        True, validation_alias="REASONING_ENUM_TOOLS_ENABLED")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

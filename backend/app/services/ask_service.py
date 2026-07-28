@@ -187,6 +187,8 @@ class AskService:
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
         cancellations=None,
+        collection_catalog=None,
+        collection_enumeration=None,
     ) -> None:
         self.ask_state = ask_state
         self.retrieval = retrieval
@@ -208,6 +210,10 @@ class AskService:
         self.memory_retriever = memory_retriever
         self.current_user_id = current_user_id
         self.cancellations = cancellations
+        # 逐步推理的类型化集合地图/清单服务。缺省 None:窄测试替身与未接线的
+        # 组合根照旧可构造,只是那条 run 不提供枚举工具。
+        self.collection_catalog = collection_catalog
+        self.collection_enumeration = collection_enumeration
 
     # ------------------------------------------------------------------
     # dispatch
@@ -1700,6 +1706,8 @@ class AskService:
                     communities=self.communities(),
                     settings=self.settings,
                     cancel_event=cancel_event,
+                    collection_catalog=self.collection_catalog,
+                    collection_enumeration=self.collection_enumeration,
                 ).run(
                     notebook_id,
                     research_question,
@@ -1711,6 +1719,9 @@ class AskService:
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
                     result.chains)
+                # 类型化集合清单(CollectionEnumerationOutcome)原样带出,本任务
+                # 不消费:进证据 prompt 与 AskResponse.result_sets 是 T5 的地盘。
+                enumerations = result.enumerations
                 trace = [*pre_trace, *trace]
             except AskCancelled:
                 raise
@@ -1718,6 +1729,7 @@ class AskService:
                 top_hits, elements, trace, chunks, chains = (
                     [], [], list(pre_trace), [], []
                 )
+                enumerations = []
 
             registry = self.schemas.effective_schemas()
             seen_ids: set = set()
@@ -1860,6 +1872,10 @@ class AskService:
                         "included_kg": reasoning_counts.get("included_kg", 0),
                         "included_chunks": reasoning_counts.get("included_chunks", 0),
                         "included_elements": reasoning_counts.get("included_elements", 0),
+                        # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
+                        # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
+                        # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
+                        "enumerated_collections": len(enumerations),
                     },
                     duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
                 )

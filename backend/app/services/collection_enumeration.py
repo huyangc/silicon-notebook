@@ -281,6 +281,15 @@ class ElementEnumeration:
     items: Tuple[ElementItem, ...]
     coverage: EnumerationCoverage
     cursor: Optional[ElementCursor]
+    # Round trips this call spent BEYOND the first page of each visited source
+    # — exactly what ``EnumerationBudget.max_pages`` bounds (see ``_Walk.pages``).
+    # It is cost accounting for a caller that pools a page allowance across
+    # several actions, and it is deliberately NOT part of ``coverage``: coverage
+    # is the user-facing proof of what was and was not listed, and a knob's
+    # consumption is not evidence about the collection.  No default on purpose:
+    # a silently-zero page charge is an under-charge, which is the precise
+    # failure this field exists to prevent.
+    extra_pages: int
 
 
 @dataclass(frozen=True)
@@ -289,6 +298,7 @@ class KgObjectEnumeration:
     items: Tuple[KgObjectItem, ...]
     coverage: EnumerationCoverage
     cursor: Optional[KgObjectCursor]
+    extra_pages: int        # see ``ElementEnumeration.extra_pages``
 
 
 def _payload_chars(item: object) -> int:
@@ -660,6 +670,7 @@ class CollectionEnumerationService:
             items=tuple(items),
             coverage=coverage,
             cursor=_resumable(coverage, resume),
+            extra_pages=walk.pages,
         )
 
     # ----------------------------------------------------------- KG objects
@@ -712,6 +723,7 @@ class CollectionEnumerationService:
                             walk, total=total, exhausted=False, scope_stable=False
                         ),
                         cursor=None,
+                        extra_pages=walk.pages,
                     )
                 walk_ids = notebook_ids[notebook_ids.index(cursor.notebook_id):]
                 after = (
@@ -782,6 +794,7 @@ class CollectionEnumerationService:
             items=tuple(items),
             coverage=coverage,
             cursor=_resumable(coverage, resume),
+            extra_pages=walk.pages,
         )
 
     # ---------------------------------------------------------------- reads
@@ -828,6 +841,7 @@ class CollectionEnumerationService:
                 walk, total=total, exhausted=False, scope_stable=False
             ),
             cursor=None,
+            extra_pages=walk.pages,
         )
 
     def _source_display(

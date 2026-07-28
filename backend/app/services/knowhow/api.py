@@ -2066,6 +2066,12 @@ def complete_row(
         # reason PPR/community are off above — this channel was never
         # designed against this profile's input shape.
         reasoning_retriever.allow_exact_lookup = False
+        # Typed-collection enumeration stays off here for a different reason:
+        # completion may only cite server-issued evidence keys, and an
+        # enumerated list is a separate evidence channel this prompt cannot
+        # reference. Leaving it on would spend the run's listing budget on
+        # items the synthesis step is required to ignore.
+        reasoning_retriever.allow_enumeration = False
         reasoning_retriever.untrusted_evidence = True
         reasoning_result = reasoning_retriever.run(
             notebook_id,

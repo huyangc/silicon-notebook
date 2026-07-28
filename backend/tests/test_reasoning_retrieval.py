@@ -1527,12 +1527,15 @@ def test_compatibility_factory_constructs_replacement_without_classmethod(
 
     class Replacement:
         def __init__(self, *, retrieval, model_clients, communities, settings,
-                     cancel_event=None):
+                     cancel_event=None, collection_catalog=None,
+                     collection_enumeration=None):
             self.retrieval = retrieval
             self.model_clients = model_clients
             self.communities = communities
             self.settings = settings
             self.cancel_event = cancel_event
+            self.collection_catalog = collection_catalog
+            self.collection_enumeration = collection_enumeration
 
     monkeypatch.setattr(module, "ReasoningRetriever", Replacement)
     retriever = module.reasoning_retriever_from_repository(
@@ -1544,6 +1547,10 @@ def test_compatibility_factory_constructs_replacement_without_classmethod(
     assert retriever.model_clients is rrepo
     assert retriever.communities.sibling_min_bridge == rrepo.settings.sibling_min_bridge
     assert retriever.cancel_event == "cancel-token"
+    # 集合地图/清单同样经这个冻结工厂接线,且必须是仓库里**那两个**实例:
+    # 各自新建一份会让地图计数与清单枚举读到两份缓存(「地图报 12、清单列 8」)。
+    assert retriever.collection_catalog is rrepo.collection_catalog
+    assert retriever.collection_enumeration is rrepo.collection_enumeration
 
 
 def test_run_expand_community_no_base_noop(rrepo, monkeypatch):

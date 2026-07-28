@@ -6,7 +6,7 @@ without touching the repository/extraction code.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
@@ -236,11 +236,25 @@ PLAN_SCHEMA_HINT = (
 )
 
 
-def plan_prompt(question: str, history_block: str = "") -> str:
+def plan_prompt(
+    question: str, history_block: str = "", collection_map: str = ""
+) -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else ""
     )
+    # NOTE: this function is a BACKUP spelling of the planning instruction and
+    # is not what production sends — ``ReasoningRetriever.plan`` goes through
+    # ``expand_query`` / ``expand_query_prompt``.  It is kept in sync (including
+    # this parameter) so the two never state different plans; anything that has
+    # to reach a planning model must be added to BOTH.
+    #
+    # The typed-collection map is counts only (no titles, no text): it tells the
+    # planner what kinds of listable material exist and how much, so a "which
+    # formulas are there" question can be planned as an inventory instead of as
+    # a keyword hunt.  Empty when the enumeration tools are off or the map could
+    # not be built — the prompt then reads exactly as it did before.
+    collection_section = f"{collection_map}\n\n" if collection_map else ""
     return (
         "You plan how to retrieve a knowledge graph (KG) to answer an "
         "engineer's question. The KG has 4 node types: concept (definitions), "
@@ -254,25 +268,101 @@ def plan_prompt(question: str, history_block: str = "") -> str:
         "- reason: one line on why this sub-query.\n"
         "Keep sub-queries focused and non-redundant.\n\n"
         f"{history_section}"
+        f"{collection_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"sub_queries":[{"query":"","types":[],'
         '"prefer":"balanced","reason":""}]}'
     )
 
 
-REFLECT_SCHEMA_HINT = (
-    '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
-    'search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup",'
-    '"expand":{"object_id":"","edge_type":null,'
-    '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
-    '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
-    '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-    '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
-    '"reason":""}'
-)
+def reflect_schema_hint(
+    element_kinds: Sequence[str] = (),
+    object_types: Sequence[str] = (),
+) -> str:
+    """The reflect response schema, with the enumeration branch iff offered.
+
+    The two whitelists are ARGUMENTS rather than imports: their single literal
+    definition lives in ``app.services.collection_catalog`` (guarded), and this
+    module deliberately imports no service.  Passing them empty is how the kill
+    switch spells "these tools do not exist" — the model then sees byte-for-byte
+    the schema it saw before the tools were added, which is the only way "off"
+    can honestly mean "back to the previous behavior".
+    """
+    actions = (
+        "answer|expand_graph|add_subquery|"
+        "search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup"
+    )
+    enumerate_branch = ""
+    if element_kinds or object_types:
+        actions += "|enumerate_elements|enumerate_kg_objects"
+        enumerate_branch = (
+            '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
+            '"object_type":"' + "|".join(object_types) + '","source_id":""},'
+        )
+    return (
+        '{"sufficient":false,"next_action":"' + actions + '","expand":'
+        '{"object_id":"","edge_type":null,'
+        '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
+        '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
+        '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
+        + enumerate_branch +
+        '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
+        '"reason":""}'
+    )
 
 
-def reflect_prompt(question: str, candidates_summary: str) -> str:
+REFLECT_SCHEMA_HINT = reflect_schema_hint()
+
+
+def reflect_prompt(
+    question: str,
+    candidates_summary: str,
+    element_kinds: Sequence[str] = (),
+    object_types: Sequence[str] = (),
+) -> str:
+    """Next-step decision prompt.
+
+    ``element_kinds`` / ``object_types`` non-empty = the typed-collection
+    enumeration tools are available this run; empty = they are not, and every
+    byte of this prompt is what it was before they existed.
+    """
+    enumeration_tools = bool(element_kinds or object_types)
+    enumerate_actions = (
+        "- enumerate_elements: the question asks you to LIST or INVENTORY a "
+        "kind of document element rather than to find the most relevant ones. "
+        "Set enumerate.kind to one of: " + ", ".join(element_kinds) + ". "
+        "PREFER this over search_elements whenever the question is 'which / "
+        "list / what are all the <kind>': relevance search returns a sample "
+        "and can never prove it returned everything, while this walks the "
+        "collection in order and reports exactly how much of it was covered. "
+        "Optionally set enumerate.source_id to restrict it to one source.\n"
+        "- enumerate_kg_objects: the same, for extracted knowledge objects of "
+        "one type. Set enumerate.object_type to one of: "
+        + ", ".join(object_types) + ".\n"
+        "Use the [Collections in scope] counts to decide BEFORE acting: a "
+        "collection whose count fits this run's listing allowance can be "
+        "listed in full, but when the count is far larger than that allowance, "
+        "do NOT try to page through it — answer with the count, a few "
+        "representative examples, and an explicit suggestion to narrow the "
+        "request (one source, one section, one topic). Requesting the same "
+        "collection again CONTINUES from where the previous call stopped; it "
+        "never restarts, and a collection already reported complete must not "
+        "be requested again.\n"
+        if enumeration_tools else ""
+    )
+    completeness_rule = (
+        "In reason, you may call a collection completely retrieved ONLY when "
+        "an enumerate action has reported its coverage as complete for that "
+        "collection. Relevance-based retrieval, however wide, cannot prove "
+        "completeness, and neither can a partial or interrupted enumeration. "
+        "Otherwise state what has actually been found so far and what, if "
+        "anything, is still missing.\n\n"
+        if enumeration_tools else
+        "In reason, NEVER claim that 'all/every X have been retrieved' — "
+        "relevance-based retrieval cannot prove completeness of a collection. "
+        "Instead state what has actually been found so far and what, if "
+        "anything, is still missing.\n\n"
+    )
     return (
         "You decide the NEXT retrieval step for answering a question from a "
         "knowledge graph. Below are the candidates gathered so far.\n"
@@ -310,16 +400,14 @@ def reflect_prompt(question: str, candidates_summary: str) -> str:
         "EXACTLY as written in the documentation; this matches the name literally "
         "and returns the whole manual section it heads, so a name you invent or "
         "paraphrase returns nothing.\n"
+        f"{enumerate_actions}"
         "Before choosing answer, check aspect by aspect that every part the "
         "question explicitly asks for (each layer / entity / requirement it "
         "names) is covered by the candidates; if an asked-for aspect has no "
         "evidence yet, prefer a retrieval action targeting it. Set "
         "sufficient=true only when that per-aspect check passes (or further "
         "retrieval keeps failing). reason: one line.\n"
-        "In reason, NEVER claim that 'all/every X have been retrieved' — "
-        "relevance-based retrieval cannot prove completeness of a collection. "
-        "Instead state what has actually been found so far and what, if "
-        "anything, is still missing.\n\n"
+        f"{completeness_rule}"
         f"Question: {question}\n\n"
         f"Candidates so far:\n{candidates_summary}\n\n"
         'Return JSON only matching the schema (omit unused branch fields).'
@@ -397,10 +485,15 @@ EXPAND_SCHEMA_HINT = ('{"query":"","high_level_keywords":[],"low_level_keywords"
 
 def expand_query_prompt(question: str, history_block: str = "", want_types: bool = False,
                         max_subqueries: int = 4,
-                        corpus_langs: Optional[List[str]] = None) -> str:
+                        corpus_langs: Optional[List[str]] = None,
+                        collection_map: str = "") -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
         f"{history_block}\n\n" if history_block else "")
+    # Counts-only typed-collection map (see ``plan_prompt``).  This function is
+    # the prompt the reasoning planner actually sends, so this — not
+    # ``plan_prompt`` — is where the map has to land to reach a planning model.
+    collection_section = f"{collection_map}\n\n" if collection_map else ""
     types_line = (
         "- types: which KG node types to search (subset of concept/claim/formula/"
         "procedure; omit/empty = all). prefer: keyword|semantic|balanced.\n"
@@ -443,6 +536,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "other LLMs'), set comparison.focal to that entity's canonical name; omit "
         "comparison otherwise.\n\n"
         f"{history_section}"
+        f"{collection_section}"
         f"Question: {question}\n\n"
         'Return JSON only: {"query":"","high_level_keywords":[],'
         '"low_level_keywords":[],"sub_queries":[{"query":""' + types_schema + '}],'

@@ -1188,6 +1188,10 @@ class RepositoryRuntime:
                 memory_retriever=self.memory_retriever,
                 current_user_id=lambda: self.identity.current_user().id,
                 cancellations=self.ask_cancellations,
+                # 逐步推理的集合地图/清单:交**这两个** eager 实例,和离线/其他
+                # 调用方共用同一份 per-source 计数缓存(地图与清单必须同源)。
+                collection_catalog=self.collection_catalog,
+                collection_enumeration=self.collection_enumeration,
             )
         return self.ask
 
