@@ -81,6 +81,7 @@ from app.services.kg_analysis_precompute import (
     ARTIFACT_LARGEST_CLUSTERS,
     ARTIFACT_RELATION_PROVENANCE,
     ARTIFACT_SOURCE_PROFILES,
+    BOARD_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_DEPENDENT_ARTIFACT_KINDS,
     CLUSTER_SEQ_PAYLOAD_KEY,
     OPTIONAL_ARTIFACT_KINDS,
@@ -496,17 +497,17 @@ class KgAnalysisService:
         created_at)。``created_at`` 必须进签名:一次 ``force=True`` 的重建会在**同一个**
         `kg_mutation_seq` 上重铸板块 id 并重写产物,只看 seq 的话缓存不会失效。
 
-        ⚠ **签名里为什么没有「板块世代」这一项,以及为什么不需要。** 板块 id 只由
+        ⚠ **签名里为什么没有「板块世代」这一项,以及缺了它靠什么补。** 板块 id 只由
         `replace_communities` 重铸,而写侧在**同一个事务**里作废依赖板块的两份账本行
-        (见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)。板块一换,账本
-        必变、签名必变 —— 包括「force 重建成功、随后的预计算恰好失败」那一档:那正是
-        评审报出来的窗口,而它此前**不是**一个瞬时窗口而是永久的(账本一行没动、seq
-        也没变,缓存会一直吐上一套板块,直到 LRU 淘汰或进程重启,而本方法自称读的是
-        live 快照)。
+        (见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`)—— 删掉一行就动了
+        签名,这是这份缓存唯一 O(1) 的失效手段。世代只能由**写侧推**、不能由读侧拉:任何
+        从 `communities` 现算的世代标记都是 O(板块数) 的读(生产 88 580 个板块,而
+        `communities` 上没有 size 索引),那恰恰就是这份缓存要省掉的那笔钱。
 
-        为什么世代只能由**写侧推**、不能由读侧拉:任何从 `communities` 现算的世代标记
-        都是 O(板块数) 的读(生产 88 580 个板块,而 `communities` 上没有 size 索引),
-        那恰恰就是这份缓存要省掉的那笔钱 —— 把它放进签名等于每次请求都付一遍。
+        但那次作废在「账本里一行依赖板块的产物都没有」时是个 **no-op**(上一轮预计算
+        失败),而 `force=True` 的重建不抬 `kg_mutation_seq` —— 那一档板块换了一整套、
+        签名却一个字节没动。所以缓存**只在签名跟得住板块重铸时才写**,判据与代价见
+        `_signature_tracks_board_recasts`。
         """
         self._reject_inside_write_transaction("KG 分析总览")
         # ⚠ 共享快照,不是裸 `connect()`:state 行与账本**必须来自同一份库**。板块那一格
@@ -543,7 +544,11 @@ class KgAnalysisService:
                         db, notebook_id, edge_limit
                     )
             cached = (boards_payload, edge_rows)
-            self._cache_put(key, signature, cached)
+            # ⚠ 只在「板块一被重铸,签名必然跟着动」成立时才写缓存。不成立的那一档
+            # (账本里一行依赖板块的产物都没有 → 同事务作废是 no-op)写进去就是一份
+            # 会无限期说谎的缓存,完整理由见 `_signature_tracks_board_recasts`。
+            if _signature_tracks_board_recasts(ledger):
+                self._cache_put(key, signature, cached)
         boards_payload, edge_rows = cached
         return KgAnalysisOverview(
             notebook_id=notebook_id,
@@ -734,6 +739,41 @@ def _detail_rows_are_readable(kind: str, ledger: Dict[str, Dict[str, Any]]) -> b
     却缺失」报成红档,读者看得到异常;而把悬空行也一并展示只会让那条异常自相矛盾。
     """
     return kind in ledger
+
+
+def _signature_tracks_board_recasts(ledger: Dict[str, Dict[str, Any]]) -> bool:
+    """板块被重铸时,签名会不会跟着动 —— 总览记忆化**唯一**的正确性前提。
+
+    板块 id 只由 `replace_communities` 重铸,而它在**同一个事务**里作废依赖板块的账本行
+    (`BOARD_DEPENDENT_ARTIFACT_KINDS`)。删掉一行就改了签名里的账本元组,这是这份缓存
+    唯一 O(1) 的失效手段。
+
+    ⚠ 但那次作废在**一行都没有**时是个 no-op(codex 第 10 轮 P2):上一轮预计算失败后
+    账本可能整个为空,也可能只剩三条与板块无关的统计快照 —— 两种都没有任何一行会被它
+    动到。而 `force=True` 的重建**不**抬 `kg_mutation_seq`,所以此时板块 id 已经换了一
+    整套、签名却一个字节没动;若预计算再次失败,已预热的缓存会**无限期**继续吐上一套
+    板块 id,直到 LRU 淘汰或进程重启,而端点自称读的是 live 快照。
+
+    所以这一档**干脆不写缓存**。理由与代价:
+
+    · 判据必须是「有没有会被那次作废动到的行」,不是「账本齐不齐」—— 它直接由作废覆盖
+      的那个集合导出,那个集合改了这里自动跟着改。写成「齐全才缓存」会在「跨板块边在、
+      来源画像缺」这种照样安全的一档白付一次板块列表读。
+    · 代价是这一档每次请求都现读一次板块列表(生产 88 580 个板块,`communities` 上没有
+      size 索引 —— 正是这份缓存要省的那笔钱)。但这一档是**异常状态**:预计算从没成功过
+      或刚失败过,报告本来就在报「产物缺失」。不该为异常状态优化,更不该为它承担一份会
+      无限期说谎的缓存。
+    · 另两条路都不成立:签名里加一个从 `communities` 现算的「板块世代」是 O(板块数) 的
+      读(第 7 轮已因此否决过一次,存进 `unified_kg_state` 则要加列 + bump SCHEMA);
+      在替换时显式驱逐则跨层(缓存在 service 进程内、`replace_communities` 在 lifecycle
+      层),而且离线 CLI 的重建跑在**另一个进程**里,根本驱逐不到。
+
+    ⚠ **只门控写、不门控读**,而这不是漏了一半:安全态写下的那条记录带的是一份**含**
+    依赖板块行的账本元组,不安全态的账本按定义不含任何一行,两个元组的 kind 集合不同、
+    签名不可能相等,那条记录在这一档取不出来。再加一道读侧门控就是一条删掉也不会让任何
+    测试报红的死代码 —— 本 PR 至今已抓出 17 个那种空守卫。
+    """
+    return any(kind in ledger for kind in BOARD_DEPENDENT_ARTIFACT_KINDS)
 
 
 def _ledger_boards(ledger: Dict[str, Dict[str, Any]]) -> Optional[int]:
@@ -974,6 +1014,10 @@ def _signature(state: KgState, ledger: Dict[str, Dict[str, Any]]) -> tuple:
     含 state 行的全部 seq + dirty,以及账本每一行的 (kind, seq, created_at)。
     ``created_at`` 不可省:一次 ``force=True`` 的重建会在**同一个** `kg_mutation_seq`
     上重铸板块 id 并整批重写产物,只看 seq 的话缓存不会失效、板块 id 会串到上一套。
+
+    ⚠ 这个键**追不到板块 id 本身**:它只经账本间接感知重铸(重铸同事务作废依赖板块的
+    账本行)。账本里没有那样一行时它就是瞎的 —— 那一档由 `_signature_tracks_board_recasts`
+    在写缓存前拦掉,不是靠往这里再加字段。
     """
     return (
         state.present,

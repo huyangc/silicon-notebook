@@ -3447,6 +3447,8 @@ class KnowledgeLifecycleService:
                 # 中间任何一次失败、取消或崩溃都会把悬空产物留在库里,而 T3 的记忆化
                 # 签名对「同 seq 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐
                 # 上一套板块 id,直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
+                # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧的
+                #  `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
                 # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
                 # 理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
                 self.unified_kg.discard_board_dependent_kg_analysis_artifacts(

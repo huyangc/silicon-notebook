@@ -1425,6 +1425,78 @@ def test_overview_cache_invalidates_when_the_ledger_is_rewritten_at_the_same_seq
     assert spy.calls.count("community_overview") == 2
 
 
+@pytest.mark.parametrize("seed_stat_snapshots", [False, True], ids=["empty", "partial"])
+def test_overview_refuses_to_cache_when_a_board_recast_would_not_move_it(
+    repo, seed_stat_snapshots
+):
+    """账本里**一份依赖板块的产物都没有**时,同事务作废是个 no-op —— 板块 id 换了,
+    签名一个字节没动。这一档必须**不写缓存**(codex 第 10 轮 P2)。
+
+    上一条钉的是「账本行在,所以作废动得了签名」;这一条钉的是它的前提不成立的那一档:
+    上一轮预计算失败(整个账本为空,或只剩三条与板块无关的统计快照)→ 一次
+    ``force=True`` 在**同一个** kg_mutation_seq 上重铸板块 id、作废什么都没删 → 预计算
+    又失败。此时签名逐字段相同,已预热的缓存会**无限期**继续吐上一套板块 id,直到 LRU
+    淘汰或进程重启,而端点自称读的是 live 快照。
+
+    走真 store 的 `replace_communities` + `discard_board_dependent_kg_analysis_artifacts`
+    而不是手写 SQL:要复现的正是「作废在这一档是 no-op」,手写 DELETE 会把这个前提
+    绕过去。
+    """
+    with repo._write() as db:
+        _state(db)
+        _community(db, "cm-old", [("K1", 1.0)])
+        if seed_stat_snapshots:
+            # 三条统计快照与板块无关,重铸时刻意不作废 —— 所以账本非空、却仍然没有
+            # 任何一行会被那次作废动到。
+            _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload())
+            _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload())
+            _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload())
+
+    service = _service(repo)
+    first = service.overview(NB)
+
+    unified = repo._runtime.unified_kg
+    with repo._write() as db:
+        unified.replace_communities(
+            db, NB, 0, [("cm-new", ["K1"])], {"K1": "name of K1"}, {"K1": 1.0},
+            "2026-01-02T09:00:00",
+        )
+        unified.discard_board_dependent_kg_analysis_artifacts(db, NB)
+
+    second = service.overview(NB)
+
+    assert [c["id"] for c in first.boards.payload["communities"]] == ["cm-old"]
+    assert [c["id"] for c in second.boards.payload["communities"]] == ["cm-new"], (
+        "板块被重铸,而账本里没有一行会被同事务作废动到 —— 签名没动,缓存无限期"
+        "继续吐上一套板块 id"
+    )
+
+
+def test_overview_still_caches_while_one_board_dependent_row_survives(repo):
+    """反向钉:判据是「有没有会被作废动到的行」,不是「账本齐不齐」。
+
+    少了来源画像的账本是 `partial`(而且 `absence` 报红),但跨板块边那一行还在 ——
+    重铸时它会被同事务删掉、签名跟着动,所以这一档**照常缓存**。把判据写成「账本齐全
+    才缓存」会在这里白付一次板块列表读(生产 88 580 个板块、`communities` 上没有 size
+    索引),而那正是这份记忆化存在的理由。
+    """
+    with repo._write() as db:
+        _state(db)
+        _community(db, "cm-1", [("K1", 1.0)])
+        _artifact(db, ARTIFACT_CLUSTER_HISTOGRAM, _histogram_payload())
+        _artifact(db, ARTIFACT_LARGEST_CLUSTERS, _largest_payload())
+        _artifact(db, ARTIFACT_RELATION_PROVENANCE, _relation_payload())
+        _artifact(db, ARTIFACT_COMMUNITY_EDGES, _edges_payload())
+
+    spy = _SpyStore(repo._runtime.unified_kg)
+    service = _service(repo, store=spy)
+    first = service.overview(NB)
+    service.overview(NB)
+
+    assert first.ledger_state == LEDGER_PARTIAL, "夹具没落在 partial 档,这条就白测了"
+    assert spy.calls.count("community_overview") == 1
+
+
 def test_overview_cache_is_keyed_on_the_request_bounds(repo):
     """不同的 limit 不能互相串用缓存(否则调大 limit 会拿回上次那份更短的列表)。"""
     with repo._write() as db:
