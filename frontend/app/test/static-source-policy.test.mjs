@@ -22,6 +22,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // not a source-position query — a stylesheet cascade contract has no AST to consume,
   // and jsdom's getComputedStyle ignores specificity, so text is the only honest input.
   "effort-picker-style-guard.test.mjs",
+  // 同上,只读 globals.css:断言提问导航锚在对话区那一行(grid-row),而不是对整个
+  // 面板绝对居中。样式表没有可消费的 AST,jsdom 又不做 grid 布局(量出来的 rect
+  // 恒为 0),文本是唯一诚实的输入。对 page.tsx 的断言仍走语义解析。
+  "chat-turn-nav-anchor.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.

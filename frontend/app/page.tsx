@@ -5331,7 +5331,11 @@ export default function Home() {
               {chatMode === "ask" && (
                 <ChatTurnNav
                   questions={
-                    asking && pendingQuestion
+                    // 判据与上面渲染在途 turn 的那个 id 一致(askInFlight &&
+                    // pendingQuestion):理解阶段那一轮同样在 DOM 里、同样有
+                    // chatTurnDomId,只按 asking 算就会漏掉它 —— 轮次在,却没有
+                    // 对应的刻度可跳。
+                    askInFlight && pendingQuestion
                       ? [...turns.map((turn) => turn.question), pendingQuestion]
                       : turns.map((turn) => turn.question)
                   }

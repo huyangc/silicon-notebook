@@ -8,6 +8,7 @@ import {
   findFunction,
   ifBranchesIn,
   importsFrom,
+  jsxElements,
   jsxTextValues,
   parseModule,
   stringLiterals,
@@ -96,6 +97,34 @@ test("待澄清期间在途轨迹不消失", () => {
 
 // 理解阶段占用了输入框(草稿清空、问题以在途 turn 先显示)。中止/失败/返回修改
 // 三条留在原地的路径必须把草稿还回去,否则用户白打一遍字。
+// 逐步推理与深度报告的「确认问题理解」是同一个交互,必须共用同一张卡的外观。
+// 此前两边各写一套 report-intent-* 的用法,改一侧就会悄悄长成两个样子 ——
+// 与 EffortPicker 那条「同一套档名理应是同一个控件」同理。
+test("两个界面共用同一张问题理解确认卡", async () => {
+  for (const file of ["ask-intent-review.tsx", "report-view.tsx"]) {
+    const module = await parseModule(file);
+    const classes = [
+      ...jsxElements(module, "section"),
+      ...jsxElements(module, "div"),
+    ].map((node) => node.attributes?.className ?? "").filter(Boolean);
+    assert.ok(
+      classes.some((name) => /(^|\s)intent-card(\s|$)/.test(name)),
+      `${file} 没有用共用的 .intent-card 外壳`,
+    );
+    // 卡内结构也共用:三处骨架任缺一处就说明这一侧又自成一套了。
+    for (const part of ["intent-card-head", "intent-card-zone", "intent-card-readout"]) {
+      assert.ok(
+        classes.some((name) => name.includes(part))
+        || jsxElements(module, "details").some(
+          (node) => (node.attributes?.className ?? "").includes(part),
+        ),
+        `${file} 缺少 .${part}`,
+      );
+    }
+  }
+});
+
+
 test("理解阶段被打断时草稿退回输入框", () => {
   for (const fn of ["cancelAskIntentReview", "abortAsk"]) {
     assert.ok(callsIn(findFunction(page, fn)).includes("setQuestion"), `${fn} 未退回草稿`);

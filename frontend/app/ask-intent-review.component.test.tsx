@@ -53,7 +53,12 @@ test("reasoning intent review blocks retrieval until clarification is confirmed"
   );
 
   expect(screen.getByText("这一步只理解你的问题，不读取资料；确认后才会开始逐步检索。")).toBeVisible();
-  expect(screen.getByText(`${modeLabel("reasoning")}必须回答`)).toBeVisible();
+  // 必答主题挪进「系统的理解」读出区,行标签不再带模式名——整张卡就是这一轮的,
+  // 再挂一次模式名只是噪声。卡片的 aria-label 仍带模式名,下面那条断言钉住它。
+  expect(screen.getByText("必须回答")).toBeVisible();
+  expect(
+    screen.getByLabelText(`确认${modeLabel("reasoning")}的问题理解`),
+  ).toBeVisible();
   expect(screen.getByText("给出按优先级排序的排查步骤")).toBeVisible();
   expect(screen.getByText("环路已正常上电")).toBeVisible();
   const submit = screen.getByRole("button", { name: "确认并开始检索" });
