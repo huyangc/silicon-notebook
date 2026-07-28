@@ -33,6 +33,7 @@ from app.services.model_status import ModelStatusService
 from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
+from app.services.collection_catalog import CollectionCatalogService
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.report_execution import (
@@ -315,6 +316,16 @@ class RepositoryRuntime:
         # id/时钟来源单一（record_change 本身是模块级函数，不在这里持有——
         # 由 Task 4-6 的写方法在各自事务内直接调用）。
         self.knowhow_history_store = bundle.knowhow_history
+        # 逐步推理集合枚举 PR-2 T2:类型化集合的「地图层」计数。只吃窄端口
+        # (database/sources/notebooks/queries/unified_kg),零模型调用,构造即
+        # 建三个有界进程内缓存,故与上面几个 store 一样是 eager 且无 seam。
+        self.collection_catalog = CollectionCatalogService(
+            database=self.database,
+            sources=self.source_store,
+            notebooks=self.notebook_store,
+            queries=self.queries,
+            unified_kg=self.unified_kg,
+        )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
         # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
         # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade

@@ -194,6 +194,95 @@ class SourceStore:
             for row in rows
         ]
 
+    # ------------------------------------------- typed-collection catalog
+    # (reasoning enumeration tools PR-2): the two primitives behind
+    # app.services.collection_catalog.  Both take the CALLER's connection so a
+    # whole scope (active notebook + mounted bases) is read from one snapshot.
+    def source_change_signal_rows(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> List[tuple[str, str]]:
+        """``[(source_id, opaque change signal)]`` for the notebook's PHYSICAL
+        sources (memory/knowhow synthetic rows included — the catalog counts
+        what retrieval can reach, not what the source panel shows).
+
+        The signal is ``updated_at | parse_status | chunked_at`` because those
+        three are what the element writers touch:
+          * REPARSE of an already-chunked source: ``replace_elements`` and
+            ``clear_chunked_at`` run in the SAME write transaction
+            (``SourceIngestionService.process_source``), and ``chunked_at``
+            held a value, so nulling it flips the signal atomically with the
+            new element generation;
+          * FIRST parse: ``chunked_at`` is still NULL, so that same
+            ``clear_chunked_at`` is a no-op and the signal does NOT move when
+            the elements land.  It moves at the next ``set_status`` — which in
+            process_source comes after the summarize step, i.e. one LLM call
+            later.  So a map built inside that window reports the source's
+            PRE-parse counts (normally zero: it had no elements yet).  The
+            error direction is UNDER-count, never over-count, and it self-heals
+            at the status write that always follows;
+          * the Memory-derived reparse folds ``update_file_hash``
+            (``updated_at``) into the same transaction as its
+            ``replace_elements``;
+          * ``set_status`` moves both ``parse_status`` and ``updated_at`` on
+            every lifecycle transition;
+          * the Knowhow projector is the only other element writer and it only
+            ever writes ``element_type='knowhow_cell'``, which no enumerable
+            kind whitelist contains — it cannot change a counted number.
+        A deleted source simply drops out of this list.  ONE index-seeked
+        query per notebook (a ``notebook_id``-prefixed index); deliberately
+        NOT a timestamp comparison — the catalog only ever tests tokens for
+        equality.
+        """
+        rows = db.execute(
+            "SELECT id, updated_at, parse_status, chunked_at "
+            "FROM sources WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchall()
+        return [
+            (
+                row["id"],
+                "{}|{}|{}".format(
+                    row["updated_at"] or "",
+                    row["parse_status"] or "",
+                    row["chunked_at"] or "",
+                ),
+            )
+            for row in rows
+        ]
+
+    def element_type_count_rows(
+        self,
+        db: sqlite3.Connection,
+        source_ids: Sequence[str],
+        element_types: Sequence[str],
+    ) -> List[tuple[str, str, int]]:
+        """``[(source_id, element_type, count)]`` — covered by
+        ``idx_source_elements_source_type`` (source_id, element_type,
+        created_at, id): the whitelist keeps each source to one seek per
+        requested type instead of scanning its whole element range.  Both
+        lists are deduplicated; the source batch leaves room for the type
+        placeholders under SQLite's variable limit."""
+        ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
+        types = list(
+            dict.fromkeys(element_type for element_type in element_types if element_type)
+        )
+        if not ids or not types:
+            return []
+        type_marks = ",".join("?" for _ in types)
+        batch_size = max(1, self.IN_CHUNK - len(types))
+        out: List[tuple[str, str, int]] = []
+        for offset in range(0, len(ids), batch_size):
+            batch = ids[offset:offset + batch_size]
+            id_marks = ",".join("?" for _ in batch)
+            for row in db.execute(
+                "SELECT source_id, element_type, COUNT(*) AS c FROM source_elements "
+                f"WHERE source_id IN ({id_marks}) AND element_type IN ({type_marks}) "
+                "GROUP BY source_id, element_type",
+                (*batch, *types),
+            ).fetchall():
+                out.append((row["source_id"], row["element_type"], int(row["c"])))
+        return out
+
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:

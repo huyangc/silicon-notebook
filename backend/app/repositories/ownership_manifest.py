@@ -824,6 +824,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.claim_report_generation', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.claim_report_intent', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.close', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.collection_catalog', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_whitelist_add', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_whitelist_list', kind='attribute', target='_runtime'),

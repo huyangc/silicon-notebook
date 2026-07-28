@@ -33,6 +33,10 @@ _COUNT_IDENTIFIERS = {
     "conversations": frozenset({"notebook_id", "created_by"}),
     "reports": frozenset({"notebook_id", "created_by"}),
     "memory_items": frozenset({"notebook_id", "created_by"}),
+    # Collection catalog: "how many knowhow tables are in scope" — a plain
+    # index count over idx_knowhow_tables_nb, deliberately reusing this generic
+    # primitive instead of adding a store method for one COUNT(*).
+    "knowhow_tables": frozenset({"notebook_id"}),
 }
 
 
