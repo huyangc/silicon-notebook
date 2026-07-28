@@ -2835,9 +2835,14 @@ button.chat-session-card {
   gap: 14px;
 }
 
-.chat-user {
+.chat-user-message {
+  position: relative;
   justify-self: end;
+  width: fit-content;
   max-width: 78%;
+}
+
+.chat-user {
   background: var(--blue);
   color: #fff;
   border-radius: 14px 14px 4px 14px;
@@ -2846,6 +2851,27 @@ button.chat-session-card {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.chat-user[role="button"] {
+  cursor: default;
+}
+
+.chat-user[role="button"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 55%, #fff);
+  outline-offset: 2px;
+}
+
+.chat-question-time {
+  position: absolute;
+  top: calc(100% + 3px);
+  right: 2px;
+  z-index: 2;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
 }
 
 .chat-assistant {

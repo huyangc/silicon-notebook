@@ -106,8 +106,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 索引与确定性存量去重 migration，以及 v30 sources(notebook_id, file_hash)
     # 内容哈希去重索引 migration，以及 v31 两张 inert shadow capture 内部表，
     # v32 深度报告问题理解契约，以及 v33 relationship endpoint/id keyset
-    # 覆盖索引，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 34
+        # 覆盖索引、v34 关系补全水位，以及 v35 生成中 Ask 的浏览器提交时间，
+        # 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 35
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

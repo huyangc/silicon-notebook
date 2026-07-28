@@ -2311,6 +2311,32 @@ MIGRATION_MANIFEST[(33, 34)] = {
     "views": {},
 }
 
+# v35: persist the browser-captured submit instant on durable Ask jobs so an
+# in-flight turn keeps the user's local question time after reconnecting.
+ASK_JOBS_ASKED_AT_COLUMN = {
+    "asked_at": ("asked_at", "TEXT", 1, "''", 0),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 35, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "ask_jobs": {
+                **manifest["columns"].get("ask_jobs", {}),
+                **ASK_JOBS_ASKED_AT_COLUMN,
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(34, 35)] = {
+    "tables": {},
+    "columns": {"ask_jobs": ASK_JOBS_ASKED_AT_COLUMN},
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -13,8 +13,8 @@ This document preserves the contributor-facing architecture summary, verificatio
 - Built-in KG relations are governed by one typed registry in `backend/app/services/kg/edge_schema.py`. Core extraction is fail-closed; graph/PPR/canonical/relation and Ask evidence-context consumers filter invalid historical core pairs while preserving known edges attached to administrator-defined extension types. `EDGE_SCHEMA_VERSION` participates in scale/PPR artifact identities. Optional completion advances mode-specific persistent source-generation keyset pages, prioritizes anchors through indexed contract-valid relation `EXISTS`, and uses only bounded same-source FTS/ANN candidates plus section/pair/batch/character rails. Each job hydrates only its bounded objects and their capped evidence IDs; unfinished watermarks re-enqueue and startup recovers current pending generations. A mode change atomically publishes the newly active mode's recoverable cursor before retiring the old cursor as `stale`. Proposal and verification run outside database transactions; a short final write rechecks generation/ownership/existence, persists the exact server excerpt seen by the verifier, and inserts idempotently. Invalid zero rails fail closed without advancing. Retrieval origin is represented as accumulated producer support records; selection never reconstructs provenance from scores.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 34. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v34 and remains readable. Those migrations
+The current schema version is 35. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v35 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -40,7 +40,9 @@ reports.understanding_json for the durable question-understanding contract;
 SQLite v33 adds covering `(notebook_id, source_object_id/target_object_id, id)`
 relation indexes for stable, bounded lexical-relation keyset recall. SQLite v34
 adds the indexed `kg_relation_completion_state` source-generation watermark and
-the `(source_id,id)` object keyset index. PostgreSQL migration v12 is the paired
+the `(source_id,id)` object keyset index. SQLite v35 adds the browser-captured
+`ask_jobs.asked_at` instant for reconnecting to in-flight questions.
+PostgreSQL migration v13 is the paired
 business schema. The temporary
 shadow boundary now includes a SELECT-only UTF8-first preflight, redacted
 identity-bound confirmation, an owned/checksummed removable PostgreSQL control
@@ -51,7 +53,7 @@ batch commits with its prefix checkpoint, resume proves that exact target
 prefix without truncating or deleting business rows, seven historical rowids
 copy as explicit ordinals and their catalog-resolved identity sequences reseed,
 and the final forward checkpoint advances atomically to snapshot H0 after the
-v12 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
+v13 ledger, FK, guard, and ANALYZE checks. Snapshot publication requires an
 owner-only real directory and exclusive 0600 temporary creation. COPY fully
 qualifies business SQL to the run-bound schema, revalidates enabled live SQLite
 capture under a short `BEGIN IMMEDIATE` at every critical binding, uses a fresh
@@ -61,7 +63,7 @@ across open and immediately before publication/PG commit. JSONB prefix proof
 normalizes only JSON numeric leaves to exact finite decimal semantics; ordinary
 SQL numeric columns remain type-distinct. It uses bounded
 named server cursors plus statement timeouts/cancellation polls, and performs
-full initial/final migration-derived validation of v12 tables, columns,
+full initial/final migration-derived validation of v13 tables, columns,
 constraints, operational/GIN indexes, and `public.pg_trgm`; per-batch validation
 is intentionally lightweight. The final SQLite fence is acquired only after
 the long PG proof/ANALYZE phase and is retained until the PG H0 checkpoint and
@@ -86,9 +88,9 @@ bundle may exceed the byte cap, and a same-key replacement that grows past the
 cap rolls back and defers when another actual bundle is already accepted. FK
 parents come only from the verified current source snapshot through a
 64-row-per-event, byte-counted, batch-deduplicated closure;
-the fixed v12 graph has a branch-counted bound of exactly 9 row slots and no
+the fixed v13 graph has a branch-counted bound of exactly 9 row slots and no
 suffix-log evidence scan is used. Savepoints defer only FK/UNIQUE ordering
-SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG12 catalog plans cover all
+SQLSTATEs; CHECK/NOT NULL poison immediately. Exact PG13 catalog plans cover all
 83 unique surfaces using NULL; deterministic candidates scoped by indexable
 equality for non-NULL values and `IS NULL` for NULL values on the other unique
 columns plus the fixed predicate (`C`-collated text max plus `chr(1)`, or an

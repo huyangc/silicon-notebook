@@ -31,6 +31,7 @@ ask_jobs.conversation_id|TEXT|1|''|0
 ask_jobs.created_by|TEXT|1|''|0
 ask_jobs.mode|TEXT|1|''|0
 ask_jobs.question|TEXT|1|''|0
+ask_jobs.asked_at|TEXT|1|''|0
 ask_jobs.status|TEXT|1|'running'|0
 ask_jobs.trace_json|TEXT|1|''|0
 ask_jobs.answer_id|TEXT|1|''|0

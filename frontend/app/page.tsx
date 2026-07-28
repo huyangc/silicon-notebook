@@ -152,6 +152,7 @@ import { isAskBlocked } from "./ask-availability";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
+import { ChatQuestion } from "./chat-question";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { SourceDetailWindow } from "./source-detail-window";
@@ -741,9 +742,11 @@ export default function Home() {
     question: string;
     contract: QueryIntentContract;
     understandingMs: number;
+    askedAt: string;
   } | null>(null);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [pendingQuestion, setPendingQuestion] = useState("");
+  const [pendingAskedAt, setPendingAskedAt] = useState("");
   const [pendingMode, setPendingMode] = useState<AskModeId>(DEFAULT_ASK_MODE);
   const [pendingTrace, setPendingTrace] = useState<ReasoningTraceStep[]>([]);
   const [filter, setFilter] = useState("mine");
@@ -2990,6 +2993,7 @@ export default function Home() {
   // 收起在途 turn(问题气泡 + 轨迹面板)。
   function clearPendingTurn() {
     setPendingQuestion("");
+    setPendingAskedAt("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
   }
@@ -3042,8 +3046,9 @@ export default function Home() {
       setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
     }
+    const askedAt = new Date().toISOString();
     if (askMode !== "reasoning") {
-      await executeAsk(q, askMode);
+      await executeAsk(q, askMode, undefined, [], askedAt);
       return;
     }
 
@@ -3062,6 +3067,7 @@ export default function Home() {
     askIntentTraceRef.current = [intentUnderstandingStep()];
     setQuestion("");
     setPendingQuestion(q);
+    setPendingAskedAt(askedAt);
     setPendingMode("reasoning");
     setPendingTrace(askIntentTraceRef.current);
     setIntentChecking(true);
@@ -3090,6 +3096,7 @@ export default function Home() {
           question: q,
           contract,
           understandingMs,
+          askedAt,
         });
         setToast("问题存在会改变检索方向的歧义，请先补充确认");
         return;
@@ -3110,6 +3117,7 @@ export default function Home() {
           contract, contract.resolved_question, {}, understandingMs,
         ),
         handOffIntentTrace(askIntentTraceRef.current),
+        askedAt,
       );
       // 只有仍持有草稿槽的那一轮才有权清理:期间用户可能已经切会话并开了新一轮
       // 预检,那份草稿不归本轮处置(codex 第 9 轮 P2)。
@@ -3148,6 +3156,7 @@ export default function Home() {
     // 理解阶段合成的轨迹前缀。后端流下来的步骤追加在它后面,用户看到的是一条
     // 从「理解问题」一路走到「作答」的连续轨迹,而不是从中途冒出来的半截。
     traceSeed: ReasoningTraceStep[] = [],
+    askedAt = new Date().toISOString(),
     // 返回「本次运行有没有被真正接下」。下面这几道守卫可能在问题理解跑完之后
     // 才拦下来(那段时间里证据/图谱状态会变),调用方要据此把草稿退回输入框 ——
     // 否则输入框已清空、在途 turn 也已隐藏,用户的问题就此无声消失。
@@ -3181,6 +3190,7 @@ export default function Home() {
     setChatMode("ask");
     setQuestion("");
     setPendingQuestion(q);
+    setPendingAskedAt(askedAt);
     setPendingMode(selectedMode);
     setPendingTrace(traceSeed);
     setAsking(true);
@@ -3193,6 +3203,7 @@ export default function Home() {
     try {
       const payload = {
         question: q,
+        asked_at: askedAt,
         conversation_id: conversationId ?? undefined,
         mode: selectedMode,
         retrieval_effort: askRetrievalEffort,
@@ -3242,7 +3253,7 @@ export default function Home() {
         await refreshActiveSessions(notebookId).catch(() => {});
         return true;
       }
-      setTurns((prev) => [...prev, { question: q, response }]);
+      setTurns((prev) => [...prev, { question: q, response, askedAt }]);
       setConversationId(response.conversation_id);
     } catch (error) {
       if (!ownsRun()) {
@@ -3305,7 +3316,11 @@ export default function Home() {
       // 同 runAsk:草稿留到 executeAsk 真的接下这次运行为止,且只有仍持有草稿槽的
       // 那一轮才有权清理(codex 第 9 轮 P2)。
       const started = await executeAsk(
-        review.question, "reasoning", confirmation, handOffIntentTrace(traceSeed),
+        review.question,
+        "reasoning",
+        confirmation,
+        handOffIntentTrace(traceSeed),
+        review.askedAt,
       );
       if (releaseIntentDraft(draftToken) && !started) {
         setQuestion(review.question);
@@ -3433,11 +3448,16 @@ export default function Home() {
     setSessions((current) => current.some((session) => session.id === detail.id)
       ? current.map((session) => session.id === detail.id ? summary : session)
       : [summary, ...current]);
-    setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
+    setTurns(detail.turns.map((turn) => ({
+      question: turn.question,
+      response: turn.response,
+      askedAt: turn.asked_at,
+    })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setAskRetrievalEffort(retrievalEffortFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
     setPendingQuestion("");
+    setPendingAskedAt("");
     setPendingMode(DEFAULT_ASK_MODE);
     setPendingTrace([]);
     setChatMode("ask");
@@ -3451,6 +3471,7 @@ export default function Home() {
     if (active) {
       // 把在途 turn 渲染成「生成中」并接回实时轨迹(仿正在 ask 的 UI)。
       setPendingQuestion(active.question);
+      setPendingAskedAt(active.asked_at);
       setPendingMode(modeFromTurn({ response: { mode: active.mode } }));
       setPendingTrace(active.trace ?? []);
       setAsking(true);
@@ -5120,7 +5141,7 @@ export default function Home() {
                   <div className="chat-thread">
                     {turns.map((turn, index) => (
                       <div className="chat-turn" id={chatTurnDomId(index)} key={turn.response.answer_id || index}>
-                        <div className="chat-user">{turn.question}</div>
+                        <ChatQuestion question={turn.question} askedAt={turn.askedAt} />
                         <div className="chat-assistant">
                           <AnswerView
                             answer={turn.response}
@@ -5149,7 +5170,7 @@ export default function Home() {
                     ))}
                     {askInFlight && (
                       <div className="chat-turn" id={pendingQuestion ? chatTurnDomId(turns.length) : undefined}>
-                        {pendingQuestion && <div className="chat-user">{pendingQuestion}</div>}
+                        {pendingQuestion && <ChatQuestion question={pendingQuestion} askedAt={pendingAskedAt} />}
                         <div className="chat-assistant chat-thinking">
                           {/* 按引擎是否流式推轨迹判断,不按分组:深入分析组里只有
                               逐步推理会流轨迹,关联追溯挂上去只会让用户从头到尾

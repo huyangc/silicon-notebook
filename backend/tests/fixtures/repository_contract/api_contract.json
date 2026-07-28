@@ -4,6 +4,11 @@
       "schemas": {
         "ActiveAskJob": {
           "properties": {
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
+              "type": "string"
+            },
             "job_id": {
               "title": "Job Id",
               "type": "string"
@@ -762,6 +767,12 @@
         },
         "AskRequest": {
           "properties": {
+            "asked_at": {
+              "default": "",
+              "maxLength": 64,
+              "title": "Asked At",
+              "type": "string"
+            },
             "conversation_id": {
               "anyOf": [
                 {
@@ -835,6 +846,11 @@
             "answer_id": {
               "default": "",
               "title": "Answer Id",
+              "type": "string"
+            },
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
               "type": "string"
             },
             "citations": {
@@ -1541,6 +1557,11 @@
           "properties": {
             "answer_id": {
               "title": "Answer Id",
+              "type": "string"
+            },
+            "asked_at": {
+              "default": "",
+              "title": "Asked At",
               "type": "string"
             },
             "created_at": {
@@ -15814,6 +15835,7 @@
       "turns": [
         {
           "answer_id": "ans-api",
+          "asked_at": "",
           "created_at": "2024-01-02T03:04:05",
           "question": "fixture gain",
           "response": {

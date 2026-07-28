@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -152,6 +153,9 @@ class AskIntentConfirmation(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
+    # Browser-captured submission instant. It is display metadata only and
+    # never participates in ordering, authorization, retrieval, or scheduling.
+    asked_at: str = Field(default="", max_length=64)
     scenario: Dict[str, str] = Field(default_factory=dict)
     conversation_id: Optional[str] = None
     mode: str = "chunk"       # "chunk"(默认,通用问答) | "fast"(旧KG) | "reasoning" | "graph" | "global"
@@ -161,6 +165,19 @@ class AskRequest(BaseModel):
     # reasoning only: returned by /ask/intent and confirmed by the user (or
     # auto-confirmed by the UI when no blocking ambiguity exists).
     intent: Optional[AskIntentConfirmation] = None
+
+    @field_validator("asked_at")
+    @classmethod
+    def validate_asked_at(cls, value: str) -> str:
+        if not value:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("asked_at must be an ISO-8601 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("asked_at must include a timezone offset")
+        return value
 
 
 class AnswerAnchor(BaseModel):
@@ -306,6 +323,7 @@ class StructuredBatchCoverage(BaseModel):
 
 class AskResponse(BaseModel):
     answer_id: str = ""
+    asked_at: str = Field(default="", exclude_if=lambda value: not value)
     conclusion: str
     answer: str = ""
     grounded: bool = False
@@ -376,12 +394,14 @@ class ConversationTurn(BaseModel):
     answer_id: str
     question: str
     response: AskResponse
+    asked_at: str = ""
     created_at: str = ""
 
 
 class ActiveAskJob(BaseModel):
     job_id: str
     question: str = ""
+    asked_at: str = ""
     mode: str = ""
     trace: List[dict] = Field(default_factory=list)
 

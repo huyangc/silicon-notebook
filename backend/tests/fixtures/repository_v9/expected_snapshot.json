@@ -65,6 +65,7 @@
     "jobs": [
       {
         "answer_id": "<ans-id-1>",
+        "asked_at": "",
         "conversation_id": "<conv-id-1>",
         "created_at": "<timestamp>",
         "created_by": "<user-id-1>",
@@ -269,6 +270,7 @@
       "turns": [
         {
           "answer_id": "<ans-id-1>",
+          "asked_at": "",
           "created_at": "<timestamp>",
           "question": "Why is fixture gain stable?",
           "response": {
@@ -591,6 +593,7 @@
     "ask_jobs": [
       {
         "answer_id": "<ans-id-1>",
+        "asked_at": "",
         "conversation_id": "<conv-id-1>",
         "created_at": "<timestamp>",
         "created_by": "<user-id-1>",
@@ -1535,7 +1538,7 @@
       },
       {
         "name": "ask_jobs",
-        "sql_sha256": "393b26cacbfa9da4d62c4f4c8bba973a33c561126c364993839c665d998047b9",
+        "sql_sha256": "24c5ac5665fff6d13ba3c9a02dcdff620b80c1d5aba1ad4db8992aed4a7b3003",
         "type": "table"
       },
       {
@@ -1924,6 +1927,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 34
+    "user_version": 35
   }
 }
