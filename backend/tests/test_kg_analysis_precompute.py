@@ -2092,11 +2092,12 @@ def test_a_library_without_boards_writes_no_source_profile_product(repo):
     assert "buckets" in artifacts[ARTIFACT_RELATION_PROVENANCE]["payload"]
 
 
-# ------------------------------------------------- 两个闸的对称性(四个方向)
+# ------------------------------------------------- 两个闸的对称性(五个方向)
 # 这道闸是**对称的**:放松一边就会紧另一边。它当初是为了修 B1(「已部署库永不回填」)
 # 才加的;后来又发现它把「零板块」误判成「没建成」,让那类库每次刷新都重跑全部重活;
-# 再后来又发现那次修复顺手吞掉了「请求的 level 从没建过」(方向四)。四个方向必须
-# **同时**钉住,只测一头的守卫会在下一次调参时静默失效。
+# 再后来又发现那次修复顺手吞掉了「请求的 level 从没建过」(方向四);第 15 轮又发现
+# 方向四补的是**读侧**,写侧照旧对所有层推进那份不分 level 的账目,反向的洞还在
+# (方向五)。五个方向必须**同时**钉住,只测一头的守卫会在下一次调参时静默失效。
 
 _HEAVY_WORK = (
     "community_graph_rows",        # canonical 边图:生产 836 万边的一次 join
@@ -2284,6 +2285,124 @@ def test_the_gate_reads_the_same_default_level_the_callers_do():
                    RepositoryFacade.rebuild_communities):
         default = inspect.signature(target).parameters["level"].default
         assert default == DEFAULT_COMMUNITY_LEVEL, target.__qualname__
+
+
+def _community_seq(repo, notebook_id: str) -> int:
+    with repo._connect() as db:
+        return int(db.execute(
+            "SELECT community_seq FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,)).fetchone()["community_seq"])
+
+
+def _grow_kg(repo, notebook_id: str) -> None:
+    """再加一个自成一体的三角 —— 板块数 2 → 3,而且 `kg_mutation_seq` 跟着往前走。"""
+    _add_sources(repo, notebook_id, "src-e")
+    repo.store_kg(
+        notebook_id, "src-e",
+        [_claim(name) for name in ("P", "Q", "R")],
+        [_rel("P", "Q"), _rel("Q", "R"), _rel("P", "R")],
+    )
+
+
+def test_building_another_level_does_not_mark_the_default_level_built(repo, monkeypatch):
+    """方向五(共享账目只替默认层说话):非默认层的构建不得推进 `community_seq`。
+
+    方向四把「非默认层没建过」补上了,但补的是**读侧**;写侧照旧对所有层推进那份
+    **不分 level** 的 `community_seq`(codex 第 15 轮 P2-1)。于是先建 level 1 → seq
+    被推到当前 → 随后一次非 force 的 `rebuild_communities(level=0)` 在 level 0
+    **一行都没有**时仍然满足「seq 对齐 ⟹ 默认层建过」,拿 level-1 的账目短路返回 0。
+    方向四的判据管不到这一档:默认层那一支是**无条件**信 seq 的(零板块是合法终态,
+    见方向一),它信的正是这个被别的层顶掉的数。
+
+    补法不加列:那份共享账目(`community_seq` + `kg_analysis_artifacts` + 两张依赖板块
+    的产物表)整体收归 `DEFAULT_COMMUNITY_LEVEL` 独有 —— 只有默认层的构建写它、只有
+    默认层的构建读它。「seq 对齐 ⟹ 默认层建过」的蕴含关系因此恢复成写侧的不变式,
+    而不是一句但愿如此的假设。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id, level=1) == 2
+    assert _boards_at(repo, notebook_id, 1), "前提不成立:level 1 没建出来"
+    assert _boards_at(repo, notebook_id, 0) == {}, "前提不成立:level 0 不该有行"
+    assert _community_seq(repo, notebook_id) == -1, (
+        "非默认层的构建推进了那份不分 level 的共享 seq —— 默认层的「建过」判据"
+        "(seq 对齐)因此被别的层顶掉:下面那次 level 0 重建会直接短路,而 level 0 "
+        "一行板块都没有"
+    )
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id) == 2         # 默认层,刻意不带 force
+    assert sorted(set(calls)) == sorted(_HEAVY_WORK), (
+        f"默认层一行板块都没有,却被别的层写下的账目判成「建过」:{calls}"
+    )
+    assert _boards_at(repo, notebook_id, 0), "level 0 一行都没写出来"
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+
+
+def test_building_another_level_leaves_the_default_levels_ledger_alone(repo):
+    """同一族的另一半:非默认层的构建也不得改写/作废那份不分 level 的账本与产物表。
+
+    `kg_analysis_artifacts` / `kg_community_edges` / `kg_source_profiles` 与
+    `community_seq` 是**同一份**共享账目,只是分了四张表。让非默认层去写它,后果比
+    seq 那一半更重:
+      · `discard_board_dependent_kg_analysis_artifacts` 会连坐作废默认层**有效**的
+        两份产物(level-1 的 `replace_communities` 只删 level-1 的板块行,默认层的
+        板块 id 一个都没变,那两份根本没悬空);
+      · 随后写回的两份产物指向的是 **level-1** 的板块 id,而默认层的读侧照旧按
+        `community_seq` 对齐判「与当前一致」—— 报告会把 level-1 的跨板块连线画在
+        level-0 的板块上。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id) == 2
+    before_ledger = _artifacts(repo, notebook_id)
+    before_edges = _edges(repo, notebook_id)
+    before_profiles = _profiles(repo, notebook_id)
+    before_boards = _boards_at(repo, notebook_id, 0)
+    assert set(before_ledger) == set(ARTIFACT_KINDS)
+    assert before_edges and before_profiles and before_boards
+
+    assert repo.rebuild_communities(notebook_id, level=1) == 2
+
+    assert _edges(repo, notebook_id) == before_edges, (
+        "跨板块边被换成了另一层的板块 id"
+    )
+    assert _artifacts(repo, notebook_id) == before_ledger, (
+        "非默认层的构建改写了那份不分 level 的账本 —— 默认层的读侧照旧信它"
+    )
+    assert _profiles(repo, notebook_id) == before_profiles
+    assert _boards_at(repo, notebook_id, 0) == before_boards, (
+        "默认层的板块行被连坐了 —— `replace_communities` 是按 level 删的"
+    )
+
+
+def test_another_level_never_short_circuits_on_the_default_levels_seq(repo, monkeypatch):
+    """共享账目收归默认层之后,非默认层就**没有**账本了 —— 所以它永不短路。
+
+    保留「其它层退回 `communities_count(level) > 0`」那一支会把陈旧的划分当成新鲜的:
+    共享的 seq 只证明**默认层**建于当前 KG 世代,而这一层的行可能建在好几代以前。
+    这条把那个组合钉死 —— level 1 建于旧世代、KG 变过、默认层重建过(seq 因此对齐),
+    此时再要 level 1 必须真的重建,不能拿默认层的 seq 加上「这层有行」冒充新鲜。
+
+    代价是显式的、也是刻意选的:非默认层每次都全量重建(只会**多**建、绝不会漏建)。
+    今天没有任何调用点传非默认层,所以这笔代价的真实值是 0;而它换回来的是一句能写死
+    的不变式 —— 那份不分 level 的账目只描述默认层,别的层一个字都不占。
+    """
+    notebook_id = _seed(repo)
+    assert repo.rebuild_communities(notebook_id, level=1) == 2   # 建于旧世代
+    _grow_kg(repo, notebook_id)                                  # KG 变了
+    assert repo.rebuild_communities(notebook_id) == 3            # 默认层跟上 → seq 对齐
+    with repo._connect() as db:
+        state = db.execute(
+            "SELECT community_seq, kg_mutation_seq FROM unified_kg_state "
+            "WHERE notebook_id=?", (notebook_id,)).fetchone()
+    assert int(state["community_seq"]) == int(state["kg_mutation_seq"])
+    assert len(_boards_at(repo, notebook_id, 1)) == 2, "前提不成立:level 1 还是旧划分"
+
+    calls = _spy_heavy_work(repo, monkeypatch)
+    assert repo.rebuild_communities(notebook_id, level=1) == 3   # 刻意不带 force
+    assert "community_graph_rows" in calls, (
+        f"非默认层拿默认层的 seq + 「这层有行」冒充了新鲜:{calls}"
+    )
+    assert len(_boards_at(repo, notebook_id, 1)) == 3, "level 1 还停在旧划分上"
 
 
 def test_deleting_the_notebook_takes_the_artifacts_with_it(repo):

@@ -7152,8 +7152,15 @@ button.chat-session-card {
 
 .kg-analysis-order {
   display: flex;
+  align-items: center;
   gap: 8px;
   margin-bottom: 10px;
+}
+
+/* 请求在飞、屏上还是上一次那批行时的提示。两个排序按钮标的是**数据**的顺序而不是控件
+   选的那个（见 kg-analysis-view.tsx 的 shownOrder），所以这一条是这次点击唯一的反馈。 */
+.kg-analysis-order-status {
+  margin-left: 2px;
 }
 
 .kg-analysis-order .sort-button.active {

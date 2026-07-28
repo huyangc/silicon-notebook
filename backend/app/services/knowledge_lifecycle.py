@@ -94,8 +94,9 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 _SOURCE_BUILD_PAGE_SIZE = 500
 
 # `rebuild_communities` 的默认层,也是仓库里**唯一**被写过的层(所有调用点都传 0)。
-# 它单独取个名字是因为新鲜度闸要引用它:`unified_kg_state.community_seq` 与
-# `kg_analysis_artifacts` 都**不分 level**,那份账目只替这一层说话(见闸里的方向四)。
+# 它单独取个名字是因为那份**不分 level** 的共享账目整体归它独有:
+# `unified_kg_state.community_seq`、`kg_analysis_artifacts`、以及两张依赖板块划分的
+# 产物表 —— 只有这一层的构建写它们,也只有这一层的构建读它们(见闸里的方向四/方向五)。
 # ⚠ 与 `rebuild_communities(level=...)` 的签名默认值必须一致,由
 # `test_kg_analysis_precompute` 的方向四守卫钉住。
 DEFAULT_COMMUNITY_LEVEL = 0
@@ -3287,17 +3288,33 @@ class KnowledgeLifecycleService:
         照样判得出来;而 `communities` 只被 `replace_communities` 删改、它又与
         `set_community_seq` **同事务**提交,所以 seq 对齐 ⟺ 板块确实按那个 seq 写过。
 
-        ⚠ **但 seq 这个标记不分 level,所以它只替默认层说话**(codex 第 11 轮 P2)。
-        `community_seq` 与 `kg_analysis_artifacts` 都没有 level 维度(第 7 轮刻意去掉的,
-        理由见设计 §3.4 订正 2:一次预计算产出的永远是一套自洽的产物,它描述的 level 记在
-        账本 payload 里)。于是 level 0 对齐之后,一次非 force 的 `rebuild_communities(
-        ..., level=1)`——库里一行 level-1 都没有——会满足这个闸、直接返回 0 而**根本不建
-        那一层**。被 seq 取代之前的 `板块数 > 0` 是按 level 查的,反倒建得出来。
-        补法是给闸补上第四个方向:默认层照旧信 seq(它是唯一被写过的层,零板块合法),
-        其它层退回唯一存在的按层证据 `communities_count(level) > 0`。
-        **不**给产物表加回 level 维度 —— 那正是第 7 轮删掉的东西。
-        代价只落在休眠路径上:非默认层若真的建成零板块,它每次都会重建;而那一层今天
-        没有任何调用点,拿一列 schema 去换它不值。
+        ⚠ **那份不分 level 的账目整体归默认层独有**(codex 第 11/15 轮 P2)。
+        `community_seq`、`kg_analysis_artifacts`、以及两张依赖板块划分的产物表都没有
+        level 维度(第 7 轮刻意去掉的,理由见设计 §3.4 订正 2)。第 11 轮先补了**读侧**:
+        level 0 对齐之后一次非 force 的 `rebuild_communities(..., level=1)`——库里一行
+        level-1 都没有——会满足闸、直接返回 0 而根本不建那一层。但**写侧**照旧对所有层
+        推进那份共享的 seq,于是反向的洞还在(第 15 轮 P2-1):先建 level 1 把 seq 推到
+        当前,随后 `rebuild_communities(level=0)` 在 level 0 一行都没有时仍然「seq 对齐」,
+        拿别的层的账目短路返回 0 —— 而默认层那一支是**无条件**信 seq 的(零板块是合法
+        终态),它信的正是这个被顶掉的数。
+
+        补法不加列,把那句蕴含关系变成写侧的不变式:**只有默认层的构建碰共享账目**。
+          · `set_community_seq` 只在 `level == DEFAULT_COMMUNITY_LEVEL` 时调 → 「seq 对齐
+            ⟺ 默认层的板块按那个 seq 写过」重新成立(它与 `replace_communities(level=0)`
+            同事务,别处没有第二个写点);
+          · 预计算与 `discard_board_dependent_...` 同样只在默认层跑 → 非默认层的构建
+            既不会连坐作废默认层**有效**的两份产物(它的 `replace_communities` 按 level
+            删,默认层的板块 id 一个都没变、根本没悬空),也不会把指向另一层板块 id 的
+            产物写进默认层的读侧;
+          · 闸本身也收进默认层:非默认层没有任何账本,所以它**永不短路**。保留「其它层
+            退回 `communities_count(level) > 0`」那一支会把陈旧的划分当成新鲜的 —— 共享
+            的 seq 只证明**默认层**建于当前 KG 世代,而那一层的行可能建在好几代以前。
+
+        代价是显式的、也是刻意选的,全部落在休眠路径上:非默认层每次都全量重建(只会
+        **多**建、绝不会漏建),而且它不产出分析报告 —— `/kg-analysis` 因此永远描述默认
+        层,不会出现「板块列表是 level 1、跨板块边是 level 0」那种自相矛盾的报告(那正是
+        `kg_analysis.community_overview` 不收 level 参数的理由)。今天没有任何调用点传
+        非默认层,所以这笔代价的真实值是 0;拿一列 schema 去换它不值。
 
         同理,`has_boards` 必须传**实际**的板块数而不是硬写 True:零板块的库不写
         来源画像(设计 §3.3 的 S4 —— 那张表单独看是在说「所有来源都关联稀疏」),
@@ -3329,7 +3346,7 @@ class KnowledgeLifecycleService:
         # 让「刷新图谱」等重复触发在 KG 未变时秒级 no-op;首次(community_seq=-1)或 KG
         # 变动后(seq 不匹配)才重跑。无 unified_kg_state 行 → _st=None → 不跳过(安全兜底)。
         # ⚠ 默认层的判据里**没有**板块数:零板块是合法终态,理由见 docstring 那段。
-        # 非默认层反过来 —— 那份不分 level 的账目替它说不了话,见下面的方向四。
+        # 非默认层反过来 —— 那份不分 level 的账目替它说不了话,见下面的方向四/方向五。
         # 账本读的是**整行**(含 payload)而不是只读 seq:簇世代盖在 payload 里(刻意
         # 不加列,见 `kg_analysis_precompute.CLUSTER_SEQ_PAYLOAD_KEY`),闸拿不到 payload
         # 就判不出簇是否漂过。这也是同一次读同时喂给下面 `_compute_kg_analysis` 的
@@ -3341,16 +3358,18 @@ class KnowledgeLifecycleService:
         _seq = int(_st["kg_mutation_seq"]) if _st else 0
         _cseq = int(_st["cluster_mutation_seq"]) if _st else 0
         _boards = int(_cnt["c"]) if _cnt else 0
-        # 方向四(请求的 level 没建过):`community_seq` 与账本都**不分 level**,所以
-        # 它们只替 `DEFAULT_COMMUNITY_LEVEL` 说话 —— 那是仓库里唯一被写过的层。
-        # 对其它层,库里仅存的按层证据就是 `communities_count(level)` 本身,所以退回
-        # 「这一层有行才算建过」(也正是方向一改动之前的判据)。少了这一句,level 0
-        # 对齐之后一次 `rebuild_communities(..., level=1)` 会满足闸、直接返回 0 而
-        # **根本不建那一层**。
-        _level_built = level == DEFAULT_COMMUNITY_LEVEL or _boards > 0
+        # 方向四(请求的 level 没建过)+ 方向五(别的层的构建不得替默认层背书):
+        # `community_seq`、账本、两张依赖板块的产物表**都不分 level**,那份共享账目整体
+        # 归 `DEFAULT_COMMUNITY_LEVEL` 独有 —— 只有它写、也只有它读(docstring 那段)。
+        # 于是闸也只对默认层成立:非默认层没有任何账本,所以它**永不短路**、每次都全量
+        # 重建。少了这一句,level 0 对齐之后一次 `rebuild_communities(..., level=1)` 会
+        # 满足闸、直接返回 0 而**根本不建那一层**(方向四);而退回「其它层看
+        # `communities_count(level) > 0`」同样不行 —— 共享的 seq 只证明默认层建于当前
+        # KG 世代,那一层的行可能建在好几代以前,「有行」会把陈旧划分冒充成新鲜的。
+        _ledger_speaks_for_level = level == DEFAULT_COMMUNITY_LEVEL
         graph_fresh = bool(
             not force and _st is not None and int(_st["community_seq"]) == _seq
-            and _level_built
+            and _ledger_speaks_for_level
         )
         if graph_fresh and analysis_ledger_is_current(
             _ledger, _seq, _cseq, has_boards=_boards > 0
@@ -3517,28 +3536,39 @@ class KnowledgeLifecycleService:
         # `kg_analysis_backfilled` —— 同一次执行里失败事件与成功事件并存,而账本其实
         # 仍然不完整。运维监控与任何事件消费方都会被误导(「补过了」与「补失败了」是
         # 相反的运维动作)。变的只是那条成功事件的前提。
+        #
+        # ⚠ 只有默认层跑它(方向五):账本与两张产物表都不分 level,让非默认层去写就是
+        # 把指向**另一层**板块 id 的产物塞进默认层的读侧,而读侧照旧按 `community_seq`
+        # 对齐判「与当前一致」。非默认层因此只发布它自己的板块行,一个字都不占共享账目。
         analysis: "Optional[Tuple[list, list, Dict[str, dict]]]" = None
-        try:
-            analysis = self._compute_kg_analysis(
-                notebook_id, level, _cseq, kept_rows, edge_table, can2idx,
-                # `force` 是「用户明确要求重算」——它上面不省钱,见
-                # `reusable_artifact_payloads` 的最后一段。
-                reusable=({} if force
-                          else reusable_artifact_payloads(_ledger, _seq, _cseq)),
-                # 板块划分是这一轮**刚跑出来**的,还是库里现成的?依赖板块的两份产物
-                # 据此决定盖不盖簇世代的戳(见 `stamp_cluster_seq`):补账本那条路径
-                # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
-                # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
-                partition_rebuilt=not graph_fresh,
-            )
-        except KgBuildAborted:
-            raise
-        except Exception as exc:
-            self.event_log.emit({
-                "kind": "kg_analysis_precompute_failed",
-                "notebook_id": notebook_id, "level": level, "seq": _seq,
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+        if not _ledger_speaks_for_level:
+            # 边表在这里就到头了 —— 它平时是交给 `_compute_kg_analysis` 边消化边释放的
+            # (生产 836 万边约 100 MB),这条路径没有接手方,得自己放掉,不能让它一路
+            # 活到函数返回。`can2idx` 同理(生产 171 万 canonical)。
+            del edge_table
+            can2idx.clear()
+        else:
+            try:
+                analysis = self._compute_kg_analysis(
+                    notebook_id, level, _cseq, kept_rows, edge_table, can2idx,
+                    # `force` 是「用户明确要求重算」——它上面不省钱,见
+                    # `reusable_artifact_payloads` 的最后一段。
+                    reusable=({} if force
+                              else reusable_artifact_payloads(_ledger, _seq, _cseq)),
+                    # 板块划分是这一轮**刚跑出来**的,还是库里现成的?依赖板块的两份产物
+                    # 据此决定盖不盖簇世代的戳(见 `stamp_cluster_seq`):补账本那条路径
+                    # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
+                    # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
+                    partition_rebuilt=not graph_fresh,
+                )
+            except KgBuildAborted:
+                raise
+            except Exception as exc:
+                self.event_log.emit({
+                    "kind": "kg_analysis_precompute_failed",
+                    "notebook_id": notebook_id, "level": level, "seq": _seq,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
         analysis_done = analysis is not None
         # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
         #
@@ -3573,14 +3603,22 @@ class KnowledgeLifecycleService:
                     # 理由见 `kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
                     # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
                     # **失败**那一档,而那一档没有别的东西替它守。
-                    self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
-                        db, notebook_id
-                    )
-                    # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE no-op,
-                    # 下次仍重建)。⚠ 它必须与 `replace_communities` **同事务**:分开
-                    # 提交会留下「板块已换、seq 还是旧的」的窗口,而闸正是拿 seq 判
-                    # 「建过没有」。
-                    self.unified_kg.set_community_seq(db, notebook_id, _seq)
+                    #
+                    # ⚠ 作废与记版本都**只在默认层**做(方向五,codex 第 15 轮 P2-1)。
+                    # 上面那次 `replace_communities` 是按 level 删/写的,非默认层重铸的
+                    # 是它自己那一层的板块 id —— 默认层的板块 id 一个都没变,那两份产物
+                    # 根本没悬空,作废它们是**连坐**;而推进那份不分 level 的 seq 更糟:
+                    # 「seq 对齐 ⟹ 默认层建过」是闸里默认层那一支**无条件**信的蕴含关系,
+                    # 让别的层去推它,默认层就会在一行板块都没有时被判成「建过」。
+                    if _ledger_speaks_for_level:
+                        self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                            db, notebook_id
+                        )
+                        # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE
+                        # no-op,下次仍重建)。⚠ 它必须与 `replace_communities`
+                        # **同事务**:分开提交会留下「板块已换、seq 还是旧的」的窗口,
+                        # 而闸正是拿 seq 判「建过没有」。
+                        self.unified_kg.set_community_seq(db, notebook_id, _seq)
                 if analysis is not None:
                     _edges, _profiles, _payloads = analysis
                     self.unified_kg.replace_kg_analysis_artifacts(

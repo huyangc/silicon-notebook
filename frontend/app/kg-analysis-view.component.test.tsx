@@ -521,6 +521,56 @@ test("切换排序回到第一页，并按新顺序取数", async () => {
   });
 });
 
+// 切排序 / 翻页时请求在飞、屏上还是**上一次**的行。此时任何「跟着控件走」的标注都会把
+// 旧数据说成新的：换排序时那两个按钮当场亮起新选的那个（aria-pressed），换页时页码同理。
+// 与第 11 轮那条「换库不复位」是同一类缺陷（状态不跟着数据走），只是 scope 从 notebook
+// 缩到了一次请求。修法：**渲染一律读 `page` 自带的 order/offset**，控件值只在一页都还
+// 没有时兜底；再补一条「正在读取」的反馈，免得点了没反应。
+test("切排序时旧的行不会被标上新选的顺序——标注跟着数据走，不跟着控件走", async () => {
+  renderView();
+  await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  const block = blockByTitle("关联稀疏的来源");
+
+  // 新的一页挂着不返回：屏上留着「关联最稀疏的在前」那一页的行。
+  vi.mocked(fetchKgAnalysisSources).mockReturnValue(new Promise(() => {}));
+  fireEvent.click(within(block).getByRole("button", { name: "关联最紧密的在前" }));
+
+  expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenLastCalledWith("nb-1", {
+    limit: 20,
+    offset: 0,
+    order: "connected",
+  });
+  expect(within(block).getByText("光遗传学质粒手册")).toBeInTheDocument();
+  expect(
+    within(block).getByRole("button", { name: "关联最稀疏的在前" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  expect(
+    within(block).getByRole("button", { name: "关联最紧密的在前" }),
+  ).toHaveAttribute("aria-pressed", "false");
+  // 点了必须有反应 —— 否则「标注跟着数据走」就成了「整块死住、毫无反馈」。
+  expect(within(block).getByText(/正在读取/)).toBeInTheDocument();
+});
+
+test("翻页时旧的行不会被标上新的页码", async () => {
+  renderView();
+  await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });
+  const block = blockByTitle("关联稀疏的来源");
+  expect(within(block).getByText(/第 1–2 个/)).toBeInTheDocument();
+
+  vi.mocked(fetchKgAnalysisSources).mockReturnValue(new Promise(() => {}));
+  fireEvent.click(within(block).getByRole("button", { name: /下一页/ }));
+
+  expect(vi.mocked(fetchKgAnalysisSources)).toHaveBeenLastCalledWith("nb-1", {
+    limit: 20,
+    offset: 20,
+    order: "sparse",
+  });
+  // 行还是第一页那两条，页码就必须还是第一页的。
+  expect(within(block).getByText("光遗传学质粒手册")).toBeInTheDocument();
+  expect(within(block).getByText(/第 1–2 个/)).toBeInTheDocument();
+  expect(within(block).queryByText(/第 21–/)).not.toBeInTheDocument();
+});
+
 test("指向已删除来源的那一行标出来，而不是留一个空标题让人猜", async () => {
   renderView();
   await screen.findByRole("heading", { name: "关联稀疏的来源", level: 3 });

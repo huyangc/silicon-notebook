@@ -739,6 +739,16 @@ function SourcesBlock({
 }) {
   const note = freshnessNote(page?.freshness ?? artifact?.freshness ?? null);
   const units = page?.units ?? null;
+  // ⚠ 按钮标的是**屏上这批行**的顺序,不是控件选的那个。切排序只重取 `/sources`,请求在
+  // 飞的那段时间 `page` 还是上一次的 —— 拿控件值去标,旧的行当场就被写上新选的顺序,而
+  // 那正是本视图存在理由的反面(「每个数字都要说得出自己的口径」)。分页那一半天然已经
+  // 这样了(页码/范围/上下页全读 `page.offset` / `page.limit` / `page.has_more`),这里
+  // 只是把排序补齐。一页都还没有时才落回控件值 —— 那时没有任何数据会被误标。
+  //
+  // 另一条路(请求一开始就清掉 `page`)会闪一下加载态,而且把「上一次的结果还看得见」
+  // 这个好处也一起丢了;标注跟着数据走则两者都留得住。代价是点下去按钮不当场亮 ——
+  // 所以旁边补一条在飞提示,让这次点击有反馈。
+  const shownOrder = page?.order ?? order;
   return (
     <div className="kg-analysis-block">
       <BlockHead
@@ -752,13 +762,18 @@ function SourcesBlock({
           <button
             key={value}
             type="button"
-            className={`sort-button${order === value ? " active" : ""}`}
-            aria-pressed={order === value}
+            className={`sort-button${shownOrder === value ? " active" : ""}`}
+            aria-pressed={shownOrder === value}
             onClick={() => onOrder(value)}
           >
             {label(SOURCE_ORDER_LABEL, value, "默认顺序")}
           </button>
         ))}
+        {loading && page ? (
+          <p className="kg-analysis-hint kg-analysis-order-status" aria-live="polite">
+            正在读取…下面还是上一次的结果
+          </p>
+        ) : null}
       </div>
       <MainstreamBasis artifact={artifact} page={page} />
       {error ? (

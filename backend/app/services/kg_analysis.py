@@ -722,6 +722,12 @@ def _ledger_level(ledger: Dict[str, Dict[str, Any]]) -> int:
     两张明细表的账本 payload 都记了 `level`,取跨板块边那一份(它是**必需**的,来源
     画像可以合法缺席)。账本缺席时落回 0 —— `rebuild_communities` 的默认层,也是
     `communities` 表里唯一被写过的层。
+
+    ⚠ 第 15 轮起写侧收紧了:那份不分 level 的账本只由 `DEFAULT_COMMUNITY_LEVEL`
+    的构建写(见 `knowledge_lifecycle.rebuild_communities` 的方向五),所以这里读回来的
+    实际上恒为默认层。**这一读仍然保留**:载荷里那个字段是产物自证「我描述哪一层」的
+    唯一凭据,把它换成硬编码的 0 就等于把写侧的约束抄成一份读侧的假设 —— 两边一漂,
+    报告会安静地把另一层的板块说成默认层的。
     """
     entry = ledger.get(ARTIFACT_COMMUNITY_EDGES)
     if entry is None:
