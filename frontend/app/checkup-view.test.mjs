@@ -5,6 +5,8 @@ import {
   sourceHealthGroups,
   checkupCount,
   checkupAlertSignature,
+  repairRelease,
+  isRepairing,
 } from "./checkup-view.ts";
 
 const item = (code, count, sample = [], fix = "reparse") => ({ code, count, sample, fix });
@@ -103,4 +105,50 @@ test("签名随命中集合变化(新问题/修好)", () => {
   const after = checkup([item("H2", 0), item("H4", 1, [], "backfill_vectors")]);
   assert.notEqual(checkupAlertSignature(before), checkupAlertSignature(after));
   assert.equal(checkupAlertSignature(after), "nb-1:H4");
+});
+
+// ---- 修复忙碌位的解除条件(repairRelease / isRepairing)----------------------
+// 两类修复的形状不同,解除条件不能一刀切。这几条把差异钉住——尤其是最后两条,
+// 它们钉的是**刻意保留**的取舍,不是待修的 bug(理由见 checkup-view.ts 的注释)。
+
+test("reparse 逐轮修一批:count 一变就恢复可点(让用户接着修下一批)", () => {
+  const entry = repairRelease("reparse", 37);
+  assert.deepEqual(entry, { release: "count-changed", count: 37 });
+  assert.equal(isRepairing(entry, 37), true, "count 没变 → 这一轮还在跑");
+  assert.equal(isRepairing(entry, 17), false, "count 降了 → 这一轮见效,放行下一轮");
+});
+
+test("backfill_vectors 一次修全库:count 递减**不**解锁(否则会排出并发全库补齐)", () => {
+  // 这是 codex 第 2 轮 P2 的回归钉:看板 H4/H5 排除活跃租约,job 逐源补齐时 count
+  // 一路递减。若按 count 解除,job 还剩大半按钮就放行,用户能再排一次全库补齐——
+  // 正是后端 checkup.py 里 H4/H5 注释点名要防的「并发 backfill 重复模型调用」。
+  const entry = repairRelease("backfill_vectors", 25);
+  assert.deepEqual(entry, { release: "group-gone" });
+  assert.equal(isRepairing(entry, 25), true);
+  assert.equal(isRepairing(entry, 12), true, "补到一半 count 降了,但 job 还在跑,不能放行");
+  assert.equal(isRepairing(entry, 1), true, "只剩一项也还在跑");
+});
+
+test("没有在跑的修复时不显示忙碌态", () => {
+  assert.equal(isRepairing(undefined, 25), false);
+});
+
+test("group-gone 的解除只能靠该组消失/窗口结束——这是刻意取舍,不是待修 bug", () => {
+  // ⚠ 改这条之前请先读 checkup-view.ts::repairRelease 的注释。
+  // backfill job 若因嵌入服务不可用而每源都失败,H4/H5 不归零(后端逐源吞异常,且
+  // backfill **没有**持久 job 状态),按钮会锁到有界轮询窗口结束(≤10 分钟)或
+  // 切库/重开看板为止,即便此刻已没有 job 在跑。反方向(提前放行)会重新打开
+  // 「并发全库补齐 = 重复付费模型调用」那道口子,而补齐失败几乎都是嵌入服务不可用
+  // ——立刻重试也还是失败。真正的修法是给 backfill 加持久 job 状态(新表 + 迁移 +
+  // PG 对等),那是独立特性。这条用例存在的意义就是让「顺手放宽」改不动而不报红。
+  const entry = repairRelease("backfill_vectors", 25);
+  assert.equal(isRepairing(entry, 25), true, "全失败、count 原封不动 → 仍显示修复中");
+  assert.notEqual(entry.release, "count-changed", "被改成按 count 解除即视为退化");
+});
+
+test("extract_kg 不走 repairingFix(忙碌位由 buildingKg 单独表达)", () => {
+  // page.tsx 对 extract_kg 直接早退、从不写这张表,故这里查不到条目即恒不忙碌。
+  // 真正的忙碌位是 buildingKg —— 它在建图 POST 失败时会被 startKgBuild 自己清掉,
+  // 而 repairingFix 里的条目没人清得掉(codex 第 1 轮 P2)。
+  assert.equal(isRepairing(undefined, 8), false);
 });

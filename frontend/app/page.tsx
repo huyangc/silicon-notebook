@@ -106,7 +106,7 @@ import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from 
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
-import { sourceHealthGroups, checkupCount, checkupAlertSignature } from "./checkup-view";
+import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, confirmReportIntent, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -887,20 +887,10 @@ export default function Home() {
   // 修复触发后短暂轮询 checkup 到此刻(反映 count 下降):reparse/backfill 是后台 job、
   // 无 build 忙碌位,不走三系统聚合 poll,故用这个有界窗口驱动一条专门的 checkup 轮询。
   const [checkupRepairPollUntil, setCheckupRepairPollUntil] = useState(0);
-  // 已触发、后台仍在跑的体检修复:分组 key → 解除条件。修复是后台 job,POST 返回 ≠ 修好,
-  // 中间这段真空期按钮必须禁用改文案,否则每点一次就再排一份同样的活(后端
-  // backfill-vectors / reparse 都没有单飞守卫,重复提交会真的重复干活)。
-  //
-  // 解除条件按**修复的形状**分两种,不能一刀切用 count(codex 第 2 轮 P2):
-  //   · count-changed —— 一轮只修一批(reparse 的样本上界 ≤20 篇)。count 一变就说明这
-  //     一轮见效,立刻恢复可点,让用户接着修下一批。这是既有设计(「逐轮修复、每轮
-  //     count 下降」),不是缺陷。
-  //   · group-gone —— 一次修全库(backfill_vectors)。job 逐源补齐,而看板 H4/H5 的口径
-  //     **排除活跃租约**,所以 count 在 job 跑的过程中就会一路递减——拿它当完成信号会
-  //     在 job 还剩大半时就解锁按钮,又能排一次全库补齐,正好是本 PR 要防的那件事。
-  //     只有该组彻底消失(归零、卡片卸载)或轮询窗口结束才解除。
-  // 窗口结束 / 切库是两种共用的兜底。
-  type RepairRelease = { release: "count-changed"; count: number } | { release: "group-gone" };
+  // 已触发、后台仍在跑的体检修复:分组 key → 解除条件。解除条件按**修复的形状**分两种
+  // (reparse 逐轮修一批 / backfill_vectors 一次修全库),规则与判定都在 checkup-view.ts
+  // 的 repairRelease / isRepairing,那里也记着一条刻意保留的取舍——改之前先读那段注释。
+  // 有界轮询窗口结束 / 切库是两种共用的兜底,保证按钮不会永久卡死。
   const [repairingFix, setRepairingFix] = useState<Record<string, RepairRelease>>({});
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
@@ -5739,18 +5729,13 @@ export default function Home() {
                     <p className="tool-hint">部分来源需要处理：</p>
                     {groups.map((g) => {
                       const titles = g.sample.map(titleOf).filter(Boolean).slice(0, 6);
-                      // 「这一组的修复还在后台跑」——解除条件按修复形状分两种,见 repairingFix
-                      // 声明处:reparse 是 count 一变就解除(逐轮修复),backfill_vectors 要等
-                      // 整组消失(它的 count 在 job 跑的过程中就会递减,不能当完成信号)。
+                      // 「这一组的修复还在后台跑」——判定规则在 checkup-view.ts::isRepairing。
                       //
                       // extract_kg 是例外:它**只**看 buildingKg,不进 repairingFix(见下方
-                      // runFix 里的理由)。这里查表恒为 undefined(从没写过那个键),
+                      // runFix 里的理由)。isRepairing 对它恒为 false(从没写过那个键),
                       // 忙碌态完全由 buildingKg 表达——那个位失败时会被 startKgBuild 清掉。
-                      const busyEntry = repairingFix[g.key];
-                      const repairing = (
-                        busyEntry !== undefined
-                        && (busyEntry.release === "group-gone" || busyEntry.count === g.count)
-                      ) || (g.fix === "extract_kg" && buildingKg);
+                      const repairing = isRepairing(repairingFix[g.key], g.count)
+                        || (g.fix === "extract_kg" && buildingKg);
                       const runFix = async () => {
                         const nb = currentNotebookId;
                         if (!nb || repairing) return;
@@ -5765,10 +5750,7 @@ export default function Home() {
                           return;
                         }
                         // 先乐观置忙碌位(POST 在飞的这段也不能再点),未受理/报错再撤销。
-                        const release: RepairRelease = g.fix === "backfill_vectors"
-                          ? { release: "group-gone" }
-                          : { release: "count-changed", count: g.count };
-                        setRepairingFix((previous) => ({ ...previous, [g.key]: release }));
+                        setRepairingFix((previous) => ({ ...previous, [g.key]: repairRelease(g.fix, g.count) }));
                         let started = false;
                         try {
                           if (g.fix === "reparse") started = await runReparse(nb, g.sample);
