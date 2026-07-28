@@ -825,6 +825,34 @@ class UnifiedKgStore:
         return rows
 
     @staticmethod
+    def board_partition_still_holds(
+        db: Any, notebook_id: str, level: int, board_id: str
+    ) -> bool:
+        """复核「产物所依据的那套板块划分」是否还在库里 —— 与 SQLite 侧逐条对应
+        (完整用途与「查一行就够」的判据见那边的 docstring)。
+
+        ⚠ **`FOR SHARE` 是这一侧的载重件,不是装饰。** `PostgresDatabase.write()` 是
+        READ COMMITTED、**没有**进程级锁,裸 SELECT 只是一次瞬时读:并发的
+        `replace_communities` 完全可以在我们「查完」与「插完」之间提交,复核照样放行,
+        写出去的仍是悬空产物。带上行锁之后两个方向都对:
+          · 并发写者的 `DELETE FROM communities …` 会**阻塞**到我们提交为止;
+          · 它若已经提交,`FOR SHARE` 根本读不到这一行 → 我们正确地判失效。
+        SQLite 那侧没有也不需要这个语法(进程级写锁 + 文件写锁已经串行),parity 红线
+        要的是语义等价而不是 SQL 等价。
+
+        ⚠ **不改锁对象(死锁)。** 锁 `unified_kg_state` 那一行看着更"权威",但它会与
+        并发写者的 `discard_board_dependent_… → set_community_seq` 顺序**反向**,PG 上
+        可以真死锁。锁 `communities` 的行不会:并发写者的第一个动作就是
+        `DELETE FROM communities`,它在**碰任何产物表之前**就被挡住,因此不可能持有
+        我们想要的东西 —— 两边的加锁顺序共享同一个前缀。
+        """
+        return db.execute(
+            "SELECT 1 FROM communities "
+            "WHERE notebook_id=%s AND level=%s AND id=%s FOR SHARE",
+            (notebook_id, level, board_id),
+        ).fetchone() is not None
+
+    @staticmethod
     def set_community_summary(
         db: Any,
         community_id: str,

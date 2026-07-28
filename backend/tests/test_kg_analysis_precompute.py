@@ -1360,8 +1360,32 @@ STATE_TABLE = "unified_kg_state"
 
 # ⚠ 表名**不能**用裸子串匹配:trace 回调拿到的是参数已展开的 SQL,而账本 payload 里
 # 恰好有一个 `"communities"` 字段(板块个数)—— 于是落库事务会被误判成板块重铸事务,
-# 两类混成一类、断言全空。只认 FROM / INTO / UPDATE 后面的那个标识符。
-_DML_TABLE = re.compile(r"\b(?:FROM|INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_]*)", re.I)
+# 两类混成一类、断言全空。只认写语句里那个被写的标识符。
+#
+# ⚠ **只认写,裸 `FROM` 不算**(codex 第 16 轮 P2 之后)。下面两条守卫钉的都是「哪个
+# 写事务**写过**哪张表」(重铸板块 / 记版本戳 / 落产物),而发布事务里现在有一次刻意的
+# **读** —— `board_partition_still_holds` 的 `SELECT 1 FROM communities`(发布前复核那套
+# 划分还在,不在就整趟放弃)。把只读的 `FROM` 也记成「碰过」,补账本那条守卫会报
+# 「它重铸了板块」,而它一行板块都没写。这不是放松:`DELETE FROM communities` /
+# `INSERT INTO communities` / `UPDATE unified_kg_state` 照旧逐条命中,「把
+# `replace_communities` 或 `set_community_seq` 挪进/拆出发布事务」这两类移动变异一个都
+# 没放过 —— 改这条正则的**同一轮**里重新实测过两次:把 `set_community_seq` 拆回自己的
+# `with self._write()` → 下面第一条报红(`Extra items in the right set: 'unified_kg_state'`);
+# 让补账本路径顺手调一次 `replace_communities` → 第二条报红
+# (`Extra items in the left set: 'communities'`)。守卫的匹配规则一改就得重新验,
+# 不能靠改之前那次实测背书。
+#
+# ⚠ 插入的**冲突子句变体**必须一起认。旧的裸 `INTO` 顺带覆盖了 `INSERT OR REPLACE INTO`
+# / `INSERT OR IGNORE INTO` / `REPLACE INTO`(SQLite 方言)与 `INSERT INTO … ON CONFLICT`;
+# 收紧成 `INSERT\s+INTO` 就把前三种漏掉了。今天这几张表的写语句**全是**裸 `INSERT INTO`
+# (两侧 store 逐条查过),所以漏掉它们此刻不改变任何结论 —— 但这正是「守卫悄悄留下
+# 未来的盲区」的形状:哪天有人给 `communities` 换成 upsert 写法,守卫会静默放行而不是
+# 报红。把变体写进正则,代价是一个分支。
+_DML_TABLE = re.compile(
+    r"\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|DELETE\s+FROM|UPDATE)"
+    r"\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.I,
+)
 
 
 def _trace_product_table_transactions(repo, monkeypatch) -> list:
@@ -2053,6 +2077,160 @@ def test_a_failed_backfill_does_not_emit_the_success_event(repo, monkeypatch):
     assert _artifacts(repo, notebook_id) == {}
     # 社区图一动没动:失败的是那份辅助报告,不是图重建。
     assert _boards(repo, notebook_id) == boards_before
+
+
+def _usurp_the_board_partition(repo, notebook_id: str) -> list[str]:
+    """模拟**另一个重建**(`force=True`)当场提交:整套板块换成新铸的 id。
+
+    刻意**不**递归调 `rebuild_communities` —— 那会把闸、事件、返回值全搅进来,断言就分不
+    清哪条事件是谁发的。这里直接开一个写事务调 `replace_communities`:抢占者在库里留下的
+    痕迹与真正的 force 重建**逐字相同**(同一个「整表删再插 + 重铸 id」),而窗口精确落在
+    「划分已经读回来、产物还没落库」那一刻。
+
+    ⚠ 成员列表原样保留,所以板块**个数**不变。这是刻意的:把复核写成
+    `COUNT(*) > 0` 这类计数判据的实现在这条夹具上完全看不出区别 —— 并发 replace 在没变
+    的图上产出**同样多**的板块。守卫必须靠 **id** 判,不是靠数量。
+    """
+    store = repo._runtime.unified_kg
+    with repo._connect() as db:
+        members = [
+            json.loads(row["member_ids"] or "[]")
+            for row in store.community_rows_for_summary(db, notebook_id, 0)
+        ]
+    fresh_ids = [f"cm-usurper-{index}" for index in range(len(members))]
+    with repo._write() as db:
+        store.replace_communities(
+            db, notebook_id, 0, list(zip(fresh_ids, members)), {}, {},
+            "2026-01-01T00:00:00",
+        )
+    return fresh_ids
+
+
+def _backfill_with_a_writer_racing_the_precompute(
+    repo, monkeypatch, notebook_id: str, writer
+) -> tuple[int, list[dict]]:
+    """走真 `rebuild_communities` 的补账本路径,在预计算**返回之前**让 `writer` 提交。
+
+    `_compute_kg_analysis` 跑在写事务**之外**(那是硬约束,见它的 docstring),所以这里
+    就是生产上那个分钟级窗口的最小复现:划分已经从库里读回来了、产物还一行没写。
+    """
+    lifecycle = repo._runtime.knowledge_lifecycle
+    original_compute = lifecycle._compute_kg_analysis
+    fired: list[bool] = []
+
+    def compute_then_let_the_writer_commit(*args, **kwargs):
+        analysis = original_compute(*args, **kwargs)
+        writer()
+        fired.append(True)
+        return analysis
+
+    monkeypatch.setattr(
+        lifecycle, "_compute_kg_analysis", compute_then_let_the_writer_commit
+    )
+    events: list[dict] = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit", events.append)
+    kept = repo.rebuild_communities(notebook_id)      # 刻意不带 force
+    assert fired, "仪器没装上:补账本路径上 _compute_kg_analysis 一次都没被调用"
+    return kept, events
+
+
+def test_a_backfill_discards_its_products_when_the_boards_were_replaced_under_it(
+    repo, monkeypatch
+):
+    """codex 第 16 轮 P2:补账本期间板块被换掉,产物**一行都不许**发布。
+
+    补账本那条路径的板块划分读自**写事务之外**(`community_rows_for_summary`),而随后的
+    `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级的。这条路径没有任何
+    单飞守卫 —— `POST /notebooks/{id}/unified-kg/rebuild` 直接调它,`scripts/recluster_kg.py`
+    与 `batch_ingest` 还从**别的进程**调 —— 所以那段窗口里一次 `force=True` 的重建完全
+    可以把整套板块换掉。修复前那一趟照旧把按**旧** `kept_rows` 算出来的产物写进库:
+    `kg_community_edges` / `kg_source_profiles` 的每一行都指向已不存在的板块 id,而它们的
+    账本盖着「与当前一致」的戳。悬空 + 自称新鲜,比缺失更糟 —— 缺失至少是诚实的。
+
+    ⚠ **四件事必须一起钉住**,少一件这条守卫就能被错误的实现满足:
+      1. 成功事件没了(否则又是第 8 轮那句谎话的翻版);
+      2. `kg_analysis_backfill_discarded` 在,且 reason 说得出是哪一档 —— 不是把两条
+         都吞掉换个清静(那是静默失败);
+      3. 账本一个字节没被这一趟改写;
+      4. 两张明细表里没有任何一行指向已被删除的旧板块 id。
+    正向那一侧由下面 `test_a_backfill_publishes_normally_when_nobody_touches_the_boards`
+    钉着(同一套仪器、只换 writer),所以「干脆永远不发布」也过不去。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    stale_board_ids = set(_boards(repo, notebook_id))
+    _wipe_ledger(repo, notebook_id)        # 图新鲜、账本空 → 下一次走「只补账本」
+
+    fresh_ids: list[str] = []
+    kept, events = _backfill_with_a_writer_racing_the_precompute(
+        repo, monkeypatch, notebook_id,
+        lambda: fresh_ids.extend(_usurp_the_board_partition(repo, notebook_id)),
+    )
+
+    # 抢占者确实提交了(仪器真的复现了那个窗口,不是靠什么都没发生换绿)。
+    assert set(_boards(repo, notebook_id)) == set(fresh_ids)
+    assert stale_board_ids and not (stale_board_ids & set(fresh_ids))
+
+    kinds = [event["kind"] for event in events]
+    assert "kg_analysis_backfilled" not in kinds, (
+        f"板块已经被换掉,却仍然宣布「补齐了」:{kinds}"
+    )
+    discarded = [
+        event for event in events
+        if event["kind"] == "kg_analysis_backfill_discarded"
+    ]
+    assert len(discarded) == 1, f"放弃发布被吞成了静默,一条事件都没留下:{kinds}"
+    assert discarded[0]["reason"] == "board_partition_replaced"
+    assert discarded[0]["notebook_id"] == notebook_id
+    # 账本一个字节没动 —— 事件说的是实话。
+    assert _artifacts(repo, notebook_id) == {}
+    # 两张明细表里一行悬空引用都没有(这才是这条修复要挡的实际后果)。
+    referenced = {
+        board_id
+        for src, dst, _weight in _edges(repo, notebook_id)
+        for board_id in (src, dst)
+    } | {
+        row[2] for row in _profiles(repo, notebook_id).values() if row[2]
+    }
+    assert not (referenced & stale_board_ids), (
+        f"产物里留下了指向已删除板块的悬空行:{sorted(referenced & stale_board_ids)}"
+    )
+    assert (_edges(repo, notebook_id), _profiles(repo, notebook_id)) == ([], {})
+    # 返回值仍是读到那一刻的板块数:那些板块确实存在过,而放弃的只是一份辅助报告。
+    assert kept == 2
+
+
+def test_a_backfill_publishes_normally_when_nobody_touches_the_boards(
+    repo, monkeypatch
+):
+    """上面那条的**正向对照**:同一套仪器、唯一的差别是抢占者什么都不做。
+
+    没有它,「复核永远判失效、什么都不发布」也能让上面那条全绿 —— 而那会让本特性在
+    生产上永远补不出账本(B1 原地复发)。
+    """
+    notebook_id = _seed(repo)
+    repo.rebuild_communities(notebook_id)
+    board_ids = set(_boards(repo, notebook_id))
+    _wipe_ledger(repo, notebook_id)
+
+    kept, events = _backfill_with_a_writer_racing_the_precompute(
+        repo, monkeypatch, notebook_id, lambda: None
+    )
+
+    kinds = [event["kind"] for event in events]
+    assert "kg_analysis_backfilled" in kinds, f"正常补账本却没发成功事件:{kinds}"
+    assert "kg_analysis_backfill_discarded" not in kinds, (
+        f"没人碰板块,复核却判了失效:{kinds}"
+    )
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+    # 板块原样(补账本不重铸 id),产物指向的就是它们。
+    assert set(_boards(repo, notebook_id)) == board_ids
+    assert {
+        board_id
+        for src, dst, _weight in _edges(repo, notebook_id)
+        for board_id in (src, dst)
+    } <= board_ids
+    assert kept == 2
 
 
 def test_a_failed_precompute_heals_on_the_next_plain_rebuild(repo, monkeypatch):

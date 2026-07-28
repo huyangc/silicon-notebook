@@ -89,6 +89,9 @@ LIFECYCLE_STORE_CALLS = {
         "community_member_ids",
         "community_reports",
         "community_rows_for_summary",
+        # 与上一条配对:补账本路径在**事务外**读回板块划分,发布事务里复核它还在
+        # (codex 第 16 轮 P2),不在就整份放弃发布。
+        "board_partition_still_holds",
         "concept_clusters_count",
         "distinct_cluster_count",
         "finish_rebuild_state",

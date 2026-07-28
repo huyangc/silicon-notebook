@@ -3731,3 +3731,85 @@ def test_kg_source_profile_page_is_clamped_and_stable_on_ties_on_postgres(
 
     seen = [row["source_id"] for page in pages for row in page]
     assert seen == ids, "并列组内翻页必须既不重复也不漏行,且顺序两个后端一致"
+
+
+def test_board_partition_still_holds_tracks_the_committed_partition_on_both_backends(
+    knowledge_harness,
+):
+    """发布前那道复核的**后端中性行为**(codex 第 16 轮 P2)。
+
+    判据是「`kept_rows` 里任意一个板块 id 还在吗」:`replace_communities` 对
+    `(notebook_id, level)` 是整表删再插、新 id 128 bit 新铸,所以「还在」⟺「期间没有
+    任何一次 replace 提交过」。这条把那句蕴含关系的两端都钉住,并且顺带钉住两个归属
+    谓词 —— 少了 `notebook_id` 或 `level`,别的库/别的层的板块会替当前这一套背书,
+    复核当场变成永远放行。
+
+    刻意在 `write()` 里调:这就是它**唯一**的调用契约(发布事务内),PG 侧的
+    `FOR SHARE` 也只有在事务里才有意义。
+    """
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    with knowledge_harness.database.write() as connection:
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-big") is True
+        # 归属谓词的两个证人:别的 notebook 的板块、别的 level 的板块都不算数。
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-foreign") is False
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-l1") is False
+
+    # 一次已提交的整表重铸(= 抢占者干的事)。
+    with knowledge_harness.database.write() as connection:
+        unified.replace_communities(
+            connection, ANALYSIS_NB, 0, [("cm-recast", ["canonical-quad"])],
+            {"canonical-quad": "Recast board"}, {"canonical-quad": 1.0}, NOW,
+        )
+
+    with knowledge_harness.database.write() as connection:
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-big") is False
+        assert unified.board_partition_still_holds(
+            connection, ANALYSIS_NB, 0, "cm-recast") is True
+
+
+def test_the_board_revalidation_blocks_a_concurrent_board_replacement(
+    knowledge_harness,
+):
+    """PG 侧 `FOR SHARE` 的**行为**守卫 —— 不是「SQL 里有那几个字」。
+
+    `PostgresDatabase.write()` 是 READ COMMITTED、**没有**进程级锁(SQLite 那侧有一把
+    `threading.Lock`,同进程两个写事务根本不可能交错)。所以这一侧裸 SELECT 只是一次
+    瞬时读:并发的 `replace_communities` 完全可以在我们「查完」与「插完」之间提交,
+    复核照样放行,写出去的仍是悬空产物。行锁把这个窗口关掉。
+
+    ⚠ 判据用 `lock_timeout` 而**不是** sleep:锁真的被持有时超时是**确定性**的
+    (250 ms 到点必抛 `LockNotAvailable`),不是靠两个线程赛跑。
+    ⚠ **对照组是这条测试自带的变异证明**:同一条 DELETE 在读事务结束之后必须立刻成功。
+    没有它,「DELETE 因为别的原因失败」也能让上半段全绿;把 `FOR SHARE` 删掉则上半段
+    当场报红(M3 变异实测)。
+    ⚠ 两条连接各自从 harness 取:`write()` 有 `NestedPostgresWriteError` 的单飞守卫
+    (ContextVar),套在同一个 `write()` 里会先撞那个守卫,根本测不到锁。
+    """
+    import psycopg
+
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+
+    def delete_the_boards() -> str:
+        with knowledge_harness.database.write() as connection:
+            connection.execute("SET LOCAL lock_timeout = '250ms'")
+            connection.execute(
+                "DELETE FROM communities WHERE notebook_id=%s AND level=%s",
+                (ANALYSIS_NB, 0),
+            )
+        return "deleted"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with knowledge_harness.database.write() as connection:
+            assert unified.board_partition_still_holds(
+                connection, ANALYSIS_NB, 0, "cm-big") is True
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                executor.submit(delete_the_boards).result(timeout=30)
+        # 对照组:share 锁随复核所在的那个事务结束而释放,同一条 DELETE 立刻成功。
+        assert executor.submit(delete_the_boards).result(timeout=30) == "deleted"

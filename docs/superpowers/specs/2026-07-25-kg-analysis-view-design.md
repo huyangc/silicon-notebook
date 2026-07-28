@@ -384,6 +384,8 @@ swap）**刻意不动** `kg_mutation_seq`，变化信号独立在 `cluster_mutat
   板块换掉。这与板块自身在两次调用间被换掉是同一类问题，不是本次三事务窗口那种**自伤**；
   修它要么给板块划分加一个世代列（= 追加迁移 + bump `SCHEMA_VERSION`），要么在
   notebook 级串行化整个重建，两者都超出本次范围。
+  ⚠ **本条已被第 16 轮修掉**，而且两条路都没走 —— 改成发布前在事务内复核那套划分还在，
+  不在就整份放弃发布。见本节末尾第 16 轮那一条。
 
 **批 1 上 codex 第 12 轮评审后的订正（2026-07-28）—— 第 8 轮那条修复自己留下的半截**：
 
@@ -486,6 +488,57 @@ swap）**刻意不动** `kg_mutation_seq`，变化信号独立在 `cluster_mutat
   `page.offset` / `page.limit` / `page.has_more`），控件值只在一页都还没有时兜底。
   另一条路（请求一开始就清掉 `page`）会闪一下加载态、还把「上一次的结果还看得见」一起
   丢掉。代价是点下去按钮不当场亮，所以旁边补一条在飞提示让这次点击有反馈。
+
+**批 1 上 codex 第 16 轮评审后的订正（2026-07-28）—— 第 13 轮那条「已知残留」的正式修复**：
+
+- **补账本发布产物之前，必须在**发布事务内**复核那套板块划分还在。** 第 13 轮把发布做成
+  了原子的，但只覆盖「一次调用**自己**的板块与产物」；补账本那条路径的板块划分是在**写
+  事务之外**读回来的（`community_rows_for_summary`），而随后的 `_compute_kg_analysis` 在
+  生产（878 万对象 / 836 万边）上是**分钟级**的。那段窗口里另一次 `force=True` 的重建
+  完全可以把整套板块换掉：`rebuild_communities` 没有任何单飞守卫，
+  `POST /notebooks/{id}/unified-kg/rebuild` 直接调它，`scripts/recluster_kg.py` 与
+  `batch_ingest` 还从**别的进程**调。修复前那一趟照旧把按**旧** `kept_rows` 算出来的
+  产物写进库：`kg_community_edges` / `kg_source_profiles` 的每一行都指向已不存在的板块
+  id，而它们的账本盖着「与当前一致」的戳。悬空 + 自称新鲜，比缺失更糟。
+- **判据是「任意一个旧板块 id 还在吗」，查一行就够。** `replace_communities` 对
+  `(notebook_id, level)` 是**整表删再插**，新 id 由 `_new_id("cm")` 铸出（128 bit），
+  所以「`kept_rows` 里任意一个 id 还在」⟺「期间没有任何一次 replace 提交过」。不需要比对
+  整套 id，也**不能**退化成计数——并发 replace 在没变的图上产出**同样多**的板块。
+- **原子性的来源两个后端不对称，这是刻意的**（parity 红线要的是语义等价，不是 SQL 等价）：
+  PostgreSQL 侧那条查询必须带 **`FOR SHARE`** 行锁——`PostgresDatabase.write()` 是
+  READ COMMITTED、**没有**进程级锁，裸 SELECT 挡不住并发写者在「查完」与「插完」之间提交；
+  带锁之后并发的 `DELETE FROM communities` 会阻塞到我们提交，而它若已经提交，`FOR SHARE`
+  根本读不到那一行 → 正确判失效。SQLite 侧裸 SELECT 就够，也**没有** `FOR SHARE` 这个语法：
+  `SqliteDatabase.write()` 拿的是**进程级 `threading.Lock`**，同进程两个写事务不可能交错，
+  跨进程由 SQLite 自己的文件写锁串行。
+- **锁 `communities` 而不是 `unified_kg_state`，理由是无死锁。** 锁 state 那一行会与并发
+  写者的 `discard_board_dependent_… → set_community_seq` 顺序**反向**，PG 上可以真死锁。
+  锁 `communities` 的行不会：并发写者的第一个动作就是 `DELETE FROM communities`，它在
+  **碰任何产物表之前**就被挡住，因此不可能持有我们想要的东西——两边的加锁顺序共享同一个
+  前缀。
+- **失效时整份放弃发布，不重试。** 重试要重跑那趟分钟级的全表重活，而且可能反复被同一个
+  抢占者打断。既有的自愈路径就是为这一档设计的：账本不齐 ⟹ 下一次 `rebuild_communities`
+  （哪怕不带 force）照样走补账本重来，那时它读到的是抢占者留下的那套划分。放弃的那一趟
+  发一条**新**事件 `kg_analysis_backfill_discarded`（`reason: board_partition_replaced`），
+  刻意不复用 `kg_analysis_precompute_failed`——「算不出来」与「算出来了但板块被换掉」的
+  运维动作不同。**成功事件跟着「真的发布了」走，不是「算出来了」**，否则又是第 8 轮那句
+  谎话的翻版。返回值仍是读到那一刻的板块数（那些板块确实存在过）。
+- **零板块那一档刻意不查，而且刻意不退化成 `COUNT(*) == 0`**，两个理由都成立、后一个更硬：
+  ① 零板块时**没有任何东西会悬空**——来源画像整份跳过（`_compute_kg_analysis` 的
+  `if total_members:`），跨板块边是空的；最坏结果只是一份 `communities: 0` 的陈旧载荷，而
+  `analysis_ledger_is_current(..., has_boards=_boards > 0)` 在下一次调用（那时 `_boards > 0`）
+  会因为缺 `source_profiles` 判不齐全 → 自动重补，一次调用内自愈。② 没有行可锁 ⟹ 计数
+  检查挡不住 phantom insert；加一个**看起来严密、实际有洞**的守卫，正是本批反复禁止的形态。
+- **全量路径不加这道复核**：那一档的板块是同一个事务里刚写的，板块与产物构造上自洽，
+  没有任何窗口可钻。这也是「只在补账本那一档判」而不是无条件判的理由。
+- **没有走另外两条路**：给板块划分加世代列要追加迁移 + bump `SCHEMA_VERSION`；notebook 级
+  串行化整个重建挡不住**跨进程**的调用方（离线 CLI 在另一个进程里），而那正是最现实的
+  抢占来源。
+- **守卫的强度靠四条变异钉住**（都实测报红）：删掉复核调用；把它**整段上移**到预计算
+  之前（语句一字不改、`grep` 照样找得到——本 PR 空守卫的主要来源形态）；PG 侧去掉
+  `FOR SHARE`；把 id 判据换成 `COUNT(*) > 0`。PG 那条不测「SQL 里有那几个字」而测**行为**：
+  一条连接持锁、另一条连接带 `SET LOCAL lock_timeout = '250ms'` 的 DELETE 必须抛
+  `LockNotAvailable`，事务结束后同一条 DELETE 必须立刻成功（对照组自带变异证明）。
 
 **边界（这是 DFX 诊断工具，不是产品引导）**：本视图的职责到「如实标注」为止 ——
 标出版本戳、落后量、以及每个数字的口径来源。**不做**折叠/置灰/催促整理这类替读者

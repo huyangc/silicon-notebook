@@ -3338,6 +3338,19 @@ class KnowledgeLifecycleService:
         地方记「它建在哪一代合并结果上」,所以 `boards` 那一格的落后量只按
         `community_seq` 报,报不出簇世代。补它要给 `unified_kg_state` 加一列
         = 追加迁移 + bump `SCHEMA_VERSION`。
+
+        ⚠ **补账本路径的板块划分读自写事务之外,发布前必须复核**(codex 第 16 轮 P2)。
+        这条路径的 `kept_rows` 来自 `community_rows_for_summary`(事务外),而随后的
+        `_compute_kg_analysis` 在生产上是分钟级的 —— 那段窗口里另一次 `force=True` 的
+        重建可以把整套板块换掉:本方法没有任何单飞守卫,`POST /notebooks/{id}/
+        unified-kg/rebuild` 直接调它,`scripts/recluster_kg.py` 与 `batch_ingest` 还从
+        **别的进程**调。所以发布事务里、写产物之前要问一句「我算的那套划分还在吗」
+        (`board_partition_still_holds`,查一行足矣 —— `replace_communities` 是整表
+        删再插、id 128 bit 新铸),不在就**整份放弃发布**、发
+        `kg_analysis_backfill_discarded`,靠既有的账本闸下一次重来。
+        全量路径不需要这道复核(板块与产物同事务,构造上自洽);零板块那一档刻意不查,
+        理由写在发布段的注释里(没有东西会悬空 + 计数检查挡不住 phantom insert)。
+        彻底的替代方案是在 notebook 级串行化整个重建,那超出本次范围。
         """
         self.get_notebook(notebook_id)
         if not self.settings.community_layer_enabled:
@@ -3569,7 +3582,10 @@ class KnowledgeLifecycleService:
                     "notebook_id": notebook_id, "level": level, "seq": _seq,
                     "error": f"{type(exc).__name__}: {exc}",
                 })
-        analysis_done = analysis is not None
+        # ⚠ 「真的发布了」与「算出来了」是两件事(下面那道复核会让它们分岔),而事件必须
+        # 跟着前者走 —— 放弃发布还发「补齐了」就是谎报,与第 8 轮 P2 修的是同一个病。
+        analysis_published = False
+        partition_replaced_under_us = False
         # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
         #
         # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
@@ -3620,20 +3636,73 @@ class KnowledgeLifecycleService:
                         # 而闸正是拿 seq 判「建过没有」。
                         self.unified_kg.set_community_seq(db, notebook_id, _seq)
                 if analysis is not None:
-                    _edges, _profiles, _payloads = analysis
-                    self.unified_kg.replace_kg_analysis_artifacts(
-                        db, notebook_id, _seq, _edges, _profiles, _payloads, now
-                    )
+                    # ⚠ **发布前复核板块划分还在**(codex 第 16 轮 P2)。只有「只补账本」
+                    # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
+                    # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
+                    # 的,窗口很宽。期间另一次 `force=True` 的重建完全可以把整套板块换掉
+                    # —— `POST /notebooks/{id}/unified-kg/rebuild` 没有任何单飞守卫,
+                    # `scripts/recluster_kg.py` 与 `batch_ingest` 还从**别的进程**调同一条
+                    # 路径。不复核就会写出指向已不存在板块 id 的 `kg_community_edges` /
+                    # `kg_source_profiles`,而它们的账本盖着「与当前一致」的戳 —— 比缺失
+                    # 更糟,缺失至少是诚实的。
+                    #
+                    # 全量路径**不需要**这道复核:那一档的板块是上面同一个事务里刚写的,
+                    # 板块与产物构造上自洽,没有任何窗口可钻。
+                    #
+                    # ⚠ **查一行就够。** `replace_communities` 对 (notebook_id, level) 是
+                    # 整表删再插、新 id 由 `_new_id("cm")` 铸出(128 bit),所以「`kept_rows`
+                    # 里任意一个 id 还在」⟺「期间没有任何一次 replace 提交过」。原子性由
+                    # store 那侧兑现(PG 的 `FOR SHARE` 行锁 / SQLite 的进程级写锁),
+                    # 两侧的不对称写在它的 docstring 里。
+                    #
+                    # ⚠ **零板块那一档刻意不查,而且刻意不退化成 `COUNT(*) == 0`。** 两个
+                    # 理由,后一个更硬:
+                    #   1. 零板块时**没有任何东西会悬空** —— 来源画像整份跳过
+                    #      (`_compute_kg_analysis` 里的 `if total_members:`),跨板块边是
+                    #      空的。最坏结果只是一份 `communities: 0` 的陈旧载荷,而
+                    #      `analysis_ledger_is_current(..., has_boards=_boards > 0)` 在下一次
+                    #      调用(那时 `_boards > 0`)会因为缺 `source_profiles` 判不齐全 →
+                    #      自动重补。一次调用内自愈,不需要人工介入。
+                    #   2. 没有行可锁 ⟹ 计数检查挡不住 phantom insert。加一个**看起来严密、
+                    #      实际有洞**的守卫,正是本 PR 已经吃过十几次亏的那个形态 ——
+                    #      守卫不得夸大自己的强度。
+                    if (graph_fresh and kept_rows
+                            and not self.unified_kg.board_partition_still_holds(
+                                db, notebook_id, level, kept_rows[0][0])):
+                        # 放弃整份发布,**不重试**:重试要重跑那趟分钟级的全表重活,而且
+                        # 可能反复被同一个抢占者打断。既有的自愈路径就是为这一档设计的 ——
+                        # 账本不齐 ⟹ 下一次 `rebuild_communities`(哪怕不带 force)照样走
+                        # 补账本重来,那时它读到的是抢占者留下的那套划分。
+                        partition_replaced_under_us = True
+                    else:
+                        _edges, _profiles, _payloads = analysis
+                        self.unified_kg.replace_kg_analysis_artifacts(
+                            db, notebook_id, _seq, _edges, _profiles, _payloads, now
+                        )
+                        analysis_published = True
         if graph_fresh:
             # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
             # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
             #
-            # ⚠ 只在预计算**真的完成**时发:这条路径除了补账本什么都没做,预计算一失败
-            # 这一趟就等于什么都没发生,发一条「补齐了」是纯粹的谎报。失败那一档已经有
-            # 自己的事件(上面 `kg_analysis_precompute_failed`),不是静默。
+            # ⚠ 只在产物**真的落库**时发:这条路径除了补账本什么都没做,一旦预计算失败
+            # (`kg_analysis_precompute_failed`)或发布前的板块复核判失效
+            # (`kg_analysis_backfill_discarded`),这一趟就等于什么都没发生,发一条
+            # 「补齐了」是纯粹的谎报。两档各有自己的事件,都不是静默。
+            # 判据因此是 `analysis_published` 而不是「算出来了」—— 后者在复核放弃那一档
+            # 仍然为真(codex 第 16 轮 P2)。
             # 返回值不受影响:社区还在库里,如实返回它的数量 —— 一份辅助报告没补上,
-            # 不能表现成「一个板块都没有」。
-            if analysis_done:
+            # 不能表现成「一个板块都没有」。这里的 `kept` 是读到那一刻的板块数,刻意不为
+            # 复核失败再发一次查询:那些板块确实在库里存在过,而抢占者写的是它自己的一套。
+            if partition_replaced_under_us:
+                # 与 `kg_analysis_precompute_failed` 并列的**另一条**事件,刻意不复用它:
+                # 「算不出来」与「算出来了但期间板块被换掉」的运维动作不同,前者要查模型/
+                # 数据,后者说明有两个重建在抢同一个库。
+                self.event_log.emit({
+                    "kind": "kg_analysis_backfill_discarded",
+                    "notebook_id": notebook_id, "level": level, "seq": _seq,
+                    "reason": "board_partition_replaced",
+                })
+            if analysis_published:
                 self.event_log.emit({
                     "kind": "kg_analysis_backfilled", "notebook_id": notebook_id,
                     "level": level, "seq": _seq, "communities": kept,

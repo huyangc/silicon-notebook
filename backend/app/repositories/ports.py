@@ -911,6 +911,22 @@ class UnifiedKgStorePort(Protocol):
     def community_reports(db: object, notebook_id: str, level: int) -> list[Any]: ...
     @staticmethod
     def community_rows_for_summary(db: object, notebook_id: str, level: int) -> list[Any]: ...
+    # ⚠ 与上面那条配对,而且**必须在发布事务内**调:`community_rows_for_summary` 是
+    # 「只补账本」路径在**写事务之外**读回来的板块划分,而随后的预计算在生产上是分钟级
+    # 的 —— 期间另一次 `force=True` 的重建可以把整套板块换掉。所以写产物之前要在**那个
+    # 写事务里**问一句「我算的那套还在吗」,不在就整趟放弃(见
+    # `KnowledgeLifecycleService.rebuild_communities` 的发布段)。
+    # 查一行就够:`replace_communities` 对 (notebook_id, level) 是整表删再插、id 是 128
+    # bit 新铸的,所以「任意一个旧 id 还在」⟺「期间没有任何一次 replace 提交过」。
+    # 两侧的原子性来源刻意不同(parity 要的是语义等价):PostgreSQL 侧靠 `FOR SHARE` 行锁
+    # (READ COMMITTED、无进程级锁,裸 SELECT 挡不住并发写者在查完与插完之间提交),
+    # SQLite 侧靠 `SqliteDatabase.write()` 的进程级 `threading.Lock` + 文件写锁,既不需要
+    # 也没有 `FOR SHARE` 这个语法。
+    # 它与下面 `discard_board_dependent_kg_analysis_artifacts` 是同一条不变式的两半:
+    # 那条守的是**本次自己重铸板块**时不留悬空产物(全量路径,同事务、构造上自洽),
+    # 这条守的是**别人重铸了板块**时不写悬空产物(补账本路径,划分读自事务之外)。
+    @staticmethod
+    def board_partition_still_holds(db: object, notebook_id: str, level: int, board_id: str) -> bool: ...
     @staticmethod
     def concept_clusters_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
@@ -934,6 +950,9 @@ class UnifiedKgStorePort(Protocol):
     # 记忆化签名(state 的 seq + 账本行的 seq/created_at)在 `force=True` 的同 seq
     # 重铸上一个字段都不会变。理由与「为什么只作废这两份」见
     # `app.services.kg_analysis_precompute.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+    # ⚠ 它只覆盖**本次自己重铸板块**那一档(全量路径:重铸与作废同事务,构造上自洽)。
+    # 「板块被**别人**换掉」那一档由上面的 `board_partition_still_holds` 守 —— 补账本
+    # 路径根本不调本方法(它不重铸板块),所以两条都要,少一条就漏一半。
     @staticmethod
     def discard_board_dependent_kg_analysis_artifacts(db: object, notebook_id: str) -> None: ...
     @staticmethod
