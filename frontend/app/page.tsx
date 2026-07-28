@@ -3841,8 +3841,10 @@ export default function Home() {
       if (targetNodeId) {
         try {
           neighborhood = await fetchKgNeighbors(
-            sourceNotebookId || notebookId,
+            notebookId,
             targetNodeId,
+            50,
+            sourceNotebookId || notebookId,
           );
         } catch { /* 核心图仍可展示；下面按 focus 是否可达给出定位提示。 */ }
       }
@@ -3853,11 +3855,14 @@ export default function Home() {
       ) return;
       const focus = prepareKgFocus(g, targetNodeId, neighborhood);
       const nodeNotebookIds = new Map<string, string>();
-      if (targetNodeId && sourceNotebookId) {
+      const resolvedSourceNotebookId = neighborhood?.source_notebook_id
+        || sourceNotebookId
+        || notebookId;
+      if (targetNodeId) {
         for (const node of neighborhood?.nodes ?? []) {
-          nodeNotebookIds.set(node.id, sourceNotebookId);
+          nodeNotebookIds.set(node.id, resolvedSourceNotebookId);
         }
-        if (focus.focusId) nodeNotebookIds.set(focus.focusId, sourceNotebookId);
+        if (focus.focusId) nodeNotebookIds.set(focus.focusId, resolvedSourceNotebookId);
       }
       kgNodeNotebookRef.current = nodeNotebookIds;
       setUGraph(g); setPendingMerges(pend); setUnifiedKgStatus(status);
@@ -3999,13 +4004,20 @@ export default function Home() {
     window.setTimeout(() => {
       kgDetailRef.current?.scrollTo({ top: 0, behavior: "smooth" });
     }, 0);
+    let resolvedNodeNotebookId = nodeNotebookId;
     // 逐跳展开：拉取邻居节点/边并合并进视图（去重由 uGraphMerged 处理）。
     try {
-      const neighbors = await fetchKgNeighbors(nodeNotebookId, nodeId);
+      const neighbors = await fetchKgNeighbors(
+        currentNotebookId,
+        nodeId,
+        50,
+        nodeNotebookId,
+      );
+      resolvedNodeNotebookId = neighbors.source_notebook_id || nodeNotebookId;
       if (neighbors.nodes.length > 0 || neighbors.edges.length > 0) {
         for (const node of neighbors.nodes) {
           if (!kgNodeNotebookRef.current.has(node.id)) {
-            kgNodeNotebookRef.current.set(node.id, nodeNotebookId);
+            kgNodeNotebookRef.current.set(node.id, resolvedNodeNotebookId);
           }
         }
         setKgExpandedNodes((prev) => {
@@ -4022,8 +4034,8 @@ export default function Home() {
     } catch { /* 邻居展开 best-effort，不阻断主流程 */ }
     const node = uGraphMerged?.nodes.find((item) => item.id === nodeId);
     if (node?.object_type !== "concept") setConceptDetail(null);
-    else { try { setConceptDetail(await fetchConceptDetail(nodeNotebookId, nodeId)); } catch (err) { setConceptDetail(null); reportError(err); } }
-    try { setNodeCtx(await fetchNodeContext(nodeNotebookId, nodeId)); } catch { /* node context best-effort */ }
+    else { try { setConceptDetail(await fetchConceptDetail(currentNotebookId, nodeId, resolvedNodeNotebookId)); } catch (err) { setConceptDetail(null); reportError(err); } }
+    try { setNodeCtx(await fetchNodeContext(currentNotebookId, nodeId, resolvedNodeNotebookId)); } catch { /* node context best-effort */ }
   }
 
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {

@@ -4794,7 +4794,7 @@
     "owner": "KnowledgeQueryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', canonical_id: 'str') -> 'dict'"
+    "signature": "(self, notebook_id: 'str', canonical_id: 'str', *, source_notebook_id: 'str' = '') -> 'dict'"
   },
   "concept_whitelist_add": {
     "consumers": [
@@ -6090,7 +6090,7 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', object_id: 'str', cap: 'int' = 50) -> 'dict'"
+    "signature": "(self, notebook_id: 'str', object_id: 'str', cap: 'int' = 50, *, source_notebook_id: 'str' = '') -> 'dict'"
   },
   "kg_search": {
     "consumers": [
@@ -6870,10 +6870,10 @@
       }
     ],
     "kind": "method",
-    "owner": "KnowledgeStore",
+    "owner": "KnowledgeQueryService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id, object_id)"
+    "signature": "(self, notebook_id, object_id, *, source_notebook_id: 'str' = '')"
   },
   "notebook_analytics": {
     "consumers": [

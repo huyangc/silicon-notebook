@@ -2156,10 +2156,22 @@ class RepositoryFacade:
         return self._runtime.knowledge_lifecycle._unified_graph_bounded(
             notebook_id, idx, limit
         )
-    def kg_neighbors(self, notebook_id: str, object_id: str, cap: int = 50) -> dict:
+    def kg_neighbors(
+        self,
+        notebook_id: str,
+        object_id: str,
+        cap: int = 50,
+        *,
+        source_notebook_id: str = "",
+    ) -> dict:
         """1-hop folded neighborhood — KnowledgeLifecycleService owns the read
         orchestration (Task 15); frozen-signature delegate."""
-        return self._runtime.knowledge_lifecycle.kg_neighbors(notebook_id, object_id, cap)
+        return self._runtime.knowledge_lifecycle.kg_neighbors(
+            notebook_id,
+            object_id,
+            cap,
+            source_notebook_id=source_notebook_id,
+        )
 
     def _kg_neighbors_db(self, notebook_id: str, object_id: str, cap: int) -> dict:
         """DB fallback for kg_neighbors — lifecycle-owned (Task 15)."""
@@ -2234,8 +2246,18 @@ class RepositoryFacade:
     def get_community_reports(self, notebook_id: str, level: int = 0) -> List[dict]:
         """Persisted community reports — lifecycle-owned (Task 15)."""
         return self._runtime.knowledge_lifecycle.get_community_reports(notebook_id, level)
-    def concept_detail(self, notebook_id: str, canonical_id: str) -> dict:
-        return self._runtime.knowledge_query.concept_detail(notebook_id, canonical_id)
+    def concept_detail(
+        self,
+        notebook_id: str,
+        canonical_id: str,
+        *,
+        source_notebook_id: str = "",
+    ) -> dict:
+        return self._runtime.knowledge_query.concept_detail(
+            notebook_id,
+            canonical_id,
+            source_notebook_id=source_notebook_id,
+        )
 
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
         return self._runtime.knowledge._element_texts(db, element_ids, with_ordinal=with_ordinal)
@@ -2243,8 +2265,18 @@ class RepositoryFacade:
     def _enrich_evidence(self, db, evidence):
         return self._runtime.knowledge._enrich_evidence(db, evidence)
 
-    def node_context(self, notebook_id, object_id):
-        return self._runtime.knowledge.node_context(notebook_id, object_id)
+    def node_context(
+        self,
+        notebook_id,
+        object_id,
+        *,
+        source_notebook_id: str = "",
+    ):
+        return self._runtime.knowledge_query.node_context(
+            notebook_id,
+            object_id,
+            source_notebook_id=source_notebook_id,
+        )
 
     # test-only helper; later tasks may replace it with a public insert path
     def _test_insert_object(self, notebook_id: str, object_type: str, payload: dict, source_id: str = "") -> str:

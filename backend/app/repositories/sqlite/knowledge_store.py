@@ -793,8 +793,9 @@ class KnowledgeStore:
             enriched["source_title"] = e.get("source_title", "") or enriched.get("source_id", "")
             out.append(enriched)
         return out
-    def node_context(self, notebook_id, object_id):
-        self.get_notebook(notebook_id)
+    def node_context(self, notebook_id, object_id, *, check_access: bool = True):
+        if check_access:
+            self.get_notebook(notebook_id)
         with self._connect() as db:
             row = db.execute("SELECT id, object_type, payload, evidence FROM knowledge_objects WHERE id=? AND notebook_id=?", (object_id, notebook_id)).fetchone()
             if row is None:

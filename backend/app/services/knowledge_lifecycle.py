@@ -164,6 +164,7 @@ class KnowledgeLifecycleService:
         relations_for_notebook: Callable[[str], List[dict]],
         notebook_copy_stats: Callable[[str], dict],
         note_model_error: Callable[..., None],
+        participant_notebook_ids: Callable[[str], List[str]],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
     ) -> None:
         self.settings = settings
@@ -211,6 +212,7 @@ class KnowledgeLifecycleService:
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
+        self.participant_notebook_ids = participant_notebook_ids
         self._invalidate_knowledge_counts = invalidate_knowledge_counts
 
     # ------------------------------------------------------------------
@@ -1618,7 +1620,50 @@ class KnowledgeLifecycleService:
             "truncated": len(nodes) < total_nodes,
         }
 
-    def kg_neighbors(self, notebook_id: str, object_id: str, cap: int = 50) -> dict:
+    def _participant_source_notebook(
+        self,
+        active_notebook_id: str,
+        object_id: str,
+        source_notebook_id: str,
+    ) -> str:
+        """Resolve one globally unique raw object inside the active federation.
+
+        The request is authorized against ``active_notebook_id`` by the route;
+        mounted public bases are data participants, not notebook members, so the
+        browser must not access them directly. Every probe is an indexed lookup
+        for exactly one object id and the participant list is already bounded by
+        the notebook's explicit mounts.
+        """
+        participants = self.participant_notebook_ids(active_notebook_id)
+        if not participants:
+            return active_notebook_id
+        hint = source_notebook_id if source_notebook_id in participants else ""
+        ordered = ([hint] if hint else []) + [
+            notebook_id for notebook_id in participants if notebook_id != hint
+        ]
+        with self._connect() as db:
+            for notebook_id in ordered:
+                if self.knowledge.object_meta_rows_for_notebook(
+                    db, notebook_id, [object_id]
+                ):
+                    return notebook_id
+                if self.unified_kg.cluster_fold_rows(
+                    db, notebook_id, [object_id]
+                ):
+                    return notebook_id
+        # A canonical K-* id is synthetic and therefore has no object row. Its
+        # source hint came from a previously resolved neighborhood response; use
+        # it only after all raw-id probes miss.
+        return hint or active_notebook_id
+
+    def kg_neighbors(
+        self,
+        notebook_id: str,
+        object_id: str,
+        cap: int = 50,
+        *,
+        source_notebook_id: str = "",
+    ) -> dict:
         """1-hop neighborhood of `object_id` (≤cap) in the folded concept graph.
 
         Fast path: persisted viz graph → viz_neighbors → hydrate names/edge_types
@@ -1631,6 +1676,19 @@ class KnowledgeLifecycleService:
         the indexed cluster table before either path; never load the full cluster
         map on the indexed path."""
         self.get_notebook(notebook_id)
+        source_id = notebook_id
+        if source_notebook_id:
+            source_id = self._participant_source_notebook(
+                notebook_id, object_id, source_notebook_id
+            )
+        result = self._kg_neighbors_unchecked(source_id, object_id, cap)
+        result["source_notebook_id"] = source_id
+        return result
+
+    def _kg_neighbors_unchecked(
+        self, notebook_id: str, object_id: str, cap: int
+    ) -> dict:
+        """Participant-authorized neighbor read; caller already checked scope."""
         focus_id = object_id
         with self._connect() as db:
             fold_rows = self.unified_kg.cluster_fold_rows(

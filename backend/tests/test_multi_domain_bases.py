@@ -657,6 +657,86 @@ class TestApiUnauthorizedWrite:
         assert [b["id"] for b in resp.json()] == [base["id"]]
         assert [e["id"] for e in repo_api.list_notebook_bases(a["id"])] == [base["id"]]
 
+    def test_mounter_locates_base_kg_object_through_active_notebook_scope(self, two_users_client):
+        """A public base participates in retrieval without granting notebook
+        membership. KG deep links must therefore authorize on the active personal
+        notebook and proxy only to one of its valid mounted participants."""
+        c = two_users_client
+        client = c["client"]
+        from app.api.deps import repository
+        repo_api = repository()
+
+        active = client.post(
+            "/api/notebooks", headers=c["u1"], json={"name": "u1 项目"}
+        ).json()
+        base = client.post(
+            "/api/notebooks", headers=c["u2"], json={"name": "u2 公共库"}
+        ).json()
+        repo_api.mark_notebook_base(base["id"])
+        mounted = client.put(
+            f"/api/notebooks/{active['id']}/bases",
+            headers=c["u1"],
+            json={"base_notebook_ids": [base["id"]]},
+        )
+        assert mounted.status_code == 200
+
+        source_id = repo_api._test_insert_object(
+            base["id"], "claim", {"name": "Base source claim"}
+        )
+        target_id = repo_api._test_insert_object(
+            base["id"], "claim", {"name": "Base target claim"}
+        )
+        with repo_api._write() as db:
+            db.execute(
+                "INSERT INTO knowledge_relations "
+                "(id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "kr-base-focus",
+                    base["id"],
+                    None,
+                    source_id,
+                    target_id,
+                    "supports",
+                    "[]",
+                    "2026-07-28T00:00:00Z",
+                ),
+            )
+
+        # The mounter is deliberately not a base member; direct reads remain 404.
+        direct = client.get(
+            f"/api/notebooks/{base['id']}/objects/{source_id}/neighbors",
+            headers=c["u1"],
+        )
+        assert direct.status_code == 404
+
+        proxied = client.get(
+            f"/api/notebooks/{active['id']}/objects/{source_id}/neighbors",
+            headers=c["u1"],
+            params={"source_notebook_id": base["id"]},
+        )
+        assert proxied.status_code == 200
+        assert proxied.json()["source_notebook_id"] == base["id"]
+        assert {node["id"] for node in proxied.json()["nodes"]} == {
+            source_id,
+            target_id,
+        }
+
+        inferred = client.get(
+            f"/api/notebooks/{active['id']}/objects/{source_id}/neighbors",
+            headers=c["u1"],
+        )
+        assert inferred.status_code == 200
+        assert inferred.json()["source_notebook_id"] == base["id"]
+
+        context = client.get(
+            f"/api/notebooks/{active['id']}/objects/{source_id}/context",
+            headers=c["u1"],
+            params={"source_notebook_id": base["id"]},
+        )
+        assert context.status_code == 200
+        assert context.json()["id"] == source_id
+
 
 class TestPromotionTargetApi:
     """Task 8 Step 4b(计划补记,2026-07-19):晋升目标 target_base_id 的三处

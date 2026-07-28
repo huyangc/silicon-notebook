@@ -221,6 +221,37 @@ class TestTask3TierAnnotatedRender:
         for key, entry in id_map.items():
             assert "tier" in entry, f"id_map[{key}] missing 'tier'"
 
+    def test_graph_bfs_base_anchor_carries_owning_notebook(self):
+        """Graph-only anchors have no retrieval hit object to restore origin
+        later, so the federated node payload itself must retain the base id."""
+        from app.services.kg.graph_reason import (
+            build_rx_graph,
+            multihop_subgraph,
+            render_subgraph_context,
+        )
+
+        graph, index_to_id, id_to_index = build_rx_graph(
+            {
+                "base-object": {
+                    "type": "claim",
+                    "name": "Base claim",
+                    "tier": "base",
+                    "notebook_id": "base-notebook",
+                }
+            },
+            [],
+        )
+        subgraph = multihop_subgraph(
+            graph,
+            id_to_index,
+            index_to_id,
+            seed_ids=["base-object"],
+            edge_types=set(),
+        )
+        _context, id_map = render_subgraph_context(subgraph)
+
+        assert id_map["k1"]["notebook_id"] == "base-notebook"
+
     def test_base_edge_node_gets_base_tier_in_id_map(self):
         """A node reached via a base edge carries tier='base' in id_map."""
         from app.services.kg.graph_reason import render_subgraph_context

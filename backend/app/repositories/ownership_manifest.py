@@ -2285,7 +2285,7 @@ SURFACE_MEMBERS = (
     ),
     SurfaceMember(
         name='node_context',
-        owner='KnowledgeStore',
+        owner='KnowledgeQueryService',
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.object_context', kind='attribute', target='node_context'),
@@ -3506,7 +3506,7 @@ DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
     'maybe_auto_index': 'ScaleArtifactRuntime',
     'merge_knowledge': 'KnowledgeGovernanceService',
     'merge_review_job_status': 'KnowledgeGovernanceService',
-    'node_context': 'KnowledgeStore',
+    'node_context': 'KnowledgeQueryService',
     'notebook_analytics': 'NotebookCatalogService',
     'notebook_copy_stats': 'ScaleArtifactRuntime',
     'parse_source': 'SourceIngestionService',

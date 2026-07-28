@@ -89,21 +89,26 @@ export const fetchKgSearch = (nb: string, query: string, k = 30) =>
     options,
   );
 
-export const fetchKgNeighbors = (nb: string, id: string, cap = 50) =>
+export const fetchKgNeighbors = (
+  nb: string,
+  id: string,
+  cap = 50,
+  sourceNotebookId = "",
+) =>
   requestJson<KgNeighborsResp>(
-    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/neighbors?cap=${cap}`,
+    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/neighbors?cap=${cap}${sourceNotebookId ? `&source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`,
     options,
   );
 
-export const fetchConceptDetail = (nb: string, id: string) =>
+export const fetchConceptDetail = (nb: string, id: string, sourceNotebookId = "") =>
   requestJson<ConceptDetailResp>(
-    `/notebooks/${nb}/concepts/${encodeURIComponent(id)}/detail`,
+    `/notebooks/${nb}/concepts/${encodeURIComponent(id)}/detail${sourceNotebookId ? `?source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`,
     options,
   );
 
-export const fetchNodeContext = (nb: string, id: string) =>
+export const fetchNodeContext = (nb: string, id: string, sourceNotebookId = "") =>
   requestJson<NodeContext>(
-    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/context`,
+    `/notebooks/${nb}/objects/${encodeURIComponent(id)}/context${sourceNotebookId ? `?source_notebook_id=${encodeURIComponent(sourceNotebookId)}` : ""}`,
     options,
   );
 
