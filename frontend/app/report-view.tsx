@@ -433,22 +433,26 @@ export function IntentReview({
         )}
       </div>
 
-      {readOnly ? (
-        <p className="intent-card-readonly">该报告正在等待所有者确认问题理解。</p>
-      ) : (
-        <div className="intent-card-zone">
-          <p className="intent-card-eyebrow">
-            待你确认
-            {pending > 0 && <em className="todo">还差 {pending} 项</em>}
-            {pending === 0 && ambiguities.length > 0 && <em className="done">已补齐</em>}
-          </p>
+      {/* 只读成员照样看得到问题与澄清项(禁用即可) —— 把整个区换成一句等待提示,
+          等于让协作者看不到所有者正在被问什么。 */}
+      <div className="intent-card-zone">
+        <p className="intent-card-eyebrow">
+          {readOnly ? "等待所有者确认" : "待你确认"}
+          {!readOnly && pending > 0 && <em className="todo">还差 {pending} 项</em>}
+          {!readOnly && pending === 0 && ambiguities.length > 0 && (
+            <em className="done">已补齐</em>
+          )}
+        </p>
+        {readOnly && (
+          <p className="intent-card-readonly">该报告正在等待所有者确认问题理解。</p>
+        )}
 
           <label className="intent-card-question">
             <span>确认后的研究问题</span>
             <textarea
               rows={2}
               value={resolvedQuestion}
-              disabled={busy}
+              disabled={busy || readOnly}
               onChange={(event) => setResolvedQuestion(event.target.value)}
             />
           </label>
@@ -473,7 +477,7 @@ export function IntentReview({
                       <button
                         type="button"
                         key={option}
-                        disabled={busy}
+                        disabled={busy || readOnly}
                         aria-pressed={(answers[item.id] || "") === option}
                         className={(answers[item.id] || "") === option ? "selected" : ""}
                         onClick={() => setAnswers((current) => ({ ...current, [item.id]: option }))}
@@ -487,7 +491,7 @@ export function IntentReview({
                   aria-label={`${item.question}的补充答案`}
                   rows={2}
                   value={answers[item.id] || ""}
-                  disabled={busy}
+                  disabled={busy || readOnly}
                   placeholder="补充你的答案"
                   onChange={(event) => setAnswers((current) => ({
                     ...current,
@@ -496,9 +500,8 @@ export function IntentReview({
                 />
               </div>
             ))}
-          </div>
         </div>
-      )}
+      </div>
 
       <details className="intent-card-readout" open>
         <summary>
