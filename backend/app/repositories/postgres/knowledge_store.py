@@ -1150,6 +1150,41 @@ class KnowledgeStore:
 
     # --------------------------------------------------------------- list
     @staticmethod
+    def knowledge_object_page_rows(
+        db: Any,
+        notebook_id: str,
+        object_type: str,
+        statuses: Sequence[str],
+        after: tuple[object, str] | None,
+        limit: int,
+    ) -> "List[Any]":
+        """Backend twin of the SQLite keyset page (see it for why keyset and
+        not OFFSET, and why empty statuses mean "nothing").
+
+        ``created_at`` is ``timestamptz`` here, so the cursor value travels
+        back as the ``datetime`` this adapter returned — never re-rendered
+        text.  Row values keep the comparison index-comparable on
+        ``idx_knowledge_objects_nb_type_created``.
+        """
+        values = [str(value) for value in statuses if value]
+        if not values:
+            return []
+        params: List[Any] = [notebook_id, object_type, values]
+        clause = ""
+        if after is not None:
+            clause = "AND (created_at,id) > (%s,%s) "
+            params.extend([after[0], after[1]])
+        params.append(max(1, int(limit)))
+        return db.execute(
+            "SELECT id,object_type,payload,evidence,status,created_at "
+            "FROM knowledge_objects "
+            "WHERE notebook_id=%s AND object_type=%s "
+            f"AND status=ANY(%s) {clause}"
+            "ORDER BY created_at,id LIMIT %s",
+            tuple(params),
+        ).fetchall()
+
+    @staticmethod
     def list_knowledge_page(
         db: Any,
         notebook_id: str,

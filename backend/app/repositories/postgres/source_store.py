@@ -267,6 +267,60 @@ class SourceStore:
             )
         return out
 
+    # --------------------------------------- typed-collection enumeration
+    def element_page_rows(
+        self,
+        connection: Any,
+        source_id: str,
+        element_type: str,
+        after: tuple[object, str] | None,
+        limit: int,
+    ) -> list[Any]:
+        """Backend twin of the SQLite keyset page; see that adapter for why the
+        cursor value is passed back unparsed.
+
+        Here it matters more than on SQLite: ``created_at`` is ``timestamptz``,
+        so the value handed back is a ``datetime``.  Re-rendering it as text
+        and re-parsing it would risk a microsecond/offset round-trip that
+        silently skips or repeats a row at a page boundary.  Row values
+        ``(created_at, id) > (%s, %s)`` are index-comparable, keeping this on
+        ``idx_source_elements_source_type``.
+        """
+        params: list[Any] = [source_id, element_type]
+        clause = ""
+        if after is not None:
+            clause = "AND (created_at,id) > (%s,%s) "
+            params.extend([after[0], after[1]])
+        params.append(max(1, int(limit)))
+        return connection.execute(
+            "SELECT id,source_id,element_type,location_label,text,created_at,"
+            "metadata->>'asset_id' AS asset_id "
+            "FROM source_elements WHERE source_id=%s AND element_type=%s "
+            f"{clause}"
+            "ORDER BY created_at,id LIMIT %s",
+            tuple(params),
+        ).fetchall()
+
+    def source_display_rows(
+        self, connection: Any, source_ids: Sequence[str]
+    ) -> list[Any]:
+        """Labels (and the owning notebook) for enumerated items, on the
+        caller's connection."""
+        ids = list(dict.fromkeys(value for value in source_ids if value))
+        if not ids:
+            return []
+        out: list[Any] = []
+        for offset in range(0, len(ids), self.COUNT_IN_CHUNK):
+            batch = ids[offset : offset + self.COUNT_IN_CHUNK]
+            out.extend(connection.execute(
+                "SELECT s.id,s.notebook_id,s.title,s.file_name,"
+                "m.is_paper,m.paper_title "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "WHERE s.id=ANY(%s)",
+                (batch,),
+            ).fetchall())
+        return out
+
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:

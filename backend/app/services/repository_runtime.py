@@ -34,6 +34,7 @@ from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
 from app.services.collection_catalog import CollectionCatalogService
+from app.services.collection_enumeration import CollectionEnumerationService
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.report_execution import (
@@ -324,6 +325,17 @@ class RepositoryRuntime:
             sources=self.source_store,
             notebooks=self.notebook_store,
             queries=self.queries,
+            unified_kg=self.unified_kg,
+        )
+        # 同批 T3:类型化集合的「清单层」。刻意吃**上面那一个** catalog 实例而不是
+        # 自己新建——地图计数与枚举必须来自同一份 per-source 缓存,否则会出现
+        # 「地图报 12、清单只列 8」这种无法自证的假部分。同样零模型调用、无 seam。
+        self.collection_enumeration = CollectionEnumerationService(
+            database=self.database,
+            catalog=self.collection_catalog,
+            sources=self.source_store,
+            notebooks=self.notebook_store,
+            knowledge=self.knowledge,
             unified_kg=self.unified_kg,
         )
         # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +

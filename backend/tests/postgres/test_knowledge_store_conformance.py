@@ -849,6 +849,71 @@ def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
 
 
 @pytest.mark.postgres_integration
+def test_postgres_knowledge_object_keyset_page_conforms(postgres_database):
+    """``knowledge_object_page_rows`` — the KG half of
+    ``app.services.collection_enumeration``.
+
+    Three things must hold identically to SQLite: the status predicate stays
+    in SQL (a deprecated object is neither counted nor listed), the keyset
+    resumes from the ``created_at`` value THIS adapter returned (a
+    ``datetime`` here, text on SQLite), and an empty status tuple means
+    nothing rather than everything.
+    """
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 14
+    _seed_catalog(postgres_database)
+    store = PostgresKnowledgeStore(postgres_database, _seams())
+    rows = [
+        (
+            f"ko-page-{index}",
+            "nb-personal",
+            "concept",
+            "deprecated" if index == 2 else "approved",
+            json.dumps({"name": f"concept {index}", "section_path": "§1>1.1"}),
+            json.dumps(_evidence()),
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for index in range(5)
+    ]
+    with postgres_database.write() as connection:
+        store.insert_object_chunk(connection, rows)
+        connection.execute(
+            "UPDATE knowledge_objects SET created_at=%s WHERE id=ANY(%s)",
+            ("2026-07-23T00:00:00+00:00", ["ko-page-3", "ko-page-4"]),
+        )
+
+    collected: list[str] = []
+    after = None
+    with postgres_database.connect() as connection:
+        for _page in range(5):
+            page = store.knowledge_object_page_rows(
+                connection, "nb-personal", "concept", USABLE_STATUSES, after, 2
+            )
+            if not page:
+                break
+            collected.extend(row["id"] for row in page)
+            after = (page[-1]["created_at"], page[-1]["id"])
+        assert store.knowledge_object_page_rows(
+            connection, "nb-personal", "concept", (), None, 5
+        ) == []
+        assert store.knowledge_object_page_rows(
+            connection, "nb-personal", "claim", USABLE_STATUSES, None, 5
+        ) == []
+        first = store.knowledge_object_page_rows(
+            connection, "nb-personal", "concept", USABLE_STATUSES, None, 1
+        )[0]
+    assert collected == ["ko-page-0", "ko-page-1", "ko-page-3", "ko-page-4"]
+    # payload/evidence arrive decoded from jsonb; the executor accepts both
+    # that and SQLite's text, so pin the shape the adapter actually returns.
+    assert first["payload"]["name"] == "concept 0"
+    assert first["evidence"][0]["element_id"] == "element-golden"
+    assert first["status"] == "approved"
+
+
+@pytest.mark.postgres_integration
 def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
     postgres_database,
 ):

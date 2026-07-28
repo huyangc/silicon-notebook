@@ -2827,6 +2827,16 @@ class RepositoryFacade:
         """
         return self._runtime.collection_catalog
 
+    @property
+    def collection_enumeration(self):
+        """Typed-collection listing (the enumeration tools' list layer).
+
+        One hop to the runtime-owned ``CollectionEnumerationService``, which
+        is wired to the same catalog instance above — a second wiring would
+        let the map and the list count different things.
+        """
+        return self._runtime.collection_enumeration
+
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,

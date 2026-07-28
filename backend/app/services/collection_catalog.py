@@ -30,7 +30,7 @@ Cost shape (per build, per notebook in scope):
     seq-keyed memo and both backends get one cheap read on the warm path);
   * 1 ``knowhow_tables`` index count.
 
-Three caches, all bounded, all under one lock, and all instance-scoped (NOT
+Four caches, all bounded, all under one lock, and all instance-scoped (NOT
 module-globals like ``knowledge_counts_cache``): the per-source key is a plain
 ``source_id``, and test suites happily reuse literal ids such as ``"sA"``
 across throwaway databases, so a process-global map keyed on it could serve one
@@ -43,6 +43,10 @@ that impossible.
   * L3 ``_kg_counts``      — per notebook KG per-type totals, keyed on
     ``kg_mutation_seq``.  It must NOT share L2's key: a KG rebuild moves no
     ``sources`` row, so an L2 fingerprint would happily serve stale KG counts.
+  * L4 ``_plan_sources``   — per (notebook, kind) list of the sources that
+    hold that kind, keyed like L2 and bounded by total entries.  It is what
+    the enumeration executor traverses, and what keeps a resumed enumeration
+    from recounting a library that does not fit in L1.
 """
 from __future__ import annotations
 
@@ -88,6 +92,11 @@ COLLECTION_MAP_MAX_CHARS = 600
 # 50k-source mounted base from re-querying after the LRU has rolled over.
 _MAX_CACHED_SOURCES = 4096
 _MAX_CACHED_NOTEBOOKS = 512
+# Total ``ScopeSource`` entries the plan memo may hold across all (notebook,
+# kind) pairs.  Each entry is three short fields, so this is a few megabytes
+# at worst — and it is a TOTAL, because the size of one plan is a property of
+# the library, not a constant.
+_MAX_CACHED_PLAN_SOURCES = 50_000
 
 
 @dataclass(frozen=True)
@@ -97,6 +106,39 @@ class ElementKindCount:
     kind: str
     count: int
     sources: int
+
+
+@dataclass(frozen=True)
+class ScopeSource:
+    """One physical source an enumeration must visit for a given kind."""
+
+    notebook_id: str
+    source_id: str
+    count: int
+
+
+@dataclass(frozen=True)
+class ScopeElementPlan:
+    """Which sources hold a kind, in traversal order, plus the scope identity.
+
+    This is the map layer's answer to "where would an enumeration have to
+    look?", and it is deliberately the ONLY way the executor
+    (``app.services.collection_enumeration``) picks sources: the executor's
+    physical source set is then the map's source set by construction, not by
+    two implementations agreeing.  Diverging sets would surface as the worst
+    possible failure — "the map says 12, the list shows 8" — with nothing in
+    the response able to explain the gap.
+
+    ``sources`` holds only sources whose count for the kind is non-zero, so a
+    50 000-source base costs zero queries for the 49 990 sources that hold no
+    formula.  ``total`` is exactly the number ``CollectionMap.element_count``
+    reports for the same kind and scope.
+    """
+
+    notebook_ids: Tuple[str, ...]
+    sources: Tuple[ScopeSource, ...]
+    total: int
+    fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -191,7 +233,18 @@ class CollectionCatalogService:
         )
         # notebook_id -> (kg_mutation_seq, {object_type: count})
         self._kg_counts: "OrderedDict[str, Tuple[int, Dict[str, int]]]" = OrderedDict()
-        # One lock for all three maps: every critical section is a handful of
+        # L4 (notebook_id, kind) -> (signal fingerprint, non-zero source list).
+        # L2's twin for the enumeration plan.  It exists for the same reason L2
+        # does and then some: a library past ``_MAX_CACHED_SOURCES`` cannot hold
+        # its working set in L1, so without this every enumeration — including
+        # every RESUMED page of one — re-runs the whole notebook's batched
+        # count.  L2 cannot serve it: L2 memoizes per-kind TOTALS, and a plan
+        # needs which sources those totals came from.
+        self._plan_sources: (
+            "OrderedDict[Tuple[str, str], Tuple[str, Tuple[ScopeSource, ...]]]"
+        ) = OrderedDict()
+        self._plan_source_entries = 0
+        # One lock for all four maps: every critical section is a handful of
         # dict operations, and the service is called from request threads.
         self._lock = threading.Lock()
 
@@ -226,6 +279,113 @@ class CollectionCatalogService:
     def collection_map_text(self, active_notebook_id: str) -> str:
         return render_collection_map(self.collection_map(active_notebook_id))
 
+    def scope_element_plan(
+        self, db: object, notebook_ids: Sequence[str], kind: str
+    ) -> ScopeElementPlan:
+        """Traversal plan for one kind over one already-resolved scope.
+
+        Runs on the CALLER's connection and through the same
+        ``source_change_signal_rows`` + per-source count path the map uses, so
+        it hits (and fills) L1 rather than opening a second counting road.
+
+        Order is deterministic and backend-independent: participants in the
+        order the caller resolved them (active first, then mounted bases in
+        mount order), sources sorted by id inside each participant.  The
+        signal query has no ORDER BY — neither engine promises a row order and
+        SQLite will change it with the plan — so the sort happens here, on a
+        list that is already materialized, and costs nothing.  A cursor
+        handed back across calls is only meaningful because of this order.
+
+        Memoized per (notebook, kind) on that notebook's own signal
+        fingerprint, so a warm scope costs one signal query per participant
+        and NO counting — which is what makes a resumed enumeration as cheap
+        as its first page on a library too large for L1.
+        """
+        sources: List[ScopeSource] = []
+        all_signals: List[Tuple[str, str]] = []
+        total = 0
+        for notebook_id in notebook_ids:
+            signals = list(self._sources.source_change_signal_rows(db, notebook_id))
+            all_signals.extend(signals)
+            notebook_sources = self._notebook_plan_sources(
+                db, notebook_id, kind, signals
+            )
+            sources.extend(notebook_sources)
+            total += sum(entry.count for entry in notebook_sources)
+        return ScopeElementPlan(
+            notebook_ids=tuple(notebook_ids),
+            sources=tuple(sources),
+            total=total,
+            fingerprint=signal_fingerprint(all_signals),
+        )
+
+    def _notebook_plan_sources(
+        self,
+        db: object,
+        notebook_id: str,
+        kind: str,
+        signals: Sequence[Tuple[str, str]],
+    ) -> Tuple[ScopeSource, ...]:
+        fingerprint = signal_fingerprint(signals)
+        key = (notebook_id, kind)
+        with self._lock:
+            cached = self._plan_sources.get(key)
+            if cached is not None and cached[0] == fingerprint:
+                self._plan_sources.move_to_end(key)
+                return cached[1]
+
+        counts = self._per_source_counts(db, signals)
+        result = tuple(
+            ScopeSource(notebook_id=notebook_id, source_id=source_id, count=count)
+            for source_id, count in (
+                (source_id, int(counts.get(source_id, {}).get(kind, 0)))
+                for source_id, _signal in sorted(signals)
+            )
+            if count > 0
+        )
+        # Bounded by TOTAL entries, not by number of plans: one plan is as
+        # large as the notebook's non-zero source count, so a per-plan LRU
+        # would bound the count of unbounded things.  An oversized plan is
+        # simply not stored — recomputing it is cheaper than evicting every
+        # other library to hold it.
+        with self._lock:
+            if len(result) <= _MAX_CACHED_PLAN_SOURCES:
+                previous = self._plan_sources.get(key)
+                if previous is not None:
+                    self._plan_source_entries -= len(previous[1])
+                self._plan_sources[key] = (fingerprint, result)
+                self._plan_sources.move_to_end(key)
+                self._plan_source_entries += len(result)
+                while (
+                    self._plan_source_entries > _MAX_CACHED_PLAN_SOURCES
+                    and len(self._plan_sources) > 1
+                ):
+                    _evicted_key, evicted = self._plan_sources.popitem(last=False)
+                    self._plan_source_entries -= len(evicted[1])
+        return result
+
+    def scope_signal_fingerprint(
+        self, db: object, notebook_ids: Sequence[str]
+    ) -> str:
+        """Just the identity half of ``scope_element_plan``.
+
+        Used for the closing check of an enumeration: one signal query per
+        participant, no counting, no cache write.  Equality with the opening
+        fingerprint is what turns "the cursor ran out" into "the collection is
+        complete".
+        """
+        all_signals: List[Tuple[str, str]] = []
+        for notebook_id in notebook_ids:
+            all_signals.extend(self._sources.source_change_signal_rows(db, notebook_id))
+        return signal_fingerprint(all_signals)
+
+    def scope_kg_type_counts(
+        self, db: object, notebook_ids: Sequence[str]
+    ) -> Tuple[Tuple[str, int], ...]:
+        """Per-type KG totals for a resolved scope — the enumeration's
+        denominator, from the same seq-gated memo the map renders."""
+        return self._scope_kg_counts(db, notebook_ids)
+
     def invalidate(self) -> None:
         """Drop every cached count.
 
@@ -241,6 +401,8 @@ class CollectionCatalogService:
             self._source_counts.clear()
             self._notebook_counts.clear()
             self._kg_counts.clear()
+            self._plan_sources.clear()
+            self._plan_source_entries = 0
 
     # ----------------------------------------------------------------- element
     def _scope_element_counts(
@@ -263,7 +425,7 @@ class CollectionCatalogService:
         self, db: object, notebook_id: str
     ) -> Tuple[ElementKindCount, ...]:
         signals = self._sources.source_change_signal_rows(db, notebook_id)
-        fingerprint = _fingerprint(signals)
+        fingerprint = signal_fingerprint(signals)
         with self._lock:
             cached = self._notebook_counts.get(notebook_id)
             if cached is not None and cached[0] == fingerprint:
@@ -273,7 +435,7 @@ class CollectionCatalogService:
         per_source = self._per_source_counts(db, signals)
         totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
         source_totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
-        for counts in per_source:
+        for counts in per_source.values():
             for kind, count in counts.items():
                 if count <= 0:
                     continue
@@ -294,24 +456,28 @@ class CollectionCatalogService:
 
     def _per_source_counts(
         self, db: object, signals: Sequence[Tuple[str, str]]
-    ) -> List[Dict[str, int]]:
-        """Per-source ``{kind: count}`` for every source in the notebook, served
-        from the LRU where the change signal still matches and queried in one
-        batched round trip for the rest.
+    ) -> Dict[str, Dict[str, int]]:
+        """``{source_id: {kind: count}}`` for every source in the notebook,
+        served from the LRU where the change signal still matches and queried
+        in one batched round trip for the rest.
+
+        Keyed by source id (not a bare list) because the enumeration plan has
+        to ask "which sources hold this kind?", and answering that from a
+        second query path is exactly how a map and its list start disagreeing.
 
         The query returns only (source, kind) pairs that actually exist, so a
         source with no whitelisted element caches an empty dict — that is a
         real answer (zero of everything) and must be cached, otherwise every
         prose-only source re-queries forever.
         """
-        results: List[Dict[str, int]] = []
+        results: Dict[str, Dict[str, int]] = {}
         stale: List[Tuple[str, str]] = []
         with self._lock:
             for source_id, signal in signals:
                 cached = self._source_counts.get(source_id)
                 if cached is not None and cached[0] == signal:
                     self._source_counts.move_to_end(source_id)
-                    results.append(cached[1])
+                    results[source_id] = cached[1]
                 else:
                     stale.append((source_id, signal))
         if not stale:
@@ -330,7 +496,7 @@ class CollectionCatalogService:
                 counts = fresh[source_id]
                 self._source_counts[source_id] = (signal, counts)
                 self._source_counts.move_to_end(source_id)
-                results.append(counts)
+                results[source_id] = counts
             while len(self._source_counts) > _MAX_CACHED_SOURCES:
                 self._source_counts.popitem(last=False)
         return results
@@ -414,8 +580,13 @@ class CollectionCatalogService:
         )
 
 
-def _fingerprint(signals: Sequence[Tuple[str, str]]) -> str:
-    """Order-independent digest of the notebook's whole (source, signal) set.
+def signal_fingerprint(signals: Sequence[Tuple[str, str]]) -> str:
+    """Order-independent digest of a (source, signal) set.
+
+    Public because the enumeration executor needs the SAME digest to decide
+    whether a scope stayed still from its first page to its last; a second
+    implementation there would be a completeness claim resting on two
+    definitions of "unchanged".
 
     Sorted before hashing so two reads of an unchanged notebook agree
     regardless of row order, and a source added / removed / re-parsed changes

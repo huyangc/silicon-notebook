@@ -506,16 +506,16 @@ def test_fingerprint_ignores_row_order(repo):
     都可以换返回顺序(甚至同一库不同计划就会变),不排序会让指纹随机漂,
     L2 永远 miss、每次建图都全库重扫。"""
     pairs = [("s1", "sig-a"), ("s2", "sig-b"), ("s3", "sig-c")]
-    baseline = collection_catalog._fingerprint(pairs)
-    assert collection_catalog._fingerprint(list(reversed(pairs))) == baseline
-    assert collection_catalog._fingerprint([pairs[1], pairs[2], pairs[0]]) == baseline
+    baseline = collection_catalog.signal_fingerprint(pairs)
+    assert collection_catalog.signal_fingerprint(list(reversed(pairs))) == baseline
+    assert collection_catalog.signal_fingerprint([pairs[1], pairs[2], pairs[0]]) == baseline
     # 内容真的变了则必须变。
-    assert collection_catalog._fingerprint(
+    assert collection_catalog.signal_fingerprint(
         [("s1", "sig-a"), ("s2", "sig-b"), ("s3", "sig-CHANGED")]
     ) != baseline
     # 分隔符不可伪造:拼接歧义会让不同集合撞同一指纹。
-    assert collection_catalog._fingerprint([("s1", "sig-a")]) != (
-        collection_catalog._fingerprint([("s1|sig-a", "")])
+    assert collection_catalog.signal_fingerprint([("s1", "sig-a")]) != (
+        collection_catalog.signal_fingerprint([("s1|sig-a", "")])
     )
 
 

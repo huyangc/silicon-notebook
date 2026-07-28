@@ -26,6 +26,7 @@ from app.repositories.postgres.model_status_store import (
 from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
 from app.repositories.postgres.sharing_store import SharingStore as PostgresSharingStore
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
+from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services import repository_facade
 
@@ -827,7 +828,9 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
     notebook_id = core_stores.notebooks.create_row(
         NotebookCreate(name="Collections"), owner.id
     )
-    kinds = ("formula", "table", "image", "code_block")
+    # 白名单只有一处字面量(collection_catalog),这里 import 而不是再抄一份
+    # ——源码守卫 test_collection_enumeration 会拦第二份副本。
+    kinds = ENUMERABLE_ELEMENT_KINDS
     for source_id, source_type in (
         ("src-collect-a", "markdown"),
         ("src-collect-b", "markdown"),
@@ -961,6 +964,164 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
         )
     assert "src-collect-b" not in remaining
+
+
+def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
+    core_stores: CoreStores,
+):
+    """``element_page_rows`` / ``source_display_rows`` — the two primitives
+    behind ``app.services.collection_enumeration``.
+
+    The parity risk that matters here is the CURSOR: ``created_at`` is
+    ``timestamptz`` on PostgreSQL and text on SQLite, so the executor hands
+    the value back exactly as this adapter returned it.  A page boundary is
+    therefore tested with the real ``datetime`` object, not a reformatted
+    string — re-rendering it is precisely how a row gets skipped or repeated.
+    """
+    owner = core_stores.identity.create_user("n00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Enumeration"), owner.id
+    )
+    core_stores.sources.insert_source(
+        source_id="src-enum",
+        notebook_id=notebook_id,
+        title="Enumerable",
+        source_type="markdown",
+        status="parsed",
+        parse_status="parsed",
+        file_name="enum.md",
+        file_path="uploads/enum.md",
+        file_size=1,
+        file_hash="hash",
+        summary="",
+        doc_type="",
+    )
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-enum",
+            tuple(
+                SourceElementWrite(f"el-enum-{index}", "formula", f"p{index}",
+                                   f"E={index}", {})
+                for index in range(5)
+            ) + (
+                # Prose must never appear in a typed page.
+                SourceElementWrite("el-enum-prose", "paragraph", "p9", "body", {}),
+                # An image's short asset id is projected out of metadata IN
+                # SQL; a table's unbounded HTML must never be selected.
+                SourceElementWrite(
+                    "el-enum-image", "image", "p8", "figure",
+                    {"asset_id": "asset-enum", "mime": "image/png"},
+                ),
+                SourceElementWrite(
+                    "el-enum-table", "table", "p7", "grid",
+                    {"table_html": "<table>" + "x" * 2_000 + "</table>"},
+                ),
+            ),
+            created_at=NOW,
+        )
+    # Two elements pushed to a later timestamp so the keyset exercises the
+    # created_at half of the key, not only the id tie-break.
+    _write_sql(
+        core_stores,
+        "UPDATE source_elements SET created_at=%s WHERE id=ANY(%s)",
+        ("2026-07-23T00:00:00+00:00", ["el-enum-3", "el-enum-4"]),
+    )
+
+    collected: list[str] = []
+    after = None
+    with core_stores.database.connect() as connection:
+        for _page in range(5):
+            rows = core_stores.sources.element_page_rows(
+                connection, "src-enum", "formula", after, 2
+            )
+            if not rows:
+                break
+            collected.extend(row["id"] for row in rows)
+            after = (rows[-1]["created_at"], rows[-1]["id"])
+        # A type with no elements is an empty page, not an error.
+        assert core_stores.sources.element_page_rows(
+            connection, "src-enum", "code_block", None, 5
+        ) == []
+        image_rows = core_stores.sources.element_page_rows(
+            connection, "src-enum", "image", None, 5
+        )
+        table_rows = core_stores.sources.element_page_rows(
+            connection, "src-enum", "table", None, 5
+        )
+        labels = core_stores.sources.source_display_rows(
+            connection, ["src-enum", "src-missing", ""]
+        )
+    assert collected == [
+        "el-enum-0", "el-enum-1", "el-enum-2", "el-enum-3", "el-enum-4",
+    ]
+    # asset_id is a projection, not the metadata column: the image's short id
+    # comes back, the table's HTML never leaves the database.
+    assert image_rows[0]["asset_id"] == "asset-enum"
+    assert table_rows[0]["asset_id"] is None
+    assert "metadata" not in table_rows[0].keys()
+    assert [row["id"] for row in labels] == ["src-enum"]
+    assert labels[0]["notebook_id"] == notebook_id
+    assert labels[0]["title"] == "Enumerable"
+    assert labels[0]["file_name"] == "enum.md"
+    # No paper metadata row: the outer join keeps the source, with empty
+    # paper fields rather than dropping the label entirely.
+    assert not labels[0]["is_paper"]
+    assert labels[0]["paper_title"] is None
+
+
+def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores):
+    """禁全表扫描:PostgreSQL 侧的翻页也必须落在
+    ``idx_source_elements_source_type`` 上。计划器细节(Index Scan /
+    Index Only Scan)不是契约,「不是 Seq Scan」和「用的是这条索引」才是。"""
+    owner = core_stores.identity.create_user("p00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Plan"), owner.id
+    )
+    core_stores.sources.insert_source(
+        source_id="src-plan",
+        notebook_id=notebook_id,
+        title="Plan",
+        source_type="markdown",
+        status="parsed",
+        parse_status="parsed",
+        file_name="plan.md",
+        file_path="uploads/plan.md",
+        file_size=1,
+        file_hash="hash",
+        summary="",
+        doc_type="",
+    )
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-plan",
+            tuple(
+                SourceElementWrite(f"el-plan-{index}", "formula", "p1", "E", {})
+                for index in range(40)
+            ),
+            created_at=NOW,
+        )
+    with core_stores.database.connect() as connection:
+        # Same technique as the trigram guard in test_search_conformance: a
+        # 40-row table is small enough that the planner would rightly scan it,
+        # so seqscan is penalised and the question becomes "does an index path
+        # for this exact shape EXIST at all?".  If none did, the plan would
+        # still come back as a Seq Scan and both assertions would fire.
+        connection.execute("SET LOCAL enable_seqscan=off")
+        plan_rows = connection.execute(
+            "EXPLAIN SELECT id,source_id,element_type,location_label,text,"
+            "created_at,metadata->>'asset_id' AS asset_id "
+            "FROM source_elements WHERE source_id=%s AND "
+            "element_type=%s AND (created_at,id) > (%s,%s) "
+            "ORDER BY created_at,id LIMIT %s",
+            ("src-plan", "formula", NOW, "el-plan-0", 25),
+        ).fetchall()
+    plan = "\n".join(str(next(iter(row.values()))) for row in plan_rows)
+    assert "idx_source_elements_source_type" in plan, plan
+    assert "Seq Scan" not in plan, plan
+    # An index range, not a sort of the whole (source, type) group.
+    assert "Sort" not in plan, plan
 
 
 def test_latest_extraction_run_uses_ordinal_tie_break(
