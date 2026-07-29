@@ -6085,6 +6085,23 @@ button.chat-session-card {
   gap: 6px;
 }
 
+/* 参与集内代理读取:标题行右侧那一格平时放重新解析/删除两个写入按钮,来源属于挂载的
+   参考库时改放所属库徽章(那两个写入是 owner-only 的,挂载方点了只会 404)。库名是
+   用户自取的笔记本名,须复位 .tier-badge 继承来的 text-transform:uppercase——理由与
+   .cite-detail-head .tier-badge-source-name 那条完全一致;截断同样走那套省略号惯例,
+   完整文案留在 title 上。.tier-badge 本身是 inline,不给 inline-block 的话 max-width
+   与 ellipsis 都不生效。align-self:center 让这枚小徽章对齐 30px 大标题的视觉中线,而不是
+   贴着 grid 顶边(容器是 align-items:start)。 */
+.source-detail-base-badge {
+  align-self: center;
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+
 .danger-icon {
   color: #9b2c2c;
 }

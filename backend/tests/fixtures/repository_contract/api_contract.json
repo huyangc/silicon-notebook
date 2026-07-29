@@ -15662,6 +15662,106 @@
           "summary": "Add Url Sources"
         }
       },
+      "/api/notebooks/{notebook_id}/sources/{source_id}": {
+        "get": {
+          "operationId": "get_source_in_scope_api_notebooks__notebook_id__sources__source_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SourceDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Source In Scope"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/elements": {
+        "get": {
+          "operationId": "source_elements_in_scope_api_notebooks__notebook_id__sources__source_id__elements_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/SourceElement"
+                    },
+                    "title": "Response Source Elements In Scope Api Notebooks  Notebook Id  Sources  Source Id  Elements Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Source Elements In Scope"
+        }
+      },
       "/api/notebooks/{notebook_id}/tier": {
         "post": {
           "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。",

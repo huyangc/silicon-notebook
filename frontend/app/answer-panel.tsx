@@ -232,13 +232,13 @@ function collectionCoverageStatus(
 }
 
 
-// 挂载公共参考库不等于获得该库的直接成员权限(红线):`GET /sources/{id}` 与
-// `GET /notebooks/{id}/assets/{assetId}` 都是 owner∪member 口径,前端不能替
-// 用户猜权限去直连另一个库的资源——那类请求大概率 403(即便这条证据确实是
-// 当前 notebook 的有效检索结果:后端在服务端 participant 集内代理读取,浏览器
-// 侧仍只用当前 active notebook 过权限)。跨库条目因此收敛成"只读展示":不提供
-// 「查看来源」跳转、不发图片鉴权请求,只标注它来自哪个参考库。完整解(浏览器
-// 侧也能直连挂载库的资源)已登记为独立后续任务,不在本次前端收口范围内。
+// 挂载公共参考库不等于获得该库的直接成员权限(红线):裸 `GET /sources/{id}` 是
+// owner∪member 口径,前端绝不替用户猜权限去直连另一个库的资源。跨库条目的来源详情
+// 与图片改走**按 active notebook 代理读取**的端点(`/notebooks/{active}/sources/{id}`
+// 与 `/notebooks/{active}/assets/{assetId}`),与「问答引用定位图谱节点」红线同构:
+// 浏览器始终只用当前 active notebook 过权限,后端在它的有效 participant 集内解析目标
+// 并内部代理读取,挂载边一失效就当场 404。因此这里不再按跨库与否决定"能不能点/能不能
+// 看图"——两种条目走同一条路径;跨库标注保留,它是有用的出处信息,不是能力降级。
 //
 // item.notebook_id 两种条目类型都会填(design doc §2.6/collection_enumeration.py
 // 的 ElementItem/KgObjectItem——不是"只在跨库命中才非空"的 Citation.notebook_id
@@ -286,8 +286,10 @@ function ElementCollectionItemRow({
   // 局部 const 而非 item.source_id!:非空断言只是在闭包里骗过编译器,局部 const
   // 让 TS 在这个块内真的把它窄化成 string,闭包捕获的是这个已收窄的绑定。
   const sourceId = item.source_id ?? "";
-  const imageUrl = kind === "image" && item.asset_id && !crossLibrary
-    ? sourceImageAssetUrl(API_BASE, itemNotebookId || notebookId || "", item.asset_id)
+  // 资产 URL 恒用**当前 active notebook**:后端按资产自己声明的所属库在参与集内解析,
+  // 跨库图片因此也能取到。绝不拿 item.notebook_id 去直连另一个库(那是成员口径的越权猜测)。
+  const imageUrl = kind === "image" && item.asset_id
+    ? sourceImageAssetUrl(API_BASE, notebookId || "", item.asset_id)
     : "";
   return (
     <li className="answer-collection-item">
@@ -296,11 +298,7 @@ function ElementCollectionItemRow({
         {kind === "image" && (
           imageUrl
             ? <AuthedImage url={imageUrl} alt={item.location_label || "图片"} />
-            : (
-              <p className="tool-hint">
-                {crossLibrary ? "图片来自参考库，暂不支持预览" : (item.text || "图片不可用")}
-              </p>
-            )
+            : <p className="tool-hint">{item.text || "图片不可用"}</p>
         )}
         {kind === "code_block" && (
           <pre className="answer-collection-code"><code>{item.text ?? ""}</code></pre>
@@ -318,7 +316,7 @@ function ElementCollectionItemRow({
             tier={item.tier ?? "personal"}
           />
         )}
-        {!crossLibrary && onOpenSource && sourceId && (
+        {onOpenSource && sourceId && (
           <button
             type="button"
             className="answer-collection-open"
