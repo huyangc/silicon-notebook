@@ -207,19 +207,16 @@ class SourceStore:
 
         The signal is ``updated_at | parse_status | chunked_at`` because those
         three are what the element writers touch:
+          * EVERY element swap: ``replace_elements`` advances ``updated_at`` to
+            the instant its new elements carry, inside the caller's write
+            transaction.  That alone makes the signal flip atomically with the
+            element generation, on a first parse as well as on a reparse.  The
+            two clauses below are older, narrower guarantees that still hold
+            and cost nothing to keep — this one is the load-bearing rule;
           * REPARSE of an already-chunked source: ``replace_elements`` and
             ``clear_chunked_at`` run in the SAME write transaction
             (``SourceIngestionService.process_source``), and ``chunked_at``
-            held a value, so nulling it flips the signal atomically with the
-            new element generation;
-          * FIRST parse: ``chunked_at`` is still NULL, so that same
-            ``clear_chunked_at`` is a no-op and the signal does NOT move when
-            the elements land.  It moves at the next ``set_status`` — which in
-            process_source comes after the summarize step, i.e. one LLM call
-            later.  So a map built inside that window reports the source's
-            PRE-parse counts (normally zero: it had no elements yet).  The
-            error direction is UNDER-count, never over-count, and it self-heals
-            at the status write that always follows;
+            held a value, so nulling it flips the signal too;
           * the Memory-derived reparse folds ``update_file_hash``
             (``updated_at``) into the same transaction as its
             ``replace_elements``;
@@ -856,7 +853,27 @@ class SourceStore:
         created_at: str,
     ) -> None:
         """Swap a source's elements INSIDE the caller's write transaction (the
-        parse pipeline clears extraction state in the same transaction)."""
+        parse pipeline clears extraction state in the same transaction).
+
+        The source's ``updated_at`` is advanced to the SAME instant the new
+        elements carry, in this same transaction.  That is what makes the
+        change signal (see ``source_change_signal_rows``) flip atomically with
+        the element generation, so a count cached against the previous
+        generation becomes unreachable the moment the new one commits.
+        Without it a FIRST parse landed elements while every component of the
+        signal stayed put — ``chunked_at`` was already NULL so nulling it was a
+        no-op — and the signal only moved at the next ``set_status``, an LLM
+        call later.  Anything counting in that window (the collection map, and
+        therefore the enumeration plan built from it) read the source as empty.
+
+        It is a bump the source was going to receive anyway: every lifecycle
+        transition writes ``updated_at``, and the parse always ends in one.
+        This only moves it earlier, to the instant the data actually changed.
+        ``sources.updated_at`` is written by the status/hash/doc-type paths and
+        read in exactly one place — the change-signal query — so nothing
+        orders, displays or keys on it (source listings order by
+        ``created_at``, and the API model does not carry the column).
+        """
         connection.execute(
             "DELETE FROM source_elements WHERE source_id = ?", (source_id,)
         )
@@ -878,6 +895,13 @@ class SourceStore:
                 )
                 for element in elements
             ],
+        )
+        # ``created_at`` is the caller's own ``now()`` (microsecond precision,
+        # the repository-wide convention), so the signal moves to a value that
+        # belongs to THIS element generation rather than to a second clock read.
+        connection.execute(
+            "UPDATE sources SET updated_at = ? WHERE id = ?",
+            (created_at, source_id),
         )
 
     def delete_source_row(

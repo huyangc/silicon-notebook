@@ -666,6 +666,111 @@ def test_page_ceiling_counts_only_extra_round_trips(repo):
     assert result.coverage.truncated_reason == TRUNCATED_BUDGET
 
 
+def _count_query_charges(monkeypatch) -> dict:
+    """记录 ``_Walk.charge_query`` 的真实调用次数。
+
+    只断言「实际查询数 ≤ 上界」是不够的:把计费点整个删掉,上界照样成立、
+    守卫照样绿,而不变式已经不再被强制。拿它与页查询次数逐一对齐,才是在守
+    「每次往返都过了计数器」。
+    """
+    state = {"count": 0}
+    original = collection_enumeration._Walk.charge_query
+
+    def counted(self):
+        state["count"] += 1
+        return original(self)
+
+    monkeypatch.setattr(
+        collection_enumeration._Walk, "charge_query", counted
+    )
+    return state
+
+
+def test_round_trip_count_stays_within_the_budget_derived_bound(repo, monkeypatch):
+    """一次动作的页查询数有硬上界 `max_rows + max_pages`,并在代码里被强制。
+
+    推导(codex 第 3 轮 P2):同源第 2 页起都计入 `max_pages`;首页免费,但一个源
+    只因为地图数出过行才进计划,访问它就会产行,而行受 `max_rows` 约束。这条
+    用例走「宽而薄」形态(100 源 × 1 公式)的最坏情况——每个源恰好 1 次查询。
+
+    400 个零计数源刻意排在**前面**(计划按 source_id 排序):它们一旦进入计划就
+    会在行预算被消耗之前先烧掉 400 次查询,计数器当场超界报错——这正是让「零
+    计数源不访问」这条前提可被证伪的形状。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(400):
+        _add_source(repo, notebook.id, f"s-a-miss-{index:03d}", [("paragraph", 1)])
+    for index in range(100):
+        _add_source(repo, notebook.id, f"s-z-hit-{index:03d}", [("formula", 1)])
+
+    store = repo._runtime.source_store
+    original = store.element_page_rows
+    calls: list[str] = []
+
+    def spy(db, source_id, element_type, after, limit):
+        calls.append(source_id)
+        return original(db, source_id, element_type, after, limit)
+
+    monkeypatch.setattr(store, "element_page_rows", spy)
+    charges = _count_query_charges(monkeypatch)
+    budget = _budget(page_size=25, max_rows=100, max_pages=4)
+    result = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=budget
+    )
+
+    assert result.coverage.returned == 100
+    assert result.coverage.complete is True          # 宽而薄仍然可达完整
+    assert len(calls) <= budget.max_rows + budget.max_pages, len(calls)
+    assert not any("miss" in source_id for source_id in calls), (
+        "零计数源不该被访问——它们不在计划里")
+    # 上界必须是**强制**的,不能只是恰好成立:每一次页查询都要过计数器。
+    assert charges["count"] == len(calls), (charges["count"], len(calls))
+
+
+def test_kg_page_queries_are_charged_against_the_ceiling_too(repo, monkeypatch):
+    """知识对象侧的每一次页查询(含状态过滤的补页)同样过计数器。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(12):
+        _add_kg_object(
+            repo, notebook.id, f"d{index:03d}", "concept", status="deprecated"
+        )
+    for index in range(6):
+        _add_kg_object(repo, notebook.id, f"z{index}", "concept")
+
+    store = repo._runtime.knowledge
+    original = store.knowledge_object_page_rows
+    calls: list[int] = []
+
+    def spy(db, notebook_id, object_type, after, limit):
+        calls.append(limit)
+        return original(db, notebook_id, object_type, after, limit)
+
+    monkeypatch.setattr(store, "knowledge_object_page_rows", spy)
+    charges = _count_query_charges(monkeypatch)
+    budget = _budget(page_size=4, max_rows=6, max_pages=4)
+    result = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=budget
+    )
+
+    assert result.coverage.returned == 6 and result.coverage.complete is True
+    assert len(calls) > 1, "过扫描确实发生了,否则这条守不到补页"
+    assert charges["count"] == len(calls), (charges["count"], len(calls))
+
+
+def test_query_ceiling_is_enforced_not_merely_documented(repo):
+    """上界是**强制**的:计数器越界立刻抛 ``EnumerationInvariantError``。
+
+    直接对账本做单元断言,因为让真实遍历越界的唯一办法是先破坏它所依赖的
+    前提(上面那条用例负责),而「越界会怎样」本身必须自己钉住。
+    """
+    walk = collection_enumeration._Walk(_budget())
+    walk.bound_queries(2)
+    walk.charge_query()
+    walk.charge_query()
+    with pytest.raises(collection_enumeration.EnumerationInvariantError):
+        walk.charge_query()
+
+
 def test_page_budget_does_not_starve_a_wide_thin_corpus(repo):
     """真实语料形态:公式散在很多源、每源一条。首页若计入页预算,
     enum_pages_per_run(最低档 2)会在行预算用掉 4% 时就先见底,
@@ -940,10 +1045,51 @@ def test_in_scope_source_without_the_kind_is_a_complete_empty_answer(repo):
     assert result.coverage.complete is True
 
 
+def test_freshly_replaced_elements_are_enumerable_immediately(repo):
+    """走真正的写入口 ``replace_elements`` 落新元素后,**不需要**任何后续状态
+    写入,整个作用域的枚举当场就能看到它们(codex 第 3 轮 P1)。
+
+    这条是原「首解析窗口」用例的反面:那时元素已落库而信号未动,地图把该源
+    数成 0、它因此不进遍历计划、枚举列不出来,只能靠显式点名或等下一次
+    set_status。现在信号与元素换代同事务翻转,窗口不存在。
+    """
+    from app.repositories.ports import SourceElementWrite
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_source(repo, notebook.id, "s-a", [("paragraph", 1)])
+    # 先把「该源 0 条公式」按当前信号缓存住。
+    assert repo.collection_catalog.collection_map(
+        notebook.id
+    ).element_count("formula") == 0
+
+    store = repo._runtime.source_store
+    with repo._write() as db:
+        store.replace_elements(
+            db, "s-a",
+            [
+                SourceElementWrite(
+                    id=f"el-fresh-{index}", element_type="formula",
+                    location_label="p1", text="E", metadata={},
+                )
+                for index in range(3)
+            ],
+            created_at="2026-07-29T10:00:00.123456+08:00",
+        )
+
+    result = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget()
+    )
+    assert [item.element_id for item in result.items] == [
+        "el-fresh-0", "el-fresh-1", "el-fresh-2",
+    ]
+    assert result.coverage.total == 3
+    assert result.coverage.complete is True
+
+
 def test_explicit_source_is_queried_not_inferred_from_a_stale_zero(repo):
-    """首次解析窗口:元素已落库,但来源的变更信号还没动(chunked_at 本就是
-    NULL、set_status 还没发生),所以地图的 per-source 计数仍是 0。显式点名
-    该源时必须真的分页查询它,不能因为「不在计划里」就回一个自信的空清单。"""
+    """绕过元素写入口的直写(测试夹具、离线脚本)仍可能让 per-source 计数陈旧:
+    信号一个字节都没动,地图仍报 0。显式点名该源时必须真的分页查询它,
+    不能因为「不在计划里」就回一个自信的空清单。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_source(repo, notebook.id, "s-a", [("paragraph", 1)])
     # 先建一次地图,把「该源 0 条公式」按当前信号缓存住。

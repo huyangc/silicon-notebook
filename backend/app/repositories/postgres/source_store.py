@@ -667,6 +667,10 @@ class SourceStore:
         *,
         created_at: TimestampInput,
     ) -> None:
+        """Backend twin of the SQLite swap — including the ``updated_at`` bump
+        that flips the change signal atomically with the new element
+        generation (see the SQLite docstring for why it exists and why it is
+        harmless)."""
         created_at = normalize_timestamp(created_at)
         connection.execute("DELETE FROM source_elements WHERE source_id=%s", (source_id,))
         execute_many(
@@ -686,6 +690,9 @@ class SourceStore:
                 )
                 for item in elements
             ],
+        )
+        connection.execute(
+            "UPDATE sources SET updated_at=%s WHERE id=%s", (created_at, source_id)
         )
 
     def delete_source_row(self, connection, source_id: str) -> None:

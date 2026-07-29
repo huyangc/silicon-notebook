@@ -965,6 +965,33 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
         )
     assert "src-collect-b" not in remaining
 
+    # ``replace_elements`` moves ``updated_at`` in its own write transaction, so
+    # the signal flips with the element generation on a FIRST parse too — no
+    # status write, no chunked_at to null (neither happens here). Same
+    # guarantee as SQLite; without it this backend would count a just-parsed
+    # source as empty until the next status write — a silent parity divergence
+    # in a completeness claim.
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-collect-a",
+            [
+                SourceElementWrite(
+                    id="el-collect-a-fresh", element_type="formula",
+                    location_label="p9", text="E", metadata={},
+                )
+            ],
+            created_at="2026-07-29T10:00:00.123456+00:00",
+        )
+    with core_stores.database.connect() as connection:
+        after_swap = dict(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+        assert core_stores.sources.element_type_count_rows(
+            connection, ["src-collect-a"], kinds
+        ) == [("src-collect-a", "formula", 1)]
+    assert after_swap["src-collect-a"] != remaining["src-collect-a"]
+
 
 def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
     core_stores: CoreStores,
