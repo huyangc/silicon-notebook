@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  TRACE_STEP_LABELS,
   formatDuration,
   getReasoningTraceSummary,
   getTraceStepDetail,
@@ -315,5 +316,28 @@ test("Knowhow 的 scanned_rows 分支与集合枚举分支不串台(仍走各自
       detail: { scanned_rows: 12, known_total_rows: 100 },
     }),
     "12/100 行",
+  );
+});
+
+test("跳过步:未执行的已确认检索方向给出数量,不被通用分支读成候选数", () => {
+  const skipped = {
+    step_type: "skip",
+    summary: "检索预算不足,以下已确认方向未能执行:方向四、方向五",
+    detail: {
+      reason: "intent_coverage_incomplete",
+      pending: 2,
+      directions: ["方向四", "方向五"],
+    },
+  };
+  assert.equal(getTraceStepDetail(skipped), "2 个方向未执行");
+  assert.equal(TRACE_STEP_LABELS.skip, "跳过");
+  // 其他跳过步(熔断、重复子查询…)不带 pending,继续走既有分支/空兜底。
+  assert.equal(
+    getTraceStepDetail({ step_type: "skip", summary: "", detail: { reason: "stale_circuit_breaker" } }),
+    "",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "skip", summary: "", detail: { reason: "x", count: 3 } }),
+    "3 个候选",
   );
 });

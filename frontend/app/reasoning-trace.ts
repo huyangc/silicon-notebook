@@ -116,6 +116,12 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 段`);
     return parts.join(" · ");
   }
+  if (step.step_type === "skip" && typeof detail.pending === "number") {
+    // 步骤预算不足时未能执行的已确认检索方向数。summary 已逐条列出(有界),
+    // detail 只补一个总数 —— 它不带 count/found,落到下面的通用分支只会返回空,
+    // 用户就看不出"漏了几个"。
+    return `${detail.pending} 个方向未执行`;
+  }
   if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {
     return `${detail.scanned_rows}/${Number(detail.known_total_rows ?? 0)} 行`;
   }
