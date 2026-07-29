@@ -1636,16 +1636,63 @@ def test_kg_enumeration_stays_bounded_when_most_objects_are_deprecated(
     assert result.coverage.complete is False
     assert result.coverage.truncated_reason == TRUNCATED_BUDGET
     assert result.coverage.overflow_semantics == EXPLICIT_PARTIAL_OVERFLOW
-    # 原始行有界:计入 scanned,且不超过过扫描上限加最后一页的粒度。
-    assert result.coverage.scanned <= cap + max(calls), (
-        result.coverage.scanned, cap, calls
-    )
+    # 原始行**严格**有界(codex #395 第 5 轮):fetch 在查询前夹到剩余额度,
+    # 文档声明的上限一行都不能越——不再容忍「最后一批的粒度」。
+    assert result.coverage.scanned <= cap, (result.coverage.scanned, cap, calls)
     assert result.coverage.scanned >= cap
     # 查询次数有界:上限 / 每次至少 1 行。若过扫描上限失效,这一条会随 200 行
     # 全扫而爆掉。
     assert len(calls) <= cap, calls
     # 而且必须能续跑(complete=false ⟹ 游标非空)。
     assert result.cursor is not None
+
+
+def test_kg_raw_scan_ceiling_clamps_the_fetch_before_the_query(
+    repo, monkeypatch
+):
+    """越界批次被构造出来时,fetch 必须在查询前被夹到剩余额度(codex #395 R5)。
+
+    3 个可用对象让首批收下 3 行,后续 fetch 缩为 7——累计 38 行后旧实现会再发
+    一个 limit=7 的查询读到 45/40(越过声明上限),且若那批凑满页还会当成功
+    退出。修复后:最后一批 limit 被夹为 2,scanned 恰好等于上限,诚实报 budget。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(3):
+        _add_kg_object(repo, notebook.id, f"a-usable-{index}", "concept")
+    for index in range(60):
+        _add_kg_object(
+            repo, notebook.id, f"d{index:03d}", "concept", status="deprecated"
+        )
+
+    store = repo._runtime.knowledge
+    original = store.knowledge_object_page_rows
+    calls: list[tuple[int, int]] = []          # (请求 limit, 实际返回行数)
+    running = 0
+
+    def spy(db, notebook_id, object_type, after, limit):
+        rows = original(db, notebook_id, object_type, after, limit)
+        nonlocal running
+        running += len(rows)
+        calls.append((limit, len(rows)))
+        return rows
+
+    monkeypatch.setattr(store, "knowledge_object_page_rows", spy)
+    result = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(max_rows=10, page_size=10)
+    )
+
+    cap = 10 * collection_enumeration._KG_RAW_SCAN_FACTOR
+    assert result.coverage.truncated_reason == TRUNCATED_BUDGET
+    # 每一步累计都不越界——不是「总量恰好没超」的巧合,而是逐批钳制。
+    totals = []
+    acc = 0
+    for _limit, returned in calls:
+        acc += returned
+        totals.append(acc)
+    assert all(total <= cap for total in totals), (totals, cap)
+    assert result.coverage.scanned == cap, (result.coverage.scanned, calls)
+    # 最后一批的 limit 就是被夹后的剩余额度(2),不是未夹的 want 余量(7)。
+    assert calls[-1][0] == cap - totals[-2], calls
 
 
 def test_kg_resume_after_the_overscan_ceiling_makes_progress(repo):
