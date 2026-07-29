@@ -205,3 +205,25 @@ def test_exact_reserve_is_bounded_by_its_setting():
         exact_section_reserve_rule(1, {"exact-1", "exact-2", "exact-3"}),
     ))
     assert [chunk.chunk_id for chunk in selected] == ["direct", "exact-1"]
+
+
+def test_naturally_selected_quota_holder_of_another_rule_is_not_evicted():
+    """Codex #399 P2:他 rule 的**配额内持有块**不可被驱逐——无论它是被救进来
+    的还是天然入选的。graph 块天然入选时 graph rule 配额已满、不产生 rescue,
+    此前 exact 插入会把它当普通候选驱逐,静默击穿 CHUNK_GRAPH_RESERVE。保护
+    只覆盖配额内前 reserve 个持有块:超额持有块仍可驱逐,否则会反向复活
+    「大 exact 节挡死 graph 驱逐」的旧 bug(见 two_reserves 用例)。"""
+    ranked = [
+        _chunk("direct-1", 3, RetrievalSupport("semantic", "chunk", "direct-1", 0.9)),
+        _chunk("direct-2", 3, RetrievalSupport("lexical", "chunk", "direct-2", 0.8)),
+        _chunk("graph", 3, RetrievalSupport("ppr", "ppr", "", 0.7)),
+        _chunk("exact", 3, RetrievalSupport("lexical", "chunk", "exact", 0.1)),
+    ]
+    selected = select_with_reserves(ranked, 9, (
+        graph_reserve_rule(1),
+        exact_section_reserve_rule(1, {"exact"}),
+    ))
+    ids = [chunk.chunk_id for chunk in selected]
+    # 驱逐受害者必须是 direct-2(最后一个普通候选),不是天然入选的 graph。
+    assert "graph" in ids and "exact" in ids, ids
+    assert "direct-2" not in ids, ids

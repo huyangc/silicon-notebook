@@ -775,3 +775,36 @@ def test_ask_without_an_identifier_is_bit_for_bit_neutral(repo, monkeypatch):
     identified, probes_identified = _run("set_db 命令是怎样的", enabled=True)
     assert probes_identified == 1
     assert SET_DB_CHUNKS <= set(identified["selected"])
+
+
+def test_nested_identifier_section_keeps_its_own_slot():
+    """Codex #399 P2:命中按**产生它的 term** 折叠,不按全量 terms。
+
+    问题同时点名 `set_db` 与 `config.yaml`,而 `config.yaml` 的小节嵌在
+    `Ref > set_db` 之下。按全量 terms 折叠时,config.yaml 的命中会塌进
+    `set_db` 组(它的面包屑含 set_db),而 set_db 子树的有界取数在触达
+    config.yaml 小节前就耗尽——探测到了、通道自己丢了。按产生命中的 term
+    折叠后,config.yaml 保住自己的组与 slot。
+    """
+    hits = [
+        _hit("m0", "s1", "Ref > set_db", "set_db"),
+        _hit("m1", "s1", "Ref > set_db", "set_db"),
+        _hit("cfg", "s1", "Ref > set_db > config.yaml", "config.yaml"),
+    ]
+    sections = {
+        # set_db 子树取数(有界)只吐得出它自己的 3 块,够不到 config 小节。
+        ("s1", "Ref > set_db"): [
+            _row(f"row-main-{i}", "Ref > set_db", f"set_db body {i}")
+            for i in range(3)
+        ],
+        ("s1", "Ref > set_db > config.yaml"): [
+            _row("row-cfg", "Ref > set_db > config.yaml", "config.yaml keys"),
+        ],
+    }
+    stub = _StubDeps(hits=hits, sections=sections)
+    out = exact_lookup_chunks(
+        stub.as_deps(), "nb", "set_db 的 config.yaml 怎么配",
+        ExactLookupLimits(max_sections=2, max_chunks_per_section=3))
+    assert [call[1] for call in stub.section_calls] == [
+        "Ref > set_db", "Ref > set_db > config.yaml"]
+    assert "row-cfg" in [chunk.chunk_id for chunk in out]
