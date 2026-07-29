@@ -107,6 +107,13 @@
   source_title / element_type / location_label / text（截 `cell_excerpt_chars`=1000）。
 - `enumerate_kg_objects(scope, object_type)`：走现成 `(notebook_id, object_type,
   created_at, id)` 索引；item 含 object_id / name / section_path / 有界来源引用。
+  **【codex 第 1 轮 P2-5 订正】** 页查询不带 status 谓词——该索引不含 `status`，
+  写进 SQL 就是无界残余过滤，停用对象占比高的老库上「一页」不再是 O(limit)。
+  改为读回原始行（含 `status`）后在服务层用同一份 `USABLE_STATUSES` 过滤，内部
+  循环补页至凑满一页或触及 `max_rows × 4` 的原始行过扫描上限；`scanned` 计原始
+  行，触顶发 `truncated_reason="budget"` 的诚实 partial，且游标越过已扫的不可用
+  区段以保证续跑推进。刻意**不加**状态索引：那要在本 PR 里再叠一次 schema bump
+  （已因 master 抢号顺延过一次），且 partial index 会把 status 集合冻进 schema。
 - **一次动作在预算内自动翻页**：直到游标耗尽或触及 `enum_rows_per_run` / `enum_pages_per_run`
   / `structured_payload_chars`(256k 复用) 任一上限。**页预算只计同一源的第 2 页及之后**（真正
   的额外往返；源访问次数由行预算天然约束）。模型不感知 cursor；同一集合重复请求时，
@@ -133,7 +140,13 @@
 
 - `REFLECT_SCHEMA_HINT` / `allowed_actions` 增加 `enumerate_elements` / `enumerate_kg_objects`；
   schema 增分支对象 `enumerate: {"kind":"formula|table|image|code_block",
-  "object_type":"concept|claim|formula|procedure","source_id":""}`。
+  "object_type":"concept|claim|formula|procedure","source_id":"","source_title":""}`。
+  **【codex 第 1 轮 P2-4 订正】** 内部 source id 从不上屏也从不进候选摘要，模型
+  只能按标题表达「列出《某某》里的公式」。`source_title` 由服务端在
+  `scope_element_plan` 的源清单里做确定性解析（trim + casefold 精确匹配，按
+  `source_display_rows` 窗口批量读标题，上限 1024 个源），唯一命中才用其 id；
+  零命中或多命中记 `skip(enumeration_source_unresolved)`，trace 只报匹配个数与
+  模型给的名字、不报内部 id。两个都给时 id 优先。
 - `reflect_prompt` 增加动作说明：问题要求列出/盘点某类条目时优先于 search_elements；结合地图
   计数判断是否值得全量；大集合应改为「计数+样例+建议缩小范围」。完整性陈述以工具 coverage 为准。
 - run() 新增 elif 分支（镜像 search_elements 形态）：无效 kind/object_type → fail-open skip
@@ -147,11 +160,25 @@
 - 页预算计费：执行器在结果对象（非用户面 coverage）回传 `extra_pages`（同源第 2 页起的真实
   额外往返数），run 级按它精确扣减——不做 `scanned // page_size` 上界折算（在
   rows==size×pages 恒等式下上界折算使页池要么形同虚设、要么在载荷截断时错误提前截断）。
+- **【codex 第 1 轮 P2-3 订正】载荷预算同样是 run 级**：执行器在结果对象上另回传
+  `payload_chars`（本次真实消耗，与 `extra_pages` 同款「不进 coverage」的成本记账），
+  run 维护 `enum_payload_used`，每次动作只发 `structured_payload_chars − 已用`；
+  余量 <1 时按 `skip(enumeration_budget)` 跳过。否则一轮里的第 N 次 enumerate 会拿到
+  全新满额，累计返回数倍于文档写明的 256k 请求级上限。三个池同为 run 级的推论：
+  任一池触顶都会当场见底，跨动作续跑因此只在执行器停在池未耗尽的位置时才发生。
 - 新档位字段（`AskRetrievalLimits`）：`enum_page_size`=50（各档相同，transport 批量而非答案
   top-N，口径同 structured_page_size）；`enum_pages_per_run` 2/4/6/8/12；`enum_rows_per_run`
   100/200/300/400/600。
 - kill switch：`REASONING_ENUM_TOOLS_ENABLED`（config.py，注意 pydantic-settings v2 需
   validation_alias），默认 true；false 时不注册动作、不注入地图（回到现状）。
+- **【codex 第 1 轮 P1-1 订正】无图笔记本必须够得到枚举工具**：ask_service 的
+  「本笔记本尚未构建知识图谱」早退跑在 `ReasoningRetriever` 之前，会把「解析了来源但
+  没建图」的库（自动 KG 抽取默认关，这是常态）整个挡在工具外面。早退条件收窄为
+  「无图 **且** 集合地图上没有任何非零集合」；放行后照常进循环（图为空 ⇒ 初检索/expand
+  自然返回空，地图 + enumerate + search_elements 照常工作）。`kg_required` 语义不变
+  （无图且无可用 base 时为 True，前端提示继续显示），只是不再阻断执行。接线判据抽成
+  `reasoning_retrieval.enumeration_wiring_active()` 供两处共用——各写一份的话，kill
+  switch 一关就会放进一轮什么工具都没有的空循环。
 
 ### 2.5 合成与响应契约
 
@@ -169,9 +196,15 @@
 - 枚举块预算：上限 `chunk_context_chars // 2`（为 chunks/elements 保底），prompt 条目行
   text 截 200 字符（卡片/transport 仍用执行器 1000 字符摘录），块头预留优先保活，条目行
   单行化且不得出现可与引用正则冲突的 `[数字]` 形状。
-- `completeness_unavailable` 免责文案更新：仅当 `result_scope != "aggregate"` 且存在
-  `returned_total > 0` 的清单结果时不再前置（coverage 徽章承担披露）；aggregate（计数/
-  去重）与空清单场景保留警告；三处文案（长版+两处早退短版）统一提及元素/知识对象清单能力。
+- `completeness_unavailable` 免责文案更新：**【codex 第 1 轮 P1-2 收紧后的最终规则】**
+  四条同时成立才不前置——① `result_scope != "aggregate"`；② 意图合同的 `constraints` /
+  `excluded_topics` / `assumptions` 全为空；③ 至少一条清单结果 `returned_total > 0`；
+  ④ 且该条 `complete == True`。aggregate（计数/去重）、带谓词的请求、空清单与「只有
+  部分清单」的场景一律保留警告。②的理由：清单卡的 coverage 只证明某个物理集合被完整
+  走了一遍，证明不了它就是用户要的那个子集——模型完全可能枚举了无关 kind、或把带条件
+  的请求做成不过滤的全集；这里刻意**不做**语义匹配（无确定性判据），方向定为宁可多
+  警告，`assumptions`（前提）因此也算谓词。三处文案（长版+两处早退短版）统一提及
+  元素/知识对象清单能力。
 
 ### 2.6 前端
 
