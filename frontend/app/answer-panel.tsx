@@ -394,6 +394,7 @@ function CollectionResultCard({
   notebookNames: Record<string, string>;
   onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const visibleLimit = STRUCTURED_ENUMERATION_LIMITS.initialVisibleRows;
   const items = expanded ? resultSet.items : resultSet.items.slice(0, visibleLimit);
@@ -415,62 +416,75 @@ function CollectionResultCard({
         {scopedSourceTitle && (
           <span className="answer-collection-scope">仅限来源：{scopedSourceTitle}</span>
         )}
-      </div>
-      {!coverage.complete && coverage.truncated_reason && coverage.truncated_reason !== "concurrent_change" && (
-        <span
-          className="answer-collection-partial-reason"
-          title={coverage.overflow_semantics || "explicit_partial"}
-        >
-          已明确标注为部分结果（{truncatedReasonLabel(coverage.truncated_reason)}）
-        </span>
-      )}
-      {showPreviewNote && (
-        <p className="answer-collection-coverage-note">
-          {resultSet.synthesis_rows === 0
-            ? "本轮分析未包含该清单"
-            : `本轮分析基于前 ${resultSet.synthesis_rows} 条预览`}
-        </p>
-      )}
-      {resultSet.collection === "elements" ? (
-        <div className="answer-collection-groups">
-          {groupElementItemsBySource(items).map((group) => (
-            <div className="answer-collection-group" key={group.sourceId || "unknown"}>
-              <h4 className="answer-collection-group-title">{group.sourceTitle}</h4>
-              <ul className="answer-collection-items">
-                {group.items.map((item) => (
-                  <ElementCollectionItemRow
-                    key={item.item_id}
-                    item={item}
-                    notebookId={notebookId}
-                    notebookNames={notebookNames}
-                    onOpenSource={onOpenSource}
-                  />
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <ul className="answer-collection-items">
-          {items.map((item) => (
-            <KgObjectCollectionItemRow
-              key={item.item_id}
-              item={item}
-              objectType={resultSet.object_type ?? ""}
-              notebookId={notebookId}
-              notebookNames={notebookNames}
-            />
-          ))}
-        </ul>
-      )}
-      {hasMoreLoadedItems && (
         <button
           type="button"
-          className="answer-collection-expand"
-          onClick={() => setExpanded((value) => !value)}
+          className="answer-collection-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
         >
-          {expanded ? "收起已加载内容" : `展开全部已加载的 ${resultSet.items.length} 条`}
+          {open ? <ChevronDown size={15} aria-hidden="true" /> : <ChevronRight size={15} aria-hidden="true" />}
+          {open ? `收起${title}` : `展开${title}`}
         </button>
+      </div>
+      {open && (
+        <div className="answer-collection-content">
+          {!coverage.complete && coverage.truncated_reason && coverage.truncated_reason !== "concurrent_change" && (
+            <span
+              className="answer-collection-partial-reason"
+              title={coverage.overflow_semantics || "explicit_partial"}
+            >
+              已明确标注为部分结果（{truncatedReasonLabel(coverage.truncated_reason)}）
+            </span>
+          )}
+          {showPreviewNote && (
+            <p className="answer-collection-coverage-note">
+              {resultSet.synthesis_rows === 0
+                ? "本轮分析未包含该清单"
+                : `本轮分析基于前 ${resultSet.synthesis_rows} 条预览`}
+            </p>
+          )}
+          {resultSet.collection === "elements" ? (
+            <div className="answer-collection-groups">
+              {groupElementItemsBySource(items).map((group) => (
+                <div className="answer-collection-group" key={group.sourceId || "unknown"}>
+                  <h4 className="answer-collection-group-title">{group.sourceTitle}</h4>
+                  <ul className="answer-collection-items">
+                    {group.items.map((item) => (
+                      <ElementCollectionItemRow
+                        key={item.item_id}
+                        item={item}
+                        notebookId={notebookId}
+                        notebookNames={notebookNames}
+                        onOpenSource={onOpenSource}
+                      />
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <ul className="answer-collection-items">
+              {items.map((item) => (
+                <KgObjectCollectionItemRow
+                  key={item.item_id}
+                  item={item}
+                  objectType={resultSet.object_type ?? ""}
+                  notebookId={notebookId}
+                  notebookNames={notebookNames}
+                />
+              ))}
+            </ul>
+          )}
+          {hasMoreLoadedItems && (
+            <button
+              type="button"
+              className="answer-collection-expand"
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {expanded ? "收起已加载内容" : `展开全部已加载的 ${resultSet.items.length} 条`}
+            </button>
+          )}
+        </div>
       )}
     </section>
   );
