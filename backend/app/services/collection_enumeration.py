@@ -1128,9 +1128,10 @@ class CollectionEnumerationService:
           would read another member's Memory-derived objects.
 
         Filtering here costs top-up reads whenever unlistable objects are
-        interleaved, and that cost is what ``_KG_RAW_SCAN_FACTOR`` bounds: the
-        loop stops once it has read ``walk.raw_scan_limit`` raw rows for this
-        action, whatever it has managed to collect.  Stopping short is reported
+        interleaved, and that cost is what ``_KG_RAW_SCAN_FACTOR`` bounds: each
+        fetch is clamped to the remaining raw allowance, so the loop can never
+        read past ``walk.raw_scan_limit`` raw rows for this action, whatever it
+        has managed to collect.  Stopping short is reported
         honestly (``truncated_reason="budget"``) rather than silently — a list
         that quietly ends where the scan gave up is exactly the false "all"
         this module exists to prevent.
@@ -1148,10 +1149,19 @@ class CollectionEnumerationService:
         scan_after = after
         while len(collected) < want:
             raise_if_cancelled(cancel_event)
-            # The first read asks for exactly ``want`` rows, so a notebook with
-            # no deprecated objects issues precisely the query it issued before
-            # the filter moved out of SQL.
-            fetch = max(1, want - len(collected))
+            # The ceiling is enforced BEFORE the query, not observed after it
+            # (codex #395 round-5): the fetch is clamped to the remaining raw
+            # allowance, so the documented ``raw_scan_limit`` can never be
+            # exceeded — not even by the final batch — and an exhausted
+            # allowance stops with an honest ``budget`` truncation instead of
+            # letting an over-budget read fill the page and report success.
+            remaining_raw = walk.raw_scan_limit - walk.raw_scanned
+            if remaining_raw <= 0:
+                return collected, scan_after, True
+            # The first read of an all-usable notebook still asks for exactly
+            # ``want`` rows — precisely the query it issued before the status
+            # filter moved out of SQL.
+            fetch = min(max(1, want - len(collected)), remaining_raw)
             walk.charge_query()
             rows = self._knowledge.knowledge_object_page_rows(
                 db, notebook_id, object_type, scan_after, fetch
