@@ -808,3 +808,19 @@ def test_nested_identifier_section_keeps_its_own_slot():
     assert [call[1] for call in stub.section_calls] == [
         "Ref > set_db", "Ref > set_db > config.yaml"]
     assert "row-cfg" in [chunk.chunk_id for chunk in out]
+
+
+def test_probe_anchors_via_text_only_so_prose_free_grandchild_sections_are_not_found():
+    """反向护栏(codex #399 R2 的已知锚定边界,刻意延期):探测只搜 chunk 文本,
+    打分文本前缀只有尾部两段面包屑。命令节与子节两层都零正文、只有孙层 chunk
+    (前缀 `[Arguments > Required]`)且正文不提命令名时,探测锚不上——这是当前
+    合同的一部分:修复需要 section_path 进 FTS/trigram 索引(schema 迁移),
+    无索引的 section_path LIKE 全列扫描违反有界红线,不许作为捷径。若这条用例
+    因「探测开始命中 section_path」而变红,说明索引化修复落了地,应把它改写成
+    正向断言而不是删除。"""
+    hits: list = []   # 探测(仅文本)一无所获——孙层文本不含 set_db
+    stub = _StubDeps(hits=hits, sections={})
+    out = exact_lookup_chunks(
+        stub.as_deps(), "nb", "set_db 命令是怎样的", ExactLookupLimits())
+    assert out == []
+    assert stub.section_calls == []
