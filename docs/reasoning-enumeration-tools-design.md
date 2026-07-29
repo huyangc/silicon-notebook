@@ -87,8 +87,11 @@
   `idx_source_elements_source_created` 索引 seek 的 per-source MAX(created_at)。
 - 作用域 = active notebook + 有效挂载 base（`mount_sql.py` 谓词，与 Ask 联邦同口径）；
   作用域计数 = Σ 各源缓存计数，源列表本身有界。
-- KG 对象类型计数：复用 `notebook_catalog.py` 现有 per-type 缓存（按 kg_mutation_seq 记忆化），
-  不新增查询路径。
+- KG 对象类型计数：复用 `notebook_catalog.py` 对同一个 `knowledge_type_count_rows` port 的调用，
+  不新增查询路径；`collection_catalog.py` 另按 `kg_mutation_seq` 记一份自己的 L3 记忆化（而非
+  直接复用 `notebook_catalog.py` 的缓存对象），因为该 port 调用只在 SQLite 侧由 store 记忆化、
+  PostgreSQL 侧不记忆化——两侧都要在热路径上只付一次读取，就必须各自持有这层 seq-keyed memo。
+  【落地后订正，T7】
 - 地图文本 ≤600 字符，形如
   `[Collections in scope] elements: formula 12 (3 sources), table 5 … | KG objects:
   concept 1234, claim 567, formula 89, procedure 45 | knowhow tables: 2`；

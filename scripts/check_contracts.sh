@@ -79,6 +79,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_object_type_labels_contract.py"
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
+  "$ROOT_DIR/scripts/check_enumeration_list_labels_contract.py"
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" \
   "$ROOT_DIR/scripts/check_ui_vocabulary.py"
 
 PYTHONPATH="$ROOT_DIR/backend:$ROOT_DIR" "$PYTHON_BIN" \

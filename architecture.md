@@ -88,7 +88,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/model_registry.py` 持有稳定 workload 目录并加载部署 TOML；`model_provider.py` 是进程级模型访问组合根，按 workload 解析物理服务并复用每服务唯一的 `ServiceScheduler`；`model_scheduler.py` 与 `model_circuit_breaker.py` 持有容量、公平队列、截止时间与熔断状态。业务 service、repository、batch、探测路径都只能请求 workload adapter，不得直接构造/暴露 raw chat、embedding 或 rerank client。底层 HTTP 只存在于架构测试明确许可的 transport 边界。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
-- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、Knowhow 稳定游标枚举、mode 注册和 reasoning 迭代；`core/ask_retrieval_policy.py` 集中声明五档预算与完整枚举安全线。
+- `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、Knowhow 稳定游标枚举、mode 注册和 reasoning 迭代；`core/ask_retrieval_policy.py` 集中声明五档预算与完整枚举安全线。`collection_catalog.py`（零 LLM、索引辅助的集合地图，含来源元素按类型计数与 KG 对象按类型计数的有界缓存）与 `collection_enumeration.py`（对地图同一物理源集合做稳定游标遍历的枚举执行器）为 reasoning 的 `enumerate_elements`/`enumerate_kg_objects` reflect 动作供数；两者与地图注入、reflect prompt、schema 分支、allowed_actions 共用同一个 `REASONING_ENUM_TOOLS_ENABLED`（默认 true）总闸。
 - `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
 - `memory_service.py` 与 `memory_retrieval.py` 负责 owner/notebook 隔离的生命周期、revision/provenance、两个检索平面、Agent token policy 与 confirmed-only 正式投影；Memory 不写入 source/chunk/KG 表。
 - `parsers.py`、`structural_markdown.py` 与 `mineru_client.py` 负责 PDF、Markdown、DOCX、PPTX、CSV、XLSX 等来源的结构化解析；FastAPI 进程不直接加载 torch 或 MinerU 模型。
@@ -233,21 +233,29 @@ base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 
-`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定；`answer_element_items` 是这条镜像关系的例外——它只控制最终合成 prompt 里直接来源元素（公式/表格/图片等）的纳入条数上限，是后端专有字段，前端没有消费者，也不在 `ask-retrieval-effort.ts` 里重复。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
+`backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定；`answer_element_items` 与 `enum_page_size`/`enum_pages_per_run`/`enum_rows_per_run` 是这条镜像关系的例外——它们都是后端专有字段，前端没有消费者，也不在 `ask-retrieval-effort.ts` 里重复：前者只控制最终合成 prompt 里直接来源元素（公式/表格/图片等）的纳入条数上限，后三者约束 §3.3.1 之外「集合枚举工具」一节所述的 `enumerate_elements`/`enumerate_kg_objects` 的每 run 预算。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
 
-| id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 | 合成纳入的直接来源元素 |
-|---|---:|---:|---:|---:|---:|
-| `overview` | 4 | 8/2/12 | 4/2 | 4,000/12,000 | 4 |
-| `standard` | 8 | 20/3/36 | 8/5 | 6,000/30,000 | 6 |
-| `deep` | 8 | 24/4/48 | 16/6 | 8,000/50,000 | 8 |
-| `thorough` | 12 | 32/5/64 | 32/8 | 12,000/80,000 | 12 |
-| `exhaustive` | 16 | 40/6/96 | 50/10 | 16,000/120,000 | 16 |
+| id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 | 合成纳入的直接来源元素 | 枚举页大小 | 每 run 额外翻页 | 每 run 累计行数 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `overview` | 4 | 8/2/12 | 4/2 | 4,000/12,000 | 4 | 50 | 2 | 100 |
+| `standard` | 8 | 20/3/36 | 8/5 | 6,000/30,000 | 6 | 50 | 4 | 200 |
+| `deep` | 8 | 24/4/48 | 16/6 | 8,000/50,000 | 8 | 50 | 6 | 300 |
+| `thorough` | 12 | 32/5/64 | 32/8 | 12,000/80,000 | 12 | 50 | 8 | 400 |
+| `exhaustive` | 16 | 40/6/96 | 50/10 | 16,000/120,000 | 16 | 50 | 12 | 600 |
 
 候选召回不随档位变化，而由部署参数独立控制：`CHUNK_RECALL` 默认 200，分别约束 Chunk/KG 的 ANN 与词法候选窗（默认去重前最多 400）；`RELATION_RECALL` 默认 200，分别约束 Relation ANN 和词法端点扩出的关系总窗（默认去重前最多 400，词法总窗内仍为 source/target 两个方向预留份额）。调整这两个部署值会改变候选窗，界面不把默认值伪装成请求级硬上限。档位只表达“允许多少轮判断与最终证据”。
 
-`QueryIntentContract.result_scope` 用 `ranked` / `complete` / `aggregate` / `hybrid` 分开相关性检索与集合问题。`structured_retrieval.py` 仅对可识别的 Knowhow 集合请求启用，调用 repository port 的稳定 `(table_id, position, row_id)` 游标逐页枚举，持久化回答则携带结构化 result set 与 coverage；普通 KG/element/Memory 集合尚无完整枚举器，仍只返回相关性命中并披露边界。五档共享同一安全线：25 行/页、50 页、1,250 物理行/请求、8 表、每表 8 列、单元格模型摘录 1,000 字符、结构化载荷 256,000 字符、正文内联 100 行、结果卡初始显示 20 行。正文与初始显示阈值不删除已经回传的结构化行。只有游标耗尽，且枚举前后 `mutation_seq`、history-backed `enumeration_seq`、行数、列元数据和所选表范围全部稳定，才发布 `complete=true`；`enumeration_seq` 会随行增删历史原子推进，因此等量删一增一也会被判为并发变化。任一行/页/表/列/载荷上限触顶或并发改表都发布 `complete=false` + `explicit_partial`。因此一张 100 行表可证明并显示 `100/100`，而低档位也不能缩小显式“全部”的枚举上限。
+`QueryIntentContract.result_scope` 用 `ranked` / `complete` / `aggregate` / `hybrid` 分开相关性检索与集合问题。`structured_retrieval.py` 仅对可识别的 Knowhow 集合请求启用，调用 repository port 的稳定 `(table_id, position, row_id)` 游标逐页枚举，持久化回答则携带结构化 result set 与 coverage；Memory 与其他集合仍无完整枚举器，只返回相关性命中并披露边界。来源元素与 KG 对象集合另有独立的枚举路径，见下文「3.3.2 集合枚举工具」——它由模型显式调用，不由这里的 `result_scope` 自动触发。五档共享同一安全线：25 行/页、50 页、1,250 物理行/请求、8 表、每表 8 列、单元格模型摘录 1,000 字符、结构化载荷 256,000 字符、正文内联 100 行、结果卡初始显示 20 行。正文与初始显示阈值不删除已经回传的结构化行。只有游标耗尽，且枚举前后 `mutation_seq`、history-backed `enumeration_seq`、行数、列元数据和所选表范围全部稳定，才发布 `complete=true`；`enumeration_seq` 会随行增删历史原子推进，因此等量删一增一也会被判为并发变化。任一行/页/表/列/载荷上限触顶或并发改表都发布 `complete=false` + `explicit_partial`。因此一张 100 行表可证明并显示 `100/100`，而低档位也不能缩小显式“全部”的枚举上限。
 
 执行边界是可证明的物理行语义，而不是所有被分类为集合的问题：确认后按最终措辞与权威澄清答案重算 scope；只有整表清单、直接物理行/记录计数及其 hybrid 可执行，“多少种”等 distinct/type count、条件筛选、group-by 必须回退并披露不支持完整。选择范围使用最多 8 个描述的轻量 catalog，不读取格、代码附件或健康 payload；截窗前按查询优先纳入显式点名表，全库聚合计数/序列用于 batch 稳定性。响应分开 per-table、batch 与 synthesis coverage，所以 200/200 枚举配 100/200 模型预览是“枚举完整、分析部分”，8 表截断仅使 batch partial。KG/Memory/chain 共享 KG 字符硬预算，结构化预览/chunk/direct element 共享原文字符硬预算，最终证据块不超过两者之和。
+
+### 3.3.2 集合枚举工具
+
+`enumerate_elements`/`enumerate_kg_objects` 是与上述 Knowhow 执行器并行、由模型在 reflect 循环里显式调用的两个零 LLM 动作：可枚举来源元素 kind 白名单为 `formula`/`table`/`image`/`code_block`，可枚举知识对象类型白名单为 `concept`/`claim`/`formula`/`procedure`（限可用状态）；两张白名单唯一真源是 `collection_catalog.ENUMERABLE_ELEMENT_KINDS`/`ENUMERABLE_KG_OBJECT_TYPES`。每个 run 只构建一次的集合地图（`[Collections in scope] elements: formula 12 (3 sources), table 5, image 0, code_block 0 | KG objects: concept 1234, claim 567, formula 89, procedure 0 | knowhow tables: 2`，每个白名单 kind/type 恒在场、缺省即 0，硬顶 600 字符）注入 plan/reflect 上下文，让模型先看计数再决定是否值得整份列出；地图统计的物理源集合与执行器实际遍历的源集合按构造逐字一致。
+
+覆盖率是 `TypedCollectionCoverage`：`returned_total`/`total`（`None`=分母未知，渲染为未知而非 `/0`）/`complete`/`truncated_reason`（`budget`/`payload`/`concurrent_change`）/`overflow_semantics`；`complete=true` 要求游标耗尽、首尾作用域身份一致，且跨续跑链的累计条数与已知规模相符。`TypedCollectionResult` 另携带 `synthesis_rows`/`synthesis_complete`，把「已枚举的清单」与「实际进入答案合成 prompt 的有界预览」分开披露，语义对齐 Knowhow batch 的枚举/合成两轨。预算按 run 累计：`enum_rows_per_run` 是本 run 所有枚举动作可返回的总行数，`enum_pages_per_run` 只计每个被访问分片的第二页及之后——元素侧按来源分片，KG 对象侧按参与的库分片，每个分片各自免首页（否则「每分片一条」的普通语料在预算耗尽前就无法枚全）。该游标是纯 run 内部句柄：不落库、不序列化进响应、模型也看不到它，只作为同一进程内续跑的凭据。`complete=false` 恒意味着游标可续跑，唯一例外 `truncated_reason=concurrent_change`——两次调用之间作用域发生变化时终止且绝不静默重来；未耗尽预算的续跑请求走该游标继续，预算耗尽则跳过为 `enumeration_budget`（仍是部分结果），只有链条已 `complete` 才跳过为 `already_enumerated`。支撑地图的按源计数在某源元素刚落盘、其变更信号尚未更新时会低报为零，该源因此不进遍历计划、不被走到，地图与清单在零点上保持一致、缺口在下次状态写入时自愈；显式点名的 `source_id` 绕开这个问题，直接查询该源而非把「不在计划」当作「为空」。挂载参考库的跨库条目 v1 只读展示（标注来源库名，不提供来源跳转/图片加载），因为挂载不等于持有该库直接成员权限；浏览器侧参与者作用域代理读取与「纯文本兜底解析来源」的覆盖披露均登记为独立后续任务。总闸 `REASONING_ENUM_TOOLS_ENABLED`（默认 true）关闭时两个动作都不提供、地图也不注入。
+
+上述地图/枚举共用五个 T2/T3 新增的有界 repository 端口，双后端（SQLite/PostgreSQL）adapter 均实现：`SourceStorePort.source_change_signal_rows`（T2，每 notebook 一条查询取全部源的不透明变更信号）、`SourceStorePort.element_type_count_rows`（T2，按白名单批量 `GROUP BY source_id, element_type`）、`SourceStorePort.element_page_rows`（T3，一个源一种 kind 的 keyset 分页）、`SourceStorePort.source_display_rows`（T3，来源标题/论文标题批量查询）与 `KnowledgeStorePort.knowledge_object_page_rows`（T3，一个 notebook 一种 object_type 的 keyset 分页，复用地图同一条 `USABLE_STATUSES` 谓词）。
 
 ### 3.4 Memory 与 Agent MCP
 
@@ -356,7 +364,7 @@ before 写回到目标点（行/列**原样复用 id**，引用跳转与代码�
 | 系统模型服务 | `backend/app/services/model_registry.py`、`model_provider.py`、`model_scheduler.py`、`model_circuit_breaker.py` + model-service status/admin routes | 部署 TOML 绑定 workload；provider 独占 adapter 解析，scheduler 按物理服务独占容量/队列/熔断；状态只读脱敏，admin 探测显式执行，support id 关联维护日志。 |
 | Sharing | `backend/app/services/notebook_sharing.py` + `backend/app/repositories/sqlite/sharing_store.py` | share token、reader 权限、深拷贝与补偿/恢复；`sqlite_notebook_sharing.py` 为兼容 shim。 |
 | KG | `backend/app/services/kg/`、`kg_ingest.py`、`kg_merge.py` | 抽取、证据、图、PPR、质量与合并；所有消费者共享 usable relation 规则。 |
-| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py`、`core/ask_retrieval_policy.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding、tier 次序与集合完整性保持分离；mode registry 是 mode 真源，effort policy 是档位与枚举阈值真源。 |
+| Retrieval / Ask | `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py`、`structured_retrieval.py`、`collection_catalog.py`、`collection_enumeration.py`、`core/ask_retrieval_policy.py`、`ask_modes.py` 与 facade 中的兼容方法 | 分数、grounding、tier 次序与集合完整性保持分离；mode registry 是 mode 真源，effort policy 是档位与枚举阈值真源；collection_catalog/collection_enumeration 是集合地图与元素/KG 对象枚举执行器的唯一实现，共用 `REASONING_ENUM_TOOLS_ENABLED` 总闸。 |
 | Reports | `backend/app/services/report_engine.py` | 两阶段后台 job，保持 outline 审阅、取消与 section progress 语义。 |
 | Memory / MCP | `memory_service.py`、`memory_retrieval.py`、`memory_store.py`、`memory_routes.py`、`mcp_server.py` | owner+notebook 隔离；Agent candidate 与 confirmed-only 正式投影分离；token/scope/allowlist 每次调用重校验。 |
 | Knowhow 表 | `backend/app/services/knowhow/`（`projection.py`、`api.py`、`grid_parser.py`、`textops.py`、`assets.py`）+ `repositories/sqlite/knowhow_store.py` + `api/knowhow_agent_routes.py` | 5+1 表 schema 域；唯一零 LLM KG 写入方；变更统一走 `ProjectionScheduler`；代码附件与检索/KG 严格隔离；会话与 Agent 面共享服务核心。 |
