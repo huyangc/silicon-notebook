@@ -182,6 +182,19 @@ def exact_lookup_chunks(
       (source, path) under a LIMIT returned the first 12 of them — the probe
       had found the parameter table and then the channel itself threw it away.
       Addressing the hits by primary key cannot lose them.
+
+    Known anchoring limit (codex #399 round 2, deferred): the probe searches
+    chunk TEXT only, and the scored text carries just the tail-two breadcrumb
+    segments. A command's own chunks (`[Commands > set_db]`) and its child
+    chunks (`[set_db > Arguments]`) both carry the name, so the section
+    anchors in every ordinary shape; the miss needs a command whose section
+    AND child sections hold zero prose while only grandchild chunks
+    (`[Arguments > Required]`) exist and the body never names the command.
+    Fixing that requires section_path to join the FTS/trigram index (schema
+    migration + backfill) — an unindexed LIKE over `chunks.section_path`
+    would be an unbounded per-notebook scan, which this module must not do.
+    Pinned by test_probe_anchors_via_text_only_so_prose_free_grandchild_
+    sections_are_not_found.
     """
     terms = exact_probe_terms(query)[: max(0, limits.max_identifiers)]
     if not terms or limits.max_sections <= 0 or limits.max_chunks_per_section <= 0:
