@@ -456,6 +456,9 @@ _TABLES = (
         "jsonb+timestamptz",
     ),
     # SQLite v36 / PostgreSQL v14: the KG-quality-analysis precompute products.
+    # These two numbers are a deliberate historical milestone -- the generation
+    # that introduced these three tables -- not a running-version reference, so
+    # they must stay pinned and must not follow later schema bumps.
     # All three hang off notebooks (copy rank 15), so any rank after it is safe;
     # they are ranked last among the replicated tables because nothing else
     # references them.
@@ -693,7 +696,12 @@ def validate_sqlite_schema(
     expected_pair: SchemaPair,
     validate_rows: bool = True,
 ) -> SchemaValidationReport:
-    """Validate the frozen SQLite v34 schema and, by default, its key rows.
+    """Validate the frozen SQLite schema at ``expected_pair`` and, by default, its key rows.
+
+    The generation is never spelled here: ``_validate_expected_pair`` pins it to
+    ``manifest.schema_pair``, which ``validate_manifest`` pins to
+    ``RUNNING_SCHEMA_PAIR``.  A hardcoded number went stale twice before.
+
 
     ``validate_rows=False`` is reserved for short live-source fences that must
     validate catalog/control identity without scanning every business table
