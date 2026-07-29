@@ -123,6 +123,13 @@
   `concurrent_change`，绝不静默从头重跑；分母校验在链末端按累计 returned 生效。合同不变式：
   `complete=false ⟹ cursor 非空`，唯一例外 `truncated_reason=concurrent_change`。显式
   `source_id` 请求直接对该源发索引分页查询，不得做「不在计划⇒零」推断（首解析窗口保护）。
+- **【codex 第 2 轮 P1 订正】收尾复检必须重解析参与库集合**：只对**开场那份参与
+  notebook id 列表**重算指纹/seq，看不见「跨页期间挂载/卸载/失效了参考库」——空的
+  新库不贡献来源信号，被卸载的库的信号也仍在，两种都会被判成稳定并报 complete。
+  收尾改为经 `participant_ids`（与开场 `participant_tiers` 同一个
+  `resolve_participants` / `mount_sql.py` 谓词入口）重新解析，集合不等即
+  `scope_stable=False`；指纹/seq 复检也用**收尾解析出的集合**算。元素与 KG 两条
+  路径同修。
 - complete 判定：作用域游标耗尽 && 作用域指纹（源集合+变更信号 / kg_mutation_seq）首尾一致；
   否则 complete=false + `explicit_partial`（复用 `EXPLICIT_PARTIAL_OVERFLOW`）+
   truncated_reason（budget/payload/concurrent_change）。total 来自 2.2 缓存，取不到则省略。
@@ -147,6 +154,10 @@
   `source_display_rows` 窗口批量读标题，上限 1024 个源），唯一命中才用其 id；
   零命中或多命中记 `skip(enumeration_source_unresolved)`，trace 只报匹配个数与
   模型给的名字、不报内部 id。两个都给时 id 优先。
+  **【codex 第 2 轮 P2 订正】** 计划长度超过 `_MAX_TITLE_RESOLVE_SOURCES` 时不得
+  再从前缀断言唯一（同名的第二个源可能就在上限之后），直接返回
+  `("", 0, truncated=True)`、不扫描；调用方沿用同一条
+  `enumeration_source_unresolved` skip，detail 带 `truncated=true` 供排查。
 - `reflect_prompt` 增加动作说明：问题要求列出/盘点某类条目时优先于 search_elements；结合地图
   计数判断是否值得全量；大集合应改为「计数+样例+建议缩小范围」。完整性陈述以工具 coverage 为准。
 - run() 新增 elif 分支（镜像 search_elements 形态）：无效 kind/object_type → fail-open skip

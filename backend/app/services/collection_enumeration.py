@@ -17,7 +17,11 @@ Four contracts this module owns:
 1. **Coverage is a fact.**  ``complete=True`` requires that the traversal
    walked off the end of the plan, that the scope identity taken before the
    first page equals the one taken after the last, AND — across a resumed
-   chain — that everything returned adds up to the known total.  Anything else
+   chain — that everything returned adds up to the known total.  That identity
+   includes the PARTICIPANT SET, re-resolved at the close (see
+   ``_closing_participants``): a reference library mounted or unmounted
+   mid-walk changes what "the whole scope" means, and a fingerprint recomputed
+   over the opening id list cannot see it.  Anything else
    is ``complete=False`` with a ``truncated_reason`` and the shared
    ``EXPLICIT_PARTIAL_OVERFLOW`` semantics; the caller must never render a
    truncated list as "all".
@@ -55,8 +59,8 @@ Cost shape per action, all index-assisted and bounded by the budget:
     memoized per-type counts, then one page query per page, plus top-up
     queries when deprecated objects are interleaved — bounded, per action, by
     ``max_rows × _KG_RAW_SCAN_FACTOR`` raw rows;
-  * closing check — 1 signal query per participant (elements) or 1 seq read
-    per participant (KG).
+  * closing check — 1 participant resolution, then 1 signal query per
+    participant (elements) or 1 seq read per participant (KG).
 
 Concurrency shape, for callers that share a connection pool: one action holds
 ONE connection for its whole walk.  On SQLite that is the thread's reused
@@ -133,9 +137,11 @@ _MAX_TITLE_WINDOW = 256
 # walks holds only sources that carry the requested kind, so this is already a
 # small fraction of a big library; the cap exists so that a mounted base with
 # tens of thousands of formula-bearing sources cannot turn one reflection into
-# a full label sweep.  Overrunning it is answered as "no unique match" (the
-# caller skips the action and says so) — never as a silent whole-scope
-# enumeration of the wrong thing.
+# a full label sweep.  A plan LONGER than this is declined outright rather than
+# resolved from its prefix: uniqueness is a property of the whole scope, and a
+# prefix cannot witness it (see ``resolve_source_title``).  The caller skips the
+# action and says so — never a silent whole-scope enumeration of the wrong
+# thing, and never a confident pick between two same-titled documents.
 _MAX_TITLE_RESOLVE_SOURCES = 4 * _MAX_TITLE_WINDOW
 
 # How many RAW knowledge-object rows one KG action may read while filtering out
@@ -749,8 +755,10 @@ class CollectionEnumerationService:
                 walk.reason = stop.reason
                 exhausted = False
 
+            closing_ids = self._closing_participants(db, active_notebook_id)
             scope_stable = (
-                self._catalog.scope_signal_fingerprint(db, notebook_ids)
+                closing_ids == tuple(notebook_ids)
+                and self._catalog.scope_signal_fingerprint(db, closing_ids)
                 == plan.fingerprint
             )
 
@@ -774,7 +782,7 @@ class CollectionEnumerationService:
         title: str,
         *,
         cancel_event: CancelEvent = None,
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, int, bool]:
         """Resolve a source TITLE to the id of the one source that bears it.
 
         The model never sees internal source ids — candidate summaries and
@@ -785,25 +793,29 @@ class CollectionEnumerationService:
         this kind.  A fuzzy match would silently enumerate the wrong document
         and report it as complete.
 
-        Returns ``(source_id, matches)``.  ``matches`` is 0 when nothing bears
-        that title, 1 with the resolved id, and 2 when the title is ambiguous
-        (the scan stops at the second hit — the caller only needs to know that
-        it is not unique).  The caller decides what to do with anything other
-        than exactly one; this method never guesses.
+        Returns ``(source_id, matches, truncated)``.  ``matches`` is 0 when
+        nothing bears that title, 1 with the resolved id, and 2 when the title
+        is ambiguous (the scan stops at the second hit — the caller only needs
+        to know that it is not unique).  The caller decides what to do with
+        anything other than exactly one; this method never guesses.
 
         Bounded by construction: it reuses ``scope_element_plan`` (which
         already holds only the sources that carry this kind) and reads their
         labels through the same batched ``source_display_rows`` window the walk
-        uses, capped at ``_MAX_TITLE_RESOLVE_SOURCES``.  A scope larger than
-        that cap resolves to "no unique match" rather than to a full-table
-        scan; the honest skip is cheap and the alternative is a per-request
-        scan of every source in a mounted base.
+        uses.  When the plan is LONGER than ``_MAX_TITLE_RESOLVE_SOURCES`` the
+        method refuses to answer at all — ``truncated=True``, no scan, no id.
+        Scanning a prefix and reporting "exactly one match" would be a claim
+        about the whole scope drawn from a part of it: a second source with the
+        same title could sit anywhere past the cap, and the caller would then
+        enumerate one of two same-titled documents and report it complete.
+        Declining is cheap and honest; the alternative to both is a per-request
+        label sweep of every source in a mounted base.
         """
         if kind not in ENUMERABLE_ELEMENT_KINDS:
             raise ValueError(f"unknown enumerable element kind: {kind!r}")
         wanted = _normalized_title(title)
         if not wanted:
-            return "", 0
+            return "", 0, False
         raise_if_cancelled(cancel_event)
         found = ""
         matches = 0
@@ -813,7 +825,9 @@ class CollectionEnumerationService:
             )
             sources = self._catalog.scope_element_plan(
                 db, notebook_ids, kind
-            ).sources[:_MAX_TITLE_RESOLVE_SOURCES]
+            ).sources
+            if len(sources) > _MAX_TITLE_RESOLVE_SOURCES:
+                return "", 0, True
             for start in range(0, len(sources), _MAX_TITLE_WINDOW):
                 raise_if_cancelled(cancel_event)
                 window = sources[start:start + _MAX_TITLE_WINDOW]
@@ -828,9 +842,9 @@ class CollectionEnumerationService:
                         continue
                     matches += 1
                     if matches > 1:
-                        return "", 2
+                        return "", 2, False
                     found = entry.source_id
-        return found, matches
+        return found, matches, False
 
     # ----------------------------------------------------------- KG objects
     def enumerate_kg_objects(
@@ -957,7 +971,11 @@ class CollectionEnumerationService:
                 walk.reason = stop.reason
                 exhausted = False
 
-            scope_stable = self._kg_seqs(db, notebook_ids) == opening_seqs
+            closing_ids = self._closing_participants(db, active_notebook_id)
+            scope_stable = (
+                closing_ids == tuple(notebook_ids)
+                and self._kg_seqs(db, closing_ids) == opening_seqs
+            )
 
         coverage = _coverage(
             walk, total=total, exhausted=exhausted, scope_stable=scope_stable
@@ -1081,6 +1099,29 @@ class CollectionEnumerationService:
             extra_pages=walk.pages,
             payload_chars=walk.payload,
         )
+
+    def _closing_participants(
+        self, db: object, active_notebook_id: str
+    ) -> Tuple[str, ...]:
+        """Re-resolve the scope's participants for the closing stability check.
+
+        The opening participant list is NOT reusable here, and that is the whole
+        point.  Between the first page and the last sits at least one LLM round
+        trip, during which a reference library can be mounted, unmounted,
+        downgraded or change owner.  Recomputing a fingerprint over the OLD id
+        list asks "did the libraries I already knew about change?" — a question
+        whose answer is yes even when a whole new library appeared, and no when
+        one silently dropped out.  Either way the walk never visited it, and
+        reporting ``complete=true`` would be a false "all".
+
+        Resolution goes through ``participant_ids``, i.e. the same
+        ``resolve_participants`` and the same ``mount_sql.py`` validity
+        predicate the opening ``participant_tiers`` call used — one definition
+        of "in scope", checked twice.  Tiers are deliberately not re-read: they
+        are display metadata already carried by the emitted items, not part of
+        the scope's identity.
+        """
+        return tuple(self._notebooks.participant_ids(db, active_notebook_id))
 
     def _source_display(
         self, db: object, source_ids: Sequence[str]
