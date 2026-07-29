@@ -1430,8 +1430,21 @@ class AskService:
                 intent_contract.model_dump(),
                 question,
                 # The first slot is always the whole confirmed question; the
-                # remaining slots are reviewed directions within this effort.
-                max_queries=limits.max_initial_subqueries,
+                # remaining slots are the reviewed directions.  Ask for one
+                # seed per mandatory topic even when that exceeds this effort's
+                # first-round width: the effort limit bounds first-round
+                # *concurrency*, and the retriever defers the overflow into its
+                # bounded coverage pass (run inside the same step budget, and
+                # disclosed in the trace when that budget runs out).  Capping
+                # the request at the first-round width instead would discard the
+                # later topics before the retriever ever sees them, which is
+                # what made "every mandatory topic gets a seed" false at low
+                # efforts.  The ceiling remains the contract's own bound
+                # (1 whole question + at most 16 mandatory topics).
+                max_queries=max(
+                    limits.max_initial_subqueries,
+                    1 + len(intent_contract.mandatory_topics),
+                ),
                 objective_is_authoritative=auto_confirmed_clear_intent,
             )
             if payload.intent is not None else []

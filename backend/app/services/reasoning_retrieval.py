@@ -261,6 +261,32 @@ def _norm_query(q: str) -> str:
     return " ".join(str(q).split()).casefold()
 
 
+# 已确认检索方向在轨迹/回喂里的展示上界。方向种子是「方向本身 + 换行 + 整份已
+# 确认问题契约」的复合串(confirmed_intent_queries 截到 8000 字符),原样进
+# TraceStep summary 或 reflect prompt,一条方向就能顶掉半屏。执行用的仍是完整原文。
+_INTENT_DIRECTION_LABEL_CHARS = 60
+# 披露步 detail 与 reflect 回喂里最多逐条列出几个未执行方向(其余只给总数)。
+# 未执行方向数上界是 16(契约的必答主题上限),但一屏列 16 条谁也读不完。
+_INTENT_PENDING_DISCLOSE = 8
+
+
+def intent_direction_label(query: str) -> str:
+    """已确认检索方向的可读简称:取首个非空行,再按字符截断。
+
+    `confirmed_intent_queries` 产出的每条方向是「方向本身 + 已确认问题契约」的
+    复合串——契约是给检索用的附加约束,不是方向的名字;首行才是用户在确认卡上
+    真正审阅过的那句话。截断只影响展示与回喂措辞,检索仍用完整原文。
+    """
+    head = ""
+    for line in str(query or "").splitlines():
+        head = line.strip()
+        if head:
+            break
+    if len(head) > _INTENT_DIRECTION_LABEL_CHARS:
+        return head[:_INTENT_DIRECTION_LABEL_CHARS] + "…"
+    return head
+
+
 def clean_exact_term(raw: str) -> str:
     """模型给的名称去首尾包裹标点。**不在这里截长。**
 
@@ -324,10 +350,20 @@ def effective_top_n(
 
 @dataclass
 class _QueryAttempt:
-    """单条子查询的执行账目:原文、带来的新增证据数、尝试次数(含被跳过的重复)。"""
+    """单条子查询的执行账目:原文、带来的新增证据数、尝试次数(含被跳过的重复)。
+
+    `label` 只服务展示(轨迹 detail、reflect 回喂账目):来自 intent_queries 的条目
+    (首轮切片 + 补种)写入 `intent_direction_label(query)`——那些条目的 `query`
+    可能是「方向 + 完整已确认问题契约」的复合串(截到 8000 字符),原样渲染会让
+    一条方向顶掉半屏,也会让回喂账目与模型只见过的简称(prompt 里已经在用
+    intent_direction_label 展示)对不上。非 intent 路径(模型 plan/add_subquery
+    产生的查询)留空,渲染时回退到 `query` 本身——这是中性硬约束,那条路径的
+    展示逐字节不变。执行(检索)永远用 `query` 原文,`label` 只影响展示。
+    """
     query: str
     new: int = 0
     tries: int = 0
+    label: str = ""
 
 
 @dataclass
@@ -970,10 +1006,17 @@ class ReasoningRetriever:
                         summary="跳过内容清点(暂时读不到各类条目数量)",
                         detail={"reason": "collection_map_unavailable",
                                 "error": str(exc)[:120]}))
-            reviewed_queries = list(dict.fromkeys(
+            reviewed_all = list(dict.fromkeys(
                 str(query).strip() for query in (intent_queries or [])
                 if str(query).strip()
-            ))[:initial_query_limit]
+            ))
+            reviewed_queries = reviewed_all[:initial_query_limit]
+            # 首轮上限约束的是**首轮并发**,不是「装不下的方向就不做了」。溢出的
+            # 已确认方向进入待覆盖账目,在首轮与确定性 seed pass 之后、reflect
+            # 循环之前按序补种(见下方 coverage pass)。intent_queries 为空或不
+            # 超限时它恒为空列表,补种整段与披露/回喂全部不执行 —— 这是中性回归
+            # 的落点:那两种形态下轨迹与检索行为与本特性之前逐位一致。
+            pending_intent_queries = reviewed_all[initial_query_limit:]
             # A reviewed intent contract is authoritative. Do not ask a second
             # model to reinterpret it before retrieval; the reflect loop may
             # still add evidence-driven subqueries after the frozen seed pass.
@@ -1038,8 +1081,14 @@ class ReasoningRetriever:
                     for sq, future in zip(subqueries, search_futures):
                         hits = future.result()
                         raise_if_cancelled(self.cancel_event)
+                        # label 只在这轮子查询来自已确认意图种子(reviewed_queries)
+                        # 时才写——plan() 产生的子查询走非 intent 路径,label 留空,
+                        # 渲染时回退到 query 原文(中性硬约束)。
                         rec = attempted.setdefault(_norm_query(sq.query),
-                                                   _QueryAttempt(query=sq.query))
+                                                   _QueryAttempt(
+                                                       query=sq.query,
+                                                       label=(intent_direction_label(sq.query)
+                                                              if reviewed_queries else "")))
                         rec.tries += 1
                         for h in hits:
                             if h.object_id not in collected:
@@ -1107,6 +1156,83 @@ class ReasoningRetriever:
         follow_chain_done: set = set()
 
         steps = 0
+
+        # --- 已确认意图种子补种(coverage pass)-------------------------------
+        # 优先级理由:用户在确认卡上审阅过的检索方向,优先于模型自己提出的探索动作。
+        # 这与 PPR seed pass、精确查找 seed pass 是同一个哲学 ——「不赌模型」:那两条
+        # 兜底不赌 agent 会不会选对应动作,这里不赌 agent 会不会用 add_subquery 把
+        # 首轮装不下的方向补回来。位置也随之一致:确定性 seed pass 之后、reflect
+        # 循环之前。
+        #
+        # 步骤预算:与 reflect 循环共用同一份 max_steps 记账(下面的 while 用的就是
+        # 这个 steps),预算内能补几条补几条,绝不超步。补种最多用掉一半预算,另一半
+        # 留给 reflect,理由是这条链只有两端都活着才成立:补种把装不下的方向执行掉,
+        # 剩下的**披露 + 回喂 reflect** 让模型自己挑最该补的补。把预算吃干净会让
+        # `while steps < max_steps` 直接不进、回喂段成为死代码,"披露 + 优先补齐"
+        # 这半个合同随之落空;只留 1 步也不够 —— 模型只够做一个动作,面对多条未覆盖
+        # 方向时无从取舍。对半分只在 pending 真的超过一半预算时才咬合:overview
+        # (首轮宽度 2、预算 2)、standard(首轮宽度 5、预算 4)在多必答主题下都会
+        # 撞上;deep(首轮宽度 6、预算 8)只在主题数 ≥14(pending>8)时撞上,更常见
+        # 的主题数下补种照样一条不落;thorough/exhaustive 的预算(16/25)恒大于
+        # 契约上限撑出的最大 pending(9/7),两档不可达——这两档不是"补种恒不触发",
+        # 而是"预算恒够用,永不截断"。
+        #
+        # 熔断交互:stale 熔断只作用于 reflect 循环内部(它统计的是"上一轮动作有没有
+        # 带来新证据"),补种整段跑在循环之前,既不读也不写 stale/no_progress,天然
+        # 无交互;补种拿到的新证据只是让循环入口的 no_progress 初值更诚实。
+        uncovered_intent_queries: List[str] = []
+        if pending_intent_queries:
+            coverage_budget = max(0, max_steps // 2)
+            for query in pending_intent_queries:
+                if _norm_query(query) in attempted:
+                    # 首轮已经跑过同一条(归一化后相同):已覆盖,不重复付 I/O,
+                    # 也不该出现在"未执行"的披露里。
+                    continue
+                if steps >= coverage_budget:
+                    uncovered_intent_queries.append(query)
+                    continue
+                steps += 1
+                # 检索调用复用初检索的 _run_search:每查询纳入数(per_query_take)、
+                # 单条失败语义(fail-open;fail_closed 下照抛;AskCancelled 始终上抛)
+                # 都与首轮逐字一致 —— 这些种子本就是首轮装不下的溢出,不是模型动作。
+                added = 0
+                for h in _run_search(SubQuery(query=query)):
+                    if h.object_id not in collected:
+                        collected[h.object_id] = h
+                        added += 1
+                # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
+                # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
+                # label 恒写:补种只处理 pending_intent_queries,来源必为已确认意图。
+                attempted[_norm_query(query)] = _QueryAttempt(
+                    query=query, new=added, tries=1,
+                    label=intent_direction_label(query))
+                if query not in used_queries:
+                    used_queries.append(query)
+                # detail["query"] 只带简称(与轨迹 summary、reflect 回喂账目同口径)——
+                # 完整原文是「方向+已确认问题契约」的复合串,原样进 NDJSON 推给浏览器
+                # 并持久化没有意义,还会把契约全文重复吐给前端。执行仍用 query 原文
+                # (上面的 _run_search 调用),detail 只影响展示。
+                record(TraceStep(
+                    step_type="retrieve",
+                    summary=f"补充已确认方向:{intent_direction_label(query)}",
+                    detail={"query": intent_direction_label(query), "new": added,
+                            "source": "confirmed_intent"}))
+            if uncovered_intent_queries:
+                # 预算耗尽必须显式披露:嘴上说"已按确认后的问题理解检索"、实际悄悄
+                # 漏掉几个方向,比少检索本身更糟。
+                shown = [intent_direction_label(q)
+                         for q in uncovered_intent_queries[:_INTENT_PENDING_DISCLOSE]]
+                more = len(uncovered_intent_queries) - len(shown)
+                record(TraceStep(
+                    step_type="skip",
+                    summary=("检索预算不足,以下已确认方向未能执行:"
+                             + "、".join(shown)
+                             + (f" 等 {len(uncovered_intent_queries)} 个"
+                                if more > 0 else "")),
+                    detail={"reason": "intent_coverage_incomplete",
+                            "pending": len(uncovered_intent_queries),
+                            "directions": shown}))
+
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
         no_progress = len(collected) == 0
@@ -1146,9 +1272,13 @@ class ReasoningRetriever:
             # 已执行过的子查询账目回喂 reflect(镜像 visited 回喂,治"反复补充同
             # 一条子查询"):模型据此区分"没查过"与"查过但没捞到";账目含尝试次数,
             # 重复被跳过时 prompt 仍变化 → 不再是不动点,LLM 缓存不会逐字重放决策。
+            # 有 label 用 label(intent 路径:query 可能是「方向+已确认问题契约」的
+            # 复合串,原样重放每轮都要多花 ~150% 字符);无 label 回退原文 query
+            # (非 intent 路径,即模型 plan/add_subquery 产生的查询)——这是中性
+            # 硬约束,那条路径的渲染逐字节不变。
             if attempted:
                 tried = "、".join(
-                    f"「{a.query}」(新增{a.new}条"
+                    f"「{a.label or a.query}」(新增{a.new}条"
                     + (f",已试{a.tries}次" if a.tries > 1 else "") + ")"
                     for a in attempted.values())
                 summary = (f"{summary}\n\n（已执行过的子查询及各自新增证据数: {tried}。"
@@ -1171,7 +1301,37 @@ class ReasoningRetriever:
                            f"{looked_up}。勿重复请求相同名称;新增为 0 说明本笔记本内"
                            "未定位到该名称对应的完整章节(挂载的参考库不在精确查找"
                            "范围),请改用其他动作。）")
-            # 已枚举清单的账目回喂(镜像上面两处),再接本 run 唯一那份集合地图。
+            # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
+            # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
+            # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
+            # 下一轮它就自动从清单里消失,账目不会撒谎。
+            #
+            # 匹配必须在**简称空间**做,不能直接比较原文:披露段(上面的
+            # pending_text)只给模型看 intent_direction_label 截出的首行简称,模型
+            # 据此用 add_subquery 提交的也是这个简称,而 uncovered_intent_queries
+            # 里的仍是「方向+完整已确认问题契约」的复合串(confirmed_intent_queries
+            # 产出,截到 8000 字符)。直接按原文比较永远不相等,"已覆盖"当场摘不掉,
+            # 下一轮 prompt 会同时说"没执行过"又"别重复提交"——自相矛盾,模型只能
+            # 重复空转。对裸短查询(无换行、≤60 字符)label≈自身,不受影响。
+            if uncovered_intent_queries:
+                attempted_labels = {
+                    _norm_query(intent_direction_label(a.query))
+                    for a in attempted.values()
+                }
+                still = [q for q in uncovered_intent_queries
+                         if _norm_query(intent_direction_label(q))
+                         not in attempted_labels]
+                if still:
+                    pending_text = "、".join(
+                        f"「{intent_direction_label(q)}」"
+                        for q in still[:_INTENT_PENDING_DISCLOSE])
+                    summary = (
+                        f"{summary}\n\n（以下已确认的检索方向因步骤预算不足尚未执行: "
+                        f"{pending_text}"
+                        + (f" 等 {len(still)} 个"
+                           if len(still) > _INTENT_PENDING_DISCLOSE else "")
+                        + "。若仍需覆盖,请优先用 add_subquery 提交对应方向。）")
+            # 已枚举清单的账目回喂(镜像上面几处),再接本 run 唯一那份集合地图。
             enum_note = _enumeration_note(enum_chains)
             if enum_note:
                 summary = f"{summary}\n\n{enum_note}"

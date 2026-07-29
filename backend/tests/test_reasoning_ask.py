@@ -65,6 +65,51 @@ def test_reasoning_ask_returns_trace_and_evidence_level(arepo):
     assert resp.conversation_id
 
 
+def test_reasoning_ask_requests_all_mandatory_topic_seeds_beyond_first_round_width(
+    arepo, monkeypatch
+):
+    """P1-4b 修复项 2: ask_service 的使能行
+    `max(limits.max_initial_subqueries, 1 + len(mandatory_topics))` 必须真正传导到
+    `ReasoningRetriever.run` 收到的 `intent_queries`,而不是在请求阶段就被砍回首轮
+    并发宽度 —— 砍回首轮宽度会让补种(coverage pass)没有源头方向可补,退化成
+    "首轮之外的已确认主题永远补不上"。overview 档首轮宽度只有 2,3 个必答主题
+    应让请求长度到 4(1 权威问题 + 3 个主题),而不是被夹到 2。"""
+    from app.models.ask import AskIntentConfirmation, QueryIntentContract, QueryIntentTopic
+    from app.services.reasoning_retrieval import ReasoningRetriever, ReasoningResult
+
+    nb = _seed(arepo)
+    question = "RTL 到 GDSII 的完整实现流程有哪些阶段？"
+    contract = QueryIntentContract(
+        objective=question,
+        resolved_question=question,
+        mandatory_topics=[
+            QueryIntentTopic(id="t1", title="综合", question="RTL 综合阶段的关键步骤"),
+            QueryIntentTopic(id="t2", title="布局布线", question="布局布线阶段的关键指标"),
+            QueryIntentTopic(id="t3", title="签核", question="签核阶段涉及的检查项"),
+        ],
+        needs_clarification=False,
+        confirmed=True,
+    )
+    captured: dict = {}
+
+    def _spy_run(self, notebook_id, question, history="", on_step=None, **kwargs):
+        captured["intent_queries"] = kwargs.get("intent_queries")
+        return ReasoningResult()
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _spy_run)
+
+    arepo.ask(nb.id, AskRequest(
+        question=question, mode="reasoning", retrieval_effort="overview",
+        intent=AskIntentConfirmation(
+            contract=contract, resolved_question=question, answers=[]),
+    ))
+
+    seeded = captured.get("intent_queries")
+    assert seeded is not None, "ReasoningRetriever.run 必须收到 intent_queries"
+    # 首轮宽度(overview=2)只约束首轮并发,不该反过来把请求本身砍回 2。
+    assert len(seeded) == 4
+
+
 def test_reasoning_uses_distinct_planning_refinement_and_answer_workloads(arepo):
     class _Planner:
         configured = True
