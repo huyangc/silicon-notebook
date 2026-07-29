@@ -12,7 +12,7 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol, TYPE_CHECKING
+from typing import Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
 
 from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, AskRetrievalLimits, ask_retrieval_limits,
@@ -265,26 +265,106 @@ def _norm_query(q: str) -> str:
 # 确认问题契约」的复合串(confirmed_intent_queries 截到 8000 字符),原样进
 # TraceStep summary 或 reflect prompt,一条方向就能顶掉半屏。执行用的仍是完整原文。
 _INTENT_DIRECTION_LABEL_CHARS = 60
+# 简称碰撞消解:默认 60 字符前缀相同时依次加宽展示窗口,仍碰撞则追加序号后缀
+# (见 _build_direction_registry)。加宽本身也只影响展示,不影响检索用的原文。
+_INTENT_DIRECTION_LABEL_WIDEN_CHARS = (120, 240)
 # 披露步 detail 与 reflect 回喂里最多逐条列出几个未执行方向(其余只给总数)。
 # 未执行方向数上界是 16(契约的必答主题上限),但一屏列 16 条谁也读不完。
 _INTENT_PENDING_DISCLOSE = 8
 
 
-def intent_direction_label(query: str) -> str:
+def intent_direction_label(query: str, max_chars: int = _INTENT_DIRECTION_LABEL_CHARS) -> str:
     """已确认检索方向的可读简称:取首个非空行,再按字符截断。
 
     `confirmed_intent_queries` 产出的每条方向是「方向本身 + 已确认问题契约」的
     复合串——契约是给检索用的附加约束,不是方向的名字;首行才是用户在确认卡上
     真正审阅过的那句话。截断只影响展示与回喂措辞,检索仍用完整原文。
+
+    `max_chars` 默认 60(轨迹/回喂的标准展示宽度);`_build_direction_registry`
+    在两个方向撞出同一简称时会传更宽的值重算,消解碰撞。
     """
     head = ""
     for line in str(query or "").splitlines():
         head = line.strip()
         if head:
             break
-    if len(head) > _INTENT_DIRECTION_LABEL_CHARS:
-        return head[:_INTENT_DIRECTION_LABEL_CHARS] + "…"
+    if len(head) > max_chars:
+        return head[:max_chars] + "…"
     return head
+
+
+def _build_direction_registry(
+    queries: List[str],
+) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """把一个 run 内全部已确认检索方向(全量,不受首轮上限切片)一次性映射到
+    互异的展示简称,并建立简称(归一化)→方向原文的反查。
+
+    根因:`intent_direction_label` 只按 60 字符截断首行,两个方向的首行前 60
+    字符相同时会撞出同一个简称——而简称此前**既当展示、又当账目身份**(披露
+    /回喂展示直接调用它,防重/未覆盖重算也拿它去比对),碰撞会让两个本该独立
+    追踪的方向在账目里被并成一个:一个执行了,另一个的"未执行"状态被悄悄覆盖
+    掉,或是模型按简称重提时被错误地放行/拦截(PR#400 codex R1 P2-3)。
+
+    收敛办法是把"简称"提升为一份显式的、构建一次的注册表,run() 内的三处
+    消费(展示、未覆盖重算、防重解析)都经它,不再各自直接调用
+    `intent_direction_label` 或做原文比较:
+      - 先按默认 60 字符取简称;撞了就依次加宽到 120、240 字符重算(仍然只是
+        截断首行,只是截断点更靠后,足以覆盖"前缀相同、后半不同"的碰撞)；
+      - 240 字符仍然碰撞(首行本身就完全相同,理论上不该发生,因为
+        `reviewed_all` 已经按原文去重)则追加确定性序号后缀 ` (2)`、` (3)`……
+        直到互异。
+
+    互异性以**已处理过的方向**为界:同一批 `queries` 内两两互异,不同 run 之间
+    不保证也不需要保证(注册表是 run 局部状态)。返回:
+      - `label_of`: 方向原文 → 唯一简称(展示用)。
+      - `direction_of`: `_norm_query(简称)` → 方向原文(供防重/未覆盖识别
+        模型按简称提交的 add_subquery 命中的是哪一个已确认方向)。
+    """
+    label_of: Dict[str, str] = {}
+    direction_of: Dict[str, str] = {}
+    used_norms: set = set()
+    for q in queries:
+        label = intent_direction_label(q)
+        norm = _norm_query(label)
+        if norm in used_norms:
+            for width in _INTENT_DIRECTION_LABEL_WIDEN_CHARS:
+                label = intent_direction_label(q, width)
+                norm = _norm_query(label)
+                if norm not in used_norms:
+                    break
+        if norm in used_norms:
+            base_label = label
+            suffix_n = 2
+            while norm in used_norms:
+                label = f"{base_label} ({suffix_n})"
+                norm = _norm_query(label)
+                suffix_n += 1
+        label_of[q] = label
+        direction_of[norm] = q
+        used_norms.add(norm)
+    return label_of, direction_of
+
+
+def _still_uncovered_directions(
+    pending: List[str],
+    attempted: Dict[str, "_QueryAttempt"],
+    label_of: Dict[str, str],
+) -> List[str]:
+    """按注册表口径重算「仍未覆盖」的已确认方向;reflect 每轮回喂与 run 收尾
+    的终态披露共用这一份口径(镜像 visited/attempted 回喂的既有惯例),不会
+    出现"回喂说没执行、披露却说已执行"的自相矛盾。
+
+    `attempted` 里的条目分两类:来自已确认意图种子的(`a.query` 本身就是
+    `label_of` 的键)按注册表简称归一;模型 plan/add_subquery 产生的非 intent
+    条目(`label_of` 里没有)仍按自身 `label or query` 归一——这是中性硬约束,
+    那条路径的识别口径不因本次改动而变。
+    """
+    covered_norms = {
+        _norm_query(label_of[a.query]) if a.query in label_of
+        else _norm_query(a.label or a.query)
+        for a in attempted.values()
+    }
+    return [q for q in pending if _norm_query(label_of[q]) not in covered_norms]
 
 
 def clean_exact_term(raw: str) -> str:
@@ -353,12 +433,16 @@ class _QueryAttempt:
     """单条子查询的执行账目:原文、带来的新增证据数、尝试次数(含被跳过的重复)。
 
     `label` 只服务展示(轨迹 detail、reflect 回喂账目):来自 intent_queries 的条目
-    (首轮切片 + 补种)写入 `intent_direction_label(query)`——那些条目的 `query`
-    可能是「方向 + 完整已确认问题契约」的复合串(截到 8000 字符),原样渲染会让
-    一条方向顶掉半屏,也会让回喂账目与模型只见过的简称(prompt 里已经在用
-    intent_direction_label 展示)对不上。非 intent 路径(模型 plan/add_subquery
-    产生的查询)留空,渲染时回退到 `query` 本身——这是中性硬约束,那条路径的
-    展示逐字节不变。执行(检索)永远用 `query` 原文,`label` 只影响展示。
+    (首轮切片、补种、以及 add_subquery 命中已注册方向时)写入 run() 本轮
+    `_build_direction_registry` 算出的**唯一**简称(`label_of[query]`)——那些
+    条目的 `query` 可能是「方向 + 完整已确认问题契约」的复合串(截到 8000
+    字符),原样渲染会让一条方向顶掉半屏,也会让回喂账目与模型只见过的简称
+    (prompt 里已经在用注册表简称展示)对不上;经注册表而非直接调用
+    `intent_direction_label` 是为了让两个默认简称相同的方向仍能各自持有互异
+    的展示身份(否则会被账目误判成同一条)。非 intent 路径(模型 plan 产生、
+    或 add_subquery 提交了未命中任何已确认方向的全新查询)留空,渲染时回退到
+    `query` 本身——这是中性硬约束,那条路径的展示逐字节不变。执行(检索)永远
+    用 `query` 原文,`label` 只影响展示。
     """
     query: str
     new: int = 0
@@ -1010,6 +1094,11 @@ class ReasoningRetriever:
                 str(query).strip() for query in (intent_queries or [])
                 if str(query).strip()
             ))
+            # 方向身份注册表:本 run 对已确认方向的展示简称与防重/未覆盖识别
+            # 的唯一真源(见 _build_direction_registry)。intent_queries 为空
+            # 时 reviewed_all 恒空,两个字典也恒空——下游三处消费全部短路,
+            # 是中性回归的落点之一。
+            label_of, direction_of = _build_direction_registry(reviewed_all)
             reviewed_queries = reviewed_all[:initial_query_limit]
             # 首轮上限约束的是**首轮并发**,不是「装不下的方向就不做了」。溢出的
             # 已确认方向进入待覆盖账目,在首轮与确定性 seed pass 之后、reflect
@@ -1082,12 +1171,13 @@ class ReasoningRetriever:
                         hits = future.result()
                         raise_if_cancelled(self.cancel_event)
                         # label 只在这轮子查询来自已确认意图种子(reviewed_queries)
-                        # 时才写——plan() 产生的子查询走非 intent 路径,label 留空,
-                        # 渲染时回退到 query 原文(中性硬约束)。
+                        # 时才写,取自注册表的唯一简称——plan() 产生的子查询走非
+                        # intent 路径,label_of 里没有它,label 留空,渲染时回退到
+                        # query 原文(中性硬约束)。
                         rec = attempted.setdefault(_norm_query(sq.query),
                                                    _QueryAttempt(
                                                        query=sq.query,
-                                                       label=(intent_direction_label(sq.query)
+                                                       label=(label_of.get(sq.query, "")
                                                               if reviewed_queries else "")))
                         rec.tries += 1
                         for h in hits:
@@ -1202,10 +1292,11 @@ class ReasoningRetriever:
                         added += 1
                 # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
                 # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
-                # label 恒写:补种只处理 pending_intent_queries,来源必为已确认意图。
+                # label 恒写(取自注册表的唯一简称):补种只处理 pending_intent_queries,
+                # 来源必为已确认意图,query 恒是 label_of 的键。
                 attempted[_norm_query(query)] = _QueryAttempt(
                     query=query, new=added, tries=1,
-                    label=intent_direction_label(query))
+                    label=label_of[query])
                 if query not in used_queries:
                     used_queries.append(query)
                 # detail["query"] 只带简称(与轨迹 summary、reflect 回喂账目同口径)——
@@ -1214,24 +1305,16 @@ class ReasoningRetriever:
                 # (上面的 _run_search 调用),detail 只影响展示。
                 record(TraceStep(
                     step_type="retrieve",
-                    summary=f"补充已确认方向:{intent_direction_label(query)}",
-                    detail={"query": intent_direction_label(query), "new": added,
+                    summary=f"补充已确认方向:{label_of[query]}",
+                    detail={"query": label_of[query], "new": added,
                             "source": "confirmed_intent"}))
-            if uncovered_intent_queries:
-                # 预算耗尽必须显式披露:嘴上说"已按确认后的问题理解检索"、实际悄悄
-                # 漏掉几个方向,比少检索本身更糟。
-                shown = [intent_direction_label(q)
-                         for q in uncovered_intent_queries[:_INTENT_PENDING_DISCLOSE]]
-                more = len(uncovered_intent_queries) - len(shown)
-                record(TraceStep(
-                    step_type="skip",
-                    summary=("检索预算不足,以下已确认方向未能执行:"
-                             + "、".join(shown)
-                             + (f" 等 {len(uncovered_intent_queries)} 个"
-                                if more > 0 else "")),
-                    detail={"reason": "intent_coverage_incomplete",
-                            "pending": len(uncovered_intent_queries),
-                            "directions": shown}))
+            # 披露不在这里落笔:预算耗尽只代表"补种这一步没跑完",不代表
+            # run 最终结果——reflect 循环随后可能用 add_subquery 把
+            # uncovered_intent_queries 里的方向补上(见下方 add_subquery 分支的
+            # 方向身份识别)。若在这里立即 record 一条 skip,轨迹会永久停留在
+            # "预算刚耗尽那一刻"的旧账,即便模型后来真的补齐了也不会更正
+            # (PR#400 codex R1 P2-1)。uncovered_intent_queries 仍在这里累积,只是
+            # 消费点挪到 run 收尾的终态披露(见 while 循环结束之后)。
 
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
@@ -1306,24 +1389,19 @@ class ReasoningRetriever:
             # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
             # 下一轮它就自动从清单里消失,账目不会撒谎。
             #
-            # 匹配必须在**简称空间**做,不能直接比较原文:披露段(上面的
-            # pending_text)只给模型看 intent_direction_label 截出的首行简称,模型
-            # 据此用 add_subquery 提交的也是这个简称,而 uncovered_intent_queries
-            # 里的仍是「方向+完整已确认问题契约」的复合串(confirmed_intent_queries
-            # 产出,截到 8000 字符)。直接按原文比较永远不相等,"已覆盖"当场摘不掉,
-            # 下一轮 prompt 会同时说"没执行过"又"别重复提交"——自相矛盾,模型只能
-            # 重复空转。对裸短查询(无换行、≤60 字符)label≈自身,不受影响。
+            # 匹配统一走 _still_uncovered_directions(方向身份注册表口径),不能
+            # 直接比较原文:模型只见过注册表算出的唯一简称(prompt 里就是这么
+            # 展示的),据此用 add_subquery 提交的也是这个简称,而
+            # uncovered_intent_queries 里的仍是「方向+完整已确认问题契约」的
+            # 复合串(confirmed_intent_queries 产出,截到 8000 字符)。直接按原文
+            # 比较永远不相等,"已覆盖"当场摘不掉,下一轮 prompt 会同时说"没执行
+            # 过"又"别重复提交"——自相矛盾,模型只能重复空转。
             if uncovered_intent_queries:
-                attempted_labels = {
-                    _norm_query(intent_direction_label(a.query))
-                    for a in attempted.values()
-                }
-                still = [q for q in uncovered_intent_queries
-                         if _norm_query(intent_direction_label(q))
-                         not in attempted_labels]
+                still = _still_uncovered_directions(
+                    uncovered_intent_queries, attempted, label_of)
                 if still:
                     pending_text = "、".join(
-                        f"「{intent_direction_label(q)}」"
+                        f"「{label_of[q]}」"
                         for q in still[:_INTENT_PENDING_DISCLOSE])
                     summary = (
                         f"{summary}\n\n（以下已确认的检索方向因步骤预算不足尚未执行: "
@@ -1403,30 +1481,69 @@ class ReasoningRetriever:
                 else:
                     sq = decision.new_sub_query
                     key = _norm_query(sq.query)
+                    # 模型在 prompt 里只见过注册表算出的唯一简称(展示/回喂
+                    # 都不给它看完整 compound),所以它用 add_subquery 重提或
+                    # 补交某个已确认方向时,提交的文本大概率是简称而非原文
+                    # ——直接按 sq.query 的字面归一化键去比对 attempted 抓不住
+                    # 这种情况(简称的归一化键与它所指方向的 compound 归一化键
+                    # 不是同一个字符串)。matched_direction 把简称解回它所指的
+                    # 方向原文,后面两段分支都按这个方向身份而非提交串本身判断。
+                    matched_direction = direction_of.get(key)
                     if key in attempted:
-                        # 重复子查询硬跳过(镜像 expand_graph 的 visited 守卫):
-                        # 不重跑检索;tries 递增让回喂账目(与 prompt)随之变化。
+                        # 提交串本身就命中某条已执行记录(逐字重复,或提交的
+                        # 就是方向原文且原文已执行)——原有语义不变。
                         attempted[key].tries += 1
                         record(TraceStep(step_type="skip",
                                          summary=f"跳过重复子查询: {sq.query}",
                                          detail={"query": sq.query,
                                                  "reason": "duplicate_subquery",
                                                  "tries": attempted[key].tries}))
+                    elif (matched_direction is not None
+                          and _norm_query(matched_direction) in attempted):
+                        # 简称命中的方向已经被(补种或此前某轮 add_subquery)
+                        # 执行过,只是账目记在方向原文的身份上、提交串是简称
+                        # ——按方向身份识别为重复,不重跑检索(治「模型换用
+                        # prompt 里看到的简称就能绕过 duplicate_subquery,白烧
+                        # 一轮检索预算」,PR#400 codex R1 P2-2)。
+                        dkey = _norm_query(matched_direction)
+                        attempted[dkey].tries += 1
+                        record(TraceStep(step_type="skip",
+                                         summary=f"跳过重复子查询: {sq.query}",
+                                         detail={"query": sq.query,
+                                                 "reason": "duplicate_subquery",
+                                                 "tries": attempted[dkey].tries}))
                     else:
+                        # 简称命中一个尚未执行的已确认方向:执行用方向本身的
+                        # 完整原文(方向+已确认问题契约的复合串),不是模型提交
+                        # 的简称——契约是检索用的附加约束,只给简称会丢掉它,
+                        # 检索质量与补种(coverage pass)、首轮切片同型。未命中
+                        # 任何已确认方向(matched_direction 为 None)时走原有
+                        # 非 intent 路径,原文直接执行,label 留空——中性硬约束。
+                        exec_query = (matched_direction if matched_direction is not None
+                                     else sq.query)
+                        exec_key = _norm_query(exec_query)
+                        display = (label_of[exec_query] if matched_direction is not None
+                                  else sq.query)
                         added = 0
-                        for h in self.search(notebook_id, sq.query,
+                        for h in self.search(notebook_id, exec_query,
                                              sq.types, sq.prefer)[:per_query_take]:
                             raise_if_cancelled(self.cancel_event)
                             if h.object_id not in collected:
                                 collected[h.object_id] = h
                                 added += 1
-                        attempted[key] = _QueryAttempt(query=sq.query,
-                                                       new=added, tries=1)
-                        if sq.query not in used_queries:
-                            used_queries.append(sq.query)
+                        # 账目记在 exec_query(方向原文)的身份上,而非模型提交
+                        # 的简称——这样它同时从未覆盖清单(_still_uncovered_
+                        # directions 按 a.query in label_of 识别)摘除,且后续
+                        # 再用简称重提会被上面的 matched_direction 分支拦住。
+                        attempted[exec_key] = _QueryAttempt(
+                            query=exec_query, new=added, tries=1,
+                            label=(label_of[exec_query]
+                                  if matched_direction is not None else ""))
+                        if exec_query not in used_queries:
+                            used_queries.append(exec_query)
                         record(TraceStep(step_type="retrieve",
-                                         summary=f"补充子查询: {sq.query}",
-                                         detail={"query": sq.query, "new": added}))
+                                         summary=f"补充子查询: {display}",
+                                         detail={"query": display, "new": added}))
             elif decision.next_action == "search_elements":
                 if elements_searches >= self.settings.reasoning_max_element_searches:
                     record(TraceStep(step_type="skip",
@@ -1928,6 +2045,32 @@ class ReasoningRetriever:
                                  summary=f"连续 {stale} 轮无新进展,熔断收尾(避免空转)",
                                  detail={"reason": "stale_circuit_breaker", "stale": stale}))
                 break
+
+        # --- 已确认意图种子:终态披露(挪自补种阶段,见上方 coverage pass 的
+        # 说明)---------------------------------------------------------------
+        # 必须等 reflect 循环跑完才落笔:上面补种阶段只知道"预算耗尽那一刻"
+        # 还剩哪些方向没跑,但 reflect 循环随后可能已经用 add_subquery(直接
+        # 提交简称也算,见上方 matched_direction 分支)把其中一些补上了。这里
+        # 按同一份注册表口径(_still_uncovered_directions,与 reflect 每轮回喂
+        # 共用)重算一次"run 结束时到底还有哪些没跑过",只披露这份终态——
+        # 全部被补上时不落 skip 步,不能让轨迹永久停留在预算刚耗尽那一刻的旧账
+        # (PR#400 codex R1 P2-1)。仍在检索循环的墙钟范围内、位于下面的 answer 步之前。
+        if uncovered_intent_queries:
+            still = _still_uncovered_directions(
+                uncovered_intent_queries, attempted, label_of)
+            if still:
+                # 预算耗尽必须显式披露:嘴上说"已按确认后的问题理解检索"、实际悄悄
+                # 漏掉几个方向,比少检索本身更糟。
+                shown = [label_of[q] for q in still[:_INTENT_PENDING_DISCLOSE]]
+                more = len(still) - len(shown)
+                record(TraceStep(
+                    step_type="skip",
+                    summary=("检索预算不足,以下已确认方向未能执行:"
+                             + "、".join(shown)
+                             + (f" 等 {len(still)} 个" if more > 0 else "")),
+                    detail={"reason": "intent_coverage_incomplete",
+                            "pending": len(still),
+                            "directions": shown}))
 
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。

@@ -1647,6 +1647,273 @@ def test_reflect_feedback_renders_intent_seed_labels_not_full_contract_text(
     assert "「方向二」" in prompt         # 补种的 label
 
 
+def test_direction_registry_disambiguates_same_prefix_labels():
+    """两个方向的默认 60 字符简称完全相同(截断点之前逐字一致)时,注册表必须
+    先加宽展示窗口消解碰撞——不能让两个不同方向共用同一个展示身份,否则覆盖
+    账目会把两者的执行状态并成一个(PR#400 codex R1 P2-3)。"""
+    from app.services.reasoning_retrieval import (
+        _build_direction_registry, _norm_query, intent_direction_label,
+    )
+
+    shared_head = "共享前缀" * 20            # 80 字符,超过 60 字符默认截断点
+    q1 = shared_head + "甲\n\n检索必须服从以下已确认问题契约：\n" + "契" * 200
+    q2 = shared_head + "乙\n\n检索必须服从以下已确认问题契约：\n" + "契" * 200
+
+    # 前提:默认宽度下两者的简称确实碰撞(否则本用例没有测到该分支)。
+    assert intent_direction_label(q1) == intent_direction_label(q2)
+
+    label_of, direction_of = _build_direction_registry([q1, q2])
+
+    assert label_of[q1] != label_of[q2]
+    assert direction_of[_norm_query(label_of[q1])] == q1
+    assert direction_of[_norm_query(label_of[q2])] == q2
+
+
+def test_run_tracks_colliding_default_labels_independently(rrepo, monkeypatch):
+    """验收 1:两个已确认方向撞出同一默认简称时,注册表给出互异简称,且覆盖
+    账目必须独立追踪二者——一个被执行后,另一个仍然出现在未覆盖清单里(不能
+    因为简称一度相同就把两者的执行状态并成一个)。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    authoritative = "完整问题"
+    shared_head = "共享前缀" * 20
+
+    def compound(tail):
+        return f"{shared_head}{tail}\n\n检索必须服从以下已确认问题契约：\n{authoritative}"
+
+    q_a = compound("甲")
+    q_b = compound("乙")
+
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+    )
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever, "search",
+        lambda notebook_id, query, types=None, prefer="balanced": [
+            _mk_rk(f"id-{abs(hash(query))}", "候选证据")])
+
+    # authoritative、"占位方向" 装满首轮(overview 首轮宽度 2),q_a/q_b 都溢出到
+    # 补种;max_steps=3 → 补种预算 3//2=1,只够覆盖 q_a,q_b 留在未覆盖清单。
+    result = retriever.run(
+        nb.id,
+        authoritative,
+        intent_queries=[authoritative, "占位方向", q_a, q_b],
+        max_steps=3,
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    attempted_queries = [row["query"] for row in result.attempted]
+    assert q_a in attempted_queries
+    assert q_b not in attempted_queries
+
+    skips = [s for s in result.trace
+             if (s.detail or {}).get("reason") == "intent_coverage_incomplete"]
+    assert len(skips) == 1
+    shown = skips[0].detail["directions"]
+    assert len(shown) == 1
+    # 未覆盖的是 q_b(含"乙"),展示的简称必须是它独有的、区别于 q_a(含"甲")的
+    # 简称——而不是两者共享的默认截断前缀。
+    assert "乙" in shown[0]
+    assert "甲" not in shown[0]
+
+
+def test_add_subquery_resubmitting_label_of_seeded_direction_is_treated_as_duplicate(
+    rrepo, monkeypatch
+):
+    """验收 2:补种(coverage pass)已经执行过某个已确认方向后,模型若按
+    prompt 里看到的简称用 add_subquery 重提同一方向,必须被识别为重复、检索
+    零执行——即使 attempted 账目实际按完整 compound 串记账、模型提交的只是
+    简称。否则模型换用简称就能绕过 duplicate_subquery,白烧一轮检索预算
+    (PR#400 codex R1 P2-2)。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    authoritative = "完整问题"
+
+    def compound(direction):
+        return f"{direction}\n\n检索必须服从以下已确认问题契约：\n{authoritative}"
+
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[
+            {"next_action": "add_subquery", "new_sub_query": {"query": "方向二"}},
+            {"next_action": "answer", "sufficient": True},
+        ],
+    )
+    # 收尾配额重排(_quota_rerank)会为每个 used_query 再打一遍分,那是既有的
+    # 独立行为、与本用例要证明的"简称重提不重跑检索"无关——关掉它才能让
+    # calls 只反映检索循环本身发起的调用。
+    rrepo.settings.reasoning_quota_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls: list[str] = []
+
+    def fake_search(notebook_id, query, types=None, prefer="balanced"):
+        calls.append(query)
+        return [_mk_rk(f"id-{abs(hash(query))}", "候选证据")]
+
+    monkeypatch.setattr(retriever, "search", fake_search)
+
+    # overview 首轮宽度 2:authoritative + compound("方向一") 进首轮,
+    # compound("方向二") 溢出到补种;补种预算 4//2=2 足够覆盖它。
+    result = retriever.run(
+        nb.id,
+        authoritative,
+        intent_queries=[authoritative, compound("方向一"), compound("方向二")],
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    assert calls.count(compound("方向二")) == 1        # 补种已经真的执行过一次
+    dup_skips = [s for s in result.trace if s.step_type == "skip"
+                 and (s.detail or {}).get("reason") == "duplicate_subquery"]
+    assert len(dup_skips) == 1
+    assert dup_skips[0].detail["query"] == "方向二"
+    # 简称重提没有触发第二次 search 调用 —— 检索零执行,步数不浪费。
+    assert calls.count(compound("方向二")) == 1
+
+
+def test_add_subquery_label_matches_uncovered_direction_executes_compound(
+    rrepo, monkeypatch
+):
+    """验收 3:模型用简称补交一个尚未执行的已确认方向时,必须以完整 compound
+    (方向+已确认问题契约)执行、账目记在 compound 身份上而非裸简称;该方向
+    随即从未覆盖清单摘除,且后续再用相同简称重提会被防重拦下(不重跑检索)。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    authoritative = "完整问题"
+
+    def compound(direction):
+        return f"{direction}\n\n检索必须服从以下已确认问题契约：\n{authoritative}"
+
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[
+            {"next_action": "add_subquery", "new_sub_query": {"query": "方向四"}},
+            {"next_action": "add_subquery", "new_sub_query": {"query": "方向四"}},
+        ],
+    )
+    # 关闭收尾配额重排(与上一条用例同理:那是独立行为,不是本用例要证明的东西)。
+    rrepo.settings.reasoning_quota_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls: list[str] = []
+
+    def fake_search(notebook_id, query, types=None, prefer="balanced"):
+        calls.append(query)
+        return [_mk_rk(f"id-{abs(hash(query))}", "候选证据")]
+
+    monkeypatch.setattr(retriever, "search", fake_search)
+
+    result = retriever.run(
+        nb.id,
+        authoritative,
+        intent_queries=[
+            authoritative, compound("方向一"), compound("方向二"),
+            compound("方向三"), compound("方向四"), compound("方向五"),
+        ],
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    # 第一次简称补交必须真的按完整 compound 执行(不是裸简称 "方向四")。
+    assert calls.count(compound("方向四")) == 1
+    assert "方向四" not in calls
+    # 账目记在 compound 身份上,不是裸简称。
+    attempted_queries = [row["query"] for row in result.attempted]
+    assert compound("方向四") in attempted_queries
+    assert "方向四" not in attempted_queries
+    # 第二次用相同简称重提必须被防重拦下,不再调用 search。
+    dup_skips = [s for s in result.trace if s.step_type == "skip"
+                 and (s.detail or {}).get("reason") == "duplicate_subquery"]
+    assert len(dup_skips) == 1
+    assert dup_skips[0].detail["query"] == "方向四"
+    assert calls.count(compound("方向四")) == 1
+
+
+def test_run_terminal_disclosure_reflects_final_coverage_after_reflect_covers_one(
+    rrepo, monkeypatch
+):
+    """验收 4(部分补齐):预算耗尽留 2 个未执行方向,reflect 轮用 add_subquery
+    补上其中 1 个后,最终轨迹的 skip 步必须只列剩下的 1 个——不能还停留在
+    "预算刚耗尽那一刻"的旧账(PR#400 codex R1 P2-1)。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[
+            {"next_action": "add_subquery", "new_sub_query": {"query": "方向四"}},
+            {"next_action": "answer", "sufficient": True},
+        ],
+    )
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever, "search",
+        lambda notebook_id, query, types=None, prefer="balanced": [
+            _mk_rk(f"{query}-0", query)])
+
+    result = retriever.run(
+        nb.id,
+        "完整问题",
+        # overview:首轮 2、补种预算 2 → 方向二/方向三 补种执行,方向四/方向五
+        # 未覆盖;reflect 第一轮用 add_subquery 把方向四补上。
+        intent_queries=["完整问题", "方向一", "方向二", "方向三", "方向四", "方向五"],
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    skips = [s for s in result.trace
+             if s.step_type == "skip"
+             and (s.detail or {}).get("reason") == "intent_coverage_incomplete"]
+    assert len(skips) == 1
+    assert skips[0].detail["pending"] == 1
+    assert skips[0].detail["directions"] == ["方向五"]
+    assert "方向四" not in skips[0].summary
+    assert "方向五" in skips[0].summary
+
+
+def test_run_terminal_disclosure_has_no_skip_when_reflect_covers_all_pending(
+    rrepo, monkeypatch
+):
+    """验收 4(全部补齐):全部未执行方向都被 reflect 用 add_subquery 补上后,
+    终态不应再出现 intent_coverage_incomplete 的 skip 步。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[
+            {"next_action": "add_subquery", "new_sub_query": {"query": "方向四"}},
+            {"next_action": "add_subquery", "new_sub_query": {"query": "方向五"}},
+        ],
+    )
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever, "search",
+        lambda notebook_id, query, types=None, prefer="balanced": [
+            _mk_rk(f"{query}-0", query)])
+
+    result = retriever.run(
+        nb.id,
+        "完整问题",
+        intent_queries=["完整问题", "方向一", "方向二", "方向三", "方向四", "方向五"],
+        limits=ask_retrieval_limits("overview"),
+    )
+
+    assert not [s for s in result.trace
+                if (s.detail or {}).get("reason") == "intent_coverage_incomplete"]
+
+
 @pytest.mark.parametrize("intent_queries", [None, ["完整问题", "方向一"]])
 def test_intent_coverage_is_neutral_without_overflow(
     rrepo, monkeypatch, intent_queries
