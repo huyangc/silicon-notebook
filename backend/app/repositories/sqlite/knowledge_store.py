@@ -947,12 +947,11 @@ class KnowledgeStore:
         db: sqlite3.Connection,
         notebook_id: str,
         object_type: str,
-        statuses: Sequence[str],
         after: tuple[object, str] | None,
         limit: int,
     ) -> "List[sqlite3.Row]":
-        """One keyset page of usable objects of one type — the enumeration
-        twin of ``list_knowledge_page``'s OFFSET paging.
+        """One RAW keyset page of one type — the enumeration twin of
+        ``list_knowledge_page``'s OFFSET paging.
 
         OFFSET is fine for a UI page jump but wrong for enumeration: page N
         costs O(N·page) and a concurrent insert shifts every later page.  The
@@ -960,17 +959,14 @@ class KnowledgeStore:
         (notebook_id, object_type, created_at, id) with a row-value comparison
         so each page is O(limit) and stable under inserts.
 
-        ``statuses`` is applied in SQL and comes from the caller (the executor
-        passes the same tuple the counting path uses).  Empty statuses return
-        nothing rather than everything: "no usable status" is a meaningful,
-        empty answer, whereas dropping the predicate would leak deprecated
-        objects into a list whose total was computed without them.
+        No status predicate, on purpose (see the port docstring): that index
+        does not carry ``status``, so filtering here would make one page walk
+        an unbounded number of deprecated index entries on a notebook with a
+        long governance history.  ``status`` travels on every row instead, and
+        the enumeration executor applies the counting path's own
+        ``USABLE_STATUSES`` over a bounded over-scan.
         """
-        values = [str(value) for value in statuses if value]
-        if not values:
-            return []
-        marks = ",".join("?" for _ in values)
-        params: List[object] = [notebook_id, object_type, *values]
+        params: List[object] = [notebook_id, object_type]
         clause = ""
         if after is not None:
             clause = "AND (created_at, id) > (?, ?) "
@@ -979,8 +975,7 @@ class KnowledgeStore:
         return db.execute(
             "SELECT id, object_type, payload, evidence, status, created_at "
             "FROM knowledge_objects "
-            "WHERE notebook_id = ? AND object_type = ? "
-            f"AND status IN ({marks}) {clause}"
+            f"WHERE notebook_id = ? AND object_type = ? {clause}"
             "ORDER BY created_at, id LIMIT ?",
             params,
         ).fetchall()

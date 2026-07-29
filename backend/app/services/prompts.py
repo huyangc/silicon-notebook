@@ -297,7 +297,8 @@ def reflect_schema_hint(
         actions += "|enumerate_elements|enumerate_kg_objects"
         enumerate_branch = (
             '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
-            '"object_type":"' + "|".join(object_types) + '","source_id":""},'
+            '"object_type":"' + "|".join(object_types) + '",'
+            '"source_id":"","source_title":""},'
         )
     return (
         '{"sufficient":false,"next_action":"' + actions + '","expand":'
@@ -335,7 +336,12 @@ def reflect_prompt(
         "list / what are all the <kind>': relevance search returns a sample "
         "and can never prove it returned everything, while this walks the "
         "collection in order and reports exactly how much of it was covered. "
-        "Optionally set enumerate.source_id to restrict it to one source.\n"
+        "To restrict it to ONE source, set enumerate.source_title to that "
+        "source's title copied EXACTLY as it appears in the candidates above "
+        "(the server resolves the title to the source itself, and skips the "
+        "action when the title matches no source or more than one); use "
+        "enumerate.source_id only if an id was given to you. Leave both empty "
+        "to cover the whole scope.\n"
         "- enumerate_kg_objects: the same, for extracted knowledge objects of "
         "one type. Set enumerate.object_type to one of: "
         + ", ".join(object_types) + ".\n"

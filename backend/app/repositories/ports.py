@@ -872,26 +872,30 @@ class KnowledgeStorePort(Protocol):
         db: object,
         notebook_id: str,
         object_type: str,
-        statuses: Sequence[str],
         after: tuple[object, str] | None,
         limit: int,
     ) -> list[Any]:
         """One keyset page of one notebook's knowledge objects of ONE type,
         ordered by ``(created_at, id)`` ascending and bounded by ``limit``.
 
-        ``statuses`` is the caller's usability predicate and stays IN THE
-        QUERY: the enumeration executor passes exactly the tuple the counting
-        path uses, so "the map says 89" and "the list has 89" cannot drift
-        apart.  ``after`` is the opaque ``(created_at, id)`` pair of the last
-        consumed row (see ``element_page_rows``).
+        RAW rows: this page carries NO usability predicate, and every row it
+        returns carries its ``status`` so the caller can apply one.  That is
+        deliberate.  ``idx_knowledge_objects_nb_type_created``
+        (notebook_id, object_type, created_at, id) does not contain ``status``,
+        so a status predicate in this query would be a residual filter over an
+        unbounded number of visited index entries — on a notebook whose history
+        is mostly deprecated objects, "one page" would stop being O(limit) and
+        the engine would walk as far as it had to.  Keeping the query purely
+        keyset-ordered makes the cost exactly ``limit`` rows, and the caller
+        (``app.services.collection_enumeration``) filters with the SAME
+        ``USABLE_STATUSES`` object the counting path uses, over-scans within an
+        explicit ceiling, and reports an honest partial when that ceiling
+        fires.  The predicate therefore still has exactly one definition; only
+        the layer that evaluates it moved.
 
-        Index path: ``idx_knowledge_objects_nb_type_created``
-        (notebook_id, object_type, created_at, id) — equality on the first two
-        columns, range on the rest, no sort.  ``status`` is not in that index
-        and is applied as a residual filter on the visited rows, which is
-        bounded by ``limit`` plus however many unusable objects are
-        interleaved.  Rows carry id / object_type / payload / evidence /
-        status / created_at.
+        ``after`` is the opaque ``(created_at, id)`` pair of the last consumed
+        row (see ``element_page_rows``).  Rows carry id / object_type /
+        payload / evidence / status / created_at.
         """
         ...
     @staticmethod

@@ -752,10 +752,81 @@ def test_enumerate_only_run_with_no_other_evidence_still_reaches_synthesis(arepo
     assert any(row.kind == "collection" for row in resp.result_sets)
 
 
-def _completeness_required_payload(question: str, *, result_scope: str = "complete") -> AskRequest:
+# ------------------------------------------------- 无图笔记本也够得到枚举工具
+
+def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
+    """codex 第 1 轮 P1-1:自动 KG 抽取默认关,「解析了来源但没建图」是常态。
+
+    那条「本笔记本尚未构建知识图谱」的早退跑在 ReasoningRetriever 之前,会把
+    这类库整个挡在枚举工具外面——而公式/表格/图片/代码块清单恰恰不需要图。
+    放行后必须:枚举动作真的执行、产出 result_sets,而 kg_required 仍然如实
+    为 True(前端的建图提示不能因此消失)。
+    """
+    nb = _seed(arepo, formulas=3, with_kg=False)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "已列出公式 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert collection_rows, resp.result_sets
+    assert collection_rows[0].coverage.returned_total == 3
+    assert collection_rows[0].coverage.complete is True
+    assert llm.answer_prompts, "放行后必须真的跑到合成,而不是另一种早退"
+    assert resp.llm_mode != "deterministic"
+    # 旗标语义不变:无图且无可用参考库仍是 True。
+    assert resp.kg_required is True
+    assert "本笔记本尚未构建知识图谱" not in resp.conclusion
+
+
+def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(arepo):
+    """反向:既没有图、作用域里也没有任何可列出的集合时,早退原样保留——
+    进循环只会让每个工具都返回空,那句明确的「请先构建知识图谱」才是对的。"""
+    nb = _seed(arepo, formulas=0, with_kg=False)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不该跑到这里。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert resp.kg_required is True
+    assert resp.llm_mode == "deterministic"
+    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+    assert not llm.answer_prompts
+
+
+def test_kill_switch_restores_the_no_kg_early_return(arepo):
+    """接线判据与 run 内的总闸必须是同一个:kill switch 关掉枚举工具后,放行
+    条件也必须随之失效,否则会放一整轮什么工具都没有的空循环进来。"""
+    arepo.settings.reasoning_enum_tools_enabled = False
+    nb = _seed(arepo, formulas=3, with_kg=False)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不该跑到这里。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert resp.llm_mode == "deterministic"
+    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+
+
+def _completeness_required_payload(
+    question: str, *, result_scope: str = "complete", **contract_fields
+) -> AskRequest:
     contract = QueryIntentContract(
         objective=question, resolved_question=question,
         completeness_required=True, result_scope=result_scope,
+        **contract_fields,
     )
     return AskRequest(
         question=question, mode="reasoning",
@@ -824,6 +895,57 @@ def test_completeness_unavailable_kept_when_card_is_empty(arepo):
     collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
     # 空集合仍然算一次枚举(0 条也是诚实的清单结果),只是不足以背书完整性。
     assert collection_rows and collection_rows[0].coverage.returned_total == 0
+    assert "当前精确完整枚举支持" in resp.conclusion
+
+
+@pytest.mark.parametrize("field", ["constraints", "excluded_topics", "assumptions"])
+def test_completeness_unavailable_kept_when_the_request_carries_a_predicate(
+    arepo, field
+):
+    """规则④意图合同带谓词(约束/排除项/前提)时永不抑制。
+
+    codex 第 1 轮 P1-2:条件筛选/分组/去重类的完整请求,只要模型顺手枚举出
+    **任何**一张非空卡就消音,而那张卡的 coverage 只证明「某个物理集合被完整
+    走了一遍」,证明不了它就是用户要的那个子集。方向定为宁可多警告。
+    """
+    nb = _seed(arepo, formulas=2)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "已列出公式 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, _completeness_required_payload(
+        "库里 2023 年之后的公式有哪些", **{field: ["2023 年之后"]}
+    ))
+
+    collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert collection_rows and collection_rows[0].coverage.complete is True
+    assert "当前精确完整枚举支持" in resp.conclusion
+
+
+def test_completeness_unavailable_kept_when_every_card_is_partial(arepo):
+    """规则⑤部分清单不背书完整性:卡自己的 partial 徽章只说明「这张卡没列完」,
+    承担不了「你要的那种请求本产品还不支持完整枚举」这句披露。
+
+    overview 档的每轮条目上限是 100 条;101 条公式必然截断成 partial。"""
+    nb = _seed(arepo, formulas=101)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "已列出部分公式 [k1].", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    payload = _completeness_required_payload("库里有哪些公式")
+    payload.retrieval_effort = "overview"
+    resp = arepo.ask(nb.id, payload)
+
+    collection_rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert collection_rows, resp.result_sets
+    assert collection_rows[0].coverage.returned_total == 100
+    assert collection_rows[0].coverage.complete is False
     assert "当前精确完整枚举支持" in resp.conclusion
 
 

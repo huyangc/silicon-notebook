@@ -853,11 +853,12 @@ def test_postgres_knowledge_object_keyset_page_conforms(postgres_database):
     """``knowledge_object_page_rows`` — the KG half of
     ``app.services.collection_enumeration``.
 
-    Three things must hold identically to SQLite: the status predicate stays
-    in SQL (a deprecated object is neither counted nor listed), the keyset
-    resumes from the ``created_at`` value THIS adapter returned (a
-    ``datetime`` here, text on SQLite), and an empty status tuple means
-    nothing rather than everything.
+    Three things must hold identically to SQLite: the page is RAW (no status
+    predicate — that filter lives in the executor, over a bounded over-scan,
+    because the keyset index carries no ``status``) yet every row still carries
+    its ``status`` so the executor can apply one; the keyset resumes from the
+    ``created_at`` value THIS adapter returned (a ``datetime`` here, text on
+    SQLite); and a type with no rows returns nothing.
     """
     from app.repositories.postgres.migrator import PostgresMigrator
 
@@ -886,25 +887,30 @@ def test_postgres_knowledge_object_keyset_page_conforms(postgres_database):
         )
 
     collected: list[str] = []
+    raw: list[str] = []
     after = None
     with postgres_database.connect() as connection:
         for _page in range(5):
             page = store.knowledge_object_page_rows(
-                connection, "nb-personal", "concept", USABLE_STATUSES, after, 2
+                connection, "nb-personal", "concept", after, 2
             )
             if not page:
                 break
-            collected.extend(row["id"] for row in page)
+            raw.extend(row["id"] for row in page)
+            collected.extend(
+                row["id"] for row in page if row["status"] in USABLE_STATUSES
+            )
             after = (page[-1]["created_at"], page[-1]["id"])
         assert store.knowledge_object_page_rows(
-            connection, "nb-personal", "concept", (), None, 5
-        ) == []
-        assert store.knowledge_object_page_rows(
-            connection, "nb-personal", "claim", USABLE_STATUSES, None, 5
+            connection, "nb-personal", "claim", None, 5
         ) == []
         first = store.knowledge_object_page_rows(
-            connection, "nb-personal", "concept", USABLE_STATUSES, None, 1
+            connection, "nb-personal", "concept", None, 1
         )[0]
+    # 原始行按 keyset 全部返回(含 deprecated),过滤是执行器的事。
+    assert raw == [
+        "ko-page-0", "ko-page-1", "ko-page-2", "ko-page-3", "ko-page-4"
+    ]
     assert collected == ["ko-page-0", "ko-page-1", "ko-page-3", "ko-page-4"]
     # payload/evidence arrive decoded from jsonb; the executor accepts both
     # that and SQLite's text, so pin the shape the adapter actually returns.

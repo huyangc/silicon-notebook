@@ -1019,8 +1019,8 @@ def test_kg_mutation_between_pages_is_not_complete(repo, monkeypatch):
     original = store.knowledge_object_page_rows
     state = {"pages": 0}
 
-    def hook(db, notebook_id, object_type, statuses, after, limit):
-        rows = original(db, notebook_id, object_type, statuses, after, limit)
+    def hook(db, notebook_id, object_type, after, limit):
+        rows = original(db, notebook_id, object_type, after, limit)
         state["pages"] += 1
         if state["pages"] == 1:
             with repo._write() as write_db:
@@ -1098,9 +1098,9 @@ def test_cancel_between_kg_pages(repo, monkeypatch):
     store = repo._runtime.knowledge
     original = store.knowledge_object_page_rows
 
-    def hook(db, notebook_id, object_type, statuses, after, limit):
+    def hook(db, notebook_id, object_type, after, limit):
         cancel.set()
-        return original(db, notebook_id, object_type, statuses, after, limit)
+        return original(db, notebook_id, object_type, after, limit)
 
     monkeypatch.setattr(store, "knowledge_object_page_rows", hook)
     with pytest.raises(AskCancelled):
@@ -1131,22 +1131,126 @@ def test_enumerable_kg_types_match_the_edge_contract():
 
 
 def test_kg_status_predicate_is_the_counting_predicate(repo, monkeypatch):
-    """执行器传给 SQL 的 status 元组必须**就是** USABLE_STATUSES 本身。"""
+    """可用状态的判据必须**就是** USABLE_STATUSES 本身,而不是一份等值副本。
+
+    谓词从 SQL 挪到服务层(页查询要保持 O(limit),见 ``_usable_kg_page``)之后,
+    「同一份」不能再靠 spy 传参的对象身份来证明。改为行为反证:把执行器所在
+    模块的那个名字换成一个更窄的集合,清单必须立刻随之改变——只有真的在读
+    这个对象才做得到,一份 import 期就固化的副本不会跟着变。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_kg_object(repo, notebook.id, "o0", "concept", status="approved")
+    _add_kg_object(repo, notebook.id, "o1", "concept", status="reviewed")
+
+    # 同一个对象,不是等值副本。
+    assert collection_enumeration.USABLE_STATUSES is USABLE_STATUSES
+    both = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget()
+    )
+    assert {item.object_id for item in both.items} == {"o0", "o1"}
+
+    monkeypatch.setattr(collection_enumeration, "USABLE_STATUSES", ("reviewed",))
+    narrowed = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget()
+    )
+    assert {item.object_id for item in narrowed.items} == {"o1"}
+
+
+def test_kg_page_query_carries_no_status_predicate(repo):
+    """页查询必须只按 keyset 取原始行:status 一旦回到 SQL,一个 deprecated
+    占比高的库就会让「一页」重新变成无界残余过滤(codex 第 1 轮 P2-5)。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_kg_object(repo, notebook.id, "o0", "concept")
-    seen: list[object] = []
+    store = repo._runtime.knowledge
+    with repo._connect() as db:
+        statements: list[str] = []
+        db.set_trace_callback(statements.append)
+        try:
+            store.knowledge_object_page_rows(db, notebook.id, "concept", None, 2)
+        finally:
+            db.set_trace_callback(None)
+    executed = [item for item in statements if "FROM knowledge_objects" in item]
+    assert executed, statements
+    for statement in executed:
+        head, _, where = statement.partition("WHERE")
+        # 列仍要带回来——过滤搬到了服务层,不是取消了。
+        assert "status" in head, statement
+        # 谓词不得回到 SQL。
+        assert "status" not in where, statement
+
+
+def test_kg_enumeration_stays_bounded_when_most_objects_are_deprecated(
+    repo, monkeypatch
+):
+    """deprecated 高占比库:查询次数与读到的原始行都必须有界,并如实报部分。
+
+    这是 P2-5 的替代方案(不加 status 索引)的护栏:执行器在服务层过滤,
+    只允许 ``max_rows × _KG_RAW_SCAN_FACTOR`` 行的原始过扫描,触顶即
+    ``truncated_reason="budget"`` 的诚实 partial,绝不静默把清单截短成「全部」。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(200):
+        _add_kg_object(
+            repo, notebook.id, f"d{index:03d}", "concept", status="deprecated"
+        )
+    _add_kg_object(repo, notebook.id, "zz-usable", "concept")
+
     store = repo._runtime.knowledge
     original = store.knowledge_object_page_rows
+    calls: list[int] = []
 
-    def spy(db, notebook_id, object_type, statuses, after, limit):
-        seen.append(statuses)
-        return original(db, notebook_id, object_type, statuses, after, limit)
+    def spy(db, notebook_id, object_type, after, limit):
+        calls.append(limit)
+        return original(db, notebook_id, object_type, after, limit)
 
     monkeypatch.setattr(store, "knowledge_object_page_rows", spy)
-    _enum(repo).enumerate_kg_objects(notebook.id, "concept", budget=_budget())
-    # 身份相等,不是内容相等:docstring 说的就是「同一份」,一份等值副本
-    # 会随时间各自漂移,而那正是要防的东西。
-    assert seen and all(item is USABLE_STATUSES for item in seen)
+    result = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(max_rows=10, page_size=10)
+    )
+
+    cap = 10 * collection_enumeration._KG_RAW_SCAN_FACTOR
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_BUDGET
+    assert result.coverage.overflow_semantics == EXPLICIT_PARTIAL_OVERFLOW
+    # 原始行有界:计入 scanned,且不超过过扫描上限加最后一页的粒度。
+    assert result.coverage.scanned <= cap + max(calls), (
+        result.coverage.scanned, cap, calls
+    )
+    assert result.coverage.scanned >= cap
+    # 查询次数有界:上限 / 每次至少 1 行。若过扫描上限失效,这一条会随 200 行
+    # 全扫而爆掉。
+    assert len(calls) <= cap, calls
+    # 而且必须能续跑(complete=false ⟹ 游标非空)。
+    assert result.cursor is not None
+
+
+def test_kg_resume_after_the_overscan_ceiling_makes_progress(repo):
+    """触顶后的续跑必须真的往前走:游标越过已扫过的 deprecated 前缀。
+
+    否则每一次续跑都重扫同一段、再次触顶,链条永远推进不了。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(60):
+        _add_kg_object(
+            repo, notebook.id, f"d{index:03d}", "concept", status="deprecated"
+        )
+    _add_kg_object(repo, notebook.id, "zz-usable", "concept")
+
+    collected: list[str] = []
+    cursor = None
+    rounds = 0
+    for _round in range(12):
+        rounds += 1
+        page = _enum(repo).enumerate_kg_objects(
+            notebook.id, "concept",
+            budget=_budget(max_rows=4, page_size=4), cursor=cursor,
+        )
+        collected.extend(item.object_id for item in page.items)
+        cursor = page.cursor
+        if page.coverage.complete or cursor is None:
+            break
+    assert collected == ["zz-usable"]
+    assert rounds < 12, "续跑没有推进:每次都重扫同一段 deprecated 前缀"
 
 
 # ------------------------------------------------- 白名单单一真源(源码守卫)
@@ -1281,10 +1385,10 @@ def test_kg_object_page_query_rides_the_typed_index(repo):
 
     def run(db):
         first = store.knowledge_object_page_rows(
-            db, notebook.id, "concept", USABLE_STATUSES, None, 2
+            db, notebook.id, "concept", None, 2
         )
         store.knowledge_object_page_rows(
-            db, notebook.id, "concept", USABLE_STATUSES,
+            db, notebook.id, "concept",
             (first[-1]["created_at"], first[-1]["id"]), 2,
         )
 
