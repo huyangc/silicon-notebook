@@ -71,10 +71,10 @@
 
 ### 2.1 存储与迁移
 
-- SQLite：`_migration_36` 追加索引
+- SQLite：`_migration_37` 追加索引
   `CREATE INDEX IF NOT EXISTS idx_source_elements_source_type ON
-  source_elements(source_id, element_type, created_at, id)`；`SCHEMA_VERSION` 35→36。
-- PostgreSQL：新增打包迁移 `0014_source_element_type_index.sql`（同索引，风格对齐现有
+  source_elements(source_id, element_type, created_at, id)`；`SCHEMA_VERSION` 36→37。
+- PostgreSQL：新增打包迁移 `0015_source_element_type_index.sql`（同索引，风格对齐现有
   COLLATE "C" 约定）；`schema_manifest.py` bump；全仓核对 `migrate()`==N 类断言同步。
 - 双后端 schema 测试同步。
 

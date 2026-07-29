@@ -861,7 +861,7 @@ def test_postgres_knowledge_object_keyset_page_conforms(postgres_database):
     """
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 14
+    assert PostgresMigrator(postgres_database).migrate() == 15
     _seed_catalog(postgres_database)
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
