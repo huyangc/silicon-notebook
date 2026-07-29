@@ -203,9 +203,14 @@ def exact_lookup_chunks(
                     # A chunk outside any heading has no section to complete;
                     # ordinary retrieval already covers it.
                     continue
+                # Group by the term THAT PRODUCED this hit, not the full term
+                # list: with both `set_db` and `config.yaml` in the question, a
+                # hit under `set_db > config.yaml` must keep its own slot — the
+                # full-list fold would collapse it onto `set_db`, whose bounded
+                # subtree fetch may exhaust before ever reaching it.
                 group = _SectionKey(
                     source_id=source_id,
-                    section_path=_group_path(section_path, terms),
+                    section_path=_group_path(section_path, [term]),
                 )
                 hits_by_group.setdefault(group, {})[str(hit["chunk_id"])] = None
         if not hits_by_group:

@@ -777,7 +777,8 @@ def select_with_reserves(
     positions = {chunk.chunk_id: index for index, chunk in enumerate(ranked)}
     rescued: set[str] = set()
 
-    for rule in active:
+    for rule_index, rule in enumerate(active):
+        completed = active[:rule_index]   # earlier rules: floors already settled
         already = sum(1 for chunk in selected if rule.holds(chunk))
         need = max(0, rule.reserve - already)
         if need == 0:
@@ -794,9 +795,30 @@ def select_with_reserves(
                 continue
             trial = list(selected)
             used = sum(est_tokens(chunk.text) for chunk in trial)
+            # Rule order is priority order: a rule whose pass already COMPLETED
+            # has settled its floor, and this rule may not undo it — protect
+            # that rule's quota holders (its first `reserve` held chunks in
+            # ranked order, natural or rescued). Protecting only `rescued` let
+            # a later rule evict a naturally selected graph-only chunk and
+            # silently break CHUNK_GRAPH_RESERVE (codex #399); protecting every
+            # ACTIVE rule's holders is the opposite bug — a not-yet-run rule's
+            # natural holders must stay evictable, because demands can exceed
+            # the budget (exact reserve 4 + graph reserve 1 in 3 seats) and
+            # that rule will rescue its own quota in its own pass afterwards.
+            quota_held: set[str] = set()
+            for other in completed:
+                count = 0
+                for chunk in trial:
+                    if other.holds(chunk):
+                        quota_held.add(chunk.chunk_id)
+                        count += 1
+                        if count >= other.reserve:
+                            break
             removable = sorted(
                 (chunk for chunk in trial[1:]
-                 if chunk.chunk_id not in rescued and not rule.holds(chunk)),
+                 if chunk.chunk_id not in rescued
+                 and chunk.chunk_id not in quota_held
+                 and not rule.holds(chunk)),
                 key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)),
                 reverse=True,
             )
