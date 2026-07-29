@@ -3617,10 +3617,36 @@ button.chat-session-card {
   font-size: 13px;
 }
 
+.answer-collection-result-heading:last-child {
+  margin-bottom: 0;
+}
+
 .answer-collection-result-heading strong {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+}
+
+.answer-collection-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding: 4px 7px;
+  border-color: transparent;
+  background: transparent;
+  color: #475569;
+  font-size: 12px;
+}
+
+.answer-collection-toggle:hover {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+
+.answer-collection-content {
+  min-width: 0;
 }
 
 .answer-collection-scope {

@@ -12,7 +12,7 @@
 //      "枚举完整、分析部分"复合披露、单源限定;
 //   5. image 条目走 AuthedImage(经 fetchInternalAssetBlob 取图), formula 条目走
 //      KaTeX 容器(镜像 math-rendering.component.test.tsx 的断言方式)。
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
 
@@ -93,7 +93,11 @@ function collectionResult(overrides: Partial<TypedCollectionResult> = {}): Typed
 }
 
 
-function renderAnswer(answer: AskResponse, extraProps: Record<string, unknown> = {}) {
+function renderAnswer(
+  answer: AskResponse,
+  extraProps: Record<string, unknown> = {},
+  { openCollections = true }: { openCollections?: boolean } = {},
+) {
   render(
     <AnswerView
       answer={answer}
@@ -110,6 +114,12 @@ function renderAnswer(answer: AskResponse, extraProps: Record<string, unknown> =
       {...extraProps}
     />,
   );
+  // 绝大多数既有断言验证清单内容本身；测试辅助函数替它们显式打开卡片，避免
+  // “默认折叠”的交互改动掩盖条目渲染、来源跳转和跨库权限等独立合同。
+  if (openCollections) {
+    document.querySelectorAll<HTMLButtonElement>(".answer-collection-toggle")
+      .forEach((button) => fireEvent.click(button));
+  }
 }
 
 
@@ -119,6 +129,25 @@ test("kind=collection 行不再崩溃,渲染出清单卡(此前会在 .rows.slic
   expect(() => renderAnswer(answer)).not.toThrow();
   expect(screen.getByText("已全部列出 1 条")).toBeInTheDocument();
   expect(screen.getByText("公式清单")).toBeInTheDocument();
+});
+
+
+test("清单卡默认收起，用户主动展开后才渲染条目", async () => {
+  const user = userEvent.setup();
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    element_kind: "code_block",
+    items: [elementItem({ element_type: "code_block", text: "default-hidden-code" })],
+  })];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  const toggle = screen.getByRole("button", { name: "展开代码块清单" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByText("default-hidden-code")).not.toBeInTheDocument();
+
+  await user.click(toggle);
+  expect(screen.getByRole("button", { name: "收起代码块清单" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("default-hidden-code")).toBeInTheDocument();
 });
 
 
@@ -248,6 +277,7 @@ test("formula 元素条目走 KaTeX 容器渲染", () => {
       memorySaved={false}
     />,
   );
+  fireEvent.click(screen.getByRole("button", { name: "展开公式清单" }));
   expect(container.querySelector(".element-formula .katex")).not.toBeNull();
 });
 
@@ -331,7 +361,7 @@ test("元素条目按来源分组显示(source_title 作为分组小标题)", ()
 });
 
 
-test("初始显示 20 行 + 客户端展开全部(对齐既有结果卡口径)", async () => {
+test("打开清单后显示前 20 行 + 客户端展开全部(对齐既有结果卡口径)", async () => {
   const user = userEvent.setup();
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({
