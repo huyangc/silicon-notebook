@@ -7,18 +7,51 @@
 #
 # 环境变量:PYTHON_BIN BACKEND_HOST PORT FRONTEND_PORT SKIP_INSTALL SKIP_BUILD
 #              START_TIMEOUT_SECONDS(默认 1800,允许大库预加载)
+#              START_CLEANUP_GRACE_SECONDS(默认 10,失败启动的 SIGTERM 宽限)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cleanup() {
-  if [[ -n "${BACKEND_PID:-}" ]]; then
-    kill "$BACKEND_PID" 2>/dev/null || true
+  local status=$? pid alive deadline
+  trap - EXIT INT TERM HUP
+
+  if [[ -z "${BACKEND_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
+    exit "$status"
   fi
-  if [[ -n "${FRONTEND_PID:-}" ]]; then
-    kill "$FRONTEND_PID" 2>/dev/null || true
-  fi
+
+  # Both services are direct children (the launch subshell execs into the real
+  # process). Signal them together so one slow shutdown cannot consume a full
+  # grace window before the other even receives SIGTERM.
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    kill "$pid" 2>/dev/null || true
+  done
+
+  deadline=$((SECONDS + ${START_CLEANUP_GRACE_SECONDS:-10}))
+  while true; do
+    alive=0
+    for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+      [[ -n "$pid" ]] || continue
+      if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+    done
+    [[ "$alive" == "0" || "$SECONDS" -ge "$deadline" ]] && break
+    sleep 1
+  done
+
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "startup child PID $pid did not stop after SIGTERM; sending SIGKILL" >&2
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
+    [[ -n "$pid" ]] || continue
+    wait "$pid" 2>/dev/null || true
+  done
+  exit "$status"
 }
 
 trap cleanup EXIT
@@ -66,9 +99,14 @@ BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-1800}"
+START_CLEANUP_GRACE_SECONDS="${START_CLEANUP_GRACE_SECONDS:-10}"
 
 if [[ ! "$START_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "错误: START_TIMEOUT_SECONDS 必须是正整数。" >&2
+  exit 2
+fi
+if [[ ! "$START_CLEANUP_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "错误: START_CLEANUP_GRACE_SECONDS 必须是正整数。" >&2
   exit 2
 fi
 
@@ -87,13 +125,25 @@ fi
 # 在拉起新进程前拒绝占用中的端口，避免将旧服务的 curl 响应误认为
 # 本次启动成功。生产目标 Ubuntu 有 ss，macOS 回落到 lsof。
 listeners() {
-  local port="$1"
+  local port="$1" rows pids
   if command -v ss >/dev/null 2>&1; then
-    ss -tlnp "sport = :${port}" 2>/dev/null | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+' | sort -u || true
+    rows="$(ss -H -tlnp "sport = :${port}" 2>/dev/null || true)"
+    [[ -n "$rows" ]] || return 0
+    pids="$(printf '%s\n' "$rows" | grep -oE 'pid=[0-9]+' | grep -oE '[0-9]+' | sort -u || true)"
+    if [[ -n "$pids" ]]; then
+      pids="${pids//$'\n'/,}"
+      printf 'PID %s\n' "$pids"
+    else
+      printf 'PID unavailable\n'
+    fi
   elif command -v lsof >/dev/null 2>&1; then
-    lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true
+    pids="$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)"
+    [[ -n "$pids" ]] || return 0
+    printf 'PID %s\n' "${pids//$'\n'/,}"
   elif command -v fuser >/dev/null 2>&1; then
-    fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true
+    pids="$(fuser "${port}/tcp" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true)"
+    [[ -n "$pids" ]] || return 0
+    printf 'PID %s\n' "${pids//$'\n'/,}"
   else
     echo "错误: 需要 ss / lsof / fuser 之一检查启动端口，但都不可用。" >&2
     exit 1
@@ -101,10 +151,10 @@ listeners() {
 }
 
 ensure_port_free() {
-  local label="$1" port="$2" pids
-  pids="$(listeners "$port")"
-  if [[ -n "$pids" ]]; then
-    echo "错误: $label 端口 :$port 已被占用(PID $pids)；请先运行 npm run stop 或换端口。" >&2
+  local label="$1" port="$2" occupant
+  occupant="$(listeners "$port")"
+  if [[ -n "$occupant" ]]; then
+    echo "错误: $label 端口 :$port 已被占用($occupant)；请先运行 npm run stop 或换端口。" >&2
     exit 1
   fi
 }

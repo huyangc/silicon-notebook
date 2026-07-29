@@ -151,10 +151,13 @@ npm run stop
 `curl` 轮询后端 `/api/ready`
 (必须 `ready=true`)和前端首页；两者连续两次通过且本次进程仍存活后，
 `npm run start` 成功退出，之后可直接关掉 terminal。若进程提前退出、就绪超时或
-在成功前被中断，脚本会清理本次拉起的两个进程并返回非零。默认超时为 1800 秒，
-便于大库完成启动预加载；可用正整数 `START_TIMEOUT_SECONDS` 覆盖。环境需要
-`curl` 以及 `ss` / `lsof` / `fuser` 之一；目标端口已被占用时会在启动前拒绝，
-避免把旧监听器的响应误判为本次启动成功。后台服务用 `npm run stop` 停止。
+在成功前被中断，脚本会同时向本次两个子进程发 SIGTERM，最多等待
+`START_CLEANUP_GRACE_SECONDS`(默认 10 秒)，对残留进程发 SIGKILL 并 `wait`
+回收后才返回非零。默认就绪超时为 1800 秒，便于大库完成启动预加载；
+可用正整数 `START_TIMEOUT_SECONDS` 覆盖。环境需要 `curl` 以及
+`ss` / `lsof` / `fuser` 之一；目标端口已被占用时会在安装依赖前拒绝，
+即使当前用户看不到监听器 PID 也不例外，避免把旧监听器的响应误判为本次启动成功。
+后台服务用 `npm run stop` 停止。
 已同时预装两端依赖的镜像可设 `SKIP_INSTALL=1`；该模式下若缺少
 `frontend/node_modules/.bin/next`，仍会在 build 前直接报错，不会带病继续。
 

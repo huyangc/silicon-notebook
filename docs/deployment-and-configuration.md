@@ -169,11 +169,13 @@ The command polls the backend's
 `/api/ready` document with `curl` (requiring `ready=true`) and curls the frontend root;
 after both checks pass twice while both launched PIDs remain alive, it exits successfully.
 The services therefore survive closing the terminal. A process exit, readiness timeout,
-or interruption before success cleans up both processes and returns non-zero. The default
-timeout is 1,800 seconds so large-library startup preloading can finish; override it with a
-positive integer `START_TIMEOUT_SECONDS`. `curl` plus one of `ss`, `lsof`, or `fuser` is
-required, and occupied target ports fail before launch so an old listener cannot be mistaken
-for this run. Use `npm run stop` for the detached services. Prebuilt images that already
+or interruption before success sends SIGTERM to both launched children together, waits the
+bounded `START_CLEANUP_GRACE_SECONDS` (default 10 seconds), SIGKILLs any survivor, reaps both,
+and returns non-zero. The default readiness timeout is 1,800 seconds so large-library startup
+preloading can finish; override it with a positive integer `START_TIMEOUT_SECONDS`. `curl`
+plus one of `ss`, `lsof`, or `fuser` is required. Occupied target ports fail before dependency
+installation even when the current user cannot see the listener PID, so an old listener cannot
+be mistaken for this run. Use `npm run stop` for the detached services. Prebuilt images that already
 contain both dependency sets may set `SKIP_INSTALL=1`; with that escape hatch, a missing
 `frontend/node_modules/.bin/next` still fails before build rather than silently continuing.
 

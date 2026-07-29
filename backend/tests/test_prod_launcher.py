@@ -22,7 +22,7 @@ def _pid_is_alive(pid: int) -> bool:
     return True
 
 
-def test_prod_launcher_detaches_and_waits_for_curl_readiness(tmp_path: Path) -> None:
+def _prepare_launcher(tmp_path: Path) -> tuple[Path, Path, Path, Path, dict[str, str]]:
     repository_root = Path(__file__).resolve().parents[2]
     root = tmp_path / "checkout"
     scripts = root / "scripts"
@@ -94,6 +94,14 @@ fi
         "PORT": "18800",
         "FRONTEND_PORT": "18801",
     }
+    return root, scripts, fake_bin, next_bin, env
+
+
+def test_prod_launcher_detaches_and_waits_for_curl_readiness(tmp_path: Path) -> None:
+    root, scripts, _fake_bin, _next_bin, env = _prepare_launcher(tmp_path)
+    calls_file = Path(env["CURL_CALLS_FILE"])
+    install_calls_file = Path(env["INSTALL_CALLS_FILE"])
+    backend = root / "backend"
     launched_pids: list[int] = []
     try:
         completed = subprocess.run(
@@ -127,3 +135,81 @@ fi
             if _pid_is_alive(pid):
                 os.kill(pid, signal.SIGTERM)
         time.sleep(0.05)
+
+
+def test_failed_start_escalates_and_reaps_term_ignoring_children(tmp_path: Path) -> None:
+    root, scripts, fake_bin, next_bin, env = _prepare_launcher(tmp_path)
+    backend_pid_file = root / "backend.pid"
+    frontend_pid_file = root / "frontend.pid"
+    _write_executable(
+        fake_bin / "python",
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then exit 0; fi
+if [[ "${1:-}" == "-c" ]]; then exec "$REAL_PYTHON" "$@"; fi
+printf '%s\n' "$$" >"$BACKEND_PID_FILE"
+trap '' TERM
+exec sleep 30
+""",
+    )
+    _write_executable(
+        next_bin / "next",
+        """#!/usr/bin/env bash
+printf '%s\n' "$$" >"$FRONTEND_PID_FILE"
+trap '' TERM
+exec sleep 30
+""",
+    )
+    _write_executable(fake_bin / "curl", "#!/usr/bin/env bash\nexit 22\n")
+    env.update(
+        BACKEND_PID_FILE=str(backend_pid_file),
+        FRONTEND_PID_FILE=str(frontend_pid_file),
+        START_TIMEOUT_SECONDS="1",
+        START_CLEANUP_GRACE_SECONDS="1",
+    )
+
+    launched_pids: list[int] = []
+    try:
+        completed = subprocess.run(
+            ["bash", str(scripts / "prod.sh")],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        assert completed.returncode == 1, completed.stdout + completed.stderr
+        launched_pids = [
+            int(backend_pid_file.read_text(encoding="utf-8")),
+            int(frontend_pid_file.read_text(encoding="utf-8")),
+        ]
+        assert not any(_pid_is_alive(pid) for pid in launched_pids)
+        assert completed.stderr.count("sending SIGKILL") == 2
+    finally:
+        for pid in launched_pids:
+            if _pid_is_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_port_preflight_detects_ss_listener_without_visible_pid(tmp_path: Path) -> None:
+    root, scripts, fake_bin, _next_bin, env = _prepare_launcher(tmp_path)
+    _write_executable(
+        fake_bin / "ss",
+        """#!/usr/bin/env bash
+printf 'LISTEN 0 4096 0.0.0.0:18800 0.0.0.0:*\n'
+""",
+    )
+
+    completed = subprocess.run(
+        ["bash", str(scripts / "prod.sh")],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "backend 端口 :18800 已被占用(PID unavailable)" in completed.stderr
+    assert not Path(env["INSTALL_CALLS_FILE"]).exists()
