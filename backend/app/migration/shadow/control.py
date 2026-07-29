@@ -263,6 +263,10 @@ _CONTROL_CONSTRAINT_DEFINITIONS = {
     ),
 }
 _CONTROL_SQL_PATH = Path(__file__).with_name("sql") / "postgres_control.sql"
+# The ``:v1`` here is the control-protocol namespace, not a schema version: it
+# is hashed into the advisory-lock key, so bumping it with a schema bump would
+# silently hand out a different lock and break mutual exclusion against an
+# already-running worker.  It must not track ``RUNNING_SCHEMA_PAIR``.
 _CONTROL_LOCK_KEY = int.from_bytes(
     hashlib.sha256(b"silicon-notebook:shadow-control:v1").digest()[:8],
     byteorder="big",
@@ -824,6 +828,8 @@ def control_sql_checksum() -> str:
 
 
 def _control_schema_comment() -> str:
+    # Same deliberate ``v1``: the control-schema protocol generation, stamped on
+    # the deployed schema and compared verbatim.  Not a business schema version.
     return f"silicon-notebook shadow control v1 sha256:{control_sql_checksum()}"
 
 

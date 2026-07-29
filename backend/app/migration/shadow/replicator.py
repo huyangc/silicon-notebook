@@ -55,7 +55,8 @@ from app.migration.shadow.postgres_catalog import (
     EXPECTED_COLUMNS,
     EXPECTED_CONSTRAINTS,
     EXPECTED_OPERATIONAL_INDEXES,
-    validate_postgres_v11_catalog,
+    _SCHEMA_LABEL,
+    validate_postgres_business_catalog,
 )
 from app.migration.shadow.snapshot import (
     _change_log_high_water,
@@ -505,7 +506,7 @@ def _fk_max_ancestor_closure() -> int:
 
     def visit(table: str, path: frozenset[str]) -> int:
         if table in path:
-            raise ValueError("PostgreSQL v14 foreign-key graph contains a cycle")
+            raise ValueError(f"{_SCHEMA_LABEL} foreign-key graph contains a cycle")
         return 1 + sum(
             visit(parent, path | {table}) for parent in parents.get(table, ())
         )
@@ -545,18 +546,18 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
         columns: list[str] = []
         for key in index.keys:
             if not key or key[0] not in EXPECTED_COLUMNS[index.table]:
-                raise ValueError("PostgreSQL v14 unique index is not column-parkable")
+                raise ValueError(f"{_SCHEMA_LABEL} unique index is not column-parkable")
             columns.append(key[0])
         predicate = None
         if index.predicate_tokens:
             predicate_pin = _UNIQUE_PREDICATES.get(name)
             if predicate_pin is None or predicate_pin[1] != index.predicate_tokens:
-                raise ValueError("PostgreSQL v14 partial unique predicate is unpinned")
+                raise ValueError(f"{_SCHEMA_LABEL} partial unique predicate is unpinned")
             predicate = predicate_pin[0]
             seen_predicates.add(name)
         raw.append((name, index.table, tuple(columns), predicate))
     if seen_predicates != set(_UNIQUE_PREDICATES):
-        raise ValueError("PostgreSQL v14 partial unique predicate pins drifted")
+        raise ValueError(f"{_SCHEMA_LABEL} partial unique predicate pins drifted")
     for guard in replication_guard_specs(manifest):
         raw.append((guard.name, guard.table, guard.columns, None))
 
@@ -593,13 +594,13 @@ def _build_unique_surfaces(manifest: Manifest) -> dict[str, _UniqueSurface]:
                 strategy = _ParkStrategy.LEAF_DELETE
             if strategy is None:
                 raise ValueError(
-                    f"PostgreSQL v14 unique surface is not safely parkable: {name}"
+                    f"{_SCHEMA_LABEL} unique surface is not safely parkable: {name}"
                 )
         result[name] = _UniqueSurface(
             name, table, columns, strategy, park_column, predicate
         )
     if len(result) != len(raw):
-        raise ValueError("PostgreSQL v14 unique surface names are ambiguous")
+        raise ValueError(f"{_SCHEMA_LABEL} unique surface names are ambiguous")
     return result
 
 
@@ -650,7 +651,7 @@ class ShadowReplicator:
         self._specs = {spec.name: spec for spec in manifest.replicated}
         self._unique_surfaces = _build_unique_surfaces(manifest)
         if _fk_max_ancestor_closure() >= _MAX_DEPENDENCY_ROWS_PER_EVENT:
-            raise ValueError("PostgreSQL v14 foreign-key closure exceeds its hard cap")
+            raise ValueError(f"{_SCHEMA_LABEL} foreign-key closure exceeds its hard cap")
         self._run_lock = threading.Lock()
 
     def _crash(self, boundary: str) -> None:
@@ -784,7 +785,7 @@ class ShadowReplicator:
             _verify_postgres_guard(
                 conn, definition, business_schema=state.target_business_schema
             )
-        validate_postgres_v11_catalog(
+        validate_postgres_business_catalog(
             conn,
             business_schema=state.target_business_schema,
             manifest=self.manifest,
