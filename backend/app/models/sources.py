@@ -110,6 +110,34 @@ class SourceDetail(SourceSummary):
     paper_meta: Optional[PaperMeta] = None
 
 
+class ScopedSourceDetail(SourceSummary):
+    """参与集内**代理读取**的来源详情：`SourceDetail` 去掉两个后端内部字段。
+
+    这个模型存在的唯一理由是收窄披露面。代理读取会把挂载参考库的来源交给一个对
+    该库既非 owner 也非成员的用户，而 `SourceDetail` 带着两样只对库主有意义、却
+    会泄露服务端内部形态的东西：
+
+    - `file_path` 是后端存储的**本机绝对路径**，前端一处都没用过；
+    - `error_message` 是 `str(exc)` 原样落库的异常串（`services/source_ingestion.py`），
+      同样可能带上绝对路径（`FileNotFoundError: /…/storage/notebooks/…`）。前端从来
+      不直出它，只按「有没有失败」二选一给固定文案——那点信息由 `parse_failed` 如实
+      承载，原文没有任何理由跨出这个库。
+
+    刻意做成**去掉字段**而不是运行时置空：schema 层的保证不会因为哪条分支忘了清而
+    悄悄退回去。也刻意对同库/跨库**一视同仁**——同库来源另有 `/sources/{id}` 那条
+    owner∪member 的完整详情路径，代理端点没必要按调用场景分叉出两种响应形状。
+    """
+    paper_meta: Optional[PaperMeta] = None
+    parse_failed: bool = False
+
+    @classmethod
+    def of(cls, detail: SourceDetail) -> "ScopedSourceDetail":
+        return cls(
+            **detail.model_dump(exclude={"file_path", "error_message"}),
+            parse_failed=bool(detail.error_message),
+        )
+
+
 class UploadedSourceSummary(SourceSummary):
     """One row of an upload response: a plain ``SourceSummary`` plus whether it
     is a brand-new source or an existing same-content one that was reused.

@@ -52,6 +52,16 @@ export const getSource = (id: string) =>
 export const getSourceElements = (id: string) =>
   requestJson<SourceElement[]>(`/sources/${id}/elements`, options);
 
+// 参与集内的代理读取:路径里的 notebookId 是**当前 active 笔记本**（权限按它判），
+// 来源本身可以属于它有效挂载的任一参考库。挂载参考库不等于获得该库的直接成员权限
+// （红线），所以浏览器一律不去直连另一个库——由后端在 participant 集内解析并代理读取。
+// 参与集首项恒为 active 自身，本库来源走的也是这条路径，调用方不必先判断跨不跨库。
+export const getNotebookSource = (notebookId: string, id: string) =>
+  requestJson<SourceSummary>(`/notebooks/${notebookId}/sources/${id}`, options);
+
+export const getNotebookSourceElements = (notebookId: string, id: string) =>
+  requestJson<SourceElement[]>(`/notebooks/${notebookId}/sources/${id}/elements`, options);
+
 export const parseSource = (id: string) =>
   requestJson<SourceSummary>(`/sources/${id}/parse`, {
     ...options,

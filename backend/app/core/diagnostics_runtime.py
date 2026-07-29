@@ -56,6 +56,7 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("sources", "url"),
     ("sources", "reparse"),
     ("sources", None),
+    ("sources", None, "elements"),
     ("backfill-vectors",),
     ("assets",),
     ("assets", None),
