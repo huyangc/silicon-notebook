@@ -122,7 +122,20 @@
   KG=参与 notebook 的 kg_mutation_seq 向量）与累计 returned；续跑先比对，作用域已变→
   `concurrent_change`，绝不静默从头重跑；分母校验在链末端按累计 returned 生效。合同不变式：
   `complete=false ⟹ cursor 非空`，唯一例外 `truncated_reason=concurrent_change`。显式
-  `source_id` 请求直接对该源发索引分页查询，不得做「不在计划⇒零」推断（首解析窗口保护）。
+  `source_id` 请求直接对该源发索引分页查询，不得做「不在计划⇒零」推断。
+- **【codex 第 3 轮 P1 订正】首解析窗口根治，而非披露**：`replace_elements` 在**同一
+  写事务**里把 `sources.updated_at` 推到新元素所带的时刻（双后端同修），变更信号因此
+  与元素换代原子翻转。此前登记的「首解析 under-count 自愈窗口」（元素已落库、
+  `chunked_at` 本就是 NULL 所以清空是空操作、信号要等下一次 `set_status`）不复存在，
+  文档与注释里所有把它写成「已登记的一致低报」的段落一并改写。副作用核实：
+  `sources.updated_at` 只被变更信号查询读取一次，不参与排序/展示/其他缓存键，而且解析
+  收尾本来就会写它——这只是提前到数据真正改变的那一刻。
+- **【codex 第 3 轮 P2 订正】往返上界显式化**：每次动作维护页查询计数器，元素侧上界
+  `max_rows + max_pages`（零计数源不进计划⇒不访问；进计划的源访问即产行⇒受行预算
+  约束），KG 侧上界 `参与库数 + max_pages + 原始行过扫描上限`（该侧没有 per-分片计数
+  可跳过，且状态过滤会产生补页）。越界抛 `EnumerationInvariantError`，调用方按普通
+  执行器失败 fail-open 成一次 skip。**驳回**「首页也计费」：那会重新打破宽而薄语料
+  （一百个源各一条公式）的 complete 可达性——本特性第 1 轮已经修过这个形态。
 - **【codex 第 2 轮 P1 订正】收尾复检必须重解析参与库集合**：只对**开场那份参与
   notebook id 列表**重算指纹/seq，看不见「跨页期间挂载/卸载/失效了参考库」——空的
   新库不贡献来源信号，被卸载的库的信号也仍在，两种都会被判成稳定并报 complete。
@@ -243,8 +256,8 @@
   Baseline」与 CLAUDE.md 红线补「集合枚举工具」条目——并修订两处现有红线句
   「当前只有 Knowhow 支持完整枚举，其他对象集合仍是相关性结果」（PR-2 落地后不再成立，
   fangan 同款表述在 fangan_done.md 记账）；architecture.md 补 collection_catalog /
-  collection_enumeration 运行时组件与全部新端口（T2 两个 + T3 三个）；首解析 under-count
-  窗口的披露口径一并写入；README 中英一句能力入口。
+  collection_enumeration 运行时组件与全部新端口（T2 两个 + T3 三个）；README 中英一句
+  能力入口。
 - 测试：scripted fake chat client 驱动 reflect 返回 enumerate 动作，断言自动翻页/预算/
   complete/partial/取消/双后端 parity；离线测试钉「工具可达性与合同」，模型是否选用属真机评测
   （部署机手动对照）。

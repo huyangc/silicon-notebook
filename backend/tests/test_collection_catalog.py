@@ -218,8 +218,7 @@ def test_reparse_clearing_chunked_at_invalidates_the_count(repo):
 
 
 def test_status_transition_invalidates_the_count(repo):
-    """第二条信号来源:任何 ``set_status`` 都动 updated_at(首次解析的来源
-    chunked_at 本就是 NULL,清空是空操作,只能靠它收敛)。"""
+    """第二条信号来源:任何 ``set_status`` 都动 updated_at。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_source(repo, notebook.id, "s1", [("formula", 1)])
     catalog = _catalog(repo)
@@ -227,6 +226,46 @@ def test_status_transition_invalidates_the_count(repo):
 
     _replace_elements(repo, "s1", 6, clear_chunked_at=False, touch_updated_at=True)
     assert catalog.collection_map(notebook.id).element_count("formula") == 6
+
+
+def test_replace_elements_alone_invalidates_the_count(repo):
+    """真正的元素写入口 ``replace_elements`` 自己就翻转信号(codex 第 3 轮 P1)。
+
+    以前首次解析的来源 ``chunked_at`` 本就是 NULL、清空是空操作,信号要等到
+    下一次 ``set_status`` 才动——那是一次 LLM 调用之后,期间地图把这个来源数
+    成 0。现在 ``replace_elements`` 在**同一个写事务**里把 ``updated_at`` 推到
+    新元素所带的时刻,窗口不再是「已登记的低报」,而是不存在。
+
+    这里刻意**不**清 chunked_at、**不**改状态:两条旧路径都被排除后,还能收敛
+    就只可能是 replace_elements 自己做的。
+    """
+    from app.repositories.ports import SourceElementWrite
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_source(repo, notebook.id, "s1", [("formula", 1)])
+    catalog = _catalog(repo)
+    assert catalog.collection_map(notebook.id).element_count("formula") == 1
+
+    store = repo._runtime.source_store
+    with repo._connect() as db:
+        before = dict(store.source_change_signal_rows(db, notebook.id))
+    later = "2026-07-29T10:00:00.123456+08:00"
+    with repo._write() as db:
+        store.replace_elements(
+            db, "s1",
+            [
+                SourceElementWrite(
+                    id=f"el-fresh-{index}", element_type="formula",
+                    location_label="p1", text="E", metadata={},
+                )
+                for index in range(5)
+            ],
+            created_at=later,
+        )
+    with repo._connect() as db:
+        after = dict(store.source_change_signal_rows(db, notebook.id))
+    assert after["s1"] != before["s1"], "信号必须随元素换代当场翻转"
+    assert catalog.collection_map(notebook.id).element_count("formula") == 5
 
 
 def test_deleted_source_drops_out_of_the_scope_sum(repo):

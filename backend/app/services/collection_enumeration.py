@@ -38,9 +38,9 @@ Four contracts this module owns:
    Knowhow-projection synthetic sources.  Were the two to drift, the UI would
    show "map: 12 / list: 8" with nothing able to explain the gap.  The one
    exception is an explicitly named ``source_id``, which is queried directly:
-   absence from the plan means "the map counted zero", and inferring an empty
-   answer from a cached zero would hide the rows of a source parsed seconds
-   ago (see the under-count window registered on ``_coverage``).
+   absence from the plan means "the map counted zero", and a source the user
+   named by hand is worth one index-seeked query rather than an answer derived
+   from a cached zero.
 4. **The KG status predicate is the counting predicate.**  Both sides evaluate
    the very same ``USABLE_STATUSES`` object (defined once in
    ``app.services.knowledge_contracts``), so a deprecated object can never be
@@ -402,6 +402,24 @@ def _row_get(row: Any, key: str) -> Any:
     return row[key]
 
 
+class EnumerationInvariantError(RuntimeError):
+    """One action issued more page queries than its budget can account for.
+
+    Not a user-facing condition and not a budget ceiling: the ceilings already
+    stop a walk honestly (``_Stop`` → an ``explicit_partial`` result).  This is
+    the executor telling on itself — the round-trip count is supposed to be
+    bounded by the budget *by construction* (see ``_Walk.bound_queries``), so
+    exceeding it means a traversal, a plan or a ceiling stopped behaving the
+    way the cost argument assumes.  Raising is the point: a silent overrun is a
+    library-sized query storm behind a hundred-row request, and it would look
+    exactly like a slow day.
+
+    The caller (``reasoning_retrieval``) treats it like any other executor
+    failure — one skipped action, fail-open — so a breach costs a list, never
+    a request.
+    """
+
+
 class _Stop(Exception):
     """Internal: a budget ceiling fired mid-traversal."""
 
@@ -430,6 +448,10 @@ class _Walk:
         # apart from ``scanned`` because ``scanned`` is a reported fact and
         # this is a ceiling: see ``_KG_RAW_SCAN_FACTOR``.
         self.raw_scanned = 0
+        # Page queries issued by this action, and the ceiling the traversal
+        # proved before it started.  See ``bound_queries``.
+        self.queries = 0
+        self.query_limit = 0
         self.reason = ""
 
     @property
@@ -488,6 +510,42 @@ class _Walk:
         if not first_page:
             self.pages += 1
 
+    def bound_queries(self, limit: int) -> None:
+        """Arm this action's page-query ceiling, once, before the traversal.
+
+        The number of round trips one action can spend IS bounded by the
+        budget, but only through an argument about the traversal rather than
+        through any single counter — and an unstated bound is one refactor
+        away from not holding.  Each traversal states its own bound here (the
+        derivations live at the two call sites) and every page query is charged
+        against it, so the property is checked instead of believed.
+
+        Deliberately NOT the same thing as ``max_pages``.  That allowance
+        bounds the EXTRA round trips a caller pools across actions and
+        deliberately leaves each partition's first page free — charging first
+        pages would make a wide-and-thin corpus (one formula each across a
+        hundred sources, the ordinary shape) unenumerable at every effort
+        level, which is a completeness regression this feature already had to
+        fix once.  So the first pages stay free and are bounded HERE instead,
+        by the row budget: a partition is only visited because the map counted
+        rows in it, and a visited partition yields rows.  Two rails, two
+        questions, both answered.
+        """
+        self.query_limit = max(1, int(limit))
+
+    def charge_query(self) -> None:
+        """Charge one page query BEFORE it is issued.
+
+        Before, not after: the ceiling exists to stop the round trip, not to
+        notice it afterwards.
+        """
+        self.queries += 1
+        if self.query_limit and self.queries > self.query_limit:
+            raise EnumerationInvariantError(
+                "enumeration issued more page queries than its budget allows "
+                f"({self.queries} > {self.query_limit})"
+            )
+
     def scan_raw(self, count: int) -> bool:
         """Charge raw rows read by a status-filtered traversal.
 
@@ -525,18 +583,19 @@ def _coverage(
     returns only its own tail, so comparing one call's ``returned`` against the
     collection's size would condemn every continuation.
 
-    Registered asymmetry, because this check quietly promotes a cache into a
-    completeness assertion: the map's per-source counts can under-report during
-    the first-parse window (elements land while ``chunked_at`` is still NULL
-    and ``updated_at`` has not moved yet — see
-    ``SourceStore.source_change_signal_rows``).  In that window the source is
-    counted as zero, is therefore not in the plan, is not walked, and both
-    numbers agree at zero: the list stays consistent with the map, and the
-    error is an under-count that heals at the next status write.  What the
-    check does catch is the reverse — a plan that promised rows the walk could
-    not find — and that is reported as ``concurrent_change`` rather than
-    swallowed, because answering "complete" on a denominator that disagrees
-    with the list is exactly the false "all" this module exists to prevent.
+    This check promotes a cache into a completeness assertion, so the cache has
+    to be exact rather than merely eventually right.  It is: ``replace_elements``
+    advances the source's ``updated_at`` in the same write transaction as the
+    new elements, so the change signal flips the instant they commit and a
+    count taken against the previous generation can never be served again.
+    (Earlier this held only for a REPARSE — a first parse landed elements
+    without moving any component of the signal, and a map built before the
+    following status write counted the source as zero.  That window is gone,
+    not merely disclosed.)  What the denominator check catches is a plan that
+    promised rows the walk could not find, and that is reported as
+    ``concurrent_change`` rather than swallowed, because answering "complete"
+    on a denominator that disagrees with the list is exactly the false "all"
+    this module exists to prevent.
     """
     reason = walk.reason
     if (
@@ -651,8 +710,8 @@ class CollectionEnumerationService:
         ``source_id`` narrows the traversal to a single source, which must
         belong to a participant notebook (one primary-key check) and is then
         paged DIRECTLY.  Its absence from the map's plan is not read as "it has
-        none": the plan's counts are a cache, and a source parsed moments ago
-        can hold rows the cache still reports as zero.
+        none": one explicitly named source is worth an index-seeked query
+        rather than an answer inferred from a cached zero.
         """
         if kind not in ENUMERABLE_ELEMENT_KINDS:
             raise ValueError(f"unknown enumerable element kind: {kind!r}")
@@ -700,6 +759,20 @@ class CollectionEnumerationService:
                 # scope check; do not query it a second time.
                 loaded_until=len(sources) if preloaded else 0,
             )
+            # Round-trip bound, proved from the two rails:
+            #   * every page query beyond a source's first is charged to
+            #     ``max_pages``  ⇒  at most ``max_pages`` of those;
+            #   * a source is in the plan only because the map counted rows in
+            #     it, and the walk visits sources in plan order  ⇒  each first
+            #     page belongs to a source that yields a row, and rows are
+            #     capped at ``max_rows``.
+            # Hence ``max_rows + max_pages`` page queries, whatever the corpus
+            # shape.  A stale plan entry (counted rows, holds none by the time
+            # it is read) is the one way a first page can come back empty, and
+            # the same concurrent write that caused it makes the closing scope
+            # check report ``concurrent_change`` — the result is already known
+            # bad, and a breach here degrades to one skipped action.
+            walk.bound_queries(budget.max_rows + budget.max_pages)
             try:
                 for index, entry in enumerate(sources):
                     raise_if_cancelled(cancel_event)
@@ -717,6 +790,7 @@ class CollectionEnumerationService:
                     while True:
                         raise_if_cancelled(cancel_event)
                         allowance = walk.emit_allowance(first_page=first_page)
+                        walk.charge_query()
                         rows = self._sources.element_page_rows(
                             db, entry.source_id, kind, after, allowance + 1
                         )
@@ -907,6 +981,20 @@ class CollectionEnumerationService:
                     if cursor.created_at is not None else None
                 )
 
+            # Round-trip bound, same shape as the element side but with the
+            # status filter's top-up reads in it (see ``_usable_kg_page``):
+            #   * logical pages ≤ one free first page per participant, plus
+            #     ``max_pages`` charged ones;
+            #   * inside one logical page, every query that comes back with
+            #     rows charges them to ``raw_scan_limit``, and the first query
+            #     that comes back short ends that page — so the queries that
+            #     are NOT bounded by the raw ceiling are at most one per page.
+            # Participants replace ``max_rows`` here because a participant with
+            # no objects of the type still costs its one query: unlike the
+            # element plan, the KG side has no per-partition count to skip on.
+            walk.bound_queries(
+                len(walk_ids) + budget.max_pages + walk.raw_scan_limit
+            )
             try:
                 for notebook_id in walk_ids:
                     raise_if_cancelled(cancel_event)
@@ -1031,6 +1119,7 @@ class CollectionEnumerationService:
             # no deprecated objects issues precisely the query it issued before
             # the filter moved out of SQL.
             fetch = max(1, want - len(collected))
+            walk.charge_query()
             rows = self._knowledge.knowledge_object_page_rows(
                 db, notebook_id, object_type, scan_after, fetch
             )
@@ -1069,9 +1158,9 @@ class CollectionEnumerationService:
 
         The source is then walked whatever the map says about it.  Its
         ``total`` comes from the plan when the map has a count for it, and is
-        ``None`` (unknown denominator) otherwise: inferring zero from "absent
-        from the plan" would turn a just-parsed source into a confident empty
-        answer.
+        ``None`` (unknown denominator) otherwise: "absent from the plan" is a
+        statement about a cache, and reporting an unknown denominator costs
+        nothing next to answering a hand-named source with a confident zero.
         """
         rows = self._source_display(db, [source_id])
         row = rows.get(source_id)
