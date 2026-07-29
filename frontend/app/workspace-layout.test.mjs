@@ -7,6 +7,7 @@ import {
   workspaceRequestIsCurrent,
 } from "./workspace-transitions.ts";
 import {
+  callSitesIn,
   declarations,
   importsFrom,
   jsxElements,
@@ -101,11 +102,47 @@ test("source detail uses the dedicated draggable window shell", () => {
   const windows = jsxElements(page, "SourceDetailWindow");
   assert.equal(windows.length, 1);
   assert.deepEqual(windows[0].bindings, {
-    onClose: "() => setSourceDetail(null)",
+    // PR-2 T6: 关闭来源详情也要清掉 highlightedElementId——否则 Ask 清单卡「查看
+    // 来源」跳转设置的高亮目标会残留到下一次经普通来源列表打开的、无关的来源上
+    // （该状态与目标元素同一个 getElementById 效果消费，参见 highlightedElementId
+    // 声明处的效果与 openSourceById 的注释）。
+    onClose: '() => { setSourceDetail(null); setHighlightedElementId(""); }',
   });
   assert.equal(
     importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),
     false,
+  );
+});
+
+
+// 双评审 P2-6: 来源详情「查看来源」跳转能不能真的定位到目标元素,取决于两处
+// 独立代码是否仍在用同一个 sourceElementDomId(...) 变换互相对应——评审实测:
+// 删掉元素卡的 id 属性,现有测试(上面那条只钉 onClose 绑定)全绿。这条测试把
+// 两处绑到一起:元素卡必须把 id 设成 sourceElementDomId(element.id),滚动 effect
+// 必须用同一个函数把 highlightedElementId 变换成同一种 id 去 getElementById。
+// 任一处被删除或被"移动"(换成不调用 sourceElementDomId 的等价写法)都会报红。
+test("来源详情的元素卡片 DOM id 与滚动 effect 消费同一个 sourceElementDomId(...)", () => {
+  const sourceCards = jsxElements(page, "article").filter(
+    (element) => element.bindings?.id === "sourceElementDomId(element.id)",
+  );
+  assert.equal(
+    sourceCards.length,
+    1,
+    "元素卡片未绑定 id={sourceElementDomId(element.id)}(被删除,或改了绑定表达式)",
+  );
+
+  const scrollEffect = callSitesIn(page).find(
+    (call) => call.target === "useEffect"
+      && call.arguments[1] === "[highlightedElementId, sourceDetail, sourceElements]",
+  );
+  assert.ok(
+    scrollEffect,
+    "highlightedElementId 滚动 effect 未找到(依赖数组已改变,或整段被删)",
+  );
+  assert.match(
+    scrollEffect.arguments[0],
+    /sourceElementDomId\(highlightedElementId\)/,
+    "滚动 effect 不再调用 sourceElementDomId(highlightedElementId)(被改写成了不经过它的等价逻辑)",
   );
 });
 

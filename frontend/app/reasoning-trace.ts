@@ -24,13 +24,21 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 8 个真实取值见 reasoning_retrieval.py `run()` 循环里的 elif 分支。用「下一步
-// 意图」措辞而非机制名(ppr/community/chain 这些是内部机制,不该摆给用户)。
+// 全部 10 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
+// `decision.next_action == "answer" or decision.sufficient` 起,到
+// `elif decision.next_action == "expand_community":` 止(PR-2 在其中插入了
+// enumerate_elements/enumerate_kg_objects 两个,精确查找通道插入了 exact_lookup
+// 一个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续改动
+// 腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不重蹈
+// 覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
+// exact_lookup 这些是内部机制,不该摆给用户)。
 const NEXT_ACTION: Record<string, string> = {
   answer: "开始作答",
   expand_graph: "顺着相关内容继续找",
   add_subquery: "换个角度再查一遍",
   search_elements: "回原文里找细节",
+  enumerate_elements: "列元素清单",
+  enumerate_kg_objects: "列知识对象清单",
   ppr_retrieve: "顺着关联扩大范围",
   expand_community: "找相似内容对比",
   follow_chain: "顺着推导链继续",
@@ -110,6 +118,21 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   }
   if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {
     return `${detail.scanned_rows}/${Number(detail.known_total_rows ?? 0)} 行`;
+  }
+  // PR-2 集合枚举工具的 enumerate 步:字段名刻意与上面 Knowhow 那条不同
+  // (returned_total/total,不是 scanned_rows/known_total_rows——那是表的「行」口径,
+  // 这里数的是集合的「条目」,而且分母可能未知)。用 detail.collection 存在与否
+  // 区分两条分支,不能共用同一个数字读法,否则会把「12 条」渲染成「12/0 行」。
+  if (
+    step.step_type === "enumerate"
+    && typeof detail.collection === "string" && detail.collection
+    && typeof detail.returned_total === "number"
+  ) {
+    if (detail.complete) return "已全部列出";
+    if (detail.total === null || detail.total === undefined) {
+      return `${detail.returned_total} 条（总数未知）`;
+    }
+    return `${detail.returned_total}/${detail.total} 条`;
   }
   if (typeof detail.count === "number") return `${detail.count} 个候选`;
   if (typeof detail.found === "number") return `新增 ${detail.found}`;

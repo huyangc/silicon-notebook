@@ -350,6 +350,70 @@ export type KnowhowBatchCoverage = {
   synthesis_complete?: boolean | null;
 };
 
+/**
+ * 枚举工具(PR-2)的类型化元素/知识对象清单覆盖率。**不是** `KnowhowResultSet["coverage"]`
+ * 的复用——那一个的 `total_rows` 缺省是 0，表达不了"分母未知"（大库地图算不出总数时，
+ * 后端把 `total` 置 `None`）。渲染时 `total === null` 必须显示"总数未知"，绝不能落成
+ * `N/0`。真源：`backend/app/models/ask.py TypedCollectionCoverage`。
+ */
+export type TypedCollectionCoverage = {
+  returned_total: number;
+  total: number | null;
+  complete: boolean;
+  truncated_reason?: string | null;
+  overflow_semantics?: "explicit_partial" | "";
+};
+
+/**
+ * 一条枚举出的来源元素或知识对象。两种用途共享一个线上形状（真源见
+ * `backend/app/models/ask.py TypedCollectionItem`）：元素行填
+ * `source_id`/`source_title`/`element_type`/`location_label`/`text`/`asset_id`；
+ * 知识对象行填 `name`/`section_path`/`evidence_element_ids`。`notebook_id` 两种都填
+ * （多领域基准库场景下是证据的真实来源笔记本，不是"只在跨库命中才非空"的
+ * Citation.notebook_id 惯例）。
+ */
+export type TypedCollectionItem = {
+  item_id: string;
+  // 仅 collection === "elements" 时有效
+  source_id?: string;
+  source_title?: string;
+  element_type?: string;
+  location_label?: string;
+  text?: string;
+  /** 仅 image 元素非空；空串代表"非图片/无图片资产"，不是 null。 */
+  asset_id?: string;
+  // 仅 collection === "kg_objects" 时有效
+  name?: string;
+  section_path?: string;
+  evidence_element_ids?: string[];
+  // 两种都填
+  notebook_id?: string;
+  tier?: string;
+};
+
+/**
+ * 一份类型化的元素/知识对象清单结果（PR-2 枚举工具）。与 `KnowhowResultSet`
+ * 并列进 `AskResponse.result_sets`，按 `kind` 判别；`coverage`（而非它在相关度
+ * 排序里的位置）才是完整/部分的权威依据。真源：
+ * `backend/app/models/ask.py TypedCollectionResult`。
+ */
+export type TypedCollectionResult = {
+  kind: "collection";
+  collection: "elements" | "kg_objects";
+  /** collection === "elements" 时非空："formula" | "table" | "image" | "code_block"。 */
+  element_kind?: string;
+  /** collection === "kg_objects" 时非空："concept" | "claim" | "formula" | "procedure"。 */
+  object_type?: string;
+  /** 非空时表示这份清单被限定在单个来源范围内。 */
+  source_id?: string;
+  items: TypedCollectionItem[];
+  coverage: TypedCollectionCoverage;
+  /** 实际进入本轮答案合成预览的条目数；与 coverage.returned_total（枚举出的总条目数）分开披露。 */
+  synthesis_rows: number;
+  /** null = 本轮没有尝试过合成预览（模型未配置，或从未触发）；不要渲染成"分析不完整"。 */
+  synthesis_complete?: boolean | null;
+};
+
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
@@ -370,8 +434,14 @@ export type AskResponse = {
   mode?: AskModeId;
   /** 提交本轮时选的 reasoning 检索档位；历史打开时据此恢复。 */
   retrieval_effort?: import("./ask-retrieval-effort").AskRetrievalEffortId;
-  /** complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。 */
-  result_sets?: KnowhowResultSet[];
+  /**
+   * complete / aggregate / hybrid 查询的可验证行集，独立于 Markdown 摘要。
+   * kind 判别的 union（PR-2 T5/T6）：Knowhow 的整表批次（kind="knowhow"）与
+   * 枚举工具产出的类型化元素/知识对象清单（kind="collection"）共用这个数组，
+   * 渲染必须按 kind 分派，不能按下标猜测；未知 kind 一律跳过，不得当作 knowhow
+   * 卡片渲染（会在 `.rows` 上炸出 TypeError）。
+   */
+  result_sets?: (KnowhowResultSet | TypedCollectionResult)[];
   /** 整个请求范围的覆盖率；与每张已选表自身的 coverage 分开。 */
   result_coverage?: KnowhowBatchCoverage;
   model_errors?: {

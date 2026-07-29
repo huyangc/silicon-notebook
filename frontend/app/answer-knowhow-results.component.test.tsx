@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import { AnswerView } from "./answer-panel";
-import type { AskResponse } from "./workspace-model";
+import type { AskResponse, KnowhowResultSet } from "./workspace-model";
 
 
 function answerWithRows(totalRows: number, complete = true): AskResponse {
@@ -90,14 +90,17 @@ test("complete Knowhow result shows coverage, initially caps at 20 rows, then ex
 test("partial Knowhow result never claims completeness and exposes the bound reason", () => {
   renderAnswer(answerWithRows(100, false));
   expect(screen.getByText("部分 25/100")).toBeInTheDocument();
-  expect(screen.getByText("已明确标注为部分结果（row_limit）")).toBeInTheDocument();
+  // truncated_reason 走界面词映射(P2 修复),不再原样吐 row_limit 这个内部代号。
+  expect(screen.getByText("已明确标注为部分结果（已达本轮可读取的行数上限）")).toBeInTheDocument();
   expect(screen.getByText(/未扫描部分不会被表述为“全部”/)).toBeInTheDocument();
 });
 
 
 test("payload-limited badge reports returned rows separately from scanned rows", () => {
   const answer = answerWithRows(100, false);
-  const result = answer.result_sets![0];
+  // result_sets 是 kind 判别 union(PR-2 T5/T6);answerWithRows 只构造 kind="knowhow"
+  // 行,这里窄化类型以继续直接改 .rows/.coverage(与本文件其余用例一致的写法)。
+  const result = answer.result_sets![0] as KnowhowResultSet;
   result.rows = result.rows.slice(0, 5);
   result.coverage.returned_rows = 5;
   result.coverage.scanned_rows = 25;
@@ -106,6 +109,17 @@ test("payload-limited badge reports returned rows separately from scanned rows",
   renderAnswer(answer);
   expect(screen.getByText("部分 5/100")).toBeInTheDocument();
   expect(screen.getAllByText(/已扫描 25 行/)).toHaveLength(2);
+});
+
+
+test("未知 truncated_reason 兜底显示「部分结果」,不吐英文内部代号", () => {
+  const answer = answerWithRows(100, false);
+  const result = answer.result_sets![0] as KnowhowResultSet;
+  result.coverage.truncated_reason = "some_future_reason_code";
+
+  renderAnswer(answer);
+  expect(screen.getByText("已明确标注为部分结果（部分结果）")).toBeInTheDocument();
+  expect(screen.queryByText(/some_future_reason_code/)).not.toBeInTheDocument();
 });
 
 
@@ -128,6 +142,7 @@ test("batch coverage distinguishes omitted tables from complete selected tables"
   expect(screen.getByText("总体部分")).toBeInTheDocument();
   expect(screen.getByText("表 8/10；行 8/10")).toBeInTheDocument();
   expect(screen.getByText("分析覆盖 8/10（部分）")).toBeInTheDocument();
-  expect(screen.getByText("截断原因：table_limit")).toBeInTheDocument();
+  // truncated_reason 走界面词映射(P2 修复),不再原样吐 table_limit 这个内部代号。
+  expect(screen.getByText("截断原因：已达本轮可读取的表数上限")).toBeInTheDocument();
   expect(screen.getByText("完整 10/10")).toBeInTheDocument();
 });
