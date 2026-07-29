@@ -21,6 +21,7 @@ from app.models.sources import (
     PaginatedSources,
     ReparseSourcesRequest,
     RepairScheduledResult,
+    ScopedSourceDetail,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
@@ -388,11 +389,14 @@ def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail
 
 @router.get(
     "/notebooks/{notebook_id}/sources/{source_id}",
-    response_model=SourceDetail,
+    response_model=ScopedSourceDetail,
     dependencies=[Depends(require_notebook_read)],
 )
-def get_source_in_scope(notebook_id: str, source_id: str) -> SourceDetail:
-    return _participant_scoped_source(notebook_id, source_id)
+def get_source_in_scope(notebook_id: str, source_id: str) -> ScopedSourceDetail:
+    # ⚠ 响应模型不是 SourceDetail:代理读取会把参考库的来源交给一个对该库既非 owner
+    # 也非成员的用户,`file_path`(后端绝对路径)和 `error_message`(原始异常串,同样
+    # 可能带绝对路径)不能跟着出去。理由与取舍见 ScopedSourceDetail 的 docstring。
+    return ScopedSourceDetail.of(_participant_scoped_source(notebook_id, source_id))
 
 
 @router.get(
@@ -456,8 +460,17 @@ def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
     path = _asset_service().path_for(asset)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Asset not found")
+    # ⚠ 代理来的跨库资产不进浏览器缓存。挂载有效期内取回的图片若按 max-age=86400
+    # 缓存,取消挂载/降级/易主之后重新打开会由缓存直接命中、根本到不了上面那次参与集
+    # 判定——「挂载边一失效就当场 404」这条合同会被静默架空整整一天。本端点不做条件
+    # 请求(没有 If-None-Match 处理),`no-cache` 的重验同样要回源整份字节,与 `no-store`
+    # 没有带宽差别,故直接取语义最不含糊的那个。本库资产不涉及挂载生命周期,保持原有
+    # 长缓存不动——它才是「一张图一次请求」的高频路径。
+    cacheable = asset["notebook_id"] == notebook_id
     return FileResponse(
-        path, media_type=asset["mime"], headers={"Cache-Control": "private, max-age=86400"}
+        path,
+        media_type=asset["mime"],
+        headers={"Cache-Control": "private, max-age=86400" if cacheable else "no-store"},
     )
 
 

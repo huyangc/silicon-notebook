@@ -6061,11 +6061,13 @@ export default function Home() {
                 )) : (
                   <article className="item">
                     <h3>等待解析</h3>
-                    {/* error_message 是后端的原始异常串(services/source_ingestion.py),
-                        不直出——这里只按「有没有失败」二选一给稳定文案。原文在来源
-                        轮询那条路径上已经过 toUserMessage 落进 console(见 justFailed)。
-                        渲染期不调 toUserMessage:它会随重渲染反复刷日志。 */}
-                    <p>{sourceDetail.error_message
+                    {/* 只按「有没有失败」二选一给稳定文案,绝不直出后端的原始异常串。
+                        代理读取端点(openSourceById 的主路径)刻意只回 parse_failed 布尔
+                        ——原文可能带服务端绝对路径,跨库读取不该拿到;老的 /sources/{id}
+                        仍回 error_message,兜底路径与轮询路径靠它。原文在来源轮询那条
+                        路径上已经过 toUserMessage 落进 console(见 justFailed);渲染期
+                        不调 toUserMessage:它会随重渲染反复刷日志。 */}
+                    <p>{(sourceDetail.parse_failed ?? Boolean(sourceDetail.error_message))
                       ? "这个来源没能解析成功，可以删除后重新上传。"
                       : "当前来源还没有解析出元素。"}</p>
                   </article>

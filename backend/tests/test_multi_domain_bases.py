@@ -1635,6 +1635,63 @@ class TestParticipantScopedSourceAndAssetProxy:
         assert image.status_code == 200
         assert image.content == _PROXY_PNG
 
+    def test_proxied_reads_disclose_no_backend_internals(self, two_users_client):
+        """代理读取把参考库的来源交给一个非 owner 非成员的用户,后端内部形态不能跟着出去:
+        `file_path`(本机绝对路径)与 `error_message`(原样落库的异常串,同样可能带绝对路径)
+        整个字段不在响应模型里,只留如实的 `parse_failed` 布尔。"""
+        c = two_users_client
+        client = c["client"]
+        active, _base, seeded, repo_api = self._mounted_base(c)
+        with repo_api._write() as db:
+            db.execute(
+                "UPDATE sources SET file_path=?, error_message=? WHERE id=?",
+                ("/srv/silicon/storage/notebooks/secret/base.md",
+                 "FileNotFoundError: /srv/silicon/storage/notebooks/secret/base.md",
+                 seeded["source_id"]),
+            )
+
+        body = client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            headers=c["u1"],
+        ).json()
+        assert "file_path" not in body and "error_message" not in body
+        assert body["parse_failed"] is True
+        assert "/srv/silicon" not in client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            headers=c["u1"],
+        ).text, "整份响应正文里不得出现服务端路径"
+
+        # 同库来源走同一个模型(不按调用场景分叉出两种响应形状);解析没失败就是 False。
+        own = _seed_source_with_element_and_asset(repo_api, active["id"], "own-clean")
+        own_body = client.get(
+            f"/api/notebooks/{active['id']}/sources/{own['source_id']}",
+            headers=c["u1"],
+        ).json()
+        assert "file_path" not in own_body and own_body["parse_failed"] is False
+
+    def test_proxied_asset_is_not_browser_cacheable(self, two_users_client):
+        """挂载有效期内取回的跨库图片若进了浏览器缓存,取消挂载后重开会由缓存命中、
+        绕过参与集判定——「失效即 404」会被静默架空一天。跨库响应因此 no-store,
+        本库资产保持原有长缓存(它才是一张图一次请求的高频路径)。"""
+        c = two_users_client
+        client = c["client"]
+        active, _base, seeded, repo_api = self._mounted_base(c)
+
+        proxied = client.get(
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+            headers=c["u1"],
+        )
+        assert proxied.status_code == 200
+        assert proxied.headers["cache-control"] == "no-store"
+
+        own = _seed_source_with_element_and_asset(repo_api, active["id"], "own-asset")
+        local = client.get(
+            f"/api/notebooks/{active['id']}/assets/{own['asset_id']}",
+            headers=c["u1"],
+        )
+        assert local.status_code == 200
+        assert local.headers["cache-control"] == "private, max-age=86400"
+
     def test_unmounted_public_base_is_denied(self, two_users_client):
         """公共库本身可挂,但**没挂**就不在参与集里——公共 ≠ 人人可直接读。"""
         c = two_users_client
