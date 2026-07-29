@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from psycopg import sql
 
+from app.repositories.like_pattern import LIKE_ESCAPE_CHAR, escape_like_pattern
+
 
 PAYLOAD_NAME_EXPRESSION = '(payload ->> \'name\') COLLATE "C"'
 TAGS_JSON_EXPRESSION = '(tags_json::text) COLLATE "C"'
@@ -100,7 +102,7 @@ def lexical_candidate_sql(
     )
 
 
-LIKE_ESCAPE_CHARACTER = "\\"
+LIKE_ESCAPE_CHARACTER = LIKE_ESCAPE_CHAR
 
 
 def like_contains_pattern(term: str) -> str:
@@ -112,12 +114,7 @@ def like_contains_pattern(term: str) -> str:
     ``set db``.  Escaping belongs to the LIKE arm alone; the trigram operator
     and ``public.similarity`` keep the unescaped term so ordering is unchanged.
     """
-    escaped = (
-        term.replace(LIKE_ESCAPE_CHARACTER, LIKE_ESCAPE_CHARACTER * 2)
-        .replace("%", LIKE_ESCAPE_CHARACTER + "%")
-        .replace("_", LIKE_ESCAPE_CHARACTER + "_")
-    )
-    return f"%{escaped}%"
+    return f"%{escape_like_pattern(term)}%"
 
 
 def expression(name: str) -> str:
@@ -275,6 +272,64 @@ def knowledge_candidate_documents(connection, ids):
         f"SELECT id,{PAYLOAD_NAME_EXPRESSION} AS name "
         "FROM knowledge_objects WHERE id=ANY(%s) AND status!='deprecated'",
         (values,),
+    ).fetchall()
+
+
+def chunk_exact_candidate_rows(connection, notebook_id: str, needle: str, limit: int):
+    """EXACT substring chunk candidates for the identifier fast path.
+
+    Only `ILIKE '%needle%'` — no `OPERATOR(public.%)` similarity branch, since
+    "exact" here means exact; the trigram GIN index (`idx_chunks_text_trgm`)
+    accelerates ILIKE patterns just as it does the union path's.
+
+    `%`/`_`/`\\` in the needle are escaped, and that is load-bearing rather
+    than defensive: `set_db` contains LIKE's single-character wildcard, so the
+    unescaped pattern would also accept `setXdb` — a silent precision loss in
+    the one code path whose entire purpose is precision.
+
+    `similarity()` supplies the ordering key (and the reported score) exactly
+    as `lexical_candidate_sql` does, with the same `C`-collated id tie-break so
+    a truncated window is deterministic.
+    """
+    if limit <= 0 or not (needle or "").strip():
+        return []
+    text_expression = expression("chunk_text")
+    return connection.execute(
+        "SELECT id AS candidate_id,source_id,section_path,"
+        f"public.similarity({text_expression},%s) AS candidate_similarity "
+        f"FROM chunks WHERE notebook_id=%s AND {text_expression} ILIKE %s "
+        "ORDER BY candidate_similarity DESC,id COLLATE \"C\" LIMIT %s",
+        (needle, notebook_id, f"%{escape_like_pattern(needle)}%", int(limit)),
+    ).fetchall()
+
+
+def chunk_section_rows(
+    connection, notebook_id: str, source_id: str, section_path: str, limit: int
+):
+    """One section's chunks (that node plus its descendants) in document order.
+
+    `ordinal` is PostgreSQL's document order, mirroring the SQLite adapter's
+    `rowid` (chunk ids are random surrogates and sort meaninglessly).  The
+    subtree predicate and its escaping match the SQLite adapter verbatim;
+    PostgreSQL needs no ESCAPE clause because backslash is already its default
+    LIKE escape character and the pattern is a bound parameter.
+    """
+    path = section_path or ""
+    if not path or limit <= 0:
+        return []
+    return connection.execute(
+        "SELECT c.id,c.source_id,c.text,c.section_path,c.element_ids,"
+        "s.title AS source_title FROM chunks c JOIN sources s ON s.id=c.source_id "
+        "WHERE c.notebook_id=%s AND c.source_id=%s "
+        "AND (c.section_path=%s OR c.section_path LIKE %s) "
+        "ORDER BY c.ordinal LIMIT %s",
+        (
+            notebook_id,
+            source_id,
+            path,
+            escape_like_pattern(path) + " > %",
+            int(limit),
+        ),
     ).fetchall()
 
 

@@ -2342,3 +2342,50 @@ def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
             ).fetchall()
         }
     assert texts == {"振荡", "新方法"}
+
+
+@pytest.mark.postgres_integration
+def test_postgres_source_elements_for_chunking_extracts_metadata_keys(
+    postgres_database,
+):
+    """PG 侧 source_elements_for_chunking 的 metadata 提取(caption + section_path)
+    与 SQLite 侧语义对等。历史上这半边零覆盖:把提取写成 metadata.get("section_paths")
+    这类笔误只会让 PG 部署静默退回旧标签,本地门与 CI 都不报红——SQLite 半边有
+    集成回归门,这条钉住 PG 半边(质量评审 P2-2)。"""
+    from app.repositories.postgres._store_utils import jsonb
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 14
+    _seed_catalog(postgres_database)
+    mark = "%s"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+            "file_path,file_size,file_hash,summary,created_at,updated_at,doc_type) "
+            f"VALUES ('src-crumb',{mark},'source','markdown','extracted','parsed',"
+            f"'a.md','',0,'hash-crumb','',{mark},{mark},'textbook')",
+            ("nb-content", NOW, NOW),
+        )
+        rows = [
+            ("el-src-crumb-0001", "heading", "set_db",
+             {"section_path": "Manual > Commands > set_db"}),
+            ("el-src-crumb-0002", "paragraph", "body text", {}),
+            ("el-src-crumb-0003", "image", "", {"caption": "flow diagram"}),
+        ]
+        for element_id, element_type, text, metadata in rows:
+            connection.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,metadata,created_at) "
+                f"VALUES ({mark},'src-crumb',{mark},'L1',{mark},{mark},{mark})",
+                (element_id, element_type, text, jsonb(metadata), NOW),
+            )
+
+    elements = ChunkStore(postgres_database).source_elements_for_chunking("src-crumb")
+
+    by_id = {element["id"]: element for element in elements}
+    assert by_id["el-src-crumb-0001"]["section_path"] == "Manual > Commands > set_db"
+    assert by_id["el-src-crumb-0002"]["section_path"] == ""
+    assert by_id["el-src-crumb-0003"]["caption"] == "flow diagram"
+    assert [element["id"] for element in elements] == sorted(by_id)

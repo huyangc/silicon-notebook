@@ -16,7 +16,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Literal, Optional, Sequence, Set
+from typing import (
+    AbstractSet,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Set,
+)
 
 from app.models.common import Evidence
 
@@ -663,47 +673,37 @@ def is_graph_only_chunk(chunk: "RetrievedChunk") -> bool:
     )
 
 
-def select_with_graph_reserve(
-    ranked: Sequence["RetrievedChunk"],
-    max_tokens: int,
-    *,
-    reserve: int = 1,
-    min_graph_score: float = RELEVANCE_FLOOR,
-) -> List["RetrievedChunk"]:
-    """Token truncation with a bounded reserve for genuinely graph-only hits.
+@dataclass(frozen=True)
+class ReserveRule:
+    """One bounded floor inside the SAME token budget.
 
-    The historical global-first oversize rule is preserved exactly: if the
-    highest-ranked chunk alone exceeds the budget it remains the sole result.
-    Reserve candidates may evict only lower-ranked direct candidates; they do
-    not create a second oversize exception.
+    ``holds`` marks the chunks that satisfy this floor — they count toward it
+    and, once a rule is active, they are protected from being evicted to make
+    room for another rule's candidate. ``admits`` marks the chunks that may be
+    pulled in to fill it; it is usually stricter than ``holds`` (a graph-only
+    chunk counts as graph coverage even when it is too weak to be worth pulling
+    in deliberately).
     """
-    ranked = list(ranked)
-    selected = truncate_by_tokens(ranked, lambda chunk: chunk.text, max_tokens)
-    if reserve <= 0 or not ranked or not selected:
-        return selected
-    first_tokens = est_tokens(selected[0].text)
-    if first_tokens > max_tokens:
-        return selected
-    already = sum(1 for chunk in selected if is_graph_only_chunk(chunk))
-    need = max(0, reserve - already)
-    if need == 0:
-        return selected
 
-    selected_ids = {chunk.chunk_id for chunk in selected}
-    eligible = []
-    for position, chunk in enumerate(ranked):
-        if (
-            chunk.chunk_id in selected_ids
-            or not is_graph_only_chunk(chunk)
-            or not chunk.element_ids
-        ):
-            continue
+    reserve: int
+    holds: Callable[["RetrievedChunk"], bool]
+    admits: Callable[["RetrievedChunk"], bool]
+
+
+def graph_reserve_rule(
+    reserve: int, *, min_graph_score: float = RELEVANCE_FLOOR
+) -> ReserveRule:
+    """The historical graph-only reserve, unchanged."""
+
+    def _admits(chunk: "RetrievedChunk") -> bool:
+        if not is_graph_only_chunk(chunk) or not chunk.element_ids:
+            return False
         if any(
             support.origin == "relation"
             and support.review_status_snapshot == "rejected"
             for support in chunk.retrieval_supports
         ):
-            continue
+            return False
         graph_supports = [
             support for support in chunk.retrieval_supports
             if support.origin in {"kg_source", "ppr", "relation"}
@@ -713,39 +713,128 @@ def select_with_graph_reserve(
             (support.score for support in graph_supports if support.score is not None),
             default=chunk.relevance,
         )
-        if graph_supports and best >= min_graph_score:
-            eligible.append((position, chunk))
+        return bool(graph_supports) and best >= min_graph_score
+
+    return ReserveRule(reserve=reserve, holds=is_graph_only_chunk, admits=_admits)
+
+
+def exact_section_reserve_rule(
+    reserve: int, chunk_ids: AbstractSet[str]
+) -> ReserveRule:
+    """Reserve slots for chunks the exact-identifier channel fetched.
+
+    Membership is an explicit id set rather than a new `RetrievalSupport`
+    origin: those chunks legitimately carry a `lexical` support (they ARE
+    substring matches), and widening the support vocabulary would reach
+    `is_graph_only_chunk` and every other consumer of that literal for no gain.
+
+    Unlike the graph rule this does not demand `element_ids`: exact hits are
+    ordinary chunks that the normal lexical path could have surfaced on its
+    own, whereas graph-only chunks are indirect evidence that must at least be
+    citable to earn a reserved slot.
+    """
+    ids = frozenset(chunk_ids)
+
+    def _member(chunk: "RetrievedChunk") -> bool:
+        return chunk.chunk_id in ids
+
+    return ReserveRule(reserve=reserve, holds=_member, admits=_member)
+
+
+def select_with_reserves(
+    ranked: Sequence["RetrievedChunk"],
+    max_tokens: int,
+    rules: Sequence[ReserveRule],
+) -> List["RetrievedChunk"]:
+    """Token truncation with bounded reserves, applied in the given order.
+
+    The historical global-first oversize rule is preserved exactly: if the
+    highest-ranked chunk alone exceeds the budget it remains the sole result.
+    Reserve candidates may evict only lower-ranked direct candidates; they do
+    not create a second oversize exception, and they never enlarge the budget.
+
+    With several rules active, none of them may evict a chunk another one has
+    actually PULLED IN — otherwise the second reserve would silently undo the
+    first. That cross-rule protection covers only rescued chunks (bounded by
+    each rule's quota, since a rule inserts at most ``reserve``): a naturally
+    selected chunk that merely satisfies another rule's floor stays an
+    ordinary evictable candidate, or a large exact section could silently
+    defeat the graph floor without any rescue having happened. Within its own
+    pass a rule still never evicts chunks it holds, exactly like the
+    historical single-rule selector. A rule with ``reserve <= 0`` is inert in
+    every respect, so enabling one reserve cannot change what another does
+    when it is switched off.
+    """
+    ranked = list(ranked)
+    selected = truncate_by_tokens(ranked, lambda chunk: chunk.text, max_tokens)
+    active = [rule for rule in rules if rule.reserve > 0]
+    if not active or not ranked or not selected:
+        return selected
+    first_tokens = est_tokens(selected[0].text)
+    if first_tokens > max_tokens:
+        return selected
 
     positions = {chunk.chunk_id: index for index, chunk in enumerate(ranked)}
-    inserted = 0
-    for _position, candidate in eligible:
-        if inserted >= need:
-            break
-        candidate_tokens = est_tokens(candidate.text)
-        if candidate_tokens > max_tokens:
+    rescued: set[str] = set()
+
+    for rule in active:
+        already = sum(1 for chunk in selected if rule.holds(chunk))
+        need = max(0, rule.reserve - already)
+        if need == 0:
             continue
-        trial = list(selected)
-        used = sum(est_tokens(chunk.text) for chunk in trial)
-        removable = sorted(
-            (
-                chunk for chunk in trial[1:]
-                if not is_graph_only_chunk(chunk)
-            ),
-            key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)),
-            reverse=True,
-        )
-        while used + candidate_tokens > max_tokens and removable:
-            victim = removable.pop(0)
-            trial.remove(victim)
-            used -= est_tokens(victim.text)
-        if used + candidate_tokens > max_tokens:
-            continue
-        trial.append(candidate)
-        trial.sort(key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)))
-        selected = trial
-        selected_ids.add(candidate.chunk_id)
-        inserted += 1
+        selected_ids = {chunk.chunk_id for chunk in selected}
+        inserted = 0
+        for candidate in ranked:
+            if inserted >= need:
+                break
+            if candidate.chunk_id in selected_ids or not rule.admits(candidate):
+                continue
+            candidate_tokens = est_tokens(candidate.text)
+            if candidate_tokens > max_tokens:
+                continue
+            trial = list(selected)
+            used = sum(est_tokens(chunk.text) for chunk in trial)
+            removable = sorted(
+                (chunk for chunk in trial[1:]
+                 if chunk.chunk_id not in rescued and not rule.holds(chunk)),
+                key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)),
+                reverse=True,
+            )
+            while used + candidate_tokens > max_tokens and removable:
+                victim = removable.pop(0)
+                trial.remove(victim)
+                used -= est_tokens(victim.text)
+            if used + candidate_tokens > max_tokens:
+                continue
+            trial.append(candidate)
+            trial.sort(key=lambda chunk: positions.get(chunk.chunk_id, len(ranked)))
+            selected = trial
+            selected_ids.add(candidate.chunk_id)
+            rescued.add(candidate.chunk_id)
+            inserted += 1
     return selected
+
+
+def select_with_graph_reserve(
+    ranked: Sequence["RetrievedChunk"],
+    max_tokens: int,
+    *,
+    reserve: int = 1,
+    min_graph_score: float = RELEVANCE_FLOOR,
+) -> List["RetrievedChunk"]:
+    """Token truncation with a bounded reserve for genuinely graph-only hits.
+
+    Retained as the single-rule spelling even though the ask path now passes its
+    rules explicitly: this is the shape the historical behaviour was specified
+    in, and the suite that pins that behaviour still drives it. Keeping it is
+    what makes "the generalisation changed nothing" a checked claim rather than
+    an assertion.
+    """
+    return select_with_reserves(
+        ranked,
+        max_tokens,
+        (graph_reserve_rule(reserve, min_graph_score=min_graph_score),),
+    )
 
 
 @dataclass

@@ -160,6 +160,9 @@ class _MinimalCandidates:
     def keyword_chunk_candidates(self, notebook_id, keywords):
         return []
 
+    def exact_lookup_chunks(self, notebook_id, query):
+        return []
+
     def retrieve_chunk_candidates(self, notebook_id, query):
         return [], [], []
 

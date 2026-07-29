@@ -105,8 +105,21 @@ def is_noise_concept(name: str, whitelist) -> Tuple[bool, str]:
         return True, "reference"
     if _SECTION_RE.match(raw):
         return True, "section_heading"
-    if (" " not in raw) and ("_" in raw or "^" in raw):
-        return True, "symbol"  # bare single-token symbol; multi-word names with a symbol are kept
+    if " " not in raw:
+        if "^" in raw:
+            return True, "symbol"  # bare single-token symbol (mathematical superscript)
+        if "_" in raw and any(len(seg) <= 1 for seg in raw.split("_")):
+            # underscore symbol only when some segment is a bare single-char/empty
+            # stem (V_DD, g_m1, x_0, _foo) — snake_case identifiers like set_db /
+            # report_timing / place_opt_design have all-multi-char segments and pass.
+            # 阈值 ≤1 被两头夹死: 下界由 V_DD 的 "V" 定, 上界由 set_db 的 "db"
+            # 定(≤2 会把 set_db 判回 symbol); 段长按 code point 算, 数字段同样
+            # 命中(x_0 的 "0")。口径刻意比 eval 探针(probes.py classify_concept
+            # 仍是宽口径"含 _ 即 symbol")窄, 探针只作疑似信号, 勿对齐。
+            # 注意: scripts/validate_concept_filter.py 只回放已入库的 concept,
+            # 而老规则在入库时就丢弃了整类命令名——它对"放松"方向的改动结构性
+            # 报零变化, 不能拿它的零变化当放行证据; 真信号需拿抽取原始输出跑。
+            return True, "symbol"
     if _INSTANCE_RE.match(raw):
         return True, "instance_label"
     return False, ""

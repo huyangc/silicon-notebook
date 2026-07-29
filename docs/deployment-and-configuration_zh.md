@@ -354,7 +354,35 @@ RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
 REASONING_TOP_N_PER_QUERY  # 自适应预算：每个方面（子查询，含社区兄弟）保底席位（默认 3）
 REASONING_TOP_N_CAP        # 自适应预算上限；对比题按方面数扩容（默认 36）
 CHUNK_GRAPH_RESERVE        # 为已过相关度门槛的纯图路径 chunk 预留席位（默认 0；评测后可设 1）
+EXACT_LOOKUP_ENABLED       # 精确标识符通道：按 `set_db` 这类完整命令名整节取齐（默认 true）
+EXACT_LOOKUP_MAX_IDENTIFIERS       # 每个问题最多探测几个名称（默认 3）
+EXACT_LOOKUP_FTS_K                 # 每个标识符的精确命中采样窗口，用于挑选小节（默认 50）
+EXACT_LOOKUP_MAX_SECTIONS          # 每个问题最多取齐几个小节（默认 3）
+EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # 每个小节最多取几块（默认 12）
+EXACT_SECTION_RESERVE      # mix 最终选择为这些块预留的席位，仍在既有预算内（默认 4）
 ```
+
+**精确标识符通道：**问题里点到可精确查找的名称（`set_db`、`place_opt_design`、
+`config.yaml`）时，检索先精确定位它所在的小节，再把整节取齐，避免一条命令的参数表
+和示例被切散后又被预算截掉。
+
+这条通道的闸比普通词法召回用的标识符抽取更窄，差别是一个成本决定：带 `_` 或 `.`
+的名称一律放行，而只用连字符连接的词必须含数字。于是 `GPT-4`、`v1-2` 会探测，
+`state-of-the-art`、`real-time`、`end-to-end` 不会。后面这批词出现在相当大比例的
+分析型问题里（实际上深度报告的每一节问题都含一个），而每个词都要付一次真实的子串
+探测——2 万块规模的库上实测 16 毫秒 / 50 命中——一旦命中还可能把整整一章推进答案的
+证据预算。它们仍留在词法召回里，那边多一个 OR 词项几乎不花钱。
+
+「整节取齐」依赖标题面包屑，而面包屑是 Markdown 解析路径才有的东西。MinerU 解析的
+来源（PDF/DOCX）没有面包屑，通道在那里退回到「精确返回命中的那些块」。这仍然是本
+特性要的效果——参数表能被救回来——但它不是整节补全，所以手册是 PDF 的库，收益会
+小于手册是 Markdown 的库。
+
+通道自身零模型调用、零 embedding；但在 mix 回答路径上它取回的 chunk 会一并进入既有
+的一次 rerank 调用，最多给那一次请求多加
+`EXACT_LOOKUP_MAX_SECTIONS × EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION` 篇文档。所有查询
+都受上面这些参数硬界约束；问题里没有这类名称时不会多发一次查询。只作用于当前笔记本，
+挂载的参考库刻意不在范围内。
 
 **有界 KG 关系补全：**这是默认严格关闭的部署实验。它按来源代次绑定的持久
 `(source_id,id)` keyset 水位逐页推进，每页只做索引化关系检查和有界的同源 FTS/ANN 候选，

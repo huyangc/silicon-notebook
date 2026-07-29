@@ -69,7 +69,7 @@ nb-012 的 5 个源当前 `doc_type=''`。一次性 `UPDATE sources SET doc_type
 **拒绝（判噪声）：**
 - 图表/公式/章节引用：`^(Fig|Figure|Table|Eq|Equation|Sec|Section|§)\b`
 - 章节标题概念：`^\d+(\.\d+)+`（如 "8.4.1 Series-Shunt Feedback"）
-- 裸符号/下标变量：name 含 `_` 或 `^`（V_DD、g_m1、i_b68、R_E26、(W/L)_1、A_v^+）
+- 裸符号/下标变量：name 含 `^`，或含 `_` 且存在长度 ≤1 的分段（V_DD、g_m1、i_b68、R_E26、(W/L)_1、A_v^+）。（2026-07 收窄：`set_db`/`place_opt_design` 这类全部分段 ≥2 字符的 snake_case 命令名不再判噪,详见 `app/services/kg/filters.py` 的 symbol 分支注释。）
 - 实例标号：`^[A-Za-z]\d+$`（Q1、M5、p8、C2、A1）
 - ≤2 字符、纯数字、纯标点
 

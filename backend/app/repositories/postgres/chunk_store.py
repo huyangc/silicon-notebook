@@ -14,6 +14,7 @@ from app.repositories.postgres._store_utils import (
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.search import chunk_section_rows
 
 
 def _compat_element_ids(row: dict) -> dict:
@@ -30,6 +31,11 @@ class ChunkStore:
         self.database = database
 
     def source_elements_for_chunking(self, source_id: str) -> list[dict]:
+        """额外带出 metadata 里的 caption 与 section_path，语义与 SQLite 侧
+        ChunkStore.source_elements_for_chunking 逐字对等：section_path 是
+        markdown 解析路径存的完整标题面包屑（含自身、" > " 分隔），供
+        build_chunks 的 heading 分支代替标题自身文本作 section 标签；缺省时
+        build_chunks 自行回退到标题自身文本，字节不变。"""
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT id,element_type,text,metadata FROM source_elements "
@@ -39,13 +45,16 @@ class ChunkStore:
         output = []
         for row in rows:
             metadata = json_value(row["metadata"], {})
-            caption = str(metadata.get("caption") or "") if isinstance(metadata, dict) else ""
+            is_dict = isinstance(metadata, dict)
+            caption = str(metadata.get("caption") or "") if is_dict else ""
+            section_path = str(metadata.get("section_path") or "") if is_dict else ""
             output.append(
                 {
                     "id": row["id"],
                     "element_type": row["element_type"],
                     "text": row["text"],
                     "caption": caption,
+                    "section_path": section_path,
                 }
             )
         return output
@@ -250,6 +259,24 @@ class ChunkStore:
             "SELECT id FROM chunks WHERE notebook_id=%s ORDER BY ordinal",
             (notebook_id,),
         ).fetchall()
+
+    @staticmethod
+    def chunks_by_section(
+        connection,
+        notebook_id: str,
+        source_id: str,
+        section_path: str,
+        limit: int,
+    ):
+        """One section's chunks (that node plus its descendants), document
+        order, hard-bounded — semantically equal to the SQLite adapter's
+        `chunks_by_section`. SQL lives in `postgres/search.py` so the LIKE
+        predicate stays next to the expression indexes it shares a table with.
+        """
+        rows = chunk_section_rows(
+            connection, notebook_id, source_id, section_path, limit
+        )
+        return [_compat_element_ids(row) for row in rows]
 
     @staticmethod
     def backfill_fts(connection, notebook_id: str) -> int:

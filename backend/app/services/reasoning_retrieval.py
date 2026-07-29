@@ -48,6 +48,9 @@ class _ReasoningRetrieverFactory(Protocol):
     ) -> object: ...
 
 from app.models.ask import TraceStep
+from app.repositories.lexical_query import (
+    MAX_EXACT_PHRASE_CHARS, exact_probe_terms,
+)
 from app.services.prompts import (
     PLAN_SCHEMA_HINT, REFLECT_SCHEMA_HINT, plan_prompt, reflect_prompt,
 )
@@ -71,6 +74,20 @@ _MAX_PPR_RETRIEVES = 3
 # follow_chain 每次最多形成少量两跳路径，但 agent 若不断换起点仍可能把关系
 # evidence 上下文撑爆；与 PPR 动作同样设内部硬上限，不增加环境变量。
 _MAX_FOLLOW_CHAIN_ACTIONS = 3
+# agent 主动 exact_lookup 的累计次数上限(镜像 _MAX_PPR_RETRIEVES 的常量与用法):
+# 每次精确查找都整节取齐,必然带来"新证据"→ stale 熔断不跳,无此上限一次推理可以把
+# 整本手册按节搬进上下文。注:run() 初检索后的 seed pass 不计入此上限(它是保证
+# 基线、非 agent 动作),与 PPR seed pass 的记账口径一致。
+_MAX_EXACT_LOOKUPS = 3
+# 模型给的名称去包裹标点用。刻意不含 `_`/`-`/`.`——它们是标识符的组成部分,而
+# identifier_terms 的正则两端都要求 alnum,首尾的分隔符本就进不了匹配。
+_EXACT_TERM_WRAPPERS = " \t\r\n\"'`“”‘’「」『』《》()（）[]【】<>,，。:：;；!！?？"
+# 名称形状闸拒绝时回喂给模型(并上屏)的措辞。写成「该给什么」而不是「你给错了」:
+# 只说非法,模型下一轮往往换一个同样非法的普通词再试一次,白烧一轮反思。
+_NOT_A_NAME_NOTE = (
+    "「{term}」不是可精确查找的名称"
+    "(要像 set_db、config.yaml 这样带下划线或点;只用连字符连接的词还需带数字,如 GPT-4)"
+)
 # expand_community 跨挂载库合并去重后的兄弟实体总量帽,相对单库上限
 # community_peers_topk(默认 8)的倍数。多领域基准库下每个挂载库最多贡献
 # topk 个,不设总量帽会让合并结果随挂载库数 N 线性到 topk×N——每个新增的
@@ -103,6 +120,22 @@ def _norm_query(q: str) -> str:
     """子查询防重的归一化键:压空白 + casefold。保守精确匹配、不做语义归一——
     宁可放过真改写的近似查询(由回喂账目提示模型约束),不误杀新角度。"""
     return " ".join(str(q).split()).casefold()
+
+
+def clean_exact_term(raw: str) -> str:
+    """模型给的名称去首尾包裹标点。**不在这里截长。**
+
+    `set_db`、"set_db"、「set_db」、`set_db。` 都归一到 set_db。**只做清洗,不做
+    形状校验**——「这是不是一个可精确查找的名称」由 exact_probe_terms 判定,与
+    seed 通道共用同一把闸,这样模型无法通过动作参数绕过那条按实测定标的低选择度
+    子串闸(`2.1` 这类 needle 曾把一次探测从 0.7ms/3 命中放大到 22ms/200 命中;
+    `state-of-the-art` 这类纯连字符英文词组同样被拦在闸外)。
+
+    截长故意不放在这里:上游 reflect() 的 fail_closed 硬闸会拒绝超过 2000
+    字符的字段(见该函数 bounded_fields 检查),但若这里先把值截到词法层的
+    256 字符上界,那条硬闸对 exact_term 就恒不可达——截长挪到真正使用这个
+    值的地方(run() 的 exact_lookup 动作分支),硬闸才能先起作用。"""
+    return str(raw or "").strip().strip(_EXACT_TERM_WRAPPERS)
 
 
 def merge_element_hits(elements: list, found: list) -> list:
@@ -159,6 +192,31 @@ class _QueryAttempt:
 
 
 @dataclass
+class _ExactLookupAttempt:
+    """单次精确查找的执行账目:本次探测的名称、新增原文段数、尝试次数。
+
+    与 `_QueryAttempt` 分开记、且按**调用**而非按名称记:一次调用可以同时探测
+    多个名称(seed pass 用问题里抽出的全部标识符),按名称记只能把批次总数摊到
+    每个名称头上假装是它各自的贡献——回喂给模型的账目必须是真的。
+
+    `note` 区分两种行:空 = 真正执行过的一次查找(seed 或通过全部闸的
+    action),`new`/`tries` 是它的真实产出;非空 = 被 skip 掉、根本没发起探测
+    的一次尝试,`note` 就是回喂 reflect 的教学措辞(为什么被跳过)。没有这一行,
+    模型连续提交同一个非法名称只在 TraceStep 里留痕、账本却对它保持沉默——
+    模型看不到"为什么",只能重复空转,直到 stale 熔断兜底。
+    """
+    terms: List[str] = field(default_factory=list)
+    new: int = 0
+    tries: int = 1
+    note: str = ""
+    # 仅 note 非空(skip 行)时使用:去重键,由调用方按"是否与具体名称相关"
+    # 显式给出——channel 级 skip(未启用/缺名称)用固定键,名称级 skip(非
+    # 标识符/已达上限)用归一化名称,让不同名称各自留痕、同一名称的重复只
+    # 递增 tries。真正执行过的行不用这个字段,复用既有的按 terms 去重逻辑。
+    dedup_key: str = ""
+
+
+@dataclass
 class SubQuery:
     query: str
     types: List[str] = field(default_factory=list)   # 空 = 全部 4 类
@@ -169,7 +227,8 @@ class SubQuery:
 @dataclass
 class ReflectDecision:
     sufficient: bool = False
-    # answer|expand_graph|add_subquery|search_elements|ppr_retrieve|expand_community
+    # answer|expand_graph|add_subquery|search_elements|ppr_retrieve|
+    # expand_community|follow_chain|exact_lookup
     next_action: str = "answer"
     expand_object_id: str = ""
     expand_edge_type: Optional[str] = None
@@ -178,6 +237,7 @@ class ReflectDecision:
     community_focal: str = ""
     elements_query: str = ""
     ppr_query: str = ""
+    exact_term: str = ""
     chain_start_object_id: str = ""
     chain_target_object_id: str = ""
     chain_edge_type: Optional[str] = None
@@ -223,6 +283,13 @@ class ReasoningRetriever:
         self.candidate_filter = None
         self.allow_community_expansion = True
         self.allow_ppr = True
+        # Authoring-flow policy hook mirroring allow_ppr: True (Ask's historical
+        # behavior) keeps both the exact-lookup seed pass and the reflect
+        # exact_lookup action live; False makes both skip with zero I/O (the
+        # action reuses the existing exact_lookup_disabled skip branch/reason).
+        # knowhow completion sets this False for the same reason it turns PPR
+        # off — see the call site for why this specific channel is unsafe there.
+        self.allow_exact_lookup = True
         self.untrusted_evidence = False
         # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
         # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
@@ -296,6 +363,26 @@ class ReasoningRetriever:
             "chunk", self.retrieval.ppr_retrieve(notebook_id, query)
         )
 
+    def exact_lookup(self, notebook_id, query):
+        """按名称精确定位小节 → 整节 chunk。零模型调用、零 embedding。
+
+        走 `_filter_candidates` 与 PPR/element 同一条策略边界:knowhow 智能补全
+        用它剔除私有 Memory 与当前表自身投影,新通道不能绕过。
+        """
+        return self._filter_candidates(
+            "chunk", self.retrieval.exact_lookup_chunks(notebook_id, query)
+        )
+
+    def _exact_lookup_terms(self, text: str) -> List[str]:
+        """本轮实际会被探测的名称(供轨迹如实记账)。
+
+        服务层按 `exact_lookup_max_identifiers` 截断,这里用同一个上界切片,轨迹
+        里的 terms 才是真正探测过的那几个,而不是问题里出现过的全部标识符。
+        """
+        return exact_probe_terms(text)[
+            : max(0, self.settings.exact_lookup_max_identifiers)
+        ]
+
     def follow_chain(self, notebook_id, start_object_id, edge_type=None,
                      target_object_id="", direction="out"):
         result = self.retrieval.follow_chain(
@@ -360,9 +447,14 @@ class ReasoningRetriever:
                     raise ValueError("reasoning model returned a non-object reflection")
                 return answer_decision
             action = str(data.get("next_action", "answer"))
+            # 白名单与 reflect_prompt 都**不随 flag 改写**(沿用 ppr_retrieve 立下的
+            # 先例:不把开关串进 prompt 签名)。exact_lookup_enabled=False 时该动作
+            # 在执行处被 skip 掉,零 I/O;代价只是模型偶尔选到它浪费一轮反思,换来
+            # prompt 与动作契约不随部署配置漂移。
             allowed_actions = (
                 "answer", "expand_graph", "add_subquery", "search_elements",
                 "ppr_retrieve", "expand_community", "follow_chain",
+                "exact_lookup",
             )
             if action not in allowed_actions:
                 if self.fail_closed:
@@ -392,6 +484,7 @@ class ReasoningRetriever:
             d.community_focal = str(data.get("community_focal", "")).strip()
             d.elements_query = str(data.get("elements_query", "")).strip()
             d.ppr_query = str(data.get("ppr_query", "")).strip()
+            d.exact_term = clean_exact_term(data.get("exact_term", ""))
             chain = data.get("follow_chain")
             if isinstance(chain, dict):
                 d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
@@ -407,12 +500,15 @@ class ReasoningRetriever:
                     raise ValueError("reasoning add_subquery action is missing query")
                 if action == "follow_chain" and not d.chain_start_object_id:
                     raise ValueError("reasoning follow_chain action is missing start_object_id")
+                if action == "exact_lookup" and not d.exact_term:
+                    raise ValueError("reasoning exact_lookup action is missing exact_term")
                 bounded_fields = (
                     d.reason,
                     d.expand_object_id,
                     d.community_focal,
                     d.elements_query,
                     d.ppr_query,
+                    d.exact_term,
                     d.chain_start_object_id,
                     d.chain_target_object_id,
                     d.new_sub_query.query if d.new_sub_query else "",
@@ -524,6 +620,11 @@ class ReasoningRetriever:
         chains: List[object] = []
         seen_chunks: set = set()
         visited: set = set()
+        # 精确查找账目:seed pass 一条、每个真正执行的 agent 动作一条。
+        # exact_terms_done 是 seed 与动作共用的防重来源(归一化名称),保证 seed
+        # 已经探测过的名称不会被 agent 再花一轮请求一遍。
+        exact_lookup_log: List[_ExactLookupAttempt] = []
+        exact_terms_done: set = set()
 
         # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
         # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
@@ -650,6 +751,37 @@ class ReasoningRetriever:
                 record(TraceStep(step_type="ppr",
                                  summary=f"概念漫游:跨文档检索,得到 {len(seeded)} 段原文",
                                  detail={"found": len(seeded), "phase": "seed"}))
+
+            # 精确查找 seed pass(确定性兜底,镜像上面的 PPR seed pass):权威问题里
+            # 点名了完整命令/接口名时无条件先按名称定位它所在的小节并整节取齐,不赌
+            # agent 是否选 exact_lookup。零模型调用、零 embedding。
+            # 排在 PPR seed 之后是为了让 PPR 的 seen_chunks 去重与 seeded 计数逐位
+            # 保持原样——本通道只往 chunks 里追加,不改既有那一步的任何数字。
+            # 问题不含可探测名称 → exact_probe_terms 为空 → 一次调用都不发、也不记轨迹步,
+            # 现有轨迹逐字节不变(这是中性回归的验收点,由 stub 测试直接断言)。
+            seed_terms = (self._exact_lookup_terms(question)
+                          if self.settings.exact_lookup_enabled
+                          and self.allow_exact_lookup else [])
+            if seed_terms:
+                raise_if_cancelled(self.cancel_event)
+                # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
+                # (action 传 " ".join(fresh))。打分口径现在由通道自己钉死(它对
+                # 本次实际探测的名称打分,不看调用方传什么串),所以这里传名称是
+                # 为了探测语义正确,不再是为了把分数拿对。
+                found = [c for c in self.exact_lookup(
+                             notebook_id, " ".join(seed_terms))
+                         if c.chunk_id not in seen_chunks]
+                for c in found:
+                    seen_chunks.add(c.chunk_id)
+                chunks.extend(found)
+                exact_terms_done.update(_norm_query(t) for t in seed_terms)
+                exact_lookup_log.append(
+                    _ExactLookupAttempt(terms=list(seed_terms), new=len(found)))
+                record(TraceStep(
+                    step_type="exact_lookup",
+                    summary=f"按名称精确查找:新增 {len(found)} 段原文",
+                    detail={"terms": list(seed_terms), "found": len(found),
+                            "phase": "seed"}))
         finally:
             # 无论正常走完、plan/初检索抛异常(含 AskCancelled)、还是上面
             # ppr_future.result() 本身抛异常,这里都无条件关闭线程池且只关一次;
@@ -674,6 +806,20 @@ class ReasoningRetriever:
         elements_searches = 0
         ppr_searches = 0
         follow_chain_searches = 0
+        exact_lookups = 0
+
+        def feed_exact_lookup_skip(key: str, terms: List[str], note: str) -> None:
+            """把一次被跳过的按名称查找计入账本(带教学措辞)并回喂 reflect——
+            TraceStep 只对 UI 可见,不进 `exact_lookup_log` 这份回喂账本的话,
+            模型看不到"为什么"、只能在同一非法输入上反复请求。同一 `key` 的
+            重复跳过只递增 tries、不重复记账,回喂块因此保持有界。"""
+            for attempt in exact_lookup_log:
+                if attempt.note and attempt.dedup_key == key:
+                    attempt.tries += 1
+                    return
+            exact_lookup_log.append(_ExactLookupAttempt(
+                terms=terms, new=0, tries=1, note=note, dedup_key=key))
+
         while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
             steps += 1
@@ -697,6 +843,23 @@ class ReasoningRetriever:
                 summary = (f"{summary}\n\n（已执行过的子查询及各自新增证据数: {tried}。"
                            "勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,"
                            "或改用其他动作。）")
+            # 已精确查找过的名称回喂 reflect(镜像上面的子查询账目):seed pass 那次
+            # 也在内,模型据此知道问题里的名称已经查过了,不必再花一轮请求同一个。
+            # 与子查询账目同理带尝试次数,重复被跳过时 prompt 仍变化 → 不是不动点。
+            # note 非空的行是被 skip 掉、根本没发起探测的尝试——渲染教学措辞而
+            # 非"新增N段"(那会谎称查过),模型才知道"为什么"而不只是"又没用"。
+            if exact_lookup_log:
+                looked_up = "、".join(
+                    (a.note + (f"（已尝试{a.tries}次）" if a.tries > 1 else ""))
+                    if a.note else
+                    ("".join(f"「{t}」" for t in a.terms)
+                     + f"(新增{a.new}段"
+                     + (f",已试{a.tries}次" if a.tries > 1 else "") + ")")
+                    for a in exact_lookup_log)
+                summary = (f"{summary}\n\n（已按名称精确查找过及各自结果: "
+                           f"{looked_up}。勿重复请求相同名称;新增为 0 说明本笔记本内"
+                           "未定位到该名称对应的完整章节(挂载的参考库不在精确查找"
+                           "范围),请改用其他动作。）")
             decision = self.reflect(question, summary)
             raise_if_cancelled(self.cancel_event)
             record(TraceStep(step_type="reflect",
@@ -818,6 +981,77 @@ class ReasoningRetriever:
                     record(TraceStep(step_type="ppr",
                                      summary=f"概念漫游:{pq},新增 {len(new)} 段",
                                      detail={"query": pq, "found": len(new), "phase": "action"}))
+            elif decision.next_action == "exact_lookup":
+                # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
+                # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到
+                # 词法层的精确短语上界,供探测与展示使用(item 6)。
+                term = decision.exact_term[:MAX_EXACT_PHRASE_CHARS]
+                # 防重按**名称**而非按请求串:seed 用问题原文、agent 可能给
+                # 「set_db 的参数」,两者抽出的名称相同就是同一次查找。真正执行时只
+                # 探测本轮新出现的名称,已查过的不再重复付 I/O。
+                probed = self._exact_lookup_terms(term) if term else []
+                fresh = [t for t in probed if _norm_query(t) not in exact_terms_done]
+                if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
+                    # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
+                    # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
+                    feed_exact_lookup_skip(
+                        "exact_lookup_disabled", [],
+                        "按名称精确查找当前不可用(本次检索场景未开启该能力)")
+                    record(TraceStep(step_type="skip",
+                                     summary="跳过按名称精确查找(未启用)",
+                                     detail={"reason": "exact_lookup_disabled"}))
+                elif not term:
+                    feed_exact_lookup_skip(
+                        "missing_exact_term", [], "未提供可精确查找的名称")
+                    record(TraceStep(step_type="skip",
+                                     summary="跳过按名称精确查找(缺少名称)",
+                                     detail={"reason": "missing_exact_term"}))
+                elif not probed:
+                    # 与 seed 通道共用 exact_probe_terms 这把闸:模型不能用一个低选择度
+                    # 的短串(如「第 2.1 节」)或一个普通英文词组(如「state-of-the-art」)
+                    # 把精确通道变成全库子串扫描。措辞要教会模型下一轮该给什么,
+                    # 光说「不合法」它只会换一个同样不合法的词再试一次。
+                    feed_exact_lookup_skip(
+                        _norm_query(term), [term], _NOT_A_NAME_NOTE.format(term=term))
+                    record(TraceStep(step_type="skip",
+                                     summary=f"跳过按名称精确查找:{_NOT_A_NAME_NOTE.format(term=term)}",
+                                     detail={"reason": "exact_term_not_identifier",
+                                             "term": term}))
+                elif not fresh:
+                    # 账目按调用记,重复请求要落到当初真正查过它的那一条上——
+                    # 只有账目变了 prompt 才变,模型才不会在同一个不动点上空转。
+                    probed_keys = {_norm_query(t) for t in probed}
+                    for attempt in exact_lookup_log:
+                        if probed_keys & {_norm_query(t) for t in attempt.terms}:
+                            attempt.tries += 1
+                            break
+                    record(TraceStep(step_type="skip",
+                                     summary=f"跳过重复的按名称精确查找:{term}",
+                                     detail={"reason": "duplicate_exact_lookup",
+                                             "term": term, "terms": probed}))
+                elif exact_lookups >= _MAX_EXACT_LOOKUPS:
+                    feed_exact_lookup_skip(
+                        _norm_query(term), [term],
+                        f"「{term}」已达按名称精确查找次数上限（{_MAX_EXACT_LOOKUPS}）")
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=f"跳过按名称精确查找(已达次数上限 {_MAX_EXACT_LOOKUPS})",
+                        detail={"reason": "exact_lookup_cap", "term": term}))
+                else:
+                    exact_lookups += 1
+                    new = [c for c in self.exact_lookup(notebook_id, " ".join(fresh))
+                           if c.chunk_id not in seen_chunks]
+                    for c in new:
+                        seen_chunks.add(c.chunk_id)
+                    chunks.extend(new)
+                    exact_terms_done.update(_norm_query(t) for t in fresh)
+                    exact_lookup_log.append(
+                        _ExactLookupAttempt(terms=list(fresh), new=len(new)))
+                    record(TraceStep(
+                        step_type="exact_lookup",
+                        summary=f"按名称精确查找「{term}」:新增 {len(new)} 段原文",
+                        detail={"term": term, "terms": list(fresh),
+                                "found": len(new), "phase": "reflect"}))
             elif decision.next_action == "follow_chain":
                 action_key = (
                     decision.chain_start_object_id,

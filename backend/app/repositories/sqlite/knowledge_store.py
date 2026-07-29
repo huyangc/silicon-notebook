@@ -1712,6 +1712,42 @@ class KnowledgeStore:
                  "match": "lexical"} for r in rows]
 
     @staticmethod
+    def chunk_exact_search(db, notebook_id: str, needle: str, k: int = 50) -> List[Dict]:
+        """EXACT substring chunk hits — deliberately NOT lexical_recall_terms.
+
+        `chunk_fts_search` above decomposes its query into an OR-union of
+        phrase / word / CJK-trigram terms, which is what recall wants and
+        precisely what the identifier fast path must not do: `set_db` has to
+        mean `set_db`, not `set` OR `db`. FTS5's trigram tokenizer makes a
+        single quoted phrase a literal (case-folded) substring match, so one
+        phrase term is the whole query. `"` is doubled so a needle can never
+        become FTS5 syntax.
+
+        Returns `[{chunk_id, source_id, section_path, score, match}]` — the
+        section coordinates ride along because the caller's next move is always
+        "group these hits by section", and a second round-trip to look them up
+        would cost one query per identifier for nothing. `score` is native bm25
+        ranking; it orders this backend's own hits and is never compared across
+        backends.
+        """
+        term = (needle or "").strip()
+        if len(term) < 3 or k <= 0:
+            # FTS5 trigram cannot index a shorter term at all; identifier_terms
+            # already guarantees >= 4, so this is a defensive floor.
+            return []
+        match_query = '"' + term.replace('"', '""') + '"'
+        rows = db.execute(
+            "SELECT chunks_fts.chunk_id AS chunk_id, c.source_id AS source_id, "
+            "c.section_path AS section_path, bm25(chunks_fts) AS rank "
+            "FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.chunk_id "
+            "WHERE chunks_fts.notebook_id=? AND chunks_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (notebook_id, match_query, k)).fetchall()
+        return [{"chunk_id": r["chunk_id"], "source_id": r["source_id"],
+                 "section_path": r["section_path"] or "",
+                 "score": -float(r["rank"]), "match": "lexical"} for r in rows]
+
+    @staticmethod
     def backfill_fts(db: sqlite3.Connection, notebook_id: str) -> int:
         """Re-populate kg_objects_fts from knowledge_objects for this notebook.
         Idempotent: deletes existing FTS rows first, then re-inserts from

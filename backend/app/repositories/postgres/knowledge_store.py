@@ -38,6 +38,7 @@ from app.repositories.postgres.mount_sql import (
 from app.repositories.postgres.search import (
     chunk_candidate_documents,
     chunk_candidate_rows_for_terms,
+    chunk_exact_candidate_rows,
     deterministic_lexical_score_terms,
     knowledge_candidate_documents,
     knowledge_candidate_rows_for_terms,
@@ -1956,6 +1957,30 @@ class KnowledgeStore:
             output_id="chunk_id",
             text_field="text",
         )
+
+    @staticmethod
+    def chunk_exact_search(db, notebook_id: str, needle: str, k: int = 50) -> List[Dict]:
+        """EXACT substring chunk hits — the identifier fast path's probe.
+
+        Semantically equal to the SQLite adapter: no `lexical_recall_terms`
+        decomposition, so `set_db` means `set_db` and never `set` OR `db`.
+        `score` is this backend's own trigram similarity; the caller groups by
+        section and never compares scores across backends.
+        """
+        term = (needle or "").strip()
+        if len(term) < 3 or k <= 0:
+            return []
+        rows = chunk_exact_candidate_rows(db, notebook_id, term, k)
+        return [
+            {
+                "chunk_id": row["candidate_id"],
+                "source_id": row["source_id"],
+                "section_path": row["section_path"] or "",
+                "score": float(row["candidate_similarity"] or 0.0),
+                "match": "lexical",
+            }
+            for row in rows
+        ]
 
     @staticmethod
     def backfill_fts(db: Any, notebook_id: str) -> int:

@@ -843,8 +843,15 @@ class AskService:
             # 按相关度降序(_chunk_answer_context 自带 char 预算,保留最相关;跨 PPR run
             # 的归一分仅大致可比,只影响预算边缘取舍,不破坏 [0,1]);chunk 段 k1..N + KG 段
             # k1001+,合并 id_map,两段都可 [k] 引用。无需 _answer_mix 的 base-1 截断:chunk
-            # 数 ≤ ppr_top_chunks×(1 seed + _MAX_PPR_RETRIEVES) ≪ _MIX_KG_KEY_BASE(1000)。
-            ordered = sorted(chunks, key=lambda c: (-c.relevance, c.chunk_id))
+            # 数 ≤ ppr_top_chunks×(1 seed + _MAX_PPR_RETRIEVES) + 精确查找通道贡献(每次
+            # 调用至多 max_sections×max_chunks_per_section=3×12=36,run 内至多 1 seed +
+            # _MAX_EXACT_LOOKUPS=3 次调用 → ≤144)≪ _MIX_KG_KEY_BASE(1000)。
+            # 同分不再按 chunk_id 打破平手:chunk id 是随机 128 位代理键,而精确
+            # 通道整节取齐后那一节的每一块都是 1.0 同分——按 id 排等于在同分组内
+            # 随机洗牌,而 `_chunk_answer_context` 的字符预算恰好切在这个组里,
+            # 于是「参数表进不进 prompt」成了掷骰子。Python 的稳定排序保留插入序
+            # (= 检索序 / 节内文档序),这既是确定的,也正好是该节该被读的顺序。
+            ordered = sorted(chunks, key=lambda c: -c.relevance)
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 ordered, notebook_id=notebook_id,
                 budget_chars=max(0, chunk_budget - len(source_context)))
@@ -1090,6 +1097,15 @@ class AskService:
             kw_str = " ".join(ex.high_level_keywords + ex.low_level_keywords) if ex else ""
             kw_hits = (self.candidates.keyword_chunk_candidates(notebook_id, kw_str)
                        if kw_str.strip() else [])
+            # Exact-identifier fast path: when the question names a full command
+            # (`set_db`), locate its section precisely and take the WHOLE section,
+            # so the 600-char chunker cannot hand back the prose while dropping the
+            # Arguments table. Zero model calls; a question without an identifier
+            # does no I/O at all. Computed ONCE per ask, like kw_hits above, and
+            # merged into whichever candidate branch runs below.
+            exact_hits = (self.candidates.exact_lookup_chunks(notebook_id, retrieval_query)
+                          if self.settings.exact_lookup_enabled else [])
+            exact_ids = {c.chunk_id for c in exact_hits}
             ask_stage("expand_query", _t, n=len(sub_queries))
 
             # ── 检索 + 选择 ──
@@ -1109,6 +1125,8 @@ class AskService:
                         notebook_id, retrieval_query, hl, sub_queries))
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
                 candidates = self.candidates.merge_chunk_candidates(candidates, kw_hits)
+                # ∪ exact-identifier whole-section hits (same dedup contract)
+                candidates = self.candidates.merge_chunk_candidates(candidates, exact_hits)
                 raise_if_cancelled(cancel_event)
                 rerank_client = self.model_clients.rerank("retrieval_rerank")
                 order = rerank_client.rerank(
@@ -1124,13 +1142,24 @@ class AskService:
                 kg_block = self.evidence_context.truncate_kg_block(kg_block, kg_budget)
                 chunk_budget = max(0, self.settings.max_total_tokens
                                    - est_tokens(kg_block) - self._MIX_PROMPT_BUFFER_TOKENS)
-                from app.services.retrieval import select_with_graph_reserve
-
-                selected = select_with_graph_reserve(
-                    ranked,
-                    chunk_budget,
-                    reserve=max(0, self.settings.chunk_graph_reserve),
+                from app.services.retrieval import (
+                    exact_section_reserve_rule, graph_reserve_rule,
+                    select_with_reserves,
                 )
+
+                # Two floors inside ONE budget. The reranker is a general
+                # relevance model and routinely ranks an Arguments table below
+                # prose that merely talks about the command, so without a
+                # reserved seat the exact section is assembled and then
+                # truncated away. Neither reserve enlarges the budget nor
+                # evicts what the other is holding; a reserve set to 0 is fully
+                # inert, so `chunk_graph_reserve` keeps its historical
+                # behaviour byte-for-byte.
+                selected = select_with_reserves(ranked, chunk_budget, (
+                    graph_reserve_rule(max(0, self.settings.chunk_graph_reserve)),
+                    exact_section_reserve_rule(
+                        max(0, self.settings.exact_section_reserve), exact_ids),
+                ))
                 ask_stage("mix_rerank", _t, recall=len(candidates),
                           selected=len(selected), kg_nodes=len(kg_id_map),
                           concept_walk=concept_walk_n)
@@ -1146,6 +1175,15 @@ class AskService:
                         if cur is None or c.relevance > cur.relevance:
                             collected[c.chunk_id] = c
                     per_query = per_query + [{c.chunk_id: c for c in kw_hits}]
+                # ∪ exact-identifier whole-section hits, treated identically:
+                # its own per_query group is what gives quota_fuse a reason to
+                # surface a section chunk whose standalone relevance is low.
+                if exact_hits:
+                    for c in exact_hits:
+                        cur = collected.get(c.chunk_id)
+                        if cur is None or c.relevance > cur.relevance:
+                            collected[c.chunk_id] = c
+                    per_query = per_query + [{c.chunk_id: c for c in exact_hits}]
                 selected, _counts = quota_fuse(collected, per_query, plan.fuse_k,
                                                relevance=lambda c: c.relevance)
                 ask_stage("retrieve_fuse", _t, recall=len(collected), selected=len(selected))
@@ -1154,6 +1192,8 @@ class AskService:
                     notebook_id, sub_queries[0])
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
                 scored = self.candidates.merge_chunk_candidates(scored, kw_hits)
+                # ∪ exact-identifier whole-section hits (same dedup contract)
+                scored = self.candidates.merge_chunk_candidates(scored, exact_hits)
                 raise_if_cancelled(cancel_event)
                 selected = self.candidates.select_chunk_candidates(
                     scored, ids, mat, plan.mmr_k, plan.mmr_lambda)
