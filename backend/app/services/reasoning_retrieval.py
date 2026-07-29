@@ -1297,10 +1297,11 @@ class ReasoningRetriever:
                 # id 本来就是服务端发出去的,不需要再猜。
                 # None = 本轮没做过解析(要么给了 id,要么根本没给名字)。
                 source_matches: "int | None" = None
+                source_truncated = False
                 resolve_error = ""
                 if kind and is_elements and not source_id and source_title:
                     try:
-                        source_id, source_matches = (
+                        source_id, source_matches, source_truncated = (
                             self.collection_enumeration.resolve_source_title(
                                 notebook_id, kind, source_title,
                                 cancel_event=self.cancel_event,
@@ -1315,6 +1316,7 @@ class ReasoningRetriever:
                         if self.fail_closed:
                             raise
                         source_id, source_matches = "", 0
+                        source_truncated = False
                         resolve_error = str(exc)[:120]
                 key = (collection, kind, source_id)
                 chain_state = enum_chains.get(key)
@@ -1329,14 +1331,20 @@ class ReasoningRetriever:
                         summary="跳过枚举(没有指定可列出的条目类型)",
                         detail={"reason": "enumeration_kind",
                                 "collection": collection}))
-                elif source_matches is not None and source_matches != 1:
+                elif source_matches is not None and (
+                    source_truncated or source_matches != 1
+                ):
                     # 名字没有唯一对应的来源。detail 只报匹配个数与模型给的
                     # 名字,不报任何内部 id——它们从来就不该出现在轨迹里。
                     # (匹配数 2 的含义是「至少两个」,见 resolve_source_title:
-                    # 扫到第二个就停,再往下数没有意义。)
+                    # 扫到第二个就停,再往下数没有意义。truncated 则表示可查的
+                    # 来源太多、解析器拒绝从前缀断言唯一,此时 matches 无意义。)
                     record(TraceStep(
                         step_type="skip",
                         summary=(
+                            f"跳过枚举{label}(可按名称查找的来源太多,"
+                            "无法确定是哪一个)"
+                            if source_truncated else
                             f"跳过枚举{label}(没有名称匹配的来源)"
                             if source_matches == 0 else
                             f"跳过枚举{label}(名称匹配到多个来源,无法确定是哪一个)"
@@ -1345,6 +1353,7 @@ class ReasoningRetriever:
                                 "collection": collection, "kind": kind,
                                 "requested_title": source_title[:200],
                                 "matches": source_matches,
+                                "truncated": source_truncated,
                                 **({"error": resolve_error}
                                    if resolve_error else {})}))
                 elif chain_state is not None and chain_state.state == "complete":

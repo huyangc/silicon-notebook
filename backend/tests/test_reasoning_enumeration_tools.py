@@ -743,10 +743,40 @@ def test_source_title_resolution_is_exact_not_fuzzy(repo):
     service = repo.collection_enumeration
 
     assert service.resolve_source_title(
-        notebook.id, "formula", "layout basics.pdf") == ("s2", 1)
+        notebook.id, "formula", "layout basics.pdf") == ("s2", 1, False)
     assert service.resolve_source_title(
-        notebook.id, "formula", "Layout Basics") == ("", 0)
-    assert service.resolve_source_title(notebook.id, "formula", "  ") == ("", 0)
+        notebook.id, "formula", "Layout Basics") == ("", 0, False)
+    assert service.resolve_source_title(
+        notebook.id, "formula", "  ") == ("", 0, False)
+
+
+def test_truncated_title_plan_refuses_to_assert_uniqueness(repo, monkeypatch):
+    """作用域内含该 kind 的源多到超过解析上限时,前缀里的唯一命中**不算**唯一
+    ——同名的第二个源可能就在上限之后(codex 第 2 轮 P2)。
+
+    这里刻意让被找的名字**落在前缀里**(计划按 id 排序,s1「论文一」是第一个,
+    上限压到 1 后前缀恰好只有它):截断前它是干净的唯一命中,所以这条用例区分的
+    正是「从前缀断言唯一」与「拒绝断言」。必须照常 skip 并标 truncated,而不是
+    拿前缀的结论去枚举一个可能选错了的文档、再把它报成完整。
+    """
+    notebook = _seed(repo, formulas=2)
+    _add_titled_source(repo, notebook.id, "s2", "论文二", formulas=1)
+    # 上限压到 1:计划里有两个带公式的源,必然被判为「超上限」。
+    monkeypatch.setattr(enum_module, "_MAX_TITLE_RESOLVE_SOURCES", 1)
+    assert repo.collection_enumeration.resolve_source_title(
+        notebook.id, "formula", "论文一") == ("", 0, True)
+
+    llm = _SeqLLM([_enumerate_action(source_title="论文一"),
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    result = retriever.run(notebook.id, "《论文一》里有哪些公式", "", limits=limits)
+
+    assert result.enumerations == []
+    skip = _skips(result)["enumeration_source_unresolved"]
+    assert skip.summary == (
+        "跳过枚举公式清单(可按名称查找的来源太多,无法确定是哪一个)")
+    assert skip.detail["truncated"] is True
+    assert skip.detail["requested_title"] == "论文一"
 
 
 def test_source_scoped_enumeration_is_a_separate_cursor_chain(repo):

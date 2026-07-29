@@ -485,6 +485,156 @@ def test_resume_after_the_cursor_source_vanishes_is_reported(repo):
     assert resumed.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
 
 
+# -------------------------------------------------- 收尾复检:参与库集合本身
+
+def _hook_element_page(repo, monkeypatch, on_first_page):
+    """在元素翻页的第一页之后触发一次副作用(模拟跨页期间的并发改动)。"""
+    store = repo._runtime.source_store
+    original = store.element_page_rows
+    state = {"pages": 0}
+
+    def hook(db, source_id, element_type, after, limit):
+        rows = original(db, source_id, element_type, after, limit)
+        state["pages"] += 1
+        if state["pages"] == 1:
+            on_first_page()
+        return rows
+
+    monkeypatch.setattr(store, "element_page_rows", hook)
+
+
+def _hook_kg_page(repo, monkeypatch, on_first_page):
+    store = repo._runtime.knowledge
+    original = store.knowledge_object_page_rows
+    state = {"pages": 0}
+
+    def hook(db, notebook_id, object_type, after, limit):
+        rows = original(db, notebook_id, object_type, after, limit)
+        state["pages"] += 1
+        if state["pages"] == 1:
+            on_first_page()
+        return rows
+
+    monkeypatch.setattr(store, "knowledge_object_page_rows", hook)
+
+
+def test_mounting_a_base_mid_walk_is_not_complete(repo, monkeypatch):
+    """跨页期间挂上一个新的参考库 → 参与库集合变了,不能报 complete。
+
+    codex 第 2 轮 P1:旧的收尾复检只对**开场抓到的那份 id 列表**重算指纹,
+    所以「多了一个库」这件事它根本看不见。这里刻意挂一个**空**库——空库不
+    贡献任何来源信号,指纹按旧列表算是逐字不变的,唯一能抓到它的就是收尾时
+    重新解析出的参与库集合。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_source(repo, notebook.id, "s-a", [("formula", 6)])
+    late = repo.create_notebook(NotebookCreate(name="late-base"))
+    repo.mark_notebook_base(late.id)
+
+    def mount_it():
+        repo.replace_notebook_bases(notebook.id, [late.id], "user-local")
+        repo.collection_catalog.invalidate()
+
+    _hook_element_page(repo, monkeypatch, mount_it)
+    result = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_unmounting_a_base_mid_walk_is_not_complete(repo, monkeypatch):
+    """反向:跨页期间卸载参考库同样是参与集变化。
+
+    按旧列表复检也看不见——``scope_signal_fingerprint`` 按显式 id 查询,
+    不复核挂载是否仍然有效,被卸掉的库的来源信号原样还在。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
+    _add_source(repo, notebook.id, "s-a", [("formula", 6)])
+    _add_source(repo, base.id, "s-b", [("formula", 2)])
+
+    def unmount_it():
+        repo.replace_notebook_bases(notebook.id, [], "user-local")
+        repo.collection_catalog.invalidate()
+
+    _hook_element_page(repo, monkeypatch, unmount_it)
+    result = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_kg_mounting_a_base_mid_walk_is_not_complete(repo, monkeypatch):
+    """知识对象侧同款:seq 向量按旧列表算同样看不见新挂载的库。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_kg_object(repo, notebook.id, f"o{index}", "concept")
+    late = repo.create_notebook(NotebookCreate(name="late-base"))
+    repo.mark_notebook_base(late.id)
+
+    def mount_it():
+        repo.replace_notebook_bases(notebook.id, [late.id], "user-local")
+        repo.collection_catalog.invalidate()
+
+    _hook_kg_page(repo, monkeypatch, mount_it)
+    result = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_kg_unmounting_a_base_mid_walk_is_not_complete(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
+    for index in range(4):
+        _add_kg_object(repo, notebook.id, f"o{index}", "concept")
+    _add_kg_object(repo, base.id, "b0", "concept")
+
+    def unmount_it():
+        repo.replace_notebook_bases(notebook.id, [], "user-local")
+        repo.collection_catalog.invalidate()
+
+    _hook_kg_page(repo, monkeypatch, unmount_it)
+    result = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_an_undisturbed_scope_still_reports_complete(repo, monkeypatch):
+    """反向对照:同样的 hook 但什么都不改,收尾复检必须照常放行 complete。
+
+    没有这一条,上面四条只要把 scope_stable 写死成 False 就能全绿。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
+    _add_source(repo, notebook.id, "s-a", [("formula", 6)])
+    _add_source(repo, base.id, "s-b", [("formula", 2)])
+    _add_kg_object(repo, notebook.id, "o0", "concept")
+    _add_kg_object(repo, base.id, "b0", "concept")
+
+    _hook_element_page(repo, monkeypatch, lambda: None)
+    _hook_kg_page(repo, monkeypatch, lambda: None)
+    elements = _enum(repo).enumerate_elements(
+        notebook.id, "formula", budget=_budget(page_size=2)
+    )
+    objects = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(page_size=2)
+    )
+    assert elements.coverage.returned == 8 and elements.coverage.complete is True
+    assert objects.coverage.returned == 2 and objects.coverage.complete is True
+
+
 # ------------------------------------------------------------------ 预算触顶
 
 def test_row_ceiling_reports_budget(repo):
