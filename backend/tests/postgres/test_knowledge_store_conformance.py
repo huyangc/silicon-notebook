@@ -193,6 +193,81 @@ def test_usable_status_filter_and_insertion_order_match_golden(knowledge_harness
     assert {item["evidence"][0].source_id for item in objects} == {"source-golden"}
 
 
+def test_enumeration_page_rows_and_per_source_counts_carry_the_memory_seam(
+    knowledge_harness,
+):
+    """枚举侧两条 KG 原语的 PG 对等:翻页行必须带 ``source_id``,按源计数必须
+    只数给定的那几个源。
+
+    这两条合起来就是「私有 Memory 不进清单」在 KG 侧的全部机制:执行器靠行上
+    的 ``source_id`` 过滤,地图靠按源计数把同一批对象从分母里减掉。缺任何一条,
+    要么把别人的确认记忆列出来,要么把一张本该完整的清单永久判成假部分。
+    """
+    memory_source = (
+        "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+        "file_name,summary,created_at,updated_at) "
+        "VALUES (%s,'nb-personal','私人记忆','memory','ready','ready','','',%s,%s)"
+    )
+    rows = [
+        (
+            f"ko-enum-{index}",
+            "nb-personal",
+            "concept",
+            "approved",
+            json.dumps({"name": f"concept {index}", "section_path": "1"}),
+            json.dumps(_evidence()),
+            "source-golden" if index < 2 else "source-memory",
+            NOW,
+            NOW,
+        )
+        for index in range(4)
+    ]
+    # 一条 deprecated:按源计数与翻页共用 USABLE_STATUSES,不能各算各的。
+    rows.append((
+        "ko-enum-dep", "nb-personal", "concept", "deprecated",
+        json.dumps({"name": "gone", "section_path": "1"}),
+        json.dumps(_evidence()), "source-memory", NOW, NOW,
+    ))
+    with knowledge_harness.database.write() as connection:
+        connection.execute(memory_source, ("source-memory", NOW, NOW))
+        knowledge_harness.knowledge.insert_object_chunk(connection, rows)
+
+    queries = PostgresQueryStore(knowledge_harness.database)
+    with knowledge_harness.database.connect() as connection:
+        page = knowledge_harness.knowledge.knowledge_object_page_rows(
+            connection, "nb-personal", "concept", None, 10
+        )
+        total = {
+            row["object_type"]: int(row["c"])
+            for row in queries.knowledge_type_count_rows(
+                connection, "nb-personal", USABLE_STATUSES
+            )
+        }
+        per_source = {
+            row["object_type"]: int(row["c"])
+            for row in queries.knowledge_type_count_rows_for_sources(
+                connection, "nb-personal", ["source-memory"], USABLE_STATUSES
+            )
+        }
+        assert queries.knowledge_type_count_rows_for_sources(
+            connection, "nb-personal", [], USABLE_STATUSES
+        ) == []
+        assert queries.knowledge_type_count_rows_for_sources(
+            connection, "nb-personal", ["source-memory"], ()
+        ) == []
+
+    assert {row["id"]: row["source_id"] for row in page} == {
+        "ko-enum-0": "source-golden",
+        "ko-enum-1": "source-golden",
+        "ko-enum-2": "source-memory",
+        "ko-enum-3": "source-memory",
+        "ko-enum-dep": "source-memory",
+    }
+    # 分母减法的两个输入:全量 4(不含 deprecated),Memory 名下 2 → 清单 2。
+    assert total["concept"] == 4
+    assert per_source["concept"] == 2
+
+
 def test_formula_evidence_enrichment_on_postgres(knowledge_harness):
     formula = r"C _ {l} = 2 \sigma (\tilde {C} _ {l}).\tag{7}"
     values = (

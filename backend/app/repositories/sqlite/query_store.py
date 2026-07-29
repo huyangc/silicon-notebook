@@ -78,6 +78,54 @@ class QueryStore:
         counts = knowledge_counts_cache.type_counts(db, notebook_id, statuses)
         return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
+    # Bound parameters per batch, leaving room for the notebook id and the
+    # status placeholders under SQLite's default variable limit.
+    _SOURCE_COUNT_IN_CHUNK = 512
+
+    @classmethod
+    def knowledge_type_count_rows_for_sources(
+        cls,
+        db: sqlite3.Connection,
+        notebook_id: str,
+        source_ids: "list[str]",
+        statuses: tuple[str, ...],
+    ) -> "list[dict]":
+        """``[{object_type, c}]`` restricted to objects owned by the GIVEN
+        sources — the enumeration denominator's subtrahend.
+
+        Deliberately generic ("count these sources' objects by type") rather
+        than "count the Memory objects": the caller already owns the one
+        definition of which sources are Memory
+        (``SourceStore.memory_source_ids``), and re-spelling that predicate
+        here would give the exclusion a second, drift-prone home.
+
+        Bounded and index-assisted: ``idx_knowledge_objects_source``
+        (source_id) turns this into one seek per id, and the id list is the
+        notebook's Memory count.  NOT served from
+        ``knowledge_counts_cache``: that memo holds the whole notebook's
+        ``(type, status)`` breakdown and knows nothing about sources, and it is
+        the board's counting path — widening it for one enumeration subtrahend
+        would put the exclusion into every count in the product.
+        """
+        ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
+        if not ids or not statuses:
+            return []
+        status_marks = ",".join("?" for _ in statuses)
+        totals: "dict[str, int]" = {}
+        for offset in range(0, len(ids), cls._SOURCE_COUNT_IN_CHUNK):
+            batch = ids[offset:offset + cls._SOURCE_COUNT_IN_CHUNK]
+            id_marks = ",".join("?" for _ in batch)
+            for row in db.execute(
+                "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
+                f"WHERE notebook_id = ? AND source_id IN ({id_marks}) "
+                f"AND status IN ({status_marks}) GROUP BY object_type",
+                (notebook_id, *batch, *statuses),
+            ).fetchall():
+                totals[row["object_type"]] = (
+                    totals.get(row["object_type"], 0) + int(row["c"])
+                )
+        return [{"object_type": ot, "c": c} for ot, c in totals.items()]
+
     @staticmethod
     def knowhow_knowledge_type_rows(
         db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]

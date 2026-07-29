@@ -434,6 +434,12 @@ class ReasoningResult:
     # 刻意**不**混进 elements/top_hits:那两个是相关性候选池,会被按分数截断,而
     # 清单的价值恰恰在于它没有被截断过 —— 混进去等于把「已列全」重新变成抽样。
     enumerations: List[CollectionEnumerationOutcome] = field(default_factory=list)
+    # 本 run 建出的集合地图(``[Collections in scope] ...``),原样带给合成层。
+    # 带出来而不是让 ask_service 再建一次:地图是 run 内已经付过的若干次查询,
+    # 而且 reflect prompt 明确教模型「集合太大就别枚举、直接用地图计数作答」——
+    # 那个数必须真的到得了合成模型手里,否则就是要求它报一个它看不到的数
+    # (codex 第 4 轮 P2)。枚举工具关闭或地图建不出来时是空串,行为不变。
+    collection_map_text: str = ""
 
 
 class ReasoningRetriever:
@@ -1802,6 +1808,7 @@ class ReasoningRetriever:
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
             chains=chains, enumerations=enumerations,
+            collection_map_text=collection_map_text,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])
 

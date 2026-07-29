@@ -647,7 +647,8 @@ class SourceStorePort(Protocol):
     def source_change_signal_rows(
         self, db: object, notebook_id: str
     ) -> list[tuple[str, str]]:
-        """``[(source_id, change_signal)]`` for every physical source row.
+        """``[(source_id, change_signal)]`` for every physical source row
+        EXCEPT the notebook's private Memory synthetic rows.
 
         ``change_signal`` is an OPAQUE backend-formatted token: equal tokens
         mean "this source's ``source_elements`` cannot have changed since the
@@ -657,6 +658,27 @@ class SourceStorePort(Protocol):
         ``app.services.collection_catalog``).  Never parse it, never compare
         it across backends or processes — only for equality against a token
         taken from the same store.
+
+        The Memory exclusion is part of the contract, not an adapter detail: a
+        typed-collection listing is scoped to a notebook's participants and has
+        no owner filter, so leaving Memory in would let any member of a shared
+        notebook read another member's confirmed Memory through its formulas /
+        tables / images / code blocks.  ``memory_source_ids`` returns exactly
+        the rows this one drops.
+        """
+        ...
+    def memory_source_ids(self, db: object, notebook_id: str) -> list[str]:
+        """The notebook's private Memory synthetic source ids — the exact
+        complement of ``source_change_signal_rows``' exclusion, and the single
+        definition of "which sources are Memory" that the services layer
+        consumes.
+
+        Bounded by the notebook's Memory count (``idx_sources_memory_id``
+        allows one derived source per Memory) and index-seeked on
+        ``notebook_id``.  The KG enumeration path needs the ids rather than a
+        predicate because ``knowledge_objects`` carries no source type: it
+        filters the rows it reads against this set, and subtracts the objects
+        those sources own from the enumeration denominator.
         """
         ...
     def element_type_count_rows(
@@ -893,9 +915,15 @@ class KnowledgeStorePort(Protocol):
         fires.  The predicate therefore still has exactly one definition; only
         the layer that evaluates it moved.
 
+        The private-Memory exclusion travels the same road and for the same
+        reason: ``source_id`` rides on every row, and the caller drops the
+        objects whose source is in ``memory_source_ids`` inside that same
+        ceiling.  A ``NOT EXISTS`` against ``sources`` here would be a second
+        unindexed residual with the identical unbounded-skip hazard.
+
         ``after`` is the opaque ``(created_at, id)`` pair of the last consumed
         row (see ``element_page_rows``).  Rows carry id / object_type /
-        payload / evidence / status / created_at.
+        source_id / payload / evidence / status / created_at.
         """
         ...
     @staticmethod
@@ -2184,6 +2212,24 @@ class QueryStorePort(Protocol):
     def knowledge_type_count_rows(
         db: object, notebook_id: str, statuses: tuple[str, ...]
     ) -> list[dict]: ...
+    @staticmethod
+    def knowledge_type_count_rows_for_sources(
+        db: object,
+        notebook_id: str,
+        source_ids: list[str],
+        statuses: tuple[str, ...],
+    ) -> list[dict]:
+        """``[{object_type, c}]`` for objects owned by the GIVEN sources.
+
+        Generic by design: the collection catalog passes
+        ``SourceStorePort.memory_source_ids`` to subtract private Memory from
+        the enumeration denominator, and that single definition of "which
+        sources are Memory" stays in one place instead of being re-spelled as
+        a join predicate here.  Bounded and index-assisted on
+        ``knowledge_objects(source_id)``; the id list is batched by the
+        adapter.
+        """
+        ...
     @staticmethod
     def knowhow_knowledge_type_rows(
         db: object, notebook_id: str, statuses: tuple[str, ...]

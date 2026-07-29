@@ -1163,7 +1163,9 @@ class KnowledgeStore:
         ``created_at`` is ``timestamptz`` here, so the cursor value travels
         back as the ``datetime`` this adapter returned — never re-rendered
         text.  Row values keep the comparison index-comparable on
-        ``idx_knowledge_objects_nb_type_created``.
+        ``idx_knowledge_objects_nb_type_created``.  ``source_id`` travels with
+        the row for the same reason ``status`` does: the private-Memory
+        exclusion is evaluated by the caller, inside its over-scan ceiling.
         """
         params: List[Any] = [notebook_id, object_type]
         clause = ""
@@ -1172,7 +1174,7 @@ class KnowledgeStore:
             params.extend([after[0], after[1]])
         params.append(max(1, int(limit)))
         return db.execute(
-            "SELECT id,object_type,payload,evidence,status,created_at "
+            "SELECT id,object_type,source_id,payload,evidence,status,created_at "
             "FROM knowledge_objects "
             f"WHERE notebook_id=%s AND object_type=%s {clause}"
             "ORDER BY created_at,id LIMIT %s",

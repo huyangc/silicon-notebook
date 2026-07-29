@@ -821,8 +821,12 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
 
     Same contract as the SQLite adapter: counts are grouped per
     (source, element_type) and restricted to the requested whitelist; signals
-    cover every PHYSICAL source (memory/knowhow synthetic rows included) and
-    move on each of the three columns the element writers touch.
+    cover every PHYSICAL source EXCEPT the private Memory synthetic rows (the
+    Knowhow projection source stays in) and move on each of the three columns
+    the element writers touch.  ``memory_source_ids`` returns exactly the rows
+    the signal query drops — the two are one predicate in two directions, and
+    a backend where they were not complements would silently list one member's
+    confirmed Memory to the rest of a shared notebook.
     """
     owner = core_stores.identity.create_user("m00123456", "password-12")
     notebook_id = core_stores.notebooks.create_row(
@@ -835,6 +839,7 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
         ("src-collect-a", "markdown"),
         ("src-collect-b", "markdown"),
         ("src-collect-hidden", "knowhow"),
+        ("src-collect-memory", "memory"),
     ):
         core_stores.sources.insert_source(
             source_id=source_id,
@@ -877,6 +882,12 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
             (SourceElementWrite("el-ch-1", "knowhow_cell", "r1c1", "cell", {}),),
             created_at=NOW,
         )
+        core_stores.sources.replace_elements(
+            connection,
+            "src-collect-memory",
+            (SourceElementWrite("el-cm-1", "formula", "p1", "private", {}),),
+            created_at=NOW,
+        )
 
     with core_stores.database.connect() as connection:
         counts = core_stores.sources.element_type_count_rows(
@@ -900,10 +911,20 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
         signals = dict(
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
         )
+        memory_ids = set(
+            core_stores.sources.memory_source_ids(connection, notebook_id)
+        )
     assert set(signals) == {
         "src-collect-a", "src-collect-b", "src-collect-hidden",
     }
     assert all(isinstance(value, str) and value for value in signals.values())
+    # Complement, both directions: nothing counted twice, nothing lost.
+    assert memory_ids == {"src-collect-memory"}
+    assert set(signals) & memory_ids == set()
+    assert set(signals) | memory_ids == {
+        "src-collect-a", "src-collect-b", "src-collect-hidden",
+        "src-collect-memory",
+    }
 
     # updated_at + parse_status move together on every lifecycle transition.
     core_stores.sources.set_status("src-collect-a", "extracted")

@@ -24,11 +24,24 @@ Cost shape (per build, per notebook in scope):
   * 0 element queries when the notebook's signal fingerprint is unchanged;
   * otherwise one batched ``GROUP BY source_id, element_type`` per batch of
     sources, restricted to the whitelist;
-  * 1 O(1) ``unified_kg_state`` seq read, plus the per-type GROUP BY only when
-    that seq moved (see ``_scope_kg_counts``: the port call is memoized by the
-    store on SQLite but NOT on PostgreSQL, so the catalog carries its own
-    seq-keyed memo and both backends get one cheap read on the warm path);
+  * 1 O(1) ``unified_kg_state`` seq read, plus — only when that seq moved —
+    the per-type GROUP BY, one bounded Memory-source id query, and (only when
+    that notebook actually has Memory sources) one bounded per-source GROUP BY
+    to subtract them (see ``_scope_kg_counts`` / ``_notebook_kg_counts``: the
+    port call is memoized by the store on SQLite but NOT on PostgreSQL, so the
+    catalog carries its own seq-keyed memo and both backends get one cheap read
+    on the warm path);
   * 1 ``knowhow_tables`` index count.
+
+**Private Memory is never in scope.**  A confirmed Memory is owner-private and
+every other channel treats it that way, while a typed-collection listing is
+scoped to a notebook's participants and has no owner filter of its own.  So the
+map counts — and the enumeration lists — exclude Memory synthetic sources and
+the knowledge objects extracted from them, unconditionally: the same listing
+means the same thing in a one-person notebook as in a shared one.  The element
+side gets this for free (``source_change_signal_rows`` drops those rows, so
+they are absent from every count AND from the traversal plan); the KG side
+subtracts them here and filters them in the executor.
 
 Four caches, all bounded, all under one lock, and all instance-scoped (NOT
 module-globals like ``knowledge_counts_cache``): the per-source key is a plain
@@ -527,6 +540,14 @@ class CollectionCatalogService:
 
         Restricted to ``USABLE_STATUSES`` for the same reason retrieval is: a
         deprecated object is not something the model can be told to enumerate.
+
+        And restricted to non-Memory sources, for the reason the element side
+        is: a confirmed Memory is owner-private, a typed-collection listing has
+        no owner filter, and the map is the listing's denominator.  This is
+        deliberately NOT the same number ``notebook_catalog`` shows on the
+        board — that one answers "how much knowledge does this notebook hold",
+        which legitimately includes the viewer-independent total.  The two
+        counts differ on purpose; see ``_notebook_kg_counts``.
         """
         totals: Dict[str, int] = {
             object_type: 0 for object_type in ENUMERABLE_KG_OBJECT_TYPES
@@ -541,6 +562,22 @@ class CollectionCatalogService:
         )
 
     def _notebook_kg_counts(self, db: object, notebook_id: str) -> Dict[str, int]:
+        """Per-type usable object counts MINUS the ones a private Memory owns.
+
+        Two queries on a miss instead of one, and the second only when the
+        notebook has Memory synthetic sources at all (a reference library has
+        none, so it keeps paying exactly what it paid before).  Both are
+        index-seeked and bounded by the Memory count, and the whole result is
+        memoized on ``kg_mutation_seq`` — which every write that can move
+        either number bumps, including ``ingest_memory_source``'s own
+        post-extraction dirty mark.
+
+        The subtraction happens here rather than inside
+        ``knowledge_type_count_rows`` because that port is also
+        ``notebook_catalog``'s board count, where the Memory objects genuinely
+        belong.  Enumeration and the board answer different questions; giving
+        them one number would mean getting one of them wrong.
+        """
         seq = int(self._unified_kg.graph_seq_row(db, notebook_id)[0])
         with self._lock:
             cached = self._kg_counts.get(notebook_id)
@@ -555,6 +592,21 @@ class CollectionCatalogService:
                 db, notebook_id, USABLE_STATUSES
             )
         }
+        memory_ids = list(self._sources.memory_source_ids(db, notebook_id))
+        if memory_ids:
+            for row in self._queries.knowledge_type_count_rows_for_sources(
+                db, notebook_id, memory_ids, USABLE_STATUSES
+            ):
+                object_type = row["object_type"]
+                if object_type in counts:
+                    # max(0, …) is a floor, not a fix: the two counts come from
+                    # one connection but not one snapshot, so a Memory
+                    # extraction committing between them can make the
+                    # subtrahend the larger number.  A negative count would
+                    # then travel into the map line and the coverage
+                    # denominator; the seq gate means the wrong entry is
+                    # unreachable on the next build anyway.
+                    counts[object_type] = max(0, counts[object_type] - int(row["c"]))
         with self._lock:
             self._kg_counts[notebook_id] = (seq, counts)
             self._kg_counts.move_to_end(notebook_id)

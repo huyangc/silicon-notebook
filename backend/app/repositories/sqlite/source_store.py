@@ -202,8 +202,22 @@ class SourceStore:
         self, db: sqlite3.Connection, notebook_id: str
     ) -> List[tuple[str, str]]:
         """``[(source_id, opaque change signal)]`` for the notebook's PHYSICAL
-        sources (memory/knowhow synthetic rows included — the catalog counts
-        what retrieval can reach, not what the source panel shows).
+        sources, EXCLUDING the private Memory synthetic rows.
+
+        Knowhow's hidden projection source stays in (it is notebook-wide
+        content, visible to every member through the table itself); a
+        ``source_type='memory'`` row does not.  A confirmed Memory belongs to
+        one user, and every other channel treats it that way — Ask reaches it
+        only through the owner-scoped Memory retriever, Knowhow completion
+        excludes it from its candidate set by contract.  A typed-collection
+        listing has no owner filter of its own: it is built from a notebook's
+        participant scope, so any member of a shared notebook would otherwise
+        read another member's confirmed Memory through its formulas, tables,
+        images and code blocks.  The exclusion is unconditional — the same
+        listing means the same thing in a single-user notebook as in a shared
+        one — and its complement is ``memory_source_ids`` below (one predicate,
+        two directions; ``test_memory_source_ids_complement_the_signal_rows``
+        pins them together).
 
         The signal is ``updated_at | parse_status | chunked_at`` because those
         three are what the element writers touch:
@@ -228,11 +242,14 @@ class SourceStore:
         A deleted source simply drops out of this list.  ONE index-seeked
         query per notebook (a ``notebook_id``-prefixed index); deliberately
         NOT a timestamp comparison — the catalog only ever tests tokens for
-        equality.
+        equality.  The ``source_type`` restriction rides along for free: the
+        three signal columns are not carried by any index, so every candidate
+        row is visited anyway and the predicate is a residual filter on rows
+        already in hand, never a second access path.
         """
         rows = db.execute(
             "SELECT id, updated_at, parse_status, chunked_at "
-            "FROM sources WHERE notebook_id = ?",
+            "FROM sources WHERE notebook_id = ? AND source_type <> 'memory'",
             (notebook_id,),
         ).fetchall()
         return [
@@ -245,6 +262,35 @@ class SourceStore:
                 ),
             )
             for row in rows
+        ]
+
+    def memory_source_ids(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> List[str]:
+        """The notebook's private Memory synthetic source ids.
+
+        The exact complement of ``source_change_signal_rows``' exclusion, and
+        the ONE place the services layer learns which sources are Memory.  The
+        element side can filter in SQL because it already reads every source
+        row; the KG side cannot — ``knowledge_objects`` carries no source type
+        — so it filters the rows it reads against this set instead, exactly the
+        way it already filters them against ``USABLE_STATUSES``.
+
+        Bounded by the notebook's Memory count (one synthetic source per
+        confirmed Memory, enforced by ``idx_sources_memory_id``), and returned
+        as ids rather than as a count so the caller can both filter rows and
+        subtract the objects those sources own from the enumeration
+        denominator, without a second spelling of "which sources are Memory".
+        One query per notebook, same ``notebook_id``-prefixed index seek as the
+        signal query, projecting the primary key only.
+        """
+        return [
+            row["id"]
+            for row in db.execute(
+                "SELECT id FROM sources "
+                "WHERE notebook_id = ? AND source_type = 'memory'",
+                (notebook_id,),
+            ).fetchall()
         ]
 
     def element_type_count_rows(

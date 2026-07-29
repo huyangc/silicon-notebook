@@ -11,9 +11,12 @@ response contract/synthesis prompt (T5): it turns a run's outcomes into
   ``AskResponse.result_sets`` alongside Knowhow's ``StructuredKnowhowResult``;
 * ``enumeration_prompt_block`` — the bounded, English, model-facing preview
   spliced into the answer-synthesis evidence block (mirrors
-  ``app.services.structured_retrieval.structured_prompt_block``).
+  ``app.services.structured_retrieval.structured_prompt_block``);
+* ``collection_map_block`` — the run's collection MAP (counts, no rows) wrapped
+  for that same evidence block, so the count the reflect prompt tells the model
+  to answer with actually reaches the model that writes the answer.
 
-Both are pure functions over ``CollectionEnumerationOutcome`` — no I/O, no
+All three are pure functions over what the run already produced — no I/O, no
 model calls, no mutation of the outcomes they read.  (``typed_collection_results``
 mutates the *rows it just built*, via ``apply_synthesis_preview_counts``, but
 never the outcomes.)
@@ -28,6 +31,7 @@ from app.models.ask import (
     TypedCollectionItem,
     TypedCollectionResult,
 )
+from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
 from app.services.collection_enumeration import (
     MAX_EVIDENCE_REFS,
     TRUNCATED_BUDGET,
@@ -212,6 +216,53 @@ _INSTRUCTION_LINE = (
     "that subset — the full list is authoritative in the result card, not "
     "this preview.]"
 )
+
+
+# Header for the deterministic count line (the collection MAP, not a list).
+# Two things it must say and nothing more: the numbers are server-computed and
+# exact, and they are quotable without a [k] marker.  The second half matters
+# because Rule 11 otherwise forbids an uncited claim — the same markerless
+# endorsement the enumeration preview's coverage header carries, for the same
+# reason: no per-row citation key exists to attach.
+_COLLECTION_MAP_HEADER = (
+    "[Collection counts — computed by the server, exact. Quote them WITHOUT a "
+    "[k] marker. They say how many items EXIST in scope, not how many were "
+    "retrieved; private Memory is never counted.]"
+)
+
+# Hard ceiling on the whole block, DERIVED rather than picked: a fixed header
+# plus a map line the catalog already caps at ``COLLECTION_MAP_MAX_CHARS``.
+# Pinned by ``test_collection_map_block_stays_bounded`` so a longer header or a
+# raised map cap has to be a deliberate change, not a silent one.
+COLLECTION_MAP_BLOCK_MAX_CHARS = (
+    len(_COLLECTION_MAP_HEADER) + 1 + COLLECTION_MAP_MAX_CHARS
+)
+
+
+def collection_map_block(collection_map_text: str) -> str:
+    """The map, wrapped for the answer-synthesis evidence block.
+
+    The reflect prompt tells the model that a collection far larger than the
+    run's listing allowance should NOT be paged through — it should be answered
+    with the map's count instead.  The answer-synthesis model is a different
+    call with a different context: it sees retrieved evidence and enumeration
+    previews, and never saw the map.  Without this block that instruction asks
+    for a number nobody supplied, and in the extreme case (a big collection, no
+    other evidence) synthesis would not even run (codex round-4 P2).
+
+    Deterministic server output, so it carries no ``[k]`` id and none can be
+    invented for it; hard-bounded at ``COLLECTION_MAP_BLOCK_MAX_CHARS`` (the
+    map line is clamped here rather than merely assumed to be short — the
+    catalog's renderer already caps it, but this block rides in EVERY answer
+    prompt and a ceiling that depends on another module keeping its promise is
+    not a ceiling); empty in, empty out — a run without the enumeration tools,
+    or whose map failed to build, injects nothing and behaves exactly as it did
+    before.
+    """
+    text = str(collection_map_text or "").strip()[:COLLECTION_MAP_MAX_CHARS]
+    if not text:
+        return ""
+    return f"{_COLLECTION_MAP_HEADER}\n{text}"
 
 
 def _collection_noun(collection: str) -> str:
