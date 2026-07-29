@@ -100,6 +100,26 @@ def lexical_candidate_sql(
     )
 
 
+LIKE_ESCAPE_CHARACTER = "\\"
+
+
+def like_contains_pattern(term: str) -> str:
+    """Return a literal "contains" ILIKE pattern for one lexical term.
+
+    Recall terms are raw user text -- the whole question is itself a term -- so
+    ``%``, ``_`` and ``\\`` would otherwise reach LIKE as metacharacters and
+    silently widen the probe: ``set_db`` would also admit ``setXdb`` and
+    ``set db``.  Escaping belongs to the LIKE arm alone; the trigram operator
+    and ``public.similarity`` keep the unescaped term so ordering is unchanged.
+    """
+    escaped = (
+        term.replace(LIKE_ESCAPE_CHARACTER, LIKE_ESCAPE_CHARACTER * 2)
+        .replace("%", LIKE_ESCAPE_CHARACTER + "%")
+        .replace("_", LIKE_ESCAPE_CHARACTER + "_")
+    )
+    return f"%{escaped}%"
+
+
 def expression(name: str) -> str:
     try:
         return _SEARCH_EXPRESSIONS[name]
@@ -188,13 +208,16 @@ def _candidate_rows_for_terms(
     ]
     if live_only:
         predicates.append(target.live_predicate)
+    # The LIKE pattern is escaped and wrapped in Python so LIKE metacharacters
+    # in the term stay literal; the trigram arm keeps the raw term.
     predicates.append(
         f"({target.text_expression} OPERATOR(public.%%) lexical_terms.term OR "
-        f"{target.text_expression} ILIKE ('%%' || lexical_terms.term || '%%'))"
+        f"{target.text_expression} ILIKE lexical_terms.like_pattern "
+        f"ESCAPE '{LIKE_ESCAPE_CHARACTER}')"
     )
-    term_values = ",".join("(%s,%s)" for _ in terms)
+    term_values = ",".join("(%s,%s,%s)" for _ in terms)
     statement = (
-        f"WITH lexical_terms(term_rank,term) AS (VALUES {term_values}) "
+        f"WITH lexical_terms(term_rank,term,like_pattern) AS (VALUES {term_values}) "
         "SELECT candidate.candidate_id,lexical_terms.term_rank,"
         "candidate.candidate_similarity FROM lexical_terms "
         "CROSS JOIN LATERAL ("
@@ -209,7 +232,7 @@ def _candidate_rows_for_terms(
     params = [
         value
         for term_rank, term in enumerate(terms)
-        for value in (term_rank, term)
+        for value in (term_rank, term, like_contains_pattern(term))
     ]
     params.extend((notebook_id, int(per_term_limit)))
     return connection.execute(statement, params).fetchall()
