@@ -9,8 +9,10 @@ from app.repositories.ports import ChunkWrite
 from app.repositories.postgres.search import (
     PAYLOAD_NAME_EXPRESSION,
     TAGS_JSON_EXPRESSION,
+    chunk_candidate_rows_for_terms,
     knowledge_candidate_rows_for_terms,
     lexical_candidate_sql,
+    like_contains_pattern,
 )
 
 
@@ -64,7 +66,48 @@ def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
     statement, params = connection.calls[0]
     assert "CROSS JOIN LATERAL" in statement
     assert statement.count("LIMIT %s") == 1
-    assert params == [0, "thermal", 1, "ZXCV9000", "nb", 2]
+    assert params == [
+        0,
+        "thermal",
+        "%thermal%",
+        1,
+        "ZXCV9000",
+        "%ZXCV9000%",
+        "nb",
+        2,
+    ]
+
+
+def test_like_contains_pattern_keeps_metacharacters_literal():
+    # The trigram arm keeps the raw term; only the LIKE arm is escaped.
+    assert like_contains_pattern("plain") == "%plain%"
+    assert like_contains_pattern("set_db") == r"%set\_db%"
+    assert like_contains_pattern("100%") == r"%100\%%"
+    assert like_contains_pattern("a\\b") == r"%a\\b%"
+
+
+def test_lateral_probe_escapes_only_the_like_arm():
+    class _Result:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class _Connection:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((statement, params))
+            return _Result()
+
+    connection = _Connection()
+    knowledge_candidate_rows_for_terms(connection, "nb", ["set_db"], per_term_limit=2)
+
+    statement, params = connection.calls[0]
+    assert "ILIKE lexical_terms.like_pattern ESCAPE '\\'" in statement
+    assert "'%' || lexical_terms.term" not in statement
+    assert "OPERATOR(public.%%) lexical_terms.term" in statement
+    assert params == [0, "set_db", r"%set\_db%", "nb", 2]
 
 
 @dataclass
@@ -320,6 +363,59 @@ def test_zh_en_search_quality_and_citation_identity(
     assert element_ids == EXPECTED_ELEMENT_IDS
     assert _recall(knowledge_ids, EXPECTED_IDS) == 1.0
     assert _recall(chunk_ids, EXPECTED_CHUNK_IDS) == 1.0
+
+
+@pytest.mark.postgres_integration
+def test_like_metacharacters_do_not_widen_the_candidate_probe(search_harness):
+    """`set_db` must not admit `setXdb`/`set db` through the ILIKE arm.
+
+    All three rows sit below the trigram similarity threshold for this term, so
+    the LIKE arm alone decides membership and the escaping is what is measured.
+    """
+    probe_chunks = [
+        ChunkWrite(
+            id="chunk-like-literal",
+            text="netlist set_db max_transition guidance",
+            section_path="§L",
+            element_ids=("element-search-b",),
+        ),
+        ChunkWrite(
+            id="chunk-like-wildcard",
+            text="netlist setXdb max_transition guidance",
+            section_path="§W",
+            element_ids=("element-search-b",),
+        ),
+        ChunkWrite(
+            id="chunk-like-spaced",
+            text="netlist set db max_transition guidance",
+            section_path="§S",
+            element_ids=("element-search-b",),
+        ),
+    ]
+    search_harness.chunks.replace_source_chunks(
+        "source-search-b", "nb-search", probe_chunks, created_at=NOW
+    )
+
+    with search_harness.database.connect() as connection:
+        rows = chunk_candidate_rows_for_terms(
+            connection, "nb-search", ["set_db"], per_term_limit=10
+        )
+        widened = connection.execute(
+            "SELECT id FROM chunks WHERE notebook_id=%s AND text ILIKE %s",
+            ("nb-search", "%set_db%"),
+        ).fetchall()
+
+    # Without escaping the same pattern is a single-character wildcard, so the
+    # probe would have pulled all three rows in.
+    assert {row["id"] for row in widened} == {
+        "chunk-like-literal",
+        "chunk-like-wildcard",
+        "chunk-like-spaced",
+    }
+    candidate_ids = {row["candidate_id"] for row in rows}
+    assert "chunk-like-literal" in candidate_ids
+    assert "chunk-like-wildcard" not in candidate_ids
+    assert "chunk-like-spaced" not in candidate_ids
 
 
 @pytest.mark.postgres_integration
