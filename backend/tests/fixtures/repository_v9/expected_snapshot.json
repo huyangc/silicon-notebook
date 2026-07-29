@@ -277,6 +277,7 @@
             "anchors": [],
             "answer": "Source degeneration stabilizes gain [k1].",
             "answer_id": "<ans-id-1>",
+            "answered_at": "<timestamp>",
             "citations": [
               {
                 "element_id": "<el-id-1>",

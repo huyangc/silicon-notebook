@@ -371,6 +371,7 @@ class AskStateStore:
         and must already be applied to ``response``."""
         answer_id = self.seams.new_id("ans")
         now = normalize_timestamp(self.seams.now())
+        response.answered_at = iso_timestamp(now)
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
@@ -427,6 +428,7 @@ class AskStateStore:
         """Atomically save the final answer and move a running job to done."""
         answer_id = self.seams.new_id("ans")
         now = normalize_timestamp(self.seams.now())
+        response.answered_at = iso_timestamp(now)
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
@@ -481,6 +483,9 @@ class AskStateStore:
         turns = []
         for row in rows:
             payload = json_value(row["payload"], {})
+            payload["answered_at"] = str(
+                payload.get("answered_at") or iso_timestamp(row["created_at"])
+            )
             turns.append(
                 ConversationTurn(
                     answer_id=row["id"],

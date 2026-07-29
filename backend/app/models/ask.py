@@ -324,6 +324,10 @@ class StructuredBatchCoverage(BaseModel):
 class AskResponse(BaseModel):
     answer_id: str = ""
     asked_at: str = Field(default="", exclude_if=lambda value: not value)
+    # Server-side answer completion instant.  AskStateStore stamps this from
+    # the same clock value persisted as answers.created_at so live stream
+    # responses and reopened conversations expose one authoritative time.
+    answered_at: str = Field(default="", exclude_if=lambda value: not value)
     conclusion: str
     answer: str = ""
     grounded: bool = False

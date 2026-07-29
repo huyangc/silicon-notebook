@@ -3038,6 +3038,44 @@ button.chat-session-card {
   user-select: none;
 }
 
+.chat-assistant-message {
+  position: relative;
+  justify-self: start;
+  width: 100%;
+  max-width: 100%;
+}
+
+.chat-answer-time-toggle {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 2px;
+  z-index: 2;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-answer-time-toggle.visible,
+.chat-answer-time-toggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-answer-time-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 55%, #fff);
+  outline-offset: 2px;
+}
+
 .chat-assistant {
   justify-self: start;
   max-width: 100%;

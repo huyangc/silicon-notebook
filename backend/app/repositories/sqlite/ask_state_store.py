@@ -397,6 +397,7 @@ class AskStateStore:
         and must already be applied to ``response``."""
         answer_id = self.seams.new_id("ans")
         now = self.seams.now()
+        response.answered_at = now
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
@@ -465,6 +466,7 @@ class AskStateStore:
         """
         answer_id = self.seams.new_id("ans")
         now = self.seams.now()
+        response.answered_at = now
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
@@ -524,6 +526,12 @@ class AskStateStore:
                 payload = json.loads(row["payload"] or "{}")
             except (TypeError, ValueError):
                 payload = {}
+            # Pre-answered_at rows retain their authoritative completion time
+            # in the answers table.  Project it into the response so old and
+            # new conversations render identically without a migration.
+            payload["answered_at"] = str(
+                payload.get("answered_at") or row["created_at"] or ""
+            )
             turns.append(
                 ConversationTurn(
                     answer_id=row["id"],
