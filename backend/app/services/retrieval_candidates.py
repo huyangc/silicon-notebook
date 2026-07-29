@@ -36,6 +36,7 @@ from app.services.retrieval import (
     score_knowledge,
     type_weight,
 )
+from app.services.source_display import source_display_title
 
 
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
@@ -1304,18 +1305,13 @@ class CandidateRetrievalService(_RetrievalState):
             if not row:
                 continue
             source_id = str(row.get("source_id") or "")
-            source = metadata.get(source_id) or {}
-            paper_title = str(source.get("paper_title") or "").strip()
-            ordinary_title = str(
-                source.get("title") or source.get("file_name") or ""
-            ).strip()
             candidates.append({
                 "element_id": element_id,
                 "source_id": source_id,
-                "source_title": (
-                    paper_title
-                    if source.get("is_paper") and paper_title
-                    else ordinary_title
+                # Same naming rule as the citation cards these elements end up
+                # on (``source_display.source_display_title``).
+                "source_title": source_display_title(
+                    metadata.get(source_id) or {}
                 ),
                 "location_label": str(row.get("location_label") or ""),
                 "element_type": str(row.get("element_type") or ""),

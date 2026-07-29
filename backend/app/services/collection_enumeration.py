@@ -109,6 +109,7 @@ from app.services.collection_catalog import (
     ScopeSource,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.source_display import source_display_title
 
 
 # ``truncated_reason`` vocabulary — exactly the three the design doc fixes.
@@ -381,22 +382,6 @@ def _payload_chars(item: object) -> int:
     ))
 
 
-def _display_title(row: Mapping[str, Any]) -> str:
-    """A grounded paper title beats an upload name; everything else keeps its
-    ordinary source title (then file name).
-
-    The citation-side twin of this rule is
-    ``EvidenceContextService.citation_titles``; both exist because the
-    enumeration list and the answer's ``[k]`` citations must name the same
-    source the same way.  Deliberately not refactored into a shared helper in
-    this task: that would drag the evidence/citation hydration path into a
-    change that has no other reason to touch it.
-    """
-    paper_title = str(row["paper_title"] or "").strip()
-    ordinary = str(row["title"] or row["file_name"] or "").strip()
-    return paper_title if row["is_paper"] and paper_title else ordinary
-
-
 def _normalized_title(value: Any) -> str:
     """The comparison form for title→id resolution.
 
@@ -655,7 +640,7 @@ class _TitleWindow:
                 [entry.source_id for entry in self.sources[index:end]]
             )
             for candidate_id, row in rows.items():
-                self.titles[candidate_id] = _display_title(row)
+                self.titles[candidate_id] = source_display_title(row)
             self.loaded_until = end
         # A source whose row vanished between the plan and this lookup has no
         # label and is NOT re-queried: the window advanced past it, and an
@@ -765,7 +750,7 @@ class CollectionEnumerationService:
                 load=lambda ids: self._source_display(db, ids),
                 window=min(_MAX_TITLE_WINDOW, budget.max_rows),
                 titles={
-                    key: _display_title(row) for key, row in preloaded.items()
+                    key: source_display_title(row) for key, row in preloaded.items()
                 },
                 # The explicit-source path already paid for its label with the
                 # scope check; do not query it a second time.
@@ -924,7 +909,7 @@ class CollectionEnumerationService:
                     row = rows.get(entry.source_id)
                     if row is None:
                         continue
-                    if _normalized_title(_display_title(row)) != wanted:
+                    if _normalized_title(source_display_title(row)) != wanted:
                         continue
                     matches += 1
                     if matches > 1:
