@@ -80,6 +80,8 @@ npm run start
 npm run stop
 ```
 
+`npm run start` 会先安装后端依赖与锁定版本的前端依赖，再在前台完成构建并用与 terminal 脱离的后台进程启动前后端；待后端 readiness 与前端 HTTP 访问都通过后，命令即退出。日志仍位于 `.local/logs/`，停服使用 `npm run stop`；已预装依赖的部署可设 `SKIP_INSTALL=1`。
+
 目标机没有 npm/node 或 root 权限时，先用 `bash scripts/pack.sh` 构建离线包，再按 [packaging/DEPLOY.md](./packaging/DEPLOY.md) 部署。
 
 ### 验证

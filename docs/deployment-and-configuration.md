@@ -160,12 +160,29 @@ npm run start
 npm run stop
 ```
 
-`npm run start` runs `scripts/prod.sh`: `next build` + `next start` for the frontend,
-`uvicorn --workers 1` for the backend, both logging to `.local/logs/`. Set `SKIP_BUILD=1`
-to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
-`BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports. The backend
-defaults to `127.0.0.1`; binding it to a non-loopback address requires a non-default
-`SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
+`npm run start` runs `scripts/prod.sh`: it first installs the backend requirements into
+`PYTHON_BIN`'s environment with `python -m pip install -r backend/requirements.txt`, then
+recreates the locked frontend dependency tree with `npm ci --prefix frontend`. It completes
+`next build` in the foreground, then launches `next start` and the single-worker Uvicorn
+backend under `nohup`, with stdin detached and both logs written under `.local/logs/`.
+The command polls the backend's
+`/api/ready` document with `curl` (requiring `ready=true`) and curls the frontend root;
+after both checks pass twice while both launched PIDs remain alive, it exits successfully.
+The services therefore survive closing the terminal. A process exit, readiness timeout,
+or interruption before success sends SIGTERM to both launched children together, waits the
+bounded `START_CLEANUP_GRACE_SECONDS` (default 10 seconds), SIGKILLs any survivor, reaps both,
+and returns non-zero. The default readiness timeout is 1,800 seconds so large-library startup
+preloading can finish; override it with a positive integer `START_TIMEOUT_SECONDS`. `curl`
+plus one of `ss`, `lsof`, or `fuser` is required. Occupied target ports fail before dependency
+installation even when the current user cannot see the listener PID, so an old listener cannot
+be mistaken for this run. Use `npm run stop` for the detached services. Prebuilt images that already
+contain both dependency sets may set `SKIP_INSTALL=1`; with that escape hatch, a missing
+`frontend/node_modules/.bin/next` still fails before build rather than silently continuing.
+
+Set `SKIP_BUILD=1` to reuse an already-built `frontend/.next` (e.g. a prebuilt image).
+Override `BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports. The
+backend defaults to `127.0.0.1`; binding it to a non-loopback address requires a
+non-default `SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
 
 The supported production diagnostics target is Ubuntu 24.04 running this normal
 `npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
