@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Copy,
   ExternalLink,
+  ListChecks,
   Sparkles,
   Table2,
   ThumbsDown,
@@ -24,9 +25,12 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import { AuthedImage } from "./authed-image";
+import { API_BASE } from "./api-config";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { copyTextSafely } from "./copy-text";
+import { FormulaView } from "./formula-view";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { unwrapStandaloneLatex } from "./math-markdown";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
@@ -46,9 +50,38 @@ import {
   STRUCTURED_ENUMERATION_LIMITS,
 } from "./ask-retrieval-effort";
 import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-index";
-import type { AskResponse, KnowhowBatchCoverage, KnowhowResultSet } from "./workspace-model";
+import { sourceImageAssetUrl } from "./source-image";
+import type {
+  AskResponse,
+  KnowhowBatchCoverage,
+  KnowhowResultSet,
+  TypedCollectionCoverage,
+  TypedCollectionItem,
+  TypedCollectionResult,
+} from "./workspace-model";
 import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
+
+
+// truncated_reason 的中文映射,Knowhow 卡与类型化清单卡共用(两条覆盖率分别来自
+// backend/app/services/structured_retrieval.py 与 collection_enumeration.py,
+// 取值集合不完全相同,但都是内部代号,不能原样吐给用户)。未知值兜底显示泛化的
+// "部分结果",不吐英文 token(同 label() 签名强制传 fallback 的既有惯例)。
+// concurrent_change 在类型化清单卡里有专属的终态整句(见 collectionCoverageStatus),
+// 走不到这张表;但 Knowhow 覆盖率没有那条特判分支,遇到它时仍会落到这张表,所以
+// 这里也给它一个人话翻译,不能省。
+const TRUNCATED_REASON_LABELS: Record<string, string> = {
+  row_limit: "已达本轮可读取的行数上限",
+  table_limit: "已达本轮可读取的表数上限",
+  payload_limit: "本轮内容量已达上限",
+  budget: "已达本轮枚举上限",
+  payload: "本轮内容量已达上限",
+  concurrent_change: "资料在读取期间有变动",
+};
+
+function truncatedReasonLabel(reason: string): string {
+  return label(TRUNCATED_REASON_LABELS, reason, "部分结果");
+}
 
 
 function InlineFormula({ latex }: { latex: string }) {
@@ -92,7 +125,7 @@ function KnowhowResultSetCard({
         <strong><Table2 size={14} aria-hidden="true" /> {resultSet.title}</strong>
         {!coverage.complete && coverage.truncated_reason && (
           <span className="answer-knowhow-partial-reason" title={coverage.overflow_semantics || "explicit_partial"}>
-            已明确标注为部分结果（{coverage.truncated_reason}）
+            已明确标注为部分结果（{truncatedReasonLabel(coverage.truncated_reason)}）
             {coverage.scanned_rows !== coverage.returned_rows
               ? `；已扫描 ${coverage.scanned_rows} 行`
               : ""}
@@ -146,14 +179,318 @@ function KnowhowResultSetCard({
 }
 
 
+// 元素清单的界面名。逐字镜像后端 reasoning_retrieval.py 的 _ELEMENT_KIND_LABELS +
+// "清单" 后缀(trace summary 用同一份措辞),两侧改名必须同步。
+const ELEMENT_KIND_LIST_LABELS: Record<string, string> = {
+  formula: "公式清单",
+  table: "表格清单",
+  image: "图片清单",
+  code_block: "代码块清单",
+};
+
+// 知识对象清单的界面名。逐字镜像后端 _KG_OBJECT_LABELS + "清单" 后缀。刻意带
+// "知识对象"限定——formula 在元素侧也存在("公式清单" vs "公式知识对象清单"),
+// 两套标签全域不能重名(否则模型账目回喂与本卡片会各叫一个名)。
+const KG_OBJECT_LIST_LABELS: Record<string, string> = {
+  concept: "概念知识对象清单",
+  claim: "论断知识对象清单",
+  formula: "公式知识对象清单",
+  procedure: "过程知识对象清单",
+};
+
+function collectionResultTitle(resultSet: TypedCollectionResult): string {
+  if (resultSet.collection === "elements") {
+    return label(ELEMENT_KIND_LIST_LABELS, resultSet.element_kind ?? "", "条目清单");
+  }
+  return label(KG_OBJECT_LIST_LABELS, resultSet.object_type ?? "", "知识对象清单");
+}
+
+/**
+ * 覆盖率状态行——四种硬性渲染规则的唯一落点(design doc §2.6):
+ * 1. `truncated_reason === "concurrent_change"` 是终态,必须单独一句话,不与下面
+ *    的通用「部分结果」合并(它既不能续跑也不能被当作完整)。
+ * 2. `total === null` 渲染"总数未知",绝不写成 /0。
+ * 3. complete 时不需要分母,只报已列出的条数。
+ * 4. 其余情况分子分母都已知,直接给出比例。
+ */
+function collectionCoverageStatus(
+  coverage: TypedCollectionCoverage,
+): { text: string; cls: string } {
+  if (coverage.complete) {
+    return { text: `已全部列出 ${coverage.returned_total} 条`, cls: "answer-grounded" };
+  }
+  if (coverage.truncated_reason === "concurrent_change") {
+    return {
+      text: `已列 ${coverage.returned_total} 条，但资料在枚举期间有变动，无法确认完整`,
+      cls: "answer-overview",
+    };
+  }
+  if (coverage.total === null || coverage.total === undefined) {
+    return { text: `已列 ${coverage.returned_total} 条（总数未知）`, cls: "answer-overview" };
+  }
+  return { text: `已列 ${coverage.returned_total}/${coverage.total} 条`, cls: "answer-overview" };
+}
+
+
+// 挂载公共参考库不等于获得该库的直接成员权限(红线):`GET /sources/{id}` 与
+// `GET /notebooks/{id}/assets/{assetId}` 都是 owner∪member 口径,前端不能替
+// 用户猜权限去直连另一个库的资源——那类请求大概率 403(即便这条证据确实是
+// 当前 notebook 的有效检索结果:后端在服务端 participant 集内代理读取,浏览器
+// 侧仍只用当前 active notebook 过权限)。跨库条目因此收敛成"只读展示":不提供
+// 「查看来源」跳转、不发图片鉴权请求,只标注它来自哪个参考库。完整解(浏览器
+// 侧也能直连挂载库的资源)已登记为独立后续任务,不在本次前端收口范围内。
+//
+// item.notebook_id 两种条目类型都会填(design doc §2.6/collection_enumeration.py
+// 的 ElementItem/KgObjectItem——不是"只在跨库命中才非空"的 Citation.notebook_id
+// 惯例),非空且不等于当前活跃 notebook 即为跨库条目。
+function isCrossLibraryItem(itemNotebookId: string, activeNotebookId: string | null): boolean {
+  return Boolean(itemNotebookId) && itemNotebookId !== (activeNotebookId ?? "");
+}
+
+
+// 跨库条目的所属库标注。复用既有 tier-badge 样式(SelectedReferenceDetail 同款
+// 视觉语言),名字查得到就显示「来自参考库《名》」,查不到就退回泛化的 tier 文案
+// (公共知识库/个人知识库)——绝不吐裸 notebook id。
+function CrossLibraryBadge({
+  itemNotebookId,
+  notebookNames,
+  tier,
+}: {
+  itemNotebookId: string;
+  notebookNames: Record<string, string>;
+  tier: string;
+}) {
+  const name = notebookNames[itemNotebookId];
+  return (
+    <span className={`tier-badge tier-${tier}`}>
+      {name ? `来自参考库《${name}》` : label(TIER, tier, "来自参考库")}
+    </span>
+  );
+}
+
+
+function ElementCollectionItemRow({
+  item,
+  notebookId,
+  notebookNames,
+  onOpenSource,
+}: {
+  item: TypedCollectionItem;
+  notebookId: string | null;
+  notebookNames: Record<string, string>;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
+}) {
+  const kind = item.element_type ?? "";
+  const itemNotebookId = item.notebook_id ?? "";
+  const crossLibrary = isCrossLibraryItem(itemNotebookId, notebookId);
+  // 局部 const 而非 item.source_id!:非空断言只是在闭包里骗过编译器,局部 const
+  // 让 TS 在这个块内真的把它窄化成 string,闭包捕获的是这个已收窄的绑定。
+  const sourceId = item.source_id ?? "";
+  const imageUrl = kind === "image" && item.asset_id && !crossLibrary
+    ? sourceImageAssetUrl(API_BASE, itemNotebookId || notebookId || "", item.asset_id)
+    : "";
+  return (
+    <li className="answer-collection-item">
+      <div className="answer-collection-item-body">
+        {kind === "formula" && <FormulaView latex={item.text ?? ""} />}
+        {kind === "image" && (
+          imageUrl
+            ? <AuthedImage url={imageUrl} alt={item.location_label || "图片"} />
+            : (
+              <p className="tool-hint">
+                {crossLibrary ? "图片来自参考库，暂不支持预览" : (item.text || "图片不可用")}
+              </p>
+            )
+        )}
+        {kind === "code_block" && (
+          <pre className="answer-collection-code"><code>{item.text ?? ""}</code></pre>
+        )}
+        {kind !== "formula" && kind !== "image" && kind !== "code_block" && (
+          <p className="answer-collection-text">{item.text ?? ""}</p>
+        )}
+      </div>
+      <div className="answer-collection-item-meta">
+        {item.location_label && <small>{item.location_label}</small>}
+        {crossLibrary && (
+          <CrossLibraryBadge
+            itemNotebookId={itemNotebookId}
+            notebookNames={notebookNames}
+            tier={item.tier ?? "personal"}
+          />
+        )}
+        {!crossLibrary && onOpenSource && sourceId && (
+          <button
+            type="button"
+            className="answer-collection-open"
+            onClick={() => onOpenSource(sourceId, item.item_id)}
+          >
+            {kind === "table" ? "在来源详情查看完整表格" : "查看来源"}
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+
+function KgObjectCollectionItemRow({
+  item,
+  objectType,
+  notebookId,
+  notebookNames,
+}: {
+  item: TypedCollectionItem;
+  objectType: string;
+  notebookId: string | null;
+  notebookNames: Record<string, string>;
+}) {
+  const itemNotebookId = item.notebook_id ?? "";
+  const crossLibrary = isCrossLibraryItem(itemNotebookId, notebookId);
+  return (
+    <li className="answer-collection-item answer-collection-kg-item">
+      <KgTypeMark type={objectType} />
+      <strong><LatexText text={item.name ?? ""} isFormula={objectType === "formula"} /></strong>
+      {item.section_path && <small>{item.section_path}</small>}
+      {crossLibrary && (
+        <CrossLibraryBadge
+          itemNotebookId={itemNotebookId}
+          notebookNames={notebookNames}
+          tier={item.tier ?? "personal"}
+        />
+      )}
+    </li>
+  );
+}
+
+
+// 元素清单按来源分组显示(design doc §2.6:"按来源分组"),保留原始条目顺序
+// (执行器已按 source 顺位游标产出,这里只是分桶,不重排)。
+function groupElementItemsBySource(
+  items: TypedCollectionItem[],
+): { sourceId: string; sourceTitle: string; items: TypedCollectionItem[] }[] {
+  const order: string[] = [];
+  const bySource = new Map<string, { sourceTitle: string; items: TypedCollectionItem[] }>();
+  for (const item of items) {
+    const key = item.source_id || "";
+    if (!bySource.has(key)) {
+      order.push(key);
+      bySource.set(key, { sourceTitle: item.source_title || "未知来源", items: [] });
+    }
+    bySource.get(key)!.items.push(item);
+  }
+  return order.map((sourceId) => ({ sourceId, ...bySource.get(sourceId)! }));
+}
+
+
+function CollectionResultCard({
+  resultSet,
+  notebookId,
+  notebookNames,
+  onOpenSource,
+}: {
+  resultSet: TypedCollectionResult;
+  notebookId: string | null;
+  /** id→name 映射(AnswerView 已持有,一层透传),供跨库条目标注「来自参考库《名》」。 */
+  notebookNames: Record<string, string>;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleLimit = STRUCTURED_ENUMERATION_LIMITS.initialVisibleRows;
+  const items = expanded ? resultSet.items : resultSet.items.slice(0, visibleLimit);
+  const hasMoreLoadedItems = resultSet.items.length > visibleLimit;
+  const coverage = resultSet.coverage;
+  const status = collectionCoverageStatus(coverage);
+  const title = collectionResultTitle(resultSet);
+  // "仅限来源"标注(design doc §2.6):取首个条目的 source_title,查不到就不显示——
+  // 宁可不标注也不吐裸 source_id。
+  const scopedSourceTitle = resultSet.source_id ? resultSet.items[0]?.source_title : "";
+  const showPreviewNote = resultSet.synthesis_complete === false
+    && resultSet.synthesis_rows < coverage.returned_total;
+
+  return (
+    <section className="answer-collection-result" aria-label={`清单结果：${title}`}>
+      <div className="answer-collection-result-heading">
+        <span className={`tag ${status.cls}`}>{status.text}</span>
+        <strong><ListChecks size={14} aria-hidden="true" /> {title}</strong>
+        {scopedSourceTitle && (
+          <span className="answer-collection-scope">仅限来源：{scopedSourceTitle}</span>
+        )}
+      </div>
+      {!coverage.complete && coverage.truncated_reason && coverage.truncated_reason !== "concurrent_change" && (
+        <span
+          className="answer-collection-partial-reason"
+          title={coverage.overflow_semantics || "explicit_partial"}
+        >
+          已明确标注为部分结果（{truncatedReasonLabel(coverage.truncated_reason)}）
+        </span>
+      )}
+      {showPreviewNote && (
+        <p className="answer-collection-coverage-note">
+          {resultSet.synthesis_rows === 0
+            ? "本轮分析未包含该清单"
+            : `本轮分析基于前 ${resultSet.synthesis_rows} 条预览`}
+        </p>
+      )}
+      {resultSet.collection === "elements" ? (
+        <div className="answer-collection-groups">
+          {groupElementItemsBySource(items).map((group) => (
+            <div className="answer-collection-group" key={group.sourceId || "unknown"}>
+              <h4 className="answer-collection-group-title">{group.sourceTitle}</h4>
+              <ul className="answer-collection-items">
+                {group.items.map((item) => (
+                  <ElementCollectionItemRow
+                    key={item.item_id}
+                    item={item}
+                    notebookId={notebookId}
+                    notebookNames={notebookNames}
+                    onOpenSource={onOpenSource}
+                  />
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <ul className="answer-collection-items">
+          {items.map((item) => (
+            <KgObjectCollectionItemRow
+              key={item.item_id}
+              item={item}
+              objectType={resultSet.object_type ?? ""}
+              notebookId={notebookId}
+              notebookNames={notebookNames}
+            />
+          ))}
+        </ul>
+      )}
+      {hasMoreLoadedItems && (
+        <button
+          type="button"
+          className="answer-collection-expand"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起已加载内容" : `展开全部已加载的 ${resultSet.items.length} 条`}
+        </button>
+      )}
+    </section>
+  );
+}
+
+
 function KnowhowResultSets({
   resultSets,
   batchCoverage,
   onOpenKnowhowRow,
+  notebookId,
+  notebookNames,
+  onOpenSource,
 }: {
-  resultSets: KnowhowResultSet[] | undefined;
+  resultSets: (KnowhowResultSet | TypedCollectionResult)[] | undefined;
   batchCoverage: KnowhowBatchCoverage | undefined;
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  notebookId: string | null;
+  notebookNames: Record<string, string>;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   if (!resultSets?.length) return null;
   return (
@@ -174,18 +511,39 @@ function KnowhowResultSets({
           )}
           {!batchCoverage.complete && batchCoverage.truncated_reason && (
             <span className="answer-knowhow-partial-reason">
-              截断原因：{batchCoverage.truncated_reason}
+              截断原因：{truncatedReasonLabel(batchCoverage.truncated_reason)}
             </span>
           )}
         </section>
       )}
-      {resultSets.map((resultSet) => (
-        <KnowhowResultSetCard
-          key={`${resultSet.table_id}-${resultSet.title}`}
-          resultSet={resultSet}
-          onOpenKnowhowRow={onOpenKnowhowRow}
-        />
-      ))}
+      {/* 按 kind 分派,不得按下标猜测:result_sets 是 knowhow/collection 的判别
+          union。未知 kind 一律跳过(返回 null),绝不落到 knowhow 分支——那条分支
+          假定 `.rows`/`.columns` 存在,一份没有这两个字段的 collection 行会在
+          `.rows.slice(...)` 上抛 TypeError,炸穿整个答案面板(且答案持久化后,
+          历史重开会继续炸)。这正是本函数存在的理由。 */}
+      {resultSets.map((resultSet) => {
+        if (resultSet.kind === "knowhow") {
+          return (
+            <KnowhowResultSetCard
+              key={`${resultSet.table_id}-${resultSet.title}`}
+              resultSet={resultSet}
+              onOpenKnowhowRow={onOpenKnowhowRow}
+            />
+          );
+        }
+        if (resultSet.kind === "collection") {
+          return (
+            <CollectionResultCard
+              key={`collection-${resultSet.collection}-${resultSet.element_kind || resultSet.object_type}-${resultSet.source_id || ""}`}
+              resultSet={resultSet}
+              notebookId={notebookId}
+              notebookNames={notebookNames}
+              onOpenSource={onOpenSource}
+            />
+          );
+        }
+        return null;
+      })}
     </div>
   );
 }
@@ -564,6 +922,7 @@ export function AnswerView({
   onFeedback,
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
+  onOpenSource,
   notebookId,
   notebookNames,
   onBuildScaleIndex,
@@ -583,6 +942,10 @@ export function AnswerView({
   /** Task 12（引用跳转）：命中 knowhow 格子的引用点「在表格中查看」时调用，
    * page.tsx 据此打开 Knowhow 面板并定位到该表该行的抽屉。 */
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  /** PR-2 T6：类型化元素清单条目「查看来源」/「在来源详情查看完整表格」跳转时
+   * 调用，page.tsx 据此打开来源详情并高亮到该元素。可选——旧调用方/测试不传时
+   * 清单卡的跳转按钮不渲染（同 onTestModel/onOpenModelStatus 的可选惯例）。 */
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
   notebookId: string | null;
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
    * 参考库(base_notebooks)合并，逐 turn 复用同一份，供引用徽章标来源库名。 */
@@ -681,6 +1044,9 @@ export function AnswerView({
         resultSets={answer.result_sets}
         batchCoverage={answer.result_coverage}
         onOpenKnowhowRow={onOpenKnowhowRow}
+        notebookId={notebookId}
+        notebookNames={notebookNames}
+        onOpenSource={onOpenSource}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />

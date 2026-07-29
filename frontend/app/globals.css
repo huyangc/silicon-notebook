@@ -3231,9 +3231,18 @@ button.chat-session-card {
   animation: chatUserFlash 1.3s ease-out;
 }
 
+/* 来源详情「查看来源」跳转的一次性高亮(page.tsx 滚动到 highlightedElementId 那
+   张元素卡)——复用上面既有的 chatUserFlash 动画,不引入新颜色/新关键帧;蓝色
+   box-shadow 淡出即可,几秒后 highlightedElementId 状态自动清空(page.tsx 里的
+   定时器),类名随之消失,不需要额外的 CSS 计时。 */
+.source-element-card--highlighted {
+  animation: chatUserFlash 1.3s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chat-turn-nav-loupe { animation: none; }
   .chat-user-flash { animation: none; box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.5); }
+  .source-element-card--highlighted { animation: none; box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.5); }
 }
 
 .reasoning-trace-panel {
@@ -3581,6 +3590,181 @@ button.chat-session-card {
 .answer-knowhow-expand:hover {
   border-color: var(--blue);
   background: #e9f0ff;
+}
+
+/* 类型化元素/知识对象清单卡(PR-2 枚举工具,§2.6)——布局与配色逐条对齐上面的
+   .answer-knowhow-* 家族,只是类名前缀换成 collection,同一份视觉语言。 */
+.answer-collection-result {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--soft);
+  /* 比同级 .answer-knowhow-result(无此声明)多一步:那张卡的宽内容是表格,已经
+     自带 min-width:420px 兜底 + .answer-table-wrap 的 overflow-x 出口;这张卡
+     的宽内容是 KG 名称里可能出现的行内公式(.answer-collection-kg-item strong,
+     无自带宽度下限),真的需要 grid 链条一路松开 min-width 才能在自己的内容块内
+     横向滚动而不是把整张答案面板顶宽。 */
+  min-width: 0;
+}
+
+.answer-collection-result-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 9px;
+  color: #263241;
+  font-size: 13px;
+}
+
+.answer-collection-result-heading strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.answer-collection-scope {
+  color: #475569;
+  font-size: 12px;
+}
+
+.answer-collection-partial-reason,
+.answer-collection-coverage-note {
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.answer-collection-coverage-note {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+.answer-collection-groups {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+  min-width: 0;
+}
+
+/* 按来源分组的每一组包装 div(CollectionResultCard 里 groupElementItemsBySource
+   之后 map 出来的那层)本身也是 .answer-collection-groups 的 grid item——只给
+   父容器 min-width:0 不够,子项默认仍是 min-width:auto,同一条宽公式照样能把这一
+   个 track 撑宽。 */
+.answer-collection-group {
+  min-width: 0;
+}
+
+.answer-collection-group-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+  /* 长来源标题省略号截断，不撑爆卡片(对齐 UI polish bar 的"同类控件成列对齐"惯例)。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.answer-collection-items {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.answer-collection-item {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #fff;
+  min-width: 0;
+}
+
+.answer-collection-item-body {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.answer-collection-text {
+  margin: 0;
+}
+
+/* 图片降级占位(跨库不发请求 / 加载失败 / 无可用资产)复用全局 .tool-hint,但那个
+   类没有 margin 复位——默认 <p> 的 UA margin 会在这条家族里显得比同排的
+   .element-formula/.answer-collection-code(均 margin:0)多出一截空白,不对齐。
+   只在本家族内复位,不改 .tool-hint 本身(其余用法可能仍要那段间距)。 */
+.answer-collection-item-body .tool-hint {
+  margin: 0;
+}
+
+.answer-collection-item-body pre,
+.answer-collection-code {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+}
+
+.answer-collection-item-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  color: #6b7686;
+  font-size: 12px;
+}
+
+.answer-collection-open,
+.answer-collection-expand {
+  border: 1px solid #c9d6f7;
+  border-radius: 7px;
+  background: #f2f6ff;
+  color: #1b4fcb;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.answer-collection-open {
+  padding: 4px 7px;
+}
+
+.answer-collection-expand {
+  margin-top: 9px;
+  padding: 5px 9px;
+}
+
+.answer-collection-open:hover,
+.answer-collection-expand:hover {
+  border-color: var(--blue);
+  background: #e9f0ff;
+}
+
+.answer-collection-kg-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* KG 名称走 LatexText,isFormula 时是行内 KaTeX(没有 .element-formula 那样的
+   overflow-x:auto 出口)。这个 strong 是 .answer-collection-kg-item 的 flex
+   item,同款 min-width:0 必须补上——否则一个宽公式名字会把整行、进而整个 grid
+   item 撑宽,顶出答案面板(镜像 .kg-evidence-source strong 的既有写法)。
+   同时给它 overflow-x:auto:红线要求宽公式只在所属内容块内横向滚动——不能
+   截断(会打断公式渲染),也不能任其视觉溢出到行外,滚动出口开在名称块自身。 */
+.answer-collection-kg-item strong {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.answer-collection-kg-item small {
+  margin-left: auto;
+  color: #6b7686;
 }
 
 .answer-feedback {

@@ -6,6 +6,7 @@ import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import type { ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
+import { AuthedImage } from "./authed-image";
 import { FormulaView } from "./formula-view";
 import { KgEvidenceBody } from "./kg-evidence-body";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
@@ -107,7 +108,7 @@ import { clearToken, getToken } from "./auth-session";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
-import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
+import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
@@ -1882,12 +1883,19 @@ export default function Home() {
 
   useEffect(() => {
     if (!sourceDetail || !highlightedElementId) return;
-    const timer = window.setTimeout(() => {
+    // 找不到目标元素(如后端返回的 element_id 已不在当前 sourceElements 里)时
+    // ?.scrollIntoView 静默 no-op——这是既有行为,不新增报错/提示。
+    const scrollTimer = window.setTimeout(() => {
       document
         .getElementById(sourceElementDomId(highlightedElementId))
         ?.scrollIntoView({ block: "center" });
     }, 80);
-    return () => window.clearTimeout(timer);
+    // 一次性高亮(双评审 P2-7):目标卡片的高亮态由 element.id === highlightedElementId
+    // 驱动(见下方 source-element-card 的 className),这里只负责几秒后自动清空,
+    // 让高亮态"消失"而不是无限期挂着——关闭来源详情窗口(onClose)是另一条清空
+    // 路径,两条中的任意一条先发生都行。
+    const clearTimer = window.setTimeout(() => setHighlightedElementId(""), 2600);
+    return () => { window.clearTimeout(scrollTimer); window.clearTimeout(clearTimer); };
   }, [highlightedElementId, sourceDetail, sourceElements]);
 
   useEffect(() => {
@@ -2935,12 +2943,29 @@ export default function Home() {
   }
 
   async function openSourceDetail(source: SourceSummary) {
+    await openSourceById(source.id, "");
+  }
+
+  // 供来源列表(openSourceDetail,不带目标元素)与 Ask 清单结果卡「查看来源」跳转
+  // (onOpenSourceElement,带目标元素 id)共用同一条打开路径。elementId 喂给上面
+  // 已声明但此前从未被真正置位的 highlightedElementId 高亮/滚动效果——PR-2 T6 是
+  // 它第一次真正被点亮。空字符串代表「打开来源、不指向具体元素」,与既有
+  // openSourceDetail 的行为逐字一致。
+  async function openSourceById(sourceId: string, elementId: string) {
     const [detail, elements] = await Promise.all([
-      getSource(source.id),
-      getSourceElements(source.id)
+      getSource(sourceId),
+      getSourceElements(sourceId)
     ]);
     setSourceDetail(detail);
     setSourceElements(elements);
+    setHighlightedElementId(elementId);
+  }
+
+  // Ask 清单结果卡(answer-panel.tsx CollectionResultCard)元素条目「查看来源」/
+  // 「在来源详情查看完整表格」按钮的回调:elementId 缺省时只打开来源、不高亮任何
+  // 元素(KG 知识对象清单没有这个按钮,不会调用到这里)。
+  function onOpenSourceElement(sourceId: string, elementId?: string) {
+    openSourceById(sourceId, elementId || "").catch(reportError);
   }
 
   async function reparseSource() {
@@ -5171,6 +5196,7 @@ export default function Home() {
                               sourceNotebookId || currentNotebookId,
                             )}
                             onOpenKnowhowRow={openKnowhowAt}
+                            onOpenSource={onOpenSourceElement}
                             notebookId={currentNotebookId}
                             notebookNames={notebookNames}
                             onBuildScaleIndex={() => runScaleIndexOp("build")}
@@ -5913,7 +5939,7 @@ export default function Home() {
       )}
 
       {sourceDetail && (
-        <SourceDetailWindow onClose={() => setSourceDetail(null)}>
+        <SourceDetailWindow onClose={() => { setSourceDetail(null); setHighlightedElementId(""); }}>
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 <div className="source-detail-actions">
@@ -5991,7 +6017,11 @@ export default function Home() {
               )}
               <div className="source-element-stack">
                 {sourceElements.length > 0 ? sourceElements.map((element) => (
-                  <article className="item source-element-card" key={element.id}>
+                  <article
+                    className={`item source-element-card${element.id === highlightedElementId ? " source-element-card--highlighted" : ""}`}
+                    key={element.id}
+                    id={sourceElementDomId(element.id)}
+                  >
                     <div className="element-head">
                       <h3>{element.location_label}</h3>
                       <span className="tag element-type-tag">{label(ELEMENT_TYPE, element.element_type, "内容")}</span>
@@ -7100,29 +7130,6 @@ function sanitizeTableHtml(html: string): string {
   const allowed = /^<\/?(table|thead|tbody|tfoot|tr|td|th|caption)(\s[^>]*)?>$/i;
   // Strip every tag that is not part of the allow-list above.
   return withoutHandlers.replace(/<\/?[a-z][^>]*>/gi, (tag) => (allowed.test(tag) ? tag : ""));
-}
-
-// 图片来源资产需鉴权(GET /assets/{id} 走 require_notebook_read),裸 <img src> 会 401;
-// 走 fetch→blob→objectURL(与 downloadReportsZip 同款鉴权 fetch 惯用法),卸载时 revoke 避免泄漏。
-function AuthedImage({ url, alt }: { url: string; alt: string }) {
-  const [src, setSrc] = useState<string>("");
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    if (!url) return;
-    let revoked = "";
-    let alive = true;
-    fetchInternalAssetBlob(url)
-      .then((blob) => {
-        if (!alive) return;
-        revoked = URL.createObjectURL(blob);
-        setSrc(revoked);
-      })
-      .catch(() => alive && setFailed(true));
-    return () => { alive = false; if (revoked) URL.revokeObjectURL(revoked); };
-  }, [url]);
-  if (failed) return <p className="tool-hint">图片加载失败</p>;
-  if (!src) return <p className="tool-hint">图片加载中…</p>;
-  return <img className="element-image" src={src} alt={alt} loading="lazy" />;
 }
 
 function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {

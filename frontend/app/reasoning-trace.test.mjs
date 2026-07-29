@@ -186,11 +186,16 @@ test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () =>
   );
 });
 
-test("NEXT_ACTION 覆盖后端全部 8 个真实取值(非机制名)", () => {
-  // 真源 reasoning_retrieval.py `run()` 循环的 elif 分支。后端加第 9 个值时这条会提醒补。
+test("NEXT_ACTION 覆盖后端全部 10 个真实取值(非机制名)", () => {
+  // 真源是 reasoning_retrieval.py 里 reflect 循环的 next_action if/elif 分发链
+  // (不按行号钉——本仓库行号指针已知会腐烂;按分支内容定位,见 reasoning-trace.ts
+  // 顶部 NEXT_ACTION 上方注释)。精确查找通道加了 exact_lookup,PR-2 加了
+  // enumerate_elements/enumerate_kg_objects,原为 7 个。后端加第 11 个值时这条会
+  // 提醒补。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
-    search_elements: "回原文里找细节", ppr_retrieve: "顺着关联扩大范围",
+    search_elements: "回原文里找细节", enumerate_elements: "列元素清单",
+    enumerate_kg_objects: "列知识对象清单", ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
     exact_lookup: "按名称精确查找",
   };
@@ -255,5 +260,60 @@ test("新增 exact_lookup 后,未知 step_type / next_action 的兜底仍成立(
   assert.equal(
     getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "exact_lookup_v2" } }),
     "",
+  );
+});
+
+// PR-2 T6:集合枚举工具的 enumerate 步用 detail.collection 存在与否与 Knowhow 的
+// scanned_rows/known_total_rows 分支区分,数字读法(条目 vs 行、分母可能未知)不同,
+// 混用会把「12 条」渲染成「12/0 行」。
+test("集合枚举 enumerate 步:分母已知时渲染「N/M 条」", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "enumerate",
+      summary: "枚举公式清单: 部分结果,已达本轮上限,累计 12 条/共 40",
+      detail: {
+        collection: "elements", kind: "formula", returned_total: 12, total: 40,
+        complete: false, truncated_reason: "budget",
+      },
+    }),
+    "12/40 条",
+  );
+});
+
+test("集合枚举 enumerate 步:分母未知(total=null)不得渲染成 /0", () => {
+  const out = getTraceStepDetail({
+    step_type: "enumerate",
+    summary: "枚举概念知识对象清单: 部分结果,已达本轮上限,累计 30 条",
+    detail: {
+      collection: "kg_objects", kind: "concept", returned_total: 30, total: null,
+      complete: false, truncated_reason: "budget",
+    },
+  });
+  assert.equal(out, "30 条（总数未知）");
+  assert.ok(!out.includes("/0"), "分母未知不得写成 /0");
+});
+
+test("集合枚举 enumerate 步:complete 时渲染「已全部列出」而不重复条数", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "enumerate",
+      summary: "枚举图片清单: 已全部列出 5 条",
+      detail: {
+        collection: "elements", kind: "image", returned_total: 5, total: 5,
+        complete: true, truncated_reason: "",
+      },
+    }),
+    "已全部列出",
+  );
+});
+
+test("Knowhow 的 scanned_rows 分支与集合枚举分支不串台(仍走各自数字读法)", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "enumerate",
+      summary: "枚举方法清单表: 12/100 行",
+      detail: { scanned_rows: 12, known_total_rows: 100 },
+    }),
+    "12/100 行",
   );
 });
