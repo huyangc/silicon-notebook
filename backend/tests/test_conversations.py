@@ -49,6 +49,50 @@ def test_ask_creates_then_appends_conversation(repo):
     detail = repo.get_conversation(r1.conversation_id)
     assert detail.turn_count == 2 and len(detail.turns) == 2
 
+
+def test_answer_completion_time_matches_persisted_answer_row(repo):
+    """The live response and reopened turn expose the same write-clock instant."""
+    nb = _seed(repo)
+    response = repo.ask(nb.id, AskRequest(question="when was this answered"))
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT payload, created_at FROM answers WHERE id=?",
+            (response.answer_id,),
+        ).fetchone()
+    payload = json.loads(row["payload"])
+
+    assert response.answered_at == row["created_at"]
+    assert payload["answered_at"] == row["created_at"]
+    turn = repo.get_conversation(response.conversation_id).turns[0]
+    assert turn.response.answered_at == row["created_at"]
+
+
+def test_reopened_legacy_answer_backfills_completion_time_from_row(repo):
+    """Answers saved before answered_at existed remain timestamped on reopen."""
+    nb = _seed(repo)
+    completion = "2026-07-29T09:05:00+08:00"
+    conversation_id = "conv-legacy-answer-time"
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (conversation_id, nb.id, "legacy", repo.current_user().id,
+             completion, completion),
+        )
+        db.execute(
+            "INSERT INTO answers "
+            "(id,notebook_id,question,payload,created_at,conversation_id) "
+            "VALUES (?,?,?,?,?,?)",
+            ("ans-legacy-answer-time", nb.id, "q",
+             json.dumps({"conclusion": "old answer"}), completion, conversation_id),
+        )
+
+    turn = repo.get_conversation(conversation_id).turns[0]
+    assert turn.response.answered_at == completion
+    assert turn.created_at == completion
+
 def test_ask_feeds_prior_turns_into_prompt(repo, monkeypatch):
     nb = _seed(repo)
     captured = {}

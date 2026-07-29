@@ -353,6 +353,7 @@ export type KnowhowBatchCoverage = {
 export type AskResponse = {
   answer_id: string;
   asked_at?: string;
+  answered_at?: string;
   conversation_id: string;
   conclusion: string;
   answer: string;

@@ -912,6 +912,11 @@
               "title": "Answer Id",
               "type": "string"
             },
+            "answered_at": {
+              "default": "",
+              "title": "Answered At",
+              "type": "string"
+            },
             "asked_at": {
               "default": "",
               "title": "Asked At",
@@ -16524,6 +16529,7 @@
       "anchors": [],
       "answer": "",
       "answer_id": "ans-api",
+      "answered_at": "2024-01-02T03:04:05",
       "citations": [
         {
           "element_id": "el-src-api-0002",
@@ -16566,6 +16572,7 @@
             "anchors": [],
             "answer": "",
             "answer_id": "ans-api",
+            "answered_at": "2024-01-02T03:04:05",
             "citations": [
               {
                 "element_id": "el-src-api-0002",

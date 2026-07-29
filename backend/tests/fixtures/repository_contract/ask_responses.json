@@ -18,6 +18,7 @@
         ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [
           {
             "element_id": "<el-id-1>",
@@ -61,6 +62,7 @@
         ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [
           {
             "element_id": "<el-id-1>",
@@ -106,6 +108,7 @@
         ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [
           {
             "element_id": "<el-id-1>",
@@ -159,6 +162,7 @@
         ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [
           {
             "element_id": "<el-id-1>",
@@ -201,6 +205,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "该知识库规模过大,graph 模式的全图漫游在此库上不可用(已跳过以避免长时间无响应)。请改用 chunk 或 reasoning 模式提问;若已构建规模化检索索引(scale index),graph 模式的跨文档 PPR 检索仍可正常工作。",
         "conversation_id": "<conv-id-1>",
@@ -222,6 +227,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "该知识库规模过大,graph 模式的全图漫游在此库上不可用(已跳过以避免长时间无响应)。请改用 chunk 或 reasoning 模式提问;若已构建规模化检索索引(scale index),graph 模式的跨文档 PPR 检索仍可正常工作。",
         "conversation_id": "<conv-id-1>",
@@ -245,6 +251,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "The notebook does not yet contain approved knowledge that matches this question. Upload and review sources to build coverage.",
         "conversation_id": "<conv-id-1>",
@@ -266,6 +273,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "The notebook does not yet contain approved knowledge that matches this question. Upload and review sources to build coverage.",
         "conversation_id": "<conv-id-1>",
@@ -289,6 +297,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "本笔记本尚未构建知识图谱,也没有已建图的参考库;请先点『构建知识图谱』,或为本笔记本挂载一个已建图的公共知识库。",
         "conversation_id": "<conv-id-1>",
@@ -328,6 +337,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "本笔记本尚未构建知识图谱,也没有已建图的参考库;请先点『构建知识图谱』,或为本笔记本挂载一个已建图的公共知识库。",
         "conversation_id": "<conv-id-1>",
@@ -382,6 +392,7 @@
         ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [
           {
             "element_id": "<el-id-1>",
@@ -554,6 +565,7 @@
         ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [
           {
             "element_id": "<el-id-1>",
@@ -715,6 +727,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "系统未配置当前问答所需的模型服务，请联系维护人员",
         "conversation_id": "<conv-id-1>",
@@ -765,6 +778,7 @@
         "anchors": [],
         "answer": "",
         "answer_id": "<ans-id-1>",
+        "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "系统未配置当前问答所需的模型服务，请联系维护人员",
         "conversation_id": "<conv-id-1>",

@@ -45,7 +45,7 @@ def _contract() -> dict[str, object]:
 
 
 def _normalize_runtime(value, replacements, temporary_root, key=""):
-    if key in {"created_at", "updated_at"} and isinstance(value, str):
+    if key in {"answered_at", "created_at", "updated_at"} and isinstance(value, str):
         return "2024-01-02T03:04:05"
     if key == "created_label" and isinstance(value, str):
         return "fixture-date"

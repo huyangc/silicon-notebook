@@ -154,6 +154,7 @@ import { AskSessionHeaderActions } from "./ask-session-header";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { ChatQuestion } from "./chat-question";
+import { ChatAnswer } from "./chat-answer";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { SourceDetailWindow } from "./source-detail-window";
@@ -5159,7 +5160,7 @@ export default function Home() {
                     {turns.map((turn, index) => (
                       <div className="chat-turn" id={chatTurnDomId(index)} key={turn.response.answer_id || index}>
                         <ChatQuestion question={turn.question} askedAt={turn.askedAt} />
-                        <div className="chat-assistant">
+                        <ChatAnswer answeredAt={turn.response.answered_at}>
                           <AnswerView
                             answer={turn.response}
                             feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
@@ -5182,7 +5183,7 @@ export default function Home() {
                             testingModelServices={modelTestActivity.services}
                             testingAllModels={modelTestActivity.all}
                           />
-                        </div>
+                        </ChatAnswer>
                       </div>
                     ))}
                     {askInFlight && (

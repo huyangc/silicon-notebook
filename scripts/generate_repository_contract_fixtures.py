@@ -2109,7 +2109,7 @@ def _normalize_api_serialization(
     temporary_root: Path,
     key: str = "",
 ) -> object:
-    if key in {"created_at", "updated_at"} and isinstance(value, str):
+    if key in {"answered_at", "created_at", "updated_at"} and isinstance(value, str):
         return FIXED_TIME
     if key == "created_label" and isinstance(value, str):
         return "fixture-date"
