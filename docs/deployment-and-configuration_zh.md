@@ -143,11 +143,25 @@ npm run start
 npm run stop
 ```
 
-`npm run start` 调用 `scripts/prod.sh`:前端 `next build` + `next start`,后端
-`uvicorn --workers 1`,两者日志都落 `.local/logs/`。设 `SKIP_BUILD=1` 可复用已构建好
-的 `frontend/.next`(如预构建镜像场景)。可用 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT`
-覆盖监听地址/端口。后端默认只监听 `127.0.0.1`；显式绑定非 loopback 地址时必须
-配置非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
+`npm run start` 调用 `scripts/prod.sh`:先用
+`python -m pip install -r backend/requirements.txt` 把后端依赖安装到 `PYTHON_BIN`
+所在环境，再用 `npm ci --prefix frontend` 按 lockfile 重建前端依赖树。然后在前台
+完成 `next build`，并用 `nohup` 且脱离标准输入的方式后台启动
+`next start` 与单 worker Uvicorn，两者日志都落在 `.local/logs/`。命令会用
+`curl` 轮询后端 `/api/ready`
+(必须 `ready=true`)和前端首页；两者连续两次通过且本次进程仍存活后，
+`npm run start` 成功退出，之后可直接关掉 terminal。若进程提前退出、就绪超时或
+在成功前被中断，脚本会清理本次拉起的两个进程并返回非零。默认超时为 1800 秒，
+便于大库完成启动预加载；可用正整数 `START_TIMEOUT_SECONDS` 覆盖。环境需要
+`curl` 以及 `ss` / `lsof` / `fuser` 之一；目标端口已被占用时会在启动前拒绝，
+避免把旧监听器的响应误判为本次启动成功。后台服务用 `npm run stop` 停止。
+已同时预装两端依赖的镜像可设 `SKIP_INSTALL=1`；该模式下若缺少
+`frontend/node_modules/.bin/next`，仍会在 build 前直接报错，不会带病继续。
+
+设 `SKIP_BUILD=1` 可复用已构建好的 `frontend/.next`(如预构建镜像场景)。可用
+`BACKEND_HOST` / `PORT` / `FRONTEND_PORT` 覆盖监听地址/端口。后端默认只监听
+`127.0.0.1`；显式绑定非 loopback 地址时必须配置非默认
+`SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
 
 生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
 Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
