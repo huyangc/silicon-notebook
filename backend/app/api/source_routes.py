@@ -44,6 +44,11 @@ _REPARSE_MAX = 200
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
 
+# 「隐藏合成源」:memory/knowhow 投影出来的物理 source 行,不是用户导入的文档,由各自
+# 投影服务维护。与存储层 VISIBLE_SOURCE_TYPES_PREDICATE 同一份口径(来源面板与文档数量
+# 上限都按它排除)。本模块两处消费:reparse 不受理它们,参与集代理读取跨库时拒绝它们。
+_HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
+
 
 def _asset_service() -> AssetService:
     return AssetService(repository())
@@ -246,7 +251,7 @@ def reparse_sources(
         # ⚠ 只重解析**导入型**用户源(codex):memory/knowhow 隐藏合成源无 file_path、由各自
         # 投影服务维护;把它们喂给文档解析 process_source 只会标失败/清派生态,不是修复。
         # 与 H2/H3 判据同口径(那两项本就排除 memory/knowhow),这里挡住 body 里带来的 id。
-        if src.type in ("memory", "knowhow"):
+        if src.type in _HIDDEN_SOURCE_TYPES:
             continue
         kg_scheduler.submit_job(repo.process_source, source_id)
         scheduled.append(source_id)
@@ -383,6 +388,18 @@ def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
     if not _in_participant_scope(notebook_id, detail.notebook_id):
+        raise HTTPException(status_code=404, detail="Source not found")
+    # ⚠ 跨库时再挡一道隐藏合成源。集合地图/枚举**刻意**把 memory/knowhow 的物理 source
+    # 行算进作用域(`source_change_signal_rows` 的原话:数的是检索能够到的东西,不是来源
+    # 面板显示的东西),所以一个清单条目原则上可以带着这类 source_id 出现在跨库结果里,
+    # 用户一点「查看来源」,`/elements` 就会把整条合成源摊开——包括没被枚举到的部分,而
+    # Memory 是**按创建者私有**的。当前这条路径实际走不通(knowhow 只写 `knowhow_cell`
+    # 元素、不在可枚举白名单里,Memory 投影根本不写 source_elements),但那是别处的事实,
+    # 不该被这里的授权判断依赖 —— deny by default 更便宜也更稳。
+    # 同库刻意不挡:那是既有 `/sources/{id}` owner∪member 路径逐字不变的行为,收紧它属于
+    # 另一件事。图片资产端点同样不挡:knowhow 单元格图片是普通内容资产,本就随挂载库的
+    # 内容参与检索,与「文档视图对合成源没有意义」不是一回事。
+    if detail.notebook_id != notebook_id and detail.type in _HIDDEN_SOURCE_TYPES:
         raise HTTPException(status_code=404, detail="Source not found")
     return detail
 

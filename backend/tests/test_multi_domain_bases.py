@@ -1669,6 +1669,39 @@ class TestParticipantScopedSourceAndAssetProxy:
         ).json()
         assert "file_path" not in own_body and own_body["parse_failed"] is False
 
+    def test_hidden_synthetic_sources_are_never_proxied_across_libraries(
+        self, two_users_client
+    ):
+        """memory/knowhow 的物理 source 行是投影产物,不是用户文档。集合地图/枚举刻意把
+        它们算进作用域(数的是检索能够到的东西),所以一个清单条目原则上可以带着这类
+        source_id 跨库出现;真被点开,`/elements` 会摊开整条合成源——含没被枚举到的部分,
+        而 Memory 是按创建者私有的。跨库一律 404;同库保持既有行为不动。"""
+        c = two_users_client
+        client = c["client"]
+        active, base, _seeded, repo_api = self._mounted_base(c)
+        for source_type in ("memory", "knowhow"):
+            hidden = _seed_source_with_element_and_asset(
+                repo_api, base["id"], f"hidden-{source_type}"
+            )
+            mine = _seed_source_with_element_and_asset(
+                repo_api, active["id"], f"mine-{source_type}"
+            )
+            with repo_api._write() as db:
+                db.execute(
+                    "UPDATE sources SET source_type=? WHERE id IN (?,?)",
+                    (source_type, hidden["source_id"], mine["source_id"]),
+                )
+
+            for suffix in ("", "/elements"):
+                assert client.get(
+                    f"/api/notebooks/{active['id']}/sources/{hidden['source_id']}{suffix}",
+                    headers=c["u1"],
+                ).status_code == 404, (source_type, suffix)
+                assert client.get(
+                    f"/api/notebooks/{active['id']}/sources/{mine['source_id']}{suffix}",
+                    headers=c["u1"],
+                ).status_code == 200, (source_type, suffix)
+
     def test_proxied_asset_is_not_browser_cacheable(self, two_users_client):
         """挂载有效期内取回的跨库图片若进了浏览器缓存,取消挂载后重开会由缓存命中、
         绕过参与集判定——「失效即 404」会被静默架空一天。跨库响应因此 no-store,
