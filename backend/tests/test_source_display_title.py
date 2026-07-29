@@ -125,14 +125,14 @@ def test_driver_rows_without_get_are_supported():
 
 # ------------------------------------------------- 单一真源(源码级守卫)
 
-def _row_key_reads_by_scope(path: pathlib.Path):
+def _row_key_reads_by_scope(text: str):
     """按函数作用域汇总「这段代码从行里读了哪些列名」。
 
     「读一个列名」= 字符串字面量出现在下标位 (`row["is_paper"]`) 或 `.get()`
     的第一个实参 (`row.get("is_paper")`)。用 AST 不用正则:正则分不清注释、
     文档串和 SQL 文本里的同名词,而那三样在存储层里到处都是。
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(text)
     scope_of: dict[int, tuple[ast.AST, str]] = {}
 
     def descend(node, scope, name):
@@ -184,8 +184,18 @@ def test_display_title_rule_has_exactly_one_implementation():
             if "__pycache__" in path.parts:
                 continue
             scanned += 1
+            text = path.read_text(encoding="utf-8")
+            # 先按原文筛一遍再解析。扫描只认字符串字面量,而字面量的字符必然
+            # 出现在原文里,所以三个列名缺任何一个的文件都不可能命中——省掉
+            # 全仓七百多次 ast.parse(实测 3.5s → 0.1s)。这不只是测试自己快
+            # 慢:后端泳道是并发跑的,一条烧 CPU 的守卫会把同批里靠墙钟判定
+            # 的用例(backend.sh 生命周期测试只给子进程 4 秒)挤到超时。
+            # (唯一漏网形状是跨字面量拼接出的键名,`row["paper_" "title"]`;
+            # 那已经不是「照着抄一份」会写出来的东西。)
+            if not all(column in text for column in RULE_COLUMNS):
+                continue
             relative = path.relative_to(REPO_ROOT).as_posix()
-            for name, lineno, keys in _row_key_reads_by_scope(path):
+            for name, lineno, keys in _row_key_reads_by_scope(text):
                 if not RULE_COLUMNS <= keys:
                     continue
                 if (relative, name) in ALLOWED_SITES:
