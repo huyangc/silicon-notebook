@@ -226,6 +226,28 @@
 - `enumeration_prompt_block`（仿 `structured_prompt_block`）：进入 source 分区最前，预览行数
   按 `inline_answer_rows`=100 口径 + 字符预算截断；块头写明 coverage（如
   `[Enumeration coverage: formula, returned 12/12, complete]`）。
+- **【codex 第 6 轮 P2 订正】载荷闸必须落在 wire 形状上**：执行器的 run 级池量的是
+  紧凑 dataclass，而真正下发/持久化的是 `TypedCollectionItem` —— 那是个两臂联合体，
+  元素行仍带 `name`/`section_path`/`evidence_element_ids`、知识对象行仍带
+  `source_title`/`location_label`/`text`/`asset_id`，全在默认值上，外加每份 result
+  自己的元数据与 coverage。所以 exhaustive 档贴着执行器上限跑完的一轮，下发的
+  JSON 能明显越轨。`typed_collection_results` 因此接收 `payload_chars`，逐 item 按
+  `model_dump_json()` 长度累计（与响应序列化逐字符等长，有测试钉住），并**先预留**
+  每份 result 的信封（元数据 + coverage）：信封正是「这份被裁过」的披露载体，为省
+  几百字符把它丢掉等于把披露一起丢掉。裁到的那一份诚实降级为 `complete=False` /
+  `truncated_reason="payload"` / `returned_total=实际送达条数`——coverage 描述的是
+  用户手里那份清单，执行器那个更大的数留在 trace 里当成本账。分工：执行器闸拦的是
+  「读得比该请求允许产出的还多」，wire 闸拦的是「传/存得比声明的还多」。
+  合成预览必须按**送达的那份**渲染（`delivered_outcomes` 派生视图，不重算），否则
+  prompt 里会出现结果卡没有的行、块头还写着 complete——prompt 与卡片对同一份清单
+  说两套话，正是 coverage 合同要防的东西。
+- **【codex 第 6 轮 P2 订正】预览额度跨清单分配**：`inline_rows` 是 run 级共享额度，
+  先到先得会让第一份清单（真实枚举通常一上来就够 100 条）吃光，后面每个集合
+  `previewed 0`，混合/多清单问题于是只按第一张卡作答——恰好违反这个共享额度当初
+  要防的饿死。改两遍分配：第一遍每份保底 `max(1, inline_rows // n)`（按自身条数与
+  剩余额度夹住，集合比额度还多时按序发完为止），第二遍把余量按原顺序贪心分完。
+  单清单口径逐字不变。字符预算装不下的行不再回捐——那时块已经是字符受限，下一份
+  同样花不掉。
 - **【codex 第 4 轮 P2 订正】地图计数必须进合成上下文**：reflect prompt 明确教模型
   「集合远大于本轮清单额度时别翻页、直接用地图计数作答」，而答案合成是另一次调用，
   只拿到检索证据与清单预览，从来看不到地图——那是在要求它报一个它拿不到的数；且

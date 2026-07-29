@@ -11,10 +11,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 
 import pytest
 
-from app.core.ask_retrieval_policy import ask_retrieval_limits
+from app.core.ask_retrieval_policy import (
+    EXPLICIT_PARTIAL_OVERFLOW,
+    ask_retrieval_limits,
+)
 from app.core.config import Settings
 from app.models.ask import (
     AskIntentConfirmation,
@@ -84,6 +88,11 @@ def _kg_item(**overrides) -> KgObjectItem:
     return KgObjectItem(**base)
 
 
+# 五档共用的结构化载荷上限,也是 wire 载荷闸的真源;映射测试统一用它,
+# 免得每个用例各拍一个数、真上限改了却没人红。
+PAYLOAD_LIMIT = ask_retrieval_limits("standard").structured_payload_chars
+
+
 def _outcome(**overrides) -> CollectionEnumerationOutcome:
     base = dict(collection="elements", kind="formula", source_id="",
                 items=[_element_item()], coverage=_coverage())
@@ -99,7 +108,7 @@ def test_element_outcome_maps_onto_typed_collection_result():
         coverage=_coverage(returned=3, returned_total=3, scanned=3, total=3,
                            complete=True),
     )
-    [result] = typed_collection_results([outcome])
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     assert result.kind == "collection"
     assert result.collection == "elements"
     assert result.element_kind == "formula"
@@ -122,7 +131,7 @@ def test_kg_object_outcome_maps_object_type_not_element_kind():
         items=[_kg_item(evidence_element_ids=("el-1", "el-2"))],
         coverage=_coverage(returned_total=1, total=None, complete=True),
     )
-    [result] = typed_collection_results([outcome])
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     assert result.collection == "kg_objects"
     assert result.object_type == "concept"
     assert result.element_kind == ""
@@ -135,7 +144,7 @@ def test_kg_object_outcome_maps_object_type_not_element_kind():
 
 def test_source_scoped_outcome_carries_source_id():
     outcome = _outcome(source_id="s1")
-    [result] = typed_collection_results([outcome])
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     assert result.source_id == "s1"
 
 
@@ -145,7 +154,7 @@ def test_evidence_element_ids_truncated_to_max_evidence_refs_even_if_executor_wi
         items=[_kg_item(evidence_element_ids=("a", "b", "c", "d", "e"))],
         coverage=_coverage(returned_total=1, complete=True),
     )
-    [result] = typed_collection_results([outcome])
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     assert len(result.items[0].evidence_element_ids) == MAX_EVIDENCE_REFS
 
 
@@ -168,11 +177,146 @@ def test_max_evidence_refs_parity_between_executor_and_wire_model():
         )
 
 
+# --------------------------------------------------- wire 载荷精确闸
+
+def _wire_json(results) -> str:
+    """结果集真正下发/持久化时的那串 JSON。"""
+    return json.dumps(
+        [item.model_dump() for item in results],
+        ensure_ascii=False, separators=(",", ":"),
+    )
+
+
+def test_wire_measure_matches_the_transport_serializer():
+    """闸用 ``model_dump_json`` 量,响应用 ``json.dumps`` 序列化——两者必须逐
+    字符等长,否则「精确闸」只是换了个近似。含 CJK/希腊字母,钉住不转义。"""
+    item = _typed_item_of(_element_item(text="公式 α β γ"))
+    assert item.model_dump_json() == json.dumps(
+        item.model_dump(), ensure_ascii=False, separators=(",", ":")
+    )
+    kg = _typed_item_of(_kg_item(name="共模抑制比 CMRR"))
+    assert kg.model_dump_json() == json.dumps(
+        kg.model_dump(), ensure_ascii=False, separators=(",", ":")
+    )
+
+
+def _typed_item_of(raw):
+    from app.services.collection_enumeration_answer import _typed_item
+    return _typed_item(raw)
+
+
+def test_wire_ceiling_bounds_the_serialized_payload_and_degrades_coverage():
+    """执行器的池量的是紧凑 dataclass,而 wire 形状带着联合体另一臂的全部默认
+    字段——只按前者收,下发的 JSON 就会越轨。这里按 wire 收,并诚实降级。"""
+    items = [
+        _element_item(element_id=f"el-{index:03d}", text="公" * 40)
+        for index in range(20)
+    ]
+    outcome = _outcome(
+        items=items,
+        coverage=_coverage(returned=20, returned_total=20, scanned=20, total=20,
+                           complete=True),
+    )
+    limit = 2_000
+    results = typed_collection_results([outcome], payload_chars=limit)
+
+    assert len(_wire_json(results)) <= limit
+    [result] = results
+    assert 0 < len(result.items) < 20
+    assert [item.item_id for item in result.items] == [
+        f"el-{index:03d}" for index in range(len(result.items))
+    ]                                       # 收的是前缀,不是抽样
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == "payload"
+    assert result.coverage.overflow_semantics == EXPLICIT_PARTIAL_OVERFLOW
+    assert result.coverage.returned_total == len(result.items)
+    assert result.coverage.total == 20      # 分母是集合规模,不跟着裁
+
+    # 变异钉子:改回按执行器 dataclass 记账会多收若干条,而那份 wire 越轨。
+    dataclass_chars = sum(
+        len(json.dumps(asdict(item), ensure_ascii=False,
+                       separators=(",", ":"), default=str))
+        for item in items[:len(result.items) + 1]
+    )
+    assert dataclass_chars < limit          # 紧凑记账还以为放得下
+    over = typed_collection_results(
+        [_outcome(items=items[:len(result.items) + 1],
+                  coverage=_coverage(returned_total=len(result.items) + 1))],
+        payload_chars=10**9,
+    )
+    assert len(_wire_json(over)) > limit     # 实际下发已经越轨
+
+
+def test_wire_ceiling_is_a_run_pool_and_degrades_only_the_row_it_cut():
+    """池是整轮共享的:先来的集合完整交付,被闸停的只有真正装不下的那一份。"""
+    first = _outcome(
+        kind="formula",
+        items=[_element_item(element_id=f"a-{i}", text="公" * 40) for i in range(5)],
+        coverage=_coverage(returned=5, returned_total=5, scanned=5, total=5,
+                           complete=True),
+    )
+    second = _outcome(
+        kind="table",
+        items=[_element_item(element_id=f"b-{i}", text="表" * 40) for i in range(20)],
+        coverage=_coverage(returned=20, returned_total=20, scanned=20, total=20,
+                           complete=True),
+    )
+    results = typed_collection_results([first, second], payload_chars=2_500)
+
+    assert len(_wire_json(results)) <= 2_500
+    assert len(results[0].items) == 5
+    assert results[0].coverage.complete is True
+    assert results[0].coverage.truncated_reason == ""
+    assert 0 <= len(results[1].items) < 20
+    assert results[1].coverage.complete is False
+    assert results[1].coverage.truncated_reason == "payload"
+
+
+def test_delivered_outcomes_make_the_preview_agree_with_the_card():
+    """预览必须按结果卡真正拿到的那份渲染:多出来的行 + 仍写着 complete 的
+    头部,等于 prompt 和卡片对同一份清单说两套话。"""
+    from app.services.collection_enumeration_answer import delivered_outcomes
+
+    items = [
+        _element_item(element_id=f"el-{index:03d}", text="公" * 40)
+        for index in range(20)
+    ]
+    outcome = _outcome(
+        items=items,
+        coverage=_coverage(returned=20, returned_total=20, scanned=20, total=20,
+                           complete=True),
+    )
+    results = typed_collection_results([outcome], payload_chars=2_000)
+    [view] = delivered_outcomes([outcome], results)
+
+    delivered = len(results[0].items)
+    assert len(view.items) == delivered
+    assert view.coverage.complete is False
+    assert view.coverage.truncated_reason == "payload"
+    assert outcome.items == items and outcome.coverage.complete is True  # 不改原件
+
+    preview = enumeration_prompt_block(
+        [view], inline_rows=100, budget_chars=100_000
+    )
+    assert f"listed {delivered}/20, partial: payload limit" in preview.text
+    item_lines = [line for line in preview.text.splitlines() if line.startswith("- ")]
+    assert len(item_lines) == delivered
+
+
+def test_delivered_outcomes_passes_untrimmed_outcomes_straight_through():
+    outcome = _outcome(coverage=_coverage(returned_total=1, total=1, complete=True))
+    from app.services.collection_enumeration_answer import delivered_outcomes
+
+    results = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
+    [view] = delivered_outcomes([outcome], results)
+    assert view is outcome
+
+
 # ---------------------------------------------------- apply_synthesis_preview_counts
 
 def test_apply_synthesis_preview_counts_marks_complete_when_shown_equals_listed():
     outcome = _outcome(coverage=_coverage(returned_total=3, total=3, complete=True))
-    [result] = typed_collection_results([outcome])
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     apply_synthesis_preview_counts([result], [3])
     assert result.synthesis_rows == 3
     assert result.synthesis_complete is True
@@ -180,7 +324,7 @@ def test_apply_synthesis_preview_counts_marks_complete_when_shown_equals_listed(
 
 def test_apply_synthesis_preview_counts_marks_incomplete_when_shown_is_partial():
     outcome = _outcome(coverage=_coverage(returned_total=300, total=300, complete=True))
-    [result] = typed_collection_results([outcome])
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     apply_synthesis_preview_counts([result], [100])
     assert result.synthesis_rows == 100
     assert result.synthesis_complete is False
@@ -461,6 +605,55 @@ def test_inline_rows_cap_is_shared_across_outcomes_and_reports_omitted_count():
     assert len(item_lines) == 2       # capped at inline_rows, not the full 5
     assert "(+3 more rows in the result card)" in preview.text
     assert preview.shown_rows == [2]
+
+
+def _sized_outcome(kind, prefix, count):
+    return _outcome(
+        kind=kind,
+        items=[_element_item(element_id=f"{prefix}-{i}") for i in range(count)],
+        coverage=_coverage(returned=count, returned_total=count, scanned=count,
+                           total=count, complete=True),
+    )
+
+
+def test_inline_rows_are_split_so_a_big_list_cannot_starve_a_later_one():
+    """先到先得会让第一份清单吃光共享额度,后面的集合 previewed 全是 0——混合
+    问题于是只按第一张卡作答。两遍分配:先保底,再把余量按序贪心分完。"""
+    preview = enumeration_prompt_block(
+        [_sized_outcome("formula", "f", 120), _sized_outcome("table", "t", 30)],
+        inline_rows=100, budget_chars=100_000,
+    )
+    assert preview.shown_rows == [70, 30]
+    assert sum(preview.shown_rows) == 100
+    assert all(shown > 0 for shown in preview.shown_rows)
+
+
+def test_single_outcome_still_takes_the_whole_allowance():
+    """单清单口径逐字不变:保底=全额,余量无处可分。"""
+    preview = enumeration_prompt_block(
+        [_sized_outcome("formula", "f", 300)],
+        inline_rows=100, budget_chars=100_000,
+    )
+    assert preview.shown_rows == [100]
+
+
+def test_small_first_list_donates_its_unused_quota_to_the_next():
+    """保底不是硬分配:装不满的那份把余量让出去,不浪费在一个只有 3 条的集合上。"""
+    preview = enumeration_prompt_block(
+        [_sized_outcome("formula", "f", 3), _sized_outcome("table", "t", 300)],
+        inline_rows=100, budget_chars=100_000,
+    )
+    assert preview.shown_rows == [3, 97]
+
+
+def test_more_outcomes_than_rows_degrades_without_over_committing():
+    """额度比集合还少:按序发到发完为止,总数绝不超过 inline_rows。"""
+    outcomes = [_sized_outcome("formula", f"o{i}", 5) for i in range(5)]
+    preview = enumeration_prompt_block(
+        outcomes, inline_rows=2, budget_chars=100_000
+    )
+    assert sum(preview.shown_rows) == 2
+    assert preview.shown_rows == [1, 1, 0, 0, 0]
 
 
 def test_budget_chars_never_exceeded_even_with_many_rows():
@@ -1036,3 +1229,56 @@ def test_enumeration_block_shares_chunk_budget_with_knowhow_and_stays_bounded(ar
     # 一半),真正的总量守卫在下面的单元测试(test_budget_chars_never_exceeded)
     # 已经钉过,这里只确认端到端接线没有把它撑爆到荒谬的量级。
     assert len(prompt) < limits.chunk_context_chars * 4
+
+
+# ------------------------------------------- wire 载荷闸的端到端(卡片 ⇄ prompt)
+
+def test_wire_payload_ceiling_bites_end_to_end_and_prompt_agrees_with_the_card(
+    arepo, monkeypatch
+):
+    """执行器按紧凑 dataclass 记账判 complete,而真正下发的 wire 形状更宽——
+    此时结果卡必须降级为 payload 部分,合成 prompt 的块头必须跟着降级,两者
+    报同一个数。把 structured_payload_chars 压到一个「dataclass 放得下、wire
+    放不下」的窄值来复现;窄值同时喂给执行器,所以这里不是人为只掐一侧。"""
+    from dataclasses import replace as _replace
+    import app.services.ask_service as ask_service_module
+
+    real = ask_retrieval_limits("standard")
+    narrow = _replace(real, structured_payload_chars=1_000)
+    monkeypatch.setattr(
+        ask_service_module, "ask_retrieval_limits", lambda _effort: narrow
+    )
+
+    nb = _seed(arepo, formulas=4)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "部分清单。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    [enum_step] = [s for s in resp.reasoning_trace if s.step_type == "enumerate"]
+    # 前置条件(而非结论):执行器自己认为列全了——被闸停的确实是 wire 这一侧。
+    assert enum_step.detail["complete"] is True
+    assert enum_step.detail["returned_total"] == 4
+
+    [row] = [item for item in resp.result_sets if item.kind == "collection"]
+    delivered = len(row.items)
+    assert 0 < delivered < 4
+    assert row.coverage.complete is False
+    assert row.coverage.truncated_reason == "payload"
+    assert row.coverage.overflow_semantics == EXPLICIT_PARTIAL_OVERFLOW
+    assert row.coverage.returned_total == delivered
+    assert len(_wire_json([row])) <= narrow.structured_payload_chars
+
+    prompt = llm.answer_prompts[-1]
+    assert f"listed {delivered}/4, partial: payload limit" in prompt
+    assert "listed 4/4, complete" not in prompt
+    # prompt 里的清单行数不得多于卡片真正携带的条数。
+    item_lines = [
+        line for line in prompt.splitlines()
+        if line.startswith("- 论文一 · ")
+    ]
+    assert len(item_lines) == delivered
