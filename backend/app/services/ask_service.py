@@ -1863,11 +1863,16 @@ class AskService:
                 try:
                     from app.services.collection_enumeration_answer import (
                         apply_synthesis_preview_counts,
+                        delivered_outcomes,
                         enumeration_prompt_block,
                         typed_collection_results,
                     )
+                    # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
+                    # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
+                    # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
                     typed_collection_result_sets = typed_collection_results(
-                        enumerations
+                        enumerations,
+                        payload_chars=limits.structured_payload_chars,
                     )
                     if answer_client.configured:
                         from app.services.collection_enumeration_answer import (
@@ -1885,8 +1890,14 @@ class AskService:
                             chunk_context_chars=limits.chunk_context_chars,
                             structured_block_len=len(structured_block),
                         )
+                        # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
+                        # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
+                        # 头部还写着「complete」——prompt 与卡片对同一份清单说
+                        # 两套话,正是 coverage 合同要防的东西。
                         preview = enumeration_prompt_block(
-                            enumerations,
+                            delivered_outcomes(
+                                enumerations, typed_collection_result_sets
+                            ),
                             inline_rows=limits.inline_answer_rows,
                             budget_chars=enum_budget_chars,
                         )

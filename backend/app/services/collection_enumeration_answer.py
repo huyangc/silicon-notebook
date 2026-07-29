@@ -8,24 +8,32 @@ This module is the seam between those two closed-out layers (T3/T4) and the
 response contract/synthesis prompt (T5): it turns a run's outcomes into
 
 * ``typed_collection_results`` — the ``TypedCollectionResult`` rows that join
-  ``AskResponse.result_sets`` alongside Knowhow's ``StructuredKnowhowResult``;
+  ``AskResponse.result_sets`` alongside Knowhow's ``StructuredKnowhowResult``,
+  and the place the documented structured-payload ceiling is enforced against
+  the SERIALIZED shape (the executor's own rail weighs a narrower dataclass);
+* ``delivered_outcomes`` — outcome views carrying exactly what those rows
+  carry, so the synthesis preview below cannot describe a longer list than the
+  result card holds;
 * ``enumeration_prompt_block`` — the bounded, English, model-facing preview
   spliced into the answer-synthesis evidence block (mirrors
-  ``app.services.structured_retrieval.structured_prompt_block``);
+  ``app.services.structured_retrieval.structured_prompt_block``), with its row
+  allowance SPLIT across the run's collections rather than handed out
+  first-come-first-served;
 * ``collection_map_block`` — the run's collection MAP (counts, no rows) wrapped
   for that same evidence block, so the count the reflect prompt tells the model
   to answer with actually reaches the model that writes the answer.
 
-All three are pure functions over what the run already produced — no I/O, no
+All four are pure functions over what the run already produced — no I/O, no
 model calls, no mutation of the outcomes they read.  (``typed_collection_results``
 mutates the *rows it just built*, via ``apply_synthesis_preview_counts``, but
 never the outcomes.)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, List, Sequence
 
+from app.core.ask_retrieval_policy import EXPLICIT_PARTIAL_OVERFLOW
 from app.models.ask import (
     TypedCollectionCoverage,
     TypedCollectionItem,
@@ -101,8 +109,23 @@ def _typed_coverage(raw: EnumerationCoverage) -> TypedCollectionCoverage:
     )
 
 
+def _wire_chars(model: object) -> int:
+    """One model's exact serialized width, in the shape it will travel.
+
+    ``model_dump_json()`` is the same compact, non-escaping serializer the
+    response and the persisted answer go through (verified character-for-
+    character against ``json.dumps(..., ensure_ascii=False,
+    separators=(",", ":"))`` by
+    ``test_wire_measure_matches_the_transport_serializer``), so this measures
+    the real payload rather than a proxy for it.
+    """
+    return len(model.model_dump_json())
+
+
 def typed_collection_results(
     outcomes: Sequence["CollectionEnumerationOutcome"],
+    *,
+    payload_chars: int,
 ) -> List[TypedCollectionResult]:
     """Map one run's enumeration outcomes onto ``AskResponse.result_sets`` rows.
 
@@ -116,16 +139,42 @@ def typed_collection_results(
     prompt block is never built.  ``apply_synthesis_preview_counts`` backfills
     them once ``enumeration_prompt_block`` has actually rendered a preview.
 
-    Payload size: each item's text/name already passed through the
-    executor's own run-level budget (``EnumerationBudget.max_payload_chars``,
-    wired from ``AskRetrievalLimits.structured_payload_chars`` = 256,000
-    characters at every effort profile) before it ever reached this mapping,
-    so one turn's collection rows cannot exceed that same ~256k-character
-    ceiling. This function adds no further truncation of its own — the
-    prompt-preview clamp below (``_PROMPT_LINE_EXCERPT_CHARS``) is a
-    separate, much smaller cut that only shortens what enters the LLM
-    prompt, not the transport/card copy carried here.
+    **The documented payload ceiling is enforced HERE, on the wire shape.**
+    Two rails, two jobs, and they measure different things on purpose:
+
+    * the executor's own ``EnumerationBudget.max_payload_chars`` (pooled per
+      run from ``AskRetrievalLimits.structured_payload_chars``) charges the
+      compact executor dataclass.  Its job is to stop the *walk* — to keep a
+      traversal from reading and holding more than the request is allowed to
+      produce — and it has to be charged before an item is ever mapped;
+    * this rail charges ``TypedCollectionItem``, which is what is actually
+      serialized, streamed and persisted.  That model is a two-armed union:
+      an element row still carries ``name``/``section_path``/
+      ``evidence_element_ids`` and a knowledge-object row still carries
+      ``source_title``/``location_label``/``text``/``asset_id``, all at their
+      defaults, plus each result's own metadata and coverage.  So the wire
+      form runs materially wider than the dataclass the executor weighed, and
+      an exhaustive run sitting just under the executor's ceiling could ship a
+      response well over it.  (Knowhow solves the same problem with a final
+      exact serialization-and-trim pass; this is the forward equivalent —
+      one serialization per item instead of one per whole-list re-check.)
+
+    Each row's envelope (its metadata + coverage, with an empty ``items``
+    list) is reserved BEFORE any item is admitted.  A row's envelope is what
+    *discloses* that its list was cut; dropping it to save a few hundred
+    characters would remove the disclosure and leave a silently missing card.
+    The accounting is a strict upper bound on the final serialized array (it
+    charges one separator per row and per item where the real encoding writes
+    ``n-1``), so the emitted payload is never larger than it claims.
+
+    When the ceiling stops a row short, THAT ROW's coverage degrades
+    honestly: ``complete=False``, ``truncated_reason="payload"``,
+    ``overflow_semantics=explicit_partial``, and ``returned_total`` becomes
+    the number actually delivered.  Coverage describes the list the user
+    holds, not the one the walk produced — the executor's own (larger) figure
+    is still in the reasoning trace, where it belongs as cost accounting.
     """
+    budget = max(0, int(payload_chars))
     results: List[TypedCollectionResult] = []
     for outcome in outcomes:
         is_elements = outcome.collection == "elements"
@@ -134,10 +183,67 @@ def typed_collection_results(
             element_kind=outcome.kind if is_elements else "",
             object_type=outcome.kind if not is_elements else "",
             source_id=outcome.source_id,
-            items=[_typed_item(item) for item in outcome.items],
+            items=[],
             coverage=_typed_coverage(outcome.coverage),
         ))
+    # ``2`` = the enclosing ``[]`` of the serialized array; ``+ 1`` per row and
+    # per item = its separator, one more than the encoding actually writes.
+    remaining = budget - 2 - sum(_wire_chars(row) + 1 for row in results)
+    for result, outcome in zip(results, outcomes):
+        trimmed = False
+        for raw in outcome.items:
+            item = _typed_item(raw)
+            cost = _wire_chars(item) + 1
+            if cost > remaining:
+                trimmed = True
+                break
+            remaining -= cost
+            result.items.append(item)
+        if trimmed:
+            result.coverage.returned_total = len(result.items)
+            result.coverage.complete = False
+            result.coverage.truncated_reason = TRUNCATED_PAYLOAD
+            result.coverage.overflow_semantics = EXPLICIT_PARTIAL_OVERFLOW
     return results
+
+
+def delivered_outcomes(
+    outcomes: Sequence["CollectionEnumerationOutcome"],
+    results: Sequence[TypedCollectionResult],
+) -> List["CollectionEnumerationOutcome"]:
+    """Outcome views that carry exactly what the wire rows carry.
+
+    ``enumeration_prompt_block`` renders both the preview lines and the
+    coverage header from an outcome, so feeding it the raw outcomes after
+    ``typed_collection_results`` trimmed a row would print rows the result
+    card does not hold, under a header that still claims the list is complete
+    — the prompt and the card disagreeing about the same list is the exact
+    failure this feature's coverage contract exists to prevent.
+
+    Derived, never recomputed: the delivered items are the prefix the mapping
+    already admitted (``len(result.items)``) and the four coverage fields the
+    wire rail can change are copied straight off the row it produced.  There
+    is therefore one definition of the trim, and this is a view of it.  The
+    inputs are not mutated — each view is a fresh ``replace``.
+    """
+    views: List["CollectionEnumerationOutcome"] = []
+    for outcome, result in zip(outcomes, results):
+        delivered = len(result.items)
+        if delivered == len(outcome.items):
+            views.append(outcome)
+            continue
+        views.append(replace(
+            outcome,
+            items=list(outcome.items[:delivered]),
+            coverage=replace(
+                outcome.coverage,
+                returned_total=result.coverage.returned_total,
+                complete=result.coverage.complete,
+                truncated_reason=result.coverage.truncated_reason,
+                overflow_semantics=result.coverage.overflow_semantics,
+            ),
+        ))
+    return views
 
 
 def apply_synthesis_preview_counts(
@@ -406,6 +512,50 @@ class EnumerationPreview:
     shown_rows: List[int] = field(default_factory=list)
 
 
+def _row_quota(
+    outcomes: Sequence["CollectionEnumerationOutcome"], inline_rows: int
+) -> List[int]:
+    """Split the shared ``inline_rows`` allowance across the run's outcomes.
+
+    Two passes, and the first one is the whole point.  Handing the allowance
+    out first-come-first-served lets outcome #1 take all of it whenever it
+    holds at least ``inline_rows`` items — which a real enumeration usually
+    does — leaving every later collection with ``previewed 0``.  A
+    multi-collection or hybrid question then gets an answer synthesized from
+    the first list alone, while the other cards sit in the response unread:
+    the precise starvation the shared (rather than per-outcome) allowance was
+    introduced to avoid.
+
+    Pass 1 reserves ``max(1, inline_rows // n)`` for each outcome, clamped by
+    what it actually holds and by what is left (so more outcomes than rows
+    still degrades gracefully instead of over-committing).  Pass 2 hands the
+    remainder out greedily in outcome order, so a small collection never
+    wastes the quota it cannot fill and the leftovers still go to the biggest
+    list first.
+
+    A single outcome is unchanged by construction: ``floor`` becomes the whole
+    allowance, pass 1 gives it everything it can hold, and pass 2 has nothing
+    left to move.
+    """
+    count = len(outcomes)
+    left = max(0, int(inline_rows))
+    quota = [0] * count
+    if not count or left <= 0:
+        return quota
+    floor = max(1, left // count)
+    for index, outcome in enumerate(outcomes):
+        take = min(len(outcome.items), floor, left)
+        quota[index] = take
+        left -= take
+    for index, outcome in enumerate(outcomes):
+        if left <= 0:
+            break
+        take = min(len(outcome.items) - quota[index], left)
+        quota[index] += take
+        left -= take
+    return quota
+
+
 def enumeration_prompt_block(
     outcomes: Sequence["CollectionEnumerationOutcome"],
     *,
@@ -416,10 +566,10 @@ def enumeration_prompt_block(
 
     Mirrors ``structured_prompt_block``: a coverage header the model can
     quote, followed by item lines, both bounded — ``inline_rows`` shared
-    across every outcome in this run (not per-outcome, so one giant list
-    cannot starve every other collection's preview), ``budget_chars`` a hard
-    character ceiling the returned text never exceeds (every join separator
-    is charged against it too, not just the lines themselves).
+    across every outcome in this run and split by ``_row_quota`` so one giant
+    list cannot starve every other collection's preview, ``budget_chars`` a
+    hard character ceiling the returned text never exceeds (every join
+    separator is charged against it too, not just the lines themselves).
 
     Header-over-items priority: for each outcome this tries the largest
     ``shown`` (bounded by the remaining row quota and outcome size) that
@@ -438,7 +588,7 @@ def enumeration_prompt_block(
     if not outcomes:
         return EnumerationPreview(text="", shown_rows=[])
     budget = max(0, int(budget_chars))
-    remaining_rows = max(0, int(inline_rows))
+    quota = _row_quota(outcomes, inline_rows)
     blocks: List[str] = []
     used = 0
     shown_rows: List[int] = [0] * len(outcomes)
@@ -458,16 +608,17 @@ def enumeration_prompt_block(
     try_commit(_INSTRUCTION_LINE)
 
     for index, outcome in enumerate(outcomes):
-        row_cap = max(0, min(remaining_rows, len(outcome.items)))
-        for shown in range(row_cap, -1, -1):
+        for shown in range(quota[index], -1, -1):
             candidate = _outcome_block(outcome, shown=shown)
             if try_commit(candidate):
                 shown_rows[index] = shown
-                remaining_rows -= shown
                 break
         # Falling through the loop without committing (even at shown=0) means
         # this outcome's bare header does not fit in what remains; it is
         # skipped entirely rather than truncated mid-line, and the next
         # outcome — which may be smaller — still gets its own attempt.
+        # Rows an outcome could not fit into the CHARACTER budget are not
+        # re-donated: at that point the block is character-bound, not
+        # row-bound, so the next outcome could not spend them either.
 
     return EnumerationPreview(text="\n\n".join(blocks), shown_rows=shown_rows)
