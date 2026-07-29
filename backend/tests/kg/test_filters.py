@@ -133,12 +133,42 @@ def test_backmatter_matches_segment_not_substring():
 
 def test_multiword_name_with_symbol_kept():
     # bare single-token symbols are dropped
-    for n in ["V_DD", "g_m1", "(W/L)_1", "A_v^+", "phi_MS"]:
+    for n in ["V_DD", "g_m1", "(W/L)_1", "A_v^+"]:
         assert is_noise_concept(n, WL)[0] is True, n
-    # descriptive multi-word concepts that merely CONTAIN a symbol notation are kept
+    # P0-2: narrower symbol rule -- an underscore token is only "symbol" noise
+    # when some segment is a bare single-char/empty stem. "phi_MS" has two
+    # multi-char segments (phi, MS) so it no longer matches; this is the same
+    # segment-length test that lets snake_case command names like set_db pass
+    # (see test_snake_case_command_names_kept below).
+    assert is_noise_concept("phi_MS", WL)[0] is False
+    # descriptive multi-word concepts that merely CONTAIN a symbol notation are
+    # kept — the caret example pins the "^" branch inside the `" " not in raw`
+    # guard (hoisting it above the space check would wrongly drop this name).
     for n in ["Oxide Capacitance (C_ox)", "Threshold Voltage (V_T0)",
-              "gate-to-source capacitance (C_GS)", "depletion-layer capacitance C_j"]:
+              "gate-to-source capacitance (C_GS)", "depletion-layer capacitance C_j",
+              "gain A_v^+ at low frequency"]:
         assert is_noise_concept(n, WL)[0] is False, n
+
+
+def test_snake_case_command_names_kept():
+    # P0-2: EDA/CLI command-style snake_case identifiers where every
+    # underscore segment has length > 1 must NOT be classified as bare
+    # symbol noise -- the old blanket "_ in raw" rule filtered these out
+    # systematically, keeping command entities out of the KG.
+    for n in ["set_db", "report_timing", "place_opt_design", "create_clock"]:
+        keep, reason = is_noise_concept(n, WL)
+        assert keep is False, (n, reason)
+
+
+def test_symbol_rule_still_drops_short_segment_symbols():
+    # symbols with a bare single-char/empty underscore segment, or a caret
+    # (mathematical superscript), remain classified as symbol noise.
+    # "_foo" pins the empty-segment half of the predicate (len(seg) == 0):
+    # rewriting it as min(...) == 1 or pre-filtering empty segments would
+    # silently start keeping leading/trailing-underscore names.
+    for n in ["V_DD", "g_m1", "x_0", "a^2", "_foo"]:
+        keep, reason = is_noise_concept(n, WL)
+        assert keep is True and reason == "symbol", n
 
 
 def test_section_heading_vs_measurement_or_standard():

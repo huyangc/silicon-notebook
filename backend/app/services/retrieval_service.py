@@ -83,6 +83,9 @@ class RetrievalService:
     def keyword_chunk_candidates(self, notebook_id, keywords):
         return self.candidates._keyword_chunk_candidates(notebook_id, keywords)
 
+    def exact_lookup_chunks(self, notebook_id, query):
+        return self.candidates._exact_lookup_chunks(notebook_id, query)
+
     def retrieve_chunk_candidates(self, notebook_id, query):
         return self.candidates._retrieve_chunks(notebook_id, query)
 

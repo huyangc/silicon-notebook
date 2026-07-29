@@ -186,16 +186,74 @@ test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () =>
   );
 });
 
-test("NEXT_ACTION 覆盖后端全部 7 个真实取值(非机制名)", () => {
-  // 真源 reasoning_retrieval.py:529-726 的 elif 分支。后端加第 8 个值时这条会提醒补。
+test("NEXT_ACTION 覆盖后端全部 8 个真实取值(非机制名)", () => {
+  // 真源 reasoning_retrieval.py `run()` 循环的 elif 分支。后端加第 9 个值时这条会提醒补。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
     search_elements: "回原文里找细节", ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
+    exact_lookup: "按名称精确查找",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
     assert.equal(out, zh, `${action} 未译或译错`);
     assert.notEqual(out, action, `${action} 泄漏了英文机制名`);
   }
+});
+
+// 精确查找步是后端新增的一段轨迹(seed pass 与 agent 动作共用 step_type)。缺标签
+// 会回退成 "exact_lookup" 直出英文机制名,撑爆 48px 徽章列。
+test("exact_lookup 有短标签,detail 显示查了哪个名称、捞回多少段", () => {
+  const seed = {
+    step_type: "exact_lookup",
+    summary: "按名称精确查找:命中 7 段原文",
+    detail: { terms: ["set_db"], found: 7, phase: "seed" },
+  };
+  assert.equal(getReasoningTraceSummary([seed], true).latestLabel, "精查");
+  assert.equal(getTraceStepDetail(seed), "set_db · 新增 7 段");
+
+  // 多名称、以及只有其中一半字段可用时都不能露出空壳分隔符。
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "exact_lookup",
+      summary: "",
+      detail: { terms: ["set_db", "place_opt_design"], found: 0, phase: "reflect" },
+    }),
+    "set_db、place_opt_design · 新增 0 段",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "exact_lookup", summary: "", detail: { found: 3 } }),
+    "新增 3 段",
+  );
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "exact_lookup",
+      summary: "",
+      detail: { terms: ["set_db", 42, ""] },
+    }),
+    "set_db",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "exact_lookup", summary: "", detail: {} }),
+    "",
+  );
+});
+
+test("新增 exact_lookup 后,未知 step_type / next_action 的兜底仍成立(精确匹配,不前缀命中)", () => {
+  assert.equal(
+    getReasoningTraceSummary(
+      [{ step_type: "exact_lookup_v2", summary: "", detail: { terms: ["x"], found: 1 } }],
+      true,
+    ).latestLabel,
+    "处理中",
+  );
+  // 兜底走通用分支,不能被新的 exact_lookup 专用分支前缀吃掉。
+  assert.equal(
+    getTraceStepDetail({ step_type: "exact_lookup_v2", summary: "", detail: { found: 1 } }),
+    "新增 1",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "exact_lookup_v2" } }),
+    "",
+  );
 });

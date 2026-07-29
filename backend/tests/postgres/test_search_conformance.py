@@ -456,3 +456,172 @@ def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres
         ).fetchall()
     plan = "\n".join(str(next(iter(row.values()))) for row in plan_rows)
     assert "idx_knowledge_objects_name_trgm" in plan
+
+
+# ------------------------------- exact-identifier fast path (PostgreSQL half)
+# The SQLite half of these lives in tests/test_exact_lookup.py. Both adapters
+# must agree, and only these can catch a PostgreSQL-only regression: the whole
+# risk here is a *silent* precision loss (LIKE reading `_` as a wildcard), which
+# raises nothing and merely returns extra rows.
+MANUAL_CHUNKS = (
+    ("chunk-manual-main", "Manual > Commands > set_db",
+     "[Commands > set_db] set_db configures a database property."),
+    ("chunk-manual-args", "Manual > Commands > set_db > Arguments",
+     "[set_db > Arguments] -name property name. -value property value."),
+    ("chunk-manual-examples", "Manual > Commands > set_db > Examples",
+     "[set_db > Examples] see the script snippet below."),
+    ("chunk-manual-other", "Manual > Commands > report_timing",
+     "[Commands > report_timing] report_timing prints a timing report."),
+    ("chunk-manual-decoy", "Manual > Notes",
+     "[Manual > Notes] setXdb is a similarly spelled historical alias."),
+    ("chunk-manual-split", "Manual > Notes",
+     "[Manual > Notes] set the db value by hand."),
+)
+
+
+def _seed_manual(harness, rows=MANUAL_CHUNKS, source_id="source-search-b"):
+    harness.chunks.replace_source_chunks(
+        source_id,
+        "nb-search",
+        [
+            ChunkWrite(id=chunk_id, text=text, section_path=section_path,
+                       element_ids=("element-search-b",))
+            for chunk_id, section_path, text in rows
+        ],
+        created_at=NOW,
+    )
+
+
+@pytest.mark.postgres_integration
+def test_chunk_exact_search_treats_underscore_literally(search_harness):
+    """`_` is LIKE's single-character wildcard and every command name has one.
+
+    `setXdb` is the whole point of this test: without escaping it matches, and
+    nothing anywhere would report an error.
+    """
+    _seed_manual(search_harness)
+    with search_harness.database.connect() as connection:
+        hits = search_harness.knowledge.chunk_exact_search(
+            connection, "nb-search", "set_db", 50)
+
+    ids = {hit["chunk_id"] for hit in hits}
+    assert {"chunk-manual-main", "chunk-manual-args", "chunk-manual-examples"} <= ids
+    assert "chunk-manual-decoy" not in ids, "unescaped `_` matched `setXdb`"
+    assert "chunk-manual-other" not in ids
+    by_id = {hit["chunk_id"]: hit for hit in hits}
+    assert by_id["chunk-manual-args"]["source_id"] == "source-search-b"
+    assert (by_id["chunk-manual-args"]["section_path"]
+            == "Manual > Commands > set_db > Arguments")
+
+
+@pytest.mark.postgres_integration
+def test_chunk_exact_search_does_not_decompose_the_needle(search_harness):
+    """`chunk_fts_search` ORs `set`/`db` apart; the exact probe must not."""
+    _seed_manual(search_harness)
+    with search_harness.database.connect() as connection:
+        union = search_harness.knowledge.chunk_fts_search(
+            connection, "nb-search", "set_db", 50)
+        exact = search_harness.knowledge.chunk_exact_search(
+            connection, "nb-search", "set_db", 50)
+    assert "chunk-manual-split" in {hit["chunk_id"] for hit in union}
+    assert "chunk-manual-split" not in {hit["chunk_id"] for hit in exact}
+
+
+@pytest.mark.postgres_integration
+def test_chunk_exact_search_is_notebook_scoped_and_bounded(search_harness):
+    _seed_manual(search_harness)
+    with search_harness.database.connect() as connection:
+        assert search_harness.knowledge.chunk_exact_search(
+            connection, "nb-absent", "set_db", 50) == []
+        assert len(search_harness.knowledge.chunk_exact_search(
+            connection, "nb-search", "set_db", 2)) == 2
+        assert search_harness.knowledge.chunk_exact_search(
+            connection, "nb-search", "set_db", 0) == []
+
+
+@pytest.mark.postgres_integration
+def test_chunks_by_section_takes_the_subtree_in_document_order(search_harness):
+    _seed_manual(search_harness)
+    with search_harness.database.connect() as connection:
+        rows = search_harness.chunks.chunks_by_section(
+            connection, "nb-search", "source-search-b",
+            "Manual > Commands > set_db", 12)
+        capped = search_harness.chunks.chunks_by_section(
+            connection, "nb-search", "source-search-b",
+            "Manual > Commands > set_db", 2)
+        wrong_notebook = search_harness.chunks.chunks_by_section(
+            connection, "nb-absent", "source-search-b",
+            "Manual > Commands > set_db", 12)
+        empty_path = search_harness.chunks.chunks_by_section(
+            connection, "nb-search", "source-search-b", "", 12)
+
+    assert [row["id"] for row in rows] == [
+        "chunk-manual-main", "chunk-manual-args", "chunk-manual-examples"]
+    assert rows[0]["source_title"] == "Reference B"
+    assert json.loads(rows[0]["element_ids"]) == ["element-search-b"]
+    assert [row["id"] for row in capped] == ["chunk-manual-main", "chunk-manual-args"]
+    assert wrong_notebook == []
+    assert empty_path == []
+
+
+@pytest.mark.postgres_integration
+def test_chunks_by_section_escapes_like_wildcards(search_harness):
+    """A section literally named `a_b` must not also drag in `axb`."""
+    _seed_manual(search_harness, rows=(
+        ("chunk-under", "a_b", "real section"),
+        ("chunk-under-child", "a_b > Leaf", "real child"),
+        ("chunk-wild", "axb > Leaf", "unrelated section"),
+    ))
+    with search_harness.database.connect() as connection:
+        rows = search_harness.chunks.chunks_by_section(
+            connection, "nb-search", "source-search-b", "a_b", 12)
+    assert [row["id"] for row in rows] == ["chunk-under", "chunk-under-child"]
+
+
+_EXACT_ROW_FIELDS = ("id", "source_id", "text", "section_path",
+                     "element_ids", "source_title")
+
+
+@pytest.mark.postgres_integration
+def test_hydrate_rows_matches_the_section_row_shape_for_the_exact_channel(
+        search_harness):
+    """精确通道的两条取数分支必须给出同一种行。
+
+    有面包屑的库按小节整节取齐;没有面包屑的库(MinerU 解析的 PDF/DOCX)按命中
+    id 直接取行——两条分支的结果落进同一个 `_build_chunks`,行形状不一致会在
+    生产上静默少列。SQLite 侧的对等断言在 tests/test_exact_lookup.py。
+    """
+    _seed_manual(search_harness)
+    with search_harness.database.connect() as connection:
+        section = search_harness.chunks.chunks_by_section(
+            connection, "nb-search", "source-search-b",
+            "Manual > Commands > set_db", 12)
+        hydrated = search_harness.chunks.hydrate_rows(
+            connection, ["chunk-manual-args", "chunk-manual-main"])
+
+    by_section = {row["id"]: dict(row) for row in section}
+    by_id = {row["id"]: dict(row) for row in hydrated}
+    assert set(by_id) == {"chunk-manual-args", "chunk-manual-main"}
+    for chunk_id, row in by_id.items():
+        assert set(row) >= set(_EXACT_ROW_FIELDS), row
+        assert ({field: row[field] for field in _EXACT_ROW_FIELDS}
+                == {field: by_section[chunk_id][field]
+                    for field in _EXACT_ROW_FIELDS})
+    # element_ids 两条分支都归一成 JSON 字符串形态(`_build_chunks` 依赖这一点)。
+    assert json.loads(by_id["chunk-manual-args"]["element_ids"]) == [
+        "element-search-b"]
+
+
+@pytest.mark.postgres_integration
+def test_exact_chunk_probe_is_planner_usable_on_the_trigram_index(postgres_database):
+    """Bounded is not enough — the probe must ride `idx_chunks_text_trgm`."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 14
+    with postgres_database.connect() as connection:
+        connection.execute("SET LOCAL enable_seqscan=off")
+        plan_rows = connection.execute(
+            "EXPLAIN SELECT id FROM chunks WHERE text ILIKE %s", ("%set\\_db%",)
+        ).fetchall()
+    plan = "\n".join(str(next(iter(row.values()))) for row in plan_rows)
+    assert "idx_chunks_text_trgm" in plan

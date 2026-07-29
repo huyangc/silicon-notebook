@@ -408,7 +408,42 @@ RETRIEVAL_TOP_N         # reasoning/report synthesis evidence-budget floor (defa
 REASONING_TOP_N_PER_QUERY  # adaptive budget: seats reserved per aspect/sub-query (default 3)
 REASONING_TOP_N_CAP        # adaptive budget cap; comparison Qs scale by #aspects (default 36)
 CHUNK_GRAPH_RESERVE        # seats for graph-only chunks already above the relevance floor (default 0; set 1 after evaluation)
+EXACT_LOOKUP_ENABLED       # exact-identifier fast path: whole-section fetch for `set_db`-style names (default true)
+EXACT_LOOKUP_MAX_IDENTIFIERS       # names probed per question (default 3)
+EXACT_LOOKUP_FTS_K                 # exact hits sampled per identifier when ranking sections (default 50)
+EXACT_LOOKUP_MAX_SECTIONS          # sections fetched whole per question (default 3)
+EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # chunks taken per section (default 12)
+EXACT_SECTION_RESERVE      # mix-selection seats reserved for those chunks, inside the existing budget (default 4)
 ```
+
+**Exact-identifier fast path:** when a question names something exactly
+lookup-able (`set_db`, `place_opt_design`, `config.yaml`), retrieval first
+locates the section that name occurs in and fetches that whole section, so a
+command's Arguments and Examples cannot be split off and truncated away.
+
+The gate for this channel is narrower than the identifier extraction used for
+ordinary lexical recall, and the difference is a cost decision: a name joined by
+`_` or `.` always qualifies, but a purely hyphen-joined word must contain a
+digit. `GPT-4` and `v1-2` therefore probe; `state-of-the-art`, `real-time` and
+`end-to-end` do not. Those appear in a large share of analytical questions
+(every deep-report section question, in practice), and each would buy a real
+substring probe — measured at 16 ms / 50 hits on a 20k-chunk library — whose hit
+can promote an entire chapter into the answer's evidence budget. They remain in
+lexical recall, where an extra OR-ed term is nearly free.
+
+"Fetch the whole section" depends on heading breadcrumbs, which are a property
+of the Markdown parsing path. Sources parsed by MinerU (PDF/DOCX) carry no
+breadcrumbs; there the channel returns exactly the chunks that matched instead
+of a whole section. That is still the behaviour the feature exists for — the
+parameter table survives — but it is not section completion, so a library whose
+manuals are PDFs benefits less than one whose manuals are Markdown.
+
+The channel itself makes zero model and zero embedding calls; note that in the
+mix answering path its chunks do join the existing rerank call, adding at most
+`EXACT_LOOKUP_MAX_SECTIONS × EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION` documents to
+that one request. Every query is bounded by the settings above, and a question
+with no such name issues no additional queries at all. It searches the active
+notebook only; mounted reference libraries are deliberately out of scope.
 
 **Bounded KG relation completion:** this post-extraction stage is a deployment
 experiment and is strictly disabled by default. It advances persistent, generation-bound

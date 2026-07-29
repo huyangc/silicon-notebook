@@ -1628,6 +1628,49 @@ class CandidateRetrievalService(_RetrievalState):
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
             self._note_model_error("chunk_keyword_union", "", exc)
             return []
+    def _exact_lookup_chunks(self, notebook_id: str, query: str):
+        """Exact-identifier fast path → whole-section RetrievedChunks.
+
+        Zero model calls and zero embeddings; every query is bounded by the
+        `exact_lookup_*` settings. `exact_lookup_chunks` itself returns `[]`
+        without touching the database when the query holds no identifier, so
+        an ordinary question pays nothing here — the settings gate below is the
+        operator's kill switch, not the hot-path guard.
+
+        Called ONCE per ask (not per sub-query), exactly like
+        `_keyword_chunk_candidates`, and fail-open for the same reason: a
+        supplementary recall channel must never take the whole retrieval down.
+        """
+        if not self.settings.exact_lookup_enabled:
+            return []
+        from app.services.exact_lookup import (
+            ExactLookupDeps, ExactLookupLimits, exact_lookup_chunks,
+        )
+        try:
+            return exact_lookup_chunks(
+                ExactLookupDeps(
+                    connect=self._connect,
+                    exact_search=self.knowledge.chunk_exact_search,
+                    section_rows=self.chunks.chunks_by_section,
+                    # `hydrate_rows` already returns the exact row shape the
+                    # section fetch does (id/source_id/text/section_path/
+                    # element_ids/source_title) on BOTH adapters, so the
+                    # by-id path needs no new store primitive — only this seam.
+                    chunk_rows=self.chunks.hydrate_rows,
+                ),
+                notebook_id,
+                query,
+                ExactLookupLimits(
+                    max_identifiers=self.settings.exact_lookup_max_identifiers,
+                    fts_k=self.settings.exact_lookup_fts_k,
+                    max_sections=self.settings.exact_lookup_max_sections,
+                    max_chunks_per_section=(
+                        self.settings.exact_lookup_max_chunks_per_section),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — 精确通道失败绝不拖垮检索
+            self._note_model_error("chunk_exact_lookup", "", exc)
+            return []
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:
         """Append `extra` RetrievedChunks to `base`, deduped by chunk_id (keep the

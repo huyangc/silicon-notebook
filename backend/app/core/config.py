@@ -472,6 +472,25 @@ class Settings(BaseSettings):
     # they clear the existing relevance floor.  It never enlarges the token
     # budget or changes the historical oversized-first-chunk exception.
     chunk_graph_reserve: int = Field(0, validation_alias="CHUNK_GRAPH_RESERVE")
+    # 精确标识符 fast path(exact_lookup):问题里出现 `_`/`-`/`.` 连接的完整命令名
+    # (set_db、place_opt_design)时,先精确定位它所在的小节,再把整节的 chunk 一次
+    # 取齐并入候选——手册小节被 600 字分块切成主描述/参数表/示例,普通检索只召回
+    # 其中最相关的一块,答案就缺参数细节。零模型调用、零 embedding;查询里没有标识符
+    # 时整条通道零 IO(总闸在 identifier_terms)。
+    exact_lookup_enabled: bool = Field(True, validation_alias="EXACT_LOOKUP_ENABLED")
+    # 一次问答最多用前 N 个标识符探测(粘贴整页命令表时的上界)。
+    exact_lookup_max_identifiers: int = Field(
+        3, validation_alias="EXACT_LOOKUP_MAX_IDENTIFIERS")
+    # 每个标识符的精确命中窗口(用于统计哪个小节命中最多,不是最终结果数)。
+    exact_lookup_fts_k: int = Field(50, validation_alias="EXACT_LOOKUP_FTS_K")
+    # 最多取齐几个小节 / 每个小节最多取几块 —— 通道的结构性硬界。
+    exact_lookup_max_sections: int = Field(
+        3, validation_alias="EXACT_LOOKUP_MAX_SECTIONS")
+    exact_lookup_max_chunks_per_section: int = Field(
+        12, validation_alias="EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION")
+    # mix 最终选择为精确小节 chunk 预留的席位数。与 chunk_graph_reserve 同构:
+    # 只在既有 token 预算内预留,绝不扩预算,也不制造第二个 oversize 例外。
+    exact_section_reserve: int = Field(4, validation_alias="EXACT_SECTION_RESERVE")
     # chunk×graph mix token 预算(照 LightRAG 6000/8000/30000)。
     max_entity_tokens: int = Field(6000, validation_alias="MAX_ENTITY_TOKENS")
     max_relation_tokens: int = Field(8000, validation_alias="MAX_RELATION_TOKENS")

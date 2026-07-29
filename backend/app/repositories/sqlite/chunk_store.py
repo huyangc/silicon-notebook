@@ -4,6 +4,7 @@ import json
 import sqlite3
 from typing import Sequence
 
+from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.ports import ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -19,7 +20,11 @@ class ChunkStore:
     def source_elements_for_chunking(self, source_id: str) -> list:
         """元素 id 形如 el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。
         额外带出 metadata 里的 caption：MinerU 带图注的 image 元素需凭它进检索
-        chunk（build_chunks 对 image/figure 仅在无 caption 时跳过）。"""
+        chunk（build_chunks 对 image/figure 仅在无 caption 时跳过）。同时带出
+        section_path（markdown 解析路径存的完整标题面包屑，含自身、" > " 分隔）：
+        build_chunks 的 heading 分支用它代替标题自身文本作 section 标签，避免子标题
+        （如 Arguments/Examples）覆盖掉上级标题（命令名）；缺省时 build_chunks 自行
+        回退到标题自身文本，字节不变。"""
         with self.database.connect() as db:
             erows = db.execute(
                 "SELECT id, element_type, text, metadata FROM source_elements "
@@ -27,6 +32,7 @@ class ChunkStore:
         out = []
         for r in erows:
             caption = ""
+            section_path = ""
             raw = r["metadata"]
             if raw:
                 try:
@@ -35,8 +41,10 @@ class ChunkStore:
                     parsed = None
                 if isinstance(parsed, dict):
                     caption = str(parsed.get("caption") or "")
+                    section_path = str(parsed.get("section_path") or "")
             out.append({"id": r["id"], "element_type": r["element_type"],
-                        "text": r["text"], "caption": caption})
+                        "text": r["text"], "caption": caption,
+                        "section_path": section_path})
         return out
 
     def replace_source_chunks(
@@ -257,6 +265,46 @@ class ChunkStore:
     def id_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT id FROM chunks WHERE notebook_id=?", (notebook_id,),
+        ).fetchall()
+
+    @staticmethod
+    def chunks_by_section(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str,
+        section_path: str,
+        limit: int,
+    ):
+        """One section's chunks — that node PLUS its descendants — in document
+        order, for the exact-identifier fast path's "fetch the whole section".
+
+        `section_path` holds the full breadcrumb (`Commands > set_db >
+        Arguments`), so the subtree predicate is equality OR the
+        ``<path> > %`` prefix. Legacy rows hold a single heading instead: the
+        prefix branch then simply matches nothing and equality still works,
+        which is exactly the degraded-but-correct behaviour those libraries
+        should get.
+
+        The pattern is escaped (`escape_like_pattern` + the ESCAPE clause
+        SQLite requires, since it has no default escape character) because
+        command names contain `_`, LIKE's single-character wildcard.
+
+        `ORDER BY rowid` is document order: chunk ids are random 128-bit
+        surrogates, so ordering by id would shuffle a section's parts. `LIMIT`
+        is a hard bound — a pathological section can never dump a source.
+        """
+        path = section_path or ""
+        if not path or limit <= 0:
+            return []
+        return db.execute(
+            "SELECT c.id, c.source_id, c.text, c.section_path, c.element_ids, "
+            "s.title AS source_title "
+            "FROM chunks c JOIN sources s ON s.id=c.source_id "
+            "WHERE c.notebook_id=? AND c.source_id=? "
+            "AND (c.section_path=? OR c.section_path LIKE ? ESCAPE '\\') "
+            "ORDER BY c.rowid LIMIT ?",
+            (notebook_id, source_id, path,
+             escape_like_pattern(path) + " > %", int(limit)),
         ).fetchall()
 
     @staticmethod

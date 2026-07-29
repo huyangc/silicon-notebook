@@ -2055,6 +2055,17 @@ def complete_row(
         # those two provenance-opaque expansions off.
         reasoning_retriever.allow_community_expansion = False
         reasoning_retriever.allow_ppr = False
+        # The completion query built by `_completion_retrieval_query` is a JSON
+        # envelope (table_title/known_cells/content_md), not a natural-language
+        # question. `identifier_terms` reliably finds one of those envelope
+        # keys inside it, so without this the exact-lookup seed pass would
+        # unconditionally probe on every single completion request: burning
+        # the per-run identifier budget on noise, adding an `exact_lookup`
+        # trace step nobody asked for, and (under fail_closed) leaving a
+        # zero-hit probe's overhead on the critical path. Off for the same
+        # reason PPR/community are off above — this channel was never
+        # designed against this profile's input shape.
+        reasoning_retriever.allow_exact_lookup = False
         reasoning_retriever.untrusted_evidence = True
         reasoning_result = reasoning_retriever.run(
             notebook_id,

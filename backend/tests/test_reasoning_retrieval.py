@@ -1589,3 +1589,541 @@ def test_merge_element_hits_keeps_max_score_across_queries():
     assert scores["b"] == 0.5
     merge_element_hits(elements, [el("b", 0.2)])
     assert {e.element_id: e.score for e in elements}["b"] == 0.5
+
+
+# ----------------------------------------------------------- 精确查找(exact_lookup)
+# 命令类问题的确定性通道:seed pass 无条件按问题里的名称取齐整节(不赌 agent 选动作),
+# reflect 动作让模型补查证据里缺的名称。零模型调用、零 embedding。
+
+_MANUAL_SECTIONS = [
+    ("ck-main", "Manual > Commands > set_db",
+     "[Commands > set_db] set_db 用于设置数据库属性。"),
+    ("ck-args", "Manual > Commands > set_db > Arguments",
+     "[set_db > Arguments] -name 属性名。-value 属性值。"),
+    ("ck-timing", "Manual > Commands > report_timing",
+     "[Commands > report_timing] report_timing 输出时序报告。"),
+    ("ck-place", "Manual > Commands > place_opt_design",
+     "[Commands > place_opt_design] place_opt_design 执行布局优化。"),
+    ("ck-get", "Manual > Commands > get_db",
+     "[Commands > get_db] get_db 读取数据库属性。"),
+]
+
+
+def _seed_manual_notebook(repo):
+    """KG 两节点(让 plan/初检索照常有候选)+ 一份分节手册的 chunk 行。
+
+    直接写 chunk 行而不过分块器:本组用例考的是「给定这样的小节布局,检索会怎么
+    做」,把布局写出来,fixture 读起来就是它所代表的那份手册。
+    """
+    from app.services.sqlite_repository import _now
+    nb = _seed_two_nodes(repo)
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-manual", nb.id, "Tool Manual", "document", "m.md",
+             "/tmp/m.md", 0, "h-src-manual", "", "", "extracted", now, now))
+        for index, (chunk_id, section_path, text) in enumerate(_MANUAL_SECTIONS, 1):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+                "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb.id, "src-manual", text, section_path,
+                 json.dumps([f"el-{index:04d}"]), now))
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                (chunk_id, nb.id, text))
+    return nb
+
+
+def _retriever_counting_exact_lookup(repo, calls):
+    """构造 retriever 并记录每次精确查找实际收到的检索串(空列表=一次都没调)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rr = ReasoningRetriever.from_repository(repo, repo.settings)
+    original = rr.exact_lookup
+
+    def _counted(notebook_id, query):
+        calls.append(query)
+        return original(notebook_id, query)
+
+    rr.exact_lookup = _counted
+    return rr
+
+
+def test_reflect_prompt_and_schema_expose_exact_lookup():
+    from app.services.prompts import reflect_prompt, REFLECT_SCHEMA_HINT
+    assert "exact_lookup" in REFLECT_SCHEMA_HINT
+    assert "exact_term" in REFLECT_SCHEMA_HINT
+    p = reflect_prompt("set_db 命令是怎样的", "- [chunk] Tool Manual · set_db: ...")
+    assert "- exact_lookup:" in p
+    assert "exact_term" in p
+    # 既有 7 个动作的说明不能被挤掉。
+    for action in ("answer", "expand_graph", "add_subquery", "search_elements",
+                   "ppr_retrieve", "expand_community", "follow_chain"):
+        assert f"- {action}:" in p
+
+
+def test_clean_exact_term_unwraps_without_truncating():
+    """item 6:截长挪到 fail_closed 硬闸(:485 一带)之后 + 使用点,解析阶段
+    (clean_exact_term)只做标点清洗——先截到 256 会让那条 2000 字符硬闸对
+    exact_term 恒不可达。"""
+    from app.services.reasoning_retrieval import clean_exact_term
+    assert clean_exact_term("  set_db  ") == "set_db"
+    assert clean_exact_term('"set_db"') == "set_db"
+    assert clean_exact_term("`set_db`") == "set_db"
+    assert clean_exact_term("「set_db」。") == "set_db"
+    # 名称内部的分隔符是名称的一部分,不能被当包裹标点吃掉。
+    assert clean_exact_term("place_opt_design") == "place_opt_design"
+    assert clean_exact_term("state-of-the-art") == "state-of-the-art"
+    assert clean_exact_term(None) == ""
+    long_raw = "a_" * 5000
+    assert clean_exact_term(long_raw) == long_raw
+    assert len(clean_exact_term(long_raw)) == 10000
+
+
+def test_reflect_accepts_exact_lookup_and_keeps_invalid_actions_rejected(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    class _OneShot:
+        configured = True
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps(self._payload)
+
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _OneShot({"next_action": "exact_lookup",
+                               "exact_term": " 「set_db」 "}))
+    decision = ReasoningRetriever.from_repository(rrepo, rrepo.settings).reflect("q", "s")
+    assert decision.next_action == "exact_lookup"
+    assert decision.exact_term == "set_db"      # 解析时就清洗好
+
+    # fail_closed: 非法动作语义不变(仍抛),exact_lookup 缺名称同样抛。
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _OneShot({"next_action": "teleport_to_answer"}))
+    strict = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    with pytest.raises(ValueError):
+        strict.reflect("q", "s")
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _OneShot({"next_action": "exact_lookup", "exact_term": "  "}))
+    with pytest.raises(ValueError):
+        ReasoningRetriever.from_repository(
+            rrepo, rrepo.settings, fail_closed=True).reflect("q", "s")
+
+
+def test_reflect_fail_closed_rejects_overlong_exact_term(rrepo):
+    """item 6:截长挪到硬闸之后才有意义——验证硬闸真的能对超长 exact_term
+    生效(此前 clean_exact_term 先截到 256,这条 2000 字符闸恒不可达)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    class _OneShot:
+        configured = True
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps(self._payload)
+
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _OneShot({"next_action": "exact_lookup",
+                               "exact_term": "a_" * 5000}))
+    strict = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    with pytest.raises(ValueError, match="too long"):
+        strict.reflect("q", "s")
+
+
+def test_run_exact_lookup_seed_pass_takes_the_whole_named_section(rrepo):
+    """问题点名 set_db → 不等 agent 决定,seed pass 直接把整节取齐。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "set_db 命令是怎样的", "")
+
+    step = next(t for t in res.trace if t.step_type == "exact_lookup")
+    assert step.detail == {"terms": ["set_db"], "found": 2, "phase": "seed"}
+    assert step.summary == "按名称精确查找:新增 2 段原文"
+    # 主描述与参数表都在——分块把它们切开、普通检索只留其一,正是本通道要治的。
+    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
+    # item 1:打分串是抽出的名称本身(" ".join(seed_terms)),不是整句问题——
+    # 与 action 同构。命中节的章节路径+正文都包含名称,关键词覆盖率是 1.0;
+    # 整句问题打分会被问题里一堆不相关词拖到约 0.286(评审实测的回归值),把
+    # 这个精确命中挤到合成排序垫底、还可能拖过 grounded 判定阈值。
+    assert [c.relevance for c in res.chunks] == [1.0, 1.0]
+    assert calls == ["set_db"]
+    # seed 步排在初检索之后,天然被「轨迹覆盖整轮」包住。
+    kinds = [t.step_type for t in res.trace]
+    assert kinds.index("retrieve") < kinds.index("exact_lookup") < kinds.index("reflect")
+
+
+def test_run_without_an_identifier_makes_zero_exact_lookup_calls_and_no_step(rrepo):
+    """中性回归:问题不含名称 → 一次调用都不发,轨迹里也没有多出来的步。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "这个流程是怎样的", "")
+    assert calls == []
+    assert [t.step_type for t in res.trace] == ["plan", "retrieve", "reflect", "answer"]
+
+
+def test_run_seed_pass_does_not_probe_a_digitless_hyphen_word(rrepo):
+    """整支评审阻塞项 3 的复现:`state-of-the-art` 不配一次精确探测。
+
+    词法召回侧仍认它是标识符(多一个 OR 词项无害),但精确通道每个词都要付一次
+    真探测:2 万块的库上 16ms/50 命中,而报告引擎每节的问题恒含这批词——等于
+    每节白付一次。命中章节标题时还会把整章 12 块以 1.0 分推进证据。
+    """
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "对比"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "这个方法与 state-of-the-art 相比如何", "")
+    assert calls == []
+    assert not any(t.step_type == "exact_lookup" for t in res.trace)
+    # 同一把闸下,真名称照常触发——否则这条断言只是把通道关掉了。
+    calls_named = []
+    _retriever_counting_exact_lookup(rrepo, calls_named).run(
+        nb.id, "set_db 与 state-of-the-art 方案相比如何", "")
+    assert calls_named == ["set_db"]
+
+
+def test_run_exact_lookup_action_rejects_a_digitless_hyphen_word_with_a_teaching_note(rrepo):
+    """模型给普通英文词组时,skip 要带「该给什么」的措辞回喂,而不是只说不行。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    prompts: list[str] = []
+
+    class _CapturingLLM(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" not in schema_hint:
+                prompts.append(messages[-1]["content"])
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    bind_chat_client(rrepo, "reasoning_agent", _CapturingLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "real-time"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "这个命令怎么用", "")
+
+    assert calls == []
+    skip = next(t for t in res.trace
+                if t.detail.get("reason") == "exact_term_not_identifier")
+    assert skip.detail["term"] == "real-time"
+    assert "只用连字符连接的词还需带数字" in skip.summary
+    assert "只用连字符连接的词还需带数字" in prompts[-1]
+
+
+def test_run_exact_lookup_action_pulls_the_section_the_model_named(rrepo):
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "这个命令怎么用", "")           # 问题本身无名称 → seed 不触发
+
+    step = next(t for t in res.trace if t.step_type == "exact_lookup")
+    assert step.detail == {"term": "set_db", "terms": ["set_db"],
+                           "found": 2, "phase": "reflect"}
+    assert step.summary == "按名称精确查找「set_db」:新增 2 段原文"
+    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
+    assert calls == ["set_db"]
+
+
+def test_run_exact_lookup_action_skips_a_term_the_seed_already_probed(rrepo):
+    """seed 与动作共用防重账目:问题里已经查过的名称,agent 不必再花一轮。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db 的参数"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "set_db 命令是怎样的", "")
+
+    assert len(calls) == 1                      # 只有 seed 那一次真的落到检索层
+    lookups = [t for t in res.trace if t.step_type == "exact_lookup"]
+    assert [t.detail["phase"] for t in lookups] == ["seed"]
+    skip = next(t for t in res.trace
+                if t.detail.get("reason") == "duplicate_exact_lookup")
+    assert skip.step_type == "skip"
+    assert skip.detail["terms"] == ["set_db"]   # 防重按名称,不按请求串
+
+
+def test_run_exact_lookup_action_repeats_are_fed_back_to_reflect(rrepo):
+    """账目回喂:模型看得到查过哪些名称、各自新增多少,重复请求让账目变化。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    prompts: list[str] = []
+
+    class _CapturingLLM(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" not in schema_hint:
+                prompts.append(messages[-1]["content"])
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    bind_chat_client(rrepo, "reasoning_agent", _CapturingLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
+                  {"next_action": "exact_lookup", "exact_term": "set_db"},
+                  {"next_action": "answer", "sufficient": True}]))
+    _retriever_counting_exact_lookup(rrepo, []).run(nb.id, "这个命令怎么用", "")
+
+    assert "已按名称精确查找过" not in prompts[0]
+    assert "「set_db」(新增2段)" in prompts[1]
+    # 重复被跳过时账目仍变化 → prompt 不是不动点,LLM 缓存不会逐字重放同一决策。
+    assert "「set_db」(新增2段,已试2次)" in prompts[2]
+
+
+def test_run_exact_lookup_action_rejects_a_low_selectivity_term(rrepo):
+    """名称形状闸与 seed 通道共用:模型不能拿一个短串把精确通道变成全库子串扫描。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "2.1"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "这个命令怎么用", "")
+    assert calls == []
+    skip = next(t for t in res.trace
+                if t.detail.get("reason") == "exact_term_not_identifier")
+    assert skip.step_type == "skip" and skip.detail["term"] == "2.1"
+    assert not any(t.step_type == "exact_lookup" for t in res.trace)
+
+
+def test_run_exact_lookup_action_caps_at_three_and_seed_does_not_count(rrepo):
+    from app.services.reasoning_retrieval import _MAX_EXACT_LOOKUPS
+    assert _MAX_EXACT_LOOKUPS == 3
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": t} for t in (
+            "report_timing", "place_opt_design", "get_db", "write_db")]
+        + [{"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "set_db 命令是怎样的", "")
+
+    # seed(问题里的 set_db)不占动作额度 → 3 个动作全部执行,第 4 个才被上限拦。
+    # seed 打分串是抽出的名称本身("set_db"),不是整句问题(item 1)。
+    assert calls == ["set_db", "report_timing", "place_opt_design", "get_db"]
+    lookups = [t for t in res.trace if t.step_type == "exact_lookup"]
+    assert [t.detail["phase"] for t in lookups] == ["seed", "reflect", "reflect", "reflect"]
+    skip = next(t for t in res.trace
+                if t.detail.get("reason") == "exact_lookup_cap")
+    assert skip.step_type == "skip" and skip.detail["term"] == "write_db"
+
+
+def test_exact_lookup_disabled_turns_off_both_the_seed_and_the_action(rrepo):
+    """总开关关 → seed 与动作都零调用;白名单仍收该动作(它在执行处被 skip)。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.exact_lookup_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "set_db"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls = []
+    res = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "set_db 命令是怎样的", "")
+    assert calls == []
+    assert not any(t.step_type == "exact_lookup" for t in res.trace)
+    skip = next(t for t in res.trace
+                if t.detail.get("reason") == "exact_lookup_disabled")
+    assert skip.step_type == "skip"
+    reflect = next(t for t in res.trace if t.step_type == "reflect")
+    assert reflect.detail["next_action"] == "exact_lookup"   # 白名单未剔除
+
+
+def test_exact_lookup_seed_respects_the_identifier_budget(rrepo, monkeypatch):
+    """轨迹里的 terms 必须是真正探测过的那几个,不是问题里出现的全部标识符。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    monkeypatch.setattr(rrepo.settings, "exact_lookup_max_identifiers", 2)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    res = _retriever_counting_exact_lookup(rrepo, []).run(
+        nb.id, "set_db、report_timing、get_db 分别是什么", "")
+    step = next(t for t in res.trace if t.step_type == "exact_lookup")
+    assert step.detail["terms"] == ["set_db", "report_timing"]
+
+
+def test_exact_lookup_goes_through_the_candidate_policy_boundary(rrepo):
+    """新通道不得绕过 `_filter_candidates`。
+
+    knowhow 智能补全就是靠这条边界剔除私有 Memory 与当前表自身投影的;精确查找
+    直连 `self.retrieval.exact_lookup_chunks` 会在那条流程里开一个后门。
+    """
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "report_timing"},
+                  {"next_action": "answer", "sufficient": True}]))
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    seen: list[tuple] = []
+
+    def _policy(kind, items):
+        values = list(items)
+        seen.append((kind, tuple(getattr(v, "chunk_id", "") for v in values)))
+        # 策略钩子把 set_db 那一节整个挡掉,seed 与动作两条路径都必须服从。
+        return [v for v in values if not getattr(v, "chunk_id", "").startswith("ck-main")]
+
+    rr.candidate_filter = _policy
+    res = rr.run(nb.id, "set_db 命令是怎样的", "")
+
+    assert ("chunk", ("ck-main", "ck-args")) in seen          # seed 经过策略
+    assert ("chunk", ("ck-timing",)) in seen                  # 动作也经过策略
+    assert [c.chunk_id for c in res.chunks] == ["ck-args", "ck-timing"]
+    seed_step = next(t for t in res.trace
+                     if t.step_type == "exact_lookup" and t.detail["phase"] == "seed")
+    assert seed_step.detail["found"] == 1                     # 记账记的是过滤后的真实新增
+
+
+def test_allow_exact_lookup_policy_flag_disables_seed_and_action(rrepo):
+    """item 2:knowhow 智能补全传进来的 question 是 JSON 信封文本,
+    identifier_terms 恒抽出 `table_title`/`known_cells`/`content_md` 这类信封
+    键——不加策略位,每次补全请求都会白发探测、烧掉标识符名额、把内部键经
+    轨迹上屏。`allow_exact_lookup` 与 `allow_ppr` 同构:False 时 seed 与
+    reflect 动作都零 I/O(动作复用既有 exact_lookup_disabled skip 语义);
+    True(默认)行为不变——seed 仍按信封键探测,即便在这份手册库里零命中。
+    """
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    completion_question = json.dumps({
+        "table_title": "参数表", "known_cells": ["a"], "content_md": "x"})
+
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "参数"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "table_title"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls = []
+    rr = _retriever_counting_exact_lookup(rrepo, calls)
+    rr.allow_exact_lookup = False
+    res = rr.run(nb.id, completion_question, "")
+
+    assert calls == []                                        # 零探测
+    assert not any(t.step_type == "exact_lookup" for t in res.trace)   # 零轨迹步
+    skip = next(t for t in res.trace
+                if t.detail.get("reason") == "exact_lookup_disabled")
+    assert skip.step_type == "skip"
+
+    # True(默认):seed 照常按信封键探测(这份手册库里没有这几个键对应的
+    # 章节,零命中,但通道本身照常发起探测、记轨迹步——策略位关闭前的现状)。
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "参数"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    calls2 = []
+    res2 = _retriever_counting_exact_lookup(rrepo, calls2).run(
+        nb.id, completion_question, "")
+    assert calls2 == ["table_title known_cells content_md"]
+    seed_step = next(t for t in res2.trace if t.step_type == "exact_lookup")
+    assert seed_step.detail == {
+        "terms": ["table_title", "known_cells", "content_md"],
+        "found": 0, "phase": "seed",
+    }
+
+
+def test_run_exact_lookup_skip_feeds_teaching_note_to_reflect(rrepo):
+    """item 3:四类 skip(未启用/缺名称/非标识符/超上限)不再只留 TraceStep
+    沉默,也写进 `exact_lookup_log` 账本并回喂 reflect——否则模型看不到"为
+    什么",只能在同一非法输入上反复请求(评审实测:连续 3 轮同 prompt,只能
+    靠 stale 熔断兜底)。这里钉住 exact_term_not_identifier 这条:同一非
+    标识符 term 连续两轮提交 → 第二轮起 prompt 带教学措辞,且账本按 term
+    去重(措辞不随重复请求线性增长,只在末尾追加已尝试次数)。"""
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    prompts: list[str] = []
+
+    class _CapturingLLM(_SeqLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" not in schema_hint:
+                prompts.append(messages[-1]["content"])
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    bind_chat_client(rrepo, "reasoning_agent", _CapturingLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "2.1"},
+                  {"next_action": "exact_lookup", "exact_term": "2.1"},
+                  {"next_action": "answer", "sufficient": True}]))
+    _retriever_counting_exact_lookup(rrepo, []).run(nb.id, "这个命令怎么用", "")
+
+    assert "不是可精确查找的名称" not in prompts[0]
+    assert prompts[1].count("「2.1」不是可精确查找的名称") == 1
+    # 第二轮仍是同一条账目(tries 递增),不是新追加的第二条——教学措辞在
+    # prompt 里只出现一次,不随重复请求线性增长,只在末尾多出已尝试次数。
+    assert prompts[2].count("「2.1」不是可精确查找的名称") == 1
+    assert "已尝试2次" in prompts[2]
+
+
+def test_run_ppr_seed_precedes_exact_seed_and_shares_chunk_dedup(rrepo):
+    """item 4:模块内注释声称"exact seed 排在 PPR seed 之后保 PPR 去重/计数
+    逐位不变",但既有 13 条用例全部 graph_ppr_enabled=False,两个 seed 块整块
+    对调后测试照样全绿——没有一条用例在 PPR 开着的时候真正跑过标识符问题。
+    这里补上:graph_ppr_enabled=True(默认)+ 问题含标识符,钉住 trace 里
+    ppr 先于 exact_lookup,且两条通道对同一 chunk_id 的重叠按 PPR 先到者得
+    (PPR 的 seen_chunks 去重发生在先,精确查找侧的新增数随之减去重叠)。
+    移动变异(对调两个 seed 块)会让此断言翻转,见任务验证要求。"""
+    from app.services.retrieval import RetrievedChunk
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_manual_notebook(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    # 与精确查找命中的 ck-main 重叠一段(考验去重顺序)+ 一段只有 PPR 命中。
+    ppr_overlap_chunk = RetrievedChunk(
+        chunk_id="ck-main", source_id="src-manual", source_title="Tool Manual",
+        section_path="Manual > Commands > set_db", text="ppr 命中的重叠段",
+        relevance=0.5, score=0.5)
+    ppr_only_chunk = RetrievedChunk(
+        chunk_id="ppr-only", source_id="src-manual", source_title="Tool Manual",
+        section_path="Manual > PPR", text="仅 PPR 命中的段",
+        relevance=0.4, score=0.4)
+    rr.ppr_retrieve = lambda notebook_id, query: [ppr_overlap_chunk, ppr_only_chunk]
+
+    res = rr.run(nb.id, "set_db 命令是怎样的", "")
+
+    kinds = [t.step_type for t in res.trace]
+    ppr_idx = kinds.index("ppr")
+    exact_idx = kinds.index("exact_lookup")
+    assert ppr_idx < exact_idx                                # PPR seed 排在精确查找 seed 之前
+
+    ppr_step = res.trace[ppr_idx]
+    assert ppr_step.detail == {"found": 2, "phase": "seed"}   # PPR 先到,两段都算它的新增
+
+    exact_step = res.trace[exact_idx]
+    # 精确查找命中 ck-main + ck-args,但 ck-main 已被 PPR 领走 → 只剩 ck-args 算新增。
+    assert exact_step.detail["found"] == 1
+
+    # 两通道去重后的并集,顺序即两个 seed 块各自 extend 的顺序:
+    # PPR 的两段(重叠段 + 独占段)在前,精确查找真正新增的一段在后。
+    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ppr-only", "ck-args"]

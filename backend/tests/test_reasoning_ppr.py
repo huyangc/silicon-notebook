@@ -291,6 +291,55 @@ def test_answer_reasoning_final_evidence_respects_combined_hard_budget(
     assert len(llm.prompt) <= 220
 
 
+def test_answer_reasoning_orders_equal_relevance_chunks_by_insertion(repo, monkeypatch):
+    """同分不得按 chunk_id 打破平手——那是随机 128 位代理键。
+
+    精确通道整节取齐后,那一节的每一块都是 1.0 同分,而 `_chunk_answer_context`
+    的字符预算恰好切在这个同分组里:按 id 排等于在组内洗牌,「参数表进不进
+    prompt」变成掷骰子。稳定排序保留插入序(=检索序 / 节内文档序)。
+    """
+    from app.services.retrieval import RetrievalSupport, RetrievedChunk
+
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+
+    def _chunk(chunk_id, relevance):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="src-A", source_title="Tool Manual",
+            section_path="Manual > Commands > set_db", text=f"{chunk_id} body",
+            element_ids=[], score=relevance, relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport("lexical", "chunk", chunk_id, relevance),),
+        )
+
+    # 检索序 = 节内文档序(主描述 → 参数表 → 示例);id 序刻意与之相反,
+    # 于是「按 id tie-break」与「保留插入序」必然给出不同答案,不会巧合排对。
+    chunks = [_chunk("zzz-main", 1.0), _chunk("mmm-args", 1.0),
+              _chunk("aaa-examples", 1.0), _chunk("kkk-unrelated", 0.4)]
+
+    ask = repo._runtime.ask_service()
+    captured: dict = {}
+    real = ask._chunk_answer_context
+
+    def _spy(ordered, **kwargs):
+        captured["ids"] = [chunk.chunk_id for chunk in ordered]
+        return real(ordered, **kwargs)
+
+    monkeypatch.setattr(ask, "_chunk_answer_context", _spy)
+
+    class _Stub:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({"answer": "ok", "grounded": True})
+
+    bind_chat_client(repo, "ask_answer", _Stub())
+    repo.settings.kg_query_refine_enabled = False
+    ask._answer_reasoning(nb.id, "set_db 命令是怎样的", [], [], chunks=chunks)
+
+    assert captured["ids"] == [
+        "zzz-main", "mmm-args", "aaa-examples", "kkk-unrelated"]
+
+
 def test_answer_reasoning_admits_top_elements_by_relevance_desc(repo, monkeypatch):
     """PR-1 止血(元素装配保真):不再是插入序 elements[:6] 的裸切——装配前按
     RetrievedElement.score 降序排序(tie-break element_id),只取前 element_items 条。

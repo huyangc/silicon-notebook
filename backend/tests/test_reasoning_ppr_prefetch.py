@@ -19,6 +19,11 @@ class _StubSettings:
     reasoning_quota_enabled = False
     graph_ppr_enabled = True
     reasoning_ppr_prefetch = True
+    # 与真实 Settings 默认一致:精确查找 seed pass 也读它们。这里刻意如实镜像而不是
+    # 在 run() 里 getattr 兜个默认值——settings 少一个字段就该响亮地报错。本文件的
+    # 问题串不含标识符,seed 通道因此一次 I/O 都不发,预取等价性用例不受影响。
+    exact_lookup_enabled = True
+    exact_lookup_max_identifiers = 3
     reasoning_timeout_seconds = 5
     reasoning_max_retries = 0
     community_peers_topk = 4
@@ -34,6 +39,9 @@ class _StubRetrieval:
         return []
 
     def retrieve_scored(self, nb, q):
+        return []
+
+    def exact_lookup_chunks(self, nb, q):
         return []
 
     def ppr_retrieve(self, nb, q):

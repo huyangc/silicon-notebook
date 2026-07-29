@@ -262,11 +262,13 @@ def plan_prompt(question: str, history_block: str = "") -> str:
 
 REFLECT_SCHEMA_HINT = (
     '{"sufficient":false,"next_action":"answer|expand_graph|add_subquery|'
-    'search_elements|ppr_retrieve|expand_community|follow_chain","expand":{"object_id":"","edge_type":null,'
+    'search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup",'
+    '"expand":{"object_id":"","edge_type":null,'
     '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
     '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
     '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-    '"community_focal":"","elements_query":"","ppr_query":"","reason":""}'
+    '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
+    '"reason":""}'
 )
 
 
@@ -302,6 +304,12 @@ def reflect_prompt(question: str, candidates_summary: str) -> str:
         "prerequisite_of, precedes, or part_of chains. NEVER request it for supports, "
         "depends_on, contrasts_with, about, defines, used_in, composed_of, or mixed "
         "edge types because those are not safely transitive.\n"
+        "- exact_lookup: the question names a specific command / API / option / "
+        "parameter (e.g. 'set_db') and the candidates do not yet cover its full "
+        "definition (arguments, defaults, examples). Set exact_term to that name "
+        "EXACTLY as written in the documentation; this matches the name literally "
+        "and returns the whole manual section it heads, so a name you invent or "
+        "paraphrase returns nothing.\n"
         "Before choosing answer, check aspect by aspect that every part the "
         "question explicitly asks for (each layer / entity / requirement it "
         "names) is covered by the candidates; if an asked-for aspect has no "

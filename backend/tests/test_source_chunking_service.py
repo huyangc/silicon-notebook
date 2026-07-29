@@ -38,23 +38,27 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _seed_source_with_elements(repo, texts, element_type="paragraph"):
+def _seed_source_with_elements(repo, texts=(), element_type="paragraph", rows=None):
+    """rows: 可选 [(element_type, text, metadata_json)],与 texts 二选一 —— 需要
+    异构元素(heading+metadata)的用例传 rows,避免整段复制 13 列 INSERT 样板。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     import uuid
 
     sid = f"src-{uuid.uuid4().hex[:8]}"
     now = "2026-01-01T00:00:00"
+    element_rows = (list(rows) if rows is not None
+                    else [(element_type, t, "{}") for t in texts])
     with repo._write() as db:
         db.execute(
             "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
             "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, nb.id, "S", "document", "s.md", "/tmp/s.md", 0, "h", "", "", "extracted", now, now))
-        for i, t in enumerate(texts, 1):
+        for i, (etype, text, metadata) in enumerate(element_rows, 1):
             db.execute(
                 "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (f"el-{sid}-{i:04d}", sid, element_type, f"p{i}", t, "{}", now))
+                (f"el-{sid}-{i:04d}", sid, etype, f"p{i}", text, metadata, now))
     return nb, sid
 
 
@@ -85,6 +89,33 @@ def test_build_chunks_mints_ck_ids_with_json_element_ids(repo):
     assert len(rows) >= 2
     assert all(row["id"].startswith("ck-") for row in rows)
     assert all(json.loads(row["element_ids"]) for row in rows)
+
+
+def test_build_chunks_consumes_section_path_breadcrumb_from_metadata(repo):
+    """store 侧 source_elements_for_chunking 把 metadata.section_path(markdown 解析
+    路径存的完整标题面包屑)带出来:section_path 列存完整面包屑(子标题 Arguments 不再
+    覆盖掉上级标题 set_db),打分文本前缀只取尾部两段(父级 > 叶子),文档级 token
+    不进检索文本(P1-3 + 质量评审 P1-1 解耦)。"""
+    nb, sid = _seed_source_with_elements(repo, rows=[
+        ("heading", "set_db",
+         json.dumps({"section_path": "Manual > Commands > set_db"})),
+        ("paragraph", "x" * 300, "{}"),
+        ("heading", "Arguments",
+         json.dumps({"section_path": "Manual > Commands > set_db > Arguments"})),
+        ("table_row", "name | type", "{}"),
+    ])
+
+    repo._build_chunks_for_source(sid)
+
+    with repo._connect() as db:
+        chunk_rows = db.execute(
+            "SELECT section_path, text FROM chunks WHERE source_id=? ORDER BY id", (sid,)
+        ).fetchall()
+    section_paths = [row["section_path"] for row in chunk_rows]
+    assert "Manual > Commands > set_db > Arguments" in section_paths
+    idx = section_paths.index("Manual > Commands > set_db > Arguments")
+    assert chunk_rows[idx]["text"].startswith("[set_db > Arguments] ")
+    assert "Manual" not in chunk_rows[idx]["text"]
 
 
 def test_build_chunks_id_minting_rides_module_seam(repo, monkeypatch):

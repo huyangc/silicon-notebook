@@ -11,6 +11,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   reflect: "反思",
   expand: "扩展",
   ppr: "漫游",
+  exact_lookup: "精查",
   expand_community: "对比",
   follow_chain: "推导",
   fallback: "原文",
@@ -23,8 +24,8 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 7 个真实取值见 reasoning_retrieval.py:529-726 的 elif 分支。用「下一步意图」
-// 措辞而非机制名(ppr/community/chain 这些是内部机制,不该摆给用户)。
+// 全部 8 个真实取值见 reasoning_retrieval.py `run()` 循环里的 elif 分支。用「下一步
+// 意图」措辞而非机制名(ppr/community/chain 这些是内部机制,不该摆给用户)。
 const NEXT_ACTION: Record<string, string> = {
   answer: "开始作答",
   expand_graph: "顺着相关内容继续找",
@@ -33,6 +34,7 @@ const NEXT_ACTION: Record<string, string> = {
   ppr_retrieve: "顺着关联扩大范围",
   expand_community: "找相似内容对比",
   follow_chain: "顺着推导链继续",
+  exact_lookup: "按名称精确查找",
 };
 
 export type ReasoningTraceSummary = {
@@ -93,6 +95,18 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     // 进入合成 prompt 的计数(区别于更早 answer 步的候选池计数),同样只供排查
     // 不上屏,不在此处渲染。
     return typeof detail.anchors === "number" ? `${detail.anchors} 处引用` : "";
+  }
+  if (step.step_type === "exact_lookup") {
+    // terms 是服务端本轮真正探测过的名称(已按上限截过),不是问题里出现的全部。
+    // 名称和新增段数一起显示,用户才看得出「查的是哪个名字、捞回了多少」——落到
+    // 下面的通用 found 分支只说得出后半句。
+    const terms = Array.isArray(detail.terms)
+      ? detail.terms.filter((term): term is string => typeof term === "string" && !!term)
+      : [];
+    const parts: string[] = [];
+    if (terms.length) parts.push(terms.join("、"));
+    if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 段`);
+    return parts.join(" · ");
   }
   if (step.step_type === "enumerate" && typeof detail.scanned_rows === "number") {
     return `${detail.scanned_rows}/${Number(detail.known_total_rows ?? 0)} 行`;

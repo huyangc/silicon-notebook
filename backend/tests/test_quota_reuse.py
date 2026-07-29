@@ -20,6 +20,10 @@ class _StubSettings:
     reasoning_quota_reuse_enabled = True
     graph_ppr_enabled = False
     reasoning_ppr_prefetch = False
+    # 与真实 Settings 默认一致(精确查找 seed pass 也读它们)。本文件的问题串
+    # 「问题A」「问题B」不含标识符,seed 通道零 I/O,reuse⇔rerun 的逐位等价不受影响。
+    exact_lookup_enabled = True
+    exact_lookup_max_identifiers = 3
     reasoning_timeout_seconds = 5
     reasoning_max_retries = 0
     community_peers_topk = 4
@@ -46,6 +50,9 @@ class _StubRetrieval:
         return [replace(h) for h in self.TABLE.get(q, [])]
 
     def retrieve_scored(self, nb, q):
+        return []
+
+    def exact_lookup_chunks(self, nb, q):
         return []
 
     def ppr_retrieve(self, nb, q):
@@ -128,6 +135,9 @@ class _PreferAwareRetrieval:
                 for oid, base in row.items()]
 
     def retrieve_scored(self, nb, q):
+        return []
+
+    def exact_lookup_chunks(self, nb, q):
         return []
 
     def ppr_retrieve(self, nb, q):
