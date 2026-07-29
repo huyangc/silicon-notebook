@@ -506,6 +506,7 @@ RELATION_SEED_TOP_N          # 开启时喂入图种子的关系/节点命中数
 KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节点（默认 false）
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph 节点检索（默认 true；false 只关闭直接节点路径，不影响格子 chunk 检索）
+REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工具，enumerate_elements/enumerate_kg_objects（默认 true；false 同时关闭两个工具与集合地图，零额外查询）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
