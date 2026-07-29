@@ -22,6 +22,7 @@ from app.services.cancellation import AskCancelled
 from app.services.collection_enumeration import (
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
+    TRUNCATED_PAYLOAD,
     ElementEnumeration,
     EnumerationCoverage,
 )
@@ -244,6 +245,11 @@ def test_reflect_prompt_and_schema_offer_the_tools_only_when_supplied():
                                  ENUMERABLE_KG_OBJECT_TYPES)
     assert '"enumerate":{"kind":"' in schema
     assert '"object_type":"' in schema and '"source_id":""' in schema
+    # 模型看不到内部 source id(候选摘要与引用里只有标题),所以限定单一来源
+    # 必须能按**名字**表达,由服务端解析(codex 第 1 轮 P2-4)。
+    assert '"source_title":""' in schema
+    assert "set enumerate.source_title" in on
+    assert "copied EXACTLY as it appears in the candidates" in on
     assert "enumerate_elements|enumerate_kg_objects" in schema
     # 关闭态必须与接入前**逐字**一致,否则「回到现状」只是说法。对照的是钉死的
     # 字面量,不是 REFLECT_SCHEMA_HINT ——后者现在就是 reflect_schema_hint() 的
@@ -334,30 +340,33 @@ def test_enumerate_kg_objects_action_uses_the_object_type_whitelist(repo):
 def test_second_request_of_the_same_collection_resumes_the_cursor(repo):
     """同集合再次请求 = 续跑:条目接着上次往下,returned_total 是链上累计。
 
-    触发路径是**载荷**上限(行预算是整池给一次动作的,一旦按它截断,池子也就空
-    了)。这里把 structured_payload_chars 压到刚好装两条。
+    用 stub 驱动,因为三个预算池(行/页/载荷)都是 **run 级** 的:真执行器一次
+    动作若因任一池截断,那个池当场就见底,第二次动作只会被 skip 拦下。续跑的
+    机制本身仍必须成立(执行器可能因作用域外的理由停在半路),这里钉的就是
+    run() 把上次的游标接回去、把两段并成同一个集合结果。
     """
     notebook = _seed(repo, formulas=4)
-    probe_llm = _SeqLLM([_enumerate_action(), {"next_action": "answer",
-                                               "sufficient": True}])
-    probe, probe_limits = _retriever(repo, probe_llm)
-    probe_result = probe.run(notebook.id, "哪些公式", "", limits=probe_limits)
-    two_items = sum(
-        enum_module._payload_chars(item)
-        for item in probe_result.enumerations[0].items[:2]
+    partial = ElementEnumeration(
+        kind="formula", items=(), cursor="cursor-1", extra_pages=0,
+        payload_chars=10,
+        coverage=_coverage(returned=2, returned_total=2, complete=False,
+                           has_more=True, total=4,
+                           truncated_reason=TRUNCATED_BUDGET),
     )
-
+    done = ElementEnumeration(
+        kind="formula", items=(), cursor=None, extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=2, returned_total=4, total=4),
+    )
+    stub = _StubEnumeration([partial, done])
     llm = _SeqLLM([_enumerate_action(), _enumerate_action(),
                    {"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(
-        repo, llm, limits_overrides={"structured_payload_chars": two_items}
-    )
+    retriever, limits = _retriever(repo, llm)
+    retriever.collection_enumeration = stub
+
     result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
 
     assert len(result.enumerations) == 1, "续跑必须并进同一个集合结果,不是两条"
     outcome = result.enumerations[0]
-    assert [item.element_id for item in outcome.items] == [
-        "el-001", "el-002", "el-003", "el-004"]
     assert outcome.coverage.returned_total == 4
     assert outcome.coverage.complete is True
     steps = _steps(result, "enumerate")
@@ -374,16 +383,58 @@ def test_second_request_of_the_same_collection_resumes_the_cursor(repo):
     assert answer_step.detail["enumerations"] == 1
 
 
+def test_payload_allowance_is_a_run_pool_not_a_per_action_grant(repo):
+    """载荷上限是 **一次问答** 的公开契约(structured_payload_chars),不是每个
+    动作各来一份。
+
+    codex 第 1 轮 P2-3:每次动作都发全新满额时,deep/thorough/exhaustive 的多次
+    枚举可以持久化并返回数倍于文档上限的结构化载荷。这里钉两件事——传给执行器
+    的额度逐次递减(等于剩余),以及额度用尽后不再发起动作而是记 skip。
+    """
+    notebook = _seed(repo, formulas=4)
+    first = ElementEnumeration(
+        kind="formula", items=(), cursor="cursor-1", extra_pages=0,
+        payload_chars=700,
+        coverage=_coverage(returned=2, returned_total=2, complete=False,
+                           has_more=True, total=4,
+                           truncated_reason=TRUNCATED_PAYLOAD),
+    )
+    second = ElementEnumeration(
+        kind="formula", items=(), cursor="cursor-2", extra_pages=0,
+        payload_chars=300,
+        coverage=_coverage(returned=1, returned_total=3, complete=False,
+                           has_more=True, total=4,
+                           truncated_reason=TRUNCATED_PAYLOAD),
+    )
+    stub = _StubEnumeration([first, second])
+    llm = _SeqLLM([_enumerate_action()] * 3
+                  + [{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(
+        repo, llm, limits_overrides={"structured_payload_chars": 1000}
+    )
+    retriever.collection_enumeration = stub
+
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+
+    granted = [call["budget"].max_payload_chars for call in stub.calls]
+    assert granted == [1000, 300], granted
+    # 第三次动作:剩余为 0,必须停在 skip 而不是再发一次满额。
+    skip = _skips(result)["enumeration_budget"]
+    assert skip.detail["payload_left"] == 0
+    assert skip.detail["rows_left"] > 0, "拦住它的必须是载荷池,不是行池"
+    assert len(stub.calls) == 2
+
+
 def test_resumed_call_receives_the_previous_cursor(repo):
     """续跑必须把上次的游标原样传回执行器——不传就是从头重列。"""
     notebook = _seed(repo, formulas=1)
     partial = ElementEnumeration(
-        kind="formula", items=(), cursor="cursor-1", extra_pages=0,
+        kind="formula", items=(), cursor="cursor-1", extra_pages=0, payload_chars=0,
         coverage=_coverage(returned=0, returned_total=2, complete=False,
                            has_more=True, truncated_reason=TRUNCATED_BUDGET),
     )
     done = ElementEnumeration(
-        kind="formula", items=(), cursor=None, extra_pages=0,
+        kind="formula", items=(), cursor=None, extra_pages=0, payload_chars=0,
         coverage=_coverage(returned=0, returned_total=2),
     )
     stub = _StubEnumeration([partial, done])
@@ -435,38 +486,28 @@ def test_row_budget_is_one_pool_shared_by_both_collections(repo):
     assert skip.summary == "跳过枚举(已达本轮可列出的条目上限)"
 
 
-def test_payload_truncation_does_not_burn_the_page_budget(repo):
-    """载荷截断的多次调用必须能把整个行池用满。
+def test_page_budget_is_charged_by_real_round_trips_not_scanned_rows(repo):
+    """页预算按**执行器回传的真实额外往返数**计费,不是「扫过行数 ÷ 页大小」的
+    上界折算。
 
-    页预算按**执行器回传的真实额外往返数**计费。若改回「扫过行数 ÷ 页大小」的
-    上界折算,一次扫了两页(实际只有 1 次额外往返)就要被扣 2 页,standard 档 4 页
-    的额度两次调用就见底,行池 200 行只用掉一半左右就再也列不动了。
+    210 条公式、standard 档(行 200 / 页 4 / 页大小 50):一次动作走 4 页(首页免费
+    + 3 次额外往返)后被行池拦停,页池应只被扣 3。若改回上界折算(200 // 50 = 4),
+    页池当场归零,行池明明还没成为瓶颈的事实就被掩盖了——这条会红。
     """
     notebook = _seed(repo, formulas=210)
-    probe_llm = _SeqLLM([_enumerate_action(), {"next_action": "answer",
-                                               "sufficient": True}])
-    probe, probe_limits = _retriever(repo, probe_llm)
-    probe_result = probe.run(notebook.id, "哪些公式", "", limits=probe_limits)
-    fifty_one = sum(
-        enum_module._payload_chars(item)
-        for item in probe_result.enumerations[0].items[:51]
-    )
-
-    llm = _SeqLLM([_enumerate_action()] * 6
+    llm = _SeqLLM([_enumerate_action()] * 2
                   + [{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(
-        repo, llm, limits_overrides={"structured_payload_chars": fifty_one}
-    )
+    retriever, limits = _retriever(repo, llm)
     result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
 
     outcome = result.enumerations[0]
     assert outcome.coverage.returned_total == limits.enum_rows_per_run == 200
     assert len(outcome.items) == 200
-    assert len(_steps(result, "enumerate")) >= 4, (
-        "按真实往返计费应能跑完 4 轮以上;两轮就停说明页池被高估扣光了")
+    assert outcome.coverage.truncated_reason == TRUNCATED_BUDGET
     budget_skip = _skips(result)["enumeration_budget"]
     assert budget_skip.detail["rows_left"] == 0
-    assert budget_skip.detail["pages_left"] > 0, "停在行池上,而不是被页池提前掐断"
+    assert budget_skip.detail["pages_left"] == 1, (
+        "4 页只有 3 次额外往返;扣成 4 就是上界折算的痕迹")
 
 
 def test_extra_page_budget_stops_enumeration_while_rows_remain(repo):
@@ -540,7 +581,7 @@ def test_completed_collection_is_not_enumerated_twice(repo):
 def test_concurrent_change_becomes_a_terminal_conflict(repo):
     notebook = _seed(repo, formulas=2)
     conflicted = ElementEnumeration(
-        kind="formula", items=(), cursor=None, extra_pages=0,
+        kind="formula", items=(), cursor=None, extra_pages=0, payload_chars=0,
         coverage=_coverage(returned=0, returned_total=7, complete=False,
                            has_more=True, total=9,
                            truncated_reason=TRUNCATED_CONCURRENT_CHANGE,
@@ -602,6 +643,110 @@ def test_out_of_scope_source_id_fails_open_into_a_skip(repo):
     assert result.enumerations == []
     assert _skips(result)["enumeration_rejected"].summary == (
         "跳过枚举公式清单(请求的范围不可用)")
+
+
+def _add_titled_source(repo, notebook_id, source_id, title, formulas=1):
+    """再加一个带标题的来源(``_seed`` 的 s1 标题固定为「论文一」)。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, title, "pdf", "extracted", "extracted",
+             NOW, NOW),
+        )
+        for index in range(formulas):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"{source_id}-el-{index}", source_id, "formula",
+                 f"p{index}", f"公式 {source_id} {index}", "{}", NOW),
+            )
+    repo.collection_catalog.invalidate()
+
+
+def test_source_title_resolves_to_the_named_source(repo):
+    """「列出《某某》里的公式」:模型只能给标题,服务端确定性解析成来源。"""
+    notebook = _seed(repo, formulas=2)
+    _add_titled_source(repo, notebook.id, "s2", "论文二", formulas=3)
+    llm = _SeqLLM([_enumerate_action(source_title="  论文二 "),
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "《论文二》里有哪些公式", "", limits=limits)
+
+    assert [outcome.source_id for outcome in result.enumerations] == ["s2"]
+    outcome = result.enumerations[0]
+    assert len(outcome.items) == 3
+    assert {item.source_id for item in outcome.items} == {"s2"}
+    assert outcome.coverage.complete is True
+
+
+def test_unmatched_source_title_is_skipped_not_widened(repo):
+    """名字对不上时必须 skip,绝不退成「那就枚举整个库」。"""
+    notebook = _seed(repo, formulas=2)
+    llm = _SeqLLM([_enumerate_action(source_title="不存在的论文"),
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+
+    assert result.enumerations == []
+    skip = _skips(result)["enumeration_source_unresolved"]
+    assert skip.summary == "跳过枚举公式清单(没有名称匹配的来源)"
+    assert skip.detail["matches"] == 0
+    assert skip.detail["requested_title"] == "不存在的论文"
+
+
+def test_ambiguous_source_title_is_skipped(repo):
+    """两个来源同名 = 无法确定是哪一个,同样 skip(不挑第一个)。"""
+    notebook = _seed(repo, formulas=2)
+    _add_titled_source(repo, notebook.id, "s2", "同名论文", formulas=1)
+    _add_titled_source(repo, notebook.id, "s3", "同名论文", formulas=1)
+    llm = _SeqLLM([_enumerate_action(source_title="同名论文"),
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+
+    assert result.enumerations == []
+    skip = _skips(result)["enumeration_source_unresolved"]
+    assert skip.summary == (
+        "跳过枚举公式清单(名称匹配到多个来源,无法确定是哪一个)")
+    assert skip.detail["matches"] == 2
+    # 内部 id 不得出现在轨迹里。
+    assert "s2" not in json.dumps(skip.detail, ensure_ascii=False)
+    assert "s3" not in json.dumps(skip.detail, ensure_ascii=False)
+
+
+def test_source_id_wins_over_source_title(repo):
+    """两个都给时以 id 为准:id 只会是服务端发出去的,不需要再按名字猜。"""
+    notebook = _seed(repo, formulas=2)
+    _add_titled_source(repo, notebook.id, "s2", "论文二", formulas=3)
+    llm = _SeqLLM([_enumerate_action(source_id="s1", source_title="论文二"),
+                   {"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+
+    assert [outcome.source_id for outcome in result.enumerations] == ["s1"]
+    assert {item.source_id for item in result.enumerations[0].items} == {"s1"}
+
+
+def test_source_title_resolution_is_exact_not_fuzzy(repo):
+    """解析是精确匹配(仅 trim + 大小写折叠),不是检索。
+
+    模糊匹配会悄悄枚举另一篇文档并把它报成完整——比不解析更糟。
+    """
+    notebook = _seed(repo, formulas=2)
+    _add_titled_source(repo, notebook.id, "s2", "Layout Basics.pdf", formulas=1)
+    service = repo.collection_enumeration
+
+    assert service.resolve_source_title(
+        notebook.id, "formula", "layout basics.pdf") == ("s2", 1)
+    assert service.resolve_source_title(
+        notebook.id, "formula", "Layout Basics") == ("", 0)
+    assert service.resolve_source_title(notebook.id, "formula", "  ") == ("", 0)
 
 
 def test_source_scoped_enumeration_is_a_separate_cursor_chain(repo):
@@ -720,7 +865,7 @@ def test_unwired_caller_keeps_the_previous_behavior(repo):
 def test_cancel_event_reaches_the_executor(repo):
     notebook = _seed(repo, formulas=1)
     listed = ElementEnumeration(
-        kind="formula", items=(), cursor=None, extra_pages=0,
+        kind="formula", items=(), cursor=None, extra_pages=0, payload_chars=0,
         coverage=_coverage(returned=0, returned_total=0, total=0),
     )
     stub = _StubEnumeration([listed])

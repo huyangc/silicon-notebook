@@ -37,10 +37,13 @@ Four contracts this module owns:
    absence from the plan means "the map counted zero", and inferring an empty
    answer from a cached zero would hide the rows of a source parsed seconds
    ago (see the under-count window registered on ``_coverage``).
-4. **The KG status predicate is the counting predicate.**  Both sides pass the
-   very same ``USABLE_STATUSES`` object (defined once in
-   ``app.services.knowledge_contracts``) into SQL, so a deprecated object can
-   never be counted-but-not-listed.
+4. **The KG status predicate is the counting predicate.**  Both sides evaluate
+   the very same ``USABLE_STATUSES`` object (defined once in
+   ``app.services.knowledge_contracts``), so a deprecated object can never be
+   counted-but-not-listed.  It is evaluated HERE rather than in SQL because
+   the keyset index does not carry ``status`` (see ``_usable_kg_page``); the
+   page query stays O(limit) and this module over-scans within an explicit
+   ceiling instead.
 
 Cost shape per action, all index-assisted and bounded by the budget:
 
@@ -49,7 +52,9 @@ Cost shape per action, all index-assisted and bounded by the budget:
     window of up to ``max_rows`` sources, then one page query per visited
     source per page.  Sources with zero items of the kind are never visited;
   * KG objects — 1 O(1) ``kg_mutation_seq`` read per participant plus the
-    memoized per-type counts, then one page query per page;
+    memoized per-type counts, then one page query per page, plus top-up
+    queries when deprecated objects are interleaved — bounded, per action, by
+    ``max_rows × _KG_RAW_SCAN_FACTOR`` raw rows;
   * closing check — 1 signal query per participant (elements) or 1 seq read
     per participant (KG).
 
@@ -123,6 +128,36 @@ MAX_EVIDENCE_REFS = 3
 # ``max_rows`` and this constant only stops a very large row budget from
 # turning the label query into a thousand-id IN list.
 _MAX_TITLE_WINDOW = 256
+
+# Upper bound on the sources one title→id resolution may examine.  The plan it
+# walks holds only sources that carry the requested kind, so this is already a
+# small fraction of a big library; the cap exists so that a mounted base with
+# tens of thousands of formula-bearing sources cannot turn one reflection into
+# a full label sweep.  Overrunning it is answered as "no unique match" (the
+# caller skips the action and says so) — never as a silent whole-scope
+# enumeration of the wrong thing.
+_MAX_TITLE_RESOLVE_SOURCES = 4 * _MAX_TITLE_WINDOW
+
+# How many RAW knowledge-object rows one KG action may read while filtering out
+# unusable (deprecated / retired) objects, expressed as a multiple of that
+# action's row budget.
+#
+# Why a multiple and not a constant: the ceiling has to scale with what the
+# action was asked to produce, or the deepest effort level would truncate on
+# the same absolute scan the shallowest one survives.
+#
+# Why 4: the page query is keyset-ordered on
+# ``(notebook_id, object_type, created_at, id)`` and carries no status
+# predicate, so a notebook where three of every four objects of a type have
+# been deprecated still lists its full row budget without a single top-up
+# beyond this ceiling.  Past that ratio the cost of finding the next usable row
+# stops being proportional to the answer, and an honest ``budget`` partial is
+# the right answer — the alternative (a status-aware index) would freeze the
+# status vocabulary into the schema and cost a third migration bump in this
+# change.  Deliberately NOT charged against ``max_pages``: that allowance
+# bounds the round trips a caller pools across actions, and a top-up read is an
+# artifact of this notebook's history, not of the caller's request.
+_KG_RAW_SCAN_FACTOR = 4
 
 
 @dataclass(frozen=True)
@@ -226,8 +261,10 @@ class EnumerationCoverage:
     NOT zero, and a renderer must say so rather than print "N/0".
     ``returned`` and ``scanned`` are per CALL; ``returned_total`` adds
     everything the cursor chain returned before it, and is the number to show
-    against ``total``.  ``scanned`` exceeds ``returned`` only when the payload
-    ceiling stopped emission mid-page.
+    against ``total``.  ``scanned`` counts the rows the traversal actually
+    read, so it exceeds ``returned`` when the payload ceiling stopped emission
+    mid-page and — on the KG side — by every unusable row the status filter
+    dropped (that gap is the whole reason the over-scan ceiling exists).
     """
 
     returned: int
@@ -294,6 +331,14 @@ class ElementEnumeration:
     # a silently-zero page charge is an under-charge, which is the precise
     # failure this field exists to prevent.
     extra_pages: int
+    # Serialized characters this call's items actually cost, measured exactly
+    # the way ``max_payload_chars`` bounds them.  Same role as ``extra_pages``
+    # and same reasoning for keeping it out of ``coverage``: a run that pools
+    # one documented payload allowance across several actions can only pass the
+    # REMAINDER to the next action if each action reports what it spent.
+    # Without it every action would receive a fresh full allowance and a deep
+    # run would return several times the documented ceiling.
+    payload_chars: int
 
 
 @dataclass(frozen=True)
@@ -303,6 +348,7 @@ class KgObjectEnumeration:
     coverage: EnumerationCoverage
     cursor: Optional[KgObjectCursor]
     extra_pages: int        # see ``ElementEnumeration.extra_pages``
+    payload_chars: int      # see ``ElementEnumeration.payload_chars``
 
 
 def _payload_chars(item: object) -> int:
@@ -331,6 +377,18 @@ def _display_title(row: Mapping[str, Any]) -> str:
     paper_title = str(row["paper_title"] or "").strip()
     ordinary = str(row["title"] or row["file_name"] or "").strip()
     return paper_title if row["is_paper"] and paper_title else ordinary
+
+
+def _normalized_title(value: Any) -> str:
+    """The comparison form for title→id resolution.
+
+    Trim plus case fold, nothing else: the point is to survive a model copying
+    a title with stray whitespace or different capitalisation, NOT to match
+    approximately.  Normalising punctuation or dropping an extension would let
+    two genuinely different documents collide, and the caller would enumerate
+    one of them and call it complete.
+    """
+    return str(value or "").strip().casefold()
 
 
 def _row_get(row: Any, key: str) -> Any:
@@ -362,11 +420,19 @@ class _Walk:
         self.scanned = 0
         self.pages = 0          # EXTRA round trips only; see emit_allowance
         self.payload = 0
+        # RAW rows read by a status-filtered traversal (KG only).  Tracked
+        # apart from ``scanned`` because ``scanned`` is a reported fact and
+        # this is a ceiling: see ``_KG_RAW_SCAN_FACTOR``.
+        self.raw_scanned = 0
         self.reason = ""
 
     @property
     def returned_total(self) -> int:
         return self.returned_before + self.returned
+
+    @property
+    def raw_scan_limit(self) -> int:
+        return max(1, int(self.budget.max_rows)) * _KG_RAW_SCAN_FACTOR
 
     # ------------------------------------------------------------- ceilings
     def emit_allowance(self, *, first_page: bool) -> int:
@@ -401,11 +467,33 @@ class _Walk:
         self, rows: Sequence[Any], allowance: int, *, first_page: bool
     ) -> Tuple[List[Any], bool]:
         """Split a fetched page into emittable rows and the lookahead answer."""
-        if not first_page:
-            self.pages += 1
+        self.charge_page(first_page=first_page)
         usable = list(rows[:allowance])
         self.scanned += len(usable)
         return usable, len(rows) > allowance
+
+    def charge_page(self, *, first_page: bool) -> None:
+        """Charge one logical page against ``max_pages``.
+
+        Split out of ``take_page`` because the KG traversal assembles one
+        logical page out of several raw reads (``_usable_kg_page``) and must
+        charge the page exactly once, not once per read.
+        """
+        if not first_page:
+            self.pages += 1
+
+    def scan_raw(self, count: int) -> bool:
+        """Charge raw rows read by a status-filtered traversal.
+
+        Returns whether the over-scan ceiling still has room.  It is a return
+        value rather than a raise because the caller has to keep the rows it
+        already gathered AND advance the keyset past the unusable ones before
+        it stops — a raise here would either discard usable rows or leave a
+        resumed chain re-reading the same deprecated prefix forever.
+        """
+        self.scanned += count
+        self.raw_scanned += count
+        return self.raw_scanned < self.raw_scan_limit
 
     def admit(self, item: object) -> None:
         """Charge one item against the row and payload ceilings."""
@@ -675,7 +763,74 @@ class CollectionEnumerationService:
             coverage=coverage,
             cursor=_resumable(coverage, resume),
             extra_pages=walk.pages,
+            payload_chars=walk.payload,
         )
+
+    # -------------------------------------------------- name → id resolution
+    def resolve_source_title(
+        self,
+        active_notebook_id: str,
+        kind: str,
+        title: str,
+        *,
+        cancel_event: CancelEvent = None,
+    ) -> Tuple[str, int]:
+        """Resolve a source TITLE to the id of the one source that bears it.
+
+        The model never sees internal source ids — candidate summaries and
+        citations carry titles — so "list every formula in <title>" can only be
+        expressed by name.  Resolution is deterministic and server-side, and it
+        is deliberately not a search: the comparison is exact after trimming
+        and case folding, over the sources the map already plans to visit for
+        this kind.  A fuzzy match would silently enumerate the wrong document
+        and report it as complete.
+
+        Returns ``(source_id, matches)``.  ``matches`` is 0 when nothing bears
+        that title, 1 with the resolved id, and 2 when the title is ambiguous
+        (the scan stops at the second hit — the caller only needs to know that
+        it is not unique).  The caller decides what to do with anything other
+        than exactly one; this method never guesses.
+
+        Bounded by construction: it reuses ``scope_element_plan`` (which
+        already holds only the sources that carry this kind) and reads their
+        labels through the same batched ``source_display_rows`` window the walk
+        uses, capped at ``_MAX_TITLE_RESOLVE_SOURCES``.  A scope larger than
+        that cap resolves to "no unique match" rather than to a full-table
+        scan; the honest skip is cheap and the alternative is a per-request
+        scan of every source in a mounted base.
+        """
+        if kind not in ENUMERABLE_ELEMENT_KINDS:
+            raise ValueError(f"unknown enumerable element kind: {kind!r}")
+        wanted = _normalized_title(title)
+        if not wanted:
+            return "", 0
+        raise_if_cancelled(cancel_event)
+        found = ""
+        matches = 0
+        with self._database.connect() as db:
+            notebook_ids, _tiers = self._notebooks.participant_tiers(
+                db, active_notebook_id
+            )
+            sources = self._catalog.scope_element_plan(
+                db, notebook_ids, kind
+            ).sources[:_MAX_TITLE_RESOLVE_SOURCES]
+            for start in range(0, len(sources), _MAX_TITLE_WINDOW):
+                raise_if_cancelled(cancel_event)
+                window = sources[start:start + _MAX_TITLE_WINDOW]
+                rows = self._source_display(
+                    db, [entry.source_id for entry in window]
+                )
+                for entry in window:
+                    row = rows.get(entry.source_id)
+                    if row is None:
+                        continue
+                    if _normalized_title(_display_title(row)) != wanted:
+                        continue
+                    matches += 1
+                    if matches > 1:
+                        return "", 2
+                    found = entry.source_id
+        return found, matches
 
     # ----------------------------------------------------------- KG objects
     def enumerate_kg_objects(
@@ -689,11 +844,13 @@ class CollectionEnumerationService:
     ) -> KgObjectEnumeration:
         """List usable knowledge objects of one type across the scope.
 
-        The status predicate is ``USABLE_STATUSES`` — the same tuple the
-        catalog's per-type counting passes into ``knowledge_type_count_rows``
-        — and it is applied in SQL.  This is the whole reason the map and the
-        list can be shown side by side: "concept 89" and a list of 89 come
-        from one definition of usable, not two.
+        The status predicate is ``USABLE_STATUSES`` — the same object the
+        catalog's per-type counting uses.  This is the whole reason the map and
+        the list can be shown side by side: "concept 89" and a list of 89 come
+        from one definition of usable, not two.  It is applied to rows this
+        module reads rather than inside the page query, because the keyset
+        index carries no ``status`` column; see ``_usable_kg_page`` for the
+        ceiling that keeps that filtering bounded.
         """
         if object_type not in ENUMERABLE_KG_OBJECT_TYPES:
             raise ValueError(f"unknown enumerable object type: {object_type!r}")
@@ -728,6 +885,7 @@ class CollectionEnumerationService:
                         ),
                         cursor=None,
                         extra_pages=walk.pages,
+                        payload_chars=walk.payload,
                     )
                 walk_ids = notebook_ids[notebook_ids.index(cursor.notebook_id):]
                 after = (
@@ -746,18 +904,14 @@ class CollectionEnumerationService:
                     while True:
                         raise_if_cancelled(cancel_event)
                         allowance = walk.emit_allowance(first_page=first_page)
-                        rows = self._knowledge.knowledge_object_page_rows(
-                            db,
-                            notebook_id,
-                            object_type,
-                            USABLE_STATUSES,
-                            after,
-                            allowance + 1,
+                        usable, scan_after, capped = self._usable_kg_page(
+                            db, notebook_id, object_type, after,
+                            allowance + 1, walk, cancel_event,
                         )
-                        page, lookahead = walk.take_page(
-                            rows, allowance, first_page=first_page
-                        )
+                        walk.charge_page(first_page=first_page)
                         first_page = False
+                        lookahead = len(usable) > allowance
+                        page = usable[:allowance]
                         for row in page:
                             payload = _json_object(_row_get(row, "payload"))
                             item = KgObjectItem(
@@ -781,7 +935,22 @@ class CollectionEnumerationService:
                             resume = _kg_cursor(
                                 object_type, notebook_id, after, opening_seqs, walk
                             )
+                        if capped:
+                            # Everything scanned past the last emitted row was
+                            # unusable (the over-scan only stops while it is
+                            # still short of what it was asked for), so the
+                            # cursor may skip that stretch for good.  Without
+                            # this the next call would re-read the very
+                            # deprecated prefix that exhausted this one and the
+                            # chain would never advance.
+                            after = scan_after
+                            resume = _kg_cursor(
+                                object_type, notebook_id, after, opening_seqs, walk
+                            )
+                            raise _Stop(TRUNCATED_BUDGET)
                         if not lookahead:
+                            # No lookahead and no ceiling = this participant's
+                            # keyset ran out.
                             break
                     after = None        # each notebook restarts its own keyset
             except _Stop as stop:
@@ -799,7 +968,71 @@ class CollectionEnumerationService:
             coverage=coverage,
             cursor=_resumable(coverage, resume),
             extra_pages=walk.pages,
+            payload_chars=walk.payload,
         )
+
+    def _usable_kg_page(
+        self,
+        db: object,
+        notebook_id: str,
+        object_type: str,
+        after: Optional[Tuple[Any, str]],
+        want: int,
+        walk: _Walk,
+        cancel_event: CancelEvent,
+    ) -> Tuple[List[Any], Optional[Tuple[Any, str]], bool]:
+        """Assemble ONE logical page of usable rows out of raw keyset rows.
+
+        The page query carries no status predicate (see the port docstring), so
+        this is where "usable" is decided — with the counting path's own
+        ``USABLE_STATUSES`` object, so the map and the list can never disagree
+        about what a deprecated object is.
+
+        Filtering here costs top-up reads whenever unusable objects are
+        interleaved, and that cost is what ``_KG_RAW_SCAN_FACTOR`` bounds: the
+        loop stops once it has read ``walk.raw_scan_limit`` raw rows for this
+        action, whatever it has managed to collect.  Stopping short is reported
+        honestly (``truncated_reason="budget"``) rather than silently — a list
+        that quietly ends where the scan gave up is exactly the false "all"
+        this module exists to prevent.
+
+        Returns ``(usable rows, position of the last row READ, ceiling hit)``.
+        The second value lets the caller move its cursor past a stretch of
+        unusable rows: they are not part of the collection, so skipping them
+        permanently is correct, and it is what guarantees a resumed chain makes
+        progress instead of re-reading the same deprecated prefix.  The ceiling
+        flag can only be set while the page is still SHORT of ``want``, so a
+        caller that skips ahead on it can never skip a usable row it has not
+        emitted.
+        """
+        collected: List[Any] = []
+        scan_after = after
+        while len(collected) < want:
+            raise_if_cancelled(cancel_event)
+            # The first read asks for exactly ``want`` rows, so a notebook with
+            # no deprecated objects issues precisely the query it issued before
+            # the filter moved out of SQL.
+            fetch = max(1, want - len(collected))
+            rows = self._knowledge.knowledge_object_page_rows(
+                db, notebook_id, object_type, scan_after, fetch
+            )
+            within_ceiling = walk.scan_raw(len(rows))
+            for row in rows:
+                usable = str(_row_get(row, "status") or "") in USABLE_STATUSES
+                scan_after = (
+                    _row_get(row, "created_at"), str(_row_get(row, "id"))
+                )
+                if usable:
+                    collected.append(row)
+                    if len(collected) >= want:
+                        break
+            if len(collected) >= want:
+                break
+            if len(rows) < fetch:
+                break                   # this participant's keyset ran out
+            if not within_ceiling:
+                return collected, scan_after, True
+        return collected, scan_after, False
 
     # ---------------------------------------------------------------- reads
     def _explicit_source_plan(
@@ -846,6 +1079,7 @@ class CollectionEnumerationService:
             ),
             cursor=None,
             extra_pages=walk.pages,
+            payload_chars=walk.payload,
         )
 
     def _source_display(

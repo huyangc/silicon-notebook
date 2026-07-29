@@ -1154,22 +1154,18 @@ class KnowledgeStore:
         db: Any,
         notebook_id: str,
         object_type: str,
-        statuses: Sequence[str],
         after: tuple[object, str] | None,
         limit: int,
     ) -> "List[Any]":
         """Backend twin of the SQLite keyset page (see it for why keyset and
-        not OFFSET, and why empty statuses mean "nothing").
+        not OFFSET, and why the usable-status predicate is the caller's).
 
         ``created_at`` is ``timestamptz`` here, so the cursor value travels
         back as the ``datetime`` this adapter returned — never re-rendered
         text.  Row values keep the comparison index-comparable on
         ``idx_knowledge_objects_nb_type_created``.
         """
-        values = [str(value) for value in statuses if value]
-        if not values:
-            return []
-        params: List[Any] = [notebook_id, object_type, values]
+        params: List[Any] = [notebook_id, object_type]
         clause = ""
         if after is not None:
             clause = "AND (created_at,id) > (%s,%s) "
@@ -1178,8 +1174,7 @@ class KnowledgeStore:
         return db.execute(
             "SELECT id,object_type,payload,evidence,status,created_at "
             "FROM knowledge_objects "
-            "WHERE notebook_id=%s AND object_type=%s "
-            f"AND status=ANY(%s) {clause}"
+            f"WHERE notebook_id=%s AND object_type=%s {clause}"
             "ORDER BY created_at,id LIMIT %s",
             tuple(params),
         ).fetchall()

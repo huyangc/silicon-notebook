@@ -122,6 +122,23 @@ NO_NEW_EVIDENCE_NOTE = (
 ENUMERATE_ELEMENTS_ACTION = "enumerate_elements"
 ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
 
+
+def enumeration_wiring_active(settings, catalog, enumeration) -> bool:
+    """接线层面上,枚举工具这一整套是否可用(kill switch + 两个服务都在)。
+
+    单独抽出来是因为它有**第二个**调用方:``ask_service`` 的「本笔记本还没有
+    知识图谱」早退路径。那条早退跑在 ``ReasoningRetriever`` 之前,而只解析了
+    来源、还没建图的库(自动抽取默认关,这是常态)恰恰是枚举工具最该起作用的
+    场景——早退把它整个挡在门外。两处必须用**同一个**判据:各写一份,kill
+    switch 一关就会出现「早退放行了,但 run 里没有工具」的空转。
+    """
+    return bool(
+        getattr(settings, "reasoning_enum_tools_enabled", True)
+        and catalog is not None
+        and enumeration is not None
+    )
+
+
 # trace summary 会上屏,所以清单名必须是界面词。刻意**不**复用后端
 # ``OBJECT_TYPE_LABELS``(那是「概念 Concept」这种中英双写的类型标签契约,和前端
 # KG_TYPE_LABELS 逐字绑定):轨迹里一行摘要写成「枚举概念 Concept 清单」既啰嗦
@@ -371,6 +388,7 @@ class ReflectDecision:
     enumerate_kind: str = ""
     enumerate_object_type: str = ""
     enumerate_source_id: str = ""
+    enumerate_source_title: str = ""
     reason: str = ""
 
 
@@ -494,9 +512,9 @@ class ReasoningRetriever:
         """
         return bool(
             self.allow_enumeration
-            and getattr(self.settings, "reasoning_enum_tools_enabled", True)
-            and self.collection_catalog is not None
-            and self.collection_enumeration is not None
+            and enumeration_wiring_active(
+                self.settings, self.collection_catalog, self.collection_enumeration
+            )
         )
 
     # --- KG 工具箱(薄封装 repo 原语) ---
@@ -707,6 +725,13 @@ class ReasoningRetriever:
                 d.enumerate_source_id = str(
                     enumerate_request.get("source_id", "")
                 ).strip()
+                # 模型看得到的是来源**标题**(候选摘要与引用里就是标题),内部
+                # id 从不上屏,所以「列出《某某》里的公式」只能靠标题表达。
+                # 服务端在作用域源清单里确定性解析;id 优先(给了 id 就说明
+                # 它是从服务端来的,不需要再猜)。
+                d.enumerate_source_title = str(
+                    enumerate_request.get("source_title", "")
+                ).strip()
             chain = data.get("follow_chain")
             if isinstance(chain, dict):
                 d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
@@ -745,8 +770,9 @@ class ReasoningRetriever:
                     d.exact_term,
                     d.chain_start_object_id,
                     d.chain_target_object_id,
-                    # kind/object_type 已被白名单夹住,只有 source_id 是自由文本。
+                    # kind/object_type 已被白名单夹住,只有这两个是自由文本。
                     d.enumerate_source_id,
+                    d.enumerate_source_title,
                     d.new_sub_query.query if d.new_sub_query else "",
                 )
                 if any(len(value) > 2000 for value in bounded_fields):
@@ -873,6 +899,12 @@ class ReasoningRetriever:
         enumeration_active = self.enumeration_active()
         enum_rows_used = 0
         enum_pages_used = 0
+        # 载荷预算与行/页预算一样是 **run 级** 的:`structured_payload_chars`
+        # 是「一次问答最多返回多少结构化载荷」的公开契约(256k),不是「每个
+        # 动作各来一份」。每次动作只发剩余额度,执行器据实回传本次消耗
+        # (`payload_chars`),否则一轮深度检索里的第 N 个 enumerate 会拿到
+        # 全新满额,累计返回远超契约上限(codex 第 1 轮 P2-3)。
+        enum_payload_used = 0
         # (collection, kind, source_id) → 该集合的续跑状态。source_id 进键:限定
         # 单源的遍历与全作用域遍历是两条不同的游标链,混用会让执行器立刻判
         # concurrent_change。
@@ -1254,17 +1286,67 @@ class ReasoningRetriever:
                 kind = (decision.enumerate_kind if is_elements
                         else decision.enumerate_object_type)
                 source_id = decision.enumerate_source_id if is_elements else ""
+                source_title = (
+                    decision.enumerate_source_title if is_elements else ""
+                )
+                label = _collection_label(collection, kind)
+                # 「列出《某某》里的公式」只能按**名字**表达:内部 source id 从不
+                # 上屏,候选摘要与引用里给模型看的一直是来源标题。所以这里先做
+                # 一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
+                # (续跑链的键、执行器的作用域校验)。给了 id 就以 id 为准——那说明
+                # id 本来就是服务端发出去的,不需要再猜。
+                # None = 本轮没做过解析(要么给了 id,要么根本没给名字)。
+                source_matches: "int | None" = None
+                resolve_error = ""
+                if kind and is_elements and not source_id and source_title:
+                    try:
+                        source_id, source_matches = (
+                            self.collection_enumeration.resolve_source_title(
+                                notebook_id, kind, source_title,
+                                cancel_event=self.cancel_event,
+                            )
+                        )
+                    except AskCancelled:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 — 见下的 skip
+                        # 解析不出来与「名字对不上」对用户是同一件事:这一个动作
+                        # 做不成。绝不退成「那就枚举整个库吧」——那会把一个被限定
+                        # 到单一来源的请求悄悄换成另一个问题的答案。
+                        if self.fail_closed:
+                            raise
+                        source_id, source_matches = "", 0
+                        resolve_error = str(exc)[:120]
                 key = (collection, kind, source_id)
                 chain_state = enum_chains.get(key)
-                label = _collection_label(collection, kind)
                 rows_left = enum_limits.enum_rows_per_run - enum_rows_used
                 pages_left = enum_limits.enum_pages_per_run - enum_pages_used
+                payload_left = (
+                    enum_limits.structured_payload_chars - enum_payload_used
+                )
                 if not kind:
                     record(TraceStep(
                         step_type="skip",
                         summary="跳过枚举(没有指定可列出的条目类型)",
                         detail={"reason": "enumeration_kind",
                                 "collection": collection}))
+                elif source_matches is not None and source_matches != 1:
+                    # 名字没有唯一对应的来源。detail 只报匹配个数与模型给的
+                    # 名字,不报任何内部 id——它们从来就不该出现在轨迹里。
+                    # (匹配数 2 的含义是「至少两个」,见 resolve_source_title:
+                    # 扫到第二个就停,再往下数没有意义。)
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=(
+                            f"跳过枚举{label}(没有名称匹配的来源)"
+                            if source_matches == 0 else
+                            f"跳过枚举{label}(名称匹配到多个来源,无法确定是哪一个)"
+                        ),
+                        detail={"reason": "enumeration_source_unresolved",
+                                "collection": collection, "kind": kind,
+                                "requested_title": source_title[:200],
+                                "matches": source_matches,
+                                **({"error": resolve_error}
+                                   if resolve_error else {})}))
                 elif chain_state is not None and chain_state.state == "complete":
                     record(TraceStep(
                         step_type="skip",
@@ -1279,17 +1361,19 @@ class ReasoningRetriever:
                         summary=f"跳过枚举{label}(资料有变动,无法继续)",
                         detail={"reason": "enumeration_conflict",
                                 "collection": collection, "kind": kind}))
-                elif rows_left < 1 or pages_left < 1:
+                elif rows_left < 1 or pages_left < 1 or payload_left < 1:
                     # 预算耗尽必须跳过而不是请求 0 行:EnumerationBudget 对非正
                     # 上限直接 ValueError,而一个「返回 0 条的部分结果」与真的截断
-                    # 长得一模一样。
+                    # 长得一模一样。三个池共用同一条 skip:对用户是同一句话
+                    # (「本轮能列的已经列完了」),池的名字不该上屏。
                     record(TraceStep(
                         step_type="skip",
                         summary="跳过枚举(已达本轮可列出的条目上限)",
                         detail={"reason": "enumeration_budget",
                                 "collection": collection, "kind": kind,
                                 "rows_left": rows_left,
-                                "pages_left": pages_left}))
+                                "pages_left": pages_left,
+                                "payload_left": payload_left}))
                 else:
                     listed = None
                     try:
@@ -1301,7 +1385,7 @@ class ReasoningRetriever:
                             page_size=enum_limits.enum_page_size,
                             max_rows=rows_left,
                             max_pages=pages_left,
-                            max_payload_chars=enum_limits.structured_payload_chars,
+                            max_payload_chars=payload_left,
                             excerpt_chars=enum_limits.cell_excerpt_chars,
                         )
                         if is_elements:
@@ -1346,6 +1430,11 @@ class ReasoningRetriever:
                         # 计费。夹到 pages_left 只是防越界记账,正常路径下执行器本身
                         # 就受同一个 max_pages 约束。
                         enum_pages_used += min(pages_left, listed.extra_pages)
+                        # 同上,按执行器回传的真实消耗扣减。夹到 payload_left
+                        # 只是防越界记账:执行器本身就受同一个上限约束。
+                        enum_payload_used += min(
+                            payload_left, max(0, listed.payload_chars)
+                        )
                         if chain_state is None:
                             outcome = CollectionEnumerationOutcome(
                                 collection=collection, kind=kind,

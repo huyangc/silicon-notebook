@@ -393,6 +393,41 @@ class AskService:
     def _primary_llm_unconfigured(self) -> bool:
         return self.model_clients.primary_unconfigured()
 
+    def _collections_reachable(self, notebook_id: str) -> bool:
+        """作用域里是否还有集合枚举工具真的能列出来的东西。
+
+        这是「本笔记本还没有知识图谱」早退的唯一放行条件(见调用处)。判据刻意
+        是**地图上有非零集合**,而不是宽松的「有来源」:一个只被纯文本解析器
+        处理过的库既没有公式/表格/图片/代码块元素、也没有知识对象,放它进循环
+        只会让每个工具都返回空,用户拿到的是一段更含糊的「依据不足」,而不是那
+        句明确的「请先构建知识图谱」。
+
+        接线判据与 run 内的总闸共用 ``enumeration_wiring_active`` ——各写一份的
+        话,kill switch 一关就会出现「早退放行了、run 里却没有工具」的空转。
+
+        地图本身随后会在 ``ReasoningRetriever.run`` 里再建一次;计数走的是按源
+        变更信号 keyed 的有界缓存,第二次基本只付参与者与信号查询,而且这条路径
+        原本是直接早退的,增量成本只落在它自己身上。
+
+        fail-open 的方向在这里是**反的**:地图建不出来就回到早退(接入前的行为),
+        而不是把用户送进一轮什么都拿不到的循环。
+        """
+        from app.services.reasoning_retrieval import enumeration_wiring_active
+
+        if not enumeration_wiring_active(
+            self.settings, self.collection_catalog, self.collection_enumeration
+        ):
+            return False
+        try:
+            collection_map = self.collection_catalog.collection_map(notebook_id)
+        except AskCancelled:
+            raise
+        except Exception:       # noqa: BLE001 — 见 docstring:退回早退
+            return False
+        return any(item.count > 0 for item in collection_map.elements) or any(
+            count > 0 for _object_type, count in collection_map.kg_objects
+        )
+
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
 
@@ -1630,9 +1665,17 @@ class AskService:
                 completeness_unavailable=completeness_unavailable,
                 reasoning_trace=streamed_pre_trace())
 
-        if not memory_hits and not (
-                self.candidates.has_kg(notebook_id)
-                or self.candidates.any_base_has_kg(notebook_id)):
+        # 无图 ≠ 无法作答。元素/知识对象清单工具在「解析了来源但没建图」的库里
+        # 照样能给出精确清单,而自动 KG 抽取默认是关的——那正是常态。所以早退的
+        # 条件收窄成「无图 **且** 枚举工具在这个作用域里也拿不出任何东西」;
+        # 放行后进入正常 reasoning 循环:图是空的,初检索/expand 自然返回空,
+        # 地图、enumerate 与 search_elements 照常工作。
+        # kg_required 的语义原样保留(无图且无可用参考库 = True),它只是不再顺带
+        # 阻断执行——旗标是响应契约的一部分,不能因为这一轮跑通了就变成假的。
+        no_usable_kg = not memory_hits and not (
+            self.candidates.has_kg(notebook_id)
+            or self.candidates.any_base_has_kg(notebook_id))
+        if no_usable_kg and not self._collections_reachable(notebook_id):
             coverage_prefix = ""
             coverage_answer = ""
             if structured_batch is not None:
@@ -1966,23 +2009,44 @@ class AskService:
                     "The notebook does not yet contain approved knowledge that matches "
                     "this question. Upload and review sources to build coverage.")
 
-            # 抑制免责声明须是确定性规则,不是"有任何一张卡就消音":
+            # 抑制免责声明须是确定性规则,不是"有任何一张卡就消音"。四个条件
+            # 全部成立才抑制,任一不成立就保留警告——方向是**宁可多警告**:
+            # 多一句免责最多显得啰嗦,少一句就是把「相关性抽样」说成了「全部」。
+            #
             # ①result_scope=="aggregate"(如"库里有多少种公式"这类去重/种类计数)
             # 从不抑制——枚举工具只会精确统计"表里的物理条目数",证明不了模型
             # 自己在归并去重后的种类数,红线要求这类问题必须回退到相关性检索并
             # 保留警告,哪怕模型顺手枚举出了一张卡。
-            # ②卡有但 returned_total==0(例如枚举了一个空集合)同样不算「已产出
-            # 清单结果」——0 条清单不能替这道题的「全部结果」背书,警告必须留着。
-            # 只有非 aggregate 且至少一张卡的 coverage.returned_total>0 时才抑制;
-            # 这时每张卡自己的 coverage 徽章已经承担「完整/部分」的披露,重复声明
-            # 反而会让「明明列出了公式清单」的回答开头显得像在道歉。
-            has_nonempty_collection_result = any(
-                row.coverage.returned_total > 0
+            # ②意图合同里带**谓词**(约束/排除项/前提)时同样不抑制。清单卡的
+            # coverage 只证明「某个物理集合被完整走了一遍」,证明不了那个集合就是
+            # 用户要的那个子集——模型完全可能枚举了无关的 kind、或者把带条件的
+            # 请求做成了不过滤的全集(codex 第 1 轮 P1-2)。这里刻意**不做**语义
+            # 匹配(「这张卡是否覆盖了这条约束」没有确定性判据,做出来的只会是
+            # 又一个说不清对错的启发式),而是按合同字段是否为空一刀切。
+            #   assumptions(前提)也算在内:一条「只统计 2023 年之后的」与一条
+            #   「假定用户指当前笔记本」在字段层面长得一模一样,区分它们需要的
+            #   正是上面刚否掉的语义匹配。宁可在有前提时多留一句免责。
+            # ③卡有但 returned_total==0(例如枚举了一个空集合)不算「已产出清单
+            # 结果」——0 条清单不能替这道题的「全部结果」背书。
+            # ④而且必须至少有一张 complete=True 的卡:部分清单自己的 partial
+            # 徽章只说明「这张卡没列完」,承担不了「你要的那种请求本产品还不
+            # 支持完整枚举」这句披露。
+            #
+            # 四条都过时,每张卡自己的 coverage 徽章已经承担「完整/部分」的披露,
+            # 再前置一句免责反而会让「明明列出了公式清单」的回答开头像在道歉。
+            has_complete_collection_result = any(
+                row.coverage.complete and row.coverage.returned_total > 0
                 for row in typed_collection_result_sets
+            )
+            has_scoping_predicate = bool(
+                intent_contract.constraints
+                or intent_contract.excluded_topics
+                or intent_contract.assumptions
             )
             suppress_completeness_warning = (
                 intent_contract.result_scope != "aggregate"
-                and has_nonempty_collection_result
+                and not has_scoping_predicate
+                and has_complete_collection_result
             )
             if completeness_unavailable and not suppress_completeness_warning:
                 warning = (
@@ -2030,6 +2094,10 @@ class AskService:
                 result_coverage=(
                     structured_batch.coverage() if structured_batch else None
                 ),
+                # 走到这里说明这一轮真的跑了检索与作答,但「本笔记本还没有知识
+                # 图谱」这件事没有因此变成假的:旗标继续如实上报,前端的建图提示
+                # 与答案并存。它只是不再是一道闸。
+                kg_required=no_usable_kg,
             )
         finally:
             _ASK_MODEL_ERRORS.reset(_err_token)

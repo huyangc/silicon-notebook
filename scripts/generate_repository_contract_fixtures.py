@@ -2059,6 +2059,8 @@ def _capture_ask_case(repo, notebook_id: str, mode: str, question: str) -> dict[
 
 def collect_ask_goldens() -> dict[str, object]:
     """Replay deterministic Ask cases without writing or baseline guarding."""
+    from app.repositories.sqlite import knowledge_counts_cache
+
     cases: dict[str, object] = {}
     with tempfile.TemporaryDirectory(prefix="repository-ask-goldens-") as temporary:
         root = Path(temporary)
@@ -2073,6 +2075,14 @@ def collect_ask_goldens() -> dict[str, object]:
                 ("large_graph_refusal", "graph", "fixture gain", True),
             ):
                 case_root = root / case_name
+                # Every case builds a FRESH database but reuses the same
+                # notebook id, and the KG count memo is process-global, keyed on
+                # (notebook_id, kg_mutation_seq).  The deterministic runtime
+                # makes both parts of that key identical across cases, so
+                # without this drop the KG-less case reads the previous case's
+                # graph counts — the goldens would then freeze one case's
+                # numbers into another's.
+                knowledge_counts_cache.invalidate()
                 repo = _new_offline_repo(
                     case_root / "fixture.db",
                     case_root / "storage",
