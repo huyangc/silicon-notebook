@@ -93,13 +93,13 @@ def _add_source(
 
 
 def _add_kg_object(repo, notebook_id, object_id, object_type, *,
-                   status="approved", evidence=(), name=""):
+                   status="approved", evidence=(), name="", source_id=""):
     with repo._write() as db:
         db.execute(
             "INSERT INTO knowledge_objects (id,notebook_id,source_id,object_type,payload,"
             "evidence,status,owner,last_reviewed,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (object_id, notebook_id, "", object_type,
+            (object_id, notebook_id, source_id, object_type,
              json.dumps({"name": name or object_id, "section_path": "第一章>1.1"}),
              json.dumps([
                  {"source_id": "s", "source_title": "t", "element_id": element_id,
@@ -985,10 +985,10 @@ def test_new_source_between_pages_is_not_complete(repo, monkeypatch):
 
 # -------------------------------------------------------- 地图 / 枚举 一致性
 
-def test_map_count_equals_enumerated_total_including_memory_sources(repo):
-    """硬约束:枚举的物理源集合与地图计数的源集合逐字一致——包括 Memory
-    派生合成源。两侧口径一旦分叉,界面就会出现「地图报 12、清单只列 8」
-    这种没人能解释的假部分。"""
+def test_map_count_equals_enumerated_total_excluding_memory_sources(repo):
+    """硬约束:枚举的物理源集合与地图计数的源集合逐字一致,而**两侧都不含**
+    Memory 派生合成源(Knowhow 投影源仍在内)。两侧口径一旦分叉,界面就会出现
+    「地图报 12、清单只列 8」这种没人能解释的假部分。"""
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     _add_source(repo, notebook.id, "s-a", [("formula", 3)])
     _add_source(repo, notebook.id, "s-mem", [("formula", 2)], source_type="memory")
@@ -998,10 +998,138 @@ def test_map_count_equals_enumerated_total_including_memory_sources(repo):
     listed = _enum(repo).enumerate_elements(
         notebook.id, "formula", budget=_budget()
     )
-    assert mapped.element_count("formula") == 6
-    assert listed.coverage.returned == 6
+    assert mapped.element_count("formula") == 4
+    assert listed.coverage.returned == 4
     assert listed.coverage.total == mapped.element_count("formula")
-    assert {item.source_id for item in listed.items} == {"s-a", "s-mem", "s-kh"}
+    assert listed.coverage.complete is True
+    assert {item.source_id for item in listed.items} == {"s-a", "s-kh"}
+
+
+# ------------------------------------------------ 私有 Memory 永不进清单
+
+def _shared_notebook_with_private_memory(repo):
+    """一个共享笔记本:owner A 的确认 Memory 派生出隐藏合成源(带公式/表格
+    元素)+ 从该源抽出的知识对象;另有一份普通来源与普通知识对象。
+
+    枚举执行器**不接收任何调用者身份**——它只拿 active_notebook_id。这正是
+    排除必须无条件的原因:成员 B 的枚举与 owner A 的枚举是同一次调用,想按
+    调用者过滤连过滤的输入都没有。所以断言写成「清单里根本没有它」,而不是
+    「B 看不到、A 看得到」。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_source(repo, notebook.id, "s-doc", [("formula", 2), ("table", 1)])
+    _add_source(
+        repo, notebook.id, "s-mem",
+        [("formula", 3), ("table", 2), ("image", 1), ("code_block", 1)],
+        title="我的私人记忆", source_type="memory",
+    )
+    _add_kg_object(repo, notebook.id, "o-doc-1", "concept", source_id="s-doc")
+    _add_kg_object(repo, notebook.id, "o-doc-2", "concept", source_id="s-doc")
+    _add_kg_object(repo, notebook.id, "o-mem-1", "concept", source_id="s-mem")
+    _add_kg_object(repo, notebook.id, "o-mem-2", "concept", source_id="s-mem")
+    _add_kg_object(repo, notebook.id, "o-mem-3", "claim", source_id="s-mem")
+    return notebook
+
+
+@pytest.mark.parametrize(
+    "kind, expected", [("formula", 2), ("table", 1), ("image", 0), ("code_block", 0)]
+)
+def test_memory_derived_elements_are_never_enumerable(repo, kind, expected):
+    """Memory 派生合成源的元素既不进地图计数,也不进清单。
+
+    共享笔记本里任何成员都能发起枚举,而枚举没有 owner 过滤——留着 Memory
+    就等于把别人的确认记忆按公式/表格/图片/代码块逐条读出来。
+    """
+    notebook = _shared_notebook_with_private_memory(repo)
+    mapped = repo.collection_catalog.collection_map(notebook.id)
+    listed = _enum(repo).enumerate_elements(notebook.id, kind, budget=_budget())
+
+    assert mapped.element_count(kind) == expected
+    assert listed.coverage.returned_total == expected
+    assert listed.coverage.total == expected
+    # 完整性仍然成立:分子分母同口径,排除不会把「已列全」变成假部分。
+    assert listed.coverage.complete is True
+    assert all(item.source_id == "s-doc" for item in listed.items)
+
+
+def test_memory_derived_kg_objects_are_never_enumerable(repo):
+    """Memory 派生知识对象同样两侧同谓词地消失:计数减掉、行过滤掉。
+
+    只做其中一半是最坏的形态——只过滤行会让 returned(2) 与 total(4) 对不上,
+    coverage 判成 concurrent_change,一张本该完整的清单变成永远的假部分。
+    """
+    notebook = _shared_notebook_with_private_memory(repo)
+    mapped = dict(repo.collection_catalog.collection_map(notebook.id).kg_objects)
+    listed = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget()
+    )
+
+    assert mapped["concept"] == 2
+    assert mapped["claim"] == 0
+    assert [item.object_id for item in listed.items] == ["o-doc-1", "o-doc-2"]
+    assert listed.coverage.returned_total == 2
+    assert listed.coverage.total == 2
+    assert listed.coverage.complete is True
+    assert listed.coverage.truncated_reason == ""
+
+    claims = _enum(repo).enumerate_kg_objects(
+        notebook.id, "claim", budget=_budget()
+    )
+    assert claims.items == () and claims.coverage.complete is True
+
+
+def test_memory_exclusion_does_not_touch_the_board_count(repo):
+    """刻意的口径分叉:看板计数(notebook_catalog 那条口径)不受影响。
+
+    枚举问的是「清单能列出多少」,看板问的是「这个库里有多少知识」。给两者
+    同一个数,必然有一个是错的。
+    """
+    notebook = _shared_notebook_with_private_memory(repo)
+    with repo._connect() as db:
+        board = {
+            row["object_type"]: int(row["c"])
+            for row in repo._runtime.queries.knowledge_type_count_rows(
+                db, notebook.id, USABLE_STATUSES
+            )
+        }
+    assert board["concept"] == 4 and board["claim"] == 1
+
+
+def test_memory_source_cannot_be_reached_by_name_or_by_id(repo):
+    """两条「显式点名单一来源」的入口都必须挡住 Memory 合成源。
+
+    标题解析走地图的 plan(Memory 已不在里面),显式 source_id 则是刻意允许
+    走 plan 之外的那条路——那正是它必须自己再挡一次的原因。
+    """
+    notebook = _shared_notebook_with_private_memory(repo)
+    assert _enum(repo).resolve_source_title(
+        notebook.id, "formula", "我的私人记忆"
+    ) == ("", 0, False)
+    with pytest.raises(ValueError):
+        _enum(repo).enumerate_elements(
+            notebook.id, "formula", source_id="s-mem", budget=_budget()
+        )
+
+
+def test_memory_source_ids_complement_the_signal_rows(repo):
+    """两条谓词是同一条的正反面:并集=全部物理源,交集=空。
+
+    元素侧在 SQL 里排除、KG 侧靠 id 集合过滤,它们只有互为补集才等价。
+    """
+    notebook = _shared_notebook_with_private_memory(repo)
+    store = repo._runtime.source_store
+    with repo._connect() as db:
+        signalled = {sid for sid, _signal in store.source_change_signal_rows(
+            db, notebook.id)}
+        memory = set(store.memory_source_ids(db, notebook.id))
+        everything = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=?", (notebook.id,)
+            ).fetchall()
+        }
+    assert memory == {"s-mem"}
+    assert signalled & memory == set()
+    assert signalled | memory == everything
 
 
 @pytest.mark.parametrize("kind", ENUMERABLE_ELEMENT_KINDS)

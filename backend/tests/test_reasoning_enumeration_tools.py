@@ -824,6 +824,28 @@ def test_collection_map_is_built_once_and_injected_into_plan_and_reflect(repo):
     assert not _steps(result, "skip")
 
 
+def test_collection_map_travels_out_on_the_result(repo):
+    """地图必须随 ReasoningResult 带出——合成层要拿它,而重建一次既浪费查询,
+    又可能与本 run 实际注入 reflect 的那份不是同一个。"""
+    notebook = _seed(repo, formulas=3, tables=1)
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+    assert result.collection_map_text.startswith("[Collections in scope]")
+    assert "formula 3" in result.collection_map_text
+    # 同一份字符串,不是第二次构建的近似物。
+    assert result.collection_map_text in llm.reflect_prompts[0]
+
+
+def test_collection_map_is_absent_when_the_tools_are_off(repo):
+    notebook = _seed(repo, formulas=3)
+    repo.settings.reasoning_enum_tools_enabled = False
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+    assert result.collection_map_text == ""
+
+
 def test_collection_map_failure_is_fail_open(repo):
     notebook = _seed(repo, formulas=1)
     llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
@@ -1045,3 +1067,105 @@ def test_trace_copy_stays_in_interface_vocabulary(repo):
     for summary in surfaced:
         for word in banned:
             assert word not in summary, summary
+
+
+# ------------------------------------------- 地图计数进入答案合成上下文
+
+class _AskLLM:
+    """一路把 plan / reflect / evidence_refine / ask_answer 都接了的替身。
+
+    reflect 立刻 answer:这正是「集合远大于本轮清单额度,别翻页,直接报数」
+    那条 prompt 指令下模型该做的事——于是合成模型手里除了地图什么都没有。
+    """
+
+    configured = True
+    model = "stub"
+
+    def __init__(self):
+        self.answer_prompts: list[str] = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        content = messages[-1]["content"]
+        if "sub_queries" in schema_hint:
+            return json.dumps({"sub_queries": [{"query": "本库有多少公式"}]})
+        if "next_action" in schema_hint:
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        if '"relevant"' in schema_hint:
+            return json.dumps({"relevant": []})
+        self.answer_prompts.append(content)
+        return json.dumps({"answer": "本库共有 40 个公式。", "grounded": False})
+
+
+def _ask_with_stub(repo, notebook, llm):
+    from app.models.schemas import AskRequest
+
+    for service in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(repo, service, llm)
+    return repo._runtime.ask_service().ask_reasoning(
+        notebook.id,
+        AskRequest(question="本库有多少公式", mode="reasoning"),
+        user_id=repo.current_user().id,
+    )
+
+
+def test_collection_counts_reach_the_answer_synthesis_prompt(repo):
+    """reflect prompt 教模型「集合太大就别枚举,用地图计数作答」,那么那个数
+    必须真的到得了写答案的那次模型调用手里。
+
+    这里刻意构造零其它证据(库里没有知识图谱、检索什么都没捞到、一条清单也
+    没列):地图不进合成上下文的话,合成压根不会触发,用户拿到空答案。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s1", notebook.id, "手册", "pdf", "extracted", "extracted", NOW, NOW),
+        )
+        for index in range(40):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (f"el-{index:03d}", "s1", "formula", f"p{index}",
+                 f"公式 {index}", "{}", NOW),
+            )
+    repo.collection_catalog.invalidate()
+
+    llm = _AskLLM()
+    response = _ask_with_stub(repo, notebook, llm)
+
+    assert llm.answer_prompts, "零证据 + 有地图 时合成仍必须运行"
+    prompt = llm.answer_prompts[0]
+    assert "[Collections in scope]" in prompt
+    assert "formula 40" in prompt
+    # 服务端确定性输出:可无 [k] 引用,且 prompt 明说了这一点。
+    assert "WITHOUT a [k] marker" in prompt
+    assert response.answer
+
+
+def test_collection_counts_survive_a_full_evidence_partition(repo):
+    """地图排在 source 分区最前:预算再紧也不该先牺牲它。"""
+    notebook = _seed(repo, formulas=6, tables=2)
+    llm = _AskLLM()
+    service = repo._runtime.ask_service()
+    for name in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(repo, name, llm)
+    from app.services.collection_enumeration_answer import collection_map_block
+
+    block = collection_map_block(
+        repo.collection_catalog.collection_map_text(notebook.id)
+    )
+    service._answer_reasoning(
+        notebook.id, "多少公式", [], [],
+        structured_block="S" * 5_000,
+        collection_map_block=block,
+        chunk_context_chars=len(block) + 200,
+        kg_context_chars=100,
+    )
+    prompt = llm.answer_prompts[0]
+    # 地图整块存活,而 5 000 字的 knowhow 块被同一个 chunk 预算削掉大半:
+    # 装配顺序反过来的话,先满的是地图这一块。
+    assert block in prompt
+    assert prompt.index(block) < prompt.index("SSS")
+    assert prompt.count("S") < 5_000

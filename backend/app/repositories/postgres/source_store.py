@@ -199,7 +199,9 @@ class SourceStore:
     def source_change_signal_rows(
         self, connection: Any, notebook_id: str
     ) -> list[tuple[str, str]]:
-        """``[(source_id, opaque change signal)]`` for physical source rows.
+        """``[(source_id, opaque change signal)]`` for physical source rows,
+        EXCLUDING the private Memory synthetic rows (see the SQLite adapter for
+        why the exclusion is unconditional).
 
         The token is formatted here rather than in the service so the caller
         never has to know that PostgreSQL hands back ``datetime`` objects
@@ -209,7 +211,7 @@ class SourceStore:
         """
         rows = connection.execute(
             "SELECT id,updated_at,parse_status,chunked_at FROM sources "
-            "WHERE notebook_id=%s",
+            "WHERE notebook_id=%s AND source_type<>'memory'",
             (notebook_id,),
         ).fetchall()
         return [
@@ -222,6 +224,19 @@ class SourceStore:
                 ),
             )
             for row in rows
+        ]
+
+    def memory_source_ids(self, connection: Any, notebook_id: str) -> list[str]:
+        """The notebook's private Memory synthetic source ids — the exact
+        complement of the exclusion above; see the SQLite adapter for the
+        single-definition argument and the cost shape."""
+        return [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM sources "
+                "WHERE notebook_id=%s AND source_type='memory'",
+                (notebook_id,),
+            ).fetchall()
         ]
 
     # Batch width for the typed-collection count, deliberately narrower than

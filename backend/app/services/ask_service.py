@@ -848,6 +848,7 @@ class AskService:
         chunk_context_chars: int | None = None,
         element_items: int = 6,
         structured_block: str = "",
+        collection_map_block: str = "",
         counts_sink: dict | None = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
@@ -857,7 +858,10 @@ class AskService:
         Direct ``SourceElement`` passages use the isolated k4001+ namespace and
         are first-class citations rather than unbound prompt decoration; at most
         ``element_items`` are admitted, chosen by retrieval relevance descending
-        (tie-break ``element_id``) rather than insertion order. Context refinement
+        (tie-break ``element_id``) rather than insertion order.
+        ``collection_map_block`` is the run's deterministic collection counts,
+        placed at the head of the source partition and carrying no ``[k]`` id
+        (see ``collection_enumeration_answer.collection_map_block``). Context refinement
         uses ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
         (answer, llm_grounded, anchors, counts) where ``counts`` reports how many
         KG/chunk/element entries actually entered the prompt (``included_kg``/
@@ -875,6 +879,19 @@ class AskService:
         ))
         source_context = ""
         source_map: dict = {}
+        # The collection MAP goes in FIRST, ahead of every other block. It is
+        # the smallest thing in the prompt (a fixed header plus one hard-capped
+        # counts line) and the only one that cannot be recovered from anywhere
+        # else: the reflect model is told to answer a too-large collection with
+        # its count instead of paging it, and this is the only path that number
+        # takes to the model writing the answer. Appended last it would be the
+        # first casualty of a full chunk budget — precisely in the runs that
+        # need it.
+        if collection_map_block:
+            source_context, source_map = self._bounded_context_append(
+                source_context, source_map, collection_map_block, {},
+                budget_chars=chunk_budget,
+            )
         if structured_block:
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, structured_block, {},
@@ -973,10 +990,10 @@ class AskService:
         # — counting before that step over-reports what really entered the
         # prompt. Elements live in the isolated k4001+ (_ELEMENT_KEY_BASE)
         # namespace; everything else in source_map here is a chunk. A hybrid-
-        # scope request CAN pass structured_block together with chunks, but the
-        # structured preview is appended with an empty id map and contributes
-        # no keys, so every low-range key counted here is a surviving chunk
-        # line — no ambiguity.
+        # scope request CAN pass structured_block (and the collection-map
+        # block) together with chunks, but both are appended with an empty id
+        # map and contribute no keys, so every low-range key counted here is a
+        # surviving chunk line — no ambiguity.
         included_elements = 0
         for key in source_map:
             try:
@@ -1767,6 +1784,9 @@ class AskService:
                 # 类型化集合清单(CollectionEnumerationOutcome)原样带出,本任务
                 # 不消费:进证据 prompt 与 AskResponse.result_sets 是 T5 的地盘。
                 enumerations = result.enumerations
+                # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
+                # 带出来直接进合成上下文,不重建。
+                collection_map_text = result.collection_map_text
                 trace = [*pre_trace, *trace]
             except AskCancelled:
                 raise
@@ -1775,6 +1795,7 @@ class AskService:
                     [], [], list(pre_trace), [], []
                 )
                 enumerations = []
+                collection_map_text = ""
 
             registry = self.schemas.effective_schemas()
             seen_ids: set = set()
@@ -1809,6 +1830,17 @@ class AskService:
             reasoning_counts: dict = {}
             raise_if_cancelled(cancel_event)
             answer_client = self.model_clients.chat("ask_answer")
+            # 地图块:确定性服务端小块,不依赖 enumerations 是否为空——「集合太大
+            # 就别枚举、直接报数」这条路径下恰恰一条清单都没有,而那个数正是答案
+            # 本身。渲染纯字符串拼接,不可能抛,故不需要 try 包(与下方清单块不同,
+            # 那里有映射/预算计算)。
+            from app.services.collection_enumeration_answer import (
+                collection_map_block as _collection_map_block,
+            )
+            collection_map_prompt_block = (
+                _collection_map_block(collection_map_text)
+                if answer_client.configured else ""
+            )
             structured_block = ""
             if structured_batch is not None and answer_client.configured:
                 from app.services.structured_retrieval import structured_prompt_block
@@ -1887,11 +1919,18 @@ class AskService:
                     chunk_context_chars=limits.chunk_context_chars,
                     element_items=limits.answer_element_items,
                     structured_block=structured_block,
+                    collection_map_block=collection_map_prompt_block,
                     counts_sink=reasoning_counts)
                 return ans, llm_grounded_, anchors_
+            # 地图也是合成的触发条件之一:大集合场景里模型 reflect 直接 answer、
+            # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
+            # 不跑,用户拿到的是空答案(codex 第 4 轮 P2)。地图非空意味着枚举
+            # 工具接线成功且作用域里有可数的东西(空库在更早的早退里就返回了),
+            # 所以这不是给空库额外加一次模型调用。
             if answer_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits
-                    or structured_batch is not None or enumerations):
+                    or structured_batch is not None or enumerations
+                    or collection_map_prompt_block):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     _synth_reasoning,

@@ -34,7 +34,9 @@ from app.services.collection_enumeration import (
     KgObjectItem,
 )
 from app.services.collection_enumeration_answer import (
+    COLLECTION_MAP_BLOCK_MAX_CHARS,
     apply_synthesis_preview_counts,
+    collection_map_block,
     enumeration_prompt_block,
     enumeration_sub_budget,
     typed_collection_results,
@@ -256,6 +258,51 @@ def test_mixed_knowhow_and_enumeration_block_keeps_the_enum_header_and_stays_bou
     assert "[Enumeration: formula elements" in preview.text
     combined = f"{structured_block}\n\n{preview.text}"
     assert len(combined) <= limits.chunk_context_chars
+
+
+# ---------------------------------------------------------- collection_map_block
+
+def test_collection_map_block_is_empty_in_empty_out():
+    """没接枚举工具 / 地图没建出来时注入零字节,合成上下文逐字回到接入前。"""
+    assert collection_map_block("") == ""
+    assert collection_map_block("   ") == ""
+    assert collection_map_block(None) == ""
+
+
+def test_collection_map_block_endorses_a_markerless_count():
+    from app.services.collection_catalog import (
+        CollectionMap, ElementKindCount, render_collection_map,
+    )
+
+    text = render_collection_map(CollectionMap(
+        notebook_ids=("nb",),
+        elements=(ElementKindCount(kind="formula", count=812, sources=40),),
+        kg_objects=(("concept", 5),),
+        knowhow_tables=0,
+    ))
+    block = collection_map_block(text)
+    assert text in block
+    # 三件必须说的事:服务端算的、可无 [k] 引用、数的是「存在多少」而非「检索到多少」。
+    assert "WITHOUT a [k] marker" in block
+    assert "EXIST in scope" in block
+    assert "computed by the server" in block
+
+
+def test_collection_map_block_stays_bounded():
+    """块的上界是**推导**出来的(固定表头 + 硬上限 600 的地图行),不是拍的数。
+
+    表头变长或地图上限抬高都必须是显式改动:这段字符串搭每一次答案合成的车。
+    """
+    from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
+
+    assert COLLECTION_MAP_BLOCK_MAX_CHARS <= 800
+    # 上界是**强制**的,不是「假设上游守规矩」:传一份三倍长的地图进来也裁到位。
+    assert len(
+        collection_map_block("X" * (COLLECTION_MAP_MAX_CHARS * 3))
+    ) == COLLECTION_MAP_BLOCK_MAX_CHARS
+    assert len(
+        collection_map_block("X" * COLLECTION_MAP_MAX_CHARS)
+    ) == COLLECTION_MAP_BLOCK_MAX_CHARS
 
 
 # ------------------------------------------------------- enumeration_prompt_block

@@ -131,6 +131,28 @@ class QueryStore:
         ).fetchall()
 
     @staticmethod
+    def knowledge_type_count_rows_for_sources(
+        db: Any,
+        notebook_id: str,
+        source_ids: "list[str]",
+        statuses: tuple[str, ...],
+    ) -> "list[dict]":
+        """``[{object_type, c}]`` for objects owned by the GIVEN sources; see
+        the SQLite adapter for why this takes ids rather than re-spelling the
+        Memory predicate.  ``=ANY(%s)`` keeps one bound parameter per list, so
+        no batching is needed here."""
+        values = list(dict.fromkeys(value for value in source_ids if value))
+        allowed = list(statuses)
+        if not values or not allowed:
+            return []
+        return db.execute(
+            "SELECT object_type,COUNT(*) AS c FROM knowledge_objects "
+            "WHERE notebook_id=%s AND source_id=ANY(%s) AND status=ANY(%s) "
+            "GROUP BY object_type",
+            (notebook_id, values, allowed),
+        ).fetchall()
+
+    @staticmethod
     def knowhow_knowledge_type_rows(
         db: Any, notebook_id: str, statuses: tuple[str, ...]
     ) -> "list[dict]":

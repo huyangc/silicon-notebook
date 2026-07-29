@@ -12,7 +12,7 @@ Completeness here is a property of a cursor running out over a scope that did
 not move, and it is computed — never asserted by a model, never inferred from
 "the page came back short".
 
-Four contracts this module owns:
+Five contracts this module owns:
 
 1. **Coverage is a fact.**  ``complete=True`` requires that the traversal
    walked off the end of the plan, that the scope identity taken before the
@@ -34,20 +34,31 @@ Four contracts this module owns:
    source call itself complete.
 3. **The source set is the map's source set.**  Element traversal picks its
    sources exclusively from ``CollectionCatalogService.scope_element_plan``,
-   the same per-source counts the map sums — including Memory-derived and
-   Knowhow-projection synthetic sources.  Were the two to drift, the UI would
-   show "map: 12 / list: 8" with nothing able to explain the gap.  The one
+   the same per-source counts the map sums — including the Knowhow-projection
+   synthetic source.  Were the two to drift, the UI would show
+   "map: 12 / list: 8" with nothing able to explain the gap.  The one
    exception is an explicitly named ``source_id``, which is queried directly:
    absence from the plan means "the map counted zero", and a source the user
    named by hand is worth one index-seeked query rather than an answer derived
    from a cached zero.
-4. **The KG status predicate is the counting predicate.**  Both sides evaluate
-   the very same ``USABLE_STATUSES`` object (defined once in
-   ``app.services.knowledge_contracts``), so a deprecated object can never be
-   counted-but-not-listed.  It is evaluated HERE rather than in SQL because
-   the keyset index does not carry ``status`` (see ``_usable_kg_page``); the
-   page query stays O(limit) and this module over-scans within an explicit
-   ceiling instead.
+4. **The KG listable predicate is the counting predicate.**  Both sides
+   evaluate the very same ``USABLE_STATUSES`` object (defined once in
+   ``app.services.knowledge_contracts``) and subtract/skip the very same
+   ``memory_source_ids``, so an object can never be counted-but-not-listed.
+   Both are evaluated HERE rather than in SQL because the keyset index carries
+   neither ``status`` nor a source type (see ``_usable_kg_page``); the page
+   query stays O(limit) and this module over-scans within an explicit ceiling
+   instead.
+5. **A listing never contains private Memory.**  A confirmed Memory belongs to
+   one user; a typed-collection listing is scoped to a notebook's participants
+   and has no owner filter of its own.  So the Memory synthetic source's
+   elements and the knowledge objects extracted from it are outside every
+   collection this module can enumerate, in a shared notebook and in a
+   one-person notebook alike — one listing, one meaning.  The element side
+   inherits this from the map (those sources are absent from
+   ``source_change_signal_rows``, hence from every count AND every plan); the
+   KG side filters rows in ``_usable_kg_page`` against the same id list the
+   catalog subtracts from the denominator.
 
 Cost shape per action, all index-assisted and bounded by the budget:
 
@@ -55,9 +66,10 @@ Cost shape per action, all index-assisted and bounded by the budget:
     per-source count only when the plan memo misses), ONE label query per
     window of up to ``max_rows`` sources, then one page query per visited
     source per page.  Sources with zero items of the kind are never visited;
-  * KG objects — 1 O(1) ``kg_mutation_seq`` read per participant plus the
-    memoized per-type counts, then one page query per page, plus top-up
-    queries when deprecated objects are interleaved — bounded, per action, by
+  * KG objects — 1 O(1) ``kg_mutation_seq`` read plus 1 bounded Memory-source
+    id read per participant, plus the memoized per-type counts, then one page
+    query per page, plus top-up queries when deprecated or Memory-derived
+    objects are interleaved — bounded, per action, by
     ``max_rows × _KG_RAW_SCAN_FACTOR`` raw rows;
   * closing check — 1 participant resolution, then 1 signal query per
     participant (elements) or 1 seq read per participant (KG).
@@ -959,6 +971,14 @@ class CollectionEnumerationService:
             opening_seqs = self._kg_seqs(db, notebook_ids)
             total = self._kg_total(db, notebook_ids, object_type)
             walk_ids: Sequence[str] = notebook_ids
+            # Private-Memory exclusion, resolved per participant.  One bounded
+            # id query per notebook actually walked (the set is one row per
+            # confirmed Memory), deliberately NOT a SQL predicate on the page
+            # query — see ``knowledge_object_page_rows``.  It is charged to
+            # neither ``max_pages`` nor the round-trip bound below: both count
+            # PAGE queries, and this is a once-per-participant scope read, the
+            # same shape as ``_kg_seqs``.
+            memory_ids: Dict[str, frozenset] = {}
             after: Optional[Tuple[Any, str]] = None
             if cursor is not None:
                 if (
@@ -999,6 +1019,9 @@ class CollectionEnumerationService:
                 for notebook_id in walk_ids:
                     raise_if_cancelled(cancel_event)
                     tier = str(tiers.get(notebook_id, ""))
+                    memory_ids[notebook_id] = frozenset(
+                        self._sources.memory_source_ids(db, notebook_id)
+                    )
                     resume = _kg_cursor(
                         object_type, notebook_id, after, opening_seqs, walk
                     )
@@ -1009,6 +1032,7 @@ class CollectionEnumerationService:
                         usable, scan_after, capped = self._usable_kg_page(
                             db, notebook_id, object_type, after,
                             allowance + 1, walk, cancel_event,
+                            memory_ids[notebook_id],
                         )
                         walk.charge_page(first_page=first_page)
                         first_page = False
@@ -1086,15 +1110,24 @@ class CollectionEnumerationService:
         want: int,
         walk: _Walk,
         cancel_event: CancelEvent,
+        memory_source_ids: frozenset,
     ) -> Tuple[List[Any], Optional[Tuple[Any, str]], bool]:
-        """Assemble ONE logical page of usable rows out of raw keyset rows.
+        """Assemble ONE logical page of LISTABLE rows out of raw keyset rows.
 
-        The page query carries no status predicate (see the port docstring), so
-        this is where "usable" is decided — with the counting path's own
-        ``USABLE_STATUSES`` object, so the map and the list can never disagree
-        about what a deprecated object is.
+        The page query carries neither a status nor a source-type predicate
+        (see the port docstring), so this is where "listable" is decided, out
+        of two parts:
 
-        Filtering here costs top-up reads whenever unusable objects are
+        * ``USABLE_STATUSES`` — the counting path's own object, so the map and
+          the list can never disagree about what a deprecated object is;
+        * not owned by a private Memory synthetic source — the ids come from
+          ``SourceStore.memory_source_ids``, the same list the catalog
+          subtracts from this type's count, so again map and list share one
+          definition.  A confirmed Memory is owner-private and this traversal
+          has no owner filter; without this, any member of a shared notebook
+          would read another member's Memory-derived objects.
+
+        Filtering here costs top-up reads whenever unlistable objects are
         interleaved, and that cost is what ``_KG_RAW_SCAN_FACTOR`` bounds: the
         loop stops once it has read ``walk.raw_scan_limit`` raw rows for this
         action, whatever it has managed to collect.  Stopping short is reported
@@ -1102,14 +1135,14 @@ class CollectionEnumerationService:
         that quietly ends where the scan gave up is exactly the false "all"
         this module exists to prevent.
 
-        Returns ``(usable rows, position of the last row READ, ceiling hit)``.
+        Returns ``(listable rows, position of the last row READ, ceiling hit)``.
         The second value lets the caller move its cursor past a stretch of
-        unusable rows: they are not part of the collection, so skipping them
-        permanently is correct, and it is what guarantees a resumed chain makes
-        progress instead of re-reading the same deprecated prefix.  The ceiling
-        flag can only be set while the page is still SHORT of ``want``, so a
-        caller that skips ahead on it can never skip a usable row it has not
-        emitted.
+        skipped rows: neither a deprecated object nor a Memory-derived one is
+        part of this collection, so skipping them permanently is correct, and
+        it is what guarantees a resumed chain makes progress instead of
+        re-reading the same prefix.  The ceiling flag can only be set while the
+        page is still SHORT of ``want``, so a caller that skips ahead on it can
+        never skip a listable row it has not emitted.
         """
         collected: List[Any] = []
         scan_after = after
@@ -1125,7 +1158,11 @@ class CollectionEnumerationService:
             )
             within_ceiling = walk.scan_raw(len(rows))
             for row in rows:
-                usable = str(_row_get(row, "status") or "") in USABLE_STATUSES
+                usable = (
+                    str(_row_get(row, "status") or "") in USABLE_STATUSES
+                    and str(_row_get(row, "source_id") or "")
+                    not in memory_source_ids
+                )
                 scan_after = (
                     _row_get(row, "created_at"), str(_row_get(row, "id"))
                 )
@@ -1151,10 +1188,24 @@ class CollectionEnumerationService:
     ) -> Tuple[Tuple[ScopeSource, ...], Optional[int], Dict[str, Any]]:
         """Scope-check and plan a single explicitly requested source.
 
-        One primary-key read proves both that the source exists and that it
-        belongs to a participant notebook — an out-of-scope id raises rather
-        than returning another notebook's rows, and rather than being answered
-        with a silent empty list.
+        One primary-key read proves three things at once: that the source
+        exists, that it belongs to a participant notebook, and that it is not a
+        private Memory synthetic row.  An out-of-scope id raises rather than
+        returning another notebook's rows, and rather than being answered with
+        a silent empty list; a Memory row raises for the same reason, in the
+        same shape.
+
+        The Memory check is defence in depth rather than a reachable path
+        today: the only producer of a ``source_id`` here is
+        ``resolve_source_title``, which walks the map's plan, and the plan no
+        longer contains Memory sources at all.  But this branch exists
+        precisely to walk a source the plan does NOT list ("absence from the
+        plan is a statement about a cache"), so the one place that argument
+        must not be extended is the one place the plan's absence is a privacy
+        boundary rather than a cache miss.  It costs ONE extra bounded query,
+        only on this explicitly-named path, and it asks the same
+        ``memory_source_ids`` the rest of the feature asks rather than
+        re-spelling the predicate.
 
         The source is then walked whatever the map says about it.  Its
         ``total`` comes from the plan when the map has a count for it, and is
@@ -1166,6 +1217,11 @@ class CollectionEnumerationService:
         row = rows.get(source_id)
         if row is None or str(row["notebook_id"]) not in set(notebook_ids):
             raise ValueError(f"source is not in scope: {source_id!r}")
+        owner_notebook_id = str(row["notebook_id"])
+        if source_id in set(
+            self._sources.memory_source_ids(db, owner_notebook_id)
+        ):
+            raise ValueError(f"source is not enumerable: {source_id!r}")
         planned = next(
             (entry for entry in plan.sources if entry.source_id == source_id), None
         )

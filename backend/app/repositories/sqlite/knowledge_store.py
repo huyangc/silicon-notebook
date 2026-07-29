@@ -965,6 +965,13 @@ class KnowledgeStore:
         long governance history.  ``status`` travels on every row instead, and
         the enumeration executor applies the counting path's own
         ``USABLE_STATUSES`` over a bounded over-scan.
+
+        ``source_id`` travels for exactly the same reason: an object extracted
+        from a private Memory synthetic source must not be listed to a
+        notebook's other members, and a ``NOT EXISTS`` against ``sources`` in
+        this query would be a second unindexed residual with the same
+        unbounded-skip hazard.  The executor filters it against
+        ``memory_source_ids`` inside the same over-scan ceiling.
         """
         params: List[object] = [notebook_id, object_type]
         clause = ""
@@ -973,7 +980,7 @@ class KnowledgeStore:
             params.extend([after[0], after[1]])
         params.append(max(1, int(limit)))
         return db.execute(
-            "SELECT id, object_type, payload, evidence, status, created_at "
+            "SELECT id, object_type, source_id, payload, evidence, status, created_at "
             "FROM knowledge_objects "
             f"WHERE notebook_id = ? AND object_type = ? {clause}"
             "ORDER BY created_at, id LIMIT ?",

@@ -150,8 +150,25 @@
   allowlist / 默认模式 rebaseline）。禁全表扫描：查询必须命中上述索引形状，测试仿
   `test_indexed_only_principle.py` 风格钉住。
 - **地图/枚举覆盖一致性（T2 评审移交的硬约束）**：执行器枚举的物理源集合必须与集合地图
-  计数的源集合逐字一致（含 Memory 派生合成源）；若未来要排除某类源，两侧必须同步排除并在
-  coverage 行显式披露，否则会出现「地图报 12、枚举只给 8」的假部分。
+  计数的源集合逐字一致；若要排除某类源，两侧必须同步排除，否则会出现「地图报 12、
+  枚举只给 8」的假部分。
+- **【codex 第 4 轮 P1 订正】私有 Memory 两侧同谓词排除**：确认 Memory 是 owner 私有的
+  （Ask 只经按 owner 隔离的记忆检索通道读它，Knowhow 补全按合同排除它），而集合清单按
+  participant 作用域取数、自身没有 owner 过滤——共享笔记本里任何成员都能把别人的确认
+  记忆按公式/表格/图片/代码块、以及从该合成源抽出的知识对象逐条读出来。修法是
+  **无条件排除**（单人库同口径，一份清单只有一个含义），且**计数与行两侧同一谓词**：
+  * 元素侧在 `source_change_signal_rows` 里排除 `source_type='memory'`。那条查询同时
+    是计数、计划与收尾指纹的唯一来源，排掉即三处一致；三个信号列都不在任何索引上、
+    行本来就要访问，所以谓词是纯残余过滤、不改访问路径。
+  * KG 侧不能进 SQL——`knowledge_objects` 不带来源类型，`NOT EXISTS` 又是第二条无索引
+    残余过滤（与 status 同形态）。改为每个参与库一次有界 `memory_source_ids` 读取，行
+    过滤与 `USABLE_STATUSES` 并列放在同一段有界过扫描里；分母同步减去这些源名下的
+    可用对象数（`knowledge_type_count_rows_for_sources`，按 id 传入，避免第二处
+    「谁是 Memory」的拼写）。只做行过滤不减分母是最坏形态：returned 与 total 对不上，
+    一张本该完整的清单被判成永久 `concurrent_change`。
+  * 显式 `source_id` 那条刻意绕开计划的路径必须自己再挡一次（一次有界查询，仅该路径付）。
+  * 看板计数（`notebook_catalog` 的 `knowledge_type_count_rows`）**不改**：它回答的是
+    「这个库里有多少知识」，把 Memory 派生对象算进去是对的。两处口径分叉是刻意的。
 - **kind 白名单单一真源**：执行器与 reflect 校验必须 import `collection_catalog` 的
   `ENUMERABLE_ELEMENT_KINDS` / `ENUMERABLE_KG_OBJECT_TYPES`，禁止再写字面量副本；T3 补一条
   源码级唯一性守卫（防「再抄一份」变异）。
@@ -209,6 +226,16 @@
 - `enumeration_prompt_block`（仿 `structured_prompt_block`）：进入 source 分区最前，预览行数
   按 `inline_answer_rows`=100 口径 + 字符预算截断；块头写明 coverage（如
   `[Enumeration coverage: formula, returned 12/12, complete]`）。
+- **【codex 第 4 轮 P2 订正】地图计数必须进合成上下文**：reflect prompt 明确教模型
+  「集合远大于本轮清单额度时别翻页、直接用地图计数作答」，而答案合成是另一次调用，
+  只拿到检索证据与清单预览，从来看不到地图——那是在要求它报一个它拿不到的数；且
+  「大集合 + 零其它证据」这一路连合成触发条件都不满足，用户拿到空答案。修法：
+  `ReasoningResult` 带出本 run 已建好的 `collection_map_text`（不重建，地图有 memo），
+  `collection_enumeration_answer.collection_map_block()` 包一层固定表头（服务端确定性
+  输出、可无 `[k]` 引用、数的是「存在多少」而非「检索到多少」），整块硬上界 = 表头
+  长度 + 地图上限 600，装配在 source 分区**最前**（预算吃紧时第一个被牺牲的不该是
+  它），并把它加进 `_answer_reasoning` 的合成触发条件。地图为空（工具关闭 / 建图失败）
+  时注入零字节，行为逐字回到接入前。
 - `AskResponse.result_sets` 泛化为 kind 判别 union：现有 `StructuredKnowhowResult
   (kind="knowhow")` + 新 `TypedCollectionResult(kind="collection")`
   {collection:"elements"|"kg_objects", element_kind/object_type, source_id, items,
