@@ -19,12 +19,41 @@ export type ReadySnapshot = {
   error?: string | null;
 };
 
+export type SystemConfiguration = {
+  /** Parsed backend Settings value; use this exact byte limit for file picking. */
+  source_upload_max_bytes: number;
+  /** Fixed multipart resource guard published by the backend. */
+  source_upload_max_files_per_batch: number;
+};
+
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
 export const fetchHealth = () => requestJson<Health>("/health", options);
 
 export const fetchDocumentTypes = () =>
   requestJson<Array<{ id: string; label: string }>>("/doc-types", options);
+
+function parseSystemConfiguration(value: unknown): SystemConfiguration {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("系统上传配置格式无效");
+  }
+  const limit = (value as Record<string, unknown>).source_upload_max_bytes;
+  const batchFiles = (value as Record<string, unknown>).source_upload_max_files_per_batch;
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) {
+    throw new TypeError("系统上传配置格式无效");
+  }
+  if (typeof batchFiles !== "number" || !Number.isSafeInteger(batchFiles) || batchFiles <= 0) {
+    throw new TypeError("系统上传配置格式无效");
+  }
+  return {
+    source_upload_max_bytes: limit,
+    source_upload_max_files_per_batch: batchFiles,
+  };
+}
+
+/** Authenticated, deliberately small mirror of browser-relevant backend Settings. */
+export const fetchSystemConfiguration = async (): Promise<SystemConfiguration> =>
+  parseSystemConfiguration(await requestJson<unknown>("/system/config", options));
 
 export async function probeReady(): Promise<ReadySnapshot | null> {
   try {

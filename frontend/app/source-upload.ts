@@ -2,6 +2,36 @@ import type { UploadedSource } from "./workspace-model.ts";
 
 export const STAGED_FILE_NAME_MAX_LENGTH = 48;
 
+type SizedSourceFile = { name: string; size: number };
+
+/** Human-readable form of the exact byte cap sent by the backend. */
+export function sourceUploadSizeLabel(maxBytes: number): string {
+  const mib = 1024 * 1024;
+  const kib = 1024;
+  if (maxBytes % mib === 0) return `${maxBytes / mib} MB`;
+  if (maxBytes % kib === 0) return `${maxBytes / kib} KB`;
+  return `${maxBytes} 字节`;
+}
+
+/** Split selected files by the current server-issued per-file byte cap.
+ *
+ * A missing value means the authenticated configuration has not arrived yet;
+ * preserve the selection and let the server's authoritative 413 guard decide
+ * rather than guessing a stale client-side limit.
+ */
+export function splitFilesByUploadSize<T extends SizedSourceFile>(
+  files: readonly T[],
+  maxBytes: number | null,
+): { accepted: T[]; rejected: T[] } {
+  if (maxBytes === null || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    return { accepted: [...files], rejected: [] };
+  }
+  return {
+    accepted: files.filter((file) => file.size <= maxBytes),
+    rejected: files.filter((file) => file.size > maxBytes),
+  };
+}
+
 /** Compact a long staged filename without hiding its extension or final words.
  *
  * CSS ellipsis still protects very narrow windows, while this deterministic

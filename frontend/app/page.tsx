@@ -106,10 +106,10 @@ import { fetchMe, logoutUser, type AuthUser } from "./auth";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
-import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
+import { fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, getNotebookSource, getNotebookSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
-import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
+import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate, sourceUploadSizeLabel, splitFilesByUploadSize } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
@@ -780,6 +780,10 @@ export default function Home() {
   const [createName, setCreateName] = useState("");
   const [createDesc, setCreateDesc] = useState("");
   const [docTypeOptions, setDocTypeOptions] = useState<Array<{ id: string; label: string }>>([]);
+  // Authenticated system configuration is the browser mirror of Settings. Null is
+  // only the short initial fetch window; the server remains the final 413 guard.
+  const [sourceUploadMaxBytes, setSourceUploadMaxBytes] = useState<number | null>(null);
+  const [sourceUploadMaxFilesPerBatch, setSourceUploadMaxFilesPerBatch] = useState<number | null>(null);
   const [stagedFiles, setStagedFiles] = useState<File[]>([]);
   // 上传在飞:multipart 传大 PDF 可能几十秒,期间「上传 N 个文件」必须禁用改文案。后端按
   // 内容哈希在同 notebook 内去重,重复提交不会建出重复来源,但会白传一遍并再跑一次解析。
@@ -1075,6 +1079,31 @@ export default function Home() {
   useEffect(() => {
     try { window.localStorage.setItem("sn.sourcesCollapsed", sourcesCollapsed ? "1" : "0"); } catch { /* ignore */ }
   }, [sourcesCollapsed]);
+  // The file picker must never guess a deployment cap. If the initial collection
+  // load missed the lightweight config endpoint, retry while the add-source dialog
+  // is open and keep only the file inputs disabled until the authoritative value
+  // arrives. URL import has a separate server-side size contract and stays usable.
+  useEffect(() => {
+    if (
+      !sourceModalOpen
+      || (sourceUploadMaxBytes !== null && sourceUploadMaxFilesPerBatch !== null)
+    ) return;
+    let cancelled = false;
+    let retryTimer = 0;
+    const loadUploadLimit = async () => {
+      try {
+        const config = await fetchSystemConfiguration();
+        if (!cancelled) {
+          setSourceUploadMaxBytes(config.source_upload_max_bytes);
+          setSourceUploadMaxFilesPerBatch(config.source_upload_max_files_per_batch);
+        }
+      } catch {
+        if (!cancelled) retryTimer = window.setTimeout(loadUploadLimit, 2000);
+      }
+    };
+    void loadUploadLimit();
+    return () => { cancelled = true; window.clearTimeout(retryTimer); };
+  }, [sourceModalOpen, sourceUploadMaxBytes, sourceUploadMaxFilesPerBatch]);
   // Relink isolated nodes: additive/synchronous, no confirm needed.
   // 补连孤立节点已移入知识图谱视图（relinkFromKgView，完成后按当前范围重拉）。
   // While a build runs, poll the notebook until kg_ready flips — the build can
@@ -2437,9 +2466,13 @@ export default function Home() {
     // The model status request reads only the persisted local snapshot. It is
     // deliberately detached so a missing status endpoint cannot hide notebooks.
     void refreshModelStatus();
-    const [healthResponse, notebookResponse] = await Promise.all([
+    const [healthResponse, notebookResponse, systemConfiguration] = await Promise.all([
       fetchHealth(),
       listNotebooks(),
+      // A transient config failure must not hide the notebook collection. Until a
+      // later successful refresh, do not guess a local cap; the upload route's
+      // authoritative 413 remains the safe fallback.
+      fetchSystemConfiguration().catch(() => null),
     ]);
     setHealth(healthResponse);
     setStatusText(
@@ -2450,6 +2483,10 @@ export default function Home() {
           : "服务正常 · 模型服务不可用",
     );
     setNotebooks(notebookResponse);
+    if (systemConfiguration) {
+      setSourceUploadMaxBytes(systemConfiguration.source_upload_max_bytes);
+      setSourceUploadMaxFilesPerBatch(systemConfiguration.source_upload_max_files_per_batch);
+    }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
         .then(setDocTypeOptions)
@@ -2768,16 +2805,29 @@ export default function Home() {
   function stageFiles(event: ChangeEvent<HTMLInputElement>) {
     const all = Array.from(event.target.files || []);
     event.target.value = "";
-    const picked = all.filter((file) => SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
+    const supported = all.filter((file) => SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
     const rejected = all.filter((file) => !SUPPORTED_SOURCE_EXTENSIONS.includes(fileExtension(file.name)));
+    const { accepted: picked, rejected: oversized } = splitFilesByUploadSize(
+      supported,
+      sourceUploadMaxBytes,
+    );
+    const notices: string[] = [];
     if (rejected.length > 0) {
       const names = rejected.map((file) => file.name).join("、");
       const hasLegacy = rejected.some((file) => LEGACY_OFFICE_EXTENSIONS.includes(fileExtension(file.name)));
       const hint = hasLegacy
         ? "旧版 Office 格式请另存为 .docx / .pptx / .xlsx"
         : `支持：${SUPPORTED_SOURCE_USER_HINT}`;
-      setToast(`已跳过不支持的文件：${names}。${hint}`);
+      notices.push(`已跳过不支持的文件：${names}。${hint}`);
     }
+    if (oversized.length > 0 && sourceUploadMaxBytes !== null) {
+      const names = oversized.map((file) => file.name).join("、");
+      const limit = sourceUploadSizeLabel(sourceUploadMaxBytes);
+      notices.push(
+        `已跳过超过单文件上限（${limit}）的文件：${names}。请选择不超过 ${limit} 的文件，或联系管理员调整上限。`,
+      );
+    }
+    if (notices.length > 0) setToast(notices.join("；"));
     if (picked.length === 0) {
       return;
     }
@@ -2786,13 +2836,27 @@ export default function Home() {
     const mergedTypes = [...stagedDocTypes];
     const mergedTouched = [...stagedDocTypeTouched];
     const added: File[] = [];
+    const batchOverflow: File[] = [];
     for (const file of picked) {
       if (!merged.some((existing) => existing.name === file.name && existing.size === file.size)) {
+        if (
+          sourceUploadMaxFilesPerBatch !== null
+          && merged.length >= sourceUploadMaxFilesPerBatch
+        ) {
+          batchOverflow.push(file);
+          continue;
+        }
         merged.push(file);
         mergedTypes.push("");        // 新文件默认「自动检测」
         mergedTouched.push(false);   // 且尚未被用户手动设置（与 mergedTypes 同步增长）
         added.push(file);
       }
+    }
+    if (batchOverflow.length > 0 && sourceUploadMaxFilesPerBatch !== null) {
+      notices.push(
+        `单次最多上传 ${sourceUploadMaxFilesPerBatch} 个文件，已跳过其余 ${batchOverflow.length} 个。请先上传当前批次，再继续添加。`,
+      );
+      setToast(notices.join("；"));
     }
     setStagedFiles(merged);
     setStagedDocTypes(mergedTypes);
@@ -2849,6 +2913,21 @@ export default function Home() {
 
   async function confirmUpload() {
     if (!currentNotebookId || stagedFiles.length === 0 || uploadBusy) return;
+    if (
+      sourceUploadMaxFilesPerBatch !== null
+      && stagedFiles.length > sourceUploadMaxFilesPerBatch
+    ) {
+      setToast(`单次最多上传 ${sourceUploadMaxFilesPerBatch} 个来源文件。请先移除多余文件。`);
+      return;
+    }
+    const { rejected: oversized } = splitFilesByUploadSize(stagedFiles, sourceUploadMaxBytes);
+    if (oversized.length > 0 && sourceUploadMaxBytes !== null) {
+      const limit = sourceUploadSizeLabel(sourceUploadMaxBytes);
+      setToast(
+        `有 ${oversized.length} 个待上传文件超过单个文件上限（${limit}）。请先移除它们，或联系管理员调整上限。`,
+      );
+      return;
+    }
     const blockedReason = documentUploadBlockReason(docCapacity, stagedFiles.length);
     if (blockedReason) {
       setToast(blockedReason);
@@ -4505,6 +4584,20 @@ export default function Home() {
     documentCount: notebookSourceTotal,
   });
   const atDocCapacityHint = "已达该笔记本的文档数量上限，无法继续添加文档。";
+  const sourceUploadConfigLoading = sourceUploadMaxBytes === null
+    || sourceUploadMaxFilesPerBatch === null;
+  const sourceBatchAtCapacity = sourceUploadMaxFilesPerBatch !== null
+    && stagedFiles.length >= sourceUploadMaxFilesPerBatch;
+  const sourceFilePickerDisabled = docCapacity.atCapacity
+    || sourceUploadConfigLoading
+    || sourceBatchAtCapacity;
+  const sourceFilePickerHint = docCapacity.atCapacity
+    ? atDocCapacityHint
+    : sourceUploadConfigLoading
+      ? "正在读取单文件上传上限…"
+      : sourceBatchAtCapacity
+        ? `单次最多上传 ${sourceUploadMaxFilesPerBatch} 个文件，请先上传当前批次。`
+        : undefined;
   const stagedUploadBlockedReason = documentUploadBlockReason(docCapacity, stagedFiles.length);
   const capabilities = workspaceCapabilities(
     currentNotebook?.access,
@@ -5665,16 +5758,16 @@ export default function Home() {
                 )}
               </div>
             )}
-            <label className={`drop-zone${docCapacity.atCapacity ? " is-disabled" : ""}`} title={docCapacity.atCapacity ? atDocCapacityHint : undefined}>
-              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={docCapacity.atCapacity} />
+            <label className={`drop-zone${sourceFilePickerDisabled ? " is-disabled" : ""}`} title={sourceFilePickerHint}>
+              <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               <span className="drop-plus">＋</span>
               <strong>{stagedFiles.length > 0 ? "继续添加文件" : "或拖放文件"}</strong>
-              <small>支持 {SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。</small>
+              <small>{sourceUploadConfigLoading ? "正在读取上传限制…" : `支持 ${SUPPORTED_SOURCE_USER_HINT}；图片与 OCR 暂不处理。单个文件最大 ${sourceUploadSizeLabel(sourceUploadMaxBytes)}，单次最多 ${sourceUploadMaxFilesPerBatch} 个。`}</small>
             </label>
             <div className="source-action-row">
-              <label className={`source-action-button${docCapacity.atCapacity ? " is-disabled" : ""}`} title={docCapacity.atCapacity ? atDocCapacityHint : undefined}>
+              <label className={`source-action-button${sourceFilePickerDisabled ? " is-disabled" : ""}`} title={sourceFilePickerHint}>
                 <Upload size={18} strokeWidth={2.5} /> 上传文件
-                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={docCapacity.atCapacity} />
+                <input type="file" multiple accept={SUPPORTED_SOURCE_ACCEPT} onChange={stageFiles} disabled={sourceFilePickerDisabled} />
               </label>
               <button
                 type="button"

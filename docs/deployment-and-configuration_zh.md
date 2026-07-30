@@ -347,6 +347,19 @@ DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
 
+**来源文件上传：**
+
+```text
+SOURCE_UPLOAD_MAX_MB    # 单个上传来源文件的最大大小（默认 50）
+```
+
+`SOURCE_UPLOAD_MAX_MB` 必须是 1–1024 的整数；1 MB 严格等于 `1024 × 1024` 字节。后端从
+Settings 派生字节上限，并对 multipart 的每个来源文件权威执行（413 会带当前上限）。
+用户登录后，浏览器从 `GET /api/system/config` 取得解析后的字节上限，在添加来源弹窗
+显示并即时拒绝超限选择，发送 multipart 前还会复查暂存文件。前后端还会固定限制每次
+multipart 请求最多 20 个文件，避免可配置的单文件额度叠加成无界临时 spool。旧标签页和
+直接 API 客户端仍始终以后端为准。
+
 **检索：**
 
 ```text

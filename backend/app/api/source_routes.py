@@ -1,8 +1,10 @@
 from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from starlette.datastructures import FormData, UploadFile as StarletteUploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.api.deps import (
     get_current_user,
@@ -14,6 +16,7 @@ from app.api.deps import (
     source_repository,
     user_error,
 )
+from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
 from app.models.identity import UserProfile
 from app.models.sources import (
     AddUrlSourcesRequest,
@@ -42,7 +45,35 @@ router = APIRouter()
 _REPARSE_MAX = 200
 
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
-MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
+
+_SOURCE_UPLOAD_OPENAPI = {
+    "requestBody": {
+        "required": True,
+        "content": {
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["files"],
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string", "format": "binary"},
+                        },
+                        "doc_types": {"type": "array", "items": {"type": "string"}},
+                        "doc_type_explicit": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                }
+            }
+        },
+    }
+}
+
+_SOURCE_UPLOAD_MAX_FORM_FIELDS = SOURCE_UPLOAD_MAX_FILES_PER_BATCH * 2
+_SOURCE_UPLOAD_MAX_FIELD_BYTES = 4 * 1024
+_SOURCE_UPLOAD_FORM_KEYS = frozenset({"files", "doc_types", "doc_type_explicit"})
 
 # 「隐藏合成源」:memory/knowhow 投影出来的物理 source 行,不是用户导入的文档,由各自
 # 投影服务维护。与存储层 VISIBLE_SOURCE_TYPES_PREDICATE 同一份口径(来源面板与文档数量
@@ -52,6 +83,116 @@ _HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 
 def _asset_service() -> AssetService:
     return AssetService(repository())
+
+
+def _format_upload_size_limit(limit_bytes: int) -> str:
+    """Compact, stable display for the configured byte limit in user errors."""
+    mib = 1024 * 1024
+    kib = 1024
+    if limit_bytes % mib == 0:
+        return f"{limit_bytes // mib} MB"
+    if limit_bytes % kib == 0:
+        return f"{limit_bytes // kib} KB"
+    return f"{limit_bytes} bytes"
+
+
+def _source_upload_too_large(max_bytes: int) -> HTTPException:
+    return user_error(
+        413,
+        "上传的单个来源文件超过当前大小上限 "
+        f"{_format_upload_size_limit(max_bytes)}（{max_bytes} 字节）。"
+        "请选择更小的文件，或联系管理员调整部署配置。",
+    )
+
+
+class _SourceUploadTooLarge(MultiPartException):
+    """Internal multipart abort used to close spool files before returning 413."""
+
+
+class _BoundedSourceMultiPartParser(MultiPartParser):
+    """Stop a source file part while it is streaming into Starlette's spool.
+
+    Starlette's ``max_part_size`` applies only to ordinary form fields, not file
+    parts. Tracking the active file here prevents an oversized upload from first
+    consuming arbitrary temporary-disk space. The route parses manually so this
+    check and authentication both happen before FastAPI's usual eager form parse.
+    """
+
+    def __init__(self, *args, max_source_bytes: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._max_source_bytes = max_source_bytes
+        self._current_source_bytes = 0
+
+    def on_part_begin(self) -> None:
+        super().on_part_begin()
+        self._current_source_bytes = 0
+
+    def on_part_data(self, data: bytes, start: int, end: int) -> None:
+        if self._current_part.file is not None:
+            self._current_source_bytes += end - start
+            if self._current_source_bytes > self._max_source_bytes:
+                raise _SourceUploadTooLarge("source file exceeded configured limit")
+        super().on_part_data(data, start, end)
+
+
+async def _parse_source_upload(
+    request: Request,
+    max_bytes: int,
+) -> tuple[FormData, list[StarletteUploadFile], list[str], list[str]]:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise user_error(400, "来源文件上传必须使用 multipart/form-data 请求。")
+    parser = _BoundedSourceMultiPartParser(
+        request.headers,
+        request.stream(),
+        max_source_bytes=max_bytes,
+        max_files=SOURCE_UPLOAD_MAX_FILES_PER_BATCH,
+        max_fields=_SOURCE_UPLOAD_MAX_FORM_FIELDS,
+        max_part_size=_SOURCE_UPLOAD_MAX_FIELD_BYTES,
+    )
+    try:
+        form = await parser.parse()
+    except _SourceUploadTooLarge:
+        raise _source_upload_too_large(max_bytes)
+    except MultiPartException as exc:
+        if exc.message.startswith("Too many files."):
+            raise user_error(
+                413,
+                f"单次最多上传 {SOURCE_UPLOAD_MAX_FILES_PER_BATCH} 个来源文件。"
+                "请减少本批文件数量后重试。",
+            )
+        if exc.message.startswith("Too many fields.") or "maximum size" in exc.message:
+            raise user_error(413, "上传请求中的文件类型元数据过多或过大，请减少本批文件后重试。")
+        raise HTTPException(status_code=400, detail=f"Invalid multipart upload: {exc.message}")
+
+    unexpected_keys = set(form.keys()) - _SOURCE_UPLOAD_FORM_KEYS
+    if unexpected_keys:
+        await form.close()
+        raise HTTPException(status_code=422, detail="Unexpected source upload form field")
+
+    raw_files = form.getlist("files")
+    files = [item for item in raw_files if isinstance(item, StarletteUploadFile)]
+    if not files or len(files) != len(raw_files):
+        await form.close()
+        raise HTTPException(status_code=422, detail="At least one source file is required")
+
+    def _string_fields(name: str) -> list[str] | None:
+        values = form.getlist(name)
+        if any(not isinstance(item, str) for item in values):
+            return None
+        return [str(item) for item in values]
+
+    doc_types = _string_fields("doc_types")
+    doc_type_explicit = _string_fields("doc_type_explicit")
+    if (
+        doc_types is None
+        or doc_type_explicit is None
+        or len(doc_types) > len(files)
+        or len(doc_type_explicit) > len(files)
+    ):
+        await form.close()
+        raise HTTPException(status_code=422, detail="Invalid source upload metadata")
+    return form, files, doc_types, doc_type_explicit
 
 
 def _validate_source_file(file_name: str, content_size: int | None = None) -> None:
@@ -65,8 +206,9 @@ def _validate_source_file(file_name: str, content_size: int | None = None) -> No
     if content_size is not None:
         if content_size == 0:
             raise HTTPException(status_code=400, detail="Uploaded source file is empty")
-        if content_size > MAX_SOURCE_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Uploaded source file is too large")
+        max_bytes = get_settings().source_upload_max_bytes
+        if content_size > max_bytes:
+            raise _source_upload_too_large(max_bytes)
 
 
 def _document_capacity(notebook_id: str) -> "tuple[int, int] | None":
@@ -156,22 +298,40 @@ def add_url_sources(
 # response_model 是 SourceSummary 的子类：字段只增不减（多一个 reused），旧客户端
 # 原样可用。上传路径会做同 notebook 内容去重，返回值里可能夹着**没有新建**的既有
 # 源——前端据 reused 分别计数/措辞，别再拿 len(response) 当「新增了几个」。
-@router.post("/notebooks/{notebook_id}/sources", response_model=List[UploadedSourceSummary], dependencies=[Depends(require_notebook_access)])
+@router.post(
+    "/notebooks/{notebook_id}/sources",
+    response_model=List[UploadedSourceSummary],
+    dependencies=[Depends(require_notebook_access)],
+    openapi_extra=_SOURCE_UPLOAD_OPENAPI,
+)
 async def upload_sources(
     notebook_id: str,
-    files: List[UploadFile] = File(...),
-    doc_types: List[str] = Form(default=[]),
-    doc_type_explicit: List[str] = Form(default=[]),
+    request: Request,
 ) -> List[UploadedSourceSummary]:
+    max_bytes = get_settings().source_upload_max_bytes
+    # A full notebook must fail before any multipart bytes are consumed. Other
+    # requests remain bounded by SOURCE_UPLOAD_MAX_FILES_PER_BATCH in the parser.
+    cap = _document_capacity(notebook_id)
+    if cap is not None and cap[0] >= cap[1]:
+        _enforce_document_capacity(notebook_id, 1)
+    form, files, doc_types, doc_type_explicit = await _parse_source_upload(
+        request, max_bytes
+    )
     try:
         repo = source_repository()
-        # 建源前先挡容量(在读取任何文件内容之前 fail-fast,不为超限的批次白读进内存)。
+        # 先用 multipart parser 已核算的真实 part 大小验证整批，再做任何持久化。
+        for file in files:
+            file_name = file.filename or "source.bin"
+            _validate_source_file(file_name, file.size)
         _enforce_document_capacity(notebook_id, len(files))
-        uploaded_files = []
+
+        uploaded: list[UploadedSourceSummary] = []
         for index, file in enumerate(files):
             file_name = file.filename or "source.bin"
-            _validate_source_file(file_name)
-            content = await file.read()
+            # Keep the read bounded even if a future parser or test double reports
+            # an incorrect size. Process one file at a time so a valid batch does
+            # not retain N × max_bytes in memory before persistence starts.
+            content = await file.read(max_bytes + 1)
             _validate_source_file(file_name, len(content))
             # doc_types / doc_type_explicit are aligned with files by position;
             # missing/extra are tolerated (老前端不发 doc_type_explicit → 一律非显式)。
@@ -181,22 +341,27 @@ async def upload_sources(
                 if index < len(doc_type_explicit)
                 else False
             )
-            uploaded_files.append(
-                UploadedSourceFile(
-                    file_name=file_name,
-                    content_type=file.content_type or "",
-                    content=content,
-                    doc_type=doc_type,
-                    doc_type_explicit=explicit,
-                )
+            result = repo.upload_sources(
+                notebook_id,
+                [
+                    UploadedSourceFile(
+                        file_name=file_name,
+                        content_type=file.content_type or "",
+                        content=content,
+                        doc_type=doc_type,
+                        doc_type_explicit=explicit,
+                    )
+                ],
+                scheduler=lambda source_id: kg_scheduler.submit_job(
+                    repo.process_source, source_id
+                ),
             )
-        return repo.upload_sources(
-            notebook_id,
-            uploaded_files,
-            scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
-        )
+            uploaded.extend(result)
+        return uploaded
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    finally:
+        await form.close()
 
 
 @router.get("/sources/{source_id}", response_model=SourceDetail)

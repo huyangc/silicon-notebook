@@ -370,7 +370,8 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 - `GET /api/notebooks/{id}/checkup` —— 流水线体检（只读，看板高频入口）：聚合来源与索引的损坏/待办信号——空源、缺检索片段、缺检索向量、待分析来源、检索索引过期/损坏——每项含数量、命中样本与建议修复动作，健康时全为 0。看板「来源状态」「索引与构建」两块与头像旁铃铛消费它；健康的库保持中性、不打扰。
 - `POST /api/notebooks/{id}/sources/reparse` —— 体检修复：批量重新解析指定来源（空源/缺片段），后台复用既有解析管线，按 notebook 作用域过滤入参
 - `POST /api/notebooks/{id}/backfill-vectors` —— 体检修复：后台补齐该库缺失的检索向量（只补缺失、幂等，仅嵌入、不动解析）
-- `POST /api/notebooks/{id}/sources` — multipart 文件上传（异步解析/抽取）
+- `GET /api/system/config` —— 登录后可读的非敏感浏览器配置；当前返回 `source_upload_max_bytes`（来源选择器使用的部署上限字节值）和 `source_upload_max_files_per_batch`（固定的单次请求文件数护栏）
+- `POST /api/notebooks/{id}/sources` —— multipart 文件上传（异步解析/抽取）。每个文件在 multipart 流写入临时 spool 时即受限，超过 `SOURCE_UPLOAD_MAX_MB`（默认 50 MiB）返回 413；每次请求超过 20 个文件也返回 413。浏览器读取上面的两个护栏，取得前禁用文件输入，选择时即时拒绝超限文件，并在发送前复查暂存文件
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements` —— owner∪成员口径，按来源自己所属的笔记本判权限
 - `GET /api/notebooks/{id}/sources/{source_id}`、`GET /api/notebooks/{id}/sources/{source_id}/elements` —— 同样两个读取，但权限按路径里的**当前活跃**笔记本判，目标在它的有效参与集（自身 + 已生效挂载的参考库）内解析。挂载参考库不等于获得该库的直接成员权限，因此浏览器始终只用活跃笔记本过权限、由后端内部代理读取；参与集每次请求实时判定，被挂库降级/易主/深拷贝中或挂载被取消时当场 404。本库来源走的是同一条路径（参与集首项恒为活跃笔记本自身），响应如实返回来源真正所属的笔记本，供前端据此按只读渲染。写入刻意不代理——重新解析与删除仍是 `/api/sources/{id}` 上的 owner-only 操作。详情响应比 `/api/sources/{id}` 更窄：去掉 `file_path` 与原始 `error_message`（两者都可能带服务端绝对路径），改回一个如实的 `parse_failed` 布尔；跨库的隐藏合成源（memory/knowhow 投影行，集合地图刻意把它们算进作用域）直接拒绝
 - `GET /api/notebooks/{id}/assets/{asset_id}` —— 图片资产（knowhow 单元格图片、来源插图）适用同一条参与集规则：路径里的笔记本是查看者的活跃笔记本，资产自己声明所属笔记本，不在活跃笔记本有效参与集内的资产一律 404。经挂载库代理来的资产用 `Cache-Control: no-store`，取消挂载即刻生效；活跃笔记本自己的资产保持原有长缓存
