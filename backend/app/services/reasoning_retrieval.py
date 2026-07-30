@@ -11,7 +11,7 @@ import json
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
 
 from app.core.ask_retrieval_policy import (
@@ -552,6 +552,63 @@ def bind_outline_evidence(
     return bound, dropped
 
 
+def outline_truncated_kg_evidence(
+    sections: List[OutlineSection],
+    collected: Dict[str, "RetrievedKnowledge"],
+    top_hits: List["RetrievedKnowledge"],
+    *,
+    rescored: Dict[str, "RetrievedKnowledge"] = None,
+    relevance_ceiling: float = None,
+) -> List["RetrievedKnowledge"]:
+    """大纲绑上、但没进最终相关性选集的知识对象。
+
+    这一份是**按节合成(O2)的完整性补丁**,不是一条新的检索通道:`top_hits` 是
+    `collected` 按相关度截到 `top_n` 的选集(穷尽档 cap 96),而绑定键的合法集合
+    是**整个** `collected` —— 模型完全可以在第 3 轮把一个当时排在前面、最终被
+    挤出选集的对象绑给某一节。缺了这一份,那一节的切片会凭空少掉一条它自己
+    指名要的证据,而且悄无声息。
+
+    **零查询**:三个候选池(`collected`/`elements`/`chunks`)在 run 内只增不减
+    (见 `_window` 的注释),所以任何**曾经**合法的绑定键,在 run 收尾时仍然在池
+    子里 —— 按 id 回库 hydrate 是一条永远走不到的分支,而 Ask 的合成路径上多一
+    次数据库往返是要付钱的(运行效率是一等约束)。元素与原文段同理,由
+    `ReasoningResult.elements`/`chunks` 原样带出,这里只补知识对象这一路。
+
+    **相关度必须与 `top_hits` 同口径**,否则这份补集会变成一条抬分的后门:
+    `collected[oid]` 里存的是**首次收下它的那个产出方**给的分,而 `top_hits` 的每
+    一条都经过了对**整个问题**的重排。一个首收 0.95、重排 0.12 的对象若带着 0.95
+    进 `classify_evidence` 的证据池,它一条就能把整篇答案抬到 grounded ——而它恰恰
+    是被截断掉的那种"其实不相关"。两条路径各自校正,都不发新查询:
+
+    * ``rescored`` —— 非 quota 路径手里现成的 `retrieve_scored` 结果映射,与
+      `top_hits` 用的是**同一个** map、同一句 `.get(oid, rk)`,所以补集与选集逐条
+      同口径(不在 map 里的沿用原对象,与 top_hits 对自己成员的处理完全一致)。
+    * ``relevance_ceiling`` —— quota 路径没有全局重排 map(它按子查询配额融合),
+      于是把带出值**夹到选集的最低分**:补集是被选集挤出去的那一批,不可能比选集
+      里最差的一条更相关。选集为空时天花板取 0.0,补集一条都抬不动 —— 那正是
+      "没有任何排名证据"该有的结果。
+
+    返回按大纲顺序去重的列表,并排除已在 `top_hits` 里的对象 —— 调用方把它当成
+    `top_hits` 的补集使用(合并时 `top_hits` 的重排分数优先)。
+    """
+    if not sections:
+        return []
+    present = {hit.object_id for hit in top_hits}
+    extra: List["RetrievedKnowledge"] = []
+    for section in sections:
+        for key in section.evidence_keys:
+            if key in present or key not in collected:
+                continue
+            present.add(key)
+            hit = collected[key]
+            if rescored is not None:
+                hit = rescored.get(key, hit)
+            elif relevance_ceiling is not None and hit.relevance > relevance_ceiling:
+                hit = replace(hit, relevance=relevance_ceiling)
+            extra.append(hit)
+    return extra
+
+
 def outline_signature(sections: List[OutlineSection]) -> tuple:
     """大纲的可比较快照。用于判定一次 update_outline 是否**实质**改变了大纲——
     逐字重提同一份大纲不算进展(那正是需要被 stale 熔断兜住的空转),而增删节、
@@ -953,6 +1010,10 @@ class ReasoningResult:
     # 就悄悄删掉。刻意**不进** AskResponse(设计文档 §3.1:v1 不加响应字段,免掉
     # api_contract churn),所以它是一个服务层结构,不是协议。
     outline: List[OutlineSection] = field(default_factory=list)
+    # 大纲绑上、却被 top_n 截断挤出 `top_hits` 的知识对象(见
+    # `outline_truncated_kg_evidence`)。它是 `top_hits` 的**补集**,不重复其中
+    # 已有的对象;按节合成把两者合起来解析绑定键,别的路径不消费它。
+    outline_evidence: List[RetrievedKnowledge] = field(default_factory=list)
 
 
 class ReasoningRetriever:
@@ -2664,12 +2725,22 @@ class ReasoningRetriever:
                 notebook_id, collected, used_queries, top_n)
             # 只暴露各子查询贡献数(不含兜底组), 便于观测。
             answer_detail["quota"] = counts[:len(used_queries)]
+            # 配额融合没有全局重排 map,补集只能按"被选集挤出去的不会比选集里最差
+            # 的更相关"夹一刀(见 outline_truncated_kg_evidence 的说明)。
+            outline_evidence = outline_truncated_kg_evidence(
+                outline, collected, top_hits,
+                relevance_ceiling=min(
+                    (hit.relevance for hit in top_hits), default=0.0),
+            )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
             scored_map = {h.object_id: h for h in self.retrieval.retrieve_scored(notebook_id, question)}
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[:top_n]
+            # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
+            outline_evidence = outline_truncated_kg_evidence(
+                outline, collected, top_hits, rescored=scored_map)
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由
@@ -2686,6 +2757,7 @@ class ReasoningRetriever:
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
             chains=chains, enumerations=enumerations,
             collection_map_text=collection_map_text, outline=outline,
+            outline_evidence=outline_evidence,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])
 

@@ -198,12 +198,74 @@ def followup_rewrite_prompt(history_block: str, question: str) -> str:
 ANSWER_SCHEMA_HINT = '{"answer":"","grounded":true}'
 
 
-def answer_prompt(question: str, context_block: str, history_block: str = "") -> str:
+def _answer_section_directive(
+    sectioned: bool, section_title: str, section_index: int, section_total: int
+) -> str:
+    """按节合成(设计文档 §3.1)时追加的节级指令;单次合成下恒为空串。
+
+    刻意与规则集共用一份 `answer_prompt`,而不是复制一份「章节版」出来:规则 1–11
+    (引用标记、LaTeX、推断标注、枚举完整性披露……)对每一节同样成立,复制一份的
+    唯一确定结局是两份逐渐分叉。
+
+    三句话各有理由:
+      * 「只写这一节」—— 不说的话,每节都会写成一篇独立的完整答案,拼出来通篇重复;
+      * 「不要重复标题」—— `##/###` 标题由服务端按大纲层级加(见
+        `outline_synthesis.outline_answer_text`),模型再写一遍就是两层标题;
+      * 「其他节的证据没给你看」—— 模型会把「证据里没有」误读成「库里没有」,
+        于是给整篇答案下一个过度保守的结论,或者去补写别节的内容。
+
+    判定用**显式的 `sectioned`**,不看标题真值:标题是内容,不是模式开关。靠真值判
+    的话,一个绕过 `parse_outline_sections`(它保证标题非空)的构造 —— 未来的调用方、
+    窄测试替身 —— 会落进「号段偏移生效了、节级指令却没发」的混合态,而那正是最难
+    发现的一种:prompt 看着正常,模型却按整篇答案的口径写每一节。
+    """
+    if not sectioned:
+        return ""
+    position = (
+        f" ({section_index} of {section_total})"
+        if section_index and section_total else ""
+    )
+    # 标题缺席时只省这一行(其余指令仍然成立)。`parse_outline_sections` 保证标题
+    # 非空,所以这只是防御性分支。
+    title_line = (
+        f"This section{position} is titled: {section_title}\n"
+        if section_title else
+        f"This is section{position or ' one'} of the answer.\n"
+    )
+    return (
+        "You are writing ONE section of a longer, multi-section answer.\n"
+        + title_line
+        + "Write ONLY this section's body. Do NOT repeat the section title as a "
+        "heading (the system adds it), do NOT open with an introduction or "
+        "close with a conclusion for the whole answer, and do NOT cover what "
+        "the other sections are for. The knowledge items below are the "
+        "evidence bound to THIS section; the other sections have their own "
+        "evidence which is deliberately not shown to you, so never state that "
+        "the notebook lacks material you simply were not given.\n\n"
+    )
+
+
+def answer_prompt(
+    question: str,
+    context_block: str,
+    history_block: str = "",
+    *,
+    sectioned: bool = False,
+    section_title: str = "",
+    section_index: int = 0,
+    section_total: int = 0,
+) -> str:
+    """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
+    history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
+    什么」变成一个要靠数逗号回答的问题。"""
     history_section = (
         "Prior conversation (for context; the current question may refer to it):\n"
         f"{history_block}\n\n"
         if history_block
         else ""
+    )
+    section_section = _answer_section_directive(
+        sectioned, section_title, section_index, section_total
     )
     return (
         "You answer an engineer's question using the notebook knowledge below, "
@@ -274,6 +336,7 @@ def answer_prompt(question: str, context_block: str, history_block: str = "") ->
         "relevance-based retrieval cannot prove it covers the entire "
         "collection on its own.\n\n"
         f"{history_section}"
+        f"{section_section}"
         f"Question: {question}\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'

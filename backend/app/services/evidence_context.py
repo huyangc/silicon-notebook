@@ -275,8 +275,12 @@ class EvidenceContextService:
         chunks: Sequence[RetrievedChunk],
         *,
         notebook_id: str,
+        id_offset: int = 0,
         budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """``id_offset`` 镜像 ``element_context``/``knowledge_context``:默认 0 保持
+        chunk 段恒为 ``k1..kN``(所有既有调用方),按节合成给每节整体加一段偏移,
+        让各节的 key 号段互不相交(见 ``outline_synthesis``)。"""
         budget = (
             self.settings.chunk_answer_budget_chars
             if budget_chars is None
@@ -306,7 +310,7 @@ class EvidenceContextService:
             remaining = budget - used - separator
             if remaining <= 0:
                 break
-            key = f"k{index}"
+            key = f"k{index + id_offset}"
             source_title = citation_titles.get(chunk.source_id, chunk.source_title)
             prefix = f"{key}: "
             if remaining <= len(prefix):

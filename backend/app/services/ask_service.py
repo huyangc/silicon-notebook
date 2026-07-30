@@ -27,6 +27,7 @@ import json
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -74,6 +75,21 @@ _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
 # a real anchor, so no fabricated/malformed marker reaches the user. Kept
 # separate from _MARKER_GROUP_RE so strict anchor resolution is unchanged.
 _LOOSE_MARKER_GROUP_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
+
+
+@dataclass
+class _SectionedSynthesis:
+    """按节合成成功后的整篇产物(设计文档 §3.1)。
+
+    ``counts`` 是各节装配计数之和 —— 同一条证据被两节绑上就计两次,那是诚实的:
+    它确实进了两次 prompt。
+    """
+
+    answer: str
+    llm_grounded: bool
+    anchors: list
+    sections: int
+    counts: dict
 
 
 def _graph_classification_hits(
@@ -453,9 +469,10 @@ class AskService:
         return self.evidence_context.tier_map(list(notebook_ids))
 
     def _chunk_answer_context(self, chunks, budget_chars: "int | None" = None,
-                              notebook_id: str = "") -> tuple:
+                              notebook_id: str = "", id_offset: int = 0) -> tuple:
         return self.evidence_context.chunk_context(
-            chunks, notebook_id=notebook_id, budget_chars=budget_chars)
+            chunks, notebook_id=notebook_id, id_offset=id_offset,
+            budget_chars=budget_chars)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
                         id_offset: int = 0, budget_chars: int | None = None) -> tuple:
@@ -872,6 +889,11 @@ class AskService:
         structured_map: dict | None = None,
         collection_map_block: str = "",
         counts_sink: dict | None = None,
+        sectioned: bool = False,
+        key_offset: int = 0,
+        section_title: str = "",
+        section_index: int = 0,
+        section_total: int = 0,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -887,7 +909,15 @@ class AskService:
         uses ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
         (answer, llm_grounded, anchors, counts) where ``counts`` reports how many
         KG/chunk/element entries actually entered the prompt (``included_kg``/
-        ``included_chunks``/``included_elements``)."""
+        ``included_chunks``/``included_elements``).
+
+        按节合成(设计文档 §3.1)复用这同一个装配器。``sectioned`` 是**唯一**的模式
+        判定(不看标题真值,见 ``prompts._answer_section_directive``):它开着时
+        ``key_offset`` 把本节的每一段 ``[k]`` 号整体平移(见
+        ``outline_synthesis.OUTLINE_SECTION_KEY_STRIDE``),prompt 多一段节级指令,
+        证据精炼跳过。缺省为「不在按节合成里」,单次合成路径逐字节不变。节模式下
+        调用方只传该节绑定的证据,Memory / 推导链 / 集合地图 / 结构化预览一律不传
+        ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。"""
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
@@ -933,7 +963,7 @@ class AskService:
             # (= 检索序 / 节内文档序),这既是确定的,也正好是该节该被读的顺序。
             ordered = sorted(chunks, key=lambda c: -c.relevance)
             chunk_block, chunk_id_map = self._chunk_answer_context(
-                ordered, notebook_id=notebook_id,
+                ordered, notebook_id=notebook_id, id_offset=key_offset,
                 budget_chars=max(0, chunk_budget - len(source_context)))
             source_context, source_map = self._bounded_context_append(
                 source_context, source_map, chunk_block, chunk_id_map,
@@ -952,7 +982,7 @@ class AskService:
             )[:element_items]
             element_block, element_id_map = self.evidence_context.element_context(
                 ranked_elements, notebook_id=notebook_id,
-                id_offset=self._ELEMENT_KEY_BASE,
+                id_offset=key_offset + self._ELEMENT_KEY_BASE,
                 budget_chars=max(0, chunk_budget - len(source_context)),
             )
             source_context, source_map = self._bounded_context_append(
@@ -965,7 +995,7 @@ class AskService:
         effective_kg_budget = max(0, kg_budget - (2 if source_context else 0))
         kg_context, kg_map = self._answer_context(
             notebook_id, top_hits,
-            id_offset=(self._MIX_KG_KEY_BASE if chunks else 0),
+            id_offset=key_offset + (self._MIX_KG_KEY_BASE if chunks else 0),
             budget_chars=effective_kg_budget,
         )
         if kg_context == "(none)":
@@ -976,7 +1006,7 @@ class AskService:
         included_kg = len(kg_map)
         if memory_hits and len(kg_context) < effective_kg_budget:
             memory_block, memory_map = self.memory_retriever.context(
-                memory_hits, id_offset=self._MEMORY_KEY_BASE
+                memory_hits, id_offset=key_offset + self._MEMORY_KEY_BASE
             )
             kg_context, kg_map = self._bounded_context_append(
                 kg_context, kg_map, memory_block, memory_map,
@@ -985,7 +1015,8 @@ class AskService:
         if chains:
             from app.services.kg.follow_chain import render_follow_chain_context
             chain_block, chain_id_map = render_follow_chain_context(
-                chains, id_offset=2000, active_notebook_id=notebook_id)
+                chains, id_offset=key_offset + 2000,
+                active_notebook_id=notebook_id)
             kg_context, kg_map = self._bounded_context_append(
                 kg_context, kg_map, chain_block, chain_id_map,
                 budget_chars=effective_kg_budget, heading="Derived chains",
@@ -998,11 +1029,16 @@ class AskService:
         id_map = {**source_map, **kg_map}
         total_context_budget = chunk_budget + kg_budget
         answer_client = answer_client or self.model_clients.chat("ask_answer")
-        refine_client = self.model_clients.chat("evidence_refine")
-        context_block = self._refine_context(
-            question, context_block, refine_client, cancel_event,
-            budget_chars=total_context_budget,
-        )
+        # 按节合成不做证据精炼。两条理由都硬:①精炼是**每次装配一次**模型调用,
+        # 节模式下会把 k 次合成变成 2k 次调用——成本合同只承诺了合成那一半;
+        # ②精炼是给「上下文太大、要先挑重点」准备的,而一节的切片至多 8 条绑定
+        # 证据,本来就没有中段可丢。
+        if not sectioned:
+            refine_client = self.model_clients.chat("evidence_refine")
+            context_block = self._refine_context(
+                question, context_block, refine_client, cancel_event,
+                budget_chars=total_context_budget,
+            )
         context_block = context_block[:total_context_budget]
         # Partition the merged *source* map (structured preview + chunks +
         # elements) by numeric key range rather than trusting chunk_id_map /
@@ -1016,11 +1052,14 @@ class AskService:
         # block) together with chunks, but both are appended with an empty id
         # map and contribute no keys, so every low-range key counted here is a
         # surviving chunk line — no ambiguity.
+        # 分区判定按**去掉本节偏移之后**的号段来做:节偏移是 10000 的倍数,不减
+        # 掉的话第 2 节的 chunk(k10001)会被算成"集合清单"(>=5000),整份 synthesis
+        # 计数从第二节起全错。
         included_elements = 0
         included_collections = 0
         for key in source_map:
             try:
-                key_num = int(key[1:])
+                key_num = int(key[1:]) - key_offset
             except (TypeError, ValueError):
                 continue
             if key_num >= self._COLLECTION_KEY_BASE:
@@ -1042,7 +1081,13 @@ class AskService:
             counts_sink.clear()
             counts_sink.update(counts)
         raw = answer_client.chat_json(
-            [{"role": "user", "content": answer_prompt(question, context_block, history)}],
+            [{"role": "user", "content": answer_prompt(
+                question, context_block, history,
+                sectioned=sectioned,
+                section_title=section_title,
+                section_index=section_index,
+                section_total=section_total,
+            )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
             max_retries=self.settings.reasoning_max_retries,
@@ -1055,8 +1100,119 @@ class AskService:
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
         llm_grounded = bool(data.get("grounded", False))
+        # 锚点按**本节自己的** id_map 解析(节模式下 id_map 只含本节证据)。合并
+        # 之后再统一解析拼好的全文是错的:一节写出别节号段的 `[k]`(它根本没见过
+        # 那个号)只可能是幻觉,合并解析会把它一本正经地绑到别节的证据上,而按节
+        # 解析直接丢弃 —— 这正是号段偏移要买到的东西。合法标记两种口径结果相同
+        # (号段互不相交),差别只在幻觉这一种情况上。
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors, counts
+
+    def _answer_reasoning_sections(
+        self,
+        notebook_id: str,
+        question: str,
+        slices,
+        *,
+        history: str,
+        limits,
+        answer_client,
+        cancel_event: CancelEvent = None,
+        on_section=None,
+    ):
+        """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
+
+        返回 ``_SectionedSynthesis``;**任何一节失败就返回 None**,由调用方整体
+        回退到单次合成。绝不半篇拼接:少写一节的答案与「这一节没有内容」在屏幕上
+        长得一模一样,而实际发生的是一次模型故障 —— 宁可多付一次单次合成,也不
+        交付一份看不出缺口的残篇。
+
+        每节沿用 ``_answer_with_retry`` 的重试语义(空 content 重掷一次、两次皆空
+        才记 model_error),所以「思考型模型偶发空 content」不会把整轮拖进回退。
+        取消异常照常穿透 —— 用户按了中断不是合成失败。
+
+        ``on_section(step)`` 在每节写完后立刻收到一条轻量进度步。分节合成是整轮
+        里最长的一段(k 次模型调用),不发进度的话实时轨迹会在「合成」上静止几分钟。
+        **进度步实时发出、不因后续回退而回收**:那一节确实写完了、那笔钱确实付了,
+        事后抹掉等于让轨迹少报整轮做过的工作;回退由收尾那条 synthesis 步的
+        ``outline_fallback`` 说清楚。
+        """
+        from app.services.outline_synthesis import outline_answer_text
+
+        rendered: list = []
+        merged_anchors: list = []
+        seen_anchor_keys: set = set()
+        merged_counts = {
+            "included_kg": 0, "included_chunks": 0,
+            "included_elements": 0, "included_collections": 0,
+        }
+        grounded = False
+        total = len(slices)
+        model_label = getattr(answer_client, "model", "")
+        for item in slices:
+            section_counts: dict = {}
+            section_started = time.perf_counter()
+
+            def _synth_section(item=item, section_counts=section_counts):
+                text_, grounded_, anchors_, _counts = self._answer_reasoning(
+                    notebook_id, question, item.hits, item.elements, history,
+                    cancel_event=cancel_event, chunks=item.chunks,
+                    answer_client=answer_client,
+                    kg_context_chars=limits.kg_context_chars,
+                    chunk_context_chars=limits.chunk_context_chars,
+                    element_items=limits.answer_element_items,
+                    counts_sink=section_counts,
+                    sectioned=True,
+                    key_offset=item.key_offset,
+                    section_title=item.section.title,
+                    section_index=item.index + 1,
+                    section_total=total,
+                )
+                return text_, grounded_, anchors_
+
+            text, section_grounded, section_anchors, ok = self._answer_with_retry(
+                _synth_section, model_label, service="ask_answer",
+            )
+            if not ok:
+                return None
+            if on_section is not None:
+                # 复用 synthesis 这个 step_type:前端 reasoning-trace.ts 的
+                # synthesis 分支只在 `detail.anchors` 是数字时给出细节文案,进度步
+                # 不带 anchors,于是它自然只显示 summary —— 不必等 O3 补渲染就
+                # 是可读的,而 O3 想把节标题做成细节行时 detail 已经在那里了。
+                on_section(TraceStep(
+                    step_type="synthesis",
+                    summary=f"已写完第 {item.index + 1}/{total} 节",
+                    detail={
+                        "section_index": item.index + 1,
+                        "section_total": total,
+                        "section_title": item.section.title[:60],
+                    },
+                    duration_ms=round(
+                        (time.perf_counter() - section_started) * 1000),
+                ))
+            for key in merged_counts:
+                merged_counts[key] += int(section_counts.get(key, 0) or 0)
+            rendered.append((item, text))
+            grounded = grounded or section_grounded
+            # 号段互不相交,所以跨节不可能撞 key;去重只防同一节内重复标记(
+            # parse_anchors 自己已经去过一次,这一层是拼接侧的常数级防御)。
+            for anchor in section_anchors:
+                if anchor.key in seen_anchor_keys:
+                    continue
+                seen_anchor_keys.add(anchor.key)
+                merged_anchors.append(anchor)
+        return _SectionedSynthesis(
+            answer=outline_answer_text(rendered),
+            # 任一节自报 grounded 即算 grounded:每节的 grounded 只描述**它自己**
+            # 的切片,全篇要求 all 会让一节合理的常识补充把整篇降级。真正的门仍在
+            # classify_evidence —— 它还要求存在相关度 >= tau_high 的**被引用**证据,
+            # 所以 any 单独抬不高任何东西。
+            llm_grounded=grounded,
+            anchors=merged_anchors,
+            sections=len(rendered),
+            counts=merged_counts,
+        )
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
@@ -1826,10 +1982,11 @@ class AskService:
                 # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
                 # 带出来直接进合成上下文,不重建。
                 collection_map_text = result.collection_map_text
-                # 终态大纲(仅穷尽档非空)。**O2 消费它**:按节合成会按每节的绑定
-                # 证据分片装配上下文。O1 只负责把它接出来,所以在 O2 落地之前它看
-                # 起来是个没人读的变量 —— 删掉它等于删掉这个特性的输出。
+                # 终态大纲(仅穷尽档非空)+ 被 top_n 截断挤出 top_hits 的绑定对象。
+                # 按节合成按每节的绑定证据分片装配上下文,两者合起来才解析得全
+                # (见 reasoning_retrieval.outline_truncated_kg_evidence)。
                 reasoning_outline = result.outline
+                reasoning_outline_evidence = result.outline_evidence
                 trace = [*pre_trace, *trace]
             except AskCancelled:
                 raise
@@ -1840,6 +1997,7 @@ class AskService:
                 enumerations = []
                 collection_map_text = ""
                 reasoning_outline = []
+                reasoning_outline_evidence = []
 
             registry = self.schemas.effective_schemas()
             seen_ids: set = set()
@@ -1992,16 +2150,75 @@ class AskService:
                     collection_map_block=collection_map_prompt_block,
                     counts_sink=reasoning_counts)
                 return ans, llm_grounded_, anchors_
+
+            # ---------------------------------------------- 按节合成(设计文档 §3.1)
+            # 终态大纲有 ≥2 个能装配出证据的节时,逐节合成再拼接:每节只看见自己
+            # 绑上的那几条证据(DualGraph 的产出侧借鉴,避免 lost-in-the-middle)。
+            # 闸与 O1 同一个 —— 只在穷尽档提供,k 次合成调用的成本由用户显式选择
+            # 「穷尽」来承担;门关着或大纲够不到两节时,下面那条单次合成路径逐字
+            # 节不变。
+            outline_slices: list = []
+            outline_skipped: list[str] = []
+            outline_attempted = False
+            sectioned = None
+            # 分节阶段可能记下的 model_error 起点。回退**成功**后要把这一段摘掉:
+            # 那次故障已经被同一轮的重试路径吸收,用户拿到了完整答案,再挂一条红色
+            # 横幅是假报警。事件日志(events.jsonl)不受影响 —— note_model_error 的
+            # 两个副作用里,只有响应里的这一份是给用户看的。
+            outline_err_mark = len(_err_sink)
+
+            def record_section_step(step: TraceStep) -> None:
+                """分节进度步:实时推给客户端,同时留在本轮轨迹里。"""
+                raise_if_cancelled(cancel_event)
+                trace.append(step)
+                if on_trace:
+                    on_trace(step)
+
+            if answer_client.configured and reasoning_outline:
+                from app.services.outline_synthesis import plan_outline_sections
+                from app.services.reasoning_retrieval import outline_wiring_active
+                if outline_wiring_active(self.settings, limits):
+                    # top_hits 的重排分数优先:同一个对象两处都有时,以最终选集
+                    # 那一份为准(补集只补它没有的)。
+                    outline_kg_by_id = {
+                        hit.object_id: hit for hit in reasoning_outline_evidence
+                    }
+                    outline_kg_by_id.update({hit.object_id: hit for hit in top_hits})
+                    outline_slices, outline_skipped = plan_outline_sections(
+                        reasoning_outline,
+                        kg_by_id=outline_kg_by_id,
+                        element_by_id={item.element_id: item for item in elements},
+                        chunk_by_id={item.chunk_id: item for item in chunks},
+                    )
+                    if len(outline_slices) >= 2:
+                        outline_attempted = True
+                        sectioned = self._answer_reasoning_sections(
+                            notebook_id, research_question, outline_slices,
+                            history=history, limits=limits,
+                            answer_client=answer_client, cancel_event=cancel_event,
+                            on_section=record_section_step,
+                        )
+            # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
+            # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
+            outline_fallback = outline_attempted and sectioned is None
+            if sectioned is not None:
+                answer = sectioned.answer
+                llm_grounded = sectioned.llm_grounded
+                anchors = sectioned.anchors
+                reasoning_counts.clear()
+                reasoning_counts.update(sectioned.counts)
+                synthesis_ran = True
             # 地图也是合成的触发条件之一:大集合场景里模型 reflect 直接 answer、
             # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
             # 不跑,用户拿到的是空答案(codex 第 4 轮 P2)。地图非空意味着枚举
             # 工具接线成功且作用域里有可数的东西(空库在更早的早退里就返回了),
             # 所以这不是给空库额外加一次模型调用。
-            if answer_client.configured and (
+            elif answer_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits
                     or structured_batch is not None or enumerations
                     or collection_map_prompt_block):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
+                fallback_err_mark = len(_err_sink)
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     _synth_reasoning,
                     getattr(answer_client, "model", ""),
@@ -2009,6 +2226,10 @@ class AskService:
                 )
                 synth_failed = not _ok
                 synthesis_ran = True
+                if outline_fallback and _ok:
+                    # 只摘分节那一段(mark..fallback_mark),单次合成自己记的那几条
+                    # 原样保留 —— 「重试一次才成功」在既有口径里就是要报的。
+                    del _err_sink[outline_err_mark:fallback_err_mark]
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
             # object_id 对齐,classify_evidence 即可正确计 anchored_rel(守 tau)。
@@ -2062,8 +2283,22 @@ class AskService:
             element_evidence = [SimpleNamespace(
                 object_id=item.element_id, relevance=float(item.score or 0.0),
             ) for item in elements]
+            # 按节合成真正写进 prompt 的知识对象里,有一部分被 top_n 截断挤出了
+            # top_hits(见 outline_truncated_kg_evidence)。它们进不了这个池子的话,
+            # 引用了它们的句子在 classify_evidence 眼里就是"引了个不存在的东西",
+            # 整篇答案被降级成 inferred —— 而模型引的恰恰是服务端指名喂给它的证据。
+            # 只在按节合成真的产出答案时并入:回退路径与关闭态的池子逐字不变。
+            outline_pool_extra: list = []
+            if sectioned is not None:
+                pooled_ids = {hit.object_id for hit in top_hits}
+                for item in outline_slices:
+                    for hit in item.hits:
+                        if hit.object_id in pooled_ids:
+                            continue
+                        pooled_ids.add(hit.object_id)
+                        outline_pool_extra.append(hit)
             evidence_pool = (
-                list(top_hits) + list(chunks) + chain_evidence
+                list(top_hits) + outline_pool_extra + list(chunks) + chain_evidence
                 + element_evidence + list(memory_hits)
             )
             collection_exact_keys = {
@@ -2125,6 +2360,19 @@ class AskService:
                     },
                     duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
                 )
+                if outline_attempted:
+                    # 三个键只在按节合成**真的被尝试过**时出现:没有大纲、低档位
+                    # 与关闭态下 synthesis 步的 detail 逐键不变(冻结基线口径)。
+                    synthesis_step.detail.update({
+                        # 实际合成的节数;回退时为 0(分节产物已全部丢弃)。
+                        "outline_sections": (
+                            sectioned.sections if sectioned is not None else 0
+                        ),
+                        "outline_fallback": outline_fallback,
+                        # 被跳过的空节标题:它们是「问到了但没找到」的诚实记录,
+                        # 只在轨迹里露面,答案里不留空壳标题。
+                        "outline_skipped": outline_skipped,
+                    })
                 trace.append(synthesis_step)
                 if on_trace:
                     on_trace(synthesis_step)

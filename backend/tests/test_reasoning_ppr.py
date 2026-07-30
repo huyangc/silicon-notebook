@@ -278,7 +278,9 @@ def test_answer_reasoning_final_evidence_respects_combined_hard_budget(
     repo.settings.kg_query_refine_enabled = False
     monkeypatch.setattr(
         "app.services.ask_service.answer_prompt",
-        lambda _question, context, _history: context,
+        # **_section 吞掉按节合成新增的 section_title/index/total(单次合成下它们
+        # 恒为缺省值);本用例量的是证据块字节数,与 prompt 外壳无关。
+        lambda _question, context, _history, **_section: context,
     )
 
     repo._runtime.ask_service()._answer_reasoning(

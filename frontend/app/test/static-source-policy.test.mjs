@@ -26,6 +26,11 @@ const DIRECT_READ_ALLOWLIST = new Set([
   // 面板绝对居中。样式表没有可消费的 AST,jsdom 又不做 grid 布局(量出来的 rect
   // 恒为 0),文本是唯一诚实的输入。对 page.tsx 的断言仍走语义解析。
   "chat-turn-nav-anchor.test.mjs",
+  // 同上,只读 globals.css:断言按节合成的答案标题字阶收窄在 `.chat-answer` 容器链下,
+  // 不泄漏进共用同一个 `.answer-markdown` 渲染管线类的深度报告。样式表没有可消费的
+  // AST,jsdom 又不实现特异性级联,文本是唯一诚实的输入。同文件对 report-view.tsx 的
+  // 断言仍走 semantic-source 的语义解析。
+  "answer-heading-scope-guard.test.mjs",
 ]);
 const STRICT_TEXT_READER_ALLOWLIST = new Set([
   // This helper owns production source text and must expose only AST semantics.
