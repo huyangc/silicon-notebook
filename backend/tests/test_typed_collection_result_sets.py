@@ -989,12 +989,16 @@ class _SeqLLM:
         self._reflects = list(reflects)
         self._answer = answer
         self.answer_prompts: list[str] = []
+        # reflect 的 prompt 也录下来:来源清单的标题回喂只出现在**下一轮 reflect**
+        # 里,合成 prompt 断言不到它。
+        self.reflect_prompts: list[str] = []
 
     def chat_json(self, messages, schema_hint, **kwargs):
         content = messages[-1]["content"]
         if "sub_queries" in schema_hint:
             return json.dumps(self._plan)
         if "next_action" in schema_hint:
+            self.reflect_prompts.append(content)
             return json.dumps(
                 self._reflects.pop(0) if self._reflects
                 else {"next_action": "answer", "sufficient": True}
@@ -1157,6 +1161,15 @@ def test_per_document_analysis_gets_a_roster_then_deepens_by_title(arepo):
     # 目录先于按标题的深挖:轨迹顺序就是「枚举 → 补充子查询」。
     kinds = [step.step_type for step in (resp.reasoning_trace or [])]
     assert kinds.index("enumerate") < kinds.index("retrieve", kinds.index("enumerate"))
+    # (d) 闭环的那一环:枚举**之后**那一轮 reflect 的 prompt 里模型真的看得到标题。
+    # 没有这一条,「按标题 add_subquery」只是 prompt 里的一句空话——上面那个按标题
+    # 发出的子查询是测试脚本写死的,不代表模型手上有过那个标题。
+    assert len(llm.reflect_prompts) >= 2
+    after_roster = llm.reflect_prompts[1]
+    assert "「来源清单」已完整列出 2 条" in after_roster
+    assert "《论文一》《论文二》" in after_roster
+    # 首轮(枚举之前)当然还没有标题——否则就说明它是从别处漏进来的。
+    assert "《论文一》" not in llm.reflect_prompts[0]
 
 
 def test_prompt_block_failure_clears_the_result_cards_too_and_does_not_crash_ask(

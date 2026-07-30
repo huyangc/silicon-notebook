@@ -98,6 +98,18 @@ def _seed(repo, *, formulas=3, tables=0):
     return notebook
 
 
+def _add_source_row(repo, notebook_id, source_id, title, *, created_at=NOW):
+    """再加一份文档(不带元素)——来源清单只关心文档本身。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, title, "pdf", "extracted", "extracted",
+             created_at, NOW),
+        )
+    repo.collection_catalog.invalidate()
+
+
 class _SeqLLM:
     """plan 固定;reflect 按序列返回(耗尽后默认 answer)。记录每次 prompt 正文。"""
 
@@ -1353,6 +1365,71 @@ def test_listed_items_count_as_progress_and_are_fed_back(repo):
     # 账目回喂:模型能看到自己已经列过什么、列全了没有。
     assert "「公式清单」已完整列出 3 条" in llm.reflect_prompts[1]
     assert "已完整列出的不要再请求" in llm.reflect_prompts[1]
+    # 元素清单的账目一个字的正文都不带(标题豁免只属于来源清单)。
+    assert "标题:" not in llm.reflect_prompts[1]
+
+
+# ------------------------------------------------- 来源清单的标题回喂(定向豁免)
+
+def test_source_chain_note_feeds_back_the_titles(repo):
+    """来源清单账目必须带**标题**,否则 prompt 教的「按标题逐篇深挖」下一轮就断链。
+
+    模型看不到标题时,它被教的那条路径无从执行:只能拿已存摘要凑答案,或者反复请求
+    同一个集合。标题对这一个集合不是「条目正文」,它是这份清单唯一的可操作输出。
+    """
+    notebook = _seed(repo, formulas=1)
+    _add_source_row(repo, notebook.id, "s2", "论文二")
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    retriever.run(notebook.id, "当前notebook的文章分析", "", limits=limits)
+
+    note = llm.reflect_prompts[1]
+    assert "「来源清单」已完整列出 2 条" in note
+    assert "标题: 《论文一》《论文二》" in note
+    assert "(+" not in note              # 两条没超上限,不该出现省略尾巴
+
+
+def test_source_titles_note_is_bounded_three_ways():
+    """三重硬界:条数 / 每条字符 / 合计字符。超出写 (+N more)。
+
+    直接测纯函数——e2e 要构造 20+ 份文档才能碰到上限,那既慢又把「上界是多少」埋进
+    夹具里。分母用「有名字的条目数」:没有显示名的文档没有可回喂的句柄,把它算进
+    (+N more) 会让模型去找一个不存在的标题。
+    """
+    from app.services import reasoning_retrieval as rr
+
+    class _Item:
+        def __init__(self, title):
+            self.source_title = title
+
+    # ① 条数上界:第 21 条起进 (+N more)。
+    many = [_Item(f"文档{index:02d}") for index in range(30)]
+    note = rr._source_titles_note(many)
+    assert note.count("《") == rr._ENUM_NOTE_SOURCE_TITLES == 20
+    assert "(+10 more)" in note
+
+    # ② 每条字符上界:长标题被截到 60,不是整条丢掉。
+    long_title = "长" * 200
+    one = rr._source_titles_note([_Item(long_title)])
+    assert f"《{'长' * rr._ENUM_NOTE_TITLE_CHARS}》" in one
+    assert "长" * (rr._ENUM_NOTE_TITLE_CHARS + 1) not in one
+
+    # ③ 合计字符上界:一串长标题在撞到 800 之前就停,且整段真的不超。
+    long_ones = [_Item("长" * 60) for _ in range(20)]
+    capped = rr._source_titles_note(long_ones)
+    assert len(capped) <= rr._ENUM_NOTE_TITLES_TOTAL_CHARS + len("，标题: ") + 16
+    assert capped.count("《") < 20        # 合计上界比条数上界先生效
+    assert "more)" in capped
+
+    # 无名文档不占标题位,也不进 (+N more) 的分母。
+    mixed = [_Item("有名"), _Item(""), _Item("   ")]
+    assert rr._source_titles_note(mixed) == "，标题: 《有名》"
+    assert rr._source_titles_note([_Item(""), _Item("  ")]) == ""
+    assert rr._source_titles_note([]) == ""
 
 
 def test_repeating_a_finished_collection_trips_the_stale_breaker(repo):

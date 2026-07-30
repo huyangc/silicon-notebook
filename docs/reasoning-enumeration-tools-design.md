@@ -428,6 +428,19 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
   跨库沿用围栏）；标签 parity 守卫扩展。
 - 合成：走既有 enumeration_prompt_block（块头 `[Enumeration: sources, ...]`）；模型据目录
   可对每篇标题继续 add_subquery 定向深挖（既有机制，零新代码）。
+- **【订正，codex R3 P1】账目回喂必须带标题**：`_enumeration_note` 原本只回「标签 + 覆盖计数」，
+  于是「先枚举目录、再按标题逐篇深挖」这条 prompt 教出来的路径在下一轮就断了——模型手上一个
+  标题都没有，只能拿已存摘要凑答案或反复请求同一集合。这是对「账目只回账目、不回条目正文」
+  那条规则的**定向豁免**，只对 sources 成立：对这一个集合，标题不是条目正文，它是这份清单
+  唯一的可操作输出。边界 = 三重硬界（≤20 条 / 每条 ≤60 字符 / 合计 ≤800 字符，超出写
+  `(+N more)`），因此是**常数级**、不随清单长度增长；只回标题不回摘要；元素/知识对象清单的
+  账目一个字正文都不带（它们的正文属于合成预算，而模型也不靠它们发起下一步动作）。常数依据：
+  20 = 结果卡 `initialVisibleRows`（同一个「一屏能扫多少」判断），60 = 本模块
+  `_INTENT_DIRECTION_LABEL_CHARS` 的先例，800 与集合地图块上限同量级。`(+N more)` 的分母是
+  「有显示名的条目数」——无名文档没有可回喂的句柄，算进去会让模型去找一个不存在的标题。
+  信任等级不变：标题与 `_summarize` 已在同一份 prompt 里回喂的 `el.source_title` /
+  `c.source_title` / KG `name` 同类，`UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION`（reflect 在
+  `untrusted_evidence` 开启时注入）的措辞逐字点名 "every retrieved title"。
 - reflect_prompt 动作说明补一句：「库里有哪几篇/逐篇分析/文章总结」类问题先枚举 sources
   拿目录（标题+摘要），再按需对各篇标题 add_subquery 深挖。
 - **自适应粒度（对照 NotebookLM 实测行为，用户提供 57 源案例）**：合成侧指导——来源少时
@@ -485,7 +498,11 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
 - **遍历顺序 = 来源页签顺序 `(created_at, id)`**（订正 spec-review B3：先前按 id 排，那是一个
   用户从没见过的顺序，而「前 N 篇」的截断前缀因此没有意义）。排序键随信号行一起回来
   （`source_change_signal_rows` 多投影一列 `created_at`，同一行访问、零额外查询），双后端各自
-  归一化成「按字典序比较即等于本后端 `ORDER BY created_at, id`」的文本——PostgreSQL 侧这条
+  归一化成「按字典序比较即等于本后端 `ORDER BY created_at, id`」的文本。**两侧的来源列表查询
+  也必须带 `id` 次键**（codex R3 P2）：批量导入会写出并列 `created_at`，SQLite 对并列行不保证
+  稳定顺序，`list_sources`/`list_sources_page` 缺次键就与目录的 `(created_at, id)` 序分叉，
+  「前 N 篇」在页签与模型手上成了不同的 N 篇（并列时还会让翻页重复/漏行）；PostgreSQL 侧
+  `ORDER BY created_at,id COLLATE "C"` 本来就带，这是 SQLite 单侧补齐。排序键本身——PostgreSQL 侧这条
   归一化**必须先转 UTC**（codex R2 P2）：`timestamptz` 的 offset 不是一列之内的常量，跨 DST
   转换时相隔一小时的两行会读成 `…01:30:00+02:00` 与 `…01:30:00+01:00`，按字符串比是先比墙钟
   数字再比 offset 文本，于是 `+01:00` 排在 `+02:00` 前面——而它是**更晚**的那个瞬间。不归一

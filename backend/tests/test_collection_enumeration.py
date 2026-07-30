@@ -1641,6 +1641,39 @@ def test_source_order_is_the_source_tab_order_not_id_order(repo):
     assert listed != sorted(listed), "按 id 排就退回了那个用户没见过的顺序"
 
 
+def test_tied_created_at_orders_identically_in_tab_and_roster(repo):
+    """并列 `created_at` 时来源页签与目录必须**同序**(codex R3 P2)。
+
+    批量导入会给同一批文档写同一个 `created_at`。SQLite 对并列行不保证稳定顺序,
+    而目录按 `(created_at, id)` 走——`list_sources` 缺了 `, id` 次键就与它分叉,
+    于是「前 N 篇」在页签里是一批、在模型手上是另一批,而那份前缀正是模型据以逐篇
+    深挖的东西。PostgreSQL 侧本来就带次键,所以这是 SQLite 单侧的补齐。
+
+    这条也顺带钉住翻页:并列时间戳下没有次键,`LIMIT/OFFSET` 会重复或漏行。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    tied = "2026-07-15T00:00:00"
+    # 插入顺序与 id 字典序相反,好让「没有次键就按插入序/rowid 出来」暴露出来。
+    for source_id in ("s-c", "s-a", "s-b"):
+        _add_document(repo, notebook.id, source_id, created_at=tied)
+
+    tab = [source.id for source in repo.list_sources(notebook.id)]
+    roster = _source_ids(_enum(repo).enumerate_sources(
+        notebook.id, budget=_budget()))
+
+    assert tab == ["s-a", "s-b", "s-c"], "并列时间戳必须按 id 次键定序"
+    assert roster == tab
+    # 分页与整表同序(并列时间戳下这才是「第 1 页 + 第 2 页 == 整表」)。
+    first = repo.list_sources_page(notebook.id, offset=0, limit=2)
+    second = repo.list_sources_page(notebook.id, offset=2, limit=2)
+    assert [item.id for item in first.items] + [
+        item.id for item in second.items] == tab
+    # 截断前缀因此在两侧指同一批文档。
+    truncated = _source_ids(_enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=2)))
+    assert truncated == tab[:2]
+
+
 def test_truncated_source_listing_keeps_the_earliest_documents(repo):
     """截断前缀因此有意义:「前 N 篇」= 最早加入的 N 篇。
 

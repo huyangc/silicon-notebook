@@ -72,7 +72,12 @@ class SourceStore:
             rows = db.execute(
                 "SELECT * FROM sources WHERE notebook_id = ? "
                 f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
-                "ORDER BY created_at ASC",
+                # `, id` 是必需的次键,不是装饰:`created_at` 在同一次批量导入里
+                # 会出现并列值,而 SQLite 对并列行不保证稳定顺序。来源清单枚举
+                # 按 `(created_at, id)` 走,两处一旦分叉,「前 N 篇」在页签与目录
+                # 里就是不同的 N 篇——而那正是模型据以逐篇深挖的那份前缀。
+                # PostgreSQL 侧本来就带(`ORDER BY created_at,id COLLATE "C"`)。
+                "ORDER BY created_at ASC, id ASC",
                 (notebook_id,),
             ).fetchall()
             return self.sources_from_rows(db, rows)
@@ -102,7 +107,10 @@ class SourceStore:
             total = db.execute(
                 f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]
             rows = db.execute(
-                f"SELECT * FROM sources {where} ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                f"SELECT * FROM sources {where} "
+                # 同上:并列 created_at 下没有次键,翻页会重复/漏行,而且与来源
+                # 清单的 `(created_at, id)` 序分叉。
+                "ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             ).fetchall()
             items = self.sources_from_rows(db, rows)

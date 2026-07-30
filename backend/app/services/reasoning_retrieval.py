@@ -240,6 +240,68 @@ def _enumeration_step_summary(label: str, coverage, source_id: str) -> str:
 # 数量本就被 max_steps 与行预算夹住,这里只防摘要被一串同类条目撑长。
 _ENUM_NOTE_MAX_ITEMS = 8
 
+# 来源清单账目里回喂的标题上界。三个常数各有依据,不是随手取的:
+#   * 20 条 —— 与结果卡的初始可见行数(`ask-retrieval-effort.ts`
+#     `initialVisibleRows`)同一个数:「一份目录一次能扫多少」这个判断 UI 已经做过
+#     一次,模型侧没有理由取一个不一样的;
+#   * 每条 60 字符 —— 沿用本模块 `_INTENT_DIRECTION_LABEL_CHARS` 立的先例(同一份
+#     prompt 里「一个标签占一行」的宽度);
+#   * 合计 800 字符 —— 与集合地图块的硬上限同量级(`COLLECTION_MAP_MAX_CHARS`=600
+#     加块头),让「账目 + 地图」两段服务端小块在最坏情况下仍是常数级开销。
+_ENUM_NOTE_SOURCE_TITLES = 20
+_ENUM_NOTE_TITLE_CHARS = 60
+_ENUM_NOTE_TITLES_TOTAL_CHARS = 800
+
+
+def _source_titles_note(items) -> str:
+    """来源清单账目后面附的**有界**标题清单。
+
+    **这是对「账目回喂只报账目、不带条目正文」那条规则的定向豁免**,只对 sources
+    集合成立,理由是那条规则在这里恰好自相矛盾:reflect prompt 教模型「先枚举目录
+    拿到标题,再按标题 add_subquery 逐篇深挖」,而账目若只回「「来源清单」已完整列出
+    7 条」,模型手上一个标题都没有——它被教的那条路径在下一轮就断了,只能拿已存摘要
+    凑答案。目录的**内容就是那些标题**:对这一个集合,标题不是「条目正文」,它是这份
+    清单唯一的可操作输出。
+
+    边界(为什么这不会重新打开正文膨胀那个洞):
+    * 只有 sources 集合走这条路。元素/知识对象清单的账目一个字的正文都不带——它们
+      的正文属于合成阶段的证据预算,而且模型不需要靠它们发起下一步动作;
+    * 三重硬界(条数/每条字符/合计字符),所以它是**常数级**,不随清单长度增长。
+      600 篇文档的库与 7 篇的库在这里付一样的钱;
+    * 摘要**不**回喂——只有标题。标题是句柄,摘要是内容。
+
+    信任等级不变:标题与 `_summarize` 已经在同一份 prompt 里回喂的
+    `el.source_title` / `c.source_title` / KG `name` 完全同类,而
+    `UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION`(reflect 在 `untrusted_evidence` 开启时
+    注入)的措辞逐字点名了 "every retrieved title"。所以这一条没有引入新的不可信
+    面,只是把已在场的那一类多带了几条。
+    """
+    titles: List[str] = []
+    used = 0
+    for item in items:
+        raw = " ".join(str(getattr(item, "source_title", "") or "").split())
+        if not raw:
+            continue
+        if len(titles) >= _ENUM_NOTE_SOURCE_TITLES:
+            break
+        text = raw[:_ENUM_NOTE_TITLE_CHARS]
+        # +2 是《》的开销;先算再收,不能先塞进去再回头砍。
+        if used + len(text) + 2 > _ENUM_NOTE_TITLES_TOTAL_CHARS:
+            break
+        titles.append(text)
+        used += len(text) + 2
+    if not titles:
+        return ""
+    # 分母用「有名字的条目数」而不是 len(items):没有显示名的文档在这份清单里本来
+    # 就没有可回喂的句柄,把它算进 (+N more) 会让模型去找一个不存在的标题。
+    nameable = sum(
+        1 for item in items
+        if str(getattr(item, "source_title", "") or "").strip()
+    )
+    omitted = max(0, nameable - len(titles))
+    tail = f"(+{omitted} more)" if omitted else ""
+    return "，标题: " + "".join(f"《{text}》" for text in titles) + tail
+
 
 def _enumeration_note(chains) -> str:
     """把本 run 的枚举账目回喂给 reflect(镜像 visited / attempted 回喂)。
@@ -248,7 +310,9 @@ def _enumeration_note(chains) -> str:
     (那是会被截断的相关性候选池),summary 也就一个字不提,于是模型只能反复请求
     同一个集合——第二次起要么被 already_enumerated 跳过、要么白花预算续跑。
     刻意只回喂**账目**(条数+覆盖状态)而不是条目正文:条目正文属于合成阶段的
-    证据预算(T5),塞进每一轮 reflect 会让 prompt 随清单长度线性膨胀。
+    证据预算(T5),塞进每一轮 reflect 会让 prompt 随清单长度线性膨胀。**唯一的
+    定向豁免是来源清单的标题**,见 ``_source_titles_note``:对那一个集合,标题就是
+    模型下一步动作的句柄,不给它等于把 prompt 教的「按标题逐篇深挖」当场掐断。
     """
     if not chains:
         return ""
@@ -257,17 +321,23 @@ def _enumeration_note(chains) -> str:
         coverage = chain.outcome.coverage
         label = _collection_label(chain.outcome.collection, chain.outcome.kind)
         returned_total = getattr(coverage, "returned_total", 0)
+        titles = (
+            _source_titles_note(chain.outcome.items)
+            if chain.outcome.collection == "sources" else ""
+        )
         if chain.state == "complete":
-            parts.append(f"「{label}」已完整列出 {returned_total} 条")
+            parts.append(f"「{label}」已完整列出 {returned_total} 条{titles}")
         elif chain.state == "conflict":
             parts.append(
                 f"「{label}」列出 {returned_total} 条后资料发生变动,"
-                "既不能继续也不能当作完整"
+                f"既不能继续也不能当作完整{titles}"
             )
         else:
             total = getattr(coverage, "total", None)
             denominator = f"/共 {total}" if total is not None else ""
-            parts.append(f"「{label}」已列出 {returned_total} 条{denominator},尚未列完")
+            parts.append(
+                f"「{label}」已列出 {returned_total} 条{denominator},尚未列完{titles}"
+            )
     omitted = max(0, len(chains) - _ENUM_NOTE_MAX_ITEMS)
     tail = f",另有 {omitted} 个清单从略" if omitted else ""
     return (
