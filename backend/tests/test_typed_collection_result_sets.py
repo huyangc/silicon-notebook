@@ -1689,7 +1689,9 @@ def test_document_rows_carry_their_own_citation_and_bind_as_evidence(arepo):
     # (3) 模型引用后建出的锚点。
     anchor = next(a for a in (resp.anchors or []) if a.key == "k5001")
     assert anchor.object_type == "source"
-    assert anchor.object_id == "", "文档不是图谱节点,object_id 必须为空"
+    # object_id 是**查表身份**(= enumerated_item_id),不是图谱句柄:下游按它找这一行
+    # 的 Citation。图谱按钮的抑制由 object_type=="source" 决定,不靠这里为空。
+    assert anchor.object_id == "s1"
     assert anchor.source_id == "s1"
     assert anchor.element_id == ""
     assert anchor.name == "论文一"
@@ -1701,3 +1703,9 @@ def test_document_rows_carry_their_own_citation_and_bind_as_evidence(arepo):
         if step.step_type == "synthesis"
     )
     assert synthesis.detail["included_collections"] >= 1
+
+    # (5) 答案级 citations 数组必须**含**这份被引文档。下游按 `anchor.object_id`
+    # 查 citation 表,而那张表按文档的 source_id 键控——所以文档锚点的 object_id
+    # 必须携带查表身份,否则被引文档在 citations 里凭空消失(codex R7 P2)。
+    assert [c.source_id for c in (resp.citations or [])] == ["s1"]
+    assert (resp.citations or [])[0].element_id == ""

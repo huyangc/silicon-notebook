@@ -281,6 +281,20 @@ function CrossLibraryBadge({
 }
 
 
+// 引用的 object_type 不是 KG 类型时的界面词。两类:来源清单的**文档**行,以及
+// #402 给来源元素建的引用。它们都不该摆 KG 类型标记(那个形状是给知识对象看的),
+// 也都**不能**走 kgTypeLabel —— 它对未知类型是原样返回,于是内部词 `source` /
+// `element` 会照字面上屏(codex R7 P2)。
+//
+// `Object.hasOwn` 而非 `NON_KG_REFERENCE_LABELS[type]`:后者走原型链,自定义类型名
+// 恰为 "constructor"/"__proto__" 时会命中继承属性——与 kg-type-mark.tsx 里记下的
+// 同一个坑,同款防护。
+const NON_KG_REFERENCE_LABELS: Record<string, string> = {
+  source: "来源",
+  element: "原文",
+};
+
+
 function CollectionItemCitation({ citation }: { citation: Citation }) {
   return (
     <details className="answer-collection-citation">
@@ -764,7 +778,11 @@ function SelectedReferenceDetail({
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
         <strong>{reference.displayLabel}</strong>
-        {objectType && <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>}
+        {objectType && (
+          Object.hasOwn(NON_KG_REFERENCE_LABELS, objectType)
+            ? <span>{NON_KG_REFERENCE_LABELS[objectType]}</span>
+            : <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>
+        )}
         {tier && (
           <span
             className={`tier-badge tier-${tier}`}

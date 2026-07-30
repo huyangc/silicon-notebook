@@ -657,14 +657,22 @@ def _preview_evidence(
         name = str(item.location_label or item.source_title)
         definition = str(item.text)
     elif collection == "sources":
-        # A cited document row binds to the DOCUMENT, and ``object_id`` stays
-        # empty on purpose: that field is the knowledge-graph handle, and a
-        # source is not a graph object.  Leaving it empty is what makes the
-        # reference detail's graph button correctly report "this citation is not
-        # bound to a knowledge object" instead of offering a lookup that cannot
-        # resolve.  The locator the row DOES have (its ``source_id``) arrives
-        # below from the citation, which is what "查看原文" needs.
-        object_id = ""
+        # ``object_id`` is the row's LOOKUP IDENTITY, not a knowledge-graph
+        # handle: it is what ``enumerated_item_id`` returns, and it is the key
+        # AskService uses to find this row's ``Citation`` when the answer cites
+        # it.  For an element row that identity is the element id, for a KG row
+        # the object id, and for a document row its source id — the same one
+        # ``collection_item_citations`` keyed the table with.
+        #
+        # This was empty in the first cut, on the theory that "a source is not a
+        # graph object" and emptiness would suppress the graph button.  Both
+        # halves of that were wrong: graph suppression is decided by
+        # ``object_type == "source"`` in the reference detail (not by an empty
+        # id), and the emptiness silently dropped every cited document from the
+        # answer-level ``citations`` array, because the lookup found nothing
+        # under "" (codex R7 P2).  Pinned end to end by
+        # ``test_document_rows_carry_their_own_citation_and_bind_as_evidence``.
+        object_id = str(item.source_id)
         object_type = "source"
         name = str(item.source_title or item.source_id)
         definition = str(item.doc_type_label or "")
