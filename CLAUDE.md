@@ -181,7 +181,7 @@ codex exec review --base <base> --ephemeral \
   -c 'model_reasoning_effort=medium' -c 'notify=[]' -o <out>
 ```
 
-`review --base` 与自定义 PROMPT 位置参数互斥（报 `cannot be used with '[PROMPT]'`），所以不传自定义指令，正文是 codex 原生英文输出。
+`review --base` 与自定义 PROMPT 位置参数互斥（报 `cannot be used with '[PROMPT]'`），所以不传自定义指令，正文是 codex 原生英文输出。对 codex 评审行为的约定只能经 `AGENTS.md` 传达（codex 每轮自动加载它）：已写明评审场景**勿重跑 `check.sh`/前端构建**（评审沙箱写不了 `frontend/node_modules`，必然 EPERM；完整门由提交方本地跑并在 PR 附结果）——该规则仅限评审场景，不放松实现场景的硬门。
 
 ### 判成败要双判据
 

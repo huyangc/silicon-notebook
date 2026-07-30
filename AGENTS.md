@@ -495,6 +495,16 @@ outside-sandbox execution directly for GitHub network operations (`git fetch`,
 `git push`, and `gh auth/repo/pr`); ordinary local read-only Git inspection remains
 inside the sandbox.
 
+Codex review sessions (`codex exec review`): do NOT re-run `scripts/check.sh`
+or the frontend build/vitest lanes while reviewing a diff. The review sandbox
+cannot write under `frontend/node_modules`, so those lanes fail with EPERM
+regardless of code correctness, and the submitter already runs the full local
+gate and posts its result on the PR. Review by reading the diff; when a claim
+needs verification, prefer targeted read-only checks (focused pytest files,
+contract scripts). This is a review-scope rule only — it does not relax any
+gate for implementation sessions, where the full `scripts/check.sh` remains
+mandatory before a PR.
+
 ```bash
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
