@@ -106,6 +106,122 @@ class EvidenceContextService:
                 titles[source_id] = title
         return titles
 
+    def collection_item_citations(
+        self,
+        items: Sequence[object],
+        *,
+        active_notebook_id: str,
+    ) -> dict[str, Citation]:
+        """Resolve one bounded original-source citation per enumerated row.
+
+        The enumeration executor restricts items to the active notebook's
+        participant set, and this boundary is rechecked here before any global
+        element hydration.  The hydrated source's real notebook must also
+        match the item's origin.  The browser receives only a compact locator
+        and excerpt and never needs direct membership in a mounted base.
+
+        KG rows expose at most ``MAX_EVIDENCE_REFS`` element ids; hydrate all
+        requested ids in one bounded store read, then select the first live
+        occurrence in the executor's stable order.  Element rows already carry
+        their exact source projection and therefore remain citable even if the
+        optional hydration read misses.
+        """
+        participants = set(
+            self.notebooks.participant_notebook_ids(active_notebook_id)
+        )
+        rows = [
+            item for item in items
+            if str(getattr(item, "notebook_id", "") or active_notebook_id)
+            in participants
+        ]
+        evidence_ids = list(dict.fromkeys(
+            str(element_id)
+            for item in rows
+            for element_id in (
+                ([getattr(item, "element_id", "")]
+                 if getattr(item, "element_id", "") else [])
+                + list(getattr(item, "evidence_element_ids", ()) or ())
+            )
+            if element_id
+        ))
+        hydrated = self.sources.evidence_elements(evidence_ids)
+
+        source_ids: list[str] = []
+        for item in rows:
+            direct_source_id = str(getattr(item, "source_id", "") or "")
+            if direct_source_id:
+                source_ids.append(direct_source_id)
+            for element_id in (getattr(item, "evidence_element_ids", ()) or ()):
+                row = hydrated.get(str(element_id)) or {}
+                source_id = str(row.get("source_id") or "")
+                if source_id:
+                    source_ids.append(source_id)
+        source_metadata = self.source_metadata(source_ids)
+        titles = self.citation_titles(source_ids)
+
+        citations: dict[str, Citation] = {}
+        for item in rows:
+            item_id = str(
+                getattr(item, "element_id", "")
+                or getattr(item, "object_id", "")
+                or ""
+            )
+            if not item_id:
+                continue
+            origin = str(getattr(item, "notebook_id", "") or "")
+            expected_notebook_id = origin or active_notebook_id
+            if expected_notebook_id not in participants:
+                continue
+            direct_element_id = str(getattr(item, "element_id", "") or "")
+            evidence_id = direct_element_id
+            evidence_row: Mapping[str, Any] = {}
+            if direct_element_id:
+                evidence_row = hydrated.get(direct_element_id) or {}
+                source_id = str(getattr(item, "source_id", "") or "")
+                if str(
+                    (source_metadata.get(source_id) or {}).get("notebook_id") or ""
+                ) != expected_notebook_id:
+                    continue
+                location = str(getattr(item, "location_label", "") or "")
+                quoted = str(getattr(item, "text", "") or "")
+                source_title = str(getattr(item, "source_title", "") or "")
+            else:
+                source_id = ""
+                location = ""
+                quoted = ""
+                source_title = ""
+                for candidate_id in (
+                    getattr(item, "evidence_element_ids", ()) or ()
+                ):
+                    candidate = hydrated.get(str(candidate_id))
+                    if not candidate:
+                        continue
+                    candidate_source_id = str(candidate.get("source_id") or "")
+                    if str(
+                        (source_metadata.get(candidate_source_id) or {}).get("notebook_id") or ""
+                    ) != expected_notebook_id:
+                        continue
+                    evidence_id = str(candidate_id)
+                    evidence_row = candidate
+                    source_id = candidate_source_id
+                    location = str(candidate.get("location_label") or "")
+                    quoted = str(candidate.get("text") or "")
+                    break
+            if not source_id or not evidence_id:
+                continue
+            source_title = titles.get(source_id, source_title)
+            citations[item_id] = Citation(
+                label=f"{source_title} · {location}".strip(" ·"),
+                source_id=source_id,
+                element_id=evidence_id,
+                location_label=location,
+                quoted_span=quoted[:300],
+                tier=str(getattr(item, "tier", "personal") or "personal"),
+                notebook_id=(origin if origin != active_notebook_id else ""),
+                knowhow=_knowhow_ref(evidence_row) if evidence_row else None,
+            )
+        return citations
+
     def chunk_context(
         self,
         chunks: Sequence[RetrievedChunk],
@@ -427,6 +543,8 @@ class EvidenceContextService:
                         str(context.get("source_title", "")),
                     ),
                     location_label=str(context.get("location_label", "")),
+                    source_id=str(context.get("source_id", "")),
+                    element_id=str(context.get("element_id", "")),
                     tier=str(context.get("tier", "personal")),
                     # Task 14: 只有 chunk_context/knowledge_context 填了才非空
                     # (render_subgraph_context 的纯 graph-BFS 节点暂未填,`.get`

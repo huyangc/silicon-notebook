@@ -89,6 +89,45 @@ def test_classify_evidence_three_levels():
     assert lvl == "inferred" and top == 0.0
 
 
+def test_exact_enumeration_anchor_is_grounded_without_faking_ranked_relevance():
+    from app.services.retrieval import classify_evidence
+
+    lvl, top = classify_evidence(
+        [], [_anchor("row-1")], True, 0.18, 0.35,
+        exact_evidence_keys={"k1"},
+    )
+    assert lvl == "grounded"
+    assert top == 0.0
+
+
+def test_exact_enumeration_grounding_matches_the_cited_key_not_object_identity():
+    from app.models.schemas import AnswerAnchor
+    from app.services.retrieval import classify_evidence
+
+    ordinary_anchor = AnswerAnchor(
+        key="k1", object_id="same-object", object_type="claim", label="x"
+    )
+    lvl, _ = classify_evidence(
+        [_rk("same-object", "claim", 0.2)], [ordinary_anchor], True,
+        0.18, 0.35, exact_evidence_keys={"k5001"},
+    )
+    assert lvl == "overview"
+
+
+def test_enumerated_row_without_live_source_is_not_exact_grounding():
+    from app.models.schemas import AnswerAnchor
+    from app.services.retrieval import classify_evidence
+
+    anchor = AnswerAnchor(
+        key="k5001", object_id="orphan-object", object_type="claim", label="x"
+    )
+    lvl, top = classify_evidence(
+        [], [anchor], True, 0.18, 0.35, exact_evidence_keys=set()
+    )
+    assert lvl == "inferred"
+    assert top == 0.0
+
+
 def test_followup_rewrite_prompt():
     from app.services.prompts import followup_rewrite_prompt, FOLLOWUP_REWRITE_SCHEMA_HINT
     p = followup_rewrite_prompt("User: innovus中有哪些常见flow\nAssistant: ...RTL到GDSII...",

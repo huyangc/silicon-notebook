@@ -228,6 +228,18 @@ adds the indexed `(source_id, element_type, created_at, id)` ordering on
 (formula/table/image/code_block listings). PostgreSQL migration v15 mirrors
 v37 and is the paired business schema.
 
+### Typed Collection Citation Contract
+
+Every delivered element or KG-object collection row carries at most one live,
+bounded original-source `Citation`. Resolve mounted-library evidence on the
+server inside the active notebook's participant set; the browser must not call
+a mounted library's member-only source endpoints. Rows that enter answer
+synthesis use the isolated `k5001+` namespace and a reverse evidence map. Only
+bound row anchors may attribute the final answer; only a bound collection key
+with a live `source_id` and `element_id` may ground it. When an enumeration
+answer binds no anchor, do not display unrelated ranked-retrieval citations as
+if they sourced the list.
+
 ### Database Backend And Switching Contract
 
 - At the `open_fresh_live_sqlite` call boundary, a non-transient `sqlite3.OperationalError` is a source-binding identity failure. Locked, busy, and interrupted opens remain transient whole-batch retries; SQLite operational errors after that open boundary retain their existing schema/query classifications.

@@ -3718,6 +3718,28 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+.answer-collection-citation {
+  margin-top: 7px;
+  color: #536174;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.answer-collection-citation summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.answer-collection-citation p {
+  margin: 6px 0 0;
+  padding: 7px 9px;
+  border-left: 2px solid #c9d6f7;
+  background: #f8faff;
+  color: #3f4d61;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .answer-collection-open,
 .answer-collection-expand {
   border: 1px solid #c9d6f7;
@@ -3749,6 +3771,26 @@ button.chat-session-card {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-wrap: wrap;
+}
+
+.answer-collection-kg-citation {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.answer-collection-kg-citation .answer-collection-citation {
+  flex: 1;
+  margin-top: 0;
+}
+
+.answer-collection-citation-missing {
+  width: 100%;
+  color: #8a6370;
+  font-size: 12px;
 }
 
 /* KG 名称走 LatexText,isFormula 时是行内 KaTeX(没有 .element-formula 那样的

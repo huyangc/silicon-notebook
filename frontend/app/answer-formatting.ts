@@ -8,6 +8,8 @@ export type AnswerAnchorLike = {
   snippet?: string | null;
   source_title?: string;
   location_label?: string;
+  source_id?: string;
+  element_id?: string;
   tier?: string;
   // 多领域基准库(Task 14)：只在跨库命中(federated retrieval 从一个挂载的参考库
   // 找到、并非本次 ask 所在 notebook 的证据)时非空；本库内证据这个字段缺席

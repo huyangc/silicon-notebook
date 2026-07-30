@@ -300,6 +300,8 @@ export type AnswerAnchor = {
   snippet?: string | null;
   source_title: string;
   location_label: string;
+  source_id?: string;
+  element_id?: string;
   tier?: string;
   notebook_id?: string;
 };
@@ -386,6 +388,8 @@ export type TypedCollectionItem = {
   name?: string;
   section_path?: string;
   evidence_element_ids?: string[];
+  /** 首个仍存活的权威原文出处；跨库时由后端在 participant 范围内代理解析。 */
+  citation?: Citation;
   // 两种都填
   notebook_id?: string;
   tier?: string;

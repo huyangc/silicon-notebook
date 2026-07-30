@@ -163,6 +163,7 @@ class AskService:
     _MIX_PROMPT_BUFFER_TOKENS = 2000
     _MEMORY_KEY_BASE = 3000
     _ELEMENT_KEY_BASE = 4000
+    _COLLECTION_KEY_BASE = 5000
 
     def __init__(
         self,
@@ -848,6 +849,7 @@ class AskService:
         chunk_context_chars: int | None = None,
         element_items: int = 6,
         structured_block: str = "",
+        structured_map: dict | None = None,
         collection_map_block: str = "",
         counts_sink: dict | None = None,
     ):
@@ -894,7 +896,7 @@ class AskService:
             )
         if structured_block:
             source_context, source_map = self._bounded_context_append(
-                source_context, source_map, structured_block, {},
+                source_context, source_map, structured_block, structured_map or {},
                 budget_chars=chunk_budget,
             )
         if chunks:
@@ -995,18 +997,22 @@ class AskService:
         # map and contribute no keys, so every low-range key counted here is a
         # surviving chunk line — no ambiguity.
         included_elements = 0
+        included_collections = 0
         for key in source_map:
             try:
                 key_num = int(key[1:])
             except (TypeError, ValueError):
                 continue
-            if key_num >= self._ELEMENT_KEY_BASE:
+            if key_num >= self._COLLECTION_KEY_BASE:
+                included_collections += 1
+            elif key_num >= self._ELEMENT_KEY_BASE:
                 included_elements += 1
-        included_chunks = len(source_map) - included_elements
+        included_chunks = len(source_map) - included_elements - included_collections
         counts = {
             "included_kg": included_kg,
             "included_chunks": included_chunks,
             "included_elements": included_elements,
+            "included_collections": included_collections,
         }
         # Fill the sink BEFORE the model call: when the answer client raises
         # or returns malformed JSON, the synthesis trace must still report the
@@ -1872,6 +1878,8 @@ class AskService:
             # 出岔子。
             typed_collection_result_sets: list = []
             enumeration_block_dropped = False
+            collection_item_citations: dict = {}
+            structured_map: dict = {}
             if enumerations:
                 try:
                     from app.services.collection_enumeration_answer import (
@@ -1883,9 +1891,19 @@ class AskService:
                     # 载荷闸在这里按**真实 wire 形状**收口:执行器的池量的是
                     # 紧凑 dataclass,而联合体两臂的默认字段 + 结果元数据会让
                     # 下发/持久化的 JSON 明显更宽(见该函数 docstring)。
+                    collection_items = [
+                        item for outcome in enumerations for item in outcome.items
+                    ]
+                    collection_item_citations = (
+                        self.evidence_context.collection_item_citations(
+                            collection_items,
+                            active_notebook_id=notebook_id,
+                        )
+                    )
                     typed_collection_result_sets = typed_collection_results(
                         enumerations,
                         payload_chars=limits.structured_payload_chars,
+                        citations_by_item_id=collection_item_citations,
                     )
                     if answer_client.configured:
                         from app.services.collection_enumeration_answer import (
@@ -1913,7 +1931,9 @@ class AskService:
                             ),
                             inline_rows=limits.inline_answer_rows,
                             budget_chars=enum_budget_chars,
+                            citations_by_item_id=collection_item_citations,
                         )
+                        structured_map = preview.evidence_by_id
                         apply_synthesis_preview_counts(
                             typed_collection_result_sets, preview.shown_rows
                         )
@@ -1943,6 +1963,7 @@ class AskService:
                     chunk_context_chars=limits.chunk_context_chars,
                     element_items=limits.answer_element_items,
                     structured_block=structured_block,
+                    structured_map=structured_map,
                     collection_map_block=collection_map_prompt_block,
                     counts_sink=reasoning_counts)
                 return ans, llm_grounded_, anchors_
@@ -2000,6 +2021,19 @@ class AskService:
                     notebook_id="",
                     knowhow=element_refs.get(item.element_id),
                 ))
+            # Typed collection rows have their own deterministic k5001+
+            # bindings.  Mirror the cited rows into the fallback Citation
+            # contract as well, while keeping the anchor path authoritative.
+            seen_collection_citations: set[tuple[str, str]] = set()
+            for anchor in anchors:
+                citation = collection_item_citations.get(anchor.object_id)
+                if citation is None:
+                    continue
+                identity = (citation.source_id, citation.element_id)
+                if identity in seen_collection_citations:
+                    continue
+                seen_collection_citations.add(identity)
+                citations.append(citation)
             element_evidence = [SimpleNamespace(
                 object_id=item.element_id, relevance=float(item.score or 0.0),
             ) for item in elements]
@@ -2007,10 +2041,23 @@ class AskService:
                 list(top_hits) + list(chunks) + chain_evidence
                 + element_evidence + list(memory_hits)
             )
+            collection_exact_keys = {
+                key
+                for key, context in structured_map.items()
+                if context.get("source_id") and context.get("element_id")
+            }
             evidence_level, top_relevance = classify_evidence(
                 evidence_pool, anchors, llm_grounded,
-                self.settings.evidence_tau_low, self.settings.evidence_tau_high)
+                self.settings.evidence_tau_low, self.settings.evidence_tau_high,
+                exact_evidence_keys=collection_exact_keys,
+            )
             grounded = evidence_level == "grounded"
+
+            # An enumeration answer with no bound [k] marker has no verifiable
+            # attribution.  Do not let unrelated ranked-retrieval citations
+            # masquerade as sources for a checklist the model may have copied.
+            if enumerations and synthesis_ran and not anchors:
+                citations = []
 
             if synthesis_ran:
                 # The retriever's own last step reports which evidence it ADOPTED;
@@ -2038,6 +2085,9 @@ class AskService:
                         "included_kg": reasoning_counts.get("included_kg", 0),
                         "included_chunks": reasoning_counts.get("included_chunks", 0),
                         "included_elements": reasoning_counts.get("included_elements", 0),
+                        "included_collections": reasoning_counts.get(
+                            "included_collections", 0
+                        ),
                         # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
                         # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
                         # 让「工具跑了但答案没体现」这种情况在轨迹里可查。

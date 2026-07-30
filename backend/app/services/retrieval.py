@@ -166,24 +166,38 @@ def ensure_procedure_quota(scored_all, top_n, min_proc, key):
     return sorted(kept + extra, key=key, reverse=True)[:top_n]
 
 
-def classify_evidence(top_hits, anchors, llm_grounded, tau_low, tau_high):
+def classify_evidence(
+    top_hits,
+    anchors,
+    llm_grounded,
+    tau_low,
+    tau_high,
+    *,
+    exact_evidence_keys=None,
+):
     """Relevance-aware grounding. Returns (evidence_level, top_relevance).
 
-    - grounded : an answer-CITED hit is strongly relevant (>= tau_high) AND the
-                 LLM self-reported grounded. (Can't fake grounding on junk.)
+    - grounded : an answer-CITED ranked hit is strongly relevant (>= tau_high),
+                 or the cited key came from a source-backed exact enumeration,
+                 AND the LLM self-reported grounded.
     - overview : some relevant hit exists (top relevance >= tau_low) but the
                  answer is largely extrapolated from thin evidence.
     - inferred : no relevant hit / nothing cited — general-knowledge answer.
     """
+    exact_keys = set(exact_evidence_keys or ())
     top_rel = max((h.relevance for h in top_hits), default=0.0)
     if anchors:
         ids = {a.object_id for a in anchors}
         anchored_rel = max((h.relevance for h in top_hits if h.object_id in ids), default=0.0)
+        exact_anchored = bool({a.key for a in anchors} & exact_keys)
     else:
         anchored_rel = 0.0
-    if top_hits and llm_grounded and anchors and anchored_rel >= tau_high:
+        exact_anchored = False
+    if llm_grounded and anchors and (
+        (top_hits and anchored_rel >= tau_high) or exact_anchored
+    ):
         level = "grounded"
-    elif top_hits and anchors and top_rel >= tau_low:
+    elif anchors and ((top_hits and top_rel >= tau_low) or exact_anchored):
         level = "overview"
     else:
         level = "inferred"

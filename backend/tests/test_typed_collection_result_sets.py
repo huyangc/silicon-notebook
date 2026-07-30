@@ -299,7 +299,7 @@ def test_delivered_outcomes_make_the_preview_agree_with_the_card():
         [view], inline_rows=100, budget_chars=100_000
     )
     assert f"listed {delivered}/20, partial: payload limit" in preview.text
-    item_lines = [line for line in preview.text.splitlines() if line.startswith("- ")]
+    item_lines = [line for line in preview.text.splitlines() if line.startswith("k5")]
     assert len(item_lines) == delivered
 
 
@@ -465,8 +465,9 @@ def test_complete_header_reports_previewed_count():
                            complete=True))
     preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
     assert "[Enumeration: formula elements, listed 3/3, complete, previewed 3]" in preview.text
-    assert "- 论文一 · p1: 公式1" in preview.text
+    assert "k5001: [enumerated-source-element] 论文一 · p1: 公式1" in preview.text
     assert preview.shown_rows == [3]
+    assert list(preview.evidence_by_id) == ["k5001", "k5002", "k5003"]
 
 
 def test_partial_header_reports_budget_reason_and_previewed():
@@ -546,13 +547,14 @@ def test_source_scoped_outcome_states_single_source_scope():
     assert "[scope: single source 论文一]" in preview.text
 
 
-def test_kg_object_item_line_has_no_bracket_at_all():
+def test_kg_object_item_line_has_a_real_key_but_no_bogus_numeric_marker():
     outcome = _outcome(
         collection="kg_objects", kind="concept",
         items=[_kg_item(section_path="")],
         coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
     preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
-    assert "- 版图设计要点 · —" in preview.text
+    assert "k5001: [enumerated-concept] 版图设计要点 · —" in preview.text
+    assert preview.evidence_by_id["k5001"]["object_id"] == "k-1"
 
 
 def test_item_line_never_contains_a_bare_bracketed_number():
@@ -564,14 +566,14 @@ def test_item_line_never_contains_a_bare_bracketed_number():
         coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
     preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
     assert "[1]" not in preview.text
-    assert "- 版图设计要点 · 1" in preview.text
+    assert "k5001: [enumerated-concept] 版图设计要点 · 1" in preview.text
 
 
 def test_element_item_line_uses_dot_and_colon_not_brackets():
     outcome = _outcome(items=[_element_item(source_title="论文一", location_label="p3",
                                              text="公式3")])
     preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
-    assert "- 论文一 · p3: 公式3" in preview.text
+    assert "k5001: [enumerated-source-element] 论文一 · p3: 公式3" in preview.text
     assert "[论文一" not in preview.text
 
 
@@ -579,7 +581,7 @@ def test_multiline_element_text_collapses_onto_one_preview_line():
     outcome = _outcome(items=[_element_item(
         text="第一行\n第二行\n\n第三行   有多余空白")])
     preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=10_000)
-    item_lines = [line for line in preview.text.splitlines() if line.startswith("- ")]
+    item_lines = [line for line in preview.text.splitlines() if line.startswith("k5")]
     assert len(item_lines) == 1
     assert "第一行 第二行 第三行 有多余空白" in item_lines[0]
 
@@ -588,7 +590,7 @@ def test_element_text_clamped_to_prompt_line_excerpt_chars():
     long_text = "字" * 500
     outcome = _outcome(items=[_element_item(text=long_text)])
     preview = enumeration_prompt_block([outcome], inline_rows=100, budget_chars=100_000)
-    item_line = next(l for l in preview.text.splitlines() if l.startswith("- "))
+    item_line = next(l for l in preview.text.splitlines() if l.startswith("k5"))
     # 200 是 prompt 行摘录常量;传输/结果卡仍由执行器的 1000 字符摘录负责,
     # 这里只钉 prompt 行本身足够短。
     assert len(item_line) < 260
@@ -601,7 +603,7 @@ def test_inline_rows_cap_is_shared_across_outcomes_and_reports_omitted_count():
         coverage=_coverage(returned=5, returned_total=5, scanned=5, total=5,
                            complete=True))
     preview = enumeration_prompt_block([outcome], inline_rows=2, budget_chars=10_000)
-    item_lines = [line for line in preview.text.splitlines() if line.startswith("- ")]
+    item_lines = [line for line in preview.text.splitlines() if line.startswith("k5")]
     assert len(item_lines) == 2       # capped at inline_rows, not the full 5
     assert "(+3 more rows in the result card)" in preview.text
     assert preview.shown_rows == [2]
@@ -911,7 +913,7 @@ def test_enumerate_action_populates_result_sets_and_reaches_synthesis(arepo):
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
         reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
-        answer={"answer": "版图设计要点如下 [k1].", "grounded": True},
+        answer={"answer": "公式清单如下 [k5001].", "grounded": True},
     )
     _bind_reasoning(arepo, llm)
 
@@ -927,6 +929,9 @@ def test_enumerate_action_populates_result_sets_and_reaches_synthesis(arepo):
     # previewed 全部 3 条(未截断)→ synthesis 也认为完整。
     assert row.synthesis_rows == 3
     assert row.synthesis_complete is True
+    assert all(item.citation for item in row.items)
+    assert row.items[0].citation.source_id == "s1"
+    assert row.items[0].citation.element_id == "el-001"
 
     assert llm.answer_prompts, "answer synthesis must have run"
     prompt = llm.answer_prompts[-1]
@@ -979,7 +984,7 @@ def test_enumerate_only_run_with_no_other_evidence_still_reaches_synthesis(arepo
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点", "types": ["formula"]}]},
         reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
-        answer={"answer": "仅根据清单作答。", "grounded": True},
+        answer={"answer": "仅根据清单作答 [k5001].", "grounded": True},
     )
     _bind_reasoning(arepo, llm)
 
@@ -987,9 +992,31 @@ def test_enumerate_only_run_with_no_other_evidence_still_reaches_synthesis(arepo
 
     assert not resp.related_knowledge  # top_hits 确实是空的,不是巧合
     assert llm.answer_prompts, "synthesis must actually run"
-    assert resp.answer == "仅根据清单作答。"
+    assert resp.answer == "仅根据清单作答 [k5001]."
     assert resp.llm_mode != "deterministic"
     assert any(row.kind == "collection" for row in resp.result_sets)
+    assert [anchor.key for anchor in resp.anchors] == ["k5001"]
+    assert resp.anchors[0].source_id == "s1"
+    assert resp.anchors[0].element_id == "el-001"
+    assert resp.evidence_level == "grounded"
+
+
+def test_enumeration_answer_without_bound_row_does_not_show_unrelated_fallback_citations(
+    arepo,
+):
+    nb = _seed(arepo, formulas=2, with_kg=True)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点", "types": ["formula"]}]},
+        reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
+        answer={"answer": "清单里有两项。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert resp.anchors == []
+    assert resp.citations == []
+    assert resp.evidence_level == "inferred"
 
 
 # ------------------------------------------------- 无图笔记本也够得到枚举工具
@@ -1006,7 +1033,7 @@ def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
         reflects=[_enumerate_action(), {"next_action": "answer", "sufficient": True}],
-        answer={"answer": "已列出公式 [k1].", "grounded": True},
+        answer={"answer": "已列出公式 [k5001].", "grounded": True},
     )
     _bind_reasoning(arepo, llm)
 
@@ -1279,6 +1306,6 @@ def test_wire_payload_ceiling_bites_end_to_end_and_prompt_agrees_with_the_card(
     # prompt 里的清单行数不得多于卡片真正携带的条数。
     item_lines = [
         line for line in prompt.splitlines()
-        if line.startswith("- 论文一 · ")
+        if line.startswith("k5") and "论文一 · " in line
     ]
     assert len(item_lines) == delivered

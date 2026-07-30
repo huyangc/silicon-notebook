@@ -268,7 +268,12 @@
   未知 kind 有意 fail-loud；补反序列化测试。
 - 枚举块预算：上限 `chunk_context_chars // 2`（为 chunks/elements 保底），prompt 条目行
   text 截 200 字符（卡片/transport 仍用执行器 1000 字符摘录），块头预留优先保活，条目行
-  单行化且不得出现可与引用正则冲突的 `[数字]` 形状。
+  单行化且不得出现可与引用正则冲突的 `[数字]` 形状。进入预览的条目使用隔离的
+  `k5001+` id 和反向证据映射；模型用到哪一行就引用哪一个 `[k]`，只有实际绑定的清单
+  锚点可为答案归因。只有带存活 `source_id`/`element_id` 的绑定键才能通过单独的
+  exact-evidence 合同判 grounded，且按实际引用 key 而非 object id 匹配（同一对象的普通
+  `k1` 命中不能借 `k5001` 绕过相关度阈值）；枚举答案无锚点时清空无关
+  ranked-citation 回退，避免伪归因。
 - `completeness_unavailable` 免责文案更新：**【codex 第 1 轮 P1-2 收紧后的最终规则】**
   四条同时成立才不前置——① `result_scope != "aggregate"`；② 意图合同的 `constraints` /
   `excluded_topics` / `assumptions` 全为空；③ 至少一条清单结果 `returned_total > 0`；
@@ -289,9 +294,11 @@
 - 面向用户文案：元素侧「公式 / 表格 / 图片 / 代码块清单」，知识对象侧「概念 / 论断 /
   公式 / 过程知识对象清单」（与后端 trace 标签同口径，两张映射全域不重名）；
   「已全部列出 / 部分结果」；truncated_reason 经中文映射上屏（不吐内部 token）——过词汇守卫。
-- 跨库条目收口（v1）：挂载参考库的条目显示「来自参考库《名》」标注，不渲染「查看来源」
-  跳转、图片降级占位——挂载不等于该库直接成员权限（红线），来源/资产端点是 owner∪member
-  口径；participant 集内的后端代理读取（与图谱引用定位红线同构）登记为独立后续任务。
+- 跨库条目收口：每个送达条目至多携带一条有界原文 `Citation`；KG 对象从最多三个
+  evidence element id 中取首个仍存活的元素。挂载参考库的证据由后端在 active notebook
+  participant 集内代理解析，卡片可原地展开标题/位置/摘录，但仍不渲染「查看来源」跳转，
+  图片也继续降级占位——挂载不等于该库直接成员权限（红线），浏览器绝不直连其
+  owner∪member 来源/资产端点。历史 KG 引用全部失效时明确显示「暂无可用原文出处」。
 - 图片条目可见性触发加载（IntersectionObserver，测试环境回退立即加载）——防止大清单展开
   产生数百并发鉴权资产请求。
 - enumerate trace 步 detail 展示适配（scanned_rows 分支已在 reasoning-trace.ts）。
