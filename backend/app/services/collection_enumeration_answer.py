@@ -31,7 +31,7 @@ never the outcomes.)
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, List, Sequence
+from typing import TYPE_CHECKING, Any, List, Mapping, Sequence
 
 from app.core.ask_retrieval_policy import EXPLICIT_PARTIAL_OVERFLOW
 from app.models.ask import (
@@ -59,7 +59,10 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _typed_item(raw: object) -> TypedCollectionItem:
+def _typed_item(
+    raw: object,
+    citations_by_item_id: Mapping[str, object] | None = None,
+) -> TypedCollectionItem:
     """Project one ``ElementItem``/``KgObjectItem`` onto the shared wire item.
 
     ``isinstance`` rather than a ``collection`` string switch: the outcome's
@@ -75,6 +78,7 @@ def _typed_item(raw: object) -> TypedCollectionItem:
     ``test_max_evidence_refs_parity_between_executor_and_wire_model``) would
     otherwise turn a widened executor value into a 500 instead of a clamp.
     """
+    citations = citations_by_item_id or {}
     if isinstance(raw, ElementItem):
         return TypedCollectionItem(
             item_id=raw.element_id,
@@ -86,6 +90,7 @@ def _typed_item(raw: object) -> TypedCollectionItem:
             asset_id=raw.asset_id,
             notebook_id=raw.notebook_id,
             tier=raw.tier,
+            citation=citations.get(raw.element_id),
         )
     if isinstance(raw, KgObjectItem):
         return TypedCollectionItem(
@@ -95,6 +100,7 @@ def _typed_item(raw: object) -> TypedCollectionItem:
             notebook_id=raw.notebook_id,
             tier=raw.tier,
             evidence_element_ids=list(raw.evidence_element_ids)[:MAX_EVIDENCE_REFS],
+            citation=citations.get(raw.object_id),
         )
     raise TypeError(f"unknown collection-enumeration item type: {type(raw)!r}")
 
@@ -126,6 +132,7 @@ def typed_collection_results(
     outcomes: Sequence["CollectionEnumerationOutcome"],
     *,
     payload_chars: int,
+    citations_by_item_id: Mapping[str, object] | None = None,
 ) -> List[TypedCollectionResult]:
     """Map one run's enumeration outcomes onto ``AskResponse.result_sets`` rows.
 
@@ -175,6 +182,7 @@ def typed_collection_results(
     is still in the reasoning trace, where it belongs as cost accounting.
     """
     budget = max(0, int(payload_chars))
+    item_citations = citations_by_item_id or {}
     results: List[TypedCollectionResult] = []
     for outcome in outcomes:
         is_elements = outcome.collection == "elements"
@@ -192,7 +200,7 @@ def typed_collection_results(
     for result, outcome in zip(results, outcomes):
         trimmed = False
         for raw in outcome.items:
-            item = _typed_item(raw)
+            item = _typed_item(raw, item_citations)
             cost = _wire_chars(item) + 1
             if cost > remaining:
                 trimmed = True
@@ -310,6 +318,12 @@ _REASON_LABELS = {
 # for every row again via ``inline_rows``/``budget_chars``.
 _PROMPT_LINE_EXCERPT_CHARS = 200
 
+# Dedicated namespace for deterministic collection rows.  Existing answer
+# evidence uses k1+, k1001+, k2001+, k3001+ and k4001+; collection previews
+# start at k5001 so their reverse bindings cannot collide with any ranked
+# retrieval producer.
+COLLECTION_KEY_BASE = 5000
+
 # A single, one-time reminder that the preview is a SUBSET of what was
 # listed. Mirrors ``structured_prompt_block``'s coverage-header instruction
 # sentence, but is not repeated per outcome (one enumeration_prompt_block
@@ -319,8 +333,9 @@ _INSTRUCTION_LINE = (
     "[Enumeration preview note: base analysis only on each block's "
     "\"previewed\" count, never its \"listed\" count. When previewed is "
     "less than listed, explicitly disclose that the analysis covers only "
-    "that subset — the full list is authoritative in the result card, not "
-    "this preview.]"
+    "that subset. Every preview row has a kN id: cite a row with its own [kN] "
+    "marker whenever the answer uses it — the full list is authoritative in "
+    "the result card, not this preview.]"
 )
 
 
@@ -452,7 +467,7 @@ def _clean(text: object) -> str:
     return " ".join(str(text).split())
 
 
-def _item_line(collection: str, item: object) -> str:
+def _item_line(collection: str, item: object, key: str) -> str:
     """One preview row.
 
     Deliberately avoids ANY ``[...]`` wrapper around title/location/section:
@@ -466,13 +481,18 @@ def _item_line(collection: str, item: object) -> str:
     """
     if collection == "elements":
         text = _clean(item.text)[:_PROMPT_LINE_EXCERPT_CHARS]
-        return f"- {item.source_title} · {item.location_label}: {text}"
+        return f"{key}: [enumerated-source-element] {item.source_title} · {item.location_label}: {text}"
     location = item.section_path or "—"
     name = _clean(item.name)[:_PROMPT_LINE_EXCERPT_CHARS]
-    return f"- {name} · {location}"
+    return f"{key}: [enumerated-{item.object_type}] {name} · {location}"
 
 
-def _outcome_block(outcome: "CollectionEnumerationOutcome", *, shown: int) -> str:
+def _outcome_block(
+    outcome: "CollectionEnumerationOutcome",
+    *,
+    shown: int,
+    key_start: int = COLLECTION_KEY_BASE + 1,
+) -> str:
     """Render one outcome's header + up to ``shown`` item lines.
 
     A pure sizing/rendering helper: ``enumeration_prompt_block`` calls this
@@ -489,8 +509,8 @@ def _outcome_block(outcome: "CollectionEnumerationOutcome", *, shown: int) -> st
             else outcome.source_id
         )
         lines.append(f"[scope: single source {title}]")
-    for item in outcome.items[:shown]:
-        lines.append(_item_line(outcome.collection, item))
+    for offset, item in enumerate(outcome.items[:shown]):
+        lines.append(_item_line(outcome.collection, item, f"k{key_start + offset}"))
     omitted = len(outcome.items) - shown
     if omitted > 0:
         lines.append(f"(+{omitted} more rows in the result card)")
@@ -510,6 +530,58 @@ class EnumerationPreview:
 
     text: str = ""
     shown_rows: List[int] = field(default_factory=list)
+    evidence_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def _preview_evidence(
+    collection: str,
+    item: object,
+    citation: object | None,
+) -> dict[str, Any]:
+    """Build the reverse binding for one row that actually entered synthesis."""
+    if collection == "elements":
+        object_id = str(item.element_id)
+        object_type = "element"
+        name = str(item.location_label or item.source_title)
+        definition = str(item.text)
+    else:
+        object_id = str(item.object_id)
+        object_type = str(item.object_type)
+        name = str(item.name)
+        definition = str(getattr(citation, "quoted_span", "") or "")
+    source_id = str(getattr(citation, "source_id", "") or "")
+    element_id = str(getattr(citation, "element_id", "") or "")
+    source_title = str(
+        getattr(citation, "label", "").rsplit(" · ", 1)[0]
+        if citation else getattr(item, "source_title", "") or ""
+    )
+    location = str(
+        getattr(citation, "location_label", "")
+        if citation else getattr(item, "location_label", "") or ""
+    )
+    snippet = str(
+        getattr(citation, "quoted_span", "")
+        if citation else getattr(item, "text", "") or ""
+    )
+    return {
+        "object_id": object_id,
+        "object_type": object_type,
+        "name": name,
+        "definition": definition,
+        "snippet": snippet[:300],
+        "source_id": source_id,
+        "element_id": element_id,
+        "source_title": source_title,
+        "location_label": location,
+        "tier": str(getattr(item, "tier", "personal") or "personal"),
+        "notebook_id": str(getattr(citation, "notebook_id", "") or ""),
+        "relevance": 0.0,
+        "provenance": {
+            "producer": "collection_enumeration",
+            "authority": "deterministic",
+        },
+        "knowhow": getattr(citation, "knowhow", None) if citation else None,
+    }
 
 
 def _row_quota(
@@ -561,6 +633,7 @@ def enumeration_prompt_block(
     *,
     inline_rows: int,
     budget_chars: int,
+    citations_by_item_id: Mapping[str, object] | None = None,
 ) -> EnumerationPreview:
     """Bound the enumeration preview injected into answer synthesis.
 
@@ -581,9 +654,9 @@ def enumeration_prompt_block(
     but is not load-bearing: a budget too small even for that one sentence
     still lets outcome headers try.
 
-    Item lines deliberately carry no ``[k]`` id: Rule 11 exempts structured
-    rows with no per-row citation key, because the coverage header line
-    already backs the whole block.
+    Every admitted item line receives a key in the isolated k5001+ namespace
+    and a matching reverse-map entry.  Coverage headers remain deterministic
+    server metadata and therefore do not pretend to be source citations.
     """
     if not outcomes:
         return EnumerationPreview(text="", shown_rows=[])
@@ -592,6 +665,9 @@ def enumeration_prompt_block(
     blocks: List[str] = []
     used = 0
     shown_rows: List[int] = [0] * len(outcomes)
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    item_citations = citations_by_item_id or {}
+    next_key = COLLECTION_KEY_BASE + 1
 
     def room() -> int:
         return budget - used
@@ -609,9 +685,22 @@ def enumeration_prompt_block(
 
     for index, outcome in enumerate(outcomes):
         for shown in range(quota[index], -1, -1):
-            candidate = _outcome_block(outcome, shown=shown)
+            candidate = _outcome_block(
+                outcome, shown=shown, key_start=next_key
+            )
             if try_commit(candidate):
                 shown_rows[index] = shown
+                for offset, item in enumerate(outcome.items[:shown]):
+                    key = f"k{next_key + offset}"
+                    item_id = str(
+                        getattr(item, "element_id", "")
+                        or getattr(item, "object_id", "")
+                        or ""
+                    )
+                    evidence_by_id[key] = _preview_evidence(
+                        outcome.collection, item, item_citations.get(item_id)
+                    )
+                next_key += shown
                 break
         # Falling through the loop without committing (even at shown=0) means
         # this outcome's bare header does not fit in what remains; it is
@@ -621,4 +710,8 @@ def enumeration_prompt_block(
         # re-donated: at that point the block is character-bound, not
         # row-bound, so the next outcome could not spend them either.
 
-    return EnumerationPreview(text="\n\n".join(blocks), shown_rows=shown_rows)
+    return EnumerationPreview(
+        text="\n\n".join(blocks),
+        shown_rows=shown_rows,
+        evidence_by_id=evidence_by_id,
+    )

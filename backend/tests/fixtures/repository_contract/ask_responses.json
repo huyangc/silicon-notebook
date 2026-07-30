@@ -5,6 +5,7 @@
         "anchors": [
           {
             "definition": null,
+            "element_id": "<el-id-1>",
             "key": "k1",
             "label": "§1 Gain",
             "location_label": "§1 Gain",
@@ -12,6 +13,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
           }
@@ -49,6 +51,7 @@
         "anchors": [
           {
             "definition": null,
+            "element_id": "<el-id-1>",
             "key": "k1",
             "label": "§1 Gain",
             "location_label": "§1 Gain",
@@ -56,6 +59,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
           }
@@ -95,6 +99,7 @@
         "anchors": [
           {
             "definition": null,
+            "element_id": "<el-id-1>",
             "key": "k1",
             "label": "§1 Gain",
             "location_label": "§1 Gain",
@@ -102,6 +107,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
           }
@@ -149,6 +155,7 @@
         "anchors": [
           {
             "definition": null,
+            "element_id": "<el-id-1>",
             "key": "k1",
             "label": "§1 Gain",
             "location_label": "§1 Gain",
@@ -156,6 +163,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
           }
@@ -379,6 +387,7 @@
         "anchors": [
           {
             "definition": "A source-degenerated stage stabilizes voltage gain.",
+            "element_id": "<el-id-1>",
             "key": "k1",
             "label": "fixture gain remains stable",
             "location_label": "",
@@ -386,6 +395,7 @@
             "object_id": "<ko-id-1>",
             "object_type": "claim",
             "snippet": "A source-degenerated stage stabilizes voltage gain.",
+            "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
           }
@@ -513,6 +523,7 @@
               "enumeration_block_dropped": false,
               "evidence_level": "grounded",
               "included_chunks": 0,
+              "included_collections": 0,
               "included_elements": 0,
               "included_kg": 1
             },
@@ -556,6 +567,7 @@
         "anchors": [
           {
             "definition": "A source-degenerated stage stabilizes voltage gain.",
+            "element_id": "<el-id-1>",
             "key": "k1",
             "label": "fixture gain remains stable",
             "location_label": "",
@@ -563,6 +575,7 @@
             "object_id": "<ko-id-1>",
             "object_type": "claim",
             "snippet": "A source-degenerated stage stabilizes voltage gain.",
+            "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
           }
@@ -690,6 +703,7 @@
               "enumeration_block_dropped": false,
               "evidence_level": "grounded",
               "included_chunks": 0,
+              "included_collections": 0,
               "included_elements": 0,
               "included_kg": 1
             },

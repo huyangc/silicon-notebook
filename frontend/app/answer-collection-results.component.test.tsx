@@ -346,6 +346,61 @@ test("KG 对象条目使用 result 级 object_type(条目本身没有 per-item o
 });
 
 
+test("KG 清单条目展示原文引用摘录,本库条目可跳到精确来源元素", async () => {
+  const user = userEvent.setup();
+  const onOpenSource = vi.fn();
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    collection: "kg_objects",
+    element_kind: "",
+    object_type: "claim",
+    items: [{
+      item_id: "ko-1", name: "锁相环需要稳定参考", section_path: "3.2",
+      notebook_id: "nb-1", tier: "personal",
+      citation: {
+        label: "工艺手册 · 第 9 页", source_id: "src-9", element_id: "el-9",
+        location_label: "第 9 页", quoted_span: "这是原文中的权威片段。",
+        tier: "personal",
+      },
+    }],
+  })];
+  renderAnswer(answer, { onOpenSource });
+
+  await user.click(screen.getByText("原文引用：工艺手册 · 第 9 页"));
+  expect(screen.getByText("这是原文中的权威片段。")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "查看原文" }));
+  expect(onOpenSource).toHaveBeenCalledWith("src-9", "el-9");
+});
+
+
+test("跨库 KG 清单条目展示安全摘录,并经 active notebook 代理跳转原文", async () => {
+  const user = userEvent.setup();
+  const onOpenSource = vi.fn();
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    collection: "kg_objects", element_kind: "", object_type: "claim",
+    items: [{
+      item_id: "ko-base", name: "参考库结论", notebook_id: "base-1", tier: "base",
+      citation: {
+        label: "参考论文 · p. 4", source_id: "base-src", element_id: "base-el",
+        location_label: "p. 4", quoted_span: "跨库原文摘录", tier: "base",
+        notebook_id: "base-1",
+      },
+    }],
+  })];
+  renderAnswer(answer, {
+    onOpenSource,
+    notebookNames: { "base-1": "模拟电路基准库" },
+  });
+
+  expect(screen.getByText("来自参考库《模拟电路基准库》")).toBeInTheDocument();
+  await user.click(screen.getByText("原文引用：参考论文 · p. 4"));
+  expect(screen.getByText("跨库原文摘录")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "查看原文" }));
+  expect(onOpenSource).toHaveBeenCalledWith("base-src", "base-el");
+});
+
+
 test("元素条目按来源分组显示(source_title 作为分组小标题)", () => {
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({

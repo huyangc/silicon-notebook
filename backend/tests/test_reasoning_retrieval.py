@@ -188,7 +188,7 @@ def test_answer_prompt_requires_full_enumeration_for_list_questions():
     # hybrid Knowhow 的 structured_prompt_block 注入的行没有 kN id(不在
     # id_map 里):对它们强挂 [k] 是不可满足合同(codex PR#391 P2),必须豁免
     # 且禁止捏造不存在的 [k]。
-    assert "list them WITHOUT [k] markers" in p
+    assert "cite that exact row with its [kN] marker" in p
     assert "never invent a [k] id that does not exist" in p
 
 

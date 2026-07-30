@@ -268,7 +268,12 @@
   未知 kind 有意 fail-loud；补反序列化测试。
 - 枚举块预算：上限 `chunk_context_chars // 2`（为 chunks/elements 保底），prompt 条目行
   text 截 200 字符（卡片/transport 仍用执行器 1000 字符摘录），块头预留优先保活，条目行
-  单行化且不得出现可与引用正则冲突的 `[数字]` 形状。
+  单行化且不得出现可与引用正则冲突的 `[数字]` 形状。进入预览的条目使用隔离的
+  `k5001+` id 和反向证据映射；模型用到哪一行就引用哪一个 `[k]`，只有实际绑定的清单
+  锚点可为答案归因。只有带存活 `source_id`/`element_id` 的绑定键才能通过单独的
+  exact-evidence 合同判 grounded，且按实际引用 key 而非 object id 匹配（同一对象的普通
+  `k1` 命中不能借 `k5001` 绕过相关度阈值）；枚举答案无锚点时清空无关
+  ranked-citation 回退，避免伪归因。
 - `completeness_unavailable` 免责文案更新：**【codex 第 1 轮 P1-2 收紧后的最终规则】**
   四条同时成立才不前置——① `result_scope != "aggregate"`；② 意图合同的 `constraints` /
   `excluded_topics` / `assumptions` 全为空；③ 至少一条清单结果 `returned_total > 0`；
@@ -289,6 +294,11 @@
 - 面向用户文案：元素侧「公式 / 表格 / 图片 / 代码块清单」，知识对象侧「概念 / 论断 /
   公式 / 过程知识对象清单」（与后端 trace 标签同口径，两张映射全域不重名）；
   「已全部列出 / 部分结果」；truncated_reason 经中文映射上屏（不吐内部 token）——过词汇守卫。
+- 每个送达的来源元素/KG 对象条目至多携带一条仍存活的有界原文 `Citation`；KG 对象从
+  已封顶的 evidence element id 中取首个有效元素。进入答案合成预览的条目使用隔离的
+  `k5001+` 引用键与反向映射；只有模型实际绑定且带存活 `source_id`/`element_id` 的清单
+  锚点可确定性判 grounded。一个锚点都没绑的枚举答案不展示无关 ranked-citation 兜底，
+  历史 KG 出处全部失效时明确显示「暂无可用原文出处」。
 - 跨库条目（v1 收口 → 已由后续任务补齐）：挂载参考库的条目保留「来自参考库《名》」标注；
   「查看来源」跳转与图片**已恢复**，走 participant 集内的后端代理读取
   （`GET /notebooks/{active}/sources/{id}[/elements]` 与既有资产端点的同口径放宽），与图谱

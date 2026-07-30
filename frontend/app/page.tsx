@@ -2970,7 +2970,7 @@ export default function Home() {
 
   // Ask 清单结果卡(answer-panel.tsx CollectionResultCard)元素条目「查看来源」/
   // 「在来源详情查看完整表格」按钮的回调:elementId 缺省时只打开来源、不高亮任何
-  // 元素(KG 知识对象清单没有这个按钮,不会调用到这里)。
+  // 元素；KG 知识对象清单在有原文 citation 时同样用它精确跳转。
   function onOpenSourceElement(sourceId: string, elementId?: string) {
     openSourceById(sourceId, elementId || "").catch(reportError);
   }

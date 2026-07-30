@@ -53,6 +53,7 @@ import { shouldShowIndexRequiredBanner, type ScaleIndexStatus } from "./scale-in
 import { sourceImageAssetUrl } from "./source-image";
 import type {
   AskResponse,
+  Citation,
   KnowhowBatchCoverage,
   KnowhowResultSet,
   TypedCollectionCoverage,
@@ -269,6 +270,16 @@ function CrossLibraryBadge({
 }
 
 
+function CollectionItemCitation({ citation }: { citation: Citation }) {
+  return (
+    <details className="answer-collection-citation">
+      <summary>原文引用：{citation.label || citation.location_label || "来源片段"}</summary>
+      {citation.quoted_span && <p><LatexText text={citation.quoted_span} /></p>}
+    </details>
+  );
+}
+
+
 function ElementCollectionItemRow({
   item,
   notebookId,
@@ -326,6 +337,7 @@ function ElementCollectionItemRow({
           </button>
         )}
       </div>
+      {item.citation && <CollectionItemCitation citation={item.citation} />}
     </li>
   );
 }
@@ -336,11 +348,13 @@ function KgObjectCollectionItemRow({
   objectType,
   notebookId,
   notebookNames,
+  onOpenSource,
 }: {
   item: TypedCollectionItem;
   objectType: string;
   notebookId: string | null;
   notebookNames: Record<string, string>;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   const itemNotebookId = item.notebook_id ?? "";
   const crossLibrary = isCrossLibraryItem(itemNotebookId, notebookId);
@@ -355,6 +369,26 @@ function KgObjectCollectionItemRow({
           notebookNames={notebookNames}
           tier={item.tier ?? "personal"}
         />
+      )}
+      {item.citation && (
+        <div className="answer-collection-kg-citation">
+          <CollectionItemCitation citation={item.citation} />
+          {onOpenSource && (
+            <button
+              type="button"
+              className="answer-collection-open"
+              onClick={() => onOpenSource(
+                item.citation!.source_id,
+                item.citation!.element_id,
+              )}
+            >
+              查看原文
+            </button>
+          )}
+        </div>
+      )}
+      {!item.citation && (
+        <span className="answer-collection-citation-missing">暂无可用原文出处</span>
       )}
     </li>
   );
@@ -469,6 +503,7 @@ function CollectionResultCard({
                   objectType={resultSet.object_type ?? ""}
                   notebookId={notebookId}
                   notebookNames={notebookNames}
+                  onOpenSource={onOpenSource}
                 />
               ))}
             </ul>
@@ -608,6 +643,7 @@ function SelectedReferenceDetail({
   notebookNames,
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
+  onOpenSource,
 }: {
   reference: AnswerReference;
   /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
@@ -616,6 +652,7 @@ function SelectedReferenceDetail({
   onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
   /** Task 12（引用跳转）：命中 knowhow 格子的引用才出现「在表格中查看」按钮。 */
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   const objectType = reference.anchor?.object_type || "";
   const title = referenceTitle(reference);
@@ -628,8 +665,11 @@ function SelectedReferenceDetail({
   // "anchor 优先、citation 兜底"惯例保持一致。
   const tier = reference.anchor?.tier ?? reference.citation?.tier ?? "";
   const sourceNotebookId = reference.citation?.notebook_id || reference.anchor?.notebook_id || "";
+  const sourceId = reference.citation?.source_id || reference.anchor?.source_id || "";
+  const elementId = reference.citation?.element_id || reference.anchor?.element_id || "";
   const sourceName = sourceNotebookId ? notebookNames[sourceNotebookId] : undefined;
   const isRelationReference = objectType === "relation";
+  const isSourceElementReference = objectType === "element";
   const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
   // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
   // 出现在同一条 reference 上（buildAnswerReferences 二选一），但顺序仍按
@@ -661,27 +701,29 @@ function SelectedReferenceDetail({
             )}
           </span>
         )}
-        <button
-          type="button"
-          onClick={() => onOpenKnowledgeGraph(
-            reference.anchor?.object_id,
-            sourceNotebookId || undefined,
-          )}
-          disabled={!canLocateInGraph}
-          title={
-            // 用「知识对象」而非「概念」:引用锚定的是 object_id,其 object_type 可以是
-            // Concept / Claim / Formula / Procedure 或 knowhow 表带来的自定义类型。
-            // 说「概念」会把后四类说成第一类,用户按图索骥时对不上。
-            isRelationReference
-              ? "关系引用绑定的是一条关联，不是具体的知识对象，无法在知识图谱中定位"
-              : reference.anchor?.object_id
-                ? "在知识图谱中定位"
-                : "该引用没有绑定到具体的知识对象"
-          }
-        >
-          <ExternalLink size={14} />
-          {isRelationReference ? "关系证据不可定位" : "知识图谱"}
-        </button>
+        {!isSourceElementReference && (
+          <button
+            type="button"
+            onClick={() => onOpenKnowledgeGraph(
+              reference.anchor?.object_id,
+              sourceNotebookId || undefined,
+            )}
+            disabled={!canLocateInGraph}
+            title={
+              // 用「知识对象」而非「概念」:引用锚定的是 object_id,其 object_type 可以是
+              // Concept / Claim / Formula / Procedure 或 knowhow 表带来的自定义类型。
+              // 说「概念」会把后四类说成第一类,用户按图索骥时对不上。
+              isRelationReference
+                ? "关系引用绑定的是一条关联，不是具体的知识对象，无法在知识图谱中定位"
+                : reference.anchor?.object_id
+                  ? "在知识图谱中定位"
+                  : "该引用没有绑定到具体的知识对象"
+            }
+          >
+            <ExternalLink size={14} />
+            {isRelationReference ? "关系证据不可定位" : "知识图谱"}
+          </button>
+        )}
         {knowhowRef && (
           <button
             type="button"
@@ -690,6 +732,16 @@ function SelectedReferenceDetail({
           >
             <Table2 size={14} />
             在表格中查看
+          </button>
+        )}
+        {onOpenSource && sourceId && (
+          <button
+            type="button"
+            onClick={() => onOpenSource(sourceId, elementId || undefined)}
+            title="在来源详情中查看这段原文"
+          >
+            <ExternalLink size={14} />
+            查看原文
           </button>
         )}
       </div>
@@ -708,6 +760,7 @@ function CitationPopover({
   onClose,
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
+  onOpenSource,
 }: {
   reference: AnswerReference;
   notebookNames: Record<string, string>;
@@ -715,6 +768,7 @@ function CitationPopover({
   onClose: () => void;
   onOpenKnowledgeGraph: (objectId?: string, sourceNotebookId?: string) => void;
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ top: number; left: number }>(
@@ -763,6 +817,7 @@ function CitationPopover({
         notebookNames={notebookNames}
         onOpenKnowledgeGraph={onOpenKnowledgeGraph}
         onOpenKnowhowRow={onOpenKnowhowRow}
+        onOpenSource={onOpenSource}
       />
     </div>
   );
@@ -1082,6 +1137,10 @@ export function AnswerView({
             setCitePopover(null);
             onOpenKnowhowRow(tableId, rowId);
           }}
+          onOpenSource={onOpenSource ? (sourceId, elementId) => {
+            setCitePopover(null);
+            onOpenSource(sourceId, elementId);
+          } : undefined}
         />
       )}
       <div className="answer-feedback">

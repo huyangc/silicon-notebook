@@ -1392,6 +1392,12 @@ class EvidenceContextPort(Protocol):
     def citation_titles(
         self, source_ids: Iterable[str]
     ) -> dict[str, str]: ...
+    def collection_item_citations(
+        self,
+        items: Sequence[object],
+        *,
+        active_notebook_id: str,
+    ) -> dict[str, Citation]: ...
     def chunk_context(
         self,
         chunks: Sequence[RetrievedChunk],

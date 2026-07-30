@@ -593,4 +593,5 @@ def test_answer_reasoning_fills_counts_sink_before_model_call(repo):
         "included_kg": 1,
         "included_chunks": 0,
         "included_elements": 1,
+        "included_collections": 0,
     }

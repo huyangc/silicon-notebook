@@ -16,11 +16,13 @@ class _Notebooks:
 
 
 class _Sources:
-    def __init__(self, metadata=None):
+    def __init__(self, metadata=None, elements=None):
         self.metadata = metadata or {}
+        self.elements = elements or {}
 
     def evidence_elements(self, element_ids):
-        return {}
+        return {element_id: self.elements[element_id]
+                for element_id in element_ids if element_id in self.elements}
 
     def source_metadata(self, source_ids):
         return {source_id: self.metadata[source_id]
@@ -49,10 +51,10 @@ class _Knowledge:
         return 1
 
 
-def _service(*, source_metadata=None):
+def _service(*, source_metadata=None, elements=None):
     return EvidenceContextService(
         notebooks=_Notebooks(),
-        sources=_Sources(source_metadata),
+        sources=_Sources(source_metadata, elements),
         knowledge=_Knowledge(),
         settings=Settings(),
     )
@@ -61,15 +63,15 @@ def _service(*, source_metadata=None):
 def test_citation_titles_prefer_grounded_paper_title_and_keep_other_sources():
     service = _service(source_metadata={
         "paper": {
-            "title": "2401.01234.pdf", "file_name": "2401.01234.pdf",
+            "title": "2401.01234.pdf", "file_name": "2401.01234.pdf", "notebook_id": "active",
             "is_paper": True, "paper_title": "A Useful Article Title",
         },
         "ordinary": {
-            "title": "design-notes.md", "file_name": "design-notes.md",
+            "title": "design-notes.md", "file_name": "design-notes.md", "notebook_id": "active",
             "is_paper": False, "paper_title": "Ignored stale title",
         },
         "untitled-paper": {
-            "title": "scan.pdf", "file_name": "scan.pdf",
+            "title": "scan.pdf", "file_name": "scan.pdf", "notebook_id": "active",
             "is_paper": True, "paper_title": "   ",
         },
     })
@@ -124,6 +126,94 @@ def test_fallback_citation_label_uses_parsed_paper_title():
     )
 
     assert citations[0].label == "Meaningful Paper Name · p. 2"
+
+
+def test_collection_kg_item_gets_bounded_cross_library_original_source():
+    from app.services.collection_enumeration import KgObjectItem
+
+    service = _service(
+        source_metadata={
+            "s-base": {"title": "base.pdf", "is_paper": True,
+                       "paper_title": "Reference Paper", "notebook_id": "base"},
+        },
+        elements={
+            "e-base": {
+                "id": "e-base", "source_id": "s-base",
+                "element_type": "paragraph", "location_label": "p. 9",
+                "text": "authoritative excerpt", "metadata": "{}",
+            },
+        },
+    )
+    item = KgObjectItem(
+        object_id="o-base", object_type="claim", name="Claim",
+        section_path="§2", notebook_id="base", tier="base",
+        evidence_element_ids=("missing", "e-base"),
+    )
+
+    citations = service.collection_item_citations(
+        [item], active_notebook_id="active"
+    )
+
+    citation = citations["o-base"]
+    assert citation.label == "Reference Paper · p. 9"
+    assert citation.source_id == "s-base"
+    assert citation.element_id == "e-base"
+    assert citation.quoted_span == "authoritative excerpt"
+    assert citation.notebook_id == "base"
+
+
+def test_collection_kg_item_rejects_an_evidence_id_from_another_notebook():
+    from app.services.collection_enumeration import KgObjectItem
+
+    service = _service(
+        source_metadata={
+            "s-other": {"title": "private.pdf", "notebook_id": "other"},
+        },
+        elements={
+            "e-other": {
+                "id": "e-other", "source_id": "s-other",
+                "element_type": "paragraph", "location_label": "p. 1",
+                "text": "must not leak", "metadata": "{}",
+            },
+        },
+    )
+    item = KgObjectItem(
+        object_id="o-base", object_type="claim", name="Corrupt historical row",
+        section_path="", notebook_id="base", tier="base",
+        evidence_element_ids=("e-other",),
+    )
+
+    citations = service.collection_item_citations(
+        [item], active_notebook_id="active"
+    )
+
+    assert citations == {}
+
+
+def test_collection_citation_rejects_a_non_participant_even_when_source_matches():
+    from app.services.collection_enumeration import KgObjectItem
+
+    service = _service(
+        source_metadata={
+            "s-other": {"title": "private.pdf", "notebook_id": "other"},
+        },
+        elements={
+            "e-other": {
+                "id": "e-other", "source_id": "s-other",
+                "element_type": "paragraph", "location_label": "p. 1",
+                "text": "must not leak", "metadata": "{}",
+            },
+        },
+    )
+    item = KgObjectItem(
+        object_id="o-other", object_type="claim", name="Unauthorized row",
+        section_path="", notebook_id="other", tier="personal",
+        evidence_element_ids=("e-other",),
+    )
+
+    assert service.collection_item_citations(
+        [item], active_notebook_id="active"
+    ) == {}
 
 
 def test_evidence_context_chunk_golden_matches_master():

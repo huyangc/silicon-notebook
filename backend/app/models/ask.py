@@ -190,6 +190,11 @@ class AnswerAnchor(BaseModel):
     snippet: Optional[str] = None      # element_text of the grounding sentence
     source_title: str = ""
     location_label: str = ""
+    # Exact source locator for anchors backed by one SourceElement.  Chunk/KG
+    # anchors may leave either value empty; enumerated collection rows fill
+    # both whenever their bounded evidence reference still exists.
+    source_id: str = Field(default="", exclude_if=lambda value: not value)
+    element_id: str = Field(default="", exclude_if=lambda value: not value)
     # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
     # user notes). Lets the UI surface authority + supports conflict precedence.
     tier: str = "personal"
@@ -356,6 +361,13 @@ class TypedCollectionItem(BaseModel):
     # test_typed_collection_result_sets.py::
     # test_max_evidence_refs_parity_between_executor_and_wire_model.
     evidence_element_ids: List[str] = Field(default_factory=list, max_length=3)
+    # First live source occurrence, resolved server-side inside the active
+    # notebook's participant set.  This is intentionally one bounded Citation
+    # rather than an unbounded evidence expansion; it gives every delivered
+    # checklist row an original-source locator and excerpt.
+    citation: Optional[Citation] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     # shared
     notebook_id: str = ""
     tier: str = "personal"
