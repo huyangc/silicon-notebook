@@ -15,6 +15,12 @@ Do not update only one language README when the same information should be avail
 
 Keep the root READMEs as concise project entry points. Detailed behavior belongs in the paired canonical references under `docs/`: `product-and-api`, `deployment-and-configuration`, `operations`, and `development`. A change must also update the owning English/Chinese detail pair; do not copy the full detail back into the root READMEs.
 
+External Agent onboarding is documented as the paired operational runbook
+`docs/agent-mcp-memory-sop.md` / `docs/agent-mcp-memory-sop_zh.md`. Keep its UI path,
+Codex/Claude configuration, scope table, runnable official-client command, Memory review
+gate, and revocation guidance synchronized with the product/API contract and
+`scripts/example_mcp_memory_client.py`.
+
 ## Tracking Completed Spec Features
 
 `silicon_notebook_fangan.md` is the product spec; `fangan_done.md` records what has actually been implemented against it.

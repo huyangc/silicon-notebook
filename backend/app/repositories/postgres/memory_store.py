@@ -16,6 +16,7 @@ from app.models.memory import (
 )
 from app.core.json_safety import strict_json_dumps
 from app.repositories.postgres._store_utils import (
+    execute_many,
     iso_timestamp,
     json_value,
     jsonb,
@@ -192,7 +193,8 @@ class MemoryStore:
                     normalize_timestamp(now),
                 ),
             )
-            db.executemany(
+            execute_many(
+                db,
                 "INSERT INTO agent_token_notebooks (token_id,notebook_id) VALUES (%s,%s)",
                 [(token_id, notebook_id) for notebook_id in notebook_ids],
             )
@@ -1568,7 +1570,8 @@ class MemoryStore:
                 (user_id, *unique),
             ).fetchall()
             ids = [r["id"] for r in rows]
-            db.executemany(
+            execute_many(
+                db,
                 "DELETE FROM memory_items WHERE id=%s AND created_by=%s",
                 [(i, user_id) for i in ids],
             )

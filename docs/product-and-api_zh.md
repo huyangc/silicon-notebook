@@ -96,6 +96,10 @@ Ask 引用命中 knowhow 格子时会直接跳转到该行的详情抽屉，而�
 
 ## Memory 与 Agent MCP
 
+从界面签发 token、配置 Codex/Claude CLI 并运行官方 client 示例的逐步操作见
+[Agent MCP 与 Memory 接入 SOP](./agent-mcp-memory-sop_zh.md)。本节继续作为产品/API 权威契约；
+SOP 负责首次接入与验收步骤。
+
 Memory 必须由用户手动选择、归创建者私有，并且始终绑定到且只绑定到一个 notebook。
 在 Ask 回答上点击“保存到 Memory”后，后端先生成标题、正文和标签预览，用户可编辑，
 只有最终确认才写入 `confirmed` Memory。预览模型未配置或失败时，系统确定性地用问题作

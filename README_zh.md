@@ -186,6 +186,7 @@ preview/apply/retry 的完整命令、SQLite↔PostgreSQL selector 写法、正�
 | 需求 | 文档 |
 | --- | --- |
 | 产品行为、检索模式、Memory/MCP、knowhow、API、当前限制 | [产品与 API 参考](./docs/product-and-api_zh.md) |
+| 外部 Agent 界面配置、Codex/Claude CLI 与可运行 MCP/Memory 示例 | [Agent MCP 与 Memory 接入 SOP](./docs/agent-mcp-memory-sop_zh.md) |
 | 安装、源码/生产部署、模型服务、配置项 | [部署与配置](./docs/deployment-and-configuration_zh.md) |
 | 日志、事故采集、MinerU、批量摄取、回放、迁移、回填 | [运维、诊断与摄取工具](./docs/operations_zh.md) |
 | 验证、CI、开发流程、测试和文档契约 | [开发与仓库契约](./docs/development_zh.md) |

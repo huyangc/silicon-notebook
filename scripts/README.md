@@ -52,6 +52,20 @@ scripts/dev.sh                # 同时起 backend(:8000)+ frontend(:3000),Ctrl+C
 全栈本地开发用。前台运行、看实时日志、退出即清理两个进程。需先在 `frontend/` 跑过 `npm install`。
 (只需要后端、或要后台常驻 + 明确 stop/status,用 `backend.sh`。)
 
+### `example_mcp_memory_client.py` —— 外部 Agent MCP/Memory 接入示例
+
+用官方 Python MCP client 连接已经启动的 `/mcp`，完成工具发现、默认/指定 notebook
+选择、正式上下文检索与 Agent Memory 检索；加 `--propose` 后提交一条幂等 candidate 并
+立即从 Agent Memory 召回。token 只从 `SILICON_NOTEBOOK_AGENT_TOKEN` 读取且不打印。
+
+```bash
+export SILICON_NOTEBOOK_AGENT_TOKEN='<界面签发且只显示一次的 token>'
+python scripts/example_mcp_memory_client.py --query '有哪些可复用经验？' --propose
+```
+
+完整的界面签发、scope、Codex/Claude 配置、人审与撤销步骤见
+[`docs/agent-mcp-memory-sop_zh.md`](../docs/agent-mcp-memory-sop_zh.md)。
+
 ### `check.sh` —— 本地全量自检(提交/PR 前)
 ```bash
 PYTHON_BIN=/path/to/python bash scripts/check.sh
