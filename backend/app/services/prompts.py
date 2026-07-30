@@ -349,16 +349,23 @@ def reflect_schema_hint(
         actions += "|enumerate_elements|enumerate_kg_objects"
         # ``collection`` is the third collection's whole model-facing surface:
         # the action space stays at ten ids and the document roster arrives as a
-        # PARAMETER value beside kind/object_type (design doc §6.2).  Its only
-        # accepted value is spelled out because that is all it accepts — omit it
-        # and the action id decides, exactly as before this field existed.  It
-        # rides the same gate as the other two, so it appears whenever the
-        # whitelists do: one kill switch for the whole tool family, with no
-        # second flag able to disagree with it.
+        # PARAMETER value beside kind/object_type (design doc §6.2).  It rides
+        # the same gate as the other two, so it appears whenever the whitelists
+        # do: one kill switch for the whole tool family, with no second flag
+        # able to disagree with it.
+        #
+        # Shown EMPTY, like ``source_id``/``source_title`` above it, not as its
+        # single accepted value.  A schema hint is a template, and models copy
+        # templates field by field: spelling ``"collection":"sources"`` here made
+        # "list the formulas" runs carry it along too, and because the parameter
+        # wins over the action id (by design), that silently rerouted a formula
+        # listing into the document roster.  The value belongs in the ACTION
+        # DESCRIPTION, where it reads as a conditional instruction; the schema
+        # only has to show the field exists and defaults to absent.
         enumerate_branch = (
             '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
             '"object_type":"' + "|".join(object_types) + '",'
-            '"collection":"sources",'
+            '"collection":"",'
             '"source_id":"","source_title":""},'
         )
     return (
@@ -426,10 +433,15 @@ def reflect_prompt(
         "- enumerate_kg_objects: the same, for extracted knowledge objects of "
         "one type. Set enumerate.object_type to one of: "
         + ", ".join(object_types) + ".\n"
-        "- To list the DOCUMENTS themselves instead of anything inside them, "
-        "choose enumerate_elements and set enumerate.collection to \"sources\" "
-        "(kind, object_type, source_id and source_title are then ignored — the "
-        "library's document roster is one whole collection with no sub-type). "
+        "- enumerate.collection is EMPTY for both actions above; set it to "
+        "\"sources\" ONLY to list the DOCUMENTS themselves instead of anything "
+        "inside them, and leave it empty in every other enumerate call — it "
+        "OVERRIDES the action and its kind/object_type, so carrying it along out "
+        "of habit turns a formula listing into a document roster. To list the "
+        "documents, choose enumerate_elements with enumerate.collection set to "
+        "\"sources\" (kind, object_type, source_id and source_title are then "
+        "ignored — the library's document roster is one whole collection with no "
+        "sub-type). "
         "Do that when the question asks WHICH documents the library holds, or "
         "asks for a per-document treatment of it ('库里有哪几篇', "
         "'逐篇分析当前notebook', 'summarize each paper here'). It lists every "

@@ -36,6 +36,7 @@ from app.services.collection_enumeration import (
 from app.services.embedding import FakeEmbedder
 from app.services.kg.edge_schema import NODE_TYPES
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.source_display import source_display_title
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
@@ -1674,6 +1675,206 @@ def test_tied_created_at_orders_identically_in_tab_and_roster(repo):
     assert truncated == tab[:2]
 
 
+def _patch_listing_to_mutate_midwalk(repo, mutate):
+    """让第一次 hydration 之后触发 ``mutate()``,模拟走页期间的并发改动。
+
+    改在**第一个窗口之后**:那正好造出「早先那一页说的是旧代、后面几页说的是新代」
+    这种混代目录——本条守卫要抓的就是它仍然报 complete。
+    """
+    from unittest.mock import patch
+
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+    state = {"n": 0}
+
+    def spy(db, source_ids):
+        rows = original(db, source_ids)
+        state["n"] += 1
+        if state["n"] == 1:
+            mutate()
+        return rows
+
+    return patch.object(store, "source_listing_rows", spy)
+
+
+def test_paper_title_backfill_midwalk_reports_concurrent_change(repo):
+    """走页期间回填论文标题 ⇒ `concurrent_change`,不得报 complete。
+
+    这是作用域指纹**证明不了**的那一类:`upsert_paper_meta` 只写
+    `source_paper_meta`/`source_authors`,从不碰 `sources.updated_at`,所以变更信号
+    一动不动,而目录的显示名已经换了一代。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}", title=f"上传名{index}")
+
+    def backfill():
+        repo._runtime.source_store.upsert_paper_meta(
+            "s-0", notebook.id,
+            {"is_paper": True, "paper_title": "回填后的论文标题"},
+        )
+
+    with _patch_listing_to_mutate_midwalk(repo, backfill):
+        result = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=2))
+
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+    # 指纹本身确实没动——所以这条 partial 只可能来自元数据复检。
+    with repo._connect() as db:
+        assert repo.collection_catalog.scope_signal_fingerprint(
+            db, (notebook.id,)) == repo.collection_catalog.scope_source_plan(
+                db, (notebook.id,)).fingerprint
+
+
+def test_doc_type_change_midwalk_reports_concurrent_change(repo):
+    """`doc_type` 是 `sources` 上的普通列,维护动作可以单独改它(不动 updated_at)。
+
+    改的必须是**已经发出去**的那一篇(`s-0`,第一个窗口里)。这就是这条复检的语义
+    边界:它抓的是「我已经交出去的东西变了」,不是「表变过」——第二个窗口之后才被
+    改的行,是带着新值第一次被读出来的,那一份目录并不混代,不该判 partial。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}", doc_type="academic_paper")
+
+    def retype():
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sources SET doc_type='textbook' WHERE id='s-0'")
+
+    with _patch_listing_to_mutate_midwalk(repo, retype):
+        result = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=2))
+
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_a_change_to_a_not_yet_read_document_is_not_a_conflict(repo):
+    """反向边界:第一个窗口之后才被改、且尚未读过的行,不该判 partial。
+
+    它是带着新值第一次被读出来的——那份目录里没有两代混在一起,报
+    `concurrent_change` 会把一份完整答案降级成对不上任何事实的 partial。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}", doc_type="academic_paper")
+
+    def retype_unread():
+        with repo._write() as db:
+            db.execute(
+                "UPDATE sources SET doc_type='textbook' WHERE id='s-3'")
+
+    with _patch_listing_to_mutate_midwalk(repo, retype_unread):
+        result = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=2))
+
+    assert result.coverage.complete is True
+    assert result.coverage.truncated_reason == ""
+    # 而且它交出的就是新值(不是旧值加一句「可能过期」)。
+    assert [item.doc_type_label for item in result.items][-1] == "教材 / 课本"
+
+
+def test_unchanged_metadata_leaves_complete_alone(repo):
+    """反向:元数据没变时 complete 不受影响(复检不是一个恒 partial 的开关)。
+
+    也钉住摘要**刻意不在**摘要键里:摘要的唯一写者 `set_status` 同一条语句就推
+    `updated_at`,所以它已经被指纹覆盖;把它算进来只会在例行重写摘要时误报。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}", summary="原摘要")
+
+    def rewrite_summary_only():
+        # 直接改列、不动 updated_at:摘要不进摘要键,所以这一步不该触发 partial。
+        with repo._write() as db:
+            db.execute("UPDATE sources SET summary='改过的摘要' WHERE id='s-0'")
+
+    with _patch_listing_to_mutate_midwalk(repo, rewrite_summary_only):
+        result = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=2))
+
+    assert result.coverage.complete is True
+    assert result.coverage.truncated_reason == ""
+
+
+def test_metadata_ledger_rides_the_cursor_across_a_resume(repo):
+    """账目是**链级**的:第二次调用期间改掉第一次发出的那篇,也必须被抓到。
+
+    这是把账目放在游标上而不是只查本次调用那一片的理由——混代目录的典型形态正是
+    「早先那一页被改了」。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}", title=f"文档{index}")
+
+    first = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=2))
+    assert first.coverage.complete is False
+    assert first.cursor is not None
+    assert [pair[0] for pair in first.cursor.emitted_meta] == ["s-0", "s-1"]
+
+    # 改的是**第一次**发出的那篇,在第二次调用之前。
+    repo._runtime.source_store.upsert_paper_meta(
+        "s-0", notebook.id, {"is_paper": True, "paper_title": "换了名字"})
+
+    rest = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(), cursor=first.cursor)
+
+    assert rest.coverage.complete is False
+    assert rest.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_meta_recheck_treats_a_vanished_row_as_changed(repo):
+    """已发出的文档在复读时**查不到**了,也算「变了」。
+
+    这条是纵深防御,不是可达路径:删源/移库都会让它掉出 signal 行、从而改变作用域
+    指纹,那道闸先判 partial。所以直接对 `_source_meta_unchanged` 下断言——不然这个
+    分支永远没有测试覆盖,改成 `continue`(把消失当没变)不会有任何用例变红。
+
+    方向必须是「宁可报 partial」:查不到的行意味着这份目录里有一条已经交出去的记录
+    现在无从证实,而 complete 是一个关于「整份清单都核对过」的断言。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_document(repo, notebook.id, "s-0", title="文档零")
+    enumerator = _enum(repo)
+
+    with repo._connect() as db:
+        rows = repo._runtime.source_store.source_listing_rows(db, ["s-0"])
+        digest = collection_enumeration._source_meta_digest(
+            source_display_title(rows[0]),
+            collection_enumeration._doc_type_label(rows[0]["doc_type"]),
+        )
+        # 在场且未变 → True。
+        assert enumerator._source_meta_unchanged(db, [("s-0", digest)]) is True
+        # 同一份账目里混进一条查不到的 id → False。
+        assert enumerator._source_meta_unchanged(
+            db, [("s-0", digest), ("s-gone", digest)]) is False
+        # 只有查不到的那条 → 同样 False。
+        assert enumerator._source_meta_unchanged(db, [("s-gone", digest)]) is False
+
+
+def test_metadata_digest_never_reaches_user_facing_coverage(repo):
+    """摘要账目只活在游标里:用户面 coverage 上不得出现它。
+
+    它是内部新鲜度凭据,不是要披露给用户的覆盖率事实——把它放进 coverage 就等于让
+    前端徽章与持久化 payload 背上一串只有执行器看得懂的哈希。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(2):
+        _add_document(repo, notebook.id, f"s-{index}", title=f"文档{index}")
+
+    partial = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=1))
+
+    assert partial.cursor is not None and partial.cursor.emitted_meta
+    coverage_text = repr(partial.coverage)
+    assert "emitted_meta" not in coverage_text
+    for _source_id, digest in partial.cursor.emitted_meta:
+        assert digest not in coverage_text
+
+
 def test_truncated_source_listing_keeps_the_earliest_documents(repo):
     """截断前缀因此有意义:「前 N 篇」= 最早加入的 N 篇。
 
@@ -1841,7 +2042,11 @@ def test_source_extra_pages_counts_only_windows_past_the_first(repo):
 
 
 def test_source_window_is_one_batched_hydration_query(repo):
-    """每个窗口恰好一次批量 by-id 读取——不是每篇一次查询。"""
+    """每个窗口恰好一次批量 by-id 读取——不是每篇一次查询;收尾复检再一次。
+
+    收尾那一次是元数据换代复检(见 `_source_meta_unchanged`):它读的是**整条链已
+    发出的** id,一条批量点查,与收尾的参与者/指纹读取同级,不计入翻页预算。
+    """
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     for index in range(6):
         _add_document(repo, notebook.id, f"s-{index}")
@@ -1860,7 +2065,12 @@ def test_source_window_is_one_batched_hydration_query(repo):
             notebook.id, budget=_budget(page_size=3)
         )
     assert result.coverage.returned == 6
-    assert calls == [["s-0", "s-1", "s-2"], ["s-3", "s-4", "s-5"]]
+    assert calls == [
+        ["s-0", "s-1", "s-2"],                       # 窗口 1
+        ["s-3", "s-4", "s-5"],                       # 窗口 2
+        ["s-0", "s-1", "s-2", "s-3", "s-4", "s-5"],  # 收尾:整链一次复检
+    ]
+    assert result.coverage.complete is True          # 元数据未变,complete 不受影响
 
 
 def test_source_page_budget_stops_the_walk_honestly(repo):
@@ -2117,7 +2327,8 @@ def test_source_query_count_is_bounded_by_the_page_budget(repo):
         result = _enum(repo).enumerate_sources(
             notebook.id, budget=_budget(page_size=2, max_pages=3)
         )
-    assert calls["n"] <= 1 + 3
+    # 1 + max_pages 个窗口,外加收尾一次整链元数据复检(固定尾巴,不进翻页预算)。
+    assert calls["n"] <= 1 + 3 + 1
     assert result.coverage.complete is False
 
 

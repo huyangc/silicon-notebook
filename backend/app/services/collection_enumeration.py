@@ -96,6 +96,7 @@ text or unbounded element markup.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -295,6 +296,15 @@ class SourceCursor:
     turn the chain into ``concurrent_change`` rather than into a confident,
     wrong "complete".  ``returned_before`` carries the chain's running total so
     the denominator check survives resumption.
+
+    ``emitted_meta`` is the chain's running ``(source_id, metadata digest)``
+    ledger for every document already handed out — see
+    ``_source_meta_digest`` for what it covers and why the scope fingerprint
+    cannot.  It lives on the cursor because the executor is stateless between
+    calls and the closing check has to verify the WHOLE chain, not just the last
+    call's slice.  In-memory only (the run holds it in ``_EnumChain.cursor``; it
+    is never serialized, persisted, or shown to the model) and bounded by the
+    row pool, so a 600-document chain carries 600 short pairs.
     """
 
     notebook_id: str
@@ -302,6 +312,7 @@ class SourceCursor:
     scope_notebook_ids: Tuple[str, ...]
     scope_fingerprint: str
     returned_before: int
+    emitted_meta: Tuple[Tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -449,6 +460,39 @@ def _payload_chars(item: object) -> int:
     return len(json.dumps(
         asdict(item), ensure_ascii=False, separators=(",", ":"), default=str
     ))
+
+
+def _source_meta_digest(display_title: str, doc_type_label: str) -> str:
+    """Short digest of the two listed fields the CHANGE SIGNAL cannot see.
+
+    The signal token is ``updated_at | parse_status | chunked_at`` on
+    ``sources``, so it moves for element swaps, status transitions and reparses.
+    Two of a listed document's three fields sit outside it:
+
+    * the display title can come from ``source_paper_meta.paper_title``, and
+      ``upsert_paper_meta`` writes that table (plus ``source_authors``) WITHOUT
+      touching ``sources.updated_at`` — verified, not assumed.  So a paper-metadata
+      backfill running while a roster is being paged changes what page 1 should
+      have said, invisibly to the signal;
+    * ``doc_type`` is a plain column a maintenance update can set on its own.
+
+    ``summary`` is deliberately NOT in here, and that is not an oversight: its
+    only writer is ``set_status``, which sets ``updated_at`` in the same
+    statement, so a summary edit already moves the fingerprint and is already
+    reported.  Hashing it too would only add false ``concurrent_change`` reports
+    on routine re-summarization.
+
+    A digest rather than the strings: the ledger rides on the cursor for the
+    whole chain, and 600 titles is prose held in memory to answer a yes/no
+    question.  8 bytes because it gates a freshness check inside one request,
+    not a security boundary, and the values it separates are two short fields of
+    the same row.
+    """
+    digest = hashlib.blake2b(digest_size=8)
+    digest.update(str(display_title).encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(str(doc_type_label).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _doc_type_label(value: Any) -> str:
@@ -1041,6 +1085,9 @@ class CollectionEnumerationService:
         items: List[SourceItem] = []
         resume: Optional[SourceCursor] = None
         exhausted = True
+        # 整条链已发出文档的 (id, 元数据摘要) 账目:续跑时从游标接回来,收尾复读时
+        # 逐条比对。链级而非本次调用级——混代页正是「早先那一页」被改掉。
+        emitted: List[Tuple[str, str]] = list(cursor.emitted_meta) if cursor else []
 
         with self._database.connect() as db:
             notebook_ids, tiers = self._notebooks.participant_tiers(
@@ -1070,7 +1117,8 @@ class CollectionEnumerationService:
                     # stop from here on must hand back a cursor pointing at the
                     # first source not yet listed, including a payload ceiling
                     # that fires on the very first item of the window.
-                    resume = _source_cursor(sources[position], scope_id, walk)
+                    resume = _source_cursor(
+                        sources[position], scope_id, walk, emitted)
                     allowance = walk.emit_allowance(first_page=first_window)
                     window = sources[position:position + allowance]
                     walk.charge_query()
@@ -1080,7 +1128,7 @@ class CollectionEnumerationService:
                     walk.charge_page(first_page=first_window)
                     first_window = False
                     for entry in window:
-                        resume = _source_cursor(entry, scope_id, walk)
+                        resume = _source_cursor(entry, scope_id, walk, emitted)
                         # Counted as read whether or not it yields an item: a
                         # source whose row vanished between the plan and this
                         # hydration was still visited, and hiding that would
@@ -1105,6 +1153,11 @@ class CollectionEnumerationService:
                             )
                             walk.admit(item)
                             items.append(item)
+                            emitted.append((
+                                entry.source_id,
+                                _source_meta_digest(
+                                    item.source_title, item.doc_type_label),
+                            ))
                         position += 1
             except _Stop as stop:
                 walk.reason = stop.reason
@@ -1116,6 +1169,15 @@ class CollectionEnumerationService:
                 and self._catalog.scope_signal_fingerprint(db, closing_ids)
                 == plan.fingerprint
             )
+            # 元数据换代复检。作用域指纹证明的是「源集合与元素代次没变」,证明不了
+            # 「这些文档的显示名/类型还是发出去时那个」——见 ``_source_meta_digest``:
+            # 论文元数据回填不碰 ``sources.updated_at``。不复检的话,走页期间的一次
+            # 回填会产出一份混代目录、却仍然报 complete。
+            # 成本 = 每条链收尾一次有界 IN 点查(≤行池上限,≤1 条 SQL);刻意不计入
+            # ``charge_query``,那个预算约束的是**翻页**往返,而这是与收尾参与者/
+            # 指纹读取同级的固定尾巴。
+            if emitted and not self._source_meta_unchanged(db, emitted):
+                scope_stable = False
 
         coverage = _coverage(
             walk, total=total, exhausted=exhausted, scope_stable=scope_stable
@@ -1149,6 +1211,35 @@ class CollectionEnumerationService:
             str(row["id"]): row
             for row in self._sources.source_listing_rows(db, list(source_ids))
         }
+
+    def _source_meta_unchanged(
+        self, db: object, emitted: Sequence[Tuple[str, str]]
+    ) -> bool:
+        """Re-read the chain's emitted documents and confirm their listed
+        metadata still digests to what was handed out.
+
+        ``False`` on ANY discrepancy, including a row that has since disappeared:
+        the caller turns that into ``concurrent_change``, which is the honest
+        answer for "a roster whose earlier pages may describe a different
+        generation than its later ones".  It never repairs or re-emits — an
+        enumeration hands out one generation or says it could not.
+
+        One batched primary-key read (``source_listing_rows`` batches by the
+        adapter's ``IN`` width, and the ledger is capped by the run's row pool),
+        so the whole check is one query per chain close.
+        """
+        rows = self._source_listing(db, [source_id for source_id, _ in emitted])
+        for source_id, digest in emitted:
+            row = rows.get(source_id)
+            if row is None:
+                return False
+            current = _source_meta_digest(
+                source_display_title(row),
+                _doc_type_label(_row_get(row, "doc_type")),
+            )
+            if current != digest:
+                return False
+        return True
 
     # ----------------------------------------------------------- KG objects
     def enumerate_kg_objects(
@@ -1583,14 +1674,22 @@ def _source_cursor(
     entry: ScopeSource,
     scope_id: Tuple[Tuple[str, ...], str],
     walk: _Walk,
+    emitted: Sequence[Tuple[str, str]],
 ) -> SourceCursor:
-    """A cursor pointing AT ``entry`` — the first source not yet listed."""
+    """A cursor pointing AT ``entry`` — the first source not yet listed.
+
+    ``emitted`` is snapshotted (``tuple(...)``) rather than referenced: the
+    caller keeps appending to that list, and a cursor is supposed to describe the
+    moment it was cut.  Aliasing it would let a later item retroactively appear
+    in an earlier cursor's ledger.
+    """
     return SourceCursor(
         notebook_id=entry.notebook_id,
         source_id=entry.source_id,
         scope_notebook_ids=scope_id[0],
         scope_fingerprint=scope_id[1],
         returned_before=walk.returned_total,
+        emitted_meta=tuple(emitted),
     )
 
 

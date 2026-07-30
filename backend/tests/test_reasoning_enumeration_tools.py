@@ -325,9 +325,17 @@ def test_reflect_prompt_offers_the_sources_collection(repo):
     assert "enumerate_sources" not in schema_on
     assert "enumerate_sources" not in on
     assert schema_on.count("enumerate_") == 2
-    # 是 enumerate 分支的一个参数值,与 kind/object_type 并列。
-    assert '"collection":"sources"' in schema_on
-    assert 'enumerate.collection to "sources"' in on
+    # 是 enumerate 分支的一个参数值,与 kind/object_type 并列。schema 里**空缺省**
+    # (与 source_id/source_title 同惯例):写成唯一值 "sources" 会让逐字段照抄
+    # 模板的模型在列公式时也带上它,而参数优先于动作 id ⇒ 静默改道成文档目录。
+    # 取值只出现在动作说明里,那里它读起来是一条条件指令。
+    assert '"collection":"",' in schema_on
+    assert '"collection":"sources"' not in schema_on
+    assert 'enumerate.collection set to "sources"' in on
+    assert "enumerate.collection is EMPTY for both actions above" in on
+    assert "leave it empty in every other enumerate call" in on
+    # 「它会覆盖动作本身」这句必须在场:模型只有知道代价才会克制地填它。
+    assert "OVERRIDES the action" in on
     assert "collection" not in reflect_schema_hint()   # 关掉工具就整段不存在
     assert "enumerate.collection" not in off
     # 「先拿目录、再按标题逐篇深挖」——这条分工必须写清楚,否则模型会拿相关性
@@ -573,6 +581,31 @@ def test_the_collection_parameter_decides_not_the_action_id(repo):
     # 同时给了 object_type 也不生效:集合选择器优先,否则同一个请求有两种解释。
     assert outcome.kind == ""
     assert _steps(result, "enumerate")[0].summary.startswith("枚举来源清单")
+
+
+def test_a_model_copying_every_schema_field_still_gets_element_enumeration(repo):
+    """逐字段照抄模板的模型(`kind=formula` + `collection=""`)必须走**元素**枚举。
+
+    这是把 schema 示例从唯一值 `"sources"` 改成空缺省的行为面:参数优先于动作 id 是
+    刻意的设计,所以只要模板里摆着一个 `"sources"`,照抄它的那一轮就会被静默改道成
+    文档目录——用户问「有哪些公式」,拿回一份文档清单。
+    """
+    notebook = _seed(repo, formulas=2)
+    llm = _SeqLLM([
+        # 照抄整个 enumerate 分支:每个字段都在,可选的都是空串。
+        {"next_action": "enumerate_elements",
+         "enumerate": {"kind": "formula", "object_type": "",
+                       "collection": "", "source_id": "", "source_title": ""}},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "库里有哪些公式", "", limits=limits)
+
+    outcome = result.enumerations[0]
+    assert outcome.collection == "elements" and outcome.kind == "formula"
+    assert len(outcome.items) == 2
+    assert _steps(result, "enumerate")[0].summary.startswith("枚举公式清单")
 
 
 def test_an_unrecognized_collection_value_teaches_the_legal_one(repo):
