@@ -366,6 +366,7 @@ def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsy
     assert "call sites found" in capsys.readouterr().err
 
 
+@pytest.mark.architecture_contract
 def test_真实后端确有可展示文案站点(tmp_path):
     """非空性:守卫真的在后端 app 树上找到了标记站点(不是扫了个空目录)。"""
     total = sum(
@@ -397,5 +398,6 @@ def test_后端真实文案确实曾经违规过(tmp_path):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.architecture_contract
 def test_真实前后端源码都通过守卫(capsys):
     assert guard.main() == 0, capsys.readouterr().err

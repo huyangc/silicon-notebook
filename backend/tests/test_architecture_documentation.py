@@ -3,18 +3,7 @@ import inspect
 import re
 from pathlib import Path
 
-from app.repositories.ports import (
-    AskCandidatePort,
-    AskGraphPort,
-    AskStreamPort,
-    RetrievalPort,
-)
-from app.repositories.ownership_manifest import OWNER_BY_MEMBER
-from app.services.repository_facade import RepositoryFacade
 from app.services import report_engine, report_execution, repository_runtime
-from tests.architecture import facade_contract
-from tests.architecture.repository_callers import collect_caller_contract
-from tests.test_repository_protocol_coverage import protocol_calls
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -145,7 +134,7 @@ def test_postgres_integration_lane_is_separate_fail_closed_and_pg16_authoritativ
     ):
         assert phrase in workflow
     assert "scripts/check_postgres.sh" not in _between(
-        ".github/workflows/ci.yml", "full-gate:", "postgres-integration:"
+        ".github/workflows/ci.yml", "standard-gate:", "postgres-integration:"
     )
 
 
@@ -311,10 +300,10 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
     )
     _assert_phrases(
         {
-            "README.md": "default 9 backend pytest workers",
-            "README_zh.md": "默认使用 9 个 backend pytest worker",
-            "AGENTS.md": "default 9 backend pytest workers",
-            "architecture.md": "默认使用 9 个 backend pytest worker",
+            "README.md": "default 12 backend pytest workers",
+            "README_zh.md": "默认使用 12 个 backend pytest worker",
+            "AGENTS.md": "default 12 backend pytest workers",
+            "architecture.md": "默认使用 12 个 backend pytest worker",
         }
     )
     for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md"):
@@ -679,39 +668,8 @@ def test_repository_v9_compatibility_guards_remain_documented():
         )
 
 
-def test_completed_repository_boundary_claims_are_source_guarded():
-    """The completion prose is coupled to production-source architecture guards.
-
-    The semantic caller contract is checked exactly against its reviewed fixture
-    in the repository dependency suite. Here we additionally pin that every
-    remaining boundary crossing has an explicit architectural reason.
-    """
-    caller_contract = collect_caller_contract()
-    assert caller_contract["independent_sql"]
-    assert caller_contract["independent_private"]
-    assert all(
-        entry["reason"]
-        for entries in caller_contract.values()
-        for entry in entries
-    )
-    assert facade_contract.facade_body_violations(RepositoryFacade) == []
-    assert facade_contract.manifest_delegate_mismatches(
-        RepositoryFacade, OWNER_BY_MEMBER
-    ) == []
-
-    assert protocol_calls("RetrievalPort") - set(RetrievalPort.__dict__) == set()
-    for name, protocol in (
-        ("AskCandidatePort", AskCandidatePort),
-        ("AskGraphPort", AskGraphPort),
-        ("AskStreamPort", AskStreamPort),
-    ):
-        declared = {
-            member
-            for member, value in protocol.__dict__.items()
-            if callable(value) and not member.startswith("_")
-        }
-        assert protocol_calls(name) == declared
-
+def test_completed_repository_boundary_claims_remain_documented():
+    """Pin the prose; dedicated contract suites own production-source scans."""
     _assert_phrases(
         {
             "README.md": "Application services do not assemble product SQL",

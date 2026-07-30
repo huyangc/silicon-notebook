@@ -109,6 +109,7 @@ def _settings(tmp_path) -> Settings:
     )
 
 
+@pytest.mark.architecture_contract
 def test_raw_model_transports_are_confined_to_reviewed_boundaries():
     """Raw SDK construction/calls must never bypass the runtime scheduler."""
     offenders: list[str] = []
@@ -143,6 +144,7 @@ def test_raw_model_transports_are_confined_to_reviewed_boundaries():
     assert offenders == []
 
 
+@pytest.mark.architecture_contract
 def test_offline_kg_transport_has_no_product_runtime_importers():
     importers: set[str] = set()
     prefixes: dict[str, set[str]] = {}
@@ -171,6 +173,7 @@ def test_offline_kg_transport_has_no_product_runtime_importers():
     }
 
 
+@pytest.mark.architecture_contract
 def test_retired_model_configuration_and_gate_symbols_are_absent():
     offenders: list[str] = []
     retired_routes = {"/me/model-settings", "/me/model-services"}
@@ -262,6 +265,7 @@ def _retired_model_attribute_offenders(tree: ast.AST, relative: str) -> list[str
     return offenders
 
 
+@pytest.mark.architecture_contract
 def test_retired_repository_model_attributes_cannot_be_read_or_rebound():
     offenders: list[str] = []
     for path, relative in _python_sources("backend/app", "backend/tests", "scripts"):

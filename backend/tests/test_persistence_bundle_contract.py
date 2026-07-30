@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from typing import get_type_hints
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 NEUTRAL_MODULES = (
@@ -73,6 +75,7 @@ def test_neutral_ports_do_not_import_database_backends():
     assert offenders == {module: set() for module in NEUTRAL_MODULES}, offenders
 
 
+@pytest.mark.architecture_contract
 def test_clean_neutral_runtime_and_facade_imports_load_no_backend_modules():
     script = """
 import json

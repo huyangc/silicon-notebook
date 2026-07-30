@@ -28,7 +28,7 @@
 
 ### 硬门
 
-- 完整本地门是 `bash scripts/check.sh`（后端 pytest + 语法/契约/harness + 前端 test/typecheck/build 三条并发泳道）。CI 只是它的只读包装，不要在 workflow 里另起测试根。
+- 门禁分为 G0 目标测试、G1 `bash scripts/check.sh` 标准门（编辑期及每次 PR/push，默认 12 个后端 pytest worker + 语法/契约/harness + 前端 test/typecheck/build 三条并发泳道，Apple Silicon warm 目标 ≤60 秒）、G2 `bash scripts/check_extended.sh` 扩展门（再补跑 slow 真实索引/性能测试与 architecture_contract 全仓语义扫描，每天 18:17 UTC/北京时间次日 02:17 一次，也可手动触发）和 G3 独立 PostgreSQL 集成门。G1/G2 的 backend marker 必须精确互补。测试加速保持断言和生产默认值不变：全仓语法扫描按进程复用解析结果，纯缓存策略不搭建无关数据库/索引，生命周期脚本仅通过私有 `_SCRIPT_TEST_*` 控制缩短测试轮询，并发顺序用 event/barrier 而不是固定 sleep 证明。
 - **仅 Codex 的沙箱规则（Claude Code 不适用）**：Codex 第一次运行 `scripts/check.sh` 就必须申请沙箱外执行，因为后端生命周期测试会绑定 loopback 端口并管理子进程；不得先在沙箱内试错。GitHub 网络操作（`git fetch`、`git push`、`gh auth/repo/pr`）也必须直接申请沙箱外执行；普通本地只读 Git 检查仍在沙箱内完成。
 - 数据库专项门只覆盖直接 PostgreSQL 后端；已退役的 SQLite 后端实现专项测试、SQLite→PostgreSQL 导入/正向 shadow 测试与跨后端 parity 测试不得重新加入当前套件。
 - **schema**：加表或改结构必须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不要塞进已封版的旧迁移——版本闸会对已部署库短路，`IF NOT EXISTS` 救不了没被执行到的语句。当前 SQLite schema 为 v37；PostgreSQL checksummed schema 为 v15；除关系端点 keyset 覆盖索引和关系补全的来源代次水位外，两侧还包含生成中 Ask 的浏览器提交时间 `ask_jobs.asked_at`、图谱质量分析的三张预计算产物表，以及按 `(source_id, element_type, created_at, id)` 的集合枚举索引 `idx_source_elements_source_type`。

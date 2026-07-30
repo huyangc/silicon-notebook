@@ -8,11 +8,18 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+DAILY_EXTENDED_WORKFLOW_PATH = (
+    ROOT / ".github" / "workflows" / "daily-extended.yml"
+)
 
 
 def _load_workflow() -> dict[str, object]:
+    return _load_workflow_path(WORKFLOW_PATH)
+
+
+def _load_workflow_path(path: Path) -> dict[str, object]:
     workflow = yaml.load(
-        WORKFLOW_PATH.read_text(encoding="utf-8"),
+        path.read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
     assert isinstance(workflow, dict)
@@ -65,15 +72,15 @@ def test_ci_events_permissions_and_concurrency_are_bounded() -> None:
     assert "secrets." not in repr(workflow)
 
 
-def test_offline_ci_job_installs_declared_dependencies_and_runs_only_complete_gate() -> None:
+def test_standard_ci_job_installs_declared_dependencies_and_runs_only_standard_gate() -> None:
     workflow = _load_workflow()
     jobs = workflow["jobs"]
     assert isinstance(jobs, dict)
-    assert set(jobs) == {"full-gate", "postgres-integration"}
-    job = jobs["full-gate"]
+    assert set(jobs) == {"standard-gate", "postgres-integration"}
+    job = jobs["standard-gate"]
     assert isinstance(job, dict)
 
-    assert job["name"] == "full-gate"
+    assert job["name"] == "level-1-standard"
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == "20"
 
@@ -128,7 +135,7 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
     workflow = _load_workflow()
     job = workflow["jobs"]["postgres-integration"]
     assert isinstance(job, dict)
-    assert job["name"] == "postgres-integration"
+    assert job["name"] == "level-3-postgres-integration"
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == "35"
 
@@ -202,7 +209,7 @@ def test_postgres_ci_job_uses_pg16_least_privilege_targets_and_only_pg_gate() ->
 
 def test_ci_builds_hnswlib_portably_without_reusing_native_wheels() -> None:
     workflow = _load_workflow()
-    job = workflow["jobs"]["full-gate"]
+    job = workflow["jobs"]["standard-gate"]
     assert isinstance(job, dict)
 
     python = _uses_step(
@@ -216,3 +223,64 @@ def test_ci_builds_hnswlib_portably_without_reusing_native_wheels() -> None:
     assert install["run"] == (
         "python -m pip install --no-cache-dir -r backend/requirements.txt"
     )
+
+
+def test_daily_extended_gate_runs_once_per_day_and_is_manually_dispatchable() -> None:
+    workflow = _load_workflow_path(DAILY_EXTENDED_WORKFLOW_PATH)
+
+    assert workflow["name"] == "Daily Extended Gate"
+    events = workflow["on"]
+    assert isinstance(events, dict)
+    assert events == {
+        "schedule": [{"cron": "17 18 * * *"}],
+        "workflow_dispatch": {},
+    }
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {
+        "group": "daily-extended-${{ github.ref }}",
+        "cancel-in-progress": "true",
+    }
+
+    jobs = workflow["jobs"]
+    assert isinstance(jobs, dict)
+    assert set(jobs) == {"extended-gate"}
+    job = jobs["extended-gate"]
+    assert isinstance(job, dict)
+    assert job["name"] == "level-2-extended"
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert job["timeout-minutes"] == "25"
+
+    checkout = _uses_step(
+        job,
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    )
+    assert checkout["with"] == {"persist-credentials": "false"}
+    python = _uses_step(
+        job,
+        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+    )
+    assert python["with"] == {"python-version": "3.13"}
+    node = _uses_step(
+        job,
+        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+    )
+    assert node["with"] == {
+        "node-version": "22",
+        "cache": "npm",
+        "cache-dependency-path": "frontend/package-lock.json",
+    }
+
+    run_steps = [
+        step
+        for step in job["steps"]
+        if isinstance(step, dict) and isinstance(step.get("run"), str)
+    ]
+    commands = [step["run"] for step in run_steps]
+    assert commands[-1] == "bash scripts/check_extended.sh"
+    assert [command for command in commands if "scripts/check" in command] == [
+        "bash scripts/check_extended.sh"
+    ]
+    assert run_steps[-1]["env"] == {
+        "PYTHON_BIN": "python",
+        "BACKEND_PYTEST_WORKERS": "4",
+    }

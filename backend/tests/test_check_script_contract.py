@@ -64,18 +64,18 @@ def test_check_script_termination_reaps_lane_descendants(tmp_path):
     check.chmod(0o755)
     pid_dir = tmp_path / "pids"
     pid_dir.mkdir()
-    # pid 文件**故意**分两步写:先创建空文件,停一下,再落内容。真实 lane 用的
+    # pid 文件**故意**分两步写:先创建空文件,握手后再落内容。真实 lane 用的
     # `printf … >file` 本来就是这两步(shell 先创建/截断再写),只是间隙短到本地几乎撞不上
     # —— 曾经因此在 CI 上偶发 `int('')` 而本地怎么跑都是绿的。把间隙固定放大,这个竞态就从
     # "偶发 flake" 变成"确定性用例":谁把就绪判据改回「文件出现即读」,这里必红。
-    # 0.5s 远大于轮询间隔 20ms,轮询必然至少观察到一次空文件。
+    # release 文件保证 controller 已观察到空文件,无需固定 sleep 猜调度时机。
     lane_body = """#!/usr/bin/env bash
 set -euo pipefail
 sleep 60 &
 child=$!
 pid_file="$CHECK_TEST_PID_DIR/$CHECK_LANE_NAME.pid"
 : >"$pid_file"
-sleep 0.5
+while [[ ! -f "$CHECK_TEST_RELEASE_DIR/$CHECK_LANE_NAME" ]]; do sleep 0.01; done
 printf '%s\\n' "$child" >>"$pid_file"
 wait "$child"
 """
@@ -90,6 +90,7 @@ wait "$child"
         env={
             **os.environ,
             "CHECK_TEST_PID_DIR": str(pid_dir),
+            "CHECK_TEST_RELEASE_DIR": str(pid_dir),
             "PYTHON_BIN": sys.executable,
         },
         start_new_session=True,
@@ -99,6 +100,18 @@ wait "$child"
     child_pids: list[int] = []
     try:
         deadline = time.monotonic() + 5
+        pid_files: list[Path] = []
+        while time.monotonic() < deadline:
+            pid_files = sorted(pid_dir.glob("*.pid"))
+            if len(pid_files) == 3 and all(
+                path.read_text(encoding="utf-8") == "" for path in pid_files
+            ):
+                break
+            time.sleep(0.01)
+        assert len(pid_files) == 3
+        for lane in ("backend", "contracts", "frontend"):
+            (pid_dir / lane).touch()
+
         while time.monotonic() < deadline:
             child_pids = _written_lane_pids(pid_dir)
             if len(child_pids) == 3:

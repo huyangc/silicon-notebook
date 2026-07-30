@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 import inspect
 from pathlib import Path
 from typing import get_type_hints
@@ -64,11 +65,18 @@ class ProtocolCallSite:
     diagnostic_lines: tuple[int, ...] = field(compare=False)
 
 
-def _production_files():
+@lru_cache(maxsize=1)
+def _production_syntax() -> tuple[tuple[str, ast.AST, dict[ast.AST, str]], ...]:
+    """Parse the production corpus once for all protocol audits in this worker."""
+    parsed: list[tuple[str, ast.AST, dict[ast.AST, str]]] = []
     for base in PRODUCTION_ROOTS:
         for path in sorted(base.rglob("*.py")):
-            if "__pycache__" not in path.parts:
-                yield path, str(path.relative_to(ROOT))
+            if "__pycache__" in path.parts:
+                continue
+            rel = str(path.relative_to(ROOT))
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+            parsed.append((rel, tree, qualified_scopes(tree)))
+    return tuple(parsed)
 
 
 def _dotted(node: ast.AST) -> str:
@@ -121,6 +129,7 @@ def _protocol_receivers(tree: ast.AST, protocol_name: str) -> set[str]:
     return receivers
 
 
+@lru_cache(maxsize=None)
 def protocol_call_sites(protocol_name: str) -> frozenset[ProtocolCallSite]:
     """Return public calls made through the named production protocol seat.
 
@@ -137,14 +146,12 @@ def protocol_call_sites(protocol_name: str) -> frozenset[ProtocolCallSite]:
     diagnostic_lines_by_site: dict[tuple[str, str, str], list[int]] = defaultdict(
         list
     )
-    for path, rel in _production_files():
+    for rel, tree, scopes in _production_syntax():
         if rel in {
             "backend/app/services/retrieval_service.py",
             "backend/app/repositories/ports.py",
         }:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        scopes = qualified_scopes(tree)
         if protocol_name == "AskStreamPort":
             for scope in ast.walk(tree):
                 if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):

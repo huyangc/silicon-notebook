@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  full-gate:
-    name: full-gate
+  standard-gate:
+    name: level-1-standard
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -45,14 +45,14 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci --prefix frontend
 
-      - name: Run complete offline gate
+      - name: Run standard offline gate
         env:
           PYTHON_BIN: python
           BACKEND_PYTEST_WORKERS: "4"
         run: bash scripts/check.sh
 
   postgres-integration:
-    name: postgres-integration
+    name: level-3-postgres-integration
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     services:

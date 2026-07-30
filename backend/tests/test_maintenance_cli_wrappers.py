@@ -76,6 +76,7 @@ def test_root_wrappers_reject_unconfirmed_postgres_before_opening_repository(
     assert module.main() == 2
 
 
+@pytest.mark.architecture_contract
 def test_maintenance_wrappers_use_the_backend_neutral_cli_opener_only():
     imports = production_source_index().imports()
     wrapper_imports = [item for item in imports if item.key.path in WRAPPER_PATHS]

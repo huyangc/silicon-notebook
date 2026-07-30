@@ -3,6 +3,8 @@ import importlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 MODELS = ROOT / "backend" / "app" / "models"
@@ -237,6 +239,7 @@ def test_moved_facade_reference_helper_allows_unmoved_facade_access():
         assert not moved_facade_references(source)
 
 
+@pytest.mark.architecture_contract
 def test_first_party_production_uses_domain_model_modules():
     app_root = ROOT / "backend" / "app"
     offenders = []

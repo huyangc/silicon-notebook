@@ -37,7 +37,16 @@ Baseline snapshot 发布要求 owner-only 的真实目录并以 0600 独占创�
 bash scripts/check.sh
 ```
 
-这是完整的本地离线门禁，并行运行三个有界 lane：`check_backend.sh` 执行完整 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、`tsc --noEmit` 与 production build。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+验证门禁分为四级：
+
+| 级别 | 范围 | 执行频率 |
+| --- | --- | --- |
+| G0 目标测试 | 按当前改动文件与行为选跑 | 编辑循环中随时执行 |
+| G1 标准门 | `scripts/check.sh`：稳定后端、契约/harness、前端测试/类型检查/构建 | 本地交付前以及每次 PR/push/手动 CI |
+| G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试与全仓语义扫描 | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
+| G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
+
+G1 并行运行三个有界 lane：`check_backend.sh` 以默认 12 个 worker 执行稳定 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、`tsc --noEmit` 与 production build。G1 backend 只排除 `slow` 真实索引/性能用例、`architecture_contract` 全仓语义扫描和 PostgreSQL 树；G2 先执行 G1，再执行精确互补的 backend marker 集。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 
@@ -47,19 +56,23 @@ bash scripts/check.sh
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
 
-完整门禁并发运行三个 lane：backend、contracts、frontend。`check_backend.sh` 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 60 秒；CI 各 lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。
+G1 标准门并发运行 backend、contracts、frontend 三个 lane。`check_backend.sh` 默认使用 12 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 60 秒；G2 每日扩展门不受该本机时限约束，各 CI lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。
+
+测试加速必须保持结果语义：G1 标准门与 G2 扩展门的 marker 表达式精确互补，PostgreSQL 独立负责，任何已提交用例都不能变成不可达；全仓 AST/协议扫描在同一 pytest 进程内只解析每个生产文件一次；缓存容器策略直接验证容器，不搭建无关数据库与 ANN 索引；autouse 隔离路径从 worker 已有的 pytest base temp 派生，不为每条纯测试额外创建 `tmp_path`；生命周期测试只能显式设置私有 `_SCRIPT_TEST_*` 时间控制，未设置时发布脚本仍沿用生产超时与轮询间隔。并发顺序与公平性使用 event/barrier，而非固定 sleep 或线程唤醒顺序；真实进程生命周期模块使用独立 xdist group。
 
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` 把同一套完整门禁暴露为唯一的
-`CI / full-gate` 检查。它在目标为 `master` 的 PR、`master` push 与手动触发时
-运行，环境固定为 `ubuntu-24.04`、Python 3.13、Node.js 22。workflow 从
-`backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
-测试选择完整委托给 `scripts/check.sh`。
+`.github/workflows/ci.yml` 把 G1 暴露为 `CI / level-1-standard`，在目标为
+`master` 的 PR、`master` push 与手动触发时运行；
+`.github/workflows/daily-extended.yml` 把 G2 暴露为
+`Daily Extended Gate / level-2-extended`，只保留每日一个 cron 和手动触发。
+两者固定使用 `ubuntu-24.04`、Python 3.13、Node.js 22，从声明的依赖文件安装，
+并把测试选择委托给对应 wrapper。G3 保持为
+`CI / level-3-postgres-integration`。
 
 已提交的 OpenAPI 契约是字节语义冻结契约，因此
 `backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
-`2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑完整门禁时，
+`2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑 G2 扩展门时，
 才同步升级这两个框架。
 
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
@@ -69,10 +82,10 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
 生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。20 分钟 timeout 包含依赖安装，
 与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
-`CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
+`CI / level-1-standard` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
 
-PostgreSQL 覆盖与离线 full gate 明确分离。`postgres-integration` job 启动 PostgreSQL 16，
+PostgreSQL 覆盖与离线门禁明确分离。`level-3-postgres-integration` job 启动 PostgreSQL 16，
 创建最小权限与辅助 encoding/locale 目标，并通过 `bash scripts/check_postgres.sh` 只运行
 `postgres_integration` marker。本地使用已安装的 PostgreSQL 16 和显式 `TEST_POSTGRES_URL`；
 `scripts/check.sh` 不得启动或连接 PostgreSQL。

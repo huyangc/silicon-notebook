@@ -1760,6 +1760,7 @@ def _literal_string_sequences(path: pathlib.Path):
         yield node, frozenset(values), assigned.get(id(node), "")
 
 
+@pytest.mark.architecture_contract
 def test_enumerable_element_kinds_have_exactly_one_literal_definition():
     """可枚举元素 kind 白名单只能有一处字面量:``collection_catalog`` 的
     定义点。执行器与(将来的)reflect 校验一律 import。

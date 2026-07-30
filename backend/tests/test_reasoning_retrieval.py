@@ -769,12 +769,23 @@ def test_run_initial_retrieval_is_parallel(rrepo, monkeypatch):
         plan={"sub_queries": subq},
         reflects=[{"next_action": "answer", "sufficient": True}]))
 
-    barrier = threading.Barrier(len(subq))
+    expected_parallel_queries = {item["query"] for item in subq}
+    barrier = threading.Barrier(len(expected_parallel_queries))
+    first_arrivals: set[str] = set()
+    arrivals_lock = threading.Lock()
 
     def fake_search(self, notebook_id, query, types=None, prefer="balanced"):
-        # 串行:第一个线程在此 wait,无人来汇合 → 超时抛 BrokenBarrierError。
-        # 并行:三个线程同时到达 → 全部放行。
-        barrier.wait(timeout=3)
+        # Only each planned query's first call participates. Quota reranking
+        # legitimately calls search() for the same queries again; feeding those
+        # calls into the reusable Barrier started a second generation serially
+        # and added a deterministic 3-second timeout to every successful run.
+        with arrivals_lock:
+            first_arrival = query not in first_arrivals
+            first_arrivals.add(query)
+        if query in expected_parallel_queries and first_arrival:
+            # 串行:第一个线程在此 wait,无人来汇合 → 超时抛 BrokenBarrierError。
+            # 并行:三个线程同时到达 → 全部放行。
+            barrier.wait(timeout=1)
         return [_mk_rk(f"id-{query}", query)]
 
     monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
