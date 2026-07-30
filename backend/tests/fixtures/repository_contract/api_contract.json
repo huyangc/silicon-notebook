@@ -7662,7 +7662,7 @@
           "type": "object"
         },
         "TypedCollectionItem": {
-          "description": "One row of an enumerated source-element or knowledge-object list.\nElement rows populate ``source_id``/``source_title``/``element_type``/\n``location_label``/``text``/``asset_id``; knowledge-object rows populate\n``name``/``section_path``/``evidence_element_ids`` instead.",
+          "description": "One row of an enumerated source-element, knowledge-object or document\nlist.  Element rows populate ``source_id``/``source_title``/\n``element_type``/``location_label``/``text``/``asset_id``;\nknowledge-object rows populate ``name``/``section_path``/\n``evidence_element_ids`` instead; document rows (``collection ==\n\"sources\"``) reuse the element arm's ``source_id``/``source_title`` plus\n``location_label`` for the document TYPE (already in interface words) and\n``text`` for the stored summary excerpt, leaving ``element_type`` empty.",
           "properties": {
             "asset_id": {
               "default": "",
@@ -7744,12 +7744,13 @@
           "type": "object"
         },
         "TypedCollectionResult": {
-          "description": "One enumerated element or knowledge-object collection, kept alongside\nranked evidence in the response rather than folded into it. Its\n``coverage`` — not its position in a relevance ranking — is the\nauthority on whether the list is complete.",
+          "description": "One enumerated element, knowledge-object or document collection, kept\nalongside ranked evidence in the response rather than folded into it. Its\n``coverage`` — not its position in a relevance ranking — is the\nauthority on whether the list is complete.",
           "properties": {
             "collection": {
               "enum": [
                 "elements",
-                "kg_objects"
+                "kg_objects",
+                "sources"
               ],
               "title": "Collection",
               "type": "string"

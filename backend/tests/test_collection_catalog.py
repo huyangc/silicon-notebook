@@ -560,15 +560,16 @@ def test_fingerprint_ignores_row_order(repo):
 
 # ------------------------------------------------------------------ 地图文本
 
-def _map(elements, kg, knowhow):
+def _map(elements, kg, knowhow, sources=0):
     return CollectionMap(
         notebook_ids=("nb",),
         elements=tuple(
-            ElementKindCount(kind=kind, count=count, sources=sources)
-            for kind, count, sources in elements
+            ElementKindCount(kind=kind, count=count, sources=sources_count)
+            for kind, count, sources_count in elements
         ),
         kg_objects=tuple(kg),
         knowhow_tables=knowhow,
+        sources=sources,
     )
 
 
@@ -579,12 +580,13 @@ def test_render_matches_the_documented_shape():
         [("formula", 12, 3), ("table", 5, 2), ("image", 0, 0), ("code_block", 7, 1)],
         [("concept", 1234), ("claim", 567), ("formula", 89), ("procedure", 45)],
         2,
+        7,
     ))
     assert text == (
         "[Collections in scope] elements: formula 12 (3 sources), "
         "table 5 (2 sources), image 0, code_block 7 | "
         "KG objects: concept 1234, claim 567, formula 89, procedure 45 | "
-        "knowhow tables: 2"
+        "knowhow tables: 2 | sources: 7"
     )
     assert len(text) <= COLLECTION_MAP_MAX_CHARS
 
@@ -594,11 +596,12 @@ def test_render_zero_shape_is_stable():
         [(kind, 0, 0) for kind in ENUMERABLE_ELEMENT_KINDS],
         [("concept", 0), ("claim", 0), ("formula", 0), ("procedure", 0)],
         0,
+        0,
     ))
     assert text == (
         "[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | "
         "KG objects: concept 0, claim 0, formula 0, procedure 0 | "
-        "knowhow tables: 0"
+        "knowhow tables: 0 | sources: 0"
     )
 
 
@@ -607,6 +610,7 @@ def test_render_is_hard_capped():
     text = render_collection_map(_map(
         [(kind, huge, huge) for kind in ENUMERABLE_ELEMENT_KINDS],
         [(name, huge) for name in ("concept", "claim", "formula", "procedure")],
+        huge,
         huge,
     ))
     assert len(text) == COLLECTION_MAP_MAX_CHARS

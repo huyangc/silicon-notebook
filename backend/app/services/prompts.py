@@ -9,6 +9,37 @@ from __future__ import annotations
 from typing import List, Optional, Sequence
 
 
+# Deictic phrases that name the SCOPE of a request rather than anything inside
+# it.  One paragraph, one wording, spliced into every prompt that turns a user
+# question into retrieval text: the intent contract, both spellings of the
+# planner, and the reflect loop.  Written once because four hand-written
+# variants would be four chances for one of them to say something subtly
+# different about the same phrase (design doc §6.1).
+#
+# Why it is needed: "当前 notebook 的文章分析" used to be planned as a keyword
+# hunt for the tokens 当前/notebook/知识图谱 — words that appear in no document,
+# so the sub-query spends its budget probing for the name of the container the
+# user is already standing in.  Grounding them removes the noise AND is what
+# makes "list what is in this library" reachable as an enumeration.
+#
+# Deliberately prompt-level only: no deterministic strip list.  A phrase table
+# that edits user text would be exactly the lexical routing this feature's
+# design decision rules out, and it would mangle the legitimate case (a
+# document that genuinely discusses knowledge graphs).
+SCOPE_DEIXIS_GROUNDING = (
+    "Scope words are not search terms. Phrases like 当前notebook / 这个库 / "
+    "本库 / 整个库 / 库里 / the current notebook / this notebook / this library "
+    "refer to the notebook the user has open together with the reference "
+    "libraries mounted on it — that is the SCOPE every retrieval already runs "
+    "in, not content that can be found inside it. 知识图谱 / KG likewise names "
+    "this library's own knowledge structure, not a topic to look up. So resolve "
+    "such a phrase into the scope and then DROP it: never carry it into a "
+    "query, a keyword or a name to look up, because no document contains the "
+    "name of the library holding it. Keep the rest of the question intact — "
+    "'当前notebook里的文章讲了什么' asks about the documents themselves, and "
+    "dropping the scope words must not turn it into a different question.\n"
+)
+
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
 CONCEPT_DESC_SCHEMA_HINT = '{"description":""}'
@@ -272,7 +303,9 @@ def plan_prompt(
         "- prefer: keyword (exact terms/codes), semantic (paraphrase/concept), "
         "or balanced.\n"
         "- reason: one line on why this sub-query.\n"
-        "Keep sub-queries focused and non-redundant.\n\n"
+        "Keep sub-queries focused and non-redundant.\n"
+        f"{SCOPE_DEIXIS_GROUNDING}"
+        "\n"
         f"{history_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
@@ -301,9 +334,18 @@ def reflect_schema_hint(
     enumerate_branch = ""
     if element_kinds or object_types:
         actions += "|enumerate_elements|enumerate_kg_objects"
+        # ``collection`` is the third collection's whole model-facing surface:
+        # the action space stays at ten ids and the document roster arrives as a
+        # PARAMETER value beside kind/object_type (design doc §6.2).  Its only
+        # accepted value is spelled out because that is all it accepts — omit it
+        # and the action id decides, exactly as before this field existed.  It
+        # rides the same gate as the other two, so it appears whenever the
+        # whitelists do: one kill switch for the whole tool family, with no
+        # second flag able to disagree with it.
         enumerate_branch = (
             '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
             '"object_type":"' + "|".join(object_types) + '",'
+            '"collection":"sources",'
             '"source_id":"","source_title":""},'
         )
     return (
@@ -334,6 +376,26 @@ def reflect_prompt(
     byte of this prompt is what it was before they existed.
     """
     enumeration_tools = bool(element_kinds or object_types)
+    # The reflect-local half of the scope-grounding rule: this is the prompt with
+    # four separate free-text retrieval fields, and each of them is a place a
+    # scope word can leak back in after the paragraph above told the model to
+    # drop it. ``exact_term`` is named explicitly because it is the one field
+    # that is matched LITERALLY — "当前notebook" as an exact_term is a guaranteed
+    # zero-hit probe. The library-composition sentence only appears with the
+    # tools, since the counts line it points at only exists then.
+    scope_fields_rule = (
+        "This applies to every retrieval field you fill: new_sub_query.query, "
+        "elements_query, ppr_query and exact_term. exact_term especially — it "
+        "is matched literally against document text, so a scope word there "
+        "returns nothing.\n"
+        + (
+            "A question about the library ITSELF (how much it holds, what kinds "
+            "of material, how many documents) is answered from the "
+            "[Collections in scope] counts and the enumerate actions, never by "
+            "searching for the words 知识图谱 / KG / notebook.\n"
+            if enumeration_tools else ""
+        )
+    )
     enumerate_actions = (
         "- enumerate_elements: the question asks you to LIST or INVENTORY a "
         "kind of document element rather than to find the most relevant ones. "
@@ -351,6 +413,20 @@ def reflect_prompt(
         "- enumerate_kg_objects: the same, for extracted knowledge objects of "
         "one type. Set enumerate.object_type to one of: "
         + ", ".join(object_types) + ".\n"
+        "- To list the DOCUMENTS themselves instead of anything inside them, "
+        "choose enumerate_elements and set enumerate.collection to \"sources\" "
+        "(kind, object_type, source_id and source_title are then ignored — the "
+        "library's document roster is one whole collection with no sub-type). "
+        "Do that when the question asks WHICH documents the library holds, or "
+        "asks for a per-document treatment of it ('库里有哪几篇', "
+        "'逐篇分析当前notebook', 'summarize each paper here'). It lists every "
+        "document in scope with its type and stored summary, in the order the "
+        "library shows them. Use it FIRST for that shape of question — the "
+        "document roster is the outline the rest of the answer hangs on — and "
+        "then, for each document worth going deeper into, add_subquery using "
+        "that document's TITLE from the list. Relevance search cannot "
+        "substitute: it returns passages from whichever documents matched, "
+        "never the roster.\n"
         "Use the [Collections in scope] counts to decide BEFORE acting: a "
         "collection whose count fits this run's listing allowance can be "
         "listed in full, but when the count is far larger than that allowance, "
@@ -413,6 +489,8 @@ def reflect_prompt(
         "and returns the whole manual section it heads, so a name you invent or "
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
+        f"{SCOPE_DEIXIS_GROUNDING}"
+        f"{scope_fields_rule}"
         "Before choosing answer, check aspect by aspect that every part the "
         "question explicitly asks for (each layer / entity / requirement it "
         "names) is covered by the candidates; if an asked-for aspect has no "
@@ -546,7 +624,9 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "Keep sub-queries non-redundant.\n"
         "If the question compares an entity with others of its kind (e.g. 'X vs "
         "other LLMs'), set comparison.focal to that entity's canonical name; omit "
-        "comparison otherwise.\n\n"
+        "comparison otherwise.\n"
+        f"{SCOPE_DEIXIS_GROUNDING}"
+        "\n"
         f"{history_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
@@ -630,6 +710,11 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "for an exact count/grouping over the whole collection, or hybrid for a "
         "full list plus analysis. Set completeness_required=true for complete, "
         "aggregate, and hybrid; a relevance top-N can never satisfy those scopes.\n"
+        f"{SCOPE_DEIXIS_GROUNDING}"
+        "A request scoped to the whole open library ('当前notebook有哪几篇文章', "
+        "'逐篇分析这个库') is a request about the library's own documents: keep it "
+        "as the topic, classify result_scope as complete or hybrid, and do NOT "
+        "raise an ambiguity asking WHICH library — the open one is the answer.\n"
         f"{confirmation_rule}\n"
         f"{history_section}User request: {question}\n\n"
         f"Return JSON only: {QUERY_INTENT_SCHEMA_HINT}"

@@ -35,12 +35,15 @@ Five contracts this module owns:
 3. **The source set is the map's source set.**  Element traversal picks its
    sources exclusively from ``CollectionCatalogService.scope_element_plan``,
    the same per-source counts the map sums — including the Knowhow-projection
-   synthetic source.  Were the two to drift, the UI would show
-   "map: 12 / list: 8" with nothing able to explain the gap.  The one
-   exception is an explicitly named ``source_id``, which is queried directly:
-   absence from the plan means "the map counted zero", and a source the user
-   named by hand is worth one index-seeked query rather than an answer derived
-   from a cached zero.
+   synthetic source.  The sources collection does the same through
+   ``scope_source_plan``, whose set is the USER-VISIBLE source list (the
+   source tab's own predicate, so a hidden Knowhow projection row is in
+   neither its count nor its list).  Were a plan and its count to drift, the UI
+   would show "map: 12 / list: 8" with nothing able to explain the gap.  The
+   one exception is an explicitly named ``source_id``, which is queried
+   directly: absence from the plan means "the map counted zero", and a source
+   the user named by hand is worth one index-seeked query rather than an answer
+   derived from a cached zero.
 4. **The KG listable predicate is the counting predicate.**  Both sides
    evaluate the very same ``USABLE_STATUSES`` object (defined once in
    ``app.services.knowledge_contracts``) and subtract/skip the very same
@@ -58,7 +61,9 @@ Five contracts this module owns:
    inherits this from the map (those sources are absent from
    ``source_change_signal_rows``, hence from every count AND every plan); the
    KG side filters rows in ``_usable_kg_page`` against the same id list the
-   catalog subtracts from the denominator.
+   catalog subtracts from the denominator; the sources side never sees those
+   rows at all, because the user-visible source predicate it inherits drops
+   them before anything is listed or counted.
 
 Cost shape per action, all index-assisted and bounded by the budget:
 
@@ -71,8 +76,11 @@ Cost shape per action, all index-assisted and bounded by the budget:
     query per page, plus top-up queries when deprecated or Memory-derived
     objects are interleaved — bounded, per action, by
     ``max_rows × _KG_RAW_SCAN_FACTOR`` raw rows;
+  * sources — 1 signal query plus 1 bounded hidden-id read per participant
+    (that IS the plan; no query walks the collection), then one batched
+    primary-key hydration per window of up to ``page_size`` documents;
   * closing check — 1 participant resolution, then 1 signal query per
-    participant (elements) or 1 seq read per participant (KG).
+    participant (elements, sources) or 1 seq read per participant (KG).
 
 Concurrency shape, for callers that share a connection pool: one action holds
 ONE connection for its whole walk.  On SQLite that is the thread's reused
@@ -108,6 +116,7 @@ from app.services.collection_catalog import (
     ScopeElementPlan,
     ScopeSource,
 )
+from app.services.extraction_profiles import PROFILES
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.source_display import source_display_title
 
@@ -271,6 +280,31 @@ class KgObjectCursor:
 
 
 @dataclass(frozen=True)
+class SourceCursor:
+    """Resume handle for source enumeration (see ``ElementCursor``).
+
+    Position is ``(notebook_id, source_id)`` of the first source NOT yet listed
+    — inclusive, unlike the element cursor's "last consumed" spelling.  One
+    source is one row here, so "the next row" and "the next source" are the same
+    thing, and pointing AT the unlisted source is what lets a payload ceiling
+    that fires before the first item still hand back a usable cursor.
+
+    Identity is the opening participant list plus the scope's signal
+    fingerprint, exactly as on the element side: between two calls sits an LLM
+    round trip, and a document added, deleted or unmounted in that window must
+    turn the chain into ``concurrent_change`` rather than into a confident,
+    wrong "complete".  ``returned_before`` carries the chain's running total so
+    the denominator check survives resumption.
+    """
+
+    notebook_id: str
+    source_id: str
+    scope_notebook_ids: Tuple[str, ...]
+    scope_fingerprint: str
+    returned_before: int
+
+
+@dataclass(frozen=True)
 class EnumerationCoverage:
     """What the action did and did not cover.  Structured, so the badge in the
     UI and the coverage header in the prompt both read the same fact.
@@ -323,6 +357,29 @@ class ElementItem:
 
 
 @dataclass(frozen=True)
+class SourceItem:
+    """One enumerated document of the scope's user-visible source list.
+
+    The projection is deliberately the source CARD's, not the source's: display
+    title (the frozen ``source_display.source_display_title`` rule — a grounded
+    paper title beats an upload name, and citations name the same source the same
+    way),
+    the document type as the label the upload picker shows, and the summary the
+    library already stored, excerpt-truncated.  Nothing here is derived from a
+    model call, and no element text or file path travels: this is the answer to
+    "which documents are in this library", and a per-document deep dive is a
+    separate retrieval the model can ask for by title.
+    """
+
+    source_id: str
+    source_title: str
+    doc_type_label: str
+    summary: str
+    notebook_id: str
+    tier: str
+
+
+@dataclass(frozen=True)
 class KgObjectItem:
     """One enumerated knowledge object with bounded evidence references."""
 
@@ -370,6 +427,18 @@ class KgObjectEnumeration:
     payload_chars: int      # see ``ElementEnumeration.payload_chars``
 
 
+@dataclass(frozen=True)
+class SourceEnumeration:
+    """No ``kind``/``object_type``: the sources collection has no sub-type — the
+    library's document list is one collection, whole."""
+
+    items: Tuple[SourceItem, ...]
+    coverage: EnumerationCoverage
+    cursor: Optional[SourceCursor]
+    extra_pages: int        # see ``ElementEnumeration.extra_pages``
+    payload_chars: int      # see ``ElementEnumeration.payload_chars``
+
+
 def _payload_chars(item: object) -> int:
     """Serialized size of one item, measured the way it will travel.
 
@@ -382,6 +451,21 @@ def _payload_chars(item: object) -> int:
     ))
 
 
+def _doc_type_label(value: Any) -> str:
+    """The document type as the interface names it, or "" when it has none.
+
+    ``PROFILES`` is the same registry the upload picker's ``GET /doc-types``
+    renders, so a listed document says "学术论文" in the answer exactly as it does
+    on its source card — one label table, no second translation on the frontend
+    to drift out of sync.
+
+    An unknown or empty ``doc_type`` yields "" rather than the raw column value:
+    ``academic_paper`` is an internal id, and interface copy does not show
+    internal ids.  Omitting the line is the honest fallback — a legacy row whose
+    type was never detected genuinely has nothing to say here.
+    """
+    profile = PROFILES.get(str(value or ""))
+    return str(profile.label) if profile is not None else ""
 def _normalized_title(value: Any) -> str:
     """The comparison form for title→id resolution.
 
@@ -917,6 +1001,155 @@ class CollectionEnumerationService:
                     found = entry.source_id
         return found, matches, False
 
+    # --------------------------------------------------------------- sources
+    def enumerate_sources(
+        self,
+        active_notebook_id: str,
+        *,
+        budget: EnumerationBudget,
+        cursor: Optional[SourceCursor] = None,
+        cancel_event: CancelEvent = None,
+    ) -> SourceEnumeration:
+        """List the scope's USER-VISIBLE documents, in the source tab's order.
+
+        This is the collection that makes "分析当前 notebook 的文章" answerable as
+        a per-document pass instead of as a relevance sample: the model gets the
+        library's table of contents (title, type, stored summary) and can then
+        ask for whatever document is worth a deeper look, by name.
+
+        Three properties it inherits rather than re-implements:
+
+        * **the set** is ``CollectionCatalogService.scope_source_plan``, i.e. the
+          same list the map counts and the same predicate the source tab shows
+          (Memory synthetic rows and Knowhow projection rows are in neither);
+        * **the identity** is the scope's signal fingerprint plus the
+          re-resolved participant set, so completeness is proved exactly the way
+          the element side proves it;
+        * **the ceilings** are the shared ``_Walk``: one source is one row, and
+          the whole collection is ONE partition — its first hydration window is
+          free (the "free first page per partition" rule this feature is built
+          on) and every later window is charged to ``max_pages``.
+
+        No page query walks the collection: the plan is already in memory (it is
+        arithmetic over the change-signal rows the map read), so a window costs
+        exactly one batched primary-key hydration.  That is also why no lookahead
+        row is needed here — "is there more?" is ``position < len(plan)``, an
+        exact answer rather than an inferred one.
+        """
+        raise_if_cancelled(cancel_event)
+        walk = _Walk(budget, cursor.returned_before if cursor else 0)
+        items: List[SourceItem] = []
+        resume: Optional[SourceCursor] = None
+        exhausted = True
+
+        with self._database.connect() as db:
+            notebook_ids, tiers = self._notebooks.participant_tiers(
+                db, active_notebook_id
+            )
+            plan = self._catalog.scope_source_plan(db, notebook_ids)
+            sources: Optional[Tuple[ScopeSource, ...]] = plan.sources
+            total: Optional[int] = plan.total
+            scope_id = (tuple(notebook_ids), plan.fingerprint)
+            if cursor is not None:
+                if (cursor.scope_notebook_ids, cursor.scope_fingerprint) != scope_id:
+                    return self._source_scope_moved(walk, total)
+                sources = _resume_source_plan(plan.sources, cursor)
+                if sources is None:
+                    return self._source_scope_moved(walk, total)
+            # Round-trip bound, proved from the traversal: one hydration query
+            # per window, the first window free and every later one charged to
+            # ``max_pages`` — hence ``1 + max_pages`` queries, whatever the
+            # library's size.
+            walk.bound_queries(1 + budget.max_pages)
+            try:
+                position = 0
+                first_window = True
+                while position < len(sources):
+                    raise_if_cancelled(cancel_event)
+                    # Set BEFORE the ceiling check and BEFORE the fetch: every
+                    # stop from here on must hand back a cursor pointing at the
+                    # first source not yet listed, including a payload ceiling
+                    # that fires on the very first item of the window.
+                    resume = _source_cursor(sources[position], scope_id, walk)
+                    allowance = walk.emit_allowance(first_page=first_window)
+                    window = sources[position:position + allowance]
+                    walk.charge_query()
+                    rows = self._source_listing(
+                        db, [entry.source_id for entry in window]
+                    )
+                    walk.charge_page(first_page=first_window)
+                    first_window = False
+                    for entry in window:
+                        resume = _source_cursor(entry, scope_id, walk)
+                        # Counted as read whether or not it yields an item: a
+                        # source whose row vanished between the plan and this
+                        # hydration was still visited, and hiding that would
+                        # make ``scanned == returned`` claim a walk that did not
+                        # happen.  It also makes the missing row visible where it
+                        # belongs — as the denominator mismatch that reports
+                        # ``concurrent_change`` below.
+                        walk.scanned += 1
+                        row = rows.get(entry.source_id)
+                        if row is not None:
+                            item = SourceItem(
+                                source_id=entry.source_id,
+                                source_title=source_display_title(row),
+                                doc_type_label=_doc_type_label(
+                                    _row_get(row, "doc_type")
+                                ),
+                                summary=str(_row_get(row, "summary") or "")[
+                                    : max(0, int(budget.excerpt_chars))
+                                ],
+                                notebook_id=entry.notebook_id,
+                                tier=str(tiers.get(entry.notebook_id, "")),
+                            )
+                            walk.admit(item)
+                            items.append(item)
+                        position += 1
+            except _Stop as stop:
+                walk.reason = stop.reason
+                exhausted = False
+
+            closing_ids = self._closing_participants(db, active_notebook_id)
+            scope_stable = (
+                closing_ids == tuple(notebook_ids)
+                and self._catalog.scope_signal_fingerprint(db, closing_ids)
+                == plan.fingerprint
+            )
+
+        coverage = _coverage(
+            walk, total=total, exhausted=exhausted, scope_stable=scope_stable
+        )
+        return SourceEnumeration(
+            items=tuple(items),
+            coverage=coverage,
+            cursor=_resumable(coverage, resume),
+            extra_pages=walk.pages,
+            payload_chars=walk.payload,
+        )
+
+    def _source_scope_moved(
+        self, walk: _Walk, total: Optional[int]
+    ) -> SourceEnumeration:
+        """The scope this cursor was cut from is gone: stop, do not restart."""
+        return SourceEnumeration(
+            items=(),
+            coverage=_coverage(
+                walk, total=total, exhausted=False, scope_stable=False
+            ),
+            cursor=None,
+            extra_pages=walk.pages,
+            payload_chars=walk.payload,
+        )
+
+    def _source_listing(
+        self, db: object, source_ids: Sequence[str]
+    ) -> Dict[str, Any]:
+        return {
+            str(row["id"]): row
+            for row in self._sources.source_listing_rows(db, list(source_ids))
+        }
+
     # ----------------------------------------------------------- KG objects
     def enumerate_kg_objects(
         self,
@@ -1344,6 +1577,43 @@ def _kg_cursor(
         scope_seqs=scope_seqs,
         returned_before=walk.returned_total,
     )
+
+
+def _source_cursor(
+    entry: ScopeSource,
+    scope_id: Tuple[Tuple[str, ...], str],
+    walk: _Walk,
+) -> SourceCursor:
+    """A cursor pointing AT ``entry`` — the first source not yet listed."""
+    return SourceCursor(
+        notebook_id=entry.notebook_id,
+        source_id=entry.source_id,
+        scope_notebook_ids=scope_id[0],
+        scope_fingerprint=scope_id[1],
+        returned_before=walk.returned_total,
+    )
+
+
+def _resume_source_plan(
+    sources: Sequence[ScopeSource], cursor: SourceCursor
+) -> Optional[Tuple[ScopeSource, ...]]:
+    """Re-align a source plan against a cursor from an earlier call.
+
+    By KEY, not by position, for the same reason ``_resume_sources`` is: the plan
+    is rebuilt on every call, and an index-based resume would skip or repeat a
+    document whenever one was added or removed in between.  The slice STARTS at
+    the cursor's source (inclusive — it is the first one not yet listed).
+    ``None`` means that document is no longer in the plan, which cannot be
+    honestly continued: the caller reports ``concurrent_change`` rather than
+    silently restarting the list.
+    """
+    for index, entry in enumerate(sources):
+        if (
+            entry.notebook_id == cursor.notebook_id
+            and entry.source_id == cursor.source_id
+        ):
+            return tuple(sources[index:])
+    return None
 
 
 def _resumable(coverage: EnumerationCoverage, resume: Optional[Any]) -> Optional[Any]:

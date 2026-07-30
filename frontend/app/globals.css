@@ -3792,6 +3792,48 @@ button.chat-session-card {
   background: #e9f0ff;
 }
 
+/* 来源清单的一行 = 一份文档:标题(可省略号截断)+ 类型小字 + 摘要摘录。摘要来自
+   后端已存的 per-source summary(执行器已按摘录上限截过),这里再做视觉上的两行
+   收敛,让一张清单卡在十几篇文档下仍然是一屏能扫完的目录而不是一堵墙。 */
+.answer-collection-source-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.answer-collection-source-title {
+  min-width: 0;
+  font-size: 13px;
+  color: #1f2937;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.answer-collection-source-type {
+  margin-left: auto;
+  flex: none;
+  color: #6b7686;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.answer-collection-source-summary {
+  margin: 4px 0 0;
+  color: #475569;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  /* 两行后省略号。-webkit-* 前缀是这条特性的事实标准写法(Chrome/Safari/
+     Firefox 都实现了它),标准 line-clamp 一并写上以备将来。 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
 .answer-collection-kg-item {
   display: flex;
   align-items: center;

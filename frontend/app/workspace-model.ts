@@ -381,6 +381,10 @@ export type TypedCollectionCoverage = {
 export type TypedCollectionItem = {
   item_id: string;
   // 仅 collection === "elements" 时有效
+  // ——collection === "sources" 复用其中三个:`source_id`/`source_title` 同义
+  // （被列出的那份文档本身）、`location_label` 装文档类型的界面词（如「学术论文」，
+  // 后端 PROFILES 是唯一真源，前端不再翻一遍）、`text` 装已存摘要的摘录；
+  // `element_type` 保持空串（文档不是元素，分派看 `collection`）。
   source_id?: string;
   source_title?: string;
   element_type?: string;
@@ -407,11 +411,12 @@ export type TypedCollectionItem = {
  */
 export type TypedCollectionResult = {
   kind: "collection";
-  collection: "elements" | "kg_objects";
+  collection: "elements" | "kg_objects" | "sources";
   /** collection === "elements" 时非空："formula" | "table" | "image" | "code_block"。 */
   element_kind?: string;
   /** collection === "kg_objects" 时非空："concept" | "claim" | "formula" | "procedure"。 */
   object_type?: string;
+  /** collection === "sources"（库里的文档清单）没有子类型，上面两个字段都为空。 */
   /** 非空时表示这份清单被限定在单个来源范围内。 */
   source_id?: string;
   items: TypedCollectionItem[];

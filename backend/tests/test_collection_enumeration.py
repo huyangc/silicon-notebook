@@ -1489,6 +1489,491 @@ def test_unknown_object_type_raises(repo):
         _enum(repo).enumerate_kg_objects(notebook.id, "rule", budget=_budget())
 
 
+# ------------------------------------------------------------------ 来源清单
+
+def _source_ids(result):
+    return [item.source_id for item in result.items]
+
+
+def _add_document(
+    repo, notebook_id, source_id, *, title="", source_type="pdf",
+    doc_type="", summary="",
+):
+    """一份来源行(不带元素)——来源清单不关心元素,只关心文档本身。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,doc_type,summary,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, title or source_id, source_type, "extracted",
+             "extracted", doc_type, summary, NOW, NOW),
+        )
+    repo.collection_catalog.invalidate()
+
+
+def test_source_enumeration_lists_the_user_visible_documents(repo):
+    """全集对照:作用域(含挂载 base)的用户可见来源,按参与库序 + 源 id 序。
+
+    Memory 派生源与 knowhow 隐藏投影源两侧都不在——这不是「顺手也排掉」,而是
+    这份清单的定义:它列的就是来源页签列的那一批。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
+    _add_document(repo, notebook.id, "s-a", title="论文甲",
+                  doc_type="academic_paper", summary="甲的摘要")
+    _add_document(repo, notebook.id, "s-b", title="教材乙", doc_type="textbook")
+    _add_document(repo, notebook.id, "s-mem", title="我的私人记忆",
+                  source_type="memory", summary="私密")
+    _add_document(repo, notebook.id, "s-kh", title="Knowhow 表:X",
+                  source_type="knowhow")
+    _add_document(repo, base.id, "b-a", title="参考丙")
+
+    result = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert _source_ids(result) == ["s-a", "s-b", "b-a"]
+    assert result.coverage.returned == 3
+    assert result.coverage.total == 3
+    assert result.coverage.complete is True
+    assert result.coverage.has_more is False
+    assert result.coverage.truncated_reason == ""
+    assert result.cursor is None
+    assert [item.tier for item in result.items] == ["personal", "personal", "base"]
+    assert [item.notebook_id for item in result.items] == [
+        notebook.id, notebook.id, base.id
+    ]
+
+
+def test_source_map_count_equals_the_listed_total(repo):
+    """地图的 ``sources: N`` 与清单 returned 必须逐字一致(两侧同一 helper)。
+
+    分叉的后果与元素侧一样:地图报 5、清单列 3,界面上是一张没人能解释的
+    假部分。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_document(repo, notebook.id, "s-a")
+    _add_document(repo, notebook.id, "s-b")
+    _add_document(repo, notebook.id, "s-mem", source_type="memory")
+    _add_document(repo, notebook.id, "s-kh", source_type="knowhow")
+
+    mapped = repo.collection_catalog.collection_map(notebook.id)
+    listed = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert mapped.sources == 2
+    assert listed.coverage.returned_total == mapped.sources
+    assert listed.coverage.total == mapped.sources
+    assert listed.coverage.complete is True
+    assert "sources: 2" in collection_catalog.render_collection_map(mapped)
+
+
+def test_source_visible_predicate_matches_the_source_tab(repo):
+    """口径守卫:清单的来源集合 == ``list_sources`` 的来源集合。
+
+    两处若各写谓词,答案卡里就会出现一张用户在来源页签上根本看不到的文档卡。
+    这条断言直接对照那个用户可见列表,而不是复述「排除 memory/knowhow」。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(3):
+        _add_document(repo, notebook.id, f"s-{index}")
+    _add_document(repo, notebook.id, "s-mem", source_type="memory")
+    _add_document(repo, notebook.id, "s-kh", source_type="knowhow")
+
+    visible = [source.id for source in repo.list_sources(notebook.id)]
+    listed = _source_ids(_enum(repo).enumerate_sources(notebook.id, budget=_budget()))
+    assert sorted(listed) == sorted(visible)
+    assert repo.visible_document_count(notebook.id) == len(listed)
+
+
+def test_source_items_carry_title_type_and_summary(repo):
+    """条目 = 显示名 + 文档类型界面词 + 已存摘要摘录。
+
+    类型走后端 ``PROFILES`` 的界面词(与上传选择器同一份表);未知/空类型渲染成
+    空串而不是 ``academic_paper`` 这类内部 id。摘要按 ``excerpt_chars`` 截断。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_document(repo, notebook.id, "s-a", title="论文甲",
+                  doc_type="academic_paper", summary="摘" * 5_000)
+    _add_document(repo, notebook.id, "s-b", title="教材乙", doc_type="textbook")
+    _add_document(repo, notebook.id, "s-c", title="无类型", doc_type="mystery")
+
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(excerpt_chars=100)
+    )
+    first, second, third = result.items
+    assert first.source_title == "论文甲"
+    assert first.doc_type_label == "学术论文"
+    assert len(first.summary) == 100
+    assert second.doc_type_label == "教材 / 课本"
+    assert second.summary == ""
+    assert third.doc_type_label == ""
+
+
+def test_source_doc_type_labels_come_from_the_upload_picker_registry(repo):
+    """类型标签的真源是 ``extraction_profiles.PROFILES``——不是这里的一份副本。"""
+    from app.services.extraction_profiles import PROFILES
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for profile_id in PROFILES:
+        _add_document(repo, notebook.id, f"s-{profile_id}", doc_type=profile_id)
+    result = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert {item.doc_type_label for item in result.items} == {
+        profile.label for profile in PROFILES.values()
+    }
+
+
+def test_grounded_paper_title_labels_a_listed_document(repo):
+    """显示名口径与元素清单/引用一致:接地论文优先显示论文标题。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_document(repo, notebook.id, "s-a", title="upload-1.pdf")
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_paper_meta (source_id,notebook_id,is_paper,paper_title,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("s-a", notebook.id, 1, "A Study of Things", NOW, NOW),
+        )
+    result = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert result.items[0].source_title == "A Study of Things"
+
+
+def test_source_row_budget_charges_one_row_per_document(repo):
+    """每份文档计一行:行预算 3 → 只列 3 篇,诚实 partial + 可续游标。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(6):
+        _add_document(repo, notebook.id, f"s-{index}")
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=3, page_size=2)
+    )
+    assert _source_ids(result) == ["s-0", "s-1", "s-2"]
+    assert result.coverage.complete is False
+    assert result.coverage.has_more is True
+    assert result.coverage.truncated_reason == TRUNCATED_BUDGET
+    assert result.coverage.overflow_semantics == EXPLICIT_PARTIAL_OVERFLOW
+    assert result.cursor is not None
+    assert result.cursor.source_id == "s-3"
+
+
+def test_source_cursor_resume_equals_one_shot(repo):
+    """续跑三段拼起来 == 一次跑到底,且末段报 complete。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(7):
+        _add_document(repo, notebook.id, f"s-{index}")
+    one_shot = _source_ids(_enum(repo).enumerate_sources(
+        notebook.id, budget=_budget()
+    ))
+
+    collected = []
+    cursor = None
+    for _round in range(3):
+        chunk = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(max_rows=3, page_size=3), cursor=cursor
+        )
+        collected.extend(_source_ids(chunk))
+        cursor = chunk.cursor
+        if cursor is None:
+            break
+    assert collected == one_shot
+    assert chunk.coverage.complete is True
+    assert chunk.coverage.returned_total == 7
+
+
+def test_source_exact_row_budget_does_not_report_a_false_partial(repo):
+    """行预算与集合大小恰好相等时必须报 complete。
+
+    元素侧要靠 lookahead 行才能区分「集合到头」与「预算到头」;来源侧的计划
+    长度是已知的,所以这条同款陷阱在这里由 ``position < len(plan)`` 直接答对
+    ——把它钉住,防止有人「顺手统一」成需要 lookahead 的写法。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}")
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=4, page_size=2)
+    )
+    assert result.coverage.returned == 4
+    assert result.coverage.complete is True
+    assert result.cursor is None
+
+
+def test_source_payload_ceiling_stops_with_a_usable_cursor(repo):
+    """载荷触顶 → partial(payload) + 游标指向**还没列出**的那一篇。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(5):
+        _add_document(repo, notebook.id, f"s-{index}", summary="摘要" * 50)
+    first = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_payload_chars=400)
+    )
+    assert 0 < len(first.items) < 5
+    assert first.coverage.truncated_reason == TRUNCATED_PAYLOAD
+    assert first.cursor is not None
+    assert first.cursor.source_id == f"s-{len(first.items)}"
+    rest = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(), cursor=first.cursor
+    )
+    assert _source_ids(first) + _source_ids(rest) == [f"s-{i}" for i in range(5)]
+    assert rest.coverage.complete is True
+
+
+def test_source_extra_pages_counts_only_windows_past_the_first(repo):
+    """整份清单是**一个**分片:首个窗口免费,之后每个窗口计一次额外往返。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(6):
+        _add_document(repo, notebook.id, f"s-{index}")
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(page_size=2)
+    )
+    assert result.coverage.returned == 6
+    assert result.extra_pages == 2        # 3 个窗口,首个不计
+    assert result.payload_chars > 0
+
+
+def test_source_window_is_one_batched_hydration_query(repo):
+    """每个窗口恰好一次批量 by-id 读取——不是每篇一次查询。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(6):
+        _add_document(repo, notebook.id, f"s-{index}")
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+    calls: list[list[str]] = []
+
+    def spy(db, source_ids):
+        ids = list(source_ids)
+        calls.append(ids)
+        return original(db, ids)
+
+    from unittest.mock import patch
+    with patch.object(store, "source_listing_rows", spy):
+        result = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=3)
+        )
+    assert result.coverage.returned == 6
+    assert calls == [["s-0", "s-1", "s-2"], ["s-3", "s-4", "s-5"]]
+
+
+def test_source_page_budget_stops_the_walk_honestly(repo):
+    """页预算耗尽 → partial(budget),不是悄悄少列几篇。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(9):
+        _add_document(repo, notebook.id, f"s-{index}")
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(page_size=2, max_pages=1)
+    )
+    assert result.coverage.returned == 4          # 首个窗口 + 一个计费窗口
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_BUDGET
+    assert result.cursor is not None
+
+
+def test_source_added_mid_walk_is_not_complete(repo, monkeypatch):
+    """跨窗口期间新增一篇文档 → 指纹变了,不能报 complete。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}")
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+    state = {"windows": 0}
+
+    def hook(db, source_ids):
+        rows = original(db, source_ids)
+        state["windows"] += 1
+        if state["windows"] == 1:
+            _add_document(repo, notebook.id, "s-late")
+        return rows
+
+    monkeypatch.setattr(store, "source_listing_rows", hook)
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+    assert result.cursor is None            # 冲突是终态,不给游标
+
+
+def test_source_mounting_a_base_mid_walk_is_not_complete(repo, monkeypatch):
+    """跨窗口期间挂上一个**空**参考库:指纹按旧 id 列表算逐字不变,只有收尾
+    重新解析参与库集合才抓得到(与元素/KG 两侧同一条复检)。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_document(repo, notebook.id, f"s-{index}")
+    late = repo.create_notebook(NotebookCreate(name="late-base"))
+    repo.mark_notebook_base(late.id)
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+    state = {"windows": 0}
+
+    def hook(db, source_ids):
+        rows = original(db, source_ids)
+        state["windows"] += 1
+        if state["windows"] == 1:
+            repo.replace_notebook_bases(notebook.id, [late.id], "user-local")
+            repo.collection_catalog.invalidate()
+        return rows
+
+    monkeypatch.setattr(store, "source_listing_rows", hook)
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_source_cursor_from_a_moved_scope_is_refused(repo):
+    """作用域已变的游标:立刻停,不静默从头重跑。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(5):
+        _add_document(repo, notebook.id, f"s-{index}")
+    first = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=2)
+    )
+    assert first.cursor is not None
+    _add_document(repo, notebook.id, "s-new")
+    resumed = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(), cursor=first.cursor
+    )
+    assert resumed.items == ()
+    assert resumed.coverage.complete is False
+    assert resumed.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+    assert resumed.cursor is None
+
+
+def test_source_deleted_between_plan_and_hydration_is_not_claimed_complete(repo):
+    """计划里有、hydrate 时行已消失 → returned < total,报 concurrent_change。
+
+    绝不能悄悄少列一篇还说「已全部列出」。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(3):
+        _add_document(repo, notebook.id, f"s-{index}")
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+
+    def hook(db, source_ids):
+        rows = original(db, source_ids)
+        return [row for row in rows if row["id"] != "s-1"]
+
+    from unittest.mock import patch
+    with patch.object(store, "source_listing_rows", hook):
+        result = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert _source_ids(result) == ["s-0", "s-2"]
+    assert result.coverage.scanned == 3         # 访问过三篇
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
+def test_empty_scope_lists_nothing_and_is_complete(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    result = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert result.items == ()
+    assert result.coverage.total == 0
+    assert result.coverage.complete is True
+    assert result.cursor is None
+
+
+def test_private_memory_is_never_in_a_source_listing(repo):
+    """共享库里的私有 Memory:成员发起的枚举与 owner 发起的是同一次调用
+    (执行器不接收调用者身份),所以断言写成「清单里根本没有它」。"""
+    notebook = _shared_notebook_with_private_memory(repo)
+    result = _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    assert _source_ids(result) == ["s-doc"]
+    assert all("私人记忆" not in item.source_title for item in result.items)
+    assert repo.collection_catalog.collection_map(notebook.id).sources == 1
+
+
+def test_hidden_source_ids_complement_the_visible_source_list(repo):
+    """``hidden_source_ids`` 与用户可见来源集合互为补集(并集 = 全部物理源)。
+
+    这两条是同一条谓词的正反面(适配器里由 ``VISIBLE_SOURCE_TYPES_PREDICATE``
+    取反得来);只有互补,清单的「signal 行 − hidden」才等价于来源页签那条查询。
+    """
+    notebook = _shared_notebook_with_private_memory(repo)
+    _add_document(repo, notebook.id, "s-kh", source_type="knowhow")
+    store = repo._runtime.source_store
+    with repo._connect() as db:
+        hidden = set(store.hidden_source_ids(db, notebook.id))
+        everything = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=?", (notebook.id,)
+            ).fetchall()
+        }
+    visible = {source.id for source in repo.list_sources(notebook.id)}
+    assert hidden == {"s-mem", "s-kh"}
+    assert hidden & visible == set()
+    assert hidden | visible == everything
+
+
+def test_source_plan_costs_no_extra_full_read_of_sources(repo):
+    """成本形状:一次枚举对每个参与库只付「1 次 signal 查询 + 1 次 hidden id
+    读取」,没有第三次整表读——那正是「零新扫描」的含义。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(5):
+        _add_document(repo, notebook.id, f"s-{index}")
+    store = repo._runtime.source_store
+    signals = {"n": 0}
+    hidden = {"n": 0}
+    original_signals = store.source_change_signal_rows
+    original_hidden = store.hidden_source_ids
+
+    def signal_spy(db, notebook_id):
+        signals["n"] += 1
+        return original_signals(db, notebook_id)
+
+    def hidden_spy(db, notebook_id):
+        hidden["n"] += 1
+        return original_hidden(db, notebook_id)
+
+    from unittest.mock import patch
+    with patch.object(store, "source_change_signal_rows", signal_spy), \
+            patch.object(store, "hidden_source_ids", hidden_spy):
+        _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    # 开场计划 1 次 + 收尾复检 1 次(收尾只要指纹,不再读 hidden)。
+    assert signals["n"] == 2
+    assert hidden["n"] == 1
+
+
+def test_source_query_count_is_bounded_by_the_page_budget(repo):
+    """往返上界:窗口数 ≤ 1 + max_pages,越界抛 EnumerationInvariantError。
+
+    这里直接钉住上界的**存在**:把预算调成 1 页 + 极大行预算,窗口数仍受限。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(20):
+        _add_document(repo, notebook.id, f"s-{index:02d}")
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+    calls = {"n": 0}
+
+    def spy(db, source_ids):
+        calls["n"] += 1
+        return original(db, source_ids)
+
+    from unittest.mock import patch
+    with patch.object(store, "source_listing_rows", spy):
+        result = _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=2, max_pages=3)
+        )
+    assert calls["n"] <= 1 + 3
+    assert result.coverage.complete is False
+
+
+def test_cancel_between_source_windows(repo, monkeypatch):
+    import threading
+
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(10):
+        _add_document(repo, notebook.id, f"s-{index}")
+    cancel = threading.Event()
+    store = repo._runtime.source_store
+    original = store.source_listing_rows
+
+    def hook(db, source_ids):
+        cancel.set()
+        return original(db, source_ids)
+
+    monkeypatch.setattr(store, "source_listing_rows", hook)
+    with pytest.raises(AskCancelled):
+        _enum(repo).enumerate_sources(
+            notebook.id, budget=_budget(page_size=2), cancel_event=cancel
+        )
+
+
 # -------------------------------------------------------------------- 取消
 
 def test_cancel_between_pages(repo, monkeypatch):

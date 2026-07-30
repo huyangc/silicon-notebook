@@ -129,6 +129,16 @@ def _enumerate_action(kind="formula", **extra):
             "reason": "列出公式"}
 
 
+def _enumerate_sources_action(reason="先看库里有哪几篇", **extra):
+    """来源清单不是第 11 个动作:它是 enumerate 动作的一个参数值(design doc
+    §6.2 用户拍板)。这个 helper 就是那份合同的唯一拼写——测试里到处手写
+    ``{"collection": "sources"}`` 的话,哪天形态变了会有十几处各自漂移。"""
+    request = {"collection": "sources"}
+    request.update(extra)
+    return {"next_action": "enumerate_elements", "enumerate": request,
+            "reason": reason}
+
+
 def _retriever(repo, llm, *, limits_overrides=None, fail_closed=False):
     bind_chat_client(repo, "reasoning_agent", llm)
     retriever = ReasoningRetriever.from_repository(
@@ -176,6 +186,12 @@ class _StubEnumeration:
                            "budget": budget, "cursor": cursor,
                            "cancel_event": cancel_event})
 
+    def enumerate_sources(self, notebook_id, *, budget, cursor=None,
+                          cancel_event=None):
+        return self._next({"collection": "sources", "kind": "",
+                           "budget": budget, "cursor": cursor,
+                           "cancel_event": cancel_event})
+
 
 def _coverage(**overrides):
     base = dict(returned=1, returned_total=1, scanned=1, total=1, has_more=False,
@@ -203,12 +219,16 @@ def test_collection_labels_are_globally_unique():
         [_collection_label("elements", kind) for kind in ENUMERABLE_ELEMENT_KINDS]
         + [_collection_label("kg_objects", object_type)
            for object_type in ENUMERABLE_KG_OBJECT_TYPES]
+        + [_collection_label("sources", "")]
     )
     assert len(labels) == len(set(labels)), labels
-    assert len(labels) == 8, "白名单变了就要重新审这条守卫"
+    assert len(labels) == 9, "白名单变了就要重新审这条守卫"
     # 撞名的那一对必须真的分开(把它写死,免得「唯一」靠的是别处的偶然差异)。
     assert _collection_label("elements", "formula") != _collection_label(
         "kg_objects", "formula")
+    # 来源清单的 kind 恒为空串:它必须由 collection 决定标签,而不是落进
+    # 「不是 elements 就查 KG 表」的分支拼出一个光秃秃的「清单」。
+    assert _collection_label("sources", "") == "来源清单"
 
 
 # ------------------------------------------------------------- prompt 合同
@@ -270,6 +290,99 @@ def test_completeness_claim_rule_follows_the_tools():
     assert "NEVER claim that 'all/every X have been retrieved'" not in on
     assert "ONLY when an enumerate action has reported its coverage as complete" in on
     assert "neither can a partial or interrupted enumeration" in on
+
+
+def test_reflect_prompt_offers_the_sources_collection(repo):
+    """来源清单从**参数**进来,动作空间维持 10 个(design doc §6.2 用户拍板)。
+
+    这条同时是那个决定的回归门:模型面若哪天多出一个 `enumerate_sources` 动作 id,
+    下面第一组断言会红。
+    """
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    off = reflect_prompt("q", "s")
+    on = reflect_prompt("q", "s", element_kinds=ENUMERABLE_ELEMENT_KINDS,
+                        object_types=ENUMERABLE_KG_OBJECT_TYPES)
+    schema_on = reflect_schema_hint(ENUMERABLE_ELEMENT_KINDS,
+                                    ENUMERABLE_KG_OBJECT_TYPES)
+
+    # 不是第三个动作 id:动作串里没有它,prompt 也不把它当动作名教。
+    assert "enumerate_sources" not in schema_on
+    assert "enumerate_sources" not in on
+    assert schema_on.count("enumerate_") == 2
+    # 是 enumerate 分支的一个参数值,与 kind/object_type 并列。
+    assert '"collection":"sources"' in schema_on
+    assert 'enumerate.collection to "sources"' in on
+    assert "collection" not in reflect_schema_hint()   # 关掉工具就整段不存在
+    assert "enumerate.collection" not in off
+    # 「先拿目录、再按标题逐篇深挖」——这条分工必须写清楚,否则模型会拿相关性
+    # 检索去凑「有哪几篇」。
+    assert "add_subquery using that document's TITLE" in on
+    assert "never the roster" in on
+
+
+def test_scope_deixis_grounding_reaches_every_query_writing_prompt():
+    """指示语接地(design doc §6.1):四份把用户问题变成检索文本的 prompt
+    ——意图契约、两份规划拼写、反思——必须都带这一段。
+
+    少任何一份,那一层就会继续把「当前notebook」「知识图谱」当关键词发出去:
+    没有文档含有装着它的那个库的名字,所以那是一次注定零命中的探测。
+    """
+    from app.services.prompts import (
+        SCOPE_DEIXIS_GROUNDING, expand_query_prompt, plan_prompt,
+        query_intent_prompt, reflect_prompt,
+    )
+
+    assert SCOPE_DEIXIS_GROUNDING in query_intent_prompt("q")
+    assert SCOPE_DEIXIS_GROUNDING in plan_prompt("q")
+    assert SCOPE_DEIXIS_GROUNDING in expand_query_prompt("q")
+    assert SCOPE_DEIXIS_GROUNDING in reflect_prompt("q", "s")
+    # 关掉枚举工具也不影响这一段:它讲的是子查询卫生,与工具无关。
+    assert SCOPE_DEIXIS_GROUNDING in reflect_prompt(
+        "q", "s", element_kinds=("formula",))
+
+
+def test_scope_deixis_grounding_names_the_phrases_and_the_rule():
+    """内容断言:中英两组指示语 + 「剥掉,别当关键词」+ 「别把问题改成另一个」。"""
+    from app.services.prompts import SCOPE_DEIXIS_GROUNDING as text
+
+    for phrase in ("当前notebook", "这个库", "本库", "整个库",
+                   "the current notebook", "this notebook", "知识图谱", "KG"):
+        assert phrase in text, phrase
+    assert "not content that can be found inside it" in text
+    assert "DROP it" in text
+    # 剥词不等于换题:去掉范围词之后问题本身必须留着(否则「库里的文章讲了
+    # 什么」会被剥成空)。
+    assert "must not turn it into a different question" in text
+
+
+def test_reflect_names_the_fields_a_scope_word_could_leak_into():
+    """reflect 是唯一有四个自由文本检索字段的 prompt,必须逐个点名。
+
+    exact_term 尤其:它是字面匹配,一个范围词进去就是保证零命中的探测。
+    """
+    from app.services.prompts import reflect_prompt
+
+    on = reflect_prompt("q", "s", element_kinds=("formula",))
+    for field in ("new_sub_query.query", "elements_query", "ppr_query",
+                  "exact_term"):
+        assert field in on, field
+    # 有工具时才教「问库本身的规模看计数行」——没有工具时那行计数根本不存在。
+    assert "[Collections in scope] counts and the enumerate actions" in on
+    assert "[Collections in scope] counts and the enumerate actions" not in (
+        reflect_prompt("q", "s"))
+
+
+def test_query_intent_prompt_keeps_a_library_wide_request_as_the_topic():
+    """「当前notebook有哪几篇」不是歧义,而是一个范围明确的完整枚举请求。"""
+    from app.services.prompts import query_intent_prompt
+
+    text = query_intent_prompt("q")
+    assert "the open one is the answer" in text
+    assert "complete or hybrid" in text
 
 
 def test_plan_side_prompts_take_the_collection_map():
@@ -335,6 +448,166 @@ def test_enumerate_kg_objects_action_uses_the_object_type_whitelist(repo):
     # KG 侧一律带「知识对象」限定,与文档元素侧的同名类型区分开(见唯一性守卫)。
     assert _steps(result, "enumerate")[0].summary == (
         "枚举论断知识对象清单: 已全部列出 1 条")
+
+
+def test_enumerate_sources_action_lists_the_library_roster(repo):
+    """来源清单:`enumerate.collection="sources"` 产出一份文档目录,trace 说
+    「枚举来源清单」。"""
+    notebook = _seed(repo, formulas=1)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,doc_type,summary,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("s2", notebook.id, "论文二", "pdf", "extracted", "extracted",
+             "academic_paper", "第二篇摘要", NOW, NOW),
+        )
+    repo.collection_catalog.invalidate()
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "当前notebook的文章分析", "", limits=limits)
+
+    outcome = result.enumerations[0]
+    assert outcome.collection == "sources"
+    assert outcome.kind == ""            # 没有子类型
+    assert outcome.source_id == ""
+    assert [item.source_id for item in outcome.items] == ["s1", "s2"]
+    assert [item.source_title for item in outcome.items] == ["论文一", "论文二"]
+    assert outcome.coverage.complete is True
+    assert outcome.coverage.returned_total == 2 and outcome.coverage.total == 2
+    step = _steps(result, "enumerate")[0]
+    assert step.summary == "枚举来源清单: 已全部列出 2 条"
+    assert step.detail["collection"] == "sources"
+    assert step.detail["kind"] == ""
+    # 「没指定条目类型」那条 skip 不得对来源清单生效。
+    assert "enumeration_kind" not in _skips(result)
+
+
+def test_the_collection_parameter_decides_not_the_action_id(repo):
+    """动作空间维持 10 个的直接推论:选哪个 enumerate 动作 id 都不影响结果——
+    `collection="sources"` 一旦给出,这一轮列的就是文档目录。
+
+    钉住它是因为反过来的写法(按动作 id 判 sources)会让模型选中 kg_objects +
+    collection=sources 时静默列出概念清单,而模型明确说了它要哪个集合。
+    """
+    notebook = _seed(repo, formulas=1)
+    llm = _SeqLLM([
+        {"next_action": "enumerate_kg_objects",
+         "enumerate": {"collection": "sources", "object_type": "claim"}},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+
+    outcome = result.enumerations[0]
+    assert outcome.collection == "sources"
+    # 同时给了 object_type 也不生效:集合选择器优先,否则同一个请求有两种解释。
+    assert outcome.kind == ""
+    assert _steps(result, "enumerate")[0].summary.startswith("枚举来源清单")
+
+
+def test_an_unrecognized_collection_value_falls_back_to_the_action_id(repo):
+    """`collection` 只识别 "sources"。其他值(含 "elements"/"kg_objects" 与垃圾
+    值)在解析期就清成空串,落回按动作 id 的 kind 分派——与本分支其他非白名单值
+    的 fail-open 处理同形,而不是废掉整个动作。"""
+    notebook = _seed(repo, formulas=2)
+    llm = _SeqLLM([
+        _enumerate_action(kind="formula", collection="everything"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "库里有哪些公式", "", limits=limits)
+
+    outcome = result.enumerations[0]
+    assert outcome.collection == "elements" and outcome.kind == "formula"
+    assert len(outcome.items) == 2
+
+
+def test_sources_action_shares_the_one_run_budget_pool(repo):
+    """三个集合共用同一个行预算池:来源清单也从同一个池里扣。"""
+    notebook = _seed(repo, formulas=4)
+    with repo._write() as db:
+        for index in range(2, 5):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (f"s{index}", notebook.id, f"来源{index}", "pdf", "extracted",
+                 "extracted", NOW, NOW),
+            )
+    repo.collection_catalog.invalidate()
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        _enumerate_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 4,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇、都有哪些公式", "",
+                           limits=limits)
+
+    sources_outcome = result.enumerations[0]
+    assert sources_outcome.collection == "sources"
+    assert sources_outcome.coverage.returned_total == 4        # 池被它用光
+    # 第二个动作只剩 0 行额度 → 必须 skip,而不是请求 0 行(那会 ValueError)。
+    assert "enumeration_budget" in _skips(result)
+    assert len(result.enumerations) == 1
+
+
+def test_sources_chain_resumes_on_a_second_request(repo):
+    """同一个集合再次请求 = 续跑(键含 collection,与元素/KG 链互不串台)。"""
+    from app.services.collection_enumeration import SourceEnumeration
+
+    notebook = _seed(repo, formulas=1)
+    partial = SourceEnumeration(
+        items=(), cursor="cursor-1", extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=1, complete=False,
+                           has_more=True, total=2,
+                           truncated_reason=TRUNCATED_BUDGET),
+    )
+    done = SourceEnumeration(
+        items=(), cursor=None, extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=2, total=2),
+    )
+    stub = _StubEnumeration([partial, done])
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+    retriever.collection_enumeration = stub
+
+    result = retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+
+    assert len(result.enumerations) == 1
+    assert result.enumerations[0].coverage.returned_total == 2
+    assert stub.calls[0]["cursor"] is None
+    assert stub.calls[1]["cursor"] == "cursor-1"
+    assert stub.calls[1]["collection"] == "sources"
+
+
+def test_completed_sources_listing_is_not_enumerated_twice(repo):
+    notebook = _seed(repo, formulas=1)
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+
+    skips = _skips(result)
+    assert "already_enumerated" in skips
+    assert skips["already_enumerated"].summary == "跳过枚举来源清单(本轮已全部列出)"
 
 
 def test_second_request_of_the_same_collection_resumes_the_cursor(repo):
@@ -884,6 +1157,25 @@ def test_kill_switch_removes_tools_map_and_prompt_text(repo):
     assert "[Collections in scope]" not in llm.plan_prompts[0]
     assert "enumerate_elements" not in llm.reflect_prompts[0]
     assert all("enumerate" not in hint for hint in llm.schema_hints[1:])
+    assert result.trace[-1].step_type == "answer"
+
+
+def test_kill_switch_also_covers_the_sources_collection(repo):
+    """来源清单不新增开关(design doc §6.2):同一把闸关掉后,即使模型硬吐
+    `collection="sources"`,解析期就不看这个字段,执行器一次都不会被调用。"""
+    notebook = _seed(repo, formulas=1)
+    repo.settings.reasoning_enum_tools_enabled = False
+    stub = _StubEnumeration([])
+    llm = _SeqLLM([_enumerate_sources_action()])
+    retriever, limits = _retriever(repo, llm)
+    retriever.collection_enumeration = stub
+
+    result = retriever.run(notebook.id, "有哪几篇", "", limits=limits)
+
+    assert stub.calls == []
+    assert result.enumerations == []
+    assert _steps(result, "enumerate") == []
+    assert '"collection"' not in llm.schema_hints[-1]
     assert result.trace[-1].step_type == "answer"
 
 

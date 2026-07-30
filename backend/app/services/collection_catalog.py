@@ -21,6 +21,12 @@ Three hard properties, in priority order:
 Cost shape (per build, per notebook in scope):
 
   * 1 ``sources`` query for the change signals — the ONLY unconditional query;
+  * 1 bounded ``hidden_source_ids`` read (the user-visible source list's own
+    exclusion, projected to primary keys and bounded by the notebook's Memory +
+    Knowhow-table count).  The sources collection's count and its traversal
+    plan are then arithmetic over rows already in hand: no second full read of
+    ``sources``, and — because both come out of the same helper — no way for the
+    map's ``sources: N`` to disagree with the list the executor walks;
   * 0 element queries when the notebook's signal fingerprint is unchanged;
   * otherwise one batched ``GROUP BY source_id, element_type`` per batch of
     sources, restricted to the whitelist;
@@ -131,6 +137,29 @@ class ScopeSource:
 
 
 @dataclass(frozen=True)
+class ScopeSourcePlan:
+    """Which sources the SOURCES collection lists, in traversal order.
+
+    Same four fields as ``ScopeElementPlan`` and deliberately a separate type:
+    there ``ScopeSource.count`` means "how many elements of the requested kind
+    this source holds", here every entry counts as exactly one listed row, and
+    one dataclass carrying both meanings is how a row budget starts being
+    charged in element units.
+
+    ``total`` is exactly ``CollectionMap.sources`` for the same scope — both come
+    out of ``_notebook_visible_sources``.  Order: participants as the caller
+    resolved them, sources by id inside each participant (the element plan's
+    order, for the same reason — a cursor handed back across calls is only
+    meaningful because the order is stable).
+    """
+
+    notebook_ids: Tuple[str, ...]
+    sources: Tuple[ScopeSource, ...]
+    total: int
+    fingerprint: str
+
+
+@dataclass(frozen=True)
 class ScopeElementPlan:
     """Which sources hold a kind, in traversal order, plus the scope identity.
 
@@ -163,6 +192,12 @@ class CollectionMap:
     elements: Tuple[ElementKindCount, ...]
     kg_objects: Tuple[Tuple[str, int], ...]
     knowhow_tables: int
+    # How many documents the scope holds, in the USER-VISIBLE sense — the number
+    # the source tab shows, not the number of physical ``sources`` rows (Memory
+    # synthetic rows and Knowhow projection rows are neither listed nor counted).
+    # No default: a silently-zero count would render "sources: 0" on a library
+    # full of documents, which reads as a fact rather than as a missing field.
+    sources: int
 
     def element_count(self, kind: str) -> int:
         for item in self.elements:
@@ -198,7 +233,8 @@ def render_collection_map(collection_map: CollectionMap) -> str:
         "[Collections in scope] "
         f"elements: {elements} | "
         f"KG objects: {kg_objects} | "
-        f"knowhow tables: {collection_map.knowhow_tables}"
+        f"knowhow tables: {collection_map.knowhow_tables} | "
+        f"sources: {collection_map.sources}"
     )
     if len(text) > COLLECTION_MAP_MAX_CHARS:
         return text[: COLLECTION_MAP_MAX_CHARS - 1] + "…"
@@ -279,7 +315,7 @@ class CollectionCatalogService:
             notebook_ids = tuple(
                 self._notebooks.participant_ids(db, active_notebook_id)
             )
-            elements = self._scope_element_counts(db, notebook_ids)
+            elements, sources = self._scope_signal_row_counts(db, notebook_ids)
             kg_objects = self._scope_kg_counts(db, notebook_ids)
             knowhow_tables = self._scope_knowhow_tables(db, notebook_ids)
         return CollectionMap(
@@ -287,6 +323,7 @@ class CollectionCatalogService:
             elements=elements,
             kg_objects=kg_objects,
             knowhow_tables=knowhow_tables,
+            sources=sources,
         )
 
     def collection_map_text(self, active_notebook_id: str) -> str:
@@ -330,6 +367,73 @@ class CollectionCatalogService:
             sources=tuple(sources),
             total=total,
             fingerprint=signal_fingerprint(all_signals),
+        )
+
+    def scope_source_plan(
+        self, db: object, notebook_ids: Sequence[str]
+    ) -> ScopeSourcePlan:
+        """Traversal plan for the SOURCES collection over one resolved scope.
+
+        The user-visible document list, in the same participant/id order the
+        element plan uses, with the same signal fingerprint as its scope
+        identity — so the sources cursor, the closing stability check and the
+        completeness proof are literally the element side's machinery, not a
+        second implementation of it.
+
+        It costs one bounded ``hidden_source_ids`` read per participant on top
+        of the signal query the caller pays anyway, and NO count query: the
+        number of visible sources is the length of this list, which is also what
+        the map reports (``_notebook_visible_sources`` is the one place that
+        decides).  Deliberately not memoized: unlike the element plan there is
+        no counting to skip, and the read is one primary-key projection bounded
+        by the notebook's Memory + Knowhow-table count.
+        """
+        sources: List[ScopeSource] = []
+        all_signals: List[Tuple[str, str]] = []
+        for notebook_id in notebook_ids:
+            signals = list(self._sources.source_change_signal_rows(db, notebook_id))
+            all_signals.extend(signals)
+            sources.extend(
+                self._notebook_visible_sources(db, notebook_id, signals)
+            )
+        return ScopeSourcePlan(
+            notebook_ids=tuple(notebook_ids),
+            sources=tuple(sources),
+            total=len(sources),
+            fingerprint=signal_fingerprint(all_signals),
+        )
+
+    def _notebook_visible_sources(
+        self,
+        db: object,
+        notebook_id: str,
+        signals: Sequence[Tuple[str, str]],
+    ) -> Tuple[ScopeSource, ...]:
+        """One notebook's user-visible sources, from signal rows already read.
+
+        THE definition of "which sources does the sources collection contain",
+        used by the map's count and by the executor's plan alike — the same
+        consistency-by-construction rule the element side follows, and the one
+        that keeps "map says 7, list shows 8" impossible.
+
+        Two exclusions, neither of them spelled here:
+
+        * Memory synthetic rows are already absent from
+          ``source_change_signal_rows`` (its contract, for the privacy reason
+          documented there and in this module's header);
+        * the Knowhow projection row is dropped via ``hidden_source_ids``, which
+          each adapter derives from its own user-visible-source predicate — the
+          one ``list_sources`` / ``visible_document_count`` share.  So this list
+          is the source tab's list, by derivation rather than by resemblance.
+
+        ``count=1``: for this collection one source IS one listed row, and the
+        row budget must be charged in listed rows.
+        """
+        hidden = frozenset(self._sources.hidden_source_ids(db, notebook_id))
+        return tuple(
+            ScopeSource(notebook_id=notebook_id, source_id=source_id, count=1)
+            for source_id, _signal in sorted(signals)
+            if source_id not in hidden
         )
 
     def _notebook_plan_sources(
@@ -418,26 +522,40 @@ class CollectionCatalogService:
             self._plan_source_entries = 0
 
     # ----------------------------------------------------------------- element
-    def _scope_element_counts(
+    def _scope_signal_row_counts(
         self, db: object, notebook_ids: Sequence[str]
-    ) -> Tuple[ElementKindCount, ...]:
+    ) -> Tuple[Tuple[ElementKindCount, ...], int]:
+        """Element counts AND the user-visible source count, in one pass.
+
+        Both answers come out of the same ``source_change_signal_rows`` read, so
+        they are computed together rather than by two loops: the signal query is
+        this module's only unconditional query and it returns one row per source,
+        so calling it twice per notebook would double the map's floor cost on a
+        50 000-source base for nothing.  Peak memory is unchanged — one
+        notebook's signal list at a time, exactly as before.
+        """
         totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
         source_totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
+        visible_sources = 0
         for notebook_id in notebook_ids:
-            for item in self._notebook_element_counts(db, notebook_id):
+            signals = list(self._sources.source_change_signal_rows(db, notebook_id))
+            for item in self._notebook_element_counts(db, notebook_id, signals):
                 totals[item.kind] += item.count
                 source_totals[item.kind] += item.sources
-        return tuple(
+            visible_sources += len(
+                self._notebook_visible_sources(db, notebook_id, signals)
+            )
+        elements = tuple(
             ElementKindCount(
                 kind=kind, count=totals[kind], sources=source_totals[kind]
             )
             for kind in ENUMERABLE_ELEMENT_KINDS
         )
+        return elements, visible_sources
 
     def _notebook_element_counts(
-        self, db: object, notebook_id: str
+        self, db: object, notebook_id: str, signals: Sequence[Tuple[str, str]]
     ) -> Tuple[ElementKindCount, ...]:
-        signals = self._sources.source_change_signal_rows(db, notebook_id)
         fingerprint = signal_fingerprint(signals)
         with self._lock:
             cached = self._notebook_counts.get(notebook_id)

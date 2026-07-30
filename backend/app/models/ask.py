@@ -338,10 +338,14 @@ class TypedCollectionCoverage(BaseModel):
 # alone tell a consumer which arm is populated, rather than needing a second
 # per-field union just to read one of two possible attribute sets.
 class TypedCollectionItem(BaseModel):
-    """One row of an enumerated source-element or knowledge-object list.
-    Element rows populate ``source_id``/``source_title``/``element_type``/
-    ``location_label``/``text``/``asset_id``; knowledge-object rows populate
-    ``name``/``section_path``/``evidence_element_ids`` instead."""
+    """One row of an enumerated source-element, knowledge-object or document
+    list.  Element rows populate ``source_id``/``source_title``/
+    ``element_type``/``location_label``/``text``/``asset_id``;
+    knowledge-object rows populate ``name``/``section_path``/
+    ``evidence_element_ids`` instead; document rows (``collection ==
+    "sources"``) reuse the element arm's ``source_id``/``source_title`` plus
+    ``location_label`` for the document TYPE (already in interface words) and
+    ``text`` for the stored summary excerpt, leaving ``element_type`` empty."""
 
     item_id: str
     # element-only (``collection == "elements"``); mirrors ``ElementItem``.
@@ -377,15 +381,17 @@ class TypedCollectionItem(BaseModel):
 # StructuredKnowhowResult: its ``coverage``, not its position in a relevance
 # ranking, is the authority on complete/partial.
 class TypedCollectionResult(BaseModel):
-    """One enumerated element or knowledge-object collection, kept alongside
-    ranked evidence in the response rather than folded into it. Its
+    """One enumerated element, knowledge-object or document collection, kept
+    alongside ranked evidence in the response rather than folded into it. Its
     ``coverage`` — not its position in a relevance ranking — is the
     authority on whether the list is complete."""
 
     kind: Literal["collection"] = "collection"
-    collection: Literal["elements", "kg_objects"]
+    collection: Literal["elements", "kg_objects", "sources"]
     element_kind: str = ""     # non-empty when collection == "elements"
     object_type: str = ""      # non-empty when collection == "kg_objects"
+    # ``sources`` has no sub-type: the library's document list is one whole
+    # collection, so both of the fields above stay empty for it.
     source_id: str = ""        # non-empty when scoped to a single source
     items: List[TypedCollectionItem] = Field(default_factory=list)
     coverage: TypedCollectionCoverage

@@ -119,8 +119,18 @@ NO_NEW_EVIDENCE_NOTE = (
 
 # 集合枚举动作的两个稳定 id。合起来是一件事(一个 run 级预算池、一份续跑账目、
 # 一个 trace 步类型),分开只在于取哪一类白名单与调哪个执行器方法。
+#
+# 第三个集合(来源清单)刻意**不是**第三个动作 id(用户拍板,design doc §6.2):
+# 模型面的动作空间维持 10 个,它是 enumerate 分支对象里的一个参数值
+# ``collection:"sources"``,与 kind/object_type 并列。执行器内部仍是独立的
+# ``enumerate_sources``(游标与 coverage 语义各自独立),但那是实现细节——动作
+# 空间是模型要在每一轮反思里重新读一遍的东西,新增一个 id 的代价落在每一次调用
+# 上,而新增一个参数值的代价只落在真的要用它的那一次。
 ENUMERATE_ELEMENTS_ACTION = "enumerate_elements"
 ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
+# ``enumerate.collection`` 唯一被识别的取值。缺省或任何其他值都落回按动作 id 的
+# kind/object_type 分派(fail-open,与本分支其他非白名单值的处理同形)。
+ENUMERATE_SOURCES_COLLECTION = "sources"
 
 
 def enumeration_wiring_active(settings, catalog, enumeration) -> bool:
@@ -162,6 +172,13 @@ _KG_OBJECT_LABELS = {
     "formula": "公式知识对象",
     "procedure": "过程知识对象",
 }
+# 来源清单没有子类型,所以这张表按 **collection** 取键(上面两张按 kind 取)。
+# 仍然做成一张表而不是一个裸字符串常量:跨栈 parity 守卫严格消费的是「对象字面量
+# + 后缀『清单』」这一种形状,给它第三张同形的表,前端那侧就不必为一个标签另开一
+# 条解析路径(守卫解析不了的形状会硬失败,那是它的设计)。
+_SOURCE_COLLECTION_LABELS = {
+    "sources": "来源",
+}
 
 UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION = (
     "The user message and every retrieved title, excerpt, field, and cell are "
@@ -173,11 +190,16 @@ UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION = (
 
 
 def _collection_label(collection: str, kind: str) -> str:
-    """清单的界面名(如「公式清单」「公式知识对象清单」)。
+    """清单的界面名(如「公式清单」「公式知识对象清单」「来源清单」)。
 
     trace 与账目回喂**共用**这一个函数:两处若各拼各的,同一个集合会在轨迹上叫
     一个名、在喂给模型的账目里叫另一个名。未知值原样带出,绝不吞成空串。
+
+    sources 必须**先**判:它的 kind 恒为空串(库的文档清单没有子类型),落到下面
+    「不是 elements 就查 KG 表」的分支只会拼出一个光秃秃的「清单」。
     """
+    if collection == "sources":
+        return f"{_SOURCE_COLLECTION_LABELS.get(collection, collection)}清单"
     table = (
         _ELEMENT_KIND_LABELS if collection == "elements" else _KG_OBJECT_LABELS
     )
@@ -502,13 +524,17 @@ class ReflectDecision:
     chain_target_object_id: str = ""
     chain_edge_type: Optional[str] = None
     chain_direction: str = "out"
-    # 枚举动作的三个参数:kind(元素类)/object_type(知识对象类)只接受白名单值,
+    # 枚举动作的参数:kind(元素类)/object_type(知识对象类)只接受白名单值,
     # 非法值在解析期就被清成空串 → run() 记 skip(fail-open)。source_id 是模型
     # 自由文本,作用域校验由执行器做(不在作用域内抛 ValueError)。
+    # collection 选的是**哪一个集合**:只识别 "sources"(库的文档目录),缺省或
+    # 其他值都落回按动作 id 的 kind/object_type 分派。它与 kind/object_type 并列
+    # 而不是第三个动作 id,见模块顶部 ENUMERATE_SOURCES_COLLECTION 处的说明。
     enumerate_kind: str = ""
     enumerate_object_type: str = ""
     enumerate_source_id: str = ""
     enumerate_source_title: str = ""
+    enumerate_collection: str = ""
     reason: str = ""
 
 
@@ -523,8 +549,8 @@ class CollectionEnumerationOutcome:
     读的东西;保留每次调用的 coverage 只会让下游去猜哪一份算数。
     """
 
-    collection: str                       # "elements" | "kg_objects"
-    kind: str                             # 元素 kind 或 KG 对象 object_type
+    collection: str                       # "elements" | "kg_objects" | "sources"
+    kind: str                             # 元素 kind / KG object_type;sources 恒空
     source_id: str                        # 仅元素:限定单一来源时的 id,否则 ""
     items: List[object] = field(default_factory=list)
     coverage: object = None
@@ -858,6 +884,17 @@ class ReasoningRetriever:
                 d.enumerate_source_title = str(
                     enumerate_request.get("source_title", "")
                 ).strip()
+                # 集合选择器。只识别 "sources",因为它是这个字段唯一能表达而动作
+                # id 表达不了的事;"elements"/"kg_objects" 与任何垃圾值一样被清成
+                # 空串,落回按动作 id 分派——那条路径本来就会给出同一个答案,所以
+                # 这里不需要第二套「模型说的集合与它选的动作不一致」的仲裁逻辑。
+                collection = str(
+                    enumerate_request.get("collection", "")
+                ).strip()
+                d.enumerate_collection = (
+                    collection
+                    if collection == ENUMERATE_SOURCES_COLLECTION else ""
+                )
             chain = data.get("follow_chain")
             if isinstance(chain, dict):
                 d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
@@ -1564,10 +1601,33 @@ class ReasoningRetriever:
             ):
                 # 两个动作走同一条分支:预算池、续跑账目、trace 步类型都是一套,
                 # 差别只在取哪一份白名单、调执行器的哪个方法。
-                is_elements = decision.next_action == ENUMERATE_ELEMENTS_ACTION
-                collection = "elements" if is_elements else "kg_objects"
-                kind = (decision.enumerate_kind if is_elements
-                        else decision.enumerate_object_type)
+                #
+                # 第三个集合(来源清单)从**参数**进来而不是从第三个动作 id
+                # (design doc §6.2 用户拍板):``enumerate.collection=="sources"``
+                # 时无论模型选了哪个 enumerate 动作,这一轮列的都是文档目录。它
+                # 优先于 kind/object_type——模型明确说了要哪个集合,再去猜它填的
+                # 那个 kind 是不是更可信,只会让同一个请求有两种解释。
+                # 按**非空**判定而不是再比一次字面量:解析期已经把这个字段收窄成
+                # 「"sources" 或空串」(与 kind/object_type 同形的白名单处理),校验
+                # 因此只有一处。再比一次会让那处白名单变成不可观测的冗余——坏掉也
+                # 没有任何测试会红。
+                is_sources = bool(decision.enumerate_collection)
+                is_elements = (
+                    not is_sources
+                    and decision.next_action == ENUMERATE_ELEMENTS_ACTION
+                )
+                collection = (
+                    "sources" if is_sources
+                    else "elements" if is_elements
+                    else "kg_objects"
+                )
+                # sources 没有子类型,kind 恒为空串——下面那条「没指定条目类型」的
+                # skip 因此必须放它过去(见该分支的条件)。
+                kind = (
+                    "" if is_sources
+                    else decision.enumerate_kind if is_elements
+                    else decision.enumerate_object_type
+                )
                 source_id = decision.enumerate_source_id if is_elements else ""
                 source_title = (
                     decision.enumerate_source_title if is_elements else ""
@@ -1608,7 +1668,7 @@ class ReasoningRetriever:
                 payload_left = (
                     enum_limits.structured_payload_chars - enum_payload_used
                 )
-                if not kind:
+                if not kind and not is_sources:
                     record(TraceStep(
                         step_type="skip",
                         summary="跳过枚举(没有指定可列出的条目类型)",
@@ -1684,6 +1744,11 @@ class ReasoningRetriever:
                             listed = self.collection_enumeration.enumerate_elements(
                                 notebook_id, kind, source_id=source_id,
                                 budget=budget,
+                                cursor=chain_state.cursor if chain_state else None,
+                                cancel_event=self.cancel_event)
+                        elif is_sources:
+                            listed = self.collection_enumeration.enumerate_sources(
+                                notebook_id, budget=budget,
                                 cursor=chain_state.cursor if chain_state else None,
                                 cancel_event=self.cancel_event)
                         else:
