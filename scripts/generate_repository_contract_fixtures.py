@@ -1124,7 +1124,9 @@ def _evidence() -> dict[str, object]:
     }
 
 
-def _seed_ask_repository(repo, *, include_kg: bool = True) -> str:
+def _seed_ask_repository(
+    repo, *, include_kg: bool = True, include_source: bool = True
+) -> str:
     notebook_id = "nb-ask-fixture"
     evidence = _evidence()
     now = FIXED_TIME
@@ -1262,6 +1264,20 @@ def _seed_ask_repository(repo, *, include_kg: bool = True) -> str:
                     "verified",
                 ),
             )
+        if not include_source:
+            # 造一个**零源**笔记本:三类可枚举集合(元素/知识对象/来源)计数全为零,
+            # 那是「本笔记本尚未构建知识图谱」早退真正管的场景。
+            # 用「先照常插入、再删掉」而不是把上面整段包进 if:那会把 ~60 行现有
+            # 代码整体缩进一级,而这个生成器的守卫对行位移敏感(见 AGENTS 契约夹具
+            # 一节)。每个案例都是全新数据库,所以删除与从未插入等价。
+            for statement in (
+                "DELETE FROM chunks_fts WHERE notebook_id = ?",
+                "DELETE FROM chunks WHERE notebook_id = ?",
+                "DELETE FROM source_elements WHERE source_id IN "
+                "(SELECT id FROM sources WHERE notebook_id = ?)",
+                "DELETE FROM sources WHERE notebook_id = ?",
+            ):
+                db.execute(statement, (notebook_id,))
     return notebook_id
 
 
@@ -2065,14 +2081,20 @@ def collect_ask_goldens() -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="repository-ask-goldens-") as temporary:
         root = Path(temporary)
         with _deterministic_runtime():
-            for case_name, mode, question, include_kg in (
-                ("chunk", "chunk", "fixture gain", True),
-                ("reasoning", "reasoning", "fixture gain", True),
-                ("graph", "graph", "fixture gain", True),
-                ("unconfigured_model", "reasoning", "fixture gain", True),
-                ("no_kg", "reasoning", "fixture gain", False),
-                ("no_hits", "graph", "unrelated-zqxj", True),
-                ("large_graph_refusal", "graph", "fixture gain", True),
+            # ``include_source`` 区分两种「没有图」:``no_kg`` 是**纯散文库**
+            # (有文档、零可枚举元素、零知识对象),它现在照常进循环——文档本身
+            # 就是可枚举集合之一;``no_collections`` 是**零源**库,三类计数全为零,
+            # 那才是「本笔记本尚未构建知识图谱」早退真正管的场景。两个案例都留着,
+            # 因为这一组 golden 声称覆盖「每一条早退」。
+            for case_name, mode, question, include_kg, include_source in (
+                ("chunk", "chunk", "fixture gain", True, True),
+                ("reasoning", "reasoning", "fixture gain", True, True),
+                ("graph", "graph", "fixture gain", True, True),
+                ("unconfigured_model", "reasoning", "fixture gain", True, True),
+                ("no_kg", "reasoning", "fixture gain", False, True),
+                ("no_collections", "reasoning", "fixture gain", False, False),
+                ("no_hits", "graph", "unrelated-zqxj", True, True),
+                ("large_graph_refusal", "graph", "fixture gain", True, True),
             ):
                 case_root = root / case_name
                 # Every case builds a FRESH database but reuses the same
@@ -2089,7 +2111,9 @@ def collect_ask_goldens() -> dict[str, object]:
                     configured=True,
                     missing_ask_answer=case_name == "unconfigured_model",
                 )
-                notebook_id = _seed_ask_repository(repo, include_kg=include_kg)
+                notebook_id = _seed_ask_repository(
+                    repo, include_kg=include_kg, include_source=include_source
+                )
                 # Task 24: the graph engine lives in AskService and consumes the
                 # retrieval port directly — seat the replay stubs on the canonical
                 # candidate-retrieval owner (facade instance patches no longer sit

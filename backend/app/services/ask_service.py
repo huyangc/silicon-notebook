@@ -397,11 +397,9 @@ class AskService:
     def _collections_reachable(self, notebook_id: str) -> bool:
         """作用域里是否还有集合枚举工具真的能列出来的东西。
 
-        这是「本笔记本还没有知识图谱」早退的唯一放行条件(见调用处)。判据刻意
-        是**地图上有非零集合**,而不是宽松的「有来源」:一个只被纯文本解析器
-        处理过的库既没有公式/表格/图片/代码块元素、也没有知识对象,放它进循环
-        只会让每个工具都返回空,用户拿到的是一段更含糊的「依据不足」,而不是那
-        句明确的「请先构建知识图谱」。
+        这是「本笔记本还没有知识图谱」早退的唯一放行条件(见调用处)。判据是
+        **地图上有非零集合**,而不是宽松的「有来源」——注意这两者现在不再等价,
+        因为「有来源」正是三个集合之一(见下面那条订正)。
 
         接线判据与 run 内的总闸共用 ``enumeration_wiring_active`` ——各写一份的
         话,kill switch 一关就会出现「早退放行了、run 里却没有工具」的空转。
@@ -413,10 +411,24 @@ class AskService:
         fail-open 的方向在这里是**反的**:地图建不出来就回到早退(接入前的行为),
         而不是把用户送进一轮什么都拿不到的循环。
 
-        **来源清单刻意不算在内**(PR-2.5)。它是第三个可枚举集合,但它的计数对任何
-        非空库都 ≥1,把它算进来等于把这道闸拆掉:每个「解析过但没建图、也没有结构化
-        元素」的库都会改成进循环,而那句明确的「请先构建知识图谱」会对所有这类库
-        消失。工具本身不受影响——放行之后,来源清单和另外两个一样可用。
+        **来源计数计入放行(codex R5 P1 订正)。** PR-2.5 第一版刻意把它排除在外,
+        理由是「非空库恒 ≥1,算进来等于拆掉这道闸,那句明确的『请先构建知识图谱』
+        会对所有纯文本库消失」。那个理由的**前半段成立、结论是错的**:
+
+        * 被挡住的恰好是来源清单的主力场景。一个只被纯文本解析器处理过的论文库
+          既没有公式/表格/图片/代码块、也没有知识对象,但它**有文档**——而
+          「库里有哪几篇 / 逐篇分析当前 notebook」这类问题问的就是那些文档。
+          用户问文档目录,拿回「请先构建知识图谱」,那不是一句更明确的提示,
+          那是没有回答被问的问题;
+        * 来源清单不需要图谱:它是零 LLM 的,读的就是 ``sources`` 行。挡住它
+          换不来任何正确性;
+        * 这与 PR-2 立下的判断是同一个:自动 KG 抽取默认关,「解析了来源但没建图」
+          是常态,所以早退才收窄成「无图**且**拿不出任何集合」。加进第三个集合
+          之后没跟着更新这个判定函数,是漏跟,不是一个独立的决定。
+
+        保留的语义(两条,都在测试里钉住):零源库仍然早退(计数为 0),地图构建
+        失败仍然早退(上面的 except)。放行之后 ``kg_required`` 仍如实为 True,
+        它是响应契约的一部分,不因为这一轮跑通了就变成假的。
         """
         from app.services.reasoning_retrieval import enumeration_wiring_active
 
@@ -430,8 +442,11 @@ class AskService:
             raise
         except Exception:       # noqa: BLE001 — 见 docstring:退回早退
             return False
-        return any(item.count > 0 for item in collection_map.elements) or any(
-            count > 0 for _object_type, count in collection_map.kg_objects
+        return (
+            any(item.count > 0 for item in collection_map.elements)
+            or any(count > 0 for _object_type, count in collection_map.kg_objects)
+            # 用户可见来源数。零源库因此仍然早退——这不是「有 notebook 就放行」。
+            or collection_map.sources > 0
         )
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:

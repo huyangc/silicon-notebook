@@ -1033,7 +1033,12 @@ def _bind_reasoning(repo, client):
     bind_chat_client(repo, "ask_answer", client)
 
 
-def _seed(repo, *, formulas=3, with_kg=True):
+def _seed(repo, *, formulas=3, with_kg=True, with_source=True):
+    """``with_source=False`` = 一个**零源**库:三个集合全为空,那才是早退该管的场景。
+
+    注意 ``formulas=0`` 并不等于「什么都列不出来」——那样得到的是一个**纯散文库**
+    (有文档、没有结构化元素),而文档本身就是可枚举集合之一。
+    """
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     if with_kg:
         repo.store_kg(notebook.id, None, [
@@ -1041,11 +1046,13 @@ def _seed(repo, *, formulas=3, with_kg=True):
              "payload": {"name": "版图设计要点", "section_path": "1"}, "evidence": []},
         ], [])
     with repo._write() as db:
-        db.execute(
-            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
-            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted", NOW, NOW),
-        )
+        if with_source:
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted",
+                 NOW, NOW),
+            )
         for index in range(1, formulas + 1):
             db.execute(
                 "INSERT INTO source_elements (id,source_id,element_type,"
@@ -1250,6 +1257,90 @@ def test_enumeration_answer_without_bound_row_does_not_show_unrelated_fallback_c
 
 # ------------------------------------------------- 无图笔记本也够得到枚举工具
 
+def test_prose_only_library_reaches_the_document_roster(arepo):
+    """纯散文库(有文档、零可枚举元素、零知识对象)必须够得到文档目录。
+
+    这是来源清单的**主力场景**:一库论文只被纯文本解析器处理过——没有公式/表格/
+    图片/代码块,自动 KG 抽取默认关所以也没有知识对象——而用户问的正是
+    「库里有哪几篇 / 逐篇分析当前 notebook」。此前放行判定只看元素与知识对象两类,
+    这类库被「请先构建知识图谱」整个挡在门外:用户问文档目录,拿回一句非答案。
+    来源清单是零 LLM 的,读的就是 `sources` 行,挡住它换不来任何正确性。
+
+    三件事一起钉:枚举真的执行了、清单卡真的产出了、`kg_required` 仍如实为 True
+    (放行只是不再阻断,不是把「这个库没有图」说成假的)。
+    """
+    nb = _seed(arepo, formulas=0, with_kg=False)
+    with arepo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s2", nb.id, "论文二", "pdf", "extracted", "extracted", NOW, NOW),
+        )
+    arepo.collection_catalog.invalidate()
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[
+            {"next_action": "enumerate_elements",
+             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "本库共两篇。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    # 没有被早退挡住:合成真的跑了,不是那句确定性兜底。
+    assert llm.answer_prompts, "纯散文库仍被早退挡住了"
+    assert resp.llm_mode != "deterministic"
+    assert "本笔记本尚未构建知识图谱" not in resp.conclusion
+    # 目录真的产出了。
+    rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert len(rows) == 1 and rows[0].collection == "sources"
+    assert [item.source_title for item in rows[0].items] == ["论文一", "论文二"]
+    assert rows[0].coverage.complete is True
+    # 前提确认:这个库确实两类都是零(否则这条测的就不是纯散文库)。
+    mapped = arepo.collection_catalog.collection_map(nb.id)
+    assert all(item.count == 0 for item in mapped.elements)
+    assert all(count == 0 for _type, count in mapped.kg_objects)
+    assert mapped.sources == 2
+    # 旗标不因为这一轮跑通而变假。
+    assert resp.kg_required is True
+
+
+def test_map_build_failure_keeps_the_early_return(arepo, monkeypatch):
+    """地图建不出来时**回到早退**——这一处的 fail 方向是反的,且此前没有守卫。
+
+    放行的授权者就是集合地图:它答不出「作用域里有什么」的时候,把用户送进一轮
+    什么都拿不到的循环,得到的是一句更含糊的「依据不足」;退回早退才是接入前的
+    行为。用一个纯散文库来测,因为它是**本来会被放行**的那一类——否则这条测试
+    在任何实现下都会通过。
+    """
+    nb = _seed(arepo, formulas=0, with_kg=False)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("map unavailable")
+
+    monkeypatch.setattr(arepo.collection_catalog, "collection_map", _boom)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不该跑到这里。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    assert resp.llm_mode == "deterministic"
+    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+    assert not llm.answer_prompts
+    assert resp.kg_required is True
+
+
 def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
     """codex 第 1 轮 P1-1:自动 KG 抽取默认关,「解析了来源但没建图」是常态。
 
@@ -1281,8 +1372,12 @@ def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
 
 def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(arepo):
     """反向:既没有图、作用域里也没有任何可列出的集合时,早退原样保留——
-    进循环只会让每个工具都返回空,那句明确的「请先构建知识图谱」才是对的。"""
-    nb = _seed(arepo, formulas=0, with_kg=False)
+    进循环只会让每个工具都返回空,那句明确的「请先构建知识图谱」才是对的。
+
+    「什么都列不出来」现在必须是**零源**库:纯散文库(有文档、没有元素)有文档这一个
+    集合,放行是对的(见上一条)。
+    """
+    nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],

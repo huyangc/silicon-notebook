@@ -25,7 +25,13 @@ REQUIRED_CASES = {
     "reasoning",
     "graph",
     "unconfigured_model",
+    # 「没有图」有两种,行为不同,两个都必须在这一组 oracle 里:
+    #   no_kg          = 纯散文库(有文档、零可枚举元素、零知识对象)。文档本身是
+    #                    可枚举集合之一,所以它**照常进循环**——用户问「库里有哪几篇」
+    #                    时那份目录才是答案(codex R5 P1);
+    #   no_collections = 零源库,三类计数全为零 ⇒ 早退那句「请先构建知识图谱」。
     "no_kg",
+    "no_collections",
     "no_hits",
     "large_graph_refusal",
 }
@@ -64,7 +70,17 @@ def test_ask_early_exit_flags_are_frozen():
     cases = _goldens()["cases"]
 
     assert cases["unconfigured_model"]["response"]["model_errors"]
-    assert cases["no_kg"]["response"]["kg_required"] is True
+    # 零源库:早退仍然发生(确定性兜底 + 那句明确提示)。
+    no_collections = cases["no_collections"]["response"]
+    assert no_collections["kg_required"] is True
+    assert no_collections["llm_mode"] == "deterministic"
+    assert "本笔记本尚未构建知识图谱" in no_collections["conclusion"]
+    # 纯散文库:放行进循环(不是确定性兜底),但旗标仍如实为 True——放行只是不再
+    # 阻断,不是把「这个库没有图」说成假的。
+    prose_only = cases["no_kg"]["response"]
+    assert prose_only["kg_required"] is True
+    assert prose_only["llm_mode"] != "deterministic"
+    assert "本笔记本尚未构建知识图谱" not in prose_only["conclusion"]
     assert cases["no_hits"]["response"]["grounded"] is False
     refusal = cases["large_graph_refusal"]["response"]
     assert refusal["mode"] == "graph"
