@@ -4,6 +4,8 @@ The contract is EQUIVALENCE with the legacy `unified_graph(limit=N)` path: the
 bounded core derived from the persisted viz graph must return the SAME node-id
 set (and counts) as `limit_graph_by_degree(_unified_graph_full(...), N)`.
 """
+import time
+
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -40,7 +42,7 @@ def _build_star(repo):
     return nb
 
 
-def test_unified_graph_bounded_matches_full(repo):
+def test_bounded_graph_matches_legacy_shape_and_neighbors(repo):
     nb = _build_star(repo)
     legacy = repo._unified_graph_full(nb.id, "object")
     from app.services.kg_merge import limit_graph_by_degree
@@ -62,11 +64,9 @@ def test_unified_graph_bounded_matches_full(repo):
     assert bounded["total_edges"] == len(legacy["edges"])
     assert bounded["truncated"] is True
 
-
-def test_bounded_node_edge_shape_matches_legacy(repo):
-    nb = _build_star(repo)
-    repo.build_scale_index(nb.id)
-    bounded = repo.unified_graph(nb.id, level="object", limit=2)
+    # Shape hydration is part of the same bounded response contract. Keeping
+    # these assertions beside the equivalence check avoids rebuilding the same
+    # persisted ScaleIndex solely to inspect a second view of the result.
     for n in bounded["nodes"]:
         assert set(n.keys()) == {"id", "object_type", "payload"}
         assert "name" in n["payload"]
@@ -76,21 +76,14 @@ def test_bounded_node_edge_shape_matches_legacy(repo):
     hub = next(n for n in bounded["nodes"] if n["payload"].get("name") == "MOSFET")
     assert hub["object_type"] == "concept"
 
-
-def test_kg_neighbors_matches_topology(repo):
-    nb = _build_star(repo)
-    repo.build_scale_index(nb.id)
-    hub_id = next(n["id"] for n in repo._unified_graph_full(nb.id, "object")["nodes"]
-                  if n["payload"].get("name") == "MOSFET")
+    # The same artifact also owns neighbor hydration; one setup is sufficient
+    # to retain the topology and edge-shape coverage.
     out = repo.kg_neighbors(nb.id, hub_id, cap=50)
     names = {n["payload"]["name"] for n in out["nodes"]}
     assert "MOSFET" in names
     assert {"gain", "bias"} <= names  # both leaves are neighbors
     for e in out["edges"]:
         assert {"source_object_id", "target_object_id", "edge_type"} <= set(e.keys())  # + optional support_count/source_count
-
-
-import time
 
 
 @pytest.mark.slow

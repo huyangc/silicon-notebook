@@ -14,5 +14,7 @@ fi
 
 cd "$ROOT_DIR/frontend"
 npm run test
-npm run lint
+# `next build` owns the G1 typecheck and fails closed on TypeScript errors.
+# Keep the package typecheck as a targeted G0 command; running the same TypeScript pass
+# immediately before Next's type-validation pass only parses the program twice.
 npm run build

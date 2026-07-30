@@ -92,7 +92,7 @@ curl -s http://127.0.0.1:8000/api/health
 bash scripts/check.sh
 ```
 
-Verification is tiered: G0 runs change-focused tests; G1 `scripts/check.sh` is the edit-time and PR/push offline gate (stable backend, contracts, frontend tests/typecheck/build) with default 12 backend workers and an Apple Silicon warm target of at most 60 seconds; G2 `scripts/check_extended.sh` adds real-index/performance tests and repository-wide semantic scans and runs once daily at 18:17 UTC (02:17 Asia/Shanghai) or manually; G3 `scripts/check_postgres.sh` remains the independent PostgreSQL integration gate. CI lane timings are observational only.
+Verification is tiered: G0 runs change-focused tests; G1 `scripts/check.sh` is the edit-time and PR/push offline gate (stable backend, contracts, frontend tests and the typechecking production build) with default 12 backend workers, four frontend test workers per runner, and an Apple Silicon warm target of at most 60 seconds; G2 `scripts/check_extended.sh` adds real-index/performance tests and repository-wide semantic scans and runs once daily at 18:17 UTC (02:17 Asia/Shanghai) or manually; G3 `scripts/check_postgres.sh` remains the independent PostgreSQL integration gate. CI lane timings are observational only.
 
 Codex-only execution note: run `scripts/check.sh` outside the Codex sandbox on the first attempt because lifecycle tests bind loopback ports and manage subprocesses. GitHub network operations (`git fetch`, `git push`, and `gh auth/repo/pr`) must likewise request outside-sandbox execution directly instead of first failing inside the sandbox; ordinary local read-only Git inspection stays sandboxed.
 

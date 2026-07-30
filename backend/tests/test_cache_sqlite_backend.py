@@ -7,9 +7,11 @@ import pytest
 
 from app.core.cache.sqlite_backend import SqliteCacheBackend
 
-# SQLite ≥ 3.32 的上游默认 SQLITE_LIMIT_VARIABLE_NUMBER，也是部署机
-# （Ubuntu 24.04）的实际值。本机 conda 的 SQLite 编到 250000。
-DEPLOY_VARIABLE_LIMIT = 32766
+# 变量上限回归只需要真实越过连接自己的 SQLite limit，不需要把部署机的
+# 32766 行全量复制进每一次测试。把测试连接主动压到一个小而非平凡的边界；若生产
+# 代码退回 `IN (?, …)` 展开，LIMIT + 1 个 key 仍会真实触发同一个
+# `sqlite3.OperationalError: too many SQL variables`。
+TEST_VARIABLE_LIMIT = 128
 
 
 def _mk(tmp_path, **kw):
@@ -54,11 +56,15 @@ def _poke_timestamps(cache, key, *, created_at=None, used_at=None):
         conn.close()
 
 
-def _clamp_to_deploy_variable_limit(cache):
-    """把复用连接的变量上限压到部署机水位，让本机也能复现 too many SQL variables。
+def _clamp_to_test_variable_limit(cache):
+    """把复用连接压到小型测试水位，确定性复现 too many SQL variables。
 
     连接是 thread-local 复用的，压一次即对本线程后续所有操作生效——这也正是
     "每次操作新建连接"时做不到的事。
+
+    这里验证的是「无界 key 集不能展开成 SQL placeholders」这一性质；SQLite 对
+    128 和部署机 32766 使用同一 limit 机制，因此灌入三万多行只会增加 I/O，不会
+    增加任何分支或断言强度。
 
     自检：如果连接不是被复用的（比如退回"每次操作新建连接"），下面这行 setlimit
     压的就是一条随手丢弃的连接，后续操作会在本机 250000 上限的新连接上跑，两条
@@ -66,10 +72,16 @@ def _clamp_to_deploy_variable_limit(cache):
     这里立刻转红，而不是让后面的测试在错误的前提下"侥幸"通过。
     """
     cache._connect().setlimit(
-        sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, DEPLOY_VARIABLE_LIMIT)
+        sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, TEST_VARIABLE_LIMIT)
     assert cache._connect().getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) == (
-        DEPLOY_VARIABLE_LIMIT
+        TEST_VARIABLE_LIMIT
     ), "变量上限没有压在被复用的连接上——clamp 对后续操作不生效"
+    placeholders = ",".join("?" for _ in range(TEST_VARIABLE_LIMIT + 1))
+    with pytest.raises(sqlite3.OperationalError, match="too many SQL variables"):
+        cache._connect().execute(
+            f"SELECT 1 WHERE 1 IN ({placeholders})",
+            [1] * (TEST_VARIABLE_LIMIT + 1),
+        )
 
 
 def test_put_get_roundtrip(tmp_path):
@@ -352,9 +364,9 @@ def test_evict_tag_survives_deploy_variable_limit(tmp_path):
     tag 是模型名，"换模型后清掉它的缓存"正是 key 数最大的场景。先 SELECT key 再
     展开占位符会在部署机上抛 sqlite3.OperationalError: too many SQL variables。
     """
-    n = DEPLOY_VARIABLE_LIMIT + 1_000       # 必须越过变量上限
+    n = TEST_VARIABLE_LIMIT + 1             # 必须真实越过连接变量上限
     c = _mk(tmp_path)
-    _clamp_to_deploy_variable_limit(c)
+    _clamp_to_test_variable_limit(c)
     for i in range(n):
         c.put(f"k{i}", "v", tag="modelA")
     c.put("keep", "v", tag="modelB")
@@ -370,13 +382,21 @@ def test_expired_sweep_survives_deploy_variable_limit(tmp_path):
     这条路径长在 put() 里：调用方按"缓存故障不影响主流程"用 except Exception 吞掉
     降级为 miss，所以一旦抛异常，缓存会**无声地永久停止写入**，没有任何信号。
     """
-    n = DEPLOY_VARIABLE_LIMIT + 1_000
-    c = _mk(tmp_path, ttl_seconds=0.5)
-    _clamp_to_deploy_variable_limit(c)
+    n = TEST_VARIABLE_LIMIT + 1
+    c = _mk(tmp_path, ttl_seconds=100_000)
+    _clamp_to_test_variable_limit(c)
     for i in range(n):
         c.put(f"k{i}", "v")                 # size_limit 极大，此时不触发裁剪
-    time.sleep(0.6)                         # n 条全部过期
-    c.size_limit = 1_000                    # 让下一次 put 必然越限
+    # 用持久化状态构造过期集合，不让墙钟 sleep 成为语义前提。生产查询只关心
+    # created_at 与 cutoff 的关系；一次 bulk UPDATE 也避免为造状态再做 n 次写事务。
+    with c._connect() as db:
+        db.execute(
+            "UPDATE cache SET created_at=?",
+            (time.time() - c.ttl_seconds - 1,),
+        )
+    # 129B 过期数据 + 100B fresh > 200B，而清扫后 100B <= 90% headroom；
+    # 因而必经容量清扫路径，同时不会把作为对照的 fresh 再按 LRU 淘汰。
+    c.size_limit = 200
     c.put("fresh", "v" * 100)
 
     assert len(c) == 1, f"过期清扫未删净：还剩 {len(c)} 条"

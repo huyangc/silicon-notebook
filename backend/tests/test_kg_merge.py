@@ -354,15 +354,22 @@ def test_cluster_seeds_matches_cluster_objects_smallcase():
     assert cmap == full["cluster_map"]
 
 
-def test_ann_candidates_shards_above_cap(caplog):
-    # OOM fallback: only a max_reps at/above the sharding floor triggers sharding.
-    import numpy as np
-    from app.services.kg_merge import _ann_candidates, _MIN_SHARD_CAP
-    n = _MIN_SHARD_CAP + 5
+def test_ann_candidates_shards_above_cap(caplog, monkeypatch):
+    # OOM fallback: only a max_reps at/above the sharding floor triggers
+    # sharding. The branch is size-independent, so use a test-local floor
+    # instead of constructing 20,005 HNSW entries merely to cross a constant.
+    import app.services.kg_merge as kg_merge
+
+    assert kg_merge._MIN_SHARD_CAP == 20_000
+    test_floor = 8
+    monkeypatch.setattr(kg_merge, "_MIN_SHARD_CAP", test_floor)
+    n = test_floor + 5
     seeds = [f"s{i}" for i in range(n)]
     reps = {s: np.random.default_rng(i).random(8).astype("float32") for i, s in enumerate(seeds)}
     with caplog.at_level("WARNING"):
-        out = _ann_candidates(seeds, reps, k=5, lo=0.0, max_reps=_MIN_SHARD_CAP)
+        out = kg_merge._ann_candidates(
+            seeds, reps, k=5, lo=0.0, max_reps=test_floor
+        )
     assert isinstance(out, list)
     assert any("rep" in r.message.lower() for r in caplog.records)
 

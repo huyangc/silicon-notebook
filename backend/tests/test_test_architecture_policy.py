@@ -19,7 +19,6 @@ REQUIRED_LAYERS = {
     ),
     "scripts/check_frontend.sh": (
         "npm run test",
-        "npm run lint",
         "npm run build",
     ),
 }
@@ -144,6 +143,19 @@ def test_complete_gate_delegates_every_required_verification_layer():
         assert f"check_${{lane}}.sh" in coordinator or (
             f"check_{lane_name}.sh" in coordinator
         )
+
+
+def test_frontend_production_build_owns_the_standard_gate_typecheck():
+    frontend_lane = (ROOT / "scripts" / "check_frontend.sh").read_text(
+        encoding="utf-8"
+    )
+    next_config = (ROOT / "frontend" / "next.config.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "npm run build" in frontend_lane
+    assert "npm run lint" not in frontend_lane
+    assert "ignoreBuildErrors" not in next_config
 
 
 def test_openapi_framework_versions_are_exactly_pinned():

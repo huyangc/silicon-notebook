@@ -42,11 +42,11 @@ bash scripts/check.sh
 | 级别 | 范围 | 执行频率 |
 | --- | --- | --- |
 | G0 目标测试 | 按当前改动文件与行为选跑 | 编辑循环中随时执行 |
-| G1 标准门 | `scripts/check.sh`：稳定后端、契约/harness、前端测试/类型检查/构建 | 本地交付前以及每次 PR/push/手动 CI |
+| G1 标准门 | `scripts/check.sh`：稳定后端、契约/harness、前端测试及负责类型检查的 production build | 本地交付前以及每次 PR/push/手动 CI |
 | G2 扩展门 | `scripts/check_extended.sh`：G1 加真实索引/性能测试与全仓语义扫描 | 每天 `17 18 * * *` UTC（北京时间次日 02:17）一次，也可手动触发 |
 | G3 PostgreSQL | `scripts/check_postgres.sh`：直接 PostgreSQL adapter 集成 | 独立的 PR/push/手动 CI job |
 
-G1 并行运行三个有界 lane：`check_backend.sh` 以默认 12 个 worker 执行稳定 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、`tsc --noEmit` 与 production build。G1 backend 只排除 `slow` 真实索引/性能用例、`architecture_contract` 全仓语义扫描和 PostgreSQL 树；G2 先执行 G1，再执行精确互补的 backend marker 集。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+G1 并行运行三个有界 lane：`check_backend.sh` 以默认 12 个 worker 执行稳定 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx` 与 production build。Node 原生 test runner 和 Vitest 各限制为 4 workers，为 backend 临界路径保留 CPU；Next build 负责 TypeScript 校验并且不得启用 `ignoreBuildErrors`，因此 G1 不再先用 `tsc --noEmit` 解析一遍同一程序再立即由 build 重复解析，`npm run lint` 仍作为 G0 定向命令保留。G1 backend 只排除 `slow` 真实索引/性能用例、`architecture_contract` 全仓语义扫描和 PostgreSQL 树；G2 先执行 G1，再执行精确互补的 backend marker 集。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 验收时使用项目一直采用的 Homebrew/Miniconda Python：
 
@@ -115,6 +115,7 @@ PR 在合入前必须经过 codex 评审，且**每一轮的原始输出都要�
 
 ### 测试架构
 
+- 与规模无关的边界分支只允许降低测试局部阈值，并另行钉住生产 floor。检查同一不可变索引/产物多个视图的断言共享一次真实构建；只验证算术或观测分支的用例走最小归属接缝，同时邻近集成覆盖仍须真实构建、打开并查询该产物。
 - 后端与前端静态契约使用模块路径、限定 scope、操作种类、目标和审核后的计数等语义身份。源码位置只能作为诊断元数据；行号、offset、CSS 顺序和源码切片都不得用来标识预期站点。
 - 前端 `*.test.mjs` 用 `node:test` 覆盖纯逻辑，以及少量有明确理由的架构/安全/词汇/入口契约；`*.component.test.tsx` 用 Vitest、jsdom 与 Testing Library，通过 role、用户动作和状态验证可见行为。
 - 组件行为不得由 CSS 几何或源码布局钉死。普通特性重构只有在可观察契约改变时才应修改测试。
