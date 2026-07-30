@@ -352,6 +352,12 @@ _PROMPT_LINE_EXCERPT_CHARS = 200
 # retrieval producer.
 COLLECTION_KEY_BASE = 5000
 
+# What a document with no display name is called, in the prompt preview and on
+# the result card alike (``answer-panel.tsx`` renders the same words).  Kept as
+# one constant on this side so the two never drift into "未命名来源" on screen and
+# a raw source id in the prompt — the model quotes what it is given.
+UNNAMED_SOURCE_LABEL = "未命名来源"
+
 # A single, one-time reminder that the preview is a SUBSET of what was
 # listed. Mirrors ``structured_prompt_block``'s coverage-header instruction
 # sentence, but is not repeated per outcome (one enumeration_prompt_block
@@ -557,7 +563,13 @@ def _item_line(collection: str, item: object, key: str) -> str:
         # function renders the EXECUTOR's dataclasses (the wire projection
         # happens elsewhere, from the same items).
         summary = _clean(item.summary)[:_PROMPT_LINE_EXCERPT_CHARS]
-        parts = [str(item.source_title or item.source_id)]
+        # A nameless document falls back to the SAME neutral placeholder the
+        # result card shows, not to its internal id.  Two reasons the id is
+        # wrong here: the model would quote it back as a title (the roster's
+        # whole purpose is to give it titles to deepen by name, and an id is a
+        # name that matches nothing), and internal ids are not interface copy —
+        # they leak into an answer the moment the model echoes the line.
+        parts = [str(item.source_title or UNNAMED_SOURCE_LABEL)]
         if item.doc_type_label:
             parts.append(str(item.doc_type_label))
         line = " · ".join(parts)

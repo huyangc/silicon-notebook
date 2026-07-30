@@ -248,7 +248,7 @@ class SourceStore:
         already in hand, never a second access path.
         """
         rows = db.execute(
-            "SELECT id, updated_at, parse_status, chunked_at "
+            "SELECT id, updated_at, parse_status, chunked_at, created_at "
             "FROM sources WHERE notebook_id = ? AND source_type <> 'memory'",
             (notebook_id,),
         ).fetchall()
@@ -260,6 +260,13 @@ class SourceStore:
                     row["parse_status"] or "",
                     row["chunked_at"] or "",
                 ),
+                # Sort key, passed through as stored: ``list_sources`` orders by
+                # this very column with SQLite's default BINARY collation, and
+                # Python's codepoint comparison over the same ASCII timestamp
+                # text is that same ordering.  So the roster the sources
+                # collection walks is byte-for-byte the source tab's order —
+                # not a second interpretation of it.
+                str(row["created_at"] or ""),
             )
             for row in rows
         ]
@@ -296,28 +303,38 @@ class SourceStore:
     def hidden_source_ids(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> List[str]:
-        """The ids the user-facing source list hides — Memory synthetic rows
-        and a Knowhow table's hidden projection row.
+        """The ids the user-facing source list hides and the CALLER still has in
+        hand — i.e. a Knowhow table's hidden projection row.
 
         Derived from ``VISIBLE_SOURCE_TYPES_PREDICATE`` by negation, on purpose:
         that constant is already the single truth for "which sources does the
         user see" (``list_sources`` / ``list_sources_page`` /
         ``visible_document_count`` all share it), and the sources collection has
-        to enumerate exactly that set.  Spelling the two hidden types out again
-        here would be a second definition, free to drift into an answer card
-        that lists a phantom "Knowhow 表：…" document.
+        to enumerate exactly that set.  Spelling the hidden types out again here
+        would be a second definition, free to drift into an answer card that
+        lists a phantom "Knowhow 表：…" document.
 
-        Same cost shape as ``memory_source_ids``: one ``notebook_id``-seeked
-        query projecting the primary key, its result bounded by the notebook's
-        Memory + Knowhow-table count.  The caller subtracts these ids from the
-        change-signal rows it already read, so the visible list costs no second
-        full read of ``sources``.
+        Memory rows are then excluded a SECOND time, and that is the point of
+        the division of labour rather than a redundancy:
+        ``source_change_signal_rows`` — the list this one is subtracted FROM —
+        already drops them, so returning them here would read ids the caller
+        cannot use.  A notebook can hold one Memory row per confirmed Memory,
+        which on a heavily-used personal library is the majority of this query's
+        result; the map pays this read on every build.  ``memory_source_ids``
+        stays the place that knows about Memory rows (the KG side needs them,
+        because ``knowledge_objects`` carries no source type).
+
+        Cost shape: one ``notebook_id``-seeked query projecting the primary key,
+        bounded by the notebook's Knowhow-table count.  The caller subtracts
+        these ids from the change-signal rows it already read, so the visible
+        list costs no second full read of ``sources``.
         """
         return [
             row["id"]
             for row in db.execute(
                 "SELECT id FROM sources WHERE notebook_id = ? "
-                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE})",
+                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE}) "
+                "AND source_type <> 'memory'",
                 (notebook_id,),
             ).fetchall()
         ]

@@ -26,18 +26,31 @@ from typing import List, Optional, Sequence
 # that edits user text would be exactly the lexical routing this feature's
 # design decision rules out, and it would mangle the legitimate case (a
 # document that genuinely discusses knowledge graphs).
+#
+# 知识图谱 / KG is scoped NARROWLY, and this is the part to not loosen again.
+# The first version called it a scope word unconditionally, which is false for
+# the most likely corpus a user asks this about: a library OF GraphRAG /
+# LightRAG papers, where "这些论文里知识图谱是怎么构建的" is an ordinary topical
+# question and 知识图谱 is its most load-bearing search term.  Stripping it there
+# does not remove noise, it removes the query.  So the rule fires only on the
+# possessive/deictic form ("本库的知识图谱"), and the reverse exemption is stated
+# explicitly rather than left to be inferred — this paragraph reaches all four
+# prompts unconditionally (it is not behind the enumeration kill switch, and a
+# deep report pays it once per section per step), so a wrong reading of it is
+# expensive in exactly the corpora that care.
 SCOPE_DEIXIS_GROUNDING = (
     "Scope words are not search terms. Phrases like 当前notebook / 这个库 / "
-    "本库 / 整个库 / 库里 / the current notebook / this notebook / this library "
-    "refer to the notebook the user has open together with the reference "
-    "libraries mounted on it — that is the SCOPE every retrieval already runs "
-    "in, not content that can be found inside it. 知识图谱 / KG likewise names "
-    "this library's own knowledge structure, not a topic to look up. So resolve "
-    "such a phrase into the scope and then DROP it: never carry it into a "
-    "query, a keyword or a name to look up, because no document contains the "
-    "name of the library holding it. Keep the rest of the question intact — "
-    "'当前notebook里的文章讲了什么' asks about the documents themselves, and "
-    "dropping the scope words must not turn it into a different question.\n"
+    "本库 / 整个库 / 库里 / the current notebook / this library name the notebook "
+    "the user has open plus the reference libraries mounted on it — the SCOPE "
+    "every retrieval already runs in, not content inside it. Resolve such a "
+    "phrase into the scope and DROP it: no document contains the name of the "
+    "library holding it. 知识图谱 / KG counts as a scope word ONLY in that "
+    "possessive form (本库的知识图谱 / 这个库的图谱 / the knowledge graph of this "
+    "library), meaning this library's own knowledge structure. Standing on its "
+    "own it is an ordinary TOPIC and stays a search term: if the documents are "
+    "about knowledge graphs, '这些论文里知识图谱是怎么构建的' must keep 知识图谱. "
+    "Either way keep the rest of the question intact — dropping scope words "
+    "must never turn it into a different question.\n"
 )
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'

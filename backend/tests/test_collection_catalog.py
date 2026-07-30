@@ -248,7 +248,8 @@ def test_replace_elements_alone_invalidates_the_count(repo):
 
     store = repo._runtime.source_store
     with repo._connect() as db:
-        before = dict(store.source_change_signal_rows(db, notebook.id))
+        before = {row[0]: row[1]
+                  for row in store.source_change_signal_rows(db, notebook.id)}
     later = "2026-07-29T10:00:00.123456+08:00"
     with repo._write() as db:
         store.replace_elements(
@@ -263,7 +264,8 @@ def test_replace_elements_alone_invalidates_the_count(repo):
             created_at=later,
         )
     with repo._connect() as db:
-        after = dict(store.source_change_signal_rows(db, notebook.id))
+        after = {row[0]: row[1]
+                 for row in store.source_change_signal_rows(db, notebook.id)}
     assert after["s1"] != before["s1"], "信号必须随元素换代当场翻转"
     assert catalog.collection_map(notebook.id).element_count("formula") == 5
 
@@ -556,6 +558,31 @@ def test_fingerprint_ignores_row_order(repo):
     assert collection_catalog.signal_fingerprint([("s1", "sig-a")]) != (
         collection_catalog.signal_fingerprint([("s1|sig-a", "")])
     )
+
+
+def test_created_at_key_does_not_change_the_fingerprint():
+    """来源清单让信号行多带一个 ``created_at`` 排序键,指纹**不得**因此变化。
+
+    两件事:
+    * 值不进摘要——创建时间对活着的源永不改变,把它哈希进去只会加宽 token;而
+      指纹变化的含义是「整库重数」,一个缓存键不该为一个影响不到被缓存内容的
+      理由而移动;
+    * 与加字段之前**逐字节相同**——不然这次改动会让所有已部署库的 L1/L2 全量
+      失效一次(表现为上线后第一次建图把每个库都重扫一遍)。
+    """
+    pairs = [("s1", "sig-a"), ("s2", "sig-b")]
+    triples = [("s1", "sig-a", "2026-07-02"), ("s2", "sig-b", "2026-07-01")]
+    assert collection_catalog.signal_fingerprint(triples) == (
+        collection_catalog.signal_fingerprint(pairs)
+    )
+    # 同一批源、不同创建时间 ⇒ 指纹相同(排序键不是内容)。
+    assert collection_catalog.signal_fingerprint(
+        [("s1", "sig-a", "1999-01-01"), ("s2", "sig-b", "2030-12-31")]
+    ) == collection_catalog.signal_fingerprint(triples)
+    # 信号本身变了仍必须变(别把「忽略第三个字段」写成「只看第一个字段」)。
+    assert collection_catalog.signal_fingerprint(
+        [("s1", "sig-CHANGED", "2026-07-02"), ("s2", "sig-b", "2026-07-01")]
+    ) != collection_catalog.signal_fingerprint(triples)
 
 
 # ------------------------------------------------------------------ 地图文本

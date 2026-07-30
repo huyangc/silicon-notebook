@@ -404,9 +404,11 @@ export type TypedCollectionItem = {
 };
 
 /**
- * 一份类型化的元素/知识对象清单结果（PR-2 枚举工具）。与 `KnowhowResultSet`
- * 并列进 `AskResponse.result_sets`，按 `kind` 判别；`coverage`（而非它在相关度
- * 排序里的位置）才是完整/部分的权威依据。真源：
+ * 一份类型化的元素/知识对象/文档清单结果（PR-2 枚举工具，PR-2.5 加入文档清单）。
+ * 与 `KnowhowResultSet` 并列进 `AskResponse.result_sets`，按 `kind` 判别；
+ * `coverage`（而非它在相关度排序里的位置）才是完整/部分的权威依据。
+ * `collection === "sources"`（库里的文档清单）没有子类型，`element_kind` 与
+ * `object_type` 两个字段对它都为空。真源：
  * `backend/app/models/ask.py TypedCollectionResult`。
  */
 export type TypedCollectionResult = {
@@ -416,7 +418,6 @@ export type TypedCollectionResult = {
   element_kind?: string;
   /** collection === "kg_objects" 时非空："concept" | "claim" | "formula" | "procedure"。 */
   object_type?: string;
-  /** collection === "sources"（库里的文档清单）没有子类型，上面两个字段都为空。 */
   /** 非空时表示这份清单被限定在单个来源范围内。 */
   source_id?: string;
   items: TypedCollectionItem[];

@@ -908,9 +908,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
             connection, ["src-collect-a"], []
         ) == []
 
-        signals = dict(
+        signals = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
         memory_ids = set(
             core_stores.sources.memory_source_ids(connection, notebook_id)
         )
@@ -929,9 +930,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
     # updated_at + parse_status move together on every lifecycle transition.
     core_stores.sources.set_status("src-collect-a", "extracted")
     with core_stores.database.connect() as connection:
-        after_status = dict(
+        after_status = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
     assert after_status["src-collect-a"] != signals["src-collect-a"]
     assert after_status["src-collect-b"] == signals["src-collect-b"]
 
@@ -944,9 +946,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
         (NOW, "src-collect-b"),
     )
     with core_stores.database.connect() as connection:
-        after_chunked = dict(
+        after_chunked = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
     assert after_chunked["src-collect-b"] != signals["src-collect-b"]
     assert after_chunked["src-collect-a"] == after_status["src-collect-a"]
 
@@ -981,9 +984,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
     with core_stores.database.write() as connection:
         core_stores.sources.delete_source_row(connection, "src-collect-b")
     with core_stores.database.connect() as connection:
-        remaining = dict(
+        remaining = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
     assert "src-collect-b" not in remaining
 
     # ``replace_elements`` moves ``updated_at`` in its own write transaction, so
@@ -1005,9 +1009,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
             created_at="2026-07-29T10:00:00.123456+00:00",
         )
     with core_stores.database.connect() as connection:
-        after_swap = dict(
+        after_swap = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
         assert core_stores.sources.element_type_count_rows(
             connection, ["src-collect-a"], kinds
         ) == [("src-collect-a", "formula", 1)]
@@ -1134,7 +1139,12 @@ def test_typed_collection_source_primitives_match_sqlite_semantics(
     * ``source_listing_rows`` must return the source-card projection on the
       CALLER's connection (summary + doc_type + the paper-meta outer join), and
       ``source_metadata`` must be the same query — they are one SQL by
-      construction on both backends.
+      construction on both backends;
+    * the signal rows' ``created_at`` sort key must order the roster the way
+      THIS backend's ``list_sources`` orders it.  PostgreSQL hands back
+      ``datetime`` where SQLite hands back text, so "sort the key
+      lexicographically" is a per-adapter claim, not a shared one — and if it
+      breaks here the roster silently comes out in an order no user has seen.
     """
     owner = core_stores.identity.create_user("q00123456", "password-12")
     notebook_id = core_stores.notebooks.create_row(
@@ -1161,26 +1171,46 @@ def test_typed_collection_source_primitives_match_sqlite_semantics(
             doc_type=doc_type,
         )
 
-    visible = {source.id for source in core_stores.sources.list_sources(notebook_id)}
+    visible_order = [
+        source.id for source in core_stores.sources.list_sources(notebook_id)
+    ]
+    visible = set(visible_order)
     with core_stores.database.connect() as connection:
         hidden = set(
             core_stores.sources.hidden_source_ids(connection, notebook_id)
         )
-        signals = {
-            source_id for source_id, _signal
-            in core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        }
+        memory = set(
+            core_stores.sources.memory_source_ids(connection, notebook_id)
+        )
+        signal_rows = list(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+        signals = {row[0] for row in signal_rows}
         rows = core_stores.sources.source_listing_rows(
             connection, ["src-doc-a", "src-doc-b", "src-missing", ""]
         )
     assert visible == {"src-doc-a", "src-doc-b"}
-    assert hidden == {"src-doc-hidden", "src-doc-memory"}
+    # Memory is NOT in ``hidden_source_ids``: the signal rows never carry it, so
+    # returning it would be a read whose result is discarded.  ``memory_source_ids``
+    # remains the place that knows about Memory rows (division of labour pinned
+    # here so a "helpful" merge of the two predicates shows up as a failure).
+    assert hidden == {"src-doc-hidden"}
+    assert memory == {"src-doc-memory"}
     # Complement of the visible list, and the listing derivation it enables.
     assert hidden & visible == set()
-    assert hidden | visible == {
+    assert (hidden | memory) & visible == set()
+    assert hidden | memory | visible == {
         "src-doc-a", "src-doc-b", "src-doc-hidden", "src-doc-memory",
     }
     assert signals - hidden == visible
+    # The roster order the sources collection walks == the source tab's order.
+    ordered = [
+        row[0] for row in sorted(
+            (row for row in signal_rows if row[0] not in hidden),
+            key=lambda row: (row[2], row[0]),
+        )
+    ]
+    assert ordered == visible_order
 
     listed = {row["id"]: row for row in rows}
     assert set(listed) == {"src-doc-a", "src-doc-b"}

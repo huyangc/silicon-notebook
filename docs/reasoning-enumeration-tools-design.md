@@ -393,7 +393,16 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
   各加一段 grounding 指令：这类短语（中英同列）指用户当前打开的 notebook 及其挂载作用域，
   **不是可检索内容**；生成子查询 / `elements_query` / `exact_term` 时必须剥掉；
   「知识图谱/KG」指本库的知识结构（其规模看集合地图），不作关键词。
-- 纯 prompt 层，不做确定性剥词（避免词表路由）；prompt 内容测试钉关键短语，删除+移动变异。
+- 纯 prompt 层，不做确定性剥词（避免词表路由）；prompt 内容测试钉关键短语，删除+移动变异
+  （移动变异的另一半是**位置**：这一段必须排在 `Question:` / `User request:` 之前，规则出现在
+  被它约束的输入之后等于没出现，已有位置断言钉住）。
+- **【订正，quality P1-1】「知识图谱 / KG」只在领属/指示形式下才算范围词**（`本库的知识图谱` /
+  `这个库的图谱` / `the knowledge graph of this library`）。第一版把它无条件判成非话题，而这
+  恰好在最可能问这句话的语料上是错的：库里就是 GraphRAG / LightRAG 论文时，
+  「这些论文里知识图谱是怎么构建的」的检索词正是「知识图谱」，剥掉它不是去噪、是把查询删了。
+  所以措辞里写**显式反向豁免**（文档本身讨论 knowledge graphs 时它是正当话题与检索词），
+  测试两半都钉——只钉「要剥」那半的话，把豁免顺手删掉仍然全绿。这一段不受枚举 kill switch
+  约束、深度报告每节每步都付，读错的代价正好落在最在意它的那批语料上。
 - **【落地】** 四份 prompt 共用**一段**模块常量 `prompts.SCOPE_DEIXIS_GROUNDING`，不是四份
   手写变体——同一件事写四遍就有四次机会说出四个略有出入的版本。措辞加了一条防御:
   「剥掉范围词不能把问题变成另一个问题」（否则「当前 notebook 里的文章讲了什么」会被剥空）。
@@ -466,6 +475,28 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
 - **游标形态**：`(notebook_id, source_id)` 指向**尚未列出**的第一份文档（inclusive resume，
   与元素游标「最后消费的位置」相反）——一份文档就是一行，所以「下一行」与「下一份文档」
   是同一件事，指向未列出的那一份才能让「首行就撞载荷上限」也交回可用游标。
+- **遍历顺序 = 来源页签顺序 `(created_at, id)`**（订正 spec-review B3：先前按 id 排，那是一个
+  用户从没见过的顺序，而「前 N 篇」的截断前缀因此没有意义）。排序键随信号行一起回来
+  （`source_change_signal_rows` 多投影一列 `created_at`，同一行访问、零额外查询），双后端各自
+  归一化成「按字典序比较即等于本后端 `ORDER BY created_at, id`」的文本。三条推论：
+  ①**指纹语义不动**——摘要只吃前两个字段，创建时间对活着的源永不变，把它哈希进去只会让
+  L1/L2 在这次上线时全量失效一次；②**元素侧顺序仍按 `source_id`**：它的游标是
+  `(source_id, element_id)` keyset，换序会让已发出的游标对不上位置，而来源清单是按 key 重
+  对齐的，没有这个约束；③地图的计数路径**不排序**（只要 `len`），排序只发生在真的要遍历
+  那份清单的 `scope_source_plan` 里。游标刻意**不**携带 `created_at`：续跑是按 key 在重建的
+  计划里重对齐，而任何会改变顺序的变动（增删源）都已经改变指纹并被判为
+  `concurrent_change`——一个永不参与比较的字段只会腐烂。
+- **登记：合成块头用 `documents` 而不是 `sources`**（措辞偏离，刻意保留）。集合 id 是
+  `sources`（wire 上的 `collection`、reflect 参数值、trace detail 全用它），但注入合成 prompt
+  的块头是 `[Enumeration: documents, listed 2/2, complete, previewed 2]`。理由是块头是**给写
+  答案的模型读的一句英文**，而 `sources` 在那个位置有歧义（RAG 语境里 "sources" 常指「引用
+  出处」，正是它下面那些 `[k]` 卡片）；`documents` 只有一种读法。代价是「同一集合在协议里叫
+  `sources`、在 prompt 里叫 `documents`」，登记在此以免被当成不一致修掉；改的话两处一起改，
+  并同步 `_collection_noun` 与钉住块头的测试。界面词不受影响——用户看到的一直是「来源清单」。
+- **无名文档的占位**：目录预览行与结果卡共用同一句「未命名来源」（后端常量
+  `collection_enumeration_answer.UNNAMED_SOURCE_LABEL`），**不**退回内部 source id：模型会把
+  id 当标题引回来（目录的用途就是给它可按名深挖的标题，而 id 匹配不到任何东西），而且内部
+  id 一经模型复述就进了答案。
 - **wire 复用元素臂**：`TypedCollectionItem` 不加第三组近义字段——`source_title`=显示名、
   `location_label`=文档类型界面词、`text`=摘要摘录、`element_type` 留空（文档不是元素，
   前端按 `collection` 分派）。文档类型用 `extraction_profiles.PROFILES` 的界面词（上传选择

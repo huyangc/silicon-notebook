@@ -147,10 +147,13 @@ class ScopeSourcePlan:
     charged in element units.
 
     ``total`` is exactly ``CollectionMap.sources`` for the same scope — both come
-    out of ``_notebook_visible_sources``.  Order: participants as the caller
-    resolved them, sources by id inside each participant (the element plan's
-    order, for the same reason — a cursor handed back across calls is only
-    meaningful because the order is stable).
+    out of ``_visible_signal_rows``.  Order: participants as the caller resolved
+    them, and inside each participant ``(created_at, id)`` — i.e. what
+    ``list_sources`` returns and the source tab shows. Not the element plan's
+    id order: that one exists to keep an ``(source_id, element_id)`` cursor
+    aligned, while this roster is re-aligned by KEY on resume and is free to use
+    the order a user can actually recognize. Both are stable, which is the
+    property a cursor handed back across calls needs.
     """
 
     notebook_ids: Tuple[str, ...]
@@ -403,13 +406,13 @@ class CollectionCatalogService:
             fingerprint=signal_fingerprint(all_signals),
         )
 
-    def _notebook_visible_sources(
+    def _visible_signal_rows(
         self,
         db: object,
         notebook_id: str,
-        signals: Sequence[Tuple[str, str]],
-    ) -> Tuple[ScopeSource, ...]:
-        """One notebook's user-visible sources, from signal rows already read.
+        signals: Sequence[Tuple[str, str, str]],
+    ) -> List[Tuple[str, str, str]]:
+        """One notebook's user-visible source rows, from signals already read.
 
         THE definition of "which sources does the sources collection contain",
         used by the map's count and by the executor's plan alike — the same
@@ -426,14 +429,39 @@ class CollectionCatalogService:
           one ``list_sources`` / ``visible_document_count`` share.  So this list
           is the source tab's list, by derivation rather than by resemblance.
 
+        Returns rows, NOT ordered ``ScopeSource``s: the map only needs how many
+        there are, and sorting a 50 000-source notebook to produce a length
+        would be work the count never uses.  ``_notebook_visible_sources``
+        below adds the order, for the one caller that walks them.
+        """
+        hidden = frozenset(self._sources.hidden_source_ids(db, notebook_id))
+        return [row for row in signals if row[0] not in hidden]
+
+    def _notebook_visible_sources(
+        self,
+        db: object,
+        notebook_id: str,
+        signals: Sequence[Tuple[str, str, str]],
+    ) -> Tuple[ScopeSource, ...]:
+        """The same set, in the order the SOURCE TAB shows it.
+
+        ``(created_at, id)`` — ``list_sources``' own ``ORDER BY``, reproduced
+        over the sort keys the signal rows carry.  Ordering by id alone (what
+        this did first) produced a roster in an order no user has ever seen,
+        which matters the moment anything truncates: "the first 5 documents" of
+        an id-ordered roster is an arbitrary subset, while of a creation-ordered
+        one it is the 5 the user added first — the only reading of "first" the
+        interface supports.
+
         ``count=1``: for this collection one source IS one listed row, and the
         row budget must be charged in listed rows.
         """
-        hidden = frozenset(self._sources.hidden_source_ids(db, notebook_id))
         return tuple(
-            ScopeSource(notebook_id=notebook_id, source_id=source_id, count=1)
-            for source_id, _signal in sorted(signals)
-            if source_id not in hidden
+            ScopeSource(notebook_id=notebook_id, source_id=row[0], count=1)
+            for row in sorted(
+                self._visible_signal_rows(db, notebook_id, signals),
+                key=lambda row: (row[2], row[0]),
+            )
         )
 
     def _notebook_plan_sources(
@@ -441,7 +469,7 @@ class CollectionCatalogService:
         db: object,
         notebook_id: str,
         kind: str,
-        signals: Sequence[Tuple[str, str]],
+        signals: Sequence[Tuple[str, ...]],
     ) -> Tuple[ScopeSource, ...]:
         fingerprint = signal_fingerprint(signals)
         key = (notebook_id, kind)
@@ -456,7 +484,11 @@ class CollectionCatalogService:
             ScopeSource(notebook_id=notebook_id, source_id=source_id, count=count)
             for source_id, count in (
                 (source_id, int(counts.get(source_id, {}).get(kind, 0)))
-                for source_id, _signal in sorted(signals)
+                # 元素侧顺序刻意**仍按 source_id**:它的游标是
+                # (source_id, element_id) 的 keyset,换成 created_at 序会让
+                # 已经发出去的游标在下一次调用里对不上位置。来源清单那侧没有
+                # 这个约束(它按 key 重对齐),所以只有它改成来源页签顺序。
+                for source_id, _signal, *_ in sorted(signals)
             )
             if count > 0
         )
@@ -542,8 +574,10 @@ class CollectionCatalogService:
             for item in self._notebook_element_counts(db, notebook_id, signals):
                 totals[item.kind] += item.count
                 source_totals[item.kind] += item.sources
+            # 计数只要个数,不要顺序:排序留给真的要遍历那份清单的调用方
+            # (`scope_source_plan`),否则 5 万源的库会为了一个 len() 排一遍。
             visible_sources += len(
-                self._notebook_visible_sources(db, notebook_id, signals)
+                self._visible_signal_rows(db, notebook_id, signals)
             )
         elements = tuple(
             ElementKindCount(
@@ -554,7 +588,7 @@ class CollectionCatalogService:
         return elements, visible_sources
 
     def _notebook_element_counts(
-        self, db: object, notebook_id: str, signals: Sequence[Tuple[str, str]]
+        self, db: object, notebook_id: str, signals: Sequence[Tuple[str, ...]]
     ) -> Tuple[ElementKindCount, ...]:
         fingerprint = signal_fingerprint(signals)
         with self._lock:
@@ -586,7 +620,7 @@ class CollectionCatalogService:
         return result
 
     def _per_source_counts(
-        self, db: object, signals: Sequence[Tuple[str, str]]
+        self, db: object, signals: Sequence[Tuple[str, ...]]
     ) -> Dict[str, Dict[str, int]]:
         """``{source_id: {kind: count}}`` for every source in the notebook,
         served from the LRU where the change signal still matches and queried
@@ -604,7 +638,7 @@ class CollectionCatalogService:
         results: Dict[str, Dict[str, int]] = {}
         stale: List[Tuple[str, str]] = []
         with self._lock:
-            for source_id, signal in signals:
+            for source_id, signal, *_ in signals:
                 cached = self._source_counts.get(source_id)
                 if cached is not None and cached[0] == signal:
                     self._source_counts.move_to_end(source_id)
@@ -750,7 +784,7 @@ class CollectionCatalogService:
         )
 
 
-def signal_fingerprint(signals: Sequence[Tuple[str, str]]) -> str:
+def signal_fingerprint(signals: Sequence[Tuple[str, ...]]) -> str:
     """Order-independent digest of a (source, signal) set.
 
     Public because the enumeration executor needs the SAME digest to decide
@@ -762,9 +796,20 @@ def signal_fingerprint(signals: Sequence[Tuple[str, str]]) -> str:
     regardless of row order, and a source added / removed / re-parsed changes
     it.  blake2b at 16 bytes: this gates a cache, not a security boundary, but
     it still has to be collision-free in practice across a library's lifetime.
+
+    Consumes exactly the first two fields and ignores any that follow, so the
+    ``created_at`` sort key the rows now carry does NOT enter the digest.  That
+    is deliberate and pinned by
+    ``test_created_at_key_does_not_change_the_fingerprint``: creation time never
+    changes for a live source, so hashing it could only widen the token, and a
+    changed fingerprint means "re-count everything" — a cache key must not move
+    for a reason that cannot affect what it caches.  Sorting still lands in the
+    same order because source ids are unique, so the digest is byte-identical to
+    the pre-``created_at`` one.
     """
     digest = hashlib.blake2b(digest_size=16)
-    for source_id, signal in sorted(signals):
+    for row in sorted(signals):
+        source_id, signal = row[0], row[1]
         digest.update(source_id.encode("utf-8"))
         digest.update(b"\x00")
         digest.update(signal.encode("utf-8"))

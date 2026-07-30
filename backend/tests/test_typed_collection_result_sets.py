@@ -547,15 +547,23 @@ def test_sources_preview_renders_a_document_roster():
 
 
 def test_sources_preview_row_survives_a_missing_type_and_title():
+    """无名文档退到**中性占位**,与结果卡同一句话,绝不吐内部 source id。
+
+    id 在这里是双重错误:模型会把它当标题引回来(目录的用途就是给它可按名深挖的
+    标题,而 id 是一个什么都匹配不上的名字),而且内部 id 不是界面文案——模型一
+    复述,它就进了答案。
+    """
     outcome = _outcome(
         collection="sources", kind="",
         items=[_source_item(source_title="", doc_type_label="", summary="")],
         coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
     preview = enumeration_prompt_block([outcome], inline_rows=10,
                                        budget_chars=10_000)
-    # 退到 item_id 而不是渲染一行只有 tag 的空行(此处仍是本次提交的形态;
-    # 后续提交把它换成中性占位「未命名来源」)。
-    assert "k5001: [enumerated-source] s1" in preview.text
+    assert "k5001: [enumerated-source] 未命名来源" in preview.text
+    assert "s1" not in preview.text          # 内部 id 一个字符都不上 prompt
+    # 与结果卡同一份措辞(前端渲染的是同样这句)。
+    from app.services.collection_enumeration_answer import UNNAMED_SOURCE_LABEL
+    assert UNNAMED_SOURCE_LABEL == "未命名来源"
 
 
 def test_partial_header_reports_budget_reason_and_previewed():
@@ -1427,7 +1435,10 @@ def test_completeness_unavailable_kept_when_every_card_is_partial(arepo):
 def test_completeness_unavailable_shown_without_enumeration(arepo):
     """同样的 completeness_required=True 笔记本,但本轮 reflect 从未调用枚举
     动作(直接 answer)——没有清单结果卡背书,免责声明必须出现,且措辞提到
-    新增的元素/知识对象清单能力(不再说成「仅支持 Knowhow」)。"""
+    新增的元素/知识对象/来源清单能力(不再说成「仅支持 Knowhow」)。
+
+    三个集合都必须在这句话里点到名:免责声明是在告诉用户「精确完整这件事目前覆盖
+    到哪」,漏掉一个就是把已经交付的能力说小了,而用户会据此决定要不要换个问法。"""
     nb = _seed(arepo, formulas=2)
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
@@ -1440,7 +1451,8 @@ def test_completeness_unavailable_shown_without_enumeration(arepo):
 
     assert not any(row.kind == "collection" for row in resp.result_sets)
     assert "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数" in resp.conclusion
-    assert "元素清单" in resp.conclusion and "知识对象清单" in resp.conclusion
+    for listing in ("元素清单", "知识对象清单", "来源清单"):
+        assert listing in resp.conclusion, listing
 
 
 def test_enumeration_block_shares_chunk_budget_with_knowhow_and_stays_bounded(arepo):

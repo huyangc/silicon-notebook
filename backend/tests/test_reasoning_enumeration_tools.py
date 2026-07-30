@@ -350,13 +350,65 @@ def test_scope_deixis_grounding_names_the_phrases_and_the_rule():
     from app.services.prompts import SCOPE_DEIXIS_GROUNDING as text
 
     for phrase in ("当前notebook", "这个库", "本库", "整个库",
-                   "the current notebook", "this notebook", "知识图谱", "KG"):
+                   "the current notebook", "this library", "知识图谱", "KG"):
         assert phrase in text, phrase
-    assert "not content that can be found inside it" in text
+    assert "not content inside it" in text
     assert "DROP it" in text
     # 剥词不等于换题:去掉范围词之后问题本身必须留着(否则「库里的文章讲了
     # 什么」会被剥成空)。
-    assert "must not turn it into a different question" in text
+    assert "must never turn it into a different question" in text
+
+
+def test_kg_is_a_scope_word_only_in_the_possessive_form():
+    """「知识图谱 / KG」的收窄 + **反向豁免**必须同时钉住(quality P1-1)。
+
+    此前这段把 KG 无条件判成非话题。库里就是 GraphRAG/LightRAG 论文时,
+    「这些论文里知识图谱是怎么构建的」的检索词恰恰是「知识图谱」——剥掉它不是去噪,
+    是把查询本身删了。这一段还不受枚举 kill switch 约束、深度报告每节每步都付,
+    所以读错的代价正好落在最在意它的那批语料上。
+
+    只钉「要剥」的一半是不够的:那正是回归会发生的地方(把豁免顺手删掉,
+    「要剥」那半仍然全绿)。
+    """
+    from app.services.prompts import SCOPE_DEIXIS_GROUNDING as text
+
+    # ① 收窄:只在领属/指示形式下才算范围词。
+    assert "ONLY in that possessive form" in text
+    for form in ("本库的知识图谱", "这个库的图谱",
+                 "the knowledge graph of this library"):
+        assert form in text, form
+    # ② 反向豁免:文档本身讨论知识图谱时,它是正当话题与检索词。
+    assert "ordinary TOPIC and stays a search term" in text
+    assert "这些论文里知识图谱是怎么构建的" in text
+    assert "must keep 知识图谱" in text
+    # 两半都必须真的到得了四份 prompt(豁免只写在常量里、没被拼进去等于没写)。
+    from app.services.prompts import (
+        expand_query_prompt, plan_prompt, query_intent_prompt, reflect_prompt,
+    )
+    for rendered in (query_intent_prompt("q"), plan_prompt("q"),
+                     expand_query_prompt("q"), reflect_prompt("q", "s")):
+        assert "ordinary TOPIC and stays a search term" in rendered
+
+
+def test_scope_deixis_grounding_precedes_the_question_it_governs():
+    """位置断言(移动变异的另一半):这一段必须排在 `Question:` / `User request:`
+    之前。
+
+    删除变异由上面那条覆盖;把它挪到问题**之后**则是删不掉也测不出的另一种坏法
+    ——规则出现在被它约束的输入后面,模型已经读完问题才被告知怎么处理范围词。
+    """
+    from app.services.prompts import (
+        expand_query_prompt, plan_prompt, query_intent_prompt,
+    )
+
+    for rendered, marker in (
+        (query_intent_prompt("q"), "User request:"),
+        (plan_prompt("q"), "Question:"),
+        (expand_query_prompt("q"), "Question:"),
+    ):
+        grounding_at = rendered.index("Scope words are not search terms")
+        question_at = rendered.index(marker)
+        assert grounding_at < question_at, marker
 
 
 def test_reflect_names_the_fields_a_scope_word_could_leak_into():
@@ -509,6 +561,33 @@ def test_the_collection_parameter_decides_not_the_action_id(repo):
     # 同时给了 object_type 也不生效:集合选择器优先,否则同一个请求有两种解释。
     assert outcome.kind == ""
     assert _steps(result, "enumerate")[0].summary.startswith("枚举来源清单")
+
+
+def test_an_unrecognized_collection_value_teaches_the_legal_one(repo):
+    """非法 collection 值 + 没给 kind ⇒ skip 文案要教「该给什么」。
+
+    沿用 exact_lookup 那条实测教训:只说「没指定类型」的话,模型下一轮往往换一个
+    同样非法的集合名再试一次。所以点名唯一合法值 sources,并把模型给的原值记进
+    detail 供排查(原值只进 detail,不进面向用户的措辞之外的任何地方)。
+    """
+    notebook = _seed(repo, formulas=1)
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements",
+         "enumerate": {"collection": "documents"}},
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    skip = _skips(result)["enumeration_kind"]
+    assert "documents" in skip.summary
+    assert "sources" in skip.summary          # 唯一合法值必须点名
+    assert skip.detail["requested_collection"] == "documents"
+    assert result.enumerations == []
+    # 合法值那条不得被这段教学文案污染(它根本不该走到这个 skip)。
+    assert "不是可枚举的集合名" not in "".join(
+        step.summary for step in result.trace if step.step_type == "enumerate")
 
 
 def test_an_unrecognized_collection_value_falls_back_to_the_action_id(repo):

@@ -1119,7 +1119,7 @@ def test_memory_source_ids_complement_the_signal_rows(repo):
     notebook = _shared_notebook_with_private_memory(repo)
     store = repo._runtime.source_store
     with repo._connect() as db:
-        signalled = {sid for sid, _signal in store.source_change_signal_rows(
+        signalled = {row[0] for row in store.source_change_signal_rows(
             db, notebook.id)}
         memory = set(store.memory_source_ids(db, notebook.id))
         everything = {
@@ -1497,16 +1497,20 @@ def _source_ids(result):
 
 def _add_document(
     repo, notebook_id, source_id, *, title="", source_type="pdf",
-    doc_type="", summary="",
+    doc_type="", summary="", created_at=NOW,
 ):
-    """一份来源行(不带元素)——来源清单不关心元素,只关心文档本身。"""
+    """一份来源行(不带元素)——来源清单不关心元素,只关心文档本身。
+
+    ``created_at`` 可覆写:来源清单按 `(created_at, id)` 排(来源页签口径),所以
+    「加入顺序与 id 顺序相反」这种真实情形必须能构造出来。
+    """
     with repo._write() as db:
         db.execute(
             "INSERT INTO sources (id,notebook_id,title,source_type,status,"
             "parse_status,doc_type,summary,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (source_id, notebook_id, title or source_id, source_type, "extracted",
-             "extracted", doc_type, summary, NOW, NOW),
+             "extracted", doc_type, summary, created_at, NOW),
         )
     repo.collection_catalog.invalidate()
 
@@ -1581,6 +1585,50 @@ def test_source_visible_predicate_matches_the_source_tab(repo):
     listed = _source_ids(_enum(repo).enumerate_sources(notebook.id, budget=_budget()))
     assert sorted(listed) == sorted(visible)
     assert repo.visible_document_count(notebook.id) == len(listed)
+
+
+def test_source_order_is_the_source_tab_order_not_id_order(repo):
+    """顺序守卫:枚举顺序**逐位**等于 ``list_sources`` 的顺序。
+
+    构造成「加入顺序与 id 字典序相反」——按 id 排会给出一个用户从没见过的顺序,
+    而这份清单的整个用途是「库里有哪几篇」。断言写成逐位相等而不是集合相等:
+    集合相等那条上面已经有了,它对顺序完全不敏感。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    # id 升序 = s-a, s-b, s-c;创建顺序恰好相反。
+    _add_document(repo, notebook.id, "s-c", created_at="2026-07-01T00:00:00")
+    _add_document(repo, notebook.id, "s-b", created_at="2026-07-02T00:00:00")
+    _add_document(repo, notebook.id, "s-a", created_at="2026-07-03T00:00:00")
+
+    visible = [source.id for source in repo.list_sources(notebook.id)]
+    listed = _source_ids(_enum(repo).enumerate_sources(notebook.id, budget=_budget()))
+    assert visible == ["s-c", "s-b", "s-a"], "前提:来源页签按创建时间"
+    assert listed == visible
+    assert listed != sorted(listed), "按 id 排就退回了那个用户没见过的顺序"
+
+
+def test_truncated_source_listing_keeps_the_earliest_documents(repo):
+    """截断前缀因此有意义:「前 N 篇」= 最早加入的 N 篇。
+
+    id 序下「前 2 篇」是任意子集;创建序下它是用户最先加进来的那两篇——这是界面
+    唯一支持的「前」的读法,也是模型只列得下一部分时唯一能诚实解释的那一部分。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    _add_document(repo, notebook.id, "s-z", created_at="2026-07-01T00:00:00")
+    _add_document(repo, notebook.id, "s-y", created_at="2026-07-02T00:00:00")
+    _add_document(repo, notebook.id, "s-x", created_at="2026-07-03T00:00:00")
+
+    result = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(max_rows=2))
+
+    assert _source_ids(result) == ["s-z", "s-y"]
+    assert result.coverage.complete is False
+    assert result.coverage.total == 3
+    # 游标指向尚未列出的那一份,续跑接着往下(不重列、不跳过)。
+    assert result.cursor is not None
+    rest = _enum(repo).enumerate_sources(
+        notebook.id, budget=_budget(), cursor=result.cursor)
+    assert _source_ids(rest) == ["s-x"]
 
 
 def test_source_items_carry_title_type_and_summary(repo):
@@ -1878,25 +1926,37 @@ def test_private_memory_is_never_in_a_source_listing(repo):
 
 
 def test_hidden_source_ids_complement_the_visible_source_list(repo):
-    """``hidden_source_ids`` 与用户可见来源集合互为补集(并集 = 全部物理源)。
+    """``hidden_source_ids`` ∪ ``memory_source_ids`` ∪ 可见来源 = 全部物理源。
 
-    这两条是同一条谓词的正反面(适配器里由 ``VISIBLE_SOURCE_TYPES_PREDICATE``
-    取反得来);只有互补,清单的「signal 行 − hidden」才等价于来源页签那条查询。
+    三者互不相交。``hidden_source_ids`` 由 ``VISIBLE_SOURCE_TYPES_PREDICATE``
+    取反得来(所以清单的「signal 行 − hidden」等价于来源页签那条查询),再把
+    Memory 行减掉——它被减掉的那份列表(signal 行)本来就不含 Memory,返回它们只是
+    读一批调用方用不上的 id,而在重度使用的个人库里那正是这条查询的大头。
+    Memory 行的知识仍然只属于 ``memory_source_ids``(KG 侧需要它:
+    ``knowledge_objects`` 不带来源类型)。
     """
     notebook = _shared_notebook_with_private_memory(repo)
     _add_document(repo, notebook.id, "s-kh", source_type="knowhow")
     store = repo._runtime.source_store
     with repo._connect() as db:
         hidden = set(store.hidden_source_ids(db, notebook.id))
+        memory = set(store.memory_source_ids(db, notebook.id))
+        signalled = {
+            row[0] for row in store.source_change_signal_rows(db, notebook.id)
+        }
         everything = {
             row["id"] for row in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (notebook.id,)
             ).fetchall()
         }
     visible = {source.id for source in repo.list_sources(notebook.id)}
-    assert hidden == {"s-mem", "s-kh"}
-    assert hidden & visible == set()
-    assert hidden | visible == everything
+    assert hidden == {"s-kh"}
+    assert memory == {"s-mem"}
+    assert hidden & visible == set() and memory & visible == set()
+    assert hidden & memory == set()
+    assert hidden | memory | visible == everything
+    # 分工的可执行形式:清单 = signal 行 − hidden,不需要再减 Memory。
+    assert signalled - hidden == visible
 
 
 def test_source_plan_costs_no_extra_full_read_of_sources(repo):

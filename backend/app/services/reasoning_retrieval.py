@@ -535,6 +535,9 @@ class ReflectDecision:
     enumerate_source_id: str = ""
     enumerate_source_title: str = ""
     enumerate_collection: str = ""
+    # 模型给了 collection 但不是合法值时留下的原值,仅用于把 skip 文案写成教学式
+    # (「该给什么」),从不参与分派。
+    enumerate_collection_rejected: str = ""
     reason: str = ""
 
 
@@ -895,6 +898,11 @@ class ReasoningRetriever:
                     collection
                     if collection == ENUMERATE_SOURCES_COLLECTION else ""
                 )
+                # 被拒的原值留着:它不改变分派(照旧按动作 id),但下游 skip 要能
+                # 教模型「该给什么」而不是沉默——沿用 exact_lookup 那条教训:
+                # 只说「你给错了」的话,模型下一轮往往换一个同样非法的值再试。
+                if collection and not d.enumerate_collection:
+                    d.enumerate_collection_rejected = collection
             chain = data.get("follow_chain")
             if isinstance(chain, dict):
                 d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
@@ -1669,11 +1677,24 @@ class ReasoningRetriever:
                     enum_limits.structured_payload_chars - enum_payload_used
                 )
                 if not kind and not is_sources:
+                    # 措辞按「该给什么」写,不是「你给错了」(exact_lookup 那条
+                    # 教训):模型给了一个非法 collection 值时,它显然是在**试图**
+                    # 请求某个集合,只回一句「没指定类型」会让它下一轮换一个同样
+                    # 非法的值再试一次。所以这里点名唯一合法值,并把它给的原值
+                    # 带进 detail 供排查(不上屏 —— trace summary 才上屏)。
+                    rejected = decision.enumerate_collection_rejected
                     record(TraceStep(
                         step_type="skip",
-                        summary="跳过枚举(没有指定可列出的条目类型)",
+                        summary=(
+                            f"跳过枚举(「{rejected[:60]}」不是可枚举的集合名;"
+                            "要列库里的文档请用 sources,其他集合按条目类型指定)"
+                            if rejected else
+                            "跳过枚举(没有指定可列出的条目类型)"
+                        ),
                         detail={"reason": "enumeration_kind",
-                                "collection": collection}))
+                                "collection": collection,
+                                **({"requested_collection": rejected[:120]}
+                                   if rejected else {})}))
                 elif source_matches is not None and (
                     source_truncated or source_matches != 1
                 ):

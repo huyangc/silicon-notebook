@@ -1062,7 +1062,7 @@ class AskService:
         if completeness_unavailable:
             msg = (
                 "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                "以及元素清单（公式/表格/图片/代码块）与知识对象清单；"
+                "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
                 "本次请求不能视为全部结果。\n\n"
                 + msg
             )
@@ -1733,7 +1733,7 @@ class AskService:
                     (f"{coverage_prefix}\n\n" if coverage_prefix else "")
                     + (
                         "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                        "以及元素清单（公式/表格/图片/代码块）与知识对象清单；"
+                        "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
                         "本次请求不能视为全部结果。\n\n"
                         if completeness_unavailable else ""
                     )
@@ -2169,7 +2169,7 @@ class AskService:
             if completeness_unavailable and not suppress_completeness_warning:
                 warning = (
                     "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数，"
-                    "以及元素清单（公式/表格/图片/代码块）与知识对象清单；"
+                    "以及元素清单（公式/表格/图片/代码块）、知识对象清单与来源清单；"
                     "条件筛选、去重、分组或其他集合请求本次仍来自相关性检索，"
                     "不能视为全部结果。"
                 )

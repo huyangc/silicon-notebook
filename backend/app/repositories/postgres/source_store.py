@@ -40,6 +40,26 @@ _UNSET = SOURCE_PAPER_META_UNSET
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
 
 
+def _sort_key(value: object) -> str:
+    """A timestamp column as ORDER-BY-compatible text.
+
+    ``datetime.isoformat()`` for driver datetimes, the value as-is for text
+    columns, ``""`` for NULL (which sorts first, exactly where PostgreSQL's
+    ``ORDER BY`` with default ``NULLS LAST``… does NOT put it — see below).
+
+    The one asymmetry worth naming: SQL sorts NULLs last by default on
+    ascending order, while ``""`` sorts first here.  ``sources.created_at`` is
+    written on every insert path and has never been NULL, so this branch is
+    defensive only; putting an impossible row first is preferable to raising
+    mid-enumeration, and the roster's coverage would disclose nothing wrong
+    either way.
+    """
+    if value is None:
+        return ""
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
+
+
 def _created_label(value: object) -> str:
     try:
         parsed = local_datetime(value)
@@ -208,19 +228,27 @@ class SourceStore:
     # WHY the signal is (updated_at, parse_status, chunked_at).
     def source_change_signal_rows(
         self, connection: Any, notebook_id: str
-    ) -> list[tuple[str, str]]:
-        """``[(source_id, opaque change signal)]`` for physical source rows,
-        EXCLUDING the private Memory synthetic rows (see the SQLite adapter for
-        why the exclusion is unconditional).
+    ) -> list[tuple[str, str, str]]:
+        """``[(source_id, opaque change signal, created_at sort key)]`` for
+        physical source rows, EXCLUDING the private Memory synthetic rows (see
+        the SQLite adapter for why the exclusion is unconditional).
 
         The token is formatted here rather than in the service so the caller
         never has to know that PostgreSQL hands back ``datetime`` objects
         where SQLite hands back ISO text: both backends produce a string that
         is only ever compared for equality against a token from the same
         store.
+
+        The created-at key is normalized with ``isoformat()`` for the same
+        reason, but for ORDERING rather than equality: every row in one notebook
+        goes through the same formatting, so lexicographic comparison over these
+        strings reproduces this backend's ``ORDER BY created_at, id`` — the
+        order ``list_sources`` returns and the source tab shows.  (A bare
+        ``str()`` would work today too; ``isoformat()`` is the one that stays
+        sortable if the column ever becomes ``timestamptz``.)
         """
         rows = connection.execute(
-            "SELECT id,updated_at,parse_status,chunked_at FROM sources "
+            "SELECT id,updated_at,parse_status,chunked_at,created_at FROM sources "
             "WHERE notebook_id=%s AND source_type<>'memory'",
             (notebook_id,),
         ).fetchall()
@@ -232,6 +260,7 @@ class SourceStore:
                     row["parse_status"] or "",
                     row["chunked_at"] if row["chunked_at"] is not None else "",
                 ),
+                _sort_key(row["created_at"]),
             )
             for row in rows
         ]
@@ -250,16 +279,18 @@ class SourceStore:
         ]
 
     def hidden_source_ids(self, connection: Any, notebook_id: str) -> list[str]:
-        """The ids the user-facing source list hides (Memory synthetic rows and
-        a Knowhow table's hidden projection row) — the negation of this module's
-        ``VISIBLE_SOURCE_TYPES_PREDICATE``, so the sources collection enumerates
-        exactly what the source tab shows.  See the SQLite adapter for the
-        single-definition argument and the cost shape."""
+        """The ids the user-facing source list hides and the caller still holds —
+        a Knowhow table's hidden projection row — as the negation of this
+        module's ``VISIBLE_SOURCE_TYPES_PREDICATE`` minus the Memory rows the
+        change-signal list already drops.  See the SQLite adapter for the
+        single-definition argument, the division of labour with
+        ``memory_source_ids``, and the cost shape."""
         return [
             row["id"]
             for row in connection.execute(
                 "SELECT id FROM sources WHERE notebook_id=%s "
-                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE})",
+                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE}) "
+                "AND source_type<>'memory'",
                 (notebook_id,),
             ).fetchall()
         ]

@@ -646,9 +646,9 @@ class SourceStorePort(Protocol):
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_change_signal_rows(
         self, db: object, notebook_id: str
-    ) -> list[tuple[str, str]]:
-        """``[(source_id, change_signal)]`` for every physical source row
-        EXCEPT the notebook's private Memory synthetic rows.
+    ) -> list[tuple[str, str, str]]:
+        """``[(source_id, change_signal, created_at_key)]`` for every physical
+        source row EXCEPT the notebook's private Memory synthetic rows.
 
         ``change_signal`` is an OPAQUE backend-formatted token: equal tokens
         mean "this source's ``source_elements`` cannot have changed since the
@@ -658,6 +658,19 @@ class SourceStorePort(Protocol):
         ``app.services.collection_catalog``).  Never parse it, never compare
         it across backends or processes — only for equality against a token
         taken from the same store.
+
+        ``created_at_key`` is a SORT key, not a timestamp to display or to
+        compare across backends: text that orders the notebook's sources the
+        way ``list_sources`` orders them (``ORDER BY created_at, id``), so the
+        sources collection can walk the roster in the order the source tab
+        shows it.  Adapters normalize it (PostgreSQL hands back ``datetime``
+        where SQLite hands back the stored text) such that lexicographic
+        comparison within one backend equals that backend's own SQL ordering.
+        It rides along on a row the query already visits — the column is in the
+        same row as the three signal columns, so carrying it costs nothing —
+        and it is deliberately NOT part of the change signal: a source's
+        creation time never changes, so folding it into the token would only
+        make the token wider.
 
         The Memory exclusion is part of the contract, not an adapter detail: a
         typed-collection listing is scoped to a notebook's participants and has
@@ -682,23 +695,32 @@ class SourceStorePort(Protocol):
         """
         ...
     def hidden_source_ids(self, db: object, notebook_id: str) -> list[str]:
-        """The ids the USER-FACING source list hides — the exact complement of
-        the visible-source predicate that ``list_sources`` /
-        ``list_sources_page`` / ``visible_document_count`` share (Memory
-        synthetic rows plus a Knowhow table's hidden projection row).
+        """The ids the USER-FACING source list hides AND the caller still has in
+        hand: the complement of the visible-source predicate that
+        ``list_sources`` / ``list_sources_page`` / ``visible_document_count``
+        share, minus the Memory synthetic rows.  In practice: a Knowhow table's
+        hidden projection row.
 
         The sources collection (design doc §6.2) has to enumerate what the
         source tab shows, so its predicate must be the SAME one that tab
         counts with — not a second spelling that can drift into showing a
         phantom "Knowhow 表：…" card in an answer.  Each adapter derives this
         query from its own visible-source predicate rather than re-listing the
-        two hidden types, so there is one definition per backend and this is
-        its complement.
+        hidden types, so there is one definition per backend and this is its
+        complement.
+
+        Why Memory is subtracted again here: this list is subtracted FROM
+        ``source_change_signal_rows``, which already drops Memory rows, so
+        returning them would be a read whose result the caller discards — and on
+        a heavily-used personal library they are the bulk of the rows this query
+        would otherwise return.  Division of labour: ``memory_source_ids`` stays
+        the one place that knows about Memory rows, because the KG side needs
+        them (``knowledge_objects`` carries no source type).
 
         Returned as ids (like ``memory_source_ids``) because the caller
         subtracts them from the source list it already holds — the change
         signal rows — instead of paying a second full read of the notebook's
-        sources.  Bounded by the notebook's Memory + Knowhow-table count and
+        sources.  Bounded by the notebook's Knowhow-table count and
         index-seeked on ``notebook_id``, exactly the shape
         ``memory_source_ids`` has.
         """

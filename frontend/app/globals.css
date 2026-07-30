@@ -3795,6 +3795,13 @@ button.chat-session-card {
 /* 来源清单的一行 = 一份文档:标题(可省略号截断)+ 类型小字 + 摘要摘录。摘要来自
    后端已存的 per-source summary(执行器已按摘录上限截过),这里再做视觉上的两行
    收敛,让一张清单卡在十几篇文档下仍然是一屏能扫完的目录而不是一堵墙。 */
+/* 文档行比元素行更紧:一行只承载标题 + 类型 + 两行摘要,元素行那份 padding 会让
+   十几篇文档的目录被撑成需要滚动的一堵墙。这个类此前只挂在 JSX 上没有规则,
+   等于一个没兑现的样式钩子。 */
+.answer-collection-source-item {
+  padding: 7px 10px 8px;
+}
+
 .answer-collection-source-head {
   display: flex;
   align-items: baseline;
