@@ -1654,6 +1654,31 @@ def test_memory_rejects_nested_non_finite_json_without_partial_row(content_harne
         ).fetchone() is None
 
 
+def test_memory_agent_token_round_trip_uses_connection_cursor_batch(content_harness):
+    """Token allowlists work on psycopg connections without ``executemany``."""
+    store = content_harness.memory
+    profile = store.create_agent_profile(
+        "user-content", "MCP conformance", "PostgreSQL token issuance"
+    )
+
+    issued = store.create_agent_token(
+        "agent-token-content",
+        "user-content",
+        profile.id,
+        "sha256-token-hash",
+        ["knowledge:read", "memory:read"],
+        "nb-content",
+        ["nb-content"],
+        "2026-08-01T00:00:00+00:00",
+    )
+
+    assert issued.agent_profile_id == profile.id
+    assert issued.default_notebook_id == "nb-content"
+    assert issued.notebook_ids == ["nb-content"]
+    assert issued.scopes == ["knowledge:read", "memory:read"]
+    assert store.list_agent_tokens("user-content") == [issued]
+
+
 @pytest.mark.postgres_integration
 def test_postgres_memory_search_filters_scope_before_candidate_limit(
     postgres_database,

@@ -96,6 +96,10 @@ The external-Agent surface (HTTP + MCP, discrimination sets, code attachments) i
 
 ## Memory and Agent MCP
 
+For a UI-to-CLI operational walkthrough and a runnable official-client example, see the
+[Agent MCP and Memory onboarding SOP](./agent-mcp-memory-sop.md). This section remains the
+authoritative product/API contract; the SOP owns day-one setup and verification steps.
+
 Memory is manual opt-in, creator-private, and always bound to exactly one notebook. From
 an Ask answer, choose **Save to Memory**: the backend prepares a title/body/tag preview,
 the user may edit it, and only the final confirmation writes a `confirmed` Memory. If the
