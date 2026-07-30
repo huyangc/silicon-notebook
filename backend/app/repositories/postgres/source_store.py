@@ -30,6 +30,16 @@ from app.repositories.postgres.database import PostgresDatabase
 _UNSET = SOURCE_PAPER_META_UNSET
 
 
+# 「用户可见文档」的判定谓词，与 SQLite 侧 ``source_store.
+# VISIBLE_SOURCE_TYPES_PREDICATE`` 逐字同义:排除 Memory 派生源与 knowhow 表隐藏
+# 投影源。此前这段谓词在本文件里被 list_sources / list_sources_page /
+# visible_document_count 各写一遍;来源集合枚举(design doc §6.2)必须与来源页签
+# 同口径，所以先把它收成一个常量，再由 ``hidden_source_ids`` 取它的补集——否则
+# 「哪些来源用户看得见」在这一个文件里就有四份拼写，任何一份漂移都会让答案里出现
+# 一张用户在来源页签上根本看不到的卡片。SQL 文本逐字不变。
+VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
+
+
 def _created_label(value: object) -> str:
     try:
         parsed = local_datetime(value)
@@ -62,7 +72,7 @@ class SourceStore:
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM sources WHERE notebook_id=%s "
-                "AND source_type NOT IN ('memory','knowhow') "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
                 "ORDER BY created_at,id COLLATE \"C\"",
                 (notebook_id,),
             ).fetchall()
@@ -78,7 +88,7 @@ class SourceStore:
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         needle = (q or "").strip().lower()
-        where = "WHERE notebook_id=%s AND source_type NOT IN ('memory','knowhow')"
+        where = f"WHERE notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
         params: list[object] = [notebook_id]
         if needle:
             where += (
@@ -108,7 +118,7 @@ class SourceStore:
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT COUNT(*) AS c FROM sources WHERE notebook_id=%s "
-                "AND source_type NOT IN ('memory','knowhow')",
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE}",
                 (notebook_id,),
             ).fetchone()
         return int(row["c"])
@@ -239,6 +249,21 @@ class SourceStore:
             ).fetchall()
         ]
 
+    def hidden_source_ids(self, connection: Any, notebook_id: str) -> list[str]:
+        """The ids the user-facing source list hides (Memory synthetic rows and
+        a Knowhow table's hidden projection row) — the negation of this module's
+        ``VISIBLE_SOURCE_TYPES_PREDICATE``, so the sources collection enumerates
+        exactly what the source tab shows.  See the SQLite adapter for the
+        single-definition argument and the cost shape."""
+        return [
+            row["id"]
+            for row in connection.execute(
+                "SELECT id FROM sources WHERE notebook_id=%s "
+                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE})",
+                (notebook_id,),
+            ).fetchall()
+        ]
+
     # Batch width for the typed-collection count, deliberately narrower than
     # the class-wide ``IN_CHUNK`` (5 000, tuned for id hydration that returns
     # one row per id).  This query returns up to len(element_types) rows PER
@@ -357,25 +382,38 @@ class SourceStore:
                     result[row["id"]] = item
         return result
 
+    def source_listing_rows(
+        self, connection: Any, source_ids: Sequence[str]
+    ) -> list[Any]:
+        """The source-card projection (title / type / stored summary), on the
+        caller's connection; ``source_metadata`` below is this method plus its
+        own connection.  See the SQLite adapter for why they share one SQL."""
+        ids = list(dict.fromkeys(value for value in source_ids if value))
+        if not ids:
+            return []
+        out: list[Any] = []
+        for offset in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[offset : offset + self.IN_CHUNK]
+            out.extend(connection.execute(
+                "SELECT s.id,s.notebook_id,s.title,s.file_name,s.summary,s.doc_type,"
+                "s.source_type,m.is_paper,m.paper_title "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                f"WHERE s.id IN ({placeholders(batch)})",
+                batch,
+            ).fetchall())
+        return out
+
     def source_metadata(
         self, source_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
         ids = list(dict.fromkeys(value for value in source_ids if value))
         if not ids:
             return {}
-        result: dict[str, dict[str, Any]] = {}
         with self.database.connect() as connection:
-            for offset in range(0, len(ids), self.IN_CHUNK):
-                batch = ids[offset : offset + self.IN_CHUNK]
-                rows = connection.execute(
-                    "SELECT s.id,s.notebook_id,s.title,s.file_name,s.summary,s.doc_type,"
-                    "s.source_type,m.is_paper,m.paper_title "
-                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
-                    f"WHERE s.id IN ({placeholders(batch)})",
-                    batch,
-                ).fetchall()
-                result.update({row["id"]: dict(row) for row in rows})
-        return result
+            return {
+                row["id"]: dict(row)
+                for row in self.source_listing_rows(connection, ids)
+            }
 
     @staticmethod
     def retrieval_element_rows(connection, notebook_id: str):

@@ -1118,6 +1118,86 @@ def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
     assert labels[0]["paper_title"] is None
 
 
+def test_typed_collection_source_primitives_match_sqlite_semantics(
+    core_stores: CoreStores,
+):
+    """``hidden_source_ids`` / ``source_listing_rows`` — the two primitives
+    behind the SOURCES collection (design doc §6.2).
+
+    Parity risks that matter here:
+
+    * ``hidden_source_ids`` must be the exact complement of the user-visible
+      source predicate (``list_sources``' own), because the listing is built as
+      "signal rows MINUS these ids".  A backend where it dropped only Memory
+      would list a phantom Knowhow projection document; one where it dropped
+      too much would hide a real document from the roster;
+    * ``source_listing_rows`` must return the source-card projection on the
+      CALLER's connection (summary + doc_type + the paper-meta outer join), and
+      ``source_metadata`` must be the same query — they are one SQL by
+      construction on both backends.
+    """
+    owner = core_stores.identity.create_user("q00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Roster"), owner.id
+    )
+    for source_id, source_type, doc_type, summary in (
+        ("src-doc-a", "pdf", "academic_paper", "first summary"),
+        ("src-doc-b", "markdown", "", ""),
+        ("src-doc-hidden", "knowhow", "", ""),
+        ("src-doc-memory", "memory", "", "private"),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash="hash",
+            summary=summary,
+            doc_type=doc_type,
+        )
+
+    visible = {source.id for source in core_stores.sources.list_sources(notebook_id)}
+    with core_stores.database.connect() as connection:
+        hidden = set(
+            core_stores.sources.hidden_source_ids(connection, notebook_id)
+        )
+        signals = {
+            source_id for source_id, _signal
+            in core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        }
+        rows = core_stores.sources.source_listing_rows(
+            connection, ["src-doc-a", "src-doc-b", "src-missing", ""]
+        )
+    assert visible == {"src-doc-a", "src-doc-b"}
+    assert hidden == {"src-doc-hidden", "src-doc-memory"}
+    # Complement of the visible list, and the listing derivation it enables.
+    assert hidden & visible == set()
+    assert hidden | visible == {
+        "src-doc-a", "src-doc-b", "src-doc-hidden", "src-doc-memory",
+    }
+    assert signals - hidden == visible
+
+    listed = {row["id"]: row for row in rows}
+    assert set(listed) == {"src-doc-a", "src-doc-b"}
+    assert listed["src-doc-a"]["notebook_id"] == notebook_id
+    assert listed["src-doc-a"]["summary"] == "first summary"
+    assert listed["src-doc-a"]["doc_type"] == "academic_paper"
+    assert listed["src-doc-a"]["source_type"] == "pdf"
+    # No paper-meta row: the outer join keeps the document with empty fields.
+    assert not listed["src-doc-a"]["is_paper"]
+    assert listed["src-doc-a"]["paper_title"] is None
+    # ``source_metadata`` is the same projection through its own connection.
+    metadata = core_stores.sources.source_metadata(["src-doc-a", "src-doc-b"])
+    assert set(metadata) == {"src-doc-a", "src-doc-b"}
+    assert metadata["src-doc-a"]["summary"] == "first summary"
+    assert metadata["src-doc-b"]["doc_type"] == ""
+
+
 def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores):
     """禁全表扫描:PostgreSQL 侧的翻页也必须落在
     ``idx_source_elements_source_type`` 上。计划器细节(Index Scan /

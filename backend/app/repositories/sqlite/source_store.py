@@ -293,6 +293,35 @@ class SourceStore:
             ).fetchall()
         ]
 
+    def hidden_source_ids(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> List[str]:
+        """The ids the user-facing source list hides — Memory synthetic rows
+        and a Knowhow table's hidden projection row.
+
+        Derived from ``VISIBLE_SOURCE_TYPES_PREDICATE`` by negation, on purpose:
+        that constant is already the single truth for "which sources does the
+        user see" (``list_sources`` / ``list_sources_page`` /
+        ``visible_document_count`` all share it), and the sources collection has
+        to enumerate exactly that set.  Spelling the two hidden types out again
+        here would be a second definition, free to drift into an answer card
+        that lists a phantom "Knowhow 表：…" document.
+
+        Same cost shape as ``memory_source_ids``: one ``notebook_id``-seeked
+        query projecting the primary key, its result bounded by the notebook's
+        Memory + Knowhow-table count.  The caller subtracts these ids from the
+        change-signal rows it already read, so the visible list costs no second
+        full read of ``sources``.
+        """
+        return [
+            row["id"]
+            for row in db.execute(
+                "SELECT id FROM sources WHERE notebook_id = ? "
+                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE})",
+                (notebook_id,),
+            ).fetchall()
+        ]
+
     def element_type_count_rows(
         self,
         db: sqlite3.Connection,
@@ -413,26 +442,45 @@ class SourceStore:
                     out[row["id"]] = dict(row)
         return out
 
+    def source_listing_rows(
+        self, db: sqlite3.Connection, source_ids: Sequence[str]
+    ) -> List[sqlite3.Row]:
+        """The source-card projection (title / type / stored summary), on the
+        caller's connection.
+
+        One SQL text, two entry points: ``source_metadata`` below is this method
+        plus its own connection.  The sources collection needs the caller's
+        connection (an enumeration keeps its whole walk on one), and it needs
+        exactly these columns — so making them two spellings of one projection
+        would only create room for them to disagree.
+        """
+        ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
+        if not ids:
+            return []
+        out: List[sqlite3.Row] = []
+        for offset in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[offset:offset + self.IN_CHUNK]
+            placeholders = ",".join("?" for _ in batch)
+            out.extend(db.execute(
+                "SELECT s.id, s.notebook_id, s.title, s.file_name, s.summary, "
+                "s.doc_type, s.source_type, m.is_paper, m.paper_title "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                f"WHERE s.id IN ({placeholders})",
+                batch,
+            ).fetchall())
+        return out
+
     def source_metadata(
         self, source_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
         ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
         if not ids:
             return {}
-        out: dict[str, dict[str, Any]] = {}
         with self.database.connect() as db:
-            for offset in range(0, len(ids), self.IN_CHUNK):
-                batch = ids[offset:offset + self.IN_CHUNK]
-                placeholders = ",".join("?" for _ in batch)
-                for row in db.execute(
-                    "SELECT s.id, s.notebook_id, s.title, s.file_name, s.summary, "
-                    "s.doc_type, s.source_type, m.is_paper, m.paper_title "
-                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
-                    f"WHERE s.id IN ({placeholders})",
-                    batch,
-                ).fetchall():
-                    out[row["id"]] = dict(row)
-        return out
+            return {
+                row["id"]: dict(row)
+                for row in self.source_listing_rows(db, ids)
+            }
 
     @staticmethod
     def retrieval_element_rows(db: sqlite3.Connection, notebook_id: str):

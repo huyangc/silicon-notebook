@@ -681,6 +681,28 @@ class SourceStorePort(Protocol):
         those sources own from the enumeration denominator.
         """
         ...
+    def hidden_source_ids(self, db: object, notebook_id: str) -> list[str]:
+        """The ids the USER-FACING source list hides — the exact complement of
+        the visible-source predicate that ``list_sources`` /
+        ``list_sources_page`` / ``visible_document_count`` share (Memory
+        synthetic rows plus a Knowhow table's hidden projection row).
+
+        The sources collection (design doc §6.2) has to enumerate what the
+        source tab shows, so its predicate must be the SAME one that tab
+        counts with — not a second spelling that can drift into showing a
+        phantom "Knowhow 表：…" card in an answer.  Each adapter derives this
+        query from its own visible-source predicate rather than re-listing the
+        two hidden types, so there is one definition per backend and this is
+        its complement.
+
+        Returned as ids (like ``memory_source_ids``) because the caller
+        subtracts them from the source list it already holds — the change
+        signal rows — instead of paying a second full read of the notebook's
+        sources.  Bounded by the notebook's Memory + Knowhow-table count and
+        index-seeked on ``notebook_id``, exactly the shape
+        ``memory_source_ids`` has.
+        """
+        ...
     def element_type_count_rows(
         self, db: object, source_ids: Sequence[str], element_types: Sequence[str]
     ) -> list[tuple[str, str, int]]:
@@ -743,10 +765,32 @@ class SourceStorePort(Protocol):
         instead of re-listing every notebook's sources to look for the id.
 
         A bounded primary-key lookup (plus the 1:1 ``source_paper_meta``
-        outer join) used to label enumerated items.  The twin of
-        ``source_metadata``, which opens its own connection and hydrates
-        summary/doc_type as well; enumeration needs neither, and taking the
-        caller's connection keeps a whole scope on one connection.
+        outer join) used to label enumerated items.  The narrow twin of
+        ``source_listing_rows``, which adds summary/doc_type; a per-element
+        walk needs neither, and one label window covers up to 256 sources —
+        carrying a summary for each of them would move a page of prose to
+        render a page of titles.
+        """
+        ...
+    def source_listing_rows(
+        self, db: object, source_ids: Sequence[str]
+    ) -> list[Any]:
+        """``id / notebook_id / title / file_name / summary / doc_type /
+        source_type / is_paper / paper_title`` for the given sources, on the
+        CALLER's connection.
+
+        The projection the SOURCE-CARD shape needs: the sources collection
+        (design doc §6.2) lists a document by display title, document type and
+        its already-stored summary, and ``source_metadata`` — which wants the
+        identical columns — is implemented on top of this method so the two can
+        never drift into two spellings of one projection.  The difference
+        between them is only the connection: this one runs on the caller's, so
+        an enumeration keeps its whole walk on a single connection.
+
+        Bounded primary-key lookup plus the 1:1 ``source_paper_meta`` outer
+        join, batched by the adapter.  Callers page it (one window per
+        enumeration page); it must never be handed a whole library's ids just
+        because it can batch them.
         """
         ...
     def source_from_row(self, db: object, row: object, *, paper_meta: object = SOURCE_PAPER_META_UNSET) -> SourceSummary: ...
