@@ -1131,11 +1131,11 @@ class AskService:
         才记 model_error),所以「思考型模型偶发空 content」不会把整轮拖进回退。
         取消异常照常穿透 —— 用户按了中断不是合成失败。
 
-        ``on_section(step)`` 在每节写完后立刻收到一条轻量进度步。分节合成是整轮
-        里最长的一段(k 次模型调用),不发进度的话实时轨迹会在「合成」上静止几分钟。
-        **进度步实时发出、不因后续回退而回收**:那一节确实写完了、那笔钱确实付了,
-        事后抹掉等于让轨迹少报整轮做过的工作;回退由收尾那条 synthesis 步的
-        ``outline_fallback`` 说清楚。
+        ``on_section(step)`` 在每节写完后立刻收到一条轻量进度步(不带 ``duration_ms``,
+        理由见发送点)。分节合成是整轮里最长的一段(k 次模型调用),不发进度的话实时
+        轨迹会在「合成」上静止几分钟。**进度步实时发出、不因后续回退而回收**:那一节
+        确实写完了、那笔钱确实付了,事后抹掉等于让轨迹少报整轮做过的工作;回退由收尾
+        那条 synthesis 步的 ``outline_fallback`` 说清楚。
         """
         from app.services.outline_synthesis import outline_answer_text
 
@@ -1151,7 +1151,6 @@ class AskService:
         model_label = getattr(answer_client, "model", "")
         for item in slices:
             section_counts: dict = {}
-            section_started = time.perf_counter()
 
             def _synth_section(item=item, section_counts=section_counts):
                 text_, grounded_, anchors_, _counts = self._answer_reasoning(
@@ -1178,18 +1177,24 @@ class AskService:
             if on_section is not None:
                 # 复用 synthesis 这个 step_type:前端 reasoning-trace.ts 的
                 # synthesis 分支只在 `detail.anchors` 是数字时给出细节文案,进度步
-                # 不带 anchors,于是它自然只显示 summary —— 不必等 O3 补渲染就
-                # 是可读的,而 O3 想把节标题做成细节行时 detail 已经在那里了。
+                # 不带 anchors,于是它落到「第 i/共 N 节」那条进度分支上。
+                #
+                # **刻意不带 duration_ms**(codex PR#407 R1 P2):前端的轨迹总耗时
+                # 是**所有**步的 duration_ms 求和,而末尾那条总 synthesis 步已经
+                # 独家记了从 `synthesis_started` 起的整段合成时间——进度步再各记
+                # 一份,分节答案的合成耗时就报成约两倍(回退 run 还会把已完成节的
+                # 那几次尝试也算进去)。进度步是**进度标记**,不是独立的耗时区间;
+                # 「合成耗时必须进轨迹总耗时」那条红线由总步承担,恰好一次。
                 on_section(TraceStep(
                     step_type="synthesis",
-                    summary=f"已写完第 {item.index + 1}/{total} 节",
+                    # 措辞与前端 reasoning-trace.ts 的进度细节分支同款
+                    # (「第 i/共 N 节」),summary 与 detail 读起来才是一句话。
+                    summary=f"已写完第 {item.index + 1}/共 {total} 节",
                     detail={
                         "section_index": item.index + 1,
                         "section_total": total,
                         "section_title": item.section.title[:60],
                     },
-                    duration_ms=round(
-                        (time.perf_counter() - section_started) * 1000),
                 ))
             for key in merged_counts:
                 merged_counts[key] += int(section_counts.get(key, 0) or 0)

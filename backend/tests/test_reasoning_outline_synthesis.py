@@ -225,6 +225,76 @@ def test_headings_follow_the_outline_hierarchy_and_order():
     assert text.index("## 顶层一") < text.index("### 子节") < text.index("## 顶层二")
 
 
+def test_a_child_submitted_before_its_parent_is_rendered_after_it():
+    """提交序 ≠ 文档序。
+
+    `parse_outline_sections` **明确允许**先写子节再写父节(它的两层裁剪刻意等收齐
+    所有节之后才做,正是为了不把合法的前向引用误判成非法)。照提交序渲染就会得到
+    `### 子节` 排在 `## 父节` 之前 —— Markdown 里那是个层级倒挂的文档结构,前端
+    h2/h3 会照它渲染。
+    """
+    slices, _ = plan_outline_sections(
+        [_section("b", "子节", "e2", parent="a"),      # 子在前
+         _section("a", "父节", "e1"),
+         _section("c", "另一个顶层", "e3")],
+        kg_by_id={},
+        element_by_id={f"e{n}": _element(f"e{n}") for n in (1, 2, 3)},
+        chunk_by_id={},
+    )
+    # 序号与号段偏移也按文档序分配:节级 prompt 的「(2 of 3)」、进度步的
+    # 「第 2/共 3 节」与答案里的位置说的必须是同一件事。
+    assert [item.section.title for item in slices] == ["父节", "子节", "另一个顶层"]
+    assert [item.index for item in slices] == [0, 1, 2]
+    assert [item.key_offset for item in slices] == [
+        0, OUTLINE_SECTION_KEY_STRIDE, 2 * OUTLINE_SECTION_KEY_STRIDE
+    ]
+    text = outline_answer_text([(item, f"正文{item.index}") for item in slices])
+    assert text == (
+        "## 父节\n\n正文0\n\n"
+        "### 子节\n\n正文1\n\n"
+        "## 另一个顶层\n\n正文2"
+    )
+
+
+def test_a_child_whose_parent_was_skipped_is_promoted_to_a_top_level_heading():
+    """父节是空节、被跳过时,子节晋升为 `##`,不留孤儿 `###`。
+
+    空节是合法终态(O1 合同),它不进答案;而 `section.parent` 仍指着那个不会出现的
+    id。照原值渲染就是一个没有父标题的 `### 子节` —— 读者会以为上面漏了一段。
+    """
+    slices, skipped = plan_outline_sections(
+        [_section("a", "父节没有证据"),                  # 空节 → 被跳过
+         _section("b", "实子节", "e2", parent="a"),
+         _section("c", "另一个顶层", "e3")],
+        kg_by_id={},
+        element_by_id={f"e{n}": _element(f"e{n}") for n in (2, 3)},
+        chunk_by_id={},
+    )
+    assert skipped == ["父节没有证据"]
+    assert [item.section.title for item in slices] == ["实子节", "另一个顶层"]
+    assert [item.parent_id for item in slices] == ["", ""]
+    text = outline_answer_text([(item, f"正文{item.index}") for item in slices])
+    assert "###" not in text
+    assert text == "## 实子节\n\n正文0\n\n## 另一个顶层\n\n正文1"
+
+
+def test_document_order_keeps_siblings_and_roots_in_submission_order():
+    """重排只按父子分组,同层之间**不动**提交序 —— 那是模型表达的叙事顺序。"""
+    slices, _ = plan_outline_sections(
+        [_section("r2", "后写的顶层", "e1"),
+         _section("c2", "第二个子节", "e2", parent="r2"),
+         _section("r1", "先写的顶层", "e3"),
+         _section("c1", "第一个子节", "e4", parent="r2")],
+        kg_by_id={},
+        element_by_id={f"e{n}": _element(f"e{n}") for n in (1, 2, 3, 4)},
+        chunk_by_id={},
+    )
+    assert [item.section.title for item in slices] == [
+        "后写的顶层", "第二个子节", "第一个子节", "先写的顶层"
+    ]
+    assert [item.parent_id for item in slices] == ["", "r2", "r2", ""]
+
+
 # ------------------------------------------- 被 top_n 截断的绑定对象仍要进切片
 
 def test_bound_objects_cut_by_the_top_n_selection_travel_out():
@@ -610,6 +680,28 @@ def test_two_bound_sections_are_synthesised_separately_and_concatenated(
     assert detail["included_elements"] == 2, "各节装配计数求和"
 
 
+def test_a_child_first_outline_reaches_the_answer_in_document_order(
+    repo, monkeypatch
+):
+    """端到端:提交序 子→父,答案里必须 父→子,且三处序号说的是同一件事。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(outline=[
+        _section("s2", "子节", "e2", parent="s1"),
+        _section("s1", "父节", "e1"),
+    ]))
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    assert response.answer.startswith("## 父节")
+    assert "### 子节" in response.answer
+    assert response.answer.index("## 父节") < response.answer.index("### 子节")
+    # 节级 prompt 的位置、进度步的序号与答案里的位置一致。
+    assert "父节" in llm.prompts[0] and "(1 of 2)" in llm.prompts[0]
+    assert "子节" in llm.prompts[1] and "(2 of 2)" in llm.prompts[1]
+    assert [step.detail["section_title"]
+            for step in _section_progress_steps(response)] == ["父节", "子节"]
+
+
 def test_empty_sections_are_skipped_and_named_in_the_trace(repo, monkeypatch):
     outline = [
         _section("s1", "第一节", "e1"),
@@ -696,11 +788,38 @@ def test_each_finished_section_reports_progress(repo, monkeypatch):
     assert [step.detail["section_index"] for step in progress] == [1, 2]
     assert all(step.detail["section_total"] == 2 for step in progress)
     assert [step.detail["section_title"] for step in progress] == ["第一节", "第二节"]
-    assert all(step.duration_ms is not None for step in progress)
     # 收尾那条总合成步排在进度步之后,且不带 section_index。
     steps = _synthesis_steps(response)
     assert steps[-1] not in progress
     assert steps[-1].detail["outline_sections"] == 2
+
+
+def test_the_synthesis_span_is_counted_exactly_once(repo, monkeypatch):
+    """进度步不带 duration_ms —— 否则合成耗时在轨迹总耗时里被计两遍。
+
+    前端的「轨迹总耗时」是**所有**步 duration_ms 的求和(reasoning-trace.ts)。收尾
+    那条总 synthesis 步已经独家记了整段合成时间;进度步再各记一份,分节答案的合成
+    耗时就报成约两倍(回退 run 还会把已完成节的那几次尝试也算进去)。进度步是**进度
+    标记**,不是独立的耗时区间。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    progress = _section_progress_steps(response)
+    assert len(progress) == 2
+    assert [step.duration_ms for step in progress] == [None, None]
+    # 计时区间恰好一个:整条轨迹里带 duration_ms 的 synthesis 步只有收尾那条。
+    timed = [step for step in _synthesis_steps(response)
+             if step.duration_ms is not None]
+    assert len(timed) == 1
+    assert "outline_sections" in timed[0].detail
+    # 前端口径:总耗时 = 各步 duration_ms 之和。合成段贡献的那一份必须**恰好等于**
+    # 总步自己记的区间 —— 进度步一旦带上时长,这个和就会大于它(双计)。
+    synthesis_total = sum(
+        step.duration_ms or 0 for step in _synthesis_steps(response))
+    assert synthesis_total == timed[0].duration_ms
 
 
 def test_a_single_grounded_section_grounds_the_whole_answer(repo, monkeypatch):
