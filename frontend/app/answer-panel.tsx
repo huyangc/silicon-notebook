@@ -199,9 +199,20 @@ const KG_OBJECT_LIST_LABELS: Record<string, string> = {
   procedure: "过程知识对象清单",
 };
 
+// 来源清单的界面名。逐字镜像后端 _SOURCE_COLLECTION_LABELS + "清单" 后缀;这一张
+// 按 collection 取键(库的文档清单没有子类型),而不是按 kind——与后端同形。
+const SOURCE_LIST_LABELS: Record<string, string> = {
+  sources: "来源清单",
+};
+
 function collectionResultTitle(resultSet: TypedCollectionResult): string {
   if (resultSet.collection === "elements") {
     return label(ELEMENT_KIND_LIST_LABELS, resultSet.element_kind ?? "", "条目清单");
+  }
+  // sources 必须先判:它的 element_kind/object_type 都是空串,落到下面的知识对象
+  // 分支只会拿到兜底词「知识对象清单」——一份文档清单被叫成知识对象清单。
+  if (resultSet.collection === "sources") {
+    return label(SOURCE_LIST_LABELS, resultSet.collection, "来源清单");
   }
   return label(KG_OBJECT_LIST_LABELS, resultSet.object_type ?? "", "知识对象清单");
 }
@@ -268,6 +279,20 @@ function CrossLibraryBadge({
     </span>
   );
 }
+
+
+// 引用的 object_type 不是 KG 类型时的界面词。两类:来源清单的**文档**行,以及
+// #402 给来源元素建的引用。它们都不该摆 KG 类型标记(那个形状是给知识对象看的),
+// 也都**不能**走 kgTypeLabel —— 它对未知类型是原样返回,于是内部词 `source` /
+// `element` 会照字面上屏(codex R7 P2)。
+//
+// `Object.hasOwn` 而非 `NON_KG_REFERENCE_LABELS[type]`:后者走原型链,自定义类型名
+// 恰为 "constructor"/"__proto__" 时会命中继承属性——与 kg-type-mark.tsx 里记下的
+// 同一个坑,同款防护。
+const NON_KG_REFERENCE_LABELS: Record<string, string> = {
+  source: "来源",
+  element: "原文",
+};
 
 
 function CollectionItemCitation({ citation }: { citation: Citation }) {
@@ -395,6 +420,64 @@ function KgObjectCollectionItemRow({
 }
 
 
+function SourceCollectionItemRow({
+  item,
+  notebookId,
+  notebookNames,
+  onOpenSource,
+}: {
+  item: TypedCollectionItem;
+  notebookId: string | null;
+  notebookNames: Record<string, string>;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
+}) {
+  const itemNotebookId = item.notebook_id ?? "";
+  const crossLibrary = isCrossLibraryItem(itemNotebookId, notebookId);
+  // 局部 const:同 ElementCollectionItemRow,让 TS 在块内真的收窄成 string。
+  const sourceId = item.source_id ?? "";
+  // 文档类型的界面词由后端给(PROFILES 是唯一真源);没有就整段不渲染,绝不显示
+  // `academic_paper` 这类内部 id,也不写「未知类型」去填一个本来就不存在的事实。
+  const docType = item.location_label ?? "";
+  const summary = item.text ?? "";
+  return (
+    <li className="answer-collection-item answer-collection-source-item">
+      <div className="answer-collection-source-head">
+        <strong className="answer-collection-source-title">
+          {item.source_title || "未命名来源"}
+        </strong>
+        {docType && <small className="answer-collection-source-type">{docType}</small>}
+      </div>
+      {summary
+        ? <p className="answer-collection-source-summary">{summary}</p>
+        : <p className="answer-collection-source-summary tool-hint">暂无摘要</p>}
+      <div className="answer-collection-item-meta">
+        {crossLibrary && (
+          <CrossLibraryBadge
+            itemNotebookId={itemNotebookId}
+            notebookNames={notebookNames}
+            tier={item.tier ?? "personal"}
+          />
+        )}
+        {/* 跨库条目**也**给跳转,与 ElementCollectionItemRow 同口径:#398 之后
+            参考库来源详情经 active notebook 维度的代理端点读取(后端在有效参与集
+            内解析,不在集内 404),弹窗对参考库来源按只读渲染。所以这里不再有
+            `!crossLibrary` 围栏——那会把平台已经支持的读取挡掉;库名标注由上面的
+            CrossLibraryBadge 承担。 */}
+        {onOpenSource && sourceId && (
+          <button
+            type="button"
+            className="answer-collection-open"
+            onClick={() => onOpenSource(sourceId)}
+          >
+            查看来源
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+
 // 元素清单按来源分组显示(design doc §2.6:"按来源分组"),保留原始条目顺序
 // (执行器已按 source 顺位游标产出,这里只是分桶,不重排)。
 function groupElementItemsBySource(
@@ -475,7 +558,20 @@ function CollectionResultCard({
                 : `本轮分析基于前 ${resultSet.synthesis_rows} 条预览`}
             </p>
           )}
-          {resultSet.collection === "elements" ? (
+          {resultSet.collection === "sources" ? (
+            // 每一行本身就是一份文档,不必按来源分组(那正是这份清单的分组维度)。
+            <ul className="answer-collection-items">
+              {items.map((item) => (
+                <SourceCollectionItemRow
+                  key={item.item_id}
+                  item={item}
+                  notebookId={notebookId}
+                  notebookNames={notebookNames}
+                  onOpenSource={onOpenSource}
+                />
+              ))}
+            </ul>
+          ) : resultSet.collection === "elements" ? (
             <div className="answer-collection-groups">
               {groupElementItemsBySource(items).map((group) => (
                 <div className="answer-collection-group" key={group.sourceId || "unknown"}>
@@ -669,7 +765,10 @@ function SelectedReferenceDetail({
   const elementId = reference.citation?.element_id || reference.anchor?.element_id || "";
   const sourceName = sourceNotebookId ? notebookNames[sourceNotebookId] : undefined;
   const isRelationReference = objectType === "relation";
-  const isSourceElementReference = objectType === "element";
+  // 「不是知识对象」的引用类型:元素(#402)与**文档**(来源清单)。两者都没有可定位的
+  // 图谱节点,所以都不摆那个按钮——文档尤其:它的 object_id 本来就是空的,留着按钮
+  // 只会是一个永远禁用、且解释起来还得绕一圈的控件。
+  const isSourceElementReference = objectType === "element" || objectType === "source";
   const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
   // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
   // 出现在同一条 reference 上（buildAnswerReferences 二选一），但顺序仍按
@@ -679,7 +778,11 @@ function SelectedReferenceDetail({
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
         <strong>{reference.displayLabel}</strong>
-        {objectType && <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>}
+        {objectType && (
+          Object.hasOwn(NON_KG_REFERENCE_LABELS, objectType)
+            ? <span>{NON_KG_REFERENCE_LABELS[objectType]}</span>
+            : <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>
+        )}
         {tier && (
           <span
             className={`tier-badge tier-${tier}`}

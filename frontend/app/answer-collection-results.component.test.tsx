@@ -570,3 +570,85 @@ test("coverage 分支顺序:concurrent_change + total=null 组合仍优先显示
   expect(screen.getByText("已列 15 条，但资料在枚举期间有变动，无法确认完整")).toBeInTheDocument();
   expect(screen.queryByText("已列 15 条（总数未知）")).not.toBeInTheDocument();
 });
+
+
+// ---------------------------------------------------------------------------
+// PR-2.5 × #402:来源清单 arm 在新引用模型下的渲染
+// ---------------------------------------------------------------------------
+
+test("文档清单条目渲染标题/类型/摘要,并可跳到该文档本身", async () => {
+  const user = userEvent.setup();
+  const onOpenSource = vi.fn();
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    collection: "sources",
+    element_kind: "",
+    object_type: "",
+    items: [{
+      item_id: "src-1", source_id: "src-1", source_title: "论文一",
+      location_label: "学术论文", text: "第一篇的摘要",
+      notebook_id: "nb-1", tier: "personal",
+      citation: {
+        label: "论文一", source_id: "src-1", element_id: "",
+        location_label: "学术论文", quoted_span: "第一篇的摘要", tier: "personal",
+      },
+    }],
+  })];
+  renderAnswer(answer, { onOpenSource });
+
+  expect(screen.getByText("论文一")).toBeInTheDocument();
+  expect(screen.getByText("学术论文")).toBeInTheDocument();
+  expect(screen.getByText("第一篇的摘要")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "查看来源" }));
+  expect(onOpenSource).toHaveBeenCalledWith("src-1");
+});
+
+test("文档条目**不**另渲染原文引用折叠块:摘要与跳转本来就是这一行自己", () => {
+  // 与 KG/元素臂刻意不同,并且不同是有理由的:那两类条目的「原文」在别处(某个
+  // source element),所以需要一个额外的摘录块 + 「查看原文」按钮;而文档行**就是**
+  // 那份文档——摘要已经是行正文、「查看来源」已经指向同一个目标。再渲染一遍就是把
+  // 同一段文字显示两次、把同一个跳转摆两个按钮。
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    collection: "sources", element_kind: "", object_type: "",
+    items: [{
+      item_id: "src-1", source_id: "src-1", source_title: "论文一",
+      location_label: "学术论文", text: "第一篇的摘要",
+      notebook_id: "nb-1", tier: "personal",
+      citation: {
+        label: "论文一", source_id: "src-1", element_id: "",
+        location_label: "学术论文", quoted_span: "第一篇的摘要", tier: "personal",
+      },
+    }],
+  })];
+  renderAnswer(answer, { onOpenSource: vi.fn() });
+
+  expect(screen.queryByText(/^原文引用：/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "查看原文" })).not.toBeInTheDocument();
+  // 也不该出现 KG 臂那句「暂无可用原文出处」——文档行的出处一直都在。
+  expect(screen.queryByText("暂无可用原文出处")).not.toBeInTheDocument();
+  // 摘要只出现一次(而不是行正文 + 引用块各一份)。
+  expect(screen.getAllByText("第一篇的摘要")).toHaveLength(1);
+});
+
+test("跨库文档条目标注来源库名,且跳转仍走 active notebook 代理(#398 之后)", async () => {
+  const user = userEvent.setup();
+  const onOpenSource = vi.fn();
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    collection: "sources", element_kind: "", object_type: "",
+    items: [{
+      item_id: "base-src", source_id: "base-src", source_title: "参考论文",
+      location_label: "学术论文", text: "跨库摘要",
+      notebook_id: "base-1", tier: "base",
+    }],
+  })];
+  renderAnswer(answer, {
+    onOpenSource,
+    notebookNames: { "base-1": "模拟电路基准库" },
+  });
+
+  expect(screen.getByText("来自参考库《模拟电路基准库》")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "查看来源" }));
+  expect(onOpenSource).toHaveBeenCalledWith("base-src");
+});

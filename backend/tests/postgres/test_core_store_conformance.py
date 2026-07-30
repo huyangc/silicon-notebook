@@ -908,9 +908,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
             connection, ["src-collect-a"], []
         ) == []
 
-        signals = dict(
+        signals = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
         memory_ids = set(
             core_stores.sources.memory_source_ids(connection, notebook_id)
         )
@@ -929,9 +930,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
     # updated_at + parse_status move together on every lifecycle transition.
     core_stores.sources.set_status("src-collect-a", "extracted")
     with core_stores.database.connect() as connection:
-        after_status = dict(
+        after_status = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
     assert after_status["src-collect-a"] != signals["src-collect-a"]
     assert after_status["src-collect-b"] == signals["src-collect-b"]
 
@@ -944,9 +946,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
         (NOW, "src-collect-b"),
     )
     with core_stores.database.connect() as connection:
-        after_chunked = dict(
+        after_chunked = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
     assert after_chunked["src-collect-b"] != signals["src-collect-b"]
     assert after_chunked["src-collect-a"] == after_status["src-collect-a"]
 
@@ -981,9 +984,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
     with core_stores.database.write() as connection:
         core_stores.sources.delete_source_row(connection, "src-collect-b")
     with core_stores.database.connect() as connection:
-        remaining = dict(
+        remaining = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
     assert "src-collect-b" not in remaining
 
     # ``replace_elements`` moves ``updated_at`` in its own write transaction, so
@@ -1005,9 +1009,10 @@ def test_typed_collection_catalog_primitives_match_sqlite_semantics(
             created_at="2026-07-29T10:00:00.123456+00:00",
         )
     with core_stores.database.connect() as connection:
-        after_swap = dict(
+        after_swap = {
+            row[0]: row[1] for row in
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
-        )
+        }
         assert core_stores.sources.element_type_count_rows(
             connection, ["src-collect-a"], kinds
         ) == [("src-collect-a", "formula", 1)]
@@ -1116,6 +1121,114 @@ def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
     # paper fields rather than dropping the label entirely.
     assert not labels[0]["is_paper"]
     assert labels[0]["paper_title"] is None
+
+
+def test_typed_collection_source_primitives_match_sqlite_semantics(
+    core_stores: CoreStores,
+):
+    """The signal rows' ``user_visible`` projection / ``source_listing_rows`` —
+    the two primitives behind the SOURCES collection (design doc §6.2).
+
+    Parity risks that matter here:
+
+    * ``user_visible`` must be the user-visible source predicate itself
+      (``list_sources``' own), evaluated in THIS backend's SQL, because the
+      listing is defined as "the signal rows that flag says are visible".  A
+      backend whose flag only excluded Memory would list a phantom Knowhow
+      projection document; one that excluded too much would hide a real document
+      from the roster.  It is a projected column rather than a second query on
+      purpose: nothing indexes ``source_type``, so asking "which ids are hidden"
+      separately means re-scanning every source row of the notebook, on the
+      request path, right after this query walked the same rows;
+    * ``source_listing_rows`` must return the source-card projection on the
+      CALLER's connection (summary + doc_type + the paper-meta outer join), and
+      ``source_metadata`` must be the same query — they are one SQL by
+      construction on both backends;
+    * the signal rows' ``created_at`` sort key must order the roster the way
+      THIS backend's ``list_sources`` orders it.  PostgreSQL hands back
+      ``datetime`` where SQLite hands back text, so "sort the key
+      lexicographically" is a per-adapter claim, not a shared one — and if it
+      breaks here the roster silently comes out in an order no user has seen.
+    """
+    owner = core_stores.identity.create_user("q00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Roster"), owner.id
+    )
+    for source_id, source_type, doc_type, summary in (
+        ("src-doc-a", "pdf", "academic_paper", "first summary"),
+        ("src-doc-b", "markdown", "", ""),
+        ("src-doc-hidden", "knowhow", "", ""),
+        ("src-doc-memory", "memory", "", "private"),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash="hash",
+            summary=summary,
+            doc_type=doc_type,
+        )
+
+    visible_order = [
+        source.id for source in core_stores.sources.list_sources(notebook_id)
+    ]
+    visible = set(visible_order)
+    with core_stores.database.connect() as connection:
+        memory = set(
+            core_stores.sources.memory_source_ids(connection, notebook_id)
+        )
+        signal_rows = list(
+            core_stores.sources.source_change_signal_rows(connection, notebook_id)
+        )
+        rows = core_stores.sources.source_listing_rows(
+            connection, ["src-doc-a", "src-doc-b", "src-missing", ""]
+        )
+    assert visible == {"src-doc-a", "src-doc-b"}
+    signalled = {row[0] for row in signal_rows}
+    projected_visible = {row[0] for row in signal_rows if row[3]}
+    projected_hidden = {row[0] for row in signal_rows if not row[3]}
+    # The flag IS the source tab's predicate, evaluated in PostgreSQL.
+    assert projected_visible == visible
+    assert projected_hidden == {"src-doc-hidden"}
+    # Memory never reaches the signal rows at all; ``memory_source_ids`` remains
+    # the one place that knows about them (the KG side needs the ids, because
+    # ``knowledge_objects`` carries no source type).  Pinned so a "helpful" merge
+    # of the two predicates shows up as a failure.
+    assert memory == {"src-doc-memory"}
+    assert signalled & memory == set()
+    assert projected_visible & projected_hidden == set()
+    assert projected_visible | projected_hidden | memory == {
+        "src-doc-a", "src-doc-b", "src-doc-hidden", "src-doc-memory",
+    }
+    # The roster order the sources collection walks == the source tab's order.
+    ordered = [
+        row[0] for row in sorted(
+            (row for row in signal_rows if row[3]),
+            key=lambda row: (row[2], row[0]),
+        )
+    ]
+    assert ordered == visible_order
+
+    listed = {row["id"]: row for row in rows}
+    assert set(listed) == {"src-doc-a", "src-doc-b"}
+    assert listed["src-doc-a"]["notebook_id"] == notebook_id
+    assert listed["src-doc-a"]["summary"] == "first summary"
+    assert listed["src-doc-a"]["doc_type"] == "academic_paper"
+    assert listed["src-doc-a"]["source_type"] == "pdf"
+    # No paper-meta row: the outer join keeps the document with empty fields.
+    assert not listed["src-doc-a"]["is_paper"]
+    assert listed["src-doc-a"]["paper_title"] is None
+    # ``source_metadata`` is the same projection through its own connection.
+    metadata = core_stores.sources.source_metadata(["src-doc-a", "src-doc-b"])
+    assert set(metadata) == {"src-doc-a", "src-doc-b"}
+    assert metadata["src-doc-a"]["summary"] == "first summary"
+    assert metadata["src-doc-b"]["doc_type"] == ""
 
 
 def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores):

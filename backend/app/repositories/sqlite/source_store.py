@@ -72,7 +72,12 @@ class SourceStore:
             rows = db.execute(
                 "SELECT * FROM sources WHERE notebook_id = ? "
                 f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
-                "ORDER BY created_at ASC",
+                # `, id` 是必需的次键,不是装饰:`created_at` 在同一次批量导入里
+                # 会出现并列值,而 SQLite 对并列行不保证稳定顺序。来源清单枚举
+                # 按 `(created_at, id)` 走,两处一旦分叉,「前 N 篇」在页签与目录
+                # 里就是不同的 N 篇——而那正是模型据以逐篇深挖的那份前缀。
+                # PostgreSQL 侧本来就带(`ORDER BY created_at,id COLLATE "C"`)。
+                "ORDER BY created_at ASC, id ASC",
                 (notebook_id,),
             ).fetchall()
             return self.sources_from_rows(db, rows)
@@ -102,7 +107,10 @@ class SourceStore:
             total = db.execute(
                 f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]
             rows = db.execute(
-                f"SELECT * FROM sources {where} ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                f"SELECT * FROM sources {where} "
+                # 同上:并列 created_at 下没有次键,翻页会重复/漏行,而且与来源
+                # 清单的 `(created_at, id)` 序分叉。
+                "ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
                 (*params, limit, offset),
             ).fetchall()
             items = self.sources_from_rows(db, rows)
@@ -200,9 +208,10 @@ class SourceStore:
     # whole scope (active notebook + mounted bases) is read from one snapshot.
     def source_change_signal_rows(
         self, db: sqlite3.Connection, notebook_id: str
-    ) -> List[tuple[str, str]]:
-        """``[(source_id, opaque change signal)]`` for the notebook's PHYSICAL
-        sources, EXCLUDING the private Memory synthetic rows.
+    ) -> List[tuple[str, str, str, bool]]:
+        """``[(source_id, opaque change signal, created_at sort key,
+        user_visible)]`` for the notebook's PHYSICAL sources, EXCLUDING the
+        private Memory synthetic rows.
 
         Knowhow's hidden projection source stays in (it is notebook-wide
         content, visible to every member through the table itself); a
@@ -248,7 +257,15 @@ class SourceStore:
         already in hand, never a second access path.
         """
         rows = db.execute(
-            "SELECT id, updated_at, parse_status, chunked_at "
+            "SELECT id, updated_at, parse_status, chunked_at, created_at, "
+            # The user-visible flag is EVALUATED HERE, from the same constant
+            # ``list_sources`` filters on, on a row this query already visits.
+            # It replaces a second ``sources`` read per notebook: the old
+            # ``hidden_source_ids`` query could not seek on ``source_type``
+            # (no index carries it), so it re-scanned every source row of the
+            # notebook to find the one or two hidden ones — on the request path,
+            # right after this query had just walked the same rows.
+            f"({VISIBLE_SOURCE_TYPES_PREDICATE}) AS user_visible "
             "FROM sources WHERE notebook_id = ? AND source_type <> 'memory'",
             (notebook_id,),
         ).fetchall()
@@ -260,6 +277,14 @@ class SourceStore:
                     row["parse_status"] or "",
                     row["chunked_at"] or "",
                 ),
+                # Sort key, passed through as stored: ``list_sources`` orders by
+                # this very column with SQLite's default BINARY collation, and
+                # Python's codepoint comparison over the same ASCII timestamp
+                # text is that same ordering.  So the roster the sources
+                # collection walks is byte-for-byte the source tab's order —
+                # not a second interpretation of it.
+                str(row["created_at"] or ""),
+                bool(row["user_visible"]),
             )
             for row in rows
         ]
@@ -413,26 +438,45 @@ class SourceStore:
                     out[row["id"]] = dict(row)
         return out
 
+    def source_listing_rows(
+        self, db: sqlite3.Connection, source_ids: Sequence[str]
+    ) -> List[sqlite3.Row]:
+        """The source-card projection (title / type / stored summary), on the
+        caller's connection.
+
+        One SQL text, two entry points: ``source_metadata`` below is this method
+        plus its own connection.  The sources collection needs the caller's
+        connection (an enumeration keeps its whole walk on one), and it needs
+        exactly these columns — so making them two spellings of one projection
+        would only create room for them to disagree.
+        """
+        ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
+        if not ids:
+            return []
+        out: List[sqlite3.Row] = []
+        for offset in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[offset:offset + self.IN_CHUNK]
+            placeholders = ",".join("?" for _ in batch)
+            out.extend(db.execute(
+                "SELECT s.id, s.notebook_id, s.title, s.file_name, s.summary, "
+                "s.doc_type, s.source_type, m.is_paper, m.paper_title "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                f"WHERE s.id IN ({placeholders})",
+                batch,
+            ).fetchall())
+        return out
+
     def source_metadata(
         self, source_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
         ids = list(dict.fromkeys(source_id for source_id in source_ids if source_id))
         if not ids:
             return {}
-        out: dict[str, dict[str, Any]] = {}
         with self.database.connect() as db:
-            for offset in range(0, len(ids), self.IN_CHUNK):
-                batch = ids[offset:offset + self.IN_CHUNK]
-                placeholders = ",".join("?" for _ in batch)
-                for row in db.execute(
-                    "SELECT s.id, s.notebook_id, s.title, s.file_name, s.summary, "
-                    "s.doc_type, s.source_type, m.is_paper, m.paper_title "
-                    "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
-                    f"WHERE s.id IN ({placeholders})",
-                    batch,
-                ).fetchall():
-                    out[row["id"]] = dict(row)
-        return out
+            return {
+                row["id"]: dict(row)
+                for row in self.source_listing_rows(db, ids)
+            }
 
     @staticmethod
     def retrieval_element_rows(db: sqlite3.Connection, notebook_id: str):

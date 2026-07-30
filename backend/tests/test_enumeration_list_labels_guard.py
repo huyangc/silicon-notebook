@@ -43,6 +43,10 @@ KG_OBJECT_CANONICAL_BODY = """\
   procedure: "过程知识对象清单",
 """
 
+SOURCE_CANONICAL_BODY = """\
+  sources: "来源清单",
+"""
+
 
 def element_declaration(body: str = ELEMENT_CANONICAL_BODY) -> str:
     return (
@@ -58,14 +62,22 @@ def kg_object_declaration(body: str = KG_OBJECT_CANONICAL_BODY) -> str:
     )
 
 
+def source_declaration(body: str = SOURCE_CANONICAL_BODY) -> str:
+    return (
+        "const SOURCE_LIST_LABELS: Record<string, string> = {\n"
+        + body + "};"
+    )
+
+
 def write_tsx(
     tmp_path: pathlib.Path,
     element_decl: str,
     kg_decl: str,
     *,
     prelude: str = "",
+    source_decl: str | None = None,
 ) -> pathlib.Path:
-    """造一份最小 answer-panel.tsx 替身,只放守卫关心的两个声明。"""
+    """造一份最小 answer-panel.tsx 替身,只放守卫关心的三个声明。"""
     path = tmp_path / "answer-panel.tsx"
     path.write_text(
         "export const TRUNCATED_REASON_LABELS: Record<string, string> = {\n"
@@ -74,6 +86,7 @@ def write_tsx(
         f"{prelude}"
         f"{element_decl}\n\n"
         f"{kg_decl}\n\n"
+        f"{source_declaration() if source_decl is None else source_decl}\n\n"
         "function collectionResultTitle() { return null; }\n",
         encoding="utf-8",
     )
@@ -92,6 +105,7 @@ EXPECTED_KG_OBJECT_LABELS = {
     "formula": "公式知识对象清单",
     "procedure": "过程知识对象清单",
 }
+EXPECTED_SOURCE_LABELS = {"sources": "来源清单"}
 
 
 # --- 正向控制组:守卫不是「永远失败」--------------------------------------------
@@ -102,6 +116,7 @@ def test_canonical_fixture_passes_the_real_guard(tmp_path):
     path = write_tsx(tmp_path, element_declaration(), kg_object_declaration())
     assert guard.frontend_labels(guard.FRONTEND_ELEMENT_CONST, path) == EXPECTED_ELEMENT_LABELS
     assert guard.frontend_labels(guard.FRONTEND_KG_OBJECT_CONST, path) == EXPECTED_KG_OBJECT_LABELS
+    assert guard.frontend_labels(guard.FRONTEND_SOURCE_CONST, path) == EXPECTED_SOURCE_LABELS
     assert guard.main(path) == 0
 
 
@@ -316,6 +331,58 @@ def test_cross_table_duplicate_name_is_rejected(tmp_path):
     # 两张表各自解析都成功——撞名不是解析层面的问题。
     assert guard.frontend_labels(guard.FRONTEND_ELEMENT_CONST, path)["formula"] == "公式清单"
     assert guard.frontend_labels(guard.FRONTEND_KG_OBJECT_CONST, path)["formula"] == "公式清单"
+    assert guard.main(path) == 1
+
+
+# --- 10. 来源清单(第三张表)同样进两条断言 ---------------------------------------
+
+
+def test_missing_source_declaration_is_rejected(tmp_path):
+    """来源清单表缺失 → 硬失败。
+
+    它只有一个键,最容易被顺手删掉或「反正只有一个标签」地内联成字符串;守卫必须
+    像对另外两张表一样拒绝放行,否则 trace 的「来源清单」与卡片标题就没人对齐了。
+    """
+    path = write_tsx(
+        tmp_path, element_declaration(), kg_object_declaration(), source_decl=""
+    )
+    with pytest.raises(guard.GuardError):
+        guard.frontend_labels(guard.FRONTEND_SOURCE_CONST, path)
+    assert guard.main(path) == 1
+
+
+def test_renamed_source_value_is_a_mismatch(tmp_path):
+    """前端把「来源清单」改成「文档清单」而后端没改 → main() 报非零。"""
+    path = write_tsx(
+        tmp_path,
+        element_declaration(),
+        kg_object_declaration(),
+        source_decl=source_declaration('  sources: "文档清单",\n'),
+    )
+    assert guard.frontend_labels(guard.FRONTEND_SOURCE_CONST, path) == {
+        "sources": "文档清单"
+    }
+    assert guard.main(path) == 1
+
+
+def test_source_label_joins_the_global_uniqueness_check(tmp_path, monkeypatch):
+    """来源清单与元素清单撞名 → main() 报非零(断言②覆盖第三张表)。
+
+    这里把**后端**那张表也改成撞名的值(monkeypatch),于是断言①对三张表全部成立
+    ——报红只可能来自唯一性检查本身。若只改前端,断言①同样会失败,这条测试就证明
+    不了第三张表真的进了唯一性检查。
+    """
+    monkeypatch.setattr(guard, "BACKEND_SOURCE_LABELS", {"sources": "代码块"})
+    path = write_tsx(
+        tmp_path,
+        element_declaration(),
+        kg_object_declaration(),
+        source_decl=source_declaration('  sources: "代码块清单",\n'),
+    )
+    # 断言①:三张表都与(被改过的)后端一致。
+    assert guard.frontend_labels(guard.FRONTEND_SOURCE_CONST, path) == {
+        "sources": "代码块清单"
+    }
     assert guard.main(path) == 1
 
 

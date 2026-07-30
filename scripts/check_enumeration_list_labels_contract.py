@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""跨栈契约:前端 answer-panel.tsx 的两张清单标签表必须逐字等于「后端标签 + 『清单』」，
-且两张表的渲染值在全域内互不重名。
+"""跨栈契约:前端 answer-panel.tsx 的三张清单标签表必须逐字等于「后端标签 + 『清单』」，
+且三张表的渲染值在全域内互不重名。
 
-集合枚举工具（design doc `docs/reasoning-enumeration-tools-design.md` §2.4/2.6）的元素/知识对象
-清单名有两份真源：后端 `backend/app/services/reasoning_retrieval.py` 的 `_ELEMENT_KIND_LABELS` /
-`_KG_OBJECT_LABELS`（trace summary 与账目回喂用它们拼「XX清单」）与前端
-`frontend/app/answer-panel.tsx` 的 `ELEMENT_KIND_LIST_LABELS` / `KG_OBJECT_LIST_LABELS`（结果卡标题
-用它们）。任一侧改名、加删 key 而另一侧没跟，用户会在 trace 里看到一个名字、在结果卡上看到
-另一个名字。这条守卫钉住两件事:
+集合枚举工具（design doc `docs/reasoning-enumeration-tools-design.md` §2.4/2.6/§6.2）的元素 /
+知识对象 / 来源清单名有三份真源：后端 `backend/app/services/reasoning_retrieval.py` 的
+`_ELEMENT_KIND_LABELS` / `_KG_OBJECT_LABELS` / `_SOURCE_COLLECTION_LABELS`（trace summary 与账目
+回喂用它们拼「XX清单」）与前端 `frontend/app/answer-panel.tsx` 的 `ELEMENT_KIND_LIST_LABELS` /
+`KG_OBJECT_LIST_LABELS` / `SOURCE_LIST_LABELS`（结果卡标题用它们）。任一侧改名、加删 key 而另一
+侧没跟，用户会在 trace 里看到一个名字、在结果卡上看到另一个名字。这条守卫钉住两件事:
 
 1. 前端表的每个值都逐字等于对应后端表的值加上后缀「清单」，key 集合也必须相同——
    多一个键、少一个键、或某个键的值不满足这个后缀关系，都判 MISMATCH。
-2. 两张前端表（元素清单 ∪ 知识对象清单）的渲染值在全域内不得重名。`formula` 在两侧都存在
-   （文档里的公式元素 vs 已抽取的公式知识对象），如果都渲染成「公式清单」，模型账目回喂里
-   会同时出现两条同名却矛盾的「已列完/未列完」陈述，reflect 也就无法区分该续跑哪一个。
+2. 三张前端表（元素清单 ∪ 知识对象清单 ∪ 来源清单）的渲染值在全域内不得重名。`formula` 在
+   元素与知识对象两侧都存在（文档里的公式元素 vs 已抽取的公式知识对象），如果都渲染成
+   「公式清单」，模型账目回喂里会同时出现两条同名却矛盾的「已列完/未列完」陈述，reflect
+   也就无法区分该续跑哪一个。来源清单只有一个标签，但同样进这条唯一性检查——它与另外八个
+   共用同一份账目。
 
 后端一侧直接 import 运行时对象（与 `check_object_type_labels_contract.py` 对
 `OBJECT_TYPE_LABELS` 的做法一致）：Python 值天然精确，不需要额外解析。前端一侧没有 Python
@@ -39,11 +41,16 @@ sys.path.insert(0, str(ROOT / "backend"))
 from app.services.reasoning_retrieval import (  # noqa: E402
     _ELEMENT_KIND_LABELS as BACKEND_ELEMENT_LABELS,
     _KG_OBJECT_LABELS as BACKEND_KG_OBJECT_LABELS,
+    _SOURCE_COLLECTION_LABELS as BACKEND_SOURCE_LABELS,
 )
 
 LIST_SUFFIX = "清单"
 FRONTEND_ELEMENT_CONST = "ELEMENT_KIND_LIST_LABELS"
 FRONTEND_KG_OBJECT_CONST = "KG_OBJECT_LIST_LABELS"
+# 来源清单只有一个标签,但仍然做成同形的对象字面量表(后端按 collection 取键):
+# 本守卫的解析器只认这一种形状,给它一张表就不必为一个标签另开一条解析路径——
+# 那条新路径本身会成为下一个「解析不了就静默跳过」的缺口。
+FRONTEND_SOURCE_CONST = "SOURCE_LIST_LABELS"
 
 
 class GuardError(RuntimeError):
@@ -242,6 +249,7 @@ def main(tsx_path: Path | None = None) -> int:
     try:
         frontend_elements = frontend_labels(FRONTEND_ELEMENT_CONST, tsx_path)
         frontend_kg_objects = frontend_labels(FRONTEND_KG_OBJECT_CONST, tsx_path)
+        frontend_sources = frontend_labels(FRONTEND_SOURCE_CONST, tsx_path)
     except GuardError as exc:
         print("enumeration list label 跨栈契约无法判定", file=sys.stderr)
         print(f"  {exc}", file=sys.stderr)
@@ -251,6 +259,7 @@ def main(tsx_path: Path | None = None) -> int:
     pairs = (
         ("元素清单 (element kind)", BACKEND_ELEMENT_LABELS, frontend_elements),
         ("知识对象清单 (KG object type)", BACKEND_KG_OBJECT_LABELS, frontend_kg_objects),
+        ("来源清单 (sources collection)", BACKEND_SOURCE_LABELS, frontend_sources),
     )
     for label, backend, frontend in pairs:
         expected = _expected_from_backend(dict(backend))
@@ -258,13 +267,17 @@ def main(tsx_path: Path | None = None) -> int:
             ok = False
             _report_mismatch(label, expected, frontend)
 
-    all_values = list(frontend_elements.values()) + list(frontend_kg_objects.values())
+    all_values = (
+        list(frontend_elements.values())
+        + list(frontend_kg_objects.values())
+        + list(frontend_sources.values())
+    )
     duplicates = sorted({v for v in all_values if all_values.count(v) > 1})
     if duplicates:
         ok = False
         print(
-            "enumeration list label 契约 MISMATCH: 元素清单与知识对象清单存在重名 "
-            f"{duplicates}（两套标签必须全域唯一，否则模型账目回喂与结果卡会各叫一个名）",
+            "enumeration list label 契约 MISMATCH: 元素清单/知识对象清单/来源清单存在重名 "
+            f"{duplicates}（三套标签必须全域唯一，否则模型账目回喂与结果卡会各叫一个名）",
             file=sys.stderr,
         )
 
@@ -274,6 +287,7 @@ def main(tsx_path: Path | None = None) -> int:
     print(
         "enumeration list label 契约 OK: elements="
         f"{sorted(BACKEND_ELEMENT_LABELS)} kg_objects={sorted(BACKEND_KG_OBJECT_LABELS)}"
+        f" sources={sorted(BACKEND_SOURCE_LABELS)}"
     )
     return 0
 

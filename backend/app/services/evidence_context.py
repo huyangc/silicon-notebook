@@ -62,6 +62,23 @@ def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef 
     return CitationKnowhowRef(table_id=str(table_id), row_id=str(row_id))
 
 
+def _is_document_row(item: object) -> bool:
+    """Is this enumerated row a whole DOCUMENT rather than something inside one?
+
+    Structural rather than an ``isinstance`` on the executor's ``SourceItem``:
+    this module sits under the enumeration executor in the layering and imports
+    nothing from it (same reason ``collection_item_citations`` reads every field
+    through ``getattr``).  The shape is unambiguous — a document row carries a
+    ``source_id`` and neither an ``element_id`` nor an ``object_id``, which is
+    true of no other row the enumerator produces.
+    """
+    return bool(
+        getattr(item, "source_id", "")
+        and not getattr(item, "element_id", "")
+        and not getattr(item, "object_id", "")
+    )
+
+
 class EvidenceContextService:
     def __init__(
         self,
@@ -160,9 +177,19 @@ class EvidenceContextService:
 
         citations: dict[str, Citation] = {}
         for item in rows:
+            # Same ordering as ``collection_enumeration_answer.enumerated_item_id``
+            # — the module that looks these keys back up.  Not imported from
+            # there: this module is the lower layer (it knows nothing about the
+            # enumeration answer glue), so the two are kept identical by
+            # ``test_enumerated_item_key_agrees_across_the_two_layers`` instead of
+            # by a dependency that would point the wrong way.  ``source_id`` is
+            # ordered LAST so an element row — which also carries one — keys by
+            # its element and can never collide with a document row for the same
+            # file.
             item_id = str(
                 getattr(item, "element_id", "")
                 or getattr(item, "object_id", "")
+                or getattr(item, "source_id", "")
                 or ""
             )
             if not item_id:
@@ -170,6 +197,28 @@ class EvidenceContextService:
             origin = str(getattr(item, "notebook_id", "") or "")
             expected_notebook_id = origin or active_notebook_id
             if expected_notebook_id not in participants:
+                continue
+            if _is_document_row(item):
+                # A DOCUMENT row's original source is the document itself: there
+                # is no sub-location to resolve, so this branch needs neither the
+                # element hydration above nor an ``element_id``.  Leaving that
+                # field empty is load-bearing rather than lazy — the grounding
+                # classifier counts a row as exact evidence only when it carries
+                # BOTH ids, and a whole document is not an exact original-text
+                # locator.  The notebook boundary is still enforced: the row only
+                # got here because its origin is in the participant set, and the
+                # cross-library convention (``notebook_id`` empty for the active
+                # notebook) is the same one every other citation follows.
+                citations[item_id] = Citation(
+                    label=str(getattr(item, "source_title", "") or item_id),
+                    source_id=item_id,
+                    element_id="",
+                    location_label=str(getattr(item, "doc_type_label", "") or ""),
+                    quoted_span=str(getattr(item, "summary", "") or "")[:300],
+                    tier=str(getattr(item, "tier", "personal") or "personal"),
+                    notebook_id=(origin if origin != active_notebook_id else ""),
+                    knowhow=None,
+                )
                 continue
             direct_element_id = str(getattr(item, "element_id", "") or "")
             evidence_id = direct_element_id

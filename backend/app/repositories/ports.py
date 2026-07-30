@@ -646,9 +646,10 @@ class SourceStorePort(Protocol):
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_change_signal_rows(
         self, db: object, notebook_id: str
-    ) -> list[tuple[str, str]]:
-        """``[(source_id, change_signal)]`` for every physical source row
-        EXCEPT the notebook's private Memory synthetic rows.
+    ) -> list[tuple[str, str, str, bool]]:
+        """``[(source_id, change_signal, created_at_key, user_visible)]`` for
+        every physical source row EXCEPT the notebook's private Memory synthetic
+        rows.
 
         ``change_signal`` is an OPAQUE backend-formatted token: equal tokens
         mean "this source's ``source_elements`` cannot have changed since the
@@ -658,6 +659,32 @@ class SourceStorePort(Protocol):
         ``app.services.collection_catalog``).  Never parse it, never compare
         it across backends or processes — only for equality against a token
         taken from the same store.
+
+        ``created_at_key`` is a SORT key, not a timestamp to display or to
+        compare across backends: text that orders the notebook's sources the
+        way ``list_sources`` orders them (``ORDER BY created_at, id``), so the
+        sources collection can walk the roster in the order the source tab
+        shows it.  Adapters normalize it (PostgreSQL hands back ``datetime``
+        where SQLite hands back the stored text) such that lexicographic
+        comparison within one backend equals that backend's own SQL ordering.
+        It rides along on a row the query already visits — the column is in the
+        same row as the three signal columns, so carrying it costs nothing —
+        and it is deliberately NOT part of the change signal: a source's
+        creation time never changes, so folding it into the token would only
+        make the token wider.
+
+        ``user_visible`` says whether the USER-FACING source list shows this row
+        — i.e. each adapter evaluates its own visible-source predicate (the one
+        ``list_sources`` / ``list_sources_page`` / ``visible_document_count``
+        share) as a projected column.  The sources collection is defined as "what
+        the source tab lists", so it must consume that predicate rather than a
+        second spelling of it, and it must NOT pay a separate query to learn it:
+        nothing indexes ``source_type``, so a "which ids are hidden" query has to
+        scan every source row of the notebook — on the request path, right after
+        this query walked the same rows.  Evaluated in the projection it is free.
+        Like ``created_at_key`` it stays out of the change signal: a source's
+        type does not change, and widening the token would invalidate every
+        cached count for a reason that cannot affect any of them.
 
         The Memory exclusion is part of the contract, not an adapter detail: a
         typed-collection listing is scoped to a notebook's participants and has
@@ -743,10 +770,32 @@ class SourceStorePort(Protocol):
         instead of re-listing every notebook's sources to look for the id.
 
         A bounded primary-key lookup (plus the 1:1 ``source_paper_meta``
-        outer join) used to label enumerated items.  The twin of
-        ``source_metadata``, which opens its own connection and hydrates
-        summary/doc_type as well; enumeration needs neither, and taking the
-        caller's connection keeps a whole scope on one connection.
+        outer join) used to label enumerated items.  The narrow twin of
+        ``source_listing_rows``, which adds summary/doc_type; a per-element
+        walk needs neither, and one label window covers up to 256 sources —
+        carrying a summary for each of them would move a page of prose to
+        render a page of titles.
+        """
+        ...
+    def source_listing_rows(
+        self, db: object, source_ids: Sequence[str]
+    ) -> list[Any]:
+        """``id / notebook_id / title / file_name / summary / doc_type /
+        source_type / is_paper / paper_title`` for the given sources, on the
+        CALLER's connection.
+
+        The projection the SOURCE-CARD shape needs: the sources collection
+        (design doc §6.2) lists a document by display title, document type and
+        its already-stored summary, and ``source_metadata`` — which wants the
+        identical columns — is implemented on top of this method so the two can
+        never drift into two spellings of one projection.  The difference
+        between them is only the connection: this one runs on the caller's, so
+        an enumeration keeps its whole walk on a single connection.
+
+        Bounded primary-key lookup plus the 1:1 ``source_paper_meta`` outer
+        join, batched by the adapter.  Callers page it (one window per
+        enumeration page); it must never be handed a whole library's ids just
+        because it can batch them.
         """
         ...
     def source_from_row(self, db: object, row: object, *, paper_meta: object = SOURCE_PAPER_META_UNSET) -> SourceSummary: ...

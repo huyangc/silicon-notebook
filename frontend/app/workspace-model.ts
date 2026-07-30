@@ -381,6 +381,10 @@ export type TypedCollectionCoverage = {
 export type TypedCollectionItem = {
   item_id: string;
   // 仅 collection === "elements" 时有效
+  // ——collection === "sources" 复用其中三个:`source_id`/`source_title` 同义
+  // （被列出的那份文档本身）、`location_label` 装文档类型的界面词（如「学术论文」，
+  // 后端 PROFILES 是唯一真源，前端不再翻一遍）、`text` 装已存摘要的摘录；
+  // `element_type` 保持空串（文档不是元素，分派看 `collection`）。
   source_id?: string;
   source_title?: string;
   element_type?: string;
@@ -400,14 +404,16 @@ export type TypedCollectionItem = {
 };
 
 /**
- * 一份类型化的元素/知识对象清单结果（PR-2 枚举工具）。与 `KnowhowResultSet`
- * 并列进 `AskResponse.result_sets`，按 `kind` 判别；`coverage`（而非它在相关度
- * 排序里的位置）才是完整/部分的权威依据。真源：
+ * 一份类型化的元素/知识对象/文档清单结果（PR-2 枚举工具，PR-2.5 加入文档清单）。
+ * 与 `KnowhowResultSet` 并列进 `AskResponse.result_sets`，按 `kind` 判别；
+ * `coverage`（而非它在相关度排序里的位置）才是完整/部分的权威依据。
+ * `collection === "sources"`（库里的文档清单）没有子类型，`element_kind` 与
+ * `object_type` 两个字段对它都为空。真源：
  * `backend/app/models/ask.py TypedCollectionResult`。
  */
 export type TypedCollectionResult = {
   kind: "collection";
-  collection: "elements" | "kg_objects";
+  collection: "elements" | "kg_objects" | "sources";
   /** collection === "elements" 时非空："formula" | "table" | "image" | "code_block"。 */
   element_kind?: string;
   /** collection === "kg_objects" 时非空："concept" | "claim" | "formula" | "procedure"。 */

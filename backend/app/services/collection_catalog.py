@@ -21,6 +21,12 @@ Three hard properties, in priority order:
 Cost shape (per build, per notebook in scope):
 
   * 1 ``sources`` query for the change signals — the ONLY unconditional query;
+  * 0 extra queries for the sources collection: that signal query PROJECTS the
+    user-visible flag (each adapter evaluates its own ``list_sources``
+    predicate), so the collection's count and its traversal plan are arithmetic
+    over rows already in hand — no second read of ``sources``, and, because both
+    come out of the same helper, no way for the map's ``sources: N`` to disagree
+    with the list the executor walks;
   * 0 element queries when the notebook's signal fingerprint is unchanged;
   * otherwise one batched ``GROUP BY source_id, element_type`` per batch of
     sources, restricted to the whitelist;
@@ -131,6 +137,32 @@ class ScopeSource:
 
 
 @dataclass(frozen=True)
+class ScopeSourcePlan:
+    """Which sources the SOURCES collection lists, in traversal order.
+
+    Same four fields as ``ScopeElementPlan`` and deliberately a separate type:
+    there ``ScopeSource.count`` means "how many elements of the requested kind
+    this source holds", here every entry counts as exactly one listed row, and
+    one dataclass carrying both meanings is how a row budget starts being
+    charged in element units.
+
+    ``total`` is exactly ``CollectionMap.sources`` for the same scope — both come
+    out of ``_visible_signal_rows``.  Order: participants as the caller resolved
+    them, and inside each participant ``(created_at, id)`` — i.e. what
+    ``list_sources`` returns and the source tab shows. Not the element plan's
+    id order: that one exists to keep an ``(source_id, element_id)`` cursor
+    aligned, while this roster is re-aligned by KEY on resume and is free to use
+    the order a user can actually recognize. Both are stable, which is the
+    property a cursor handed back across calls needs.
+    """
+
+    notebook_ids: Tuple[str, ...]
+    sources: Tuple[ScopeSource, ...]
+    total: int
+    fingerprint: str
+
+
+@dataclass(frozen=True)
 class ScopeElementPlan:
     """Which sources hold a kind, in traversal order, plus the scope identity.
 
@@ -163,6 +195,12 @@ class CollectionMap:
     elements: Tuple[ElementKindCount, ...]
     kg_objects: Tuple[Tuple[str, int], ...]
     knowhow_tables: int
+    # How many documents the scope holds, in the USER-VISIBLE sense — the number
+    # the source tab shows, not the number of physical ``sources`` rows (Memory
+    # synthetic rows and Knowhow projection rows are neither listed nor counted).
+    # No default: a silently-zero count would render "sources: 0" on a library
+    # full of documents, which reads as a fact rather than as a missing field.
+    sources: int
 
     def element_count(self, kind: str) -> int:
         for item in self.elements:
@@ -198,7 +236,8 @@ def render_collection_map(collection_map: CollectionMap) -> str:
         "[Collections in scope] "
         f"elements: {elements} | "
         f"KG objects: {kg_objects} | "
-        f"knowhow tables: {collection_map.knowhow_tables}"
+        f"knowhow tables: {collection_map.knowhow_tables} | "
+        f"sources: {collection_map.sources}"
     )
     if len(text) > COLLECTION_MAP_MAX_CHARS:
         return text[: COLLECTION_MAP_MAX_CHARS - 1] + "…"
@@ -279,7 +318,7 @@ class CollectionCatalogService:
             notebook_ids = tuple(
                 self._notebooks.participant_ids(db, active_notebook_id)
             )
-            elements = self._scope_element_counts(db, notebook_ids)
+            elements, sources = self._scope_signal_row_counts(db, notebook_ids)
             kg_objects = self._scope_kg_counts(db, notebook_ids)
             knowhow_tables = self._scope_knowhow_tables(db, notebook_ids)
         return CollectionMap(
@@ -287,6 +326,7 @@ class CollectionCatalogService:
             elements=elements,
             kg_objects=kg_objects,
             knowhow_tables=knowhow_tables,
+            sources=sources,
         )
 
     def collection_map_text(self, active_notebook_id: str) -> str:
@@ -332,12 +372,110 @@ class CollectionCatalogService:
             fingerprint=signal_fingerprint(all_signals),
         )
 
+    def scope_source_plan(
+        self, db: object, notebook_ids: Sequence[str]
+    ) -> ScopeSourcePlan:
+        """Traversal plan for the SOURCES collection over one resolved scope.
+
+        The user-visible document list, in the same participant/id order the
+        element plan uses, with the same signal fingerprint as its scope
+        identity — so the sources cursor, the closing stability check and the
+        completeness proof are literally the element side's machinery, not a
+        second implementation of it.
+
+        It costs NOTHING beyond the signal query the caller pays anyway — the
+        visibility flag rides in that query's projection — and no count query:
+        the number of visible sources is the length of this list, which is also
+        what the map reports (``_visible_signal_rows`` is the one place that
+        decides).  Deliberately not memoized: unlike the element plan there is
+        no counting to skip and nothing left to read.
+        """
+        sources: List[ScopeSource] = []
+        all_signals: List[Tuple[str, str]] = []
+        for notebook_id in notebook_ids:
+            signals = list(self._sources.source_change_signal_rows(db, notebook_id))
+            all_signals.extend(signals)
+            sources.extend(
+                self._notebook_visible_sources(notebook_id, signals)
+            )
+        return ScopeSourcePlan(
+            notebook_ids=tuple(notebook_ids),
+            sources=tuple(sources),
+            total=len(sources),
+            fingerprint=signal_fingerprint(all_signals),
+        )
+
+    @staticmethod
+    def _visible_signal_rows(
+        signals: Sequence[Tuple[str, str, str, bool]],
+    ) -> List[Tuple[str, str, str, bool]]:
+        """One notebook's user-visible source rows, from signals already read.
+
+        THE definition of "which sources does the sources collection contain",
+        used by the map's count and by the executor's plan alike — the same
+        consistency-by-construction rule the element side follows, and the one
+        that keeps "map says 7, list shows 8" impossible.
+
+        Two exclusions, neither of them spelled here:
+
+        * Memory synthetic rows are already absent from
+          ``source_change_signal_rows`` (its contract, for the privacy reason
+          documented there and in this module's header);
+        * the Knowhow projection row is dropped by the row's own
+          ``user_visible`` flag, which each adapter evaluates from its own
+          user-visible-source predicate — the one ``list_sources`` /
+          ``visible_document_count`` share.  So this list is the source tab's
+          list, by derivation rather than by resemblance.
+
+        **Zero queries, and that is the point.**  This used to subtract a
+        ``hidden_source_ids`` read, one per participant per map build: nothing
+        indexes ``source_type``, so that query scanned every source row of the
+        notebook to find the one or two hidden ones — immediately after the
+        signal query had walked the same rows.  Moving the predicate into the
+        signal projection makes the whole thing arithmetic on rows in hand.
+        There is deliberately no fallback for a short row: a backend that does
+        not carry the flag is a contract violation and should fail loudly here
+        rather than silently list a hidden projection source.
+
+        Returns rows, NOT ordered ``ScopeSource``s: the map only needs how many
+        there are, and sorting a 50 000-source notebook to produce a length
+        would be work the count never uses.  ``_notebook_visible_sources``
+        below adds the order, for the one caller that walks them.
+        """
+        return [row for row in signals if row[3]]
+
+    def _notebook_visible_sources(
+        self,
+        notebook_id: str,
+        signals: Sequence[Tuple[str, str, str, bool]],
+    ) -> Tuple[ScopeSource, ...]:
+        """The same set, in the order the SOURCE TAB shows it.
+
+        ``(created_at, id)`` — ``list_sources``' own ``ORDER BY``, reproduced
+        over the sort keys the signal rows carry.  Ordering by id alone (what
+        this did first) produced a roster in an order no user has ever seen,
+        which matters the moment anything truncates: "the first 5 documents" of
+        an id-ordered roster is an arbitrary subset, while of a creation-ordered
+        one it is the 5 the user added first — the only reading of "first" the
+        interface supports.
+
+        ``count=1``: for this collection one source IS one listed row, and the
+        row budget must be charged in listed rows.
+        """
+        return tuple(
+            ScopeSource(notebook_id=notebook_id, source_id=row[0], count=1)
+            for row in sorted(
+                self._visible_signal_rows(signals),
+                key=lambda row: (row[2], row[0]),
+            )
+        )
+
     def _notebook_plan_sources(
         self,
         db: object,
         notebook_id: str,
         kind: str,
-        signals: Sequence[Tuple[str, str]],
+        signals: Sequence[Tuple[str, ...]],
     ) -> Tuple[ScopeSource, ...]:
         fingerprint = signal_fingerprint(signals)
         key = (notebook_id, kind)
@@ -352,7 +490,11 @@ class CollectionCatalogService:
             ScopeSource(notebook_id=notebook_id, source_id=source_id, count=count)
             for source_id, count in (
                 (source_id, int(counts.get(source_id, {}).get(kind, 0)))
-                for source_id, _signal in sorted(signals)
+                # 元素侧顺序刻意**仍按 source_id**:它的游标是
+                # (source_id, element_id) 的 keyset,换成 created_at 序会让
+                # 已经发出去的游标在下一次调用里对不上位置。来源清单那侧没有
+                # 这个约束(它按 key 重对齐),所以只有它改成来源页签顺序。
+                for source_id, _signal, *_ in sorted(signals)
             )
             if count > 0
         )
@@ -418,26 +560,42 @@ class CollectionCatalogService:
             self._plan_source_entries = 0
 
     # ----------------------------------------------------------------- element
-    def _scope_element_counts(
+    def _scope_signal_row_counts(
         self, db: object, notebook_ids: Sequence[str]
-    ) -> Tuple[ElementKindCount, ...]:
+    ) -> Tuple[Tuple[ElementKindCount, ...], int]:
+        """Element counts AND the user-visible source count, in one pass.
+
+        Both answers come out of the same ``source_change_signal_rows`` read, so
+        they are computed together rather than by two loops: the signal query is
+        this module's only unconditional query and it returns one row per source,
+        so calling it twice per notebook would double the map's floor cost on a
+        50 000-source base for nothing.  Peak memory is unchanged — one
+        notebook's signal list at a time, exactly as before.
+        """
         totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
         source_totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
+        visible_sources = 0
         for notebook_id in notebook_ids:
-            for item in self._notebook_element_counts(db, notebook_id):
+            signals = list(self._sources.source_change_signal_rows(db, notebook_id))
+            for item in self._notebook_element_counts(db, notebook_id, signals):
                 totals[item.kind] += item.count
                 source_totals[item.kind] += item.sources
-        return tuple(
+            # 计数只要个数,不要顺序:排序留给真的要遍历那份清单的调用方
+            # (`scope_source_plan`),否则 5 万源的库会为了一个 len() 排一遍。
+            visible_sources += len(
+                self._visible_signal_rows(signals)
+            )
+        elements = tuple(
             ElementKindCount(
                 kind=kind, count=totals[kind], sources=source_totals[kind]
             )
             for kind in ENUMERABLE_ELEMENT_KINDS
         )
+        return elements, visible_sources
 
     def _notebook_element_counts(
-        self, db: object, notebook_id: str
+        self, db: object, notebook_id: str, signals: Sequence[Tuple[str, ...]]
     ) -> Tuple[ElementKindCount, ...]:
-        signals = self._sources.source_change_signal_rows(db, notebook_id)
         fingerprint = signal_fingerprint(signals)
         with self._lock:
             cached = self._notebook_counts.get(notebook_id)
@@ -468,7 +626,7 @@ class CollectionCatalogService:
         return result
 
     def _per_source_counts(
-        self, db: object, signals: Sequence[Tuple[str, str]]
+        self, db: object, signals: Sequence[Tuple[str, ...]]
     ) -> Dict[str, Dict[str, int]]:
         """``{source_id: {kind: count}}`` for every source in the notebook,
         served from the LRU where the change signal still matches and queried
@@ -486,7 +644,7 @@ class CollectionCatalogService:
         results: Dict[str, Dict[str, int]] = {}
         stale: List[Tuple[str, str]] = []
         with self._lock:
-            for source_id, signal in signals:
+            for source_id, signal, *_ in signals:
                 cached = self._source_counts.get(source_id)
                 if cached is not None and cached[0] == signal:
                     self._source_counts.move_to_end(source_id)
@@ -632,7 +790,7 @@ class CollectionCatalogService:
         )
 
 
-def signal_fingerprint(signals: Sequence[Tuple[str, str]]) -> str:
+def signal_fingerprint(signals: Sequence[Tuple[str, ...]]) -> str:
     """Order-independent digest of a (source, signal) set.
 
     Public because the enumeration executor needs the SAME digest to decide
@@ -644,9 +802,20 @@ def signal_fingerprint(signals: Sequence[Tuple[str, str]]) -> str:
     regardless of row order, and a source added / removed / re-parsed changes
     it.  blake2b at 16 bytes: this gates a cache, not a security boundary, but
     it still has to be collision-free in practice across a library's lifetime.
+
+    Consumes exactly the first two fields and ignores any that follow, so the
+    ``created_at`` sort key the rows now carry does NOT enter the digest.  That
+    is deliberate and pinned by
+    ``test_created_at_key_does_not_change_the_fingerprint``: creation time never
+    changes for a live source, so hashing it could only widen the token, and a
+    changed fingerprint means "re-count everything" — a cache key must not move
+    for a reason that cannot affect what it caches.  Sorting still lands in the
+    same order because source ids are unique, so the digest is byte-identical to
+    the pre-``created_at`` one.
     """
     digest = hashlib.blake2b(digest_size=16)
-    for source_id, signal in sorted(signals):
+    for row in sorted(signals):
+        source_id, signal = row[0], row[1]
         digest.update(source_id.encode("utf-8"))
         digest.update(b"\x00")
         digest.update(signal.encode("utf-8"))

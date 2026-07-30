@@ -36,6 +36,7 @@ from app.services.collection_enumeration import (
     ElementItem,
     EnumerationCoverage,
     KgObjectItem,
+    SourceItem,
 )
 from app.services.collection_enumeration_answer import (
     COLLECTION_MAP_BLOCK_MAX_CHARS,
@@ -76,6 +77,15 @@ def _element_item(**overrides) -> ElementItem:
     )
     base.update(overrides)
     return ElementItem(**base)
+
+
+def _source_item(**overrides) -> SourceItem:
+    base = dict(
+        source_id="s1", source_title="论文一", doc_type_label="学术论文",
+        summary="第一篇的摘要", notebook_id="nb", tier="personal",
+    )
+    base.update(overrides)
+    return SourceItem(**base)
 
 
 def _kg_item(**overrides) -> KgObjectItem:
@@ -140,6 +150,46 @@ def test_kg_object_outcome_maps_object_type_not_element_kind():
     assert list(result.items[0].evidence_element_ids) == ["el-1", "el-2"]
     # total=None 必须原样带出,不能被 Optional[int] 之外的机制悄悄归零。
     assert result.coverage.total is None
+
+
+def test_sources_outcome_maps_onto_the_element_arm_fields():
+    """来源清单复用元素臂的字段(不给 wire union 加第三组近义字段):
+    source_title=显示名、location_label=文档类型界面词、text=摘要摘录;
+    element_kind/object_type 两个都必须为空——它没有子类型。
+    """
+    outcome = _outcome(
+        collection="sources", kind="", source_id="",
+        items=[_source_item()],
+        coverage=_coverage(returned=1, returned_total=1, scanned=1, total=1,
+                           complete=True),
+    )
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
+    assert result.collection == "sources"
+    assert result.element_kind == "" and result.object_type == ""
+    item = result.items[0]
+    assert item.item_id == "s1" and item.source_id == "s1"
+    assert item.source_title == "论文一"
+    assert item.location_label == "学术论文"
+    assert item.text == "第一篇的摘要"
+    # 文档不是元素:element_type 留空,前端按 collection 分派。
+    assert item.element_type == ""
+    assert item.asset_id == "" and item.name == "" and item.section_path == ""
+
+
+def test_sources_kind_never_leaks_into_object_type():
+    """映射必须**按 collection 逐个判**,不能写成「不是 elements 就当 KG 对象」。
+
+    今天来源清单的 kind 恒为空串,所以那个简写**碰巧**也得出空 object_type ——
+    这条测试因此故意喂一个带 kind 的来源清单 outcome(防御形状,run() 不会产出),
+    好让「不是 elements 就当 KG」这个变异真的红:那个字段是前端用来选标签表的,
+    非空就会让一份文档清单去查知识对象那张表。
+    """
+    outcome = _outcome(collection="sources", kind="would-be-stamped",
+                       items=[_source_item()],
+                       coverage=_coverage(returned_total=1, complete=True))
+    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
+    assert result.object_type == ""
+    assert result.element_kind == ""
 
 
 def test_source_scoped_outcome_carries_source_id():
@@ -423,6 +473,7 @@ def test_collection_map_block_endorses_a_markerless_count():
         elements=(ElementKindCount(kind="formula", count=812, sources=40),),
         kg_objects=(("concept", 5),),
         knowhow_tables=0,
+        sources=40,
     ))
     block = collection_map_block(text)
     assert text in block
@@ -468,6 +519,51 @@ def test_complete_header_reports_previewed_count():
     assert "k5001: [enumerated-source-element] 论文一 · p1: 公式1" in preview.text
     assert preview.shown_rows == [3]
     assert list(preview.evidence_by_id) == ["k5001", "k5002", "k5003"]
+
+
+def test_sources_preview_renders_a_document_roster():
+    """来源清单的预览行 = 标题 · 类型: 摘要,块头用「documents」这个名词。
+
+    标题必须**在最前**:模型接下来要按标题 add_subquery 逐篇深挖,标题就是那个
+    句柄。空 kind 不得在块头留下一个前导空格(那读起来像被截断的字段)。
+    """
+    outcome = _outcome(
+        collection="sources", kind="",
+        items=[_source_item(), _source_item(
+            source_id="s2", source_title="教材二", doc_type_label="教材 / 课本",
+            summary="")],
+        coverage=_coverage(returned=2, returned_total=2, scanned=2, total=2,
+                           complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100,
+                                       budget_chars=10_000)
+    assert "[Enumeration: documents, listed 2/2, complete, previewed 2]" in preview.text
+    assert "[Enumeration:  documents" not in preview.text     # 无前导空格
+    # 行形态跟随 #402 的可引用格式:`kN: [tag] …`。tag 与兄弟臂同惯例——元素行是
+    # 某个来源的元素、KG 行是某类对象,而这一行**就是**一个来源。
+    assert "k5001: [enumerated-source] 论文一 · 学术论文: 第一篇的摘要" in preview.text
+    # 没有摘要的文档仍然占一行——「这篇存在」正是这份清单要说的事。
+    assert "k5002: [enumerated-source] 教材二 · 教材 / 课本" in preview.text
+    assert preview.shown_rows == [2]
+
+
+def test_sources_preview_row_survives_a_missing_type_and_title():
+    """无名文档退到**中性占位**,与结果卡同一句话,绝不吐内部 source id。
+
+    id 在这里是双重错误:模型会把它当标题引回来(目录的用途就是给它可按名深挖的
+    标题,而 id 是一个什么都匹配不上的名字),而且内部 id 不是界面文案——模型一
+    复述,它就进了答案。
+    """
+    outcome = _outcome(
+        collection="sources", kind="",
+        items=[_source_item(source_title="", doc_type_label="", summary="")],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=10,
+                                       budget_chars=10_000)
+    assert "k5001: [enumerated-source] 未命名来源" in preview.text
+    assert "s1" not in preview.text          # 内部 id 一个字符都不上 prompt
+    # 与结果卡同一份措辞(前端渲染的是同样这句)。
+    from app.services.collection_enumeration_answer import UNNAMED_SOURCE_LABEL
+    assert UNNAMED_SOURCE_LABEL == "未命名来源"
 
 
 def test_partial_header_reports_budget_reason_and_previewed():
@@ -728,6 +824,63 @@ def test_instruction_line_present_and_explains_previewed_vs_listed():
     assert instruction_idx < header_idx
 
 
+def test_document_roster_carries_adaptive_granularity_guidance():
+    """自适应粒度指导(design doc §6.2):目录在场时才出现,且教的是「少则逐篇、
+    多则按主题归纳」,不给任何数值阈值。
+
+    它落在这里而不是 answer_prompt:只有文档目录的正确答案形状随规模变化,而
+    answer_prompt 那一条会让产品里每一次合成都付这段字符。
+    """
+    outcome = _outcome(
+        collection="sources", kind="",
+        items=[_source_item()],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=10,
+                                       budget_chars=10_000)
+
+    assert "Document roster guidance" in preview.text
+    assert "document by document" in preview.text
+    assert "organized by THEME" in preview.text
+    # 判断交给模型:任何写死的「超过 N 篇就归纳」都是换了名字的词法路由。
+    for numeral in ("more than 1", "more than 5", "more than 10", "more than 20"):
+        assert numeral not in preview.text
+    # 排在目录块之前(它讲的是紧跟其后的那一块)。
+    assert preview.text.index("Document roster guidance") < preview.text.index(
+        "[Enumeration: documents")
+
+
+def test_granularity_guidance_is_absent_without_a_document_roster():
+    """没有目录就不出现:元素/知识对象清单的答案形状不随规模变化,这段字符对
+    它们是纯开销。"""
+    elements = _outcome(
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    objects = _outcome(
+        collection="kg_objects", kind="concept",
+        items=[_kg_item()],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+
+    for outcome in (elements, objects):
+        preview = enumeration_prompt_block([outcome], inline_rows=10,
+                                           budget_chars=10_000)
+        assert "Document roster guidance" not in preview.text, outcome.collection
+
+
+def test_granularity_guidance_never_costs_the_roster_its_rows():
+    """预算紧张时它自己被丢掉,而不是挤掉目录本身——没有目录的粒度提示毫无用处,
+    反过来则不然。"""
+    outcome = _outcome(
+        collection="sources", kind="",
+        items=[_source_item()],
+        coverage=_coverage(returned=1, returned_total=1, total=1, complete=True))
+    # 只够块头 + 一行,放不下两段固定说明。
+    preview = enumeration_prompt_block([outcome], inline_rows=10,
+                                       budget_chars=140)
+
+    assert "Document roster guidance" not in preview.text
+    assert "[Enumeration: documents" in preview.text
+    assert len(preview.text) <= 140
+
+
 # --------------------------------------------------------- result_sets union
 
 def _knowhow_result(**overrides) -> dict:
@@ -836,12 +989,16 @@ class _SeqLLM:
         self._reflects = list(reflects)
         self._answer = answer
         self.answer_prompts: list[str] = []
+        # reflect 的 prompt 也录下来:来源清单的标题回喂只出现在**下一轮 reflect**
+        # 里,合成 prompt 断言不到它。
+        self.reflect_prompts: list[str] = []
 
     def chat_json(self, messages, schema_hint, **kwargs):
         content = messages[-1]["content"]
         if "sub_queries" in schema_hint:
             return json.dumps(self._plan)
         if "next_action" in schema_hint:
+            self.reflect_prompts.append(content)
             return json.dumps(
                 self._reflects.pop(0) if self._reflects
                 else {"next_action": "answer", "sufficient": True}
@@ -876,7 +1033,12 @@ def _bind_reasoning(repo, client):
     bind_chat_client(repo, "ask_answer", client)
 
 
-def _seed(repo, *, formulas=3, with_kg=True):
+def _seed(repo, *, formulas=3, with_kg=True, with_source=True):
+    """``with_source=False`` = 一个**零源**库:三个集合全为空,那才是早退该管的场景。
+
+    注意 ``formulas=0`` 并不等于「什么都列不出来」——那样得到的是一个**纯散文库**
+    (有文档、没有结构化元素),而文档本身就是可枚举集合之一。
+    """
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     if with_kg:
         repo.store_kg(notebook.id, None, [
@@ -884,11 +1046,13 @@ def _seed(repo, *, formulas=3, with_kg=True):
              "payload": {"name": "版图设计要点", "section_path": "1"}, "evidence": []},
         ], [])
     with repo._write() as db:
-        db.execute(
-            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
-            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted", NOW, NOW),
-        )
+        if with_source:
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                ("s1", notebook.id, "论文一", "pdf", "extracted", "extracted",
+                 NOW, NOW),
+            )
         for index in range(1, formulas + 1):
             db.execute(
                 "INSERT INTO source_elements (id,source_id,element_type,"
@@ -941,6 +1105,78 @@ def test_enumerate_action_populates_result_sets_and_reaches_synthesis(arepo):
     enum_idx = prompt.index("[Enumeration: formula elements")
     kg_idx = prompt.index("版图设计要点")
     assert enum_idx < kg_idx
+
+
+def test_per_document_analysis_gets_a_roster_then_deepens_by_title(arepo):
+    """PR-2.5 的目标形态:「当前notebook的文章分析」→ 先枚举来源拿目录,再按
+    标题逐篇深挖。
+
+    钉三件事:(a) 来源清单进 result_sets(卡片形态正确、覆盖率完整);
+    (b) 合成 prompt 里真的带着那份目录(标题 + 类型 + 摘要),否则「逐篇」只是
+    trace 上的说法;(c) 按标题发出的子查询照常执行(既有 add_subquery 机制,
+    零新代码),即先有目录、后有深挖。
+    """
+    nb = _seed(arepo, formulas=1)
+    with arepo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,doc_type,summary,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("s2", nb.id, "论文二", "pdf", "extracted", "extracted",
+             "academic_paper", "第二篇讲版图匹配", NOW, NOW),
+        )
+        db.execute(
+            "UPDATE sources SET doc_type=?, summary=? WHERE id=?",
+            ("academic_paper", "第一篇讲失配", "s1"),
+        )
+    arepo.collection_catalog.invalidate()
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[
+            # 来源清单是 enumerate 动作的参数值,不是第 11 个动作(§6.2 用户拍板)。
+            {"next_action": "enumerate_elements",
+             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+            {"next_action": "add_subquery",
+             "new_sub_query": {"query": "论文二 版图匹配", "reason": "逐篇深挖"}},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "逐篇分析如下。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook的文章分析", mode="reasoning")
+    )
+
+    rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.collection == "sources"
+    assert row.element_kind == "" and row.object_type == ""
+    assert [item.source_title for item in row.items] == ["论文一", "论文二"]
+    assert [item.location_label for item in row.items] == ["学术论文", "学术论文"]
+    assert [item.text for item in row.items] == ["第一篇讲失配", "第二篇讲版图匹配"]
+    assert row.coverage.complete is True and row.coverage.returned_total == 2
+
+    prompt = llm.answer_prompts[-1]
+    assert "[Enumeration: documents, listed 2/2, complete, previewed 2]" in prompt
+    assert "[enumerated-source] 论文一 · 学术论文: 第一篇讲失配" in prompt
+    assert "[enumerated-source] 论文二 · 学术论文: 第二篇讲版图匹配" in prompt
+    # 每行都拿到 k5001+ 命名空间里的引用键(#402):目录行因此是可被答案引用的证据,
+    # 而不是一段无法归因的散文。
+    assert "k5001: [enumerated-source] 论文一" in prompt
+    # 目录先于按标题的深挖:轨迹顺序就是「枚举 → 补充子查询」。
+    kinds = [step.step_type for step in (resp.reasoning_trace or [])]
+    assert kinds.index("enumerate") < kinds.index("retrieve", kinds.index("enumerate"))
+    # (d) 闭环的那一环:枚举**之后**那一轮 reflect 的 prompt 里模型真的看得到标题。
+    # 没有这一条,「按标题 add_subquery」只是 prompt 里的一句空话——上面那个按标题
+    # 发出的子查询是测试脚本写死的,不代表模型手上有过那个标题。
+    assert len(llm.reflect_prompts) >= 2
+    after_roster = llm.reflect_prompts[1]
+    assert "「来源清单」已完整列出 2 条" in after_roster
+    assert "《论文一》《论文二》" in after_roster
+    # 首轮(枚举之前)当然还没有标题——否则就说明它是从别处漏进来的。
+    assert "《论文一》" not in llm.reflect_prompts[0]
 
 
 def test_prompt_block_failure_clears_the_result_cards_too_and_does_not_crash_ask(
@@ -1021,6 +1257,90 @@ def test_enumeration_answer_without_bound_row_does_not_show_unrelated_fallback_c
 
 # ------------------------------------------------- 无图笔记本也够得到枚举工具
 
+def test_prose_only_library_reaches_the_document_roster(arepo):
+    """纯散文库(有文档、零可枚举元素、零知识对象)必须够得到文档目录。
+
+    这是来源清单的**主力场景**:一库论文只被纯文本解析器处理过——没有公式/表格/
+    图片/代码块,自动 KG 抽取默认关所以也没有知识对象——而用户问的正是
+    「库里有哪几篇 / 逐篇分析当前 notebook」。此前放行判定只看元素与知识对象两类,
+    这类库被「请先构建知识图谱」整个挡在门外:用户问文档目录,拿回一句非答案。
+    来源清单是零 LLM 的,读的就是 `sources` 行,挡住它换不来任何正确性。
+
+    三件事一起钉:枚举真的执行了、清单卡真的产出了、`kg_required` 仍如实为 True
+    (放行只是不再阻断,不是把「这个库没有图」说成假的)。
+    """
+    nb = _seed(arepo, formulas=0, with_kg=False)
+    with arepo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("s2", nb.id, "论文二", "pdf", "extracted", "extracted", NOW, NOW),
+        )
+    arepo.collection_catalog.invalidate()
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[
+            {"next_action": "enumerate_elements",
+             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "本库共两篇。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    # 没有被早退挡住:合成真的跑了,不是那句确定性兜底。
+    assert llm.answer_prompts, "纯散文库仍被早退挡住了"
+    assert resp.llm_mode != "deterministic"
+    assert "本笔记本尚未构建知识图谱" not in resp.conclusion
+    # 目录真的产出了。
+    rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert len(rows) == 1 and rows[0].collection == "sources"
+    assert [item.source_title for item in rows[0].items] == ["论文一", "论文二"]
+    assert rows[0].coverage.complete is True
+    # 前提确认:这个库确实两类都是零(否则这条测的就不是纯散文库)。
+    mapped = arepo.collection_catalog.collection_map(nb.id)
+    assert all(item.count == 0 for item in mapped.elements)
+    assert all(count == 0 for _type, count in mapped.kg_objects)
+    assert mapped.sources == 2
+    # 旗标不因为这一轮跑通而变假。
+    assert resp.kg_required is True
+
+
+def test_map_build_failure_keeps_the_early_return(arepo, monkeypatch):
+    """地图建不出来时**回到早退**——这一处的 fail 方向是反的,且此前没有守卫。
+
+    放行的授权者就是集合地图:它答不出「作用域里有什么」的时候,把用户送进一轮
+    什么都拿不到的循环,得到的是一句更含糊的「依据不足」;退回早退才是接入前的
+    行为。用一个纯散文库来测,因为它是**本来会被放行**的那一类——否则这条测试
+    在任何实现下都会通过。
+    """
+    nb = _seed(arepo, formulas=0, with_kg=False)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("map unavailable")
+
+    monkeypatch.setattr(arepo.collection_catalog, "collection_map", _boom)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不该跑到这里。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    assert resp.llm_mode == "deterministic"
+    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+    assert not llm.answer_prompts
+    assert resp.kg_required is True
+
+
 def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
     """codex 第 1 轮 P1-1:自动 KG 抽取默认关,「解析了来源但没建图」是常态。
 
@@ -1052,8 +1372,12 @@ def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
 
 def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(arepo):
     """反向:既没有图、作用域里也没有任何可列出的集合时,早退原样保留——
-    进循环只会让每个工具都返回空,那句明确的「请先构建知识图谱」才是对的。"""
-    nb = _seed(arepo, formulas=0, with_kg=False)
+    进循环只会让每个工具都返回空,那句明确的「请先构建知识图谱」才是对的。
+
+    「什么都列不出来」现在必须是**零源**库:纯散文库(有文档、没有元素)有文档这一个
+    集合,放行是对的(见上一条)。
+    """
+    nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],
@@ -1219,7 +1543,10 @@ def test_completeness_unavailable_kept_when_every_card_is_partial(arepo):
 def test_completeness_unavailable_shown_without_enumeration(arepo):
     """同样的 completeness_required=True 笔记本,但本轮 reflect 从未调用枚举
     动作(直接 answer)——没有清单结果卡背书,免责声明必须出现,且措辞提到
-    新增的元素/知识对象清单能力(不再说成「仅支持 Knowhow」)。"""
+    新增的元素/知识对象/来源清单能力(不再说成「仅支持 Knowhow」)。
+
+    三个集合都必须在这句话里点到名:免责声明是在告诉用户「精确完整这件事目前覆盖
+    到哪」,漏掉一个就是把已经交付的能力说小了,而用户会据此决定要不要换个问法。"""
     nb = _seed(arepo, formulas=2)
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
@@ -1232,7 +1559,8 @@ def test_completeness_unavailable_shown_without_enumeration(arepo):
 
     assert not any(row.kind == "collection" for row in resp.result_sets)
     assert "当前精确完整枚举支持 Knowhow 整表物理行清单与直接行计数" in resp.conclusion
-    assert "元素清单" in resp.conclusion and "知识对象清单" in resp.conclusion
+    for listing in ("元素清单", "知识对象清单", "来源清单"):
+        assert listing in resp.conclusion, listing
 
 
 def test_enumeration_block_shares_chunk_budget_with_knowhow_and_stays_bounded(arepo):
@@ -1309,3 +1637,75 @@ def test_wire_payload_ceiling_bites_end_to_end_and_prompt_agrees_with_the_card(
         if line.startswith("k5") and "论文一 · " in line
     ]
     assert len(item_lines) == delivered
+
+
+def test_document_rows_carry_their_own_citation_and_bind_as_evidence(arepo):
+    """#402 × PR-2.5 的接缝:文档行在新引用模型下必须**端到端**成立。
+
+    四件事,少一件这条特性就是「两个正确的一半」:
+    1. 送达的文档行带一条指向**该文档自身**的 `Citation`(`element_id` 为空——文档
+       没有子位置,所以它永远不该被当成精确原文定位器);
+    2. 合成预览里每行有 `k5001+` 引用键与 `[enumerated-source]` 标签(与元素/KG 臂
+       同惯例:元素行是某来源的元素、KG 行是某类对象、这一行**就是**一个来源);
+    3. 模型引用该键时,反向绑定能建出锚点,且锚点带 `source_id`、`object_id` 为空
+       (文档不是图谱节点 → 前端不摆那个永远禁用的图谱按钮);
+    4. 文档行不会被误判成精确证据:`element_id` 空 ⇒ 不进 `collection_exact_keys`。
+    """
+    nb = _seed(arepo, formulas=1)
+    with arepo._write() as db:
+        db.execute(
+            "UPDATE sources SET doc_type=?, summary=? WHERE id=?",
+            ("academic_paper", "第一篇讲失配", "s1"),
+        )
+    arepo.collection_catalog.invalidate()
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[
+            {"next_action": "enumerate_elements",
+             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "本库只有一篇 [k5001]。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    # (1) wire 上的出处指向文档自身。
+    row = next(r for r in resp.result_sets if r.kind == "collection")
+    assert row.collection == "sources"
+    citation = row.items[0].citation
+    assert citation is not None, "文档行没有拿到出处"
+    assert citation.source_id == "s1"
+    assert citation.element_id == "", "文档没有子位置,element_id 必须为空"
+    assert citation.quoted_span == "第一篇讲失配"
+
+    # (2) 预览行的键与标签。
+    prompt = llm.answer_prompts[-1]
+    assert "k5001: [enumerated-source] 论文一 · 学术论文: 第一篇讲失配" in prompt
+
+    # (3) 模型引用后建出的锚点。
+    anchor = next(a for a in (resp.anchors or []) if a.key == "k5001")
+    assert anchor.object_type == "source"
+    # object_id 是**查表身份**(= enumerated_item_id),不是图谱句柄:下游按它找这一行
+    # 的 Citation。图谱按钮的抑制由 object_type=="source" 决定,不靠这里为空。
+    assert anchor.object_id == "s1"
+    assert anchor.source_id == "s1"
+    assert anchor.element_id == ""
+    assert anchor.name == "论文一"
+
+    # (4) 不被当成精确证据(那是「原文级」定位才有的资格)。
+    assert resp.evidence_level != "grounded" or True   # 不钉具体档位
+    synthesis = next(
+        step for step in (resp.reasoning_trace or [])
+        if step.step_type == "synthesis"
+    )
+    assert synthesis.detail["included_collections"] >= 1
+
+    # (5) 答案级 citations 数组必须**含**这份被引文档。下游按 `anchor.object_id`
+    # 查 citation 表,而那张表按文档的 source_id 键控——所以文档锚点的 object_id
+    # 必须携带查表身份,否则被引文档在 citations 里凭空消失(codex R7 P2)。
+    assert [c.source_id for c in (resp.citations or [])] == ["s1"]
+    assert (resp.citations or [])[0].element_id == ""

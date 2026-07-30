@@ -32,6 +32,11 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 // 腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不重蹈
 // 覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
 // exact_lookup 这些是内部机制,不该摆给用户)。
+//
+// PR-2.5 的来源清单刻意**不在**这张表里:它不是第 11 个动作,而是 enumerate 动作
+// 的一个参数值(`enumerate.collection="sources"`),所以反思步的「下一步意图」仍是
+// 「列元素清单」,而真正发生的那一步由 enumerate 步自己的 summary 说清
+// (「枚举来源清单: …」——后端 `_collection_label` 拼的)。
 const NEXT_ACTION: Record<string, string> = {
   answer: "开始作答",
   expand_graph: "顺着相关内容继续找",

@@ -48,6 +48,7 @@ from app.services.collection_enumeration import (
     ElementItem,
     EnumerationCoverage,
     KgObjectItem,
+    SourceItem,
 )
 
 if TYPE_CHECKING:
@@ -59,11 +60,31 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def enumerated_item_id(item: object) -> str:
+    """一个枚举行的**身份**——引用映射的键。
+
+    单一定义点,因为这个表达式此前有三处副本(``collection_item_citations`` 的键、
+    本模块的 wire 投影、以及合成预览的反向绑定),而少改一处的后果是**不可见的**:
+    卡片上的出处照常显示,只有答案锚点悄悄丢掉定位器。集成 #402 时确实踩到了这个
+    形状,所以它现在只有一处。
+
+    顺序是有意义的:``source_id`` 排最后并且只在既无元素 id 也无对象 id 时才用,
+    否则元素行(它同时带 ``source_id``)会退化成按来源计键,与同一份文档的文档行撞键。
+    """
+    return str(
+        getattr(item, "element_id", "")
+        or getattr(item, "object_id", "")
+        or getattr(item, "source_id", "")
+        or ""
+    )
+
+
 def _typed_item(
     raw: object,
     citations_by_item_id: Mapping[str, object] | None = None,
 ) -> TypedCollectionItem:
-    """Project one ``ElementItem``/``KgObjectItem`` onto the shared wire item.
+    """Project one ``ElementItem``/``KgObjectItem``/``SourceItem`` onto the
+    shared wire item.
 
     ``isinstance`` rather than a ``collection`` string switch: the outcome's
     own ``items`` list is already homogeneous (the executor never mixes the
@@ -90,7 +111,7 @@ def _typed_item(
             asset_id=raw.asset_id,
             notebook_id=raw.notebook_id,
             tier=raw.tier,
-            citation=citations.get(raw.element_id),
+            citation=citations.get(enumerated_item_id(raw)),
         )
     if isinstance(raw, KgObjectItem):
         return TypedCollectionItem(
@@ -100,7 +121,30 @@ def _typed_item(
             notebook_id=raw.notebook_id,
             tier=raw.tier,
             evidence_element_ids=list(raw.evidence_element_ids)[:MAX_EVIDENCE_REFS],
-            citation=citations.get(raw.object_id),
+            citation=citations.get(enumerated_item_id(raw)),
+        )
+    if isinstance(raw, SourceItem):
+        # A listed document reuses the element arm's fields rather than adding a
+        # third set of near-synonyms to the wire union: ``source_title`` is the
+        # display title either way, ``text`` is the excerpt either way, and
+        # ``location_label`` is the one short "where/what is this" label the card
+        # prints under the title — here the document type, already in interface
+        # words (see ``_doc_type_label``).  ``element_type`` stays empty: a
+        # document is not an element, and the frontend routes on ``collection``.
+        return TypedCollectionItem(
+            item_id=raw.source_id,
+            source_id=raw.source_id,
+            source_title=raw.source_title,
+            location_label=raw.doc_type_label,
+            text=raw.summary,
+            notebook_id=raw.notebook_id,
+            tier=raw.tier,
+            # Keyed by ``source_id`` because that IS this row's identity (the
+            # sibling arms key by element/object id).  The citation points at the
+            # document itself with an empty ``element_id`` — a document has no
+            # sub-location, so it can never be an EXACT original-text locator,
+            # which is exactly how the grounding classifier should read it.
+            citation=citations.get(enumerated_item_id(raw)),
         )
     raise TypeError(f"unknown collection-enumeration item type: {type(raw)!r}")
 
@@ -185,11 +229,14 @@ def typed_collection_results(
     item_citations = citations_by_item_id or {}
     results: List[TypedCollectionResult] = []
     for outcome in outcomes:
-        is_elements = outcome.collection == "elements"
+        # Explicit per-collection mapping rather than "elements or else": the
+        # sources collection has NO sub-type, and an "everything that is not
+        # elements is an object type" shortcut would quietly stamp its empty
+        # kind into ``object_type`` — a field the frontend reads to pick a label.
         results.append(TypedCollectionResult(
             collection=outcome.collection,
-            element_kind=outcome.kind if is_elements else "",
-            object_type=outcome.kind if not is_elements else "",
+            element_kind=outcome.kind if outcome.collection == "elements" else "",
+            object_type=outcome.kind if outcome.collection == "kg_objects" else "",
             source_id=outcome.source_id,
             items=[],
             coverage=_typed_coverage(outcome.coverage),
@@ -324,6 +371,12 @@ _PROMPT_LINE_EXCERPT_CHARS = 200
 # retrieval producer.
 COLLECTION_KEY_BASE = 5000
 
+# What a document with no display name is called, in the prompt preview and on
+# the result card alike (``answer-panel.tsx`` renders the same words).  Kept as
+# one constant on this side so the two never drift into "未命名来源" on screen and
+# a raw source id in the prompt — the model quotes what it is given.
+UNNAMED_SOURCE_LABEL = "未命名来源"
+
 # A single, one-time reminder that the preview is a SUBSET of what was
 # listed. Mirrors ``structured_prompt_block``'s coverage-header instruction
 # sentence, but is not repeated per outcome (one enumeration_prompt_block
@@ -336,6 +389,33 @@ _INSTRUCTION_LINE = (
     "that subset. Every preview row has a kN id: cite a row with its own [kN] "
     "marker whenever the answer uses it — the full list is authoritative in "
     "the result card, not this preview.]"
+)
+
+# Adaptive granularity for a DOCUMENT roster, emitted only when this run
+# actually carries one (design doc §6.2).  It sits here rather than in
+# ``answer_prompt``'s enumeration rules for two reasons: the roster is the only
+# listing whose right answer shape changes with its size, and a rule that lives
+# in ``answer_prompt`` would be paid by every synthesis in the product, most of
+# which never see a document list.  Emitted next to the roster, it costs
+# nothing when there is no roster and it reads as guidance about the block
+# immediately below it.
+#
+# NO numeric threshold, on purpose: the model already has the exact count (from
+# this block's header and from the collection map) and it is the only party that
+# knows how much the question wants per document.  A hard-coded "more than N ⇒
+# summarize" would be lexical routing under another name, and it would be wrong
+# in both directions — five dense papers can want a thematic answer while
+# thirty one-page notes can want a line each.
+_SOURCE_GRANULARITY_LINE = (
+    "[Document roster guidance: choose the granularity from how many documents "
+    "are listed against how much the question wants about each. A roster small "
+    "enough to treat individually should be answered document by document, each "
+    "with its own titled passage. A roster too large for that should be "
+    "organized by THEME instead — group the documents into a few dimensions the "
+    "titles and summaries actually share, name the documents belonging to each, "
+    "and say plainly that the answer is organized thematically rather than one "
+    "document at a time. Either way, name every document you draw on and never "
+    "silently drop part of the roster.]"
 )
 
 
@@ -387,7 +467,11 @@ def collection_map_block(collection_map_text: str) -> str:
 
 
 def _collection_noun(collection: str) -> str:
-    return "elements" if collection == "elements" else "objects"
+    if collection == "elements":
+        return "elements"
+    if collection == "sources":
+        return "documents"
+    return "objects"
 
 
 def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int) -> str:
@@ -421,7 +505,11 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     not on the coverage claim alone.
     """
     coverage = outcome.coverage
-    label = f"{outcome.kind} {_collection_noun(outcome.collection)}"
+    # The sources collection has no sub-type, so its label is the noun alone —
+    # ``f"{kind} {noun}"`` with an empty kind would emit a leading space and
+    # read as a truncated field rather than as "the documents".
+    noun = _collection_noun(outcome.collection)
+    label = f"{outcome.kind} {noun}" if outcome.kind else noun
     listed = coverage.returned_total
     suffix = f", previewed {previewed}"
     if coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE:
@@ -482,6 +570,30 @@ def _item_line(collection: str, item: object, key: str) -> str:
     if collection == "elements":
         text = _clean(item.text)[:_PROMPT_LINE_EXCERPT_CHARS]
         return f"{key}: [enumerated-source-element] {item.source_title} · {item.location_label}: {text}"
+    if collection == "sources":
+        # Tag follows the sibling arms' naming: an element row is an element OF a
+        # source, a KG row is an object of its type, and this row IS a source.
+        # Title first — it is the handle the model uses to ask for a deeper pass
+        # on one document (an ordinary add_subquery on that title) — then the
+        # document type, then whatever summary the library stored.  An untyped or
+        # unsummarized document still gets a row: "this document exists" is the
+        # fact the listing is for.
+        # Field names are ``SourceItem``'s, not ``TypedCollectionItem``'s: this
+        # function renders the EXECUTOR's dataclasses (the wire projection
+        # happens elsewhere, from the same items).
+        summary = _clean(item.summary)[:_PROMPT_LINE_EXCERPT_CHARS]
+        # A nameless document falls back to the SAME neutral placeholder the
+        # result card shows, not to its internal id.  Two reasons the id is
+        # wrong here: the model would quote it back as a title (the roster's
+        # whole purpose is to give it titles to deepen by name, and an id is a
+        # name that matches nothing), and internal ids are not interface copy —
+        # they leak into an answer the moment the model echoes the line.
+        parts = [str(item.source_title or UNNAMED_SOURCE_LABEL)]
+        if item.doc_type_label:
+            parts.append(str(item.doc_type_label))
+        line = " · ".join(parts)
+        head = f"{key}: [enumerated-source] {line}"
+        return f"{head}: {summary}" if summary else head
     location = item.section_path or "—"
     name = _clean(item.name)[:_PROMPT_LINE_EXCERPT_CHARS]
     return f"{key}: [enumerated-{item.object_type}] {name} · {location}"
@@ -544,6 +656,26 @@ def _preview_evidence(
         object_type = "element"
         name = str(item.location_label or item.source_title)
         definition = str(item.text)
+    elif collection == "sources":
+        # ``object_id`` is the row's LOOKUP IDENTITY, not a knowledge-graph
+        # handle: it is what ``enumerated_item_id`` returns, and it is the key
+        # AskService uses to find this row's ``Citation`` when the answer cites
+        # it.  For an element row that identity is the element id, for a KG row
+        # the object id, and for a document row its source id — the same one
+        # ``collection_item_citations`` keyed the table with.
+        #
+        # This was empty in the first cut, on the theory that "a source is not a
+        # graph object" and emptiness would suppress the graph button.  Both
+        # halves of that were wrong: graph suppression is decided by
+        # ``object_type == "source"`` in the reference detail (not by an empty
+        # id), and the emptiness silently dropped every cited document from the
+        # answer-level ``citations`` array, because the lookup found nothing
+        # under "" (codex R7 P2).  Pinned end to end by
+        # ``test_document_rows_carry_their_own_citation_and_bind_as_evidence``.
+        object_id = str(item.source_id)
+        object_type = "source"
+        name = str(item.source_title or item.source_id)
+        definition = str(item.doc_type_label or "")
     else:
         object_id = str(item.object_id)
         object_type = str(item.object_type)
@@ -682,6 +814,13 @@ def enumeration_prompt_block(
         return True
 
     try_commit(_INSTRUCTION_LINE)
+    # Only when a document roster is actually in this run — see the constant.
+    # Tried after the disclosure note and, like it, not load-bearing: a budget
+    # too small for it still lets the outcome blocks themselves through, because
+    # a list without its granularity hint is far better than a hint without its
+    # list.
+    if any(outcome.collection == "sources" for outcome in outcomes):
+        try_commit(_SOURCE_GRANULARITY_LINE)
 
     for index, outcome in enumerate(outcomes):
         for shown in range(quota[index], -1, -1):
@@ -692,11 +831,7 @@ def enumeration_prompt_block(
                 shown_rows[index] = shown
                 for offset, item in enumerate(outcome.items[:shown]):
                     key = f"k{next_key + offset}"
-                    item_id = str(
-                        getattr(item, "element_id", "")
-                        or getattr(item, "object_id", "")
-                        or ""
-                    )
+                    item_id = enumerated_item_id(item)
                     evidence_by_id[key] = _preview_evidence(
                         outcome.collection, item, item_citations.get(item_id)
                     )

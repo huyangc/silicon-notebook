@@ -379,3 +379,196 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
   「纯文本解析来源数」黄色档披露（需要按来源解析器口径的有界探针，登记为独立后续任务）；
   v1 的诚实边界=coverage 只声明「已存储元素」的完整性，产品文档（T7）明写元素清单的
   解析器覆盖范围。KG 对象清单以「知识对象」限定词表达「已抽取」语义。
+
+## 6. PR-2.5：指示语接地与来源集合（enumerate_sources）
+
+背景（用户以 NotebookLM 对照提出）：「当前notebook的文章分析」应产出逐篇分析。两个缺口：
+①「当前notebook / 这个库 / 本库 / 知识图谱 / KG」等指示语未被接地为「用户打开的 active
+作用域」，还会混进子查询充当噪声检索词；②「来源/文章」不是可枚举集合——模型拿不到
+「库里有哪几篇」的目录，无法自发做逐篇分析或按篇定向深挖。
+
+### 6.1 指示语接地（零新调用）
+
+- `query_intent_prompt`、`expand_query_prompt`（`plan_prompt` 备份拼写同步）、`reflect_prompt`
+  各加一段 grounding 指令：这类短语（中英同列）指用户当前打开的 notebook 及其挂载作用域，
+  **不是可检索内容**；生成子查询 / `elements_query` / `exact_term` 时必须剥掉；
+  「知识图谱/KG」指本库的知识结构（其规模看集合地图），不作关键词。
+- 纯 prompt 层，不做确定性剥词（避免词表路由）；prompt 内容测试钉关键短语，删除+移动变异
+  （移动变异的另一半是**位置**：这一段必须排在 `Question:` / `User request:` 之前，规则出现在
+  被它约束的输入之后等于没出现，已有位置断言钉住）。
+- **【订正，quality P1-1】「知识图谱 / KG」只在领属/指示形式下才算范围词**（`本库的知识图谱` /
+  `这个库的图谱` / `the knowledge graph of this library`）。第一版把它无条件判成非话题，而这
+  恰好在最可能问这句话的语料上是错的：库里就是 GraphRAG / LightRAG 论文时，
+  「这些论文里知识图谱是怎么构建的」的检索词正是「知识图谱」，剥掉它不是去噪、是把查询删了。
+  所以措辞里写**显式反向豁免**（文档本身讨论 knowledge graphs 时它是正当话题与检索词），
+  测试两半都钉——只钉「要剥」那半的话，把豁免顺手删掉仍然全绿。这一段不受枚举 kill switch
+  约束、深度报告每节每步都付，读错的代价正好落在最在意它的那批语料上。
+- **【落地】** 四份 prompt 共用**一段**模块常量 `prompts.SCOPE_DEIXIS_GROUNDING`，不是四份
+  手写变体——同一件事写四遍就有四次机会说出四个略有出入的版本。措辞加了一条防御:
+  「剥掉范围词不能把问题变成另一个问题」（否则「当前 notebook 里的文章讲了什么」会被剥空）。
+  `reflect_prompt` 另加一段**本地**规则逐个点名四个自由文本检索字段
+  （`new_sub_query.query` / `elements_query` / `ppr_query` / `exact_term`），因为
+  `exact_term` 是字面匹配——范围词进去就是一次保证零命中的探测；「问库本身的规模看计数行」
+  那句只在工具开启时出现（关闭时那行计数根本不存在）。`query_intent_prompt` 另加一条:
+  库级请求（「当前notebook有哪几篇」）是范围明确的完整枚举请求，不得当成「问的是哪个库」
+  的歧义去阻断确认门。
+
+### 6.2 来源集合
+
+- 集合地图行尾加 `| sources: N`——与枚举同一计划口径；排除 Memory 合成源与 knowhow
+  投影隐藏源（**以来源列表的用户可见口径为准**：先找该口径的唯一谓词处并复用，勿自造）。
+- **动作形态（用户拍板）**：模型面**不新增动作**——就是既有 enumerate 动作的分支对象加
+  `collection:"sources"` 参数值（与 kind/object_type 并列，动作空间维持 10 个）；仅执行器
+  内部拆兄弟方法 `enumerate_sources` 保持游标/coverage 语义独立。与白名单唯一真源守卫兼容。
+- 执行器（collection_enumeration）：零 LLM；item = display_title（论文标题优先，复用
+  现有 helper）/ doc_type / **已存 per-source 摘要**摘录（截 excerpt_chars）/ notebook_id /
+  tier；顺序=计划源序；预算轨复用（每源计 1 行）；coverage/指纹机制复用；total=作用域源数。
+- 响应：`TypedCollectionResult.collection` 增 `"sources"`（union 兼容 + api_contract 默认
+  模式重生成）；前端清单卡新 arm「来源清单」（标题+类型+摘要摘录；本库条目跳来源详情，
+  跨库沿用围栏）；标签 parity 守卫扩展。
+- 合成：走既有 enumeration_prompt_block（块头 `[Enumeration: sources, ...]`）；模型据目录
+  可对每篇标题继续 add_subquery 定向深挖（既有机制，零新代码）。
+- **【订正，codex R3 P1】账目回喂必须带标题**：`_enumeration_note` 原本只回「标签 + 覆盖计数」，
+  于是「先枚举目录、再按标题逐篇深挖」这条 prompt 教出来的路径在下一轮就断了——模型手上一个
+  标题都没有，只能拿已存摘要凑答案或反复请求同一集合。这是对「账目只回账目、不回条目正文」
+  那条规则的**定向豁免**，只对 sources 成立：对这一个集合，标题不是条目正文，它是这份清单
+  唯一的可操作输出。边界 = 三重硬界（≤20 条 / 每条 ≤60 字符 / 合计 ≤800 字符，超出写
+  `(+N more)`），因此是**常数级**、不随清单长度增长；只回标题不回摘要；元素/知识对象清单的
+  账目一个字正文都不带（它们的正文属于合成预算，而模型也不靠它们发起下一步动作）。常数依据：
+  20 = 结果卡 `initialVisibleRows`（同一个「一屏能扫多少」判断），60 = 本模块
+  `_INTENT_DIRECTION_LABEL_CHARS` 的先例，800 与集合地图块上限同量级。`(+N more)` 的分母是
+  「有显示名的条目数」——无名文档没有可回喂的句柄，算进去会让模型去找一个不存在的标题。
+  信任等级不变：标题与 `_summarize` 已在同一份 prompt 里回喂的 `el.source_title` /
+  `c.source_title` / KG `name` 同类，`UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION`（reflect 在
+  `untrusted_evidence` 开启时注入）的措辞逐字点名 "every retrieved title"。
+- reflect_prompt 动作说明补一句：「库里有哪几篇/逐篇分析/文章总结」类问题先枚举 sources
+  拿目录（标题+摘要），再按需对各篇标题 add_subquery 深挖。
+- **自适应粒度（对照 NotebookLM 实测行为，用户提供 57 源案例）**：合成侧指导——来源少时
+  逐篇分析；来源多时按主题把多篇归纳成维度式综述（目录+摘要就是聚类的原料）。粒度判断
+  **交给模型**（地图已给出 sources 计数），不设数值阈值、不做词法路由。
+- 文档 product-and-api*/CLAUDE/AGENTS 同步；测试=prompt 内容×3 + 执行器（排除谓词/预算/
+  coverage）+ e2e fake-client + 前端卡 arm + 变异矩阵。
+
+**落地决策（实现期定案，与上面的意图一致，补足未定的部分）**
+
+- **动作空间维持 10 个**（用户拍板，见上）：模型面新增的只是 `enumerate` 分支对象里的一个
+  参数值 `collection:"sources"`，与 `kind`/`object_type` 并列（排在它们之后，让既有分支的
+  前缀逐字不变）；actions 串**不变**。执行器内部仍是独立的 `enumerate_sources`（游标与
+  coverage 语义各自独立），那是实现细节。理由是成本落点：动作空间是模型每一轮反思都要重读
+  一遍的东西，多一个 id 的代价落在**每一次**调用上，而多一个参数值的代价只落在真的要用它
+  的那一次。
+  - **参数优先于动作 id**：`collection=="sources"` 一旦给出，无论模型选了
+    `enumerate_elements` 还是 `enumerate_kg_objects`，这一轮列的都是文档目录，`kind` /
+    `object_type` / `source_id` / `source_title` 全部忽略——模型已经明确说了要哪个集合，
+    再去猜它顺手填的 kind 是否更可信，只会让同一个请求有两种解释。prompt 里只教一条路径
+    （`enumerate_elements` + `collection:"sources"`），但解析不依赖模型照做。
+  - **只识别 `"sources"`**：`"elements"` / `"kg_objects"` 与任何垃圾值一样在解析期清成空
+    串，落回按动作 id 的既有分派（那条路径本来就给出同一个答案，所以不需要第二套「模型说
+    的集合与它选的动作不一致」的仲裁）。缺省即接入前行为。
+  - 共用同一把闸（`enumeration_active()`）：不新增开关。关闭态下 schema 里连 `collection`
+    字段都不存在，解析期也不看它。
+  - **代价**：反思步 trace 的「下一步意图」仍显示「列元素清单」（`NEXT_ACTION` 表没有第
+    11 个键），真正发生的那一步由 enumerate 步自己的 summary 说清（「枚举来源清单: …」）。
+    这是这个形态的已知取舍，登记在此以免被当成 bug 修掉。
+- **用户可见来源口径的真源**：SQLite `source_store.VISIBLE_SOURCE_TYPES_PREDICATE`
+  （`list_sources`/`list_sources_page`/`visible_document_count` 已共用它）；PostgreSQL 侧此前
+  在三处内联同一段谓词，本次收成同名模块常量并让那三处引用它。新端口
+  `source_change_signal_rows` 把**该谓词本身**作为投影列（`user_visible`）求值，不新造第三份「哪些类型是隐藏的」拼写，也不为它另开一条查询。
+  仓库其他位置（maintenance/knowledge_store/index_projection 等）仍各自内联同形谓词——
+  那是既有状况，不在本次范围内，也与本清单口径无关。
+- **计划与计数同一 helper、零额外查询**：`_visible_signal_rows(signals)` 是唯一决定
+  「来源清单包含哪些源」的地方，地图计数取它的长度、执行器遍历它排序后的结果，于是
+  「地图说 7、清单列 8」在构造上不可能。成本 = **0**：可见性由 signal 查询自己投影出来
+  （`user_visible`，各适配器在 SQL 里对可见谓词求值），`collection_map` 顺带把元素计数与
+  来源计数并进**同一次** signal 读取。刻意不为它加缓存：这里没有「计数」可跳过，也没有
+  剩下任何读取。
+  - **订正（codex R2 P2）**：第一版为它单开一条 `hidden_source_ids` 查询取可见谓词的补集。
+    那条查询**无法按 `source_type` seek**（没有任何索引带它），所以它是对该 notebook 全部
+    源行的又一次扫描——每参与库一次、在请求路径上、而且就紧跟在 signal 查询刚扫过同一批
+    行之后。谓词移进投影后端口整个删掉（它没有第二个调用方；显式 `source_id` 那条路径用的
+    是 `memory_source_ids`）。`user_visible` 与 `created_at` 一样**不进指纹**：源类型不会变，
+    把它哈希进去只会让所有已部署库的计数缓存白失效一次。守卫按 SQL 语句文本计数
+    （退回一条独立查询时端口调用计数看不出来，语句计数看得出来）。
+- **【订正，codex R4 P2】schema 里的 `collection` 显示为空缺省**：示例写成唯一值 `"sources"` 时，
+  逐字段照抄模板的模型在列公式/知识对象时也会带上它，而参数优先于动作 id（刻意的设计）⇒ 那一轮
+  被**静默改道**成文档目录。改成 `"collection":""`（与同一分支里 `source_id`/`source_title`
+  同惯例），取值只出现在动作说明里——那里它读起来是一条条件指令，并显式写明「它会覆盖动作本身，
+  别顺手带上」。解析行为逐字不变（空串→按动作 id 分派）；关闭态 schema 的冻结字面量不含
+  `collection`，不受影响。
+- **【订正，codex R4 P2】收尾补元数据换代复检**：作用域指纹是 `updated_at|parse_status|chunked_at`，
+  证明不了「已发出文档的显示名/类型还是那一代」——`upsert_paper_meta` 只写 `source_paper_meta`
+  与 `source_authors`，**从不碰 `sources.updated_at`**（已核实，非推测），`doc_type` 也是一列可以
+  被单独改掉的普通列。于是走页期间的一次论文元数据回填会产出一份混代目录、却仍然报 complete。
+  修法：游标携带链级 `(source_id, 元数据摘要)` 账目（`emitted_meta`，仅内存、不上 wire、不进
+  用户面 coverage，条数由行池夹住），收尾对**整条链已发出的** id 做一次有界批量点查复读并逐条
+  比对，不等即 `concurrent_change`。摘要键刻意只含 (显示名, doc_type)：`summary` 的唯一写者
+  `set_status` 在同一条语句里就推 `updated_at`，早已被指纹覆盖，算进来只会在例行重写摘要时误报。
+  语义边界：它抓的是「我已经交出去的东西变了」，不是「表变过」——尚未读过的行带着新值第一次
+  被读出来，那份目录并不混代，不判 partial（有反向用例钉住）。成本 = 每条链收尾 1 条 SQL，与
+  收尾的参与者/指纹读取同级，刻意不计入翻页预算。
+- **计划即全集 ⇒ 无 lookahead**：计划长度已知，`position < len(plan)` 就是「还有没有更多」的
+  精确答案，因此来源侧不需要元素侧那个 +1 lookahead 行（「行预算恰好等于集合大小」不会
+  误报 partial），并有一条测试钉住这一点，防止有人「顺手统一」成需要 lookahead 的写法。
+- **游标形态**：`(notebook_id, source_id)` 指向**尚未列出**的第一份文档（inclusive resume，
+  与元素游标「最后消费的位置」相反）——一份文档就是一行，所以「下一行」与「下一份文档」
+  是同一件事，指向未列出的那一份才能让「首行就撞载荷上限」也交回可用游标。
+- **遍历顺序 = 来源页签顺序 `(created_at, id)`**（订正 spec-review B3：先前按 id 排，那是一个
+  用户从没见过的顺序，而「前 N 篇」的截断前缀因此没有意义）。排序键随信号行一起回来
+  （`source_change_signal_rows` 多投影一列 `created_at`，同一行访问、零额外查询），双后端各自
+  归一化成「按字典序比较即等于本后端 `ORDER BY created_at, id`」的文本。**两侧的来源列表查询
+  也必须带 `id` 次键**（codex R3 P2）：批量导入会写出并列 `created_at`，SQLite 对并列行不保证
+  稳定顺序，`list_sources`/`list_sources_page` 缺次键就与目录的 `(created_at, id)` 序分叉，
+  「前 N 篇」在页签与模型手上成了不同的 N 篇（并列时还会让翻页重复/漏行）；PostgreSQL 侧
+  `ORDER BY created_at,id COLLATE "C"` 本来就带，这是 SQLite 单侧补齐。排序键本身——PostgreSQL 侧这条
+  归一化**必须先转 UTC**（codex R2 P2）：`timestamptz` 的 offset 不是一列之内的常量，跨 DST
+  转换时相隔一小时的两行会读成 `…01:30:00+02:00` 与 `…01:30:00+01:00`，按字符串比是先比墙钟
+  数字再比 offset 文本，于是 `+01:00` 排在 `+02:00` 前面——而它是**更晚**的那个瞬间。不归一
+  就只在 DST fold 那一小时里静默错序。naive 值不动（编一个时区是猜）。三条推论：
+  ①**指纹语义不动**——摘要只吃前两个字段，创建时间对活着的源永不变，把它哈希进去只会让
+  L1/L2 在这次上线时全量失效一次；②**元素侧顺序仍按 `source_id`**：它的游标是
+  `(source_id, element_id)` keyset，换序会让已发出的游标对不上位置，而来源清单是按 key 重
+  对齐的，没有这个约束；③地图的计数路径**不排序**（只要 `len`），排序只发生在真的要遍历
+  那份清单的 `scope_source_plan` 里。游标刻意**不**携带 `created_at`：续跑是按 key 在重建的
+  计划里重对齐，而任何会改变顺序的变动（增删源）都已经改变指纹并被判为
+  `concurrent_change`——一个永不参与比较的字段只会腐烂。
+- **登记：合成块头用 `documents` 而不是 `sources`**（措辞偏离，刻意保留）。集合 id 是
+  `sources`（wire 上的 `collection`、reflect 参数值、trace detail 全用它），但注入合成 prompt
+  的块头是 `[Enumeration: documents, listed 2/2, complete, previewed 2]`。理由是块头是**给写
+  答案的模型读的一句英文**，而 `sources` 在那个位置有歧义（RAG 语境里 "sources" 常指「引用
+  出处」，正是它下面那些 `[k]` 卡片）；`documents` 只有一种读法。代价是「同一集合在协议里叫
+  `sources`、在 prompt 里叫 `documents`」，登记在此以免被当成不一致修掉；改的话两处一起改，
+  并同步 `_collection_noun` 与钉住块头的测试。界面词不受影响——用户看到的一直是「来源清单」。
+- **无名文档的占位**：目录预览行与结果卡共用同一句「未命名来源」（后端常量
+  `collection_enumeration_answer.UNNAMED_SOURCE_LABEL`），**不**退回内部 source id：模型会把
+  id 当标题引回来（目录的用途就是给它可按名深挖的标题，而 id 匹配不到任何东西），而且内部
+  id 一经模型复述就进了答案。
+- **wire 复用元素臂**：`TypedCollectionItem` 不加第三组近义字段——`source_title`=显示名、
+  `location_label`=文档类型界面词、`text`=摘要摘录、`element_type` 留空（文档不是元素，
+  前端按 `collection` 分派）。文档类型用 `extraction_profiles.PROFILES` 的界面词（上传选择
+  器同一份表），未识别渲染空串，绝不上屏 `academic_paper` 这类内部 id。
+- **早退闸计入来源数**（codex R5 P1 **订正**；本条第一版写的是「刻意不含」，那是错的，一并
+  记在这里而不是悄悄改掉）。原理由：「来源数对任何非空库都 ≥1，算进去等于把这道闸整个拆掉、
+  让那句明确提示对所有纯文本库消失」。前半段成立，结论错在三点：
+  ① 被挡住的**恰好是来源清单的主力场景**——一库论文只经纯文本解析器处理（无公式/表格/图片/
+  代码块），自动 KG 抽取默认关（无知识对象），而用户问的正是「库里有哪几篇 / 逐篇分析当前
+  notebook」。用户问文档目录、拿回「请先构建知识图谱」，那不是一句更明确的提示，是没有回答
+  被问的问题（实测确认：那句提示的唯一出口就是早退分支的确定性 `conclusion`，前端根本不消费
+  `kg_required`，所以「保住提示」保住的只是一个非答案）；
+  ② 来源清单**不需要图谱**：零 LLM，读的就是 `sources` 行，挡住它换不来任何正确性；
+  ③ 这与 PR-2 立下的判断是同一个（自动 KG 默认关、「解析了来源但没建图」是常态，所以早退才
+  收窄成「无图**且**拿不出任何集合」）——加进第三个集合后没更新判定函数，是漏跟，不是独立决定。
+  保留的语义（都有用例）：**零源库仍然早退**（计数为 0，不是「有 notebook 就放行」），地图
+  构建失败仍然早退，放行后 `kg_required` 仍如实为 `True`。
+- **标签 parity**：后端第三张表 `_SOURCE_COLLECTION_LABELS`（按 collection 取键）+ 前端
+  `SOURCE_LIST_LABELS`，接进同一条 `check_enumeration_list_labels_contract.py`（三张表都过
+  「前端值 == 后端值 + 清单」与全域唯一性）。做成同形对象字面量而非裸常量，是为了让守卫
+  不必为一个标签另开一条解析路径——那条新路径本身就会成为下一个「解析不了就放行」的缺口。
+  渲染值是「来源清单」（与来源页签同一个界面词）。
+- **自适应粒度落在合成侧、且只在目录在场时出现**：`collection_enumeration_answer.
+  _SOURCE_GRANULARITY_LINE`，随枚举预览块一起注入，条件是本轮真的有 `sources` outcome。
+  刻意不放进 `answer_prompt` 的枚举规则：那条规则会让产品里**每一次**合成都付这段字符，而
+  只有文档目录的正确答案形状随规模变化。它排在披露说明之后、目录块之前，且与披露说明同样
+  「非承重」——预算不够时它自己被丢掉而不挤掉目录本身（没有目录的粒度提示毫无用处，反过来
+  则不然）。文本里不含任何数值阈值：模型手上已经有精确计数（块头 + 集合地图），写死
+  「超过 N 篇就归纳」是换了名字的词法路由，而且两个方向都会错（5 篇长论文可能就该按主题答，
+  30 条一页笔记可能就该逐条答）。

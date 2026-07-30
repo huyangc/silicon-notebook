@@ -191,12 +191,14 @@ test("NEXT_ACTION 覆盖后端全部 10 个真实取值(非机制名)", () => {
   // 真源是 reasoning_retrieval.py 里 reflect 循环的 next_action if/elif 分发链
   // (不按行号钉——本仓库行号指针已知会腐烂;按分支内容定位,见 reasoning-trace.ts
   // 顶部 NEXT_ACTION 上方注释)。精确查找通道加了 exact_lookup,PR-2 加了
-  // enumerate_elements/enumerate_kg_objects,原为 7 个。后端加第 11 个值时这条会
-  // 提醒补。
+  // enumerate_elements/enumerate_kg_objects,原为 7 个。PR-2.5 的来源清单是
+  // enumerate 动作的一个参数值而不是第 11 个动作,所以这张表不变。后端加第 11 个
+  // 值时这条会提醒补。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
     search_elements: "回原文里找细节", enumerate_elements: "列元素清单",
-    enumerate_kg_objects: "列知识对象清单", ppr_retrieve: "顺着关联扩大范围",
+    enumerate_kg_objects: "列知识对象清单",
+    ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
     exact_lookup: "按名称精确查找",
   };
@@ -305,6 +307,34 @@ test("集合枚举 enumerate 步:complete 时渲染「已全部列出」而不�
       },
     }),
     "已全部列出",
+  );
+});
+
+// PR-2.5:来源清单是第三个 collection。它的 kind 恒为空串,所以渲染分支必须只
+// 依赖 detail.collection 是否非空 + returned_total 是否为数字——若哪天改成按 kind
+// 判分支,来源清单的 detail 就会掉进「无可显示」的兜底,轨迹上只剩一句摘要。
+test("集合枚举 enumerate 步:来源清单(kind 为空串)照常渲染条数", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "enumerate",
+      summary: "枚举来源清单: 已全部列出 7 条",
+      detail: {
+        collection: "sources", kind: "", returned_total: 7, total: 7,
+        complete: true, truncated_reason: "",
+      },
+    }),
+    "已全部列出",
+  );
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "enumerate",
+      summary: "枚举来源清单: 部分结果,已达本轮上限,累计 4 条/共 12",
+      detail: {
+        collection: "sources", kind: "", returned_total: 4, total: 12,
+        complete: false, truncated_reason: "budget",
+      },
+    }),
+    "4/12 条",
   );
 });
 
