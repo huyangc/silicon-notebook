@@ -8,6 +8,11 @@ import subprocess
 import sys
 import time
 
+import pytest
+
+
+pytestmark = pytest.mark.xdist_group("prod_script_lifecycle")
+
 
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
@@ -91,6 +96,7 @@ fi
         "INSTALL_CALLS_FILE": str(install_calls_file),
         "SKIP_BUILD": "1",
         "START_TIMEOUT_SECONDS": "5",
+        "_SCRIPT_TEST_START_POLL_INTERVAL_SECONDS": "0.02",
         "PORT": "18800",
         "FRONTEND_PORT": "18801",
     }
@@ -159,12 +165,24 @@ trap '' TERM
 exec sleep 30
 """,
     )
-    _write_executable(fake_bin / "curl", "#!/usr/bin/env bash\nexit 22\n")
+    _write_executable(
+        fake_bin / "curl",
+        """#!/usr/bin/env bash
+for _ in {1..100}; do
+  [[ -s "$BACKEND_PID_FILE" && -s "$FRONTEND_PID_FILE" ]] && exit 22
+  sleep 0.01
+done
+exit 22
+""",
+    )
     env.update(
         BACKEND_PID_FILE=str(backend_pid_file),
         FRONTEND_PID_FILE=str(frontend_pid_file),
         START_TIMEOUT_SECONDS="1",
         START_CLEANUP_GRACE_SECONDS="1",
+        _SCRIPT_TEST_START_MAX_POLLS="1",
+        _SCRIPT_TEST_CLEANUP_MAX_POLLS="1",
+        _SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS="0.02",
     )
 
     launched_pids: list[int] = []

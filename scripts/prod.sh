@@ -14,7 +14,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cleanup() {
-  local status=$? pid alive deadline
+  local status=$? pid alive deadline polls=0
   trap - EXIT INT TERM HUP
 
   if [[ -z "${BACKEND_PID:-}" && -z "${FRONTEND_PID:-}" ]]; then
@@ -37,7 +37,12 @@ cleanup() {
       if kill -0 "$pid" 2>/dev/null; then alive=1; fi
     done
     [[ "$alive" == "0" || "$SECONDS" -ge "$deadline" ]] && break
-    sleep 1
+    if [[ -n "${_SCRIPT_TEST_CLEANUP_MAX_POLLS:-}" \
+      && "$polls" -ge "${_SCRIPT_TEST_CLEANUP_MAX_POLLS}" ]]; then
+      break
+    fi
+    sleep "${_SCRIPT_TEST_CLEANUP_POLL_INTERVAL_SECONDS:-1}"
+    polls=$((polls + 1))
   done
 
   for pid in "${BACKEND_PID:-}" "${FRONTEND_PID:-}"; do
@@ -236,6 +241,7 @@ echo "  curl --fail $BACKEND_READY_URL"
 echo "  curl --fail $FRONTEND_READY_URL"
 
 START_DEADLINE=$((SECONDS + START_TIMEOUT_SECONDS))
+START_POLLS=0
 while [[ "$SECONDS" -lt "$START_DEADLINE" ]]; do
   if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
     echo "backend process exited before readiness; see $BACKEND_LOG" >&2
@@ -249,7 +255,7 @@ while [[ "$SECONDS" -lt "$START_DEADLINE" ]]; do
   if backend_ready && frontend_ready; then
     # Require a second successful probe after one interval so a conflicting or
     # immediately-crashing child cannot borrow an older listener's response.
-    sleep 1
+    sleep "${_SCRIPT_TEST_START_POLL_INTERVAL_SECONDS:-1}"
     if kill -0 "$BACKEND_PID" 2>/dev/null \
       && kill -0 "$FRONTEND_PID" 2>/dev/null \
       && backend_ready \
@@ -261,7 +267,12 @@ while [[ "$SECONDS" -lt "$START_DEADLINE" ]]; do
     fi
   fi
 
-  sleep 1
+  START_POLLS=$((START_POLLS + 1))
+  if [[ -n "${_SCRIPT_TEST_START_MAX_POLLS:-}" \
+    && "$START_POLLS" -ge "${_SCRIPT_TEST_START_MAX_POLLS}" ]]; then
+    break
+  fi
+  sleep "${_SCRIPT_TEST_START_POLL_INTERVAL_SECONDS:-1}"
 done
 
 echo "startup timed out after ${START_TIMEOUT_SECONDS}s; cleaning up this launch." >&2

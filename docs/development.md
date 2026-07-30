@@ -177,7 +177,16 @@ Run:
 bash scripts/check.sh
 ```
 
-This is the complete offline local gate. It runs three bounded lanes concurrently: `check_backend.sh` executes the complete backend pytest suite with default 9 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+The verification gates are tiered:
+
+| Grade | Scope | Frequency |
+| --- | --- | --- |
+| G0 targeted | Tests selected for the files and behavior being changed | During the edit loop |
+| G1 standard | `scripts/check.sh`: stable backend, contracts/harness, frontend tests/typecheck/build | Local handoff and every PR/push/manual CI run |
+| G2 extended | `scripts/check_extended.sh`: G1 plus real-index/performance and repository-wide semantic scans | Once daily at `17 18 * * *` UTC (02:17 Asia/Shanghai), plus manual dispatch |
+| G3 PostgreSQL | `scripts/check_postgres.sh`: direct PostgreSQL adapter integration | Independent PR/push/manual CI job |
+
+G1 runs three bounded lanes concurrently: `check_backend.sh` executes the stable backend pytest suite with default 12 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. Its backend lane excludes `slow` real-index/performance tests, `architecture_contract` repository-wide semantic scans, and the PostgreSQL tree. G2 first runs G1 and then the exact complementary backend marker set. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
@@ -194,19 +203,22 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 
 The Apple Silicon warm gate hard target is at most 60 seconds. CI lane timings are observational only, so this measured local target is not a portable timeout assertion for every CI host.
 
+Keep test-speed changes result-preserving. The G1 standard and G2 extended marker expressions are exact complements, while PostgreSQL stays independently authoritative; never make a committed test unreachable. Cache repository-wide AST/protocol parsing once per pytest process; test cache/container policy through the policy object instead of constructing unrelated database and ANN artifacts; derive autouse isolation paths from the worker's existing pytest base temp rather than allocating a new `tmp_path` directory for every pure test; and use the private `_SCRIPT_TEST_*` lifecycle timing controls only from tests. When those controls are unset, shipped timeout and polling behavior is unchanged. Concurrency tests use events/barriers for ordering and fairness assertions rather than fixed sleeps or assumed thread wake-up order, and real-process lifecycle modules use dedicated xdist groups.
+
 ### GitHub Actions CI
 
-`.github/workflows/ci.yml` exposes the same complete gate as the single
-`CI / full-gate` check. It runs for pull requests targeting `master`, pushes
-to `master`, and manual dispatches on `ubuntu-24.04` with Python 3.13 and
-Node.js 22. The workflow installs from `backend/requirements.txt` and
-`frontend/package-lock.json`, then delegates test selection entirely to
-`scripts/check.sh`.
+`.github/workflows/ci.yml` exposes G1 as `CI / level-1-standard` for pull
+requests targeting `master`, pushes to `master`, and manual dispatches.
+`.github/workflows/daily-extended.yml` exposes G2 as
+`Daily Extended Gate / level-2-extended`, with one daily cron and a manual
+dispatch only. Both use `ubuntu-24.04`, Python 3.13, Node.js 22, install from
+the declared lock/requirements files, and delegate selection to their matching
+wrapper script. G3 remains `CI / level-3-postgres-integration`.
 
 The committed OpenAPI contract is byte-semantically frozen, so
 `backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
 exactly. Upgrade either framework only together with an intentional OpenAPI
-contract regeneration and a clean-environment full-gate run.
+contract regeneration and a clean-environment G2 extended-gate run.
 
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers to avoid oversubscribing the hosted runner.
@@ -217,12 +229,12 @@ CPU features. The portable build trades a small ANN speedup for deterministic
 CI; production wheelhouses may still target their declared deployment CPU.
 Its 20-minute timeout includes dependency installation and is intentionally
 separate from the under-60-second local Apple Silicon warm-gate target.
-`CI / full-gate` is initially observational; make it a required `master` check
+`CI / level-1-standard` is initially observational; make it a required `master` check
 only after stable green pull-request and post-merge runs have been observed
 and the user explicitly approves the branch-protection change.
 
-PostgreSQL coverage is deliberately separate from the offline full gate. The
-`postgres-integration` job starts PostgreSQL 16, provisions least-privilege and
+PostgreSQL coverage is deliberately separate from the offline gates. The
+`level-3-postgres-integration` job starts PostgreSQL 16, provisions least-privilege and
 auxiliary encoding/locale targets, and runs `bash scripts/check_postgres.sh` with
 only the `postgres_integration` marker. Local verification uses an installed
 PostgreSQL 16 service and an explicit `TEST_POSTGRES_URL`; `scripts/check.sh`

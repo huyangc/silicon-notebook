@@ -859,6 +859,7 @@ class _StressPeaks:
     def __init__(self, expected: dict[str, int]) -> None:
         self.expected = expected
         self.release_seeds = threading.Event()
+        self.release_interactive = threading.Event()
         self.background_started = threading.Event()
         self.at_capacity = {
             service_id: threading.Event() for service_id in expected
@@ -890,6 +891,12 @@ class _StressPeaks:
         try:
             if label.startswith("seed-"):
                 assert self.release_seeds.wait(5)
+            elif label == "interactive-0":
+                # Keep one interactive slot active while the other slots
+                # advance through the 8:2:1 dispatch pattern. The background
+                # request must then be admitted beside this sentinel. This is
+                # an event handshake instead of a race against a 10 ms sleep.
+                assert self.release_interactive.wait(5)
             else:
                 time.sleep(0.01)
             return label
@@ -1087,6 +1094,7 @@ def test_stress_shared_peak_and_background_starvation_with_twenty_callers(
         tracker.release_seeds.set()
         assert tracker.background_started.wait(3)
         assert tracker.background_had_interactive_peer is True
+        tracker.release_interactive.set()
         results = [future.result(timeout=5) for future in futures]
         assert len(results) == 20
         assert all(result is not None for result in results)
@@ -1109,5 +1117,6 @@ def test_stress_shared_peak_and_background_starvation_with_twenty_callers(
         )
     finally:
         tracker.release_seeds.set()
+        tracker.release_interactive.set()
         pool.shutdown(wait=True, cancel_futures=False)
         provider.close()

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import socket
 import subprocess
 import sys
+import threading
 import time
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -14,6 +16,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "backend.sh"
+pytestmark = pytest.mark.xdist_group("backend_script_lifecycle")
 
 
 def _free_port() -> int:
@@ -37,6 +40,13 @@ def _env(tmp_path: Path, port: int) -> dict[str, str]:
         LLM_LOG_ENABLED="false",
         EVENT_LOG_ENABLED="false",
         START_TIMEOUT_SECONDS="8",
+        _SCRIPT_TEST_PROBE_TIMEOUT_SECONDS="0.5",
+        _SCRIPT_TEST_START_POLL_INTERVAL_SECONDS="0.02",
+        _SCRIPT_TEST_START_MAX_POLLS="400",
+        _SCRIPT_TEST_STOP_POLL_INTERVAL_SECONDS="0.01",
+        _SCRIPT_TEST_TERMINATE_POLL_INTERVAL_SECONDS="0.01",
+        _SCRIPT_TEST_FORCE_KILL_SETTLE_SECONDS="0.01",
+        _SCRIPT_TEST_PORT_PID_FILE=str(tmp_path / "listener.pid"),
     )
     return env
 
@@ -63,7 +73,7 @@ def test_backend_script_start_status_stop_with_default_authenticated_api(tmp_pat
         assert "启动成功" in started.stdout
 
         with pytest.raises(HTTPError) as captured:
-            urlopen(f"http://127.0.0.1:{port}/api/notebooks", timeout=2)
+            urlopen(f"http://127.0.0.1:{port}/api/notebooks", timeout=5)
         assert captured.value.code == 401
 
         status = _run("status", env)
@@ -78,21 +88,22 @@ def test_backend_script_start_status_stop_with_default_authenticated_api(tmp_pat
 def test_backend_script_distinguishes_foreign_openapi_service(tmp_path):
     port = _free_port()
     env = _env(tmp_path, port)
-    foreign = subprocess.Popen(
-        [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
-        cwd=tmp_path,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+
+    class ForeignHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            return
+
+    foreign = ThreadingHTTPServer(("127.0.0.1", port), ForeignHandler)
+    thread = threading.Thread(target=foreign.serve_forever, daemon=True)
+    thread.start()
+    Path(env["_SCRIPT_TEST_PORT_PID_FILE"]).write_text(
+        f"{os.getpid()}\n", encoding="utf-8"
     )
     try:
-        for _ in range(40):
-            if foreign.poll() is not None:
-                raise AssertionError("foreign server exited")
-            try:
-                urlopen(f"http://127.0.0.1:{port}/", timeout=0.2)
-                break
-            except OSError:
-                time.sleep(0.05)
         status = _run("status", env)
         assert status.returncode == 0
         assert "但不是 silicon-notebook" in status.stdout
@@ -100,18 +111,16 @@ def test_backend_script_distinguishes_foreign_openapi_service(tmp_path):
         assert refused.returncode != 0
         assert "别的服务占用" in refused.stdout
     finally:
-        foreign.terminate()
-        try:
-            foreign.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            foreign.kill()
-            foreign.wait(timeout=5)
+        foreign.shutdown()
+        foreign.server_close()
+        thread.join(timeout=2)
 
 
 def test_backend_start_timeout_terminates_the_exact_launched_process(tmp_path):
     port = _free_port()
     env = _env(tmp_path, port)
     env["START_TIMEOUT_SECONDS"] = "1"
+    env["_SCRIPT_TEST_START_MAX_POLLS"] = "1"
     pid_file = tmp_path / "fake.pid"
     wrapper = tmp_path / "python-wrapper"
     wrapper.write_text(

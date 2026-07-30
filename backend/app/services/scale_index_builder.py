@@ -14,6 +14,33 @@ import numpy as np
 
 from app.services.kg import scale_index as scale_index_module
 from app.services.kg import viz_index as viz_index_module
+from app.services.vector_index import resolve_runtime_dim
+
+
+def _warn_if_scale_index_uses_full_width(
+    settings,
+    logger,
+    notebook_id: str,
+) -> None:
+    """Emit the native-width warning without requiring an index build."""
+    embed_dim = int(settings.embed_dim)
+    runtime_dim = resolve_runtime_dim(settings)
+    effective_dim = (
+        runtime_dim if 0 < runtime_dim < embed_dim else embed_dim
+    )
+    if effective_dim < 4096:
+        return
+    logger.warning(
+        "scale-index build for %s: vectors/ANN build at effective width %s "
+        "(EMBED_DIM=%s, EMBED_RUNTIME_DIM=%s) — a large index, ~%sx the "
+        "memory of a 1024-dim one. Lower EMBED_RUNTIME_DIM below EMBED_DIM "
+        "(e.g. 1024) to shrink it if the similarity space allows.",
+        notebook_id,
+        effective_dim,
+        settings.embed_dim,
+        runtime_dim,
+        effective_dim // 1024,
+    )
 
 
 class ScaleIndexBuilder:
@@ -139,19 +166,11 @@ class ScaleIndexBuilder:
         # >= EMBED_DIM (a no-op truncation, e.g. EMBED_RUNTIME_DIM == EMBED_DIM,
         # which the validator permits — codex PR#353 r4) both build full width.
         # Loud, NOT fatal: a natively small-dim model legitimately needs none.
-        from app.services.vector_index import resolve_runtime_dim as _runtime_dim
-        _embed_dim = int(self.settings.embed_dim)
-        _runtime = _runtime_dim(self.settings)
-        _effective_dim = _runtime if 0 < _runtime < _embed_dim else _embed_dim
-        if _effective_dim >= 4096:
-            self.event_log.logger.warning(
-                "scale-index build for %s: vectors/ANN build at effective width %s "
-                "(EMBED_DIM=%s, EMBED_RUNTIME_DIM=%s) — a large index, ~%sx the "
-                "memory of a 1024-dim one. Lower EMBED_RUNTIME_DIM below EMBED_DIM "
-                "(e.g. 1024) to shrink it if the similarity space allows.",
-                notebook_id, _effective_dim, self.settings.embed_dim, _runtime,
-                _effective_dim // 1024,
-            )
+        _warn_if_scale_index_uses_full_width(
+            self.settings,
+            self.event_log.logger,
+            notebook_id,
+        )
         build_started = time.perf_counter()
         timings: dict[str, int] = {}
 

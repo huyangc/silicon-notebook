@@ -36,29 +36,21 @@ def _seed_and_build(repo, name):
     return nb.id
 
 
-def test_scale_idx_cache_is_lru_process_cache_instance(repo):
-    from app.services.vector_cache import LRUProcessCache
-    assert isinstance(repo._scale_idx_cache, LRUProcessCache)
-    assert isinstance(repo._viz_idx_cache, LRUProcessCache)
+def test_scale_idx_cache_respects_configured_cap():
+    from app.services.vector_cache import LargeAwareLRUCache
 
+    cache = LargeAwareLRUCache(
+        max_entries=2,
+        max_large=2,
+        is_large=lambda _value: False,
+    )
+    for notebook_id in ("nb0", "nb1", "nb2"):
+        cache[notebook_id] = object()
 
-def test_scale_idx_cache_respects_configured_cap(repo, monkeypatch):
-    monkeypatch.setattr(repo.settings, "scale_idx_cache_max", 2)
-    # Cache max is baked in at __init__ time (matches VectorCache's own
-    # construction-time max_entries convention) — rebuild the cache object
-    # the way __init__ does, to test the cap in isolation without needing to
-    # spin up 3 real scale indexes (slow) just to prove eviction.
-    from app.services.vector_cache import LRUProcessCache
-    repo._scale_idx_cache = LRUProcessCache(max_entries=repo.settings.scale_idx_cache_max)
-
-    nb_ids = [_seed_and_build(repo, f"nb{i}") for i in range(3)]
-    for nb_id in nb_ids:
-        idx = repo._scale_index(nb_id)
-        assert idx is not None
     # Cap=2: only the 2 most-recently-accessed notebooks remain cached.
-    assert len(repo._scale_idx_cache) <= 2
-    assert nb_ids[0] not in repo._scale_idx_cache  # evicted (accessed first, never re-touched)
-    assert nb_ids[2] in repo._scale_idx_cache      # most recent
+    assert len(cache) == 2
+    assert "nb0" not in cache  # evicted (inserted first, never re-touched)
+    assert "nb2" in cache      # most recent
 
 
 def test_evicted_scale_index_reloads_correctly_from_disk(repo, monkeypatch):

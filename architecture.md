@@ -410,7 +410,7 @@ python scripts/verify_repository_snapshot.py \
   --storage-dir backend/tests/fixtures/repository_v9/storage
 ```
 
-完整离线门禁与前端生产构建：
+编辑期离线门禁与前端生产构建：
 
 ```bash
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
@@ -418,7 +418,7 @@ cd frontend
 npm run build
 ```
 
-`scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；backend 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖；每个 lane
+门禁按 G0–G3 分级：G0 是按改动选跑的目标测试；G1 `scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane，并用于编辑期及每次 PR/push，backend 默认使用 12 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖；G2 `scripts/check_extended.sh` 先复用 G1，再补跑 `slow` 真实索引/性能用例与 `architecture_contract` 全仓语义源码扫描，由独立 GitHub Actions workflow 每天 18:17 UTC（北京时间次日 02:17）执行一次，也支持手动触发；G3 `scripts/check_postgres.sh` 独立负责 PostgreSQL 集成覆盖。G1/G2 backend marker 表达式必须精确互补。每个 lane
 拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js
 后代。静态契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；
 源码行号/offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用
@@ -426,5 +426,7 @@ npm run build
 Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块。pytest controller
 在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个图谱 worker
 重复执行 macOS 字体枚举。Apple Silicon warm gate 硬目标是不超过 60 秒；CI 各 lane 时长仅作观察，不把该本机目标变成 hosted runner 的 timeout 断言。
+
+测试性能优化保持结果语义不变：同一 pytest 进程内的全仓 AST/协议扫描只解析每个生产文件一次；缓存容器策略直接针对容器验证，不为纯淘汰语义构建数据库和 ANN 索引；autouse 隔离路径从各 worker 已有的 pytest base temp 派生，而不是为每条纯测试额外创建 `tmp_path`；生命周期脚本仅在测试显式设置私有 `_SCRIPT_TEST_*` 环境变量时缩短轮询，未设置时仍使用生产超时与轮询间隔。并发正确性以 event/barrier 握手证明，不把固定 sleep 或线程唤醒顺序当作契约；真实 backend/prod 进程生命周期模块使用各自 xdist group，避免互相争抢端口与清理时序。
 
 SQLite source open 的分类只在 `open_fresh_live_sqlite` 调用边界生效：非瞬态 `sqlite3.OperationalError` 归为 binding identity；locked、busy、interrupted open 仍瞬态整批重试，后续 SQLite operational error 保持原 schema/query 分类。

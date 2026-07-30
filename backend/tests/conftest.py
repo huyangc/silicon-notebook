@@ -1,6 +1,7 @@
 """测试进程默认开 auth_optional：无 token 的请求回退 seeded admin，
 既有 HTTP 测试无需逐一登录即可继续以 admin 身份跑。"""
 import os
+from itertools import count
 from pathlib import Path
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
@@ -42,6 +43,13 @@ _GRAPH_INDEX_CONTRACT_MODULES = {
     "test_chunk_retrieval_characterization.py",
 }
 
+# ``tmp_path`` creates and later walks a directory for every test, including
+# pure parser/policy tests that never touch the filesystem. Keep the same
+# per-test isolation contract with cheap, unique paths below xdist's existing
+# worker-specific base temp directory. The application creates storage/log
+# directories lazily when a test actually uses them; SQLite only needs the
+# already-existing base directory for its database file.
+_TEST_ISOLATION_IDS = count()
 
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(items):
@@ -78,7 +86,7 @@ def python_source_index() -> PythonSourceIndex:
 
 
 @pytest.fixture(autouse=True)
-def _reset_singleton_caches(tmp_path, monkeypatch):
+def _reset_singleton_caches(tmp_path_factory, monkeypatch):
     """Give every test an isolated default DB/storage/log root and clear singletons.
 
     Individual tests may override or delete these variables after this fixture
@@ -86,13 +94,23 @@ def _reset_singleton_caches(tmp_path, monkeypatch):
     touching the developer's real ``.local/storage`` and makes the suite safe
     in linked worktrees and CI sandboxes.
     """
-    from app.core.config import get_settings
     from app.api import deps
+    from app.core.config import get_settings
+
+    base_temp = tmp_path_factory.getbasetemp()
+    isolation_id = next(_TEST_ISOLATION_IDS)
     repository_factory = deps.repository
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'default.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
-    monkeypatch.setenv("EVENT_LOG_DIR", str(tmp_path / "logs"))
-    monkeypatch.setenv("LLM_LOG_PATH", str(tmp_path / "logs" / "llm.jsonl"))
+    monkeypatch.setenv(
+        "DATABASE_URL", f"sqlite:///{base_temp / f'default-{isolation_id}.db'}"
+    )
+    monkeypatch.setenv(
+        "SILICON_NOTEBOOK_STORAGE_DIR",
+        str(base_temp / f"storage-{isolation_id}"),
+    )
+    monkeypatch.setenv("EVENT_LOG_DIR", str(base_temp / f"logs-{isolation_id}"))
+    monkeypatch.setenv(
+        "LLM_LOG_PATH", str(base_temp / f"logs-{isolation_id}" / "llm.jsonl")
+    )
     get_settings.cache_clear()
     repository_factory.cache_clear()
     yield

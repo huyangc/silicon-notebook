@@ -15,6 +15,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO_ROOT / "backend"
 _CACHE_PKG = _BACKEND / "app" / "core" / "cache"
@@ -85,6 +87,7 @@ def _concrete_backend_imports(path: Path) -> list[str]:
     return hits
 
 
+@pytest.mark.architecture_contract
 def test_concrete_backend_is_not_imported_outside_the_cache_module():
     offenders = []
     for path in _python_files():

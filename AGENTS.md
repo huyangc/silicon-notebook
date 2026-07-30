@@ -464,10 +464,18 @@ Run:
 bash scripts/check.sh
 ```
 
-`scripts/check.sh` is the complete offline local gate. It runs three bounded
-lanes concurrently: complete backend pytest with default 9 backend pytest workers
+`scripts/check.sh` is the level-1 edit-time and PR/push offline gate. It runs three bounded
+lanes concurrently: the stable backend pytest suite with default 12 backend pytest workers
 (override with `BACKEND_PYTEST_WORKERS`), syntax/smoke/contract/harness
-checks, and frontend test/typecheck/build. Each lane owns a process group;
+checks, and frontend test/typecheck/build. The level-1 backend lane excludes only
+the `slow` real-index/performance marker, the `architecture_contract` repository-wide
+semantic source scans, and the separately authoritative PostgreSQL tree. Run
+`scripts/check_extended.sh` for level 2: it reuses level 1 and adds the exact
+backend complement. `.github/workflows/daily-extended.yml` runs level 2 once
+daily at 18:17 UTC (02:17 Asia/Shanghai) and on manual dispatch; ordinary PRs
+and pushes run level 1. Level 0 is change-focused test selection, and level 3
+is the independent PostgreSQL integration gate.
+Each lane owns a process group;
 interrupting or terminating the controller must terminate and reap every
 pytest/npm/Next.js descendant. Acceptance on the current Apple Silicon
 development machine uses:
@@ -487,14 +495,21 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 The Apple Silicon warm gate hard target is at most 60 seconds; CI lane timings are observational only, so this measured local target is not a portable timeout
 assertion for every host.
 
+Test-speed optimizations must preserve the same assertions and production defaults. The level-1 standard and level-2 extended backend marker expressions must remain exact complements, and PostgreSQL remains owned by `scripts/check_postgres.sh`; no committed test may become unreachable. Repository-wide syntax/contract discovery should parse each production file at most once per pytest process; tests of cache/container policy should use the policy object directly instead of constructing unrelated database/index artifacts; and lifecycle scripts may expose private `_SCRIPT_TEST_*` timing controls for tests while their unset production polling and timeout values remain unchanged. The autouse isolation fixture derives unique paths from each worker's existing pytest base temp rather than requesting a fresh `tmp_path` directory for every test. Concurrency tests use events/barriers for positive ordering and fairness assertions rather than depending on fixed sleeps or thread wake-up order; real-process lifecycle modules use dedicated xdist groups.
+
 ### GitHub Actions CI
 
-- `.github/workflows/ci.yml` is a read-only wrapper around
-  `scripts/check.sh`; never duplicate test roots or frontend commands in the
-  workflow.
-- `CI / full-gate` runs on pull requests to `master`, pushes to `master`, and
+- `.github/workflows/ci.yml` is a read-only wrapper around the level-1
+  `scripts/check.sh`; `.github/workflows/daily-extended.yml` wraps only the
+  level-2 `scripts/check_extended.sh`. Never duplicate test roots or frontend
+  commands in either workflow.
+- `CI / level-1-standard` runs on pull requests to `master`, pushes to `master`, and
   manual dispatches on `ubuntu-24.04` with Python 3.13, Node.js 22, and four
   backend pytest workers.
+- `Daily Extended Gate / level-2-extended` has exactly one daily cron
+  (`17 18 * * *`) plus manual dispatch. Do not add PR/push triggers to it.
+- `CI / level-3-postgres-integration` remains the separately authoritative
+  PostgreSQL adapter integration check.
 - Keep model/deployment secrets out of this workflow. Package-manager caches
   may contain downloads only; do not cache `node_modules`, virtualenvs,
   databases, or `.local` application state.

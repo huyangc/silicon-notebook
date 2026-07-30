@@ -97,6 +97,8 @@ def test_transient_exhaustion_opens_only_its_run(monkeypatch):
     )
     a = KgExtractionRunControl("job-a")
     b = KgExtractionRunControl("job-b")
+    backoffs = []
+    monkeypatch.setattr(a, "wait_backoff", backoffs.append)
     delegate = _SequenceClient(
         [_connection_error(), _connection_error(), _connection_error()]
     )
@@ -107,6 +109,7 @@ def test_transient_exhaustion_opens_only_its_run(monkeypatch):
 
     assert raised.value.failure.code == "model_unavailable"
     assert delegate.calls == 3
+    assert backoffs == [1, 2]
     assert all(call["timeout"] == 60 for call in delegate.kwargs)
     assert all(call["max_retries"] == 0 for call in delegate.kwargs)
     assert a.aborted is True
@@ -119,12 +122,15 @@ def test_success_before_limit_does_not_open_circuit(monkeypatch):
         lambda *_args: 0,
     )
     control = KgExtractionRunControl("job-a")
+    backoffs = []
+    monkeypatch.setattr(control, "wait_backoff", backoffs.append)
     delegate = _SequenceClient([_timeout_error(), '{"ok":true}'])
     client = TaskScopedKgClient(delegate, _settings(retries=2), control)
     assert (
         client.chat_json([{"role": "user", "content": "x"}], "{}")
         == '{"ok":true}'
     )
+    assert backoffs == [1]
     assert control.aborted is False
 
 

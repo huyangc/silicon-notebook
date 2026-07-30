@@ -167,40 +167,36 @@ def test_rebuild_releases_concept_reps_before_derivation_tail(repo, monkeypatch)
     assert tail.get("reps_alive") is False       # ...and released before build_viz
 
 
-def _build_dim_warnings(tmp_path, monkeypatch, embed_dim, runtime_dim):
-    import uuid
-    d = tmp_path / uuid.uuid4().hex[:8]
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{d/'t.db'}")
-    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(d/"s"))
-    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_DIM", str(embed_dim))
-    if runtime_dim is None:
-        monkeypatch.delenv("EMBED_RUNTIME_DIM", raising=False)
-    else:
-        monkeypatch.setenv("EMBED_RUNTIME_DIM", str(runtime_dim))
-    r = SQLiteRepository(Settings())
-    bind_all_embedding_clients(r, FakeEmbedder(dim=embed_dim))
-    nb = r.create_notebook(NotebookCreate(name="base"))
-    r.store_kg(nb.id, None, [
-        {"local_id": "a", "object_type": "concept", "payload": {"name": "M", "section_path": ""}, "evidence": []},
-    ], [])
-    warned: list = []
-    monkeypatch.setattr(
-        r._runtime.scale_builder.event_log.logger, "warning",
-        lambda msg, *a, **k: warned.append(str(msg)),
-    )
-    r._runtime.scale_builder.build(nb.id)
-    return [w for w in warned if "effective width" in w]
-
-
-def test_build_warns_when_effective_width_is_full_native(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("runtime_dim", "warns"),
+    ((None, True), (4096, True), (1024, False)),
+)
+def test_build_warns_when_effective_width_is_full_native(
+    monkeypatch, runtime_dim, warns
+):
     """OOM audit P2-6 (codex PR#353 r4): warn whenever the EFFECTIVE build width
     is full native — EMBED_RUNTIME_DIM unset (0) OR >= EMBED_DIM (a no-op
     truncation the validator permits) — not only when it is 0. A truncating
     runtime (< EMBED_DIM) stays quiet. NOT fatal."""
-    assert _build_dim_warnings(tmp_path, monkeypatch, 4096, None)     # unset → full width → warn
-    assert _build_dim_warnings(tmp_path, monkeypatch, 4096, 4096)     # no-op truncation → warn
-    assert not _build_dim_warnings(tmp_path, monkeypatch, 4096, 1024)  # truncates → quiet
+    from app.services.scale_index_builder import (
+        _warn_if_scale_index_uses_full_width,
+    )
+
+    monkeypatch.setenv("EMBED_DIM", "4096")
+    if runtime_dim is None:
+        monkeypatch.delenv("EMBED_RUNTIME_DIM", raising=False)
+    else:
+        monkeypatch.setenv("EMBED_RUNTIME_DIM", str(runtime_dim))
+    messages: list[str] = []
+
+    class Logger:
+        def warning(self, message, *_args):
+            messages.append(str(message))
+
+    _warn_if_scale_index_uses_full_width(Settings(), Logger(), "nb-test")
+
+    assert bool(messages) is warns
+    assert all("effective width" in message for message in messages)
 
 
 def test_persist_ann_fails_loud_on_labels_without_vectors_or_matching_index(tmp_path):

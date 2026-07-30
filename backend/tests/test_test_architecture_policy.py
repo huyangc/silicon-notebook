@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from tests.architecture.policy import policy_offenders
 
 
@@ -21,6 +23,11 @@ REQUIRED_LAYERS = {
         "npm run build",
     ),
 }
+
+EXTENDED_BACKEND_LAYERS = (
+    "scripts/check_backend.sh",
+    "scripts/check_backend_extended.sh",
+)
 
 
 def _write(tmp_path: Path, source: str) -> Path:
@@ -106,6 +113,7 @@ def test_policy_detects_skip_and_xfail_markers(tmp_path):
     ]
 
 
+@pytest.mark.architecture_contract
 def test_repository_contracts_have_no_source_position_identity_or_markers():
     policy_implementation = {
         ROOT / "backend" / "tests" / "architecture" / "policy.py",
@@ -151,11 +159,21 @@ def test_openapi_framework_versions_are_exactly_pinned():
     assert "pydantic==2.12.4" in requirements
 
 
-def test_verification_lanes_do_not_disable_committed_tests():
-    forbidden = ('-m "not slow"', "--ignore", "pytest.mark.skip", "xfail")
+def test_verification_lanes_do_not_hide_committed_tests():
+    forbidden = ("pytest.mark.skip", "xfail")
     for relative in REQUIRED_LAYERS:
         source = (ROOT / relative).read_text(encoding="utf-8")
         assert not any(value in source for value in forbidden), relative
+
+    standard = (ROOT / EXTENDED_BACKEND_LAYERS[0]).read_text(encoding="utf-8")
+    extended = (ROOT / EXTENDED_BACKEND_LAYERS[1]).read_text(encoding="utf-8")
+    assert '-m "not slow and not architecture_contract"' in standard
+    assert '-m "slow or architecture_contract"' in extended
+    assert "backend/tests/postgres" in standard
+    assert "backend/tests/postgres" in extended
+    assert "check_backend_extended.sh" in (
+        ROOT / "scripts/check_extended.sh"
+    ).read_text(encoding="utf-8")
 
 
 def test_backend_parallelism_is_bounded_and_explicit():
@@ -166,7 +184,7 @@ def test_backend_parallelism_is_bounded_and_explicit():
     assert "-n auto" not in config
     assert "worksteal" not in config
     backend_lane = (ROOT / "scripts" / "check_backend.sh").read_text(encoding="utf-8")
-    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-9}"' in backend_lane
+    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-12}"' in backend_lane
 
 
 def test_parallel_graph_tests_share_repo_local_matplotlib_cache():

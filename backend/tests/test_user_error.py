@@ -148,6 +148,7 @@ def _bare_chinese_4xx_sites() -> list[str]:
     return offenders
 
 
+@pytest.mark.architecture_contract
 def test_no_bare_chinese_4xx_http_exception():
     """中文字面量 detail 说明它是写给用户的 —— 那就必须用 user_error() 标出来，
     否则前端只会显示「操作失败，请重试」，可操作信息静默丢失。
@@ -230,6 +231,7 @@ def _user_error_sites() -> tuple[list[str], list[str]]:
     return static_offenders, dynamic_sites
 
 
+@pytest.mark.architecture_contract
 def test_static_user_error_messages_are_chinese():
     """user_error() 的文案是**给终端用户看的**，按产品约定一律中文。
 
@@ -244,6 +246,7 @@ def test_static_user_error_messages_are_chinese():
     )
 
 
+@pytest.mark.architecture_contract
 def test_dynamic_user_error_sites_are_explicitly_registered():
     """动态实参 AST 查不了内容 —— 那就**显式登记**，不许静默放过。
 
