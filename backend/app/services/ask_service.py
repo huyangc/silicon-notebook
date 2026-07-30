@@ -139,6 +139,40 @@ def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
+def _keep_only_section_markers(answer: str, section_keys: set) -> str:
+    """按节合成:把一节的正文里**不属于本节号段**的 `[k…]` 标记清掉。
+
+    为什么必须在拼接**之前**做(codex PR#407 R3 P1):按节解析已经正确地不给跨节标记
+    发锚点了,但正文里那个 `[k1]` 还原样留着 —— 而**前端是按合并后的引用表解析正文
+    标记的**(`buildAnswerReferences` 拿 `answer.matchAll` 去查 `anchorsByKey`)。第二节
+    写出的 `[k1]` 于是照样绑到第一节那条毫不相干的证据上:按节解析防住的误绑,从
+    渲染这道后门原样回来了。号段偏移买到的隔离,必须在**送到读者眼前的那份文本**上
+    也成立。
+
+    与 `_strip_unbound_markers`(graph 模式)的两处刻意分歧:
+
+    * **混合组保留合法子集**而不是整组丢弃。那边未知键是**凭空造的** id,没法判断
+      它想引什么,所以整组失效最诚实;这边不同 —— 号段互不相交是**服务端**造的
+      事实,本节模型手里从来就没有过 `k1` 这个号,它只可能是幻觉,而同组里的
+      `k10001` 是服务端确确实实发给这一节、它也确确实实看见了的证据。连着好的一半
+      一起丢,是拿一次幻觉惩罚一条真引用。
+    * **空白收敛带 `(?<=\\S)` 前置断言**:标记按 prompt 规则 1 挂在句末,删掉只会留下
+      「词__词」这种**跟在非空白字符后面**的空格串。不加断言的话,分节答案里的嵌套
+      列表(`  - 项`)与四空格代码块会被一起压平 —— 那对长文比漏一个标记严重得多。
+
+    合法标记逐字保留(顺带把 `[ k10001]` 这类畸形写法规范化成可绑定的形态,同
+    `_strip_unbound_markers` 的既有行为)。整组全非法时连同方括号一起移除,所以不会
+    留下空括号或多余逗号。
+    """
+    def _sub(match: re.Match) -> str:
+        keys = [part.strip() for part in match.group(0).strip("[]").split(",")]
+        kept = [key for key in keys if key in section_keys]
+        return ("[" + ", ".join(kept) + "]") if kept else ""
+
+    cleaned = _LOOSE_MARKER_GROUP_RE.sub(_sub, answer or "")
+    return re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned).strip()
+
+
 def knowledge_record(object_type: str, obj: dict, schema) -> KnowledgeRecord:
     """KG 对象 → KnowledgeRecord 展示投影(canonical body;facade 的
     _knowledge_record 与 ask_reasoning 的 related_knowledge 共用)。"""
@@ -1100,6 +1134,18 @@ class AskService:
             raise ValueError("answer did not return a JSON object")
         answer = str(data.get("answer", "")).strip()
         llm_grounded = bool(data.get("grounded", False))
+        # 节模式:先按本节号段清洗正文,再解析锚点。
+        #
+        # 顺序是有讲究的。**清洗必须在解析之前**,因为 `parse_anchors` 对混合组
+        # (`[k10001, k1]`)是整组失效的 —— 先解析的话,那一组里合法的 k10001 也拿不到
+        # 锚点,而清洗后正文却写着 `[k10001]`,变成一个永远绑不上的标记。先洗再解,
+        # 两边说的是同一件事。
+        #
+        # **清洗本身是必需的**(codex PR#407 R3 P1):按节解析只决定谁能拿到锚点,
+        # 而前端是拿正文里的标记去查**合并后**的引用表 —— 不清洗,第二节那个 `[k1]`
+        # 会绑到第一节的无关证据上,按节解析防住的误绑从渲染这道后门回来。
+        if sectioned:
+            answer = _keep_only_section_markers(answer, set(id_map))
         # 锚点按**本节自己的** id_map 解析(节模式下 id_map 只含本节证据)。合并
         # 之后再统一解析拼好的全文是错的:一节写出别节号段的 `[k]`(它根本没见过
         # 那个号)只可能是幻觉,合并解析会把它一本正经地绑到别节的证据上,而按节

@@ -912,30 +912,120 @@ def test_the_kill_switch_also_turns_off_sectioned_synthesis(repo, monkeypatch):
                    for key in _synthesis_detail(response))
 
 
-def test_a_marker_from_another_sections_namespace_binds_nothing(
+def _frontend_bound_keys(response):
+    """按**前端**的口径解析:正文里的标记 × 合并后的引用表。
+
+    前端 `buildAnswerReferences` 就是这么做的 —— `answer.matchAll(标记正则)` 去查
+    `anchorsByKey`(整篇合并的那一份),而不是按节查。所以「跨节标记不许绑」这条合同
+    必须在**送到读者眼前的那份文本**上成立,只让后端的按节解析不发锚点是不够的。
+    整组里有一个键查不到就整组不绑(前端同款规则)。
+    """
+    by_key = {anchor.key: anchor for anchor in response.anchors}
+    bound = []
+    for group in re.findall(r"\[((?:k\d+\s*,\s*)*k\d+)\]", response.answer or ""):
+        keys = [part.strip() for part in group.split(",")]
+        if any(key not in by_key for key in keys):
+            continue
+        bound.extend(keys)
+    return bound
+
+
+def test_a_marker_from_another_sections_namespace_is_scrubbed_before_joining(
     repo, monkeypatch
 ):
-    """一节写出别节的号 = 幻觉。按节解析直接丢弃,不许它绑到别节的证据上。
+    """一节写出别节的号 = 幻觉。锚点不发**而且**正文里的那个标记要洗掉。
 
     **两种口径必须在这里分叉**,所以第一节刻意**不**引用任何东西:第一节也合法引用
     同一个 key 的话,合并解析同样会产出那一条锚点,两种口径结果重合,这条用例就成了
-    空转。现在的形状下——按节解析 ⇒ 零锚点(第二节从没见过 k4001);合并解析 ⇒ 一条
-    指向第一节证据 e1 的锚点。
+    空转。
+
+    只丢锚点、留着正文里的 `[k4001]` 是不够的(codex PR#407 R3 P1):前端拿正文标记
+    去查**合并后**的引用表,那个号照样绑到第一节的证据上 —— 按节解析防住的误绑,从
+    渲染这道后门原样回来。
     """
     notebook = _notebook(repo)
     _stub_run(monkeypatch, _reasoning_result())
     first_section_key = f"k{AskService._ELEMENT_KEY_BASE + 1}"
     llm = _CaptureAnswerLLM(answers=[
-        {"answer": "第一节正文,不带任何引用。", "grounded": False},
+        # 第一节合法引用它自己的号 —— 合并表里于是**真的有** k4001 这条锚点,
+        # 第二节抄来的那个号才有东西可以误绑上去(否则前端本来也绑不上,空转)。
+        {"answer": f"第一节正文[{first_section_key}]", "grounded": True},
         # 第二节的合法号段是 k1400x,这里故意抄第一节的号。
         {"answer": f"第二节正文[{first_section_key}]", "grounded": True},
     ])
     response = _ask(repo, notebook, llm)
 
-    assert first_section_key in response.answer, "幻觉标记确实出现在拼好的全文里"
-    assert response.anchors == [], (
-        "第二节从未见过 k4001,它写出的这个号必须一个锚点都绑不出来"
-    )
+    # 第一节自己那个标记逐字保留(合法的一份不受清洗影响)。
+    assert response.answer.count(f"[{first_section_key}]") == 1
+    assert response.answer.split("## 第二节")[1].strip() == "第二节正文"
+    assert [anchor.key for anchor in response.anchors] == [first_section_key]
+    # 前端口径:整篇只解析出第一节那一处引用,第二节一处都没有。
+    assert _frontend_bound_keys(response) == [first_section_key]
+
+
+def test_a_mixed_marker_group_keeps_only_this_sections_key(repo, monkeypatch):
+    """混合组 `[本节合法键, 别节键]` → 清洗成 `[本节合法键]`,并且**绑得上**。
+
+    整组丢弃(graph 模式 `_strip_unbound_markers` 的口径)在这里是错的:号段互不相交
+    是服务端造的事实,同组里那个合法键是服务端确确实实发给这一节、它也确确实实看见
+    了的证据 —— 连着好的一半一起丢,是拿一次幻觉惩罚一条真引用。
+
+    顺序也在这里被钉住:`parse_anchors` 对混合组整组失效,所以清洗必须在解析**之前**
+    做,否则正文写着 `[k14001]`、锚点却没有,变成一个永远绑不上的标记。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    alien = f"k{AskService._ELEMENT_KEY_BASE + 1}"                    # 第一节的号
+    own = f"k{OUTLINE_SECTION_KEY_STRIDE + AskService._ELEMENT_KEY_BASE + 1}"
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": "第一节正文,不带任何引用。", "grounded": False},
+        {"answer": f"第二节正文[{own}, {alien}]", "grounded": True},
+    ])
+    response = _ask(repo, notebook, llm)
+
+    assert alien not in response.answer
+    assert f"[{own}]" in response.answer
+    assert [anchor.key for anchor in response.anchors] == [own]
+    assert _frontend_bound_keys(response) == [own]
+
+
+def test_an_entirely_alien_group_leaves_no_residue(repo, monkeypatch):
+    """整组全非法 → 连方括号一起移除,不留空括号、多余逗号或双空格。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    alien_a = f"k{AskService._ELEMENT_KEY_BASE + 1}"
+    alien_b = f"k{AskService._ELEMENT_KEY_BASE + 2}"
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": "第一节正文。", "grounded": False},
+        {"answer": f"前半句 [{alien_a}, {alien_b}] 后半句。", "grounded": True},
+    ])
+    response = _ask(repo, notebook, llm)
+
+    body = response.answer.split("## 第二节")[1].strip()
+    assert body == "前半句 后半句。"
+    for residue in ("[]", "[,", ",]", "  "):
+        assert residue not in body, residue
+    assert response.anchors == []
+
+
+def test_scrubbing_leaves_indentation_and_legal_markers_alone(repo, monkeypatch):
+    """清洗只收敛「删标记留下的那个空格」,不碰行首缩进。
+
+    分节答案是长文,嵌套列表(`  - 项`)与四空格代码块都很常见;无差别地把 2+ 空格压成
+    1 个,会把它们一起压平 —— 那对读者比漏洗一个标记严重得多。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    own = f"k{OUTLINE_SECTION_KEY_STRIDE + AskService._ELEMENT_KEY_BASE + 1}"
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": "第一节正文。", "grounded": False},
+        {"answer": f"要点如下:\n- 一级\n  - 二级缩进\n结论[{own}]", "grounded": True},
+    ])
+    response = _ask(repo, notebook, llm)
+
+    body = response.answer.split("## 第二节")[1].strip()
+    assert "\n  - 二级缩进\n" in body, "行首缩进必须原样保留"
+    assert body.endswith(f"结论[{own}]"), "合法标记逐字保留"
 
 
 def test_a_bound_object_outside_the_ranked_selection_still_grounds_the_answer(
