@@ -1860,6 +1860,77 @@ class ReasoningRetriever:
             exact_lookup_log.append(_ExactLookupAttempt(
                 terms=terms, new=0, tries=1, note=note, dedup_key=key))
 
+        def apply_outline_update(decision) -> None:
+            """应用一次 update_outline 载荷:预算 → 校验 → 留存 → trace。
+
+            零检索、零模型调用,只把模型交上来的结构按服务端事实夹一遍并留存。
+            只有 outline_active 时才可能被调到——关闭态下这个动作不在
+            allowed_actions 里,reflect() 会按既有未知动作合同把它退成 answer
+            (fail_closed 下抛错),与枚举分支同形。
+
+            **抽成函数是因为它有两个调用点**:动作分发链里的那一条,以及
+            `sufficient` 短路之前的那一次(见调用处的理由)。两处各写一份的话,
+            「校验/预算/trace 语义完全一致」就成了一句要靠人复核的话——而这正是
+            本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
+            """
+            nonlocal outline, outline_updates
+            if outline_updates >= _MAX_OUTLINE_UPDATES:
+                # 措辞按「该给什么」写(exact_lookup 那条实测教训):只说
+                # 「不能再整理了」的话,模型下一轮往往再交一份大纲空转一步。
+                record(TraceStep(
+                    step_type="skip",
+                    summary=(
+                        f"跳过整理大纲(已达本轮整理次数上限 "
+                        f"{_MAX_OUTLINE_UPDATES};大纲就按现在这份定稿,"
+                        "请改用检索动作补齐空节,或直接作答)"),
+                    detail={"reason": "outline_budget",
+                            "updates": outline_updates,
+                            "sections": len(outline)}))
+                return
+            if not decision.outline_sections:
+                record(TraceStep(
+                    step_type="skip",
+                    summary=(
+                        "跳过整理大纲(这次提交里没有可用的章节;"
+                        "每次都要交上整份大纲,每一节至少要有标题)"),
+                    detail={"reason": "outline_empty"}))
+                return
+            outline_updates += 1
+            # 绑定键的合法集合按**本 run 累计**的候选算,不按上一轮摘要展示过
+            # 什么算 —— 见 outline_binding_keys 的说明(全量替换 + 头尾窗口会让
+            # 「本轮展示过」这个口径持续吃掉合法绑定)。
+            bound, dropped = bind_outline_evidence(
+                decision.outline_sections,
+                outline_binding_keys(collected, elements, chunks),
+            )
+            # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
+            # 初始化处的理由),所以这里既不加分也不清零。
+            changed = outline_signature(bound) != outline_signature(outline)
+            replaced = len(outline)
+            outline = bound
+            empty = [s.title for s in bound if not s.evidence_keys]
+            record(TraceStep(
+                step_type="outline",
+                summary=(f"更新大纲: {len(bound)} 节"
+                         f"({len(empty)} 节待补证据)"),
+                detail={
+                    "sections": [
+                        {"id": s.id, "title": s.title, "parent": s.parent,
+                         "evidence": list(s.evidence_keys)}
+                        for s in bound
+                    ],
+                    # 空节点名:它们就是下一步该定向检索的方向,轨迹里单独列
+                    # 出来,排查时不用去数哪一节的 evidence 是空的。
+                    "empty_sections": empty,
+                    # 这次替换掉的上一份大纲有几节(全量替换语义的账目)。
+                    "replaced": replaced,
+                    # 被丢掉的非法键数。对模型是静默的(它只该引用服务端发出去
+                    # 的标识),但轨迹必须留痕,否则「模型一直在编 id」这种情况
+                    # 没有任何地方看得出来。
+                    "dropped_evidence": dropped,
+                    "changed": changed,
+                }))
+
         while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
             steps += 1
@@ -1961,6 +2032,19 @@ class ReasoningRetriever:
                                      "sufficient": decision.sufficient,
                                      "no_progress": no_progress, "stale": stale}))
             if decision.next_action == "answer" or decision.sufficient:
+                # 「交最终版大纲」与「宣布证据够了」是**同一轮**的事:prompt 教模型
+                # 「每个方面都有证据了才置 sufficient」,而那正是它把最后一批绑定补
+                # 上、交出定稿大纲的时刻。直接 break 会把这份载荷静默丢掉,按节合成
+                # 于是用上一轮的旧大纲——那一节的绑定明明检索到了,答案里却看不到。
+                # 应用走与分发链**同一个函数**(预算/校验/trace 语义因此不可能分叉:
+                # 额度耗尽同样记 outline_budget 并不改大纲),应用完再收尾。
+                #
+                # 只对 update_outline 这么做,不是「让所有动作都跑完再 break」:
+                # 其余动作都是检索,而模型既然说了证据已经够,再花一次检索就是纯
+                # 成本。`next_action == "answer"` 那条路不碰大纲(模型没提交任何
+                # 载荷,也没说要改结构)。
+                if decision.next_action == OUTLINE_ACTION:
+                    apply_outline_update(decision)
                 break
             if (
                 decision.next_action == "expand_community"
@@ -2344,66 +2428,10 @@ class ReasoningRetriever:
                                 "truncated_reason": coverage.truncated_reason,
                             }))
             elif decision.next_action == OUTLINE_ACTION:
-                # 大纲便签:零检索、零模型调用,只把模型交上来的结构按服务端事实
-                # 夹一遍并留存。这一步只有在 outline_active 时才可能到达——关闭态
-                # 下这个动作不在 allowed_actions 里,reflect() 会按既有未知动作
-                # 合同把它退成 answer(fail_closed 下抛错),与枚举分支同形。
-                if outline_updates >= _MAX_OUTLINE_UPDATES:
-                    # 措辞按「该给什么」写(exact_lookup 那条实测教训):只说
-                    # 「不能再整理了」的话,模型下一轮往往再交一份大纲空转一步。
-                    record(TraceStep(
-                        step_type="skip",
-                        summary=(
-                            f"跳过整理大纲(已达本轮整理次数上限 "
-                            f"{_MAX_OUTLINE_UPDATES};大纲就按现在这份定稿,"
-                            "请改用检索动作补齐空节,或直接作答)"),
-                        detail={"reason": "outline_budget",
-                                "updates": outline_updates,
-                                "sections": len(outline)}))
-                elif not decision.outline_sections:
-                    record(TraceStep(
-                        step_type="skip",
-                        summary=(
-                            "跳过整理大纲(这次提交里没有可用的章节;"
-                            "每次都要交上整份大纲,每一节至少要有标题)"),
-                        detail={"reason": "outline_empty"}))
-                else:
-                    outline_updates += 1
-                    # 绑定键的合法集合按**本 run 累计**的候选算,不按上一轮摘要
-                    # 展示过什么算 —— 见 outline_binding_keys 的说明(全量替换 +
-                    # 头尾窗口会让「本轮展示过」这个口径持续吃掉合法绑定)。
-                    bound, dropped = bind_outline_evidence(
-                        decision.outline_sections,
-                        outline_binding_keys(collected, elements, chunks),
-                    )
-                    # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面
-                    # 状态初始化处的理由),所以这里既不加分也不清零。
-                    changed = outline_signature(bound) != outline_signature(outline)
-                    replaced = len(outline)
-                    outline = bound
-                    empty = [s.title for s in bound if not s.evidence_keys]
-                    record(TraceStep(
-                        step_type="outline",
-                        summary=(f"更新大纲: {len(bound)} 节"
-                                 f"({len(empty)} 节待补证据)"),
-                        detail={
-                            "sections": [
-                                {"id": s.id, "title": s.title,
-                                 "parent": s.parent,
-                                 "evidence": list(s.evidence_keys)}
-                                for s in bound
-                            ],
-                            # 空节点名:它们就是下一步该定向检索的方向,轨迹里
-                            # 单独列出来,排查时不用去数哪一节的 evidence 是空的。
-                            "empty_sections": empty,
-                            # 这次替换掉的上一份大纲有几节(全量替换语义的账目)。
-                            "replaced": replaced,
-                            # 被丢掉的非法键数。对模型是静默的(它只该引用服务端
-                            # 发出去的标识),但轨迹必须留痕,否则「模型一直在编
-                            # id」这种情况没有任何地方看得出来。
-                            "dropped_evidence": dropped,
-                            "changed": changed,
-                        }))
+                # 与 sufficient 短路之前那次应用共用同一个函数(见 apply_outline_
+                # update 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
+                # 复核的缝。
+                apply_outline_update(decision)
             elif decision.next_action == "ppr_retrieve":
                 if not self.allow_ppr:
                     record(TraceStep(step_type="skip",

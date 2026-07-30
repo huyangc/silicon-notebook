@@ -1024,3 +1024,61 @@ def test_a_real_run_builds_the_outline_and_writes_it_section_by_section(repo):
     detail = _synthesis_detail(response)
     assert detail["outline_sections"] == 2
     assert detail["outline_fallback"] is False
+
+
+def test_a_final_outline_submitted_with_sufficient_reaches_the_synthesis(repo):
+    """端到端:定稿大纲与 `sufficient=true` 在**同一轮**交上来,按节合成照样吃到它。
+
+    这是最常见的收尾形态——reflect prompt 教模型「每个方面都有证据了才置
+    sufficient」,那正是它交出最终版大纲的时刻。`sufficient` 短路若排在动作分发之前,
+    这份载荷会被静默丢弃:检索循环里没有任何报错,答案却退回一次性合成,用户拿到的
+    是一篇没有结构的答案(codex PR#407 R2 P2)。
+    """
+    notebook = _notebook(repo)
+    repo.store_kg(notebook.id, None, [
+        {"local_id": "C1", "object_type": "claim",
+         "payload": {"name": "版图设计要点甲", "section_path": "1"}, "evidence": []},
+        {"local_id": "C2", "object_type": "claim",
+         "payload": {"name": "版图设计要点乙", "section_path": "2"}, "evidence": []},
+    ], [])
+
+    class _LLM(_CaptureAnswerLLM):
+        def __init__(self):
+            super().__init__()
+            self.bound = False
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            content = messages[-1]["content"]
+            if "next_action" in schema_hint and not self.bound:
+                body = content.split("Candidates so far:", 1)[-1]
+                ids = re.findall(r"\(id=([^)]+)\)", body)
+                if len(ids) >= 2:
+                    self.bound = True
+                    # 与上一条用例的唯一差别:同一份响应里还置了 sufficient。
+                    return json.dumps({
+                        "next_action": OUTLINE_ACTION, "reason": "补齐后收尾",
+                        "sufficient": True,
+                        "outline": {"sections": [
+                            {"id": "s1", "title": "甲部分",
+                             "evidence": [ids[0]]},
+                            {"id": "s2", "title": "乙部分",
+                             "evidence": [ids[1]]},
+                        ]},
+                    })
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    llm = _LLM()
+    response = _ask(repo, notebook, llm)
+
+    assert llm.bound
+    assert len(llm.prompts) == 2, "两节 = 两次合成调用(载荷被丢的话只会有一次)"
+    assert response.answer.startswith("## 甲部分")
+    assert "## 乙部分" in response.answer
+    detail = _synthesis_detail(response)
+    assert detail["outline_sections"] == 2
+    assert detail["outline_fallback"] is False
+    # 那一轮只发生一次反思(应用完就收尾,不再多问一轮)。
+    outline_steps = [step for step in (response.reasoning_trace or [])
+                     if step.step_type == "outline"]
+    assert len(outline_steps) == 1
+    assert outline_steps[0].detail["empty_sections"] == []

@@ -898,3 +898,96 @@ def test_roster_then_two_outline_rounds_fill_an_empty_section(repo):
     # 「库里有什么」)。
     assert body.index("「来源清单」已完整列出") < body.index("本轮大纲便签")
     assert body.index("本轮大纲便签") < body.index("[Collections in scope]")
+
+
+# ------------------------------------- sufficient 与最终一次 update_outline
+
+def test_the_final_update_outline_lands_even_with_sufficient(repo):
+    """「交最终版大纲」与「宣布证据够了」是同一轮的事。
+
+    reflect prompt 教模型「每个方面都有证据了才置 sufficient」——那正是它把最后一批
+    绑定补上、交出定稿大纲的时刻。`sufficient` 短路若排在动作分发之前,这份载荷就被
+    静默丢掉:那一节的证据明明检索到了、模型也绑上了,按节合成拿到的却是上一轮那份
+    还带着空节的旧大纲(codex PR#407 R2 P2)。
+    """
+    notebook = _seed(repo, elements=2)
+    llm = _SeqLLM([
+        # ① 先建大纲,第二节故意留空。
+        lambda prompt: _outline_action([
+            {"id": "a", "title": "已有证据的一节",
+             "evidence": [_shown_ids(prompt)[0]]},
+            {"id": "b", "title": "待补的一节"},
+        ]),
+        # ② 为空节做一次定向检索(它也把 stale 清零,与真实用法同形)。
+        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        # ③ 最终版大纲 + sufficient=true:同一轮里既补上绑定又宣布收尾。
+        lambda prompt: dict(
+            _outline_action([
+                {"id": "a", "title": "已有证据的一节",
+                 "evidence": [_shown_ids(prompt)[0]]},
+                {"id": "b", "title": "待补的一节",
+                 "evidence": [_shown_ids(prompt)[-1]]},
+            ], reason="补齐后收尾"),
+            sufficient=True,
+        ),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述一下", "", limits=limits)
+
+    # 最后一次载荷真的落到了终态大纲上:没有空节。
+    assert [s.id for s in result.outline] == ["a", "b"]
+    assert all(s.evidence_keys for s in result.outline), [
+        (s.id, s.evidence_keys) for s in result.outline]
+    # 它也照常留下一条 outline 轨迹步(与正常分支同一套语义)。
+    steps = _steps(result, "outline")
+    assert len(steps) == 2
+    assert steps[-1].summary == "更新大纲: 2 节(0 节待补证据)"
+    assert steps[-1].detail["empty_sections"] == []
+    # 循环确实终止:应用完就收尾,不再多跑一轮反思。
+    assert result.trace[-1].step_type == "answer"
+    assert result.trace[-2].step_type == "outline"
+    assert len(_steps(result, "reflect")) == 3
+
+
+def test_answer_with_sufficient_applies_no_outline_payload(repo):
+    """对照:next_action=answer 立即断路,绝不顺手应用任何 outline 载荷。
+
+    模型没说要改结构(它选的是「作答」),把它上一轮的模板残留当成一次提交会让终态
+    大纲被一份没人要求过的东西替换掉。
+    """
+    notebook = _seed(repo)
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "保留的一节"}]),
+        {"next_action": "answer", "sufficient": True,
+         "outline": {"sections": [{"id": "z", "title": "不该生效的一节"}]}},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert [s.title for s in result.outline] == ["保留的一节"]
+    assert len(_steps(result, "outline")) == 1
+
+
+def test_the_final_update_outline_still_obeys_the_budget(repo):
+    """短路前那次应用与分发链共用同一个函数,所以预算语义不可能分叉:额度用完
+    时它同样只记 outline_budget,不改大纲。"""
+    notebook = _seed(repo)
+    repo.settings.reasoning_stale_limit = 99      # 单独测预算,不牵扯熔断
+    llm = _SeqLLM([
+        _outline_action([{"id": f"s{i}", "title": f"第{i}节"}])
+        for i in range(_MAX_OUTLINE_UPDATES)
+    ] + [
+        dict(_outline_action([{"id": "late", "title": "迟到的一节"}]),
+             sufficient=True),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert len(_steps(result, "outline")) == _MAX_OUTLINE_UPDATES
+    assert "outline_budget" in _skips(result)
+    assert [s.id for s in result.outline] == [
+        f"s{_MAX_OUTLINE_UPDATES - 1}"]
+    assert result.trace[-1].step_type == "answer"
