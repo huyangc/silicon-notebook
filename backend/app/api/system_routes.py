@@ -13,11 +13,12 @@ from app.api.deps import (
     notebook_catalog_repository,
     repository,
 )
-from app.core.config import get_settings
+from app.core.config import SOURCE_UPLOAD_MAX_FILES_PER_BATCH, get_settings
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServicesStatus
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
+from app.models.system import SystemConfiguration
 from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 
@@ -49,6 +50,22 @@ def get_system_model_services_status(
 @router.get("/me", response_model=UserProfile)
 def me(user: UserProfile = Depends(get_current_user)) -> UserProfile:
     return user
+
+
+@router.get("/system/config", response_model=SystemConfiguration)
+def system_configuration(
+    _user: UserProfile = Depends(get_current_user),
+) -> SystemConfiguration:
+    """Small authenticated browser configuration surface.
+
+    Keep this deliberately limited to non-sensitive values that need matching
+    client behavior. Deployment environment names, paths, credentials, and
+    unrelated Settings fields must never be reflected here.
+    """
+    return SystemConfiguration(
+        source_upload_max_bytes=get_settings().source_upload_max_bytes,
+        source_upload_max_files_per_batch=SOURCE_UPLOAD_MAX_FILES_PER_BATCH,
+    )
 
 
 @router.get("/doc-types")

@@ -9,6 +9,8 @@ import {
   markTouched,
   markAllTouched,
   applyTouchedUpdate,
+  sourceUploadSizeLabel,
+  splitFilesByUploadSize,
 } from "./source-upload.ts";
 
 const src = (id, reused) => ({ id, title: `${id}.pdf`, ...(reused === undefined ? {} : { reused }) });
@@ -29,6 +31,27 @@ test("compactStagedFileName: 不会截断 emoji 等代理对字符", () => {
   assert.equal(Array.from(compacted).length, 12);
   assert.doesNotMatch(compacted, /\uFFFD/);
   assert.match(compacted, /\.pdf$/);
+});
+
+test("splitFilesByUploadSize: 精确采用后端下发的字节上限，等于上限可上传", () => {
+  const files = [
+    { name: "fits.pdf", size: 1024 },
+    { name: "too-large.pdf", size: 1025 },
+  ];
+  assert.deepEqual(splitFilesByUploadSize(files, 1024), {
+    accepted: [files[0]],
+    rejected: [files[1]],
+  });
+  assert.equal(sourceUploadSizeLabel(50 * 1024 * 1024), "50 MB");
+  assert.equal(sourceUploadSizeLabel(1024), "1 KB");
+});
+
+test("splitFilesByUploadSize: 配置尚未到达时不猜测旧上限，交给后端 413", () => {
+  const files = [{ name: "pending.pdf", size: 99 * 1024 * 1024 }];
+  assert.deepEqual(splitFilesByUploadSize(files, null), {
+    accepted: files,
+    rejected: [],
+  });
 });
 
 // ---------------- 追踪「用户是否动过类型下拉框」→ 上传发 per-file doc_type_explicit

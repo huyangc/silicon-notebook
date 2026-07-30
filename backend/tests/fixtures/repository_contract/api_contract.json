@@ -1349,39 +1349,6 @@
           "title": "Body_upload_notebook_asset_api_notebooks__notebook_id__assets_post",
           "type": "object"
         },
-        "Body_upload_sources_api_notebooks__notebook_id__sources_post": {
-          "properties": {
-            "doc_type_explicit": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "title": "Doc Type Explicit",
-              "type": "array"
-            },
-            "doc_types": {
-              "default": [],
-              "items": {
-                "type": "string"
-              },
-              "title": "Doc Types",
-              "type": "array"
-            },
-            "files": {
-              "items": {
-                "contentMediaType": "application/octet-stream",
-                "type": "string"
-              },
-              "title": "Files",
-              "type": "array"
-            }
-          },
-          "required": [
-            "files"
-          ],
-          "title": "Body_upload_sources_api_notebooks__notebook_id__sources_post",
-          "type": "object"
-        },
         "CacheEvictRequest": {
           "description": "按 tag（模型名）清理，或整库清空。\n\n两者必须显式二选一：不给默认的\"留空即全清\"，避免一次手滑把整个缓存清掉。",
           "properties": {
@@ -7583,6 +7550,28 @@
             "position"
           ],
           "title": "StructuredResultRow",
+          "type": "object"
+        },
+        "SystemConfiguration": {
+          "additionalProperties": false,
+          "description": "Non-sensitive, authenticated configuration required by the web client.",
+          "properties": {
+            "source_upload_max_bytes": {
+              "exclusiveMinimum": 0.0,
+              "title": "Source Upload Max Bytes",
+              "type": "integer"
+            },
+            "source_upload_max_files_per_batch": {
+              "exclusiveMinimum": 0.0,
+              "title": "Source Upload Max Files Per Batch",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "source_upload_max_bytes",
+            "source_upload_max_files_per_batch"
+          ],
+          "title": "SystemConfiguration",
           "type": "object"
         },
         "TraceStep": {
@@ -15646,7 +15635,31 @@
             "content": {
               "multipart/form-data": {
                 "schema": {
-                  "$ref": "#/components/schemas/Body_upload_sources_api_notebooks__notebook_id__sources_post"
+                  "properties": {
+                    "doc_type_explicit": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "doc_types": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "files": {
+                      "items": {
+                        "format": "binary",
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "files"
+                  ],
+                  "type": "object"
                 }
               }
             },
@@ -16964,6 +16977,25 @@
             }
           },
           "summary": "Parse Source"
+        }
+      },
+      "/api/system/config": {
+        "get": {
+          "description": "Small authenticated browser configuration surface.\n\nKeep this deliberately limited to non-sensitive values that need matching\nclient behavior. Deployment environment names, paths, credentials, and\nunrelated Settings fields must never be reflected here.",
+          "operationId": "system_configuration_api_system_config_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/SystemConfiguration"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "System Configuration"
         }
       }
     }

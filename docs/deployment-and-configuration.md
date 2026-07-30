@@ -401,6 +401,22 @@ DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
 
+**Source uploads:**
+
+```text
+SOURCE_UPLOAD_MAX_MB    # maximum size in MB for one uploaded source file (default 50)
+```
+
+`SOURCE_UPLOAD_MAX_MB` is a whole-number setting from 1 through 1024; one MB is exactly
+`1024 × 1024` bytes. The backend derives and enforces that byte limit for every
+multipart source file (413 includes the active limit). After login, the browser
+reads the parsed byte limit from `GET /api/system/config`, displays it in the
+add-source dialog, rejects oversized selections immediately, and rechecks the
+staged files before it sends multipart data. Both sides also enforce a fixed
+20-file maximum per multipart request so the configured per-file allowance cannot
+multiply into an unbounded temporary spool. The backend remains authoritative for
+stale tabs and direct API clients.
+
 **Retrieval:**
 
 ```text

@@ -26,6 +26,11 @@ _ENV_FILE = (
     else (_ENV_FILE_OVERRIDE.strip() or None)
 )
 
+# Multipart resource guard, intentionally fixed rather than a second deployment
+# knob: one request may carry at most this many source files. The browser reads
+# the value from /api/system/config so its staging behavior stays in lockstep.
+SOURCE_UPLOAD_MAX_FILES_PER_BATCH = 20
+
 
 def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[str]]":
     """启动预检用:(期望的 .env 路径, 是否存在, 疑似改名残骸文件名列表)。
@@ -83,6 +88,15 @@ class Settings(BaseSettings):
     # 缺省时回退到此值。pydantic-settings v2 下 Field(env=) 失效,必须用 validation_alias。
     user_upload_document_limit: int = Field(
         20, validation_alias="USER_UPLOAD_DOCUMENT_LIMIT"
+    )
+    # 单个用户上传来源文件的 MB 上限。这个 Settings 值是唯一真源：上传路由用
+    # source_upload_max_bytes 作权威 413 校验，而已认证的浏览器取得同一解析后的
+    # 字节数，在选择文件时提前拒绝。部署变量用 MB，避免要求运维手算字节。
+    source_upload_max_mb: int = Field(
+        50,
+        gt=0,
+        le=1024,
+        validation_alias="SOURCE_UPLOAD_MAX_MB",
     )
     # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
     # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
@@ -712,6 +726,11 @@ class Settings(BaseSettings):
         if mode == "cli":
             return True
         return False
+
+    @property
+    def source_upload_max_bytes(self) -> int:
+        """Configured per-source upload cap in bytes (1 MB = 1024 × 1024 bytes)."""
+        return self.source_upload_max_mb * 1024 * 1024
 
     @property
     def mineru_cloud_enabled(self) -> bool:
