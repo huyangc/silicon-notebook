@@ -460,15 +460,22 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
 - **用户可见来源口径的真源**：SQLite `source_store.VISIBLE_SOURCE_TYPES_PREDICATE`
   （`list_sources`/`list_sources_page`/`visible_document_count` 已共用它）；PostgreSQL 侧此前
   在三处内联同一段谓词，本次收成同名模块常量并让那三处引用它。新端口
-  `hidden_source_ids` 由**该谓词取反**得到，不新造第三份「哪些类型是隐藏的」拼写。
+  `source_change_signal_rows` 把**该谓词本身**作为投影列（`user_visible`）求值，不新造第三份「哪些类型是隐藏的」拼写，也不为它另开一条查询。
   仓库其他位置（maintenance/knowledge_store/index_projection 等）仍各自内联同形谓词——
   那是既有状况，不在本次范围内，也与本清单口径无关。
-- **计划与计数同一 helper、零新扫描**：`_notebook_visible_sources(db, nb, signals)` 是唯一
-  决定「来源清单包含哪些源」的地方，地图计数取它的长度、执行器遍历它本身，于是
-  「地图说 7、清单列 8」在构造上不可能。成本 = 每参与库 1 次 `hidden_source_ids`
-  （有界主键投影）叠在本来就要付的 signal 查询上；`collection_map` 顺带把元素计数与来源
-  计数并进**同一次** signal 读取（此前每库一次，现在仍是一次）。刻意不为它加缓存:
-  与元素计划不同，这里没有「计数」可跳过，读取本身就是有界的。
+- **计划与计数同一 helper、零额外查询**：`_visible_signal_rows(signals)` 是唯一决定
+  「来源清单包含哪些源」的地方，地图计数取它的长度、执行器遍历它排序后的结果，于是
+  「地图说 7、清单列 8」在构造上不可能。成本 = **0**：可见性由 signal 查询自己投影出来
+  （`user_visible`，各适配器在 SQL 里对可见谓词求值），`collection_map` 顺带把元素计数与
+  来源计数并进**同一次** signal 读取。刻意不为它加缓存：这里没有「计数」可跳过，也没有
+  剩下任何读取。
+  - **订正（codex R2 P2）**：第一版为它单开一条 `hidden_source_ids` 查询取可见谓词的补集。
+    那条查询**无法按 `source_type` seek**（没有任何索引带它），所以它是对该 notebook 全部
+    源行的又一次扫描——每参与库一次、在请求路径上、而且就紧跟在 signal 查询刚扫过同一批
+    行之后。谓词移进投影后端口整个删掉（它没有第二个调用方；显式 `source_id` 那条路径用的
+    是 `memory_source_ids`）。`user_visible` 与 `created_at` 一样**不进指纹**：源类型不会变，
+    把它哈希进去只会让所有已部署库的计数缓存白失效一次。守卫按 SQL 语句文本计数
+    （退回一条独立查询时端口调用计数看不出来，语句计数看得出来）。
 - **计划即全集 ⇒ 无 lookahead**：计划长度已知，`position < len(plan)` 就是「还有没有更多」的
   精确答案，因此来源侧不需要元素侧那个 +1 lookahead 行（「行预算恰好等于集合大小」不会
   误报 partial），并有一条测试钉住这一点，防止有人「顺手统一」成需要 lookahead 的写法。
@@ -478,7 +485,11 @@ PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收�
 - **遍历顺序 = 来源页签顺序 `(created_at, id)`**（订正 spec-review B3：先前按 id 排，那是一个
   用户从没见过的顺序，而「前 N 篇」的截断前缀因此没有意义）。排序键随信号行一起回来
   （`source_change_signal_rows` 多投影一列 `created_at`，同一行访问、零额外查询），双后端各自
-  归一化成「按字典序比较即等于本后端 `ORDER BY created_at, id`」的文本。三条推论：
+  归一化成「按字典序比较即等于本后端 `ORDER BY created_at, id`」的文本——PostgreSQL 侧这条
+  归一化**必须先转 UTC**（codex R2 P2）：`timestamptz` 的 offset 不是一列之内的常量，跨 DST
+  转换时相隔一小时的两行会读成 `…01:30:00+02:00` 与 `…01:30:00+01:00`，按字符串比是先比墙钟
+  数字再比 offset 文本，于是 `+01:00` 排在 `+02:00` 前面——而它是**更晚**的那个瞬间。不归一
+  就只在 DST fold 那一小时里静默错序。naive 值不动（编一个时区是猜）。三条推论：
   ①**指纹语义不动**——摘要只吃前两个字段，创建时间对活着的源永不变，把它哈希进去只会让
   L1/L2 在这次上线时全量失效一次；②**元素侧顺序仍按 `source_id`**：它的游标是
   `(source_id, element_id)` keyset，换序会让已发出的游标对不上位置，而来源清单是按 key 重

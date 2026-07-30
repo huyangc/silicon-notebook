@@ -646,9 +646,10 @@ class SourceStorePort(Protocol):
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_change_signal_rows(
         self, db: object, notebook_id: str
-    ) -> list[tuple[str, str, str]]:
-        """``[(source_id, change_signal, created_at_key)]`` for every physical
-        source row EXCEPT the notebook's private Memory synthetic rows.
+    ) -> list[tuple[str, str, str, bool]]:
+        """``[(source_id, change_signal, created_at_key, user_visible)]`` for
+        every physical source row EXCEPT the notebook's private Memory synthetic
+        rows.
 
         ``change_signal`` is an OPAQUE backend-formatted token: equal tokens
         mean "this source's ``source_elements`` cannot have changed since the
@@ -672,6 +673,19 @@ class SourceStorePort(Protocol):
         creation time never changes, so folding it into the token would only
         make the token wider.
 
+        ``user_visible`` says whether the USER-FACING source list shows this row
+        — i.e. each adapter evaluates its own visible-source predicate (the one
+        ``list_sources`` / ``list_sources_page`` / ``visible_document_count``
+        share) as a projected column.  The sources collection is defined as "what
+        the source tab lists", so it must consume that predicate rather than a
+        second spelling of it, and it must NOT pay a separate query to learn it:
+        nothing indexes ``source_type``, so a "which ids are hidden" query has to
+        scan every source row of the notebook — on the request path, right after
+        this query walked the same rows.  Evaluated in the projection it is free.
+        Like ``created_at_key`` it stays out of the change signal: a source's
+        type does not change, and widening the token would invalidate every
+        cached count for a reason that cannot affect any of them.
+
         The Memory exclusion is part of the contract, not an adapter detail: a
         typed-collection listing is scoped to a notebook's participants and has
         no owner filter, so leaving Memory in would let any member of a shared
@@ -692,37 +706,6 @@ class SourceStorePort(Protocol):
         predicate because ``knowledge_objects`` carries no source type: it
         filters the rows it reads against this set, and subtracts the objects
         those sources own from the enumeration denominator.
-        """
-        ...
-    def hidden_source_ids(self, db: object, notebook_id: str) -> list[str]:
-        """The ids the USER-FACING source list hides AND the caller still has in
-        hand: the complement of the visible-source predicate that
-        ``list_sources`` / ``list_sources_page`` / ``visible_document_count``
-        share, minus the Memory synthetic rows.  In practice: a Knowhow table's
-        hidden projection row.
-
-        The sources collection (design doc §6.2) has to enumerate what the
-        source tab shows, so its predicate must be the SAME one that tab
-        counts with — not a second spelling that can drift into showing a
-        phantom "Knowhow 表：…" card in an answer.  Each adapter derives this
-        query from its own visible-source predicate rather than re-listing the
-        hidden types, so there is one definition per backend and this is its
-        complement.
-
-        Why Memory is subtracted again here: this list is subtracted FROM
-        ``source_change_signal_rows``, which already drops Memory rows, so
-        returning them would be a read whose result the caller discards — and on
-        a heavily-used personal library they are the bulk of the rows this query
-        would otherwise return.  Division of labour: ``memory_source_ids`` stays
-        the one place that knows about Memory rows, because the KG side needs
-        them (``knowledge_objects`` carries no source type).
-
-        Returned as ids (like ``memory_source_ids``) because the caller
-        subtracts them from the source list it already holds — the change
-        signal rows — instead of paying a second full read of the notebook's
-        sources.  Bounded by the notebook's Knowhow-table count and
-        index-seeked on ``notebook_id``, exactly the shape
-        ``memory_source_ids`` has.
         """
         ...
     def element_type_count_rows(

@@ -21,12 +21,12 @@ Three hard properties, in priority order:
 Cost shape (per build, per notebook in scope):
 
   * 1 ``sources`` query for the change signals — the ONLY unconditional query;
-  * 1 bounded ``hidden_source_ids`` read (the user-visible source list's own
-    exclusion, projected to primary keys and bounded by the notebook's Memory +
-    Knowhow-table count).  The sources collection's count and its traversal
-    plan are then arithmetic over rows already in hand: no second full read of
-    ``sources``, and — because both come out of the same helper — no way for the
-    map's ``sources: N`` to disagree with the list the executor walks;
+  * 0 extra queries for the sources collection: that signal query PROJECTS the
+    user-visible flag (each adapter evaluates its own ``list_sources``
+    predicate), so the collection's count and its traversal plan are arithmetic
+    over rows already in hand — no second read of ``sources``, and, because both
+    come out of the same helper, no way for the map's ``sources: N`` to disagree
+    with the list the executor walks;
   * 0 element queries when the notebook's signal fingerprint is unchanged;
   * otherwise one batched ``GROUP BY source_id, element_type`` per batch of
     sources, restricted to the whitelist;
@@ -383,13 +383,12 @@ class CollectionCatalogService:
         completeness proof are literally the element side's machinery, not a
         second implementation of it.
 
-        It costs one bounded ``hidden_source_ids`` read per participant on top
-        of the signal query the caller pays anyway, and NO count query: the
-        number of visible sources is the length of this list, which is also what
-        the map reports (``_notebook_visible_sources`` is the one place that
+        It costs NOTHING beyond the signal query the caller pays anyway — the
+        visibility flag rides in that query's projection — and no count query:
+        the number of visible sources is the length of this list, which is also
+        what the map reports (``_visible_signal_rows`` is the one place that
         decides).  Deliberately not memoized: unlike the element plan there is
-        no counting to skip, and the read is one primary-key projection bounded
-        by the notebook's Memory + Knowhow-table count.
+        no counting to skip and nothing left to read.
         """
         sources: List[ScopeSource] = []
         all_signals: List[Tuple[str, str]] = []
@@ -397,7 +396,7 @@ class CollectionCatalogService:
             signals = list(self._sources.source_change_signal_rows(db, notebook_id))
             all_signals.extend(signals)
             sources.extend(
-                self._notebook_visible_sources(db, notebook_id, signals)
+                self._notebook_visible_sources(notebook_id, signals)
             )
         return ScopeSourcePlan(
             notebook_ids=tuple(notebook_ids),
@@ -406,12 +405,10 @@ class CollectionCatalogService:
             fingerprint=signal_fingerprint(all_signals),
         )
 
+    @staticmethod
     def _visible_signal_rows(
-        self,
-        db: object,
-        notebook_id: str,
-        signals: Sequence[Tuple[str, str, str]],
-    ) -> List[Tuple[str, str, str]]:
+        signals: Sequence[Tuple[str, str, str, bool]],
+    ) -> List[Tuple[str, str, str, bool]]:
         """One notebook's user-visible source rows, from signals already read.
 
         THE definition of "which sources does the sources collection contain",
@@ -424,24 +421,33 @@ class CollectionCatalogService:
         * Memory synthetic rows are already absent from
           ``source_change_signal_rows`` (its contract, for the privacy reason
           documented there and in this module's header);
-        * the Knowhow projection row is dropped via ``hidden_source_ids``, which
-          each adapter derives from its own user-visible-source predicate — the
-          one ``list_sources`` / ``visible_document_count`` share.  So this list
-          is the source tab's list, by derivation rather than by resemblance.
+        * the Knowhow projection row is dropped by the row's own
+          ``user_visible`` flag, which each adapter evaluates from its own
+          user-visible-source predicate — the one ``list_sources`` /
+          ``visible_document_count`` share.  So this list is the source tab's
+          list, by derivation rather than by resemblance.
+
+        **Zero queries, and that is the point.**  This used to subtract a
+        ``hidden_source_ids`` read, one per participant per map build: nothing
+        indexes ``source_type``, so that query scanned every source row of the
+        notebook to find the one or two hidden ones — immediately after the
+        signal query had walked the same rows.  Moving the predicate into the
+        signal projection makes the whole thing arithmetic on rows in hand.
+        There is deliberately no fallback for a short row: a backend that does
+        not carry the flag is a contract violation and should fail loudly here
+        rather than silently list a hidden projection source.
 
         Returns rows, NOT ordered ``ScopeSource``s: the map only needs how many
         there are, and sorting a 50 000-source notebook to produce a length
         would be work the count never uses.  ``_notebook_visible_sources``
         below adds the order, for the one caller that walks them.
         """
-        hidden = frozenset(self._sources.hidden_source_ids(db, notebook_id))
-        return [row for row in signals if row[0] not in hidden]
+        return [row for row in signals if row[3]]
 
     def _notebook_visible_sources(
         self,
-        db: object,
         notebook_id: str,
-        signals: Sequence[Tuple[str, str, str]],
+        signals: Sequence[Tuple[str, str, str, bool]],
     ) -> Tuple[ScopeSource, ...]:
         """The same set, in the order the SOURCE TAB shows it.
 
@@ -459,7 +465,7 @@ class CollectionCatalogService:
         return tuple(
             ScopeSource(notebook_id=notebook_id, source_id=row[0], count=1)
             for row in sorted(
-                self._visible_signal_rows(db, notebook_id, signals),
+                self._visible_signal_rows(signals),
                 key=lambda row: (row[2], row[0]),
             )
         )
@@ -577,7 +583,7 @@ class CollectionCatalogService:
             # 计数只要个数,不要顺序:排序留给真的要遍历那份清单的调用方
             # (`scope_source_plan`),否则 5 万源的库会为了一个 len() 排一遍。
             visible_sources += len(
-                self._visible_signal_rows(db, notebook_id, signals)
+                self._visible_signal_rows(signals)
             )
         elements = tuple(
             ElementKindCount(

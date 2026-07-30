@@ -666,6 +666,40 @@ def test_page_ceiling_counts_only_extra_round_trips(repo):
     assert result.coverage.truncated_reason == TRUNCATED_BUDGET
 
 
+def _notebook_scoped_source_reads(repo, action) -> list[str]:
+    """跑 ``action()``,回传其间所有**按 notebook 取数**的 `sources` 语句。
+
+    按 SQL 文本计数而不是按端口调用计数:退回一条独立的「哪些源被隐藏」查询时,
+    端口调用计数完全看不出来(它是另一个端口),SQL 语句计数看得出来。
+
+    按 `WHERE notebook_id` 认「整个库取数」的形状,从而排除按主键 hydrate 的那些
+    (`WHERE s.id IN (…)`,它的 SELECT 列表里也有 `s.notebook_id`,所以不能只看
+    `notebook_id` 出现过)——那些是有界点查,不是这条守卫关心的整表扫描。SQLite 的
+    线程本地连接会被复用,所以在这里挂上的 trace 回调也覆盖服务内部自己
+    `connect()` 拿到的那条连接。
+    """
+    with repo._connect() as db:
+        statements: list[str] = []
+        db.set_trace_callback(statements.append)
+        try:
+            action()
+        finally:
+            db.set_trace_callback(None)
+    return [
+        item for item in statements
+        if "FROM sources" in item and "WHERE notebook_id" in item
+    ]
+
+
+def _signal_shaped_reads(statements) -> list[str]:
+    """上面那批里「扫全部非 Memory 源」形状的那些(即 signal 查询)。
+
+    与 `memory_source_ids` 的 `source_type = 'memory'` 点集查询区分开:两者都是
+    按 notebook 取数,但只有前者是这条守卫要限成「每参与库一次」的那个。
+    """
+    return [item for item in statements if "<> 'memory'" in item]
+
+
 def _count_query_charges(monkeypatch) -> dict:
     """记录 ``_Walk.charge_query`` 的真实调用次数。
 
@@ -1925,67 +1959,108 @@ def test_private_memory_is_never_in_a_source_listing(repo):
     assert repo.collection_catalog.collection_map(notebook.id).sources == 1
 
 
-def test_hidden_source_ids_complement_the_visible_source_list(repo):
-    """``hidden_source_ids`` ∪ ``memory_source_ids`` ∪ 可见来源 = 全部物理源。
+def test_signal_rows_project_visibility_and_stay_disjoint_from_memory(repo):
+    """可见性从 signal 行的**投影列**来,而不是第二条查询。
 
-    三者互不相交。``hidden_source_ids`` 由 ``VISIBLE_SOURCE_TYPES_PREDICATE``
-    取反得来(所以清单的「signal 行 − hidden」等价于来源页签那条查询),再把
-    Memory 行减掉——它被减掉的那份列表(signal 行)本来就不含 Memory,返回它们只是
-    读一批调用方用不上的 id,而在重度使用的个人库里那正是这条查询的大头。
-    Memory 行的知识仍然只属于 ``memory_source_ids``(KG 侧需要它:
-    ``knowledge_objects`` 不带来源类型)。
+    钉三件事:
+    * 投影出的 `user_visible` 逐位等于来源页签的可见集合(适配器在 SQL 里求值的是
+      `VISIBLE_SOURCE_TYPES_PREDICATE` 本身,不是服务层再拼一份谓词);
+    * Memory 行仍然不在 signal 行里(隐私合同不变),它只属于 `memory_source_ids`
+      ——KG 侧需要 id,因为 `knowledge_objects` 不带来源类型;
+    * 三者(可见 / knowhow 隐藏 / Memory)互不相交且并集为全部物理源。
+
+    此前这份可见性由一条独立的 `hidden_source_ids` 查询给出。`source_type` 上没有
+    索引,所以那条查询只能整表扫这个 notebook 的全部源行——而且就发生在 signal
+    查询刚扫过同一批行之后,每个参与库一次,在请求路径上。
     """
     notebook = _shared_notebook_with_private_memory(repo)
     _add_document(repo, notebook.id, "s-kh", source_type="knowhow")
     store = repo._runtime.source_store
     with repo._connect() as db:
-        hidden = set(store.hidden_source_ids(db, notebook.id))
+        rows = store.source_change_signal_rows(db, notebook.id)
         memory = set(store.memory_source_ids(db, notebook.id))
-        signalled = {
-            row[0] for row in store.source_change_signal_rows(db, notebook.id)
-        }
         everything = {
             row["id"] for row in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (notebook.id,)
             ).fetchall()
         }
+    signalled = {row[0] for row in rows}
+    projected_visible = {row[0] for row in rows if row[3]}
+    projected_hidden = {row[0] for row in rows if not row[3]}
     visible = {source.id for source in repo.list_sources(notebook.id)}
-    assert hidden == {"s-kh"}
+
+    assert projected_visible == visible
+    assert projected_hidden == {"s-kh"}
     assert memory == {"s-mem"}
-    assert hidden & visible == set() and memory & visible == set()
-    assert hidden & memory == set()
-    assert hidden | memory | visible == everything
-    # 分工的可执行形式:清单 = signal 行 − hidden,不需要再减 Memory。
-    assert signalled - hidden == visible
+    assert signalled & memory == set()            # 隐私合同不变
+    assert projected_visible & projected_hidden == set()
+    assert projected_visible | projected_hidden | memory == everything
+    # 清单 = signal 行里 user_visible 为真的那些,零额外查询。
+    assert _source_ids(
+        _enum(repo).enumerate_sources(notebook.id, budget=_budget())
+    ) == [source.id for source in repo.list_sources(notebook.id)]
 
 
-def test_source_plan_costs_no_extra_full_read_of_sources(repo):
-    """成本形状:一次枚举对每个参与库只付「1 次 signal 查询 + 1 次 hidden id
-    读取」,没有第三次整表读——那正是「零新扫描」的含义。"""
+def test_source_plan_costs_no_extra_source_query(repo):
+    """成本形状:一次枚举对每个参与库只付 signal 查询,**没有第二遍源扫描**。
+
+    这条是上一版「1 次 signal + 1 次 hidden id」的收紧版:可见性移进投影之后,
+    `sources` 表在计划阶段只被读一次(收尾复检再读一次拿指纹)。用 execute 级别的
+    SQL 计数,而不是只数端口调用——退回一条独立 hidden 查询时,端口计数看不出来,
+    SQL 计数看得出来。
+    """
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     for index in range(5):
         _add_document(repo, notebook.id, f"s-{index}")
     store = repo._runtime.source_store
     signals = {"n": 0}
-    hidden = {"n": 0}
     original_signals = store.source_change_signal_rows
-    original_hidden = store.hidden_source_ids
 
     def signal_spy(db, notebook_id):
         signals["n"] += 1
         return original_signals(db, notebook_id)
 
-    def hidden_spy(db, notebook_id):
-        hidden["n"] += 1
-        return original_hidden(db, notebook_id)
-
     from unittest.mock import patch
-    with patch.object(store, "source_change_signal_rows", signal_spy), \
-            patch.object(store, "hidden_source_ids", hidden_spy):
-        _enum(repo).enumerate_sources(notebook.id, budget=_budget())
-    # 开场计划 1 次 + 收尾复检 1 次(收尾只要指纹,不再读 hidden)。
+    with patch.object(store, "source_change_signal_rows", signal_spy):
+        reads = _notebook_scoped_source_reads(
+            repo, lambda: _enum(repo).enumerate_sources(
+                notebook.id, budget=_budget())
+        )
+    # 开场计划 1 次 + 收尾复检 1 次(收尾只要指纹)。
     assert signals["n"] == 2
-    assert hidden["n"] == 1
+    # 按 notebook 取数的 `sources` 语句**只有**这两条 signal 查询:没有第三条。
+    assert _signal_shaped_reads(reads) == reads, reads
+    assert len(reads) == 2, reads
+
+
+def test_collection_map_reads_sources_once_per_participant(repo):
+    """地图构建:每个参与库对 `sources` 只有 signal 那**一次**扫描。
+
+    地图是每个 run 都要建一次的东西,它的底价直接决定 5 万源库上一次提问的开销。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
+    for index in range(3):
+        _add_document(repo, notebook.id, f"s-{index}")
+    _add_document(repo, base.id, "b-0")
+    _add_document(repo, notebook.id, "s-kh", source_type="knowhow")
+    repo.collection_catalog.invalidate()
+
+    reads = _notebook_scoped_source_reads(
+        repo, lambda: repo.collection_catalog.collection_map(notebook.id)
+    )
+
+    # 2 个参与库 × 1 次 signal 扫描。元素计数走 `source_elements`(不匹配),
+    # KG 计数那条 `source_type = 'memory'` 点集查询按形状排除。
+    signal_reads = _signal_shaped_reads(reads)
+    assert len(signal_reads) == 2, signal_reads
+    # 且**除了** signal 与 memory-id 之外没有第三种按 notebook 取数的 sources 语句。
+    assert all(
+        "<> 'memory'" in item or "= 'memory'" in item for item in reads
+    ), reads
+    assert repo.collection_catalog.collection_map(notebook.id).sources == 4
 
 
 def test_source_query_count_is_bounded_by_the_page_budget(repo):

@@ -1126,16 +1126,20 @@ def test_typed_collection_enumeration_primitives_match_sqlite_semantics(
 def test_typed_collection_source_primitives_match_sqlite_semantics(
     core_stores: CoreStores,
 ):
-    """``hidden_source_ids`` / ``source_listing_rows`` — the two primitives
-    behind the SOURCES collection (design doc §6.2).
+    """The signal rows' ``user_visible`` projection / ``source_listing_rows`` —
+    the two primitives behind the SOURCES collection (design doc §6.2).
 
     Parity risks that matter here:
 
-    * ``hidden_source_ids`` must be the exact complement of the user-visible
-      source predicate (``list_sources``' own), because the listing is built as
-      "signal rows MINUS these ids".  A backend where it dropped only Memory
-      would list a phantom Knowhow projection document; one where it dropped
-      too much would hide a real document from the roster;
+    * ``user_visible`` must be the user-visible source predicate itself
+      (``list_sources``' own), evaluated in THIS backend's SQL, because the
+      listing is defined as "the signal rows that flag says are visible".  A
+      backend whose flag only excluded Memory would list a phantom Knowhow
+      projection document; one that excluded too much would hide a real document
+      from the roster.  It is a projected column rather than a second query on
+      purpose: nothing indexes ``source_type``, so asking "which ids are hidden"
+      separately means re-scanning every source row of the notebook, on the
+      request path, right after this query walked the same rows;
     * ``source_listing_rows`` must return the source-card projection on the
       CALLER's connection (summary + doc_type + the paper-meta outer join), and
       ``source_metadata`` must be the same query — they are one SQL by
@@ -1176,37 +1180,36 @@ def test_typed_collection_source_primitives_match_sqlite_semantics(
     ]
     visible = set(visible_order)
     with core_stores.database.connect() as connection:
-        hidden = set(
-            core_stores.sources.hidden_source_ids(connection, notebook_id)
-        )
         memory = set(
             core_stores.sources.memory_source_ids(connection, notebook_id)
         )
         signal_rows = list(
             core_stores.sources.source_change_signal_rows(connection, notebook_id)
         )
-        signals = {row[0] for row in signal_rows}
         rows = core_stores.sources.source_listing_rows(
             connection, ["src-doc-a", "src-doc-b", "src-missing", ""]
         )
     assert visible == {"src-doc-a", "src-doc-b"}
-    # Memory is NOT in ``hidden_source_ids``: the signal rows never carry it, so
-    # returning it would be a read whose result is discarded.  ``memory_source_ids``
-    # remains the place that knows about Memory rows (division of labour pinned
-    # here so a "helpful" merge of the two predicates shows up as a failure).
-    assert hidden == {"src-doc-hidden"}
+    signalled = {row[0] for row in signal_rows}
+    projected_visible = {row[0] for row in signal_rows if row[3]}
+    projected_hidden = {row[0] for row in signal_rows if not row[3]}
+    # The flag IS the source tab's predicate, evaluated in PostgreSQL.
+    assert projected_visible == visible
+    assert projected_hidden == {"src-doc-hidden"}
+    # Memory never reaches the signal rows at all; ``memory_source_ids`` remains
+    # the one place that knows about them (the KG side needs the ids, because
+    # ``knowledge_objects`` carries no source type).  Pinned so a "helpful" merge
+    # of the two predicates shows up as a failure.
     assert memory == {"src-doc-memory"}
-    # Complement of the visible list, and the listing derivation it enables.
-    assert hidden & visible == set()
-    assert (hidden | memory) & visible == set()
-    assert hidden | memory | visible == {
+    assert signalled & memory == set()
+    assert projected_visible & projected_hidden == set()
+    assert projected_visible | projected_hidden | memory == {
         "src-doc-a", "src-doc-b", "src-doc-hidden", "src-doc-memory",
     }
-    assert signals - hidden == visible
     # The roster order the sources collection walks == the source tab's order.
     ordered = [
         row[0] for row in sorted(
-            (row for row in signal_rows if row[0] not in hidden),
+            (row for row in signal_rows if row[3]),
             key=lambda row: (row[2], row[0]),
         )
     ]

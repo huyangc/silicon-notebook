@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from app.models.sources import (
@@ -34,18 +34,34 @@ _UNSET = SOURCE_PAPER_META_UNSET
 # VISIBLE_SOURCE_TYPES_PREDICATE`` 逐字同义:排除 Memory 派生源与 knowhow 表隐藏
 # 投影源。此前这段谓词在本文件里被 list_sources / list_sources_page /
 # visible_document_count 各写一遍;来源集合枚举(design doc §6.2)必须与来源页签
-# 同口径，所以先把它收成一个常量，再由 ``hidden_source_ids`` 取它的补集——否则
-# 「哪些来源用户看得见」在这一个文件里就有四份拼写，任何一份漂移都会让答案里出现
-# 一张用户在来源页签上根本看不到的卡片。SQL 文本逐字不变。
+# 同口径，所以先把它收成一个常量，再由 ``source_change_signal_rows`` 把它作为
+# **投影列**求值（`user_visible`）——否则「哪些来源用户看得见」在这一个文件里就有
+# 四份拼写，任何一份漂移都会让答案里出现一张用户在来源页签上根本看不到的卡片。
+# 求值放在投影里而不是另开一条 id 查询，是因为 `source_type` 上没有索引：那条查询
+# 只能整表扫这个 notebook 的全部源行，而且就发生在刚扫过同一批行之后。SQL 文本
+# 逐字不变。
 VISIBLE_SOURCE_TYPES_PREDICATE = "source_type NOT IN ('memory','knowhow')"
 
 
 def _sort_key(value: object) -> str:
     """A timestamp column as ORDER-BY-compatible text.
 
-    ``datetime.isoformat()`` for driver datetimes, the value as-is for text
-    columns, ``""`` for NULL (which sorts first, exactly where PostgreSQL's
-    ``ORDER BY`` with default ``NULLS LAST``… does NOT put it — see below).
+    Driver datetimes become ISO text; text columns pass through; NULL becomes
+    ``""``.
+
+    **Aware datetimes are converted to UTC first**, and that is the load-bearing
+    line.  ``timestamptz`` values arrive with a UTC offset, and offsets are not
+    constant within one column: across a DST transition two rows an hour apart
+    can read ``…01:30:00+02:00`` and ``…01:30:00+01:00``.  Comparing those
+    strings lexicographically ranks them by the wall-clock digits and then by
+    the offset text, which is not chronological — ``+01:00`` sorts before
+    ``+02:00`` even though it is the LATER instant.  PostgreSQL's ``ORDER BY``
+    compares instants, so the roster would come out in an order the source tab
+    never shows, silently, and only around a DST fold.  Normalizing to UTC makes
+    every key share one offset, which is the condition under which lexicographic
+    ISO comparison equals instant comparison.  (Naive datetimes carry no offset
+    and are left alone: they are already single-convention, and inventing a
+    timezone for them would be a guess.)
 
     The one asymmetry worth naming: SQL sorts NULLs last by default on
     ascending order, while ``""`` sorts first here.  ``sources.created_at`` is
@@ -57,7 +73,16 @@ def _sort_key(value: object) -> str:
     if value is None:
         return ""
     isoformat = getattr(value, "isoformat", None)
-    return isoformat() if callable(isoformat) else str(value)
+    if not callable(isoformat):
+        return str(value)
+    if getattr(value, "tzinfo", None) is not None:
+        try:
+            return value.astimezone(timezone.utc).isoformat()
+        except (TypeError, ValueError, OverflowError):
+            # A datetime whose offset cannot be applied is not worth failing an
+            # enumeration over; the unconverted form is still a stable key.
+            return isoformat()
+    return isoformat()
 
 
 def _created_label(value: object) -> str:
@@ -228,10 +253,11 @@ class SourceStore:
     # WHY the signal is (updated_at, parse_status, chunked_at).
     def source_change_signal_rows(
         self, connection: Any, notebook_id: str
-    ) -> list[tuple[str, str, str]]:
-        """``[(source_id, opaque change signal, created_at sort key)]`` for
-        physical source rows, EXCLUDING the private Memory synthetic rows (see
-        the SQLite adapter for why the exclusion is unconditional).
+    ) -> list[tuple[str, str, str, bool]]:
+        """``[(source_id, opaque change signal, created_at sort key,
+        user_visible)]`` for physical source rows, EXCLUDING the private Memory
+        synthetic rows (see the SQLite adapter for why the exclusion is
+        unconditional).
 
         The token is formatted here rather than in the service so the caller
         never has to know that PostgreSQL hands back ``datetime`` objects
@@ -239,16 +265,23 @@ class SourceStore:
         is only ever compared for equality against a token from the same
         store.
 
-        The created-at key is normalized with ``isoformat()`` for the same
-        reason, but for ORDERING rather than equality: every row in one notebook
-        goes through the same formatting, so lexicographic comparison over these
+        The created-at key is normalized by ``_sort_key`` for the same reason,
+        but for ORDERING rather than equality: every row in one notebook goes
+        through the same formatting, so lexicographic comparison over these
         strings reproduces this backend's ``ORDER BY created_at, id`` — the
-        order ``list_sources`` returns and the source tab shows.  (A bare
-        ``str()`` would work today too; ``isoformat()`` is the one that stays
-        sortable if the column ever becomes ``timestamptz``.)
+        order ``list_sources`` returns and the source tab shows.
+
+        ``user_visible`` is evaluated in SQL from this module's
+        ``VISIBLE_SOURCE_TYPES_PREDICATE`` — the same constant ``list_sources``
+        filters on — on a row this query already visits.  It exists so the
+        catalog does NOT need a second ``sources`` read per notebook: nothing
+        indexes ``source_type``, so a "which ids are hidden" query has to scan
+        every source row of the notebook, and it would do that on the request
+        path immediately after this query walked the same rows.
         """
         rows = connection.execute(
-            "SELECT id,updated_at,parse_status,chunked_at,created_at FROM sources "
+            "SELECT id,updated_at,parse_status,chunked_at,created_at,"
+            f"({VISIBLE_SOURCE_TYPES_PREDICATE}) AS user_visible FROM sources "
             "WHERE notebook_id=%s AND source_type<>'memory'",
             (notebook_id,),
         ).fetchall()
@@ -261,6 +294,7 @@ class SourceStore:
                     row["chunked_at"] if row["chunked_at"] is not None else "",
                 ),
                 _sort_key(row["created_at"]),
+                bool(row["user_visible"]),
             )
             for row in rows
         ]
@@ -274,23 +308,6 @@ class SourceStore:
             for row in connection.execute(
                 "SELECT id FROM sources "
                 "WHERE notebook_id=%s AND source_type='memory'",
-                (notebook_id,),
-            ).fetchall()
-        ]
-
-    def hidden_source_ids(self, connection: Any, notebook_id: str) -> list[str]:
-        """The ids the user-facing source list hides and the caller still holds —
-        a Knowhow table's hidden projection row — as the negation of this
-        module's ``VISIBLE_SOURCE_TYPES_PREDICATE`` minus the Memory rows the
-        change-signal list already drops.  See the SQLite adapter for the
-        single-definition argument, the division of labour with
-        ``memory_source_ids``, and the cost shape."""
-        return [
-            row["id"]
-            for row in connection.execute(
-                "SELECT id FROM sources WHERE notebook_id=%s "
-                f"AND NOT ({VISIBLE_SOURCE_TYPES_PREDICATE}) "
-                "AND source_type<>'memory'",
                 (notebook_id,),
             ).fetchall()
         ]
