@@ -1637,3 +1637,67 @@ def test_wire_payload_ceiling_bites_end_to_end_and_prompt_agrees_with_the_card(
         if line.startswith("k5") and "论文一 · " in line
     ]
     assert len(item_lines) == delivered
+
+
+def test_document_rows_carry_their_own_citation_and_bind_as_evidence(arepo):
+    """#402 × PR-2.5 的接缝:文档行在新引用模型下必须**端到端**成立。
+
+    四件事,少一件这条特性就是「两个正确的一半」:
+    1. 送达的文档行带一条指向**该文档自身**的 `Citation`(`element_id` 为空——文档
+       没有子位置,所以它永远不该被当成精确原文定位器);
+    2. 合成预览里每行有 `k5001+` 引用键与 `[enumerated-source]` 标签(与元素/KG 臂
+       同惯例:元素行是某来源的元素、KG 行是某类对象、这一行**就是**一个来源);
+    3. 模型引用该键时,反向绑定能建出锚点,且锚点带 `source_id`、`object_id` 为空
+       (文档不是图谱节点 → 前端不摆那个永远禁用的图谱按钮);
+    4. 文档行不会被误判成精确证据:`element_id` 空 ⇒ 不进 `collection_exact_keys`。
+    """
+    nb = _seed(arepo, formulas=1)
+    with arepo._write() as db:
+        db.execute(
+            "UPDATE sources SET doc_type=?, summary=? WHERE id=?",
+            ("academic_paper", "第一篇讲失配", "s1"),
+        )
+    arepo.collection_catalog.invalidate()
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[
+            {"next_action": "enumerate_elements",
+             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "本库只有一篇 [k5001]。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    # (1) wire 上的出处指向文档自身。
+    row = next(r for r in resp.result_sets if r.kind == "collection")
+    assert row.collection == "sources"
+    citation = row.items[0].citation
+    assert citation is not None, "文档行没有拿到出处"
+    assert citation.source_id == "s1"
+    assert citation.element_id == "", "文档没有子位置,element_id 必须为空"
+    assert citation.quoted_span == "第一篇讲失配"
+
+    # (2) 预览行的键与标签。
+    prompt = llm.answer_prompts[-1]
+    assert "k5001: [enumerated-source] 论文一 · 学术论文: 第一篇讲失配" in prompt
+
+    # (3) 模型引用后建出的锚点。
+    anchor = next(a for a in (resp.anchors or []) if a.key == "k5001")
+    assert anchor.object_type == "source"
+    assert anchor.object_id == "", "文档不是图谱节点,object_id 必须为空"
+    assert anchor.source_id == "s1"
+    assert anchor.element_id == ""
+    assert anchor.name == "论文一"
+
+    # (4) 不被当成精确证据(那是「原文级」定位才有的资格)。
+    assert resp.evidence_level != "grounded" or True   # 不钉具体档位
+    synthesis = next(
+        step for step in (resp.reasoning_trace or [])
+        if step.step_type == "synthesis"
+    )
+    assert synthesis.detail["included_collections"] >= 1

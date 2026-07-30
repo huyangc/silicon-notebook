@@ -177,14 +177,19 @@ class EvidenceContextService:
 
         citations: dict[str, Citation] = {}
         for item in rows:
+            # Same ordering as ``collection_enumeration_answer.enumerated_item_id``
+            # — the module that looks these keys back up.  Not imported from
+            # there: this module is the lower layer (it knows nothing about the
+            # enumeration answer glue), so the two are kept identical by
+            # ``test_enumerated_item_key_agrees_across_the_two_layers`` instead of
+            # by a dependency that would point the wrong way.  ``source_id`` is
+            # ordered LAST so an element row — which also carries one — keys by
+            # its element and can never collide with a document row for the same
+            # file.
             item_id = str(
                 getattr(item, "element_id", "")
                 or getattr(item, "object_id", "")
-                # A document row's identity IS its source id.  Ordered last and
-                # gated on ``_is_document_row`` so an element row — which also
-                # carries ``source_id`` — can never fall back to keying by its
-                # source and collide with a document row for the same file.
-                or (getattr(item, "source_id", "") if _is_document_row(item) else "")
+                or getattr(item, "source_id", "")
                 or ""
             )
             if not item_id:

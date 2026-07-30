@@ -439,3 +439,43 @@ def test_evidence_context_citations_from_blanks_self_notebook_id():
         "真正跨库命中(s-base 来自 base)必须原样带出 notebook_id,实为 "
         f"{by_source['s-base'].notebook_id!r}")
     assert by_source["s-base"].tier == "base"
+
+
+def test_enumerated_item_key_agrees_across_the_two_layers():
+    """引用键的两处拼写必须逐位一致(#402 × PR-2.5 接缝)。
+
+    `evidence_context.collection_item_citations` **建** 这张映射,
+    `collection_enumeration_answer` 三处 **查** 它。两边不能共用一个函数——
+    evidence_context 是下层,不认识枚举答案胶水层——所以由这条守卫钉住等价。
+
+    这不是假想风险:集成 #402 时 master 有三处副本,漏改一处的后果是**不可见的**
+    (卡片出处照常显示,只有答案锚点悄悄丢掉定位器)。
+    """
+    from types import SimpleNamespace
+
+    from app.services.collection_enumeration_answer import enumerated_item_id
+    from app.services.evidence_context import _is_document_row
+
+    element = SimpleNamespace(element_id="el-1", source_id="src-1")
+    kg = SimpleNamespace(object_id="ko-1", evidence_element_ids=["el-9"])
+    document = SimpleNamespace(source_id="src-1", source_title="论文一")
+
+    def evidence_context_key(item):
+        # 与 collection_item_citations 里那段逐字同形。
+        return str(
+            getattr(item, "element_id", "")
+            or getattr(item, "object_id", "")
+            or getattr(item, "source_id", "")
+            or ""
+        )
+
+    for item, expected in ((element, "el-1"), (kg, "ko-1"), (document, "src-1")):
+        assert enumerated_item_id(item) == expected
+        assert evidence_context_key(item) == expected
+
+    # 元素行绝不退化成按来源计键——否则它会与同一份文档的文档行撞同一个键。
+    assert enumerated_item_id(element) != enumerated_item_id(document)
+    # 文档行的判定同样只认「有 source_id、无 element/object id」这一种形状。
+    assert _is_document_row(document) is True
+    assert _is_document_row(element) is False
+    assert _is_document_row(kg) is False

@@ -60,6 +60,25 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
+def enumerated_item_id(item: object) -> str:
+    """一个枚举行的**身份**——引用映射的键。
+
+    单一定义点,因为这个表达式此前有三处副本(``collection_item_citations`` 的键、
+    本模块的 wire 投影、以及合成预览的反向绑定),而少改一处的后果是**不可见的**:
+    卡片上的出处照常显示,只有答案锚点悄悄丢掉定位器。集成 #402 时确实踩到了这个
+    形状,所以它现在只有一处。
+
+    顺序是有意义的:``source_id`` 排最后并且只在既无元素 id 也无对象 id 时才用,
+    否则元素行(它同时带 ``source_id``)会退化成按来源计键,与同一份文档的文档行撞键。
+    """
+    return str(
+        getattr(item, "element_id", "")
+        or getattr(item, "object_id", "")
+        or getattr(item, "source_id", "")
+        or ""
+    )
+
+
 def _typed_item(
     raw: object,
     citations_by_item_id: Mapping[str, object] | None = None,
@@ -92,7 +111,7 @@ def _typed_item(
             asset_id=raw.asset_id,
             notebook_id=raw.notebook_id,
             tier=raw.tier,
-            citation=citations.get(raw.element_id),
+            citation=citations.get(enumerated_item_id(raw)),
         )
     if isinstance(raw, KgObjectItem):
         return TypedCollectionItem(
@@ -102,7 +121,7 @@ def _typed_item(
             notebook_id=raw.notebook_id,
             tier=raw.tier,
             evidence_element_ids=list(raw.evidence_element_ids)[:MAX_EVIDENCE_REFS],
-            citation=citations.get(raw.object_id),
+            citation=citations.get(enumerated_item_id(raw)),
         )
     if isinstance(raw, SourceItem):
         # A listed document reuses the element arm's fields rather than adding a
@@ -125,7 +144,7 @@ def _typed_item(
             # document itself with an empty ``element_id`` — a document has no
             # sub-location, so it can never be an EXACT original-text locator,
             # which is exactly how the grounding classifier should read it.
-            citation=citations.get(raw.source_id),
+            citation=citations.get(enumerated_item_id(raw)),
         )
     raise TypeError(f"unknown collection-enumeration item type: {type(raw)!r}")
 
@@ -804,11 +823,7 @@ def enumeration_prompt_block(
                 shown_rows[index] = shown
                 for offset, item in enumerate(outcome.items[:shown]):
                     key = f"k{next_key + offset}"
-                    item_id = str(
-                        getattr(item, "element_id", "")
-                        or getattr(item, "object_id", "")
-                        or ""
-                    )
+                    item_id = enumerated_item_id(item)
                     evidence_by_id[key] = _preview_evidence(
                         outcome.collection, item, item_citations.get(item_id)
                     )

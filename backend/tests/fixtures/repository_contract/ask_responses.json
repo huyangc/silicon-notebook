@@ -499,6 +499,7 @@
               "enumeration_block_dropped": false,
               "evidence_level": "inferred",
               "included_chunks": 0,
+              "included_collections": 0,
               "included_elements": 0,
               "included_kg": 0
             },
@@ -628,6 +629,7 @@
               "enumeration_block_dropped": false,
               "evidence_level": "inferred",
               "included_chunks": 0,
+              "included_collections": 0,
               "included_elements": 0,
               "included_kg": 0
             },
