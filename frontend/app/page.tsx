@@ -108,7 +108,7 @@ import { clearToken, getToken } from "./auth-session";
 import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
-import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
+import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, getNotebookSource, getNotebookSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
 import { compactStagedFileName, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, applyTouchedUpdate } from "./source-upload.ts";
 import { sourceHealthGroups, checkupCount, checkupAlertSignature, repairRelease, isRepairing, type RepairRelease } from "./checkup-view";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, previewAskIntent, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
@@ -172,6 +172,7 @@ import {
 } from "./kg-build-status";
 import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
+import { crossLibrarySourceNotebookId } from "./source-scope";
 import {
   doneItemDestination,
   followLatestNotebookRequest,
@@ -2951,10 +2952,16 @@ export default function Home() {
   // 已声明但此前从未被真正置位的 highlightedElementId 高亮/滚动效果——PR-2 T6 是
   // 它第一次真正被点亮。空字符串代表「打开来源、不指向具体元素」,与既有
   // openSourceDetail 的行为逐字一致。
+  // 走 active 笔记本维度的代理读取端点(getNotebookSource/-Elements):路径里的
+  // notebook 是当前 active 库、权限按它判,来源本身可以属于它有效挂载的任一参考库
+  // ——挂载参考库不等于该库的直接成员权限(红线),浏览器因此绝不直连另一个库。参与集
+  // 首项恒为 active 自身,本库来源与跨库来源共用这一条路径,不分叉。currentNotebookId
+  // 缺席(理论上打不开任何来源)时退回旧的 owner∪member 端点,保持既有行为。
   async function openSourceById(sourceId: string, elementId: string) {
+    const notebookId = currentNotebookId;
     const [detail, elements] = await Promise.all([
-      getSource(sourceId),
-      getSourceElements(sourceId)
+      notebookId ? getNotebookSource(notebookId, sourceId) : getSource(sourceId),
+      notebookId ? getNotebookSourceElements(notebookId, sourceId) : getSourceElements(sourceId)
     ]);
     setSourceDetail(detail);
     setSourceElements(elements);
@@ -2963,13 +2970,15 @@ export default function Home() {
 
   // Ask 清单结果卡(answer-panel.tsx CollectionResultCard)元素条目「查看来源」/
   // 「在来源详情查看完整表格」按钮的回调:elementId 缺省时只打开来源、不高亮任何
-  // 元素(KG 知识对象清单没有这个按钮,不会调用到这里)。
+  // 元素；KG 知识对象清单在有原文 citation 时同样用它精确跳转。
   function onOpenSourceElement(sourceId: string, elementId?: string) {
     openSourceById(sourceId, elementId || "").catch(reportError);
   }
 
   async function reparseSource() {
     if (!sourceDetail || reparsingSource) return;
+    // 防御性复检:参考库来源是只读的(按钮本就不渲染),重新解析是 owner-only 的写入。
+    if (crossLibrarySourceNotebookId(sourceDetail.notebook_id, currentNotebookId)) return;
     const notebookId = currentNotebookId ?? sourceDetail.notebook_id;
     setReparsingSource(true);
     try {
@@ -2995,6 +3004,8 @@ export default function Home() {
   }
 
   function confirmDeleteSource(source: SourceSummary) {
+    // 同上:参考库来源只读,删除是 owner-only 的写入,连确认框都不该弹。
+    if (crossLibrarySourceNotebookId(source.notebook_id, currentNotebookId)) return;
     setInfoModal({
       title: "删除来源",
       message: `确定删除“${source.title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`,
@@ -4513,6 +4524,16 @@ export default function Home() {
   // 来源详情弹窗的异常徽标(anomaly-tiers spec)。算一次给下方两处用(是否渲染
   // 容器 div + map 渲染),避免重复调用。
   const sourceDetailAnomalies = sourceDetail ? sourceAnomalies(sourceDetail) : [];
+  // 打开的来源属于挂载的参考库而非当前库时,只读:代理读取只给「看」,不给「改」。
+  const sourceDetailBaseId = sourceDetail
+    ? crossLibrarySourceNotebookId(sourceDetail.notebook_id, currentNotebookId)
+    : "";
+  // 库名查不到就退回泛化文案,绝不吐裸 notebook id(与清单卡的 CrossLibraryBadge 同口径)。
+  const sourceDetailBaseLabel = !sourceDetailBaseId
+    ? ""
+    : notebookNames[sourceDetailBaseId]
+      ? `来自参考库《${notebookNames[sourceDetailBaseId]}》`
+      : "来自参考库";
 
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
@@ -5942,6 +5963,14 @@ export default function Home() {
         <SourceDetailWindow onClose={() => { setSourceDetail(null); setHighlightedElementId(""); }}>
           <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
+                {sourceDetailBaseId ? (
+                  <span
+                    className="tier-badge tier-base source-detail-base-badge"
+                    title={sourceDetailBaseLabel}
+                  >
+                    {sourceDetailBaseLabel}
+                  </span>
+                ) : (
                 <div className="source-detail-actions">
                   <button
                     className="icon-button subtle-icon"
@@ -5958,6 +5987,7 @@ export default function Home() {
                     <Trash2 size={20} />
                   </button>
                 </div>
+                )}
               </div>
               <section className="source-guide-card">
                 <div className="source-guide-heading">
@@ -6031,11 +6061,13 @@ export default function Home() {
                 )) : (
                   <article className="item">
                     <h3>等待解析</h3>
-                    {/* error_message 是后端的原始异常串(services/source_ingestion.py),
-                        不直出——这里只按「有没有失败」二选一给稳定文案。原文在来源
-                        轮询那条路径上已经过 toUserMessage 落进 console(见 justFailed)。
-                        渲染期不调 toUserMessage:它会随重渲染反复刷日志。 */}
-                    <p>{sourceDetail.error_message
+                    {/* 只按「有没有失败」二选一给稳定文案,绝不直出后端的原始异常串。
+                        代理读取端点(openSourceById 的主路径)刻意只回 parse_failed 布尔
+                        ——原文可能带服务端绝对路径,跨库读取不该拿到;老的 /sources/{id}
+                        仍回 error_message,兜底路径与轮询路径靠它。原文在来源轮询那条
+                        路径上已经过 toUserMessage 落进 console(见 justFailed);渲染期
+                        不调 toUserMessage:它会随重渲染反复刷日志。 */}
+                    <p>{(sourceDetail.parse_failed ?? Boolean(sourceDetail.error_message))
                       ? "这个来源没能解析成功，可以删除后重新上传。"
                       : "当前来源还没有解析出元素。"}</p>
                   </article>

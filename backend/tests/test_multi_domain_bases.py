@@ -1531,3 +1531,324 @@ class TestCopyingNotebookExcludedFromMounting:
         with repo._connect() as db:
             got = set(repo._runtime.notebook_store.participant_ids(db, a.id))
         assert got == {a.id, mid_copy.id}, "拷贝完成(status 翻回非 copying)后应立即恢复参与,无需重新挂载"
+
+
+_PROXY_PNG = b"\x89PNG\r\n\x1a\n" + b"participant-scoped-asset-fixture" * 4
+_PROXY_NOW = "2026-07-29T00:00:00Z"
+
+
+def _seed_source_with_element_and_asset(repo, notebook_id: str, tag: str) -> dict:
+    """在 ``notebook_id`` 里插一条最小可读来源(1 个元素 + 1 张图片资产)。
+
+    直插行而不跑摄取管线:本组用例只关心**权限口径**,解析/嵌入/抽取都与之无关。
+    """
+    from app.services.knowhow.assets import AssetService
+
+    source_id = f"src-{tag}"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (source_id, notebook_id, f"{tag} 讲义", "document", "ready",
+             _PROXY_NOW, _PROXY_NOW),
+        )
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"el-{tag}", source_id, "formula", "第 2 页", "E = mc^2", "{}", _PROXY_NOW),
+        )
+    asset = AssetService(repo).save_source_image(
+        notebook_id, source_id, f"{tag}.png", "image/png", _PROXY_PNG, "seed",
+    )
+    return {"source_id": source_id, "element_id": f"el-{tag}", "asset_id": asset["id"]}
+
+
+class TestParticipantScopedSourceAndAssetProxy:
+    """挂载参考库的来源详情 / 元素 / 图片资产,经 active notebook 代理读取。
+
+    与「问答引用定位图谱节点」红线同构:浏览器只用当前 active notebook 过权限,
+    后端只在它的**有效** participant 集内解析目标并内部代理读取。挂载 ≠ 该库的
+    直接成员权限——owner∪member 口径的裸 `/sources/{id}` 端点必须继续 404,
+    而挂载边一旦失效(降级/易主/深拷贝中/取消挂载),代理路径当场也回到 404。
+    """
+
+    @staticmethod
+    def _mounted_base(c, *, mount: bool = True):
+        client = c["client"]
+        from app.api.deps import repository
+        repo_api = repository()
+
+        active = client.post(
+            "/api/notebooks", headers=c["u1"], json={"name": "u1 项目"}
+        ).json()
+        base = client.post(
+            "/api/notebooks", headers=c["u2"], json={"name": "u2 公共库"}
+        ).json()
+        repo_api.mark_notebook_base(base["id"])
+        if mount:
+            mounted = client.put(
+                f"/api/notebooks/{active['id']}/bases",
+                headers=c["u1"],
+                json={"base_notebook_ids": [base["id"]]},
+            )
+            assert mounted.status_code == 200
+        seeded = _seed_source_with_element_and_asset(repo_api, base["id"], "base")
+        return active, base, seeded, repo_api
+
+    def test_mounter_reads_base_source_element_and_asset_through_active_notebook(
+        self, two_users_client
+    ):
+        c = two_users_client
+        client = c["client"]
+        active, base, seeded, _repo = self._mounted_base(c)
+
+        # 直连仍是 owner∪member 口径:挂载方对被挂库两者都不是。
+        assert client.get(
+            f"/api/sources/{seeded['source_id']}", headers=c["u1"]
+        ).status_code == 404
+        assert client.get(
+            f"/api/sources/{seeded['source_id']}/elements", headers=c["u1"]
+        ).status_code == 404
+
+        detail = client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            headers=c["u1"],
+        )
+        assert detail.status_code == 200
+        assert detail.json()["notebook_id"] == base["id"], (
+            "代理读取必须如实返回来源真正所属的参考库 id,前端据此判定只读"
+        )
+
+        elements = client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            headers=c["u1"],
+        )
+        assert elements.status_code == 200
+        assert [e["id"] for e in elements.json()] == [seeded["element_id"]]
+
+        image = client.get(
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+            headers=c["u1"],
+        )
+        assert image.status_code == 200
+        assert image.content == _PROXY_PNG
+
+    def test_proxied_reads_disclose_no_backend_internals(self, two_users_client):
+        """代理读取把参考库的来源交给一个非 owner 非成员的用户,后端内部形态不能跟着出去:
+        `file_path`(本机绝对路径)与 `error_message`(原样落库的异常串,同样可能带绝对路径)
+        整个字段不在响应模型里,只留如实的 `parse_failed` 布尔。"""
+        c = two_users_client
+        client = c["client"]
+        active, _base, seeded, repo_api = self._mounted_base(c)
+        with repo_api._write() as db:
+            db.execute(
+                "UPDATE sources SET file_path=?, error_message=? WHERE id=?",
+                ("/srv/silicon/storage/notebooks/secret/base.md",
+                 "FileNotFoundError: /srv/silicon/storage/notebooks/secret/base.md",
+                 seeded["source_id"]),
+            )
+
+        body = client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            headers=c["u1"],
+        ).json()
+        assert "file_path" not in body and "error_message" not in body
+        assert body["parse_failed"] is True
+        assert "/srv/silicon" not in client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            headers=c["u1"],
+        ).text, "整份响应正文里不得出现服务端路径"
+
+        # 同库来源走同一个模型(不按调用场景分叉出两种响应形状);解析没失败就是 False。
+        own = _seed_source_with_element_and_asset(repo_api, active["id"], "own-clean")
+        own_body = client.get(
+            f"/api/notebooks/{active['id']}/sources/{own['source_id']}",
+            headers=c["u1"],
+        ).json()
+        assert "file_path" not in own_body and own_body["parse_failed"] is False
+
+    def test_hidden_synthetic_sources_are_never_proxied_across_libraries(
+        self, two_users_client
+    ):
+        """memory/knowhow 的物理 source 行是投影产物,不是用户文档。集合地图/枚举刻意把
+        它们算进作用域(数的是检索能够到的东西),所以一个清单条目原则上可以带着这类
+        source_id 跨库出现;真被点开,`/elements` 会摊开整条合成源——含没被枚举到的部分,
+        而 Memory 是按创建者私有的。跨库一律 404;同库保持既有行为不动。"""
+        c = two_users_client
+        client = c["client"]
+        active, base, _seeded, repo_api = self._mounted_base(c)
+        for source_type in ("memory", "knowhow"):
+            hidden = _seed_source_with_element_and_asset(
+                repo_api, base["id"], f"hidden-{source_type}"
+            )
+            mine = _seed_source_with_element_and_asset(
+                repo_api, active["id"], f"mine-{source_type}"
+            )
+            with repo_api._write() as db:
+                db.execute(
+                    "UPDATE sources SET source_type=? WHERE id IN (?,?)",
+                    (source_type, hidden["source_id"], mine["source_id"]),
+                )
+
+            for suffix in ("", "/elements"):
+                assert client.get(
+                    f"/api/notebooks/{active['id']}/sources/{hidden['source_id']}{suffix}",
+                    headers=c["u1"],
+                ).status_code == 404, (source_type, suffix)
+                assert client.get(
+                    f"/api/notebooks/{active['id']}/sources/{mine['source_id']}{suffix}",
+                    headers=c["u1"],
+                ).status_code == 200, (source_type, suffix)
+
+    def test_proxied_asset_is_not_browser_cacheable(self, two_users_client):
+        """挂载有效期内取回的跨库图片若进了浏览器缓存,取消挂载后重开会由缓存命中、
+        绕过参与集判定——「失效即 404」会被静默架空一天。跨库响应因此 no-store,
+        本库资产保持原有长缓存(它才是一张图一次请求的高频路径)。"""
+        c = two_users_client
+        client = c["client"]
+        active, _base, seeded, repo_api = self._mounted_base(c)
+
+        proxied = client.get(
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+            headers=c["u1"],
+        )
+        assert proxied.status_code == 200
+        assert proxied.headers["cache-control"] == "no-store"
+
+        own = _seed_source_with_element_and_asset(repo_api, active["id"], "own-asset")
+        local = client.get(
+            f"/api/notebooks/{active['id']}/assets/{own['asset_id']}",
+            headers=c["u1"],
+        )
+        assert local.status_code == 200
+        assert local.headers["cache-control"] == "private, max-age=86400"
+
+    def test_unmounted_public_base_is_denied(self, two_users_client):
+        """公共库本身可挂,但**没挂**就不在参与集里——公共 ≠ 人人可直接读。"""
+        c = two_users_client
+        client = c["client"]
+        active, _base, seeded, _repo = self._mounted_base(c, mount=False)
+
+        for path in (
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+        ):
+            assert client.get(path, headers=c["u1"]).status_code == 404, path
+
+    def test_demoted_base_stops_being_readable_and_recovers(self, two_users_client):
+        """挂载边不是授权凭证:公共库被降级后边保留但不生效,代理读取当场 404;
+        重新满足条件即自动恢复(MOUNT_VALID_EXPR 的实时判定)。"""
+        c = two_users_client
+        client = c["client"]
+        active, base, seeded, repo_api = self._mounted_base(c)
+        paths = (
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+        )
+        for path in paths:
+            assert client.get(path, headers=c["u1"]).status_code == 200, path
+
+        with repo_api._write() as db:
+            db.execute("UPDATE notebooks SET tier='personal' WHERE id=?", (base["id"],))
+        for path in paths:
+            assert client.get(path, headers=c["u1"]).status_code == 404, path
+
+        with repo_api._write() as db:
+            db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (base["id"],))
+        for path in paths:
+            assert client.get(path, headers=c["u1"]).status_code == 200, path
+
+    def test_copying_base_is_denied(self, two_users_client):
+        """被挂库正在深拷贝(status='copying')时是半成品,参与集把它挡住,
+        代理读取不得读到写入中途的内容。"""
+        c = two_users_client
+        client = c["client"]
+        active, base, seeded, repo_api = self._mounted_base(c)
+        with repo_api._write() as db:
+            db.execute("UPDATE notebooks SET status='copying' WHERE id=?", (base["id"],))
+
+        for path in (
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+        ):
+            assert client.get(path, headers=c["u1"]).status_code == 404, path
+
+    def test_strangers_private_notebook_is_never_in_scope(self, two_users_client):
+        """他人**私有**库(既非公共库也不同 owner)根本挂不上,代理路径也拿它没辙。"""
+        c = two_users_client
+        client = c["client"]
+        from app.api.deps import repository
+        repo_api = repository()
+
+        active = client.post(
+            "/api/notebooks", headers=c["u1"], json={"name": "u1 项目"}
+        ).json()
+        theirs = client.post(
+            "/api/notebooks", headers=c["u2"], json={"name": "u2 私有笔记"}
+        ).json()
+        seeded = _seed_source_with_element_and_asset(repo_api, theirs["id"], "priv")
+
+        rejected = client.put(
+            f"/api/notebooks/{active['id']}/bases",
+            headers=c["u1"],
+            json={"base_notebook_ids": [theirs["id"]]},
+        )
+        assert rejected.status_code == 400, "私有库不在可挂候选集里"
+
+        for path in (
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+        ):
+            assert client.get(path, headers=c["u1"]).status_code == 404, path
+
+    def test_active_notebook_guard_still_applies(self, two_users_client):
+        """路径里的 notebook_id 是**请求方自己的** active notebook:对它没有读权限时,
+        require_notebook_read 先挡(404),不给「拿别人的 active 当跳板」的机会。"""
+        c = two_users_client
+        client = c["client"]
+        active, _base, seeded, _repo = self._mounted_base(c)
+
+        for path in (
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+        ):
+            assert client.get(path, headers=c["u2"]).status_code == 404, path
+
+    def test_own_notebook_resources_still_readable(self, two_users_client):
+        """回归:参与集首项恒为 active 自身,本库来源/元素/资产走同一条路径必须照常 200
+        (前端因此不需要先判断跨不跨库再选端点),不存在的 id 仍 404。"""
+        c = two_users_client
+        client = c["client"]
+        from app.api.deps import repository
+        repo_api = repository()
+
+        active = client.post(
+            "/api/notebooks", headers=c["u1"], json={"name": "u1 项目"}
+        ).json()
+        seeded = _seed_source_with_element_and_asset(repo_api, active["id"], "own")
+
+        assert client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}",
+            headers=c["u1"],
+        ).status_code == 200
+        assert client.get(
+            f"/api/notebooks/{active['id']}/sources/{seeded['source_id']}/elements",
+            headers=c["u1"],
+        ).status_code == 200
+        assert client.get(
+            f"/api/notebooks/{active['id']}/assets/{seeded['asset_id']}",
+            headers=c["u1"],
+        ).status_code == 200
+        assert client.get(
+            f"/api/notebooks/{active['id']}/sources/src-nope", headers=c["u1"],
+        ).status_code == 404
+        assert client.get(
+            f"/api/notebooks/{active['id']}/assets/asset-nope", headers=c["u1"],
+        ).status_code == 404

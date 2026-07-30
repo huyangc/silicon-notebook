@@ -6500,6 +6500,156 @@
           "title": "ScaleIndexStatus",
           "type": "object"
         },
+        "ScopedSourceDetail": {
+          "description": "参与集内**代理读取**的来源详情：`SourceDetail` 去掉两个后端内部字段。\n\n这个模型存在的唯一理由是收窄披露面。代理读取会把挂载参考库的来源交给一个对\n该库既非 owner 也非成员的用户，而 `SourceDetail` 带着两样只对库主有意义、却\n会泄露服务端内部形态的东西：\n\n- `file_path` 是后端存储的**本机绝对路径**，前端一处都没用过；\n- `error_message` 是 `str(exc)` 原样落库的异常串（`services/source_ingestion.py`），\n  同样可能带上绝对路径（`FileNotFoundError: /…/storage/notebooks/…`）。前端从来\n  不直出它，只按「有没有失败」二选一给固定文案——那点信息由 `parse_failed` 如实\n  承载，原文没有任何理由跨出这个库。\n\n刻意做成**去掉字段**而不是运行时置空：schema 层的保证不会因为哪条分支忘了清而\n悄悄退回去。也刻意对同库/跨库**一视同仁**——同库来源另有 `/sources/{id}` 那条\nowner∪member 的完整详情路径，代理端点没必要按调用场景分叉出两种响应形状。",
+          "properties": {
+            "authors": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Authors",
+              "type": "array"
+            },
+            "created_label": {
+              "default": "",
+              "title": "Created Label",
+              "type": "string"
+            },
+            "doc_type": {
+              "default": "",
+              "title": "Doc Type",
+              "type": "string"
+            },
+            "element_count": {
+              "title": "Element Count",
+              "type": "integer"
+            },
+            "extraction_warning": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Extraction Warning"
+            },
+            "file_hash": {
+              "default": "",
+              "title": "File Hash",
+              "type": "string"
+            },
+            "file_name": {
+              "default": "",
+              "title": "File Name",
+              "type": "string"
+            },
+            "file_size": {
+              "default": 0,
+              "title": "File Size",
+              "type": "integer"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kg_extracted": {
+              "default": false,
+              "title": "Kg Extracted",
+              "type": "boolean"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "paper_meta": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PaperMeta"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "paper_meta_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Paper Meta Status"
+            },
+            "parse_failed": {
+              "default": false,
+              "title": "Parse Failed",
+              "type": "boolean"
+            },
+            "parse_status": {
+              "default": "",
+              "title": "Parse Status",
+              "type": "string"
+            },
+            "pub_year": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pub Year"
+            },
+            "source_url": {
+              "default": "",
+              "title": "Source Url",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "type": {
+              "title": "Type",
+              "type": "string"
+            },
+            "venue": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Venue"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "title",
+            "type",
+            "status",
+            "summary",
+            "element_count"
+          ],
+          "title": "ScopedSourceDetail",
+          "type": "object"
+        },
         "SearchHit": {
           "properties": {
             "element_id": {
@@ -15680,6 +15830,106 @@
             }
           },
           "summary": "Add Url Sources"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}": {
+        "get": {
+          "operationId": "get_source_in_scope_api_notebooks__notebook_id__sources__source_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ScopedSourceDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Source In Scope"
+        }
+      },
+      "/api/notebooks/{notebook_id}/sources/{source_id}/elements": {
+        "get": {
+          "operationId": "source_elements_in_scope_api_notebooks__notebook_id__sources__source_id__elements_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/SourceElement"
+                    },
+                    "title": "Response Source Elements In Scope Api Notebooks  Notebook Id  Sources  Source Id  Elements Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Source Elements In Scope"
         }
       },
       "/api/notebooks/{notebook_id}/tier": {

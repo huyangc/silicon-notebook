@@ -207,6 +207,10 @@ export type SourceSummary = {
   doc_type?: string;
   created_label: string;
   error_message?: string;
+  /** 参与集内代理读取（`/notebooks/{active}/sources/{id}`）的响应用它代替
+   *  `error_message`：那是后端的原始异常串（可能带服务端绝对路径），跨库读取不该
+   *  拿到；前端本来也只用它的真假。老的 `/sources/{id}` 仍返回 `error_message`。 */
+  parse_failed?: boolean;
   extraction_warning?: string | null;
   kg_extracted?: boolean;
   authors?: string[];

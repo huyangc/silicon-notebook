@@ -10,7 +10,7 @@ from app.core.audit_actor import session_audit_principal
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.identity import UserProfile
 from app.repositories.factory import create_repository
-from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
+from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, NotebookStorePort, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
 
 
 @lru_cache
@@ -34,6 +34,12 @@ def notebook_sharing_repository() -> NotebookSharingRepository:
 
 def source_repository() -> SourceRepository:
     return repository()
+
+def notebook_store_port() -> NotebookStorePort:
+    # 参与集(active 本身 + 有效挂载的参考库)的唯一解析点,供「按 active notebook
+    # 代理读取参与库资源」的路由做 deny-by-default 的范围校验。有效性判定见
+    # repositories/*/mount_sql.py —— 挂载边不是授权凭证,库易主/降级后边仍在但不生效。
+    return repository()._runtime.notebook_store  # type: ignore[attr-defined]
 
 def ask_stream_repository() -> AskStreamPort:
     return repository()

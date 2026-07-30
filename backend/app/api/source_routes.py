@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from app.api.deps import (
     get_current_user,
     notebook_access_repository,
+    notebook_store_port,
     repository,
     require_notebook_access,
     require_notebook_read,
@@ -20,6 +21,7 @@ from app.models.sources import (
     PaginatedSources,
     ReparseSourcesRequest,
     RepairScheduledResult,
+    ScopedSourceDetail,
     SourceDetail,
     SourceElement,
     SourceImportRequest,
@@ -41,6 +43,11 @@ _REPARSE_MAX = 200
 
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
+
+# 「隐藏合成源」:memory/knowhow 投影出来的物理 source 行,不是用户导入的文档,由各自
+# 投影服务维护。与存储层 VISIBLE_SOURCE_TYPES_PREDICATE 同一份口径(来源面板与文档数量
+# 上限都按它排除)。本模块两处消费:reparse 不受理它们,参与集代理读取跨库时拒绝它们。
+_HIDDEN_SOURCE_TYPES = frozenset({"memory", "knowhow"})
 
 
 def _asset_service() -> AssetService:
@@ -244,7 +251,7 @@ def reparse_sources(
         # ⚠ 只重解析**导入型**用户源(codex):memory/knowhow 隐藏合成源无 file_path、由各自
         # 投影服务维护;把它们喂给文档解析 process_source 只会标失败/清派生态,不是修复。
         # 与 H2/H3 判据同口径(那两项本就排除 memory/knowhow),这里挡住 body 里带来的 id。
-        if src.type in ("memory", "knowhow"):
+        if src.type in _HIDDEN_SOURCE_TYPES:
             continue
         kg_scheduler.submit_job(repo.process_source, source_id)
         scheduled.append(source_id)
@@ -342,6 +349,87 @@ def source_elements(source_id: str, user: UserProfile = Depends(get_current_user
         raise HTTPException(status_code=404, detail="Source not found")
 
 
+# --- 参与集内的代理读取(挂载参考库的来源详情 / 元素 / 图片资产)-------------
+#
+# 「挂载公共参考库 ≠ 获得该库的直接成员权限」是红线:上面那对 `/sources/{id}` 端点
+# 是 owner∪member 口径,挂载方对被挂库通常两者都不是,直连必 404。但 Ask 的清单结果卡
+# 与引用会**合法地**列出参与库(active + 有效挂载的参考库)里的条目——用户看得到条目,
+# 却点不开来源、看不到图,是个死角。
+#
+# 解法与「问答引用定位图谱节点」红线同构(kg_routes 的 objects/{id}/neighbors|context):
+#   ① 浏览器**始终**只用当前 active notebook 过权限(require_notebook_read);
+#   ② 后端只在该 active notebook 的**有效** participant 集内解析目标资源,并内部代理读取。
+# 于是权限判定完全不依赖「用户是不是被挂库的成员」,也绝不因为挂了一个库就把该库的直接
+# 成员权限发出去:被挂库易主/降级/正在深拷贝时挂载边即刻失效(mount_sql 的实时判定),
+# 这两个端点当场回到 404。
+#
+# deny by default:目标资源自己声明它属于哪个 notebook(sources.notebook_id /
+# notebook_assets.notebook_id),不在 participant 集内一律 404(与本仓库「不泄露存在性」
+# 的惯例一致,不区分「不存在」与「无权」)。参与集查询是一次有界的挂载边 join,不随库大小增长。
+def _in_participant_scope(notebook_id: str, owner_notebook_id: str) -> bool:
+    """``owner_notebook_id`` 是否在 ``notebook_id`` 的有效参与集内。
+
+    同库先短路:participant 集首项恒为 active 自身,所以「资源就属于当前库」这个
+    绝对主流的路径(本库来源、本库图片,一张图一次请求)一次挂载边 join 都不用付。
+    """
+    return owner_notebook_id == notebook_id or owner_notebook_id in (
+        notebook_store_port().participant_notebook_ids(notebook_id)
+    )
+
+
+def _participant_scoped_source(notebook_id: str, source_id: str) -> SourceDetail:
+    """返回 ``source_id`` 的详情,前提是它属于 ``notebook_id`` 的有效参与集;否则 404。
+
+    participant 集首项恒为 active notebook 自身,所以同库来源走的是同一条路径——
+    调用方不需要先判断「跨不跨库」再选端点。
+    """
+    try:
+        detail = source_repository().get_source(source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Source not found")
+    if not _in_participant_scope(notebook_id, detail.notebook_id):
+        raise HTTPException(status_code=404, detail="Source not found")
+    # ⚠ 跨库时再挡一道隐藏合成源。集合地图/枚举**刻意**把 memory/knowhow 的物理 source
+    # 行算进作用域(`source_change_signal_rows` 的原话:数的是检索能够到的东西,不是来源
+    # 面板显示的东西),所以一个清单条目原则上可以带着这类 source_id 出现在跨库结果里,
+    # 用户一点「查看来源」,`/elements` 就会把整条合成源摊开——包括没被枚举到的部分,而
+    # Memory 是**按创建者私有**的。当前这条路径实际走不通(knowhow 只写 `knowhow_cell`
+    # 元素、不在可枚举白名单里,Memory 投影根本不写 source_elements),但那是别处的事实,
+    # 不该被这里的授权判断依赖 —— deny by default 更便宜也更稳。
+    # 同库刻意不挡:那是既有 `/sources/{id}` owner∪member 路径逐字不变的行为,收紧它属于
+    # 另一件事。图片资产端点同样不挡:knowhow 单元格图片是普通内容资产,本就随挂载库的
+    # 内容参与检索,与「文档视图对合成源没有意义」不是一回事。
+    if detail.notebook_id != notebook_id and detail.type in _HIDDEN_SOURCE_TYPES:
+        raise HTTPException(status_code=404, detail="Source not found")
+    return detail
+
+
+@router.get(
+    "/notebooks/{notebook_id}/sources/{source_id}",
+    response_model=ScopedSourceDetail,
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_source_in_scope(notebook_id: str, source_id: str) -> ScopedSourceDetail:
+    # ⚠ 响应模型不是 SourceDetail:代理读取会把参考库的来源交给一个对该库既非 owner
+    # 也非成员的用户,`file_path`(后端绝对路径)和 `error_message`(原始异常串,同样
+    # 可能带绝对路径)不能跟着出去。理由与取舍见 ScopedSourceDetail 的 docstring。
+    return ScopedSourceDetail.of(_participant_scoped_source(notebook_id, source_id))
+
+
+@router.get(
+    "/notebooks/{notebook_id}/sources/{source_id}/elements",
+    response_model=List[SourceElement],
+    dependencies=[Depends(require_notebook_read)],
+)
+def source_elements_in_scope(notebook_id: str, source_id: str) -> List[SourceElement]:
+    # 先做范围校验再读元素:元素是整源的行集合,越权请求不应该先把它捞出来。
+    _participant_scoped_source(notebook_id, source_id)
+    try:
+        return source_repository().source_elements(source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+
 @router.delete("/sources/{source_id}", status_code=204)
 def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
     if notebook_access_repository().source_owner(source_id) != user.id:
@@ -378,14 +466,28 @@ async def upload_notebook_asset(notebook_id: str, file: UploadFile = File(...)) 
 
 @router.get("/notebooks/{notebook_id}/assets/{asset_id}", dependencies=[Depends(require_notebook_read)])
 def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
+    # 路径里的 notebook_id 是**请求方当前的 active notebook**(权限就按它判,见
+    # require_notebook_read),不是「资产必须正好属于这个库」。资产自己声明所属库,
+    # 只要那个库在 active notebook 的有效参与集内就代理读取——参与集首项恒为 active
+    # 自身,所以本库资产(knowhow 单元格图片、来源插图)的既有行为逐字不变,只是额外
+    # 放行了「有效挂载的参考库」这一档,与上面来源详情/元素的代理读取同一条口径。
     asset = repository().get_notebook_asset(asset_id)
-    if asset is None or asset["notebook_id"] != notebook_id:
+    if asset is None or not _in_participant_scope(notebook_id, asset["notebook_id"]):
         raise HTTPException(status_code=404, detail="Asset not found")
     path = _asset_service().path_for(asset)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Asset not found")
+    # ⚠ 代理来的跨库资产不进浏览器缓存。挂载有效期内取回的图片若按 max-age=86400
+    # 缓存,取消挂载/降级/易主之后重新打开会由缓存直接命中、根本到不了上面那次参与集
+    # 判定——「挂载边一失效就当场 404」这条合同会被静默架空整整一天。本端点不做条件
+    # 请求(没有 If-None-Match 处理),`no-cache` 的重验同样要回源整份字节,与 `no-store`
+    # 没有带宽差别,故直接取语义最不含糊的那个。本库资产不涉及挂载生命周期,保持原有
+    # 长缓存不动——它才是「一张图一次请求」的高频路径。
+    cacheable = asset["notebook_id"] == notebook_id
     return FileResponse(
-        path, media_type=asset["mime"], headers={"Cache-Control": "private, max-age=86400"}
+        path,
+        media_type=asset["mime"],
+        headers={"Cache-Control": "private, max-age=86400" if cacheable else "no-store"},
     )
 
 

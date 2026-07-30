@@ -18,6 +18,7 @@ from app.repositories.ports import (
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, est_tokens,
 )
+from app.services.source_display import source_display_title
 
 
 _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
@@ -87,10 +88,11 @@ class EvidenceContextService:
     def citation_titles(self, source_ids: Iterable[str]) -> dict[str, str]:
         """Resolve user-facing citation titles in one bounded source lookup.
 
-        A grounded paper title is more meaningful than its upload/file name.  It
-        is authoritative for citation display only when the metadata row marks
-        the source as a paper and the parsed title is nonblank.  Every other
-        source retains its ordinary source title (then file name as fallback).
+        The naming rule itself is ``source_display.source_display_title`` — the
+        same one the enumeration list and the retrieval element cards apply, so
+        one source cannot be called two things in one answer.  A source with no
+        name at all is left out of the map rather than mapped to ``""``: callers
+        fall back to their own label, which is not the same as showing a blank.
         """
         ids = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
         if not ids:
@@ -98,10 +100,7 @@ class EvidenceContextService:
         metadata = self.source_metadata(ids)
         titles: dict[str, str] = {}
         for source_id in ids:
-            row = metadata.get(source_id) or {}
-            paper_title = str(row.get("paper_title") or "").strip()
-            ordinary_title = str(row.get("title") or row.get("file_name") or "").strip()
-            title = paper_title if bool(row.get("is_paper")) and paper_title else ordinary_title
+            title = source_display_title(metadata.get(source_id) or {})
             if title:
                 titles[source_id] = title
         return titles

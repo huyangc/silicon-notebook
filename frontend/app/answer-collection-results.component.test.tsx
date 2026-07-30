@@ -12,7 +12,7 @@
 //      "枚举完整、分析部分"复合披露、单源限定;
 //   5. image 条目走 AuthedImage(经 fetchInternalAssetBlob 取图), formula 条目走
 //      KaTeX 容器(镜像 math-rendering.component.test.tsx 的断言方式)。
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
 
@@ -93,7 +93,11 @@ function collectionResult(overrides: Partial<TypedCollectionResult> = {}): Typed
 }
 
 
-function renderAnswer(answer: AskResponse, extraProps: Record<string, unknown> = {}) {
+function renderAnswer(
+  answer: AskResponse,
+  extraProps: Record<string, unknown> = {},
+  { openCollections = true }: { openCollections?: boolean } = {},
+) {
   render(
     <AnswerView
       answer={answer}
@@ -110,6 +114,12 @@ function renderAnswer(answer: AskResponse, extraProps: Record<string, unknown> =
       {...extraProps}
     />,
   );
+  // 绝大多数既有断言验证清单内容本身；测试辅助函数替它们显式打开卡片，避免
+  // “默认折叠”的交互改动掩盖条目渲染、来源跳转和跨库权限等独立合同。
+  if (openCollections) {
+    document.querySelectorAll<HTMLButtonElement>(".answer-collection-toggle")
+      .forEach((button) => fireEvent.click(button));
+  }
 }
 
 
@@ -119,6 +129,25 @@ test("kind=collection 行不再崩溃,渲染出清单卡(此前会在 .rows.slic
   expect(() => renderAnswer(answer)).not.toThrow();
   expect(screen.getByText("已全部列出 1 条")).toBeInTheDocument();
   expect(screen.getByText("公式清单")).toBeInTheDocument();
+});
+
+
+test("清单卡默认收起，用户主动展开后才渲染条目", async () => {
+  const user = userEvent.setup();
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    element_kind: "code_block",
+    items: [elementItem({ element_type: "code_block", text: "default-hidden-code" })],
+  })];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  const toggle = screen.getByRole("button", { name: "展开代码块清单" });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByText("default-hidden-code")).not.toBeInTheDocument();
+
+  await user.click(toggle);
+  expect(screen.getByRole("button", { name: "收起代码块清单" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("default-hidden-code")).toBeInTheDocument();
 });
 
 
@@ -248,6 +277,7 @@ test("formula 元素条目走 KaTeX 容器渲染", () => {
       memorySaved={false}
     />,
   );
+  fireEvent.click(screen.getByRole("button", { name: "展开公式清单" }));
   expect(container.querySelector(".element-formula .katex")).not.toBeNull();
 });
 
@@ -343,7 +373,7 @@ test("KG 清单条目展示原文引用摘录,本库条目可跳到精确来源�
 });
 
 
-test("跨库 KG 清单条目直接展示安全摘录,不发越权来源跳转", async () => {
+test("跨库 KG 清单条目展示安全摘录,并经 active notebook 代理跳转原文", async () => {
   const user = userEvent.setup();
   const onOpenSource = vi.fn();
   const answer = baseAnswer();
@@ -366,8 +396,8 @@ test("跨库 KG 清单条目直接展示安全摘录,不发越权来源跳转", 
   expect(screen.getByText("来自参考库《模拟电路基准库》")).toBeInTheDocument();
   await user.click(screen.getByText("原文引用：参考论文 · p. 4"));
   expect(screen.getByText("跨库原文摘录")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "查看原文" })).not.toBeInTheDocument();
-  expect(onOpenSource).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "查看原文" }));
+  expect(onOpenSource).toHaveBeenCalledWith("base-src", "base-el");
 });
 
 
@@ -386,7 +416,7 @@ test("元素条目按来源分组显示(source_title 作为分组小标题)", ()
 });
 
 
-test("初始显示 20 行 + 客户端展开全部(对齐既有结果卡口径)", async () => {
+test("打开清单后显示前 20 行 + 客户端展开全部(对齐既有结果卡口径)", async () => {
   const user = userEvent.setup();
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({
@@ -405,14 +435,15 @@ test("初始显示 20 行 + 客户端展开全部(对齐既有结果卡口径)",
 
 
 // ---------------------------------------------------------------------------
-// 双评审 P1-1:跨库条目收口。挂载公共参考库不等于获得该库的直接成员权限——
-// `GET /sources/{id}` 与资产端点都是 owner∪member 口径,前端不能替用户猜权限去
-// 直连另一个库的资源。跨库条目(item.notebook_id 非空且 ≠ 当前 notebookId)必须
-// 收敛成"只读展示":不发图片鉴权请求、不提供「查看来源」跳转；后端可随条目
-// 下发一段已授权的有界原文引用,但前端仍不得直连参考库 source API。
+// 跨库条目的代理读取(承接双评审 P1-1 的 v1 收口)。挂载公共参考库仍然不等于获得
+// 该库的直接成员权限——变的不是那条红线,而是取数路径:跨库条目的来源详情与图片
+// 一律经**当前 active notebook** 维度的代理端点读取(浏览器只用 active 过权限,
+// 后端在其有效 participant 集内解析并内部代理)。于是「查看来源」与图片都恢复,
+// 而浏览器一次都没有直连过另一个库;跨库标注保留为出处信息。
 // ---------------------------------------------------------------------------
 
-test("跨库图片条目:不发鉴权请求,渲染降级占位而不是 AuthedImage", () => {
+test("跨库图片条目:经 active notebook 维度的资产 URL 取图,绝不用条目自己的 notebook_id 直连", async () => {
+  vi.mocked(fetchInternalAssetBlob).mockClear();
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({
     element_kind: "image",
@@ -421,24 +452,26 @@ test("跨库图片条目:不发鉴权请求,渲染降级占位而不是 AuthedIm
     })],
   })];
   renderAnswer(answer);
-  expect(screen.queryByRole("img")).not.toBeInTheDocument();
-  expect(screen.getByText("图片来自参考库，暂不支持预览")).toBeInTheDocument();
-  expect(fetchInternalAssetBlob).not.toHaveBeenCalled();
+  await screen.findByRole("img");
+  const url = vi.mocked(fetchInternalAssetBlob).mock.calls[0][0];
+  expect(url).toContain("/notebooks/nb-1/assets/asset-1");
+  expect(url).not.toContain("base-1");
 });
 
-test("跨库元素条目:不渲染「查看来源」按钮", () => {
+test("跨库元素条目:「查看来源」按钮照常渲染并回调(代理读取覆盖参考库来源)", async () => {
+  const user = userEvent.setup();
   const onOpenSource = vi.fn();
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({
     element_kind: "code_block",
     items: [elementItem({
       element_type: "code_block", text: "print(1)", notebook_id: "base-1",
-      source_id: "src-9", source_title: "别的库的脚本",
+      source_id: "src-9", source_title: "参考库的脚本",
     })],
   })];
   renderAnswer(answer, { onOpenSource });
-  expect(screen.queryByRole("button", { name: "查看来源" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "在来源详情查看完整表格" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "查看来源" }));
+  expect(onOpenSource).toHaveBeenCalledWith("src-9", "el-1");
 });
 
 test("跨库条目:库名可解析时标注「来自参考库《名》」", () => {
@@ -494,6 +527,7 @@ test("本库条目(notebook_id 等于当前 notebookId)回归:按钮/图片/标�
 });
 
 test("本库图片条目回归:notebook_id 为空(旧数据/兜底)时仍按当前笔记本取图,不是跨库", async () => {
+  vi.mocked(fetchInternalAssetBlob).mockClear();
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({
     element_kind: "image",
@@ -503,7 +537,8 @@ test("本库图片条目回归:notebook_id 为空(旧数据/兜底)时仍按当�
   })];
   renderAnswer(answer);
   await screen.findByRole("img");
-  expect(fetchInternalAssetBlob).toHaveBeenCalled();
+  expect(vi.mocked(fetchInternalAssetBlob).mock.calls[0][0])
+    .toContain("/notebooks/nb-1/assets/asset-1");
 });
 
 
