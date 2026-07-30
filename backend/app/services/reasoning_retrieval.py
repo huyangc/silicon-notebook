@@ -920,13 +920,22 @@ class ReasoningRetriever:
                     raise ValueError("reasoning follow_chain action is missing start_object_id")
                 if action == "exact_lookup" and not d.exact_term:
                     raise ValueError("reasoning exact_lookup action is missing exact_term")
-                if action == ENUMERATE_ELEMENTS_ACTION and not d.enumerate_kind:
+                # `collection:"sources"` 刻意没有子类型(设计文档 §6.2:参数优先
+                # 于动作 id),所以两条「缺子类型」校验都要放行它——否则合法的
+                # 文档目录请求在 fail_closed 调用方手里直接 ValueError(codex
+                # PR#403 R1 P2:schema 允许的形态不能被校验拒收)。
+                if (
+                    action == ENUMERATE_ELEMENTS_ACTION
+                    and not d.enumerate_kind
+                    and not d.enumerate_collection
+                ):
                     raise ValueError(
                         "reasoning enumerate_elements action is missing a valid kind"
                     )
                 if (
                     action == ENUMERATE_KG_OBJECTS_ACTION
                     and not d.enumerate_object_type
+                    and not d.enumerate_collection
                 ):
                     raise ValueError(
                         "reasoning enumerate_kg_objects action is missing a valid "

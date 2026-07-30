@@ -984,6 +984,24 @@ def test_unknown_kind_fails_closed_for_authoring_flows(repo):
         retriever.reflect("哪些段落", "candidates")
 
 
+def test_sources_collection_is_valid_under_fail_closed(repo):
+    """codex PR#403 R1 P2: `collection:"sources"` 刻意没有子类型,fail_closed
+    的「缺 kind/object_type」校验必须放行它——schema 允许的形态不能被校验拒收。
+    两个 enumerate 动作 id 都要放行(参数优先于动作 id)。"""
+    _seed(repo, formulas=1)
+    llm = _SeqLLM([_enumerate_sources_action(),
+                   {"next_action": "enumerate_kg_objects",
+                    "enumerate": {"collection": "sources"},
+                    "reason": "列文档"}])
+    retriever, _limits = _retriever(repo, llm, fail_closed=True)
+
+    for _ in range(2):
+        decision = retriever.reflect("库里有哪几篇", "candidates")
+        assert decision.enumerate_collection == "sources"
+        assert decision.enumerate_kind == ""
+        assert decision.enumerate_object_type == ""
+
+
 def test_out_of_scope_source_id_fails_open_into_a_skip(repo):
     notebook = _seed(repo, formulas=2)
     llm = _SeqLLM([_enumerate_action(source_id="not-in-this-notebook"),
