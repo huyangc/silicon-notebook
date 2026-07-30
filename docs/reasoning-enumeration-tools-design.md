@@ -2,6 +2,9 @@
 
 状态：spec 定稿，分三个交付物推进（PR-1 止血 / PR-2 工具化枚举 / PR-3 综述大纲协同方向）。
 本文是实现期的计划真源；数值契约合入时同步进 `docs/product-and-api*.md` 契约表（数值不上屏）。
+PR-1/PR-2/PR-2.5 已合入 master。PR-3：O1（大纲便签动作+校验+账目回喂+门控+trace）与
+O2（按节合成+集成）已实现（分支 `claude/outline-coevolution`）；O3（前端标签+文档四份+
+契约表+守卫收尾）已完成，待 O4（`check.sh` + 提 PR + codex 闭环）收尾。
 
 ## 0. 背景与设计决策
 

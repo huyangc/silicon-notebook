@@ -187,20 +187,21 @@ test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () =>
   );
 });
 
-test("NEXT_ACTION 覆盖后端全部 10 个真实取值(非机制名)", () => {
+test("NEXT_ACTION 覆盖后端全部 11 个真实取值(非机制名)", () => {
   // 真源是 reasoning_retrieval.py 里 reflect 循环的 next_action if/elif 分发链
   // (不按行号钉——本仓库行号指针已知会腐烂;按分支内容定位,见 reasoning-trace.ts
   // 顶部 NEXT_ACTION 上方注释)。精确查找通道加了 exact_lookup,PR-2 加了
   // enumerate_elements/enumerate_kg_objects,原为 7 个。PR-2.5 的来源清单是
-  // enumerate 动作的一个参数值而不是第 11 个动作,所以这张表不变。后端加第 11 个
-  // 值时这条会提醒补。
+  // enumerate 动作的一个参数值而不是第 11 个动作,所以那次没有改这张表。O1 的
+  // update_outline(大纲便签)才是货真价实的第 11 个动作 id,这条随之补上——
+  // 这条注释兑现了它自己曾经许下的诺言("后端加第 11 个值时这条会提醒补")。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
     search_elements: "回原文里找细节", enumerate_elements: "列元素清单",
     enumerate_kg_objects: "列知识对象清单",
     ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
-    exact_lookup: "按名称精确查找",
+    exact_lookup: "按名称精确查找", update_outline: "整理大纲",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
@@ -264,6 +265,67 @@ test("新增 exact_lookup 后,未知 step_type / next_action 的兜底仍成立(
     getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "exact_lookup_v2" } }),
     "",
   );
+});
+
+// O1(大纲便签,设计文档 §3.1):update_outline 落的 outline 步。缺标签会回退成
+// "outline" 直出英文机制名;detail 按「N 节(M 节待补)」给出比 summary 更短的复述。
+test("outline 步(大纲便签)有短标签,detail 按节数/待补节数渲染", () => {
+  const step = {
+    step_type: "outline",
+    summary: "更新大纲: 3 节(1 节待补证据)",
+    detail: {
+      sections: [
+        { id: "s1", title: "背景", parent: null, evidence: ["k1"] },
+        { id: "s2", title: "方法", parent: null, evidence: ["k2", "k3"] },
+        { id: "s3", title: "尚待检索", parent: null, evidence: [] },
+      ],
+      empty_sections: ["尚待检索"],
+      replaced: 0,
+      dropped_evidence: 0,
+      changed: true,
+    },
+  };
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "大纲");
+  assert.equal(getTraceStepDetail(step), "3 节(1 节待补)");
+
+  // 零值形态要稳:全部节都已绑证据时不写成 "3 节(undefined 节待补)"。
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "outline",
+      summary: "更新大纲: 2 节(0 节待补证据)",
+      detail: { sections: [{}, {}], empty_sections: [] },
+    }),
+    "2 节(0 节待补)",
+  );
+  // 畸形 detail(缺字段)不抛异常,退化为 "0 节(0 节待补)"。
+  assert.equal(
+    getTraceStepDetail({ step_type: "outline", summary: "", detail: {} }),
+    "0 节(0 节待补)",
+  );
+});
+
+// O2(按节合成,设计文档 §3.1):每节写完发一条进度步,复用 synthesis 这个
+// step_type,但 detail 没有 anchors —— 若落到既有的 anchors 分支会读成空字符串,
+// 白白丢掉「写到第几节了」这条本该有的进度文案。
+test("按节合成的进度步(synthesis 类型,不带 anchors)显示第几节", () => {
+  const step = {
+    step_type: "synthesis",
+    summary: "已写完第 2/共 3 节",
+    detail: { section_index: 2, section_total: 3, section_title: "方法" },
+  };
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "作答");
+  assert.equal(getTraceStepDetail(step), "第 2/共 3 节");
+
+  // 既有的收尾 synthesis 步(带 anchors,不带 section_index)分支必须逐字不变。
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "synthesis",
+      detail: { citations: 12, anchors: 5, evidence_level: "grounded" },
+    }),
+    "5 处引用",
+  );
+  // 两个形状都缺时兜底为空,不抛异常。
+  assert.equal(getTraceStepDetail({ step_type: "synthesis", detail: {} }), "");
 });
 
 // PR-2 T6:集合枚举工具的 enumerate 步用 detail.collection 存在与否与 Knowhow 的

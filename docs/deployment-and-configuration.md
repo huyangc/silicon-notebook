@@ -598,6 +598,7 @@ KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrie
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # projected Knowhow cell objects join reasoning/graph KG-node retrieval (default true; false disables only this direct-node path, not cell-chunk search)
 REASONING_ENUM_TOOLS_ENABLED # reasoning Ask's typed collection-enumeration reflect tools, enumerate_elements/enumerate_kg_objects (default true; false disables both tools and the collection map, zero extra queries)
+REASONING_OUTLINE_ENABLED    # reasoning Ask's outline scratchpad reflect action, update_outline (default true; only offered at the `exhaustive` effort tier regardless of this flag; false disables the action and section-by-section synthesis, reverting to byte-identical pre-feature behavior)
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
 CHUNK_MMR_K                  # MMR-selected chunks when rerank is off (default 16)
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: add local KG structure + source chunks (default true; rerank path requires `retrieval_rerank` bound)
