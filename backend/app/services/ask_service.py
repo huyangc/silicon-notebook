@@ -1826,6 +1826,10 @@ class AskService:
                 # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
                 # 带出来直接进合成上下文,不重建。
                 collection_map_text = result.collection_map_text
+                # 终态大纲(仅穷尽档非空)。**O2 消费它**:按节合成会按每节的绑定
+                # 证据分片装配上下文。O1 只负责把它接出来,所以在 O2 落地之前它看
+                # 起来是个没人读的变量 —— 删掉它等于删掉这个特性的输出。
+                reasoning_outline = result.outline
                 trace = [*pre_trace, *trace]
             except AskCancelled:
                 raise
@@ -1835,6 +1839,7 @@ class AskService:
                 )
                 enumerations = []
                 collection_map_text = ""
+                reasoning_outline = []
 
             registry = self.schemas.effective_schemas()
             seen_ids: set = set()

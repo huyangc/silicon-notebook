@@ -338,21 +338,112 @@ DualGraph（Microsoft，OEDR）的核心：把**大纲图 OG（怎么写）**与
 对位本仓库：**KG 侧资产已存在且更强**（持久 KG、canonical fold、社区、PPR、follow_chain、
 expand_community），DualGraph 是临时从网页搭图；缺的是 OG 侧与耦合：
 
-- **逐步推理（综述形问题）v1 —— 大纲便签（outline scratchpad）**：
-  - 新 reflect 动作 `update_outline`：模型维护一个有界大纲（≤12 节、两层），每节短标题 +
-    绑定的已检索证据 key（服务端校验 key 合法性，非法即丢，口径同 knowhow 补全的证据 key
-    校验）。
-  - 循环账目回喂：「无绑定证据的节: […]」（与 attempted-queries 回喂同法）——这是 OG→查询
-    的缺口信号，模型据此定向补子查询；KG→查询的缺口信号复用现有 expand_community /
-    follow_chain / PPR，不实现 SBM/结构洞分析（成本高、增量存疑，显式不做）。
-  - **按节合成**：存在大纲且证据量大时逐节合成再拼接（每节只喂该节绑定证据）；k 次合成调用
-    是真实成本，按档位门控（deep 及以上才允许，overview/standard 保持单次合成）。
-  - 何时建大纲：模型自决（哲学一致），reflect prompt 说明适用面（综述/盘点/多主体对比）。
-- **深度报告模式**：报告已有大纲+逐节深挖+真实锚点 grounded 重算；可借鉴的增量 =
-  轮间大纲**增补式**细化（只允许在已确认必答主题之下加子节，不得替换/收窄确认合同——与现有
-  确认门约束一致）+ 每节检索引入 KG 缺口信号。作为独立评估项，不与 v1 绑定。
+**2026-07-30 立项（用户拍板）**：PR-1/2/2.5 已合入且真机验收通过（公式题根治；文章题机制
+全对但深度受采样限制）。用户决定不做深度补丁（全文直读/摘要升级等暂缓），直接做大纲协同——
+「根据 notebook 的内容逐渐完善结果」，服务综述/深度分析类问题；**v1 门控钉在 `exhaustive`
+（穷尽）档**（用户原话「把档位选到穷尽的时候」；thorough 及以下完全不出现，回到现状；是否
+下放 thorough 由真机评估决定）。
 
-PR-3 在 PR-2 合入后单独立项（先真机验证 PR-1/2 对枚举类的收益，再决定 v1 范围）。
+### 3.1 v1 实现合同 —— 大纲便签（outline scratchpad）
+
+- **新 reflect 动作 `update_outline`**（第 11 个动作 id；仅 exhaustive 档且
+  `REASONING_OUTLINE_ENABLED`（默认 true，config 注意 validation_alias）开启时进
+  prompt/schema/allowed_actions——条件化机制镜像 enumeration 的单闸模式，关闭态/低档位
+  与现状逐字一致，冻结基线复用既有守卫形态）。
+- **大纲状态（run 局部）**：有界——≤12 节、两层（节可带 parent）、标题 ≤60 字符、每节绑定
+  证据 key ≤8 个；`update_outline` 动作携带整份大纲（全量替换语义，幂等、避免增量补丁的
+  对账复杂度），每 run 该动作 ≤6 次，超出 skip(outline_budget)。
+- **绑定键校验（服务端事实）**：合法键=本轮反思上下文已展示的候选标识（与 `_summarize`
+  的展示形式同一套；含枚举清单条目 id）；非法键静默丢弃；无任何合法绑定的节保留为**空节**
+  进账目。口径同 knowhow 补全的证据 key 校验先例。
+- **账目回喂（OG→检索的缺口信号）**：每轮 reflect 上下文追加大纲便签行——各节标题+绑定数，
+  空节单独点名（「无绑定证据的节: …」）；与 attempted/enumeration 账目同法。模型据此对
+  空节发定向子查询。KG→检索的缺口信号**复用**现有 expand_community / follow_chain / PPR /
+  exact_lookup；**显式不做** SBM/结构洞分析（成本高、增量存疑）。
+- **按节合成**：循环结束时若大纲 ≥2 个非空节：逐节合成——每节只装配**该节绑定证据**的
+  上下文切片（复用既有 evidence_context 装配器，各节 key 基址偏移 `section_index × 10000`
+  保证命名空间不相交），合并 id_map 与锚点，答案=各节 `## 标题` 拼接（Markdown 标题前端
+  原生渲染）；空节跳过并记 trace。任一节合成失败→整体回退单次合成（fail-open，trace 记
+  outline_synthesis_fallback）。k 次合成调用是真实成本——这正是只在 exhaustive 档开放的
+  理由（用户显式选穷尽=接受成本）。
+- **trace**：新 step_type `outline`（前端补「大纲」标签；NEXT_ACTION 补 `update_outline`
+  →「整理大纲」）；每次动作 summary 形如「更新大纲: N 节(M 节待补证据)」；按节合成在
+  synthesis 步 detail 记 `outline_sections`/`outline_fallback`。
+- **响应契约 v1 刻意不加字段**：大纲经 trace 与答案结构（标题层级）可见，不进 AskResponse
+  （避免 api_contract churn；真机验证后如需结果卡再立项）。
+- **何时建大纲：模型自决**（哲学一致）——reflect 动作说明写明适用面（综述/盘点/多主体
+  对比/「逐渐完善」类长问题）与不适用面（单点事实题别建）；集合地图与来源清单是天然的
+  大纲种子材料（先枚举目录再按主题建节）。
+- 深度报告模式**不在 v1**：报告的确认合同门槛（大纲增补式细化不得替换/收窄确认主题）留作
+  独立评估项。
+
+**落地决策（O1 实现期定案，与上面的意图一致，补足未定的部分）**
+
+- **档位闸读的是 limits 自己的身份**：`AskRetrievalLimits` 增加首字段 `effort`（就是选中它的
+  那个档位 id），`outline_wiring_active(settings, limits)` 判 `limits.effort == "exhaustive"`。
+  不从预算数字反推——那样任何一次 `dataclasses.replace(limits, 某个预算=…)`（测试与未来的调用方
+  都会这么干）都会静默改变「这是哪一档」的答案。没有 limits 的调用方（深度报告逐节深挖、knowhow
+  补全）因此天然是关闭态。
+- **账目回喂必须携带整份大纲，而不只是「标题 + 绑定数 + 空节点名」**（对 §3.1 原文的订正，理由是
+  机制性的）：reflect 的 prompt **没有对话历史**（每轮都是一条全新的 user message），而
+  `update_outline` 是全量替换语义——模型手上唯一一份「我上次交了什么」就是这段回喂。只回账目的话，
+  它每轮都得凭记忆重建，绑定逐轮蒸发，全量替换反而成了持续掉证据的机器。空节仍然单独点名（那是
+  缺口信号），只是不再是这份回喂的**全部**内容。有界性不变且是常数级：12 节 ×（32 id + 60 标题 +
+  32 parent + 8 × 48 证据 key）+ 固定文案 ≈ 6.5KB 最坏情况，与语料规模无关，且只在 exhaustive 档
+  出现（该档证据预算 16k/120k 字符）。
+- **绑定键的合法集合按「本 run 累计产出过的检索候选」算，不按「上一轮候选摘要恰好渲染过」算**
+  （对 §3.1「已展示」措辞的收敛）：`_summarize` 对候选池开的是头尾窗口，而模型每次都必须重提整份
+  大纲——按「展示过」判合法的话，第 3 轮绑上的证据会在第 5 轮因为窗口滑动变成非法键被丢掉，模型
+  什么都没做错，绑定却在悄悄蒸发。候选只增不减，所以累计口径是单调的。集合 = collected 的 KG
+  object id ∪ 已检索 element id ∪ 已检索 chunk id。
+  - **v1 不含枚举清单条目的 id**（评审订正，恢复「合法集 ⊆ 模型可见」这条不变式）：枚举账目按
+    合同只回覆盖计数、不回条目 id（元素/知识对象清单一个字的正文都不带），模型根本拿不到那些 id
+    ——放进合法集只是一片没人能踩到的死面，同时放宽了「只能引用服务端给过你的东西」这条校验。
+    **O2 或后续改动让清单条目 id 对模型可见时，连同可见性一起把它们加回来**，并在这里记一笔。
+  - **来源 id 同样刻意不在内**：一份文档不是一条证据，绑上它给 O2 的按节合成产不出任何上下文
+    切片，而目录给模型的句柄本来就是标题而不是 id。
+- **原文候选在大纲在场时才标 `(id=…)`**：KG 候选的 id 一直都在（`expand_graph`/`follow_chain` 拿它
+  当参数），chunk/element 此前没有任何动作需要指名道姓。大纲把「这一节靠哪几条证据」变成了模型要
+  表达的东西，而纯散文库（有文档、没图谱）里能绑的恰恰只有 chunk 与 element——不给 id，综述类问题
+  的大纲只能全是空节。关闭态与低档位的候选摘要逐字节不变。
+- **空提交是 skip，不是清空**：`update_outline` 带不出任何合法节（畸形、全无标题）时记
+  `skip(outline_empty)` 并**保留**上一份大纲。一次畸形响应把已经建好的大纲抹掉是最坏的一种
+  fail-open；代价是模型无法显式清空大纲（它可以用一节替换掉整份），这是刻意的取舍。
+- **大纲修订对 stale 熔断中性**（评审订正；第一版把「大纲变了」算成进展，实测有洞）：大纲不带来
+  任何新证据，而 stale 数的正是「还在不在往前推进」。算成进展的话，两份大纲 A、B 交替提交每轮都
+  「有变化」、每轮都把 stale 清零，空转上限从 3 轮被抬到 19 轮。所以 `outline_*` 一律不进
+  `no_progress` 账目：纯整理会照常推进 stale 并在 `reasoning_stale_limit` 轮内熔断，而正当流程里
+  绑定轮本来就伴随检索动作（那些动作自己会重置 stale），中性对真实用法零影响。`changed` 仍留在
+  trace detail 里当观测量。
+- **便签感知剩余额度**：`_outline_note(sections, updates_left)` 尾部带「还可以再整理 N 次」（照集合
+  地图那条 allowance 行的先例）；额度耗尽后整段措辞换成「已定稿，不要再提交 update_outline，请改用
+  检索动作补齐空节或直接作答」。账目必须描述**现在**能做什么——它若还在教「再次提交时要带上……」，
+  模型就会照做、撞上 `outline_budget`、白烧一轮反思。
+- **去重 id 的有界性是结构性的**（评审 P0）：`_unique_outline_id` 的后缀段是 `for range` 且拼后缀前
+  先把 base 裁到 `_OUTLINE_ID_CHARS - len(后缀) - 1`，穷尽后落回位置 id（鸽笼原理保证有空位）。
+  原来的 `while True` + `f"{base}-{n}"[:32]` 在两种真实输入下 100% CPU 死循环（33 字符且前 32 位
+  相同的两个 slug；三个 31 字符的同名 id——后者 `[:32]` 恰好把数字截掉），而这个函数跑在 Ask 的
+  worker 线程里：循环体内没有取消检查、`except Exception` 接不到、`/ask/cancel` 无人轮询，只能重启
+  后端。
+- **reflect 的 outline 参数按「有才传」**：`self.reflect(question, summary, **({"outline": True} if
+  … else {}))`，与 `plan()` 的 `max_subqueries`/`collection_map`、`_construct_reasoning_retriever`
+  对 `fail_closed` 的处理同一惯例。关闭态与低档位下调用形状与接入前逐字一致，既有的 reflect 测试
+  替身不必为一个它们永远收不到的参数改签名。
+- **代价登记（留给 O3）**：`update_outline` 是模型面的第 11 个动作 id，所以前端
+  `reasoning-trace.ts` 的 `NEXT_ACTION` 与 `TRACE_STEP_LABELS` 各缺一个键（反思步会显示回退文案、
+  `outline` 步没有短标签）。`reasoning-trace.test.mjs` 里那条「覆盖后端全部 10 个真实取值」的用例
+  自带 case 表，**不会**因为后端多一个动作而变红——O3 要主动补，不能等它报警。
+
+### 3.2 任务拆分
+
+| 任务 | 内容 | 角色/模型 |
+| --- | --- | --- |
+| O1 | 大纲状态+动作+校验+账目回喂+门控+trace | general-purpose (opus) |
+| O2 | 按节合成（切片/偏移/合并/回退）+集成 | general-purpose (opus) |
+| O3 | 前端标签+文档四份+契约表+守卫收尾 | impl-task (sonnet) |
+| O4 | check.sh+提PR+codex 闭环 | 主代理 |
+
+每任务后双评审（spec-review + code-quality-review，opus），变异验证规矩同全篇。
 
 ## 4. 任务拆分与模型分配
 

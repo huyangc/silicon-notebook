@@ -330,6 +330,7 @@ def plan_prompt(
 def reflect_schema_hint(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
+    outline: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -339,6 +340,11 @@ def reflect_schema_hint(
     switch spells "these tools do not exist" — the model then sees byte-for-byte
     the schema it saw before the tools were added, which is the only way "off"
     can honestly mean "back to the previous behavior".
+
+    ``outline`` is a SEPARATE gate on the same principle (the outline scratchpad
+    is offered only at the exhaustive effort).  The two gates are independent
+    because the features are: enumeration is available at every effort, the
+    outline is not.
     """
     actions = (
         "answer|expand_graph|add_subquery|"
@@ -368,13 +374,25 @@ def reflect_schema_hint(
             '"collection":"",'
             '"source_id":"","source_title":""},'
         )
+    outline_branch = ""
+    if outline:
+        actions += "|update_outline"
+        # ``evidence`` is shown as a one-empty-string list, the same way
+        # ``sub_queries`` shows its shape: the field is a list of ids the model
+        # copies from the candidates, and an empty list is a legal (and
+        # meaningful) value — a section with no evidence yet is the whole point
+        # of the scratchpad.
+        outline_branch = (
+            '"outline":{"sections":[{"id":"","title":"","parent":"",'
+            '"evidence":[""]}]},'
+        )
     return (
         '{"sufficient":false,"next_action":"' + actions + '","expand":'
         '{"object_id":"","edge_type":null,'
         '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
         '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
         '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-        + enumerate_branch +
+        + enumerate_branch + outline_branch +
         '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
         '"reason":""}'
     )
@@ -388,12 +406,17 @@ def reflect_prompt(
     candidates_summary: str,
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
+    outline: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
     ``element_kinds`` / ``object_types`` non-empty = the typed-collection
     enumeration tools are available this run; empty = they are not, and every
     byte of this prompt is what it was before they existed.
+
+    ``outline`` True = the outline scratchpad action is offered this run (only
+    at the exhaustive effort, see ``reasoning_retrieval.outline_wiring_active``);
+    False = it is not, and again every byte is what it was before it existed.
     """
     enumeration_tools = bool(element_kinds or object_types)
     # The reflect-local half of the scope-grounding rule: this is the prompt with
@@ -463,6 +486,44 @@ def reflect_prompt(
         "be requested again.\n"
         if enumeration_tools else ""
     )
+    # The outline scratchpad (design doc §3.1).  Three things have to be said
+    # here or the action is worse than useless:
+    #   * WHEN — it earns its turns on answers that have structure to build
+    #     (a survey, a roster-driven per-document treatment, a multi-subject
+    #     comparison) and costs a pure turn on a single-fact question;
+    #   * REPLACE, not patch — every call carries the whole outline.  The reflect
+    #     prompt has no conversation history, so the model's only copy of what it
+    #     sent last is the scratchpad the server feeds back; it has to be told to
+    #     resend FROM that;
+    #   * an empty section is the FEATURE — it names an uncovered aspect, which is
+    #     exactly the signal the next retrieval action should target.  Without
+    #     this sentence a model prunes its own gaps to make the outline look done.
+    outline_action = (
+        "- update_outline: the answer itself needs a STRUCTURE you build up over "
+        "several turns — a survey or overview, an inventory, a per-document "
+        "treatment of a library, a comparison of several subjects, or any long "
+        "answer the question asks you to fill in progressively. Keep that "
+        "structure in outline.sections: each section has a short stable id, a "
+        "title in the question's language, an optional parent (ONE nesting level "
+        "— a section whose parent is itself a child is flattened), and evidence = "
+        "the ids of candidates above that support it, copied exactly as they "
+        "appear in (id=...). This call REPLACES the entire outline: send every "
+        "section you still want, every time. Your previous outline is fed back to "
+        "you as the outline scratchpad in the context below — resend from it, "
+        "because anything you leave out is dropped. A section with NO evidence is "
+        "not a failure, it is the next retrieval direction: keep it in the "
+        "outline, use add_subquery / the other retrieval actions to look for its "
+        "material, and bind the ids you get in your next update_outline. "
+        + (
+            "A listed document roster or the [Collections in scope] counts are "
+            "the natural seed: list what the library holds first, then turn that "
+            "list into sections. "
+            if enumeration_tools else ""
+        )
+        + "Do NOT open an outline for a single-fact question — structuring a "
+        "one-sentence answer only burns turns.\n"
+        if outline else ""
+    )
     completeness_rule = (
         "In reason, you may call a collection completely retrieved ONLY when "
         "an enumerate action has reported its coverage as complete for that "
@@ -514,6 +575,7 @@ def reflect_prompt(
         "and returns the whole manual section it heads, so a name you invent or "
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
+        f"{outline_action}"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{scope_fields_rule}"
         "Before choosing answer, check aspect by aspect that every part the "
