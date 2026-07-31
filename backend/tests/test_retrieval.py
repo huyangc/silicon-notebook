@@ -174,6 +174,28 @@ def test_honor_quotes_false_reads_quotes_as_ordinary_words():
                          honor_quotes=False) == 1.0
 
 
+def test_bm25_ranks_a_quoted_phrase_as_one_atomic_term():
+    """RRF 路径的排序来自 BM25,所以引号必须在 BM25 里也生效。
+
+    codex #410 round-1 P2:`RETRIEVAL_RRF_ENABLED=true` 时,phrase-aware 的
+    relevance 只是随行元数据,真正决定次序的是 BM25;若 BM25 仍按拆开的词打分,
+    散落着这三个词的文档会和含整句短语的文档一起排进来——那条路径上引号就等于
+    完全没生效。这条同时钉住空白归一:文档里跨换行/多空格的短语仍算命中。
+    """
+    from app.services.retrieval import bm25_scores
+
+    docs = [
+        ("phrase", "we run static timing analysis on the design"),
+        ("scattered", "timing is static and the analysis follows separately"),
+        ("split", "we run static   timing\nanalysis here"),
+    ]
+    quoted = bm25_scores('"static timing analysis"', docs)
+    assert "scattered" not in quoted, "散落的词不构成短语命中"
+    assert set(quoted) == {"phrase", "split"}
+    # 去掉引号就回到按词打分,散落文档照常进榜——对照组证明差异确实来自引号。
+    assert "scattered" in bm25_scores("static timing analysis", docs)
+
+
 def test_fuse_custom_weights_shift_balance():
     from app.services.retrieval import _fuse
     # 默认 0.4/0.6: 语义为 0 时融合分 = keyword * 0.4/(0.4+0.6) = 0.4

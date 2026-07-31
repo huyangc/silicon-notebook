@@ -77,6 +77,24 @@ def split_quoted_phrases(text: str) -> tuple[list[str], str]:
     every occurrence is still masked, since the surviving phrase covers it.
     Blanking preserves length and offsets, so the remainder stays aligned with
     the original text for anything that reports positions.
+
+    Known boundary (codex #410 round-1 P2, deliberately not fixed here). The
+    phrase is whitespace-normalized, but the two consumers differ in how
+    tolerant they can be about the DOCUMENT's whitespace:
+
+    * Scoring (`KeywordBasis`, `bm25_scores`) normalizes the haystack too, so a
+      phrase broken across a line break still counts.
+    * Candidate generation cannot: an FTS5 trigram phrase and an escaped `ILIKE`
+      pattern are literal, contiguous matches against stored text. A document
+      that writes `static   timing\nanalysis` is therefore scored as a match if
+      something else surfaced it, but the phrase alone will not surface it.
+
+    Closing that gap needs a whitespace-normalized indexed column (schema
+    migration + backfill); an unindexed regex scan over chunk text would be the
+    unbounded per-notebook scan this layer must never do. In practice the rest
+    of the query still produces candidates — the quote-stripped whole-sentence
+    term and every non-quoted run are still in the term list — and ANN recall is
+    unaffected.
     """
     source = text or ""
     matches = _QUOTED_RE.findall(source)

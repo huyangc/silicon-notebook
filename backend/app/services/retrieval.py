@@ -575,11 +575,37 @@ def bm25_scores(query: str, docs: Sequence[tuple], k1: float = 1.5,
     IDF is computed over THIS doc set (a notebook's objects). Returns {id: score}
     for docs with score > 0 (query-term miss -> absent). Stopwords dropped from
     the query basis (same as keyword_score).
+
+    A user-quoted phrase enters as ONE atomic term whose tf is its occurrence
+    count as a contiguous substring, exactly as `KeywordBasis` treats it, and its
+    component words are not query terms. Without this, the opt-in RRF path would
+    rank purely on the split words: `relevance` there is phrase-aware but it is
+    only reported, so a document merely scattering `static`, `timing` and
+    `analysis` would out-rank one carrying the phrase — quoting would have no
+    effect on the one thing that path decides. Whitespace inside both the phrase
+    and the document is normalized here, so a phrase broken across a line break
+    still counts (the trigram/ILIKE candidate probes are literal and cannot do
+    this — see `split_quoted_phrases`).
     """
-    q_terms = [t for t in _tokens(query) if t not in _STOPWORDS]
-    if not q_terms or not docs:
+    phrases = [_normalize(p) for p in quoted_phrases(query)]
+    q_terms = [
+        t for t in _tokens(unquoted_remainder(query) if phrases else query)
+        if t not in _STOPWORDS
+    ]
+    if (not q_terms and not phrases) or not docs:
         return {}
     doc_tokens = {did: _tokens(text) for did, text in docs}
+    # Only paid for when the user actually quoted something.
+    doc_phrase_tf: Dict[str, Dict[str, int]] = {}
+    if phrases:
+        for did, text in docs:
+            haystack = _normalize(text)
+            # `\x00` namespaces the phrase away from token keys: the same string
+            # can legitimately be both a phrase and a token ("abc" 与 abc 的区别),
+            # and sharing one key would let a phrase count overwrite a token
+            # count and double-increment that key's df.
+            counts = {f"\x00{p}": haystack.count(p) for p in phrases}
+            doc_phrase_tf[did] = {p: c for p, c in counts.items() if c > 0}
     n = len(doc_tokens)
     total_len = sum(len(t) for t in doc_tokens.values())
     avgdl = (total_len / n) if n else 1.0
@@ -589,10 +615,13 @@ def bm25_scores(query: str, docs: Sequence[tuple], k1: float = 1.5,
     for toks in doc_tokens.values():
         for term in set(toks):
             df[term] = df.get(term, 0) + 1
+    for counts in doc_phrase_tf.values():
+        for phrase in counts:
+            df[phrase] = df.get(phrase, 0) + 1
     qset = set(q_terms)
     idf = {
         t: math.log(1 + (n - df.get(t, 0) + 0.5) / (df.get(t, 0) + 0.5))
-        for t in qset
+        for t in (qset | {f"\x00{p}" for p in phrases})
     }
     scores: Dict[str, float] = {}
     for did, toks in doc_tokens.items():
@@ -603,6 +632,7 @@ def bm25_scores(query: str, docs: Sequence[tuple], k1: float = 1.5,
         for t in toks:
             if t in qset:
                 tf[t] = tf.get(t, 0) + 1
+        tf.update(doc_phrase_tf.get(did, {}))
         s = 0.0
         for t, f in tf.items():
             s += idf.get(t, 0.0) * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
