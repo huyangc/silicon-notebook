@@ -139,6 +139,88 @@ def test_keyword_score_ignores_stopwords():
     assert verbose == 0.5
 
 
+def test_quoted_phrase_is_one_indivisible_unit_of_the_keyword_basis():
+    """引号内不参与分词:整段命中才算命中,散落的词一分不给。
+
+    这条是「保证完整性」在**排序**上的兑现。候选生成把含整句短语的文档捞进来了,
+    但如果打分仍按 static/timing/analysis 三个独立词算覆盖率,散落着这三个词的
+    文档和真正含该短语的文档同分——引号就只影响召回、不影响谁排在前面。
+    """
+    exact = keyword_score('"static timing analysis" 原理',
+                          "we run static timing analysis 原理 like this")
+    scattered = keyword_score('"static timing analysis" 原理',
+                              "timing is static; the analysis 原理 follows")
+    assert exact == 1.0
+    # 基是 {短语, 原理} 两项;散落文档只覆盖到 原理,短语项一分不给。
+    assert scattered == 0.5
+
+
+def test_quoted_phrase_matching_is_case_and_whitespace_insensitive():
+    assert keyword_score('"Static Timing  Analysis"',
+                         "STATIC   timing\nanalysis appears here") == 1.0
+
+
+def test_keyword_score_without_quotes_is_unchanged():
+    # 无引号查询必须与本特性之前逐位一致(基就是内容 token 集合)。
+    assert keyword_score("engram module", "Engram is a memory module") == 1.0
+    assert keyword_score("engram absent", "Engram is a memory module") == 0.5
+
+
+def test_honor_quotes_false_reads_quotes_as_ordinary_words():
+    # 治理侧比较的是两段**已存文本**,不是用户查询:文档里引用了别人的话,
+    # 不等于它在声明检索约束。
+    assert keyword_score('a "static timing analysis" b',
+                         "timing is static; the analysis follows",
+                         honor_quotes=False) == 1.0
+
+
+def test_bm25_ranks_a_quoted_phrase_as_one_atomic_term():
+    """RRF 路径的排序来自 BM25,所以引号必须在 BM25 里也生效。
+
+    codex #410 round-1 P2:`RETRIEVAL_RRF_ENABLED=true` 时,phrase-aware 的
+    relevance 只是随行元数据,真正决定次序的是 BM25;若 BM25 仍按拆开的词打分,
+    散落着这三个词的文档会和含整句短语的文档一起排进来——那条路径上引号就等于
+    完全没生效。这条同时钉住空白归一:文档里跨换行/多空格的短语仍算命中。
+    """
+    from app.services.retrieval import bm25_scores
+
+    docs = [
+        ("phrase", "we run static timing analysis on the design"),
+        ("scattered", "timing is static and the analysis follows separately"),
+        ("split", "we run static   timing\nanalysis here"),
+    ]
+    quoted = bm25_scores('"static timing analysis"', docs)
+    assert "scattered" not in quoted, "散落的词不构成短语命中"
+    assert set(quoted) == {"phrase", "split"}
+    # 去掉引号就回到按词打分,散落文档照常进榜——对照组证明差异确实来自引号。
+    assert "scattered" in bm25_scores("static timing analysis", docs)
+
+
+def test_probe_basis_treats_every_probed_name_as_atomic():
+    """通道按「自己探测的名称」打分,每个名称都是整体——不看它长什么样。
+
+    codex #410 round-3 起于多词短语被拆开(散落着 static/timing/analysis 的同节
+    兄弟块拿到满分覆盖率);round-8 指出「按有没有空格判断是否原子」是形状猜测:
+    `config.yaml`、`静态时序分析` 都不含空格,照样被降级回 token。原子性是**探测
+    的性质**——这些名称本来就是以字面子串命中的,覆盖率只有一个诚实答案:正文里
+    有没有这个串。
+    """
+    from app.services.retrieval import probe_keyword_basis
+
+    def covered(terms, text):
+        return probe_keyword_basis(terms).coverage(frozenset(), text)
+
+    assert covered(["static timing analysis"], "we run static timing analysis") == 1.0
+    assert covered(["static timing analysis"], "timing is static; the analysis") == 0.0
+    # 不含空格的两类:标点连接与 CJK —— 同样是整体。
+    assert covered(["config.yaml"], "see config.yaml") == 1.0
+    assert covered(["config.yaml"], "the config lists a yaml file") == 0.0
+    assert covered(["静态时序分析"], "这里做静态时序分析") == 1.0
+    assert covered(["静态时序分析"], "静态分析与时序检查") == 0.0
+    # 多个名称:按覆盖了几个算。
+    assert covered(["set_db", "report_timing"], "set_db 的参数表") == 0.5
+
+
 def test_fuse_custom_weights_shift_balance():
     from app.services.retrieval import _fuse
     # 默认 0.4/0.6: 语义为 0 时融合分 = keyword * 0.4/(0.4+0.6) = 0.4

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from psycopg import sql
 
@@ -349,25 +350,20 @@ def memory_candidate_ids(
     limit: int,
     *,
     scope: MemoryCandidateScope,
+    phrase_queries: Sequence[str] = (),
 ) -> list[str]:
     """Return bounded mixed-language Memory candidates using all v6 indexes."""
     if limit <= 0 or not query.strip():
         return []
-    predicates, params = _memory_match_predicates(query, scope)
-    params.extend(
-        [
-            query,
-            query,
-            query,
-            max(12, int(limit)),
-        ]
-    )
+    predicates, params = _memory_match_predicates(query, scope, phrase_queries)
+    probes = memory_match_probes(query, phrase_queries)
+    for probe in probes:
+        params.extend([probe, probe, probe])
+    params.append(max(12, int(limit)))
     rows = connection.execute(
         "SELECT id FROM memory_items WHERE "
         f"{' AND '.join(predicates)} "
-        "ORDER BY GREATEST(public.similarity(title,%s),"
-        "public.similarity(content_md,%s),"
-        f"public.similarity({TAGS_JSON_EXPRESSION},%s)) DESC,"
+        f"ORDER BY {_memory_rank_expression(probes)} DESC,"
         "id COLLATE \"C\" LIMIT %s",
         params,
     ).fetchall()
@@ -425,12 +421,53 @@ def memory_page_candidate_ids(
     return [str(row["id"]) for row in rows]
 
 
+def memory_match_probes(
+    query: str, phrase_queries: Sequence[str] = ()
+) -> list[str]:
+    """The whole query first, then each distinct extra phrase probe.
+
+    One ordering, used by both the match predicate and the ranking expression:
+    a probe that can admit a row must also be able to rank it, or the row is
+    admitted and then cut by the LIMIT before anything phrase-aware sees it.
+    """
+    probes: list[str] = [query]
+    for phrase in phrase_queries:
+        value = str(phrase).strip()
+        if value and value not in probes:
+            probes.append(value)
+    return probes
+
+
+def _memory_rank_expression(probes: Sequence[str]) -> str:
+    """`GREATEST` over every probe × every searched column.
+
+    Ranking on the full query alone discards exactly the rows the independent
+    phrase probe exists to admit: a memory carrying the quoted phrase but none
+    of the surrounding sentence scores near zero against that sentence, so with
+    more than `limit` loose matches it never survives the cut (codex #410
+    round-7 P2). Bounded by MAX_QUOTED_PHRASES + 1 probes × 3 columns.
+    """
+    terms = ",".join(
+        "public.similarity(title,%s),public.similarity(content_md,%s),"
+        f"public.similarity({TAGS_JSON_EXPRESSION},%s)"
+        for _ in probes
+    )
+    return f"GREATEST({terms})"
+
+
 def _memory_match_predicates(
     query: str,
     scope: MemoryCandidateScope,
+    phrase_queries: Sequence[str] = (),
 ) -> tuple[list[str], list[object]]:
-    """Build the one reviewed scope+match predicate shared by page and count."""
-    pattern = f"%{query}%"
+    """Build the one reviewed scope+match predicate shared by page and count.
+
+    `phrase_queries` are additional INDEPENDENT match probes OR-ed into the same
+    statement — one more OR group on an already-indexed predicate, not another
+    round trip. They exist because this path probes the whole query as one
+    value: a user-quoted phrase would otherwise only match a memory that also
+    carries the surrounding sentence (codex #410 round-6 P2).
+    """
     predicates = ["created_by=%s"]
     params: list[object] = [scope.owner_id]
     if scope.notebook_id is not None:
@@ -449,23 +486,29 @@ def _memory_match_predicates(
         "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s)))"
     )
     params.extend([scope.viewer_id, scope.viewer_id])
-    params.extend(
-        [
-            query,
-            pattern,
-            query,
-            pattern,
-            query,
-            pattern,
-        ]
-    )
-    predicates.append(
-        "("
-        "title OPERATOR(public.%%) %s OR title ILIKE %s OR "
-        "content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR "
-        f"{TAGS_JSON_EXPRESSION} OPERATOR(public.%%) %s OR "
-        f"{TAGS_JSON_EXPRESSION} ILIKE %s)"
-    )
+    probes = memory_match_probes(query, phrase_queries)
+    groups: list[str] = []
+    for index, probe in enumerate(probes):
+        # The phrase probes are escaped, the whole-query probe deliberately is
+        # not. A phrase promises exactness, and `set_db` / `100% coverage` carry
+        # LIKE's own wildcards — unescaped they would admit `setXdb` and crowd
+        # real matches out of the bounded pool (codex #410 round-7 P2). The
+        # whole-query arm keeps its historical unescaped pattern: widening a
+        # candidate probe there is imprecise but harmless, and narrowing it now
+        # would silently change Memory recall for every existing query.
+        pattern = (
+            f"%{query}%" if index == 0
+            else f"%{escape_like_pattern(probe)}%"
+        )
+        params.extend([probe, pattern, probe, pattern, probe, pattern])
+        groups.append(
+            "("
+            "title OPERATOR(public.%%) %s OR title ILIKE %s OR "
+            "content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR "
+            f"{TAGS_JSON_EXPRESSION} OPERATOR(public.%%) %s OR "
+            f"{TAGS_JSON_EXPRESSION} ILIKE %s)"
+        )
+    predicates.append("(" + " OR ".join(groups) + ")")
     return predicates, params
 
 

@@ -1460,7 +1460,13 @@ class KnowledgeGovernanceService:
     def _knowledge_similarity(self, a: dict, b: dict, element_vectors: dict) -> float:
         text_a = payload_join(a["payload"])
         text_b = payload_join(b["payload"])
-        keyword = max(keyword_score(text_a, text_b), keyword_score(text_b, text_a))
+        # honor_quotes=False: both sides are STORED TEXT, not a user query. A
+        # document that quotes someone is not declaring a search constraint, so
+        # merge similarity must keep reading `"..."` as ordinary words.
+        keyword = max(
+            keyword_score(text_a, text_b, honor_quotes=False),
+            keyword_score(text_b, text_a, honor_quotes=False),
+        )
         semantic = 0.0
         vecs_a = [element_vectors[e.element_id] for e in a["evidence"] if e.element_id in element_vectors]
         vecs_b = [element_vectors[e.element_id] for e in b["evidence"] if e.element_id in element_vectors]

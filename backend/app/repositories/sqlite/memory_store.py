@@ -1625,11 +1625,20 @@ class MemoryStore:
         *,
         lexical_limit: int,
         vector_limit: int,
+        phrase_queries: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         """Return a bounded lexical union embedding pool for one owner/notebook.
 
         The embedding side is deliberately capped and index-ordered.  It never
         turns an Ask into a whole-Memory scan or an embedding backfill.
+
+        `phrase_queries` are additional INDEPENDENT probes OR-ed into the same
+        MATCH expression — extra terms on one already-bounded query, not extra
+        queries. The whole query is otherwise one mandatory FTS phrase, so a
+        memory holding a user-quoted phrase but not the surrounding sentence
+        would never become a candidate (codex #410 round-6 P2). The trigram
+        tokenizer makes each quoted term a literal substring match, exactly as
+        on the chunk path.
         """
         allowed = tuple(
             status for status in dict.fromkeys(str(item) for item in statuses)
@@ -1640,6 +1649,14 @@ class MemoryStore:
             return []
         lexical_limit = max(1, min(int(lexical_limit), 200))
         vector_limit = max(1, min(int(vector_limit), 500))
+        probes = [clean_query]
+        for phrase in phrase_queries:
+            value = str(phrase).strip()
+            if value and value not in probes:
+                probes.append(value)
+        match_expression = " OR ".join(
+            '"' + probe.replace('"', '""') + '"' for probe in probes
+        )
         placeholders = ",".join("?" for _ in allowed)
         common_params = (user_id, notebook_id, *allowed, user_id, user_id)
         select = self._select_columns()
@@ -1655,7 +1672,7 @@ class MemoryStore:
                 f"AND {self._read_access_clause()} "
                 "AND memory_items_fts MATCH ? "
                 "ORDER BY bm25(memory_items_fts),m.updated_at DESC LIMIT ?",
-                (*common_params, '"' + clean_query.replace('"', '""') + '"', lexical_limit),
+                (*common_params, match_expression, lexical_limit),
             ).fetchall()
             vector_rows = db.execute(
                 f"SELECT {select},me.vector AS retrieval_vector "

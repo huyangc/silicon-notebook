@@ -18,6 +18,7 @@ from app.models.notebooks import (
 )
 from app.models.ask import NotebookSearchResponse, SearchHit
 from app.core import diagnostics_runtime as diagnostics
+from app.core.query_syntax import strip_accepted_quote_markers
 from app.repositories.ports import (
     IdentityStorePort,
     KgBuildJobStorePort,
@@ -443,9 +444,21 @@ class NotebookCatalogService:
     def search_notebook(
         self, notebook_id: str, query: str
     ) -> NotebookSearchResponse:
-        response = self._queries.search_notebook(notebook_id, query)
+        # This search never tokenizes — it is already a whole-string substring
+        # match, i.e. exactly what quoting asks for elsewhere. So the only thing
+        # the markers can do here is make the pattern unmatchable: nothing in
+        # the corpus contains the `"` the user typed. Dropping them keeps one
+        # syntax across the product instead of a box where it silently finds
+        # nothing.
+        needle = strip_accepted_quote_markers(query)
+        response = self._queries.search_notebook(notebook_id, needle)
         if self.memory_retriever is None:
             return response
+        # Memory keeps the ORIGINAL query: its retriever is phrase-aware and
+        # strips the markers itself for its own candidate probe. Handing it the
+        # stripped needle would delete the constraint before the scorer sees it,
+        # letting a memory that merely scatters those words qualify as though
+        # the user had never quoted anything. (codex #410 round-2 P2)
         memories = self.memory_retriever.notebook_memory_hits(
             self._identity.current_user().id, notebook_id, query, 8
         )

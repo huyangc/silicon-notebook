@@ -432,3 +432,78 @@ def test_deep_report_corpus_map_projects_confirmed_memory_only(memory_data):
 
     assert data.confirmed.title in corpus
     assert data.candidate.title not in corpus
+
+
+def test_quoted_query_splits_candidate_probe_from_phrase_scoring(memory_data):
+    """引号在 Memory 上的分工:候选去引号、评分留引号。
+
+    候选生成是对**整串**做 FTS/trigram 探测(不是拆好的词项表),引号字符直接进
+    pattern 就什么都匹配不到——所以候选侧必须先把标记去掉。评分侧相反:拿到的
+    是原串,短语仍须整段命中。
+
+    每段被接受的短语还会作为**独立探测**一并下发(round-6),否则「只含该短语、
+    不含整句」的记忆进不了候选池——那是 Memory 候选「整句作为一个 FTS 短语」的
+    既有粗粒度,引号语法必须能穿过它。
+    """
+    data = memory_data
+    retriever = data.repo._runtime.memory_retriever
+    seen: list[str] = []
+    original = retriever.store.memory_retrieval_rows
+
+    def spy(user_id, notebook_id, statuses, query, **kwargs):
+        seen.append((query, tuple(kwargs.get("phrase_queries", ()))))
+        return original(user_id, notebook_id, statuses, query, **kwargs)
+
+    retriever.store = SimpleNamespace(
+        memory_retrieval_rows=spy,
+        **{
+            name: getattr(retriever.store, name)
+            for name in dir(retriever.store)
+            if not name.startswith("_") and name != "memory_retrieval_rows"
+        },
+    )
+    token = set_request_user(data.alice)
+    try:
+        retriever.notebook_memory_hits(
+            data.alice.id, data.notebook.id, 'how does "timing closure" work', 8
+        )
+    finally:
+        reset_request_user(token)
+        retriever.store = original.__self__
+
+    # 探测串去掉标记,**并且**每段被接受的短语作为独立探测一并下发——后者是
+    # round-6 的接线,少了它下面那条 store 级守卫照样绿(它自己传参),这一条才是
+    # 「服务层真的把短语交下去了」的守卫。
+    assert seen == [("how does timing closure work", ("timing closure",))]
+
+
+def test_quoted_phrase_probes_memory_independently_of_the_sentence(memory_data):
+    """带上下文的引号查询,必须能把「只含该短语、不含整句」的记忆捞进**候选池**。
+
+    codex #410 round-6 P2:Memory 的候选是把**整串**当一个 FTS 短语探测,所以
+    `how does "timing closure" work` 若只按整句探测,那条只写了 timing closure 的
+    记忆根本进不了词法候选——引号语法在别处都生效、独独在 Memory 上失灵。短语作为
+    额外的 OR 词项进同一条有界查询,不是多发一次查询。
+
+    ⚠ 断言必须落在**词法候选**这一层:端到端的 hits 会经由「按 updated_at 取回的
+    有界向量池」把同一条记忆捞回来,于是删掉短语探测也照样绿——第一版守卫正是这样
+    打空的。这里把 vector_limit 压到最小,让向量池只可能带回最新的那一条(unrelated
+    之后的 bob/other 不属本 notebook),差异才真正来自词法侧。
+    """
+    data = memory_data
+    store = data.repo._runtime.memory_service.store
+    sentence = "how does timing closure work"
+
+    def probe(**kwargs):
+        rows = store.memory_retrieval_rows(
+            data.alice.id, data.notebook.id, ("confirmed",), sentence,
+            lexical_limit=50, vector_limit=1, **kwargs,
+        )
+        return {row["record"].id for row in rows}
+
+    without_phrase = probe()
+    with_phrase = probe(phrase_queries=["timing closure"])
+
+    assert data.confirmed.id not in without_phrase, (
+        "整句作为一个 FTS 短语匹配不到它——这正是要修的形状")
+    assert data.confirmed.id in with_phrase

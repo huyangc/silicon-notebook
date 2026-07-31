@@ -24,6 +24,7 @@ import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
 import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
+import { quotedPhraseHint } from "./query-syntax";
 import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
 import { label } from "./vocabulary";
 
@@ -1257,7 +1258,12 @@ export function ReportsPanel({
           onChange={(event) => setQuestion(event.target.value)}
         />
         <div className="report-compose-actions">
-          <span className="report-compose-hint">后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页</span>
+          {/* 逐节检索走的就是问答那套逐步推理,英文双引号在这里同样生效——
+              回执与提问框共用同一份规则,不另写一套措辞。 */}
+          <span className="report-compose-hint">
+            {quotedPhraseHint(question)
+              ?? "后台多轮检索并逐节撰写，约 5–15 分钟，期间可离开此页"}
+          </span>
           <div className="report-compose-controls">
             <EffortPicker
               chipLabel="深度"

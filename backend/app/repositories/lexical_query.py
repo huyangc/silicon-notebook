@@ -2,14 +2,28 @@
 
 The returned terms are candidates only: repository adapters keep their native
 ranking, while retrieval services apply the authoritative fused score.
+
+The one thing NOT decomposed here is a user-quoted span; `app.core.query_syntax`
+owns that parse and both this layer and the scoring layer read it from there.
 """
 from __future__ import annotations
 
 import re
 
+# `MAX_EXACT_PHRASE_CHARS` / `MAX_QUOTED_PHRASES` / `exact_probe_query` are
+# re-exported deliberately: this module is the lexical layer's facade, and the
+# reasoning retriever already reaches its lexical bounds through it. Callers
+# that need the parse itself (scoring, prompts) import `app.core.query_syntax`
+# directly — there is one definition, not two spellings of it.
+from app.core.query_syntax import (  # noqa: F401  (re-exported)
+    MAX_EXACT_PHRASE_CHARS,
+    MAX_QUOTED_PHRASES,
+    exact_probe_query,
+    split_quoted_phrases,
+    strip_accepted_quote_markers,
+)
 
 MAX_LEXICAL_TERMS = 64
-MAX_EXACT_PHRASE_CHARS = 256
 # Identifier terms share the 64-term budget with word/CJK runs; both bounds
 # below keep them from monopolising it (review-measured regressions, not
 # hypotheticals — see identifier_terms/lexical_recall_terms).
@@ -58,8 +72,22 @@ def identifier_terms(text: str) -> list[str]:
     return terms
 
 
-def exact_probe_terms(text: str) -> list[str]:
+def exact_probe_terms(text: str, *, honor_quotes: bool = True) -> list[str]:
     """The NARROWER gate: which of those identifiers deserve an exact probe.
+
+    A user-quoted phrase always passes it. The whole gate exists because an
+    INCIDENTAL name costs a probe it did not earn — the report engine's
+    per-section question contains `real-time` whether or not anybody wanted it
+    looked up. A `"..."` span is never incidental: the user typed two
+    characters whose only purpose is to ask for this exact string, so the cost
+    argument that rejects `state-of-the-art` does not apply to it.
+
+    `honor_quotes=False` is for terms that came from the MODEL rather than the
+    user. The reflect loop's `exact_term` is already stripped of wrapping
+    quotes, so this only closes the smuggling shape (`x "的方法" y`), which
+    would let a planner reopen the low-selectivity substring probe this gate was
+    measured shut. The user's own quotes reach the channel through the seed
+    pass, so nothing legitimate needs the action path to honour them.
 
     `identifier_terms` is a *recall* definition — adding one more OR-ed term to
     a lexical expression costs almost nothing, so `state-of-the-art` riding
@@ -81,10 +109,33 @@ def exact_probe_terms(text: str) -> list[str]:
     words do not contain digits, and versioned/model names essentially always
     do.
     """
-    return [
-        term for term in identifier_terms(text)
-        if "_" in term or "." in term or _DIGIT_RE.search(term)
+    phrases, remainder = (
+        split_quoted_phrases(text) if honor_quotes else ([], text or "")
+    )
+    candidates = [
+        *phrases,
+        *(
+            term for term in identifier_terms(remainder)
+            if "_" in term or "." in term or _DIGIT_RE.search(term)
+        ),
     ]
+    # Deduplicate ACROSS the two producers, not just within each: quoting a name
+    # that also appears bare (`"set_db" 与 set_db 的区别`) masks only the quoted
+    # occurrence, so the same name arrives from both sides. Each duplicate costs
+    # a real probe and one of the very few `EXACT_LOOKUP_MAX_IDENTIFIERS` slots,
+    # so a genuinely distinct third name can be dropped for a repeat of the
+    # first. Folded, because the probes themselves are case-insensitive (FTS5
+    # trigram case-folds; both adapters use ILIKE) — two casings are one probe.
+    # (codex #410 round-2 P2)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in candidates:
+        folded = term.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        terms.append(term)
+    return terms
 
 
 def _is_cjk(char: str) -> bool:
@@ -98,15 +149,30 @@ def _is_cjk(char: str) -> bool:
 
 
 def lexical_recall_terms(query: str) -> list[str]:
-    """Return an exact phrase plus independent Latin/number and CJK terms."""
+    """Return an exact phrase plus independent Latin/number and CJK terms.
+
+    User-quoted spans lead the list and are never decomposed: they are the one
+    part of the query the user has said must stay whole. Everything else keeps
+    its historical treatment, and a query without quotes produces byte-identical
+    output to the pre-change implementation.
+    """
     needle = (query or "").strip()
     if len(needle) < 3:
         return []
 
-    raw_terms: list[str] = []
-    if len(needle) <= MAX_EXACT_PHRASE_CHARS:
-        raw_terms.append(needle)
-    ident_terms = identifier_terms(needle)
+    phrases, remainder = split_quoted_phrases(needle)
+    # Quoted spans are the most precise terms in the query, so they take the
+    # front of the list, where the MAX_LEXICAL_TERMS cut and the CJK reserve
+    # below cannot reach them.
+    raw_terms: list[str] = list(phrases)
+    # The whole-sentence term has to lose the quote characters: no document
+    # contains them, so keeping them would spend a term (and, on PostgreSQL, a
+    # real per-term probe) on a string that cannot match anything.
+    sentence = strip_accepted_quote_markers(needle).strip() if phrases else needle
+    if sentence and len(sentence) <= MAX_EXACT_PHRASE_CHARS:
+        raw_terms.append(sentence)
+    priority_count = len(raw_terms)
+    ident_terms = identifier_terms(remainder)
     raw_terms.extend(ident_terms)
 
     run: list[str] = []
@@ -129,7 +195,10 @@ def lexical_recall_terms(query: str) -> list[str]:
         run = []
         run_kind = ""
 
-    for char in needle:
+    # Run decomposition reads the REMAINDER, not the query: re-emitting a quoted
+    # phrase's own words here is precisely the splitting the quotes forbid.
+    # Without quotes the remainder is the query, character for character.
+    for char in remainder:
         kind = "cjk" if _is_cjk(char) else "word" if char.isalnum() else ""
         if not kind:
             flush()
@@ -142,12 +211,19 @@ def lexical_recall_terms(query: str) -> list[str]:
 
     terms: list[str] = []
     seen: set[str] = set()
-    for term in raw_terms:
+    protected = 0
+    for index, term in enumerate(raw_terms):
         normalized = term.strip()
         if len(normalized) < 3 or normalized in seen:
             continue
         seen.add(normalized)
         terms.append(normalized)
+        if index < priority_count:
+            # Counted after dedup so it indexes `terms`, not `raw_terms`: a
+            # query that is nothing but one quoted phrase yields the same string
+            # twice and must protect one slot, not two.
+            protected += 1
+    protected = max(1, protected)
     if len(terms) <= MAX_LEXICAL_TERMS:
         return terms
     keep = terms[:MAX_LEXICAL_TERMS]
@@ -169,7 +245,9 @@ def lexical_recall_terms(query: str) -> list[str]:
     kept_cjk = sum(1 for t in keep if _has_cjk(t))
     need = min(len(overflow_cjk), max(0, CJK_RESERVED_TERMS - kept_cjk))
     for term in overflow_cjk[:need]:
-        for index in range(len(keep) - 1, 0, -1):   # never evict slot 0 (phrase)
+        # Never evict the priority head: the whole-sentence term (slot 0 as
+        # before) and, when the user quoted spans, the phrases ahead of it.
+        for index in range(len(keep) - 1, protected - 1, -1):
             if not _has_cjk(keep[index]):
                 del keep[index]
                 keep.append(term)
