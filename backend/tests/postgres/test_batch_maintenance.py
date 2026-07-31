@@ -152,6 +152,7 @@ def test_node_backfill_releases_read_connection_before_model_work(
         with runtime.database.connect() as db:
             assert db.execute("SELECT 1 AS ok").fetchone()["ok"] == 1
         calls.append([str(item["_oid"]) for item in items])
+        return len(items)
 
     monkeypatch.setattr(runtime.source_embedding, "embed_objects_batch", embed)
     assert postgres_repository.maintenance.backfill_node_embeddings(notebook_id) == 2

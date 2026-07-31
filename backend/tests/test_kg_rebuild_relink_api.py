@@ -71,13 +71,19 @@ def test_build_uses_resolved_kg_role_not_primary(client, monkeypatch):
     real_repo = deps.repository()
     bind_chat_client(real_repo, "ask_answer", _Client(False))
     bind_chat_client(real_repo, "kg_extract", _Client(True))
-    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    submitted = []
+    monkeypatch.setattr(
+        background_jobs,
+        "submit",
+        lambda *args, **kwargs: submitted.append((args, kwargs)),
+    )
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
     response = client.post(f"/api/notebooks/{nb}/kg/build")
 
     assert response.status_code == 200
     assert response.json()["job_id"].startswith("kgj-")
+    assert submitted[0][1]["retry_partial"] is True
 
 
 def test_duplicate_running_build_returns_409(client, monkeypatch):

@@ -246,13 +246,13 @@ class SourceEmbeddingService:
         return written
 
     def embed_objects_batch(self, notebook_id: str, items: List[dict],
-                            progress=None, commit_every: Optional[int] = None) -> None:
+                            progress=None, commit_every: Optional[int] = None) -> int:
         """并发计算 payload 向量,**每 commit_every 批 flush 一次**(增量提交:中断可续跑、
         内存不攒全量)。每批计算失败照旧 log+跳过(best-effort)。"""
         workload_id = "knowledge_object_embedding"
         embedder = self.embedder(workload_id)
         if not getattr(embedder, "configured", True):
-            return
+            return 0
         pending = []
         for it in items:
             text = _payload_text(it["payload"]).strip()
@@ -261,7 +261,7 @@ class SourceEmbeddingService:
         if not pending:
             if progress:
                 progress(0, 0)
-            return
+            return 0
 
         size = max(1, self.settings.embed_batch_size)
         batches = [pending[i:i + size] for i in range(0, len(pending), size)]
@@ -282,6 +282,7 @@ class SourceEmbeddingService:
 
         total = len(pending)
         done = 0
+        written = 0
         # Page the batches BEFORE mapping. _map_embedding_batches materialises a
         # whole call's results (list(pool.map(...))), so feeding it EVERY batch
         # at once holds every object vector in memory simultaneously (~32GB at
@@ -304,6 +305,7 @@ class SourceEmbeddingService:
                 done += sum(len(b) for b in chunk)
                 if buf:
                     self.flush_object_vectors(notebook_id, buf)
+                    written += len(buf)
                 if progress:
                     progress(done, total)
             if progress:
@@ -314,6 +316,7 @@ class SourceEmbeddingService:
             # MAX(created_at)) unchanged — a stale matrix would otherwise survive
             # the failure.
             self._evict_matrix(notebook_id, "knowledge_embeddings")
+        return written
 
     def embed_relations_batch(self, notebook_id: str, rel_items: List[dict]) -> None:
         """并发 COMPUTE 关系向量, 一次写事务持久化到 relation_embeddings。

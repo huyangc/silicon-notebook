@@ -166,7 +166,15 @@ def _pending_source_count_query(
         "  SELECT er.status FROM extraction_runs er "
         "  WHERE er.source_id=s.id AND er.run_type='kg' "
         "  ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
-        "), 'completed')='completed')",
+        "), 'completed')='completed' AND NOT ("
+        "COALESCE((SELECT er.error_message FROM extraction_runs er "
+        "WHERE er.source_id=s.id AND er.run_type='kg' "
+        "ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+        "GLOB '*windows_failed=[1-9]*/*' OR instr(COALESCE(("
+        "SELECT er.error_message FROM extraction_runs er "
+        "WHERE er.source_id=s.id AND er.run_type='kg' "
+        "ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),"
+        "'retry_incomplete=1')>0))",
         (notebook_id,),
     ).fetchone()
     return int(row[0])

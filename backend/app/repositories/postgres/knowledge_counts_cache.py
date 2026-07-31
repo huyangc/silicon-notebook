@@ -47,7 +47,15 @@ def _pending_query(db: Any, notebook_id: str, *, visible_only: bool) -> int:
         "SELECT er.status FROM extraction_runs er "
         "WHERE er.source_id=s.id AND er.run_type='kg' "
         "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1"
-        "),'completed')='completed')",
+        "),'completed')='completed' AND NOT ("
+        "COALESCE((SELECT er.error_message FROM extraction_runs er "
+        "WHERE er.source_id=s.id AND er.run_type='kg' "
+        "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1),'') "
+        "~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR "
+        "strpos(COALESCE((SELECT er.error_message FROM extraction_runs er "
+        "WHERE er.source_id=s.id AND er.run_type='kg' "
+        "ORDER BY er.created_at DESC,er.ordinal DESC LIMIT 1),''),"
+        "'retry_incomplete=1')>0))",
         (notebook_id,),
     ).fetchone()
     return int(row["c"])

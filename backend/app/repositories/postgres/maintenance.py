@@ -824,7 +824,7 @@ class PostgresMaintenanceAdapter:
         items: list[dict],
         progress: Optional[Callable[[int, int], None]] = None,
         commit_every: Optional[int] = None,
-    ) -> None:
+    ) -> int:
         return self._runtime.source_embedding.embed_objects_batch(
             notebook_id,
             items,
@@ -895,6 +895,7 @@ class PostgresMaintenanceAdapter:
             )
         after_id = ""
         scanned = 0
+        embedded = 0
         while True:
             with self._runtime.database.connect() as db:
                 rows = db.execute(
@@ -917,7 +918,7 @@ class PostgresMaintenanceAdapter:
                 if not row["embedded"]
             ]
             if missing:
-                self._runtime.source_embedding.embed_objects_batch(
+                embedded += self._runtime.source_embedding.embed_objects_batch(
                     notebook_id, missing
                 )
             if progress:
@@ -926,7 +927,7 @@ class PostgresMaintenanceAdapter:
                 break
         if progress and scanned == 0:
             progress(0, 0)
-        return scanned
+        return embedded
 
     def count_missing_node_vectors(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
