@@ -111,16 +111,38 @@ class EvidenceContextService:
         name at all is left out of the map rather than mapped to ``""``: callers
         fall back to their own label, which is not the same as showing a blank.
         """
+        return {
+            source_id: value["title"]
+            for source_id, value in self.citation_source_info(source_ids).items()
+            if value["title"]
+        }
+
+    def citation_source_info(
+        self,
+        source_ids: Iterable[str],
+        *,
+        metadata: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, dict[str, str]]:
+        """Resolve citation display titles and original upload names together.
+
+        Both values come from the same bounded metadata read.  Keeping them in
+        one lookup is important for Ask/report hot paths: adding filename
+        provenance must not double the number of source queries.  ``file_name``
+        is the persisted upload name; MinerU's temporary/output Markdown names
+        are never stored in this column.
+        """
         ids = list(dict.fromkeys(str(source_id) for source_id in source_ids if source_id))
         if not ids:
             return {}
-        metadata = self.source_metadata(ids)
-        titles: dict[str, str] = {}
+        rows = metadata if metadata is not None else self.source_metadata(ids)
+        result: dict[str, dict[str, str]] = {}
         for source_id in ids:
-            title = source_display_title(metadata.get(source_id) or {})
-            if title:
-                titles[source_id] = title
-        return titles
+            row = rows.get(source_id) or {}
+            title = source_display_title(row)
+            file_name = str(row.get("file_name") or "").strip()
+            if title or file_name:
+                result[source_id] = {"title": title, "file_name": file_name}
+        return result
 
     def collection_item_citations(
         self,
@@ -173,7 +195,9 @@ class EvidenceContextService:
                 if source_id:
                     source_ids.append(source_id)
         source_metadata = self.source_metadata(source_ids)
-        titles = self.citation_titles(source_ids)
+        source_info = self.citation_source_info(
+            source_ids, metadata=source_metadata
+        )
 
         citations: dict[str, Citation] = {}
         for item in rows:
@@ -215,6 +239,9 @@ class EvidenceContextService:
                     element_id="",
                     location_label=str(getattr(item, "doc_type_label", "") or ""),
                     quoted_span=str(getattr(item, "summary", "") or "")[:300],
+                    source_file_name=(source_info.get(item_id) or {}).get(
+                        "file_name", ""
+                    ),
                     tier=str(getattr(item, "tier", "personal") or "personal"),
                     notebook_id=(origin if origin != active_notebook_id else ""),
                     knowhow=None,
@@ -257,13 +284,15 @@ class EvidenceContextService:
                     break
             if not source_id or not evidence_id:
                 continue
-            source_title = titles.get(source_id, source_title)
+            item_source_info = source_info.get(source_id) or {}
+            source_title = item_source_info.get("title", source_title)
             citations[item_id] = Citation(
                 label=f"{source_title} · {location}".strip(" ·"),
                 source_id=source_id,
                 element_id=evidence_id,
                 location_label=location,
                 quoted_span=quoted[:300],
+                source_file_name=item_source_info.get("file_name", ""),
                 tier=str(getattr(item, "tier", "personal") or "personal"),
                 notebook_id=(origin if origin != active_notebook_id else ""),
                 knowhow=_knowhow_ref(evidence_row) if evidence_row else None,
@@ -289,7 +318,9 @@ class EvidenceContextService:
         tiers = self.tier_map(
             list({getattr(chunk, "notebook_id", "") or notebook_id for chunk in chunks})
         )
-        citation_titles = self.citation_titles(chunk.source_id for chunk in chunks)
+        citation_source_info = self.citation_source_info(
+            chunk.source_id for chunk in chunks
+        )
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         # Task 12b 评审修复（grounded 主路径可达性）：chunk 锚点也要带 knowhow。
@@ -311,7 +342,8 @@ class EvidenceContextService:
             if remaining <= 0:
                 break
             key = f"k{index + id_offset}"
-            source_title = citation_titles.get(chunk.source_id, chunk.source_title)
+            source_info = citation_source_info.get(chunk.source_id) or {}
+            source_title = source_info.get("title", chunk.source_title)
             prefix = f"{key}: "
             if remaining <= len(prefix):
                 break
@@ -341,6 +373,10 @@ class EvidenceContextService:
                 "definition": None,
                 "snippet": chunk.text[:300],
                 "source_title": source_title,
+                **(
+                    {"source_file_name": source_info["file_name"]}
+                    if source_info.get("file_name") else {}
+                ),
                 "location_label": chunk.section_path,
                 "tier": tiers.get(origin, "personal"),
                 "notebook_id": raw_origin,
@@ -376,14 +412,17 @@ class EvidenceContextService:
             if budget_chars is None else max(0, int(budget_chars))
         )
         tier = self.tier_map([notebook_id]).get(notebook_id, "personal")
-        citation_titles = self.citation_titles(element.source_id for element in elements)
+        citation_source_info = self.citation_source_info(
+            element.source_id for element in elements
+        )
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
         used = 0
         for index, element in enumerate(elements, 1):
             key = f"k{id_offset + index}"
             location = element.location_label or element.element_type
-            source_title = citation_titles.get(element.source_id, element.source_title)
+            source_info = citation_source_info.get(element.source_id) or {}
+            source_title = source_info.get("title", element.source_title)
             prefix = (
                 f"{key}: [source-element][{tier}] {source_title} · "
                 f"{location} — "
@@ -407,6 +446,10 @@ class EvidenceContextService:
                 "source_id": element.source_id,
                 "element_id": element.element_id,
                 "source_title": source_title,
+                **(
+                    {"source_file_name": source_info["file_name"]}
+                    if source_info.get("file_name") else {}
+                ),
                 "location_label": location,
                 "tier": tier,
                 "notebook_id": "",
@@ -520,13 +563,16 @@ class EvidenceContextService:
                 "knowhow": _knowhow_ref_from_payload(hit.payload),
             }
 
-        preferred_titles = self.citation_titles(
+        citation_source_info = self.citation_source_info(
             value.get("source_id", "") for value in evidence_by_id.values()
         )
         for value in evidence_by_id.values():
             source_id = str(value.get("source_id") or "")
-            if source_id in preferred_titles:
-                value["source_title"] = preferred_titles[source_id]
+            source_info = citation_source_info.get(source_id) or {}
+            if source_info.get("title"):
+                value["source_title"] = source_info["title"]
+            if source_info.get("file_name"):
+                value["source_file_name"] = source_info["file_name"]
 
         object_to_key = {value["object_id"]: key for key, value in evidence_by_id.items()}
         if len(object_to_key) >= 2:
@@ -580,7 +626,7 @@ class EvidenceContextService:
             for key in (part.strip() for part in marker_group.split(","))
             if key in evidence_by_id
         ))
-        preferred_titles = self.citation_titles(
+        citation_source_info = self.citation_source_info(
             str(evidence_by_id[key].get("source_id") or "") for key in cited_keys
         )
         for marker_group in marker_groups:
@@ -593,6 +639,8 @@ class EvidenceContextService:
                 seen.add(key)
                 context = evidence_by_id[key]
                 name = str(context.get("name", ""))
+                source_id = str(context.get("source_id") or "")
+                source_info = citation_source_info.get(source_id) or {}
                 anchors.append(AnswerAnchor(
                     key=key,
                     object_id=str(context["object_id"]),
@@ -601,12 +649,15 @@ class EvidenceContextService:
                     name=name,
                     definition=context.get("definition"),
                     snippet=context.get("snippet"),
-                    source_title=preferred_titles.get(
-                        str(context.get("source_id") or ""),
+                    source_title=source_info.get(
+                        "title",
                         str(context.get("source_title", "")),
                     ),
+                    source_file_name=source_info.get(
+                        "file_name", str(context.get("source_file_name") or "")
+                    ),
                     location_label=str(context.get("location_label", "")),
-                    source_id=str(context.get("source_id", "")),
+                    source_id=source_id,
                     element_id=str(context.get("element_id", "")),
                     tier=str(context.get("tier", "personal")),
                     # Task 14: 只有 chunk_context/knowledge_context 填了才非空
@@ -677,13 +728,14 @@ class EvidenceContextService:
         knowhow_refs = self.knowhow_refs_for(
             evidence.element_id for _tier, _nb, evidence in filtered
         )
-        preferred_titles = self.citation_titles(
+        citation_source_info = self.citation_source_info(
             evidence.source_id for _tier, _nb, evidence in filtered
         )
 
         citations: list[Citation] = []
         for tier, hit_notebook_id, evidence in filtered:
-            source_title = preferred_titles.get(evidence.source_id, "")
+            source_info = citation_source_info.get(evidence.source_id) or {}
+            source_title = source_info.get("title", "")
             citation_label = (
                 f"{source_title} · {evidence.location_label}".strip(" ·")
                 if source_title else label
@@ -694,6 +746,7 @@ class EvidenceContextService:
                 element_id=evidence.element_id,
                 location_label=evidence.location_label,
                 quoted_span=evidence.quoted_span,
+                source_file_name=source_info.get("file_name", ""),
                 tier=tier,
                 notebook_id=hit_notebook_id,
                 knowhow=knowhow_refs.get(evidence.element_id),

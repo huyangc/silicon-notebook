@@ -442,6 +442,7 @@ def test_assemble_prefers_parsed_paper_title_over_upload_name(repo):
     )
 
     assert references[0]["source_title"] == "Reliable Analog Design Methods"
+    assert references[0]["source_file_name"] == "2407.00123v2.pdf"
     assert references[0]["label"] == "Reliable Analog Design Methods"
     assert "Reliable Analog Design Methods" in md
     assert "2407.00123v2.pdf" not in md

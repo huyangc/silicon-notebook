@@ -303,6 +303,7 @@ export type AnswerAnchor = {
   definition?: string | null;
   snippet?: string | null;
   source_title: string;
+  source_file_name?: string;
   location_label: string;
   source_id?: string;
   element_id?: string;
@@ -316,6 +317,7 @@ export type Citation = {
   element_id: string;
   location_label: string;
   quoted_span: string;
+  source_file_name?: string;
   tier?: string;
   notebook_id?: string;
 };

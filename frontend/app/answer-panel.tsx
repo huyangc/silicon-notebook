@@ -724,7 +724,12 @@ function referenceSnippet(reference: AnswerReference): string {
 
 function referenceSource(reference: AnswerReference): string {
   if (reference.anchor) return reference.anchor.source_title || "";
-  return reference.citation?.source_id || "";
+  return reference.citation?.source_file_name || "";
+}
+
+
+function referenceSourceFileName(reference: AnswerReference): string {
+  return reference.anchor?.source_file_name || reference.citation?.source_file_name || "";
 }
 
 
@@ -754,6 +759,7 @@ function SelectedReferenceDetail({
   const title = referenceTitle(reference);
   const snippet = referenceSnippet(reference);
   const source = referenceSource(reference);
+  const sourceFileName = referenceSourceFileName(reference);
   const location = referenceLocation(reference);
   // citation/anchor 二选一(buildAnswerReferences 全有全无),但既有的 anchor-only
   // 写法会让「无 [k] 标记、走 citation 回退列表」的答案永远显示不出 tier 徽章——
@@ -851,6 +857,11 @@ function SelectedReferenceDetail({
       <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>
       {snippet && <p><LatexText text={snippet} /></p>}
       {(source || location) && <small>{[source, location].filter(Boolean).join(" · ")}</small>}
+      {sourceFileName && sourceFileName !== source && (
+        <small className="cite-source-file" title={sourceFileName}>
+          原始文件：{sourceFileName}
+        </small>
+      )}
     </aside>
   );
 }
