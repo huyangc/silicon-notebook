@@ -521,6 +521,7 @@ KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph 节点检索（默认 true；false 只关闭直接节点路径，不影响格子 chunk 检索）
 REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工具，enumerate_elements/enumerate_kg_objects（默认 true；false 同时关闭两个工具与集合地图，零额外查询）
 REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）
+REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）

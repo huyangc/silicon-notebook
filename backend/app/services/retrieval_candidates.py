@@ -21,6 +21,7 @@ from app.services.retrieval import (
     RELEVANCE_FLOOR,
     W_KEYWORD,
     W_SEMANTIC,
+    GapRelationRow,
     RetrievedElement,
     RetrievedKnowledge,
     RetrievedRelation,
@@ -40,6 +41,38 @@ from app.services.source_display import source_display_title
 
 
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
+
+# --------------------------------------- KG 弱支撑边探测(设计文档 §3.3)
+# 「支撑薄弱」= 这条 canonical 边只有 1-2 篇**文档**撑着(`source_count`),不是
+# 「只有 1-2 条原始关系」(`support_count`)。综述类问题里它恰好是最该补证的方向,
+# 所以作为提示喂给模型;阈值放到 3 就把「有一定支撑」的边也算进来,提示会被稀释
+# 成噪声。
+_KG_GAP_SOURCE_MAX = 2
+# 一次探测最多取回几条边。这是**成本闸**:它同时封住了随后名字解析那条查询的
+# 输入规模,也封住了回喂账目在内存里能攒多大。
+_KG_GAP_PROBE_LIMIT = 24
+# 一次探测最多接受几个源端 id。调用方(大纲绑定)按构造只会给 ≤12 节×8 键,这里
+# 是防御性的第二道:IN 列表的长度必须由服务端说了算,不能由上游的一个笔误决定。
+_KG_GAP_MAX_SEEDS = 96
+
+
+def _first_relation_sample(raw: object) -> str:
+    """`canonical_relations.sample_relation_ids` 的第一条样本关系 id。
+
+    两个适配器都以 JSON **文本**出参(PostgreSQL 侧显式 `::text`),所以这里只认
+    文本 —— 服务层不判断 dialect 是架构红线,而「顺手也接受 list」正是把那条判断
+    偷偷搬进服务层的写法(一侧改成出 list 时它会静默继续工作,parity 用例反而
+    测不出两侧已经不同形)。
+    """
+    if not isinstance(raw, str):
+        return ""
+    try:
+        samples = json.loads(raw)
+    except ValueError:
+        return ""
+    if isinstance(samples, list) and samples:
+        return str(samples[0])
+    return ""
 
 
 @dataclass(frozen=True)
@@ -290,6 +323,103 @@ class CandidateRetrievalService(_RetrievalState):
         return self.memory_retriever.agent_memory_hits(
             user_id, notebook_id, query, include_candidates, limit
         )
+
+    def weak_support_relations(
+        self, notebook_id: str, object_ids: Iterable[str]
+    ) -> List[GapRelationRow]:
+        """给定一批 KG 对象 id,取它们在 canonical 层上**支撑薄弱**的出边。
+
+        设计文档 §3.3 的服务端三步,全部在这里完成(调用方零 SQL):
+
+        1. 经既有 `cluster_fold_rows` 把本轮的 id 折叠成 canonical 集 —— 只折**本轮
+           给定的 id**,绝不加载整个 notebook 的 cluster map(大库那张表可达数百万
+           条,物化一次就是一次 OOM 级的内存尖峰)。
+        2. 按 canonical 源端探测 `canonical_relations`(主键前缀 seek + **来源数**
+           阈值 + LIMIT)。判据是 `source_count` 而不是 `support_count`,理由见
+           存储层同名方法:后者是聚合掉的原始关系行数,单源边攒到 >2 行是常态。
+        3. 一次有界批量解析两端显示名(簇 `canonical_name` 优先、对象 payload name
+           回退),解析不到的行丢弃 —— 一条只有内部 id 的提示对模型毫无用处,而把
+           `K-<seed>` 这种内部形状喂进 prompt,模型会把它当名字复述进答案。
+
+        `canonical_relations` 是**可选**派生产物(从未 rebuild 过就是空表),那时
+        整段静默缺席、返回空列表,不是错误。
+
+        联邦刻意不做:`canonical_relations` 是 per-notebook 产物,挂载参考库的绑定
+        贡献零候选(与 exact_lookup「联邦刻意未做」同先例,登记为残余)。
+
+        返回按 (来源数升序, 源端 id, 目标端 id) 排序 —— 展示顺序必须稳定可测,
+        否则「同一份库两次跑出两份提示」会让回归用例只能测长度。SQL 的 `ORDER BY`
+        不能代替这一步:它的次键是 `canonical_tgt`(为的是让 LIMIT 截断本身确定),
+        与这里的 `(src, tgt)` 展示序在真并列上给出不同结果。
+        """
+        seeds = [
+            text for text in dict.fromkeys(str(oid) for oid in object_ids) if text
+        ][:_KG_GAP_MAX_SEEDS]
+        if not seeds:
+            return []
+        with self._connect() as database:
+            folded: Dict[str, str] = {}
+            cluster_names: Dict[str, str] = {}
+            for row in self.unified_kg.cluster_fold_rows(
+                database, notebook_id, seeds
+            ):
+                folded[row["member_object_id"]] = row["canonical_id"]
+                name = (row["canonical_name"] or "").strip()
+                if name:
+                    cluster_names.setdefault(row["canonical_id"], name)
+            # 没有簇行的对象:它自己就是 canonical 端点(rebuild_canonical_relations
+            # 的 COALESCE 回退口径),原样入探测集合。
+            canonical_ids = list(dict.fromkeys(
+                folded.get(seed, seed) for seed in seeds
+            ))
+            edges = self.unified_kg.weak_support_relation_rows(
+                database, notebook_id, canonical_ids,
+                _KG_GAP_SOURCE_MAX, _KG_GAP_PROBE_LIMIT,
+            )
+            if not edges:
+                return []
+            sample_by_edge: Dict[tuple, str] = {}
+            for edge in edges:
+                sample = _first_relation_sample(edge["sample_relation_ids"])
+                if sample:
+                    sample_by_edge[(
+                        edge["canonical_src"], edge["edge_type"],
+                        edge["canonical_tgt"],
+                    )] = sample
+            name_rows = self.unified_kg.relation_endpoint_name_rows(
+                database, notebook_id,
+                list(dict.fromkeys(sample_by_edge.values())),
+            )
+        names_by_relation = {
+            row["rid"]: ((row["src_name"] or "").strip(),
+                         (row["tgt_name"] or "").strip())
+            for row in name_rows
+        }
+        rows: List[GapRelationRow] = []
+        for edge in edges:
+            key = (edge["canonical_src"], edge["edge_type"], edge["canonical_tgt"])
+            sampled_src, sampled_tgt = names_by_relation.get(
+                sample_by_edge.get(key, ""), ("", "")
+            )
+            # 源端优先用第 1 步已经拿到的簇名(那是**本轮绑定的那个对象**自己的
+            # 簇行,零额外查询);拿不到才回退样本关系解析出来的名字。两者可以不
+            # 同名:样本关系的源端往往是同一簇里的**另一个**成员行,而模型手上拿
+            # 到的是它绑定的那一个,提示行按它称呼才对得上。
+            source_name = cluster_names.get(edge["canonical_src"], "") or sampled_src
+            if not source_name or not sampled_tgt:
+                continue
+            rows.append(GapRelationRow(
+                canonical_src=edge["canonical_src"],
+                canonical_tgt=edge["canonical_tgt"],
+                src_name=source_name,
+                tgt_name=sampled_tgt,
+                edge_type=edge["edge_type"],
+                source_count=int(edge["source_count"]),
+            ))
+        rows.sort(key=lambda row: (
+            row.source_count, row.canonical_src, row.canonical_tgt
+        ))
+        return rows
 
     def _notebook_langs(self, notebook_id: str) -> List[str]:
         """Cheap, cached probe of a notebook's corpus languages (subset of

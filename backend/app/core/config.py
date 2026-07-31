@@ -451,6 +451,12 @@ class Settings(BaseSettings):
     # 不写这个动作、schema 没有 outline 分支、allowed_actions 里也没有它。
     reasoning_outline_enabled: bool = Field(
         True, validation_alias="REASONING_OUTLINE_ENABLED")
+    # 大纲便签的 KG 弱支撑边回喂(设计文档 §3.3)。它**叠在**上面那把闸之上:
+    # 大纲总闸或档位闸关着时它自然也不生效。单独留一把,是为了在不关掉整个大纲
+    # 特性的前提下回退这条回喂。关闭态零查询、prompt 逐字回到接入前(沿用
+    # 「flag 关 = 执行处 skip、不改动作面」的惯例——这条回喂本来也不新增动作)。
+    reasoning_outline_kg_gap_enabled: bool = Field(
+        True, validation_alias="REASONING_OUTLINE_KG_GAP_ENABLED")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

@@ -41,9 +41,13 @@ from app.services.knowledge_contracts import (
     USABLE_STATUSES,
 )
 from app.services.ask_service import knowledge_record
+from app.services.reasoning_retrieval import kg_gap_note_segment
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services.retrieval import RetrievedKnowledge, RetrievedRelation
-from app.services.retrieval_candidates import CandidateRetrievalService
+from app.services.retrieval_candidates import (
+    CandidateRetrievalService,
+    _first_relation_sample,
+)
 from app.services.vector_index import encode_vector
 
 
@@ -446,6 +450,122 @@ def test_community_graph_excludes_rejected_bridges_on_postgres(
         "rel-community-left",
         "rel-community-right",
     }
+
+
+def test_weak_support_gap_probe_matches_the_sqlite_contract(knowledge_harness):
+    """KG 弱支撑边回喂的两条新读原语在 PostgreSQL 上同语义(设计文档 §3.3)。
+
+    同库同数据的 SQLite 侧断言在 `backend/tests/test_reasoning_outline_kg_gap.py`。
+    只有真 PostgreSQL 才能暴露的三处:①`sample_relation_ids` 是 jsonb,不显式
+    `::text` 的话服务层拿到的是 list 而不是 SQLite 那样的 JSON 文本,`json.loads`
+    当场炸(或者更糟:被一个「顺手也接受 list」的解析器悄悄吃掉,两侧从此不同形);
+    ②`payload ->> 'name'` 与 SQLite 的 `json_extract` 是两套写法,必须各写各的;
+    ③`COALESCE(NULLIF(...), ...)` 在 `COLLATE "C"` 的文本列上的行为;④`bigint`
+    计数列回来的是 Python int 还是别的什么(阈值比较与渲染都吃它)。
+
+    夹具里两个计数刻意**不相等**:判据必须是 `source_count`(不同文档数),不是
+    `support_count`(聚合掉的原始关系行数)。
+    """
+    unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
+    names = {
+        "ko-gap-anchor": "版图设计",
+        "ko-gap-weak": "寄生电容",
+        "ko-gap-mid": "失配",
+        "ko-gap-strong": "工艺角",
+    }
+    objects = [
+        (
+            object_id, "nb-personal", "concept", "approved",
+            json.dumps({"name": name}), "[]", "source-golden", NOW, NOW,
+        )
+        for object_id, name in names.items()
+    ]
+    relations = [
+        (
+            relation_id, "nb-personal", "source-golden",
+            "ko-gap-anchor", target, edge_type, "[]", NOW,
+        )
+        for relation_id, target, edge_type in (
+            ("rel-gap-weak", "ko-gap-weak", "kind_of"),
+            ("rel-gap-mid", "ko-gap-mid", "part_of"),
+            ("rel-gap-strong", "ko-gap-strong", "part_of"),
+        )
+    ]
+    cluster_rows = [
+        (
+            f"cluster-gap-{index}", "nb-personal", f"K-{object_id}",
+            object_id,
+            # 目标端之一的簇名留空 → 必须回退对象 payload name。
+            "" if object_id == "ko-gap-mid" else names[object_id],
+            "concept", "", "", NOW,
+        )
+        for index, object_id in enumerate(names, 1)
+    ]
+    canonical_rows = [
+        ("nb-personal", "K-ko-gap-anchor", edge_type, target, support,
+         sources, json.dumps(samples), NOW)
+        for edge_type, target, support, sources, samples in (
+            # 多行、单源:别名归一/claim 聚簇的常态,而它正是最该补证的那条 ——
+            # 按 support_count 过滤会把它滤掉。
+            ("kind_of", "K-ko-gap-weak", 9, 1, ["rel-gap-weak"]),
+            ("part_of", "K-ko-gap-mid", 5, 2, ["rel-gap-mid"]),
+            # 阈值外的对照:被 3 篇文档印证的边不该进提示(行数反而最少)。
+            ("part_of", "K-ko-gap-strong", 1, 3, ["rel-gap-strong"]),
+        )
+    ]
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, relations)
+        unified.replace_cluster_rows_streamed(
+            connection, "nb-personal", "concept", cluster_rows
+        )
+        unified.replace_canonical_relations(
+            connection, "nb-personal", canonical_rows, 1
+        )
+    with knowledge_harness.database.connect() as connection:
+        probed = unified.weak_support_relation_rows(
+            connection, "nb-personal", ["K-ko-gap-anchor"], 2, 24
+        )
+        limited = unified.weak_support_relation_rows(
+            connection, "nb-personal", ["K-ko-gap-anchor"], 2, 1
+        )
+        endpoint_names = unified.relation_endpoint_name_rows(
+            connection, "nb-personal", ["rel-gap-weak", "rel-gap-mid"]
+        )
+
+    # 阈值:只放 source_count ≤ 2(9 行单源的那条**入选**,1 行三源的那条落选);
+    # 排序:来源数升序 → 目标端 → 源端 → 边类型。
+    assert [
+        (row["canonical_tgt"], row["edge_type"], int(row["source_count"]))
+        for row in probed
+    ] == [("K-ko-gap-weak", "kind_of", 1), ("K-ko-gap-mid", "part_of", 2)]
+    assert [row["canonical_tgt"] for row in limited] == ["K-ko-gap-weak"]
+    # jsonb 必须以 JSON **文本**出参,与 SQLite 的 TEXT 列逐字同形。
+    assert _first_relation_sample(probed[0]["sample_relation_ids"]) == "rel-gap-weak"
+    # 显示名:簇名优先,簇名为空时回退对象 payload name。
+    assert {
+        row["rid"]: (row["src_name"], row["tgt_name"]) for row in endpoint_names
+    } == {
+        "rel-gap-weak": ("版图设计", "寄生电容"),
+        "rel-gap-mid": ("版图设计", "失配"),
+    }
+
+    # 服务层组合(折叠 → 探测 → 解析)在 PostgreSQL 上给出与 SQLite 相同的行。
+    service = CandidateRetrievalService.__new__(CandidateRetrievalService)
+    service._connect = knowledge_harness.database.connect
+    service.unified_kg = unified
+    rows = service.weak_support_relations("nb-personal", ["ko-gap-anchor"])
+    assert [
+        (row.canonical_src, row.src_name, row.edge_type, row.tgt_name,
+         row.source_count)
+        for row in rows
+    ] == [
+        ("K-ko-gap-anchor", "版图设计", "kind_of", "寄生电容", 1),
+        ("K-ko-gap-anchor", "版图设计", "part_of", "失配", 2),
+    ]
+    assert service.weak_support_relations("nb-personal", []) == []
+    # 渲染出的 `(支撑N)` 用的也是来源数 —— 与头行「仅 1-2 源支撑」同口径。
+    assert "寄生电容(支撑1)" in kg_gap_note_segment(rows)[0]
 
 
 def test_mount_order_and_equal_score_relation_federation_are_id_stable(

@@ -137,6 +137,10 @@ class RetrievalService:
     def concept_cluster_id(self, notebook_id, object_id):
         return self.cluster_map(notebook_id).get(object_id, object_id)
 
+    def weak_support_relations(self, notebook_id, object_ids):
+        """canonical 层上支撑薄弱的相关边 → List[GapRelationRow](设计文档 §3.3)。"""
+        return self.candidates.weak_support_relations(notebook_id, object_ids)
+
     def runtime_dim(self):
         from app.services.vector_index import resolve_runtime_dim
 

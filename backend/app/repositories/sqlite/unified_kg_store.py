@@ -643,6 +643,102 @@ class UnifiedKgStore:
             "FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
 
     @staticmethod
+    def weak_support_relation_rows(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        canonical_ids: List[str],
+        source_max: int,
+        limit: int,
+    ) -> List[sqlite3.Row]:
+        """BOUNDED weak-support probe (设计文档 §3.3):给定 canonical 源端集合,
+        取**来源数** ≤ ``source_max`` 的出边,最多 ``limit`` 行。
+
+        判据是 `source_count`(支撑这条边的**不同文档**数)而不是 `support_count`
+        (聚合掉的原始关系行数)。两者在 canonical 层经常差得很远:别名归一与 claim
+        聚簇会让同一篇文档里的好几条原始关系折叠进同一条 canonical 边,于是一条
+        **单源**边可以攒出 5 行 support —— 按行数过滤恰好把它滤掉,而它正是这个
+        特性要救的那一批(只有一篇文献提到、最该补证)。头行对模型说的也是
+        「仅 1-2 源支撑」,按行数算会让那句断言直接失真。
+
+        谓词 `(notebook_id, canonical_src)` 正好是 `canonical_relations` 主键的
+        **前缀**,所以每个源端都是一次索引 seek,不扫全表。但代价随源端的**出度**
+        增长而不是恒定:`source_count` 上没有索引,所以它是 seek 之后的残余过滤,
+        一个 hub 源端单次可以扫到数万行(`LIMIT` 只封住**返回**行数,封不住扫描
+        行数)。本特性靠「每 run ≤7 次、只探本轮新出现的 seed」把总量压住。
+
+        `ORDER BY` 比合同多带两个尾键(`canonical_src`/`edge_type`)。合同只写了
+        计数键与 `canonical_tgt`,而它们相等的行完全可能来自不同源端/不同边类型
+        —— 那时「取前 24 行」取到哪 24 行由存储顺序决定,双后端不必一致、同一个
+        库两次也不必一致。补上尾键只在合同留白处定序,不改前两键的语义。
+
+        反向(`canonical_tgt IN (...)`)刻意不做:那一列没有索引,加覆盖索引要动
+        双后端 schema。登记为残余,等真机评估证明 src 侧有用再花这笔。
+        """
+        if not canonical_ids:
+            return []
+        placeholders = ",".join("?" for _ in canonical_ids)
+        return db.execute(
+            f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
+            f"       sample_relation_ids "
+            f"FROM canonical_relations "
+            f"WHERE notebook_id=? AND canonical_src IN ({placeholders}) "
+            f"  AND source_count<=? "
+            f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
+            f"         edge_type ASC "
+            f"LIMIT ?",
+            [notebook_id, *canonical_ids, source_max, limit],
+        ).fetchall()
+
+    @staticmethod
+    def relation_endpoint_name_rows(
+        db: sqlite3.Connection, notebook_id: str, relation_ids: List[str]
+    ) -> List[sqlite3.Row]:
+        """按**关系 id** 批量解析两端显示名(`canonical_name` 优先,payload name 回退)。
+
+        为什么经关系而不是直接按 `canonical_id` 查 `concept_clusters`:那张表上
+        `canonical_id` **没有索引**(只有 `notebook_id` 与 `member_object_id`),
+        所以 `WHERE notebook_id=? AND canonical_id IN (...)` 会退化成「把该
+        notebook 的每一行簇成员都取回来再残余过滤」—— 实测 4 万行簇的库 62ms,
+        按行数线性放大到百万级簇就是秒级,而这条查询每次被接受的大纲更新都要跑
+        一次。`canonical_relations.sample_relation_ids` 给了一条**全索引**的等价
+        路径:样本关系 id 是主键,它的两个端点对象 id 也是主键,而端点对象落在哪个
+        簇由 `idx_clusters_member` seek。数据来源的优先级与合同逐字一致,只是到达
+        它的路径换成了有索引的那条。
+
+        join 形状与 `canonical_relation_seed_rows` 逐字同构(同样的两张对象表 +
+        两条 `member_object_id` 簇 join),那条查询正是 canonical 边的产地 —— 于是
+        「样本关系的两端折叠后就是这条 canonical 边的两端」是构造上成立的,不是
+        一句需要人复核的话。
+
+        ⚠ **快照口径,刻意不继承产地的状态过滤**:产地那条查询排掉 `rejected` 关系、
+        并只把 `deprecated` 之外的对象算进图,而这里按现存行原样解析 —— 样本关系
+        自上次 rebuild 后被判 rejected、或端点对象被 deprecated 时,名字照样解析得
+        出来。这是**有意**的:`canonical_relations` 整张表本来就是上次 rebuild 的
+        快照(support/source 计数同样是那一刻的),提示行说的是「上次建图时这条边
+        只有一两篇文献撑着」。在这里补状态过滤只会让名字与计数分属两代事实,而代价
+        是两条 join 各多一个无索引的残余谓词。真正过期的整份快照由 rebuild 换掉。
+        """
+        if not relation_ids:
+            return []
+        placeholders = ",".join("?" for _ in relation_ids)
+        return db.execute(
+            f"SELECT kr.id AS rid, "
+            f"       COALESCE(NULLIF(cs.canonical_name,''), "
+            f"                json_extract(so.payload,'$.name'), '') AS src_name, "
+            f"       COALESCE(NULLIF(ct.canonical_name,''), "
+            f"                json_extract(tp.payload,'$.name'), '') AS tgt_name "
+            f"FROM knowledge_relations kr "
+            f"JOIN knowledge_objects so ON so.id=kr.source_object_id "
+            f"JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
+            f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            f"  AND cs.member_object_id=kr.source_object_id "
+            f"LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            f"  AND ct.member_object_id=kr.target_object_id "
+            f"WHERE kr.notebook_id=? AND kr.id IN ({placeholders})",
+            [notebook_id, *relation_ids],
+        ).fetchall()
+
+    @staticmethod
     def replace_canonical_relations(
         db: sqlite3.Connection, notebook_id: str, rows: List[tuple], seq: int
     ) -> None:
