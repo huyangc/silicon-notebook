@@ -824,7 +824,7 @@ class PostgresMaintenanceAdapter:
         items: list[dict],
         progress: Optional[Callable[[int, int], None]] = None,
         commit_every: Optional[int] = None,
-    ) -> None:
+    ) -> int:
         return self._runtime.source_embedding.embed_objects_batch(
             notebook_id,
             items,
@@ -918,10 +918,9 @@ class PostgresMaintenanceAdapter:
                 if not row["embedded"]
             ]
             if missing:
-                self._runtime.source_embedding.embed_objects_batch(
+                embedded += self._runtime.source_embedding.embed_objects_batch(
                     notebook_id, missing
                 )
-                embedded += len(missing)
             if progress:
                 progress(scanned, total)
             if len(rows) < _EMBEDDING_PAGE_SIZE:

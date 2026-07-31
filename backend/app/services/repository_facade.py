@@ -1704,7 +1704,7 @@ class RepositoryFacade:
         return self._runtime.source_embedding.flush_object_vectors(notebook_id, rows)
 
     def _embed_objects_batch(self, notebook_id: str, items: List[dict],
-                             progress=None, commit_every: Optional[int] = None) -> None:
+                             progress=None, commit_every: Optional[int] = None) -> int:
         return self._runtime.source_embedding.embed_objects_batch(
             notebook_id, items, progress=progress, commit_every=commit_every
         )

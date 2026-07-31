@@ -1340,6 +1340,27 @@ def test_node_backfill_reports_inserted_rows_and_only_dirties_on_change(
     assert dirty == [nb_id]
 
 
+def test_node_backfill_does_not_dirty_when_best_effort_embedding_writes_nothing(
+    repo, monkeypatch
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-node-backfill-failed")
+    _seed_node(repo, nb_id, "ko-a")
+    dirty = []
+    monkeypatch.setattr(
+        repo._runtime.source_embedding,
+        "embed_objects_batch",
+        lambda _notebook_id, _items: 0,
+    )
+    monkeypatch.setattr(
+        repo.maintenance,
+        "mark_unified_kg_dirty",
+        lambda notebook_id: dirty.append(notebook_id),
+    )
+
+    assert bi.backfill_node_embeddings(repo, nb_id) == 0
+    assert dirty == []
+
+
 def test_main_embed_end_to_end_zeroes_missing(repo, tmp_path, capsys, monkeypatch):
     """main(['embed','--notebook-id',id]) 端到端:跑完缺失归零,打印 phase=embed。
     main 自建 repo → 用 FakeEmbedder 替 make_embedder,与 fixture repo 同库。"""
