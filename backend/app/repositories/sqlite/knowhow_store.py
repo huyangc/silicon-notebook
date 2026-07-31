@@ -2490,19 +2490,19 @@ class KnowhowStore:
             ).fetchall()
         return [row[0] for row in rows]
 
-    def delete_source_asset_rows(self, source_id: str) -> list[str]:
+    def delete_source_asset_rows(self, source_id: str) -> list[dict]:
         """Delete every ``notebook_assets`` row linked to ``source_id`` and
-        return the deleted asset ids so the caller can also remove their
-        on-disk files (this store is rows-only, same division of labor as
+        return the complete deleted rows so the caller can remove their
+        on-disk files without an id-list plus per-row lookup N+1 (this store is
+        rows-only, same division of labor as
         the notebook-delete/sweep_orphan_assets asset-GC paths in
         ``AssetService``/``maintenance``)."""
-        ids = self.source_asset_ids(source_id)
-        if ids:
-            with self.database.write() as db:
-                db.execute(
-                    "DELETE FROM notebook_assets WHERE source_id = ?", (source_id,)
-                )
-        return ids
+        with self.database.write() as db:
+            rows = db.execute(
+                "DELETE FROM notebook_assets WHERE source_id = ? RETURNING *",
+                (source_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 __all__ = ["KnowhowStore", "VALID_KINDS"]

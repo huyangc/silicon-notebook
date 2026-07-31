@@ -175,6 +175,38 @@ def test_delete_commits_db_cleanup_before_file_delete(repo, monkeypatch):
         assert db.execute("SELECT 1 FROM sources WHERE id=?", (sid,)).fetchone() is None
 
 
+def test_delete_locks_source_before_projection_cleanup(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    out = repo.upload_sources(
+        nb.id,
+        [UploadedSourceFile(
+            file_name="a.md", content_type="text/markdown", content=b"# T\n\nbody",
+        )],
+        scheduler=lambda sid: None,
+    )
+    sid = out[0].id
+    events: list[str] = []
+    store = repo._runtime.source_store
+    ingestion = repo._runtime.source_ingestion
+    original_lock = store.source_exists_for_update_tx
+    original_clear = ingestion.clear_source_extraction_state
+
+    def observe_lock(db, source_id):
+        events.append("lock")
+        return original_lock(db, source_id)
+
+    def observe_clear(*args, **kwargs):
+        events.append("clear")
+        return original_clear(*args, **kwargs)
+
+    monkeypatch.setattr(store, "source_exists_for_update_tx", observe_lock)
+    monkeypatch.setattr(ingestion, "clear_source_extraction_state", observe_clear)
+
+    repo.delete_source(sid)
+
+    assert events[:2] == ["lock", "clear"]
+
+
 def test_metadata_augmentation_model_failure_falls_back_deterministically(repo):
     nb = repo.create_notebook(NotebookCreate(name="未命名笔记本"))
     sid = f"src-{uuid4().hex[:10]}"

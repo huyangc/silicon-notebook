@@ -3536,7 +3536,7 @@ class RepositoryFacade:
     def source_asset_ids(self, source_id: str) -> List[str]:
         return self._runtime.knowhow_store.source_asset_ids(source_id)
 
-    def delete_source_asset_rows(self, source_id: str) -> List[str]:
+    def delete_source_asset_rows(self, source_id: str) -> List[dict]:
         return self._runtime.knowhow_store.delete_source_asset_rows(source_id)
 
     # ---------------------------------------------------- paper metadata

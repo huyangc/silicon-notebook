@@ -54,6 +54,8 @@ _GRAPH_RESET_TABLES = frozenset({
     "unified_kg_state",
 })
 
+_DELETE_OBJECT_BATCH_SIZE = 500
+
 
 def _lexical_candidate_union(
     db: Any,
@@ -1793,11 +1795,12 @@ class KnowledgeStore:
         stay indexed until it is truly deleted."""
         if not object_ids:
             return
-        placeholders = ",".join("%s" for _ in object_ids)
-        connection.execute(
-            f"DELETE FROM knowledge_object_sources WHERE object_id IN ({placeholders})",
-            object_ids,
-        )
+        for offset in range(0, len(object_ids), _DELETE_OBJECT_BATCH_SIZE):
+            batch = object_ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+            connection.execute(
+                "DELETE FROM knowledge_object_sources WHERE object_id = ANY(%s)",
+                (batch,),
+            )
 
     @staticmethod
     def source_index_backfilled(db: Any, notebook_id: str) -> bool:
@@ -1830,34 +1833,81 @@ class KnowledgeStore:
         Fast path (backfilled notebooks): a single indexed SQL lookup against
         knowledge_object_sources — O(matches), not O(notebook size).
 
-        Legacy path (not yet backfilled): the original full-evidence-JSON scan
-        of every object in the notebook — but the scan the caller was about to
-        pay anyway is reused to populate knowledge_object_sources for every
-        object encountered, and the notebook is marked backfilled, so it is
-        provably the LAST time this notebook pays the O(N) cost (backfill-on-
-        first-use)."""
+        Legacy path (not yet backfilled): filter the JSONB evidence in keyset-
+        paged database queries. Interactive delete/reparse must not turn into a
+        notebook-wide read/parse/write backfill while holding its transaction;
+        the explicit batch-ingest backfill remains responsible for populating
+        the reverse index and flipping the marker."""
+        object_ids: List[str] = []
+        after_id = ""
+        while True:
+            batch = self._stale_object_ids_for_source_batch(
+                db, source_id, notebook_id, after_id=after_id
+            )
+            if not batch:
+                return object_ids
+            object_ids.extend(batch)
+            after_id = batch[-1]
+
+    def _stale_object_ids_for_source_batch(
+        self,
+        db: Any,
+        source_id: str,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = _DELETE_OBJECT_BATCH_SIZE,
+    ) -> List[str]:
+        """Return one stable, bounded source-reference batch."""
+        page_limit = max(1, min(int(limit), _DELETE_OBJECT_BATCH_SIZE))
         if self.source_index_backfilled(db, notebook_id):
             rows = db.execute(
                 "SELECT DISTINCT object_id COLLATE \"C\" AS object_id "
                 "FROM knowledge_object_sources "
                 "WHERE source_id = %s AND notebook_id = %s "
-                "ORDER BY object_id COLLATE \"C\"",
-                (source_id, notebook_id),
+                "AND object_id COLLATE \"C\" > %s "
+                "ORDER BY object_id COLLATE \"C\" LIMIT %s",
+                (source_id, notebook_id, after_id, page_limit),
             ).fetchall()
-            return [r["object_id"] for r in rows]
+            return [row["object_id"] for row in rows]
 
-        stale_knowledge_ids: List[str] = []
-        knowledge_rows = db.execute(
-            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id = %s",
-            (notebook_id,),
+        rows = db.execute(
+            "SELECT id AS object_id FROM knowledge_objects "
+            "WHERE notebook_id = %s AND id COLLATE \"C\" > %s "
+            "AND evidence @> jsonb_build_array(jsonb_build_object('source_id', %s)) "
+            "ORDER BY id COLLATE \"C\" LIMIT %s",
+            (notebook_id, after_id, source_id, page_limit),
         ).fetchall()
-        for row in knowledge_rows:
-            source_ids = self.source_ids_from_evidence(row["evidence"])
-            self.replace_object_sources(db, row["id"], notebook_id, row["evidence"])
-            if source_id in source_ids:
-                stale_knowledge_ids.append(row["id"])
-        self.mark_source_index_backfilled(db, notebook_id)
-        return stale_knowledge_ids
+        return [row["object_id"] for row in rows]
+
+    @staticmethod
+    def _direct_object_ids_for_source_batch(
+        db: Any,
+        source_id: str,
+        limit: int = _DELETE_OBJECT_BATCH_SIZE,
+    ) -> List[str]:
+        page_limit = max(1, min(int(limit), _DELETE_OBJECT_BATCH_SIZE))
+        rows = db.execute(
+            "SELECT id FROM knowledge_objects WHERE source_id = %s LIMIT %s",
+            (source_id, page_limit),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    @classmethod
+    def _delete_object_id_batch(cls, db: Any, object_ids: Sequence[str]) -> None:
+        """Delete one already-bounded object batch and its derived rows."""
+        batch = list(object_ids[:_DELETE_OBJECT_BATCH_SIZE])
+        if not batch:
+            return
+        db.execute(
+            "DELETE FROM knowledge_embeddings WHERE object_id = ANY(%s)",
+            (batch,),
+        )
+        db.execute(
+            "DELETE FROM knowledge_objects WHERE id = ANY(%s)",
+            (batch,),
+        )
+        cls.delete_object_sources(db, batch)
 
     def clear_source_graph_state(
         self,
@@ -1870,32 +1920,21 @@ class KnowledgeStore:
             "DELETE FROM kg_relation_completion_state WHERE source_id = %s",
             (source_id,),
         )
-        stale_knowledge_ids = self.stale_object_ids_for_source(db, source_id, notebook_id)
-
-        if stale_knowledge_ids:
-            placeholders = ",".join("%s" for _ in stale_knowledge_ids)
-            db.execute(
-                f"DELETE FROM knowledge_embeddings WHERE object_id IN ({placeholders})",
-                stale_knowledge_ids,
+        stale_after_id = ""
+        while True:
+            stale_batch = self._stale_object_ids_for_source_batch(
+                db, source_id, notebook_id, after_id=stale_after_id
             )
-            db.execute(
-                f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
-                stale_knowledge_ids,
-            )
-            self.delete_object_sources(db, stale_knowledge_ids)
+            if not stale_batch:
+                break
+            stale_after_id = stale_batch[-1]
+            self._delete_object_id_batch(db, stale_batch)
         self.delete_relations_for_source(db, source_id)
-        db.execute(
-            "DELETE FROM knowledge_embeddings WHERE object_id IN "
-            "(SELECT id FROM knowledge_objects WHERE source_id = %s)",
-            (source_id,),
-        )
-        direct_ids = [
-            r["id"] for r in db.execute(
-                "SELECT id FROM knowledge_objects WHERE source_id = %s", (source_id,)
-            ).fetchall()
-        ]
-        db.execute("DELETE FROM knowledge_objects WHERE source_id = %s", (source_id,))
-        self.delete_object_sources(db, direct_ids)
+        while True:
+            direct_batch = self._direct_object_ids_for_source_batch(db, source_id)
+            if not direct_batch:
+                break
+            self._delete_object_id_batch(db, direct_batch)
 
     def clear_source_extraction_state(
         self,

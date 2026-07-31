@@ -175,6 +175,13 @@ import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import { crossLibrarySourceNotebookId } from "./source-scope";
 import {
+  claimSourceDeleteRefresh,
+  filterDeletedSourceItems,
+  ownsSourceDeleteRefresh,
+  readStableSourceSnapshot,
+} from "./source-delete-state";
+import { clampSourcePage, sourcePageRequestIsCurrent } from "./source-page-state";
+import {
   doneItemDestination,
   followLatestNotebookRequest,
   historyModeForTransition,
@@ -804,6 +811,10 @@ export default function Home() {
     stagedDocTypeTouchedRef.current = stagedDocTypeTouched;
   }, [stagedDocTypeTouched]);
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
+  // 删除是一个可能触发大量级联清理的同步请求。按 source id 记录进行态，让列表与详情
+  // 共用同一把锁；ref 在 React 提交 state 前就同步占位，防住确认框/两个入口的连点竞态。
+  const [deletingSourceIds, setDeletingSourceIds] = useState<Set<string>>(() => new Set());
+  const deletingSourceIdsRef = useRef<Set<string>>(new Set());
   // 来源详情的「重新解析」是**同步等完**的整篇重解析(走 MinerU/解析器,大 PDF 可能数分钟),
   // 不是后台 job——期间图标按钮必须禁用并换成转圈,否则用户只看到一个毫无反应的按钮、
   // 反复点就会把同一篇重复解析若干遍。
@@ -1586,6 +1597,7 @@ export default function Home() {
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const sourcesRef = useRef<SourceSummary[]>([]);
+  const sourceDetailRef = useRef<SourceSummary | null>(null);
   // Live refs for source paging/query so long-lived poll effects (paper-meta
   // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
   // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
@@ -1593,6 +1605,9 @@ export default function Home() {
   // 轻量方案。
   const sourcesPageRef = useRef(0);
   const sourceQueryRef = useRef("");
+  // 所有来源分页/搜索/删除后重拉共享一个 latest-wins generation。删除成功会启动一个
+  // 新请求并立刻作废删除前仍在途的旧翻页/搜索，避免旧响应把已删来源重新塞回列表。
+  const sourcePageRequestRef = useRef(0);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const askIntentAbortRef = useRef<AbortController | null>(null);
@@ -1623,6 +1638,13 @@ export default function Home() {
   activeConversationIdRef.current = conversationId;
   activeAskModeRef.current = askMode;
   const workspaceEpochRef = useRef(0);
+  // notebook scoped：同库并发删除各自都会启动 collection/detail/checkup 校准，只有
+  // 最后一个成功响应对应的 generation 可以落状态，防慢的旧快照盖掉新的删除结果。
+  const sourceDeleteRefreshGenerationRef = useRef<Map<string, number>>(new Map());
+  // A successful DELETE may return while its notebook is between navigation
+  // epochs (active id is temporarily null). Keep notebook-scoped tombstones so
+  // an older direct list response can never resurrect that source.
+  const deletedSourceIdsByNotebookRef = useRef<Map<string, Set<string>>>(new Map());
   const kgBuildRequestEpochRef = useRef(0);
   const kgOpenRequestRef = useRef(0);
   const kgNodeNotebookRef = useRef<Map<string, string>>(new Map());
@@ -1998,6 +2020,7 @@ export default function Home() {
   // Keep a live ref of `sources` so the poll loop below reads the latest without
   // re-subscribing (its effect is keyed on the boolean `hasPending`, not the array).
   sourcesRef.current = sources;
+  sourceDetailRef.current = sourceDetail;
   sourcesPageRef.current = sourcesPage;
   sourceQueryRef.current = sourceQuery;
   const hasPending = sources.some(
@@ -2466,7 +2489,7 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelPanelOpen]);
 
-  async function loadNotebookCollection() {
+  async function loadNotebookCollection(opts: { guard?: () => boolean } = {}) {
     // The model status request reads only the persisted local snapshot. It is
     // deliberately detached so a missing status endpoint cannot hide notebooks.
     void refreshModelStatus();
@@ -2478,6 +2501,9 @@ export default function Home() {
       // authoritative 413 remains the safe fallback.
       fetchSystemConfiguration().catch(() => null),
     ]);
+    // 删除后的后台校准可能与切库/退出工作区竞速。调用方提供 guard 时，整个响应
+    // 必须原子地放弃，不能只守 notebook detail、却让 collection/status 落进新工作区。
+    if (opts.guard && !opts.guard()) return;
     setHealth(healthResponse);
     setStatusText(
       healthResponse.status !== "ok"
@@ -2493,7 +2519,9 @@ export default function Home() {
     }
     if (docTypeOptions.length === 0) {
       fetchDocumentTypes()
-        .then(setDocTypeOptions)
+        .then((options) => {
+          if (!opts.guard || opts.guard()) setDocTypeOptions(options);
+        })
         .catch(() => undefined);
     }
   }
@@ -2523,19 +2551,42 @@ export default function Home() {
     notebookId: string,
     opts: { page?: number; q?: string; guard?: () => boolean } = {},
   ) {
-    const pageNum = opts.page ?? 0;
+    const requestId = ++sourcePageRequestRef.current;
+    let pageNum = opts.page ?? 0;
     const q = opts.q ?? sourceQuery;
-    const offset = pageNum * SOURCES_PAGE_SIZE;
-    const result = await listSources(notebookId, offset, SOURCES_PAGE_SIZE, q);
+    const isCurrent = () => sourcePageRequestIsCurrent(
+      requestId,
+      sourcePageRequestRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
+      !opts.guard || opts.guard(),
+    );
+    let result = await listSources(notebookId, pageNum * SOURCES_PAGE_SIZE, SOURCES_PAGE_SIZE, q);
     // 后台轮询发起的刷新可能在途期间用户已切库/切会话——那时落状态会把新库的
-    // 来源列表覆盖成旧库的。guard 由调用方按房内 workspaceEpoch 约定给出;
-    // 不传 guard 的调用方(用户主动翻页/搜索)行为与此前逐字一致。
-    if (opts.guard && !opts.guard()) return;
-    setSourcesTotal(result.total_count);
+    // 来源列表覆盖成旧库的。除此之外，所有来源读取共用 request generation：一个
+    // 删除后权威重拉或更新的搜索/翻页一启动，更旧的响应就没有资格复活旧行。
+    if (!isCurrent()) return;
+    const clampedPage = clampSourcePage(pageNum, result.total_count, SOURCES_PAGE_SIZE);
+    if (clampedPage !== pageNum) {
+      pageNum = clampedPage;
+      result = await listSources(
+        notebookId,
+        pageNum * SOURCES_PAGE_SIZE,
+        SOURCES_PAGE_SIZE,
+        q,
+      );
+      if (!isCurrent()) return;
+    }
+    const filtered = filterDeletedSourceItems(
+      result.items,
+      deletedSourceIdsByNotebookRef.current.get(notebookId),
+    );
+    const visibleTotal = Math.max(0, result.total_count - filtered.removedCount);
+    setSourcesTotal(visibleTotal);
     // Only an unfiltered page reflects the notebook's true source total; a search query
     // returns the matched subset, which must not become the Ask surfaces' count.
-    if (!q) setNotebookSourceTotal(result.total_count);
-    setSources(result.items);
+    if (!q) setNotebookSourceTotal(visibleTotal);
+    setSources(filtered.items);
     setSourcesPage(pageNum);
   }
 
@@ -2545,7 +2596,12 @@ export default function Home() {
       : null;
     closeAnalytics();
     closeKnowhow();
+    setInfoModal(null);
+    setSourceDetail(null);
+    setSourceElements([]);
+    setHighlightedElementId("");
     const workspaceEpoch = ++workspaceEpochRef.current;
+    sourcePageRequestRef.current += 1;
     setSessionLoading(true);
     try {
       askRunEpochRef.current += 1;
@@ -2564,18 +2620,32 @@ export default function Home() {
     setReconnectJob(null);
     setMemoryAnswerId(null);
     setMemorySavedAnswers({});
-    const [notebook, sourcesPage] = await Promise.all([
-      getNotebook(notebookId),
-      listSources(notebookId, 0, SOURCES_PAGE_SIZE)
-    ]);
+    // A DELETE may complete while this transition deliberately holds the active
+    // notebook id at null. Keep reading both snapshots until one full read sees
+    // a stable delete generation; tombstones alone cannot repair ask_available.
+    const [notebook, sourcesPage] = await readStableSourceSnapshot(
+      () => sourceDeleteRefreshGenerationRef.current.get(notebookId) ?? 0,
+      () => Promise.all([
+        getNotebook(notebookId),
+        listSources(notebookId, 0, SOURCES_PAGE_SIZE),
+      ]),
+    );
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
     activeNotebookIdRef.current = notebookId;
     setCurrentNotebookId(notebookId);
     setCurrentNotebook(notebook);
     setTitleDraft(notebook.name);
-    setSources(sourcesPage.items);
-    setSourcesTotal(sourcesPage.total_count);
-    setNotebookSourceTotal(sourcesPage.total_count);
+    const filteredSourcesPage = filterDeletedSourceItems(
+      sourcesPage.items,
+      deletedSourceIdsByNotebookRef.current.get(notebookId),
+    );
+    const visibleSourcesTotal = Math.max(
+      0,
+      sourcesPage.total_count - filteredSourcesPage.removedCount,
+    );
+    setSources(filteredSourcesPage.items);
+    setSourcesTotal(visibleSourcesTotal);
+    setNotebookSourceTotal(visibleSourcesTotal);
     setSourcesPage(0);
     setSourceQuery("");
     setBuildingKg(shouldResumeKgBuild(notebook));
@@ -2671,7 +2741,12 @@ export default function Home() {
   function showCollection() {
     closeAnalytics();
     closeKnowhow();
+    setInfoModal(null);
+    setSourceDetail(null);
+    setSourceElements([]);
+    setHighlightedElementId("");
     workspaceEpochRef.current += 1;
+    sourcePageRequestRef.current += 1;
     askRunEpochRef.current += 1;
     abortIntentPreview();
     memoryLinksAbortRef.current?.abort();
@@ -3042,10 +3117,16 @@ export default function Home() {
   // 缺席(理论上打不开任何来源)时退回旧的 owner∪member 端点,保持既有行为。
   async function openSourceById(sourceId: string, elementId: string) {
     const notebookId = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
     const [detail, elements] = await Promise.all([
       notebookId ? getNotebookSource(notebookId, sourceId) : getSource(sourceId),
       notebookId ? getNotebookSourceElements(notebookId, sourceId) : getSourceElements(sourceId)
     ]);
+    if (
+      (notebookId && activeNotebookIdRef.current !== notebookId)
+      || workspaceEpochRef.current !== workspaceEpoch
+      || deletedSourceIdsByNotebookRef.current.get(detail.notebook_id)?.has(sourceId)
+    ) return;
     setSourceDetail(detail);
     setSourceElements(elements);
     setHighlightedElementId(elementId);
@@ -3089,6 +3170,7 @@ export default function Home() {
   function confirmDeleteSource(source: SourceSummary) {
     // 同上:参考库来源只读,删除是 owner-only 的写入,连确认框都不该弹。
     if (crossLibrarySourceNotebookId(source.notebook_id, currentNotebookId)) return;
+    if (deletingSourceIdsRef.current.has(source.id)) return;
     setInfoModal({
       title: "删除来源",
       message: `确定删除“${source.title}”吗？它的解析元素、候选知识和由该来源生成的已批准知识也会一起移除。`,
@@ -3100,22 +3182,74 @@ export default function Home() {
   }
 
   async function deleteSource(source: SourceSummary) {
-    const notebookId = currentNotebookId ?? source.notebook_id;
-    await deleteSourceRequest(source.id);
-    setSources((previous) => previous.filter((item) => item.id !== source.id));
-    setSourcesTotal((t) => Math.max(0, t - 1));
-    setNotebookSourceTotal((t) => Math.max(0, t - 1));
-    if (sourceDetail?.id === source.id) {
-      setSourceDetail(null);
-      setSourceElements([]);
+    const notebookId = source.notebook_id;
+    if (!notebookId || deletingSourceIdsRef.current.has(source.id)) return;
+    deletingSourceIdsRef.current.add(source.id);
+    setDeletingSourceIds((previous) => new Set(previous).add(source.id));
+    try {
+      await deleteSourceRequest(source.id);
+      const deletedIds = deletedSourceIdsByNotebookRef.current.get(notebookId)
+        ?? new Set<string>();
+      deletedIds.add(source.id);
+      deletedSourceIdsByNotebookRef.current.set(notebookId, deletedIds);
+      // Detail ownership is source-scoped rather than workspace-scoped. Close
+      // it even if navigation temporarily made activeNotebookId null; otherwise
+      // a successful delete can leave an actionable 404-only detail behind.
+      if (sourceDetailRef.current?.id === source.id) {
+        setSourceDetail(null);
+        setSourceElements([]);
+        setHighlightedElementId("");
+      }
+      const refreshGeneration = (sourceDeleteRefreshGenerationRef.current.get(notebookId) ?? 0) + 1;
+      sourceDeleteRefreshGenerationRef.current.set(notebookId, refreshGeneration);
+      const refreshOwner = claimSourceDeleteRefresh(
+        notebookId,
+        activeNotebookIdRef.current,
+        workspaceEpochRef.current,
+        refreshGeneration,
+      );
+      if (!refreshOwner) return;
+      const isCurrent = () => ownsSourceDeleteRefresh(
+        refreshOwner,
+        activeNotebookIdRef.current,
+        workspaceEpochRef.current,
+        sourceDeleteRefreshGenerationRef.current.get(notebookId) ?? 0,
+      );
+      // DELETE 成功就是用户等待的终点：先同步提交当前 notebook 的列表、计数与详情，
+      // collection/notebook/checkup 的权威校准随后并行进行，不再把网络瀑布算进“删除中”。
+      const wasVisible = sourcesRef.current.some((item) => item.id === source.id);
+      setSources((previous) => previous.filter((item) => item.id !== source.id));
+      if (wasVisible) setSourcesTotal((total) => Math.max(0, total - 1));
+      setNotebookSourceTotal((total) => Math.max(0, total - 1));
+      setKnowledge(EMPTY_KNOWLEDGE);
+      setDuplicates(null);
+      setToast("来源已删除");
+
+      void Promise.allSettled([
+        loadSourcesPage(notebookId, {
+          page: sourcesPageRef.current,
+          q: sourceQueryRef.current,
+          guard: isCurrent,
+        }),
+        loadNotebookCollection({ guard: isCurrent }),
+        getNotebook(notebookId).then((refreshed) => {
+          if (isCurrent()) {
+            setCurrentNotebook((current) => current?.id === notebookId ? refreshed : current);
+          }
+        }),
+        fetchCheckup(notebookId).then((refreshedCheckup) => {
+          if (isCurrent()) setCheckup(refreshedCheckup);
+        }),
+      ]);
+    } finally {
+      deletingSourceIdsRef.current.delete(source.id);
+      setDeletingSourceIds((previous) => {
+        if (!previous.has(source.id)) return previous;
+        const next = new Set(previous);
+        next.delete(source.id);
+        return next;
+      });
     }
-    await loadNotebookCollection();
-    const refreshed = await getNotebook(notebookId);
-    setCurrentNotebook(refreshed);
-    setKnowledge(EMPTY_KNOWLEDGE);
-    setDuplicates(null);
-    reloadCheckup(notebookId);  // 删掉损坏源后旧告警须消:刷新体检铃铛(codex 第5轮 P2)
-    setToast("来源已删除");
   }
 
   // 收起在途 turn(问题气泡 + 轨迹面板)。
@@ -4491,6 +4625,7 @@ export default function Home() {
 
   async function handleLogout() {
     workspaceEpochRef.current += 1;
+    sourcePageRequestRef.current += 1;
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
     abortIntentPreview();
@@ -4621,6 +4756,7 @@ export default function Home() {
   // 来源详情弹窗的异常徽标(anomaly-tiers spec)。算一次给下方两处用(是否渲染
   // 容器 div + map 渲染),避免重复调用。
   const sourceDetailAnomalies = sourceDetail ? sourceAnomalies(sourceDetail) : [];
+  const sourceDetailDeleting = Boolean(sourceDetail && deletingSourceIds.has(sourceDetail.id));
   // 打开的来源属于挂载的参考库而非当前库时,只读:代理读取只给「看」,不给「改」。
   const sourceDetailBaseId = sourceDetail
     ? crossLibrarySourceNotebookId(sourceDetail.notebook_id, currentNotebookId)
@@ -5118,13 +5254,20 @@ export default function Home() {
                       <p>点击上方的“添加来源”导入 PDF、Markdown、DOCX 或 PPTX。</p>
                     </article>
                   ) : (
-                    sources.map((source) => (
+                    sources.map((source) => {
+                      const deletingSource = deletingSourceIds.has(source.id);
+                      return (
                       <div
                         key={source.id}
-                        className="source-row compact-source-row"
+                        className={`source-row compact-source-row${deletingSource ? " source-row--deleting" : ""}`}
                         title={source.title}
+                        aria-busy={deletingSource || undefined}
                       >
-                        <button className="source-row-main" onClick={() => openSourceDetail(source).catch(reportError)}>
+                        <button
+                          className="source-row-main"
+                          disabled={deletingSource}
+                          onClick={() => openSourceDetail(source).catch(reportError)}
+                        >
                           <FileText className="source-file-icon" size={20} />
                           <span className="source-title-short">{compactSourceTitle(source)}</span>
                           <span className="source-row-status">
@@ -5144,18 +5287,40 @@ export default function Home() {
                             </span>
                           )}
                           {source.source_url ? (
-                            <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} aria-label="打开原始链接" onClick={(e) => e.stopPropagation()}>
+                            <a
+                              className="source-link-button"
+                              href={source.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={source.source_url}
+                              aria-label="打开原始链接"
+                              aria-disabled={deletingSource || undefined}
+                              tabIndex={deletingSource ? -1 : undefined}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (deletingSource) e.preventDefault();
+                              }}
+                            >
                               <ExternalLink size={13} />
                             </a>
                           ) : null}
                           {!isReader && (
-                            <button className="source-delete-button" title="删除来源" onClick={() => confirmDeleteSource(source)}>
-                              <Trash2 size={15} />
+                            <button
+                              className="source-delete-button"
+                              disabled={deletingSource}
+                              title="删除来源"
+                              aria-label={deletingSource ? `正在删除来源：${source.title}` : `删除来源：${source.title}`}
+                              onClick={() => confirmDeleteSource(source)}
+                            >
+                              {deletingSource
+                                ? <Loader2 size={15} className="busy-spin" aria-hidden="true" />
+                                : <Trash2 size={15} />}
                             </button>
                           )}
                         </div>
                       </div>
-                    ))
+                      );
+                    })
                   )}
                   <Pagination
                     page={sourcesPage}
@@ -6076,17 +6241,25 @@ export default function Home() {
                 <div className="source-detail-actions">
                   <button
                     className="icon-button subtle-icon"
-                    disabled={reparsingSource}
+                    disabled={reparsingSource || sourceDetailDeleting}
                     onClick={() => reparseSource().catch(reportError)}
-                    title={reparsingSource ? "重新解析中…" : "重新解析"}
-                    aria-label={reparsingSource ? "重新解析中…" : "重新解析"}
+                    title={sourceDetailDeleting ? "来源删除中，暂时无法重新解析" : reparsingSource ? "重新解析中…" : "重新解析"}
+                    aria-label={sourceDetailDeleting ? "来源删除中，暂时无法重新解析" : reparsingSource ? "重新解析中…" : "重新解析"}
                   >
                     {reparsingSource
                       ? <Loader2 size={23} className="busy-spin" aria-hidden="true" />
                       : <ExternalLink size={23} />}
                   </button>
-                  <button className="icon-button subtle-icon danger-icon" disabled={reparsingSource} onClick={() => confirmDeleteSource(sourceDetail)} title="删除来源">
-                    <Trash2 size={20} />
+                  <button
+                    className="icon-button subtle-icon danger-icon"
+                    disabled={reparsingSource || sourceDetailDeleting}
+                    onClick={() => confirmDeleteSource(sourceDetail)}
+                    title={sourceDetailDeleting ? "来源删除中…" : "删除来源"}
+                    aria-label={sourceDetailDeleting ? `正在删除来源：${sourceDetail.title}` : `删除来源：${sourceDetail.title}`}
+                  >
+                    {sourceDetailDeleting
+                      ? <Loader2 size={20} className="busy-spin" aria-hidden="true" />
+                      : <Trash2 size={20} />}
                   </button>
                 </div>
                 )}

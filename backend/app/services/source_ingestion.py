@@ -1256,13 +1256,17 @@ class SourceIngestionService:
     def delete_source(self, source_id: str, hooks: SourcePipelineHooks) -> None:
         source = self.sources.get_source(source_id)
         with self.write() as db:
-            self.clear_source_extraction_state(
-                db,
-                source_id,
-                source.notebook_id,
-                clear_embeddings=True,
-            )
-            self.sources.delete_source_row(db, source_id)
+            # Extraction's terminal write holds a KEY SHARE lock on this row.
+            # Take the conflicting aggregate lock before scanning/deleting any
+            # projections so extraction cannot publish KG after our cursor.
+            if self.sources.source_exists_for_update_tx(db, source_id):
+                self.clear_source_extraction_state(
+                    db,
+                    source_id,
+                    source.notebook_id,
+                    clear_embeddings=True,
+                )
+                self.sources.delete_source_row(db, source_id)
         self.source_files.delete(source.file_path)
         self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)

@@ -4462,6 +4462,13 @@ button.chat-session-card {
   color: #ba2d2d;
 }
 
+.source-delete-button:disabled,
+.source-delete-button:disabled:hover {
+  background: transparent;
+  color: #9b5b5b;
+  cursor: wait;
+}
+
 .studio-output {
   border-top: 1px solid #dfe4ee;
   padding: 18px;
@@ -4780,6 +4787,21 @@ button.chat-session-card {
 
 .source-row:hover {
   background: #eef1fb;
+}
+
+.source-row--deleting,
+.source-row--deleting:hover {
+  background: #f6f7fa;
+}
+
+.source-row--deleting .source-row-main,
+.source-row--deleting .source-link-button[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.58;
+}
+
+.source-row-main:disabled {
+  color: inherit;
 }
 
 .source-row-main {

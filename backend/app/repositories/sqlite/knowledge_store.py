@@ -26,6 +26,9 @@ from app.repositories.sqlite.mount_sql import (
 )
 
 
+_DELETE_OBJECT_BATCH_SIZE = 500
+
+
 def _completion_generation_is_current(
     connection: sqlite3.Connection,
     notebook_id: str,
@@ -1577,11 +1580,14 @@ class KnowledgeStore:
         stay indexed until it is truly deleted."""
         if not object_ids:
             return
-        placeholders = ",".join("?" for _ in object_ids)
-        connection.execute(
-            f"DELETE FROM knowledge_object_sources WHERE object_id IN ({placeholders})",
-            object_ids,
-        )
+        for offset in range(0, len(object_ids), _DELETE_OBJECT_BATCH_SIZE):
+            batch = object_ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+            placeholders = ",".join("?" for _ in batch)
+            connection.execute(
+                f"DELETE FROM knowledge_object_sources "
+                f"WHERE object_id IN ({placeholders})",
+                batch,
+            )
 
     @staticmethod
     def source_index_backfilled(db: sqlite3.Connection, notebook_id: str) -> bool:
@@ -1614,32 +1620,98 @@ class KnowledgeStore:
         Fast path (backfilled notebooks): a single indexed SQL lookup against
         knowledge_object_sources — O(matches), not O(notebook size).
 
-        Legacy path (not yet backfilled): the original full-evidence-JSON scan
-        of every object in the notebook — but the scan the caller was about to
-        pay anyway is reused to populate knowledge_object_sources for every
-        object encountered, and the notebook is marked backfilled, so it is
-        provably the LAST time this notebook pays the O(N) cost (backfill-on-
-        first-use)."""
+        Legacy path (not yet backfilled): filter the JSON evidence in keyset-
+        paged database queries. Interactive delete/reparse must not turn into a
+        notebook-wide read/parse/write backfill while holding its transaction;
+        the explicit batch-ingest backfill remains responsible for populating
+        the reverse index and flipping the marker."""
+        object_ids: List[str] = []
+        after_id = ""
+        while True:
+            batch = self._stale_object_ids_for_source_batch(
+                db, source_id, notebook_id, after_id=after_id
+            )
+            if not batch:
+                return object_ids
+            object_ids.extend(batch)
+            after_id = batch[-1]
+
+    def _stale_object_ids_for_source_batch(
+        self,
+        db: sqlite3.Connection,
+        source_id: str,
+        notebook_id: str,
+        *,
+        after_id: str = "",
+        limit: int = _DELETE_OBJECT_BATCH_SIZE,
+    ) -> List[str]:
+        """Return one stable, bounded source-reference batch.
+
+        ``clear_source_graph_state`` advances ``after_id`` after deleting each
+        page, so online delete/reparse never materializes all matching ids or
+        rescans a previously visited key range. The compatibility list API
+        above uses the same cursor while retaining its complete-list contract.
+        """
+        page_limit = max(1, min(int(limit), _DELETE_OBJECT_BATCH_SIZE))
         if self.source_index_backfilled(db, notebook_id):
             rows = db.execute(
                 "SELECT DISTINCT object_id FROM knowledge_object_sources "
-                "WHERE source_id = ? AND notebook_id = ?",
-                (source_id, notebook_id),
+                "WHERE source_id = ? AND notebook_id = ? AND object_id > ? "
+                "ORDER BY object_id LIMIT ?",
+                (source_id, notebook_id, after_id, page_limit),
             ).fetchall()
-            return [r["object_id"] for r in rows]
+            return [row["object_id"] for row in rows]
 
-        stale_knowledge_ids: List[str] = []
-        knowledge_rows = db.execute(
-            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id = ?",
-            (notebook_id,),
+        # json_each must receive only a valid top-level ARRAY.  The legacy
+        # Python parser ignored a top-level object/scalar/null, and PostgreSQL's
+        # array-containment query has the same boundary.  Nesting the CASEs
+        # avoids calling json_type on malformed historical TEXT evidence.
+        rows = db.execute(
+            "SELECT DISTINCT ko.id AS object_id "
+            "FROM knowledge_objects AS ko "
+            "JOIN json_each(CASE WHEN json_valid(ko.evidence) THEN "
+            "CASE WHEN json_type(ko.evidence) = 'array' "
+            "THEN ko.evidence ELSE '[]' END ELSE '[]' END) AS item "
+            "WHERE ko.notebook_id = ? AND ko.id > ? AND item.type = 'object' "
+            "AND json_extract(CASE WHEN item.type = 'object' "
+            "THEN item.value ELSE '{}' END, '$.source_id') = ? "
+            "ORDER BY ko.id LIMIT ?",
+            (notebook_id, after_id, source_id, page_limit),
         ).fetchall()
-        for row in knowledge_rows:
-            source_ids = self.source_ids_from_evidence(row["evidence"])
-            self.replace_object_sources(db, row["id"], notebook_id, row["evidence"])
-            if source_id in source_ids:
-                stale_knowledge_ids.append(row["id"])
-        self.mark_source_index_backfilled(db, notebook_id)
-        return stale_knowledge_ids
+        return [row["object_id"] for row in rows]
+
+    @staticmethod
+    def _direct_object_ids_for_source_batch(
+        db: sqlite3.Connection,
+        source_id: str,
+        limit: int = _DELETE_OBJECT_BATCH_SIZE,
+    ) -> List[str]:
+        page_limit = max(1, min(int(limit), _DELETE_OBJECT_BATCH_SIZE))
+        rows = db.execute(
+            "SELECT id FROM knowledge_objects WHERE source_id = ? LIMIT ?",
+            (source_id, page_limit),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    @classmethod
+    def _delete_object_id_batch(
+        cls, db: sqlite3.Connection, object_ids: Sequence[str]
+    ) -> None:
+        """Delete one already-bounded object batch and its derived rows."""
+        batch = list(object_ids[:_DELETE_OBJECT_BATCH_SIZE])
+        if not batch:
+            return
+        placeholders = ",".join("?" for _ in batch)
+        db.execute(
+            f"DELETE FROM knowledge_embeddings "
+            f"WHERE object_id IN ({placeholders})",
+            batch,
+        )
+        db.execute(
+            f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
+            batch,
+        )
+        cls.delete_object_sources(db, batch)
 
     def clear_source_graph_state(
         self,
@@ -1652,32 +1724,21 @@ class KnowledgeStore:
             "DELETE FROM kg_relation_completion_state WHERE source_id = ?",
             (source_id,),
         )
-        stale_knowledge_ids = self.stale_object_ids_for_source(db, source_id, notebook_id)
-
-        if stale_knowledge_ids:
-            placeholders = ",".join("?" for _ in stale_knowledge_ids)
-            db.execute(
-                f"DELETE FROM knowledge_embeddings WHERE object_id IN ({placeholders})",
-                stale_knowledge_ids,
+        stale_after_id = ""
+        while True:
+            stale_batch = self._stale_object_ids_for_source_batch(
+                db, source_id, notebook_id, after_id=stale_after_id
             )
-            db.execute(
-                f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
-                stale_knowledge_ids,
-            )
-            self.delete_object_sources(db, stale_knowledge_ids)
+            if not stale_batch:
+                break
+            stale_after_id = stale_batch[-1]
+            self._delete_object_id_batch(db, stale_batch)
         self.delete_relations_for_source(db, source_id)
-        db.execute(
-            "DELETE FROM knowledge_embeddings WHERE object_id IN "
-            "(SELECT id FROM knowledge_objects WHERE source_id = ?)",
-            (source_id,),
-        )
-        direct_ids = [
-            r["id"] for r in db.execute(
-                "SELECT id FROM knowledge_objects WHERE source_id = ?", (source_id,)
-            ).fetchall()
-        ]
-        db.execute("DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,))
-        self.delete_object_sources(db, direct_ids)
+        while True:
+            direct_batch = self._direct_object_ids_for_source_batch(db, source_id)
+            if not direct_batch:
+                break
+            self._delete_object_id_batch(db, direct_batch)
 
     def clear_source_extraction_state(
         self,
