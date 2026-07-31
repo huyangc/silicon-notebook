@@ -614,8 +614,8 @@ KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrie
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # projected Knowhow cell objects join reasoning/graph KG-node retrieval (default true; false disables only this direct-node path, not cell-chunk search)
 REASONING_ENUM_TOOLS_ENABLED # reasoning Ask's typed collection-enumeration reflect tools, enumerate_elements/enumerate_kg_objects (default true; false disables both tools and the collection map, zero extra queries)
-REASONING_OUTLINE_ENABLED    # reasoning Ask's outline scratchpad reflect action, update_outline (default true; only offered at the `exhaustive` effort tier regardless of this flag; false disables the action and section-by-section synthesis, reverting to byte-identical pre-feature behavior)
-REASONING_OUTLINE_KG_GAP_ENABLED # weak-support KG relation hint fed back into the outline scratchpad after each accepted update_outline (default true; layered on top of REASONING_OUTLINE_ENABLED; false stops the scratchpad from carrying weak-support relation hints, zero extra queries)
+REASONING_OUTLINE_ENABLED    # reasoning Ask's outline scratchpad reflect action, update_outline (default true; only offered at the `exhaustive` effort tier regardless of this flag; false disables the action and section-by-section synthesis, reverting to byte-identical pre-feature behavior); also gates Deep Report's per-section deep-dive at its exhaustive depth tier (depth 16, see REPORT_MAX_SECTIONS below) — same flag, no report-specific toggle
+REASONING_OUTLINE_KG_GAP_ENABLED # weak-support KG relation hint fed back into the outline scratchpad after each accepted update_outline (default true; layered on top of REASONING_OUTLINE_ENABLED; false stops the scratchpad from carrying weak-support relation hints, zero extra queries); applies identically inside Deep Report's per-section deep-dive once it reaches the exhaustive depth tier
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
 CHUNK_MMR_K                  # MMR-selected chunks when rerank is off (default 16)
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: add local KG structure + source chunks (default true; rerank path requires `retrieval_rerank` bound)
@@ -628,6 +628,8 @@ REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budge
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 ```
+
+**Behavior change (PR-5, no new flag):** each report section's deep-dive retrieval budget now follows the report's own `depth` value (1/2/4/8/16, clamped API-side to `[1, 16]`) mapped onto the same named effort tiers reasoning Ask uses (`overview`/`standard`/`deep`/`thorough`/`exhaustive`) rather than always running at the `standard` budget. Low depths therefore retrieve with a smaller budget than before this change and high depths with a larger one — this is an intentional alignment fix (same tier name, same budget in both Ask and Deep Report), not a regression. Reaching depth 16 (`exhaustive`) additionally activates the outline scratchpad and KG weak-support gap feedback described above inside that section's deep-dive only; see `docs/product-and-api.md`'s "Deep Report outline co-evolution" section for the full contract.
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
 A notebook's `tier` (`base` | `personal`, default `personal`) is data on the notebook
