@@ -374,6 +374,11 @@ _OUTLINE_MAX_EVIDENCE = 8
 # 无上限时一个偏爱整理的模型可以把整份步骤预算花在反复重排目录上。6 次足够
 # 「建 → 补 3 轮 → 收尾」,而 exhaustive 档的 50 步预算仍有绝大部分留给检索。
 _MAX_OUTLINE_UPDATES = 6
+# pending 最坏由 6 次常规提交 + 1 次专用纠错各贡献 8 个不同 key。完整状态留在
+# 服务端/终态 trace,每轮 prompt 只展示前 8 个,所以提示预算不随批次数增长。
+_OUTLINE_MAX_PENDING_EVIDENCE = _OUTLINE_MAX_EVIDENCE * (
+    _MAX_OUTLINE_UPDATES + 1
+)
 
 
 @dataclass
@@ -515,16 +520,18 @@ def _unique_outline_id(base: str, used: set) -> str:
     raise AssertionError("outline id space exhausted")
 
 
-def outline_binding_keys(collected, elements, chunks) -> set:
-    """大纲绑定键的合法集合(事实层):本 run **检索候选池**里出现过的全部标识。
+def outline_binding_keys(
+    collected, elements, chunks, ever_shown_keys, retained_keys=()
+) -> set:
+    """大纲绑定键的合法集合(事实层):候选池里**曾对模型展示**的标识。
 
     两条边界,方向相反,都要守住:
 
-    * 口径是「这一轮的检索产出过它」,而**不是**「上一轮的候选摘要恰好渲染了它」。
-      `_summarize` 对候选池开的是头尾窗口(超窗的中间部分不展示),但同 id 节的旧绑定
-      由服务端持续持有并参与 union;若合法集只看当前窗口,一个已经持有的旧键会在窗口
-      滑走后反过来被事实层判成非法。候选只增不减,所以累计口径与持久绑定同样单调。
-    * 反过来,合法集必须 **⊆ 模型可见**。所以 v1 **不含枚举清单条目的 id**:枚举
+    * 口径是「本 run 的任一候选摘要展示过它」,而不是只看上一轮窗口。`_summarize`
+      对候选池开头尾窗口,所以用 run 内单调的 ``ever_shown_keys``:早先展示并绑定的
+      key 即使后来滑出窗口也不会失效,窗口中段从未展示的 key 则不能靠猜 id 通过。
+      ``retained_keys`` 是当前大纲已经合法持有的服务端状态,在 union 时继续有效。
+    * 合法集必须 **⊆ 模型可见或服务端已持有**。所以 v1 **不含枚举清单条目的 id**:枚举
       账目按合同只回覆盖计数、不回条目 id(元素/知识对象清单一个字的正文都不带),
       模型根本拿不到那些 id,把它们放进合法集只是一片没人能踩到的死面——而它同时
       放宽了「只能引用服务端给过你的东西」这条校验。O2(或后续让清单条目 id 对模型
@@ -533,11 +540,13 @@ def outline_binding_keys(collected, elements, chunks) -> set:
       任何上下文切片;来源清单给模型的句柄本来也是标题而不是 id
       (见 `_source_titles_note`)。
     """
-    keys = set(collected)          # KG 候选:`collected` 的键就是 object_id
-    keys.update(str(getattr(el, "element_id", "")) for el in elements)
-    keys.update(str(getattr(c, "chunk_id", "")) for c in chunks)
-    keys.discard("")
-    return keys
+    candidates = set(collected)    # KG 候选:`collected` 的键就是 object_id
+    candidates.update(str(getattr(el, "element_id", "")) for el in elements)
+    candidates.update(str(getattr(c, "chunk_id", "")) for c in chunks)
+    candidates.discard("")
+    allowed = {str(key) for key in ever_shown_keys if str(key)}
+    allowed.update(str(key) for key in retained_keys if str(key))
+    return candidates & allowed
 
 
 def bind_outline_evidence(
@@ -610,6 +619,39 @@ def merge_outline_evidence(
     return merged, dropped, overflow, removed
 
 
+def carry_outline_overflow(
+    previous: Dict[str, List[str]],
+    submitted: List[OutlineSection],
+    merged: List[OutlineSection],
+    current: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """把未接纳 key 当作持久服务端状态,而不是一次性诊断。
+
+    pending key 只有三种退出方式:本次已经成功绑定;模型在 ``remove_evidence``
+    里显式点名放弃;或整节从全量结构中删除。模型只腾出旧键却漏抄待换入 key 时,
+    pending 必须继续留到下一轮/终态 trace,否则又回到了静默丢新证据。
+    """
+    submitted_by_id = {section.id: section for section in submitted}
+    merged_by_id = {section.id: section for section in merged}
+    carried: Dict[str, List[str]] = {}
+    for section_id in merged_by_id:
+        section = submitted_by_id.get(section_id)
+        removed = set(section.remove_evidence_keys) if section is not None else set()
+        accepted = set(merged_by_id[section_id].evidence_keys)
+        keys: List[str] = []
+        for key in list(previous.get(section_id, [])) + list(current.get(section_id, [])):
+            if key in accepted or key in removed or key in keys:
+                continue
+            keys.append(key)
+        if len(keys) > _OUTLINE_MAX_PENDING_EVIDENCE:
+            # 解析层每次最多 8 key、状态机最多 6 次常规更新 + 1 次专用纠错;
+            # 超过只能说明这两个结构上限被改坏。响亮失败胜过截断 pending 再静默丢 key。
+            raise AssertionError("outline pending evidence bound exceeded")
+        if keys:
+            carried[section_id] = keys
+    return carried
+
+
 def outline_truncated_kg_evidence(
     sections: List[OutlineSection],
     collected: Dict[str, "RetrievedKnowledge"],
@@ -680,6 +722,7 @@ def _outline_note(
     sections: List[OutlineSection],
     updates_left: int,
     overflow: Optional[Dict[str, List[str]]] = None,
+    overflow_repair_available: bool = False,
 ) -> str:
     """把大纲便签回喂给 reflect(镜像 visited / attempted / 枚举三份账目)。
 
@@ -689,8 +732,9 @@ def _outline_note(
     保底,但只报节数与空节名仍会让模型无法保留/调整原来的章节结构。
 
     有界性仍然成立,且是**常数级**:12 节 × (32 id + 60 标题 + 32 parent +
-    8 × 48 证据 key) + 固定文案 ≈ 6.5KB;一次 union 溢出还可多带至多同形的
-    12 × 8 个新 key,总量仍是与语料规模无关的常数级。真实 id 约 15–36 字符,
+    8 × 48 证据 key) + 固定文案 ≈ 6.5KB;pending 虽可在服务端累积至每节 56 个,
+    每轮只展示前 8 个加剩余计数,所以 prompt 仍至多多带 12 × 8 个 key。
+    总量与语料规模无关。真实 id 约 15–36 字符,
     典型值在 1–3KB。这只在 exhaustive 档出现,那一档的证据预算是 16k/120k 字符。
 
     ``updates_left`` 是本 run 还剩几次 update_outline(照集合地图那条剩余额度行的
@@ -718,18 +762,31 @@ def _outline_note(
         section = by_id.get(section_id)
         if section is None or not keys:
             continue
+        visible = list(keys[:_OUTLINE_MAX_EVIDENCE])
+        remaining = len(keys) - len(visible)
         overflow_lines.append(
             f"- {section_id}「{section.title}」未接纳新证据: "
-            + "、".join(keys)
+            + "、".join(visible)
+            + (
+                f"（另有 {remaining} 条待处理,处理或放弃这批后继续显示）"
+                if remaining else ""
+            )
         )
     overflow_note = (
-        "\n本次因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
+        "\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
         + "\n".join(overflow_lines)
         + "\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,"
-          "并继续把要加入的 key 放在 evidence。"
+          "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,也在"
+          "remove_evidence 中点名它。"
         if overflow_lines else ""
     )
-    if updates_left <= 0:
+    if updates_left <= 0 and overflow_lines and overflow_repair_available:
+        head = (
+            "（本轮大纲便签(常规整理次数已用完;因上一份有未接纳证据,仅可再提交一次"
+            "章节 id/标题/parent 完全不变的 update_outline,用 remove_evidence 腾位并"
+            "换入点名的新 key):\n"
+        )
+    elif updates_left <= 0:
         head = (
             "（本轮大纲便签(已定稿:整理次数已用完,不要再提交 update_outline;"
             "请改用检索动作补齐空节,或直接作答):\n"
@@ -1526,7 +1583,8 @@ class ReasoningRetriever:
         return list(items[:head]), list(items[-tail:]), len(items) - head - tail
 
     def _summarize(self, collected, elements, chunks, chains=(),
-                   show_ids: bool = False):
+                   show_ids: bool = False,
+                   shown_binding_keys: Optional[set] = None):
         """``show_ids`` = 给原文候选也标出 id(仅大纲便签在场时)。
 
         KG 候选的 id 一直都在——`expand_graph`/`follow_chain` 要拿它做参数。原文段
@@ -1551,15 +1609,23 @@ class ReasoningRetriever:
             return (f"- [chunk] {c.source_title} · {c.section_path}: "
                     f"{c.text[:80]}{tail}")
 
-        for items, render, head_n, tail_n, noun in (
-                (list(collected.values()), _kg_line, 20, 10, "条较早候选"),
-                (elements, _el_line, 6, 4, "段较早原文"),
-                (chunks, _ch_line, 6, 4, "段较早原文")):
+        for items, render, key_of, head_n, tail_n, noun in (
+                (list(collected.values()), _kg_line,
+                 lambda item: item.object_id, 20, 10, "条较早候选"),
+                (elements, _el_line,
+                 lambda item: item.element_id, 6, 4, "段较早原文"),
+                (chunks, _ch_line,
+                 lambda item: item.chunk_id, 6, 4, "段较早原文")):
             head, tail, omitted = self._window(items, head_n, tail_n)
             lines.extend(render(x) for x in head)
             if omitted:
                 lines.append(f"-（省略中间 {omitted} {noun},以下为最近加入）")
             lines.extend(render(x) for x in tail)
+            # 收集器只在大纲开启(show_ids=True)时传入;此时三类候选的 key 都
+            # 真实出现在上述行里。只记 head/tail,不能把被省略的中段偷偷算成可见。
+            if shown_binding_keys is not None and show_ids:
+                shown_binding_keys.update(key_of(x) for x in head)
+                shown_binding_keys.update(key_of(x) for x in tail)
         for chain in chains[-6:]:
             try:
                 h1, h2 = chain.hops
@@ -1638,6 +1704,10 @@ class ReasoningRetriever:
         outline: List[OutlineSection] = []
         outline_updates = 0
         outline_overflow: Dict[str, List[str]] = {}
+        ever_shown_outline_keys: set = set()
+        outline_overflow_feedback_pending = False
+        outline_terminal_repair_used = False
+        outline_cap_repair_used = False
 
         # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
         # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
@@ -1941,7 +2011,7 @@ class ReasoningRetriever:
             exact_lookup_log.append(_ExactLookupAttempt(
                 terms=terms, new=0, tries=1, note=note, dedup_key=key))
 
-        def apply_outline_update(decision) -> None:
+        def apply_outline_update(decision, *, overflow_repair: bool = False) -> None:
             """应用一次 update_outline 载荷:预算 → 校验 → 留存 → trace。
 
             零检索、零模型调用,只把模型交上来的结构按服务端事实夹一遍并留存。
@@ -1955,9 +2025,44 @@ class ReasoningRetriever:
             本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
             """
             nonlocal outline, outline_updates, outline_overflow
-            if outline_updates >= _MAX_OUTLINE_UPDATES:
-                # 措辞按「该给什么」写(exact_lookup 那条实测教训):只说
-                # 「不能再整理了」的话,模型下一轮往往再交一份大纲空转一步。
+            nonlocal outline_overflow_feedback_pending, outline_cap_repair_used
+            consume_regular_update = outline_updates < _MAX_OUTLINE_UPDATES
+            same_structure = tuple(
+                (s.id, s.title, s.parent) for s in decision.outline_sections
+            ) == tuple((s.id, s.title, s.parent) for s in outline)
+            if overflow_repair:
+                if outline_updates >= _MAX_OUTLINE_UPDATES:
+                    if outline_cap_repair_used:
+                        record(TraceStep(
+                            step_type="skip",
+                            summary=(
+                                f"跳过整理大纲(已达本轮整理次数上限 "
+                                f"{_MAX_OUTLINE_UPDATES};溢出纠错机会也已用完)"
+                            ),
+                            detail={"reason": "outline_budget",
+                                    "updates": outline_updates,
+                                    "sections": len(outline)}))
+                        return
+                    # 一次性资格按「收到纠错提交」消费,不是按成功写入消费。否则
+                    # 结构违规后仍可反复试,所谓最多一次只约束了成功次数。
+                    outline_cap_repair_used = True
+                if not same_structure:
+                    # 普通额度尚在时,下一轮仍面对同一份 pending overflow,所以仍
+                    # 必须是 repair-only;不能因本次结构违规把状态清掉后绕成普通更新。
+                    if outline_updates < _MAX_OUTLINE_UPDATES:
+                        outline_overflow_feedback_pending = bool(outline_overflow)
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=(
+                            "跳过大纲溢出修复(纠错提交只能保持章节 "
+                            "id/标题/parent 不变)"
+                        ),
+                        detail={"reason": "outline_repair_structure",
+                                "updates": outline_updates,
+                                "sections": len(outline)}))
+                    return
+            elif outline_updates >= _MAX_OUTLINE_UPDATES:
+                # 措辞按「该给什么」写:普通额度与专用纠错资格是两本账。
                 record(TraceStep(
                     step_type="skip",
                     summary=(
@@ -1976,14 +2081,21 @@ class ReasoningRetriever:
                         "每次都要交上整份大纲,每一节至少要有标题)"),
                     detail={"reason": "outline_empty"}))
                 return
-            outline_updates += 1
-            # 绑定键的合法集合按**本 run 累计**的候选算,不按上一轮摘要展示过
-            # 什么算 —— 见 outline_binding_keys 的说明(服务端持有的旧绑定不能
-            # 因为头尾窗口滑走就反过来变成非法)。
+            if consume_regular_update:
+                outline_updates += 1
+            retained_keys = {
+                key for section in outline for key in section.evidence_keys
+            }
             bound, dropped, overflow, removed = merge_outline_evidence(
                 outline,
                 decision.outline_sections,
-                outline_binding_keys(collected, elements, chunks),
+                outline_binding_keys(
+                    collected, elements, chunks,
+                    ever_shown_outline_keys, retained_keys,
+                ),
+            )
+            overflow = carry_outline_overflow(
+                outline_overflow, decision.outline_sections, bound, overflow,
             )
             # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
             # 初始化处的理由),所以这里既不加分也不清零。
@@ -1991,6 +2103,7 @@ class ReasoningRetriever:
             replaced = len(outline)
             outline = bound
             outline_overflow = overflow
+            outline_overflow_feedback_pending = bool(overflow)
             empty = [s.title for s in bound if not s.evidence_keys]
             record(TraceStep(
                 step_type="outline",
@@ -2019,14 +2132,35 @@ class ReasoningRetriever:
                         for section_id, keys in overflow.items()
                     },
                     "removed_evidence": removed,
+                    "overflow_repair": overflow_repair,
                     "changed": changed,
                 }))
 
-        while steps < max_steps:
+        forced_overflow_repair = False
+        while (
+            steps < max_steps
+            or forced_overflow_repair
+            or (
+                outline_overflow_feedback_pending
+                and not outline_terminal_repair_used
+            )
+        ):
             raise_if_cancelled(self.cancel_event)
+            terminal_overflow_repair = forced_overflow_repair or steps >= max_steps
+            if terminal_overflow_repair:
+                outline_terminal_repair_used = True
+                forced_overflow_repair = False
+            overflow_repair_prompt = outline_overflow_feedback_pending
+            # 这一轮 prompt 马上会带上 outline_overflow;先消费反馈权。若本轮提交
+            # 仍溢出,apply_outline_update 会重新置 True,但终态额外轮最多只有一次。
+            outline_overflow_feedback_pending = False
             steps += 1
             summary = self._summarize(collected, elements, chunks, chains,
-                                      show_ids=outline_active)
+                                      show_ids=outline_active,
+                                      shown_binding_keys=(
+                                          ever_shown_outline_keys
+                                          if outline_active else None
+                                      ))
             if no_progress:
                 summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
             # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -2101,7 +2235,9 @@ class ReasoningRetriever:
             # 没有对话历史,模型要全量重提就只能从这里抄(见 _outline_note)。
             outline_note = _outline_note(
                 outline, _MAX_OUTLINE_UPDATES - outline_updates,
-                outline_overflow)
+                outline_overflow,
+                overflow_repair_available=not outline_cap_repair_used,
+            )
             if outline_note:
                 summary = f"{summary}\n\n{outline_note}"
             if collection_map_text:
@@ -2123,6 +2259,23 @@ class ReasoningRetriever:
                              detail={"next_action": decision.next_action,
                                      "sufficient": decision.sufficient,
                                      "no_progress": no_progress, "stale": stale}))
+            overflow_repair_submission = overflow_repair_prompt or (
+                bool(outline_overflow)
+                and outline_updates >= _MAX_OUTLINE_UPDATES
+                and not outline_cap_repair_used
+            )
+            if terminal_overflow_repair:
+                # 这次是越过 max_steps / stale 的专用纠错轮,绝不能借机再发一次
+                # 检索请求突破档位预算。模型不按便签换键就如实保留未解决状态。
+                if decision.next_action == OUTLINE_ACTION:
+                    apply_outline_update(decision, overflow_repair=True)
+                else:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="大纲溢出纠错轮未提交 update_outline,按当前绑定收尾",
+                        detail={"reason": "outline_overflow_repair_declined"},
+                    ))
+                break
             if decision.next_action == "answer" or decision.sufficient:
                 # 「交最终版大纲」与「宣布证据够了」是**同一轮**的事:prompt 教模型
                 # 「每个方面都有证据了才置 sufficient」,而那正是它把最后一批绑定补
@@ -2136,7 +2289,18 @@ class ReasoningRetriever:
                 # 成本。`next_action == "answer"` 那条路不碰大纲(模型没提交任何
                 # 载荷,也没说要改结构)。
                 if decision.next_action == OUTLINE_ACTION:
-                    apply_outline_update(decision)
+                    apply_outline_update(
+                        decision, overflow_repair=overflow_repair_submission
+                    )
+                    if (
+                        outline_overflow_feedback_pending
+                        and not outline_terminal_repair_used
+                    ):
+                        # sufficient 不能吞掉刚产生的 overflow。下一轮是专用纠错:
+                        # 只许同结构换键,不能借「已经够了」再发一条检索请求。
+                        outline_terminal_repair_used = True
+                        forced_overflow_repair = True
+                        continue
                 break
             if (
                 decision.next_action == "expand_community"
@@ -2523,7 +2687,9 @@ class ReasoningRetriever:
                 # 与 sufficient 短路之前那次应用共用同一个函数(见 apply_outline_
                 # update 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
                 # 复核的缝。
-                apply_outline_update(decision)
+                apply_outline_update(
+                    decision, overflow_repair=overflow_repair_submission
+                )
             elif decision.next_action == "ppr_retrieve":
                 if not self.allow_ppr:
                     record(TraceStep(step_type="skip",
@@ -2796,10 +2962,34 @@ class ReasoningRetriever:
             stale = stale + 1 if no_progress else 0
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if stale >= self.settings.reasoning_stale_limit:
+                if (
+                    outline_overflow_feedback_pending
+                    and not outline_terminal_repair_used
+                ):
+                    # stale 原本会立即 break。保留一次只许换键的专用轮,但不把
+                    # outline 修订算作检索进展,也不重置 stale。
+                    outline_terminal_repair_used = True
+                    forced_overflow_repair = True
+                    continue
                 record(TraceStep(step_type="skip",
                                  summary=f"连续 {stale} 轮无新进展,熔断收尾(避免空转)",
                                  detail={"reason": "stale_circuit_breaker", "stale": stale}))
                 break
+
+        if outline_overflow:
+            # 即使模型拒绝纠错、再次溢出或给了结构变更,终态也必须明确披露未接纳
+            # 的 key;不能只留下早先的一条 outline 诊断,更不能继续声称总有下一轮。
+            record(TraceStep(
+                step_type="skip",
+                summary="大纲仍有未接纳的新证据,最终答案仅使用已绑定证据",
+                detail={
+                    "reason": "outline_evidence_overflow_unresolved",
+                    "overflow_evidence": {
+                        section_id: list(keys)
+                        for section_id, keys in outline_overflow.items()
+                    },
+                },
+            ))
 
         # --- 已确认意图种子:终态披露(挪自补种阶段,见上方 coverage pass 的
         # 说明)---------------------------------------------------------------

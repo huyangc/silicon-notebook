@@ -23,12 +23,14 @@ from app.services.reasoning_retrieval import (
     OutlineSection,
     ReasoningRetriever,
     bind_outline_evidence,
+    carry_outline_overflow,
     merge_outline_evidence,
     outline_binding_keys,
     outline_signature,
     outline_wiring_active,
     parse_outline_sections,
     _MAX_OUTLINE_UPDATES,
+    _OUTLINE_MAX_PENDING_EVIDENCE,
     _OUTLINE_EVIDENCE_KEY_CHARS,
     _OUTLINE_ID_CHARS,
     _OUTLINE_MAX_EVIDENCE,
@@ -446,8 +448,8 @@ def test_parse_breaks_a_parent_cycle():
 
 # ----------------------------------------------------------- 绑定键服务端校验
 
-def test_binding_keys_are_exactly_the_retrieval_candidate_pool():
-    """合法集 = 检索候选池,且必须 **⊆ 模型可见**。
+def test_binding_keys_are_candidate_pool_intersected_with_visible_or_retained():
+    """合法集 = 候选池 ∩ (曾展示 ∪ 已持有),且必须 **⊆ 模型可见或服务端状态**。
 
     枚举清单的条目 id 刻意**不在**内(v1):枚举账目按合同只回覆盖计数、不回条目
     id,模型根本拿不到那些 id,放进合法集只是一片没人能踩到的死面,同时放宽了
@@ -461,13 +463,15 @@ def test_binding_keys_are_exactly_the_retrieval_candidate_pool():
         {"ko-1": object()},
         [RetrievedElement("el-1", "s1", "论文一", "p1", "formula", "文本")],
         [RetrievedChunk("ch-1", "s1", "论文一", "1", "文本")],
+        {"ko-1", "el-1", "猜的"},
+        {"ch-1"},
     )
 
     assert keys == {"ko-1", "el-1", "ch-1"}
     # 形参也钉住:悄悄把 enumerations 接回来(而账目仍不回条目 id)会重新打开那片
     # 死面,而只看返回值的用例抓不到。
     assert list(inspect.signature(outline_binding_keys).parameters) == [
-        "collected", "elements", "chunks"]
+        "collected", "elements", "chunks", "ever_shown_keys", "retained_keys"]
 
 
 def test_evidence_key_width_fits_the_real_surrogate_ids():
@@ -559,6 +563,42 @@ def test_union_overflow_keeps_old_keys_and_names_rejected_new_keys():
     assert dropped == 0 and removed == 0
 
 
+def test_pending_overflow_persists_until_bound_or_explicitly_abandoned():
+    merged = [OutlineSection(id="a", title="一节", evidence_keys=["old-1"])]
+    submitted = [OutlineSection(
+        id="a", title="一节", evidence_keys=[], remove_evidence_keys=[])]
+
+    assert carry_outline_overflow(
+        {"a": ["new-1"]}, submitted, merged, {},
+    ) == {"a": ["new-1"]}
+
+    submitted[0].remove_evidence_keys = ["new-1"]
+    assert carry_outline_overflow(
+        {"a": ["new-1"]}, submitted, merged, {},
+    ) == {}
+
+
+def test_persistent_pending_is_complete_in_state_but_windowed_in_prompt():
+    submitted = [OutlineSection(id="a", title="一节")]
+    merged = [OutlineSection(id="a", title="一节")]
+    pending = {}
+    for batch in range(_MAX_OUTLINE_UPDATES + 1):
+        current = {
+            "a": [
+                f"pending-{batch}-{index}"
+                for index in range(_OUTLINE_MAX_EVIDENCE)
+            ]
+        }
+        pending = carry_outline_overflow(pending, submitted, merged, current)
+
+    assert len(pending["a"]) == _OUTLINE_MAX_PENDING_EVIDENCE
+    note = _outline_note(merged, 1, pending)
+    for index in range(_OUTLINE_MAX_EVIDENCE):
+        assert f"pending-0-{index}" in note
+    assert "pending-1-0" not in note
+    assert f"另有 {_OUTLINE_MAX_PENDING_EVIDENCE - _OUTLINE_MAX_EVIDENCE} 条" in note
+
+
 # --------------------------------------------------------------- 动作与 trace
 
 def test_update_outline_records_a_bounded_trace_step(repo):
@@ -632,6 +672,313 @@ def test_the_action_unions_same_id_evidence_and_feeds_back_overflow(repo, monkey
     assert "未接纳新证据" in fed
     assert "new-1、new-2" in fed
     assert "remove_evidence" in fed
+
+
+def test_sufficient_overflow_gets_one_repair_round(repo, monkeypatch):
+    """最终大纲与 sufficient 同轮提交时,overflow 不能被短路吞掉。"""
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_keys = ["new-1", "new-2"]
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + new_keys),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        dict(_outline_action([
+            {"id": "a", "title": "一节", "evidence": new_keys},
+        ]), sufficient=True),
+        dict(_outline_action([{
+            "id": "a", "title": "一节",
+            "evidence": new_keys,
+            "remove_evidence": old_keys[:2],
+        }]), sufficient=True),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].evidence_keys == old_keys[2:] + new_keys
+    assert len(llm.reflect_prompts) == 3
+    assert "未接纳新证据" in llm.reflect_prompts[2]
+    assert "outline_evidence_overflow_unresolved" not in _skips(result)
+
+
+def test_repair_that_omits_the_pending_key_keeps_it_visible_at_run_end(
+    repo, monkeypatch,
+):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        dict(_outline_action([
+            {"id": "a", "title": "一节", "evidence": [new_key]},
+        ]), sufficient=True),
+        # 腾出了位置,但转录时漏掉 new_key:服务端不能把 pending 当成已解决。
+        _outline_action([{
+            "id": "a", "title": "一节", "remove_evidence": [old_keys[0]],
+        }]),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].evidence_keys == old_keys[1:]
+    unresolved = _skips(result)["outline_evidence_overflow_unresolved"]
+    assert unresolved.detail["overflow_evidence"] == {"a": [new_key]}
+
+
+def test_sufficient_overflow_repair_round_cannot_execute_retrieval(repo, monkeypatch):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        dict(_outline_action([
+            {"id": "a", "title": "一节", "evidence": [new_key]},
+        ]), sufficient=True),
+        {"next_action": "search_elements", "elements_query": "不应执行"},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert "outline_overflow_repair_declined" in _skips(result)
+    assert all(
+        step.detail.get("query") != "不应执行"
+        for step in _steps(result, "retrieve")
+    )
+    assert "outline_evidence_overflow_unresolved" in _skips(result)
+
+
+@pytest.mark.parametrize("terminal_boundary", ["sufficient", "max_steps", "stale"])
+def test_terminal_overflow_repair_rejects_section_structure_changes(
+    repo, monkeypatch, terminal_boundary,
+):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = (
+        2 if terminal_boundary == "stale" else 99
+    )
+    overflow = _outline_action([
+        {"id": "a", "title": "原结构", "evidence": [new_key]},
+    ])
+    if terminal_boundary == "sufficient":
+        overflow = dict(overflow, sufficient=True)
+    llm = _SeqLLM([
+        _outline_action([
+            {"id": "a", "title": "原结构", "evidence": old_keys},
+        ]),
+        overflow,
+        _outline_action([{
+            "id": "a", "title": "偷偷改结构", "evidence": [new_key],
+            "remove_evidence": [old_keys[0]],
+        }]),
+    ])
+    retriever, limits = _retriever(repo, llm)
+    kwargs = {"max_steps": 2} if terminal_boundary == "max_steps" else {}
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits, **kwargs)
+
+    assert result.outline[0].title == "原结构"
+    assert result.outline[0].evidence_keys == old_keys
+    assert "outline_repair_structure" in _skips(result)
+    assert "outline_evidence_overflow_unresolved" in _skips(result)
+
+
+def test_structure_rejection_keeps_later_updates_in_repair_only_mode(
+    repo, monkeypatch,
+):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "原结构", "evidence": old_keys}]),
+        _outline_action([{"id": "a", "title": "原结构", "evidence": [new_key]}]),
+        # 第一份纠错偷改标题,应拒绝并保持 pending。
+        _outline_action([{
+            "id": "a", "title": "违规一", "evidence": [new_key],
+            "remove_evidence": [old_keys[0]],
+        }]),
+        # 下一轮仍然不能伪装成普通 update 再改一次结构。
+        _outline_action([{
+            "id": "a", "title": "违规二", "evidence": [new_key],
+            "remove_evidence": [old_keys[0]],
+        }]),
+        # 同结构提交才真正完成换键。
+        _outline_action([{
+            "id": "a", "title": "原结构", "evidence": [new_key],
+            "remove_evidence": [old_keys[0]],
+        }]),
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].title == "原结构"
+    assert result.outline[0].evidence_keys == old_keys[1:] + [new_key]
+    assert len([
+        step for step in _steps(result, "skip")
+        if step.detail.get("reason") == "outline_repair_structure"
+    ]) == 2
+    assert "outline_evidence_overflow_unresolved" not in _skips(result)
+
+
+def test_max_steps_overflow_gets_only_one_non_retrieval_repair_round(
+    repo, monkeypatch,
+):
+    """步骤预算耗尽可越界一次纠错,但不能借那轮再执行检索。"""
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        _outline_action([{"id": "a", "title": "一节", "evidence": [new_key]}]),
+        {"next_action": "search_elements", "elements_query": "不应执行"},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(
+        notebook.id, "综述", "", limits=limits, max_steps=2,
+    )
+
+    assert len(llm.reflect_prompts) == 3
+    assert "outline_overflow_repair_declined" in _skips(result)
+    assert "outline_evidence_overflow_unresolved" in _skips(result)
+    assert all(
+        step.detail.get("query") != "不应执行"
+        for step in _steps(result, "retrieve")
+    )
+
+
+def test_stale_breaker_yields_to_one_overflow_repair_round(repo, monkeypatch):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 2
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        _outline_action([{"id": "a", "title": "一节", "evidence": [new_key]}]),
+        _outline_action([{
+            "id": "a", "title": "一节", "evidence": [new_key],
+            "remove_evidence": [old_keys[0]],
+        }]),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].evidence_keys == old_keys[1:] + [new_key]
+    assert len(llm.reflect_prompts) == 3
+    assert _steps(result, "outline")[-1].detail["overflow_repair"] is True
+
+
+def test_sixth_update_overflow_allows_one_same_structure_key_swap(
+    repo, monkeypatch,
+):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    same = {"id": "a", "title": "一节", "evidence": old_keys}
+    llm = _SeqLLM(
+        [_outline_action([same]) for _ in range(_MAX_OUTLINE_UPDATES - 1)]
+        + [
+            _outline_action([
+                {"id": "a", "title": "一节", "evidence": [new_key]},
+            ]),
+            _outline_action([{
+                "id": "a", "title": "一节", "evidence": [new_key],
+                "remove_evidence": [old_keys[0]],
+            }]),
+            ANSWER,
+        ]
+    )
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].evidence_keys == old_keys[1:] + [new_key]
+    assert len(_steps(result, "outline")) == _MAX_OUTLINE_UPDATES + 1
+    assert _steps(result, "outline")[-1].detail["overflow_repair"] is True
+    assert "outline_budget" not in _skips(result)
+
+
+def test_sixth_update_repair_is_consumed_even_when_structure_is_rejected(
+    repo, monkeypatch,
+):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    same = {"id": "a", "title": "一节", "evidence": old_keys}
+    llm = _SeqLLM(
+        [_outline_action([same]) for _ in range(_MAX_OUTLINE_UPDATES - 1)]
+        + [
+            _outline_action([
+                {"id": "a", "title": "一节", "evidence": [new_key]},
+            ]),
+            # 第一次专用提交改了标题:拒绝,但机会已经消费。
+            _outline_action([{
+                "id": "a", "title": "改标题", "evidence": [new_key],
+                "remove_evidence": [old_keys[0]],
+            }]),
+            # 第二次即使结构正确也不能再使用同一份专用资格。
+            _outline_action([{
+                "id": "a", "title": "一节", "evidence": [new_key],
+                "remove_evidence": [old_keys[0]],
+            }]),
+            ANSWER,
+        ]
+    )
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].evidence_keys == old_keys
+    assert "outline_repair_structure" in _skips(result)
+    assert "outline_budget" in _skips(result)
+    assert "outline_evidence_overflow_unresolved" in _skips(result)
 
 
 def test_outline_updates_are_capped_per_run(repo):
@@ -894,7 +1241,7 @@ def test_run_wires_the_id_display_to_the_gate(repo, effort, ids_expected):
 
 
 def test_bindings_survive_the_candidate_window(repo):
-    """合法键按**本 run 累计**算,不按上一轮摘要展示过什么算。
+    """合法键按**本 run 曾展示**累计,旧窗口滑走不失效、未展示中段不放行。
 
     `_summarize` 对候选池开的是头尾窗口,但服务端会持续持有旧绑定:按「当前展示」
     判合法的话,早先绑上的证据会因窗口滑动反过来被事实层判成非法。
@@ -905,7 +1252,7 @@ def test_bindings_survive_the_candidate_window(repo):
         f"ko-{i}": RetrievedKnowledge(
             object_id=f"ko-{i}", object_type="claim", payload={"name": f"n{i}"},
             evidence=[], score=0.0, relevance=0.0)
-        for i in range(60)
+        for i in range(25)
     }
     retriever = ReasoningRetriever(
         retrieval=repo.retrieval, model_clients=repo,
@@ -913,12 +1260,30 @@ def test_bindings_survive_the_candidate_window(repo):
         settings=repo.settings,
     )
 
-    summary = retriever._summarize(collected, [], [], (), show_ids=True)
-    keys = outline_binding_keys(collected, [], [])
-    windowed_out = "ko-40"
+    ever_shown = set()
+    retriever._summarize(
+        collected, [], [], (), show_ids=True,
+        shown_binding_keys=ever_shown,
+    )
+    slid_out = "ko-22"                         # 首轮 25 条时实际展示过
+    assert slid_out in ever_shown
+    for i in range(25, 60):
+        collected[f"ko-{i}"] = RetrievedKnowledge(
+            object_id=f"ko-{i}", object_type="claim",
+            payload={"name": f"n{i}"}, evidence=[], score=0.0, relevance=0.0,
+        )
+    summary = retriever._summarize(
+        collected, [], [], (), show_ids=True,
+        shown_binding_keys=ever_shown,
+    )
+    retained = outline_binding_keys(collected, [], [], ever_shown, {slid_out})
+    never_shown = "ko-40"
 
-    assert windowed_out not in summary          # 窗口把它挤掉了
-    assert windowed_out in keys                 # 但它仍然是合法绑定键
+    assert slid_out not in summary               # 后来滑进中段
+    assert slid_out in retained                  # 但曾展示/已绑定仍合法
+    assert never_shown not in summary
+    assert never_shown not in ever_shown
+    assert never_shown not in retained            # 从未展示就不能猜 id 绑定
 
 
 # ------------------------------------------------------------------ fail_closed
