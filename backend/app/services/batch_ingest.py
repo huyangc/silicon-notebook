@@ -149,7 +149,13 @@ class BatchIngestRepository(Protocol):
     def process_source(self, source_id: str) -> SourceSummary: ...
     def extract_source(self, source_id: str) -> None: ...
     def build_notebook_kg(
-        self, notebook_id: str, *, progress: ExtractionProgress | None = None
+        self,
+        notebook_id: str,
+        *,
+        progress: ExtractionProgress | None = None,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+        finalize: Callable[[dict], dict | None] | None = None,
     ) -> KGBuildResult: ...
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: RebuildProgress | None = None,
@@ -569,12 +575,12 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
     repo.build_scale_index(notebook_id) 使索引与新簇同步。
     """
-    from app.services.kg.scheduler import submit_job
-
     if no_rebuild and rebuild_only:
         raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
     if retry_partial and rebuild_only:
         raise ValueError("retry_partial 和 rebuild_only 互斥,不能同时为 True")
+    if not rebuild_only and not repo.configured("kg_extract"):
+        raise RuntimeError("kg_extract workload 未绑定系统模型服务")
 
     log = log or (lambda _e: None)
     mnt = repo.maintenance
@@ -589,155 +595,77 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
         "nodes_embedded": 0,
     }
     try:
-        # ── 抽取阶段(rebuild_only 时跳过) ────────────────────────────────────
-        # 周期自报业务 producer/source 池；模型容量由 service scheduler 观测。
-        if not rebuild_only:
-            llm_ok = repo.configured("kg_extract")
-            if limit is None and not retry_partial:
-                # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
-                if llm_ok or not no_rebuild:
-                    # 尚无 KG 的源数当 total(build_notebook_kg 内部自算目标,故 done 靠其
-                    # progress 回调回填);查询很廉价。
-                    kg_total = mnt.count_sources_missing_kg(notebook_id)
-                    with _PoolReporter(report_interval, total=kg_total, log=log) as reporter:
-                        def _kg_progress(
-                            i: int, n: int, sid: str, ok: bool
-                        ) -> None:
-                            reporter.done = i
-                            reporter.total = n
-                            print(f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}", flush=True)
-                        # 只在这一条路径上把 SIGTERM/SIGHUP 转成 KeyboardInterrupt:
-                        # 唯有它建持久任务行(kg_build_jobs),并由 durable build 协议取消
-                        # 和排空在飞抽取。limit/retry_partial 以及 run_all/run_reparse
-                        # 不建持久任务行，仍保留 SIGTERM/SIGHUP 的默认进程级终止；它们
-                        # 只在 Python 已收到 Ctrl-C/其它 BaseException 时排空已接受的
-                        # future，确保 PostgreSQL advisory lock 不会先于 worker 释放。
-                        saved_signals = _install_termination_signals()
-                        try:
-                            out = repo.build_notebook_kg(  # 跨源并发抽取,逐源打印进度
-                                notebook_id, progress=_kg_progress)
-                        finally:
-                            _restore_signals(saved_signals)
-                    res["extracted"] = len(out["built"])
-                    res["failed"] = len(out["failed"])
-            else:
-                if not llm_ok:
-                    raise RuntimeError(
-                        "kg_extract workload 未绑定系统模型服务")
-                def _extract_one(
-                    sid: str, preserve_existing: bool,
-                ) -> tuple[str, bool, Exception | None]:
-                    try:
-                        mnt.set_source_status(sid, "extracting")
-                        if preserve_existing:
-                            mnt.run_extraction(
-                                sid, preserve_existing_until_complete=True
-                            )
-                        else:
-                            mnt.run_extraction(sid)
-                        mnt.set_source_status(sid, "extracted")
-                        return sid, preserve_existing, None
-                    except Exception as exc:  # noqa: BLE001 — 单源失败隔离
-                        mnt.set_source_status(
-                            sid, "extracted" if preserve_existing else "parsed"
-                        )
-                        return sid, preserve_existing, exc
+        def _finalize(_result: dict) -> dict[str, int]:
+            print("补 KG 节点向量…", flush=True)
+            nodes_embedded = backfill_node_embeddings(repo, notebook_id)
+            print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
+            with _PoolReporter(
+                report_interval, total=0, log=log, label="rebuild 阶段"
+            ):
+                clusters = repo.rebuild_unified_kg(
+                    notebook_id,
+                    progress=_rebuild_progress,
+                    force=(rebuild_only or fresh),
+                    fresh=fresh,
+                )
+            finalized = {
+                "clusters": clusters,
+                "nodes_embedded": nodes_embedded,
+            }
+            log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
+            print(f"rebuild done: clusters={clusters}", flush=True)
+            nb = repo.get_notebook(notebook_id)
+            if nb.tier == "base" or mnt.has_scale_index(notebook_id):
+                manifest = repo.build_scale_index(
+                    notebook_id, on_stage=_index_stage_progress
+                )
+                scale_nodes = int(manifest.get("n_nodes", 0))
+                finalized["scale_index_nodes"] = scale_nodes
+                log({
+                    "phase": "kg",
+                    "status": "scale_index_built",
+                    "nodes": scale_nodes,
+                })
+                print(f"scale index built (nodes={scale_nodes})", flush=True)
+            return finalized
 
-                max_targets = max(0, limit) if limit is not None else None
-                processed = 0
-                after_id = ""
-                with _PoolReporter(
-                    report_interval, total=max_targets or 0, log=log
-                ) as reporter:
-                    while max_targets is None or processed < max_targets:
-                        page_limit = _EMBED_PAGE_ROWS
-                        if max_targets is not None:
-                            page_limit = min(page_limit, max_targets - processed)
-                        rows = mnt.kg_target_source_rows_page(
-                            notebook_id,
-                            after_id=after_id,
-                            limit=page_limit,
-                            retry_partial=retry_partial,
-                        )
-                        if not rows:
-                            break
-                        after_id = str(rows[-1]["source_id"])
-                        reporter.total = (
-                            max_targets
-                            if max_targets is not None
-                            else processed + len(rows)
-                        )
-                        futures = {}
-                        accepted: set[Future[object]] = set()
-                        try:
-                            for row in rows:
-                                future = _submit_tracked_future(
-                                    submit_job,
-                                    accepted,
-                                    _extract_one,
-                                    str(row["source_id"]),
-                                    bool(row["is_partial"]),
-                                )
-                                futures[future] = str(row["source_id"])
-                            for page_i, future in enumerate(as_completed(futures), 1):
-                                i = processed + page_i
-                                sid, was_partial, error = future.result()
-                                if error is None:
-                                    res["extracted"] += 1
-                                    if was_partial:
-                                        res["partial_retried"] += 1
-                                    log({
-                                        "phase": "kg",
-                                        "source_id": sid,
-                                        "status": "extracted",
-                                        "progress": str(i),
-                                    })
-                                else:
-                                    res["failed"] += 1
-                                    if was_partial:
-                                        res["partial_failed_preserved"] += 1
-                                    log({
-                                        "phase": "kg",
-                                        "source_id": sid,
-                                        "status": "failed",
-                                        "error": str(error),
-                                    })
-                                reporter.done = i
-                        except BaseException:
-                            _cancel_and_drain_futures(accepted)
-                            raise
-                        processed += len(rows)
-                        if len(rows) < page_limit:
-                            break
-
-        # ── no_rebuild:抽取后直接返回,不做 rebuild/scale-index ───────────────
-        if no_rebuild:
+        if rebuild_only:
+            res.update(_finalize(res))
             return res
 
-        # ── Rebuild 阶段(有 LLM:概念描述/merge-review)→ 同样开 pool 自报 ────────
-        print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
-        with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
-            # force=(rebuild_only or fresh):rebuild_only 是显式「只重建」入口(用户主动重聚),
-            # fresh 是显式「清 checkpoint 强制重裁」入口——两者都必须绕过跳过门,否则 fresh 清完
-            # checkpoint 后仍被 force=False 的门控挡回缓存簇数,--fresh 变假 no-op。普通 kg 阶段两者
-            # 皆 False 时走门控(force=False),无新文件时跳过重聚(本次优化点)。
-            clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
-                                               force=(rebuild_only or fresh), fresh=fresh)
-            res["clusters"] = clusters
-            log({"phase": "kg", "status": "rebuilt", "clusters": clusters})
-            print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
-            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id)
+        with _PoolReporter(
+            report_interval, total=max(0, limit or 0), log=log
+        ) as reporter:
+            def _kg_progress(i: int, n: int, sid: str, ok: bool) -> None:
+                reporter.done = i
+                reporter.total = n
+                print(
+                    f"[kg {i}/{n}] {sid} {'✓' if ok else '✗ 失败'}",
+                    flush=True,
+                )
 
-            # ── Scale-index 自动联(base tier 或已有索引) ─────────────────────
-            nb = repo.get_notebook(notebook_id)
-            is_base = (nb.tier == "base")
-            has_index = mnt.has_scale_index(notebook_id)
-            if is_base or has_index:
-                manifest = repo.build_scale_index(notebook_id, on_stage=_index_stage_progress)
-                scale_nodes = manifest.get("n_nodes", 0)
-                res["scale_index_nodes"] = scale_nodes
-                log({"phase": "kg", "status": "scale_index_built", "nodes": scale_nodes})
-                print(f"scale index built (nodes={scale_nodes})", flush=True)
+            # 所有 kg 抽取形态都进入同一持久任务协议；成功终态要等批量收尾完成。
+            # no_rebuild 传空收尾回调，仅用于抑制过早的 scale-index fold 排队。
+            saved_signals = _install_termination_signals()
+            try:
+                out = repo.build_notebook_kg(
+                    notebook_id,
+                    progress=_kg_progress,
+                    target_limit=limit,
+                    retry_partial=retry_partial,
+                    finalize=(lambda _out: None) if no_rebuild else _finalize,
+                )
+            finally:
+                _restore_signals(saved_signals)
+        res["extracted"] = len(out["built"])
+        res["failed"] = len(out["failed"])
+        res["partial_retried"] = len(out.get("partial_retried", []))
+        res["partial_failed_preserved"] = len(
+            out.get("partial_failed_preserved", [])
+        )
+        for key in ("clusters", "nodes_embedded", "scale_index_nodes"):
+            if key in out:
+                res[key] = int(out[key])
 
     finally:
         repo.settings.kg_incremental_fusion_enabled = orig_fusion   # 还原,避免污染 repo 实例
@@ -1005,7 +933,8 @@ def backfill_node_embeddings(
     # Backfilling node vectors changes the ANN inputs → mark dirty so the cluster
     # version's kg_mutation_seq advances (a later force=False rebuild must not skip
     # on the strength of unchanged object/decided counts alone).
-    mnt.mark_unified_kg_dirty(notebook_id)
+    if count:
+        mnt.mark_unified_kg_dirty(notebook_id)
     return count
 
 
@@ -1050,7 +979,7 @@ def run_embed(
     element_after = _count_missing_element_vectors(repo, notebook_id)
     node_after = _count_missing_node_vectors(repo, notebook_id)
     print(f"embed done: 补 chunk={chunks_embedded} element={elements_embedded} "
-          f"node(扫描)={nodes_embedded};剩余缺失 chunk={chunk_after} "
+          f"node(新增)={nodes_embedded};剩余缺失 chunk={chunk_after} "
           f"element={element_after} node={node_after}", flush=True)
     return {
         "chunks_embedded": chunks_embedded,
@@ -1609,7 +1538,7 @@ def _dispatch_main(
 
 
 def _install_termination_signals() -> list[tuple[int, object]]:
-    """把 SIGTERM/SIGHUP 转成 KeyboardInterrupt,让批处理被终止时走和 Ctrl-C 同一条
+    """把 SIGINT/SIGTERM/SIGHUP 统一成一次 KeyboardInterrupt,让终止走同一条
     收尾路径。对 kg 阶段是必需的:不收尾,kg_build_jobs 那行就永久停在 'running',
     该 notebook 之后的每次分析都会被单飞守卫挡成 KgBuildAlreadyRunning,而离线进程
     刻意无权自行清理(启动期兜底只属于服务端 lifespan)。
@@ -1618,17 +1547,25 @@ def _install_termination_signals() -> list[tuple[int, object]]:
       * 只能在主线程装(signal.signal 的硬性限制),否则原样返回空表;
       * **已被设成忽略的信号保持忽略**——`nohup` 会把 SIGHUP 置为 SIG_IGN,把它抢
         回来会让本来能扛住掉线的长跑批处理在 SSH 断开时被杀掉;
-      * SIGINT 不动(Python 默认已抛 KeyboardInterrupt)。
+      * 第一次终止抛 KeyboardInterrupt,其后的重复信号在本次调用还原 handler 前
+        暂时吸收。这样首次中断会启动 durable job 收尾,而连续 Ctrl-C/SIGTERM 不会
+        再次打断 extraction drain 或 finalizer executor 的 shutdown(wait)。
     SIGKILL / 掉电不可捕获,那类残留仍只能由后端启动时的崩溃兜底清理。
     """
     if threading.current_thread() is not threading.main_thread():
         return []
 
+    interrupted = False
+
     def _raise_interrupt(signum, _frame):
+        nonlocal interrupted
+        if interrupted:
+            return
+        interrupted = True
         raise KeyboardInterrupt(f"terminated by signal {signum}")
 
     installed: list[tuple[int, object]] = []
-    for name in ("SIGTERM", "SIGHUP"):
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
         sig = getattr(signal, name, None)
         if sig is None:  # pragma: no cover - 平台差异(Windows 无 SIGHUP)
             continue
@@ -1750,6 +1687,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # RepositoryRuntime creates the process-wide KG business scheduler during
+    # construction.  Apply an explicit CLI override before opening the repo so
+    # --workers controls the scheduler that kg/all/reparse actually submit to.
+    if args.workers is not None and args.phase in {"kg", "all", "reparse"}:
+        settings = settings.model_copy(
+            update={"kg_job_concurrency": effective.workers}
+        )
+
     if args.dry_run:
         files = iter_files(args.input_dir) if args.input_dir else []
         print(f"[dry-run] {len(files)} files under {args.input_dir}", flush=True)
@@ -1783,8 +1728,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.notebook_id:
                 _require_notebook_owner(repo, args.notebook_id, batch_user)
             user_token = set_request_user(batch_user)
-            # 终止信号的转换**不**在这里全局安装(见 run_kg 里 build_notebook_kg 那一处的说明:
-            # 只有会排空的路径才配得上它)。这里只负责把中断收成干净的输出与 shell 惯例退出码。
+            # 终止信号的转换不在这里全局安装；持久 KG job 在 run_kg 内安装并排空，
+            # 其它阶段保留自己的收尾协议。这里只把中断收成干净输出与惯例退出码。
             try:
                 return _dispatch_main(args, repo, effective)
             except KgBuildAlreadyRunning as exc:

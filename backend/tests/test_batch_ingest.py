@@ -257,24 +257,37 @@ def test_run_ingest_same_run_duplicate_files_skip_not_reparse(repo, tmp_path):
 
 def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
     nb_id = bi.ensure_notebook(repo, None, "nb")
+    bind_chat_client(repo, "kg_extract", _StubLLM())
     calls = {}
 
-    def fake_build(nb, *, progress=None):
+    def fake_build(
+        nb, *, progress=None, target_limit=None, retry_partial=False,
+        finalize=None,
+    ):
         calls["fusion_flag_during"] = repo.settings.kg_incremental_fusion_enabled
         calls["build_nb"] = nb
-        return {"built": ["s1", "s2"], "failed": [], "skipped": []}
+        result = {"built": ["s1", "s2"], "failed": [], "skipped": []}
+        result.update(finalize(result) or {})
+        return result
 
     def fake_rebuild(nb, progress=None, force=False, fresh=False):
+        calls.setdefault("finalize_order", []).append("rebuild")
         calls["rebuild_nb"] = nb
         return 7
 
     monkeypatch.setattr(repo, "build_notebook_kg", fake_build)
     monkeypatch.setattr(repo, "rebuild_unified_kg", fake_rebuild)
+    monkeypatch.setattr(
+        bi,
+        "backfill_node_embeddings",
+        lambda *_args: calls.setdefault("finalize_order", []).append("embed") or 0,
+    )
     res = bi.run_kg(repo, nb_id, limit=None)
     assert res["extracted"] == 2 and res["failed"] == 0
     assert res["clusters"] == 7
     assert calls["fusion_flag_during"] is False
     assert calls["build_nb"] == nb_id and calls["rebuild_nb"] == nb_id
+    assert calls["finalize_order"] == ["embed", "rebuild"]
 
 
 class _StubKgChatClient:
@@ -335,10 +348,11 @@ def test_main_interrupt_exits_cleanly_with_shell_convention(
     顺带钉住会排空的那条路径(build_notebook_kg)确实被终止信号转换包住了,并在
     返回时还原(没装/装完不还原都算回归)。"""
     nb_id = bi.ensure_notebook(repo, None, "nb")
+    bind_chat_client(repo, "kg_extract", _StubLLM())
     during = {}
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
-    def _interrupt(nb, *, progress=None):
+    def _interrupt(nb, **_kwargs):
         during["sigterm"] = signal.getsignal(signal.SIGTERM)
         raise KeyboardInterrupt("ctrl-c")
 
@@ -353,68 +367,52 @@ def test_main_interrupt_exits_cleanly_with_shell_convention(
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
 
-def test_non_durable_paths_keep_default_termination_signals(
+def test_limited_kg_uses_durable_termination_signals(
     repo, monkeypatch, capsys
 ):
-    """非 durable 分支不接管 SIGTERM/SIGHUP；Ctrl-C 的 future drain 另行验证。"""
+    """limit 分支也必须进入 durable job，因而使用同一终止信号协议。"""
     nb_id = bi.ensure_notebook(repo, None, "nb")
+    bind_chat_client(repo, "kg_extract", _StubLLM())
     bind_chat_client(repo, "kg_extract", _StubKgChatClient())
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     observed = {}
 
-    def _target_page(_notebook_id, **_kwargs):
+    def _build(_notebook_id, **_kwargs):
         observed["sigterm"] = signal.getsignal(signal.SIGTERM)
         observed["sighup"] = signal.getsignal(signal.SIGHUP)
-        return []
+        return {"built": [], "failed": []}
 
-    monkeypatch.setattr(
-        repo.maintenance, "kg_target_source_rows_page", _target_page
-    )
-    monkeypatch.setattr(
-        repo, "rebuild_unified_kg",
-        lambda nb, progress=None, force=False, fresh=False: 0,
-    )
-    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb: 0)
+    monkeypatch.setattr(repo, "build_notebook_kg", _build)
 
     rc = bi.main(
         ["kg", "--notebook-id", nb_id, "--limit", "5", "--allow-no-embed"]
     )
 
     assert rc == 0
-    assert observed["sigterm"] is signal.SIG_DFL
-    assert observed["sighup"] is signal.SIG_DFL
+    assert callable(observed["sigterm"])
+    assert callable(observed["sighup"])
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
 
 def test_limited_kg_interrupt_cancels_and_drains_accepted_workers(
     repo, monkeypatch
 ):
-    """Ctrl-C 后不能先释放 PG advisory lock 再让后台 worker 继续写库。"""
+    """limit 路径委托 durable lifecycle，由它负责取消并排空 worker。"""
     nb_id = bi.ensure_notebook(repo, None, "nb")
     bind_chat_client(repo, "kg_extract", _StubKgChatClient())
-    accepted: Future[object] = Future()
-    tracked = []
+    seen = {}
 
-    monkeypatch.setattr(
-        repo.maintenance,
-        "kg_target_source_rows_page",
-        lambda *_args, **_kwargs: [{"source_id": "src-one", "is_partial": False}],
-    )
-    def _submit(_wrapper, completion, *_args, **_kwargs):
-        tracked.append(completion)
-        return accepted
-
-    monkeypatch.setattr("app.services.kg.scheduler.submit_job", _submit)
-
-    def _interrupt(_futures):
+    def _interrupt(_notebook_id, **kwargs):
+        seen.update(kwargs)
         raise KeyboardInterrupt("ctrl-c")
-        yield  # pragma: no cover - keep this a generator like as_completed
-
-    monkeypatch.setattr(bi, "as_completed", _interrupt)
+    monkeypatch.setattr(repo, "build_notebook_kg", _interrupt)
 
     with pytest.raises(KeyboardInterrupt):
         bi.run_kg(repo, nb_id, limit=1, no_rebuild=True)
 
-    assert len(tracked) == 1 and tracked[0].cancelled()
+    assert seen["target_limit"] == 1
+    assert seen["retry_partial"] is False
+    assert seen["finalize"] is not None
 
 
 def test_cancel_and_drain_absorbs_repeated_interrupt_during_cancellation():
@@ -514,35 +512,20 @@ def test_run_ingest_repeated_interrupt_cannot_escape_worker_drain(
 def test_limited_kg_interrupt_during_submission_drains_already_accepted_worker(
     repo, monkeypatch
 ):
+    """limit 的提交窗口也由 durable lifecycle 单点负责。"""
     nb_id = bi.ensure_notebook(repo, None, "nb-submit-interrupt")
     bind_chat_client(repo, "kg_extract", _StubKgChatClient())
-    accepted: Future[object] = Future()
-    tracked = []
-    calls = 0
+    seen = {}
 
-    monkeypatch.setattr(
-        repo.maintenance,
-        "kg_target_source_rows_page",
-        lambda *_args, **_kwargs: [
-            {"source_id": "src-one", "is_partial": False},
-            {"source_id": "src-two", "is_partial": False},
-        ],
-    )
-
-    def _submit(_wrapper, completion, *_args, **_kwargs):
-        nonlocal calls
-        tracked.append(completion)
-        calls += 1
-        if calls == 1:
-            return accepted
+    def _build(_notebook_id, **kwargs):
+        seen.update(kwargs)
         raise KeyboardInterrupt("ctrl-c while submitting")
-
-    monkeypatch.setattr("app.services.kg.scheduler.submit_job", _submit)
+    monkeypatch.setattr(repo, "build_notebook_kg", _build)
 
     with pytest.raises(KeyboardInterrupt):
         bi.run_kg(repo, nb_id, limit=2, no_rebuild=True)
 
-    assert len(tracked) == 2 and all(future.cancelled() for future in tracked)
+    assert seen["target_limit"] == 2
 
 
 def test_reparse_interrupt_during_submission_drains_already_accepted_worker(
@@ -581,8 +564,9 @@ def test_main_interrupt_after_a_committed_build_still_reports_130(
     提交,信号打断的仍是**整条批处理**——run_kg 后面的聚类重建与补向量都没跑完,
     所以必须给 130 + 「已中断」,不能因为 job 行是 succeeded 就报成功退出 0。"""
     nb_id = bi.ensure_notebook(repo, None, "nb")
+    bind_chat_client(repo, "kg_extract", _StubLLM())
 
-    def _succeed_then_interrupt(nb, *, progress=None):
+    def _succeed_then_interrupt(nb, **_kwargs):
         # 模拟「分析已提交,信号在返回前落下」
         raise KeyboardInterrupt("ctrl-c right after commit")
 
@@ -594,7 +578,8 @@ def test_main_interrupt_after_a_committed_build_still_reports_130(
     assert "已中断" in capsys.readouterr().err
 
 
-def test_install_termination_signals_converts_sigterm_and_restores():
+def test_install_termination_signals_converts_once_absorbs_repeats_and_restores():
+    previous_sigint = signal.getsignal(signal.SIGINT)
     saved = bi._install_termination_signals()
     try:
         assert signal.SIGTERM in [signum for signum, _ in saved]
@@ -602,9 +587,14 @@ def test_install_termination_signals_converts_sigterm_and_restores():
         assert callable(handler)
         with pytest.raises(KeyboardInterrupt):
             handler(signal.SIGTERM, None)
+        handler(signal.SIGTERM, None)
+        sigint_handler = signal.getsignal(signal.SIGINT)
+        assert callable(sigint_handler)
+        sigint_handler(signal.SIGINT, None)
     finally:
         bi._restore_signals(saved)
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) is previous_sigint
 
 
 def test_install_termination_signals_keeps_ignored_sighup_ignored():
@@ -764,12 +754,20 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
                 (f"el-lim-{i}", source_id, "paragraph", "L1", "text", "{}", now),
             )
     extracted_calls = []
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: extracted_calls.append(sid))
+    monkeypatch.setattr(
+        repo.maintenance,
+        "kg_target_source_rows_page",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy eligible-target query must not run")
+        ),
+    )
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion,
+        "run_extraction",
+        lambda sid, **_kwargs: extracted_calls.append(sid),
+    )
     monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
 
-    def _no_build(nb):
-        raise AssertionError("build_notebook_kg must not be called when limit is set")
-    monkeypatch.setattr(repo, "build_notebook_kg", _no_build)
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
 
@@ -780,6 +778,8 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
     res = bi.run_kg(repo, nb_id, limit=2)
     assert res["extracted"] == 2
     assert len(extracted_calls) == 2          # 只抽前 2 个未抽源(targets[:limit])
+    latest = repo._runtime.kg_build_jobs.latest(nb_id)
+    assert latest["status"] == "succeeded" and latest["total_sources"] == 2
 
 
 class _StubLLM:
@@ -816,19 +816,25 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
     gate = threading.Barrier(expected, timeout=30)
     arrived = 0
 
-    def _targets_page(_notebook_id, *, after_id="", limit=500, **_kwargs):
-        rows = [sid for sid in targets if sid > after_id][:limit]
-        return [{"source_id": sid, "is_partial": False} for sid in rows]
-
+    lifecycle = repo._runtime.knowledge_lifecycle
     monkeypatch.setattr(
-        repo.maintenance, "kg_target_source_rows_page", _targets_page
+        lifecycle,
+        "_kg_target_batches",
+        lambda *_args, **_kwargs: iter([(
+            [(sid, False) for sid in targets], [], []
+        )]),
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_reconcile_extracted_terminal",
+        lambda sid, extract_one: extract_one(sid),
     )
     repo._runtime.models.chat_clients = {
         **repo._runtime.models.chat_clients,
         "kg_extract": _StubLLM(),
     }
 
-    def extract(source_id):
+    def extract(source_id, **_kwargs):
         nonlocal active, peak, arrived
         with lock:
             active += 1
@@ -843,7 +849,7 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
             with lock:
                 active -= 1
 
-    monkeypatch.setattr(repo.maintenance, "run_extraction", extract)
+    monkeypatch.setattr(lifecycle, "_run_extraction", extract)
     bi.run_kg(
         repo,
         bi.ensure_notebook(repo, None, "nb-kg-limit"),
@@ -855,24 +861,28 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
 
 def test_run_kg_retry_partial_adds_safe_repair_targets(repo, monkeypatch):
     nb_id = bi.ensure_notebook(repo, None, "nb-retry-partial")
-    targets = [
-        {"source_id": "src-missing", "is_partial": False},
-        {"source_id": "src-partial", "is_partial": True},
-    ]
-
-    def _targets_page(_notebook_id, *, after_id="", limit=500, **_kwargs):
-        return [row for row in targets if row["source_id"] > after_id][:limit]
-
+    lifecycle = repo._runtime.knowledge_lifecycle
     monkeypatch.setattr(
-        repo.maintenance, "kg_target_source_rows_page", _targets_page
+        lifecycle,
+        "_kg_target_batches",
+        lambda *_args, **_kwargs: iter([(
+            [("src-missing", False), ("src-partial", True)], [], []
+        )]),
     )
-    monkeypatch.setattr(repo.maintenance, "set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_set_source_status", lambda *a, **k: None)
+    monkeypatch.setattr(
+        lifecycle,
+        "_reconcile_extracted_terminal",
+        lambda sid, extract_one: extract_one(sid),
+    )
     seen = []
 
-    def extract(source_id, *, preserve_existing_until_complete=False):
+    def extract(
+        source_id, *, preserve_existing_until_complete=False, **_kwargs
+    ):
         seen.append((source_id, preserve_existing_until_complete))
 
-    monkeypatch.setattr(repo.maintenance, "run_extraction", extract)
+    monkeypatch.setattr(lifecycle, "_run_extraction", extract)
     repo._runtime.models.chat_clients = {
         **repo._runtime.models.chat_clients,
         "kg_extract": _StubLLM(),
@@ -892,6 +902,30 @@ def test_run_kg_retry_partial_adds_safe_repair_targets(repo, monkeypatch):
     assert res["extracted"] == 2
     assert res["partial_retried"] == 1
     assert res["partial_failed_preserved"] == 0
+
+
+def test_run_kg_finalizer_failure_marks_durable_job_failed(repo, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb-finalizer-failure")
+    _seed_sources(repo, nb_id, 1, "src-finalizer")
+    _bind_chat(repo, "kg_extract", _StubLLM())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(
+        lifecycle, "_run_extraction", lambda _sid, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        repo,
+        "rebuild_unified_kg",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("finalizer failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="finalizer failed"):
+        bi.run_kg(repo, nb_id)
+
+    latest = repo._runtime.kg_build_jobs.latest(nb_id)
+    assert latest["status"] == "failed"
+    assert latest["error_code"] == "internal_error"
 
 
 def test_partial_kg_source_ids_uses_latest_run_and_requires_existing_graph(repo):
@@ -1278,6 +1312,24 @@ def test_run_embed_fills_missing_chunk_and_node_vectors(repo, tmp_path):
             "(SELECT 1 FROM knowledge_embeddings e WHERE e.object_id=o.id)",
             (nb_id,)).fetchone()["c"]
     assert chunk_missing == 0 and node_missing == 0
+
+
+def test_node_backfill_reports_inserted_rows_and_only_dirties_on_change(
+    repo, monkeypatch
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-node-backfill-count")
+    _seed_node(repo, nb_id, "ko-a")
+    _seed_node(repo, nb_id, "ko-b")
+    dirty = []
+    monkeypatch.setattr(
+        repo.maintenance,
+        "mark_unified_kg_dirty",
+        lambda notebook_id: dirty.append(notebook_id),
+    )
+
+    assert bi.backfill_node_embeddings(repo, nb_id) == 2
+    assert bi.backfill_node_embeddings(repo, nb_id) == 0
+    assert dirty == [nb_id]
 
 
 def test_main_embed_end_to_end_zeroes_missing(repo, tmp_path, capsys, monkeypatch):
@@ -1676,6 +1728,41 @@ def test_main_prints_only_business_orchestration_concurrency(
         "workers": 32,
         "workers_source": "cli",
     }
+
+
+def test_main_applies_workers_override_before_repository_construction(
+    repo, monkeypatch
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-workers-runtime")
+    opened_with = {}
+
+    @contextmanager
+    def _capture(settings, **_kwargs):
+        opened_with["kg_job_concurrency"] = settings.kg_job_concurrency
+        yield repo
+
+    monkeypatch.setattr(bi, "open_maintenance_cli_repository", _capture)
+    monkeypatch.setattr(
+        bi,
+        "run_reparse",
+        lambda *_args, **_kwargs: {
+            "targets": 0,
+            "reparsed": 0,
+            "failed": 0,
+            "clusters": 0,
+            "nodes_embedded": 0,
+        },
+    )
+
+    assert bi.main([
+        "reparse",
+        "--notebook-id",
+        nb_id,
+        "--workers",
+        "19",
+        "--no-rebuild",
+    ]) == 0
+    assert opened_with == {"kg_job_concurrency": 19}
 
 
 def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
@@ -2442,6 +2529,7 @@ def test_kg_fresh_flag_clears_checkpoint(repo, monkeypatch):
     from app.services import batch_ingest
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _bind_chat(repo, "kg_extract", _StubLLM())
     seen = {}
     def _fake_rebuild(notebook_id, progress=None, force=False, fresh=False):
         seen["force"] = force
@@ -2460,9 +2548,15 @@ def test_kg_fresh_alone_forces_rebuild(repo, monkeypatch):
     from app.services import batch_ingest
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="nb"))
+    _bind_chat(repo, "kg_extract", _StubLLM())
     monkeypatch.setattr(
         repo, "build_notebook_kg",
-        lambda notebook_id, *, progress=None: {"built": [], "failed": [], "skipped": []})
+        lambda notebook_id, *, finalize=None, **_kwargs: {
+            "built": [],
+            "failed": [],
+            "skipped": [],
+            **(finalize({}) or {}),
+        })
     seen = {}
     def _fake_rebuild(notebook_id, progress=None, force=False, fresh=False):
         seen["force"] = force

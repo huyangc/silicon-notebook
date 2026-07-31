@@ -70,7 +70,9 @@ def build_kg(notebook_id: str) -> dict:
     if not repo._runtime.models.configured("kg_extract"):
         raise HTTPException(status_code=409, detail="LLM not configured")
     try:
-        job = repo.prepare_notebook_kg_job(notebook_id, "incremental")
+        job = repo.prepare_notebook_kg_job(
+            notebook_id, "incremental", retry_partial=True
+        )
     except KgBuildAlreadyRunning:
         raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
     try:
@@ -79,6 +81,7 @@ def build_kg(notebook_id: str) -> dict:
             notebook_id,
             job["id"],
             "incremental",
+            retry_partial=True,
             name=f"buildkg-{notebook_id}",
             notify_pending=True,
         )

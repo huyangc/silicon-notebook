@@ -481,7 +481,14 @@ class KgMutationPort(Protocol):
 
 
 class KnowledgeLifecycleRepository(Protocol):
-    def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict: ...
+    def prepare_notebook_kg_job(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+    ) -> dict: ...
     def fail_notebook_kg_job_submission(self, job_id: str) -> bool: ...
     def execute_notebook_kg_job(
         self,
@@ -490,8 +497,19 @@ class KnowledgeLifecycleRepository(Protocol):
         mode: str,
         *,
         progress: Callable | None = None,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+        finalize: Callable[[dict], dict | None] | None = None,
     ) -> dict: ...
-    def build_notebook_kg(self, notebook_id: str, *, progress: Callable | None = None) -> dict: ...
+    def build_notebook_kg(
+        self,
+        notebook_id: str,
+        *,
+        progress: Callable | None = None,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+        finalize: Callable[[dict], dict | None] | None = None,
+    ) -> dict: ...
     def rebuild_notebook_kg(self, notebook_id: str) -> dict: ...
     def relink_notebook_kg(self, notebook_id: str) -> dict: ...
     def rebuild_unified_kg(self, notebook_id: str, progress: Callable[[str, int, int], None] | None = None, force: bool = False) -> int: ...
@@ -985,7 +1003,11 @@ class KnowledgeStorePort(Protocol):
     def source_build_rows(db: object, notebook_id: str) -> list[Any]: ...
     @staticmethod
     def source_build_state_page(
-        db: object, notebook_id: str, after_id: str, limit: int
+        db: object,
+        notebook_id: str,
+        after_created_at: object | None,
+        after_id: str,
+        limit: int,
     ) -> list[Any]: ...
     @staticmethod
     def sources_with_elements(db: object, notebook_id: str) -> list[Any]: ...

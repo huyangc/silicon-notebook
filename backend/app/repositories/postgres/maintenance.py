@@ -895,6 +895,7 @@ class PostgresMaintenanceAdapter:
             )
         after_id = ""
         scanned = 0
+        embedded = 0
         while True:
             with self._runtime.database.connect() as db:
                 rows = db.execute(
@@ -920,13 +921,14 @@ class PostgresMaintenanceAdapter:
                 self._runtime.source_embedding.embed_objects_batch(
                     notebook_id, missing
                 )
+                embedded += len(missing)
             if progress:
                 progress(scanned, total)
             if len(rows) < _EMBEDDING_PAGE_SIZE:
                 break
         if progress and scanned == 0:
             progress(0, 0)
-        return scanned
+        return embedded
 
     def count_missing_node_vectors(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
