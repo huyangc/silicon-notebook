@@ -580,20 +580,28 @@ def test_main_interrupt_after_a_committed_build_still_reports_130(
 
 def test_install_termination_signals_converts_once_absorbs_repeats_and_restores():
     previous_sigint = signal.getsignal(signal.SIGINT)
-    saved = bi._install_termination_signals()
+    # pytest-xdist workers may inherit SIGINT=SIG_IGN from their controller.
+    # Establish the callable precondition this test exercises, then restore the
+    # worker's original state so ignored-signal preservation remains intact.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
-        assert signal.SIGTERM in [signum for signum, _ in saved]
-        handler = signal.getsignal(signal.SIGTERM)
-        assert callable(handler)
-        with pytest.raises(KeyboardInterrupt):
+        saved = bi._install_termination_signals()
+        try:
+            assert signal.SIGTERM in [signum for signum, _ in saved]
+            handler = signal.getsignal(signal.SIGTERM)
+            assert callable(handler)
+            with pytest.raises(KeyboardInterrupt):
+                handler(signal.SIGTERM, None)
             handler(signal.SIGTERM, None)
-        handler(signal.SIGTERM, None)
-        sigint_handler = signal.getsignal(signal.SIGINT)
-        assert callable(sigint_handler)
-        sigint_handler(signal.SIGINT, None)
+            sigint_handler = signal.getsignal(signal.SIGINT)
+            assert callable(sigint_handler)
+            sigint_handler(signal.SIGINT, None)
+        finally:
+            bi._restore_signals(saved)
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     finally:
-        bi._restore_signals(saved)
-    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+        signal.signal(signal.SIGINT, previous_sigint)
     assert signal.getsignal(signal.SIGINT) is previous_sigint
 
 
