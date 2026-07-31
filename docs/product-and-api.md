@@ -411,6 +411,17 @@ Reasoning Ask gated to the `exhaustive` effort tier can maintain a bounded, mode
 
 **Visible only through the trace and the answer's own heading structure.** v1 deliberately adds no new `AskResponse` field for the outline: each outline update lands as its own `outline`-typed trace step (UI label "大纲"), each completed section lands as a lightweight `synthesis`-typed progress step, and the final answer shows the sections' own Markdown headings. Not available in Deep Report mode in this version — that flow's own confirm-then-freeze research-question contract is a separate scope question left for later evaluation.
 
+**KG weak-support gap feedback.** When the outline mechanism is active, the server also feeds the model a directed retrieval hint drawn from the knowledge graph itself: after each *accepted* `update_outline` call, it looks at the KG objects the model just bound as evidence and finds canonical relations touching them that only one or two sources corroborate — for a survey-shaped question, exactly the direction most worth chasing further. This is controlled by `REASONING_OUTLINE_KG_GAP_ENABLED` (default true), layered on top of the outline gate itself; either off means zero extra queries and a byte-identical prompt. The hint is offered through the model's existing actions (`add_subquery` / `follow_chain` / `expand_graph`) — no new action id, no new model call, no schema change. It never enters the answer text or its citations; it is scratchpad guidance for retrieval only. Numeric ceilings — the source-count threshold, probe limit, seed cap, per-round line count, and per-line/segment character limits — are contract values kept in a single table below, not repeated here. Each round's `outline`-typed trace step gains a `kg_gap_candidates` integer whenever the accepted apply queues new candidates (a terminal correction round's candidates are recorded but never rendered, since that round's own scratchpad text says not to run retrieval). If the canonical-relation layer is absent (never built) or the probe raises, the feature is silently and harmlessly absent for that round — a KG hint is optional, never a reason to fail a run.
+
+| Setting | Value |
+| --- | --- |
+| Weak-support threshold (source count) | ≤ 2 |
+| Probe result limit per apply | 24 |
+| Seed cap per apply | 96 |
+| Hint lines per reflect round | ≤ 6 |
+| Characters per hint line | ≤ 80 |
+| Characters per hint segment | ≤ 520 |
+
 ## APIs
 
 Key local beta APIs:
