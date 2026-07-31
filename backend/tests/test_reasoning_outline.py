@@ -20,6 +20,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.reasoning_retrieval import (
     OUTLINE_ACTION,
+    CollectionEnumerationOutcome,
     OutlineSection,
     ReasoningRetriever,
     bind_outline_evidence,
@@ -29,14 +30,18 @@ from app.services.reasoning_retrieval import (
     outline_signature,
     outline_wiring_active,
     parse_outline_sections,
+    _EnumChain,
     _MAX_OUTLINE_UPDATES,
     _OUTLINE_MAX_PENDING_EVIDENCE,
     _OUTLINE_EVIDENCE_KEY_CHARS,
     _OUTLINE_ID_CHARS,
     _OUTLINE_MAX_EVIDENCE,
     _OUTLINE_MAX_SECTIONS,
+    _OUTLINE_NUDGE_MAX_ROUNDS,
+    _OUTLINE_NUDGE_MIN_ITEMS,
     _OUTLINE_TITLE_CHARS,
     _outline_note,
+    _outline_nudge_note,
 )
 from app.services.retrieval import RetrievedChunk, RetrievedElement
 from app.services.sqlite_repository import SQLiteRepository
@@ -1484,3 +1489,266 @@ def test_parse_strips_citation_markers_from_titles():
     assert parse_outline_sections({"sections": [
         {"id": "s2", "title": "[k5001]", "evidence": []},
     ]}) == []
+
+
+# --------------------------------------------- 大纲采用引导(设计文档 §3.1.1)
+#
+# 真机动机:穷尽档三次 run 的 update_outline 采用率 0/3。最有说服力的一次是模型
+# 用 enumerate(collection=sources)一次性完整列出 84 篇文档,随后连开 4 次 PPR 找
+# 「核心贡献」、撞上上限,最后自述「多次子查询未返回具体每篇文章的核心贡献」并
+# 作答 —— 它手里有完整清单,缺的正是「把清单变成结构、再逐节补证」。
+
+def _roster_chain(returned_total, *, state="complete", collection="sources"):
+    """一条来源清单的续跑账目(真对象,不是 SimpleNamespace:字段改名要报红)。"""
+    from app.models.ask import TypedCollectionCoverage
+
+    return _EnumChain(
+        outcome=CollectionEnumerationOutcome(
+            collection=collection, kind="", source_id="",
+            coverage=TypedCollectionCoverage(
+                returned_total=returned_total,
+                total=returned_total,
+                complete=(state == "complete"),
+            ),
+        ),
+        state=state,
+    )
+
+
+def _nudge(sections=(), chains=None, directions=0, *, active=True, used=0):
+    return _outline_nudge_note(
+        list(sections), chains, directions, active=active, nudges_used=used)
+
+
+def test_the_nudge_needs_the_gate_the_empty_outline_and_a_structural_reason():
+    """三个前置条件缺一不可,再加「结构性理由二选一」。
+
+    少任何一条都会把引导变成噪音:门关着的档位根本没有 update_outline 可调(教一个
+    调不动的动作是纯亏);大纲已经建起来时 `_outline_note` 接管同一区位;而没有清单
+    也没有多个必答方向的单点事实题,建大纲比不建更慢。
+    """
+    roster = {("sources", "", ""): _roster_chain(84)}
+
+    assert "本轮尚未建立大纲" in _nudge(chains=roster)
+    # ① 门关着(低档位 / REASONING_OUTLINE_ENABLED=false)→ 零字节。
+    assert _nudge(chains=roster, active=False) == ""
+    # ② 大纲已非空 → 便签接管,引导退场。
+    assert _nudge([OutlineSection(id="a", title="第一节")], chains=roster) == ""
+    # ③ 本 run 引导额度用尽。
+    assert _nudge(chains=roster, used=_OUTLINE_NUDGE_MAX_ROUNDS) == ""
+    # ④ 两条结构性理由都不成立 → 不引导(空账目 + 零方向)。
+    assert _nudge(chains={}) == ""
+    assert _nudge(chains=None) == ""
+
+
+def test_the_roster_wording_wins_over_the_direction_count():
+    """两条理由同时成立时用清单那条:它更具体,而且带着一个真实条数。
+
+    「84 篇」是模型手上确实有的东西,「有 3 个方面」只是一个抽象;真机那次卡住的正是
+    「清单在手却不知道拿它做什么」,所以更具体的那条才是要说的。
+    """
+    roster = {("sources", "", ""): _roster_chain(84)}
+
+    both = _nudge(chains=roster, directions=3)
+    assert "已完整列出 84 篇文档" in both
+    assert "必答方向" not in both
+
+    only_directions = _nudge(chains={}, directions=3)
+    assert "本题有 3 个已确认的必答方向" in only_directions
+    assert "篇文档" not in only_directions
+
+
+def test_an_unfinished_roster_never_triggers_the_nudge():
+    """`state == "complete"` 是硬判据,不能放宽成「列过就算」。
+
+    半份清单变成的大纲天然缺节,而模型此刻并不知道自己缺了哪几节 —— 引导它按一份
+    没列完的目录定稿,比不引导更糟。`conflict`(枚举期间资料变了)同理。
+    """
+    for state in ("open", "conflict"):
+        assert _nudge(chains={("sources", "", ""): _roster_chain(84, state=state)}) == "", state
+    # 别的集合列完了也不算:元素/知识对象清单不是「每篇一节」的天然骨架。
+    assert _nudge(chains={
+        ("elements", "formula", ""): _roster_chain(84, collection="elements"),
+    }) == ""
+
+
+def test_a_one_item_scope_is_below_the_nudge_threshold():
+    """1 篇文档 / 1 个方向的问题一次合成就答完了,给它建大纲纯属噪音。"""
+    assert _OUTLINE_NUDGE_MIN_ITEMS == 2
+    assert _nudge(chains={("sources", "", ""): _roster_chain(1)}) == ""
+    assert _nudge(chains={}, directions=1) == ""
+    # 恰好到线就引导。
+    assert "已完整列出 2 篇文档" in _nudge(
+        chains={("sources", "", ""): _roster_chain(2)})
+    assert "本题有 2 个已确认的必答方向" in _nudge(chains={}, directions=2)
+
+
+def test_the_nudge_states_the_fact_and_offers_a_way_out_within_one_line():
+    """三要素:现状(未建大纲)+ 具体依据(N 篇 / M 方向)+ 可忽略的出口。
+
+    出口不是客套。引导是**账目**不是命令:服务端并不知道这一题到底需不需要大纲,
+    没有出口的措辞会让模型对单点事实题也硬建一份,把省下来的轮次又赔回去。
+    """
+    for text in (_nudge(chains={("sources", "", ""): _roster_chain(84)}),
+                 _nudge(chains={}, directions=4)):
+        assert "本轮尚未建立大纲" in text
+        assert "update_outline" in text
+        assert "忽略本行" in text
+        assert "\n" not in text, "一行,不许换行撑开便签区位"
+        assert len(text) <= 160, len(text)
+
+
+def test_the_biggest_finished_roster_sets_the_count():
+    """限定单源与全作用域是两条独立的链;取最大的那份,别把两份加起来。"""
+    chains = {
+        ("sources", "", ""): _roster_chain(84),
+        ("sources", "", "s1"): _roster_chain(3),
+    }
+    assert "已完整列出 84 篇文档" in _nudge(chains=chains)
+
+
+def test_a_finished_roster_nudges_the_model_at_most_twice(repo):
+    """e2e:列完目录却不建大纲 → 接下来两轮各引导一次,第三轮起闭嘴。
+
+    上界是成本合同:账目要教新东西,同一句话喊第三遍只烧 prompt 预算 —— 模型看过
+    两次仍不采用,就是它判断这题不需要大纲,而那正是「忽略本行」这个出口的意义。
+    """
+    notebook = _seed(repo, sources=("论文一", "论文二", "论文三"), elements=2)
+    repo.settings.reasoning_stale_limit = 99      # 单独测引导,不牵扯熔断
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements", "reason": "先看有哪几篇",
+         "enumerate": {"collection": "sources"}},
+        {"next_action": "search_elements", "elements_query": "版图设计要点 一"},
+        {"next_action": "search_elements", "elements_query": "版图设计要点 二"},
+        {"next_action": "search_elements", "elements_query": "版图设计要点 三"},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述这个notebook里的文章", "", limits=limits)
+
+    nudged = ["本轮尚未建立大纲" in prompt for prompt in llm.reflect_prompts]
+    # 第 1 轮还没有清单 → 不引导;第 2、3 轮引导;第 4 轮起额度用尽。
+    assert nudged == [False, True, True, False, False], nudged
+    assert sum(nudged) == _OUTLINE_NUDGE_MAX_ROUNDS
+    assert "已完整列出 3 篇文档" in llm.reflect_prompts[1]
+    # 轨迹键只在真的发出的那两轮出现。
+    assert [step.detail.get("outline_nudged")
+            for step in _steps(result, "reflect")] == [
+        None, True, True, None, None]
+
+
+def test_the_nudge_sits_between_the_ledgers_and_the_collection_map(repo):
+    """区位与大纲便签同一处:账目讲「本轮做了什么」,地图讲「库里有什么」。"""
+    notebook = _seed(repo, sources=("论文一", "论文二"), elements=2)
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements",
+         "enumerate": {"collection": "sources"}},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    retriever.run(notebook.id, "综述", "", limits=limits)
+
+    body = llm.reflect_prompts[1].split("Candidates so far:", 1)[-1]
+    assert body.index("「来源清单」已完整列出") < body.index("本轮尚未建立大纲")
+    assert body.index("本轮尚未建立大纲") < body.index("[Collections in scope]")
+
+
+def test_the_scratchpad_replaces_the_nudge_once_the_outline_exists(repo):
+    """引导与便签互斥:模型一旦真的建了大纲,同一区位由便签接管。"""
+    notebook = _seed(repo, sources=("论文一", "论文二"), elements=2)
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements",
+         "enumerate": {"collection": "sources"}},
+        lambda prompt: _outline_action([
+            {"id": "p1", "title": "论文一", "evidence": [_shown_ids(prompt)[0]]},
+        ]),
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert "本轮尚未建立大纲" in llm.reflect_prompts[1]
+    # 建完之后那一轮:便签在,引导不在。
+    assert "本轮大纲便签" in llm.reflect_prompts[2]
+    assert "本轮尚未建立大纲" not in llm.reflect_prompts[2]
+    assert [step.detail.get("outline_nudged")
+            for step in _steps(result, "reflect")] == [None, True, None]
+
+
+def test_confirmed_directions_nudge_without_any_roster(repo):
+    """理由 (b):已确认意图给出多个必答方向时,不必先枚举也该建大纲。
+
+    方向数取已确认方向清单长度减一 —— `confirmed_intent_queries` 的第一条恒为完整
+    的已确认问题本身,其余才是必答主题派生的方向。
+    """
+    notebook = _seed(repo, elements=2)
+    llm = _SeqLLM([
+        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    retriever.run(notebook.id, "综述", "", limits=limits,
+                  intent_queries=["完整的已确认问题", "方向一", "方向二"])
+
+    assert "本题有 2 个已确认的必答方向" in llm.reflect_prompts[0]
+
+
+def test_a_single_confirmed_direction_is_not_a_reason(repo):
+    """只有整体问题一条种子(零必答方向)→ 不引导。"""
+    notebook = _seed(repo, elements=2)
+    llm = _SeqLLM([
+        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    retriever.run(notebook.id, "综述", "", limits=limits,
+                  intent_queries=["完整的已确认问题"])
+
+    assert not any("本轮尚未建立大纲" in prompt
+                   for prompt in llm.reflect_prompts)
+
+
+@pytest.mark.parametrize("effort", ["overview", "standard", "deep", "thorough"])
+def test_the_nudge_is_absent_below_the_exhaustive_effort(repo, effort):
+    """低档位逐字回到接入前:没有 update_outline 可调,就没有可引导的东西。"""
+    notebook = _seed(repo, sources=("论文一", "论文二"), elements=2)
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements",
+         "enumerate": {"collection": "sources"}},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm, effort=effort)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits,
+                           intent_queries=["整体问题", "方向一", "方向二"])
+
+    assert not any("本轮尚未建立大纲" in prompt
+                   for prompt in llm.reflect_prompts)
+    # detail 逐**键**不变(不是值不变):关闭态不该多出一个键。
+    assert all("outline_nudged" not in step.detail
+               for step in _steps(result, "reflect"))
+
+
+def test_the_nudge_is_absent_when_the_switch_is_off(repo):
+    """穷尽档 + REASONING_OUTLINE_ENABLED=false:同样零字节。"""
+    notebook = _seed(repo, sources=("论文一", "论文二"), elements=2)
+    repo.settings.reasoning_outline_enabled = False
+    llm = _SeqLLM([
+        {"next_action": "enumerate_elements",
+         "enumerate": {"collection": "sources"}},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits,
+                           intent_queries=["整体问题", "方向一", "方向二"])
+
+    assert not any("本轮尚未建立大纲" in prompt
+                   for prompt in llm.reflect_prompts)
+    assert all("outline_nudged" not in step.detail
+               for step in _steps(result, "reflect"))

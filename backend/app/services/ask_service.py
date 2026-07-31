@@ -881,7 +881,23 @@ class AskService:
         reasoning_content 上→content 空→chat_json 兜底 "{}"→空 answer,不抛异常、
         status=ok)或抛错 → 重试一次("{}" 不入 LLM 缓存,故重试是真·重掷);两次皆空/
         抛错 → emit 一条 model_error(空 content 本身静默不可见,补此条让"检索到却答不出"
-        可追踪:前端横幅 + events.jsonl)。返回 (answer, grounded, anchors, ok)。"""
+        可追踪:前端横幅 + events.jsonl)。返回 (answer, grounded, anchors, ok)。
+
+        **重试成功不留假报警**:第一次尝试失败、第二次拿到完整答案时,把本次调用
+        期间新增的那几条响应内 model_error 摘掉。理由与按节合成回退那处同源——
+        那次故障已经被同一轮吸收,用户拿到的是一份完整答案,再挂一条红色横幅
+        「本次回答可能不完整」是在报一个并没有影响到结果的错误(真机:第一次合成
+        耗时 4 分 25 秒返回空 content,重试后答案 78 锚点 / 5829 字,横幅照挂)。
+        摘除**只**针对 ``mark`` 之后本次尝试自己记的那几条:同一 run 里更早的其它
+        workload 报错(evidence_refine、embedding/rerank 等)一条都不许动。
+        两次都失败时全部保留,包括最后那条 empty-content 的 RuntimeError ——
+        「检索到却答不出」必须可见。``events.jsonl`` 始终记全:``note_model_error``
+        的两个副作用里,只有响应里的这一份是给用户看的。"""
+        # sink 是本轮 Ask 的响应内报警列表(ContextVar,请求局部)。直调/离线路径
+        # 下它是 None:那时 note_model_error 只写事件日志、不写响应,没有可摘的
+        # 东西,保持现状即可。
+        sink = _ASK_MODEL_ERRORS.get()
+        mark = len(sink) if sink is not None else None
         answer, grounded, anchors = "", False, []
         for _ in range(2):
             try:
@@ -894,6 +910,8 @@ class AskService:
                 )
                 answer, grounded, anchors = "", False, []
             if answer:
+                if mark is not None:
+                    del sink[mark:]
                 return answer, grounded, anchors, True
         self.model_errors.note_model_error(
             "answer",
@@ -2313,8 +2331,13 @@ class AskService:
                 synth_failed = not _ok
                 synthesis_ran = True
                 if outline_fallback and _ok:
-                    # 只摘分节那一段(mark..fallback_mark),单次合成自己记的那几条
-                    # 原样保留 —— 「重试一次才成功」在既有口径里就是要报的。
+                    # 只摘分节那一段(mark..fallback_mark)。单次合成自己那几条
+                    # 已经由 `_answer_with_retry` 按同一条规则处理过了(重试成功
+                    # 自摘、两次都失败全留),所以这里刻意仍用**闭区间上界**
+                    # `fallback_err_mark` 而不是 `del _err_sink[outline_err_mark:]`:
+                    # 上界是这两段的边界,写成开区间就等于宣称「回退阶段的报警一律
+                    # 由这一行负责」,哪天单次合成路径多记一条本该保留的错误就会被
+                    # 这一行悄悄吞掉。
                     del _err_sink[outline_err_mark:fallback_err_mark]
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的

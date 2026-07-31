@@ -846,6 +846,87 @@ def _outline_note(
     return head + "\n".join(lines) + tail + overflow_note + kg_gap_segment + "）"
 
 
+# --------------------------------------------- 大纲采用引导(设计文档 §3.1.1)
+#
+# 真机动机(穷尽档三次 run、2 个库 3 个问题,update_outline 采用率 0/3)。最有说服
+# 力的一次:84 篇来源的库 + 「综述这个 notebook 里的文章:每篇的核心贡献是什么,
+# 它们之间有什么联系与分歧?」,模型先用 enumerate(collection=sources)**一次性
+# 完整列出 84 篇**(complete=true),随后连开 4 次 PPR 找核心贡献、撞上 PPR 次数
+# 上限,最后自述「虽然枚举了所有 84 篇文章标题,但多次子查询未返回具体每篇文章
+# 的核心贡献,现有候选无法覆盖全部文章」并作答。它手里有完整清单,缺的恰恰是
+# 「把清单变成结构、再逐节补证」——也就是大纲。
+#
+# prompt 里的动作说明讲清了大纲**是什么**、什么场合适用,却从不在模型真的拿到
+# 清单的那一刻说一句「现在正是时候」。这一行补的就是那个时刻,而且是**账目**不是
+# 命令:与 visited / attempted / 枚举三份回喂同区位、同形态,只陈述服务端手上现成
+# 的确定性事实(已完整列出 N 篇 / 有 M 个已确认方向),并显式给出「判断不需要就
+# 忽略」的出口。零新查询、零新模型调用、零新动作。
+#
+# 每 run 至多 2 轮:账目要教新东西,重复喊话只烧 prompt 预算——模型看过两次仍不
+# 采用,就是它判断这题不需要大纲,那正是出口存在的意义。
+_OUTLINE_NUDGE_MAX_ROUNDS = 2
+# 触发引导的最小规模。1 篇文档 / 1 个方向的问题一次合成就答完了,给它建大纲纯属
+# 噪音(prompt 自己也写着「Do NOT open an outline for a single-fact question」)。
+_OUTLINE_NUDGE_MIN_ITEMS = 2
+
+
+def _outline_nudge_note(
+    sections: List[OutlineSection],
+    enum_chains,
+    direction_count: int,
+    *,
+    active: bool,
+    nudges_used: int,
+) -> str:
+    """「该开大纲却还没开」时的一行引导;空串 = 本轮不引导。
+
+    出现条件全部成立才渲染:门开着(``active``,即 `outline_wiring_active`)、大纲
+    **仍为空**(一旦模型建了大纲,`_outline_note` 接管整段区位,引导就成了噪音)、
+    本 run 引导次数未用尽,且存在下列结构性理由之一——
+
+    * (a) 本 run 已把**来源清单**完整列完(`state == "complete"`)且条数 ≥ 2;
+    * (b) 已确认意图给出了 ≥ 2 个必答检索方向。
+
+    两条都成立时优先用 (a):它更具体,而且带着一个真实条数——「84 篇」比「若干个
+    方面」更能让模型看出把清单摊成章节的性价比。
+
+    ``state == "complete"`` 是硬判据,不能放宽成「列过就算」:半份清单变成的大纲
+    天然缺节,而模型此刻并不知道自己缺了什么;引导它按一份没列完的目录定稿,比
+    不引导更糟。条数取各条来源清单链里的最大值(限定单源与全作用域是两条独立的
+    链),`getattr` 兜底是防御性的——覆盖率字段缺失时按 0 处理,即不引导。
+
+    ``direction_count`` 由调用方从 run() 手上现成的已确认方向清单算出(见调用点),
+    这里不做任何解析,也不新增任何查询。
+    """
+    if not active:
+        return ""
+    if sections:
+        return ""
+    if nudges_used >= _OUTLINE_NUDGE_MAX_ROUNDS:
+        return ""
+    listed = 0
+    for chain in (enum_chains or {}).values():
+        outcome = getattr(chain, "outcome", None)
+        if outcome is None or getattr(outcome, "collection", "") != "sources":
+            continue
+        if getattr(chain, "state", "") != "complete":
+            continue
+        returned_total = getattr(
+            getattr(outcome, "coverage", None), "returned_total", 0
+        )
+        listed = max(listed, int(returned_total or 0))
+    if listed >= _OUTLINE_NUDGE_MIN_ITEMS:
+        basis = f"已完整列出 {listed} 篇文档"
+    elif direction_count >= _OUTLINE_NUDGE_MIN_ITEMS:
+        basis = f"本题有 {direction_count} 个已确认的必答方向"
+    else:
+        return ""
+    return (
+        f"（本轮尚未建立大纲。{basis}:把它们变成 update_outline 的章节、"
+        "再逐节补证,通常比反复全库检索更省轮次;若判断一次即可答完,忽略本行。）"
+    )
+
+
 # ------------------------------------------- KG 弱支撑边回喂(kg-gap,§3.3)
 #
 # DualGraph 共演化的另一半:v1 只做了 OG→检索(空节点名回喂),这里补上 KG→检索
@@ -1844,6 +1925,9 @@ class ReasoningRetriever:
         outline_active = outline_wiring_active(self.settings, limits)
         outline: List[OutlineSection] = []
         outline_updates = 0
+        # 大纲采用引导已经发出过几轮(仅内存,run 级)。见 `_outline_nudge_note`:
+        # 引导只在「该开大纲却还没开」时出现,且每 run 至多 2 轮。
+        outline_nudges = 0
         outline_overflow: Dict[str, List[str]] = {}
         ever_shown_outline_keys: set = set()
         outline_terminal_repair_used = False
@@ -2475,6 +2559,22 @@ class ReasoningRetriever:
                 # 返回空串的路径(或候选获得第二个产地),这里不至于静默丢掉一批
                 # 从没上过屏的提示。
                 del kg_gap_pending[:kg_gap_shown]
+            # 大纲采用引导(设计文档 §3.1.1):便签自己不在场、而手上的事实说明「该开
+            # 大纲」时,补一行引导。与上面那段**互斥而非嵌套**——互斥由
+            # `_outline_nudge_note` 自己的「sections 非空即返回空串」判据保证,写在
+            # 那里而不是这里的 else 上,是为了让「删掉那道判据」这类改动真的报红。
+            #
+            # 方向数取已确认方向清单的长度减一:`confirmed_intent_queries` 的第一
+            # 条恒为完整的已确认问题本身,其余才是必答主题派生的检索方向。这是
+            # run() 手上现成的结构,不再解析契约、不新增任何查询(intent_queries
+            # 为空的 planner 路径下它恒为 0,条件 (b) 天然不成立)。
+            nudge_note = _outline_nudge_note(
+                outline, enum_chains, max(0, len(reviewed_all) - 1),
+                active=outline_active, nudges_used=outline_nudges,
+            )
+            if nudge_note:
+                summary = f"{summary}\n\n{nudge_note}"
+                outline_nudges += 1
             if collection_map_text:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
@@ -2489,11 +2589,17 @@ class ReasoningRetriever:
             reflect_kwargs = {"outline": True} if outline_active else {}
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
+            reflect_detail = {"next_action": decision.next_action,
+                              "sufficient": decision.sufficient,
+                              "no_progress": no_progress, "stale": stale}
+            if nudge_note:
+                # 只在**真的发出**引导的那一轮加键(评估用)。无条件写 False 会让
+                # 关闭态/低档位的 reflect detail 多出一个键——冻结基线的口径是
+                # 「逐键不变」,而不是「值不变」。
+                reflect_detail["outline_nudged"] = True
             record(TraceStep(step_type="reflect",
                              summary=decision.reason or decision.next_action,
-                             detail={"next_action": decision.next_action,
-                                     "sufficient": decision.sufficient,
-                                     "no_progress": no_progress, "stale": stale}))
+                             detail=reflect_detail))
             overflow_repair_submission = terminal_overflow_repair or (
                 bool(outline_overflow)
                 and outline_updates >= _MAX_OUTLINE_UPDATES
