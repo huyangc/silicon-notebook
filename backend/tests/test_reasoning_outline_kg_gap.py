@@ -33,7 +33,7 @@ from app.services.retrieval import GapRelationRow
 from app.services.retrieval_candidates import (
     _KG_GAP_MAX_SEEDS,
     _KG_GAP_PROBE_LIMIT,
-    _KG_GAP_SUPPORT_MAX,
+    _KG_GAP_SOURCE_MAX,
     _first_relation_sample,
 )
 from app.services.sqlite_repository import SQLiteRepository
@@ -162,13 +162,26 @@ def _steps(result, step_type):
     return [step for step in result.trace if step.step_type == step_type]
 
 
-def _row(src="源", tgt="目标", *, support=1, edge="kind_of",
+def _row(src="源", tgt="目标", *, sources=1, edge="kind_of",
          canonical_src="", canonical_tgt=""):
     return GapRelationRow(
         canonical_src=canonical_src or f"K-{src}",
         canonical_tgt=canonical_tgt or f"K-{tgt}",
-        src_name=src, tgt_name=tgt, edge_type=edge, support_count=support,
+        src_name=src, tgt_name=tgt, edge_type=edge, source_count=sources,
     )
+
+
+def _set_counts(repo, notebook_id, canonical_tgt, *, support, sources):
+    """直接改写一条 canonical 边的两个计数。
+
+    `store_kg` 造不出「多行、单源」那种形状(一篇文档里的重复关系会被折叠),而
+    那恰好是本特性最要救的一类边,所以夹具直接落到列上。
+    """
+    with repo._write() as db:
+        db.execute(
+            "UPDATE canonical_relations SET support_count=?, source_count=? "
+            "WHERE notebook_id=? AND canonical_tgt=?",
+            (support, sources, notebook_id, canonical_tgt))
 
 
 # ------------------------------------------------------------- 探测层(服务)
@@ -179,7 +192,7 @@ def test_the_documented_bounds_are_the_ones_in_the_code():
     单独钉一条,是因为下面的用例大多拿常量本身当期望值 —— 只改常量的话它们会
     跟着一起动、全绿放行(「替换打空」)。数字必须在某一处以字面量出现。
     """
-    assert (_KG_GAP_SUPPORT_MAX, _KG_GAP_PROBE_LIMIT, _KG_GAP_MAX_SEEDS) == (
+    assert (_KG_GAP_SOURCE_MAX, _KG_GAP_PROBE_LIMIT, _KG_GAP_MAX_SEEDS) == (
         2, 24, 96)
     assert (_KG_GAP_NOTE_LINES, _KG_GAP_NOTE_LINE_CHARS, _KG_GAP_NOTE_CHARS,
             _KG_GAP_EDGE_CHARS) == (6, 80, 520, 24)
@@ -196,7 +209,7 @@ def test_probe_returns_only_weakly_supported_edges(repo):
 
     rows = repo.retrieval.weak_support_relations(notebook.id, anchors)
 
-    assert [(row.src_name, row.edge_type, row.tgt_name, row.support_count)
+    assert [(row.src_name, row.edge_type, row.tgt_name, row.source_count)
             for row in rows] == [("版图设计", "kind_of", "寄生电容", 1)]
 
 
@@ -207,26 +220,122 @@ def test_probe_accepts_the_threshold_boundary(repo):
 
     rows = repo.retrieval.weak_support_relations(notebook.id, anchors)
 
-    assert sorted((row.tgt_name, row.support_count) for row in rows) == [
+    assert sorted((row.tgt_name, row.source_count) for row in rows) == [
         ("寄生电容", 1), ("工艺角", 2)]
-    assert all(row.support_count <= _KG_GAP_SUPPORT_MAX for row in rows)
+    assert all(row.source_count <= _KG_GAP_SOURCE_MAX for row in rows)
 
 
-def test_probe_is_ordered_by_support_then_endpoint_ids(repo):
-    """展示顺序稳定可测:支撑数升序,tie 按 (src, tgt) 字典序。
+def test_the_threshold_counts_sources_not_relation_rows(repo):
+    """判据是**来源数**,不是聚合掉的原始关系行数。
 
-    失败场景:靠存储顺序的话,同一个库两次跑出两份顺序不同的提示,回归用例就只
-    能测长度 —— 而「支撑最薄弱的先说」正是这段提示的全部价值。
+    失败场景(这是本特性最要救的那批边):别名归一与 claim 聚簇会让同一篇文档里
+    的好几条原始关系折叠进同一条 canonical 边,于是一条**单源**边攒出 5 行
+    `support_count`。按行数过滤恰好把它滤掉,而它正是「只有一篇文献提到、最该补证」
+    的那条;反过来,一条 5 篇文献都印证过的边只要行数少就会被当成缺口塞进提示。
     """
     notebook = _seed(repo, well_supported_sources=2)
     anchors = _object_ids(repo, notebook.id, "版图设计")
+    # 多行、单源 → 必须**入选**(行数 9 远超阈值,来源数 1 在阈值内)。
+    _set_counts(repo, notebook.id, "K-寄生电容", support=9, sources=1)
+    # 少行、多源 → 必须**落选**(行数 1 在阈值内,来源数 9 超阈值)。
+    _set_counts(repo, notebook.id, "K-工艺角", support=1, sources=9)
 
     rows = repo.retrieval.weak_support_relations(notebook.id, anchors)
 
-    assert [(row.support_count, row.canonical_src, row.canonical_tgt)
-            for row in rows] == sorted(
-        (row.support_count, row.canonical_src, row.canonical_tgt)
-        for row in rows)
+    assert [(row.tgt_name, row.source_count) for row in rows] == [("寄生电容", 1)]
+
+
+def test_the_rendered_count_is_the_source_count(repo):
+    """`(支撑N)` 里的 N 是来源数,与头行「仅 1-2 源支撑」同口径。
+
+    失败场景:渲染 `support_count` 的话,一条单源边会带着「支撑9」出现在一段声称
+    「仅 1-2 源」的清单里 —— 提示行自己拆自己的台,模型据此判断优先级只会更糟。
+    """
+    notebook = _seed(repo, well_supported_sources=2)
+    anchors = _object_ids(repo, notebook.id, "版图设计")
+    _set_counts(repo, notebook.id, "K-寄生电容", support=9, sources=1)
+    _set_counts(repo, notebook.id, "K-工艺角", support=1, sources=2)
+
+    rows = repo.retrieval.weak_support_relations(notebook.id, anchors)
+    segment, _used = kg_gap_note_segment(rows)
+
+    assert "寄生电容(支撑1)" in segment and "支撑9" not in segment
+    assert "工艺角(支撑2)" in segment
+
+
+def test_the_store_order_decides_which_rows_survive_the_limit(repo):
+    """SQL 的 `ORDER BY` 是**截断口径**,不是可有可无的整理。
+
+    失败场景:删掉它,行按主键序回来 —— 主键是 `(…, canonical_src, edge_type,
+    canonical_tgt)`,与来源数毫无关系。服务层随后那次排序会把**取回来的**行摆正,
+    所以最终顺序看着还对;真正丢掉的是「取哪 24 行」:LIMIT 截断的将是主键靠前的
+    那些,而不是支撑最薄弱的那些。这里让主键序与来源数序**相反**,再用 LIMIT 1
+    把差别逼出来。
+    """
+    notebook = _seed(repo, well_supported_sources=2)
+    # 主键序:同源端下按 (edge_type, canonical_tgt) → kind_of/寄生电容 在
+    # part_of/工艺角 之前。来源数序刻意相反。
+    _set_counts(repo, notebook.id, "K-寄生电容", support=1, sources=2)
+    _set_counts(repo, notebook.id, "K-工艺角", support=1, sources=1)
+    store = repo.retrieval.candidates.unified_kg
+
+    with repo._connect() as db:
+        pk_order = [
+            row["canonical_tgt"] for row in db.execute(
+                "SELECT canonical_tgt FROM canonical_relations WHERE notebook_id=?",
+                (notebook.id,))
+        ]
+        capped = store.weak_support_relation_rows(
+            db, notebook.id, ["K-版图设计"], _KG_GAP_SOURCE_MAX, 1)
+
+    # 前置条件:主键序确实把「来源数更多」的那条排在前面(否则本用例是空跑)。
+    assert pk_order[0] == "K-寄生电容"
+    assert [row["canonical_tgt"] for row in capped] == ["K-工艺角"]
+
+
+def test_the_service_breaks_ties_by_source_then_target(repo):
+    """真并列时按 `(src, tgt)` 定序 —— 与 SQL 的 `(tgt, src)` 次键刻意不同。
+
+    两个次键各有各的活:SQL 那份要让 LIMIT 截断确定,服务层这份要让**展示**顺序
+    确定。用真库造这种并列要凑一堆同分边,所以这里直接把存储层换成替身,让 SQL
+    侧按它自己的次键交出行,再看服务层有没有按自己的次键重排。砍掉服务层排序键
+    的尾巴(只留来源数)时,稳定排序会原样保留输入序 → 本用例转红。
+    """
+    from contextlib import nullcontext
+
+    class _Store:
+        @staticmethod
+        def cluster_fold_rows(_db, _notebook_id, ids):
+            return [{"member_object_id": oid, "canonical_id": f"K-{oid}",
+                     "canonical_name": ""} for oid in ids]
+
+        @staticmethod
+        def weak_support_relation_rows(_db, _nb, _ids, _source_max, _limit):
+            # SQL 次键是 canonical_tgt:K-a 在 K-b 之前。
+            return [
+                {"canonical_src": "K-b", "edge_type": "kind_of",
+                 "canonical_tgt": "K-a", "source_count": 1,
+                 "sample_relation_ids": '["rel-1"]'},
+                {"canonical_src": "K-a", "edge_type": "kind_of",
+                 "canonical_tgt": "K-b", "source_count": 1,
+                 "sample_relation_ids": '["rel-2"]'},
+            ]
+
+        @staticmethod
+        def relation_endpoint_name_rows(_db, _nb, rids):
+            return [{"rid": rid, "src_name": f"src-{rid}",
+                     "tgt_name": f"tgt-{rid}"} for rid in rids]
+
+    from app.services.retrieval_candidates import CandidateRetrievalService
+
+    service = CandidateRetrievalService.__new__(CandidateRetrievalService)
+    service._connect = lambda: nullcontext(None)
+    service.unified_kg = _Store()
+
+    rows = service.weak_support_relations("nb", ["a", "b"])
+
+    assert [(row.canonical_src, row.canonical_tgt) for row in rows] == [
+        ("K-a", "K-b"), ("K-b", "K-a")]
 
 
 def test_probe_is_silent_when_the_canonical_layer_was_never_built(repo):
@@ -300,7 +409,7 @@ def test_probe_folds_only_this_round_ids_and_honours_the_limit(repo, monkeypatch
     repo.retrieval.weak_support_relations(notebook.id, anchors)
 
     assert folded_ids == [anchors]
-    assert probes == [(["K-版图设计"], _KG_GAP_SUPPORT_MAX, _KG_GAP_PROBE_LIMIT)]
+    assert probes == [(["K-版图设计"], _KG_GAP_SOURCE_MAX, _KG_GAP_PROBE_LIMIT)]
 
 
 def test_the_store_probe_honours_the_row_limit(repo):
@@ -313,14 +422,14 @@ def test_the_store_probe_honours_the_row_limit(repo):
     store = repo.retrieval.candidates.unified_kg
     with repo._connect() as db:
         full = store.weak_support_relation_rows(
-            db, notebook.id, ["K-版图设计"], _KG_GAP_SUPPORT_MAX, 24)
+            db, notebook.id, ["K-版图设计"], _KG_GAP_SOURCE_MAX, 24)
         capped = store.weak_support_relation_rows(
-            db, notebook.id, ["K-版图设计"], _KG_GAP_SUPPORT_MAX, 1)
+            db, notebook.id, ["K-版图设计"], _KG_GAP_SOURCE_MAX, 1)
 
     assert len(full) == 2 and len(capped) == 1
     # 截断取的是排序里靠前的那条(支撑最薄弱优先),不是随便一条。
     assert capped[0]["canonical_tgt"] == full[0]["canonical_tgt"]
-    assert int(capped[0]["support_count"]) == 1
+    assert int(capped[0]["source_count"]) == 1
 
 
 def test_probe_clamps_the_seed_list(repo):
@@ -370,6 +479,89 @@ def test_names_prefer_the_cluster_canonical_name(repo):
     assert [row.tgt_name for row in rows] == ["寄生电容"]
 
 
+def test_the_source_name_comes_from_the_bound_object_own_cluster_row(repo):
+    """源端名优先用**折叠本轮绑定对象**时拿到的簇名,而不是样本关系解析出来的。
+
+    两者可以不同名:样本关系的源端往往是同一簇里的**另一个**成员行,而模型手上
+    拿到的是它自己绑的那一个。失败场景:砍掉这个优先级(直接用样本解析名),提示
+    行会用一个模型这一轮根本没见过的名字称呼它绑定的对象。
+
+    顺带这也是零额外查询的那一步 —— 簇名在第 1 步的折叠里已经回来了。
+    """
+    notebook = _seed(repo)
+    anchors = _object_ids(repo, notebook.id, "版图设计")
+    # 样本关系的源端是 s1 里那个对象;再给同簇加一个**只被绑定、不参与关系**的
+    # 成员,并让两行的簇名不同,好把「用哪一行的名字」逼出来。
+    bound_only = _source_id(notebook.id, "bound")
+    _source(repo, notebook.id, bound_only)
+    repo.store_kg(notebook.id, bound_only, [_concept("A", "版图设计")], [])
+    repo.rebuild_unified_kg(notebook.id)
+    extra = [oid for oid in _object_ids(repo, notebook.id, "版图设计")
+             if oid not in anchors]
+    assert len(extra) == 1                       # 前置条件:确实多了一个同簇成员
+    with repo._write() as db:
+        db.execute(
+            "UPDATE concept_clusters SET canonical_name='绑定行的名字' "
+            "WHERE notebook_id=? AND member_object_id=?",
+            (notebook.id, extra[0]))
+        db.execute(
+            "UPDATE concept_clusters SET canonical_name='样本行的名字' "
+            "WHERE notebook_id=? AND member_object_id IN "
+            f"({','.join('?' for _ in anchors)})",
+            (notebook.id, *anchors))
+
+    rows = repo.retrieval.weak_support_relations(notebook.id, extra)
+
+    assert [row.src_name for row in rows] == ["绑定行的名字"]
+
+
+def test_the_sampled_source_name_still_prefers_the_cluster_name(repo):
+    """回退到样本关系解析时,那条 SQL 自己也必须簇名优先、payload name 其次。
+
+    失败场景:把 `COALESCE` 的两臂对调,回退路径会拿成员对象的 payload 原名 ——
+    同一个簇于是在「折叠拿到名字」和「折叠没拿到名字」两种情况下用两套称呼。
+
+    ⚠ 要测到那条 SQL,**折叠侧必须先取不到名字**(否则它短路,SQL 的选择压根不
+    参与结果)。所以这里绑定的是一个簇名为空的成员行,而样本关系的源端那一行簇名
+    非空 —— 两个来源于是给出不同的答案,SQL 选哪一臂才看得出来。
+    """
+    notebook = _seed(repo)
+    anchors = _object_ids(repo, notebook.id, "版图设计")
+    bound_only = _source_id(notebook.id, "bound")
+    _source(repo, notebook.id, bound_only)
+    repo.store_kg(notebook.id, bound_only, [_concept("A", "版图设计")], [])
+    repo.rebuild_unified_kg(notebook.id)
+    extra = [oid for oid in _object_ids(repo, notebook.id, "版图设计")
+             if oid not in anchors]
+    assert len(extra) == 1                       # 前置条件:确实多了一个同簇成员
+    with repo._write() as db:
+        # 绑定的那一行没有簇名 → 折叠侧交白卷,必须落到样本关系那条 SQL。
+        db.execute(
+            "UPDATE concept_clusters SET canonical_name='' "
+            "WHERE notebook_id=? AND member_object_id=?",
+            (notebook.id, extra[0]))
+        db.execute(
+            "UPDATE concept_clusters SET canonical_name='簇名' "
+            "WHERE notebook_id=? AND member_object_id IN "
+            f"({','.join('?' for _ in anchors)})",
+            (notebook.id, *anchors))
+        db.execute(
+            "UPDATE knowledge_objects SET payload=? "
+            f"WHERE id IN ({','.join('?' for _ in anchors)})",
+            (json.dumps({"name": "payload 原名", "section_path": "1"}), *anchors))
+
+    rows = repo.retrieval.weak_support_relations(notebook.id, extra)
+
+    assert [row.src_name for row in rows] == ["簇名"]
+    # 对照:簇名也空掉时才轮到 payload 名(回退链的另一半)。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE concept_clusters SET canonical_name='' WHERE notebook_id=?",
+            (notebook.id,))
+    fallback = repo.retrieval.weak_support_relations(notebook.id, extra)
+    assert [row.src_name for row in fallback] == ["payload 原名"]
+
+
 def test_names_fall_back_to_the_object_payload_name(repo):
     """簇名为空时回退对象 payload name(非 concept 的 canonical 走的就是这条)。"""
     notebook = _seed(repo)
@@ -414,7 +606,7 @@ def test_first_relation_sample_only_reads_json_text():
 # ------------------------------------------------------------- 便签段(渲染)
 
 def test_note_segment_renders_the_documented_shape():
-    segment, used = kg_gap_note_segment([_row("版图设计", "寄生电容", support=1)])
+    segment, used = kg_gap_note_segment([_row("版图设计", "寄生电容", sources=1)])
 
     assert used == 1
     assert _KG_GAP_NOTE_HEAD in segment
@@ -437,7 +629,7 @@ def test_note_segment_clamps_each_line_by_shortening_the_names():
     失败场景:对整行做尾截会把 `(支撑N)` 连同目标端一起削掉,留下一行读不出关系
     的残句,模型据此提交的定向查询会是半个名字。
     """
-    long_row = _row("甲" * 200, "乙" * 200, support=2)
+    long_row = _row("甲" * 200, "乙" * 200, sources=2)
 
     segment, used = kg_gap_note_segment([long_row])
     line = segment.splitlines()[-1]
@@ -461,6 +653,66 @@ def test_note_segment_clamps_the_whole_block():
 
 def test_note_segment_is_absent_without_candidates():
     assert kg_gap_note_segment([]) == ("", 0)
+
+
+def test_note_line_collapses_whitespace_before_clamping():
+    """名字先压成单行再截长。
+
+    失败场景:KG 对象的名字来自语料,claim 的「名字」经常就是一整段带换行的正文。
+    原样拼进便签的话,一条提示会被那个换行撕成两半 —— 后半截没有 `- ` 前缀也没有
+    箭头,读起来像大纲的下一节,而 `(支撑N)` 落在了那半截上。截长封不住这件事:
+    80 字符的行里塞得下好几个换行。
+    """
+    row = _row("第一行\n第二行  第三行", "目\n标", sources=1)
+
+    segment, used = kg_gap_note_segment([row])
+    body = segment.splitlines()
+
+    assert used == 1
+    # 头行 1 行 + 提示 1 行,没有第三行(名字里的换行没有漏出来)。
+    assert len(body) == 3 and body[0] == ""
+    assert body[2] == "- 第一行 第二行 第三行 —kind_of→ 目 标(支撑1)"
+
+
+def test_the_repair_round_gets_no_gap_hint():
+    """终态纠错轮不拼这一段。
+
+    失败场景(评审端到端复现):同一份便签的开头写着「不得改结构或执行检索」,
+    而这一段的头行写着「可用 add_subquery/follow_chain 定向补证」。模型照着后写的
+    那句做,这一轮就以 `outline_overflow_repair_declined` 收场 —— 纠错资格白烧
+    一次,未接纳的 key 一个都没换进来。
+    """
+    from app.services.reasoning_retrieval import OutlineSection
+
+    sections = [OutlineSection(id="a", title="一节", evidence_keys=["k1"])]
+    segment = kg_gap_note_segment([_row()])[0]
+    overflow = {"a": ["k9"]}
+
+    repair = _outline_note(sections, 0, overflow, repair_only=True,
+                           kg_gap_segment=segment)
+    ordinary = _outline_note(sections, 3, kg_gap_segment=segment)
+
+    assert _KG_GAP_NOTE_HEAD not in repair
+    assert "不得改结构或执行检索" in repair       # 前置条件:确实是纠错轮措辞
+    # 只挡这一轮:普通轮与定稿轮里检索仍然合法,提示照常出现。
+    assert _KG_GAP_NOTE_HEAD in ordinary
+    assert _KG_GAP_NOTE_HEAD in _outline_note(
+        sections, 0, kg_gap_segment=segment)
+
+
+def test_the_repair_round_consumes_no_candidates():
+    """纠错轮既不渲染也**不消费**:两件事同一个判据、同一处返回。
+
+    失败场景:只挡渲染、照常按返回的行数摘队列的话,那批候选会被算作「展示过」
+    却一行都没上屏 —— 从此再也不会出现(去重账目只认展示过一次)。所以这里断言
+    的是返回值的**第二个**分量,它就是调用方要摘掉的行数。
+    """
+    rows = [_row(f"源{index}", f"目标{index}") for index in range(3)]
+
+    assert kg_gap_note_segment(rows, repair_only=True) == ("", 0)
+    # 对照:普通轮既渲染也消费。
+    segment, used = kg_gap_note_segment(rows)
+    assert used == 3 and _KG_GAP_NOTE_HEAD in segment
 
 
 def test_the_outline_note_is_byte_identical_without_a_gap_segment():
@@ -728,10 +980,13 @@ def test_the_budget_bounds_the_number_of_probes(repo, monkeypatch):
         lambda notebook_id, object_ids: (
             probes.append(1) or real(notebook_id, object_ids)))
     repo.settings.reasoning_stale_limit = 99
+    rounds = iter(range(_MAX_OUTLINE_UPDATES + 4))
     llm = _SeqLLM([
-        lambda prompt: _outline_action([
-            {"id": "a", "title": f"第 {len(probes)} 版",
-             "evidence": [_shown_kg_ids(prompt)[0]]},
+        # 每轮换一个**新**对象,好让每次被接受的 apply 都有新 seed 可探
+        # (否则 seed 账目会先把查询挡掉,这条就测不到预算了)。
+        lambda prompt, _n=next(rounds): _outline_action([
+            {"id": "a", "title": f"第 {_n} 版",
+             "evidence": [_shown_kg_ids(prompt)[_n % 6]]},
         ])
         for _ in range(_MAX_OUTLINE_UPDATES + 4)
     ])
@@ -744,3 +999,185 @@ def test_the_budget_bounds_the_number_of_probes(repo, monkeypatch):
                 if step.detail.get("reason") == "outline_budget"]
     assert len(rejected) >= 4
     assert len(probes) == _MAX_OUTLINE_UPDATES
+
+
+def test_an_unchanged_binding_set_probes_nothing(repo, monkeypatch):
+    """绑定集合没变的 apply 零查询。
+
+    图在一个 run 内只读,所以重探同一个对象必然拿回同一批边、再被去重账目全部
+    滤掉 —— 一次纯白付的数据库往返。而「绑定没变」恰恰是常态:纯改标题、纯换
+    parent、用 remove_evidence 腾位换键的 apply 都不引入新对象。
+    """
+    notebook = _seed(repo)
+    seeds: list[list[str]] = []
+    real = repo.retrieval.candidates.weak_support_relations
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "weak_support_relations",
+        lambda notebook_id, object_ids: (
+            seeds.append(list(object_ids)) or real(notebook_id, object_ids)))
+    llm = _SeqLLM([
+        lambda prompt: _outline_action([
+            {"id": "a", "title": "初版",
+             "evidence": [_shown_kg_ids(prompt)[0]]},
+        ]),
+        # 同一个绑定、只换标题和 parent 结构 → 没有新 seed。
+        lambda prompt: _outline_action([
+            {"id": "a", "title": "改了标题的同一节",
+             "evidence": [_shown_kg_ids(prompt)[0]]},
+            {"id": "b", "title": "新加的空节"},
+        ]),
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述一下", "", limits=limits)
+
+    # 前置条件:两次 apply 都被接受了(否则这条只是在测「第二次被拒」)。
+    assert len(_steps(result, "outline")) == 2
+    assert len(seeds) == 1
+
+
+def test_the_terminal_repair_round_prompt_carries_no_gap_hint(repo, monkeypatch):
+    """端到端:真正跑到终态纠错轮时,那一轮的 prompt 里没有这一段。
+
+    上面那两条钉的是判据本身;这条钉的是**接线** —— run() 得真把
+    `repair_only=terminal_overflow_repair` 递下去,而不是恒 False。
+    """
+    from app.services.reasoning_retrieval import _OUTLINE_MAX_EVIDENCE
+
+    notebook = _seed(repo)
+    real_ids = _object_ids(repo, notebook.id, "版图设计") + _object_ids(
+        repo, notebook.id, "寄生电容")
+    old_keys = (real_ids + [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)])[
+        :_OUTLINE_MAX_EVIDENCE]
+    new_key = "new-1"
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + [new_key]),
+    )
+    # 攒够候选,好让第 2 轮展示 6 条之后队里还有剩 —— 否则纠错轮本来就没东西可拼,
+    # 这条会变成空跑。
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "weak_support_relations",
+        lambda *_args, **_kwargs: [
+            _row(f"源{index}", f"目标{index}", sources=1) for index in range(8)
+        ])
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        dict(_outline_action([{"id": "a", "title": "一节",
+                               "evidence": [new_key]}]), sufficient=True),
+        _outline_action([{"id": "a", "title": "一节", "evidence": [new_key],
+                          "remove_evidence": [old_keys[0]]}]),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    # 前置条件:确实跑到了终态纠错轮,而且此前那一轮真的展示过提示。
+    assert any(step.detail.get("overflow_repair")
+               for step in _steps(result, "outline"))
+    assert _KG_GAP_NOTE_HEAD in llm.reflect_prompts[1]
+    assert _KG_GAP_NOTE_HEAD not in llm.reflect_prompts[-1]
+    assert "不得改结构或执行检索" in llm.reflect_prompts[-1]
+
+
+def test_the_run_loop_passes_the_repair_flag_to_the_segment_builder():
+    """接线守卫:`run()` 那次 `kg_gap_note_segment` 调用必须带 `repair_only=`。
+
+    为什么要一条读源码的守卫 —— 这条接线**当前没有行为签名**:纠错轮之后循环立刻
+    `break`,所以「被误当成展示过而消费掉」的那批候选本来也不会再有机会上屏,而
+    渲染侧 `_outline_note` 里还有一道同判据的闸把 prompt 兜住了。两道闸今天是冗余
+    的,少任何一道都测不出来 —— 但一旦哪天纠错轮不再是最后一轮(或渲染侧那道闸被
+    收走),漏掉这个 kwarg 就是「算作展示过、一行都没上屏、此后再也不出现」。行为
+    用例钉不住的东西,就钉调用形状本身。
+    """
+    import inspect
+
+    source = inspect.getsource(ReasoningRetriever.run)
+    calls = [
+        line for line in source.splitlines()
+        if "kg_gap_note_segment(" in line
+    ]
+
+    assert len(calls) == 1, calls
+    # 调用跨行,所以从调用点起截一小段看实参。
+    start = source.index("kg_gap_note_segment(")
+    assert "repair_only=" in source[start:start + 200]
+
+
+def test_a_later_batch_can_outrank_what_is_still_queued(repo, monkeypatch):
+    """跨批次重排:第二轮发现的更薄弱的边排在上一轮的剩余之前。
+
+    失败场景:只按批次先后展示的话,上一轮溢出的那条 2 源边会挡在这一轮刚发现的
+    单源边前面 —— 「支撑最薄弱的先说」于是只在单批内成立,而这段提示的全部价值
+    就在那个排序上。
+    """
+    notebook = _seed(repo)
+    batches = [
+        [_row(f"旧{index}", f"旧目标{index}", sources=2) for index in range(7)],
+        [_row("新", "新目标", sources=1)],
+    ]
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "weak_support_relations",
+        lambda *_args, **_kwargs: batches.pop(0) if batches else [])
+    llm = _SeqLLM([
+        lambda prompt: _outline_action([
+            {"id": "a", "title": "第一版", "evidence": [_shown_kg_ids(prompt)[0]]},
+        ]),
+        lambda prompt: _outline_action([
+            {"id": "a", "title": "第二版",
+             "evidence": [_shown_kg_ids(prompt)[0], _shown_kg_ids(prompt)[1]]},
+        ]),
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    retriever.run(notebook.id, "综述一下", "", limits=limits)
+
+    # 第 2 轮:7 条里展示 6 条,剩 1 条 2 源边在队里。
+    first = llm.reflect_prompts[1].split(_KG_GAP_NOTE_HEAD)[-1]
+    assert first.count("\n- ") == _KG_GAP_NOTE_LINES
+    # 第 3 轮:刚发现的单源边必须排在那条剩余之前。
+    third = llm.reflect_prompts[2].split(_KG_GAP_NOTE_HEAD)[-1]
+    # 末行带着便签的收尾全角括号,剥掉再比。
+    lines = [line.rstrip("）") for line in third.splitlines()
+             if line.startswith("- ")]
+    assert len(lines) == 2
+    assert lines[0] == "- 新 —kind_of→ 新目标(支撑1)"
+    assert lines[1].endswith("(支撑2)")
+
+
+def test_a_probe_failure_never_takes_down_the_run(repo, monkeypatch):
+    """探测异常 fail-open(镜像 `collection_map_unavailable`)。
+
+    这是一段可有可无的提示,让它把整个 run 打掉是本末倒置 —— 用户问的问题还在
+    那儿。留一条 skip 步是底线:静默吞掉的话,「提示为什么一直不出现」在任何地方
+    都看不出来。
+    """
+    notebook = _seed(repo)
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "weak_support_relations",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("图谱读挂了")))
+    llm = _SeqLLM([
+        lambda prompt: _outline_action([
+            {"id": "a", "title": "锚点一节",
+             "evidence": [_shown_kg_ids(prompt)[0]]},
+        ]),
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述一下", "", limits=limits)
+
+    assert result.trace[-1].step_type == "answer"
+    skipped = _skip_reasons(result)
+    assert "kg_gap_unavailable" in skipped
+    assert "图谱读挂了" in skipped["kg_gap_unavailable"].detail["error"]
+    # 大纲本身照常落地:提示失败不该连累它。
+    assert [section.id for section in result.outline] == ["a"]
+    assert "kg_gap_candidates" not in _steps(result, "outline")[0].detail
+
+
+def _skip_reasons(result):
+    return {step.detail.get("reason"): step for step in _steps(result, "skip")}

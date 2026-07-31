@@ -43,10 +43,11 @@ from app.services.source_display import source_display_title
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
 # --------------------------------------- KG 弱支撑边探测(设计文档 §3.3)
-# 「支撑薄弱」= canonical 层聚合出的这条边只有 1-2 条原始关系撑着。综述类问题里
-# 它恰好是最该补证的方向,所以作为提示喂给模型;阈值放到 3 就把「有一定支撑」的
-# 边也算进来,提示会被稀释成噪声。
-_KG_GAP_SUPPORT_MAX = 2
+# 「支撑薄弱」= 这条 canonical 边只有 1-2 篇**文档**撑着(`source_count`),不是
+# 「只有 1-2 条原始关系」(`support_count`)。综述类问题里它恰好是最该补证的方向,
+# 所以作为提示喂给模型;阈值放到 3 就把「有一定支撑」的边也算进来,提示会被稀释
+# 成噪声。
+_KG_GAP_SOURCE_MAX = 2
 # 一次探测最多取回几条边。这是**成本闸**:它同时封住了随后名字解析那条查询的
 # 输入规模,也封住了回喂账目在内存里能攒多大。
 _KG_GAP_PROBE_LIMIT = 24
@@ -333,8 +334,9 @@ class CandidateRetrievalService(_RetrievalState):
         1. 经既有 `cluster_fold_rows` 把本轮的 id 折叠成 canonical 集 —— 只折**本轮
            给定的 id**,绝不加载整个 notebook 的 cluster map(大库那张表可达数百万
            条,物化一次就是一次 OOM 级的内存尖峰)。
-        2. 按 canonical 源端探测 `canonical_relations`(主键前缀 seek + 支撑阈值 +
-           LIMIT)。
+        2. 按 canonical 源端探测 `canonical_relations`(主键前缀 seek + **来源数**
+           阈值 + LIMIT)。判据是 `source_count` 而不是 `support_count`,理由见
+           存储层同名方法:后者是聚合掉的原始关系行数,单源边攒到 >2 行是常态。
         3. 一次有界批量解析两端显示名(簇 `canonical_name` 优先、对象 payload name
            回退),解析不到的行丢弃 —— 一条只有内部 id 的提示对模型毫无用处,而把
            `K-<seed>` 这种内部形状喂进 prompt,模型会把它当名字复述进答案。
@@ -345,8 +347,10 @@ class CandidateRetrievalService(_RetrievalState):
         联邦刻意不做:`canonical_relations` 是 per-notebook 产物,挂载参考库的绑定
         贡献零候选(与 exact_lookup「联邦刻意未做」同先例,登记为残余)。
 
-        返回按 (支撑数升序, 源端 id, 目标端 id) 排序 —— 展示顺序必须稳定可测,
-        否则「同一份库两次跑出两份提示」会让回归用例只能测长度。
+        返回按 (来源数升序, 源端 id, 目标端 id) 排序 —— 展示顺序必须稳定可测,
+        否则「同一份库两次跑出两份提示」会让回归用例只能测长度。SQL 的 `ORDER BY`
+        不能代替这一步:它的次键是 `canonical_tgt`(为的是让 LIMIT 截断本身确定),
+        与这里的 `(src, tgt)` 展示序在真并列上给出不同结果。
         """
         seeds = [
             text for text in dict.fromkeys(str(oid) for oid in object_ids) if text
@@ -370,7 +374,7 @@ class CandidateRetrievalService(_RetrievalState):
             ))
             edges = self.unified_kg.weak_support_relation_rows(
                 database, notebook_id, canonical_ids,
-                _KG_GAP_SUPPORT_MAX, _KG_GAP_PROBE_LIMIT,
+                _KG_GAP_SOURCE_MAX, _KG_GAP_PROBE_LIMIT,
             )
             if not edges:
                 return []
@@ -397,8 +401,10 @@ class CandidateRetrievalService(_RetrievalState):
             sampled_src, sampled_tgt = names_by_relation.get(
                 sample_by_edge.get(key, ""), ("", "")
             )
-            # 源端优先用第 1 步已经拿到的簇名(那是本轮绑定对象自己的簇,零额外
-            # 查询);拿不到才回退样本关系解析出来的名字。
+            # 源端优先用第 1 步已经拿到的簇名(那是**本轮绑定的那个对象**自己的
+            # 簇行,零额外查询);拿不到才回退样本关系解析出来的名字。两者可以不
+            # 同名:样本关系的源端往往是同一簇里的**另一个**成员行,而模型手上拿
+            # 到的是它绑定的那一个,提示行按它称呼才对得上。
             source_name = cluster_names.get(edge["canonical_src"], "") or sampled_src
             if not source_name or not sampled_tgt:
                 continue
@@ -408,10 +414,10 @@ class CandidateRetrievalService(_RetrievalState):
                 src_name=source_name,
                 tgt_name=sampled_tgt,
                 edge_type=edge["edge_type"],
-                support_count=int(edge["support_count"]),
+                source_count=int(edge["source_count"]),
             ))
         rows.sort(key=lambda row: (
-            row.support_count, row.canonical_src, row.canonical_tgt
+            row.source_count, row.canonical_src, row.canonical_tgt
         ))
         return rows
 

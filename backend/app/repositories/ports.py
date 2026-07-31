@@ -1189,7 +1189,7 @@ class UnifiedKgStorePort(Protocol):
         db: object,
         notebook_id: str,
         canonical_ids: list[str],
-        support_max: int,
+        source_max: int,
         limit: int,
     ) -> list[Any]: ...
     def mention_alias_candidate_batches(

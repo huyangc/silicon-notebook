@@ -676,29 +676,32 @@ class UnifiedKgStore:
         db: Any,
         notebook_id: str,
         canonical_ids: List[str],
-        support_max: int,
+        source_max: int,
         limit: int,
     ) -> List[dict]:
         """SQLite `weak_support_relation_rows` 的 parity 实现(设计文档 §3.3)。
 
-        `(notebook_id, canonical_src)` 是 `pk_canonical_relations` 的前缀,所以
-        每个源端一次索引 seek。`sample_relation_ids` 是 jsonb,按本适配器惯例
-        `::text` 出参,让服务层拿到与 SQLite 逐字同形的 JSON 文本(服务层因此
-        不必判断 dialect)。排序尾键的理由见 SQLite 侧同名方法。
+        判据是 `source_count`(不同文档数)而不是 `support_count`(原始关系行数)
+        —— 理由见 SQLite 侧同名方法。`(notebook_id, canonical_src)` 是
+        `pk_canonical_relations` 的前缀,所以每个源端一次索引 seek,但 `source_count`
+        无索引、是 seek 之后的残余过滤,hub 源端单次可扫数万行(`LIMIT` 只封返回
+        行数)。`sample_relation_ids` 是 jsonb,按本适配器惯例 `::text` 出参,让服务
+        层拿到与 SQLite 逐字同形的 JSON 文本(服务层因此不必判断 dialect)。排序
+        尾键的理由同样见 SQLite 侧。
         """
         if not canonical_ids:
             return []
         placeholders = ",".join("%s" for _ in canonical_ids)
         return db.execute(
-            f"SELECT canonical_src, edge_type, canonical_tgt, support_count, "
+            f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
             f"       sample_relation_ids::text AS sample_relation_ids "
             f"FROM canonical_relations "
             f"WHERE notebook_id=%s AND canonical_src IN ({placeholders}) "
-            f"  AND support_count<=%s "
-            f"ORDER BY support_count ASC, canonical_tgt ASC, canonical_src ASC, "
+            f"  AND source_count<=%s "
+            f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"         edge_type ASC "
             f"LIMIT %s",
-            [notebook_id, *canonical_ids, support_max, limit],
+            [notebook_id, *canonical_ids, source_max, limit],
         ).fetchall()
 
     @staticmethod
@@ -708,7 +711,8 @@ class UnifiedKgStore:
         """SQLite `relation_endpoint_name_rows` 的 parity 实现。
 
         为什么经样本关系而不是直接按 `canonical_id` 查簇表,见 SQLite 侧的说明
-        (那一列两侧都没有索引,直查是按 notebook 的整段扫描)。
+        (那一列两侧都没有索引,直查是按 notebook 的整段扫描)。同样按现存行原样
+        解析、刻意不继承产地的 rejected/deprecated 过滤(快照口径,理由见那边)。
         """
         if not relation_ids:
             return []

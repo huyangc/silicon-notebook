@@ -41,6 +41,7 @@ from app.services.knowledge_contracts import (
     USABLE_STATUSES,
 )
 from app.services.ask_service import knowledge_record
+from app.services.reasoning_retrieval import kg_gap_note_segment
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services.retrieval import RetrievedKnowledge, RetrievedRelation
 from app.services.retrieval_candidates import (
@@ -459,7 +460,11 @@ def test_weak_support_gap_probe_matches_the_sqlite_contract(knowledge_harness):
     `::text` 的话服务层拿到的是 list 而不是 SQLite 那样的 JSON 文本,`json.loads`
     当场炸(或者更糟:被一个「顺手也接受 list」的解析器悄悄吃掉,两侧从此不同形);
     ②`payload ->> 'name'` 与 SQLite 的 `json_extract` 是两套写法,必须各写各的;
-    ③`COALESCE(NULLIF(...), ...)` 在 `COLLATE "C"` 的文本列上的行为。
+    ③`COALESCE(NULLIF(...), ...)` 在 `COLLATE "C"` 的文本列上的行为;④`bigint`
+    计数列回来的是 Python int 还是别的什么(阈值比较与渲染都吃它)。
+
+    夹具里两个计数刻意**不相等**:判据必须是 `source_count`(不同文档数),不是
+    `support_count`(聚合掉的原始关系行数)。
     """
     unified = PostgresUnifiedKgStore(knowledge_harness.database, now=lambda: NOW)
     names = {
@@ -498,12 +503,14 @@ def test_weak_support_gap_probe_matches_the_sqlite_contract(knowledge_harness):
     ]
     canonical_rows = [
         ("nb-personal", "K-ko-gap-anchor", edge_type, target, support,
-         support, json.dumps(samples), NOW)
-        for edge_type, target, support, samples in (
-            ("kind_of", "K-ko-gap-weak", 1, ["rel-gap-weak"]),
-            ("part_of", "K-ko-gap-mid", 2, ["rel-gap-mid"]),
-            # 阈值外的对照:被 3 篇文档印证的边不该进提示。
-            ("part_of", "K-ko-gap-strong", 3, ["rel-gap-strong"]),
+         sources, json.dumps(samples), NOW)
+        for edge_type, target, support, sources, samples in (
+            # 多行、单源:别名归一/claim 聚簇的常态,而它正是最该补证的那条 ——
+            # 按 support_count 过滤会把它滤掉。
+            ("kind_of", "K-ko-gap-weak", 9, 1, ["rel-gap-weak"]),
+            ("part_of", "K-ko-gap-mid", 5, 2, ["rel-gap-mid"]),
+            # 阈值外的对照:被 3 篇文档印证的边不该进提示(行数反而最少)。
+            ("part_of", "K-ko-gap-strong", 1, 3, ["rel-gap-strong"]),
         )
     ]
     with knowledge_harness.database.write() as connection:
@@ -526,9 +533,10 @@ def test_weak_support_gap_probe_matches_the_sqlite_contract(knowledge_harness):
             connection, "nb-personal", ["rel-gap-weak", "rel-gap-mid"]
         )
 
-    # 阈值:只放 support_count ≤ 2;排序:支撑升序 → 目标端 → 源端 → 边类型。
+    # 阈值:只放 source_count ≤ 2(9 行单源的那条**入选**,1 行三源的那条落选);
+    # 排序:来源数升序 → 目标端 → 源端 → 边类型。
     assert [
-        (row["canonical_tgt"], row["edge_type"], int(row["support_count"]))
+        (row["canonical_tgt"], row["edge_type"], int(row["source_count"]))
         for row in probed
     ] == [("K-ko-gap-weak", "kind_of", 1), ("K-ko-gap-mid", "part_of", 2)]
     assert [row["canonical_tgt"] for row in limited] == ["K-ko-gap-weak"]
@@ -549,13 +557,15 @@ def test_weak_support_gap_probe_matches_the_sqlite_contract(knowledge_harness):
     rows = service.weak_support_relations("nb-personal", ["ko-gap-anchor"])
     assert [
         (row.canonical_src, row.src_name, row.edge_type, row.tgt_name,
-         row.support_count)
+         row.source_count)
         for row in rows
     ] == [
         ("K-ko-gap-anchor", "版图设计", "kind_of", "寄生电容", 1),
         ("K-ko-gap-anchor", "版图设计", "part_of", "失配", 2),
     ]
     assert service.weak_support_relations("nb-personal", []) == []
+    # 渲染出的 `(支撑N)` 用的也是来源数 —— 与头行「仅 1-2 源支撑」同口径。
+    assert "寄生电容(支撑1)" in kg_gap_note_segment(rows)[0]
 
 
 def test_mount_order_and_equal_score_relation_federation_are_id_stable(

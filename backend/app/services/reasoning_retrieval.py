@@ -834,6 +834,14 @@ def _outline_note(
             "要删除请在该节 remove_evidence 中点名;"
             f"还可以再整理 {updates_left} 次:\n"
         )
+    if repair_only:
+        # 终态纠错轮不给弱支撑边提示。这一段的头行写着「可用 add_subquery/
+        # follow_chain 定向补证」,而同一份便签的开头写着「不得改结构或执行检索」
+        # —— 两句话直接打架,而模型照着后写的那句做的话,这一轮会以
+        # `outline_overflow_repair_declined` 收场:纠错资格白烧一次,未接纳的
+        # key 一个都没换进来。这里只挡这一轮:`updates_left<=0` 的定稿轮与
+        # cap-repair 邀请轮都仍然允许(也鼓励)检索动作,提示在那两处照常出现。
+        kg_gap_segment = ""
     return head + "\n".join(lines) + tail + overflow_note + kg_gap_segment + "）"
 
 
@@ -860,35 +868,57 @@ _KG_GAP_NOTE_CHARS = 520
 _KG_GAP_EDGE_CHARS = 24
 
 
+def _kg_gap_name(value: object) -> str:
+    """端点显示名 → 压成单行(镜像 `_outline_text` 对模型自由文本的处理)。
+
+    必须在**截长之前**做:KG 对象的名字来自语料,claim 的「名字」经常就是一整段
+    带换行的正文。原样拼进便签的话,一条提示会被那个换行撕成两半 —— 后半截没有
+    `- ` 前缀、也没有箭头,读起来像大纲的下一节,而尾截又会让 `(支撑N)` 落到那半
+    截上。截长本身封不住这件事:80 字符的行里塞得下好几个换行。
+    """
+    return " ".join(str(value or "").split())
+
+
 def _kg_gap_line(row) -> str:
     """一条弱支撑边渲染成「A —edge→ B(支撑N)」。
+
+    `(支撑N)` 里的 N 是 `source_count`(不同文档数),与头行「仅 1-2 源支撑」是同
+    一个口径。渲染 `support_count`(原始关系行数)会让这行自己拆自己的台:一条
+    单源边可以带着「支撑5」出现在一段声称「仅 1-2 源」的清单里。
 
     ≤`_KG_GAP_NOTE_LINE_CHARS` 是硬界,而且必须靠**裁两端名字**达成,不能靠对整行
     做一刀切的尾截:尾截会把 `(支撑N)` 连同目标端一起削掉,留下一行读不出关系的
     残句 —— 模型据此提交的定向查询会是半个名字。固定部分本身就超界时(边类型被
     改坏才可能)才退回整行截断。
     """
-    edge = str(row.edge_type)[:_KG_GAP_EDGE_CHARS]
+    edge = _kg_gap_name(row.edge_type)[:_KG_GAP_EDGE_CHARS]
     prefix, middle = "- ", f" —{edge}→ "
-    tail = f"(支撑{int(row.support_count)})"
+    tail = f"(支撑{int(row.source_count)})"
     room = _KG_GAP_NOTE_LINE_CHARS - len(prefix) - len(middle) - len(tail)
     if room < 2:
         return (prefix + middle + tail)[:_KG_GAP_NOTE_LINE_CHARS]
     left = room // 2
     return (
-        prefix + str(row.src_name)[:left] + middle
-        + str(row.tgt_name)[:room - left] + tail
+        prefix + _kg_gap_name(row.src_name)[:left] + middle
+        + _kg_gap_name(row.tgt_name)[:room - left] + tail
     )
 
 
-def kg_gap_note_segment(rows) -> Tuple[str, int]:
+def kg_gap_note_segment(rows, *, repair_only: bool = False) -> Tuple[str, int]:
     """待展示候选 → (便签段, 本次消费的行数)。
 
     返回消费行数而不是就地改 `rows`,是因为这一段只有在大纲便签**真的进了 prompt**
     时才算展示过(便签为空时整段不上屏);调用方据此再从待展示队列里摘掉它们。
     「每条边只展示一次」是本特性的成本合同:它是提示不是状态,反复展示只烧预算。
+
+    ``repair_only``(终态溢出纠错轮)下返回 `("", 0)`:那一轮的便签开头写着「不得
+    改结构或执行检索」,而这一段教的正是「用 add_subquery/follow_chain 定向补证」
+    —— 两句话打架,模型照做就会把仅有的一次纠错资格烧掉(实测收在
+    `outline_overflow_repair_declined`)。渲染与消费**同一个判据、同一处返回**:
+    分成两个 `if` 写在两个文件里的话,哪天只改一处就会出现「算作展示过、却一行
+    都没上屏」——那批候选此后再也不会出现。
     """
-    if not rows:
+    if repair_only or not rows:
         return "", 0
     segment = "\n" + _KG_GAP_NOTE_HEAD
     used = 0
@@ -1816,6 +1846,13 @@ class ReasoningRetriever:
         # run 级 (src, edge, tgt) 去重账目:每条边只展示一次。它是提示不是状态,
         # 反复展示只烧 prompt 预算。仅内存,不持久化、不进 AskResponse。
         kg_gap_seen: set = set()
+        # run 级**已探测过的 seed** 账目。图在一个 run 内只读,所以同一个对象 id
+        # 重探必然拿回同一批边、再被上面那份账目全部滤掉 —— 那是一次纯白付的往返。
+        # 而「绑定集合没变」恰恰是常态:纯改标题、纯换 parent、用 remove_evidence
+        # 腾位换键的 apply 都不引入新对象。按对象 id 记(而不是折叠后的 canonical)
+        # 是因为折叠发生在服务端,推理层手上只有对象 id;同一 id ⇒ 同一 canonical,
+        # 所以按 id 去重只会更保守,不会漏掉真正的新源端。
+        kg_gap_probed_seeds: set = set()
         # 已算出、等着下一轮便签展示的候选。展示后即摘除;run 结束时仍在队里的
         # (终态轮 apply 算出来的那批)如实丢弃——提示服务于**继续检索**的轮次。
         kg_gap_pending: List = []
@@ -2132,20 +2169,43 @@ class ReasoningRetriever:
             定义在 KG 图上。判别方式是确定性的:`collected` 的键就是 object_id
             (`outline_binding_keys` 建合法集时用的也是同一份口径),所以「在不在
             collected 里」是精确判据 —— 不猜 id 前缀,前缀是会变的实现细节。
+
+            只送**本轮新出现**的 seed(见 `kg_gap_probed_seeds`),所以一次纯改标题
+            或纯换键的 apply 一条查询都不发。
+
+            探测失败 fail-open(镜像同一函数里 `collection_map_unavailable` 的处理):
+            这是一段可有可无的提示,让它把整个 run 打掉是本末倒置;记一条 skip 步
+            留痕即可,静默吞掉才是不可接受的那一种。
             """
             object_ids: List[str] = []
             picked: set = set()
             for section in sections:
                 for key in section.evidence_keys:
-                    if key in collected and key not in picked:
+                    if (
+                        key in collected
+                        and key not in picked
+                        and key not in kg_gap_probed_seeds
+                    ):
                         picked.add(key)
                         object_ids.append(key)
             if not object_ids:
                 return 0
+            kg_gap_probed_seeds.update(object_ids)
+            try:
+                probed = self.retrieval.weak_support_relations(
+                    notebook_id, object_ids
+                )
+            except AskCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 见上:提示不是必需品
+                record(TraceStep(
+                    step_type="skip",
+                    summary="跳过弱支撑关系提示(暂时读不到图谱的支撑情况)",
+                    detail={"reason": "kg_gap_unavailable",
+                            "error": str(exc)[:120]}))
+                return 0
             fresh = []
-            for row in self.retrieval.weak_support_relations(
-                notebook_id, object_ids
-            ):
+            for row in probed:
                 key = (row.canonical_src, row.edge_type, row.canonical_tgt)
                 if key in kg_gap_seen:
                     continue
@@ -2153,10 +2213,12 @@ class ReasoningRetriever:
                 fresh.append(row)
             if fresh:
                 kg_gap_pending.extend(fresh)
-                # 跨批次重排成全局展示序:队列可能攒了好几轮的候选,只按批次先后
-                # 展示会让「支撑最薄弱的先说」这条合同只在单批内成立。
+                # 跨批次重排成全局展示序:队列可能攒了好几轮的候选(每轮只展示
+                # 前 6 条),只按批次先后展示会让「支撑最薄弱的先说」这条合同
+                # 只在单批内成立 —— 上一轮剩下的一条 2 源边会排在这一轮刚发现的
+                # 单源边前面。
                 kg_gap_pending.sort(key=lambda row: (
-                    row.support_count, row.canonical_src, row.canonical_tgt
+                    row.source_count, row.canonical_src, row.canonical_tgt
                 ))
             return len(fresh)
 
@@ -2376,7 +2438,12 @@ class ReasoningRetriever:
             # 没有对话历史,模型要全量重提就只能从这里抄(见 _outline_note)。
             # 弱支撑边提示挂在大纲便签末尾:它讲的正是「已绑定的这些证据周边还有
             # 什么没查」,离开大纲上下文就只是一串无处安放的关系。
-            kg_gap_segment, kg_gap_shown = kg_gap_note_segment(kg_gap_pending)
+            #
+            # 终态纠错轮既不渲染它也**不消费**它 —— 两件事同一个判据、由
+            # `kg_gap_note_segment` 一处返回(理由见那里)。`_outline_note` 里另有
+            # 一道同判据的渲染闸,那是给「调用方仍然递了一段进来」兜底的。
+            kg_gap_segment, kg_gap_shown = kg_gap_note_segment(
+                kg_gap_pending, repair_only=terminal_overflow_repair)
             outline_note = _outline_note(
                 outline, _MAX_OUTLINE_UPDATES - outline_updates,
                 outline_overflow,
@@ -2386,9 +2453,14 @@ class ReasoningRetriever:
             )
             if outline_note:
                 summary = f"{summary}\n\n{outline_note}"
-                # 只有真的上屏了才算展示过。便签为空(没有大纲)时整段不出现,
-                # 候选留在队里等下一轮——否则「每条边只展示一次」会退化成
+                # 只有真的上屏了才算展示过——否则「每条边只展示一次」会退化成
                 # 「每条边最多被算作展示一次」,而模型一行都没看见。
+                #
+                # ⚠ 这个分支**当前恒真**:候选只可能由一次成功的 apply 产生,而
+                # 成功的 apply 必然留下非空大纲,非空大纲的便签也就非空。写成条件
+                # 而不是直接消费,是防御性的:哪天 `_outline_note` 多出一条提前
+                # 返回空串的路径(或候选获得第二个产地),这里不至于静默丢掉一批
+                # 从没上过屏的提示。
                 del kg_gap_pending[:kg_gap_shown]
             if collection_map_text:
                 summary = (

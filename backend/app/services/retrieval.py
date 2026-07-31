@@ -99,6 +99,11 @@ class GapRelationRow:
     两端各带 canonical id 与显示名。id 用于 run 级去重账目(名字会因簇换代而变,
     id 不会);显示名才是喂给模型的东西(canonical id 是 `K-<归一化 seed>` 这种
     内部形状,模型复述它只会污染答案)。
+
+    ``source_count`` 是撑着这条边的**不同文档**数,不是聚合掉的原始关系行数
+    (`canonical_relations.support_count`)。字段名照这个含义起,是因为提示行对模型
+    说的就是「仅 1-2 源支撑」—— 名字叫 support 而值是行数,下一个读到它的人会照着
+    行数去渲染,而那两个数在别名归一/claim 聚簇的库上经常差好几倍。
     """
 
     canonical_src: str
@@ -106,7 +111,7 @@ class GapRelationRow:
     src_name: str
     tgt_name: str
     edge_type: str
-    support_count: int
+    source_count: int
 
 
 # KG node-type authority weights: claim/formula are primary knowledge carriers;

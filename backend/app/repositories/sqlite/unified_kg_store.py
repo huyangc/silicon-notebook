@@ -647,20 +647,29 @@ class UnifiedKgStore:
         db: sqlite3.Connection,
         notebook_id: str,
         canonical_ids: List[str],
-        support_max: int,
+        source_max: int,
         limit: int,
     ) -> List[sqlite3.Row]:
         """BOUNDED weak-support probe (设计文档 §3.3):给定 canonical 源端集合,
-        取支撑数 ≤ ``support_max`` 的出边,最多 ``limit`` 行。
+        取**来源数** ≤ ``source_max`` 的出边,最多 ``limit`` 行。
+
+        判据是 `source_count`(支撑这条边的**不同文档**数)而不是 `support_count`
+        (聚合掉的原始关系行数)。两者在 canonical 层经常差得很远:别名归一与 claim
+        聚簇会让同一篇文档里的好几条原始关系折叠进同一条 canonical 边,于是一条
+        **单源**边可以攒出 5 行 support —— 按行数过滤恰好把它滤掉,而它正是这个
+        特性要救的那一批(只有一篇文献提到、最该补证)。头行对模型说的也是
+        「仅 1-2 源支撑」,按行数算会让那句断言直接失真。
 
         谓词 `(notebook_id, canonical_src)` 正好是 `canonical_relations` 主键的
-        **前缀**,所以每个源端都是一次索引 seek —— 没有全表扫描,代价随给定的
-        canonical 集合(本轮大纲绑定,数十个)而不是随库规模增长。
+        **前缀**,所以每个源端都是一次索引 seek,不扫全表。但代价随源端的**出度**
+        增长而不是恒定:`source_count` 上没有索引,所以它是 seek 之后的残余过滤,
+        一个 hub 源端单次可以扫到数万行(`LIMIT` 只封住**返回**行数,封不住扫描
+        行数)。本特性靠「每 run ≤7 次、只探本轮新出现的 seed」把总量压住。
 
         `ORDER BY` 比合同多带两个尾键(`canonical_src`/`edge_type`)。合同只写了
-        `support_count, canonical_tgt`,而它们相等的行完全可能来自不同源端/不同
-        边类型 —— 那时「取前 24 行」取到哪 24 行由存储顺序决定,双后端不必一致、
-        同一个库两次也不必一致。补上尾键只在合同留白处定序,不改前两键的语义。
+        计数键与 `canonical_tgt`,而它们相等的行完全可能来自不同源端/不同边类型
+        —— 那时「取前 24 行」取到哪 24 行由存储顺序决定,双后端不必一致、同一个
+        库两次也不必一致。补上尾键只在合同留白处定序,不改前两键的语义。
 
         反向(`canonical_tgt IN (...)`)刻意不做:那一列没有索引,加覆盖索引要动
         双后端 schema。登记为残余,等真机评估证明 src 侧有用再花这笔。
@@ -669,15 +678,15 @@ class UnifiedKgStore:
             return []
         placeholders = ",".join("?" for _ in canonical_ids)
         return db.execute(
-            f"SELECT canonical_src, edge_type, canonical_tgt, support_count, "
+            f"SELECT canonical_src, edge_type, canonical_tgt, source_count, "
             f"       sample_relation_ids "
             f"FROM canonical_relations "
             f"WHERE notebook_id=? AND canonical_src IN ({placeholders}) "
-            f"  AND support_count<=? "
-            f"ORDER BY support_count ASC, canonical_tgt ASC, canonical_src ASC, "
+            f"  AND source_count<=? "
+            f"ORDER BY source_count ASC, canonical_tgt ASC, canonical_src ASC, "
             f"         edge_type ASC "
             f"LIMIT ?",
-            [notebook_id, *canonical_ids, support_max, limit],
+            [notebook_id, *canonical_ids, source_max, limit],
         ).fetchall()
 
     @staticmethod
@@ -700,6 +709,14 @@ class UnifiedKgStore:
         两条 `member_object_id` 簇 join),那条查询正是 canonical 边的产地 —— 于是
         「样本关系的两端折叠后就是这条 canonical 边的两端」是构造上成立的,不是
         一句需要人复核的话。
+
+        ⚠ **快照口径,刻意不继承产地的状态过滤**:产地那条查询排掉 `rejected` 关系、
+        并只把 `deprecated` 之外的对象算进图,而这里按现存行原样解析 —— 样本关系
+        自上次 rebuild 后被判 rejected、或端点对象被 deprecated 时,名字照样解析得
+        出来。这是**有意**的:`canonical_relations` 整张表本来就是上次 rebuild 的
+        快照(support/source 计数同样是那一刻的),提示行说的是「上次建图时这条边
+        只有一两篇文献撑着」。在这里补状态过滤只会让名字与计数分属两代事实,而代价
+        是两条 join 各多一个无索引的残余谓词。真正过期的整份快照由 rebuild 换掉。
         """
         if not relation_ids:
             return []
