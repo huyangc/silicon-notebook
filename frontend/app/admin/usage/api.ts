@@ -19,7 +19,9 @@ export type AdminUserUsage = {
   created_at: string;
   notebooks: number;
   sources: number;
+  /** @deprecated 兼容旧管理端；界面使用 questions。 */
   conversations: number;
+  questions: number;
   reports: number;
   last_active: string | null;
   is_online: boolean;

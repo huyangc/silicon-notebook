@@ -33,7 +33,7 @@ export type AdminUserSortKey =
   | "created_at"
   | "notebooks"
   | "sources"
-  | "conversations"
+  | "questions"
   | "reports"
   | "last_active"
   | "upload_limit";

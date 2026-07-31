@@ -8,7 +8,9 @@ export type AdminUserNotebook = {
   name: string;
   status: string;
   sources: number;
+  /** @deprecated 兼容旧管理端；界面使用 questions。 */
   conversations: number;
+  questions: number;
   reports: number;
   created_at: string;
   updated_at: string;

@@ -81,6 +81,7 @@
         "AdminUserNotebook": {
           "properties": {
             "conversations": {
+              "deprecated": true,
               "title": "Conversations",
               "type": "integer"
             },
@@ -95,6 +96,10 @@
             "name": {
               "title": "Name",
               "type": "string"
+            },
+            "questions": {
+              "title": "Questions",
+              "type": "integer"
             },
             "reports": {
               "title": "Reports",
@@ -119,6 +124,7 @@
             "status",
             "sources",
             "conversations",
+            "questions",
             "reports",
             "created_at",
             "updated_at"
@@ -203,6 +209,7 @@
         "AdminUserUsage": {
           "properties": {
             "conversations": {
+              "deprecated": true,
               "title": "Conversations",
               "type": "integer"
             },
@@ -232,6 +239,10 @@
             },
             "notebooks": {
               "title": "Notebooks",
+              "type": "integer"
+            },
+            "questions": {
+              "title": "Questions",
               "type": "integer"
             },
             "reports": {
@@ -274,6 +285,7 @@
             "notebooks",
             "sources",
             "conversations",
+            "questions",
             "reports"
           ],
           "title": "AdminUserUsage",

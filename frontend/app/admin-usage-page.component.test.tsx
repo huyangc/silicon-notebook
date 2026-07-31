@@ -38,7 +38,8 @@ const rows = [
     created_at: "2026-07-01T00:00:00",
     notebooks: 1,
     sources: 2,
-    conversations: 3,
+    conversations: 2,
+    questions: 3,
     reports: 4,
     last_active: null,
     is_online: false,
@@ -54,6 +55,7 @@ const rows = [
     notebooks: 0,
     sources: 0,
     conversations: 0,
+    questions: 0,
     reports: 0,
     last_active: null,
     is_online: false,
@@ -89,6 +91,8 @@ test("管理员可在用户总览中二次确认并授予管理员权限", async
 
   render(<AdminUsagePage />);
   const target = await targetRow();
+  expect(screen.getByRole("columnheader", { name: /提问/ })).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: /对话/ })).not.toBeInTheDocument();
 
   await user.click(target.getByRole("button", { name: "设为管理员" }));
   expect(mocks.updateAdminUserRole).not.toHaveBeenCalled();
