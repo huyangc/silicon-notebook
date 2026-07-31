@@ -135,6 +135,7 @@ import {
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
+import { quotedPhraseHint } from "./query-syntax";
 import { AskIntentReview } from "./ask-intent-review";
 import {
   buildAskIntentConfirmation,
@@ -2120,6 +2121,9 @@ export default function Home() {
   // 引导文案。判据单一真源见 ask-availability(读后端 ask_available)。
   const askBlocked = isAskBlocked(currentNotebook);
   const askPlaceholderText = askBlocked ? "请先添加来源或挂载参考库，再开始对话" : askHint;
+  // 「英文双引号 = 整体检索」的即时回执。识别规则有边界(太短、引号太密都不算),
+  // 不当场回执的话,没被识别就是一次静默失败:用户以为下了约束,检索侧当普通词处理。
+  const askQuotedPhraseHint = useMemo(() => quotedPhraseHint(question), [question]);
   // 「这次提问还在进行中」——问题理解阶段(尚无持久 job)、等用户补充澄清、以及
   // 真正在跑的 ask 都算。在途 turn 从提交那一刻就要出现,理解阶段的轨迹才有地方
   // 落;只看 asking 会让用户在整段问题理解里对着空会话等待。
@@ -5416,6 +5420,11 @@ export default function Home() {
                   disabled={askBlocked || sessionLoading || Boolean(askIntentReview)}
                 >
                   <span>{notebookSourceTotal} 个来源</span>
+                  {/* 只在用户真的敲了英文双引号时才出现:确认哪几段被当成完整短语,
+                      或说明为什么这次没识别。判据与后端同一份规则的镜像。 */}
+                  {askQuotedPhraseHint && (
+                    <span className="chat-hint">{askQuotedPhraseHint}</span>
+                  )}
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
                       <button

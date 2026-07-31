@@ -53,7 +53,8 @@ class _ReasoningRetrieverFactory(Protocol):
 
 from app.models.ask import TraceStep
 from app.repositories.lexical_query import (
-    MAX_EXACT_PHRASE_CHARS, exact_probe_terms,
+    MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
+    exact_probe_terms,
 )
 from app.services.prompts import (
     PLAN_SCHEMA_HINT, plan_prompt, reflect_prompt, reflect_schema_hint,
@@ -807,14 +808,23 @@ class ReasoningRetriever:
             "chunk", self.retrieval.exact_lookup_chunks(notebook_id, query)
         )
 
-    def _exact_lookup_terms(self, text: str) -> List[str]:
+    def _exact_lookup_terms(self, text: str, *, honor_quotes: bool = True) -> List[str]:
         """本轮实际会被探测的名称(供轨迹如实记账)。
 
         服务层按 `exact_lookup_max_identifiers` 截断,这里用同一个上界切片,轨迹
         里的 terms 才是真正探测过的那几个,而不是问题里出现过的全部标识符。
+
+        `honor_quotes` 只在 seed 通道为真:用户亲手打的英文双引号是显式约束,而
+        模型给的 `exact_term` 不是——见 `exact_probe_terms` 的同名参数。
+
+        上界还要跟 `MAX_QUOTED_PHRASES` 取小:名称是经 `exact_probe_query` 逐个
+        加引号传给通道的,通道再按同一把闸抽回来,所以真正能往返的条数不超过一次
+        解析允许的引号短语数。默认值(3 对 8)下这一夹是恒等的,它挡的是把
+        `EXACT_LOOKUP_MAX_IDENTIFIERS` 调过 8 时轨迹记了 12 个、实际只探了 8 个。
         """
-        return exact_probe_terms(text)[
-            : max(0, self.settings.exact_lookup_max_identifiers)
+        return exact_probe_terms(text, honor_quotes=honor_quotes)[
+            : max(0, min(self.settings.exact_lookup_max_identifiers,
+                         MAX_QUOTED_PHRASES))
         ]
 
     def follow_chain(self, notebook_id, start_object_id, edge_type=None,
@@ -1339,11 +1349,14 @@ class ReasoningRetriever:
             if seed_terms:
                 raise_if_cancelled(self.cancel_event)
                 # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
-                # (action 传 " ".join(fresh))。打分口径现在由通道自己钉死(它对
+                # (action 传同一个编码)。打分口径现在由通道自己钉死(它对
                 # 本次实际探测的名称打分,不看调用方传什么串),所以这里传名称是
                 # 为了探测语义正确,不再是为了把分数拿对。
+                # 逐个加引号而不是空格拼接:通道会对收到的串**重新**抽名称,
+                # 「static timing analysis」这种多词短语裸拼进去就再也抽不回来,
+                # 会被当成三个普通词丢掉。单词标识符经引号分支原样往返。
                 found = [c for c in self.exact_lookup(
-                             notebook_id, " ".join(seed_terms))
+                             notebook_id, exact_probe_query(seed_terms))
                          if c.chunk_id not in seen_chunks]
                 for c in found:
                     seen_chunks.add(c.chunk_id)
@@ -1966,7 +1979,11 @@ class ReasoningRetriever:
                 # 防重按**名称**而非按请求串:seed 用问题原文、agent 可能给
                 # 「set_db 的参数」,两者抽出的名称相同就是同一次查找。真正执行时只
                 # 探测本轮新出现的名称,已查过的不再重复付 I/O。
-                probed = self._exact_lookup_terms(term) if term else []
+                # honor_quotes=False:这条路径上的名称来自模型,不是用户。用户的
+                # 引号已由 seed 通道兑现,而模型若能用 `x "的方法" y` 夹带引号,
+                # 就绕开了这把按实测定标的低选择度子串闸。
+                probed = (self._exact_lookup_terms(term, honor_quotes=False)
+                          if term else [])
                 fresh = [t for t in probed if _norm_query(t) not in exact_terms_done]
                 if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
                     # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
@@ -2016,7 +2033,8 @@ class ReasoningRetriever:
                         detail={"reason": "exact_lookup_cap", "term": term}))
                 else:
                     exact_lookups += 1
-                    new = [c for c in self.exact_lookup(notebook_id, " ".join(fresh))
+                    new = [c for c in self.exact_lookup(
+                               notebook_id, exact_probe_query(fresh))
                            if c.chunk_id not in seen_chunks]
                     for c in new:
                         seen_chunks.add(c.chunk_id)

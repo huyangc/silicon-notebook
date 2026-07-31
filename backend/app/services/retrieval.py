@@ -10,6 +10,10 @@ Tokenization is CJK-aware: runs of Chinese characters are turned into character
 bi-grams (single CJK chars become uni-grams) so a Chinese-first corpus is
 actually searchable by keyword. Latin/digit runs keep word-level tokens. This
 tokenizer is reused by extraction (evidence binding) and the scenario boost.
+
+One thing the query side does NOT tokenize: a span the user wrapped in ASCII
+double quotes. `KeywordBasis` keeps it whole, so it is covered only by a
+haystack that carries the entire phrase (see `keyword_basis`).
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from typing import (
     Set,
 )
 
+from app.core.query_syntax import quoted_phrases, unquoted_remainder
 from app.models.common import Evidence
 
 
@@ -300,7 +305,7 @@ _STOPWORDS = {
 }
 
 
-def keyword_score_tokens(query_tokens: Set[str], haystack_tokens: Set[str]) -> float:
+def keyword_score_tokens(query_tokens: AbstractSet[str], haystack_tokens: AbstractSet[str]) -> float:
     """Fraction of (content) query tokens present in a pre-tokenized haystack (0..1)."""
     if not query_tokens:
         return 0.0
@@ -308,15 +313,66 @@ def keyword_score_tokens(query_tokens: Set[str], haystack_tokens: Set[str]) -> f
     return hits / len(query_tokens)
 
 
-def keyword_score(query: str, text: str) -> float:
-    """Fraction of (content) query tokens present in the text (0..1).
+@dataclass(frozen=True)
+class KeywordBasis:
+    """The query side of keyword coverage: loose tokens + user-quoted phrases.
 
-    Stopwords are dropped from the query basis so verbose phrasings ("what is
-    X and what are its problems") aren't diluted relative to concise ones.
-    Thin wrapper over keyword_score_tokens for callers without a cached token set.
+    A `"..."` span is ONE indivisible unit of the basis. It counts as covered
+    only when the haystack carries the whole phrase, and its own words never
+    count separately — otherwise a document holding `timing` alone would collect
+    a third of the credit for `"static timing analysis"`, which is the dilution
+    the quotes exist to forbid.
+
+    Built once per query and reused across a candidate pool: the parse and the
+    query-side tokenization are per-query work, not per-candidate work.
     """
-    query_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
-    return keyword_score_tokens(query_tokens, set(_tokens(text)))
+
+    tokens: FrozenSet[str]
+    phrases: tuple[str, ...] = ()
+
+    def coverage(self, haystack_tokens: AbstractSet[str], haystack_text: str = "") -> float:
+        """Covered fraction of the basis (0..1).
+
+        `haystack_text` is only read when the query actually carries phrases, so
+        callers holding a cached token set pay nothing for the parameter until a
+        user asks for one.
+        """
+        total = len(self.tokens) + len(self.phrases)
+        if not total:
+            return 0.0
+        hits = sum(1 for token in self.tokens if token in haystack_tokens)
+        if self.phrases:
+            haystack = _normalize(haystack_text)
+            hits += sum(1 for phrase in self.phrases if phrase in haystack)
+        return hits / total
+
+
+def keyword_basis(query: str, *, honor_quotes: bool = True) -> KeywordBasis:
+    """Decompose a query into its keyword-coverage basis.
+
+    Stopwords are dropped so verbose phrasings ("what is X and what are its
+    problems") aren't diluted relative to concise ones.
+
+    `honor_quotes=False` is for the callers that compare two stored TEXTS rather
+    than scoring a user query — a document that happens to contain a quotation
+    is not stating a search constraint.
+    """
+    phrases = tuple(_normalize(p) for p in quoted_phrases(query)) if honor_quotes else ()
+    body = unquoted_remainder(query) if phrases else query
+    return KeywordBasis(
+        frozenset(t for t in _tokens(body) if t not in _STOPWORDS), phrases
+    )
+
+
+def keyword_score(query: str, text: str, *, honor_quotes: bool = True) -> float:
+    """Fraction of the query's keyword basis present in the text (0..1).
+
+    Thin wrapper over `keyword_basis` for callers scoring a single document; a
+    caller looping over candidates should hoist the basis out of the loop.
+    """
+    return keyword_basis(query, honor_quotes=honor_quotes).coverage(
+        set(_tokens(text)), text
+    )
 
 
 def token_overlap(span: str, text: str) -> float:
@@ -369,7 +425,7 @@ def score_knowledge(
     默认 isolated_ids=None 或 w_isolated_penalty=1.0 → 精确 no-op,现有调用者不受影响。
     """
     weight = _TYPE_WEIGHT.get(object_type, 0.5)
-    query_basis_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
+    basis = keyword_basis(query)
     scored: List[RetrievedKnowledge] = []
     for obj in objects:
         object_id = obj["id"]
@@ -378,9 +434,17 @@ def score_knowledge(
         evidence = obj.get("evidence", [])
         evidence_text = " ".join(e.quoted_span for e in evidence)
         if keyword_token_sets is not None and object_id in keyword_token_sets:
-            keyword = keyword_score_tokens(query_basis_tokens, keyword_token_sets[object_id])
+            # The cached set is tokenized from this same haystack, so a quoted
+            # phrase can still be checked against the text without giving up the
+            # cache. The join is skipped entirely when the query has no phrase,
+            # which is the path this cache exists to keep cheap.
+            keyword = basis.coverage(
+                keyword_token_sets[object_id],
+                f"{text} {evidence_text}" if basis.phrases else "",
+            )
         else:
-            keyword = keyword_score(query, f"{text} {evidence_text}")
+            haystack = f"{text} {evidence_text}"
+            keyword = basis.coverage(set(_tokens(haystack)), haystack)
 
         semantic = 0.0
         has_vector = False
@@ -459,12 +523,12 @@ def score_relations(
     ∈[0,1],低于 RELEVANCE_FLOOR 丢弃。relation_sims 是独立关系索引(dual-index
     分离,不与节点矩阵合并)。每个 relations 项: {id, source_object_id,
     target_object_id, edge_type, text}。"""
-    query_basis_tokens = {t for t in _tokens(query) if t not in _STOPWORDS}
+    basis = keyword_basis(query)
     scored: List[RetrievedRelation] = []
     for rel in relations:
         rid = rel["id"]
         text = rel.get("text", "")
-        keyword = keyword_score_tokens(query_basis_tokens, set(_tokens(text)))
+        keyword = basis.coverage(set(_tokens(text)), text)
         semantic = 0.0
         has_vector = False
         if query_vector and relation_sims is not None:
@@ -595,9 +659,10 @@ def score_elements(
     limit: int = 8,
     element_sims: Optional[Dict[str, float]] = None,
 ) -> List[RetrievedElement]:
+    basis = keyword_basis(query)
     scored: List[RetrievedElement] = []
     for element in elements:
-        keyword = keyword_score(query, element["text"])
+        keyword = basis.coverage(set(_tokens(element["text"])), element["text"])
         semantic = 0.0
         vector = element.get("vector")
         has_vector = bool(query_vector and (element_sims is not None or vector))
@@ -908,9 +973,10 @@ def score_chunks(
 ) -> List[RetrievedChunk]:
     """Keyword + 可选语义(预算好的 chunk_sims)融合打分 chunk;大召回(默认
     top-150)。与 score_elements 同构,但作用于合并后的检索 chunk。"""
+    basis = keyword_basis(query)
     scored: List[RetrievedChunk] = []
     for c in chunks:
-        keyword = keyword_score(query, c["text"])
+        keyword = basis.coverage(set(_tokens(c["text"])), c["text"])
         semantic = 0.0
         has_vector = bool(
             query_vector

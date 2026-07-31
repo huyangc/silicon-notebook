@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence
 
+from app.core.query_syntax import quoted_phrases
+
 
 # Deictic phrases that name the SCOPE of a request rather than anything inside
 # it.  One paragraph, one wording, spliced into every prompt that turns a user
@@ -52,6 +54,36 @@ SCOPE_DEIXIS_GROUNDING = (
     "Either way keep the rest of the question intact — dropping scope words "
     "must never turn it into a different question.\n"
 )
+
+# The user-facing search syntax, told to the model ONLY when the user actually
+# used it.  Unlike SCOPE_DEIXIS_GROUNDING this paragraph is conditional: a
+# question with no quotes gains nothing from it, and a deep report would
+# otherwise pay for it once per section per step.
+#
+# It is instruction, not enforcement.  Retrieval already honours the quotes
+# deterministically (lexical terms, keyword coverage, the exact channel); what
+# the model can still ruin is a REWRITE — dropping the quotes while
+# paraphrasing turns the user's one hard constraint back into three loose words,
+# and no downstream layer can tell that happened.
+_QUOTED_PHRASE_GROUNDING = (
+    "The user wrapped {phrases} in double quotes. That is this product's search "
+    "syntax for \"match this exact wording\": carry each quoted span through "
+    "VERBATIM, quotes included, into every sub-query, keyword and rewritten "
+    "question that targets it. Do not translate, paraphrase, split, reorder or "
+    "expand what is inside the quotes; the words outside them stay yours to "
+    "rewrite as usual.\n"
+)
+
+
+def quoted_phrase_grounding(question: str) -> str:
+    """The quoting rule, or "" when the question carries no quoted span."""
+    phrases = quoted_phrases(question)
+    if not phrases:
+        return ""
+    return _QUOTED_PHRASE_GROUNDING.format(
+        phrases=" and ".join(f'"{phrase}"' for phrase in phrases)
+    )
+
 
 DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
@@ -318,6 +350,7 @@ def plan_prompt(
         "- reason: one line on why this sub-query.\n"
         "Keep sub-queries focused and non-redundant.\n"
         f"{SCOPE_DEIXIS_GROUNDING}"
+        f"{quoted_phrase_grounding(question)}"
         "\n"
         f"{history_section}"
         f"{collection_section}"
@@ -515,6 +548,7 @@ def reflect_prompt(
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
         f"{SCOPE_DEIXIS_GROUNDING}"
+        f"{quoted_phrase_grounding(question)}"
         f"{scope_fields_rule}"
         "Before choosing answer, check aspect by aspect that every part the "
         "question explicitly asks for (each layer / entity / requirement it "
@@ -651,6 +685,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         "other LLMs'), set comparison.focal to that entity's canonical name; omit "
         "comparison otherwise.\n"
         f"{SCOPE_DEIXIS_GROUNDING}"
+        f"{quoted_phrase_grounding(question)}"
         "\n"
         f"{history_section}"
         f"{collection_section}"
@@ -736,6 +771,7 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "full list plus analysis. Set completeness_required=true for complete, "
         "aggregate, and hybrid; a relevance top-N can never satisfy those scopes.\n"
         f"{SCOPE_DEIXIS_GROUNDING}"
+        f"{quoted_phrase_grounding(question)}"
         "A request scoped to the whole open library ('当前notebook有哪几篇文章', "
         "'逐篇分析这个库') is a request about the library's own documents: keep it "
         "as the topic, classify result_scope as complete or hybrid, and do NOT "

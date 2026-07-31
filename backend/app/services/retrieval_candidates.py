@@ -27,10 +27,11 @@ from app.services.retrieval import (
     _TYPE_WEIGHT,
     _fuse,
     _payload_text,
+    _tokens,
     bm25_scores,
     ensure_procedure_quota,
     is_process_query,
-    keyword_score,
+    keyword_basis,
     rrf_fuse,
     score_elements,
     score_knowledge,
@@ -1754,6 +1755,7 @@ class CandidateRetrievalService(_RetrievalState):
         fused = rrf_fuse([bm25, sims], k=self.settings.retrieval_rrf_k)
         text_by_id = dict(docs)
 
+        basis = keyword_basis(query)
         result: List[RetrievedKnowledge] = []
         for oid, rrf_score in fused.items():
             if rrf_score <= 0:
@@ -1778,7 +1780,8 @@ class CandidateRetrievalService(_RetrievalState):
                     if s is not None:
                         has_vec = True
                         semantic = max(semantic, s)
-            relevance = _fuse(keyword_score(query, text_by_id.get(oid, "")),
+            doc_text = text_by_id.get(oid, "")
+            relevance = _fuse(basis.coverage(set(_tokens(doc_text)), doc_text),
                               semantic, has_vec)
             result.append(
                 RetrievedKnowledge(

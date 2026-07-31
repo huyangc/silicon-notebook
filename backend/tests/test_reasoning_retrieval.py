@@ -2266,7 +2266,13 @@ def _seed_manual_notebook(repo):
 
 
 def _retriever_counting_exact_lookup(repo, calls):
-    """构造 retriever 并记录每次精确查找实际收到的检索串(空列表=一次都没调)。"""
+    """构造 retriever 并记录每次精确查找实际收到的检索串(空列表=一次都没调)。
+
+    串里每个名称都带英文双引号:通道会对收到的串**重新**抽名称,而多词短语
+    (用户用引号锁定的那种)裸拼进去就再也抽不回来。逐个加引号是让「调用方已
+    选定的名称」原样往返的编码(`exact_probe_query`),下面的断言因此看的是
+    `"set_db"` 而不是 `set_db`——探测的仍是同一个名称。
+    """
     from app.services.reasoning_retrieval import ReasoningRetriever
     rr = ReasoningRetriever.from_repository(repo, repo.settings)
     original = rr.exact_lookup
@@ -2387,7 +2393,7 @@ def test_run_exact_lookup_seed_pass_takes_the_whole_named_section(rrepo):
     # 整句问题打分会被问题里一堆不相关词拖到约 0.286(评审实测的回归值),把
     # 这个精确命中挤到合成排序垫底、还可能拖过 grounded 判定阈值。
     assert [c.relevance for c in res.chunks] == [1.0, 1.0]
-    assert calls == ["set_db"]
+    assert calls == ['"set_db"']
     # seed 步排在初检索之后,天然被「轨迹覆盖整轮」包住。
     kinds = [t.step_type for t in res.trace]
     assert kinds.index("retrieve") < kinds.index("exact_lookup") < kinds.index("reflect")
@@ -2428,7 +2434,7 @@ def test_run_seed_pass_does_not_probe_a_digitless_hyphen_word(rrepo):
     calls_named = []
     _retriever_counting_exact_lookup(rrepo, calls_named).run(
         nb.id, "set_db 与 state-of-the-art 方案相比如何", "")
-    assert calls_named == ["set_db"]
+    assert calls_named == ['"set_db"']
 
 
 def test_run_exact_lookup_action_rejects_a_digitless_hyphen_word_with_a_teaching_note(rrepo):
@@ -2475,7 +2481,7 @@ def test_run_exact_lookup_action_pulls_the_section_the_model_named(rrepo):
                            "found": 2, "phase": "reflect"}
     assert step.summary == "按名称精确查找「set_db」:新增 2 段原文"
     assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args"]
-    assert calls == ["set_db"]
+    assert calls == ['"set_db"']
 
 
 def test_run_exact_lookup_action_skips_a_term_the_seed_already_probed(rrepo):
@@ -2558,7 +2564,8 @@ def test_run_exact_lookup_action_caps_at_three_and_seed_does_not_count(rrepo):
 
     # seed(问题里的 set_db)不占动作额度 → 3 个动作全部执行,第 4 个才被上限拦。
     # seed 打分串是抽出的名称本身("set_db"),不是整句问题(item 1)。
-    assert calls == ["set_db", "report_timing", "place_opt_design", "get_db"]
+    assert calls == ['"set_db"', '"report_timing"', '"place_opt_design"',
+                     '"get_db"']
     lookups = [t for t in res.trace if t.step_type == "exact_lookup"]
     assert [t.detail["phase"] for t in lookups] == ["seed", "reflect", "reflect", "reflect"]
     skip = next(t for t in res.trace
@@ -2670,7 +2677,7 @@ def test_allow_exact_lookup_policy_flag_disables_seed_and_action(rrepo):
     calls2 = []
     res2 = _retriever_counting_exact_lookup(rrepo, calls2).run(
         nb.id, completion_question, "")
-    assert calls2 == ["table_title known_cells content_md"]
+    assert calls2 == ['"table_title" "known_cells" "content_md"']
     seed_step = next(t for t in res2.trace if t.step_type == "exact_lookup")
     assert seed_step.detail == {
         "terms": ["table_title", "known_cells", "content_md"],

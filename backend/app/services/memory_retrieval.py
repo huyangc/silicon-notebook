@@ -6,7 +6,13 @@ from typing import Iterable, Sequence
 from app.models.memory import MemoryHit
 from app.repositories.ports import MemoryStorePort
 from app.services.embedding import Embedder
-from app.services.retrieval import RELEVANCE_FLOOR, _fuse, cosine, keyword_score
+from app.services.retrieval import (
+    RELEVANCE_FLOOR,
+    _fuse,
+    _tokens,
+    cosine,
+    keyword_basis,
+)
 from app.services.vector_index import decode_vector
 
 
@@ -77,11 +83,12 @@ class MemoryRetriever:
             query_vector = self.embedder.embed_query(clean_query)
         except Exception:
             query_vector = None
+        basis = keyword_basis(clean_query)
         hits: list[MemoryHit] = []
         for row in rows:
             item = row["record"]
             text = f"{item.title}\n{item.content_md}\n{' '.join(item.tags)}"
-            lexical = keyword_score(clean_query, text)
+            lexical = basis.coverage(set(_tokens(text)), text)
             vector = decode_vector(row.get("vector"))
             has_vector = query_vector is not None and vector is not None
             semantic = cosine(query_vector, vector.tolist()) if has_vector else 0.0

@@ -139,6 +139,41 @@ def test_keyword_score_ignores_stopwords():
     assert verbose == 0.5
 
 
+def test_quoted_phrase_is_one_indivisible_unit_of_the_keyword_basis():
+    """引号内不参与分词:整段命中才算命中,散落的词一分不给。
+
+    这条是「保证完整性」在**排序**上的兑现。候选生成把含整句短语的文档捞进来了,
+    但如果打分仍按 static/timing/analysis 三个独立词算覆盖率,散落着这三个词的
+    文档和真正含该短语的文档同分——引号就只影响召回、不影响谁排在前面。
+    """
+    exact = keyword_score('"static timing analysis" 原理',
+                          "we run static timing analysis 原理 like this")
+    scattered = keyword_score('"static timing analysis" 原理',
+                              "timing is static; the analysis 原理 follows")
+    assert exact == 1.0
+    # 基是 {短语, 原理} 两项;散落文档只覆盖到 原理,短语项一分不给。
+    assert scattered == 0.5
+
+
+def test_quoted_phrase_matching_is_case_and_whitespace_insensitive():
+    assert keyword_score('"Static Timing  Analysis"',
+                         "STATIC   timing\nanalysis appears here") == 1.0
+
+
+def test_keyword_score_without_quotes_is_unchanged():
+    # 无引号查询必须与本特性之前逐位一致(基就是内容 token 集合)。
+    assert keyword_score("engram module", "Engram is a memory module") == 1.0
+    assert keyword_score("engram absent", "Engram is a memory module") == 0.5
+
+
+def test_honor_quotes_false_reads_quotes_as_ordinary_words():
+    # 治理侧比较的是两段**已存文本**,不是用户查询:文档里引用了别人的话,
+    # 不等于它在声明检索约束。
+    assert keyword_score('a "static timing analysis" b',
+                         "timing is static; the analysis follows",
+                         honor_quotes=False) == 1.0
+
+
 def test_fuse_custom_weights_shift_balance():
     from app.services.retrieval import _fuse
     # 默认 0.4/0.6: 语义为 0 时融合分 = keyword * 0.4/(0.4+0.6) = 0.4
