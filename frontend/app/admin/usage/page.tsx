@@ -325,7 +325,7 @@ export default function AdminUsagePage() {
               <SortableHeader label="注册时间" sortKey="created_at" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="笔记本" sortKey="notebooks" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="来源" sortKey="sources" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <SortableHeader label="对话" sortKey="conversations" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="提问" sortKey="questions" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="报告" sortKey="reports" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>日志</th>
@@ -365,7 +365,7 @@ export default function AdminUsagePage() {
                   <td>{formatLastActive(u.created_at)}</td>
                   <td>{u.notebooks}</td>
                   <td>{u.sources}</td>
-                  <td>{u.conversations}</td>
+                  <td>{u.questions}</td>
                   <td>{u.reports}</td>
                   <td>{formatLastActive(u.last_active)}</td>
                   <td><a href={logsDrillHref(u.id)}>查看日志</a></td>
@@ -476,7 +476,7 @@ export default function AdminUsagePage() {
                           <thead>
                             <tr>
                               <th>笔记本</th><th>状态</th>
-                              <th>来源</th><th>对话</th><th>报告</th>
+                              <th>来源</th><th>提问</th><th>报告</th>
                               <th>创建</th><th>最近更新</th>
                             </tr>
                           </thead>
@@ -486,7 +486,7 @@ export default function AdminUsagePage() {
                                 <td>{nb.name}</td>
                                 <td>{notebookStatusLabel(nb.status)}</td>
                                 <td>{nb.sources}</td>
-                                <td>{nb.conversations}</td>
+                                <td>{nb.questions}</td>
                                 <td>{nb.reports}</td>
                                 <td>{formatLastActive(nb.created_at)}</td>
                                 <td>{formatLastActive(nb.updated_at)}</td>

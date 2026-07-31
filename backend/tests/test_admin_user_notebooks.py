@@ -13,8 +13,9 @@ def repo(tmp_path, monkeypatch):
 def _seed(repo):
     now = "2026-07-07T00:00:00"
     with repo._write() as db:
-        db.execute("INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at)"
-                   " VALUES (?,?,?,?,?,?,?,?)", ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now))
+        for user_id, username in (("u1", "a00000001"), ("u2", "b00000002")):
+            db.execute("INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at)"
+                       " VALUES (?,?,?,?,?,?,?,?)", (user_id, f"{user_id}@x", user_id.upper(), "user", "active", username, now, now))
         for nid, status in (("n1", "ready"), ("n2", "ready"), ("n3", "copying")):
             db.execute("INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at)"
                        " VALUES (?,?,?,?,?,?)", (nid, f"NB-{nid}", "u1", status, now, now))
@@ -25,6 +26,19 @@ def _seed(repo):
                    " VALUES (?,?,?,?,?)", ("r1", "n1", "q?", now, now))
         db.execute("INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at)"
                    " VALUES (?,?,?,?,?)", ("c1", "n1", "u1", now, now))
+        db.execute("INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at)"
+                   " VALUES (?,?,?,?,?)", ("c2", "n1", "u2", now, now))
+        for job_id, conversation_id, creator, question, status in (
+            ("j1", "c1", "u1", "first?", "completed"),
+            ("j2", "c1", "u1", "second?", "failed"),
+            ("j3", "c2", "u2", "shared?", "cancelled"),
+        ):
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,conversation_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (job_id, "n1", conversation_id, creator, "chunk", question, status, now, now),
+            )
 
 
 def test_list_user_notebooks_counts_and_excludes_copying(repo):
@@ -35,8 +49,12 @@ def test_list_user_notebooks_counts_and_excludes_copying(repo):
     assert by_id["n1"]["name"] == "NB-n1"
     assert by_id["n1"]["sources"] == 2
     assert by_id["n1"]["reports"] == 1
-    assert by_id["n1"]["conversations"] == 1
+    assert by_id["n1"]["conversations"] == 2
+    assert by_id["n1"]["questions"] == 2
     assert by_id["n2"]["sources"] == 0
+    # 明细是 owner-only 库清单，不是用户总提问的完整分解；u2 在共享库 n1 的
+    # 提问计入用户总览，但这里刻意不把 n1 伪装成 u2 拥有的笔记本。
+    assert repo.list_user_notebooks("u2") == []
     assert repo.list_user_notebooks("nobody") == []
 
 

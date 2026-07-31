@@ -395,6 +395,12 @@ class QueryStore:
                     "SELECT created_by AS k, COUNT(*) AS c FROM conversations GROUP BY created_by"
                 ).fetchall()
             }
+            questions = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT created_by AS k, COUNT(*) AS c FROM ask_jobs GROUP BY created_by"
+                ).fetchall()
+            }
             reports = {
                 row["k"]: row["c"]
                 for row in db.execute(
@@ -441,6 +447,7 @@ class QueryStore:
                     "notebooks": notebooks.get(user["id"], 0),
                     "sources": sources.get(user["id"], 0),
                     "conversations": conversations.get(user["id"], 0),
+                    "questions": questions.get(user["id"], 0),
                     "reports": reports.get(user["id"], 0),
                     "last_active": active.get(user["id"]),
                     "upload_limit": override if override is not None else global_default,
@@ -459,6 +466,7 @@ class QueryStore:
             ids = [row["id"] for row in notebooks]
             sources: dict[str, int] = {}
             conversations: dict[str, int] = {}
+            questions: dict[str, int] = {}
             reports: dict[str, int] = {}
             if ids:
                 placeholders = ",".join("?" * len(ids))
@@ -478,6 +486,15 @@ class QueryStore:
                         ids,
                     ).fetchall()
                 }
+                questions = {
+                    row["k"]: row["c"]
+                    for row in db.execute(
+                        f"SELECT notebook_id AS k, COUNT(*) AS c FROM ask_jobs "
+                        f"WHERE notebook_id IN ({placeholders}) AND created_by = ? "
+                        f"GROUP BY notebook_id",
+                        [*ids, user_id],
+                    ).fetchall()
+                }
                 reports = {
                     row["k"]: row["c"]
                     for row in db.execute(
@@ -495,6 +512,7 @@ class QueryStore:
                 "updated_at": row["updated_at"],
                 "sources": sources.get(row["id"], 0),
                 "conversations": conversations.get(row["id"], 0),
+                "questions": questions.get(row["id"], 0),
                 "reports": reports.get(row["id"], 0),
             }
             for row in notebooks

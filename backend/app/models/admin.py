@@ -58,7 +58,8 @@ class AdminUserUsage(BaseModel):
     created_at: str
     notebooks: int
     sources: int
-    conversations: int
+    conversations: int = Field(deprecated=True)
+    questions: int
     reports: int
     last_active: Optional[str] = None
     is_online: bool = False
@@ -115,7 +116,8 @@ class AdminUserNotebook(BaseModel):
     name: str
     status: str
     sources: int
-    conversations: int
+    conversations: int = Field(deprecated=True)
+    questions: int
     reports: int
     created_at: str
     updated_at: str

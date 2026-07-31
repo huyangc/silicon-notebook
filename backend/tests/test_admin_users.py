@@ -28,7 +28,9 @@ def _seed(repo):
                 "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?)", (nid, nid, "u1", status, now, now),
             )
-        # u1 在 n1 下:2 个 source、1 个 report、1 个 conversation
+        # u1 在 n1 下:2 个 source、1 个 report、1 个 conversation，提交 2 次提问；
+        # u2 作为共享成员在同一 notebook 另有 1 个 conversation/提问。
+        # 提问次数必须数 ask_jobs，失败/取消也属于一次已提交问题。
         for sid in ("s1", "s2"):
             db.execute(
                 "INSERT INTO sources (id,notebook_id,title,source_type,created_at,updated_at) "
@@ -42,6 +44,21 @@ def _seed(repo):
             "INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at) "
             "VALUES (?,?,?,?,?)", ("c1", "n1", "u1", "2026-07-06T10:00:00", "2026-07-06T12:00:00"),
         )
+        db.execute(
+            "INSERT INTO conversations (id,notebook_id,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?)", ("c2", "n1", "u2", "2026-07-05T10:00:00", "2026-07-05T12:00:00"),
+        )
+        for job_id, conversation_id, creator, question, status in (
+            ("j1", "c1", "u1", "first?", "completed"),
+            ("j2", "c1", "u1", "second?", "failed"),
+            ("j3", "c2", "u2", "shared?", "cancelled"),
+        ):
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,conversation_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (job_id, "n1", conversation_id, creator, "chunk", question, status, now, now),
+            )
 
 
 def test_list_user_usage_counts(repo):
@@ -54,13 +71,15 @@ def test_list_user_usage_counts(repo):
     assert a["role"] == "user"
     assert a["notebooks"] == 2          # copying 被排除
     assert a["sources"] == 2
-    assert a["conversations"] == 1
+    assert a["conversations"] == 1      # 兼容旧 API 字段
+    assert a["questions"] == 2
     assert a["reports"] == 1
     assert a["last_active"] == "2026-07-06T12:00:00"
     b = rows["b00000002"]
     assert b["notebooks"] == 0 and b["sources"] == 0
-    assert b["conversations"] == 0 and b["reports"] == 0
-    assert b["last_active"] is None
+    assert b["conversations"] == 1 and b["questions"] == 1
+    assert b["reports"] == 0
+    assert b["last_active"] == "2026-07-05T12:00:00"
 
 
 @pytest.fixture

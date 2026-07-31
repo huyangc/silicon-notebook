@@ -2334,12 +2334,38 @@ def test_postgres_query_store_multi_notebook_count_placeholders(postgres_databas
 
     assert PostgresMigrator(postgres_database).migrate() == 15
     _seed_catalog(postgres_database)
-    rows = PostgresQueryStore(postgres_database).list_user_notebooks("user-golden")
+    with postgres_database.write() as connection:
+        for job_id, status in (("job-question-1", "completed"), ("job-question-2", "failed")):
+            connection.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,conversation_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    job_id,
+                    "nb-personal",
+                    "",
+                    "user-golden",
+                    "chunk",
+                    f"question {job_id}",
+                    status,
+                    NOW,
+                    NOW,
+                ),
+            )
+    store = PostgresQueryStore(postgres_database)
+    rows = store.list_user_notebooks("user-golden")
     assert {row["id"] for row in rows} == {"nb-base", "nb-personal"}
     assert {row["id"]: row["sources"] for row in rows} == {
         "nb-base": 0,
         "nb-personal": 1,
     }
+    assert {row["id"]: row["questions"] for row in rows} == {
+        "nb-base": 0,
+        "nb-personal": 2,
+    }
+    usage = {row["id"]: row for row in store.list_user_usage()}
+    assert usage["user-golden"]["questions"] == 2
+    assert usage["user-golden"]["conversations"] == 0
 
 
 @pytest.mark.postgres_integration
