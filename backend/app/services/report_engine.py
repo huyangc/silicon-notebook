@@ -92,6 +92,87 @@ def report_retrieval_limits(depth: Optional[int]) -> Optional[AskRetrievalLimits
     return ask_retrieval_limits(report_retrieval_effort(int(depth)))
 
 
+# --- 大纲绑定证据的 KG 上下文子预算(报告 PR-5)---------------------------
+# 绑定子集分到的那一份 = 总预算的 1/2(照 ask_service 枚举块 `chunk_context_chars
+# // 2` 的先例)。留一半而不是全给:绑定证据是结构支撑,不是本节证据的全部,
+# ranked 命中被它整个饿死同样是一种坏法。
+_OUTLINE_KG_BUDGET_DIVISOR = 2
+
+
+def outline_bound_evidence_keys(sections: Sequence[Any]) -> set:
+    """子大纲各节绑定的候选键(检索期 id;知识对象/元素/原文段三个 id 空间混在
+    一起,消费方按自己那一路匹配即可 —— 三者互不相交)。"""
+    return {
+        str(key)
+        for section in (sections or ())
+        for key in (getattr(section, "evidence_keys", None) or ())
+        if key
+    }
+
+
+def knowledge_context_with_outline(
+    evidence_context: Any,
+    notebook_id: str,
+    hits: Sequence[Any],
+    sections: Sequence[Any],
+    *,
+    id_offset: int,
+    budget_chars: int,
+) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+    """KG 上下文两遍渲染:先给本节子大纲绑定的命中一份子预算,再让其余 ranked
+    命中吃剩下的额度。
+
+    **为什么必须两遍**:`knowledge_context` 按输入序渲染、预算用尽即 break,而
+    `_deep_dive` 把大纲绑定的截断对象**追加在 `top_hits` 尾部**(它们的相关度本来
+    就低于选集,只能排在后面)。KG 预算 6000 字符大约只装得下前几十条的一部分,
+    而穷尽档的最终相关性 floor 是 40 —— 于是在候选池够大的场景里,尾部那批「模型
+    自己指名要的结构支撑」**恒**被挤出上下文;`outline_structure_block` 反查不到就
+    如实丢弃绑定,子话题退成裸标题,prompt 又教「缺证据的子话题略过」,最后它从
+    成稿里整条消失。尾插本身不是承诺,子预算才是。
+
+    绑定子集为空(非穷尽档、或本节没整理出大纲、或绑定的全是元素/原文段)时**单遍
+    渲染**,输出与接入前逐字相同 —— 那是这条路径唯一可接受的关闭态。
+
+    两遍的 `[k]` 连续且不重叠(第二遍的 `id_offset` 加上第一遍实际分配的条数),
+    两份 evidence map 合并后就是本节 KG 证据的全集。第一遍的实际消耗按块长度算:
+    `knowledge_context` 的内部预算账 `used` 逐字等于它返回的 `"\\n".join(lines)`
+    的长度,端口不需要为此多回传一个值。
+
+    残留(有意接受):两遍各自的 cluster 去重是独立的,所以同一 canonical 簇的两个
+    别名对象可能各渲染一行。代价是一行重复,绝不会产生解析不出的 `[k]`;绑定子集
+    本身是小集合,为它把 cluster map 拉进这一层不值。
+    """
+    bound_keys = outline_bound_evidence_keys(sections)
+    bound_hits = [
+        hit for hit in hits
+        if str(getattr(hit, "object_id", "") or "") in bound_keys
+    ] if bound_keys else []
+    if not bound_hits:
+        return evidence_context.knowledge_context(
+            notebook_id, hits, id_offset=id_offset, budget_chars=budget_chars)
+    budget = max(0, int(budget_chars))
+    bound_block, bound_map = evidence_context.knowledge_context(
+        notebook_id, bound_hits, id_offset=id_offset,
+        budget_chars=budget // _OUTLINE_KG_BUDGET_DIVISOR)
+    bound_block = "" if bound_block == "(none)" else bound_block
+    # 排除的是**真的渲染出来了**的那些,不是整个绑定子集:子预算没装下的绑定
+    # 命中仍按原相关度顺序参与第二遍,它没有理由因为「曾被优先考虑过」而出局。
+    rendered = {
+        str((value or {}).get("object_id") or "") for value in bound_map.values()
+    }
+    rest = [
+        hit for hit in hits
+        if str(getattr(hit, "object_id", "") or "") not in rendered
+    ]
+    remaining = budget - len(bound_block) - (1 if bound_block else 0)
+    rest_block, rest_map = evidence_context.knowledge_context(
+        notebook_id, rest, id_offset=id_offset + len(bound_map),
+        budget_chars=max(0, remaining))
+    rest_block = "" if rest_block == "(none)" else rest_block
+    block = "\n".join(part for part in (bound_block, rest_block) if part)
+    return (block or "(none)"), {**bound_map, **rest_map}
+
+
 # --- 「发现的结构」块(报告 PR-5)-----------------------------------------
 # 深挖时整理出的子大纲进节撰写 prompt 的有界形态。硬界三条:行数、单行字符、
 # 整块字符。纯拼装,零模型调用、零新查询 —— 大纲与 id_map 都是手上现成的。
@@ -809,10 +890,13 @@ class ReportEngine:
         seen_elements = {item.element_id for item in result.elements}
         # 大纲绑上、却被最终相关性选集挤出 top_hits 的知识对象(仅穷尽档非空,见
         # reasoning_retrieval.outline_truncated_kg_evidence)。规则同 ask_service 的
-        # 按节合成路径:它们是模型自己指名要的结构支撑,必须能进本节上下文并计入
+        # 按节合成路径:它们是模型自己指名要的结构支撑,要能进本节上下文并计入
         # classify_evidence 的证据池 —— 否则「发现的结构」里指向它们的 [k] 解析不
         # 出来,而引用了它们的句子在分级眼里就是引了个不存在的东西。相关度已在
         # retriever 侧与选集同口径夹好,这里直接并入,零新查询。
+        # 注意这里**只**做「在池子里」:它们的相关度低于选集,尾插的位置在大候选池
+        # 下必然被上下文预算截掉。真正让它们进得了 prompt 的是 `_draft_section` 的
+        # 两遍渲染(`knowledge_context_with_outline` 的子预算),不是这个 append。
         for hit in list(getattr(result, "outline_evidence", None) or []):
             if hit.object_id in seen_objects:
                 continue
@@ -854,8 +938,13 @@ class ReportEngine:
         chunk_block, chunk_map = deps.evidence_context.chunk_context(
             result.chunks, notebook_id=notebook_id,
             budget_chars=self.settings.report_section_chunk_budget)
-        kg_block, kg_map = deps.evidence_context.knowledge_context(
-            notebook_id, result.top_hits, id_offset=len(chunk_map))
+        # 本节深挖整理出的子大纲(仅穷尽档非空)。它有两个消费点,顺序不能倒:先决定
+        # 谁进 KG 上下文(绑定证据的子预算),再据装配好的 id_map 渲染结构块。
+        sub_outline = list(getattr(result, "outline", None) or [])
+        kg_block, kg_map = knowledge_context_with_outline(
+            deps.evidence_context, notebook_id, result.top_hits, sub_outline,
+            id_offset=len(chunk_map),
+            budget_chars=self.settings.answer_context_budget_chars)
         element_block, element_map = deps.evidence_context.element_context(
             list(getattr(result, "elements", []) or []),
             notebook_id=notebook_id,
@@ -904,11 +993,10 @@ class ReportEngine:
             memory_map = {}
         client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map, **element_map}
-        # 深挖时整理出的子大纲(仅穷尽档非空)→ 有界「发现的结构」块。它只作用于
-        # 本节内部的 `###` 组织,绝不回写 reports.outline_json 里用户确认过的大纲。
-        # 两次重试共用同一份块:它与 id_map 一样在这轮里是常量。
-        structure_block = outline_structure_block(
-            list(getattr(result, "outline", None) or []), id_map)
+        # 子大纲 → 有界「发现的结构」块。它只作用于本节内部的 `###` 组织,绝不回写
+        # reports.outline_json 里用户确认过的大纲。两次重试共用同一份块:它与
+        # id_map 一样在这轮里是常量。
+        structure_block = outline_structure_block(sub_outline, id_map)
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
         # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。

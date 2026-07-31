@@ -30,15 +30,20 @@ from app.services.reasoning_retrieval import (
 )
 from app.services.report_engine import (
     REPORT_DEPTH_EFFORTS, ReportEngine, _STRUCTURE_MAX_CHARS,
-    _STRUCTURE_MAX_LINES, _STRUCTURE_MAX_LINE_CHARS, outline_structure_block,
+    _STRUCTURE_MAX_LINES, _STRUCTURE_MAX_LINE_CHARS,
+    knowledge_context_with_outline, outline_structure_block,
     report_retrieval_effort, report_retrieval_limits,
 )
-from app.services.retrieval import RetrievedChunk
+from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
 
 NOW = "2026-07-31T00:00:00+08:00"
+
+# 深挖阶段带大纲进度的 phase 文案(2 节时)。跨栈耦合的后端那一半:下面的 phase
+# 用例断言引擎真的产出它,前端对照用例断言它以前端匹配的前缀开头。
+_OUTLINE_PROGRESS_PHASE = "深挖中（已整理大纲 2 节）"
 
 
 @pytest.fixture
@@ -125,19 +130,44 @@ def test_the_depth_table_pins_every_one_of_the_five_levels():
         "overview", "standard", "deep", "thorough", "exhaustive"]
 
 
+def _report_view_source() -> str:
+    return (Path(__file__).resolve().parents[2]
+            / "frontend" / "app" / "report-view.tsx").read_text(encoding="utf-8")
+
+
 def test_the_depth_table_matches_the_slider_in_the_frontend():
     """档位下标必须与前端滑块的 DEPTHS 逐档对应。
 
     这两张表是同一件事的两半:前端按下标发 depth 值,后端按 depth 值选档位。
     只改一侧的话,用户选的第 5 档会在后端解析成第 4 档,而两边各自的测试都绿。
     """
-    source = (Path(__file__).resolve().parents[2]
-              / "frontend" / "app" / "report-view.tsx").read_text(encoding="utf-8")
+    source = _report_view_source()
     match = re.search(r"const DEPTHS = \[([^\]]+)\];", source)
     assert match, "前端 report-view.tsx 的 DEPTHS 表找不到了"
     depths = [int(value.strip()) for value in match.group(1).split(",")]
 
     assert depths == [threshold for threshold, _ in REPORT_DEPTH_EFFORTS]
+
+
+def test_the_frontend_matches_the_phase_prefix_not_the_exact_word():
+    """节进度的「第 N 步」按 phase **前缀**判定,这是一条跨栈耦合。
+
+    后端把深挖阶段的文案细化成了「深挖中（已整理大纲 N 节）」;前端一旦退回
+    `s.phase === "深挖"` 的精确相等(或后端改掉文案开头),步数计数器就在穷尽档
+    报告里静默消失 —— 而两边各自的单测都绿,因为各自都自洽。所以这条断言必须
+    落在能同时看到两侧的地方。
+    """
+    source = _report_view_source()
+
+    assert 'startsWith("深挖")' in source, (
+        "前端必须按前缀判定深挖阶段;改回精确相等会让大纲进度出现时步数消失")
+    assert 's.phase === "深挖"' not in source
+    # 另一半:后端的细化文案必须真的以前端匹配的那个前缀开头。前缀从前端源码里
+    # 读出来,而 _OUTLINE_PROGRESS_PHASE 由下面的 phase 用例钉在后端实际产出上——
+    # 任何一侧单方面改文案,这条就红。
+    prefixes = re.findall(r's\.phase\.startsWith\("([^"]+)"\)', source)
+    assert prefixes, "前端不再按 phase 前缀判定深挖阶段"
+    assert all(_OUTLINE_PROGRESS_PHASE.startswith(prefix) for prefix in prefixes)
 
 
 def test_depths_outside_the_table_still_resolve_deterministically():
@@ -248,6 +278,45 @@ def test_deep_dive_merges_the_outline_bound_truncated_objects(repo, monkeypatch)
     result = engine._deep_dive("nb", {"title": "t", "scope": "s"}, "Q", depth=16)
 
     assert [hit.object_id for hit in result.top_hits] == ["o-kept", "o-extra"]
+
+
+def test_a_real_outline_action_reaches_the_section_writer(repo):
+    """端到端:节深挖的 reflect 真的返回 `update_outline` → `ReasoningResult.outline`
+    → 「发现的结构」进节撰写 prompt。
+
+    上面那些块级用例都是直接喂 `OutlineSection` 的。这一条是唯一一条证明**整条链**
+    接通的用例:模型提交 → 绑定校验(只留合法候选键) → run 收尾把大纲带回结果 →
+    `_draft_section` 按 id_map 反查。任何一环断掉,块级用例全都照绿。
+    """
+    notebook = _notebook(repo)
+    hits = repo.retrieval.federated_retrieve(notebook.id, "版图设计要点")
+    assert hits, "夹具的知识对象没被检索到,绑定就无从谈起"
+    object_id = hits[0].object_id
+    llm = _SectionLLM(reflects=[{
+        "next_action": "update_outline", "sufficient": False,
+        "outline": {"sections": [
+            {"id": "o1", "title": "工艺角对比", "evidence": [object_id]},
+            {"id": "o2", "title": "还没找到证据的一节",
+             "evidence": ["ko-从来不是候选"]},
+        ]},
+    }])
+    engine = _engine(repo, llm)
+    section = {"title": "A", "scope": "sa", "sub_queries": ["版图设计要点"]}
+
+    result = engine._deep_dive(notebook.id, section, "Q", depth=16)
+
+    assert [s.title for s in result.outline] == ["工艺角对比", "还没找到证据的一节"]
+    assert result.outline[0].evidence_keys == [object_id]
+    assert result.outline[1].evidence_keys == []      # 非法键静默丢弃
+
+    engine._draft_section(notebook.id, section, "Q", result)
+
+    prompt = llm.section_prompts[0]
+    match = re.search(r"### 工艺角对比 — 证据: \[(k\d+)\]", prompt)
+    assert match, prompt
+    assert f"\n{match.group(1)}: [claim]" in prompt
+    # 绑定解析不出来的那一节降级成裸标题(而不是消失,也不是留一个悬空 [k])。
+    assert "### 还没找到证据的一节\n" in prompt
 
 
 # --------------------------------------------------- 「发现的结构」块
@@ -392,6 +461,9 @@ def test_the_section_prompt_teaches_the_block_as_a_suggestion():
     assert "SUGGESTION, not a contract" in prompt
     assert "skip any sub-topic" in prompt
     assert "never invent content" in prompt
+    # 块里的 id 长得像标题的一部分,措辞必须把它们赶回正文句子:留在 `###` 标题里
+    # 的 [k] 既不被 parse_anchors 当成句子的归因,读者也会在小标题上看到一串号。
+    assert "never in the heading" in prompt
     # 位置:块必须排在 Knowledge items 之后、返回格式之前(规则出现在它约束的
     # 输入之前才有效)。
     assert (prompt.index("Knowledge items")
@@ -429,6 +501,118 @@ def test_draft_section_without_an_outline_keeps_the_prompt_unchanged(repo):
                                  "sub_queries": ["q"]}, "Q", ReasoningResult())
 
     assert "Discovered structure" not in llm.section_prompts[0]
+
+
+# -------------------------------------- 大纲绑定证据的 KG 上下文子预算(P1)
+
+def _claims(repo, notebook_id, count):
+    """建 count 条知识对象,返回它们的 DB id(store_kg 就地回填 `_oid`)。"""
+    objects = [{"local_id": f"B{index}", "object_type": "claim",
+                "payload": {"name": f"版图设计要点{index}" + "细" * 20,
+                            "section_path": "1"},
+                "evidence": []}
+               for index in range(count)]
+    repo.store_kg(notebook_id, None, objects, [])
+    return [obj["_oid"] for obj in objects]
+
+
+def _kg_hits(object_ids):
+    return [RetrievedKnowledge(object_id=object_id, object_type="claim",
+                               payload={"name": f"名{index}"}, relevance=0.9)
+            for index, object_id in enumerate(object_ids)]
+
+
+def test_outline_bound_evidence_survives_a_full_kg_budget(repo):
+    """P1:候选池挤满 KG 预算时,大纲绑定的证据仍然必须进得了撰写上下文。
+
+    `_deep_dive` 把绑定的截断对象追加在 `top_hits` **尾部**(它们的相关度本来就低于
+    选集),而 `knowledge_context` 按序渲染、预算用尽即 break。只靠尾插的话,穷尽档
+    (最终相关性 floor=40)在大候选池下必然把它们挤出上下文 → 结构块反查不到就丢弃
+    绑定 → 子话题退成裸标题 → prompt 教「缺证据略过」→ 它从成稿里整条消失。
+
+    这里把**测试局部**的 KG 预算调小来复现同一个形状(生产 floor 另行断言):
+    12 条候选、预算只装得下前 4 条,而绑定的那条排在第 12 位。
+    """
+    # 生产 floor:预算是固定的,而穷尽档的相关性 floor 是 40 —— 「候选比预算多」
+    # 在生产上是常态,不是测试构造出来的边角。
+    assert Settings().answer_context_budget_chars == 6000
+    assert ask_retrieval_limits("exhaustive").ranked_final_floor == 40
+
+    notebook = _notebook(repo)
+    object_ids = _claims(repo, notebook.id, 12)
+    bound = object_ids[-1]
+    llm = _SectionLLM()
+    engine = _engine(repo, llm)
+    engine.settings.answer_context_budget_chars = 200
+    result = ReasoningResult(
+        top_hits=_kg_hits(object_ids),
+        outline=[_section("s1", "尾部绑定的一节", [bound])],
+    )
+
+    engine._draft_section(notebook.id, {"title": "A", "scope": "sa",
+                                        "sub_queries": ["q"]}, "Q", result)
+
+    prompt = llm.section_prompts[0]
+    match = re.search(r"### 尾部绑定的一节 — 证据: \[(k\d+)\]", prompt)
+    assert match, "尾部的大纲绑定被预算挤掉了,子话题只剩裸标题"
+    # 结构块引用的 [k] 必须在 Knowledge items 里真实存在(否则模型引用的是一个
+    # 它看不见的 id)。
+    # …而且就是**绑定的那一条**(第 12 个候选),不是恰好排在同一个号上的别人。
+    assert f"\n{match.group(1)}: [claim][personal] 名11" in prompt
+    # ranked 命中没有被绑定子集饿死:剩余预算仍渲染了别的候选。
+    keys = re.findall(r"\n(k\d+): \[claim\]", prompt)
+    assert len(keys) >= 3
+    # 两遍的 [k] 连续且不重叠。
+    assert keys == [f"k{index}" for index in range(1, len(keys) + 1)]
+
+
+def test_the_kg_context_stays_within_the_budget_across_both_passes(repo):
+    """两遍共用一份总预算,不是各拿一份。"""
+    notebook = _notebook(repo)
+    object_ids = _claims(repo, notebook.id, 12)
+    context = ReportEngine.from_repository(
+        repo, repo.settings).dependencies.evidence_context
+
+    block, id_map = knowledge_context_with_outline(
+        context, notebook.id, _kg_hits(object_ids),
+        [_section("s1", "一节", [object_ids[-1]])],
+        id_offset=0, budget_chars=200)
+
+    assert len(block) <= 200
+    assert list(id_map) == [f"k{index}" for index in range(1, len(id_map) + 1)]
+    assert id_map["k1"]["object_id"] == object_ids[-1]   # 绑定的先渲染
+    assert len(block.split("\n")) == len(id_map)
+
+
+def test_without_bindings_the_kg_context_is_a_single_untouched_pass(repo):
+    """关闭态(没有大纲、或绑定的全不是知识对象)必须逐字回到接入前:一次调用、
+    同一份输出。多一次调用就是多一份预算账,输出会与单遍不同。"""
+    notebook = _notebook(repo)
+    object_ids = _claims(repo, notebook.id, 12)
+    hits = _kg_hits(object_ids)
+    inner = ReportEngine.from_repository(
+        repo, repo.settings).dependencies.evidence_context
+    calls: list[tuple] = []
+
+    class _Spy:
+        def knowledge_context(self, notebook_id, hits, *, id_offset=0,
+                              budget_chars=None):
+            calls.append((len(hits), id_offset, budget_chars))
+            return inner.knowledge_context(notebook_id, hits,
+                                           id_offset=id_offset,
+                                           budget_chars=budget_chars)
+
+    baseline = inner.knowledge_context(notebook.id, hits, id_offset=7,
+                                       budget_chars=200)
+
+    for sections in ([], [_section("s1", "一节")],
+                     [_section("s1", "一节", ["el-不是知识对象"])]):
+        calls.clear()
+        assert knowledge_context_with_outline(
+            _Spy(), notebook.id, hits, sections,
+            id_offset=7, budget_chars=200) == baseline
+        assert len(calls) == 1
+        assert calls[0] == (len(hits), 7, 200)
 
 
 # ------------------------------------------- 负向守卫:确认过的大纲不被回写
@@ -510,11 +694,20 @@ def test_the_section_phase_shows_the_outline_progress(repo, monkeypatch):
     engine._run_sections(notebook.id, report_id, outline, "Q", 16)
 
     phases = {row["phase"] for snapshot in recorded for row in snapshot}
-    assert "深挖中（已整理大纲 2 节）" in phases
+    assert _OUTLINE_PROGRESS_PHASE in phases
     assert "深挖" in phases            # 没有大纲步的那一节文案不变
     # 大纲步之后的检索/反思步不得把文案退回「深挖」——那会让进度来回跳。
     with_outline = [row for snapshot in recorded for row in snapshot
                     if row["title"] == "有大纲的一节"]
-    assert with_outline[-1]["phase"] in ("完成", "深挖中（已整理大纲 2 节）")
-    assert any(row["phase"] == "深挖中（已整理大纲 2 节）" and row["step"] == 1
+    assert with_outline[-1]["phase"] in ("完成", _OUTLINE_PROGRESS_PHASE)
+    assert any(row["phase"] == _OUTLINE_PROGRESS_PHASE and row["step"] == 1
                for row in with_outline)
+    # 大纲计数是**按节**的:没有大纲步的那一节,它的每一条快照都必须逐字是「深挖」
+    # (或非深挖阶段的文案),一个字都不能借到别节的计数。把按节下标的列表改成
+    # 一个共享标量时,上面那几条集合断言全部照绿——只有这一条会红。
+    without_outline = [row for snapshot in recorded for row in snapshot
+                       if row["title"] == "没大纲的一节"]
+    assert any(row["phase"] == "深挖" for row in without_outline), (
+        "这一节根本没被快照到深挖阶段,下面的断言就没有约束力")
+    assert all(row["phase"] == "深挖" for row in without_outline
+               if row["phase"].startswith("深挖"))

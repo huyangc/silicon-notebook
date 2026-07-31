@@ -977,7 +977,9 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "Organize the body with '###' sub-headings along this structure when it "
         "fits. It is a SUGGESTION, not a contract: silently skip any sub-topic "
         "whose evidence is missing, never invent content to fill one, and never "
-        "step outside this section's scope.\n\n"
+        "step outside this section's scope. The evidence ids above belong in the "
+        "sentences of the body — write a '###' heading as plain text and put the "
+        "[k] markers on the statements they support, never in the heading.\n\n"
         if discovered_structure else ""
     )
     return (

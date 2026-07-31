@@ -432,6 +432,27 @@ EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # chunks taken per section (default 12)
 EXACT_SECTION_RESERVE      # mix-selection seats reserved for those chunks, inside the existing budget (default 4)
 ```
 
+**Behaviour change — these settings no longer size a deep report's per-section
+deep dive.** That deep dive now maps the report's own research-depth level onto
+the same five-level budget table Ask's retrieval effort uses, and passes the whole
+row down; the numeric contract lives in `docs/product-and-api.md`
+(「大纲便签与按节合成」 and the effort table), not here.
+
+* `REASONING_TOP_N_PER_QUERY` / `REASONING_TOP_N_CAP` — no longer read on the
+  report path at all. The level's per-aspect seats and cap decide the section's
+  final relevance budget.
+* `RETRIEVAL_TOP_N` — no longer the report section's evidence floor (the level's
+  floor is). It still bounds the top-up retrieval that executes each confirmed
+  outline direction.
+* `REASONING_MAX_SUBQUERIES` — no longer read on the report path. This one bites
+  at the **default** depth 2 too: that level allows 5 first-round sub-queries per
+  section where the settings-derived path allowed `REASONING_MAX_SUBQUERIES + 1`
+  (6 at the default).
+
+Raising these four therefore no longer widens a report; raise the research depth
+instead. Ask's `mix`/`graph` modes and any reasoning run made without an effort
+level still read them unchanged.
+
 **Exact-identifier fast path:** when a question names something exactly
 lookup-able (`set_db`, `place_opt_design`, `config.yaml`), retrieval first
 locates the section that name occurs in and fetches that whole section, so a
