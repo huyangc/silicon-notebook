@@ -18,7 +18,7 @@ from app.models.notebooks import (
 )
 from app.models.ask import NotebookSearchResponse, SearchHit
 from app.core import diagnostics_runtime as diagnostics
-from app.core.query_syntax import strip_quote_markers
+from app.core.query_syntax import strip_accepted_quote_markers
 from app.repositories.ports import (
     IdentityStorePort,
     KgBuildJobStorePort,
@@ -450,7 +450,7 @@ class NotebookCatalogService:
         # the corpus contains the `"` the user typed. Dropping them keeps one
         # syntax across the product instead of a box where it silently finds
         # nothing.
-        needle = strip_quote_markers(query)
+        needle = strip_accepted_quote_markers(query)
         response = self._queries.search_notebook(notebook_id, needle)
         if self.memory_retriever is None:
             return response

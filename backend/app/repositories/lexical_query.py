@@ -20,7 +20,7 @@ from app.core.query_syntax import (  # noqa: F401  (re-exported)
     MAX_QUOTED_PHRASES,
     exact_probe_query,
     split_quoted_phrases,
-    strip_quote_markers,
+    strip_accepted_quote_markers,
 )
 
 MAX_LEXICAL_TERMS = 64
@@ -168,7 +168,7 @@ def lexical_recall_terms(query: str) -> list[str]:
     # The whole-sentence term has to lose the quote characters: no document
     # contains them, so keeping them would spend a term (and, on PostgreSQL, a
     # real per-term probe) on a string that cannot match anything.
-    sentence = strip_quote_markers(needle).strip() if phrases else needle
+    sentence = strip_accepted_quote_markers(needle).strip() if phrases else needle
     if sentence and len(sentence) <= MAX_EXACT_PHRASE_CHARS:
         raw_terms.append(sentence)
     priority_count = len(raw_terms)

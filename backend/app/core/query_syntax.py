@@ -99,7 +99,24 @@ def split_quoted_phrases(text: str) -> tuple[list[str], str]:
     term and every non-quoted run are still in the term list — and ANN recall is
     unaffected.
     """
-    source = text or ""
+    phrases, spans = _accepted_spans(text or "")
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, _value in spans:
+        pieces.append((text or "")[cursor:start])
+        pieces.append(" " * (end - start))
+        cursor = end
+    pieces.append((text or "")[cursor:])
+    return phrases, "".join(pieces)
+
+
+def _accepted_spans(source: str) -> tuple[list[str], list[tuple[int, int, str]]]:
+    """The accepted phrases plus the `(start, end, value)` of every span they cover.
+
+    One acceptance rule, used by both the masking split above and the
+    marker-stripping below — a second copy of "which spans count" is exactly how
+    the two would start disagreeing about the same query.
+    """
     matches = _QUOTED_RE.findall(source)
     # DISTINCT spans, not raw occurrences. Repeating one phrase is not "many
     # constraints", and the internal research query is built by concatenating
@@ -113,11 +130,10 @@ def split_quoted_phrases(text: str) -> tuple[list[str], str]:
     # its keys and cell values are all DIFFERENT strings.
     distinct = {" ".join(value.split()).lower() for value in matches}
     if not matches or len(distinct) > MAX_QUOTED_PHRASES:
-        return [], source
+        return [], []
     phrases: list[str] = []
     seen: set[str] = set()
-    pieces: list[str] = []
-    cursor = 0
+    spans: list[tuple[int, int, str]] = []
     for match in _QUOTED_RE.finditer(source):
         value = " ".join(match.group(1).split())
         # `.lower()`, deliberately not `.casefold()`: this key has to agree with
@@ -136,11 +152,8 @@ def split_quoted_phrases(text: str) -> tuple[list[str], str]:
         if folded not in seen:
             seen.add(folded)
             phrases.append(value)
-        pieces.append(source[cursor:match.start()])
-        pieces.append(" " * (match.end() - match.start()))
-        cursor = match.end()
-    pieces.append(source[cursor:])
-    return phrases, "".join(pieces)
+        spans.append((match.start(), match.end(), value))
+    return phrases, spans
 
 
 def quoted_phrases(text: str) -> list[str]:
@@ -153,12 +166,42 @@ def unquoted_remainder(text: str) -> str:
     return split_quoted_phrases(text)[1]
 
 
-def strip_quote_markers(text: str) -> str:
-    """Drop the quote characters, keeping the words they wrapped.
+def strip_accepted_quote_markers(text: str) -> str:
+    """Drop the quote characters of ACCEPTED spans, keeping the words they wrapped.
 
-    The markers are syntax, not content: no document contains them, so any
-    matcher that consumes the whole string (the full-sentence recall term, the
-    catalog's plain substring search) has to see the text without them.
+    For an accepted span the markers are syntax, not content: no document
+    contains them, so any matcher that consumes the whole string (the
+    full-sentence recall term, the catalog's plain substring search, Memory's
+    whole-query probe) has to see the text without them.
+
+    Rejected spans — unpaired, too short, too long, or any span in a text the
+    density gate switched the syntax off for — keep their quotes, because the
+    contract everywhere else in this module is that a rejected span stays
+    ordinary query content. Stripping unconditionally broke exactly the case the
+    density gate exists for: a user searching the catalog for literal JSON or
+    code could no longer match the quotes they typed (codex #410 round-5 P2).
+    """
+    source = text or ""
+    _phrases, spans = _accepted_spans(source)
+    if not spans:
+        return source
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, value in spans:
+        pieces.append(source[cursor:start])
+        pieces.append(value)
+        cursor = end
+    pieces.append(source[cursor:])
+    return "".join(pieces)
+
+
+def strip_quote_markers(text: str) -> str:
+    """Drop EVERY quote character. Only for building a probe term, never a query.
+
+    `exact_probe_query` re-encodes each term as a quoted span, so a term that
+    itself contained a `"` would break that encoding. This is a sanitizer for
+    one value, not the query-level transform — that one is
+    `strip_accepted_quote_markers` above, which honours the acceptance rule.
     """
     return (text or "").replace('"', "")
 

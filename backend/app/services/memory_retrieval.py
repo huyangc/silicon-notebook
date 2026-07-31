@@ -6,7 +6,7 @@ from typing import Iterable, Sequence
 from app.models.memory import MemoryHit
 from app.repositories.ports import MemoryStorePort
 from app.services.embedding import Embedder
-from app.core.query_syntax import strip_quote_markers
+from app.core.query_syntax import strip_accepted_quote_markers
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     _fuse,
@@ -79,7 +79,9 @@ class MemoryRetriever:
         # the markers for CANDIDATE generation only; scoring below keeps the
         # original query so the phrase still has to be matched whole.
         # (codex #410 round-2 P2)
-        candidate_query = strip_quote_markers(clean_query).strip() or clean_query
+        candidate_query = (
+            strip_accepted_quote_markers(clean_query).strip() or clean_query
+        )
         rows = self.store.memory_retrieval_rows(
             user_id,
             notebook_id,

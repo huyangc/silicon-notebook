@@ -11,6 +11,7 @@ from app.core.query_syntax import (
     exact_probe_query,
     quoted_phrases,
     split_quoted_phrases,
+    strip_accepted_quote_markers,
     strip_quote_markers,
     unquoted_remainder,
 )
@@ -110,8 +111,29 @@ def test_quotes_do_not_span_lines():
     assert quoted_phrases('第一行有个 "\n第二行也有个 "') == []
 
 
-def test_strip_quote_markers_keeps_the_words():
-    assert strip_quote_markers('什么是 "static timing" 呢') == "什么是 static timing 呢"
+def test_strip_markers_only_around_accepted_spans():
+    """语法没生效的引号必须原样留着——那是普通查询内容,不是标记。
+
+    codex #410 round-5 P2:无条件删 `"` 会砸掉密度闸本来要保护的那个场景——
+    用户在笔记本搜索框里搜一段字面 JSON/代码,引号被抹掉就再也匹配不上。
+    """
+    assert strip_accepted_quote_markers('什么是 "static timing" 呢') == "什么是 static timing 呢"
+    # 太短 → 不被接受 → 引号留着。
+    assert strip_accepted_quote_markers('他说"ab"很重要') == '他说"ab"很重要'
+    # 未闭合 → 引号留着。
+    assert strip_accepted_quote_markers('只有一个 " 引号') == '只有一个 " 引号'
+    # 密度闸关掉语法 → 整段原样(搜字面 JSON 的场景)。
+    envelope = '{"a":"aaa","b":"bbb","c":"ccc","d":"ddd","e":"eee"}'
+    assert strip_accepted_quote_markers(envelope) == envelope
+    # 混合:被接受的那段去标记,被拒的那段留着。
+    assert strip_accepted_quote_markers('"static timing" 与 "ab"') == 'static timing 与 "ab"'
+
+
+def test_probe_term_sanitizer_still_drops_every_quote():
+    # `exact_probe_query` 把每个名称重新包成引号跨度,名称自带 `"` 会破坏那层编码,
+    # 所以那一处用的是无条件版本——它是单值清洗,不是查询级变换。
+    assert strip_quote_markers('a"b') == "ab"
+    assert exact_probe_terms(exact_probe_query(['a"b c'])) == ["ab c"]
 
 
 # --- 词法层:引号内不再被拆开 -------------------------------------------------
