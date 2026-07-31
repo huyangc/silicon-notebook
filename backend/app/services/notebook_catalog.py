@@ -454,8 +454,13 @@ class NotebookCatalogService:
         response = self._queries.search_notebook(notebook_id, needle)
         if self.memory_retriever is None:
             return response
+        # Memory keeps the ORIGINAL query: its retriever is phrase-aware and
+        # strips the markers itself for its own candidate probe. Handing it the
+        # stripped needle would delete the constraint before the scorer sees it,
+        # letting a memory that merely scatters those words qualify as though
+        # the user had never quoted anything. (codex #410 round-2 P2)
         memories = self.memory_retriever.notebook_memory_hits(
-            self._identity.current_user().id, notebook_id, needle, 8
+            self._identity.current_user().id, notebook_id, query, 8
         )
         memory_hits = [SearchHit(
             scope="Memory",

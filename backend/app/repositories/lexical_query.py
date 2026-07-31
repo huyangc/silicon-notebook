@@ -112,13 +112,30 @@ def exact_probe_terms(text: str, *, honor_quotes: bool = True) -> list[str]:
     phrases, remainder = (
         split_quoted_phrases(text) if honor_quotes else ([], text or "")
     )
-    return [
+    candidates = [
         *phrases,
         *(
             term for term in identifier_terms(remainder)
             if "_" in term or "." in term or _DIGIT_RE.search(term)
         ),
     ]
+    # Deduplicate ACROSS the two producers, not just within each: quoting a name
+    # that also appears bare (`"set_db" 与 set_db 的区别`) masks only the quoted
+    # occurrence, so the same name arrives from both sides. Each duplicate costs
+    # a real probe and one of the very few `EXACT_LOOKUP_MAX_IDENTIFIERS` slots,
+    # so a genuinely distinct third name can be dropped for a repeat of the
+    # first. Folded, because the probes themselves are case-insensitive (FTS5
+    # trigram case-folds; both adapters use ILIKE) — two casings are one probe.
+    # (codex #410 round-2 P2)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in candidates:
+        folded = term.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        terms.append(term)
+    return terms
 
 
 def _is_cjk(char: str) -> bool:

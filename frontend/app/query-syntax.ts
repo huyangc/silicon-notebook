@@ -38,7 +38,12 @@ export function analyzeQuotedPhrases(text: string): QuotedPhraseAnalysis {
   const seen = new Set<string>();
   for (const match of matches) {
     const value = match[1].split(/\s+/).filter(Boolean).join(" ");
-    if (value.length < MIN_PHRASE_CHARS || value.length > MAX_PHRASE_CHARS) continue;
+    // 按**码点**计长,不用 `value.length`:JS 的 length 数的是 UTF-16 code unit,
+    // 后端 Python 的 len 数的是码点,一段非 BMP 文字(CJK 扩展 B 等)会被后端接受
+    // 却在这里判为超长——回执与真实检索报出不同的短语集合。(codex #410 round-2 P3)
+    const length = [...value].length;
+    if (length < MIN_PHRASE_CHARS || length > MAX_PHRASE_CHARS) continue;
+    // `toLowerCase()` 与后端的 `.lower()` 对齐(后端刻意不用 casefold,理由见那边)。
     const folded = value.toLowerCase();
     if (seen.has(folded)) continue;
     seen.add(folded);

@@ -106,7 +106,14 @@ def split_quoted_phrases(text: str) -> tuple[list[str], str]:
     cursor = 0
     for match in _QUOTED_RE.finditer(source):
         value = " ".join(match.group(1).split())
-        folded = value.casefold()
+        # `.lower()`, deliberately not `.casefold()`: this key has to agree with
+        # the frontend mirror, and JavaScript has no casefold. `casefold()` maps
+        # ß→ss, so `"straße"`/`"STRASSE"` would fold together here and stay two
+        # phrases in the composer — the echo would then name a different set of
+        # phrases than retrieval applies, which is the one thing the mirror
+        # exists to prevent. Simple lowercase matches `toLowerCase()`.
+        # (codex #410 round-2 P3)
+        folded = value.lower()
         if (
             len(value) < MIN_LEXICAL_TERM_CHARS
             or len(value) > MAX_EXACT_PHRASE_CHARS

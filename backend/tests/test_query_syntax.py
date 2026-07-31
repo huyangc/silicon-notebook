@@ -31,6 +31,14 @@ PARITY_CASES = [
     ('"  static   timing  " 是什么', ["static timing"]),
     # 引号太密 = 机器文本(JSON 信封),整段语法不生效。
     ('{"a":"aaa","b":"bbb","c":"ccc","d":"ddd","e":"eee"}', []),
+    # 折叠用 .lower() 而非 .casefold():casefold 会把 ß→ss,让这两段折成一段,
+    # 而前端的 toLowerCase() 不会——回执与检索就会报出不同的短语集合。
+    ('"straße" 与 "STRASSE"', ["straße", "STRASSE"]),
+    # 非 BMP 文字按**码点**计长。这两条必须成对:只有贴着下限的那条能分辨
+    # 「码点 vs UTF-16 code unit」——两个非 BMP 字符的 len 是 2(拒),
+    # 而 JS 的 .length 是 4(收)。三个字符两种口径都通过,分辨不出任何东西。
+    ('"\U00020000\U00020001\U00020002" 是什么', ["\U00020000\U00020001\U00020002"]),
+    ('"\U00020000\U00020001" 是什么', []),
 ]
 
 
@@ -130,6 +138,21 @@ def test_user_quoted_phrase_earns_an_exact_probe():
 
 def test_phrases_lead_the_identifiers_they_share_a_query_with():
     assert exact_probe_terms('"整节取齐" 与 set_db') == ["整节取齐", "set_db"]
+
+
+def test_probe_terms_dedupe_across_both_producers():
+    """引号里和引号外是同一个名称时,只值一次探测、一个名额。
+
+    codex #410 round-2 P2:遮蔽只作用于被引起来的那次出现,同名的裸写法仍会被
+    标识符抽取拿到,于是同一个名称从两个生产者各来一份。默认 3 个名额下,重复
+    一个就意味着真正不同的第三个名称被整个丢掉。
+    """
+    assert exact_probe_terms('"set_db" 与 set_db 有什么区别') == ["set_db"]
+    # 大小写不同也是同一次探测(FTS5 trigram 与 ILIKE 都不分大小写)。
+    assert exact_probe_terms('"Set_DB" 与 set_db') == ["Set_DB"]
+    # 去重不能吃掉真正不同的名称。
+    assert exact_probe_terms('"set_db" set_db config.yaml GPT-4') == [
+        "set_db", "config.yaml", "GPT-4"]
 
 
 def test_model_supplied_text_does_not_get_the_quote_gate():

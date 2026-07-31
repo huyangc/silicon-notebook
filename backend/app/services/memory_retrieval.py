@@ -6,6 +6,7 @@ from typing import Iterable, Sequence
 from app.models.memory import MemoryHit
 from app.repositories.ports import MemoryStorePort
 from app.services.embedding import Embedder
+from app.core.query_syntax import strip_quote_markers
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     _fuse,
@@ -71,16 +72,24 @@ class MemoryRetriever:
         limit = max(1, min(int(limit), 50))
         if not clean_query:
             return []
+        # Memory's candidate generation is a whole-string trigram/ILIKE probe of
+        # the raw query, not a decomposed term list — so the quote characters
+        # would go straight into the pattern and match nothing, dropping the
+        # exact memory the user asked for out of the lexical pool entirely. Strip
+        # the markers for CANDIDATE generation only; scoring below keeps the
+        # original query so the phrase still has to be matched whole.
+        # (codex #410 round-2 P2)
+        candidate_query = strip_quote_markers(clean_query).strip() or clean_query
         rows = self.store.memory_retrieval_rows(
             user_id,
             notebook_id,
             statuses,
-            clean_query,
+            candidate_query,
             lexical_limit=self.LEXICAL_CANDIDATES,
             vector_limit=self.VECTOR_CANDIDATES,
         )
         try:
-            query_vector = self.embedder.embed_query(clean_query)
+            query_vector = self.embedder.embed_query(candidate_query)
         except Exception:
             query_vector = None
         basis = keyword_basis(clean_query)

@@ -22,6 +22,10 @@ const PARITY_CASES = [
   ['"Set DB" 与 "set db" 有区别吗', ["Set DB"]],
   ['"  static   timing  " 是什么', ["static timing"]],
   ['{"a":"aaa","b":"bbb","c":"ccc","d":"ddd","e":"eee"}', []],
+  ['"straße" 与 "STRASSE"', ["straße", "STRASSE"]],
+  // 成对:贴着下限的那条才能分辨码点与 UTF-16 code unit(len 2 拒 / .length 4 收)。
+  ['"\u{20000}\u{20001}\u{20002}" 是什么', ["\u{20000}\u{20001}\u{20002}"]],
+  ['"\u{20000}\u{20001}" 是什么', []],
 ];
 
 
