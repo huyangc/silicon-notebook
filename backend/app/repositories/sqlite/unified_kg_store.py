@@ -643,6 +643,85 @@ class UnifiedKgStore:
             "FROM canonical_relations WHERE notebook_id=?", (notebook_id,))
 
     @staticmethod
+    def weak_support_relation_rows(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        canonical_ids: List[str],
+        support_max: int,
+        limit: int,
+    ) -> List[sqlite3.Row]:
+        """BOUNDED weak-support probe (设计文档 §3.3):给定 canonical 源端集合,
+        取支撑数 ≤ ``support_max`` 的出边,最多 ``limit`` 行。
+
+        谓词 `(notebook_id, canonical_src)` 正好是 `canonical_relations` 主键的
+        **前缀**,所以每个源端都是一次索引 seek —— 没有全表扫描,代价随给定的
+        canonical 集合(本轮大纲绑定,数十个)而不是随库规模增长。
+
+        `ORDER BY` 比合同多带两个尾键(`canonical_src`/`edge_type`)。合同只写了
+        `support_count, canonical_tgt`,而它们相等的行完全可能来自不同源端/不同
+        边类型 —— 那时「取前 24 行」取到哪 24 行由存储顺序决定,双后端不必一致、
+        同一个库两次也不必一致。补上尾键只在合同留白处定序,不改前两键的语义。
+
+        反向(`canonical_tgt IN (...)`)刻意不做:那一列没有索引,加覆盖索引要动
+        双后端 schema。登记为残余,等真机评估证明 src 侧有用再花这笔。
+        """
+        if not canonical_ids:
+            return []
+        placeholders = ",".join("?" for _ in canonical_ids)
+        return db.execute(
+            f"SELECT canonical_src, edge_type, canonical_tgt, support_count, "
+            f"       sample_relation_ids "
+            f"FROM canonical_relations "
+            f"WHERE notebook_id=? AND canonical_src IN ({placeholders}) "
+            f"  AND support_count<=? "
+            f"ORDER BY support_count ASC, canonical_tgt ASC, canonical_src ASC, "
+            f"         edge_type ASC "
+            f"LIMIT ?",
+            [notebook_id, *canonical_ids, support_max, limit],
+        ).fetchall()
+
+    @staticmethod
+    def relation_endpoint_name_rows(
+        db: sqlite3.Connection, notebook_id: str, relation_ids: List[str]
+    ) -> List[sqlite3.Row]:
+        """按**关系 id** 批量解析两端显示名(`canonical_name` 优先,payload name 回退)。
+
+        为什么经关系而不是直接按 `canonical_id` 查 `concept_clusters`:那张表上
+        `canonical_id` **没有索引**(只有 `notebook_id` 与 `member_object_id`),
+        所以 `WHERE notebook_id=? AND canonical_id IN (...)` 会退化成「把该
+        notebook 的每一行簇成员都取回来再残余过滤」—— 实测 4 万行簇的库 62ms,
+        按行数线性放大到百万级簇就是秒级,而这条查询每次被接受的大纲更新都要跑
+        一次。`canonical_relations.sample_relation_ids` 给了一条**全索引**的等价
+        路径:样本关系 id 是主键,它的两个端点对象 id 也是主键,而端点对象落在哪个
+        簇由 `idx_clusters_member` seek。数据来源的优先级与合同逐字一致,只是到达
+        它的路径换成了有索引的那条。
+
+        join 形状与 `canonical_relation_seed_rows` 逐字同构(同样的两张对象表 +
+        两条 `member_object_id` 簇 join),那条查询正是 canonical 边的产地 —— 于是
+        「样本关系的两端折叠后就是这条 canonical 边的两端」是构造上成立的,不是
+        一句需要人复核的话。
+        """
+        if not relation_ids:
+            return []
+        placeholders = ",".join("?" for _ in relation_ids)
+        return db.execute(
+            f"SELECT kr.id AS rid, "
+            f"       COALESCE(NULLIF(cs.canonical_name,''), "
+            f"                json_extract(so.payload,'$.name'), '') AS src_name, "
+            f"       COALESCE(NULLIF(ct.canonical_name,''), "
+            f"                json_extract(tp.payload,'$.name'), '') AS tgt_name "
+            f"FROM knowledge_relations kr "
+            f"JOIN knowledge_objects so ON so.id=kr.source_object_id "
+            f"JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
+            f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            f"  AND cs.member_object_id=kr.source_object_id "
+            f"LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            f"  AND ct.member_object_id=kr.target_object_id "
+            f"WHERE kr.notebook_id=? AND kr.id IN ({placeholders})",
+            [notebook_id, *relation_ids],
+        ).fetchall()
+
+    @staticmethod
     def replace_canonical_relations(
         db: sqlite3.Connection, notebook_id: str, rows: List[tuple], seq: int
     ) -> None:

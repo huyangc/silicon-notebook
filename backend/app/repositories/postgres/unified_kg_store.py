@@ -672,6 +672,65 @@ class UnifiedKgStore:
             "FROM canonical_relations WHERE notebook_id=%s", (notebook_id,))
 
     @staticmethod
+    def weak_support_relation_rows(
+        db: Any,
+        notebook_id: str,
+        canonical_ids: List[str],
+        support_max: int,
+        limit: int,
+    ) -> List[dict]:
+        """SQLite `weak_support_relation_rows` 的 parity 实现(设计文档 §3.3)。
+
+        `(notebook_id, canonical_src)` 是 `pk_canonical_relations` 的前缀,所以
+        每个源端一次索引 seek。`sample_relation_ids` 是 jsonb,按本适配器惯例
+        `::text` 出参,让服务层拿到与 SQLite 逐字同形的 JSON 文本(服务层因此
+        不必判断 dialect)。排序尾键的理由见 SQLite 侧同名方法。
+        """
+        if not canonical_ids:
+            return []
+        placeholders = ",".join("%s" for _ in canonical_ids)
+        return db.execute(
+            f"SELECT canonical_src, edge_type, canonical_tgt, support_count, "
+            f"       sample_relation_ids::text AS sample_relation_ids "
+            f"FROM canonical_relations "
+            f"WHERE notebook_id=%s AND canonical_src IN ({placeholders}) "
+            f"  AND support_count<=%s "
+            f"ORDER BY support_count ASC, canonical_tgt ASC, canonical_src ASC, "
+            f"         edge_type ASC "
+            f"LIMIT %s",
+            [notebook_id, *canonical_ids, support_max, limit],
+        ).fetchall()
+
+    @staticmethod
+    def relation_endpoint_name_rows(
+        db: Any, notebook_id: str, relation_ids: List[str]
+    ) -> List[dict]:
+        """SQLite `relation_endpoint_name_rows` 的 parity 实现。
+
+        为什么经样本关系而不是直接按 `canonical_id` 查簇表,见 SQLite 侧的说明
+        (那一列两侧都没有索引,直查是按 notebook 的整段扫描)。
+        """
+        if not relation_ids:
+            return []
+        placeholders = ",".join("%s" for _ in relation_ids)
+        return db.execute(
+            f"SELECT kr.id AS rid, "
+            f"       COALESCE(NULLIF(cs.canonical_name,''), "
+            f"                so.payload ->> 'name', '') AS src_name, "
+            f"       COALESCE(NULLIF(ct.canonical_name,''), "
+            f"                tp.payload ->> 'name', '') AS tgt_name "
+            f"FROM knowledge_relations kr "
+            f"JOIN knowledge_objects so ON so.id=kr.source_object_id "
+            f"JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
+            f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            f"  AND cs.member_object_id=kr.source_object_id "
+            f"LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            f"  AND ct.member_object_id=kr.target_object_id "
+            f"WHERE kr.notebook_id=%s AND kr.id IN ({placeholders})",
+            [notebook_id, *relation_ids],
+        ).fetchall()
+
+    @staticmethod
     def replace_canonical_relations(
         db: Any, notebook_id: str, rows: List[tuple], seq: int
     ) -> None:

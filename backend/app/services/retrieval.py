@@ -88,6 +88,27 @@ class RetrievedRelation:
     review_status: str = "pending"
 
 
+@dataclass(frozen=True)
+class GapRelationRow:
+    """canonical 层里一条**支撑薄弱**的关系(设计文档 §3.3 的 KG 弱支撑边回喂)。
+
+    它不是检索结果、不进证据池、不可 `[k]` 引用 —— 只是喂给模型的一行提示
+    (「这条边只有 1-2 个来源支撑,要不要定向补证」)。所以它刻意**没有** score /
+    relevance / evidence 字段:任何一个都会立刻让人想把它混进候选排序里。
+
+    两端各带 canonical id 与显示名。id 用于 run 级去重账目(名字会因簇换代而变,
+    id 不会);显示名才是喂给模型的东西(canonical id 是 `K-<归一化 seed>` 这种
+    内部形状,模型复述它只会污染答案)。
+    """
+
+    canonical_src: str
+    canonical_tgt: str
+    src_name: str
+    tgt_name: str
+    edge_type: str
+    support_count: int
+
+
 # KG node-type authority weights: claim/formula are primary knowledge carriers;
 # procedure is process-oriented; concept is definitional/supporting.
 # Used for cross-type tie-breaking / grouping only, NOT multiplied into
