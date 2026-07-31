@@ -911,7 +911,18 @@ class AskService:
                 answer, grounded, anchors = "", False, []
             if answer:
                 if mark is not None:
-                    del sink[mark:]
+                    # 只摘**本次调用自己**记下的那条 answer 报警,不是「mark 之后
+                    # 的一切」。今天 synth() 内部没有别的 note_model_error 调用
+                    # (`_refine_context` 静默吞异常),所以两种写法等价——但那是
+                    # 一个会被下一次改动打破的巧合:给证据精炼补一条
+                    # note_model_error 是很自然的一步,那之后位置式摘除会在
+                    # 「首次即成功 + 精炼失败」时把别人的报警一起删掉,正好违反
+                    # 「其它 workload 一条都不许动」。按身份过滤让这条前提不必
+                    # 靠注释维持。
+                    sink[mark:] = [
+                        item for item in sink[mark:]
+                        if item.get("workload_id") != "ask_answer"
+                    ]
                 return answer, grounded, anchors, True
         self.model_errors.note_model_error(
             "answer",

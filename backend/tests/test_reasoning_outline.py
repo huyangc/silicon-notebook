@@ -1713,6 +1713,27 @@ def test_a_single_confirmed_direction_is_not_a_reason(repo):
                    for prompt in llm.reflect_prompts)
 
 
+def test_exactly_one_direction_is_still_not_a_reason(repo):
+    """真边界:一条权威问题 + 恰好 1 个方向 → 仍不引导。
+
+    上一条用的是零方向,它挡不住「把 >=2 写成 >=1」这种 off-by-one —— 那个写法
+    会让任何带一条补充方向的普通问题都被劝去建大纲,而单点事实题被拆出一两个
+    检索角度是常态。理由 (b) 的阈值必须由这条钉住。
+    """
+    notebook = _seed(repo, elements=2)
+    llm = _SeqLLM([
+        {"next_action": "search_elements", "elements_query": "版图设计要点"},
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    retriever.run(notebook.id, "综述", "", limits=limits,
+                  intent_queries=["完整的已确认问题", "唯一的一个方向"])
+
+    assert not any("本轮尚未建立大纲" in prompt
+                   for prompt in llm.reflect_prompts)
+
+
 @pytest.mark.parametrize("effort", ["overview", "standard", "deep", "thorough"])
 def test_the_nudge_is_absent_below_the_exhaustive_effort(repo, effort):
     """低档位逐字回到接入前:没有 update_outline 可调,就没有可引导的东西。"""

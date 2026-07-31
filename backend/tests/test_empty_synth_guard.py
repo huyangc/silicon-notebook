@@ -253,3 +253,57 @@ def test_without_a_response_sink_the_helper_is_unchanged(repo):
     assert _ASK_MODEL_ERRORS.get() is None
     ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
     assert ok is True and ans == "完整答案 [k1]"
+
+
+def test_an_alarm_raised_inside_synth_by_another_workload_survives(repo):
+    """synth() **内部**别的 workload 记下的报警不能被摘掉——哪怕首次就成功。
+
+    这条钉的是「按身份过滤」而不是「按位置截断」。今天 `_refine_context` 静默吞
+    异常、不记 note_model_error,所以两种写法碰巧等价;但那是个会被下一次改动
+    打破的巧合——给证据精炼补一条 note_model_error 是很自然的一步,那之后
+    `del sink[mark:]` 就会在「首次即成功 + 精炼失败」时把它一起删掉,正好违反
+    「其它 workload 一条都不许动」。用例因此让 synth 自己往 sink 里记一条
+    evidence_refine 再返回答案:位置式摘除必红,身份过滤必绿。
+    """
+    def synth():
+        sink_now = _ASK_MODEL_ERRORS.get()
+        sink_now.append({"stage": "answer", "workload_id": "evidence_refine",
+                         "message": "upstream_error"})
+        return ("完整答案 [k1]", True, [])
+
+    sink: list = []
+    tok = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        _ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
+    finally:
+        _ASK_MODEL_ERRORS.reset(tok)
+
+    assert ok is True
+    assert [row["workload_id"] for row in sink] == ["evidence_refine"], (
+        "首次即成功时,synth 内部别的 workload 记的报警必须原样保留,"
+        f"实得 {sink}")
+
+
+def test_a_recovered_retry_still_drops_only_its_own_answer_alarm(repo):
+    """恢复时:自己那条 ask_answer 摘掉,同一区间里别人的那条留下。"""
+    calls = []
+
+    def synth():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("upstream 503")
+        _ASK_MODEL_ERRORS.get().append(
+            {"stage": "answer", "workload_id": "evidence_refine",
+             "message": "upstream_error"})
+        return ("完整答案 [k1]", True, [])
+
+    sink: list = []
+    tok = _ASK_MODEL_ERRORS.set(sink)
+    try:
+        _ans, _g, _anc, ok = repo._answer_with_retry(synth, "m")
+    finally:
+        _ASK_MODEL_ERRORS.reset(tok)
+
+    assert ok is True
+    assert [row["workload_id"] for row in sink] == ["evidence_refine"], (
+        f"只有 ask_answer 那条该被摘掉,实得 {sink}")
