@@ -23,6 +23,7 @@ test("Ask 图谱引用把对象 id 与真实来源 notebook 一起交给跳转�
       label: "公共库结论",
       name: "公共库结论",
       source_title: "公共来源",
+      source_file_name: "user-uploaded-reference.pdf",
       location_label: "第 1 节",
       source_id: "base-source-1",
       element_id: "base-element-1",
@@ -52,6 +53,8 @@ test("Ask 图谱引用把对象 id 与真实来源 notebook 一起交给跳转�
   );
 
   await user.click(screen.getByRole("button", { name: "[1]" }));
+  expect(screen.getByText("原始文件：user-uploaded-reference.pdf")).toBeInTheDocument();
+  expect(screen.queryByText(/mineru.*\.md/i)).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "查看原文" }));
   expect(onOpenSource).toHaveBeenCalledWith("base-source-1", "base-element-1");
 

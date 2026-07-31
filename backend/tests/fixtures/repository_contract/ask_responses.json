@@ -13,6 +13,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
@@ -27,6 +28,7 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
           }
@@ -59,6 +61,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
@@ -73,6 +76,7 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
           }
@@ -107,6 +111,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
@@ -121,6 +126,7 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
           }
@@ -163,6 +169,7 @@
             "object_id": "<chunk-id-1>",
             "object_type": "chunk",
             "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
@@ -177,6 +184,7 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
           }
@@ -657,6 +665,7 @@
             "object_id": "<ko-id-1>",
             "object_type": "claim",
             "snippet": "A source-degenerated stage stabilizes voltage gain.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
@@ -671,6 +680,7 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
           }
@@ -837,6 +847,7 @@
             "object_id": "<ko-id-1>",
             "object_type": "claim",
             "snippet": "A source-degenerated stage stabilizes voltage gain.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "source_title": "Fixture amplifier notes",
             "tier": "personal"
@@ -851,6 +862,7 @@
             "label": "Fixture amplifier notes · §1 Gain",
             "location_label": "§1 Gain",
             "quoted_span": "A source-degenerated stage stabilizes voltage gain.",
+            "source_file_name": "fixture.md",
             "source_id": "<src-id-1>",
             "tier": "personal"
           }

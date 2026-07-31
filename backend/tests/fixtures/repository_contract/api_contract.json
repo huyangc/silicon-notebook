@@ -667,6 +667,11 @@
               ],
               "title": "Snippet"
             },
+            "source_file_name": {
+              "default": "",
+              "title": "Source File Name",
+              "type": "string"
+            },
             "source_id": {
               "default": "",
               "title": "Source Id",
@@ -1553,6 +1558,11 @@
             },
             "quoted_span": {
               "title": "Quoted Span",
+              "type": "string"
+            },
+            "source_file_name": {
+              "default": "",
+              "title": "Source File Name",
               "type": "string"
             },
             "source_id": {
@@ -17045,6 +17055,7 @@
           "label": "fixture.md · Gain",
           "location_label": "Gain",
           "quoted_span": "[Gain] Source degeneration stabilizes fixture gain.",
+          "source_file_name": "fixture.md",
           "source_id": "src-api",
           "tier": "personal"
         }
@@ -17088,6 +17099,7 @@
                 "label": "fixture.md · Gain",
                 "location_label": "Gain",
                 "quoted_span": "[Gain] Source degeneration stabilizes fixture gain.",
+                "source_file_name": "fixture.md",
                 "source_id": "src-api",
                 "tier": "personal"
               }

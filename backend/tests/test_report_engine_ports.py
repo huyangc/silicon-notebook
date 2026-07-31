@@ -98,6 +98,9 @@ class _Evidence:
     def citation_titles(self, source_ids):
         return {}
 
+    def citation_source_info(self, source_ids):
+        return {}
+
 
 class _SectionLLM:
     """按 prompt 关键字出大纲/节/摘要(镜像 test_report_engine._OutlineLLM)。"""

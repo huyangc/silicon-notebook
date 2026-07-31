@@ -7,6 +7,7 @@ export type AnswerAnchorLike = {
   definition?: string | null;
   snippet?: string | null;
   source_title?: string;
+  source_file_name?: string;
   location_label?: string;
   source_id?: string;
   element_id?: string;
@@ -31,6 +32,7 @@ export type CitationLike = {
   element_id: string;
   location_label: string;
   quoted_span: string;
+  source_file_name?: string;
   tier?: string;
   // 多领域基准库(Task 14)：与 AnswerAnchorLike.notebook_id 同一惯例——只在跨库
   // 命中时非空，供引用徽章查 id→name 映射标来源库名。见 schemas.py

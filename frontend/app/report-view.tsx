@@ -103,6 +103,7 @@ export type ReportDetailT = ReportSummaryT & {
     label: string;
     name?: string;
     source_title?: string;
+    source_file_name?: string;
     location_label?: string;
     object_id?: string;
     object_type?: string;
@@ -222,6 +223,7 @@ export function ReportMarkdown({
       label: r.label,
       name: r.name,
       source_title: r.source_title,
+      source_file_name: r.source_file_name,
       location_label: r.location_label,
       snippet: r.snippet,
       tier: r.tier,
@@ -293,6 +295,12 @@ export function ReportMarkdown({
         <aside className="report-reference-detail" aria-label="引用原文">
           <strong>{selectedReference.source_title || selectedReference.label}</strong>
           {selectedReference.location_label && <span>{selectedReference.location_label}</span>}
+          {selectedReference.source_file_name
+            && selectedReference.source_file_name !== selectedReference.source_title && (
+              <small title={selectedReference.source_file_name}>
+                原始文件：{selectedReference.source_file_name}
+              </small>
+            )}
           {selectedReference.snippet && <blockquote>{selectedReference.snippet}</blockquote>}
         </aside>
       )}
