@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 from psycopg import sql
 
@@ -349,11 +350,12 @@ def memory_candidate_ids(
     limit: int,
     *,
     scope: MemoryCandidateScope,
+    phrase_queries: Sequence[str] = (),
 ) -> list[str]:
     """Return bounded mixed-language Memory candidates using all v6 indexes."""
     if limit <= 0 or not query.strip():
         return []
-    predicates, params = _memory_match_predicates(query, scope)
+    predicates, params = _memory_match_predicates(query, scope, phrase_queries)
     params.extend(
         [
             query,
@@ -428,9 +430,16 @@ def memory_page_candidate_ids(
 def _memory_match_predicates(
     query: str,
     scope: MemoryCandidateScope,
+    phrase_queries: Sequence[str] = (),
 ) -> tuple[list[str], list[object]]:
-    """Build the one reviewed scope+match predicate shared by page and count."""
-    pattern = f"%{query}%"
+    """Build the one reviewed scope+match predicate shared by page and count.
+
+    `phrase_queries` are additional INDEPENDENT match probes OR-ed into the same
+    statement — one more OR group on an already-indexed predicate, not another
+    round trip. They exist because this path probes the whole query as one
+    value: a user-quoted phrase would otherwise only match a memory that also
+    carries the surrounding sentence (codex #410 round-6 P2).
+    """
     predicates = ["created_by=%s"]
     params: list[object] = [scope.owner_id]
     if scope.notebook_id is not None:
@@ -449,23 +458,23 @@ def _memory_match_predicates(
         "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s)))"
     )
     params.extend([scope.viewer_id, scope.viewer_id])
-    params.extend(
-        [
-            query,
-            pattern,
-            query,
-            pattern,
-            query,
-            pattern,
-        ]
-    )
-    predicates.append(
-        "("
-        "title OPERATOR(public.%%) %s OR title ILIKE %s OR "
-        "content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR "
-        f"{TAGS_JSON_EXPRESSION} OPERATOR(public.%%) %s OR "
-        f"{TAGS_JSON_EXPRESSION} ILIKE %s)"
-    )
+    probes: list[str] = [query]
+    for phrase in phrase_queries:
+        value = str(phrase).strip()
+        if value and value not in probes:
+            probes.append(value)
+    groups: list[str] = []
+    for probe in probes:
+        pattern = f"%{probe}%"
+        params.extend([probe, pattern, probe, pattern, probe, pattern])
+        groups.append(
+            "("
+            "title OPERATOR(public.%%) %s OR title ILIKE %s OR "
+            "content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR "
+            f"{TAGS_JSON_EXPRESSION} OPERATOR(public.%%) %s OR "
+            f"{TAGS_JSON_EXPRESSION} ILIKE %s)"
+        )
+    predicates.append("(" + " OR ".join(groups) + ")")
     return predicates, params
 
 

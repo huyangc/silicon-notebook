@@ -6,7 +6,10 @@ from typing import Iterable, Sequence
 from app.models.memory import MemoryHit
 from app.repositories.ports import MemoryStorePort
 from app.services.embedding import Embedder
-from app.core.query_syntax import strip_accepted_quote_markers
+from app.core.query_syntax import (
+    quoted_phrases,
+    strip_accepted_quote_markers,
+)
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     _fuse,
@@ -72,13 +75,18 @@ class MemoryRetriever:
         limit = max(1, min(int(limit), 50))
         if not clean_query:
             return []
-        # Memory's candidate generation is a whole-string trigram/ILIKE probe of
-        # the raw query, not a decomposed term list — so the quote characters
-        # would go straight into the pattern and match nothing, dropping the
-        # exact memory the user asked for out of the lexical pool entirely. Strip
-        # the markers for CANDIDATE generation only; scoring below keeps the
-        # original query so the phrase still has to be matched whole.
-        # (codex #410 round-2 P2)
+        # Memory's candidate generation probes the WHOLE query as one value
+        # (a single FTS phrase on SQLite, the same string on PostgreSQL), so the
+        # quotes need handling twice over:
+        #   * the markers must go, or the pattern carries characters no memory
+        #     contains and the pool comes back empty (codex #410 round-2 P2);
+        #   * each accepted phrase must ALSO probe on its own, or a memory
+        #     holding the phrase but not the surrounding sentence never becomes
+        #     a candidate — the syntax would then work everywhere except here
+        #     (codex #410 round-6 P2). These are extra OR-ed terms inside the
+        #     one existing bounded query, not extra round trips.
+        # Scoring below keeps the ORIGINAL query, so the phrase still has to be
+        # matched whole to earn its coverage.
         candidate_query = (
             strip_accepted_quote_markers(clean_query).strip() or clean_query
         )
@@ -89,6 +97,7 @@ class MemoryRetriever:
             candidate_query,
             lexical_limit=self.LEXICAL_CANDIDATES,
             vector_limit=self.VECTOR_CANDIDATES,
+            phrase_queries=quoted_phrases(clean_query),
         )
         try:
             query_vector = self.embedder.embed_query(candidate_query)

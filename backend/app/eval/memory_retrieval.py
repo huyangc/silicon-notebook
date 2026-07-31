@@ -141,8 +141,9 @@ class _FixtureMemoryStore:
         *,
         lexical_limit: int,
         vector_limit: int,
+        phrase_queries: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
-        del query, vector_limit
+        del query, vector_limit, phrase_queries
         allowed = set(statuses)
         return [
             {"record": item, "vector": None}

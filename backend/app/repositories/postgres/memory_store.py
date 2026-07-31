@@ -1770,6 +1770,7 @@ class MemoryStore:
         *,
         lexical_limit: int,
         vector_limit: int,
+        phrase_queries: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         """Return a bounded lexical union embedding pool for one owner/notebook.
 
@@ -1799,6 +1800,7 @@ class MemoryStore:
                     notebook_id=notebook_id,
                     statuses=allowed,
                 ),
+                phrase_queries=phrase_queries,
             )
             lexical_rows = db.execute(
                 f"SELECT {select},me.vector AS retrieval_vector "

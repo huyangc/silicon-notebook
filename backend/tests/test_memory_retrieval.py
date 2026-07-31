@@ -441,11 +441,9 @@ def test_quoted_query_splits_candidate_probe_from_phrase_scoring(memory_data):
     pattern 就什么都匹配不到——所以候选侧必须先把标记去掉。评分侧相反:拿到的
     是原串,短语仍须整段命中。
 
-    刻意未做(codex #410 round-3 P2,已在 PR 上说明并留了注释):把短语作为**独立
-    探测**加进候选生成。Memory 的候选一直是「整句作为一个 FTS 短语」,所以「只含
-    该短语、不含整句」的记忆在**加引号前后同样**进不了候选池——这是 Memory 既有
-    的粗粒度,不是引号带来的退化,本次改动对它只增不减。真要修得给 Memory 一份
-    与 chunk 同样的分解式词项探测,那是另一条召回契约的改动。
+    每段被接受的短语还会作为**独立探测**一并下发(round-6),否则「只含该短语、
+    不含整句」的记忆进不了候选池——那是 Memory 候选「整句作为一个 FTS 短语」的
+    既有粗粒度,引号语法必须能穿过它。
     """
     data = memory_data
     retriever = data.repo._runtime.memory_retriever
@@ -453,7 +451,7 @@ def test_quoted_query_splits_candidate_probe_from_phrase_scoring(memory_data):
     original = retriever.store.memory_retrieval_rows
 
     def spy(user_id, notebook_id, statuses, query, **kwargs):
-        seen.append(query)
+        seen.append((query, tuple(kwargs.get("phrase_queries", ()))))
         return original(user_id, notebook_id, statuses, query, **kwargs)
 
     retriever.store = SimpleNamespace(
@@ -473,4 +471,39 @@ def test_quoted_query_splits_candidate_probe_from_phrase_scoring(memory_data):
         reset_request_user(token)
         retriever.store = original.__self__
 
-    assert seen == ["how does timing closure work"], "候选探测串必须已去掉引号标记"
+    # 探测串去掉标记,**并且**每段被接受的短语作为独立探测一并下发——后者是
+    # round-6 的接线,少了它下面那条 store 级守卫照样绿(它自己传参),这一条才是
+    # 「服务层真的把短语交下去了」的守卫。
+    assert seen == [("how does timing closure work", ("timing closure",))]
+
+
+def test_quoted_phrase_probes_memory_independently_of_the_sentence(memory_data):
+    """带上下文的引号查询,必须能把「只含该短语、不含整句」的记忆捞进**候选池**。
+
+    codex #410 round-6 P2:Memory 的候选是把**整串**当一个 FTS 短语探测,所以
+    `how does "timing closure" work` 若只按整句探测,那条只写了 timing closure 的
+    记忆根本进不了词法候选——引号语法在别处都生效、独独在 Memory 上失灵。短语作为
+    额外的 OR 词项进同一条有界查询,不是多发一次查询。
+
+    ⚠ 断言必须落在**词法候选**这一层:端到端的 hits 会经由「按 updated_at 取回的
+    有界向量池」把同一条记忆捞回来,于是删掉短语探测也照样绿——第一版守卫正是这样
+    打空的。这里把 vector_limit 压到最小,让向量池只可能带回最新的那一条(unrelated
+    之后的 bob/other 不属本 notebook),差异才真正来自词法侧。
+    """
+    data = memory_data
+    store = data.repo._runtime.memory_service.store
+    sentence = "how does timing closure work"
+
+    def probe(**kwargs):
+        rows = store.memory_retrieval_rows(
+            data.alice.id, data.notebook.id, ("confirmed",), sentence,
+            lexical_limit=50, vector_limit=1, **kwargs,
+        )
+        return {row["record"].id for row in rows}
+
+    without_phrase = probe()
+    with_phrase = probe(phrase_queries=["timing closure"])
+
+    assert data.confirmed.id not in without_phrase, (
+        "整句作为一个 FTS 短语匹配不到它——这正是要修的形状")
+    assert data.confirmed.id in with_phrase
