@@ -39,6 +39,10 @@ PARITY_CASES = [
     # 而 JS 的 .length 是 4(收)。三个字符两种口径都通过,分辨不出任何东西。
     ('"\U00020000\U00020001\U00020002" 是什么', ["\U00020000\U00020001\U00020002"]),
     ('"\U00020000\U00020001" 是什么', []),
+    # 同一段短语重复出现不算「引号太密」:内部检索问题会把它在目标、规范化问题
+    # 和每个必答主题里各留一份,按出现次数数就会在推理/报告里把语法整个关掉。
+    ('"静态时序分析" a "静态时序分析" b "静态时序分析" c "静态时序分析" '
+     'd "静态时序分析" e "静态时序分析"', ["静态时序分析"]),
 ]
 
 
@@ -70,6 +74,25 @@ def test_too_many_spans_disables_the_syntax_entirely():
     text = " ".join(f'"phrase{index}"' for index in range(MAX_QUOTED_PHRASES + 1))
     assert quoted_phrases(text) == []
     assert unquoted_remainder(text) == text
+
+
+def test_repeating_one_phrase_is_not_too_many_spans(monkeypatch):
+    """闸数的是**不同**的引号内容——这是 codex #410 round-4 的阻断形状。
+
+    `confirmed_research_question` 把 objective、规范化问题、实体和最多 16 条必答
+    主题拼成内部检索问题,而规划 prompt 恰恰要求模型把用户的引号原样带进每一条。
+    按出现次数数,一个再普通不过的单短语问题也会在推理/报告里越界,把语法整个
+    关掉——正好关在它最该生效的地方。
+    """
+    expanded = " ".join(
+        [f'目标:"static timing analysis"']
+        + [f'必答主题{i}:"static timing analysis"'
+           for i in range(MAX_QUOTED_PHRASES + 3)]
+    )
+    assert quoted_phrases(expanded) == ["static timing analysis"]
+    # 但不同的内容仍然照旧被拦(JSON 信封那条形状不受影响)。
+    assert quoted_phrases(
+        " ".join(f'"distinct{i}"' for i in range(MAX_QUOTED_PHRASES + 1))) == []
 
 
 def test_at_the_limit_the_syntax_still_applies():

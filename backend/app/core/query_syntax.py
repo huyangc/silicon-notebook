@@ -25,7 +25,10 @@ from typing import Iterable
 # A single exact phrase (and therefore a quoted span) may not exceed this.
 MAX_EXACT_PHRASE_CHARS = 256
 # A user may declare at most this many atomic phrases per query — and a text
-# carrying MORE quoted spans than this has none of them honoured at all.
+# carrying MORE DISTINCT quoted spans than this has none of them honoured at
+# all. Distinct, because the internal research query legitimately repeats one
+# phrase across the objective, the normalized question and every mandatory
+# topic; see the counting comment in `split_quoted_phrases`.
 #
 # The threshold is not a budget, it is a shape test: quoting two or three things
 # is a constraint, quoting a dozen is punctuation in pasted material. The
@@ -98,7 +101,18 @@ def split_quoted_phrases(text: str) -> tuple[list[str], str]:
     """
     source = text or ""
     matches = _QUOTED_RE.findall(source)
-    if not matches or len(matches) > MAX_QUOTED_PHRASES:
+    # DISTINCT spans, not raw occurrences. Repeating one phrase is not "many
+    # constraints", and the internal research query is built by concatenating
+    # the intent contract's objective, resolved question, entities and up to 16
+    # mandatory topics — each of which the planner prompt explicitly tells the
+    # model to carry the user's quoted span through verbatim. Counting
+    # occurrences let that expansion push a perfectly ordinary one-phrase
+    # question past the limit and silently switch the syntax off for the whole
+    # reasoning/report run, i.e. exactly where it matters most (codex #410
+    # round-4 P2). The JSON-envelope shape this gate exists for is unaffected:
+    # its keys and cell values are all DIFFERENT strings.
+    distinct = {" ".join(value.split()).lower() for value in matches}
+    if not matches or len(distinct) > MAX_QUOTED_PHRASES:
         return [], source
     phrases: list[str] = []
     seen: set[str] = set()

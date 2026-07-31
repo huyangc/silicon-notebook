@@ -31,8 +31,11 @@ export type QuotedPhraseAnalysis = {
 export function analyzeQuotedPhrases(text: string): QuotedPhraseAnalysis {
   const source = text ?? "";
   const matches = [...source.matchAll(QUOTED)];
-  if (matches.length === 0 || matches.length > MAX_QUOTED_PHRASES) {
-    return { phrases: [], spans: matches.length, tooMany: matches.length > MAX_QUOTED_PHRASES };
+  // 数的是**不同**的引号内容,不是出现次数——理由见后端同名函数的注释(内部检索
+  // 问题会把同一段短语在目标/规范化问题/每个必答主题里各留一份)。
+  const distinct = new Set(matches.map((m) => m[1].split(/\s+/).filter(Boolean).join(" ").toLowerCase()));
+  if (matches.length === 0 || distinct.size > MAX_QUOTED_PHRASES) {
+    return { phrases: [], spans: distinct.size, tooMany: distinct.size > MAX_QUOTED_PHRASES };
   }
   const phrases: string[] = [];
   const seen = new Set<string>();
