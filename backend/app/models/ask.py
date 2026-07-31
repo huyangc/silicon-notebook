@@ -51,6 +51,12 @@ class Citation(BaseModel):
     element_id: str
     location_label: str
     quoted_span: str
+    # Original user-uploaded file name.  This is deliberately separate from
+    # ``label``/the source display title: grounded papers keep their parsed
+    # paper title as the readable heading, while the UI can still show which
+    # uploaded file the evidence came from.  MinerU output paths/names never
+    # populate this field.
+    source_file_name: str = Field(default="", exclude_if=lambda value: not value)
     # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
     # user notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
     # citations, not just anchors.
@@ -189,6 +195,10 @@ class AnswerAnchor(BaseModel):
     definition: Optional[str] = None
     snippet: Optional[str] = None      # element_text of the grounding sentence
     source_title: str = ""
+    # Same contract as Citation.source_file_name.  Anchors are authoritative
+    # whenever the answer contains valid [k] markers, so the field must live on
+    # both response shapes rather than only on the fallback Citation list.
+    source_file_name: str = Field(default="", exclude_if=lambda value: not value)
     location_label: str = ""
     # Exact source locator for anchors backed by one SourceElement.  Chunk/KG
     # anchors may leave either value empty; enumerated collection rows fill

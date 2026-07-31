@@ -1017,7 +1017,7 @@ class ReportEngine:
         # --- 全局引用重编号(按具体证据锚点去重,不再把同源不同元素折叠) ---
         references: List[dict] = []
         ref_pos: Dict[str, int] = {}       # dedup key -> 全局 1-based
-        preferred_titles = self.dependencies.evidence_context.citation_titles(
+        citation_source_info = self.dependencies.evidence_context.citation_source_info(
             str(ctx.get("source_id") or "")
             for section in sections
             for ctx in (section.get("id_map") or {}).values()
@@ -1025,8 +1025,14 @@ class ReportEngine:
 
         def _source_title(ctx):
             source_id = str(ctx.get("source_id") or "")
-            return preferred_titles.get(
-                source_id, str(ctx.get("source_title") or "").strip()
+            return (citation_source_info.get(source_id) or {}).get(
+                "title", str(ctx.get("source_title") or "").strip()
+            )
+
+        def _source_file_name(ctx):
+            source_id = str(ctx.get("source_id") or "")
+            return (citation_source_info.get(source_id) or {}).get(
+                "file_name", str(ctx.get("source_file_name") or "").strip()
             )
 
         def _dk(ctx):
@@ -1079,6 +1085,7 @@ class ReportEngine:
                             "label": _label(ctx),
                             "name": str(ctx.get("name") or ""),
                             "source_title": _source_title(ctx),
+                            "source_file_name": _source_file_name(ctx),
                             "location_label": str(ctx.get("location_label") or ""),
                             "source_id": str(ctx.get("source_id") or ""),
                             "element_id": str(ctx.get("element_id") or ""),

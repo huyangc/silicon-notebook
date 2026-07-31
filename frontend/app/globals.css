@@ -2259,6 +2259,14 @@ button.chat-session-card {
   font-size: 12px;
 }
 
+.report-reference-detail > small {
+  color: #6b7280;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .report-reference-detail blockquote {
   padding-left: 10px;
   border-left-color: #7c8da8;
@@ -5296,6 +5304,13 @@ button.chat-session-card {
 .cite-detail-card small {
   color: #6b7686;
   font-size: 12px;
+}
+
+.cite-detail-card .cite-source-file {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .severity-high {

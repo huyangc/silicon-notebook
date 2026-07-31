@@ -229,6 +229,9 @@ class _MinimalEvidence:
     def citation_titles(self, source_ids):
         return {}
 
+    def citation_source_info(self, source_ids):
+        return {}
+
     def truncate_kg_block(self, block, max_tokens):
         return block
 

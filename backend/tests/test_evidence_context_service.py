@@ -88,6 +88,7 @@ def test_element_context_and_anchor_expose_parsed_paper_title():
         "s-paper": {
             "title": "opaque-file-name.pdf", "is_paper": True,
             "paper_title": "Meaningful Paper Name",
+            "file_name": "opaque-file-name.pdf",
         },
     })
     element = RetrievedElement(
@@ -102,7 +103,9 @@ def test_element_context_and_anchor_expose_parsed_paper_title():
     assert "Meaningful Paper Name" in block
     assert "opaque-file-name.pdf" not in block
     assert evidence["k4001"]["source_title"] == "Meaningful Paper Name"
+    assert evidence["k4001"]["source_file_name"] == "opaque-file-name.pdf"
     assert anchors[0].source_title == "Meaningful Paper Name"
+    assert anchors[0].source_file_name == "opaque-file-name.pdf"
 
 
 def test_fallback_citation_label_uses_parsed_paper_title():
@@ -110,6 +113,7 @@ def test_fallback_citation_label_uses_parsed_paper_title():
         "s-paper": {
             "title": "opaque-file-name.pdf", "is_paper": True,
             "paper_title": "Meaningful Paper Name",
+            "file_name": "opaque-file-name.pdf",
         },
     })
     hit = RetrievedKnowledge(
@@ -126,6 +130,7 @@ def test_fallback_citation_label_uses_parsed_paper_title():
     )
 
     assert citations[0].label == "Meaningful Paper Name · p. 2"
+    assert citations[0].source_file_name == "opaque-file-name.pdf"
 
 
 def test_collection_kg_item_gets_bounded_cross_library_original_source():
@@ -133,8 +138,9 @@ def test_collection_kg_item_gets_bounded_cross_library_original_source():
 
     service = _service(
         source_metadata={
-            "s-base": {"title": "base.pdf", "is_paper": True,
-                       "paper_title": "Reference Paper", "notebook_id": "base"},
+            "s-base": {"title": "base.pdf", "file_name": "base.pdf",
+                       "is_paper": True, "paper_title": "Reference Paper",
+                       "notebook_id": "base"},
         },
         elements={
             "e-base": {
@@ -159,6 +165,7 @@ def test_collection_kg_item_gets_bounded_cross_library_original_source():
     assert citation.source_id == "s-base"
     assert citation.element_id == "e-base"
     assert citation.quoted_span == "authoritative excerpt"
+    assert citation.source_file_name == "base.pdf"
     assert citation.notebook_id == "base"
 
 
