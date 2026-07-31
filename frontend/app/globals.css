@@ -3422,6 +3422,36 @@ button.chat-session-card {
   padding-left: 24px;
 }
 
+/* 逐步推理的按节合成会把答案拼成带 ## / ### 标题的多节长文（后端
+   outline_synthesis.outline_answer_text）。浏览器默认的 h2/h3 尺寸与外边距在这个
+   grid 容器里既过大又与 12px gap 叠加，必须显式定标：层级差要看得出来，正文
+   18px/标题 21px 与 19px 是同一套字阶。
+
+   ⚠ 必须带 `.chat-answer` 前缀。`.answer-markdown` 是**共用的渲染管线类**，不是
+   问答答案的身份：report-view.tsx 的容器写的是 `report-markdown answer-markdown`
+   （同一个元素同时带两个类），memory-panel.tsx 与 knowhow-cell-editor.tsx 也各自
+   复用它。裸 `.answer-markdown h2` 与 `.report-markdown h2` 同特异性 (0,1,1)，按源码
+   顺序后来者赢——深度报告的 18px/带下边框 h2 会被这里的 21px 顶掉，h3 还会变灰。
+   收窄到问答自己的容器链后三处复用点都不受影响：Memory 卡片与 Knowhow 单元格里
+   的标题是用户自己写的短笔记，本来就不该套「多节长文」的字阶。
+   回归门：answer-heading-scope-guard.test.mjs。 */
+.chat-answer .answer-markdown h2,
+.chat-answer .answer-markdown h3 {
+  margin: 0;
+  line-height: 1.4;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.chat-answer .answer-markdown h2 {
+  font-size: 21px;
+}
+
+.chat-answer .answer-markdown h3 {
+  font-size: 19px;
+  color: var(--muted);
+}
+
 .answer-code {
   position: relative;
   max-width: 100%;

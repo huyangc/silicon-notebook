@@ -1452,6 +1452,7 @@ class EvidenceContextPort(Protocol):
         chunks: Sequence[RetrievedChunk],
         *,
         notebook_id: str,
+        id_offset: int = 0,
         budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]: ...
     def element_context(

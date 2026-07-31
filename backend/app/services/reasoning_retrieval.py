@@ -9,13 +9,15 @@ from __future__ import annotations
 import contextvars
 import json
 import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Protocol, Tuple, TYPE_CHECKING
 
 from app.core.ask_retrieval_policy import (
-    DEFAULT_RETRIEVAL_EFFORT, AskRetrievalLimits, ask_retrieval_limits,
+    DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
+    ask_retrieval_limits,
 )
 from app.core.config import Settings
 
@@ -347,6 +349,514 @@ def _enumeration_note(chains) -> str:
     )
 
 
+# --------------------------------------------------------- 大纲便签(outline)
+#
+# DualGraph(arXiv:2602.13830)借鉴的 v1(设计文档 §3.1):把「怎么写」(大纲)与
+# 「知道什么」(证据)分开,逐轮共演化。大纲是 **run 局部**的一张便签——不持久化、
+# 不进 AskResponse,只经 trace 与 ReasoningResult 出场。
+#
+# 它只在 exhaustive 档提供(见 outline_wiring_active):按节合成是 k 次真实的模型
+# 调用,那笔钱必须由用户显式选「穷尽」来承担。
+OUTLINE_ACTION = "update_outline"
+
+# 有界性是硬约束(设计文档 §3.1)。三条边界各自的作用:
+#   * 12 节 —— 一份能读的大纲的上限,同时是回喂账目长度的分母;
+#   * 60 字符标题 —— 沿用 `_INTENT_DIRECTION_LABEL_CHARS` 的先例(同一份 prompt
+#     里「一个标签占一行」的宽度);
+#   * 每节 8 个证据 key —— 一节的支撑证据,不是一个证据池。
+# id/parent 32 字符是**模型自己起的**短句柄的宽度;证据 key 48 字符则必须容得下
+# 真实代理 id(`prefix-` + 32 位 uuid hex ≈ 35 字符),截短会让合法绑定对不上。
+_OUTLINE_MAX_SECTIONS = 12
+_OUTLINE_TITLE_CHARS = 60
+_OUTLINE_ID_CHARS = 32
+_OUTLINE_EVIDENCE_KEY_CHARS = 48
+_OUTLINE_MAX_EVIDENCE = 8
+# 标题里的引用形标记(`[k12]`/`[k12, k13]`)在解析入口剥掉(codex r6):证据引用
+# 属于 evidence 字段,标题只是文案。放它留到 `## 标题` 进最终 Markdown 的话,
+# 前端是对合并全文扫标记建引用表的——标题里的 `[k5001]` 要么显示成一个绑不上
+# 的裸引用,要么恰好撞上别节号段、绑到毫不相干的证据。单一定义点在这里:
+# trace 步、账目回喂与最终标题共用同一份解析产物,一处剥、处处干净。
+_OUTLINE_TITLE_MARKER_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
+# 每 run 最多几次 update_outline。大纲本身不带来证据,所以它的成本是「轮次」:
+# 无上限时一个偏爱整理的模型可以把整份步骤预算花在反复重排目录上。6 次足够
+# 「建 → 补 3 轮 → 收尾」,而 exhaustive 档的 50 步预算仍有绝大部分留给检索。
+_MAX_OUTLINE_UPDATES = 6
+# pending 最坏由 6 次常规提交 + 1 次专用纠错各贡献 8 个不同 key。完整状态留在
+# 服务端/终态 trace,每轮 prompt 只展示前 8 个,所以提示预算不随批次数增长。
+_OUTLINE_MAX_PENDING_EVIDENCE = _OUTLINE_MAX_EVIDENCE * (
+    _MAX_OUTLINE_UPDATES + 1
+)
+
+
+@dataclass
+class OutlineSection:
+    """大纲的一节。``evidence_keys`` 只保留通过服务端校验的候选标识。
+
+    ``parent`` 为空 = 顶层节;非空 = 它的父节 id,且父节自己必须是顶层节(两层封顶,
+    见 ``parse_outline_sections``)。这是给 O2 按节合成用的结构,不是给用户看的
+    ——上屏的只有 trace 摘要与(O2 之后的)答案标题层级。
+    """
+
+    id: str
+    title: str
+    parent: str = ""
+    evidence_keys: List[str] = field(default_factory=list)
+    # 只存在于一次 update_outline 提交里:显式撤销同 id 旧节的绑定。合并后的
+    # run 状态永远把它清空,所以下一轮账目不会把一次性命令误当成持久字段重放。
+    remove_evidence_keys: List[str] = field(default_factory=list)
+
+
+def _outline_text(value: object, limit: int) -> str:
+    """模型给的自由文本 → 压空白 + 截断(镜像 knowhow 补全的 `_completion_text`)。"""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:limit]
+
+
+def parse_outline_sections(raw: object) -> List[OutlineSection]:
+    """把 reflect 响应里的 ``outline`` 分支夹成一份合法大纲(形状层,纯函数)。
+
+    只做**形状与边界**:证据 key 是否合法要看 run 局部的候选集合,由
+    ``bind_outline_evidence`` 单独判(那是事实层,而这里连候选是什么都不知道)。
+
+    fail-open 逐项丢弃,与 enumerate 分支的非白名单值处理同形:
+      * 非 dict 的条目、无标题的条目直接丢(没有标题的东西不是「一节」——O2 要拿
+        它当 `## 标题`);
+      * 超过 12 节的部分丢弃,不是整份拒绝;
+      * id 缺失或重复时按位置补一个确定性 id(`s1`、`s2`……),模型才有稳定句柄
+        可以在下一轮原样重提,parent 也才指得准;
+      * parent 指向不存在的节、指向自己、或指向一个**本身就有父节**的节时清空
+        (提为顶层)。第三条就是「两层」的实现,顺带让 A↔B 这类环自动化解。
+    """
+    if isinstance(raw, dict):
+        raw_sections = raw.get("sections")
+    else:
+        raw_sections = raw
+    if not isinstance(raw_sections, list):
+        return []
+    sections: List[OutlineSection] = []
+    used_ids: set = set()
+    for entry in raw_sections:
+        if len(sections) >= _OUTLINE_MAX_SECTIONS:
+            break
+        if not isinstance(entry, dict):
+            continue
+        raw_title = entry.get("title")
+        if isinstance(raw_title, str):
+            # 先剥标记再压空白/截断:截断后再剥会把半截 `[k1` 留在标题里。
+            raw_title = _OUTLINE_TITLE_MARKER_RE.sub("", raw_title)
+        title = _outline_text(raw_title, _OUTLINE_TITLE_CHARS)
+        if not title:
+            continue
+        section_id = _outline_text(entry.get("id"), _OUTLINE_ID_CHARS)
+        if not section_id or section_id in used_ids:
+            section_id = _unique_outline_id(
+                section_id or f"s{len(sections) + 1}", used_ids
+            )
+        used_ids.add(section_id)
+        keys: List[str] = []
+        raw_keys = entry.get("evidence")
+        if isinstance(raw_keys, list):
+            for key in raw_keys:
+                if len(keys) >= _OUTLINE_MAX_EVIDENCE:
+                    break
+                text = _outline_text(key, _OUTLINE_EVIDENCE_KEY_CHARS)
+                if text and text not in keys:
+                    keys.append(text)
+        remove_keys: List[str] = []
+        raw_remove_keys = entry.get("remove_evidence")
+        if isinstance(raw_remove_keys, list):
+            for key in raw_remove_keys:
+                if len(remove_keys) >= _OUTLINE_MAX_EVIDENCE:
+                    break
+                text = _outline_text(key, _OUTLINE_EVIDENCE_KEY_CHARS)
+                if text and text not in remove_keys:
+                    remove_keys.append(text)
+        sections.append(OutlineSection(
+            id=section_id, title=title,
+            parent=_outline_text(entry.get("parent"), _OUTLINE_ID_CHARS),
+            evidence_keys=keys,
+            remove_evidence_keys=remove_keys,
+        ))
+    # 两层封顶:先算出「谁有父节」,再据此裁剪。必须在收齐所有节之后做——模型完全
+    # 可能先写子节再写父节,边走边判会把合法的前向引用误判成非法。
+    ids = {section.id for section in sections}
+    parented = {
+        section.id for section in sections
+        if section.parent and section.parent in ids and section.parent != section.id
+    }
+    for section in sections:
+        if (
+            section.parent not in ids
+            or section.parent == section.id
+            or section.parent in parented
+        ):
+            section.parent = ""
+    return sections
+
+
+def _unique_outline_id(base: str, used: set) -> str:
+    """确定性去重:`s1` 撞了就 `s1-2`、`s1-3`……(同一份输入总得到同一份 id)。
+
+    **有界性论证**(这个函数跑在 Ask 的 worker 线程里,循环体内没有取消检查,外层的
+    `except Exception` 也接不到一个不返回的函数——所以它的终止必须是结构性的,不能
+    靠「大概会撞上一个空位」):
+
+    * 后缀段最多试 `_OUTLINE_MAX_SECTIONS + 1` 个候选,`for range` 天然有界;
+    * 拼后缀**之前**先把 base 裁到 `_OUTLINE_ID_CHARS - len(后缀) - 1`,让后缀不会
+      被那次截断吃掉。少了这一步,长 base 会让每个候选都截回同一个字符串:33 字符
+      且前 32 位相同的两个 id(模型给对比大纲起 `…-approach-a` / `…-approach-b`
+      这类 slug 是默认写法)、或者三个 31 字符的同名 id(`f"{base}-2"[:32]` 恰好把
+      数字截掉、只剩一个尾随连字符),都会让原来的 `while True` 变成 100% CPU 的
+      死循环,只能重启后端;
+    * 位置 id 兜底:候选取自 `s1..s{len(used)+1}`,共 `len(used)+1` 个互异候选对
+      `len(used)` 个已占用 id —— 鸽笼原理保证其中必有一个空位。调用方的 `used` 在
+      分配第 N 个 id 时恰有 N-1 个成员(每接受一节加一个,且总数封在 12),所以这一
+      段实际上只是防御性的。
+    """
+    if base:
+        if base not in used:
+            return base
+        for suffix in range(2, _OUTLINE_MAX_SECTIONS + 2):
+            stem = base[:max(1, _OUTLINE_ID_CHARS - len(str(suffix)) - 1)]
+            candidate = f"{stem}-{suffix}"
+            if candidate not in used:
+                return candidate
+    for position in range(1, len(used) + 2):
+        candidate = f"s{position}"
+        if candidate not in used:
+            return candidate
+    # 鸽笼原理下不可达。真到了这里就是上面的不变式被改坏了,响亮报错胜过返回一个
+    # 与别人重复的 id(那会让 parent 指向两节中的某一节,静默错乱)。
+    raise AssertionError("outline id space exhausted")
+
+
+def outline_binding_keys(
+    collected, elements, chunks, ever_shown_keys, retained_keys=()
+) -> set:
+    """大纲绑定键的合法集合(事实层):候选池里**曾对模型展示**的标识。
+
+    两条边界,方向相反,都要守住:
+
+    * 口径是「本 run 的任一候选摘要展示过它」,而不是只看上一轮窗口。`_summarize`
+      对候选池开头尾窗口,所以用 run 内单调的 ``ever_shown_keys``:早先展示并绑定的
+      key 即使后来滑出窗口也不会失效,窗口中段从未展示的 key 则不能靠猜 id 通过。
+      ``retained_keys`` 是当前大纲已经合法持有的服务端状态,在 union 时继续有效。
+    * 合法集必须 **⊆ 模型可见或服务端已持有**。所以 v1 **不含枚举清单条目的 id**:枚举
+      账目按合同只回覆盖计数、不回条目 id(元素/知识对象清单一个字的正文都不带),
+      模型根本拿不到那些 id,把它们放进合法集只是一片没人能踩到的死面——而它同时
+      放宽了「只能引用服务端给过你的东西」这条校验。O2(或后续让清单条目 id 对模型
+      可见的改动)要用它们时,连同可见性一起加回来,并在设计文档 §3.1 记一笔。
+    * 同样刻意**不含来源 id**:一份文档不是一条证据,绑上它对 O2 的按节合成产不出
+      任何上下文切片;来源清单给模型的句柄本来也是标题而不是 id
+      (见 `_source_titles_note`)。
+    """
+    candidates = set(collected)    # KG 候选:`collected` 的键就是 object_id
+    candidates.update(str(getattr(el, "element_id", "")) for el in elements)
+    candidates.update(str(getattr(c, "chunk_id", "")) for c in chunks)
+    candidates.discard("")
+    allowed = {str(key) for key in ever_shown_keys if str(key)}
+    allowed.update(str(key) for key in retained_keys if str(key))
+    return candidates & allowed
+
+
+def bind_outline_evidence(
+    sections: List[OutlineSection], legal_keys: set
+) -> Tuple[List[OutlineSection], int]:
+    """把模型给的绑定键按合法集合过滤,返回 (新大纲, 被丢弃的键数)。
+
+    非法键**静默丢弃**(口径同 knowhow 补全的证据 key 校验:模型只能引用服务端
+    发出去的标识,自造的一律不算),而丢空了的节**保留为空节**——空节不是错误,
+    它是下一步的检索方向,删掉它等于把这个特性最有用的那半功能扔掉。
+
+    返回新对象而不是就地改:入参来自 `ReflectDecision`,run() 会把返回值当成新的
+    大纲状态留存,共享同一批对象会让后续动作意外改到上一轮的账目。
+    """
+    bound: List[OutlineSection] = []
+    dropped = 0
+    for section in sections:
+        keys = [key for key in section.evidence_keys if key in legal_keys]
+        dropped += len(section.evidence_keys) - len(keys)
+        bound.append(OutlineSection(
+            id=section.id, title=section.title, parent=section.parent,
+            evidence_keys=keys,
+            remove_evidence_keys=list(section.remove_evidence_keys),
+        ))
+    return bound, dropped
+
+
+def merge_outline_evidence(
+    previous: List[OutlineSection],
+    submitted: List[OutlineSection],
+    legal_keys: set,
+) -> Tuple[List[OutlineSection], int, Dict[str, List[str]], int]:
+    """合并一次整份大纲提交,保住同 id 节已经绑定的证据。
+
+    章节结构仍是全量替换:上一份里被整个省略的 section 会消失。证据则是单独的
+    citation-persistence 合同:同 id 节先应用 ``remove_evidence`` 显式删除,再把
+    本次合法 ``evidence`` 与剩余旧键取并集。遗漏一个 evidence key 不再等于删除。
+
+    每节 8 键硬顶下旧键优先。装不下的**新**键不静默挤掉旧绑定,而是按 section id
+    返回给账目回喂,让模型下一轮用 ``remove_evidence`` 明确腾位后再加。返回值依次为
+    ``(merged, invalid_count, overflow_by_section, removed_count)``。
+    """
+    bound, dropped = bind_outline_evidence(submitted, legal_keys)
+    old_by_id = {section.id: section for section in previous}
+    merged: List[OutlineSection] = []
+    overflow: Dict[str, List[str]] = {}
+    removed = 0
+    for section in bound:
+        old = old_by_id.get(section.id)
+        old_keys = list(old.evidence_keys) if old is not None else []
+        remove_keys = set(section.remove_evidence_keys)
+        retained = [key for key in old_keys if key not in remove_keys]
+        removed += len(old_keys) - len(retained)
+        keys = retained
+        for key in section.evidence_keys:
+            # 显式删除优先于同一提交里的重新添加,避免一个自相矛盾的载荷靠字段
+            # 解析顺序得到不同结果。
+            if key in remove_keys or key in keys:
+                continue
+            if len(keys) >= _OUTLINE_MAX_EVIDENCE:
+                overflow.setdefault(section.id, []).append(key)
+                continue
+            keys.append(key)
+        merged.append(OutlineSection(
+            id=section.id,
+            title=section.title,
+            parent=section.parent,
+            evidence_keys=keys,
+        ))
+    return merged, dropped, overflow, removed
+
+
+def carry_outline_overflow(
+    previous: Dict[str, List[str]],
+    submitted: List[OutlineSection],
+    merged: List[OutlineSection],
+    current: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    """把未接纳 key 当作持久服务端状态,而不是一次性诊断。
+
+    pending key 只有三种退出方式:本次已经成功绑定;模型在 ``remove_evidence``
+    里显式点名放弃;或整节从全量结构中删除。模型只腾出旧键却漏抄待换入 key 时,
+    pending 必须继续留到下一轮/终态 trace,否则又回到了静默丢新证据。
+    """
+    submitted_by_id = {section.id: section for section in submitted}
+    merged_by_id = {section.id: section for section in merged}
+    carried: Dict[str, List[str]] = {}
+    for section_id in merged_by_id:
+        section = submitted_by_id.get(section_id)
+        removed = set(section.remove_evidence_keys) if section is not None else set()
+        accepted = set(merged_by_id[section_id].evidence_keys)
+        keys: List[str] = []
+        for key in list(previous.get(section_id, [])) + list(current.get(section_id, [])):
+            if key in accepted or key in removed or key in keys:
+                continue
+            keys.append(key)
+        if len(keys) > _OUTLINE_MAX_PENDING_EVIDENCE:
+            # 解析层每次最多 8 key、状态机最多 6 次常规更新 + 1 次专用纠错;
+            # 超过只能说明这两个结构上限被改坏。响亮失败胜过截断 pending 再静默丢 key。
+            raise AssertionError("outline pending evidence bound exceeded")
+        if keys:
+            carried[section_id] = keys
+    return carried
+
+
+def outline_truncated_kg_evidence(
+    sections: List[OutlineSection],
+    collected: Dict[str, "RetrievedKnowledge"],
+    top_hits: List["RetrievedKnowledge"],
+    *,
+    rescored: Dict[str, "RetrievedKnowledge"] = None,
+    relevance_ceiling: float = None,
+) -> List["RetrievedKnowledge"]:
+    """大纲绑上、但没进最终相关性选集的知识对象。
+
+    这一份是**按节合成(O2)的完整性补丁**,不是一条新的检索通道:`top_hits` 是
+    `collected` 按相关度截到 `top_n` 的选集(穷尽档 cap 96),而绑定键的合法集合
+    是**整个** `collected` —— 模型完全可以在第 3 轮把一个当时排在前面、最终被
+    挤出选集的对象绑给某一节。缺了这一份,那一节的切片会凭空少掉一条它自己
+    指名要的证据,而且悄无声息。
+
+    **零查询**:三个候选池(`collected`/`elements`/`chunks`)在 run 内只增不减
+    (见 `_window` 的注释),所以任何**曾经**合法的绑定键,在 run 收尾时仍然在池
+    子里 —— 按 id 回库 hydrate 是一条永远走不到的分支,而 Ask 的合成路径上多一
+    次数据库往返是要付钱的(运行效率是一等约束)。元素与原文段同理,由
+    `ReasoningResult.elements`/`chunks` 原样带出,这里只补知识对象这一路。
+
+    **相关度必须与 `top_hits` 同口径**,否则这份补集会变成一条抬分的后门:
+    `collected[oid]` 里存的是**首次收下它的那个产出方**给的分,而 `top_hits` 的每
+    一条都经过了对**整个问题**的重排。一个首收 0.95、重排 0.12 的对象若带着 0.95
+    进 `classify_evidence` 的证据池,它一条就能把整篇答案抬到 grounded ——而它恰恰
+    是被截断掉的那种"其实不相关"。两条路径各自校正,都不发新查询:
+
+    * ``rescored`` —— 非 quota 路径手里现成的 `retrieve_scored` 结果映射,与
+      `top_hits` 用的是**同一个** map、同一句 `.get(oid, rk)`,所以补集与选集逐条
+      同口径(不在 map 里的沿用原对象,与 top_hits 对自己成员的处理完全一致)。
+    * ``relevance_ceiling`` —— quota 路径没有全局重排 map(它按子查询配额融合),
+      于是把带出值**夹到选集的最低分**:补集是被选集挤出去的那一批,不可能比选集
+      里最差的一条更相关。选集为空时天花板取 0.0,补集一条都抬不动 —— 那正是
+      "没有任何排名证据"该有的结果。
+
+    返回按大纲顺序去重的列表,并排除已在 `top_hits` 里的对象 —— 调用方把它当成
+    `top_hits` 的补集使用(合并时 `top_hits` 的重排分数优先)。
+    """
+    if not sections:
+        return []
+    present = {hit.object_id for hit in top_hits}
+    extra: List["RetrievedKnowledge"] = []
+    for section in sections:
+        for key in section.evidence_keys:
+            if key in present or key not in collected:
+                continue
+            present.add(key)
+            hit = collected[key]
+            if rescored is not None:
+                hit = rescored.get(key, hit)
+            elif relevance_ceiling is not None and hit.relevance > relevance_ceiling:
+                hit = replace(hit, relevance=relevance_ceiling)
+            extra.append(hit)
+    return extra
+
+
+def outline_signature(sections: List[OutlineSection]) -> tuple:
+    """大纲的可比较快照。用于判定一次 update_outline 是否**实质**改变了大纲——
+    逐字重提同一份大纲不算进展(那正是需要被 stale 熔断兜住的空转),而增删节、
+    改标题、改层级或补上一个绑定都算。"""
+    return tuple(
+        (s.id, s.title, s.parent, tuple(s.evidence_keys)) for s in sections
+    )
+
+
+def _outline_note(
+    sections: List[OutlineSection],
+    updates_left: int,
+    overflow: Optional[Dict[str, List[str]]] = None,
+    overflow_repair_available: bool = False,
+    repair_only: bool = False,
+) -> str:
+    """把大纲便签回喂给 reflect(镜像 visited / attempted / 枚举三份账目)。
+
+    **这一份必须携带整份大纲的内容,而不只是账目**,理由是机制性的:reflect 的
+    prompt 没有对话历史(每轮都是一条全新的 user message),而章节结构是全量替换——
+    模型手上唯一一份「我上次交了什么」就是这段回喂。证据遗漏已有服务端 union
+    保底,但只报节数与空节名仍会让模型无法保留/调整原来的章节结构。
+
+    有界性仍然成立,且是**常数级**:12 节 × (32 id + 60 标题 + 32 parent +
+    8 × 48 证据 key) + 固定文案 ≈ 6.5KB;pending 虽可在服务端累积至每节 56 个,
+    每轮只展示前 8 个加剩余计数,所以 prompt 仍至多多带 12 × 8 个 key。
+    总量与语料规模无关。真实 id 约 15–36 字符,
+    典型值在 1–3KB。这只在 exhaustive 档出现,那一档的证据预算是 16k/120k 字符。
+
+    ``updates_left`` 是本 run 还剩几次 update_outline(照集合地图那条剩余额度行的
+    先例)。额度耗尽后措辞整段换成「已定稿、别再提交」:便签本身就是模型下一步动作
+    的依据,它若还在说「再次提交时要带上……」,模型就会照做、撞上 outline_budget、
+    白烧一轮反思——账目必须描述**现在**能做什么,而不是当初能做什么。
+    """
+    if not sections:
+        return ""
+    lines = []
+    for section in sections:
+        parent = f"(隶属 {section.parent})" if section.parent else ""
+        keys = "、".join(section.evidence_keys) if section.evidence_keys else "(无)"
+        lines.append(f"- {section.id}「{section.title}」{parent} 证据: {keys}")
+    empty = [section.title for section in sections if not section.evidence_keys]
+    tail = (
+        "\n无绑定证据的节: "
+        + "、".join(f"「{title}」" for title in empty)
+        + "。这些节就是下一步该定向检索的方向。"
+        if empty else ""
+    )
+    overflow_lines = []
+    by_id = {section.id: section for section in sections}
+    for section_id, keys in (overflow or {}).items():
+        section = by_id.get(section_id)
+        if section is None or not keys:
+            continue
+        visible = list(keys[:_OUTLINE_MAX_EVIDENCE])
+        remaining = len(keys) - len(visible)
+        overflow_lines.append(
+            f"- {section_id}「{section.title}」未接纳新证据: "
+            + "、".join(visible)
+            + (
+                f"（另有 {remaining} 条待处理,处理或放弃这批后继续显示）"
+                if remaining else ""
+            )
+        )
+    overflow_note = ""
+    if overflow_lines:
+        overflow_note = (
+            "\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
+            + "\n".join(overflow_lines)
+        )
+        if repair_only:
+            overflow_note += (
+                "\n本次纠错只能在该节 remove_evidence 中点名要移除的旧 key,"
+                "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,"
+                "也在 remove_evidence 中点名它。"
+            )
+        elif updates_left > 0 or overflow_repair_available:
+            overflow_note += (
+                "\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,"
+                "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,"
+                "也在 remove_evidence 中点名它。"
+            )
+        else:
+            overflow_note += (
+                "\n本 run 的大纲整理与纠错资格均已用完,不要再提交 update_outline;"
+                "未接纳 key 会在收尾轨迹中披露。"
+            )
+    if repair_only and overflow_lines:
+        head = (
+            "（本轮大纲便签(这是终态溢出纠错轮,仅可提交一次章节 "
+            "id/标题/parent 完全不变的 update_outline,不得改结构或执行检索):\n"
+        )
+    elif updates_left <= 0 and overflow_lines and overflow_repair_available:
+        head = (
+            "（本轮大纲便签(常规整理次数已用完;因上一份有未接纳证据,仅可再提交一次"
+            "章节 id/标题/parent 完全不变的 update_outline,用 remove_evidence 腾位并"
+            "换入点名的新 key):\n"
+        )
+    elif updates_left <= 0:
+        head = (
+            "（本轮大纲便签(已定稿:整理次数已用完,不要再提交 update_outline;"
+            "请改用检索动作补齐空节,或直接作答):\n"
+        )
+    else:
+        head = (
+            "（本轮大纲便签。update_outline 会整体替换章节结构,再次提交时必须带上仍要"
+            "保留的每一节;相同 id 节的 evidence 与旧绑定取并集,遗漏不会删除旧证据,"
+            "要删除请在该节 remove_evidence 中点名;"
+            f"还可以再整理 {updates_left} 次:\n"
+        )
+    return head + "\n".join(lines) + tail + overflow_note + "）"
+
+
+def outline_wiring_active(settings, limits) -> bool:
+    """本 run 是否提供大纲便签动作。
+
+    两个条件缺一不可:总开关 `REASONING_OUTLINE_ENABLED`,以及**档位为 exhaustive**
+    (用户拍板,设计文档 §3.1:「把档位选到穷尽的时候」)。档位闸不是保守起见——
+    O2 的按节合成是每节一次真实的模型调用,那笔成本只能由用户显式选择「穷尽」来
+    承担;thorough 及以下完全不出现,逐字回到接入前。
+
+    与枚举工具那把闸一样是**单点**:动作说明、schema 分支、allowed_actions 三处
+    共用这一个判据。任何一处与其余不同步,模型就会看到一个它调不动的动作(或反过来
+    调用一个它没被告知的动作),两种都是纯亏。
+
+    刻意**没有**对应 `allow_enumeration` 的策略位:那个位存在是因为枚举是一条会
+    花预算、产出可引用条目的**证据通道**,而知识补全的合成 prompt 引用不了它们;
+    大纲是一张不产证据的便签,而且写作流(knowhow 补全)根本不传 limits,永远到不了
+    exhaustive —— 加一个恒为真的开关只会多一处会与真闸不同步的地方。
+    """
+    return bool(
+        getattr(settings, "reasoning_outline_enabled", True)
+        and limits is not None
+        and getattr(limits, "effort", "") == EXHAUSTIVE_RETRIEVAL_EFFORT
+    )
+
+
 def _norm_query(q: str) -> str:
     """子查询防重的归一化键:压空白 + casefold。保守精确匹配、不做语义归一——
     宁可放过真改写的近似查询(由回喂账目提示模型约束),不误杀新角度。"""
@@ -608,6 +1118,10 @@ class ReflectDecision:
     # 模型给了 collection 但不是合法值时留下的原值,仅用于把 skip 文案写成教学式
     # (「该给什么」),从不参与分派。
     enumerate_collection_rejected: str = ""
+    # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
+    # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
+    # reflect() 在这一层根本不知道候选是什么。
+    outline_sections: List[OutlineSection] = field(default_factory=list)
     reason: str = ""
 
 
@@ -659,6 +1173,16 @@ class ReasoningResult:
     # 那个数必须真的到得了合成模型手里,否则就是要求它报一个它看不到的数
     # (codex 第 4 轮 P2)。枚举工具关闭或地图建不出来时是空串,行为不变。
     collection_map_text: str = ""
+    # 本 run 的**终态**大纲(仅 exhaustive 档会非空)。O2 的按节合成消费它:每节
+    # 只装配 `evidence_keys` 指到的那批证据。空节(`evidence_keys` 为空)刻意保留
+    # ——那是「问到了但还没找到」的诚实记录,O2 按合同跳过它并记 trace,不能在这里
+    # 就悄悄删掉。刻意**不进** AskResponse(设计文档 §3.1:v1 不加响应字段,免掉
+    # api_contract churn),所以它是一个服务层结构,不是协议。
+    outline: List[OutlineSection] = field(default_factory=list)
+    # 大纲绑上、却被 top_n 截断挤出 `top_hits` 的知识对象(见
+    # `outline_truncated_kg_evidence`)。它是 `top_hits` 的**补集**,不重复其中
+    # 已有的对象;按节合成把两者合起来解析绑定键,别的路径不消费它。
+    outline_evidence: List[RetrievedKnowledge] = field(default_factory=list)
 
 
 class ReasoningRetriever:
@@ -855,7 +1379,11 @@ class ReasoningRetriever:
                for s in ex.sub_queries]
         return out or fallback
 
-    def reflect(self, question, candidates_summary):
+    def reflect(self, question, candidates_summary, outline: bool = False):
+        """``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
+        ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
+        prompt/schema 与接入前逐字相同。档位是 run() 的参数而不是实例状态,所以
+        这把闸只能从调用处传进来——与枚举那把由实例状态算出的闸并列、互不影响。"""
         raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
         client = self.model_clients.chat("reasoning_agent")
@@ -874,6 +1402,7 @@ class ReasoningRetriever:
                 "content": reflect_prompt(
                     question, candidates_summary,
                     element_kinds=element_kinds, object_types=object_types,
+                    outline=outline,
                 ),
             }]
             if self.untrusted_evidence:
@@ -883,7 +1412,7 @@ class ReasoningRetriever:
                 })
             raw = client.chat_json(
                 messages,
-                reflect_schema_hint(element_kinds, object_types),
+                reflect_schema_hint(element_kinds, object_types, outline),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event)
@@ -904,7 +1433,7 @@ class ReasoningRetriever:
             ) + (
                 (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION)
                 if enumeration else ()
-            )
+            ) + ((OUTLINE_ACTION,) if outline else ())
             if action not in allowed_actions:
                 if self.fail_closed:
                     raise ValueError("reasoning model returned an invalid action")
@@ -973,6 +1502,11 @@ class ReasoningRetriever:
                 # 只说「你给错了」的话,模型下一轮往往换一个同样非法的值再试。
                 if collection and not d.enumerate_collection:
                     d.enumerate_collection_rejected = collection
+            if outline:
+                # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
+                # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
+                # 全在 parse_outline_sections 里,那是一个可以单独测的纯函数。
+                d.outline_sections = parse_outline_sections(data.get("outline"))
             chain = data.get("follow_chain")
             if isinstance(chain, dict):
                 d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
@@ -1010,6 +1544,13 @@ class ReasoningRetriever:
                     raise ValueError(
                         "reasoning enumerate_kg_objects action is missing a valid "
                         "object_type"
+                    )
+                # 与 expand_graph 缺 object_id 同形。大纲的文本字段不进下面那条
+                # 2000 字符硬闸:它们在解析期就被夹到 60/32/48 字符(有界是这个
+                # 动作的合同本身),没有任何未截断的自由文本会流下去。
+                if action == OUTLINE_ACTION and not d.outline_sections:
+                    raise ValueError(
+                        "reasoning update_outline action is missing outline sections"
                     )
                 bounded_fields = (
                     d.reason,
@@ -1073,7 +1614,17 @@ class ReasoningRetriever:
             return list(items), [], 0
         return list(items[:head]), list(items[-tail:]), len(items) - head - tail
 
-    def _summarize(self, collected, elements, chunks, chains=()):
+    def _summarize(self, collected, elements, chunks, chains=(),
+                   show_ids: bool = False,
+                   shown_binding_keys: Optional[set] = None):
+        """``show_ids`` = 给原文候选也标出 id(仅大纲便签在场时)。
+
+        KG 候选的 id 一直都在——`expand_graph`/`follow_chain` 要拿它做参数。原文段
+        此前没有任何动作需要指名道姓,所以不标。大纲把「这一节靠哪几条证据」变成了
+        模型要表达的东西,而纯散文库(有文档、没图谱)里能绑的恰恰只有 chunk 与
+        element:不给 id,综述类问题的大纲就只能全是空节。默认 False ⇒ 关闭态与
+        低档位的候选摘要逐字节不变。
+        """
         lines = []
 
         def _kg_line(rk):
@@ -1081,20 +1632,32 @@ class ReasoningRetriever:
             return f"- [{rk.object_type}] {name} (id={rk.object_id})"
 
         def _el_line(el):
-            return f"- [element] {el.source_title} · {el.location_label}: {el.text[:80]}"
+            tail = f" (id={el.element_id})" if show_ids else ""
+            return (f"- [element] {el.source_title} · {el.location_label}: "
+                    f"{el.text[:80]}{tail}")
 
         def _ch_line(c):
-            return f"- [chunk] {c.source_title} · {c.section_path}: {c.text[:80]}"
+            tail = f" (id={c.chunk_id})" if show_ids else ""
+            return (f"- [chunk] {c.source_title} · {c.section_path}: "
+                    f"{c.text[:80]}{tail}")
 
-        for items, render, head_n, tail_n, noun in (
-                (list(collected.values()), _kg_line, 20, 10, "条较早候选"),
-                (elements, _el_line, 6, 4, "段较早原文"),
-                (chunks, _ch_line, 6, 4, "段较早原文")):
+        for items, render, key_of, head_n, tail_n, noun in (
+                (list(collected.values()), _kg_line,
+                 lambda item: item.object_id, 20, 10, "条较早候选"),
+                (elements, _el_line,
+                 lambda item: item.element_id, 6, 4, "段较早原文"),
+                (chunks, _ch_line,
+                 lambda item: item.chunk_id, 6, 4, "段较早原文")):
             head, tail, omitted = self._window(items, head_n, tail_n)
             lines.extend(render(x) for x in head)
             if omitted:
                 lines.append(f"-（省略中间 {omitted} {noun},以下为最近加入）")
             lines.extend(render(x) for x in tail)
+            # 收集器只在大纲开启(show_ids=True)时传入;此时三类候选的 key 都
+            # 真实出现在上述行里。只记 head/tail,不能把被省略的中段偷偷算成可见。
+            if shown_binding_keys is not None and show_ids:
+                shown_binding_keys.update(key_of(x) for x in head)
+                shown_binding_keys.update(key_of(x) for x in tail)
         for chain in chains[-6:]:
             try:
                 h1, h2 = chain.hops
@@ -1161,6 +1724,21 @@ class ReasoningRetriever:
         enum_chains: Dict[tuple, _EnumChain] = {}
         enumerations: List[CollectionEnumerationOutcome] = []
         collection_map_text = ""
+        # 大纲便签(run 局部,仅 exhaustive 档)。`outline` 是当前整份大纲,每次
+        # 动作全量替换。
+        #
+        # 它**刻意不进** no_progress/stale 账目:大纲不带来任何新证据,而 stale 熔断
+        # 数的正是「还在不在往前推进」。把「大纲变了」算成进展会让熔断形同虚设——
+        # 两份大纲 A、B 交替提交,每一轮都「有变化」、每一轮都把 stale 清零,实测能
+        # 把空转上限从 3 轮抬到 19 轮。正当流程里绑定轮本来就伴随检索动作(那些动作
+        # 自己会重置 stale),所以中性对真实用法零影响,只掐掉纯整理的空转。
+        outline_active = outline_wiring_active(self.settings, limits)
+        outline: List[OutlineSection] = []
+        outline_updates = 0
+        outline_overflow: Dict[str, List[str]] = {}
+        ever_shown_outline_keys: set = set()
+        outline_terminal_repair_used = False
+        outline_cap_repair_used = False
 
         # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
         # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
@@ -1464,10 +2042,140 @@ class ReasoningRetriever:
             exact_lookup_log.append(_ExactLookupAttempt(
                 terms=terms, new=0, tries=1, note=note, dedup_key=key))
 
+        def apply_outline_update(decision, *, overflow_repair: bool = False) -> None:
+            """应用一次 update_outline 载荷:预算 → 校验 → 留存 → trace。
+
+            零检索、零模型调用,只把模型交上来的结构按服务端事实夹一遍并留存。
+            只有 outline_active 时才可能被调到——关闭态下这个动作不在
+            allowed_actions 里,reflect() 会按既有未知动作合同把它退成 answer
+            (fail_closed 下抛错),与枚举分支同形。
+
+            **抽成函数是因为它有两个调用点**:动作分发链里的那一条,以及
+            `sufficient` 短路之前的那一次(见调用处的理由)。两处各写一份的话,
+            「校验/预算/trace 语义完全一致」就成了一句要靠人复核的话——而这正是
+            本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
+            """
+            nonlocal outline, outline_updates, outline_overflow
+            nonlocal outline_cap_repair_used
+            consume_regular_update = outline_updates < _MAX_OUTLINE_UPDATES
+            same_structure = tuple(
+                (s.id, s.title, s.parent) for s in decision.outline_sections
+            ) == tuple((s.id, s.title, s.parent) for s in outline)
+            if overflow_repair:
+                if outline_updates >= _MAX_OUTLINE_UPDATES:
+                    if outline_cap_repair_used:
+                        record(TraceStep(
+                            step_type="skip",
+                            summary=(
+                                f"跳过整理大纲(已达本轮整理次数上限 "
+                                f"{_MAX_OUTLINE_UPDATES};溢出纠错机会也已用完)"
+                            ),
+                            detail={"reason": "outline_budget",
+                                    "updates": outline_updates,
+                                    "sections": len(outline)}))
+                        return
+                    # 一次性资格按「收到纠错提交」消费,不是按成功写入消费。否则
+                    # 结构违规后仍可反复试,所谓最多一次只约束了成功次数。
+                    outline_cap_repair_used = True
+                if not same_structure:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary=(
+                            "跳过大纲溢出修复(纠错提交只能保持章节 "
+                            "id/标题/parent 不变)"
+                        ),
+                        detail={"reason": "outline_repair_structure",
+                                "updates": outline_updates,
+                                "sections": len(outline)}))
+                    return
+            elif outline_updates >= _MAX_OUTLINE_UPDATES:
+                # 措辞按「该给什么」写:普通额度与专用纠错资格是两本账。
+                record(TraceStep(
+                    step_type="skip",
+                    summary=(
+                        f"跳过整理大纲(已达本轮整理次数上限 "
+                        f"{_MAX_OUTLINE_UPDATES};大纲就按现在这份定稿,"
+                        "请改用检索动作补齐空节,或直接作答)"),
+                    detail={"reason": "outline_budget",
+                            "updates": outline_updates,
+                            "sections": len(outline)}))
+                return
+            if not decision.outline_sections:
+                record(TraceStep(
+                    step_type="skip",
+                    summary=(
+                        "跳过整理大纲(这次提交里没有可用的章节;"
+                        "每次都要交上整份大纲,每一节至少要有标题)"),
+                    detail={"reason": "outline_empty"}))
+                return
+            if consume_regular_update:
+                outline_updates += 1
+            retained_keys = {
+                key for section in outline for key in section.evidence_keys
+            }
+            bound, dropped, overflow, removed = merge_outline_evidence(
+                outline,
+                decision.outline_sections,
+                outline_binding_keys(
+                    collected, elements, chunks,
+                    ever_shown_outline_keys, retained_keys,
+                ),
+            )
+            overflow = carry_outline_overflow(
+                outline_overflow, decision.outline_sections, bound, overflow,
+            )
+            # 只作为轨迹上的观测量:大纲变化**不**参与 stale 账目(见上面状态
+            # 初始化处的理由),所以这里既不加分也不清零。
+            changed = outline_signature(bound) != outline_signature(outline)
+            replaced = len(outline)
+            outline = bound
+            outline_overflow = overflow
+            empty = [s.title for s in bound if not s.evidence_keys]
+            record(TraceStep(
+                step_type="outline",
+                summary=(f"更新大纲: {len(bound)} 节"
+                         f"({len(empty)} 节待补证据)"),
+                detail={
+                    "sections": [
+                        {"id": s.id, "title": s.title, "parent": s.parent,
+                         "evidence": list(s.evidence_keys)}
+                        for s in bound
+                    ],
+                    # 空节点名:它们就是下一步该定向检索的方向,轨迹里单独列
+                    # 出来,排查时不用去数哪一节的 evidence 是空的。
+                    "empty_sections": empty,
+                    # 这次替换掉的上一份大纲有几节(全量替换语义的账目)。
+                    "replaced": replaced,
+                    # 被丢掉的非法键数。对模型是静默的(它只该引用服务端发出去
+                    # 的标识),但轨迹必须留痕,否则「模型一直在编 id」这种情况
+                    # 没有任何地方看得出来。
+                    "dropped_evidence": dropped,
+                    # 同 id 节证据取并集;旧键优先占满 8 键硬顶时,未接纳的新键
+                    # 必须可见并在下一轮账目点名,否则只是把「静默丢旧键」换成
+                    # 「静默丢新键」。
+                    "overflow_evidence": {
+                        section_id: list(keys)
+                        for section_id, keys in overflow.items()
+                    },
+                    "removed_evidence": removed,
+                    "overflow_repair": overflow_repair,
+                    "changed": changed,
+                }))
+
+        forced_overflow_repair = False
         while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
+            terminal_overflow_repair = forced_overflow_repair
+            if terminal_overflow_repair:
+                outline_terminal_repair_used = True
+                forced_overflow_repair = False
             steps += 1
-            summary = self._summarize(collected, elements, chunks, chains)
+            summary = self._summarize(collected, elements, chunks, chains,
+                                      show_ids=outline_active,
+                                      shown_binding_keys=(
+                                          ever_shown_outline_keys
+                                          if outline_active else None
+                                      ))
             if no_progress:
                 summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
             # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
@@ -1537,6 +2245,17 @@ class ReasoningRetriever:
             enum_note = _enumeration_note(enum_chains)
             if enum_note:
                 summary = f"{summary}\n\n{enum_note}"
+            # 大纲便签接在几份账目之后、地图之前:它同样是「本轮已经做了什么」,
+            # 而地图讲的是「库里有什么」。这一份还额外承担着大纲的记忆——reflect
+            # 没有对话历史,模型要全量重提就只能从这里抄(见 _outline_note)。
+            outline_note = _outline_note(
+                outline, _MAX_OUTLINE_UPDATES - outline_updates,
+                outline_overflow,
+                overflow_repair_available=not outline_cap_repair_used,
+                repair_only=terminal_overflow_repair,
+            )
+            if outline_note:
+                summary = f"{summary}\n\n{outline_note}"
             if collection_map_text:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
@@ -1544,14 +2263,62 @@ class ReasoningRetriever:
                         enum_limits.enum_rows_per_run - enum_rows_used
                     )
                 )
-            decision = self.reflect(question, summary)
+            # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map、
+            # 以及 _construct_reasoning_retriever 对 fail_closed 的处理):关闭态与
+            # 低档位下调用形状与接入前逐字一致,既有的 reflect 测试替身不必为一个
+            # 它们永远收不到的参数改签名。
+            reflect_kwargs = {"outline": True} if outline_active else {}
+            decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             record(TraceStep(step_type="reflect",
                              summary=decision.reason or decision.next_action,
                              detail={"next_action": decision.next_action,
                                      "sufficient": decision.sufficient,
                                      "no_progress": no_progress, "stale": stale}))
+            overflow_repair_submission = terminal_overflow_repair or (
+                bool(outline_overflow)
+                and outline_updates >= _MAX_OUTLINE_UPDATES
+                and not outline_cap_repair_used
+            )
+            if terminal_overflow_repair:
+                # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
+                # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
+                if decision.next_action == OUTLINE_ACTION:
+                    apply_outline_update(decision, overflow_repair=True)
+                else:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="大纲溢出纠错轮未提交 update_outline,按当前绑定收尾",
+                        detail={"reason": "outline_overflow_repair_declined"},
+                    ))
+                break
             if decision.next_action == "answer" or decision.sufficient:
+                # 「交最终版大纲」与「宣布证据够了」是**同一轮**的事:prompt 教模型
+                # 「每个方面都有证据了才置 sufficient」,而那正是它把最后一批绑定补
+                # 上、交出定稿大纲的时刻。直接 break 会把这份载荷静默丢掉,按节合成
+                # 于是用上一轮的旧大纲——那一节的绑定明明检索到了,答案里却看不到。
+                # 应用走与分发链**同一个函数**(预算/校验/trace 语义因此不可能分叉:
+                # 额度耗尽同样记 outline_budget 并不改大纲),应用完再收尾。
+                #
+                # 只对 update_outline 这么做,不是「让所有动作都跑完再 break」:
+                # 其余动作都是检索,而模型既然说了证据已经够,再花一次检索就是纯
+                # 成本。`next_action == "answer"` 那条路不碰大纲(模型没提交任何
+                # 载荷,也没说要改结构)。
+                if decision.next_action == OUTLINE_ACTION:
+                    apply_outline_update(
+                        decision, overflow_repair=overflow_repair_submission
+                    )
+                    if (
+                        outline_overflow
+                        and steps < max_steps
+                        and not outline_terminal_repair_used
+                        and not outline_cap_repair_used
+                    ):
+                        # sufficient 不能吞掉刚产生的 overflow。下一轮是专用纠错:
+                        # 只许同结构换键,不能借「已经够了」再发一条检索请求。
+                        outline_terminal_repair_used = True
+                        forced_overflow_repair = True
+                        continue
                 break
             if (
                 decision.next_action == "expand_community"
@@ -1934,6 +2701,13 @@ class ReasoningRetriever:
                                 "has_more": coverage.has_more,
                                 "truncated_reason": coverage.truncated_reason,
                             }))
+            elif decision.next_action == OUTLINE_ACTION:
+                # 与 sufficient 短路之前那次应用共用同一个函数(见 apply_outline_
+                # update 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
+                # 复核的缝。
+                apply_outline_update(
+                    decision, overflow_repair=overflow_repair_submission
+                )
             elif decision.next_action == "ppr_retrieve":
                 if not self.allow_ppr:
                     record(TraceStep(step_type="skip",
@@ -2209,7 +2983,33 @@ class ReasoningRetriever:
                 record(TraceStep(step_type="skip",
                                  summary=f"连续 {stale} 轮无新进展,熔断收尾(避免空转)",
                                  detail={"reason": "stale_circuit_breaker", "stale": stale}))
+                if (
+                    outline_overflow
+                    and steps < max_steps
+                    and not outline_terminal_repair_used
+                    and not outline_cap_repair_used
+                ):
+                    # 熔断是已经发生的事实,所以先落轨迹。若步骤预算仍有余量,再保留
+                    # 一次只许换键的专用轮;outline 修订仍不算检索进展、不重置 stale。
+                    outline_terminal_repair_used = True
+                    forced_overflow_repair = True
+                    continue
                 break
+
+        if outline_overflow:
+            # 即使模型拒绝纠错、再次溢出或给了结构变更,终态也必须明确披露未接纳
+            # 的 key;不能只留下早先的一条 outline 诊断,更不能继续声称总有下一轮。
+            record(TraceStep(
+                step_type="skip",
+                summary="大纲仍有未接纳的新证据,最终答案仅使用已绑定证据",
+                detail={
+                    "reason": "outline_evidence_overflow_unresolved",
+                    "overflow_evidence": {
+                        section_id: list(keys)
+                        for section_id, keys in outline_overflow.items()
+                    },
+                },
+            ))
 
         # --- 已确认意图种子:终态披露(挪自补种阶段,见上方 coverage pass 的
         # 说明)---------------------------------------------------------------
@@ -2255,12 +3055,22 @@ class ReasoningRetriever:
                 notebook_id, collected, used_queries, top_n)
             # 只暴露各子查询贡献数(不含兜底组), 便于观测。
             answer_detail["quota"] = counts[:len(used_queries)]
+            # 配额融合没有全局重排 map,补集只能按"被选集挤出去的不会比选集里最差
+            # 的更相关"夹一刀(见 outline_truncated_kg_evidence 的说明)。
+            outline_evidence = outline_truncated_kg_evidence(
+                outline, collected, top_hits,
+                relevance_ceiling=min(
+                    (hit.relevance for hit in top_hits), default=0.0),
+            )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
             scored_map = {h.object_id: h for h in self.retrieval.retrieve_scored(notebook_id, question)}
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[:top_n]
+            # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
+            outline_evidence = outline_truncated_kg_evidence(
+                outline, collected, top_hits, rescored=scored_map)
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由
@@ -2276,7 +3086,8 @@ class ReasoningRetriever:
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
             chains=chains, enumerations=enumerations,
-            collection_map_text=collection_map_text,
+            collection_map_text=collection_map_text, outline=outline,
+            outline_evidence=outline_evidence,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])
 

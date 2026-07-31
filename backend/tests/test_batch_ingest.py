@@ -794,11 +794,27 @@ def _bind_chat(repo, workload_id, client):
 
 
 def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
+    """run_kg 走的是业务作业池(并发跑),不是串行。
+
+    并发**用栅栏证明,不用睡眠赌**:原来的写法让每个 extract 睡 40ms、再断言峰值恰好
+    等于池宽,赌的是"这么多线程都能在 40ms 的窗口里被调度起来"。整套测试的负载一涨
+    (本仓库每加几个用例就会),这一赌就会输,而输的表现是一条与被测特性毫不相干的红
+    ——已经实测复现过。栅栏把它变成确定的:前 `expected` 次调用各自登记完就在栅栏上
+    等,峰值只有在它们**真的同时在跑**时才够得着 `expected`;池子若比声称的窄,栅栏
+    永远凑不齐、超时抛错,测试照样红,而且红得就是它本来要抓的那件事。
+
+    栅栏只拦前 `expected` 次:`threading.Barrier` 放行后会自动重置,让剩下的作业也去
+    等,它们会凑不齐人数而白白超时。
+    """
     from app.services.kg import scheduler
     lock = threading.Lock()
     active = 0
     peak = 0
     targets = [f"src-{i}" for i in range(6)]
+    expected = min(len(targets), scheduler.job_concurrency())
+    # 超时只在"池子没那么宽"这种真失败上才付,正常路径瞬间放行。
+    gate = threading.Barrier(expected, timeout=30)
+    arrived = 0
 
     def _targets_page(_notebook_id, *, after_id="", limit=500, **_kwargs):
         rows = [sid for sid in targets if sid > after_id][:limit]
@@ -813,12 +829,16 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
     }
 
     def extract(source_id):
-        nonlocal active, peak
+        nonlocal active, peak, arrived
         with lock:
             active += 1
             peak = max(peak, active)
+            wait_at_gate = arrived < expected
+            if wait_at_gate:
+                arrived += 1
         try:
-            time.sleep(0.04)
+            if wait_at_gate:
+                gate.wait()
         finally:
             with lock:
                 active -= 1
@@ -830,7 +850,7 @@ def test_run_kg_limit_uses_initialized_business_job_pool(repo, monkeypatch):
         limit=6,
         no_rebuild=True,
     )
-    assert peak == min(len(targets), scheduler.job_concurrency())
+    assert peak == expected
 
 
 def test_run_kg_retry_partial_adds_safe_repair_targets(repo, monkeypatch):

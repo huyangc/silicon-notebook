@@ -35,6 +35,11 @@ RESULT_SCOPES: tuple[ResultScope, ...] = (
     "hybrid",
 )
 DEFAULT_RETRIEVAL_EFFORT: RetrievalEffort = "standard"
+# The single spelling of "the user asked for the most expensive profile".
+# Features whose cost the user has to opt into explicitly (the reasoning
+# outline scratchpad) gate on this rather than on a second knob, so the effort
+# picker stays the one place that decision is made.
+EXHAUSTIVE_RETRIEVAL_EFFORT: RetrievalEffort = "exhaustive"
 
 # This value is deliberately the same for every effort level: effort changes
 # how much work may be attempted, never whether an overflow may be hidden.
@@ -87,8 +92,17 @@ class AskRetrievalLimits:
     On any hard ceiling the executor must return explicit coverage
     (scanned/known total) with ``complete=false``; it must never label the
     partial result "all".
+
+    ``effort`` is the row's own identity — the same id that selected it.  It is
+    carried IN the row because the row is what travels: ``ReasoningRetriever.run``
+    receives only these limits, and a capability that is only offered at one
+    effort level (the outline scratchpad, gated on ``exhaustive``) has to be able
+    to ask which level this is.  Recovering it by comparing budget values would
+    make any ``dataclasses.replace`` of a single budget silently change the
+    answer.
     """
 
+    effort: RetrievalEffort
     ranked_per_query_take: int
     ranked_final_floor: int
     ranked_per_aspect: int
@@ -136,26 +150,31 @@ class AskRetrievalLimits:
 # on that bounded set; it does not convert enumeration into a larger top-N.
 _ASK_RETRIEVAL_LIMITS: dict[RetrievalEffort, AskRetrievalLimits] = {
     "overview": AskRetrievalLimits(
+        "overview",
         4, 8, 2, 12, 4, 2,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 4_000, 12_000, 4,
         50, 2, 100
     ),
     "standard": AskRetrievalLimits(
+        "standard",
         8, 20, 3, 36, 8, 5,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 6_000, 30_000, 6,
         50, 4, 200
     ),
     "deep": AskRetrievalLimits(
+        "deep",
         8, 24, 4, 48, 16, 6,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 8_000, 50_000, 8,
         50, 6, 300
     ),
     "thorough": AskRetrievalLimits(
+        "thorough",
         12, 32, 5, 64, 32, 8,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 12_000, 80_000, 12,
         50, 8, 400
     ),
     "exhaustive": AskRetrievalLimits(
+        "exhaustive",
         16, 40, 6, 96, 50, 10,
         25, 50, 1_250, 8, 8, 1_000, 256_000, 100, 16_000, 120_000, 16,
         50, 12, 600

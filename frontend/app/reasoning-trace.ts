@@ -15,6 +15,9 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   expand_community: "对比",
   follow_chain: "推导",
   fallback: "原文",
+  // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
+  // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
+  outline: "大纲",
   answer: "合成",
   // answer = 检索器决定作答并报告采用了哪些证据;synthesis = 答案真的写出来了。
   // 分两步是因为中间那次生成调用往往是整轮里最长的一段,合并会让它彻底隐形。
@@ -24,19 +27,21 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 10 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
+// 全部 11 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
 // `decision.next_action == "answer" or decision.sufficient` 起,到
 // `elif decision.next_action == "expand_community":` 止(PR-2 在其中插入了
 // enumerate_elements/enumerate_kg_objects 两个,精确查找通道插入了 exact_lookup
-// 一个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续改动
-// 腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不重蹈
-// 覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
-// exact_lookup 这些是内部机制,不该摆给用户)。
+// 一个,O1 插入了 update_outline(`OUTLINE_ACTION`)一个,原为 7 个)。按分支内容
+// 定位而非行号:本仓库的行号指针已知会随后续改动腐烂(见
+// test_architecture_documentation 一类语义化守卫的教训),这里不重蹈覆辙。用
+// 「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/exact_lookup/
+// update_outline 这些是内部机制,不该摆给用户)。
 //
-// PR-2.5 的来源清单刻意**不在**这张表里:它不是第 11 个动作,而是 enumerate 动作
-// 的一个参数值(`enumerate.collection="sources"`),所以反思步的「下一步意图」仍是
+// PR-2.5 的来源清单刻意**不在**这张表里:它不是新增动作,而是 enumerate 动作的
+// 一个参数值(`enumerate.collection="sources"`),所以反思步的「下一步意图」仍是
 // 「列元素清单」,而真正发生的那一步由 enumerate 步自己的 summary 说清
-// (「枚举来源清单: …」——后端 `_collection_label` 拼的)。
+// (「枚举来源清单: …」——后端 `_collection_label` 拼的)。update_outline 则相反:
+// 它是货真价实的第 11 个动作 id(不是参数值),所以这张表要加一行。
 const NEXT_ACTION: Record<string, string> = {
   answer: "开始作答",
   expand_graph: "顺着相关内容继续找",
@@ -48,6 +53,7 @@ const NEXT_ACTION: Record<string, string> = {
   expand_community: "找相似内容对比",
   follow_chain: "顺着推导链继续",
   exact_lookup: "按名称精确查找",
+  update_outline: "整理大纲",
 };
 
 export type ReasoningTraceSummary = {
@@ -95,19 +101,52 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   if (step.step_type === "plan" && Array.isArray(detail.sub_queries)) {
     return `${detail.sub_queries.length} 个子查询`;
   }
+  // 大纲便签(update_outline 落的 outline 步)。summary 已经是「更新大纲: N 节(M
+  // 节待补证据)」这句完整文案,这里给一个更短的复述——供折叠态的 latestDetail
+  // 用,与 enumerate 步「summary 详述、detail 给终态数字」的先例一致。sections 是
+  // 整份大纲(数组),empty_sections 是空节标题(数组);两者都按 length 读,不存在
+  // total=null 那类分母未知陷阱,但仍需 Array.isArray 防御,防止畸形 detail 把
+  // "3 节(undefined 节待补)" 送上屏。
+  if (step.step_type === "outline") {
+    const sections = Array.isArray(detail.sections) ? detail.sections.length : 0;
+    const empty = Array.isArray(detail.empty_sections) ? detail.empty_sections.length : 0;
+    return `${sections} 节(${empty} 节待补)`;
+  }
   // memory/synthesis 必须先于下面按 detail 形状的通用分支:两者的 count/anchors
   // 数的都不是「候选」,落到通用分支会给出一个读起来对、其实错位的数。
   if (step.step_type === "memory") {
     return typeof detail.count === "number" ? `${detail.count} 条记忆` : "";
   }
   if (step.step_type === "synthesis") {
+    // 按节合成(设计文档 §3.1)的每节进度步复用 synthesis 这个 step_type,但它的
+    // detail 只有 section_index/section_total/section_title,没有 anchors —— 必须
+    // 先判这个形状,否则会落到下面 `typeof detail.anchors === "number"` 的分支
+    // 判定为假,渲染出空字符串,白白丢掉「写到第几节了」这条本该有的进度文案。
+    if (typeof detail.section_index === "number" && typeof detail.section_total === "number") {
+      return `第 ${detail.section_index}/共 ${detail.section_total} 节`;
+    }
     // 用 anchors(模型真正绑上的 [k])而不是 citations —— 后者是「每条检索到的
     // 证据一张卡」,零绑定的回答上会读成「10 处引用」。citations/evidence_level
     // 仍留在 detail 里供排查,但不上屏:那是内部口径。included_kg/
     // included_chunks/included_elements 同理:PR-1 止血加的诊断字段,记录真正
     // 进入合成 prompt 的计数(区别于更早 answer 步的候选池计数),同样只供排查
-    // 不上屏,不在此处渲染。
-    return typeof detail.anchors === "number" ? `${detail.anchors} 处引用` : "";
+    // 不上屏,不在此处渲染。outline_skipped/ungrounded_sections 则相反,必须
+    // 上屏(codex r5):它们是按节合成的诚实披露——大纲里有节但答案里没有/
+    // 有节但没过依据门,不显示的话用户拿到的是一份「看起来完整」的多节答案。
+    // 标题服务端已截 60 字符、列表 ≤12 节,这里再收到前 3 个防折叠行超长。
+    const parts: string[] = [];
+    if (typeof detail.anchors === "number") parts.push(`${detail.anchors} 处引用`);
+    const sectionTitles = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((title): title is string => typeof title === "string" && !!title)
+        : [];
+    const nameSections = (titles: string[]): string =>
+      titles.slice(0, 3).join("、") + (titles.length > 3 ? ` 等 ${titles.length} 节` : "");
+    const skipped = sectionTitles(detail.outline_skipped);
+    if (skipped.length) parts.push(`证据不足略过 ${skipped.length} 节: ${nameSections(skipped)}`);
+    const ungrounded = sectionTitles(detail.ungrounded_sections);
+    if (ungrounded.length) parts.push(`${ungrounded.length} 节依据不足: ${nameSections(ungrounded)}`);
+    return parts.join(" · ");
   }
   if (step.step_type === "exact_lookup") {
     // terms 是服务端本轮真正探测过的名称(已按上限截过),不是问题里出现的全部。

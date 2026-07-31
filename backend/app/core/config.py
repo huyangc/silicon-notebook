@@ -445,6 +445,12 @@ class Settings(BaseSettings):
     # 每次调用的成本由档位表的 enum_* 预算(每 run 行数/额外翻页)封死,不是这里。
     reasoning_enum_tools_enabled: bool = Field(
         True, validation_alias="REASONING_ENUM_TOOLS_ENABLED")
+    # 逐步推理的大纲便签(reflect 动作 update_outline)总开关。它**另外**受档位
+    # 约束:只有用户把检索档位选到「穷尽」时才提供(设计文档 §3.1,用户拍板),
+    # 因为按节合成的成本要由用户显式选择来承担。关掉即两处都回到接入前:prompt
+    # 不写这个动作、schema 没有 outline 分支、allowed_actions 里也没有它。
+    reasoning_outline_enabled: bool = Field(
+        True, validation_alias="REASONING_OUTLINE_ENABLED")
     # 推理模式(交互式,用户在线等)专用的 per-call LLM 超时/重试,与批量抽取
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")

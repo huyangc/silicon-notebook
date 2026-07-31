@@ -198,12 +198,74 @@ def followup_rewrite_prompt(history_block: str, question: str) -> str:
 ANSWER_SCHEMA_HINT = '{"answer":"","grounded":true}'
 
 
-def answer_prompt(question: str, context_block: str, history_block: str = "") -> str:
+def _answer_section_directive(
+    sectioned: bool, section_title: str, section_index: int, section_total: int
+) -> str:
+    """按节合成(设计文档 §3.1)时追加的节级指令;单次合成下恒为空串。
+
+    刻意与规则集共用一份 `answer_prompt`,而不是复制一份「章节版」出来:规则 1–11
+    (引用标记、LaTeX、推断标注、枚举完整性披露……)对每一节同样成立,复制一份的
+    唯一确定结局是两份逐渐分叉。
+
+    三句话各有理由:
+      * 「只写这一节」—— 不说的话,每节都会写成一篇独立的完整答案,拼出来通篇重复;
+      * 「不要重复标题」—— `##/###` 标题由服务端按大纲层级加(见
+        `outline_synthesis.outline_answer_text`),模型再写一遍就是两层标题;
+      * 「其他节的证据没给你看」—— 模型会把「证据里没有」误读成「库里没有」,
+        于是给整篇答案下一个过度保守的结论,或者去补写别节的内容。
+
+    判定用**显式的 `sectioned`**,不看标题真值:标题是内容,不是模式开关。靠真值判
+    的话,一个绕过 `parse_outline_sections`(它保证标题非空)的构造 —— 未来的调用方、
+    窄测试替身 —— 会落进「号段偏移生效了、节级指令却没发」的混合态,而那正是最难
+    发现的一种:prompt 看着正常,模型却按整篇答案的口径写每一节。
+    """
+    if not sectioned:
+        return ""
+    position = (
+        f" ({section_index} of {section_total})"
+        if section_index and section_total else ""
+    )
+    # 标题缺席时只省这一行(其余指令仍然成立)。`parse_outline_sections` 保证标题
+    # 非空,所以这只是防御性分支。
+    title_line = (
+        f"This section{position} is titled: {section_title}\n"
+        if section_title else
+        f"This is section{position or ' one'} of the answer.\n"
+    )
+    return (
+        "You are writing ONE section of a longer, multi-section answer.\n"
+        + title_line
+        + "Write ONLY this section's body. Do NOT repeat the section title as a "
+        "heading (the system adds it), do NOT open with an introduction or "
+        "close with a conclusion for the whole answer, and do NOT cover what "
+        "the other sections are for. The knowledge items below are the "
+        "evidence bound to THIS section; the other sections have their own "
+        "evidence which is deliberately not shown to you, so never state that "
+        "the notebook lacks material you simply were not given.\n\n"
+    )
+
+
+def answer_prompt(
+    question: str,
+    context_block: str,
+    history_block: str = "",
+    *,
+    sectioned: bool = False,
+    section_title: str = "",
+    section_index: int = 0,
+    section_total: int = 0,
+) -> str:
+    """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
+    history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
+    什么」变成一个要靠数逗号回答的问题。"""
     history_section = (
         "Prior conversation (for context; the current question may refer to it):\n"
         f"{history_block}\n\n"
         if history_block
         else ""
+    )
+    section_section = _answer_section_directive(
+        sectioned, section_title, section_index, section_total
     )
     return (
         "You answer an engineer's question using the notebook knowledge below, "
@@ -274,6 +336,7 @@ def answer_prompt(question: str, context_block: str, history_block: str = "") ->
         "relevance-based retrieval cannot prove it covers the entire "
         "collection on its own.\n\n"
         f"{history_section}"
+        f"{section_section}"
         f"Question: {question}\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'
@@ -330,6 +393,7 @@ def plan_prompt(
 def reflect_schema_hint(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
+    outline: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -339,6 +403,11 @@ def reflect_schema_hint(
     switch spells "these tools do not exist" — the model then sees byte-for-byte
     the schema it saw before the tools were added, which is the only way "off"
     can honestly mean "back to the previous behavior".
+
+    ``outline`` is a SEPARATE gate on the same principle (the outline scratchpad
+    is offered only at the exhaustive effort).  The two gates are independent
+    because the features are: enumeration is available at every effort, the
+    outline is not.
     """
     actions = (
         "answer|expand_graph|add_subquery|"
@@ -368,13 +437,25 @@ def reflect_schema_hint(
             '"collection":"",'
             '"source_id":"","source_title":""},'
         )
+    outline_branch = ""
+    if outline:
+        actions += "|update_outline"
+        # ``evidence`` is shown as a one-empty-string list, the same way
+        # ``sub_queries`` shows its shape: the field is a list of ids the model
+        # copies from the candidates, and an empty list is a legal (and
+        # meaningful) value — a section with no evidence yet is the whole point
+        # of the scratchpad.
+        outline_branch = (
+            '"outline":{"sections":[{"id":"","title":"","parent":"",'
+            '"evidence":[""],"remove_evidence":[""]}]},'
+        )
     return (
         '{"sufficient":false,"next_action":"' + actions + '","expand":'
         '{"object_id":"","edge_type":null,'
         '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
         '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
         '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-        + enumerate_branch +
+        + enumerate_branch + outline_branch +
         '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
         '"reason":""}'
     )
@@ -388,12 +469,17 @@ def reflect_prompt(
     candidates_summary: str,
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
+    outline: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
     ``element_kinds`` / ``object_types`` non-empty = the typed-collection
     enumeration tools are available this run; empty = they are not, and every
     byte of this prompt is what it was before they existed.
+
+    ``outline`` True = the outline scratchpad action is offered this run (only
+    at the exhaustive effort, see ``reasoning_retrieval.outline_wiring_active``);
+    False = it is not, and again every byte is what it was before it existed.
     """
     enumeration_tools = bool(element_kinds or object_types)
     # The reflect-local half of the scope-grounding rule: this is the prompt with
@@ -463,6 +549,49 @@ def reflect_prompt(
         "be requested again.\n"
         if enumeration_tools else ""
     )
+    # The outline scratchpad (design doc §3.1).  Three things have to be said
+    # here or the action is worse than useless:
+    #   * WHEN — it earns its turns on answers that have structure to build
+    #     (a survey, a roster-driven per-document treatment, a multi-subject
+    #     comparison) and costs a pure turn on a single-fact question;
+    #   * the section structure is REPLACE, not patch, while evidence bindings on
+    #     a stable section id are citation-persistent unions.  The scratchpad is
+    #     still the model's only copy of the current structure because reflect has
+    #     no conversation history;
+    #   * an empty section is the FEATURE — it names an uncovered aspect, which is
+    #     exactly the signal the next retrieval action should target.  Without
+    #     this sentence a model prunes its own gaps to make the outline look done.
+    outline_action = (
+        "- update_outline: the answer itself needs a STRUCTURE you build up over "
+        "several turns — a survey or overview, an inventory, a per-document "
+        "treatment of a library, a comparison of several subjects, or any long "
+        "answer the question asks you to fill in progressively. Keep that "
+        "structure in outline.sections: each section has a short stable id, a "
+        "title in the question's language, an optional parent (ONE nesting level "
+        "— a section whose parent is itself a child is flattened), and evidence = "
+        "the ids of candidates above that support it, copied exactly as they "
+        "appear in (id=...). This call REPLACES the section structure: send every "
+        "section you still want, every time; an omitted section is dropped. For a "
+        "section with the same id, evidence is UNIONED with its existing bindings, "
+        "so omitting an evidence id does not delete it. To replace evidence, list "
+        "old bound ids in that section's remove_evidence and keep the desired new "
+        "ids in evidence; explicit removal wins if the same id appears in both. "
+        "Your previous outline is fed back as the outline scratchpad in the "
+        "context below. A section with "
+        "NO evidence is "
+        "not a failure, it is the next retrieval direction: keep it in the "
+        "outline, use add_subquery / the other retrieval actions to look for its "
+        "material, and bind the ids you get in your next update_outline. "
+        + (
+            "A listed document roster or the [Collections in scope] counts are "
+            "the natural seed: list what the library holds first, then turn that "
+            "list into sections. "
+            if enumeration_tools else ""
+        )
+        + "Do NOT open an outline for a single-fact question — structuring a "
+        "one-sentence answer only burns turns.\n"
+        if outline else ""
+    )
     completeness_rule = (
         "In reason, you may call a collection completely retrieved ONLY when "
         "an enumerate action has reported its coverage as complete for that "
@@ -514,6 +643,7 @@ def reflect_prompt(
         "and returns the whole manual section it heads, so a name you invent or "
         "paraphrase returns nothing.\n"
         f"{enumerate_actions}"
+        f"{outline_action}"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{scope_fields_rule}"
         "Before choosing answer, check aspect by aspect that every part the "

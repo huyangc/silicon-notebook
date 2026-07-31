@@ -275,8 +275,12 @@ class EvidenceContextService:
         chunks: Sequence[RetrievedChunk],
         *,
         notebook_id: str,
+        id_offset: int = 0,
         budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """``id_offset`` 镜像 ``element_context``/``knowledge_context``:默认 0 保持
+        chunk 段恒为 ``k1..kN``(所有既有调用方),按节合成给每节整体加一段偏移,
+        让各节的 key 号段互不相交(见 ``outline_synthesis``)。"""
         budget = (
             self.settings.chunk_answer_budget_chars
             if budget_chars is None
@@ -306,7 +310,7 @@ class EvidenceContextService:
             remaining = budget - used - separator
             if remaining <= 0:
                 break
-            key = f"k{index}"
+            key = f"k{index + id_offset}"
             source_title = citation_titles.get(chunk.source_id, chunk.source_title)
             prefix = f"{key}: "
             if remaining <= len(prefix):
@@ -433,14 +437,25 @@ class EvidenceContextService:
         evidence_by_id: dict[str, dict[str, Any]] = {}
         seen_clusters: set[str] = set()
         participants = self.notebooks.participant_notebook_ids(notebook_id)
-        cluster_map: dict[str, str] = {}
-        for participant in participants:
-            cluster_map.update(self.knowledge.cluster_map(participant))
+        # 逐 hit 在各参与库的缓存 map 里做有界查找,绝不把它们合并进新 dict:
+        # 合并是 O(全库) 的整表拷贝(scale 下 cluster map 可达 5M 条),而本函数
+        # 每次答案合成都会被调、按节合成还要按节数放大。逆序查找保持与原
+        # dict.update 逐库覆盖完全相同的「后挂载库优先」语义。
+        participant_maps = [
+            self.knowledge.cluster_map(participant) for participant in participants
+        ]
+
+        def _canonical(object_id: str) -> str:
+            for participant_map in reversed(participant_maps):
+                canonical = participant_map.get(object_id)
+                if canonical is not None:
+                    return canonical
+            return object_id
 
         used = 0
         next_id = 0
         for hit in hits:
-            cluster_id = cluster_map.get(hit.object_id, hit.object_id)
+            cluster_id = _canonical(hit.object_id)
             if cluster_id in seen_clusters:
                 continue
             seen_clusters.add(cluster_id)

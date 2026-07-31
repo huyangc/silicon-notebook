@@ -182,6 +182,11 @@ def test_ask_retrieval_effort_protocol_defaults_and_rejects_unknown_ids():
 def test_ask_retrieval_threshold_table_is_complete_monotonic_and_exact():
     assert tuple(ASK_RETRIEVAL_LIMITS) == RETRIEVAL_EFFORTS
     limits = [ask_retrieval_limits(effort) for effort in RETRIEVAL_EFFORTS]
+    # 每一行都知道自己是哪一档:只在某一档提供的能力(逐步推理的大纲便签只在
+    # exhaustive 开放)拿这个字段当闸,而 run() 手里除了这一行就没有别的档位信息。
+    # 若改成从预算数字反推,任何一次 `replace(limits, 某预算=…)` 都会静默换档。
+    for effort, row in zip(RETRIEVAL_EFFORTS, limits):
+        assert row.effort == effort
     increasing_fields = (
         "ranked_final_floor",
         "ranked_per_aspect",

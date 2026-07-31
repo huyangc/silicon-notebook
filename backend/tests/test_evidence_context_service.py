@@ -479,3 +479,39 @@ def test_enumerated_item_key_agrees_across_the_two_layers():
     assert _is_document_row(document) is True
     assert _is_document_row(element) is False
     assert _is_document_row(kg) is False
+
+
+def test_evidence_context_folds_clusters_without_merging_participant_maps():
+    """codex r5 fix: knowledge_context 逐 hit 在参与库缓存 map 里逆序查找,不再
+    把全部参与库 map 合并进新 dict——那是每次答案合成付一遍的 O(全库) 整表
+    拷贝(scale 下 cluster map 可达 5M 条),按节合成还要按节数放大。语义必须
+    与原 dict.update 逐库覆盖完全一致:后一个参与库(base)对同一 member 的
+    canonical 覆盖前一个(active)。本用例的数据形状刻意让两种查找方向给出
+    不同答案——active 把 m1 折到 c-active,base 把 m1/m2 都折到 c-base;
+    「后库优先」下两个 hit 同折 c-base、簇去重后只剩一条;若逆序被改回正序
+    (m1→c-active),或折叠整个失效(m1→m1),都会输出两条而报红。"""
+    class _SplitClusterKnowledge(_Knowledge):
+        def cluster_map(self, notebook_id):
+            if notebook_id == "active":
+                return {"m1": "c-active"}
+            return {"m1": "c-base", "m2": "c-base"}
+
+    service = EvidenceContextService(
+        notebooks=_Notebooks(), sources=_Sources(),
+        knowledge=_SplitClusterKnowledge(), settings=Settings(),
+    )
+    hits = [
+        RetrievedKnowledge(
+            object_id="m1", object_type="concept", payload={"name": "First"},
+            evidence=[], tier="personal", notebook_id="active",
+        ),
+        RetrievedKnowledge(
+            object_id="m2", object_type="concept", payload={"name": "Second"},
+            evidence=[], tier="base", notebook_id="base",
+        ),
+    ]
+    _, evidence = service.knowledge_context("active", hits)
+    assert list(evidence) == ["k1"], (
+        "m1/m2 在「后挂载库覆盖」语义下同折 c-base,第二个 hit 必须被簇去重,"
+        f"实得 {list(evidence)}")
+    assert evidence["k1"]["object_id"] == "m1"
