@@ -1228,3 +1228,39 @@ def test_bypassed_sectioned_synthesis_still_discloses_skipped_sections(
     assert detail["outline_fallback"] is False
     assert detail["section_grounded"] == []
     assert detail["ungrounded_sections"] == []
+
+
+def test_an_enumerating_run_keeps_the_one_shot_path(repo, monkeypatch):
+    """codex r7 P1: 产出过集合清单的 run 不做按节合成——节切片刻意只装该节
+    绑定证据,清单块/覆盖披露不进切片,「按来源列出全部公式」这类请求被节化
+    后合成只拿 ranked 样本写散文,丢掉手上已有的完整清单,甚至自称不完整。
+    清单类 run 保持单次合成(清单预览与覆盖披露完整进入合成上下文);清单进
+    节切片是 v2 的设计题,不在绕过里偷做。"""
+    from app.services.collection_enumeration import ElementItem, EnumerationCoverage
+    from app.services.reasoning_retrieval import CollectionEnumerationOutcome
+
+    outcome = CollectionEnumerationOutcome(
+        collection="elements", kind="formula", source_id="",
+        items=[ElementItem(
+            element_id="el-9", source_id="s1", source_title="论文一",
+            element_type="formula", location_label="p1", text="公式甲",
+            asset_id="", notebook_id="nb", tier="personal",
+        )],
+        coverage=EnumerationCoverage(
+            returned=1, returned_total=1, scanned=1, total=1, has_more=False,
+            complete=True, truncated_reason="", overflow_semantics="",
+        ),
+    )
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(enumerations=[outcome]))
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    # 大纲有 2 个可装配节,但因为有清单,按节合成不跑:单次合成,清单预览
+    # 仍进那唯一一份合成 prompt(这正是绕过要保住的东西)。
+    assert len(llm.prompts) == 1
+    assert "公式甲" in llm.prompts[0]
+    assert "## 第一节" not in response.answer
+    detail = _synthesis_detail(response)
+    assert detail["outline_sections"] == 0
+    assert detail["outline_fallback"] is False

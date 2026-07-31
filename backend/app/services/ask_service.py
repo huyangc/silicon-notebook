@@ -2269,7 +2269,14 @@ class AskService:
                         chunk_by_id={item.chunk_id: item for item in chunks},
                     )
                     outline_planned = True
-                    if len(outline_slices) >= 2:
+                    # 产出过集合清单/结构化整表枚举的 run 保持单次合成(codex r7):
+                    # 节切片刻意只装该节绑定证据,清单块与结构化行不进切片——
+                    # 「按来源列出全部公式」这类请求若被节化,合成会拿 ranked 样本
+                    # 写散文,把手上已有的完整清单丢在回退路径里,甚至自称不完整。
+                    # 单次合成路径的清单预览/覆盖披露机制是成熟的,清单类问题本来
+                    # 就该走它;清单进节切片是 v2 的设计题,不在绕过里偷做。
+                    if (len(outline_slices) >= 2 and not enumerations
+                            and structured_batch is None):
                         outline_attempted = True
                         sectioned = self._answer_reasoning_sections(
                             notebook_id, research_question, outline_slices,
