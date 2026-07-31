@@ -953,7 +953,14 @@ REPORT_SECTION_SCHEMA_HINT = '{"markdown":"","grounded":true}'
 
 
 def report_section_prompt(section_title: str, section_scope: str, question: str,
-                          context_block: str, allow_parametric: bool = True) -> str:
+                          context_block: str, allow_parametric: bool = True,
+                          discovered_structure: str = "") -> str:
+    """``discovered_structure`` = 本节深挖时整理出的子大纲(报告 PR-5)。
+
+    它是**增补式细化**:只影响本节内部的 `###` 子标题,绝不增删改用户确认过的
+    章节合同。缺席(空串,即非穷尽档或本节没整理出大纲)时返回值逐字回到接入前
+    —— 那是这个可选参数唯一可接受的关闭态。
+    """
     parametric_rule = (
         "4. You MAY use domain general knowledge beyond the items when the "
         "items do not cover a needed link — but EVERY such sentence must start "
@@ -962,6 +969,17 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         if allow_parametric else
         "4. Do NOT introduce facts beyond the knowledge items; where evidence "
         "is missing, state the gap explicitly.\n")
+    structure_block = (
+        "Discovered structure (a sub-outline found while researching THIS "
+        "section; each line carries the knowledge item ids bound to that "
+        "sub-topic):\n"
+        f"{discovered_structure}\n"
+        "Organize the body with '###' sub-headings along this structure when it "
+        "fits. It is a SUGGESTION, not a contract: silently skip any sub-topic "
+        "whose evidence is missing, never invent content to fill one, and never "
+        "step outside this section's scope.\n\n"
+        if discovered_structure else ""
+    )
     return (
         "You write ONE section of a deep technical report for an engineer. "
         "Write ONLY this section — no report title, no executive summary, no "
@@ -995,6 +1013,7 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "conclusions. For relevant personal-tier conflicts, prefer confirmed "
         "Memory over raw personal passages; base evidence remains final.\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
+        f"{structure_block}"
         'Return JSON only: {"markdown":"","grounded":true|false}'
     )
 

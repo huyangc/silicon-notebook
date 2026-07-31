@@ -19,8 +19,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
+from app.core.ask_retrieval_policy import (
+    AskRetrievalLimits, RetrievalEffort, ask_retrieval_limits,
+)
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.report_execution import REPORT_CANCELLATIONS
@@ -46,6 +49,127 @@ _GENERIC_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
+
+
+# --- 研究深度 → 检索档位(报告 PR-5,设计文档 §3.4)------------------------
+# 报告的「研究深度」与 Ask 的「检索档位」共用 EffortPicker 和同一批档名,但报告
+# 此前调 ReasoningRetriever.run 时 limits=None —— 五档共享 standard 预算,滑块只
+# 改每节反思轮数。这张表把同名档位的**语义**对齐:同一个档名在两处买到同一份
+# 相关性/上下文预算。行为变化是显式的(低档报告的检索预算随之变小、高档变大),
+# 它是对齐修复,不是回归。
+#
+# 每节 `max_steps` 仍用报告自己的 depth 值(1/2/4/8/16),**不**采用档位表里的
+# 4/8/16/32/50:报告的成本按节数放大,一节 50 轮乘以 6 节不是用户在滑块上同意的
+# 那个量级。run() 里 `min(max_steps, limits.max_reasoning_steps)` 保证 depth 永远
+# 是更紧的那个。
+#
+# 阈值表(depth 下界 → 档位),顺序必须与 frontend/app/report-view.tsx 的
+# `DEPTHS = [1, 2, 4, 8, 16]` 逐档对应。写成阈值而不是精确字典:API 只把 depth
+# clamp 到 [1,16],3/5/7 这类值必须有确定答案,而不是抛 KeyError。
+REPORT_DEPTH_EFFORTS: Tuple[Tuple[int, RetrievalEffort], ...] = (
+    (1, "overview"),
+    (2, "standard"),
+    (4, "deep"),
+    (8, "thorough"),
+    (16, "exhaustive"),
+)
+
+
+def report_retrieval_effort(depth: int) -> RetrievalEffort:
+    """报告深度值 → 检索档位 id(总函数,表外深度取不超过它的最高档)。"""
+    effort: RetrievalEffort = REPORT_DEPTH_EFFORTS[0][1]
+    for threshold, candidate in REPORT_DEPTH_EFFORTS:
+        if depth >= threshold:
+            effort = candidate
+    return effort
+
+
+def report_retrieval_limits(depth: Optional[int]) -> Optional[AskRetrievalLimits]:
+    """本次深挖的档位预算。``depth`` 为 None(未指定深度的调用方)时保持 None,
+    即接入前的「无 limits」行为。"""
+    if depth is None:
+        return None
+    return ask_retrieval_limits(report_retrieval_effort(int(depth)))
+
+
+# --- 「发现的结构」块(报告 PR-5)-----------------------------------------
+# 深挖时整理出的子大纲进节撰写 prompt 的有界形态。硬界三条:行数、单行字符、
+# 整块字符。纯拼装,零模型调用、零新查询 —— 大纲与 id_map 都是手上现成的。
+_STRUCTURE_MAX_LINES = 12
+_STRUCTURE_MAX_LINE_CHARS = 80
+_STRUCTURE_MAX_CHARS = 1200
+
+
+def outline_structure_block(
+    sections: Sequence[Any], id_map: Dict[str, Dict[str, Any]]
+) -> str:
+    """终态子大纲 + 本节证据 id_map → 「发现的结构」块(每子节一行)。
+
+    ``[k]`` 必须与撰写模型手上的**同一套** id 空间一致:绑定键存的是检索期的
+    object/element/chunk id,而 `[k]` 是 `_draft_section` 装配上下文时分配的,所以
+    这里按 id_map 的 `object_id` 反查。**映射不到的绑定如实丢弃**(它被上下文预算
+    截断了,写进去就是让模型引用一个它看不见的 id),标题仍保留 —— 那一条子话题
+    prompt 会教它「缺证据就略过」。
+
+    顶层节渲染成 `###`(报告的节本身已经是 `##`),有父节的渲染成 `####`,层级
+    信息不丢。超界按顺序截断并显式记账 `(+N 子节略)`:静默丢行会让模型以为它
+    看到的就是全部结构。
+    """
+    if not sections:
+        return ""
+    by_object: Dict[str, str] = {}
+    for key, value in (id_map or {}).items():
+        object_id = str((value or {}).get("object_id") or "")
+        if object_id:
+            by_object.setdefault(object_id, key)
+    candidates: List[str] = []
+    for section in sections:
+        title = str(getattr(section, "title", "") or "").strip()
+        if not title:
+            continue
+        marks = list(dict.fromkeys(
+            by_object[key]
+            for key in (getattr(section, "evidence_keys", None) or [])
+            if key in by_object
+        ))
+        heading = "####" if str(getattr(section, "parent", "") or "") else "###"
+        # 行内先裁标题、再逐个装 [k],装不下的整条丢弃 —— 直接裁整行会在长标题
+        # (parse 允许 60 字符)加多个绑定时把标记切成半截 `[k1, k`,那是一个撰写
+        # 模型解释不了、却看着像引用的东西。
+        line = f"{heading} {title}"[:_STRUCTURE_MAX_LINE_CHARS]
+        rendered: List[str] = []
+        for mark in marks:
+            candidate = f"{line} — 证据: [" + ", ".join(rendered + [mark]) + "]"
+            if len(candidate) > _STRUCTURE_MAX_LINE_CHARS:
+                break
+            rendered.append(mark)
+        if rendered:
+            line = f"{line} — 证据: [" + ", ".join(rendered) + "]"
+        candidates.append(line)
+    kept: List[str] = []
+    used = 0
+    for line in candidates:
+        separator = 1 if kept else 0
+        if (len(kept) >= _STRUCTURE_MAX_LINES
+                or used + separator + len(line) > _STRUCTURE_MAX_CHARS):
+            break
+        kept.append(line)
+        used += separator + len(line)
+    if not kept:
+        return ""
+    omitted = len(candidates) - len(kept)
+    while omitted:
+        suffix = f"(+{omitted} 子节略)"
+        if used + 1 + len(suffix) <= _STRUCTURE_MAX_CHARS:
+            kept.append(suffix)
+            break
+        # 账目行本身也要在预算内:挤不下就再退一行(退掉的那行计进 N)。
+        used -= len(kept[-1]) + (1 if len(kept) > 1 else 0)
+        kept.pop()
+        omitted += 1
+        if not kept:
+            return ""
+    return "\n".join(kept)
 
 
 # --- 取消注册表委托:report_id → threading.Event(活动后台 job 才在册) ---
@@ -665,19 +789,35 @@ class ReportEngine:
         )
         # 与 ask 走同一套流程:不传 top_n → run 按本节方面数自适应证据预算
         # (effective_top_n:floor=retrieval_top_n,横向对比节因兄弟子查询多而扩容)。
+        # `limits` 按研究深度选档(PR-5):档名与 Ask 对齐,并让穷尽档在每节深挖里
+        # 自动激活大纲便签与弱支撑边回喂(`outline_wiring_active` 判的就是它)——
+        # 报告引擎因此不 import 任何大纲内部件。集合枚举保持不可达:构造 retriever
+        # 时不传 collection_catalog/collection_enumeration,wiring 判空自动关闭。
         result = ReasoningRetriever(
             retrieval=deps.retrieval,
             model_clients=deps.model_clients,
             communities=deps.communities,
             settings=self.settings,
             cancel_event=self.cancel_event,
-        ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth)
+        ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
+              limits=report_retrieval_limits(depth))
 
         # The outline's approved retrieval directions are execution requirements,
         # not merely prose hints to the reasoning planner.  Merge their bounded
         # direct KG/element results so replanning cannot silently drop one.
         seen_objects = {hit.object_id for hit in result.top_hits}
         seen_elements = {item.element_id for item in result.elements}
+        # 大纲绑上、却被最终相关性选集挤出 top_hits 的知识对象(仅穷尽档非空,见
+        # reasoning_retrieval.outline_truncated_kg_evidence)。规则同 ask_service 的
+        # 按节合成路径:它们是模型自己指名要的结构支撑,必须能进本节上下文并计入
+        # classify_evidence 的证据池 —— 否则「发现的结构」里指向它们的 [k] 解析不
+        # 出来,而引用了它们的句子在分级眼里就是引了个不存在的东西。相关度已在
+        # retriever 侧与选集同口径夹好,这里直接并入,零新查询。
+        for hit in list(getattr(result, "outline_evidence", None) or []):
+            if hit.object_id in seen_objects:
+                continue
+            result.top_hits.append(hit)
+            seen_objects.add(hit.object_id)
         for query in list(section.get("sub_queries") or [])[:4]:
             new_count = 0
             try:
@@ -764,6 +904,11 @@ class ReportEngine:
             memory_map = {}
         client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map, **element_map}
+        # 深挖时整理出的子大纲(仅穷尽档非空)→ 有界「发现的结构」块。它只作用于
+        # 本节内部的 `###` 组织,绝不回写 reports.outline_json 里用户确认过的大纲。
+        # 两次重试共用同一份块:它与 id_map 一样在这轮里是常量。
+        structure_block = outline_structure_block(
+            list(getattr(result, "outline", None) or []), id_map)
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
         # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。
@@ -776,7 +921,8 @@ class ReportEngine:
                 raw = client.chat_json(
                     [{"role": "user", "content": report_section_prompt(
                         section["title"], section["scope"], question, context_block,
-                        allow_parametric=self.settings.report_allow_parametric)}],
+                        allow_parametric=self.settings.report_allow_parametric,
+                        discovered_structure=structure_block)}],
                     REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
                     **cap_kwargs(client, "report_section_max_tokens"))
                 data = json.loads(raw)
@@ -850,6 +996,13 @@ class ReportEngine:
 
         _PHASE = {"plan": "规划", "reflect": "深挖", "retrieve": "深挖", "expand": "深挖",
                   "ppr": "深挖", "follow_chain": "深挖", "fallback": "深挖"}
+        # 本节深挖到目前为止整理出的大纲节数(仅穷尽档会非零)。深挖阶段的 phase
+        # 文案据此细化;写入仍走既有的 2 秒节流 persist,不新增落库次数。
+        outline_sections = [0] * len(outline)
+
+        def _deep_phase(index):
+            count = outline_sections[index]
+            return f"深挖中（已整理大纲 {count} 节）" if count else "深挖"
 
         def _one(i, section):
             raise_if_cancelled(self.cancel_event)
@@ -859,9 +1012,17 @@ class ReportEngine:
 
             def on_step(step, _i=i):
                 with lock:
+                    if step.step_type == "outline":
+                        # 大纲步没有自己的阶段(它发生在深挖里),但它是这一节
+                        # 唯一能看出「模型在整理结构」的时刻:立刻更新计数并改写
+                        # 文案,不等下一个检索步来带 —— 大纲步完全可能是本节反思
+                        # 循环的最后一个动作。
+                        outline_sections[_i] = len(
+                            (getattr(step, "detail", None) or {}).get("sections") or [])
+                        status[_i]["phase"] = _deep_phase(_i)
                     ph = _PHASE.get(step.step_type)
                     if ph:
-                        status[_i]["phase"] = ph
+                        status[_i]["phase"] = _deep_phase(_i) if ph == "深挖" else ph
                     if step.step_type == "reflect":
                         status[_i]["step"] += 1
                 persist()
