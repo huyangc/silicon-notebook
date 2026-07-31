@@ -90,6 +90,7 @@ class _SectionedSynthesis:
     anchors: list
     sections: int
     counts: dict
+    section_grounded: list
 
 
 def _graph_classification_hits(
@@ -1193,6 +1194,7 @@ class AskService:
             "included_elements": 0, "included_collections": 0,
         }
         grounded = False
+        section_grounded_detail: list = []
         total = len(slices)
         model_label = getattr(answer_client, "model", "")
         for item in slices:
@@ -1220,6 +1222,31 @@ class AskService:
             )
             if not ok:
                 return None
+            # 分节判定必须在本节自己的证据池与锚点上完成。只留模型自报会绕过
+            # classify_evidence 这道真实门;拿合并后的锚点回算又会把另一节的高分
+            # 证据借给本节。这个逐节结果既驱动全局确定性降级,也给 v2 留下可测信号。
+            from types import SimpleNamespace
+            section_evidence = list(item.hits) + list(item.chunks) + [
+                SimpleNamespace(
+                    object_id=element.element_id,
+                    relevance=float(element.score or 0.0),
+                )
+                for element in item.elements
+            ]
+            section_level, _ = classify_evidence(
+                section_evidence,
+                section_anchors,
+                section_grounded,
+                self.settings.evidence_tau_low,
+                self.settings.evidence_tau_high,
+            )
+            section_is_grounded = section_level == "grounded"
+            section_grounded_detail.append({
+                "id": item.section.id,
+                "title": item.section.title[:60],
+                "grounded": section_is_grounded,
+                "evidence_level": section_level,
+            })
             if on_section is not None:
                 # 复用 synthesis 这个 step_type:前端 reasoning-trace.ts 的
                 # synthesis 分支只在 `detail.anchors` 是数字时给出细节文案,进度步
@@ -1263,6 +1290,7 @@ class AskService:
             anchors=merged_anchors,
             sections=len(rendered),
             counts=merged_counts,
+            section_grounded=section_grounded_detail,
         )
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
@@ -2362,6 +2390,20 @@ class AskService:
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high,
                 exact_evidence_keys=collection_exact_keys,
             )
+            if sectioned is not None:
+                grounded_sections = sum(
+                    1 for item in sectioned.section_grounded
+                    if item["grounded"]
+                )
+                if grounded_sections == 0:
+                    # 没有一节通过自己的 classify_evidence,整篇不能从跨节合并池
+                    # 借来 overview/grounded 信号。
+                    evidence_level = "inferred"
+                elif grounded_sections < sectioned.sections:
+                    # 部分支撑复用既有 overview 档。这里是封顶而非强制设置:
+                    # 全局分类若因锚点不足已经是 inferred,不能反向抬高。
+                    if evidence_level == "grounded":
+                        evidence_level = "overview"
             grounded = evidence_level == "grounded"
 
             # An enumeration answer with no bound [k] marker has no verifiable
@@ -2423,6 +2465,20 @@ class AskService:
                         # 被跳过的空节标题:它们是「问到了但没找到」的诚实记录,
                         # 只在轨迹里露面,答案里不留空壳标题。
                         "outline_skipped": outline_skipped,
+                        # 只落 trace detail,不扩 AskResponse。每节结果已经过该节
+                        # 自己的 classify_evidence,不是模型裸自报。
+                        "section_grounded": (
+                            sectioned.section_grounded
+                            if sectioned is not None else []
+                        ),
+                        "ungrounded_sections": (
+                            [
+                                item["title"]
+                                for item in sectioned.section_grounded
+                                if not item["grounded"]
+                            ]
+                            if sectioned is not None else []
+                        ),
                     })
                 trace.append(synthesis_step)
                 if on_trace:

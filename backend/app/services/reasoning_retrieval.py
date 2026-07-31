@@ -389,6 +389,9 @@ class OutlineSection:
     title: str
     parent: str = ""
     evidence_keys: List[str] = field(default_factory=list)
+    # 只存在于一次 update_outline 提交里:显式撤销同 id 旧节的绑定。合并后的
+    # run 状态永远把它清空,所以下一轮账目不会把一次性命令误当成持久字段重放。
+    remove_evidence_keys: List[str] = field(default_factory=list)
 
 
 def _outline_text(value: object, limit: int) -> str:
@@ -444,10 +447,20 @@ def parse_outline_sections(raw: object) -> List[OutlineSection]:
                 text = _outline_text(key, _OUTLINE_EVIDENCE_KEY_CHARS)
                 if text and text not in keys:
                     keys.append(text)
+        remove_keys: List[str] = []
+        raw_remove_keys = entry.get("remove_evidence")
+        if isinstance(raw_remove_keys, list):
+            for key in raw_remove_keys:
+                if len(remove_keys) >= _OUTLINE_MAX_EVIDENCE:
+                    break
+                text = _outline_text(key, _OUTLINE_EVIDENCE_KEY_CHARS)
+                if text and text not in remove_keys:
+                    remove_keys.append(text)
         sections.append(OutlineSection(
             id=section_id, title=title,
             parent=_outline_text(entry.get("parent"), _OUTLINE_ID_CHARS),
             evidence_keys=keys,
+            remove_evidence_keys=remove_keys,
         ))
     # 两层封顶:先算出「谁有父节」,再据此裁剪。必须在收齐所有节之后做——模型完全
     # 可能先写子节再写父节,边走边判会把合法的前向引用误判成非法。
@@ -508,10 +521,9 @@ def outline_binding_keys(collected, elements, chunks) -> set:
     两条边界,方向相反,都要守住:
 
     * 口径是「这一轮的检索产出过它」,而**不是**「上一轮的候选摘要恰好渲染了它」。
-      这一条是被 `update_outline` 的全量替换语义逼出来的:`_summarize` 对候选池开
-      的是头尾窗口(超窗的中间部分不展示),而模型每次都必须重提整份大纲。按「本轮
-      展示过」判合法,第 3 轮绑上的证据会在第 5 轮因为窗口滑动变成非法键被丢掉——
-      模型什么都没做错,绑定却在悄悄蒸发。候选只增不减,所以累计口径是单调的。
+      `_summarize` 对候选池开的是头尾窗口(超窗的中间部分不展示),但同 id 节的旧绑定
+      由服务端持续持有并参与 union;若合法集只看当前窗口,一个已经持有的旧键会在窗口
+      滑走后反过来被事实层判成非法。候选只增不减,所以累计口径与持久绑定同样单调。
     * 反过来,合法集必须 **⊆ 模型可见**。所以 v1 **不含枚举清单条目的 id**:枚举
       账目按合同只回覆盖计数、不回条目 id(元素/知识对象清单一个字的正文都不带),
       模型根本拿不到那些 id,把它们放进合法集只是一片没人能踩到的死面——而它同时
@@ -548,8 +560,54 @@ def bind_outline_evidence(
         bound.append(OutlineSection(
             id=section.id, title=section.title, parent=section.parent,
             evidence_keys=keys,
+            remove_evidence_keys=list(section.remove_evidence_keys),
         ))
     return bound, dropped
+
+
+def merge_outline_evidence(
+    previous: List[OutlineSection],
+    submitted: List[OutlineSection],
+    legal_keys: set,
+) -> Tuple[List[OutlineSection], int, Dict[str, List[str]], int]:
+    """合并一次整份大纲提交,保住同 id 节已经绑定的证据。
+
+    章节结构仍是全量替换:上一份里被整个省略的 section 会消失。证据则是单独的
+    citation-persistence 合同:同 id 节先应用 ``remove_evidence`` 显式删除,再把
+    本次合法 ``evidence`` 与剩余旧键取并集。遗漏一个 evidence key 不再等于删除。
+
+    每节 8 键硬顶下旧键优先。装不下的**新**键不静默挤掉旧绑定,而是按 section id
+    返回给账目回喂,让模型下一轮用 ``remove_evidence`` 明确腾位后再加。返回值依次为
+    ``(merged, invalid_count, overflow_by_section, removed_count)``。
+    """
+    bound, dropped = bind_outline_evidence(submitted, legal_keys)
+    old_by_id = {section.id: section for section in previous}
+    merged: List[OutlineSection] = []
+    overflow: Dict[str, List[str]] = {}
+    removed = 0
+    for section in bound:
+        old = old_by_id.get(section.id)
+        old_keys = list(old.evidence_keys) if old is not None else []
+        remove_keys = set(section.remove_evidence_keys)
+        retained = [key for key in old_keys if key not in remove_keys]
+        removed += len(old_keys) - len(retained)
+        keys = retained
+        for key in section.evidence_keys:
+            # 显式删除优先于同一提交里的重新添加,避免一个自相矛盾的载荷靠字段
+            # 解析顺序得到不同结果。
+            if key in remove_keys or key in keys:
+                continue
+            if len(keys) >= _OUTLINE_MAX_EVIDENCE:
+                overflow.setdefault(section.id, []).append(key)
+                continue
+            keys.append(key)
+        merged.append(OutlineSection(
+            id=section.id,
+            title=section.title,
+            parent=section.parent,
+            evidence_keys=keys,
+        ))
+    return merged, dropped, overflow, removed
 
 
 def outline_truncated_kg_evidence(
@@ -618,19 +676,22 @@ def outline_signature(sections: List[OutlineSection]) -> tuple:
     )
 
 
-def _outline_note(sections: List[OutlineSection], updates_left: int) -> str:
+def _outline_note(
+    sections: List[OutlineSection],
+    updates_left: int,
+    overflow: Optional[Dict[str, List[str]]] = None,
+) -> str:
     """把大纲便签回喂给 reflect(镜像 visited / attempted / 枚举三份账目)。
 
     **这一份必须携带整份大纲的内容,而不只是账目**,理由是机制性的:reflect 的
-    prompt 没有对话历史(每轮都是一条全新的 user message),而 `update_outline`
-    是全量替换语义——模型手上唯一一份「我上次交了什么」就是这段回喂。只报节数与
-    空节名的话,它每一轮都只能凭记忆重建,绑定会逐轮蒸发,全量替换反而成了持续
-    掉证据的机器。
+    prompt 没有对话历史(每轮都是一条全新的 user message),而章节结构是全量替换——
+    模型手上唯一一份「我上次交了什么」就是这段回喂。证据遗漏已有服务端 union
+    保底,但只报节数与空节名仍会让模型无法保留/调整原来的章节结构。
 
     有界性仍然成立,且是**常数级**:12 节 × (32 id + 60 标题 + 32 parent +
-    8 × 48 证据 key) + 固定文案 ≈ 6.5KB 的最坏情况,与语料规模无关;真实 id 约
-    15–36 字符,典型值在 1–3KB。这只在 exhaustive 档出现,那一档的证据预算是
-    16k/120k 字符。
+    8 × 48 证据 key) + 固定文案 ≈ 6.5KB;一次 union 溢出还可多带至多同形的
+    12 × 8 个新 key,总量仍是与语料规模无关的常数级。真实 id 约 15–36 字符,
+    典型值在 1–3KB。这只在 exhaustive 档出现,那一档的证据预算是 16k/120k 字符。
 
     ``updates_left`` 是本 run 还剩几次 update_outline(照集合地图那条剩余额度行的
     先例)。额度耗尽后措辞整段换成「已定稿、别再提交」:便签本身就是模型下一步动作
@@ -651,6 +712,23 @@ def _outline_note(sections: List[OutlineSection], updates_left: int) -> str:
         + "。这些节就是下一步该定向检索的方向。"
         if empty else ""
     )
+    overflow_lines = []
+    by_id = {section.id: section for section in sections}
+    for section_id, keys in (overflow or {}).items():
+        section = by_id.get(section_id)
+        if section is None or not keys:
+            continue
+        overflow_lines.append(
+            f"- {section_id}「{section.title}」未接纳新证据: "
+            + "、".join(keys)
+        )
+    overflow_note = (
+        "\n本次因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
+        + "\n".join(overflow_lines)
+        + "\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,"
+          "并继续把要加入的 key 放在 evidence。"
+        if overflow_lines else ""
+    )
     if updates_left <= 0:
         head = (
             "（本轮大纲便签(已定稿:整理次数已用完,不要再提交 update_outline;"
@@ -658,10 +736,12 @@ def _outline_note(sections: List[OutlineSection], updates_left: int) -> str:
         )
     else:
         head = (
-            "（本轮大纲便签。update_outline 会整体替换它,再次提交时必须原样带上你仍要"
-            f"保留的每一节及其证据 id,漏掉的会丢失;还可以再整理 {updates_left} 次:\n"
+            "（本轮大纲便签。update_outline 会整体替换章节结构,再次提交时必须带上仍要"
+            "保留的每一节;相同 id 节的 evidence 与旧绑定取并集,遗漏不会删除旧证据,"
+            "要删除请在该节 remove_evidence 中点名;"
+            f"还可以再整理 {updates_left} 次:\n"
         )
-    return head + "\n".join(lines) + tail + "）"
+    return head + "\n".join(lines) + tail + overflow_note + "）"
 
 
 def outline_wiring_active(settings, limits) -> bool:
@@ -949,9 +1029,9 @@ class ReflectDecision:
     # 模型给了 collection 但不是合法值时留下的原值,仅用于把 skip 文案写成教学式
     # (「该给什么」),从不参与分派。
     enumerate_collection_rejected: str = ""
-    # update_outline 携带的**整份**大纲(全量替换语义)。解析期只夹形状与边界;
-    # 证据 key 的合法性要看 run 局部的候选集合,由 run() 用 bind_outline_evidence
-    # 判——reflect() 在那一层根本不知道候选是什么。
+    # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
+    # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
+    # reflect() 在这一层根本不知道候选是什么。
     outline_sections: List[OutlineSection] = field(default_factory=list)
     reason: str = ""
 
@@ -1557,6 +1637,7 @@ class ReasoningRetriever:
         outline_active = outline_wiring_active(self.settings, limits)
         outline: List[OutlineSection] = []
         outline_updates = 0
+        outline_overflow: Dict[str, List[str]] = {}
 
         # 每步耗时 = 相邻两次 record 的墙钟差(步在其工作完成后才 record,故
         # 差值即该步工作耗时);首步从 run 起点算(含 plan 的 LLM 时间)。
@@ -1873,7 +1954,7 @@ class ReasoningRetriever:
             「校验/预算/trace 语义完全一致」就成了一句要靠人复核的话——而这正是
             本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
             """
-            nonlocal outline, outline_updates
+            nonlocal outline, outline_updates, outline_overflow
             if outline_updates >= _MAX_OUTLINE_UPDATES:
                 # 措辞按「该给什么」写(exact_lookup 那条实测教训):只说
                 # 「不能再整理了」的话,模型下一轮往往再交一份大纲空转一步。
@@ -1897,9 +1978,10 @@ class ReasoningRetriever:
                 return
             outline_updates += 1
             # 绑定键的合法集合按**本 run 累计**的候选算,不按上一轮摘要展示过
-            # 什么算 —— 见 outline_binding_keys 的说明(全量替换 + 头尾窗口会让
-            # 「本轮展示过」这个口径持续吃掉合法绑定)。
-            bound, dropped = bind_outline_evidence(
+            # 什么算 —— 见 outline_binding_keys 的说明(服务端持有的旧绑定不能
+            # 因为头尾窗口滑走就反过来变成非法)。
+            bound, dropped, overflow, removed = merge_outline_evidence(
+                outline,
                 decision.outline_sections,
                 outline_binding_keys(collected, elements, chunks),
             )
@@ -1908,6 +1990,7 @@ class ReasoningRetriever:
             changed = outline_signature(bound) != outline_signature(outline)
             replaced = len(outline)
             outline = bound
+            outline_overflow = overflow
             empty = [s.title for s in bound if not s.evidence_keys]
             record(TraceStep(
                 step_type="outline",
@@ -1928,6 +2011,14 @@ class ReasoningRetriever:
                     # 的标识),但轨迹必须留痕,否则「模型一直在编 id」这种情况
                     # 没有任何地方看得出来。
                     "dropped_evidence": dropped,
+                    # 同 id 节证据取并集;旧键优先占满 8 键硬顶时,未接纳的新键
+                    # 必须可见并在下一轮账目点名,否则只是把「静默丢旧键」换成
+                    # 「静默丢新键」。
+                    "overflow_evidence": {
+                        section_id: list(keys)
+                        for section_id, keys in overflow.items()
+                    },
+                    "removed_evidence": removed,
                     "changed": changed,
                 }))
 
@@ -2009,7 +2100,8 @@ class ReasoningRetriever:
             # 而地图讲的是「库里有什么」。这一份还额外承担着大纲的记忆——reflect
             # 没有对话历史,模型要全量重提就只能从这里抄(见 _outline_note)。
             outline_note = _outline_note(
-                outline, _MAX_OUTLINE_UPDATES - outline_updates)
+                outline, _MAX_OUTLINE_UPDATES - outline_updates,
+                outline_overflow)
             if outline_note:
                 summary = f"{summary}\n\n{outline_note}"
             if collection_map_text:

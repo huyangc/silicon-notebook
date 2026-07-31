@@ -1,7 +1,7 @@
 """逐步推理的大纲便签(PR-3 O1,设计文档 §3.1)。
 
 覆盖:动作与门控(档位 × 开关四态)、schema/解析的有界夹取、绑定键的服务端校验、
-全量替换语义、每 run 预算、账目回喂(含它必须携带整份大纲的理由)、进展判定与
+章节全量替换/同 id 证据并集语义、每 run 预算、账目回喂、进展判定与
 stale 熔断的交互、trace 形状,以及一条 e2e:先枚举来源目录、再分两轮建大纲并补上
 空节的绑定。
 
@@ -23,6 +23,7 @@ from app.services.reasoning_retrieval import (
     OutlineSection,
     ReasoningRetriever,
     bind_outline_evidence,
+    merge_outline_evidence,
     outline_binding_keys,
     outline_signature,
     outline_wiring_active,
@@ -198,8 +199,10 @@ def test_prompt_and_schema_offer_the_action_only_when_gated_on():
     for phrase in ("survey", "inventory", "per-document treatment",
                    "comparison of several subjects"):
         assert phrase in on, phrase
-    # 全量替换语义 + 「从便签里重抄」——reflect 没有对话历史,不说这句就必然掉绑定。
-    assert "REPLACES the entire outline" in on
+    # 章节结构全量替换,证据按稳定 section id 做 citation-persistent union。
+    assert "REPLACES the section structure" in on
+    assert "evidence is UNIONED" in on
+    assert "remove_evidence" in on
     assert "outline scratchpad in the context below" in on
     # 空节是特性不是错误。
     assert "A section with NO evidence is not a failure" in on
@@ -207,7 +210,8 @@ def test_prompt_and_schema_offer_the_action_only_when_gated_on():
     assert "Do NOT open an outline for a single-fact question" in on
 
     schema_on = reflect_schema_hint(outline=True)
-    assert '"outline":{"sections":[{"id":"","title":"","parent":"","evidence":[""]}]}' in schema_on
+    assert ('"outline":{"sections":[{"id":"","title":"","parent":"",'
+            '"evidence":[""],"remove_evidence":[""]}]}' in schema_on)
     assert f"|{OUTLINE_ACTION}" in schema_on
     # 关闭态逐字回到接入前:模块级常量(枚举工具的冻结基线钉的就是它)不受影响。
     assert "outline" not in reflect_schema_hint()
@@ -291,6 +295,15 @@ def test_parse_clamps_every_documented_bound():
     # 截断保留的是**前** N 个,不是随机子集(同一份输入永远得到同一份大纲)。
     assert [s.id for s in sections] == [f"s{i}" for i in range(12)]
     assert sections[0].evidence_keys == [f"k0-{j}" for j in range(8)]
+
+
+def test_parse_clamps_and_deduplicates_explicit_evidence_removals():
+    section = parse_outline_sections({"sections": [{
+        "id": "s1", "title": "一节",
+        "remove_evidence": ["k1", None, "k1", *[f"k{n}" for n in range(2, 12)]],
+    }]})[0]
+
+    assert section.remove_evidence_keys == [f"k{n}" for n in range(1, 9)]
 
 
 def test_parse_clamps_long_ids_and_evidence_keys():
@@ -502,6 +515,50 @@ def test_binding_preserves_order_and_section_shape():
     assert dropped == 0
 
 
+def test_same_id_evidence_is_union_persistent_when_the_model_omits_it():
+    previous = [OutlineSection(
+        id="a", title="旧标题", evidence_keys=["k1", "k2"])]
+    submitted = [OutlineSection(
+        id="a", title="新标题", evidence_keys=["k3"])]
+
+    merged, dropped, overflow, removed = merge_outline_evidence(
+        previous, submitted, {"k1", "k2", "k3"})
+
+    assert [(s.id, s.title, s.evidence_keys) for s in merged] == [
+        ("a", "新标题", ["k1", "k2", "k3"])]
+    assert dropped == 0 and overflow == {} and removed == 0
+
+
+def test_explicit_removal_can_replace_old_evidence_without_resurrecting_it():
+    previous = [OutlineSection(
+        id="a", title="一节", evidence_keys=["k1", "k2"])]
+    submitted = [OutlineSection(
+        id="a", title="一节", evidence_keys=["k1", "k3"],
+        remove_evidence_keys=["k1"])]
+
+    merged, dropped, overflow, removed = merge_outline_evidence(
+        previous, submitted, {"k1", "k2", "k3"})
+
+    # 同一提交里 remove 优先于 evidence,避免字段顺序决定结果。
+    assert merged[0].evidence_keys == ["k2", "k3"]
+    assert dropped == 0 and overflow == {} and removed == 1
+
+
+def test_union_overflow_keeps_old_keys_and_names_rejected_new_keys():
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    previous = [OutlineSection(
+        id="a", title="一节", evidence_keys=old_keys)]
+    submitted = [OutlineSection(
+        id="a", title="一节", evidence_keys=["new-1", "new-2"])]
+
+    merged, dropped, overflow, removed = merge_outline_evidence(
+        previous, submitted, set(old_keys) | {"new-1", "new-2"})
+
+    assert merged[0].evidence_keys == old_keys
+    assert overflow == {"a": ["new-1", "new-2"]}
+    assert dropped == 0 and removed == 0
+
+
 # --------------------------------------------------------------- 动作与 trace
 
 def test_update_outline_records_a_bounded_trace_step(repo):
@@ -534,7 +591,7 @@ def test_update_outline_records_a_bounded_trace_step(repo):
     ]
 
 
-def test_the_action_replaces_the_whole_outline(repo):
+def test_the_action_replaces_the_whole_section_structure(repo):
     notebook = _seed(repo)
     llm = _SeqLLM([
         _outline_action([{"id": "a", "title": "一"}, {"id": "b", "title": "二"}]),
@@ -547,6 +604,34 @@ def test_the_action_replaces_the_whole_outline(repo):
 
     assert [s.id for s in result.outline] == ["c"]
     assert _steps(result, "outline")[1].detail["replaced"] == 2
+
+
+def test_the_action_unions_same_id_evidence_and_feeds_back_overflow(repo, monkeypatch):
+    notebook = _seed(repo)
+    old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
+    new_keys = ["new-1", "new-2"]
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.outline_binding_keys",
+        lambda *_args: set(old_keys + new_keys),
+    )
+    repo.settings.reasoning_stale_limit = 99
+    llm = _SeqLLM([
+        _outline_action([{"id": "a", "title": "一节", "evidence": old_keys}]),
+        _outline_action([{"id": "a", "title": "一节", "evidence": new_keys}]),
+        ANSWER,
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
+
+    assert result.outline[0].evidence_keys == old_keys
+    second = _steps(result, "outline")[1]
+    assert second.detail["overflow_evidence"] == {"a": new_keys}
+    assert second.detail["removed_evidence"] == 0
+    fed = llm.reflect_prompts[2]
+    assert "未接纳新证据" in fed
+    assert "new-1、new-2" in fed
+    assert "remove_evidence" in fed
 
 
 def test_outline_updates_are_capped_per_run(repo):
@@ -596,8 +681,8 @@ def test_an_empty_submission_is_skipped_not_a_wipe(repo):
 def test_the_scratchpad_is_fed_back_with_enough_to_resubmit(repo):
     """账目必须携带**整份大纲**,不只是节数与空节名。
 
-    reflect 的 prompt 没有对话历史,而 update_outline 是全量替换语义:模型手上
-    唯一一份「我上次交了什么」就是这段回喂。只回账目的话,绑定会逐轮蒸发。
+    reflect 的 prompt 没有对话历史,章节结构仍是全量替换:模型手上唯一一份
+    「我上次交了什么」就是这段回喂。证据有服务端 union 保底,结构仍要完整重提。
     """
     notebook = _seed(repo)
     llm = _SeqLLM([
@@ -619,7 +704,8 @@ def test_the_scratchpad_is_fed_back_with_enough_to_resubmit(repo):
     assert "b「尚缺的方法」(隶属 a) 证据: (无)" in fed        # 层级也带上
     assert "无绑定证据的节: 「尚缺的方法」" in fed
     assert "这些节就是下一步该定向检索的方向" in fed
-    assert "整体替换" in fed and "漏掉的会丢失" in fed
+    assert "整体替换章节结构" in fed
+    assert "遗漏不会删除旧证据" in fed and "remove_evidence" in fed
     # 第一轮还没有大纲,那一段不该出现(空账目不占字符)。
     assert "本轮大纲便签" not in llm.reflect_prompts[0]
 
@@ -632,18 +718,27 @@ def test_the_scratchpad_note_is_constant_bounded():
     """
     worst = [
         OutlineSection(
-            id="i" * _OUTLINE_ID_CHARS,
+            id=f"s{index}" + "i" * (_OUTLINE_ID_CHARS - len(f"s{index}")),
             title="标" * _OUTLINE_TITLE_CHARS,
             parent="p" * _OUTLINE_ID_CHARS,
             evidence_keys=[f"{n}" + "k" * (_OUTLINE_EVIDENCE_KEY_CHARS - 1)
                            for n in range(_OUTLINE_MAX_EVIDENCE)],
         )
-        for _ in range(_OUTLINE_MAX_SECTIONS)
+        for index in range(_OUTLINE_MAX_SECTIONS)
     ]
+    overflow = {
+        section.id: [
+            f"{n}" + "x" * (_OUTLINE_EVIDENCE_KEY_CHARS - 1)
+            for n in range(_OUTLINE_MAX_EVIDENCE)
+        ]
+        for section in worst
+    }
 
     # 两种措辞(还有额度 / 已定稿)都要量:上界不能只在其中一支成立。
     assert len(_outline_note(worst, _MAX_OUTLINE_UPDATES)) < 8000
     assert len(_outline_note(worst, 0)) < 8000
+    # union 溢出是第二份同形有界列表;不能因为模型重复提交而无限累积。
+    assert len(_outline_note(worst, _MAX_OUTLINE_UPDATES, overflow)) < 14000
     assert _outline_note([], _MAX_OUTLINE_UPDATES) == ""
 
 
@@ -801,8 +896,8 @@ def test_run_wires_the_id_display_to_the_gate(repo, effort, ids_expected):
 def test_bindings_survive_the_candidate_window(repo):
     """合法键按**本 run 累计**算,不按上一轮摘要展示过什么算。
 
-    `_summarize` 对候选池开的是头尾窗口,而模型每轮都必须重提整份大纲:按「展示
-    过」判合法的话,早先绑上的证据会因为窗口滑动而在后面某一轮变成非法键被丢掉。
+    `_summarize` 对候选池开的是头尾窗口,但服务端会持续持有旧绑定:按「当前展示」
+    判合法的话,早先绑上的证据会因窗口滑动反过来被事实层判成非法。
     """
     from app.services.retrieval import RetrievedKnowledge
 

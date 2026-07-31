@@ -678,6 +678,9 @@ def test_two_bound_sections_are_synthesised_separately_and_concatenated(
     assert detail["outline_fallback"] is False
     assert detail["outline_skipped"] == []
     assert detail["included_elements"] == 2, "各节装配计数求和"
+    assert [item["grounded"] for item in detail["section_grounded"]] == [True, True]
+    assert detail["ungrounded_sections"] == []
+    assert response.evidence_level == "grounded"
 
 
 def test_a_child_first_outline_reaches_the_answer_in_document_order(
@@ -822,17 +825,8 @@ def test_the_synthesis_span_is_counted_exactly_once(repo, monkeypatch):
     assert synthesis_total == timed[0].duration_ms
 
 
-def test_a_single_grounded_section_grounds_the_whole_answer(repo, monkeypatch):
-    """`grounded = any(各节)` 是**刻意**的 v1 语义,不是没想清楚。
-
-    每节的 grounded 只描述**它自己**那一份切片;要求 all 会让一节合理的常识补充
-    (「(推断)……」)把整篇降级。真正的门仍在 classify_evidence —— 它还要求存在
-    相关度 >= tau_high 的**被引用**证据,所以 any 单独抬不高任何东西:下面 11 节
-    自报 false,唯一那节 true 且它引的元素分 0.9 >= tau_high(0.35),才落成 grounded。
-
-    按比例降级(例如 12 节里只有 1 节有据就不算 grounded)是**产品行为变更**,v1 不做,
-    留真机评估(设计文档 §3.1 已登记)。
-    """
+def test_one_grounded_section_caps_the_whole_answer_at_overview(repo, monkeypatch):
+    """部分支撑必须保留逐节测量信号,并把整体徽章封顶在 overview。"""
     count = 12
     elements = [_element(f"e{n}", f"要点{n}") for n in range(count)]
     outline = [_section(f"s{n}", f"第{n}节", f"e{n}") for n in range(count)]
@@ -852,8 +846,36 @@ def test_a_single_grounded_section_grounds_the_whole_answer(repo, monkeypatch):
 
     assert len(llm.prompts) == count
     assert [anchor.key for anchor in response.anchors] == [f"k{last_key}"]
-    assert _synthesis_detail(response)["evidence_level"] == "grounded"
-    assert response.grounded is True
+    detail = _synthesis_detail(response)
+    assert detail["evidence_level"] == "overview"
+    assert [item["grounded"] for item in detail["section_grounded"]] == [
+        *[False] * (count - 1), True]
+    assert detail["ungrounded_sections"] == [
+        f"第{n}节" for n in range(count - 1)]
+    assert response.evidence_level == "overview"
+    assert response.grounded is False
+
+
+def test_zero_grounded_sections_use_the_inferred_path(repo, monkeypatch):
+    """即使两节都引用了高分证据,零节通过自己的 grounding 门也不能跨节借分。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    first_key = AskService._ELEMENT_KEY_BASE + 1
+    second_key = OUTLINE_SECTION_KEY_STRIDE + AskService._ELEMENT_KEY_BASE + 1
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": f"第一节正文[k{first_key}]", "grounded": False},
+        {"answer": f"第二节正文[k{second_key}]", "grounded": False},
+    ])
+
+    response = _ask(repo, notebook, llm)
+
+    detail = _synthesis_detail(response)
+    assert [item["evidence_level"] for item in detail["section_grounded"]] == [
+        "overview", "overview"]
+    assert detail["ungrounded_sections"] == ["第一节", "第二节"]
+    assert detail["evidence_level"] == "inferred"
+    assert response.evidence_level == "inferred"
+    assert response.grounded is False
 
 
 def test_one_bound_section_keeps_the_one_shot_path(repo, monkeypatch):

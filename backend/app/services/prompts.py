@@ -447,7 +447,7 @@ def reflect_schema_hint(
         # of the scratchpad.
         outline_branch = (
             '"outline":{"sections":[{"id":"","title":"","parent":"",'
-            '"evidence":[""]}]},'
+            '"evidence":[""],"remove_evidence":[""]}]},'
         )
     return (
         '{"sufficient":false,"next_action":"' + actions + '","expand":'
@@ -554,10 +554,10 @@ def reflect_prompt(
     #   * WHEN — it earns its turns on answers that have structure to build
     #     (a survey, a roster-driven per-document treatment, a multi-subject
     #     comparison) and costs a pure turn on a single-fact question;
-    #   * REPLACE, not patch — every call carries the whole outline.  The reflect
-    #     prompt has no conversation history, so the model's only copy of what it
-    #     sent last is the scratchpad the server feeds back; it has to be told to
-    #     resend FROM that;
+    #   * the section structure is REPLACE, not patch, while evidence bindings on
+    #     a stable section id are citation-persistent unions.  The scratchpad is
+    #     still the model's only copy of the current structure because reflect has
+    #     no conversation history;
     #   * an empty section is the FEATURE — it names an uncovered aspect, which is
     #     exactly the signal the next retrieval action should target.  Without
     #     this sentence a model prunes its own gaps to make the outline look done.
@@ -570,10 +570,15 @@ def reflect_prompt(
         "title in the question's language, an optional parent (ONE nesting level "
         "— a section whose parent is itself a child is flattened), and evidence = "
         "the ids of candidates above that support it, copied exactly as they "
-        "appear in (id=...). This call REPLACES the entire outline: send every "
-        "section you still want, every time. Your previous outline is fed back to "
-        "you as the outline scratchpad in the context below — resend from it, "
-        "because anything you leave out is dropped. A section with NO evidence is "
+        "appear in (id=...). This call REPLACES the section structure: send every "
+        "section you still want, every time; an omitted section is dropped. For a "
+        "section with the same id, evidence is UNIONED with its existing bindings, "
+        "so omitting an evidence id does not delete it. To replace evidence, list "
+        "old bound ids in that section's remove_evidence and keep the desired new "
+        "ids in evidence; explicit removal wins if the same id appears in both. "
+        "Your previous outline is fed back as the outline scratchpad in the "
+        "context below. A section with "
+        "NO evidence is "
         "not a failure, it is the next retrieval direction: keep it in the "
         "outline, use add_subquery / the other retrieval actions to look for its "
         "material, and bind the ids you get in your next update_outline. "
