@@ -3657,22 +3657,49 @@ button.chat-session-card {
   gap: 5px;
 }
 
+/* 卡片头部的折叠开关。走 .chat-session-toggle 那一支既有的「胶囊 + 1px 描边 +
+   白底」口径,而不是静止时完全隐形、hover 才冒出一圈边的裸按钮:这张卡默认收起,
+   这颗按钮就是它唯一的入口,自己得先看得见。
+   border 必须写简写而不是只覆盖 border-color——<button> 的浏览器默认
+   border-style 是 outset,只改颜色会让描边渲染成 3D 斜面。 */
 .answer-collection-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   margin-left: auto;
-  padding: 4px 7px;
-  border-color: transparent;
-  background: transparent;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  background: #fff;
   color: #475569;
   font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transition: border-color .15s ease, background .15s ease, color .15s ease;
 }
 
 .answer-collection-toggle:hover {
-  border-color: var(--line);
-  background: #fff;
+  border-color: #9aa6b7;
+  background: #f7f9fc;
   color: var(--ink);
+}
+
+/* 展开态跟着它控制的内容走同一支蓝调(与 .answer-collection-open/-expand 同色系),
+   让开关和展开出来的清单看起来是一体的。 */
+.answer-collection-toggle[aria-expanded="true"] {
+  border-color: #c9d6f7;
+  background: #f2f6ff;
+  color: #1b4fcb;
+}
+
+/* 全局没有 :focus-visible 兜底,不给这条就是浏览器默认的黑色 focus ring——点开或
+   收起之后那圈黑框会一直挂在卡片头部(正是本次要修的观感问题)。口径对齐
+   .chat-answer-time-toggle。 */
+.answer-collection-toggle:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 55%, #fff);
+  outline-offset: 2px;
 }
 
 .answer-collection-content {
