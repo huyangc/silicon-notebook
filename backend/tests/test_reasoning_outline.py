@@ -1468,3 +1468,19 @@ def test_the_final_update_outline_still_obeys_the_budget(repo):
     assert [s.id for s in result.outline] == [
         f"s{_MAX_OUTLINE_UPDATES - 1}"]
     assert result.trace[-1].step_type == "answer"
+
+
+def test_parse_strips_citation_markers_from_titles():
+    """codex r6: 标题里的 `[k12]`/`[k12, k13]` 是引用形标记,不属于标题文案。
+    留着的话 `## 标题` 进最终 Markdown 后,前端对合并全文扫标记建引用表——
+    标题里的号要么显示成绑不上的裸引用,要么恰好撞上别节号段、绑到毫不相干
+    的证据。解析入口单点剥掉,trace 步/账目回喂/最终标题共用同一份产物。"""
+    sections = parse_outline_sections({"sections": [
+        {"id": "s1", "title": "结论 [k12] 汇总 [ k3, k4 ]", "evidence": []},
+    ]})
+    assert len(sections) == 1
+    assert sections[0].title == "结论 汇总"
+    # 整个标题都是标记时,剥完为空 → 与无标题条目同判,整条丢弃。
+    assert parse_outline_sections({"sections": [
+        {"id": "s2", "title": "[k5001]", "evidence": []},
+    ]}) == []

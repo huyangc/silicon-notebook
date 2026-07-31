@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextvars
 import json
 import math
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -370,6 +371,12 @@ _OUTLINE_TITLE_CHARS = 60
 _OUTLINE_ID_CHARS = 32
 _OUTLINE_EVIDENCE_KEY_CHARS = 48
 _OUTLINE_MAX_EVIDENCE = 8
+# 标题里的引用形标记(`[k12]`/`[k12, k13]`)在解析入口剥掉(codex r6):证据引用
+# 属于 evidence 字段,标题只是文案。放它留到 `## 标题` 进最终 Markdown 的话,
+# 前端是对合并全文扫标记建引用表的——标题里的 `[k5001]` 要么显示成一个绑不上
+# 的裸引用,要么恰好撞上别节号段、绑到毫不相干的证据。单一定义点在这里:
+# trace 步、账目回喂与最终标题共用同一份解析产物,一处剥、处处干净。
+_OUTLINE_TITLE_MARKER_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
 # 每 run 最多几次 update_outline。大纲本身不带来证据,所以它的成本是「轮次」:
 # 无上限时一个偏爱整理的模型可以把整份步骤预算花在反复重排目录上。6 次足够
 # 「建 → 补 3 轮 → 收尾」,而 exhaustive 档的 50 步预算仍有绝大部分留给检索。
@@ -434,7 +441,11 @@ def parse_outline_sections(raw: object) -> List[OutlineSection]:
             break
         if not isinstance(entry, dict):
             continue
-        title = _outline_text(entry.get("title"), _OUTLINE_TITLE_CHARS)
+        raw_title = entry.get("title")
+        if isinstance(raw_title, str):
+            # 先剥标记再压空白/截断:截断后再剥会把半截 `[k1` 留在标题里。
+            raw_title = _OUTLINE_TITLE_MARKER_RE.sub("", raw_title)
+        title = _outline_text(raw_title, _OUTLINE_TITLE_CHARS)
         if not title:
             continue
         section_id = _outline_text(entry.get("id"), _OUTLINE_ID_CHARS)

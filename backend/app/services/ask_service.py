@@ -2237,6 +2237,7 @@ class AskService:
             outline_slices: list = []
             outline_skipped: list[str] = []
             outline_attempted = False
+            outline_planned = False
             sectioned = None
             # 分节阶段可能记下的 model_error 起点。回退**成功**后要把这一段摘掉:
             # 那次故障已经被同一轮的重试路径吸收,用户拿到了完整答案,再挂一条红色
@@ -2267,6 +2268,7 @@ class AskService:
                         element_by_id={item.element_id: item for item in elements},
                         chunk_by_id={item.chunk_id: item for item in chunks},
                     )
+                    outline_planned = True
                     if len(outline_slices) >= 2:
                         outline_attempted = True
                         sectioned = self._answer_reasoning_sections(
@@ -2448,9 +2450,12 @@ class AskService:
                     },
                     duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
                 )
-                if outline_attempted:
-                    # 三个键只在按节合成**真的被尝试过**时出现:没有大纲、低档位
-                    # 与关闭态下 synthesis 步的 detail 逐键不变(冻结基线口径)。
+                if outline_planned:
+                    # 这组键在大纲**规划跑过**时就出现,而不只在按节合成真的被尝试
+                    # 过时(codex r6):大纲只装配出 1 个有证据节时按节合成被绕过,
+                    # 但另一节「问到了没找到」的披露不能跟着消失——否则单节答案看
+                    # 起来是完整的。没有大纲、低档位与关闭态下规划不会跑,synthesis
+                    # 步的 detail 仍逐键不变(冻结基线口径)。
                     synthesis_step.detail.update({
                         # 实际合成的节数;回退时为 0(分节产物已全部丢弃)。
                         "outline_sections": (

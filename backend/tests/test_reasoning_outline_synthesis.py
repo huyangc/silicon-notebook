@@ -890,8 +890,12 @@ def test_one_bound_section_keeps_the_one_shot_path(repo, monkeypatch):
     assert len(llm.prompts) == 1
     assert not response.answer.startswith("##")
     detail = _synthesis_detail(response)
-    assert "outline_sections" not in detail
-    assert "outline_fallback" not in detail
+    # codex r6 翻转:绕过按节合成不再抹掉披露键——规划跑过就写键集,空节
+    # 「没找到」的记录随之保留(见 test_bypassed_sectioned_synthesis_still_
+    # discloses_skipped_sections)。
+    assert detail["outline_sections"] == 0
+    assert detail["outline_fallback"] is False
+    assert detail["outline_skipped"] == ["空的"]
 
 
 def test_no_outline_leaves_the_synthesis_step_untouched(repo, monkeypatch):
@@ -1196,3 +1200,31 @@ def test_a_final_outline_submitted_with_sufficient_reaches_the_synthesis(repo):
                      if step.step_type == "outline"]
     assert len(outline_steps) == 1
     assert outline_steps[0].detail["empty_sections"] == []
+
+
+def test_bypassed_sectioned_synthesis_still_discloses_skipped_sections(
+    repo, monkeypatch
+):
+    """codex r6: 大纲只装配出 1 个有证据节 + 1 个空节时,按节合成被绕过
+    (<2 节走普通单次合成),但空节「问到了没找到」的披露不能跟着消失——旧
+    条件挂在 outline_attempted 上,这种单节答案会显得完整。键集条件放宽到
+    outline_planned(规划真的跑过);没有大纲/低档位/关闭态下规划不会跑,
+    synthesis 步 detail 仍逐键不变(冻结基线口径)。"""
+    outline = [
+        _section("s1", "有证据的一节", "e1"),
+        _section("s0", "没找到证据的一节"),
+    ]
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(outline=outline))
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    # 按节合成没有跑:单节走普通单次合成,答案里没有服务端加的节标题。
+    assert len(llm.prompts) == 1
+    assert "## 有证据的一节" not in response.answer
+    detail = _synthesis_detail(response)
+    assert detail["outline_skipped"] == ["没找到证据的一节"]
+    assert detail["outline_sections"] == 0
+    assert detail["outline_fallback"] is False
+    assert detail["section_grounded"] == []
+    assert detail["ungrounded_sections"] == []
