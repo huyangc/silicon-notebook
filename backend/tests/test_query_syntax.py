@@ -225,3 +225,84 @@ def test_min_length_floor_is_the_index_floor():
     short = "ab"
     assert len(short) < MIN_LEXICAL_TERM_CHARS
     assert quoted_phrases(f'"{short}" 是什么') == []
+
+
+# --- PostgreSQL Memory 候选:引号短语的转义与排序 ------------------------------
+def test_pg_memory_phrase_probes_are_escaped_and_ranked():
+    """短语探测必须转义 LIKE 元字符,并参与排序。
+
+    codex #410 round-7:①`set_db` / `100% coverage` 里的 `_`/`%` 不转义就成了通配,
+    把不含该短语的记忆放进有界候选池、挤掉真命中——而短语这条路径的全部意义就是
+    精确;②只按整句相似度排序,会在超过 limit 条松散命中时,把「只含短语、不含整句」
+    的那条在服务层的短语感知打分看到它之前就砍掉,正好废掉这次新增的独立探测。
+
+    这条不需要活的 PostgreSQL:它断言的是构造出来的 SQL 与参数,而 PG 集成门在
+    另一条泳道。同时静态核对占位符与参数数量——数不齐在真库上就是运行时炸。
+    """
+    import re
+
+    from app.repositories.postgres.search import (
+        MemoryCandidateScope,
+        _memory_match_predicates,
+        _memory_rank_expression,
+        memory_match_probes,
+    )
+
+    scope = MemoryCandidateScope(owner_id="u", viewer_id="u", notebook_id="n")
+    predicates, params = _memory_match_predicates(
+        "how does set_db work", scope, ["set_db", "100% coverage"]
+    )
+    patterns = [p for p in params if isinstance(p, str) and p.startswith("%")]
+    assert "%set\\_db%" in patterns, "短语的 `_` 必须转义,否则 setXdb 也进候选"
+    assert "%100\\% coverage%" in patterns
+    # 整句探测保持历史的未转义形态(放宽候选无害,收紧会静默改变既有召回)。
+    assert "%how does set_db work%" in patterns
+
+    probes = memory_match_probes("how does set_db work", ["set_db", "100% coverage"])
+    rank = _memory_rank_expression(probes)
+    assert rank.count("public.similarity") == 3 * len(probes), "每个探测都要能排序"
+
+    # 占位符与参数必须逐一对齐(ORDER BY 每个探测 3 个 + LIMIT 1)。
+    holes = len(re.findall(r"(?<!%)%s", " AND ".join(predicates).replace("%%", "\x00")))
+    rank_holes = len(re.findall(r"(?<!%)%s", rank.replace("%%", "\x00")))
+    assert holes + rank_holes + 1 == len(params) + 3 * len(probes) + 1
+
+
+def test_pg_memory_candidate_sql_ranks_every_probe():
+    """守的是 `memory_candidate_ids` 里的**接线**,不是那两个 helper。
+
+    ⚠ 只断言 helper 挡不住「helper 正确、调用点仍只按整句排序」——第一版守卫正是
+    这样打空的。这里用一个记录 SQL 的假连接直接观察真正发出去的语句,并核对占位符
+    与参数逐一对齐(数不齐在真库上就是运行时炸)。
+    """
+    import re
+
+    from app.repositories.postgres.search import (
+        MemoryCandidateScope,
+        memory_candidate_ids,
+    )
+
+    captured: dict = {}
+
+    class _Cursor:
+        def fetchall(self):
+            return []
+
+    class _Connection:
+        def execute(self, statement, params):
+            captured["sql"] = statement
+            captured["params"] = list(params)
+            return _Cursor()
+
+    memory_candidate_ids(
+        _Connection(),
+        "how does set_db work",
+        10,
+        scope=MemoryCandidateScope(owner_id="u", viewer_id="u", notebook_id="n"),
+        phrase_queries=["set_db", "timing closure"],
+    )
+    order_by = captured["sql"].split("ORDER BY", 1)[1]
+    assert order_by.count("public.similarity") == 9, (
+        "3 个探测 × 3 列都要进排序,否则只含短语的记忆在 LIMIT 前就被砍掉")
+    holes = len(re.findall(r"(?<!%)%s", captured["sql"].replace("%%", "\x00")))
+    assert holes == len(captured["params"])
