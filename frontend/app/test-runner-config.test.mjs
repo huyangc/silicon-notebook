@@ -17,7 +17,7 @@ test("frontend Node tests import TypeScript modules under explicit ESM mode", ()
 test("frontend test command runs pure and component suites", () => {
   assert.equal(
     packageJson.scripts["test:node"],
-    "node --test $(find app -name '*.test.mjs' -type f -print)",
+    "node --test --test-concurrency=4 $(find app -name '*.test.mjs' -type f -print)",
   );
   assert.equal(packageJson.scripts["test:component"], "vitest run");
   assert.equal(
@@ -29,4 +29,5 @@ test("frontend test command runs pure and component suites", () => {
 test("component tests have an exclusive suffix and jsdom environment", () => {
   assert.match(vitestConfig, /include:\s*\["app\/\*\*\/\*\.component\.test\.tsx"\]/);
   assert.match(vitestConfig, /environment:\s*"jsdom"/);
+  assert.match(vitestConfig, /maxWorkers:\s*4/);
 });

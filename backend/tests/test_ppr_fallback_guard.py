@@ -12,6 +12,9 @@ Fix 2:scale_ppr 的每个 return [] 出口都发 scale_ppr_bailout 事件(fail-o
 仅凭 events.jsonl 就能诊断 scale_ppr 为何返回空。
 """
 import json
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -109,6 +112,39 @@ def _capture_events(repo, monkeypatch):
     return events
 
 
+def _stub_scale_participant(repo, monkeypatch, notebook_id, *, ann_labels=()):
+    """Install the smallest participant needed by bailout-only tests.
+
+    These tests own event payload/control flow, not artifact serialization or
+    PPR numerics. Real ScaleIndex build/open/query coverage remains in
+    test_ppr_retrieve's self-index integration tests, so rebuilding the same
+    two-node artifact for every bailout branch only duplicates setup cost.
+    """
+    labels = list(ann_labels)
+    node_ids = [*labels, "cA"]
+    index = SimpleNamespace(ann_labels=labels, manifest={"dim": 16})
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "_scale_index",
+        lambda candidate_id, allow_stale=False: (
+            index if candidate_id == notebook_id else None
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.graph,
+        "_scale_combined_graph",
+        lambda *_args, **_kwargs: {
+            "combined_ids": node_ids,
+            # The zero-reset branches return before matrix multiplication; only
+            # dtype participates in reset allocation.
+            "combined_A": SimpleNamespace(dtype="float32"),
+            "combined_index": {node_id: i for i, node_id in enumerate(node_ids)},
+            "combined_chunk_ids": ["cA"],
+            "combined_idf": [1.0] * len(node_ids),
+        },
+    )
+
+
 # ── Fix 1: large-notebook fallback guard ────────────────────────────────────
 
 def test_large_notebook_refuses_rustworkx_fallback(repo, monkeypatch):
@@ -201,11 +237,8 @@ def test_scale_ppr_no_participants_bailout_event(repo, monkeypatch):
 def test_scale_ppr_zero_reset_bailout_carries_seed_diagnostics(repo, monkeypatch):
     """强制无 embedding(qvec=None)+ chunk 检索为空 → reset 全零 → scale_ppr_bailout
     (zero_reset)事件携带种子诊断(ann_seeds/active_seeds/chunk_seeds/embed_ok)。"""
-    nb = _seed_two_doc_moe(nb_repo := repo)
-    repo.rebuild_unified_kg(nb.id)
-    repo.build_scale_index(nb.id)
-    with repo._write() as db:
-        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    nb = _seed_two_doc_moe(repo)
+    _stub_scale_participant(repo, monkeypatch, nb.id)
 
     monkeypatch.setattr(repo.retrieval.candidates, "_embed_query", lambda question: None)
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", lambda notebook_id, query, recall=0: ([], [], None))
@@ -227,26 +260,16 @@ def test_scale_ppr_zero_reset_bailout_carries_seed_diagnostics(repo, monkeypatch
     assert ev["chunk_seeds"] == 0
 
 
-def test_scale_ppr_zero_reset_folds_ann_source_skip_counts(embed_repo, monkeypatch):
+def test_scale_ppr_zero_reset_folds_ann_source_skip_counts(repo, monkeypatch):
     """dim 不匹配 / _open_scale_ann None 的逐 base 跳过,折叠进 zero_reset 诊断的
-    ann_sources_skipped 计数(而非一个 base 一条事件)。需要 KG 节点先有向量
-    (knowledge_embeddings)才会产生非空 ann_labels,让 _open_scale_ann 分支被真正触达
-    (故用 embed_repo:embedder_configured=True 才会真正写 knowledge_embeddings)。"""
-    repo = embed_repo
+    ann_sources_skipped 计数(而非一个 base 一条事件)。桩直接提供非空 ann_labels
+    与 query embedding,使执行流确定性进入 ANN-open 分支。"""
     nb = _seed_two_doc_moe(repo)
-    repo._embed_knowledge("e1", nb.id, {"name": "Mixture-of-Experts (MoE)"})
-    repo._embed_knowledge("e2", nb.id, {"name": "Mixture-of-Experts (MoE)"})
-    repo.rebuild_unified_kg(nb.id)
-    repo.build_scale_index(nb.id)
-    with repo._write() as db:
-        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    _stub_scale_participant(repo, monkeypatch, nb.id, ann_labels=("e1",))
 
+    monkeypatch.setattr(repo.retrieval.graph, "_embed_query", lambda _question: [1.0] * 16)
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", lambda notebook_id, query, recall=0: ([], [], None))
     monkeypatch.setattr(repo.retrieval.graph, "_open_scale_ann", lambda idx, kind: None)  # force ANN-open skip
-    # 3b (active brute-force cosine) uses knowledge_embeddings directly and would
-    # otherwise still seed reset (this notebook is both base and active/self) —
-    # neutralize it so the zero_reset bail is solely due to the ANN-open skip.
-    monkeypatch.setattr(repo.retrieval.candidates, "_vector_matrix", lambda db, nb_id, table, key: ([], None))
 
     events = _capture_events(repo, monkeypatch)
     result = repo.retrieval.graph.scale_ppr(nb.id, "Mixture of Experts")
@@ -260,14 +283,31 @@ def test_scale_ppr_zero_reset_folds_ann_source_skip_counts(embed_repo, monkeypat
 
 def test_scale_ppr_success_path_emits_no_bailout_event(repo, monkeypatch):
     """成功路径(命中非空排名)不应发任何 scale_ppr_bailout 事件(cheap:只在 bail 路径产生)。"""
-    nb = _seed_two_doc_moe(repo)
-    repo.rebuild_unified_kg(nb.id)
-    repo.build_scale_index(nb.id)
-    with repo._write() as db:
-        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (nb.id,))
+    nb = repo.create_notebook(NotebookCreate(name="kb"))
+    _stub_scale_participant(repo, monkeypatch, nb.id, ann_labels=("e1",))
+
+    class Ann:
+        def set_ef(self, _value):
+            pass
+
+        def knn_query(self, _query, k):
+            assert k >= 1
+            return [[0]], [[0.0]]
+
+    service = repo.retrieval.graph
+    monkeypatch.setattr(service, "_embed_query", lambda _question: [1.0] * 16)
+    monkeypatch.setattr(service, "_open_scale_ann", lambda *_args: Ann())
+    monkeypatch.setattr(service, "_retrieve_chunks", lambda *_args: ([], [], None))
+    import app.services.kg.scale_index as scale_index
+
+    monkeypatch.setattr(
+        scale_index,
+        "personalized_ppr",
+        lambda _transition, reset, **_kwargs: np.array([0.25, 0.75]),
+    )
 
     events = _capture_events(repo, monkeypatch)
-    result = repo.retrieval.graph.scale_ppr(nb.id, "Mixture of Experts")
+    result = service.scale_ppr(nb.id, "Mixture of Experts")
 
     assert result != []
     assert [e for e in events if e.get("kind") == "scale_ppr_bailout"] == []

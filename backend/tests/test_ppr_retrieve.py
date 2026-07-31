@@ -1,4 +1,6 @@
 import json
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from app.core.config import Settings
@@ -551,15 +553,14 @@ def test_self_only_combined_graph_reuses_scale_index_identity(repo):
 def test_self_only_scale_ppr_preserves_float64_idf_seed_arithmetic(
     repo, monkeypatch
 ):
-    base = _seed_two_doc_moe(repo)
-    repo.rebuild_unified_kg(base.id)
-    repo.build_scale_index(base.id)
-    repo._preload_scale_retrieval_artifacts()
-    index = repo._scale_index(base.id, allow_stale=True)
-    target_id = index.node_ids[0]
-    index.ann_labels = [target_id]
-    target_position = index.node_index[target_id]
-    index.idf[target_position] = np.float32(1.0 / 3.0)
+    base = repo.create_notebook(NotebookCreate(name="kb"))
+    target_id = "e1"
+    target_position = 0
+    index = SimpleNamespace(
+        ann_labels=[target_id],
+        manifest={"dim": 16},
+    )
+    combined_idf = np.array([np.float32(1.0 / 3.0), 1.0], dtype=np.float32)
     similarity = 0.4465957211525855
 
     class Ann:
@@ -577,9 +578,26 @@ def test_self_only_scale_ppr_preserves_float64_idf_seed_arithmetic(
         return np.zeros_like(reset)
 
     service = repo.retrieval.graph
-    dimension = int(index.manifest["dim"])
     monkeypatch.setattr(
-        service, "_embed_query", lambda _question: [1.0] * dimension
+        service,
+        "_scale_index",
+        lambda notebook_id, allow_stale=False: (
+            index if notebook_id == base.id else None
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_scale_combined_graph",
+        lambda *_args, **_kwargs: {
+            "combined_ids": [target_id, "cA"],
+            "combined_A": SimpleNamespace(dtype=np.float64),
+            "combined_index": {target_id: target_position, "cA": 1},
+            "combined_chunk_ids": ["cA"],
+            "combined_idf": combined_idf,
+        },
+    )
+    monkeypatch.setattr(
+        service, "_embed_query", lambda _question: [1.0] * 16
     )
     monkeypatch.setattr(service, "_open_scale_ann", lambda *_args: Ann())
     monkeypatch.setattr(service, "_retrieve_chunks", lambda *_args: ([], [], None))

@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "test": "npm run test:node && npm run test:component",
-    "test:node": "node --test $(find app -name '*.test.mjs' -type f -print)",
+    "test:node": "node --test --test-concurrency=4 $(find app -name '*.test.mjs' -type f -print)",
     "test:component": "vitest run",
     "lint": "tsc --noEmit"
   },

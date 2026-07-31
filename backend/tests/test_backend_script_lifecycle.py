@@ -67,8 +67,14 @@ def test_backend_script_start_status_stop_with_default_authenticated_api(tmp_pat
     """Anonymous `/api/notebooks` is 401; readiness+OpenAPI still identify us."""
     port = _free_port()
     env = _env(tmp_path, port)
+    # A four-core hosted runner executes this real FastAPI cold start beside
+    # the frontend and three other backend workers. Keep the fast local poll
+    # cadence, but give that contended startup enough wall-clock budget; the
+    # dedicated timeout-path test below still uses one poll and an 8s wrapper.
+    env["START_TIMEOUT_SECONDS"] = "30"
+    env["_SCRIPT_TEST_START_MAX_POLLS"] = "1500"
     try:
-        started = _run("start", env, timeout=15)
+        started = _run("start", env, timeout=45)
         assert started.returncode == 0, started.stdout + started.stderr
         assert "启动成功" in started.stdout
 
