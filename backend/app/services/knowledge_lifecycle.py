@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 from types import SimpleNamespace
@@ -1321,56 +1322,125 @@ class KnowledgeLifecycleService:
                     job_id,
                 )
 
-    def _kg_target_pages(
-        self, notebook_id: str, mode: str
-    ) -> Iterator[Tuple[List[str], List[str], List[str]]]:
-        """Yield deterministic bounded inventory pages for a durable KG job."""
+    @staticmethod
+    def _is_partial_kg_error(error_message: str) -> bool:
+        if "retry_incomplete=1" in error_message:
+            return True
+        match = re.search(r"windows_failed=(\d+)/(\d+)", error_message)
+        return bool(match and int(match.group(1)) > 0)
+
+    def _kg_target_batches(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+    ) -> Iterator[Tuple[List[Tuple[str, bool]], List[str], List[str]]]:
+        """Yield bounded durable-job targets as ``(source_id, preserve_old)``.
+
+        The keyset advances over raw source rows, not over eligible targets.  A
+        sparse notebook therefore never asks PostgreSQL to scan an unbounded
+        prefix merely to find one page of missing/partial KG sources.
+        """
+        remaining = None if target_limit is None else max(0, int(target_limit))
+        if remaining == 0:
+            return
+        after_created_at = None
         after_id = ""
         while True:
             with self._connect() as db:
                 rows = self.knowledge.source_build_state_page(
                     db,
                     notebook_id,
+                    after_created_at,
                     after_id,
                     _SOURCE_BUILD_PAGE_SIZE,
                 )
             if not rows:
                 return
-            targets: List[str] = []
+            targets: List[Tuple[str, bool]] = []
             skipped: List[str] = []
             skipped_no_elements: List[str] = []
             for row in rows:
                 source_id = str(row["id"])
                 has_kg = bool(row["has_kg"])
+                has_graph = bool(row["has_graph"])
                 has_elements = bool(row["has_elements"])
+                is_partial = has_graph and self._is_partial_kg_error(
+                    str(row["latest_kg_error"] or "")
+                )
                 if mode == "rebuild":
-                    (targets if has_elements else skipped_no_elements).append(source_id)
-                elif has_kg:
+                    if has_elements:
+                        targets.append((source_id, False))
+                    else:
+                        skipped_no_elements.append(source_id)
+                elif retry_partial and is_partial:
+                    targets.append((source_id, True))
+                elif has_kg or is_partial:
                     skipped.append(source_id)
                 elif has_elements:
-                    targets.append(source_id)
+                    targets.append((source_id, False))
                 else:
                     skipped_no_elements.append(source_id)
+                if remaining is not None and len(targets) >= remaining:
+                    break
             yield targets, skipped, skipped_no_elements
+            if remaining is not None:
+                remaining -= len(targets)
+                if remaining <= 0:
+                    return
+            after_created_at = rows[-1]["created_at"]
             after_id = str(rows[-1]["id"])
             if len(rows) < _SOURCE_BUILD_PAGE_SIZE:
                 return
 
-    def _kg_target_count(self, notebook_id: str, mode: str) -> int:
+    def _kg_target_pages(
+        self, notebook_id: str, mode: str
+    ) -> Iterator[Tuple[List[str], List[str], List[str]]]:
+        """Compatibility projection used by existing diagnostics/tests."""
+        for targets, skipped, missing in self._kg_target_batches(
+            notebook_id, mode
+        ):
+            yield [source_id for source_id, _preserve in targets], skipped, missing
+
+    def _kg_target_count(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+    ) -> int:
         return sum(
             len(targets)
-            for targets, _skipped, _missing in self._kg_target_pages(
-                notebook_id, mode
+            for targets, _skipped, _missing in self._kg_target_batches(
+                notebook_id,
+                mode,
+                target_limit=target_limit,
+                retry_partial=retry_partial,
             )
         )
 
-    def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict:
+    def prepare_notebook_kg_job(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+    ) -> dict:
         if mode not in {"incremental", "rebuild"}:
             raise ValueError("unsupported KG build mode")
         self.get_notebook(notebook_id)
         if not self.model_clients.configured("kg_extract"):
             raise RuntimeError("LLM not configured; cannot build KG")
-        target_count = self._kg_target_count(notebook_id, mode)
+        target_count = self._kg_target_count(
+            notebook_id,
+            mode,
+            target_limit=target_limit,
+            retry_partial=retry_partial,
+        )
         # create_job 先 INSERT 再 get(job_id) 返回。信号落在「已提交、尚未返回」之间时
         # job 根本没被赋值,连下面那层守卫都进不去,行就永久留在 running。这里按
         # notebook 找回它——但只在**新出现**且仍 running 的行上动手:调用前后比对最新行
@@ -1437,7 +1507,7 @@ class KnowledgeLifecycleService:
     def _extract_targets(
         self,
         notebook_id: str,
-        targets: List[str],
+        targets: List[Tuple[str, bool]],
         skipped: List[str],
         skipped_no_elements: List[str],
         job_id: str,
@@ -1452,7 +1522,10 @@ class KnowledgeLifecycleService:
         done: List[str] = []
         failed: List[str] = []
 
-        def _extract_one(source_id: str) -> bool:
+        partial_retried: List[str] = []
+        partial_failed_preserved: List[str] = []
+
+        def _extract_one(source_id: str, preserve_existing: bool) -> bool:
             control.raise_if_aborted()
             self._set_source_status(source_id, "extracting")
             try:
@@ -1467,26 +1540,42 @@ class KnowledgeLifecycleService:
                 self._reconcile_extracted_terminal(
                     source_id,
                     lambda sid: self._run_extraction(
-                        sid, kg_client=controlled_client
+                        sid,
+                        kg_client=controlled_client,
+                        preserve_existing_until_complete=preserve_existing,
                     ),
                 )
+                if preserve_existing:
+                    partial_retried.append(source_id)
                 return True
             except KgBuildAborted:
                 self._set_source_status(
-                    source_id, "parsed", error_message=""
+                    source_id,
+                    "extracted" if preserve_existing else "parsed",
+                    error_message="",
                 )
+                if preserve_existing:
+                    partial_failed_preserved.append(source_id)
                 raise
             except (KeyboardInterrupt, SystemExit):
                 # 与上一支同一件事,只是中断继承 BaseException 接不到:不退回 'parsed'
                 # 这一篇来源就会一直显示「分析中」,直到后端重启才被兜底清理。
                 self._set_source_status(
-                    source_id, "parsed", error_message=""
+                    source_id,
+                    "extracted" if preserve_existing else "parsed",
+                    error_message="",
                 )
+                if preserve_existing:
+                    partial_failed_preserved.append(source_id)
                 raise
             except Exception:  # noqa: BLE001 - isolate non-model source failure
                 self._set_source_status(
-                    source_id, "parsed", error_message=""
+                    source_id,
+                    "extracted" if preserve_existing else "parsed",
+                    error_message="",
                 )
+                if preserve_existing:
+                    partial_failed_preserved.append(source_id)
                 self.event_log.logger.exception(
                     "build_notebook_kg failed for %s", source_id
                 )
@@ -1518,7 +1607,7 @@ class KnowledgeLifecycleService:
             if future in processed or future.cancelled():
                 return None
             processed.add(future)
-            source_id = futures[future]
+            source_id, _preserve_existing = futures[future]
             try:
                 succeeded = bool(future.result())
             except KgBuildAborted as exc:
@@ -1545,11 +1634,11 @@ class KnowledgeLifecycleService:
             return None
 
         try:
-            for source_id in targets:
+            for source_id, preserve_existing in targets:
                 future = _kg_scheduler.submit_tracked_job(
-                    accepted, _extract_one, source_id
+                    accepted, _extract_one, source_id, preserve_existing
                 )
-                futures[future] = source_id
+                futures[future] = (source_id, preserve_existing)
             for future in _cf.as_completed(futures):
                 abort = _record_result(future)
                 if abort is None:
@@ -1597,10 +1686,12 @@ class KnowledgeLifecycleService:
             "failed": failed,
             "skipped": skipped,
             "skipped_no_elements": skipped_no_elements,
+            "partial_retried": sorted(partial_retried),
+            "partial_failed_preserved": sorted(partial_failed_preserved),
         }
 
     def _run_success_side_effects(
-        self, notebook_id: str, result: dict
+        self, notebook_id: str, result: dict, *, enqueue_fold: bool = True
     ) -> None:
         try:
             self._mark_unified_kg_dirty(notebook_id)
@@ -1623,7 +1714,8 @@ class KnowledgeLifecycleService:
                 self.event_log.logger.exception(
                     "build_notebook_kg: relink failed for %s", notebook_id
                 )
-        self.scale_artifacts.maybe_enqueue_fold(notebook_id)
+        if enqueue_fold:
+            self.scale_artifacts.maybe_enqueue_fold(notebook_id)
 
     def _run_notebook_kg_job(
         self,
@@ -1631,6 +1723,10 @@ class KnowledgeLifecycleService:
         job_id: str,
         mode: str,
         progress=None,
+        *,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+        finalize: Callable[[dict], dict | None] | None = None,
     ) -> dict:
         job = self.kg_build_jobs.get(job_id)
         if (
@@ -1709,10 +1805,15 @@ class KnowledgeLifecycleService:
                 "failed": [],
                 "skipped": [],
                 "skipped_no_elements": [],
+                "partial_retried": [],
+                "partial_failed_preserved": [],
             }
             processed = 0
-            for targets, skipped, skipped_no_elements in self._kg_target_pages(
-                notebook_id, "incremental"
+            for targets, skipped, skipped_no_elements in self._kg_target_batches(
+                notebook_id,
+                "incremental",
+                target_limit=target_limit,
+                retry_partial=retry_partial,
             ):
                 self._warn_skipped_sources(skipped_no_elements)
 
@@ -1746,7 +1847,13 @@ class KnowledgeLifecycleService:
                 for key in result:
                     result[key].extend(page_result[key])
                 processed += len(targets)
-            self._run_success_side_effects(notebook_id, result)
+            self._run_success_side_effects(
+                notebook_id, result, enqueue_fold=finalize is None
+            )
+            if finalize is not None:
+                finalized = finalize(result)
+                if finalized:
+                    result.update(finalized)
             self.kg_build_jobs.finish(job_id, "succeeded")
             self._emit_kg_build_event(
                 "kg_build_succeeded",
@@ -1884,21 +1991,43 @@ class KnowledgeLifecycleService:
         self._absorbing_repeated_termination(job_id, _settle)
 
     def build_notebook_kg(
-        self, notebook_id: str, *, progress=None, job_id: str | None = None
+        self,
+        notebook_id: str,
+        *,
+        progress=None,
+        job_id: str | None = None,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+        finalize: Callable[[dict], dict | None] | None = None,
     ) -> dict:
         if job_id is None:
             job_id = self.prepare_notebook_kg_job(
-                notebook_id, "incremental"
+                notebook_id,
+                "incremental",
+                target_limit=target_limit,
+                retry_partial=retry_partial,
             )["id"]
             try:
                 return self._run_notebook_kg_job(
-                    notebook_id, job_id, "incremental", progress
+                    notebook_id,
+                    job_id,
+                    "incremental",
+                    progress,
+                    target_limit=target_limit,
+                    retry_partial=retry_partial,
+                    finalize=finalize,
                 )
             except (KeyboardInterrupt, SystemExit):
                 self._settle_unentered_job(job_id, notebook_id)
                 raise
         return self._run_notebook_kg_job(
-            notebook_id, job_id, "incremental", progress
+            notebook_id,
+            job_id,
+            "incremental",
+            progress,
+            target_limit=target_limit,
+            retry_partial=retry_partial,
+            finalize=finalize,
         )
 
     def execute_notebook_kg_job(
@@ -1908,10 +2037,18 @@ class KnowledgeLifecycleService:
         mode: str,
         *,
         progress=None,
+        target_limit: int | None = None,
+        retry_partial: bool = False,
+        finalize: Callable[[dict], dict | None] | None = None,
     ) -> dict:
         if mode == "incremental":
             return self.build_notebook_kg(
-                notebook_id, progress=progress, job_id=job_id
+                notebook_id,
+                progress=progress,
+                job_id=job_id,
+                target_limit=target_limit,
+                retry_partial=retry_partial,
+                finalize=finalize,
             )
         if mode == "rebuild":
             return self.rebuild_notebook_kg(

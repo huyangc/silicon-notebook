@@ -221,23 +221,43 @@ class KnowledgeStore:
 
     @staticmethod
     def source_build_state_page(
-        db: sqlite3.Connection, notebook_id: str, after_id: str, limit: int
+        db: sqlite3.Connection,
+        notebook_id: str,
+        after_created_at: str | None,
+        after_id: str,
+        limit: int,
     ):
-        """Bounded source state for durable full-notebook extraction."""
+        """Bounded source state using the existing notebook/created index."""
         return db.execute(
-            "SELECT s.id,"
+            "SELECT s.id,s.created_at,"
             "EXISTS(SELECT 1 FROM source_elements e WHERE e.source_id=s.id) "
             "AS has_elements,"
+            "EXISTS(SELECT 1 FROM knowledge_objects ko "
+            " WHERE ko.notebook_id=? AND ko.source_id=s.id AND ko.source_id!='') "
+            "AS has_graph,"
             "EXISTS(SELECT 1 FROM knowledge_objects ko "
             " WHERE ko.notebook_id=? AND ko.source_id=s.id AND ko.source_id!='' "
             " AND COALESCE((SELECT er.status FROM extraction_runs er "
             "  WHERE er.source_id=s.id AND er.run_type='kg' "
             "  ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'completed')"
-            " ='completed') AS has_kg "
-            "FROM sources s WHERE s.notebook_id=? AND s.id>? "
+            " ='completed') AS has_kg,"
+            "COALESCE((SELECT er.error_message FROM extraction_runs er "
+            " WHERE er.source_id=s.id AND er.run_type='kg' "
+            " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+            "AS latest_kg_error "
+            "FROM sources s WHERE s.notebook_id=? "
+            "AND (? IS NULL OR (s.created_at,s.id)>(?,?)) "
             "AND s.source_type NOT IN ('memory','knowhow') "
-            "ORDER BY s.id LIMIT ?",
-            (notebook_id, notebook_id, after_id, max(1, int(limit))),
+            "ORDER BY s.created_at,s.id LIMIT ?",
+            (
+                notebook_id,
+                notebook_id,
+                notebook_id,
+                after_created_at,
+                after_created_at,
+                after_id,
+                max(1, int(limit)),
+            ),
         ).fetchall()
 
     @staticmethod

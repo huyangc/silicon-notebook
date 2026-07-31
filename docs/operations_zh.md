@@ -530,7 +530,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 `kg --retry-partial` 修复的是另一种状态：来源仍有 KG 对象，但最近一次 KG 抽取记录为 `windows_failed>0`。普通增量 `kg` 会把“已完成且已有对象”的来源视为已覆盖，不会自动重跑；显式加此参数后，它们会与正常缺 KG 来源一起进入目标集合。部分来源重试期间，旧对象和关系仍保持可读；若任一窗口再次失败或新结果为空，批处理会把本次尝试计为失败/未完整且旧图不变，只有“零失败窗口且非空”的新结果才会在一个事务内替换该来源的图。`--limit N` 限制“缺失 + 部分”合并后的目标数，`--no-rebuild` 可用于分批，末尾 rebuild/index 行为不变。它不是解析修复；没有 `source_elements` 的来源仍应使用 `reparse`。
 
-**中断 `kg` 运行，以及「同一知识库同时只允许一个分析」的守卫。** 同一个知识库同时只能有一个进行中的分析任务（持久任务表上的条件唯一索引）。正常结束的运行——成功、模型失败、Ctrl-C、`kill`（SIGTERM）——都会把任务行落到终态，因此重跑同一条命令即可继续未完成部分。Ctrl-C/SIGTERM 会合作式停掉在飞的模型窗口，并**等它们返回之后**才释放这个知识库，因此命令最多可能要等一次模型超时才退出——这个等待是刻意的：守卫在任务落终态那一刻就放开，仍在写入的工作线程绝不能活得比它久。它不会做的是继续为排队中的来源消耗模型额度。之后知识库里这次分析显示为已中断，已抽取的内容全部保留。`nohup` 运行不受影响：已被设为忽略的 SIGHUP 保持忽略，SSH 掉线不会杀掉批处理。信号转换只覆盖持有任务行的整库抽取；`kg --limit`/`--retry-partial`、`all`、`reparse`、`ingest`、`metadata` 保持 SIGTERM/SIGHUP 的默认立即终止，但收到 Ctrl-C/SystemExit 时会先取消排队 future、排空已接受任务，再释放离线维护锁和 repository。
+**中断 `kg` 运行，以及「同一知识库同时只允许一个分析」的守卫。** 同一个知识库同时只能有一个进行中的分析任务（持久任务表上的条件唯一索引）。正常结束的运行——成功、模型失败、Ctrl-C、`kill`（SIGTERM）——都会把任务行落到终态，因此重跑同一条命令即可继续未完成部分。所有 `kg` 抽取形态（含 `--limit` / `--retry-partial`）都会合作式停掉在飞的模型窗口，并**等抽取或 finalizer 线程池返回之后**才释放这个知识库，因此命令最多可能要等一次模型超时才退出。第一次 SIGINT/SIGTERM/SIGHUP 启动这条收尾，原 handler 还原前的重复信号会暂时被吸收，不能再次打断 executor shutdown，避免 durable 守卫释放后旧 worker 仍在写入。收尾不会继续为排队中的来源消耗模型额度；之后知识库里这次分析显示为已中断，已抽取的内容全部保留。`nohup` 运行不受影响：已被设为忽略的 SIGHUP 保持忽略，SSH 掉线不会杀掉批处理。非持久池化阶段（`all`、`reparse`、`ingest`、`metadata`）保持原有信号语义；收到 Ctrl-C/SystemExit 时会先取消排队 future、排空已接受任务，再释放离线维护锁和 repository。
 
 只有无法捕获的终止（`kill -9`、被 OOM 杀、掉电、机器重启）才会把任务行留在「进行中」。离线命令刻意不代为清理——它无法判断那一行是否属于一个仍在运行的后端——而是打印现存任务（阶段、完成/总数、最后更新时间）并以状态码 2 退出，而不是抛出数据库错误。若「最后更新」已长时间停滞，说明这行是残留：**重启后端服务即可清理**（启动时会把上一进程留下的进行中任务，连同搁浅的解析与投影一起落到终态）。若它确实还在运行（另一个 `batch_ingest` 进程，或网页端发起的分析），等它结束后重跑即可。
 
@@ -567,6 +567,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `all`、`kg`、`reparse`、`metadata`、`ingest` 和 `embed` 里的每次模型调用，都与在线请求共用系统模型服务调度器。各 workload 所绑定服务只从部署 TOML 读取一个模型容量参数 `max_concurrency`；批处理 CLI 不再提供模型并发覆盖项，增大 `--workers` 也不会乘大该服务上限。若一次限流留下缺失向量，之后用 `embed` 子命令补修。
 
+`kg` 的所有抽取形态都复用页面“分析”的 notebook 级持久任务：模型探活、单飞、熔断、进度和中断排空使用同一协议。`--limit` 在有界的原始 source keyset 页上累计目标，因此稀疏 PostgreSQL 大库不会为了凑满 eligible 页而无界扫描。批处理先补 KG 节点向量，再做统一聚类；聚类与按需 scale-index 完成后 durable job 才可成功。页面“继续分析”自动包含 partial completed run，CLI 用显式 `--retry-partial`；两者都在完整替换提交前保留旧图可读。
+
 例如：模型容量已经在部署 TOML 声明后，可单独提高来源管线并发：
 
 ```bash
@@ -578,7 +580,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 - `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`，显式值在 repository 构造前应用到本进程业务 scheduler；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--retry-partial`（仅 `kg`：安全重试最近一次有失败窗口且已有对象的来源）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`）、`--force`（仅 `metadata`）、`--dry-run`（只扫描预估）。模型并发不提供 CLI 覆盖参数，只取所绑定物理服务的 `max_concurrency`。`embed` 子命令补缺失的 chunk + element + 节点向量。
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 

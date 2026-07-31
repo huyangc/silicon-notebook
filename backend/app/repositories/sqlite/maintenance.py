@@ -808,7 +808,7 @@ class SQLiteMaintenanceAdapter:
         items: list[dict],
         progress=None,
         commit_every: Optional[int] = None,
-    ) -> None:
+    ) -> int:
         return self._runtime.source_embedding.embed_objects_batch(
             notebook_id, items, progress=progress, commit_every=commit_every
         )
@@ -860,6 +860,7 @@ class SQLiteMaintenanceAdapter:
             ).fetchone()["c"])
         after_id = ""
         scanned = 0
+        embedded = 0
         while True:
             with self._runtime.database.connect() as db:
                 rows = db.execute(
@@ -880,14 +881,14 @@ class SQLiteMaintenanceAdapter:
                 if not row["embedded"]
             ]
             if missing:
-                self._runtime.source_embedding.embed_objects_batch(
+                embedded += self._runtime.source_embedding.embed_objects_batch(
                     notebook_id, missing
                 )
             if progress:
                 progress(scanned, total)
             if len(rows) < 500:
                 break
-        return scanned
+        return embedded
 
     def node_embedding_counts(self, notebook_id: str) -> tuple:
         with self._runtime.database.connect() as db:

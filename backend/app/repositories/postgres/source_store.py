@@ -857,7 +857,15 @@ class SourceStore:
                 "SELECT r.status FROM extraction_runs r "
                 "WHERE r.source_id=o.source_id AND r.run_type='kg' "
                 "ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1"
-                "),'completed')='completed') AS ok",
+                "),'completed')='completed' AND NOT ("
+                "COALESCE((SELECT r.error_message FROM extraction_runs r "
+                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'') "
+                " ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR "
+                "strpos(COALESCE((SELECT r.error_message FROM extraction_runs r "
+                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),''),"
+                " 'retry_incomplete=1')>0)) AS ok",
                 (source_id,),
             ).fetchone()["ok"]
         )
@@ -914,7 +922,15 @@ class SourceStore:
                 f"WHERE o.source_id IN ({marker}) AND o.source_id<>'' "
                 "AND COALESCE((SELECT r.status FROM extraction_runs r "
                 "WHERE r.source_id=o.source_id AND r.run_type='kg' "
-                "ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'completed')='completed'",
+                "ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'completed')='completed' "
+                "AND NOT (COALESCE((SELECT r.error_message FROM extraction_runs r "
+                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'') "
+                " ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR "
+                "strpos(COALESCE((SELECT r.error_message FROM extraction_runs r "
+                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),''),"
+                " 'retry_incomplete=1')>0)",
                 batch,
             ).fetchall():
                 kg_extracted_ids.add(row["source_id"])

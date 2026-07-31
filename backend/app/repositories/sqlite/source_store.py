@@ -1087,6 +1087,14 @@ class SourceStore:
             "    WHERE er.source_id=ko.source_id AND er.run_type='kg' "
             "    ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
             "  ), 'completed')='completed'"
+            "  AND COALESCE((SELECT er.error_message FROM extraction_runs er "
+            "    WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+            "    ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+            "    NOT GLOB '*windows_failed=[1-9]*/*'"
+            "  AND instr(COALESCE((SELECT er.error_message FROM extraction_runs er "
+            "    WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+            "    ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),"
+            "    'retry_incomplete=1')=0"
             ")",
             (row["id"],),
         ).fetchone()[0])
@@ -1158,7 +1166,15 @@ class SourceStore:
                 "  SELECT er.status FROM extraction_runs er "
                 "  WHERE er.source_id=ko.source_id AND er.run_type='kg' "
                 "  ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
-                "), 'completed')='completed'",
+                "), 'completed')='completed' "
+                "AND COALESCE((SELECT er.error_message FROM extraction_runs er "
+                " WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+                " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),'') "
+                " NOT GLOB '*windows_failed=[1-9]*/*' "
+                "AND instr(COALESCE((SELECT er.error_message FROM extraction_runs er "
+                " WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+                " ORDER BY er.created_at DESC,er.rowid DESC LIMIT 1),''),"
+                " 'retry_incomplete=1')=0",
                 batch,
             ).fetchall():
                 kg_extracted_ids.add(r["source_id"])

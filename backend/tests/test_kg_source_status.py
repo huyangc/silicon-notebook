@@ -266,6 +266,71 @@ def test_failed_latest_extraction_does_not_hide_partial_source_graph(repo):
     assert skipped == []
 
 
+def test_completed_partial_run_remains_pending_and_is_retryable(repo):
+    """A completed transport run with failed windows is not a complete KG.
+
+    Normal inventory leaves its old graph visible but skips it; the page/CLI
+    repair policy selects it with preserve_existing=True.
+    """
+    nb = repo.create_notebook(NotebookCreate(name="partial completed"))
+    src_id = _insert_source(repo, nb.id)
+    repo._test_insert_object(
+        nb.id, "concept", {"name": "Partial"}, source_id=src_id
+    )
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            """
+            INSERT INTO extraction_runs
+            (id, notebook_id, source_id, run_type, status, error_message,
+             created_at, updated_at)
+            VALUES (?, ?, ?, 'kg', 'completed', 'windows_failed=1/3', ?, ?)
+            """,
+            (f"run-{uuid4().hex[:10]}", nb.id, src_id, now, now),
+        )
+    from app.repositories.sqlite import knowledge_counts_cache
+    knowledge_counts_cache.invalidate(nb.id)
+
+    assert repo.get_source(src_id).kg_extracted is False
+    assert repo.get_notebook(nb.id).kg_pending_sources == 1
+    lifecycle = repo._runtime.knowledge_lifecycle
+    normal = list(lifecycle._kg_target_batches(nb.id, "incremental"))
+    repair = list(lifecycle._kg_target_batches(
+        nb.id, "incremental", retry_partial=True
+    ))
+    assert normal == [([], [src_id], [])]
+    assert repair == [([(src_id, True)], [], [])]
+
+
+def test_failed_partial_run_with_existing_graph_is_retried_without_deleting(repo):
+    """A failed partial run must preserve the last usable graph on retry."""
+    nb = repo.create_notebook(NotebookCreate(name="failed partial"))
+    src_id = _insert_source(repo, nb.id)
+    repo._test_insert_object(
+        nb.id, "concept", {"name": "Still usable"}, source_id=src_id
+    )
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            """
+            INSERT INTO extraction_runs
+            (id, notebook_id, source_id, run_type, status, error_message,
+             created_at, updated_at)
+            VALUES (?, ?, ?, 'kg', 'failed', 'windows_failed=2/5', ?, ?)
+            """,
+            (f"run-{uuid4().hex[:10]}", nb.id, src_id, now, now),
+        )
+
+    lifecycle = repo._runtime.knowledge_lifecycle
+    normal = list(lifecycle._kg_target_batches(nb.id, "incremental"))
+    repair = list(lifecycle._kg_target_batches(
+        nb.id, "incremental", retry_partial=True
+    ))
+
+    assert normal == [([], [src_id], [])]
+    assert repair == [([(src_id, True)], [], [])]
+
+
 def test_completed_extraction_invalidates_prewarmed_pending_cache(repo):
     """Completing the run must refresh pending count without another KG write."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))

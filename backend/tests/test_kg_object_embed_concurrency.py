@@ -69,7 +69,7 @@ def test_object_producer_parallelism_comes_from_bound_workload(repo):
     }
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
 
-    repo._embed_objects_batch(notebook.id, _items(repo, notebook.id, 35))
+    assert repo._embed_objects_batch(notebook.id, _items(repo, notebook.id, 35)) == 35
 
     assert raw.maximum == 2
     assert ("embedding", "knowledge_object_embedding") in repo.recording_model_provider.calls
@@ -86,9 +86,17 @@ def test_object_failed_batch_isolated(repo):
     }
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
 
-    repo._embed_objects_batch(notebook.id, _items(repo, notebook.id, 30))
+    assert repo._embed_objects_batch(notebook.id, _items(repo, notebook.id, 30)) == 20
 
     with repo._connect() as db:
         assert db.execute(
             "SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?", (notebook.id,)
         ).fetchone()[0] == 20
+
+
+def test_object_batch_reports_zero_for_empty_payload(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+
+    assert repo._embed_objects_batch(
+        notebook.id, [{"_oid": "ko-empty", "payload": {}}]
+    ) == 0
