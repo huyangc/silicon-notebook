@@ -433,3 +433,45 @@ test("跳过步:未执行的已确认检索方向给出数量,不被通用分支
     "3 个候选",
   );
 });
+
+// codex r5:outline_skipped(大纲里有节但证据不足未进答案)与 ungrounded_sections
+// (成节但没过依据门)是按节合成的诚实披露,必须上屏——不显示的话用户拿到的是
+// 一份「看起来完整」的多节答案,却不知道少了哪节/哪节依据不足。
+test("收尾合成步渲染略过节与依据不足节的披露(有界:前 3 个标题+计数)", () => {
+  const base = { step_type: "synthesis", summary: "已生成答案" };
+  assert.equal(
+    getTraceStepDetail({
+      ...base,
+      detail: { anchors: 5, outline_skipped: ["背景"], ungrounded_sections: [] },
+    }),
+    "5 处引用 · 证据不足略过 1 节: 背景",
+  );
+  assert.equal(
+    getTraceStepDetail({
+      ...base,
+      detail: { anchors: 3, outline_skipped: [], ungrounded_sections: ["展望", "结论"] },
+    }),
+    "3 处引用 · 2 节依据不足: 展望、结论",
+  );
+  // 超过 3 个标题只点名前 3 个,余下用计数收口,折叠行不被 12×60 字符撑爆。
+  assert.equal(
+    getTraceStepDetail({
+      ...base,
+      detail: {
+        anchors: 8,
+        outline_skipped: ["甲", "乙", "丙", "丁", "戊"],
+        ungrounded_sections: [],
+      },
+    }),
+    "8 处引用 · 证据不足略过 5 节: 甲、乙、丙 等 5 节",
+  );
+  // 畸形 detail(非字符串成员)被过滤,不上屏也不抛异常;两份列表都空时逐字
+  // 回到既有「N 处引用」形态。
+  assert.equal(
+    getTraceStepDetail({
+      ...base,
+      detail: { anchors: 5, outline_skipped: [7, ""], ungrounded_sections: null },
+    }),
+    "5 处引用",
+  );
+});

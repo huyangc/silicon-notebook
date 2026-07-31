@@ -130,8 +130,23 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     // 仍留在 detail 里供排查,但不上屏:那是内部口径。included_kg/
     // included_chunks/included_elements 同理:PR-1 止血加的诊断字段,记录真正
     // 进入合成 prompt 的计数(区别于更早 answer 步的候选池计数),同样只供排查
-    // 不上屏,不在此处渲染。
-    return typeof detail.anchors === "number" ? `${detail.anchors} 处引用` : "";
+    // 不上屏,不在此处渲染。outline_skipped/ungrounded_sections 则相反,必须
+    // 上屏(codex r5):它们是按节合成的诚实披露——大纲里有节但答案里没有/
+    // 有节但没过依据门,不显示的话用户拿到的是一份「看起来完整」的多节答案。
+    // 标题服务端已截 60 字符、列表 ≤12 节,这里再收到前 3 个防折叠行超长。
+    const parts: string[] = [];
+    if (typeof detail.anchors === "number") parts.push(`${detail.anchors} 处引用`);
+    const sectionTitles = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((title): title is string => typeof title === "string" && !!title)
+        : [];
+    const nameSections = (titles: string[]): string =>
+      titles.slice(0, 3).join("、") + (titles.length > 3 ? ` 等 ${titles.length} 节` : "");
+    const skipped = sectionTitles(detail.outline_skipped);
+    if (skipped.length) parts.push(`证据不足略过 ${skipped.length} 节: ${nameSections(skipped)}`);
+    const ungrounded = sectionTitles(detail.ungrounded_sections);
+    if (ungrounded.length) parts.push(`${ungrounded.length} 节依据不足: ${nameSections(ungrounded)}`);
+    return parts.join(" · ");
   }
   if (step.step_type === "exact_lookup") {
     // terms 是服务端本轮真正探测过的名称(已按上限截过),不是问题里出现的全部。

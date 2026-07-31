@@ -540,9 +540,12 @@ expand_community），DualGraph 是临时从网页搭图；缺的是 OG 侧与�
 - **每节的字符预算沿用该档位的完整 `kg/chunk_context_chars`**，不再切分：一节至多 8 条证据，
   预算根本不会成为约束，切分只会引入一个永远不生效、却要解释的旋钮。
 - **代价登记（留给 O3）**：收尾那条 `synthesis` 步 detail 新增 `outline_sections`（实际合成节数）/
-  `outline_fallback`（bool）/ `outline_skipped`（被跳过的节标题，有界 ≤12×60 字符），另有每节一条
+  `outline_fallback`（bool）/ `outline_skipped`（被跳过的节标题，有界 ≤12×60 字符）/
+  `ungrounded_sections`（未过依据门的节标题，同界），另有每节一条
   带 `section_index`/`section_total`/`section_title` 的进度步（同为 `synthesis` 类型），前端
-  `reasoning-trace.ts` 需要为它们补渲染；答案文本新增 `## / ###` 两级标题（`globals.css` 的
+  `reasoning-trace.ts` 已为它们补渲染（进度步显示第几节；收尾步在「N 处引用」后披露
+  略过节与依据不足节，各只点名前 3 个标题、余下计数收口——codex r5：不渲染的话用户
+  拿到的是一份「看起来完整」的多节答案）；答案文本新增 `## / ###` 两级标题（`globals.css` 的
   `.chat-answer .answer-markdown h2/h3` 已在 O2 内定标，react-markdown 原生渲染）。
   ⚠ 那组字阶**必须**带 `.chat-answer` 前缀：`.answer-markdown` 是共用渲染管线类，深度报告容器
   写的是 `report-markdown answer-markdown`（同一元素两个类），裸选择器与 `.report-markdown h2`
