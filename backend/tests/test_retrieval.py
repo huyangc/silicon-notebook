@@ -196,6 +196,29 @@ def test_bm25_ranks_a_quoted_phrase_as_one_atomic_term():
     assert "scattered" in bm25_scores("static timing analysis", docs)
 
 
+def test_probe_basis_keeps_a_multi_word_name_atomic_and_words_historical():
+    """通道按「自己探测的名称」打分,多词短语在那里也不能被拆开。
+
+    codex #410 round-3 P2:名称传到打分点时引号早没了,若照旧拼成一个串再分词,
+    只是散落着 static/timing/analysis 的同节兄弟块会拿到该短语的满分覆盖率。
+    单词名称必须保持历史 token 口径不变——标识符探测的分数逐位照旧。
+    """
+    from app.services.retrieval import _tokens, probe_keyword_basis
+
+    basis = probe_keyword_basis(["static timing analysis"])
+    exact = "we run static timing analysis here"
+    scattered = "timing is static and the analysis follows"
+    assert basis.coverage(set(_tokens(exact)), exact) == 1.0
+    assert basis.coverage(set(_tokens(scattered)), scattered) == 0.0
+
+    # 单词名称:与 keyword_score 的历史口径逐位一致。
+    words = probe_keyword_basis(["set_db", "config.yaml"])
+    haystack = "set_db is described in config.yaml"
+    assert words.phrases == ()
+    assert words.coverage(set(_tokens(haystack)), haystack) == keyword_score(
+        "set_db config.yaml", haystack)
+
+
 def test_fuse_custom_weights_shift_balance():
     from app.services.retrieval import _fuse
     # 默认 0.4/0.6: 语义为 0 时融合分 = keyword * 0.4/(0.4+0.6) = 0.4

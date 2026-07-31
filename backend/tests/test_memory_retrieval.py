@@ -432,3 +432,45 @@ def test_deep_report_corpus_map_projects_confirmed_memory_only(memory_data):
 
     assert data.confirmed.title in corpus
     assert data.candidate.title not in corpus
+
+
+def test_quoted_query_splits_candidate_probe_from_phrase_scoring(memory_data):
+    """引号在 Memory 上的分工:候选去引号、评分留引号。
+
+    候选生成是对**整串**做 FTS/trigram 探测(不是拆好的词项表),引号字符直接进
+    pattern 就什么都匹配不到——所以候选侧必须先把标记去掉。评分侧相反:拿到的
+    是原串,短语仍须整段命中。
+
+    刻意未做(codex #410 round-3 P2,已在 PR 上说明并留了注释):把短语作为**独立
+    探测**加进候选生成。Memory 的候选一直是「整句作为一个 FTS 短语」,所以「只含
+    该短语、不含整句」的记忆在**加引号前后同样**进不了候选池——这是 Memory 既有
+    的粗粒度,不是引号带来的退化,本次改动对它只增不减。真要修得给 Memory 一份
+    与 chunk 同样的分解式词项探测,那是另一条召回契约的改动。
+    """
+    data = memory_data
+    retriever = data.repo._runtime.memory_retriever
+    seen: list[str] = []
+    original = retriever.store.memory_retrieval_rows
+
+    def spy(user_id, notebook_id, statuses, query, **kwargs):
+        seen.append(query)
+        return original(user_id, notebook_id, statuses, query, **kwargs)
+
+    retriever.store = SimpleNamespace(
+        memory_retrieval_rows=spy,
+        **{
+            name: getattr(retriever.store, name)
+            for name in dir(retriever.store)
+            if not name.startswith("_") and name != "memory_retrieval_rows"
+        },
+    )
+    token = set_request_user(data.alice)
+    try:
+        retriever.notebook_memory_hits(
+            data.alice.id, data.notebook.id, 'how does "timing closure" work', 8
+        )
+    finally:
+        reset_request_user(token)
+        retriever.store = original.__self__
+
+    assert seen == ["how does timing closure work"], "候选探测串必须已去掉引号标记"

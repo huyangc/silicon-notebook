@@ -31,7 +31,8 @@ from app.repositories.lexical_query import exact_probe_terms
 from app.services.retrieval import (
     RetrievalSupport,
     RetrievedChunk,
-    keyword_score,
+    _tokens,
+    probe_keyword_basis,
 )
 
 
@@ -308,7 +309,12 @@ def _build_chunks(
     own group — where a flat 1.0 degenerates to insertion order, i.e. document
     order, which is the order this channel wants anyway.
     """
-    probe = " ".join(terms)
+    # The terms arrive as bare strings, so a user-quoted phrase among them must
+    # be re-declared atomic; joining them into one string and re-tokenizing would
+    # give a sibling that merely scatters the phrase's words full relevance for a
+    # phrase it does not contain. Single-word names keep the historical token
+    # basis, so identifier probes are unaffected (codex #410 round-3 P2).
+    basis = probe_keyword_basis(terms)
     chunks: list[RetrievedChunk] = []
     seen: set[str] = set()
     for row in rows:
@@ -319,7 +325,7 @@ def _build_chunks(
         text = row["text"] or ""
         section_path = row["section_path"] or ""
         haystack = f"{section_path} {text}" if section_path else text
-        relevance = keyword_score(probe, haystack)
+        relevance = basis.coverage(set(_tokens(haystack)), haystack)
         chunks.append(
             RetrievedChunk(
                 chunk_id=chunk_id,

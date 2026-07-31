@@ -364,6 +364,27 @@ def keyword_basis(query: str, *, honor_quotes: bool = True) -> KeywordBasis:
     )
 
 
+def probe_keyword_basis(terms: Sequence[str]) -> KeywordBasis:
+    """Coverage basis for names a channel has ALREADY selected.
+
+    Used by producers that score against the terms they probed rather than
+    against the caller's query. The quotes are long gone by then — the terms are
+    bare strings — so a multi-word one has to be re-declared atomic here or the
+    scorer silently splits it again: a section sibling scattering `static`,
+    `timing` and `analysis` would take full relevance for a phrase it does not
+    contain (codex #410 round-3 P2).
+
+    Only a user-quoted phrase can be multi-word in this position, so single-word
+    names keep the historical token basis exactly — identifier probes score bit
+    for bit as they did.
+    """
+    phrases = tuple(_normalize(t) for t in terms if " " in str(t).strip())
+    words = " ".join(str(t) for t in terms if " " not in str(t).strip())
+    return KeywordBasis(
+        frozenset(t for t in _tokens(words) if t not in _STOPWORDS), phrases
+    )
+
+
 def keyword_score(query: str, text: str, *, honor_quotes: bool = True) -> float:
     """Fraction of the query's keyword basis present in the text (0..1).
 
