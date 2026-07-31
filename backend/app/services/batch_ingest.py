@@ -580,6 +580,18 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     if retry_partial and rebuild_only:
         raise ValueError("retry_partial 和 rebuild_only 互斥,不能同时为 True")
     if not rebuild_only and not repo.configured("kg_extract"):
+        # Preserve the historical extraction-only probe: plain --no-rebuild
+        # without a model is a successful no-op.  Bounded/partial runs still
+        # fail closed because their explicit target contract cannot be met.
+        if no_rebuild and limit is None and not retry_partial:
+            return {
+                "extracted": 0,
+                "failed": 0,
+                "partial_retried": 0,
+                "partial_failed_preserved": 0,
+                "clusters": 0,
+                "nodes_embedded": 0,
+            }
         raise RuntimeError("kg_extract workload 未绑定系统模型服务")
 
     log = log or (lambda _e: None)

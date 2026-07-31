@@ -1277,6 +1277,29 @@ def test_run_kg_limit_requires_llm(repo):
         bi.run_kg(repo, nb_id, limit=1)
 
 
+def test_run_kg_plain_no_rebuild_without_llm_is_noop(repo, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb")
+    monkeypatch.setattr(
+        repo,
+        "build_notebook_kg",
+        lambda *_args, **_kwargs: pytest.fail("durable KG job must not start"),
+    )
+    monkeypatch.setattr(
+        repo,
+        "rebuild_unified_kg",
+        lambda *_args, **_kwargs: pytest.fail("clustering must not start"),
+    )
+
+    assert bi.run_kg(repo, nb_id, no_rebuild=True) == {
+        "extracted": 0,
+        "failed": 0,
+        "partial_retried": 0,
+        "partial_failed_preserved": 0,
+        "clusters": 0,
+        "nodes_embedded": 0,
+    }
+
+
 # ── Task 2: embed 子命令 + run_embed ─────────────────────────────────────────
 
 def _seed_node(repo, nb_id, oid):
