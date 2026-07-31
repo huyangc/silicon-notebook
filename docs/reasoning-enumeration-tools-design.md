@@ -573,6 +573,63 @@ expand_community），DualGraph 是临时从网页搭图；缺的是 OG 侧与�
 
 每任务后双评审（spec-review + code-quality-review，opus），变异验证规矩同全篇。
 
+### 3.3 v2 合同 —— KG 弱支撑边回喂（kg-gap，PR-4，stacked 于 PR-3）
+
+DualGraph 共演化里 v1 只做了 OG→检索的一半（空节点名回喂）；KG→检索的定向缺口信号
+（Enrich：已绑定证据周边**支撑薄弱**的关系是综述最该补证的方向）是这条 PR 的全部内容。
+服务端算出有界候选、以便签行喂给模型，由模型用**既有动作**（add_subquery / follow_chain /
+expand_graph）决定要不要补——零新动作、零新模型调用、零 schema 变更。Explore（跨社区
+结构洞）仍刻意不做（v1 已否决 SBM；`kg_community_edges` 有独立新鲜度契约，接进来要多背
+一整套 stale 语义，ROI 未证）。
+
+**门控**：`REASONING_OUTLINE_KG_GAP_ENABLED`（默认 true，config.py 用 `validation_alias`）
+且 `outline_wiring_active`（即穷尽档+大纲总闸）。关闭态零查询、prompt 逐字不变——沿用
+「flag 关=执行处 skip、不改动作面」惯例。
+
+**触发与成本**（效率红线）：仅在**被接受的** `update_outline` apply 之后计算一次（被拒/
+空提交/纯结构轮不算白不算——没有新绑定就没有新邻域），每 run 天然 ≤6+1 次。每次三步、
+每步一条有界查询，全部走既有索引：
+1. 本次大纲绑定的 KG 对象 id 全集（≤12 节×8 键；element/chunk 键不参与——弱支撑边定义在
+   KG 图上）经既有 `cluster_fold_rows` 折叠成 canonical 集（有界、本轮 id，红线原文照守）。
+2. `canonical_relations` 按 `canonical_src IN (折叠集)` 的 **PK 前缀**探测，
+   `support_count <= _KG_GAP_SUPPORT_MAX`（2），`ORDER BY support_count ASC, canonical_tgt`
+   `LIMIT _KG_GAP_PROBE_LIMIT`（24）。**tgt→src 反向刻意不做**：`canonical_tgt` 无索引，
+   加覆盖索引要动双后端 schema；登记残余，等真机评估证明 src 侧有用再花这笔。
+   表空/从未 rebuild → 零行，整段静默缺席（不是错误——canonical 层本来就是可选产物）。
+3. 目标端显示名一次有界批量解析（`concept_clusters.canonical_name` 优先，非 concept 的
+   canonical 回退 `knowledge_objects` payload name；解析不到的行丢弃）。
+   联邦刻意不做（canonical_relations 是 per-notebook 产物；挂载库绑定贡献零候选，登记残余，
+   与 exact_lookup「联邦刻意未做」同先例）。
+
+**端口形状**：`RetrievalPort` 新增一个方法 `weak_support_relations(notebook_id, object_ids)
+-> list[GapRelationRow]`，fold+probe+名字解析三步全部在 `retrieval_candidates` 服务端完成
+（reasoning_retrieval 零 SQL），双后端 parity。返回行含 src/tgt canonical id、双端显示名、
+edge_type、support_count。
+
+**回喂形状**：大纲便签追加一段（仅当有**新**候选）：头行「库内支撑薄弱的相关关系(每条
+仅 1-2 源支撑,与某节相关时可用 add_subquery/follow_chain 定向补证,不相关可忽略):」+
+每行「A —edge→ B(支撑N)」。每行 ≤80 字符、每轮 ≤`_KG_GAP_NOTE_LINES`（6）行、整段
+≤520 字符。**run 级 (src,edge,tgt) dedup 账目**（仅内存）：每条边只展示一次——它是提示
+不是状态，反复展示只烧 prompt 预算；展示顺序 = support_count 升序、tie 按 (src,tgt) 字典序，
+稳定可测。apply 在终态轮发生时算出的候选无处展示，如实丢弃（提示服务于继续检索的轮次）。
+
+**trace**：outline 步 detail 增 `kg_gap_candidates`（本次新展示行数 int，无候选/关闭态不加
+键）。不加 step 类型，前端不动。
+
+**数值上限**登记进 `docs/product-and-api*.md` 大纲一节的契约段；本节不重复维护。
+
+**验收**：关闭态/低档位零查询逐字回归；canonical 层缺席时零行零噪声；dedup 不重复展示；
+行/段字符界与 LIMIT 生效；阈值只放 support_count ≤2；排序稳定；PG parity 用例；变异
+（删 dedup、删 LIMIT、阈值失效、flag 失效、便签段删除）全红。
+
+**任务拆分**：
+
+| 任务 | 内容 | 角色/模型 |
+| --- | --- | --- |
+| G1 | 端口+双后端探测实现+retriever 接入（账目/便签/trace/flag）+定向测试 | general-purpose (opus) |
+| G2 | 文档同步（设计文档勾稽+product-and-api 中英+AGENTS/CLAUDE/architecture/fangan_done）+措辞钉子 | impl-task (sonnet) |
+| G3 | check.sh+PG lane+stacked PR+codex 闭环 | 主代理 |
+
 ## 4. 任务拆分与模型分配
 
 | 任务 | 内容 | 角色/模型 |
