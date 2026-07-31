@@ -393,13 +393,16 @@ expand_community），DualGraph 是临时从网页搭图；缺的是 OG 侧与�
   对话历史**（每轮都是一条全新的 user message），而章节结构是全量替换——模型手上唯一一份「我
   上次交了什么」就是这段回喂。证据不再依赖逐字转录：服务端按稳定节 id union，模型漏抄一个 key
   不会删除旧绑定；但结构仍须完整回喂，否则模型无法保留/调整章节。空节仍单独点名（缺口信号）。
-  8 键 union 溢出时，账目另按节列出未接纳的新 key，并教学式提示用 `remove_evidence` 腾位。若溢出撞上
-  `sufficient`、步骤/stale 边界或第 6 次常规更新，最多补一轮专用纠错；所有专用纠错都只能保持
-  id/标题/parent 不变地换 evidence，第 6 次后的首次提交即消费资格，终态纠错不能执行检索，仍溢出就在收尾 trace 明示。整份账目仍由
+  8 键 union 溢出时，账目另按节列出未接纳的新 key，并教学式提示用 `remove_evidence` 腾位。pending
+  只是反馈状态，不会把普通额度尚存的下一份全量更新冻结成 repair-only；那份载荷仍可改结构，合法绑定
+  全部照常合并。`sufficient` / stale 终态只有在 `max_steps` 仍有正常步骤余额时才最多补一轮专用纠错，
+  第 6 次常规更新耗尽自身额度后也可提供一次资格；这些专用提交都只能保持 id/标题/parent 不变地换
+  evidence，第 6 次后的首次提交即消费资格，终态纠错不能执行检索。`max_steps` 是绝对上限，末步溢出
+  直接在收尾披露而不追加第 51/50 轮；stale 熔断先落 trace，再进入仍在预算内的纠错。整份账目仍由
   12 节、每节 8 个已绑定 key 加一次有界溢出列表夹住，与语料规模无关，且只在 exhaustive 档出现。
   未接纳 key 是持久 pending：成功绑定、在 `remove_evidence` 点名放弃或整节删除之前持续回喂；只腾位却
-  漏抄新 key 不会把它静默清掉。结构违规拒绝也不清 repair-only 状态，后续提交仍须同结构。完整状态
-  每节最多 56 key（6 次常规 + 1 次纠错），prompt 每轮只展示前 8 个与剩余计数，处理后滚动露出下一批。
+  漏抄新 key 不会把它静默清掉。结构违规只拒绝真正的纠错提交；普通额度轮不因 pending 继承同结构
+  限制。完整状态每节硬顶 56 key（6 次常规 + 1 次纠错），prompt 每轮只展示前 8 个与剩余计数，处理后滚动露出下一批。
 - **绑定键的合法集合按「本 run 曾实际展示」单调累积，而不是整个候选池**：`_summarize` 对候选池开
   头尾窗口，run 内维护 `ever_shown`。第 3 轮实际展示并绑定的证据即使第 5 轮滑入中段仍合法；从第一轮
   起就位于省略中段、从未渲染的 id 则不能靠猜中通过。合法集 = 当前候选池 ∩（ever_shown ∪ 当前大纲
@@ -492,12 +495,13 @@ expand_community），DualGraph 是临时从网页搭图；缺的是 OG 侧与�
     路径用同作用域现成的 `scored_map`（与 `top_hits` 同一个 map、同一句 `.get(oid, rk)`，零新
     查询）；quota 路径没有全局重排 map，把带出值夹到**选集的最低分**（选集为空 ⇒ 天花板 0.0）。
 - **逐节 grounding + 既有三档确定性降级**（用户改判，推翻此前 `any(各节)` 裁定）：每一节只用
-  自己的证据切片与锚点通过 `classify_evidence`，结果以有界 `section_grounded` 记录和无据节标题
-  列表进入收尾 synthesis detail，给 v2 留下「哪一节从无据变有据」的测量信号，不新增 AskResponse
-  字段。整体继续复用 `grounded`/`overview`/`inferred`：全部已合成节 grounded 时照旧走全局
-  `classify_evidence`；部分 grounded 时只**封顶** `overview`（全局若已是 inferred 不反向抬高）；零节
-  grounded 时固定走 `inferred`。这避免裸 `all` 因一节正当常识衔接过度降级，也不再让一节有据把
-  其余章节全部遮成 grounded。
+  自己的证据切片与锚点通过 `classify_evidence`。收尾 synthesis detail 的 `section_grounded` 是有界
+  的逐节记录列表（每项含该节 `grounded` 布尔与 `evidence_level`），不是整篇布尔值；旁边另列无据节
+  标题，给 v2 留下「哪一节从无据变有据」的测量信号，不新增 AskResponse 字段。整体继续复用
+  `grounded`/`overview`/`inferred`：全部已合成节 grounded 时照旧走全局 `classify_evidence`；否则只
+  **封顶** `overview`（全局若已是 inferred 不反向抬高）。零节达到精确 grounded 档但各节仍有高分
+  引用、仅模型自报保守时，因此可保留 overview，不再被强制误写成 inferred。这避免裸 `all` 因一节
+  正当常识衔接过度降级，也不再让一节有据把其余章节全部遮成 grounded。
 - **回退成功不留假报警**（评审 P2）：分节阶段记下的 `model_error` 在回退单次合成**成功**后从响应
   里摘掉（`_err_sink` 的 `[分节起点, 回退起点)` 区间）。那次故障已被同一轮吸收、用户拿到了完整
   答案，再挂一条红色横幅是在报一个没有影响结果的错误。**事件日志不受影响**——`note_model_error`

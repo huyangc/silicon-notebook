@@ -856,8 +856,10 @@ def test_one_grounded_section_caps_the_whole_answer_at_overview(repo, monkeypatc
     assert response.grounded is False
 
 
-def test_zero_grounded_sections_use_the_inferred_path(repo, monkeypatch):
-    """即使两节都引用了高分证据,零节通过自己的 grounding 门也不能跨节借分。"""
+def test_zero_grounded_sections_preserve_overview_without_claiming_no_evidence(
+    repo, monkeypatch,
+):
+    """两节各有高分引用但模型保守时保留 overview，不误报「未命中依据」。"""
     notebook = _notebook(repo)
     _stub_run(monkeypatch, _reasoning_result())
     first_key = AskService._ELEMENT_KEY_BASE + 1
@@ -873,8 +875,8 @@ def test_zero_grounded_sections_use_the_inferred_path(repo, monkeypatch):
     assert [item["evidence_level"] for item in detail["section_grounded"]] == [
         "overview", "overview"]
     assert detail["ungrounded_sections"] == ["第一节", "第二节"]
-    assert detail["evidence_level"] == "inferred"
-    assert response.evidence_level == "inferred"
+    assert detail["evidence_level"] == "overview"
+    assert response.evidence_level == "overview"
     assert response.grounded is False
 
 

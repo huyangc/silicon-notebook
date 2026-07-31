@@ -723,6 +723,7 @@ def _outline_note(
     updates_left: int,
     overflow: Optional[Dict[str, List[str]]] = None,
     overflow_repair_available: bool = False,
+    repair_only: bool = False,
 ) -> str:
     """把大纲便签回喂给 reflect(镜像 visited / attempted / 枚举三份账目)。
 
@@ -772,15 +773,35 @@ def _outline_note(
                 if remaining else ""
             )
         )
-    overflow_note = (
-        "\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
-        + "\n".join(overflow_lines)
-        + "\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,"
-          "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,也在"
-          "remove_evidence 中点名它。"
-        if overflow_lines else ""
-    )
-    if updates_left <= 0 and overflow_lines and overflow_repair_available:
+    overflow_note = ""
+    if overflow_lines:
+        overflow_note = (
+            "\n当前因每节最多 8 条而未接纳的新证据(旧绑定已优先保留):\n"
+            + "\n".join(overflow_lines)
+        )
+        if repair_only:
+            overflow_note += (
+                "\n本次纠错只能在该节 remove_evidence 中点名要移除的旧 key,"
+                "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,"
+                "也在 remove_evidence 中点名它。"
+            )
+        elif updates_left > 0 or overflow_repair_available:
+            overflow_note += (
+                "\n如要换入它们,下一次在该节 remove_evidence 中点名要移除的旧 key,"
+                "并继续把要加入的 key 放在 evidence;如要明确放弃某个未接纳 key,"
+                "也在 remove_evidence 中点名它。"
+            )
+        else:
+            overflow_note += (
+                "\n本 run 的大纲整理与纠错资格均已用完,不要再提交 update_outline;"
+                "未接纳 key 会在收尾轨迹中披露。"
+            )
+    if repair_only and overflow_lines:
+        head = (
+            "（本轮大纲便签(这是终态溢出纠错轮,仅可提交一次章节 "
+            "id/标题/parent 完全不变的 update_outline,不得改结构或执行检索):\n"
+        )
+    elif updates_left <= 0 and overflow_lines and overflow_repair_available:
         head = (
             "（本轮大纲便签(常规整理次数已用完;因上一份有未接纳证据,仅可再提交一次"
             "章节 id/标题/parent 完全不变的 update_outline,用 remove_evidence 腾位并"
@@ -1705,7 +1726,6 @@ class ReasoningRetriever:
         outline_updates = 0
         outline_overflow: Dict[str, List[str]] = {}
         ever_shown_outline_keys: set = set()
-        outline_overflow_feedback_pending = False
         outline_terminal_repair_used = False
         outline_cap_repair_used = False
 
@@ -2025,7 +2045,7 @@ class ReasoningRetriever:
             本仓库反复吃过亏的形态(两个各自正确的一半拼出一个错误的整体)。
             """
             nonlocal outline, outline_updates, outline_overflow
-            nonlocal outline_overflow_feedback_pending, outline_cap_repair_used
+            nonlocal outline_cap_repair_used
             consume_regular_update = outline_updates < _MAX_OUTLINE_UPDATES
             same_structure = tuple(
                 (s.id, s.title, s.parent) for s in decision.outline_sections
@@ -2047,10 +2067,6 @@ class ReasoningRetriever:
                     # 结构违规后仍可反复试,所谓最多一次只约束了成功次数。
                     outline_cap_repair_used = True
                 if not same_structure:
-                    # 普通额度尚在时,下一轮仍面对同一份 pending overflow,所以仍
-                    # 必须是 repair-only;不能因本次结构违规把状态清掉后绕成普通更新。
-                    if outline_updates < _MAX_OUTLINE_UPDATES:
-                        outline_overflow_feedback_pending = bool(outline_overflow)
                     record(TraceStep(
                         step_type="skip",
                         summary=(
@@ -2103,7 +2119,6 @@ class ReasoningRetriever:
             replaced = len(outline)
             outline = bound
             outline_overflow = overflow
-            outline_overflow_feedback_pending = bool(overflow)
             empty = [s.title for s in bound if not s.evidence_keys]
             record(TraceStep(
                 step_type="outline",
@@ -2137,23 +2152,12 @@ class ReasoningRetriever:
                 }))
 
         forced_overflow_repair = False
-        while (
-            steps < max_steps
-            or forced_overflow_repair
-            or (
-                outline_overflow_feedback_pending
-                and not outline_terminal_repair_used
-            )
-        ):
+        while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
-            terminal_overflow_repair = forced_overflow_repair or steps >= max_steps
+            terminal_overflow_repair = forced_overflow_repair
             if terminal_overflow_repair:
                 outline_terminal_repair_used = True
                 forced_overflow_repair = False
-            overflow_repair_prompt = outline_overflow_feedback_pending
-            # 这一轮 prompt 马上会带上 outline_overflow;先消费反馈权。若本轮提交
-            # 仍溢出,apply_outline_update 会重新置 True,但终态额外轮最多只有一次。
-            outline_overflow_feedback_pending = False
             steps += 1
             summary = self._summarize(collected, elements, chunks, chains,
                                       show_ids=outline_active,
@@ -2237,6 +2241,7 @@ class ReasoningRetriever:
                 outline, _MAX_OUTLINE_UPDATES - outline_updates,
                 outline_overflow,
                 overflow_repair_available=not outline_cap_repair_used,
+                repair_only=terminal_overflow_repair,
             )
             if outline_note:
                 summary = f"{summary}\n\n{outline_note}"
@@ -2259,14 +2264,14 @@ class ReasoningRetriever:
                              detail={"next_action": decision.next_action,
                                      "sufficient": decision.sufficient,
                                      "no_progress": no_progress, "stale": stale}))
-            overflow_repair_submission = overflow_repair_prompt or (
+            overflow_repair_submission = terminal_overflow_repair or (
                 bool(outline_overflow)
                 and outline_updates >= _MAX_OUTLINE_UPDATES
                 and not outline_cap_repair_used
             )
             if terminal_overflow_repair:
-                # 这次是越过 max_steps / stale 的专用纠错轮,绝不能借机再发一次
-                # 检索请求突破档位预算。模型不按便签换键就如实保留未解决状态。
+                # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
+                # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
                 if decision.next_action == OUTLINE_ACTION:
                     apply_outline_update(decision, overflow_repair=True)
                 else:
@@ -2293,8 +2298,10 @@ class ReasoningRetriever:
                         decision, overflow_repair=overflow_repair_submission
                     )
                     if (
-                        outline_overflow_feedback_pending
+                        outline_overflow
+                        and steps < max_steps
                         and not outline_terminal_repair_used
+                        and not outline_cap_repair_used
                     ):
                         # sufficient 不能吞掉刚产生的 overflow。下一轮是专用纠错:
                         # 只许同结构换键,不能借「已经够了」再发一条检索请求。
@@ -2962,18 +2969,20 @@ class ReasoningRetriever:
             stale = stale + 1 if no_progress else 0
             # 连续 stale_limit 轮无有效进展 → 硬熔断, 强制走到末尾 answer(不再交模型自觉)。
             if stale >= self.settings.reasoning_stale_limit:
-                if (
-                    outline_overflow_feedback_pending
-                    and not outline_terminal_repair_used
-                ):
-                    # stale 原本会立即 break。保留一次只许换键的专用轮,但不把
-                    # outline 修订算作检索进展,也不重置 stale。
-                    outline_terminal_repair_used = True
-                    forced_overflow_repair = True
-                    continue
                 record(TraceStep(step_type="skip",
                                  summary=f"连续 {stale} 轮无新进展,熔断收尾(避免空转)",
                                  detail={"reason": "stale_circuit_breaker", "stale": stale}))
+                if (
+                    outline_overflow
+                    and steps < max_steps
+                    and not outline_terminal_repair_used
+                    and not outline_cap_repair_used
+                ):
+                    # 熔断是已经发生的事实,所以先落轨迹。若步骤预算仍有余量,再保留
+                    # 一次只许换键的专用轮;outline 修订仍不算检索进展、不重置 stale。
+                    outline_terminal_repair_used = True
+                    forced_overflow_repair = True
+                    continue
                 break
 
         if outline_overflow:

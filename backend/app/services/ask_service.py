@@ -90,7 +90,7 @@ class _SectionedSynthesis:
     anchors: list
     sections: int
     counts: dict
-    section_grounded: list
+    section_grounding: list
 
 
 def _graph_classification_hits(
@@ -1194,7 +1194,7 @@ class AskService:
             "included_elements": 0, "included_collections": 0,
         }
         grounded = False
-        section_grounded_detail: list = []
+        section_grounding_detail: list = []
         total = len(slices)
         model_label = getattr(answer_client, "model", "")
         for item in slices:
@@ -1217,7 +1217,7 @@ class AskService:
                 )
                 return text_, grounded_, anchors_
 
-            text, section_grounded, section_anchors, ok = self._answer_with_retry(
+            text, section_llm_grounded, section_anchors, ok = self._answer_with_retry(
                 _synth_section, model_label, service="ask_answer",
             )
             if not ok:
@@ -1236,12 +1236,12 @@ class AskService:
             section_level, _ = classify_evidence(
                 section_evidence,
                 section_anchors,
-                section_grounded,
+                section_llm_grounded,
                 self.settings.evidence_tau_low,
                 self.settings.evidence_tau_high,
             )
             section_is_grounded = section_level == "grounded"
-            section_grounded_detail.append({
+            section_grounding_detail.append({
                 "id": item.section.id,
                 "title": item.section.title[:60],
                 "grounded": section_is_grounded,
@@ -1272,7 +1272,7 @@ class AskService:
             for key in merged_counts:
                 merged_counts[key] += int(section_counts.get(key, 0) or 0)
             rendered.append((item, text))
-            grounded = grounded or section_grounded
+            grounded = grounded or section_llm_grounded
             # 号段互不相交,所以跨节不可能撞 key;去重只防同一节内重复标记(
             # parse_anchors 自己已经去过一次,这一层是拼接侧的常数级防御)。
             for anchor in section_anchors:
@@ -1282,15 +1282,13 @@ class AskService:
                 merged_anchors.append(anchor)
         return _SectionedSynthesis(
             answer=outline_answer_text(rendered),
-            # 任一节自报 grounded 即算 grounded:每节的 grounded 只描述**它自己**
-            # 的切片,全篇要求 all 会让一节合理的常识补充把整篇降级。真正的门仍在
-            # classify_evidence —— 它还要求存在相关度 >= tau_high 的**被引用**证据,
-            # 所以 any 单独抬不高任何东西。
+            # 这里仅汇总模型自报供全局 classify_evidence 使用;真正的逐节判定已经
+            # 独立落在 section_grounding,后续整体档位再按其全/部分/零支撑确定性封顶。
             llm_grounded=grounded,
             anchors=merged_anchors,
             sections=len(rendered),
             counts=merged_counts,
-            section_grounded=section_grounded_detail,
+            section_grounding=section_grounding_detail,
         )
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
@@ -2392,16 +2390,13 @@ class AskService:
             )
             if sectioned is not None:
                 grounded_sections = sum(
-                    1 for item in sectioned.section_grounded
+                    1 for item in sectioned.section_grounding
                     if item["grounded"]
                 )
-                if grounded_sections == 0:
-                    # 没有一节通过自己的 classify_evidence,整篇不能从跨节合并池
-                    # 借来 overview/grounded 信号。
-                    evidence_level = "inferred"
-                elif grounded_sections < sectioned.sections:
-                    # 部分支撑复用既有 overview 档。这里是封顶而非强制设置:
-                    # 全局分类若因锚点不足已经是 inferred,不能反向抬高。
+                if grounded_sections < sectioned.sections:
+                    # 部分或零节通过逐节 grounded 门时,整体最多 overview。这里是
+                    # 封顶而非强制设置:全局分类若已是 inferred 不会被反向抬高;
+                    # 零节各自为 overview 时也不会被误写成「未命中笔记本依据」。
                     if evidence_level == "grounded":
                         evidence_level = "overview"
             grounded = evidence_level == "grounded"
@@ -2468,13 +2463,13 @@ class AskService:
                         # 只落 trace detail,不扩 AskResponse。每节结果已经过该节
                         # 自己的 classify_evidence,不是模型裸自报。
                         "section_grounded": (
-                            sectioned.section_grounded
+                            sectioned.section_grounding
                             if sectioned is not None else []
                         ),
                         "ungrounded_sections": (
                             [
                                 item["title"]
-                                for item in sectioned.section_grounded
+                                for item in sectioned.section_grounding
                                 if not item["grounded"]
                             ]
                             if sectioned is not None else []

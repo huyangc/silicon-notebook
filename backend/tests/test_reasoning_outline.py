@@ -460,7 +460,7 @@ def test_binding_keys_are_candidate_pool_intersected_with_visible_or_retained():
     import inspect
 
     keys = outline_binding_keys(
-        {"ko-1": object()},
+        {"ko-1": object(), "ko-hidden": object()},
         [RetrievedElement("el-1", "s1", "论文一", "p1", "formula", "文本")],
         [RetrievedChunk("ch-1", "s1", "论文一", "1", "文本")],
         {"ko-1", "el-1", "猜的"},
@@ -468,6 +468,7 @@ def test_binding_keys_are_candidate_pool_intersected_with_visible_or_retained():
     )
 
     assert keys == {"ko-1", "el-1", "ch-1"}
+    assert "ko-hidden" not in keys
     # 形参也钉住:悄悄把 enumerations 接回来(而账目仍不回条目 id)会重新打开那片
     # 死面,而只看返回值的用例抓不到。
     assert list(inspect.signature(outline_binding_keys).parameters) == [
@@ -591,12 +592,27 @@ def test_persistent_pending_is_complete_in_state_but_windowed_in_prompt():
         }
         pending = carry_outline_overflow(pending, submitted, merged, current)
 
-    assert len(pending["a"]) == _OUTLINE_MAX_PENDING_EVIDENCE
+    # 文档写死的是 56；同时钉常量值，避免实现和动态断言一起漂移仍全绿。
+    assert _OUTLINE_MAX_PENDING_EVIDENCE == 56
+    assert len(pending["a"]) == 56
     note = _outline_note(merged, 1, pending)
     for index in range(_OUTLINE_MAX_EVIDENCE):
         assert f"pending-0-{index}" in note
     assert "pending-1-0" not in note
     assert f"另有 {_OUTLINE_MAX_PENDING_EVIDENCE - _OUTLINE_MAX_EVIDENCE} 条" in note
+
+
+def test_pending_note_does_not_offer_an_update_after_repair_is_consumed():
+    note = _outline_note(
+        [OutlineSection(id="a", title="一节")],
+        0,
+        {"a": ["pending-1"]},
+        overflow_repair_available=False,
+    )
+
+    assert "不要再提交 update_outline" in note
+    assert "下一次在该节 remove_evidence" not in note
+    assert "未接纳 key 会在收尾轨迹中披露" in note
 
 
 # --------------------------------------------------------------- 动作与 trace
@@ -702,6 +718,8 @@ def test_sufficient_overflow_gets_one_repair_round(repo, monkeypatch):
     assert result.outline[0].evidence_keys == old_keys[2:] + new_keys
     assert len(llm.reflect_prompts) == 3
     assert "未接纳新证据" in llm.reflect_prompts[2]
+    assert "终态溢出纠错轮" in llm.reflect_prompts[2]
+    assert "不得改结构或执行检索" in llm.reflect_prompts[2]
     assert "outline_evidence_overflow_unresolved" not in _skips(result)
 
 
@@ -763,7 +781,7 @@ def test_sufficient_overflow_repair_round_cannot_execute_retrieval(repo, monkeyp
     assert "outline_evidence_overflow_unresolved" in _skips(result)
 
 
-@pytest.mark.parametrize("terminal_boundary", ["sufficient", "max_steps", "stale"])
+@pytest.mark.parametrize("terminal_boundary", ["sufficient", "stale"])
 def test_terminal_overflow_repair_rejects_section_structure_changes(
     repo, monkeypatch, terminal_boundary,
 ):
@@ -793,9 +811,7 @@ def test_terminal_overflow_repair_rejects_section_structure_changes(
         }]),
     ])
     retriever, limits = _retriever(repo, llm)
-    kwargs = {"max_steps": 2} if terminal_boundary == "max_steps" else {}
-
-    result = retriever.run(notebook.id, "综述", "", limits=limits, **kwargs)
+    result = retriever.run(notebook.id, "综述", "", limits=limits)
 
     assert result.outline[0].title == "原结构"
     assert result.outline[0].evidence_keys == old_keys
@@ -803,7 +819,7 @@ def test_terminal_overflow_repair_rejects_section_structure_changes(
     assert "outline_evidence_overflow_unresolved" in _skips(result)
 
 
-def test_structure_rejection_keeps_later_updates_in_repair_only_mode(
+def test_pending_overflow_does_not_freeze_an_ordinary_outline_update(
     repo, monkeypatch,
 ):
     notebook = _seed(repo)
@@ -817,20 +833,12 @@ def test_structure_rejection_keeps_later_updates_in_repair_only_mode(
     llm = _SeqLLM([
         _outline_action([{"id": "a", "title": "原结构", "evidence": old_keys}]),
         _outline_action([{"id": "a", "title": "原结构", "evidence": [new_key]}]),
-        # 第一份纠错偷改标题,应拒绝并保持 pending。
+        # 普通额度仍在:同一载荷既可重排结构,也必须保住合法换键与新节绑定。
         _outline_action([{
-            "id": "a", "title": "违规一", "evidence": [new_key],
+            "id": "a", "title": "重排后", "evidence": [new_key],
             "remove_evidence": [old_keys[0]],
-        }]),
-        # 下一轮仍然不能伪装成普通 update 再改一次结构。
-        _outline_action([{
-            "id": "a", "title": "违规二", "evidence": [new_key],
-            "remove_evidence": [old_keys[0]],
-        }]),
-        # 同结构提交才真正完成换键。
-        _outline_action([{
-            "id": "a", "title": "原结构", "evidence": [new_key],
-            "remove_evidence": [old_keys[0]],
+        }, {
+            "id": "b", "title": "新增一节", "evidence": [old_keys[1]],
         }]),
         ANSWER,
     ])
@@ -838,19 +846,19 @@ def test_structure_rejection_keeps_later_updates_in_repair_only_mode(
 
     result = retriever.run(notebook.id, "综述", "", limits=limits)
 
-    assert result.outline[0].title == "原结构"
+    assert [(section.id, section.title) for section in result.outline] == [
+        ("a", "重排后"), ("b", "新增一节")]
     assert result.outline[0].evidence_keys == old_keys[1:] + [new_key]
-    assert len([
-        step for step in _steps(result, "skip")
-        if step.detail.get("reason") == "outline_repair_structure"
-    ]) == 2
+    assert result.outline[1].evidence_keys == [old_keys[1]]
+    assert _steps(result, "outline")[-1].detail["overflow_repair"] is False
+    assert "outline_repair_structure" not in _skips(result)
     assert "outline_evidence_overflow_unresolved" not in _skips(result)
 
 
-def test_max_steps_overflow_gets_only_one_non_retrieval_repair_round(
+def test_max_steps_never_adds_an_overflow_repair_round(
     repo, monkeypatch,
 ):
-    """步骤预算耗尽可越界一次纠错,但不能借那轮再执行检索。"""
+    """步骤预算是绝对上限；末轮 overflow 只披露，不再花第 51 次 reflect。"""
     notebook = _seed(repo)
     old_keys = [f"old-{n}" for n in range(_OUTLINE_MAX_EVIDENCE)]
     new_key = "new-1"
@@ -870,8 +878,9 @@ def test_max_steps_overflow_gets_only_one_non_retrieval_repair_round(
         notebook.id, "综述", "", limits=limits, max_steps=2,
     )
 
-    assert len(llm.reflect_prompts) == 3
-    assert "outline_overflow_repair_declined" in _skips(result)
+    assert len(llm.reflect_prompts) == 2
+    assert "outline_overflow_repair_declined" not in _skips(result)
+    assert "outline_repair_structure" not in _skips(result)
     assert "outline_evidence_overflow_unresolved" in _skips(result)
     assert all(
         step.detail.get("query") != "不应执行"
@@ -903,6 +912,14 @@ def test_stale_breaker_yields_to_one_overflow_repair_round(repo, monkeypatch):
     assert result.outline[0].evidence_keys == old_keys[1:] + [new_key]
     assert len(llm.reflect_prompts) == 3
     assert _steps(result, "outline")[-1].detail["overflow_repair"] is True
+    reasons = [step.detail.get("reason") for step in result.trace]
+    assert "stale_circuit_breaker" in reasons
+    breaker_index = reasons.index("stale_circuit_breaker")
+    repair_index = next(
+        index for index, step in enumerate(result.trace)
+        if step.step_type == "outline" and step.detail.get("overflow_repair")
+    )
+    assert breaker_index < repair_index
 
 
 def test_sixth_update_overflow_allows_one_same_structure_key_swap(
