@@ -1101,9 +1101,11 @@ def test_the_run_loop_passes_the_repair_flag_to_the_segment_builder():
     ]
 
     assert len(calls) == 1, calls
-    # 调用跨行,所以从调用点起截一小段看实参。
+    # 调用跨行,所以从调用点起截一小段看实参。只断言 kwarg 名出现是不够的:
+    # `repair_only=False` 这种恒假值同样通过(镜像 CLAUDE.md 长任务按钮守卫里
+    # 「disabled={false} 同样报红」的教训),所以钉到实参就是那只终态轮变量。
     start = source.index("kg_gap_note_segment(")
-    assert "repair_only=" in source[start:start + 200]
+    assert "repair_only=terminal_overflow_repair" in source[start:start + 200]
 
 
 def test_a_later_batch_can_outrank_what_is_still_queued(repo, monkeypatch):
