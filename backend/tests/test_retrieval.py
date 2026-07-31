@@ -196,27 +196,29 @@ def test_bm25_ranks_a_quoted_phrase_as_one_atomic_term():
     assert "scattered" in bm25_scores("static timing analysis", docs)
 
 
-def test_probe_basis_keeps_a_multi_word_name_atomic_and_words_historical():
-    """通道按「自己探测的名称」打分,多词短语在那里也不能被拆开。
+def test_probe_basis_treats_every_probed_name_as_atomic():
+    """通道按「自己探测的名称」打分,每个名称都是整体——不看它长什么样。
 
-    codex #410 round-3 P2:名称传到打分点时引号早没了,若照旧拼成一个串再分词,
-    只是散落着 static/timing/analysis 的同节兄弟块会拿到该短语的满分覆盖率。
-    单词名称必须保持历史 token 口径不变——标识符探测的分数逐位照旧。
+    codex #410 round-3 起于多词短语被拆开(散落着 static/timing/analysis 的同节
+    兄弟块拿到满分覆盖率);round-8 指出「按有没有空格判断是否原子」是形状猜测:
+    `config.yaml`、`静态时序分析` 都不含空格,照样被降级回 token。原子性是**探测
+    的性质**——这些名称本来就是以字面子串命中的,覆盖率只有一个诚实答案:正文里
+    有没有这个串。
     """
-    from app.services.retrieval import _tokens, probe_keyword_basis
+    from app.services.retrieval import probe_keyword_basis
 
-    basis = probe_keyword_basis(["static timing analysis"])
-    exact = "we run static timing analysis here"
-    scattered = "timing is static and the analysis follows"
-    assert basis.coverage(set(_tokens(exact)), exact) == 1.0
-    assert basis.coverage(set(_tokens(scattered)), scattered) == 0.0
+    def covered(terms, text):
+        return probe_keyword_basis(terms).coverage(frozenset(), text)
 
-    # 单词名称:与 keyword_score 的历史口径逐位一致。
-    words = probe_keyword_basis(["set_db", "config.yaml"])
-    haystack = "set_db is described in config.yaml"
-    assert words.phrases == ()
-    assert words.coverage(set(_tokens(haystack)), haystack) == keyword_score(
-        "set_db config.yaml", haystack)
+    assert covered(["static timing analysis"], "we run static timing analysis") == 1.0
+    assert covered(["static timing analysis"], "timing is static; the analysis") == 0.0
+    # 不含空格的两类:标点连接与 CJK —— 同样是整体。
+    assert covered(["config.yaml"], "see config.yaml") == 1.0
+    assert covered(["config.yaml"], "the config lists a yaml file") == 0.0
+    assert covered(["静态时序分析"], "这里做静态时序分析") == 1.0
+    assert covered(["静态时序分析"], "静态分析与时序检查") == 0.0
+    # 多个名称:按覆盖了几个算。
+    assert covered(["set_db", "report_timing"], "set_db 的参数表") == 0.5
 
 
 def test_fuse_custom_weights_shift_balance():

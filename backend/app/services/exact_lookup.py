@@ -31,7 +31,6 @@ from app.repositories.lexical_query import exact_probe_terms
 from app.services.retrieval import (
     RetrievalSupport,
     RetrievedChunk,
-    _tokens,
     probe_keyword_basis,
 )
 
@@ -325,7 +324,7 @@ def _build_chunks(
         text = row["text"] or ""
         section_path = row["section_path"] or ""
         haystack = f"{section_path} {text}" if section_path else text
-        relevance = basis.coverage(set(_tokens(haystack)), haystack)
+        relevance = basis.coverage(frozenset(), haystack)
         chunks.append(
             RetrievedChunk(
                 chunk_id=chunk_id,
