@@ -753,6 +753,47 @@ def test_a_failed_section_falls_back_to_one_shot(repo, monkeypatch):
             for step in _section_progress_steps(response)] == [1]
 
 
+def test_a_section_that_recovers_on_retry_leaves_no_alarm(repo, monkeypatch):
+    """节内重试成功 → 分节合成整体成功,响应里一条假报警都不留(设计文档 §3.1.1)。
+
+    这条与下面那条回退用例是同一条规则的两端:节**自己**恢复了,由
+    `_answer_with_retry` 就地摘掉;节彻底失败、由回退救回来,则由回退成功那一段
+    区间删除覆盖。两条路径都不该把一次已经被吸收的故障挂到用户面上。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": "第一节正文", "grounded": True},
+        {"answer": "", "grounded": False},            # 第 2 节:空 content
+        {"answer": "第二节正文", "grounded": True},    # 重试成功
+    ])
+    response = _ask(repo, notebook, llm)
+
+    assert "第二节正文" in response.answer
+    assert _synthesis_detail(response)["outline_sections"] == 2
+    assert _synthesis_detail(response)["outline_fallback"] is False
+    assert response.model_errors == []
+
+
+def test_a_failed_section_recovered_then_a_later_section_fails(repo, monkeypatch):
+    """第 1 节重试后成功、第 2 节彻底失败 → 回退。第 1 节那条早就被自摘了,
+    区间删除只需负责第 2 节那条 —— 两段机制叠加后仍然一条不剩、也一条不多摘。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": "", "grounded": False},            # 第 1 节:空
+        {"answer": "第一节正文", "grounded": True},    # 第 1 节:重试成功
+        {"answer": "", "grounded": False},            # 第 2 节:空
+        {"answer": "", "grounded": False},            # 第 2 节:重试仍空 → 失败
+        {"answer": "整篇回退答案", "grounded": True},  # 单次合成
+    ])
+    response = _ask(repo, notebook, llm)
+
+    assert response.answer == "整篇回退答案"
+    assert _synthesis_detail(response)["outline_fallback"] is True
+    assert response.model_errors == []
+
+
 def test_a_failed_fallback_keeps_every_alarm(repo, monkeypatch):
     """回退也失败 = 这一轮真的没答出来,**两个阶段**的报警都要留着。
 
