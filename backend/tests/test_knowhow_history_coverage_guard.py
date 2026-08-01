@@ -9,10 +9,18 @@
 两份白名单目前逐字相同，所以共用一份；将来若某后端合法地多出/少掉一个豁免项，
 把它拆成 per-backend 映射，而不是把守卫放宽。
 
+流水必须记在写事务的 ``with`` 块**体内**——数据提交与流水追加同事务才有
+原子性，块外追加就是两个事务。所以判据是「写事务体内有没有 ``record_change``」，
+不是「方法体内有没有」：后者会让「把调用挪出 with 块」这种退化保持全绿。
+
 刻意不检查 ``record_change`` 是否是写事务的**最后一步**：那个位置断言在
 AST 上只能按「with 体最后一条语句」近似，遇到尾随的 return/计数器 bump 就会
-误红。位置约束由代码评审和 `AGENTS.md` 的契约条目承担，本守卫只保证
-「一个写事务都没漏挂」这条可机械判定的部分。
+误红。块内位置由代码评审和 `AGENTS.md` 的契约条目承担。
+
+一个方法开多个写事务时，只要求**其中一个**记流水。当前两个后端都没有这种
+方法（写事务方法各自恰好一个 ``with``），改成「每个都要记」在今天等价，但会
+给将来「一个探测事务 + 一个变更事务」的合法写法留下无处可逃的误红——真出现
+多写事务方法时应重新评估这一档，而不是当它不存在。
 
 不经 import 定位源文件：``app.repositories.postgres`` 的导入会拖进 psycopg，
 而本守卫跑在离线的 G1 泳道里，只需要读源码文本。
@@ -60,7 +68,8 @@ def _method_nodes(path: Path) -> dict[str, ast.FunctionDef]:
     }
 
 
-def _opens_write_transaction(node: ast.AST) -> bool:
+def _write_transactions(node: ast.AST) -> list[ast.With]:
+    blocks: list[ast.With] = []
     for child in ast.walk(node):
         if not isinstance(child, ast.With):
             continue
@@ -71,8 +80,9 @@ def _opens_write_transaction(node: ast.AST) -> bool:
                 and isinstance(call.func, ast.Attribute)
                 and call.func.attr == "write"
             ):
-                return True
-    return False
+                blocks.append(child)
+                break
+    return blocks
 
 
 def _calls_record_change(node: ast.AST) -> bool:
@@ -86,11 +96,26 @@ def _calls_record_change(node: ast.AST) -> bool:
     return False
 
 
+def _records_inside_a_write_transaction(node: ast.AST) -> bool:
+    """流水必须记在写事务**体内**，扫整个方法体是不够的。
+
+    数据提交与流水追加同事务才有原子性。若只在方法级找 `record_change`，
+    把它挪到 `with` 块之后（或塞进一个不相干的分支/嵌套函数）仍然全绿，
+    而这恰是守卫要防的退化。所以只在检出的写事务体内找。
+
+    注意这仍**不是**「最后一步」断言——块内位置不做要求，见模块 docstring。
+    """
+    return any(
+        any(_calls_record_change(stmt) for stmt in block.body)
+        for block in _write_transactions(node)
+    )
+
+
 def _writers(path: Path) -> dict[str, ast.FunctionDef]:
     return {
         name: node
         for name, node in _method_nodes(path).items()
-        if _opens_write_transaction(node)
+        if _write_transactions(node)
     }
 
 
@@ -112,11 +137,12 @@ def test_every_write_transaction_records_history_or_is_exempt(backend: str):
     missing = sorted(
         name
         for name, node in writers.items()
-        if name not in EXEMPT_METHODS and not _calls_record_change(node)
+        if name not in EXEMPT_METHODS and not _records_inside_a_write_transaction(node)
     )
     assert missing == [], (
-        f"{backend} 后端这些 KnowhowStore 写方法没有记变更流水：{missing}。"
-        "要么在其写事务的最后调用 record_change，要么把它加进 EXEMPT_METHODS "
+        f"{backend} 后端这些 KnowhowStore 写方法没有在写事务内记变更流水：{missing}。"
+        "要么在其写事务的最后调用 record_change（必须在 with 块**体内**，"
+        "块外追加流水就丢了原子性），要么把它加进 EXEMPT_METHODS "
         "并在那里写清为什么它不算用户可见变更。"
     )
 
