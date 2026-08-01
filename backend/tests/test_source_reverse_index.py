@@ -1,12 +1,10 @@
 """P0-4: knowledge_object_sources reverse index (perf-audit docs/kg-perf-audit-16c64g.md).
 
 _clear_source_extraction_state (delete_source / _run_extraction reparse) used to
-scan EVERY knowledge_objects.evidence JSON in the notebook to find objects
-referencing one source_id. These tests cover: the reverse-lookup table matching
-a legacy-scan oracle on multi-source-evidence (merged) objects, backfill-on-
-first-use (the scan they were going to pay anyway becomes the last one), the
-second call using SQL only (no full evidence scan), forward maintenance on
-store_kg / confirm_promotion / merge_knowledge, and deletion coherence.
+read, parse and backfill EVERY knowledge_objects.evidence row in the notebook
+while serving the request. These tests cover: the indexed reverse lookup,
+database-side legacy filtering without an interactive backfill, bounded bulk
+deletion, forward maintenance, and deletion coherence.
 """
 import json
 from uuid import uuid4
@@ -94,10 +92,9 @@ def test_reverse_lookup_matches_legacy_scan_oracle_multi_source_evidence(repo):
         assert found  # sanity: each source actually matches something
 
 
-def test_first_use_backfill_populates_and_marks(repo):
-    """A pre-existing (pre-migration-style) notebook with knowledge_objects rows
-    but an EMPTY knowledge_object_sources table (as if it predates this feature)
-    gets populated + marked backfilled on the first lookup."""
+def test_unbackfilled_lookup_filters_in_database_without_backfilling(repo):
+    """Interactive legacy lookup finds the right object but leaves the explicit
+    batch-ingest backfill and its completion marker untouched."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     s1 = _insert_source(repo, nb.id)
     objects = [
@@ -129,12 +126,109 @@ def test_first_use_backfill_populates_and_marks(repo):
     assert len(found) == 1
 
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, nb.id)
+        assert not repo._source_index_backfilled(db, nb.id)
         rows = db.execute(
             "SELECT object_id, source_id FROM knowledge_object_sources WHERE notebook_id=?",
             (nb.id,),
         ).fetchall()
-    assert {(r["object_id"], r["source_id"]) for r in rows} == {(found[0], s1)}
+    assert rows == []
+
+
+def test_unbackfilled_lookup_only_expands_valid_top_level_arrays(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    s1 = _insert_source(repo, nb.id)
+    now = _now()
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?, 'concept','approved','','{}',?,'',?,?)",
+            [
+                ("bad-json", nb.id, "not-json", now, now),
+                ("mixed-json", nb.id, json.dumps(["plain", 3, _ev(s1)]), now, now),
+                (
+                    "top-object",
+                    nb.id,
+                    json.dumps({"wrapper": {"source_id": s1}}),
+                    now,
+                    now,
+                ),
+                ("top-string", nb.id, json.dumps(s1), now, now),
+                ("top-number", nb.id, "3", now, now),
+                ("top-null", nb.id, "null", now, now),
+            ],
+        )
+    with repo._write() as db:
+        found = repo._find_stale_knowledge_ids_for_source(db, s1, nb.id)
+    assert found == ["mixed-json"]
+
+
+def test_clear_source_batches_large_object_id_sets(repo):
+    """Stale and direct-only matches stay below the 500-id batch rail."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    s1 = _insert_source(repo, nb.id)
+    now = _now()
+    stale_rows = [
+        (
+            f"obj-{idx:04d}", nb.id, json.dumps(_ev(s1)), s1, now, now,
+        )
+        for idx in range(1100)
+    ]
+    direct_rows = [
+        (f"direct-{idx:04d}", nb.id, s1, now, now)
+        for idx in range(1100)
+    ]
+    delete_statements: list[str] = []
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,'concept','approved','','{}','[' || ? || ']',?,?,?)",
+            stale_rows,
+        )
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,'concept','approved','','{}','[]',?,?,?)",
+            direct_rows,
+        )
+        db.executemany(
+            "INSERT INTO knowledge_object_sources (object_id,source_id,notebook_id) "
+            "VALUES (?,?,?)",
+            [(row[0], s1, nb.id) for row in stale_rows],
+        )
+        repo._mark_source_index_backfilled(db, nb.id)
+        db.set_trace_callback(delete_statements.append)
+        repo._clear_source_extraction_state(db, s1, nb.id, clear_embeddings=False)
+        db.set_trace_callback(None)
+
+    bounded_deletes = [
+        statement
+        for statement in delete_statements
+        if statement.startswith("DELETE FROM knowledge_objects WHERE id IN (")
+        or statement.startswith(
+            "DELETE FROM knowledge_embeddings WHERE object_id IN ("
+        )
+        or statement.startswith(
+            "DELETE FROM knowledge_object_sources WHERE object_id IN ("
+        )
+    ]
+    assert len(bounded_deletes) >= 9
+    assert all(
+        statement.count("'obj-") + statement.count("'direct-") <= 500
+        for statement in bounded_deletes
+    )
+    assert any(statement.count("'obj-") == 500 for statement in bounded_deletes)
+    assert any(statement.count("'direct-") == 500 for statement in bounded_deletes)
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_object_sources WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()["c"] == 0
 
 
 def test_store_kg_forward_maintenance_populates_reverse_index(repo):
@@ -154,6 +248,36 @@ def test_store_kg_forward_maintenance_populates_reverse_index(repo):
     assert {r["source_id"] for r in rows} == {s1, s2}
 
 
+def test_unbackfilled_clear_advances_the_legacy_scan_cursor(repo):
+    """Legacy batches must not rescan the same notebook prefix each round."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    s1 = _insert_source(repo, nb.id)
+    now = _now()
+    statements: list[str] = []
+    with repo._write() as db:
+        db.executemany(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES (?,?,'concept','approved','','{}',?,'',?,?)",
+            [
+                (f"legacy-{idx:04d}", nb.id, json.dumps([_ev(s1)]), now, now)
+                for idx in range(1100)
+            ],
+        )
+        db.set_trace_callback(statements.append)
+        repo._clear_source_extraction_state(db, s1, nb.id, clear_embeddings=False)
+        db.set_trace_callback(None)
+
+    legacy_selects = [
+        statement for statement in statements
+        if statement.startswith("SELECT DISTINCT ko.id AS object_id")
+    ]
+    assert len(legacy_selects) == 4
+    assert "ko.id > ''" in legacy_selects[0]
+    assert "ko.id > 'legacy-0499'" in legacy_selects[1]
+    assert "ko.id > 'legacy-0999'" in legacy_selects[2]
+
+
 def test_merge_knowledge_updates_reverse_index_for_target(repo):
     """merge_knowledge folds source's evidence into into_id: into_id's reverse-
     index rows must gain any new source_ids; source_id's own rows (it is only
@@ -168,11 +292,6 @@ def test_merge_knowledge_updates_reverse_index_for_target(repo):
          "evidence": [_ev(s2, element_id="e2")]},
     ]
     repo.store_kg(nb.id, None, objects, [])
-    with repo._connect() as db:
-        rows = db.execute(
-            "SELECT id, object_type FROM knowledge_objects WHERE notebook_id=? ORDER BY payload",
-            (nb.id,),
-        ).fetchall()
     by_name = {}
     with repo._connect() as db:
         for r in db.execute(
@@ -247,14 +366,13 @@ def test_reparse_source_cleans_and_does_not_leak_join_rows(repo):
     assert remaining_join == 0
 
 
-def test_copy_notebook_self_heals_reverse_index_for_the_copy(repo):
+def test_copy_notebook_uses_legacy_filter_without_mutating_reverse_index(repo):
     """copy_notebook does not copy unified_kg_state/knowledge_object_sources
     (derived indexes are intentionally excluded from the deep copy — see the
     function's docstring). The new notebook's unified_kg_state row is therefore
     absent (source_index_backfilled defaults to unbackfilled), so the FIRST
-    source-clear call on the copy correctly takes the legacy-scan path and
-    self-heals its own reverse index — no explicit wiring needed in
-    copy_notebook itself."""
+    source-clear lookup on the copy correctly takes the database JSON filter
+    path without performing the explicit batch backfill."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     s1 = _insert_source(repo, nb.id)
     objects = [
@@ -275,4 +393,8 @@ def test_copy_notebook_self_heals_reverse_index_for_the_copy(repo):
         found = repo._find_stale_knowledge_ids_for_source(db, copied_source, copy.id)
     assert len(found) == 1
     with repo._connect() as db:
-        assert repo._source_index_backfilled(db, copy.id)
+        assert not repo._source_index_backfilled(db, copy.id)
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_object_sources WHERE notebook_id=?",
+            (copy.id,),
+        ).fetchone()["c"] == 0

@@ -129,14 +129,10 @@ class AssetService:
         return asset
 
     def delete_source_images(self, source_id: str) -> None:
-        """删一个来源的全部内嵌图片：先读行拿到 asset 元数据算盘上路径，删行，
+        """删一个来源的全部内嵌图片：单次删除并返回 asset 元数据算盘上路径，
         再 unlink 文件。删盘 best-effort（文件先没了不阻塞行删除）。"""
-        ids = self._repo.source_asset_ids(source_id)
-        assets = [self._repo.get_notebook_asset(i) for i in ids]
-        self._repo.delete_source_asset_rows(source_id)
+        assets = self._repo.delete_source_asset_rows(source_id)
         for asset in assets:
-            if not asset:
-                continue
             path = self.path_for(asset)
             try:
                 if path.is_file():
