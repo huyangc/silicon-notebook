@@ -109,12 +109,18 @@ def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> 
     **没超上限就一个字节都不动**:未超限时重排没有任何取舍可做,却会改变上下文
     渲染顺序,那是一处与本修复无关、五档全会碰上的行为变化。
 
-    **大纲绑定的对象豁免**(`outline_evidence` 那一批):它们的相关度在 retriever
-    侧被刻意夹到选集最低分以下(见 `outline_truncated_kg_evidence`),按相关度排序
-    必然排在最末 —— 一起参与截断等于把它们再删一次,而它们恰恰是「被选集挤出去、
-    但模型指名要」的那一批。Ask 侧同样把它们放在 `top_hits` 选集之外
-    (`outline_pool_extra` 直接进分类池),所以这里的豁免是同一条规则,不是报告
-    的例外。它们进 prompt 仍由 `knowledge_context_with_outline` 的子预算负责。
+    **两种「绑定」待遇不同**(codex PR#418 R5 P2):
+
+    * `outline_evidence` 那一批是**上限之外**的补集 —— retriever 已经把它们判在选集
+      之外了(相关度被刻意夹到选集最低分以下,见 `outline_truncated_kg_evidence`),
+      让它们参与同一次排序等于把它们再删一次。Ask 侧同样把它们放在 `top_hits` 之外
+      (`outline_pool_extra` 直接进分类池),所以这是同一条规则,不是报告的例外。
+    * 已经在选集里、又被大纲绑上的对象**照常占用上限席位**,只是**优先占**:把它们
+      整体移出分母的话,「96 条选集 + 8 条绑定 + 8 条方向补检索」会得到 104 条而
+      clamp 什么都不做 —— 上限就成了摆设。优先占位保证绑定不会被方向补检索挤掉,
+      同时总数仍守在 `cap + len(outline_evidence)`。
+
+    元素同理:绑定的元素先占 `answer_element_items` 的席位,其余按 `(-score, id)` 补满。
     """
     if limits is None:
         return
@@ -123,32 +129,43 @@ def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> 
     # 让绑定的**元素**照常被条数上限截掉 —— 那一条子话题的 [k] 同样解析不出来
     # (codex PR#418 R3 P1)。三个 id 空间互不相交,一个集合足够。
     bound = outline_bound_evidence_keys(getattr(result, "outline", None) or ())
-    bound |= {
+    supplemental = {
         str(getattr(hit, "object_id", "") or "")
         for hit in (getattr(result, "outline_evidence", None) or [])
     }
-    ranked = [
-        hit for hit in result.top_hits
-        if str(getattr(hit, "object_id", "") or "") not in bound
-    ]
-    if len(ranked) > limits.ranked_final_cap:
-        exempt = [
-            hit for hit in result.top_hits
-            if str(getattr(hit, "object_id", "") or "") in bound
-        ]
+    bound |= supplemental
+
+    def _object_id(hit) -> str:
+        return str(getattr(hit, "object_id", "") or "")
+
+    within = [hit for hit in result.top_hits if _object_id(hit) not in supplemental]
+    if len(within) > limits.ranked_final_cap:
+        bound_within = [hit for hit in within if _object_id(hit) in bound]
+        others = [hit for hit in within if _object_id(hit) not in bound]
+        room = max(0, limits.ranked_final_cap - len(bound_within))
+        keep = {_object_id(hit) for hit in bound_within}
+        keep |= {
+            _object_id(hit) for hit in sorted(
+                others, key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0)
+            )[:room]
+        }
         result.top_hits = sorted(
-            ranked, key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0)
-        )[: limits.ranked_final_cap] + exempt
-    ranked_elements = [
-        element for element in result.elements
-        if str(getattr(element, "element_id", "") or "") not in bound
-    ]
-    if len(ranked_elements) > limits.answer_element_items:
-        result.elements = rank_elements(
-            ranked_elements, limits.answer_element_items) + [
-            element for element in result.elements
-            if str(getattr(element, "element_id", "") or "") in bound
+            [hit for hit in within if _object_id(hit) in keep],
+            key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0),
+        ) + [hit for hit in result.top_hits if _object_id(hit) in supplemental]
+
+    def _element_id(element) -> str:
+        return str(getattr(element, "element_id", "") or "")
+
+    if len(result.elements) > limits.answer_element_items:
+        bound_elements = [
+            element for element in result.elements if _element_id(element) in bound
         ]
+        others = [
+            element for element in result.elements if _element_id(element) not in bound
+        ]
+        room = max(0, limits.answer_element_items - len(bound_elements))
+        result.elements = bound_elements + rank_elements(others, room)
 
 
 def rank_elements(elements: Sequence[Any], keep: int) -> List[Any]:
@@ -954,12 +971,20 @@ class ReportEngine:
                 continue
             result.top_hits.append(hit)
             seen_objects.add(hit.object_id)
+        # 每个方向取多少,也按档位走(codex PR#418 R5 P2):方向照常逐条执行,但
+        # 「每查询取几条」在档位表里就是 `ranked_per_query_take`(概览 4、穷尽 16),
+        # 而这里此前恒取 `retrieval_top_n`(20)。只在合并后截断的话,低档位仍然付了
+        # 高档位的取数与 hydration 成本,截断只是把多拿的再扔掉。
+        direction_take = (limits.ranked_per_query_take if limits is not None
+                          else self.settings.retrieval_top_n)
+        direction_elements = (min(8, limits.answer_element_items)
+                              if limits is not None else 8)
         for query in list(section.get("sub_queries") or [])[:4]:
             new_count = 0
             try:
                 hits = self.dependencies.retrieval.federated_retrieve(
                     notebook_id, str(query)
-                )[: self.settings.retrieval_top_n]
+                )[:direction_take]
                 for hit in hits:
                     if hit.object_id not in seen_objects:
                         result.top_hits.append(hit)
@@ -969,7 +994,7 @@ class ReportEngine:
                 pass
             try:
                 elements = self.dependencies.retrieval.retrieve_elements(
-                    notebook_id, str(query), limit=8
+                    notebook_id, str(query), limit=direction_elements
                 )
                 for element in elements:
                     if element.element_id not in seen_elements:

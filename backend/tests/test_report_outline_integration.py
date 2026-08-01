@@ -328,9 +328,50 @@ def test_the_merged_directions_are_clamped_to_the_levels_final_cap(repo, monkeyp
     # run 选集里较弱的一条,否则「方向也是证据」这句话在预算里不成立。
     assert [hit.object_id for hit in result.top_hits] == (
         ["b-hot"] + [f"run-{index}" for index in range(11)])
-    # 方向照常逐条执行,账目记的是它真的找到多少(不是被截断后剩下多少)。
+    # 方向照常逐条执行,账目记的是它真的找到多少(不是被合并后截断掉多少)。
+    # 每方向 4 条 KG + 4 个元素 = 该档的 `ranked_per_query_take` 与
+    # `answer_element_items`(见下一条用例),不是接入前恒定的 20 + 8。
     assert [row["query"] for row in result.attempted] == ["a", "b", "c", "d"]
-    assert [row["new"] for row in result.attempted] == [18, 19, 18, 18]
+    assert [row["new"] for row in result.attempted] == [8, 8, 8, 8]
+
+
+def test_each_direction_retrieves_at_the_levels_own_take(repo, monkeypatch):
+    """P2(R5):方向补检索的**取数**也按档位走,不是先按 20+8 取满再截断。
+
+    只在合并后截断的话,低档位仍然付了高档位的取数与 hydration 成本 —— 截断只是
+    把多拿的再扔掉,用户在滑块上省下的那一份从来没省到。
+    """
+    takes: list[int] = []
+    limits_seen: list[int] = []
+
+    def _run(self, notebook_id, question, history="", **kwargs):
+        return ReasoningResult()
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, query: [SimpleNamespace(object_id=f"{query}-{index}", relevance=0.5)
+                           for index in range(100)])
+
+    def _elements(nb, query, limit=8):
+        limits_seen.append(limit)
+        return []
+
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements", _elements)
+    engine = _engine(repo, _SectionLLM())
+    section = {"title": "t", "scope": "s", "sub_queries": ["a"]}
+
+    for depth in (1, 16, None):
+        result = engine._deep_dive("nb", section, "Q", depth=depth)
+        takes.append(len(result.top_hits))
+
+    overview, exhaustive = (ask_retrieval_limits("overview"),
+                            ask_retrieval_limits("exhaustive"))
+    assert takes == [overview.ranked_per_query_take,
+                     exhaustive.ranked_per_query_take,
+                     repo.settings.retrieval_top_n]     # 不选档=接入前的固定值
+    assert limits_seen == [min(8, overview.answer_element_items),
+                           min(8, exhaustive.answer_element_items), 8]
 
 
 def test_the_clamp_leaves_the_outline_bound_objects_alone(repo, monkeypatch):
@@ -388,8 +429,10 @@ def test_the_clamp_leaves_outline_bound_elements_alone(repo, monkeypatch):
         "nb", {"title": "t", "scope": "s", "sub_queries": ["a"]}, "Q", depth=1)
 
     ids = [item.element_id for item in result.elements]
-    assert len(ids) == limits.answer_element_items + 1     # 上限 + 豁免的那一条
-    assert ids[-1] == "e-bound"
+    # 绑定的元素**优先占**席位(不是加在上限之外:那会让上限成为摆设),所以总数
+    # 仍是上限,而分数垫底的那一条绑定活了下来。
+    assert len(ids) == limits.answer_element_items
+    assert ids[0] == "e-bound"
 
 
 def test_an_outline_bound_element_reaches_the_writer_despite_the_cap(repo):
@@ -412,6 +455,38 @@ def test_an_outline_bound_element_reaches_the_writer_despite_the_cap(repo):
     match = re.search(r"### 绑了元素的一节 — 证据: \[(k\d+)\]", prompt)
     assert match, "绑定的元素被条数上限截掉了,子话题只剩裸标题"
     assert f"\n{match.group(1)}: [source-element]" in prompt
+
+
+def test_bound_objects_already_in_the_selection_still_consume_cap_slots(repo, monkeypatch):
+    """绑定但**已经在选集里**的对象照常占用上限席位,只是优先占(codex R5 P2)。
+
+    把它们整体移出分母的话,「满额选集 + 8 条绑定 + 方向补检索」会让总数超出上限
+    而 clamp 什么都不做 —— 上限就成了摆设。同时它们不会被方向补检索挤掉。
+    """
+    limits = ask_retrieval_limits("overview")
+    run_hits = [SimpleNamespace(object_id=f"run-{index}", relevance=0.9 - index / 100.0)
+                for index in range(limits.ranked_final_cap)]
+    bound_ids = [f"run-{index}" for index in range(10, 12)]   # 选集里最弱的两条
+
+    def _run(self, notebook_id, question, history="", **kwargs):
+        return ReasoningResult(top_hits=list(run_hits),
+                               outline=[_section("s1", "一节", bound_ids)])
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, query: [SimpleNamespace(object_id=f"{query}-{index}", relevance=0.95)
+                           for index in range(8)])
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements",
+                        lambda nb, query, limit=8: [])
+    engine = _engine(repo, _SectionLLM())
+
+    result = engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["a"]}, "Q", depth=1)
+
+    ids = [hit.object_id for hit in result.top_hits]
+    assert len(ids) == limits.ranked_final_cap        # 12,不是 12 + 2
+    assert set(bound_ids) <= set(ids)                 # 绑定的没被更高分的方向命中挤掉
 
 
 def test_a_section_under_the_cap_is_left_byte_identical(repo, monkeypatch):
