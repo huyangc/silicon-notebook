@@ -188,6 +188,24 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "无内部黑话，只说「文档」。真实响应由 tests/test_document_limit.py 的"
         " import/upload/url 三端点 409 用例覆盖(断言 X-User-Message 头 + 「文档」文案)。"
     ),
+    "app/api/source_routes.py::_parse_source_upload": (
+        "该函数三条 user_error 里只有「单次文件数上限」那条是 f-string，纯中文模板只插入"
+        "模块常量 SOURCE_UPLOAD_MAX_FILES_PER_BATCH 这一个整数（「单次最多上传 N 个来源"
+        "文件。请减少本批文件数量后重试。」）——不拼 MultiPartException 的原文，只用它的"
+        "前缀分类。另两条是中文字面量，已由静态检查覆盖。真实响应由"
+        " tests/test_source_upload_size_limit.py::"
+        "test_upload_batch_above_fixed_file_count_guard_is_rejected_before_orchestration"
+        " 覆盖(断言 413 + X-User-Message 头 + detail 含上限数字)。"
+    ),
+    "app/api/source_routes.py::_source_upload_too_large": (
+        "detail 是纯中文单文件大小上限模板 f-string，只插入部署配置派生的两个数值:"
+        "_format_upload_size_limit(max_bytes) 的「N MB」/「N KB」单位串与 max_bytes 整数"
+        "(「上传的单个来源文件超过当前大小上限 N MB(X 字节)。请选择更小的文件,或联系管理"
+        "员调整部署配置。」)——无内部黑话,只说「来源文件」。流式中断与声明大小两条 413"
+        "路径共用它。真实响应由 tests/test_source_upload_size_limit.py::"
+        "test_upload_over_configured_single_file_limit_is_authoritatively_rejected"
+        " 覆盖(断言 413 + X-User-Message 头 + detail 含「1 MB」与字节数)。"
+    ),
     "app/api/knowhow_routes.py::_knowhow_import_user_error": (
         "detail 只能来自 GridParseError 或 KnowhowImportValidationError 的 user_message；"
         "两个异常类型只接受导入层维护的固定中文可操作文案，其他 ValueError 仍走未标记的"
