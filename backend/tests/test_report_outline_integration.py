@@ -781,6 +781,40 @@ def test_every_writing_budget_is_the_levels_own_number(repo, monkeypatch):
         f"e{index:02d}" for index in range(39, 39 - limits.answer_element_items, -1)]
 
 
+def test_the_source_partition_keeps_room_for_the_outline_bindings(repo):
+    """来源分区(chunk + 直接原文段)是**一份**共享预算:chunk 按输入序吃满之后,
+    绑在后面的原文段拿到的就是 0,而绑定的 chunk 排在最后同样会被截掉——两种情况
+    下结构块里的 [k] 都解析不出来(codex PR#418 R4)。
+    """
+    limits = ask_retrieval_limits("overview")
+    chunks = [RetrievedChunk(
+        chunk_id=f"c{index:02d}", source_id="s1", source_title="论文一",
+        section_path=f"{index}", text="正文" * 400, relevance=0.9)
+        for index in range(30)]
+    assert sum(len(chunk.text) for chunk in chunks) > limits.chunk_context_chars
+    bound_chunk = chunks[-1]                       # 排在最后,必被预算截掉
+    bound_element = RetrievedElement(
+        element_id="el-bound", source_id="s1", source_title="论文一",
+        location_label="p9", element_type="formula", text="E=mc^2", score=0.01)
+    llm = _SectionLLM()
+    engine = _engine(repo, llm)
+    result = ReasoningResult(
+        chunks=chunks, elements=[bound_element],
+        outline=[_section("s1", "绑了原文的一节",
+                          [bound_chunk.chunk_id, bound_element.element_id])])
+
+    engine._draft_section("nb", {"title": "A", "scope": "sa",
+                                 "sub_queries": ["q"]}, "Q", result, 1)
+
+    prompt = llm.section_prompts[0]
+    match = re.search(r"### 绑了原文的一节 — 证据: \[([^\]]+)\]", prompt)
+    assert match, "两条绑定都被来源分区截掉了,子话题只剩裸标题"
+    marks = match.group(1).split(", ")
+    assert len(marks) == 2
+    for mark in marks:
+        assert re.search(rf"(?m)^{mark}: ", prompt), f"{mark} 不在证据块里"
+
+
 def test_the_chain_block_is_charged_against_the_kg_partition(repo, monkeypatch):
     """`kg_context_chars` 是「KG 对象/关系 + confirmed Memory + 查询期推导链」整个
     分区的上限(codex PR#418 R3 P2)。KG 块吃满之后再无条件接上推导链,就是自己

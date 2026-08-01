@@ -1000,11 +1000,41 @@ class ReportEngine:
                         else self.settings.report_section_chunk_budget)
         kg_budget = (limits.kg_context_chars if limits is not None
                      else self.settings.answer_context_budget_chars)
-        chunk_block, chunk_map = deps.evidence_context.chunk_context(
-            result.chunks, notebook_id=notebook_id, budget_chars=chunk_budget)
-        # 本节深挖整理出的子大纲(仅穷尽档非空)。它有两个消费点,顺序不能倒:先决定
-        # 谁进 KG 上下文(绑定证据的子预算),再据装配好的 id_map 渲染结构块。
+        # 本节深挖整理出的子大纲(仅穷尽档非空)。它有三个消费点,顺序不能倒:先决定
+        # 谁进来源分区、再决定谁进 KG 上下文,最后才据装配好的 id_map 渲染结构块。
         sub_outline = list(getattr(result, "outline", None) or [])
+        bound_keys = (outline_bound_evidence_keys(sub_outline)
+                      if limits is not None else set())
+        # 来源分区(chunk + 直接原文段)同样要给大纲绑定留位置(codex PR#418 R4):
+        # 它是一份**共享**预算,chunk 按输入序吃满之后,绑在后面的原文段拿到的
+        # 就是 0,绑定照样从结构块里消失 —— 那正是前两轮修 KG 侧要防的事。
+        # 两件事:绑定的 chunk 排到最前(chunk_context 按输入序渲染,逐 chunk 独立,
+        # 重排是安全的);绑定的原文段按它们**自己的实际长度**预留额度(上限仍是
+        # 分区的一半,与 KG 侧的子预算同一个比例),chunk 只吃预留之外的部分。
+        chunks = list(getattr(result, "chunks", None) or [])
+        elements = list(getattr(result, "elements", []) or [])
+        bound_elements = [
+            element for element in elements
+            if str(getattr(element, "element_id", "") or "") in bound_keys
+        ]
+        if bound_keys:
+            chunks = [
+                chunk for chunk in chunks
+                if str(getattr(chunk, "chunk_id", "") or "") in bound_keys
+            ] + [
+                chunk for chunk in chunks
+                if str(getattr(chunk, "chunk_id", "") or "") not in bound_keys
+            ]
+        element_reserve = min(
+            chunk_budget // _OUTLINE_KG_BUDGET_DIVISOR,
+            # 每条 ≈ 正文 + 前缀(`k4001: [source-element][tier] 标题 · 位置 — `)。
+            # 估多了只是少给 chunk 几百字符,估少了才会让绑定进不来。
+            sum(len(str(getattr(element, "text", "") or "")) + 120
+                for element in bound_elements),
+        )
+        chunk_block, chunk_map = deps.evidence_context.chunk_context(
+            chunks, notebook_id=notebook_id,
+            budget_chars=max(0, chunk_budget - element_reserve))
         kg_block, kg_map = knowledge_context_with_outline(
             deps.evidence_context, notebook_id, result.top_hits, sub_outline,
             id_offset=len(chunk_map), budget_chars=kg_budget)
@@ -1024,13 +1054,7 @@ class ReportEngine:
         # 绑定键横跨三个 id 空间,一个被 `answer_element_items` 截掉的绑定元素,在
         # `outline_structure_block` 里就是一个解析不出的绑定,子话题退成裸标题。
         # 排最前是因为字符预算仍按输入序消耗 —— 与 KG 那边的优先前缀同一个理由。
-        elements = list(getattr(result, "elements", []) or [])
         if limits is not None:
-            bound_keys = outline_bound_evidence_keys(sub_outline)
-            bound_elements = [
-                element for element in elements
-                if str(getattr(element, "element_id", "") or "") in bound_keys
-            ]
             others = [
                 element for element in elements
                 if str(getattr(element, "element_id", "") or "") not in bound_keys
