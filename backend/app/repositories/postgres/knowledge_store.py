@@ -67,6 +67,7 @@ def _lexical_candidate_union(
     candidate_documents,
     output_id: str,
     text_field: str,
+    allowed_source_ids: Sequence[str] | None = None,
 ) -> list[dict]:
     """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query."""
     terms = lexical_recall_terms(query)
@@ -78,9 +79,15 @@ def _lexical_candidate_union(
     # a rare independent identifier.  The union stays below 4K + 64 rows.
     candidate_budget = max(result_limit * 4, len(terms), 12)
     per_term_limit = max(1, (candidate_budget + len(terms) - 1) // len(terms))
-    candidates = candidate_rows_for_terms(
-        db, notebook_id, terms, per_term_limit
-    )
+    if allowed_source_ids is None:
+        candidates = candidate_rows_for_terms(
+            db, notebook_id, terms, per_term_limit
+        )
+    else:
+        candidates = candidate_rows_for_terms(
+            db, notebook_id, terms, per_term_limit,
+            list(dict.fromkeys(allowed_source_ids)),
+        )
     if not candidates:
         return []
 
@@ -2021,7 +2028,10 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------------ FTS
     @staticmethod
-    def fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
+    def fts_search(
+        db, notebook_id: str, q: str, k: int = 30, *,
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
         return _lexical_candidate_union(
@@ -2033,10 +2043,14 @@ class KnowledgeStore:
             candidate_documents=knowledge_candidate_documents,
             output_id="object_id",
             text_field="name",
+            allowed_source_ids=allowed_source_ids,
         )
 
     @staticmethod
-    def chunk_fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
+    def chunk_fts_search(
+        db, notebook_id: str, q: str, k: int = 30, *,
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> List[Dict]:
         """Return deterministic lexical chunk hits from trigram candidates."""
         needle = (q or "").strip()
         return _lexical_candidate_union(
@@ -2048,6 +2062,7 @@ class KnowledgeStore:
             candidate_documents=chunk_candidate_documents,
             output_id="chunk_id",
             text_field="text",
+            allowed_source_ids=allowed_source_ids,
         )
 
     @staticmethod

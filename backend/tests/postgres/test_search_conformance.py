@@ -78,6 +78,47 @@ def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
     ]
 
 
+def test_source_scope_is_inside_each_postgres_candidate_limit():
+    class _Result:
+        @staticmethod
+        def fetchall():
+            return []
+
+    class _Connection:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement, params):
+            self.calls.append((statement, params))
+            return _Result()
+
+    connection = _Connection()
+    knowledge_candidate_rows_for_terms(
+        connection, "nb", ["target command"], per_term_limit=2,
+        allowed_source_ids=["A", "B"],
+    )
+    statement, params = connection.calls[0]
+    lateral = statement.split("CROSS JOIN LATERAL", 1)[1]
+    assert "EXISTS (SELECT 1 FROM knowledge_object_sources" in lateral
+    assert lateral.index("knowledge_object_sources") < lateral.index("LIMIT %s")
+    assert params == [
+        0, "target command", "%target command%", "nb", ["A", "B"], 2
+    ]
+
+    connection = _Connection()
+    chunk_candidate_rows_for_terms(
+        connection, "nb", ["target command"], per_term_limit=2,
+        allowed_source_ids=["A", "B"],
+    )
+    statement, params = connection.calls[0]
+    lateral = statement.split("CROSS JOIN LATERAL", 1)[1]
+    assert '"chunks".source_id=ANY(%s)' in lateral
+    assert lateral.index("source_id=ANY(%s)") < lateral.index("LIMIT %s")
+    assert params == [
+        0, "target command", "%target command%", "nb", ["A", "B"], 2
+    ]
+
+
 def test_like_contains_pattern_keeps_metacharacters_literal():
     # The trigram arm keeps the raw term; only the LIKE arm is escaped.
     assert like_contains_pattern("plain") == "%plain%"
@@ -301,7 +342,7 @@ def search_harness(postgres_database) -> SearchHarness:
     from app.repositories.postgres.query_store import QueryStore as PostgresQueryStore
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     seams = RepositoryCompatibilitySeams(
         new_id=lambda prefix: f"{prefix}-unused",
         now=lambda: NOW,
@@ -422,7 +463,7 @@ def test_like_metacharacters_do_not_widen_the_candidate_probe(search_harness):
 def test_search_expression_indexes_match_catalog_and_are_planner_usable(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname=current_schema() "
@@ -617,7 +658,7 @@ def test_exact_chunk_probe_is_planner_usable_on_the_trigram_index(postgres_datab
     """Bounded is not enough — the probe must ride `idx_chunks_text_trgm`."""
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     with postgres_database.connect() as connection:
         connection.execute("SET LOCAL enable_seqscan=off")
         plan_rows = connection.execute(

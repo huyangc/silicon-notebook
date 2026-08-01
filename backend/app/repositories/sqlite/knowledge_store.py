@@ -1809,13 +1809,32 @@ class KnowledgeStore:
 
     # ------------------------------------------------------------------ FTS
     @staticmethod
-    def fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
+    def fts_search(
+        db, notebook_id: str, q: str, k: int = 30, *,
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> List[Dict]:
         """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
         [{object_id, name, score, match:'lexical'}]。q 空 → []。"""
         match_query = sqlite_fts_match_expression(q)
         if not match_query:
             return []
-        rows = db.execute(
+        if allowed_source_ids is not None:
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
+                return []
+            placeholders = ",".join("?" for _ in source_ids)
+            rows = db.execute(
+                "SELECT object_id,name,bm25(kg_objects_fts) AS rank "
+                "FROM kg_objects_fts WHERE notebook_id=? "
+                "AND kg_objects_fts MATCH ? AND EXISTS ("
+                "SELECT 1 FROM knowledge_object_sources kos "
+                "WHERE kos.notebook_id=? AND kos.object_id=kg_objects_fts.object_id "
+                f"AND kos.source_id IN ({placeholders})) "
+                "ORDER BY rank LIMIT ?",
+                (notebook_id, match_query, notebook_id, *source_ids, k),
+            ).fetchall()
+        else:
+            rows = db.execute(
             "SELECT object_id, name, bm25(kg_objects_fts) AS rank "
             "FROM kg_objects_fts WHERE notebook_id=? AND kg_objects_fts MATCH ? "
             "ORDER BY rank LIMIT ?",
@@ -1824,13 +1843,29 @@ class KnowledgeStore:
                  "score": -float(r["rank"]), "match": "lexical"} for r in rows]
 
     @staticmethod
-    def chunk_fts_search(db, notebook_id: str, q: str, k: int = 30) -> List[Dict]:
+    def chunk_fts_search(
+        db, notebook_id: str, q: str, k: int = 30, *,
+        allowed_source_ids: Sequence[str] | None = None,
+    ) -> List[Dict]:
         """FTS5 MATCH(chunks_fts, trigram)。notebook 维度过滤。返回
         [{chunk_id, score, match:'lexical'}]。q 空 → []。"""
         match_query = sqlite_fts_match_expression(q)
         if not match_query:
             return []
-        rows = db.execute(
+        if allowed_source_ids is not None:
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
+                return []
+            placeholders = ",".join("?" for _ in source_ids)
+            rows = db.execute(
+                "SELECT f.chunk_id,bm25(chunks_fts) AS rank FROM chunks_fts f "
+                "JOIN chunks c ON c.id=f.chunk_id "
+                "WHERE f.notebook_id=? AND chunks_fts MATCH ? "
+                f"AND c.source_id IN ({placeholders}) ORDER BY rank LIMIT ?",
+                (notebook_id, match_query, *source_ids, k),
+            ).fetchall()
+        else:
+            rows = db.execute(
             "SELECT chunk_id, bm25(chunks_fts) AS rank FROM chunks_fts "
             "WHERE notebook_id=? AND chunks_fts MATCH ? ORDER BY rank LIMIT ?",
             (notebook_id, match_query, k)).fetchall()

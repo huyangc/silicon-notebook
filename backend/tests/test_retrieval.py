@@ -125,6 +125,199 @@ def test_retrieve_scored_unions_lexical_candidates_with_kg_ann(repo, monkeypatch
     assert lexical_id in {hit.object_id for hit in hits}
 
 
+def test_source_scoped_kg_candidates_do_not_starve_or_hydrate_third_source(
+    repo, monkeypatch
+):
+    """C may own the global top-K, but cannot consume a selected A+B window."""
+    import json
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="manuals"))
+    now = "2026-07-01T00:00:00"
+    rows = [
+        ("ko-c1", "C", "target command target command target command"),
+        ("ko-c2", "C", "target command target command"),
+        ("ko-a", "A", "target command in manual A"),
+        ("ko-b", "B", "target command in manual B"),
+    ]
+    with repo._write() as db:
+        for source_id in ("A", "B", "C"):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (source_id, nb.id, f"Manual {source_id}", "md", "ready", now, now),
+            )
+        for object_id, source_id, name in rows:
+            evidence = json.dumps([{
+                "source_id": source_id,
+                "source_title": f"Manual {source_id}",
+                "element_id": f"el-{source_id}",
+                "element_type": "paragraph",
+                "location_label": "Commands",
+                "quoted_span": name,
+                "confidence": 1.0,
+            }])
+            db.execute(
+                "INSERT INTO knowledge_objects "
+                "(id,notebook_id,object_type,status,owner,payload,evidence,"
+                "source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (object_id, nb.id, "concept", "approved", "",
+                 json.dumps({"name": name}), evidence, source_id, now, now),
+            )
+            db.execute(
+                "INSERT INTO kg_objects_fts(object_id,notebook_id,name) VALUES (?,?,?)",
+                (object_id, nb.id, name),
+            )
+            db.execute(
+                "INSERT INTO knowledge_object_sources "
+                "(object_id,source_id,notebook_id) VALUES (?,?,?)",
+                (object_id, source_id, nb.id),
+            )
+        repo._mark_source_index_backfilled(db, nb.id)
+
+    monkeypatch.setattr(repo.settings, "chunk_recall", 2)
+    original = repo.retrieval.candidates._knowledge_objects
+    hydrated_ids = set()
+
+    def observe_hydration(database, notebook_id, object_type, **kwargs):
+        ids = set(kwargs.get("id_filter") or ())
+        hydrated_ids.update(ids)
+        assert not ids & {"ko-c1", "ko-c2"}
+        return original(database, notebook_id, object_type, **kwargs)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_knowledge_objects", observe_hydration
+    )
+    hits = repo.retrieval.retrieve_scored(
+        nb.id, "target command", allowed_source_ids=("A", "B")
+    )
+
+    assert {hit.object_id for hit in hits} == {"ko-a", "ko-b"}
+    assert hydrated_ids == {"ko-a", "ko-b"}
+    assert all(
+        evidence.source_id in {"A", "B"}
+        for hit in hits for evidence in hit.evidence
+    )
+
+
+def test_source_scoped_kg_fails_closed_without_reverse_index(repo):
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="legacy"))
+    assert repo.retrieval.retrieve_scored(
+        nb.id, "target command", allowed_source_ids=("A",)
+    ) == []
+
+
+def test_source_scoped_chunk_fts_filters_before_limit(repo):
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="large manuals"))
+    now = "2026-07-01T00:00:00"
+    chunks = [
+        ("chunk-c1", "C", "target command target command target command"),
+        ("chunk-c2", "C", "target command target command"),
+        ("chunk-a", "A", "target command in manual A"),
+        ("chunk-b", "B", "target command in manual B"),
+    ]
+    with repo._write() as db:
+        for source_id in ("A", "B", "C"):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (source_id, nb.id, f"Manual {source_id}", "md", "ready", now, now),
+            )
+        for chunk_id, source_id, text in chunks:
+            db.execute(
+                "INSERT INTO chunks "
+                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb.id, source_id, text, "Commands", "[]", now),
+            )
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                (chunk_id, nb.id, text),
+            )
+
+    with repo._connect() as db:
+        hits = repo._runtime.knowledge.chunk_fts_search(
+            db, nb.id, "target command", k=2,
+            allowed_source_ids=("A", "B"),
+        )
+    assert {hit["chunk_id"] for hit in hits} == {"chunk-a", "chunk-b"}
+
+
+def test_copyable_selected_element_search_routes_scope_into_bounded_chunks(
+    repo, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "notebook_copy_stats",
+        lambda _notebook_id: {"copyable": True},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_gather_elements",
+        lambda *_args, **_kwargs: pytest.fail(
+            "selected source search must not materialize every element/vector"
+        ),
+    )
+
+    def scoped_chunks(notebook_id, query, recall=0, *, allowed_source_ids=None):
+        calls.append((notebook_id, query, recall, tuple(allowed_source_ids or ())))
+        return [], [], None
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks", scoped_chunks)
+    assert repo.retrieval.retrieve_elements(
+        "nb", "target command", allowed_source_ids=("A", "B")
+    ) == []
+    assert calls == [("nb", "target command", 32, ("A", "B"))]
+
+
+def test_copyable_selected_chunk_search_always_uses_bounded_fts(
+    repo, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "notebook_copy_stats",
+        lambda _notebook_id: {"copyable": True},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_gather_chunks",
+        lambda *_args, **_kwargs: pytest.fail(
+            "selected source search must not materialize every chunk/vector"
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.chunks,
+        "count_row",
+        lambda *_args, **_kwargs: pytest.fail(
+            "selected source search must not scan the notebook for a count"
+        ),
+    )
+
+    def bounded(notebook_id, query, query_vector, recall, n_chunks, *,
+                allowed_source_ids=None):
+        calls.append((
+            notebook_id, query, recall, n_chunks,
+            tuple(allowed_source_ids or ()),
+        ))
+        return [], [], None
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", bounded
+    )
+    assert repo.retrieval.candidates._retrieve_chunks(
+        "nb", "target command", recall=7, allowed_source_ids=("A", "B")
+    ) == ([], [], None)
+    assert calls == [("nb", "target command", 7, -1, ("A", "B"))]
+
+
 def test_keyword_score_ignores_stopwords():
     # Verbose phrasing must not dilute the score: only content tokens count.
     # Basis after dropping stopwords (what/is/and/are/its) -> {engram, problems};

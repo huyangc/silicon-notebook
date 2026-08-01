@@ -2414,6 +2414,28 @@ MIGRATION_MANIFEST[(36, 37)] = {
     "views": {},
 }
 
+# v38: bounded identity-only roster for user-visible source scope resolution.
+VISIBLE_SOURCE_IDENTITY_INDEX = {
+    "idx_sources_visible_identity":
+        "CREATE INDEX idx_sources_visible_identity "
+        "ON sources(notebook_id, created_at, id) "
+        "WHERE source_type NOT IN ('memory','knowhow')",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 38, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **VISIBLE_SOURCE_IDENTITY_INDEX},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(37, 38)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": VISIBLE_SOURCE_IDENTITY_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

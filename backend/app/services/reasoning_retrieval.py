@@ -68,6 +68,10 @@ from app.services.collection_catalog import (
 from app.services.collection_enumeration import (
     TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
 )
+from app.services.evidence_scope import (
+    ResolvedEvidenceScope,
+    restrict_evidence_candidates,
+)
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, W_KEYWORD, W_SEMANTIC,
 )
@@ -1281,6 +1285,10 @@ class ReflectDecision:
     elements_query: str = ""
     ppr_query: str = ""
     exact_term: str = ""
+    evidence_query: str = ""
+    # None means the field was omitted and inherits the run scope.  An explicit
+    # empty list stays distinct and is rejected by the authorized resolver.
+    evidence_source_refs: Optional[List[str]] = None
     chain_start_object_id: str = ""
     chain_target_object_id: str = ""
     chain_edge_type: Optional[str] = None
@@ -1364,6 +1372,18 @@ class ReasoningResult:
     # `outline_truncated_kg_evidence`)。它是 `top_hits` 的**补集**,不重复其中
     # 已有的对象;按节合成把两者合起来解析绑定键,别的路径不消费它。
     outline_evidence: List[RetrievedKnowledge] = field(default_factory=list)
+    evidence_scope: ResolvedEvidenceScope = field(
+        default_factory=ResolvedEvidenceScope.all
+    )
+
+
+@dataclass
+class EvidenceSearchOutcome:
+    # The run ceiling remains immutable.  ``scope`` may be a call-local subset
+    # used for this search only; it is never installed as a new run ceiling.
+    scope: ResolvedEvidenceScope
+    knowledge: List[RetrievedKnowledge] = field(default_factory=list)
+    elements: List[RetrievedElement] = field(default_factory=list)
 
 
 class ReasoningRetriever:
@@ -1413,6 +1433,7 @@ class ReasoningRetriever:
         # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
         # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
         self._per_query_scored: Dict[str, Dict[str, tuple]] = {}
+        self._evidence_scope = ResolvedEvidenceScope.all()
 
     @classmethod
     def from_repository(
@@ -1442,6 +1463,7 @@ class ReasoningRetriever:
         """
         return bool(
             self.allow_enumeration
+            and not self._evidence_scope.restricted
             and enumeration_wiring_active(
                 self.settings, self.collection_catalog, self.collection_enumeration
             )
@@ -1450,17 +1472,29 @@ class ReasoningRetriever:
     # --- KG 工具箱(薄封装 repo 原语) ---
     def _filter_candidates(self, kind: str, items):
         values = list(items)
-        if self.candidate_filter is None:
-            return values
-        return list(self.candidate_filter(kind, values))
+        if self.candidate_filter is not None:
+            values = list(self.candidate_filter(kind, values))
+        # Transient graph chains are not source-addressable evidence.  They are
+        # disabled before I/O for a selected source scope; in all-source mode
+        # they must retain the historical candidate-filter behavior.
+        if kind == "chain":
+            return [] if self._evidence_scope.restricted else values
+        return list(restrict_evidence_candidates(self._evidence_scope, kind, values))
 
     def search(self, notebook_id, query, types=None, prefer="balanced"):
         wk, ws = PREFER_WEIGHTS.get(prefer, PREFER_WEIGHTS["balanced"])
+        if self._evidence_scope.restricted:
+            raw_hits = self.retrieval.federated_retrieve(
+                notebook_id, query, types=types, w_keyword=wk, w_semantic=ws,
+                allowed_source_keys=self._evidence_scope.allowed_source_keys,
+            )
+        else:
+            raw_hits = self.retrieval.federated_retrieve(
+                notebook_id, query, types=types, w_keyword=wk, w_semantic=ws
+            )
         hits = self._filter_candidates(
             "knowledge",
-            self.retrieval.federated_retrieve(
-                notebook_id, query, types=types, w_keyword=wk, w_semantic=ws
-            ),
+            raw_hits,
         )
         # P1-B: 留存本次查询的全量打分(轻量 (relevance,score) map,含未进 collected
         # 的候选)。收尾 _quota_rerank 直接复用——一次 run 内图只读、打分确定,
@@ -1493,8 +1527,15 @@ class ReasoningRetriever:
             return {}
 
     def search_elements(self, notebook_id, query):
+        if self._evidence_scope.restricted:
+            raw_elements = self.retrieval.federated_retrieve_elements(
+                notebook_id, query,
+                allowed_source_keys=self._evidence_scope.allowed_source_keys,
+            )
+        else:
+            raw_elements = self.retrieval.retrieve_elements(notebook_id, query)
         return self._filter_candidates(
-            "element", self.retrieval.retrieve_elements(notebook_id, query)
+            "element", raw_elements
         )
 
     def ppr_retrieve(self, notebook_id, query):
@@ -1510,6 +1551,57 @@ class ReasoningRetriever:
         """
         return self._filter_candidates(
             "chunk", self.retrieval.exact_lookup_chunks(notebook_id, query)
+        )
+
+    def search_evidence(
+        self,
+        notebook_id: str,
+        query: str,
+        source_refs: Optional[Sequence[str]] = None,
+    ) -> EvidenceSearchOutcome:
+        """Unified scoped evidence search used by the reasoning Agent.
+
+        Omitting ``source_refs`` inherits the immutable run ceiling.  Providing
+        references is permitted only inside an already confirmed selected run
+        and creates a call-local subset.  A reasoning run may never establish
+        its first selected scope after corpus access has begun: that decision
+        belongs to the corpus-blind preview and user confirmation gate.
+        """
+        if not str(query or "").strip():
+            raise ValueError("search_evidence requires a query")
+        search_scope = self._evidence_scope
+        if source_refs is not None:
+            if not self._evidence_scope.restricted:
+                raise ValueError(
+                    "a selected evidence scope must be confirmed before retrieval"
+                )
+            if self.collection_enumeration is None:
+                raise ValueError("source-scoped evidence search is unavailable")
+            proposed = self.collection_enumeration.resolve_evidence_scope(
+                notebook_id,
+                source_refs,
+                cancel_event=self.cancel_event,
+            )
+            if not proposed.allowed_source_keys <= self._evidence_scope.allowed_source_keys:
+                raise ValueError("an evidence scope cannot be broadened")
+            search_scope = proposed
+
+        # Existing retrieval primitives consume the instance scope.  Install a
+        # narrower scope only for these two synchronous calls and restore the
+        # confirmed run ceiling even when either adapter raises.  This makes a
+        # subset search useful without letting one Agent action rewrite which
+        # sources the user confirmed for the whole answer.
+        run_scope = self._evidence_scope
+        self._evidence_scope = search_scope
+        try:
+            knowledge = self.search(notebook_id, query)
+            elements = self.search_elements(notebook_id, query)
+        finally:
+            self._evidence_scope = run_scope
+        return EvidenceSearchOutcome(
+            scope=search_scope,
+            knowledge=knowledge,
+            elements=elements,
         )
 
     def _exact_lookup_terms(self, text: str, *, honor_quotes: bool = True) -> List[str]:
@@ -1582,6 +1674,7 @@ class ReasoningRetriever:
                 raise RuntimeError("reasoning model is not configured")
             return answer_decision
         enumeration = self.enumeration_active()
+        source_scope_tools = self.collection_enumeration is not None
         # 白名单从 collection_catalog import(唯一字面量定义点),prompt/schema/
         # 解析三处共用同一份,不各写一份副本。
         element_kinds = ENUMERABLE_ELEMENT_KINDS if enumeration else ()
@@ -1593,6 +1686,8 @@ class ReasoningRetriever:
                     question, candidates_summary,
                     element_kinds=element_kinds, object_types=object_types,
                     outline=outline,
+                    source_scope_tools=source_scope_tools,
+                    selected_source_scope=self._evidence_scope.restricted,
                 ),
             }]
             if self.untrusted_evidence:
@@ -1602,7 +1697,10 @@ class ReasoningRetriever:
                 })
             raw = client.chat_json(
                 messages,
-                reflect_schema_hint(element_kinds, object_types, outline),
+                reflect_schema_hint(
+                    element_kinds, object_types, outline,
+                    source_scope_tools=source_scope_tools,
+                ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event)
@@ -1620,6 +1718,8 @@ class ReasoningRetriever:
                 "answer", "expand_graph", "add_subquery", "search_elements",
                 "ppr_retrieve", "expand_community", "follow_chain",
                 "exact_lookup",
+            ) + (
+                ("search_evidence",) if source_scope_tools else ()
             ) + (
                 (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION)
                 if enumeration else ()
@@ -1653,6 +1753,20 @@ class ReasoningRetriever:
             d.elements_query = str(data.get("elements_query", "")).strip()
             d.ppr_query = str(data.get("ppr_query", "")).strip()
             d.exact_term = clean_exact_term(data.get("exact_term", ""))
+            evidence_request = data.get("search_evidence")
+            if source_scope_tools and isinstance(evidence_request, dict):
+                d.evidence_query = str(
+                    evidence_request.get("query", "")
+                ).strip()
+                if "source_refs" in evidence_request:
+                    raw_refs = evidence_request.get("source_refs")
+                    d.evidence_source_refs = (
+                        [
+                            str(value).strip()[:500]
+                            for value in raw_refs[:8]
+                        ]
+                        if isinstance(raw_refs, list) else []
+                    )
             enumerate_request = data.get("enumerate")
             if enumeration and isinstance(enumerate_request, dict):
                 # 非白名单值不抛错、清成空串:run() 会记一条 skip 继续跑
@@ -1714,6 +1828,8 @@ class ReasoningRetriever:
                     raise ValueError("reasoning follow_chain action is missing start_object_id")
                 if action == "exact_lookup" and not d.exact_term:
                     raise ValueError("reasoning exact_lookup action is missing exact_term")
+                if action == "search_evidence" and not d.evidence_query:
+                    raise ValueError("reasoning search_evidence action is missing query")
                 # `collection:"sources"` 刻意没有子类型(设计文档 §6.2:参数优先
                 # 于动作 id),所以两条「缺子类型」校验都要放行它——否则合法的
                 # 文档目录请求在 fail_closed 调用方手里直接 ValueError(codex
@@ -1749,11 +1865,13 @@ class ReasoningRetriever:
                     d.elements_query,
                     d.ppr_query,
                     d.exact_term,
+                    d.evidence_query,
                     d.chain_start_object_id,
                     d.chain_target_object_id,
                     # kind/object_type 已被白名单夹住,只有这两个是自由文本。
                     d.enumerate_source_id,
                     d.enumerate_source_title,
+                    *(d.evidence_source_refs or []),
                     d.new_sub_query.query if d.new_sub_query else "",
                 )
                 if any(len(value) > 2000 for value in bounded_fields):
@@ -1862,8 +1980,11 @@ class ReasoningRetriever:
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
-            limits: Optional[AskRetrievalLimits] = None):
+            limits: Optional[AskRetrievalLimits] = None,
+            evidence_scope: Optional[ResolvedEvidenceScope] = None):
         raise_if_cancelled(self.cancel_event)
+        self._evidence_scope = evidence_scope or ResolvedEvidenceScope.all()
+        self._per_query_scored.clear()
         # top_n:显式传入(报告管线每节独立预算)直通;None=合成时按最终方面数
         # (used_queries,含 expand_community 兄弟)自适应解析 —— 见 effective_top_n。
         # max_steps 覆盖 settings.reasoning_max_steps(报告滑块封顶 reflect 轮数);None=沿用全局。
@@ -1934,8 +2055,12 @@ class ReasoningRetriever:
         outline_cap_repair_used = False
         # KG 弱支撑边回喂(§3.3)。闸叠在大纲闸之上:大纲不在场就不可能有绑定,
         # 也就没有「已绑定证据的周边」可谈,所以关闭态天然零查询。
-        kg_gap_active = outline_active and bool(
+        kg_gap_active = (
+            outline_active
+            and not self._evidence_scope.restricted
+            and bool(
             getattr(self.settings, "reasoning_outline_kg_gap_enabled", True)
+            )
         )
         # run 级 (src, edge, tgt) 去重账目:每条边只展示一次。它是提示不是状态,
         # 反复展示只烧 prompt 预算。仅内存,不持久化、不进 AskResponse。
@@ -1965,6 +2090,19 @@ class ReasoningRetriever:
             if on_step:
                 on_step(step)
 
+        if self._evidence_scope.restricted:
+            record(TraceStep(
+                step_type="skip",
+                summary="限定来源下已关闭无法安全隔离的图扩展通道",
+                detail={
+                    "reason": "source_scope_unsafe_channels",
+                    "channels": [
+                        "ppr", "community", "follow_chain", "neighbors",
+                        "exact_lookup", "enumeration",
+                    ],
+                },
+            ))
+
         # P0-C: seed pass PPR 只依赖原问题与只读图状态,与 plan 的 LLM 时间完全
         # 重叠(copy_context 保住 per-user 模型解析的 ContextVar)。在原 seed pass
         # 位置 join,故 seen_chunks 合并时序/trace 顺序与串行版逐位一致;
@@ -1978,8 +2116,9 @@ class ReasoningRetriever:
         # 无人 join 且池未关闭"的线程泄漏,也不会出现两处 shutdown 各触发一次。
         ppr_future = None
         ppr_pool = None
-        if self.allow_ppr and self.settings.graph_ppr_enabled and getattr(
-                self.settings, "reasoning_ppr_prefetch", True):
+        if (not self._evidence_scope.restricted
+                and self.allow_ppr and self.settings.graph_ppr_enabled and getattr(
+                self.settings, "reasoning_ppr_prefetch", True)):
             ppr_pool = ThreadPoolExecutor(max_workers=1)
             ppr_future = ppr_pool.submit(
                 contextvars.copy_context().run,
@@ -2103,7 +2242,8 @@ class ReasoningRetriever:
 
             # PPR seed pass(确定性兜底):flag 开时无条件先跑一次跨文档 PPR,保证对比/跨文档题
             # 至少有一组跨文档 chunk,不赌 agent 是否选 ppr_retrieve。纯图传播、无 LLM、图已缓存。
-            if self.allow_ppr and self.settings.graph_ppr_enabled:
+            if (not self._evidence_scope.restricted
+                    and self.allow_ppr and self.settings.graph_ppr_enabled):
                 raise_if_cancelled(self.cancel_event)
                 ppr_all = (ppr_future.result() if ppr_future is not None
                            else self.ppr_retrieve(notebook_id, question))
@@ -2124,7 +2264,8 @@ class ReasoningRetriever:
             # 现有轨迹逐字节不变(这是中性回归的验收点,由 stub 测试直接断言)。
             seed_terms = (self._exact_lookup_terms(question)
                           if self.settings.exact_lookup_enabled
-                          and self.allow_exact_lookup else [])
+                          and self.allow_exact_lookup
+                          and not self._evidence_scope.restricted else [])
             if seed_terms:
                 raise_if_cancelled(self.cancel_event)
                 # 检索串用抽出的名称本身,不用整句问题——与 reflect 动作同构
@@ -2409,7 +2550,11 @@ class ReasoningRetriever:
             outline_overflow = overflow
             empty = [s.title for s in bound if not s.evidence_keys]
             # 探测排在 trace 之前:它的结果是这一步的账目之一。关闭态零调用。
-            kg_gap_new = collect_kg_gap(bound) if kg_gap_active else 0
+            kg_gap_new = (
+                collect_kg_gap(bound)
+                if kg_gap_active and not self._evidence_scope.restricted
+                else 0
+            )
             outline_detail = {
                 "sections": [
                     {"id": s.id, "title": s.title, "parent": s.parent,
@@ -2647,21 +2792,86 @@ class ReasoningRetriever:
                 break
             if (
                 decision.next_action == "expand_community"
-                and not self.allow_community_expansion
+                and (
+                    not self.allow_community_expansion
+                    or self._evidence_scope.restricted
+                )
             ):
                 record(TraceStep(
                     step_type="skip",
                     summary="跳过跨库同类实体扩展（当前检索范围不允许）",
-                    detail={"reason": "community_expansion_disabled"},
+                    detail={
+                        "reason": (
+                            "source_scope_unsafe_channel"
+                            if self._evidence_scope.restricted
+                            else "community_expansion_disabled"
+                        )
+                    },
                 ))
                 break
             before = (
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + enum_rows_used
             )
-            if decision.next_action == "expand_graph":
+            if (
+                self._evidence_scope.restricted
+                and decision.next_action in (
+                    ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
+                )
+            ):
+                # Defense in depth: the restricted reflect schema does not
+                # offer enumeration, but a malformed model response or a test
+                # double must still be unable to turn it into collection I/O.
+                record(TraceStep(
+                    step_type="skip",
+                    summary="跳过枚举（指定来源范围下不可用）",
+                    detail={"reason": "source_scope_unsafe_channel"},
+                ))
+            elif decision.next_action == "search_evidence":
+                # Scope failures are never an ordinary fail-open retrieval
+                # miss.  Propagate them so the caller discards the run instead
+                # of answering from the previous (possibly all-source) pool.
+                outcome = self.search_evidence(
+                    notebook_id,
+                    decision.evidence_query,
+                    decision.evidence_source_refs,
+                )
+                new_kg = 0
+                for item in outcome.knowledge[:per_query_take]:
+                    if item.object_id not in collected:
+                        collected[item.object_id] = item
+                        new_kg += 1
+                seen_elements = {item.element_id for item in elements}
+                new_elements = [
+                    item for item in outcome.elements
+                    if item.element_id not in seen_elements
+                ]
+                elements.extend(new_elements)
+                if decision.evidence_query not in used_queries:
+                    used_queries.append(decision.evidence_query)
+                record(TraceStep(
+                    step_type="retrieve",
+                    summary=(
+                        f"来源限定搜索新增 {new_kg} 个知识对象、"
+                        f"{len(new_elements)} 段原文"
+                    ),
+                    detail={
+                        "query": decision.evidence_query,
+                        "knowledge": new_kg,
+                        "elements": len(new_elements),
+                        "restricted": outcome.scope.restricted,
+                        "source_count": len(outcome.scope.sources),
+                    },
+                ))
+            elif decision.next_action == "expand_graph":
                 oid = decision.expand_object_id
-                if not oid or oid in visited:
+                if self._evidence_scope.restricted:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过关系扩展（指定来源范围下不可用）",
+                        detail={"reason": "source_scope_unsafe_channel"},
+                    ))
+                elif not oid or oid in visited:
                     record(TraceStep(step_type="skip",
                                      summary="跳过 expand_graph(空或已访问节点)",
                                      detail={"object_id": oid, "reason": "empty_or_visited"}))
@@ -3034,7 +3244,13 @@ class ReasoningRetriever:
                     decision, overflow_repair=overflow_repair_submission
                 )
             elif decision.next_action == "ppr_retrieve":
-                if not self.allow_ppr:
+                if self._evidence_scope.restricted:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过概念漫游（指定来源范围下不可用）",
+                        detail={"reason": "source_scope_unsafe_channel"},
+                    ))
+                elif not self.allow_ppr:
                     record(TraceStep(step_type="skip",
                                      summary="跳过概念漫游（当前检索范围不允许）",
                                      detail={"reason": "ppr_disabled_by_policy"}))
@@ -3071,7 +3287,17 @@ class ReasoningRetriever:
                 probed = (self._exact_lookup_terms(term, honor_quotes=False)
                           if term else [])
                 fresh = [t for t in probed if _norm_query(t) not in exact_terms_done]
-                if not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
+                if self._evidence_scope.restricted:
+                    feed_exact_lookup_skip(
+                        "source_scope_unsafe_channel", [],
+                        "指定来源范围下按名称精确查找不可用"
+                    )
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过按名称精确查找（指定来源范围下不可用）",
+                        detail={"reason": "source_scope_unsafe_channel"},
+                    ))
+                elif not self.settings.exact_lookup_enabled or not self.allow_exact_lookup:
                     # 复用既有 exact_lookup_disabled 分支语义(镜像 allow_ppr):策略位
                     # 关闭与部署 flag 关闭在动作侧是同一条路径,不再区分理由。
                     feed_exact_lookup_skip(
@@ -3140,7 +3366,13 @@ class ReasoningRetriever:
                     decision.chain_edge_type or "",
                     decision.chain_direction,
                 )
-                if not decision.chain_start_object_id:
+                if self._evidence_scope.restricted:
+                    record(TraceStep(
+                        step_type="skip",
+                        summary="跳过两跳推导（指定来源范围下不可用）",
+                        detail={"reason": "source_scope_unsafe_channel"},
+                    ))
+                elif not decision.chain_start_object_id:
                     record(TraceStep(
                         step_type="skip", summary="跳过 follow_chain(缺少起点)",
                         detail={"reason": "missing_chain_start"}))
@@ -3394,13 +3626,44 @@ class ReasoningRetriever:
             )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            scored_map = {h.object_id: h for h in self.retrieval.retrieve_scored(notebook_id, question)}
+            if self._evidence_scope.restricted:
+                rescored = self.retrieval.retrieve_scored(
+                    notebook_id, question,
+                    allowed_source_ids=self._evidence_scope.allowed_source_ids,
+                )
+            else:
+                rescored = self.retrieval.retrieve_scored(notebook_id, question)
+            scored_map = {
+                h.object_id: h
+                for h in self._filter_candidates(
+                    "knowledge", rescored,
+                )
+            }
             top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
             top_hits.sort(key=lambda h: h.relevance, reverse=True)
             top_hits = top_hits[:top_n]
             # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
             outline_evidence = outline_truncated_kg_evidence(
                 outline, collected, top_hits, rescored=scored_map)
+        # Final fail-closed boundary.  Every producer is filtered on admission,
+        # but rerank adapters and future producer additions must not be able to
+        # re-introduce evidence from outside a selected source ceiling.
+        top_hits = restrict_evidence_candidates(
+            self._evidence_scope, "knowledge", top_hits
+        )
+        elements = restrict_evidence_candidates(
+            self._evidence_scope, "element", elements
+        )
+        chunks = restrict_evidence_candidates(
+            self._evidence_scope, "chunk", chunks
+        )
+        outline_evidence = restrict_evidence_candidates(
+            self._evidence_scope, "knowledge", outline_evidence
+        )
+        if self._evidence_scope.restricted:
+            chains = []
+            enumerations = []
+            collection_map_text = ""
         raise_if_cancelled(self.cancel_event)
         answer_detail["kg"] = len(top_hits)
         # 这里统计的是候选池(截断前),不是最终进入合成 prompt 的数量——那由
@@ -3418,6 +3681,7 @@ class ReasoningRetriever:
             chains=chains, enumerations=enumerations,
             collection_map_text=collection_map_text, outline=outline,
             outline_evidence=outline_evidence,
+            evidence_scope=self._evidence_scope,
             attempted=[{"query": a.query, "new": a.new, "tries": a.tries}
                        for a in attempted.values()])
 

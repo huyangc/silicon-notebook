@@ -2854,8 +2854,16 @@ class RepositoryFacade:
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,
-                         w_semantic: float = W_SEMANTIC) -> List[RetrievedKnowledge]:
-        return self.retrieval.candidates.retrieve_scored(notebook_id, query, types, w_keyword, w_semantic)
+                         w_semantic: float = W_SEMANTIC, *,
+                         allowed_source_ids=None) -> List[RetrievedKnowledge]:
+        if allowed_source_ids is None:
+            return self.retrieval.candidates.retrieve_scored(
+                notebook_id, query, types, w_keyword, w_semantic
+            )
+        return self.retrieval.candidates.retrieve_scored(
+            notebook_id, query, types, w_keyword, w_semantic,
+            allowed_source_ids=allowed_source_ids,
+        )
 
     def federated_retrieve(
         self,
@@ -2864,8 +2872,17 @@ class RepositoryFacade:
         types: Optional[Iterable[str]] = None,
         w_keyword: float = W_KEYWORD,
         w_semantic: float = W_SEMANTIC,
+        *,
+        allowed_source_keys=None,
     ) -> List[RetrievedKnowledge]:
-        return self.retrieval.candidates.federated_retrieve(active_notebook_id, query, types, w_keyword, w_semantic)
+        if allowed_source_keys is None:
+            return self.retrieval.candidates.federated_retrieve(
+                active_notebook_id, query, types, w_keyword, w_semantic
+            )
+        return self.retrieval.candidates.federated_retrieve(
+            active_notebook_id, query, types, w_keyword, w_semantic,
+            allowed_source_keys=allowed_source_keys,
+        )
 
     def federated_retrieve_relations(self, active_notebook_id: str,
                                      query: str) -> List["RetrievedRelation"]:
@@ -2889,8 +2906,16 @@ class RepositoryFacade:
         return self.retrieval.graph.follow_chain(active_notebook_id, start_object_id, edge_type, target_object_id, direction, max_fan_out, max_results)
 
     def _retrieve_elements(self, notebook_id: str, query: str,
-                           limit: int = 8) -> List[RetrievedElement]:
-        return self.retrieval.candidates.retrieve_elements(notebook_id, query, limit)
+                           limit: int = 8, *,
+                           allowed_source_ids=None) -> List[RetrievedElement]:
+        if allowed_source_ids is None:
+            return self.retrieval.candidates.retrieve_elements(
+                notebook_id, query, limit
+            )
+        return self.retrieval.candidates.retrieve_elements(
+            notebook_id, query, limit,
+            allowed_source_ids=allowed_source_ids,
+        )
 
     def _retrieve_chunks(self, notebook_id: str, query: str, recall: int = 0):
         return self.retrieval.candidates._retrieve_chunks(notebook_id, query, recall)
@@ -2984,11 +3009,20 @@ class RepositoryFacade:
         return self._runtime.ask_component.ask_current(notebook_id, payload)
 
     def preview_reasoning_intent(
-        self, question: str, history: str = "", cancel_event: CancelEvent = None
+        self, notebook_id: str, question: str, history: str = "",
+        cancel_event: CancelEvent = None
     ) -> QueryIntentContract:
         """Corpus-blind preflight used before a reasoning Ask creates a job."""
         return self._runtime.ask_component.preview_reasoning_intent(
-            question, history, cancel_event
+            notebook_id, question, history, cancel_event
+        )
+
+    def validate_reasoning_submission(
+        self, notebook_id: str, payload: AskRequest
+    ) -> None:
+        """Preflight a selected scope before API code creates a durable Ask."""
+        return self._runtime.ask_component.validate_reasoning_submission(
+            notebook_id, payload
         )
 
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)

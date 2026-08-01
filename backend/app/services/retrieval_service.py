@@ -43,6 +43,9 @@ class RetrievalService:
         """按 query 检索 source_elements → List[RetrievedElement]。"""
         return self.candidates.retrieve_elements(*args, **kwargs)
 
+    def federated_retrieve_elements(self, *args, **kwargs):
+        return self.candidates.federated_retrieve_elements(*args, **kwargs)
+
     def notebook_memory_hits(self, *args, **kwargs):
         return self.candidates.notebook_memory_hits(*args, **kwargs)
 

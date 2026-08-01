@@ -118,6 +118,12 @@ from app.services.collection_catalog import (
     ScopeSource,
 )
 from app.services.extraction_profiles import PROFILES
+from app.services.evidence_scope import (
+    EvidenceScopeResolutionError,
+    ResolvedEvidenceScope,
+    resolve_evidence_scope as resolve_scope_references,
+    source_identity_from_row,
+)
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.source_display import source_display_title
 
@@ -1044,6 +1050,77 @@ class CollectionEnumerationService:
                         return "", 2, False
                     found = entry.source_id
         return found, matches, False
+
+    def resolve_evidence_scope(
+        self,
+        active_notebook_id: str,
+        source_refs: Optional[Sequence[str]],
+        *,
+        cancel_event: CancelEvent = None,
+    ) -> ResolvedEvidenceScope:
+        """Resolve optional references against the authorized source roster.
+
+        ``None`` is the compatibility path and deliberately returns before a
+        connection is opened.  A selected scope is derived only from the
+        active notebook plus currently valid mounted participants, and only
+        from the same user-visible source plan used by the sources collection.
+        Source identity hydration is bounded and carries no summaries or
+        source text.
+
+        A roster above the existing title-resolution ceiling is declined in
+        full.  Hydrating a prefix could find one matching title but cannot
+        prove that a second matching document does not sit after the cutoff.
+        Likewise, a source row disappearing between the plan and hydration is
+        an unavailable scope, never permission to search the whole library.
+        """
+        if source_refs is None:
+            return resolve_scope_references(None, ())
+
+        # Validate the omitted-vs-empty contract before opening the database.
+        # The pure resolver owns the exact validation wording.
+        if not source_refs or not all(str(ref or "").strip() for ref in source_refs):
+            return resolve_scope_references(source_refs, ())
+
+        raise_if_cancelled(cancel_event)
+        with self._database.connect() as db:
+            notebook_ids, _tiers = self._notebooks.participant_tiers(
+                db, active_notebook_id
+            )
+            identities = []
+            # Read no more than the global ceiling plus one across every
+            # participant.  The +1 is the proof of overflow; unlike
+            # scope_source_plan this never materializes a large roster first.
+            for notebook_id in notebook_ids:
+                remaining = _MAX_TITLE_RESOLVE_SOURCES + 1 - len(identities)
+                if remaining <= 0:
+                    break
+                rows = self._sources.visible_source_identity_rows_bounded(
+                    db, notebook_id, remaining
+                )
+                for row in rows:
+                    identity = source_identity_from_row(row)
+                    if identity.notebook_id != notebook_id:
+                        raise EvidenceScopeResolutionError(
+                            "unavailable", str(source_refs[0])
+                        )
+                    identities.append(identity)
+            if len(identities) > _MAX_TITLE_RESOLVE_SOURCES:
+                return resolve_scope_references(
+                    source_refs, (), catalog_truncated=True
+                )
+
+            # Authorization may change after the first participant read.  The
+            # selected roster is accepted only if the current participant set
+            # is still exactly the one used to build it.
+            current_notebook_ids, _current_tiers = self._notebooks.participant_tiers(
+                db, active_notebook_id
+            )
+            if tuple(current_notebook_ids) != tuple(notebook_ids):
+                raise EvidenceScopeResolutionError(
+                    "unavailable", str(source_refs[0])
+                )
+
+        return resolve_scope_references(source_refs, identities)
 
     # --------------------------------------------------------------- sources
     def enumerate_sources(

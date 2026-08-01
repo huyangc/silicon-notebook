@@ -1514,6 +1514,11 @@
         "type": "index"
       },
       {
+        "name": "idx_sources_visible_identity",
+        "sql_sha256": "33306c8cc674aeed308cf0b87e7f16130f3ea3eb6f5e166cd41bad8514c1f44e",
+        "type": "index"
+      },
+      {
         "name": "idx_users_username",
         "sql_sha256": "611bc0564c5f43d8133c0338b59cf46700be365953340d3e662cd834a78b0140",
         "type": "index"
@@ -1954,6 +1959,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 37
+    "user_version": 38
   }
 }
