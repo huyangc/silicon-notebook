@@ -68,9 +68,43 @@ def _method_nodes(path: Path) -> dict[str, ast.FunctionDef]:
     }
 
 
+#: 会开出新作用域的节点 —— 遍历时不下钻，见 ``_walk_same_scope``。
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _walk_same_scope(node: ast.AST):
+    """像 ``ast.walk``，但不进入 ``node`` 之下任何嵌套函数/类/lambda 的体内。
+
+    ``ast.walk`` 会下钻进嵌套作用域，于是写事务里一个**定义了却从未调用**的
+    局部 helper（``def _log(): record_change(...)``）就足以骗过守卫，而那个
+    事务其实一条流水都没记。同理，嵌套函数里的 ``with ...write()`` 也不该让
+    外层方法算作写方法。判据要落在事务自己的执行流上。
+
+    ``node`` 自身定义的作用域**要**遍历（否则传入方法节点就什么都扫不到）；
+    调用方若要把一批语句当同一作用域扫，必须走 ``_walk_statements_same_scope``，
+    它会先把「语句本身就是个嵌套作用域定义」这种情况挡掉——直接对那种语句调用
+    本函数会把它当根，反而把嵌套体遍历个遍。
+    """
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        yield current
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _NESTED_SCOPES):
+                continue
+            pending.append(child)
+
+
+def _walk_statements_same_scope(stmts):
+    for stmt in stmts:
+        if isinstance(stmt, _NESTED_SCOPES):
+            continue  # 定义在事务里，但不属于事务的执行流
+        yield from _walk_same_scope(stmt)
+
+
 def _write_transactions(node: ast.AST) -> list[ast.With]:
     blocks: list[ast.With] = []
-    for child in ast.walk(node):
+    for child in _walk_same_scope(node):
         if not isinstance(child, ast.With):
             continue
         for item in child.items:
@@ -85,8 +119,8 @@ def _write_transactions(node: ast.AST) -> list[ast.With]:
     return blocks
 
 
-def _calls_record_change(node: ast.AST) -> bool:
-    for child in ast.walk(node):
+def _calls_record_change(stmts) -> bool:
+    for child in _walk_statements_same_scope(stmts):
         if isinstance(child, ast.Call):
             func = child.func
             if isinstance(func, ast.Name) and func.id == "record_change":
@@ -106,7 +140,7 @@ def _records_inside_a_write_transaction(node: ast.AST) -> bool:
     注意这仍**不是**「最后一步」断言——块内位置不做要求，见模块 docstring。
     """
     return any(
-        any(_calls_record_change(stmt) for stmt in block.body)
+        _calls_record_change(block.body)
         for block in _write_transactions(node)
     )
 
