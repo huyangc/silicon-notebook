@@ -1209,9 +1209,16 @@ export function ReportsPanel({
                         {icon === "done" ? "✓" : icon === "failed" ? "!" : null}
                       </span>
                       <span className="report-section-title" title={s.title}>{s.title}</span>
-                      <span className="report-section-phase">
+                      <span
+                        className="report-section-phase"
+                        title={`${s.phase}${s.phase.startsWith("深挖") && s.step > 0 ? ` 第${s.step}步` : ""}`}
+                      >
                         {s.phase}
-                        {s.phase === "深挖" && s.step > 0 && ` 第${s.step}步`}
+                        {/* 深挖阶段的 phase 文案可能带大纲进度（「深挖中（已整理大纲 N 节）」），
+                            按前缀判定,否则一旦模型开始整理大纲,步数就凭空消失。
+                            文案变长后这一列会省略号截断（globals.css），故与标题列一样挂 title
+                            让 hover 看得到全文。 */}
+                        {s.phase.startsWith("深挖") && s.step > 0 && ` 第${s.step}步`}
                       </span>
                     </li>
                   );

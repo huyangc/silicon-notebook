@@ -471,7 +471,19 @@ class EvidenceContextService:
         *,
         id_offset: int = 0,
         budget_chars: int | None = None,
+        priority_object_ids: Sequence[str] = (),
+        priority_budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """``priority_object_ids`` 先于其余命中装配,并可另有一份更紧的子预算。
+
+        动机(报告 PR-5):大纲绑定的对象被追加在候选尾部,按输入序渲染时在大候选池
+        下恒被预算截掉。子预算让它们先拿一份额度,其余 ranked 命中吃剩下的。
+
+        **这必须在一次调用里做完**,不能由调用方拆成两次:关系行(`relations:`)是对
+        本次 `evidence_by_id` **内部**的边求的,拆两次就会丢掉所有跨两半的关系,还会
+        渲染出两行 `relations:` 并各自记一次预算;cluster 去重同理。缺省(空 priority)
+        时这个函数与接入前逐字相同。
+        """
         budget = (
             self.settings.answer_context_budget_chars
             if budget_chars is None else max(0, int(budget_chars))
@@ -497,71 +509,89 @@ class EvidenceContextService:
 
         used = 0
         next_id = 0
-        for hit in hits:
-            cluster_id = _canonical(hit.object_id)
-            if cluster_id in seen_clusters:
-                continue
-            seen_clusters.add(cluster_id)
-            # raw_origin: hit.notebook_id 的原始值,供 Task 14 的引用徽章库名映射
-            # 用;origin 另外回退本次 ask 的 notebook_id,供 node_context 查询用
-            # (同库命中也要查得到详情)。徽章要的是"真正跨库才非空"的
-            # raw_origin——但 federated_retrieve 对本库命中同样会把 notebook_id
-            # 打成 active 自己的 id(并非只在跨库命中时才打标,codex r2 review 修
-            # 正此前的错误假设),故显式比较 notebook_id 归零,镜像
-            # follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理。
-            raw_origin = getattr(hit, "notebook_id", "") or ""
-            origin = raw_origin or notebook_id
-            if raw_origin == notebook_id:
-                raw_origin = ""
-            try:
-                context = self.knowledge.node_context(origin, hit.object_id)
-            except KeyError:
-                continue
-            separator = 1 if lines else 0
-            remaining_total = budget - used - separator
-            if remaining_total <= 0:
-                break
-            next_id += 1
-            key = f"k{next_id + id_offset}"
-            name = str(hit.payload.get("name", "")).strip()
-            occurrences = context.get("occurrences") or []
-            snippet = occurrences[0].get("element_text") if occurrences else ""
-            definition = context.get("definition") or snippet
-            tier = getattr(hit, "tier", "personal")
-            prefix = f"{key}: [{hit.object_type}][{tier}] {name}"
-            if remaining_total <= len(prefix):
-                break
-            definition_cap = max(0, min(300, remaining_total - len(prefix)))
-            extra = (
-                f" — def: {definition[:definition_cap]}"
-                if definition and definition_cap
-                else ""
-            )
-            if context.get("steps") and definition_cap:
-                extra += "; steps: " + " -> ".join(
-                    step.get("name", "") for step in context["steps"][:8]
+
+        def _admit(group: Sequence[RetrievedKnowledge], ceiling: int) -> None:
+            """把 ``group`` 装进 ``ceiling`` 以内(公用 lines/used/next_id/去重集合)。
+
+            `break` 只结束**本组**:优先组用完自己的子预算后,其余命中仍要继续吃总
+            预算的剩余部分。
+            """
+            nonlocal used, next_id
+            for hit in group:
+                cluster_id = _canonical(hit.object_id)
+                if cluster_id in seen_clusters:
+                    continue
+                seen_clusters.add(cluster_id)
+                # raw_origin: hit.notebook_id 的原始值,供 Task 14 的引用徽章库名映射
+                # 用;origin 另外回退本次 ask 的 notebook_id,供 node_context 查询用
+                # (同库命中也要查得到详情)。徽章要的是"真正跨库才非空"的
+                # raw_origin——但 federated_retrieve 对本库命中同样会把 notebook_id
+                # 打成 active 自己的 id(并非只在跨库命中时才打标,codex r2 review 修
+                # 正此前的错误假设),故显式比较 notebook_id 归零,镜像
+                # follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理。
+                raw_origin = getattr(hit, "notebook_id", "") or ""
+                origin = raw_origin or notebook_id
+                if raw_origin == notebook_id:
+                    raw_origin = ""
+                try:
+                    context = self.knowledge.node_context(origin, hit.object_id)
+                except KeyError:
+                    continue
+                separator = 1 if lines else 0
+                remaining_total = ceiling - used - separator
+                if remaining_total <= 0:
+                    break
+                next_id += 1
+                key = f"k{next_id + id_offset}"
+                name = str(hit.payload.get("name", "")).strip()
+                occurrences = context.get("occurrences") or []
+                snippet = occurrences[0].get("element_text") if occurrences else ""
+                definition = context.get("definition") or snippet
+                tier = getattr(hit, "tier", "personal")
+                prefix = f"{key}: [{hit.object_type}][{tier}] {name}"
+                if remaining_total <= len(prefix):
+                    break
+                definition_cap = max(0, min(300, remaining_total - len(prefix)))
+                extra = (
+                    f" — def: {definition[:definition_cap]}"
+                    if definition and definition_cap
+                    else ""
                 )
-            line = (prefix + extra)[:remaining_total]
-            lines.append(line)
-            used += separator + len(line)
-            evidence_by_id[key] = {
-                "object_id": hit.object_id,
-                "object_type": hit.object_type,
-                "name": name,
-                "definition": definition,
-                "snippet": snippet,
-                "source_title": occurrences[0].get("source_title", "") if occurrences else "",
-                "location_label": occurrences[0].get("section_path", "") if occurrences else "",
-                "tier": tier,
-                "notebook_id": raw_origin,
-                "source_id": str(occurrences[0].get("source_id", "")) if occurrences else "",
-                "element_id": str(occurrences[0].get("element_id", "")) if occurrences else "",
-                "relevance": float(getattr(hit, "relevance", 0.0) or 0.0),
-                # Task 12b（引用跳转扩面，锚点侧）: KO payload 已在内存里（同
-                # 上面 hit.payload.get("name","") 的零额外查询惯例），命中单行
-                # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
-                "knowhow": _knowhow_ref_from_payload(hit.payload),
-            }
+                if context.get("steps") and definition_cap:
+                    extra += "; steps: " + " -> ".join(
+                        step.get("name", "") for step in context["steps"][:8]
+                    )
+                line = (prefix + extra)[:remaining_total]
+                lines.append(line)
+                used += separator + len(line)
+                evidence_by_id[key] = {
+                    "object_id": hit.object_id,
+                    "object_type": hit.object_type,
+                    "name": name,
+                    "definition": definition,
+                    "snippet": snippet,
+                    "source_title": occurrences[0].get("source_title", "") if occurrences else "",
+                    "location_label": occurrences[0].get("section_path", "") if occurrences else "",
+                    "tier": tier,
+                    "notebook_id": raw_origin,
+                    "source_id": str(occurrences[0].get("source_id", "")) if occurrences else "",
+                    "element_id": str(occurrences[0].get("element_id", "")) if occurrences else "",
+                    "relevance": float(getattr(hit, "relevance", 0.0) or 0.0),
+                    # Task 12b（引用跳转扩面，锚点侧）: KO payload 已在内存里（同
+                    # 上面 hit.payload.get("name","") 的零额外查询惯例），命中单行
+                    # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
+                    "knowhow": _knowhow_ref_from_payload(hit.payload),
+                }
+
+        priority = {str(object_id) for object_id in (priority_object_ids or ()) if object_id}
+        if priority:
+            first = [hit for hit in hits if str(hit.object_id) in priority]
+            rest = [hit for hit in hits if str(hit.object_id) not in priority]
+            _admit(first, budget if priority_budget_chars is None
+                   else max(0, min(budget, int(priority_budget_chars))))
+            _admit(rest, budget)
+        else:
+            _admit(hits, budget)
 
         citation_source_info = self.citation_source_info(
             value.get("source_id", "") for value in evidence_by_id.values()

@@ -711,6 +711,75 @@ edge_type、`source_count`（撑着这条边的**不同文档**数，不是聚�
 | G2 | 文档同步（设计文档勾稽+product-and-api 中英+AGENTS/CLAUDE/architecture/fangan_done）+措辞钉子 | impl-task (sonnet) |
 | G3 | check.sh+PG lane+stacked PR+codex 闭环 | 主代理 |
 
+### 3.4 深度报告接入 —— 逐节深挖启用大纲共演化（report-outline，PR-5）
+
+**动机（2026-07-31 用户拍板「先在深度报告中实现这部分的生成过程」）**：真机评估显示 Ask 穷尽档
+的大纲采用率低——短综述题在小库上两三轮就答满，模型没有理由付大纲轮次；而深度报告**天生**是
+大纲机制的主场（必答主题、逐节深挖、长文合成、覆盖压力）。v1 把报告排除在外的理由（k 次合成
+成本、双层大纲嵌套）在「大纲只服务检索、不接管合成」的接法下不成立。
+
+**裁定边界（沿用 2026-07-28 评估结论）**：报告侧只允许**确认合同之下的增补式细化**。用户确认
+的章节/必答主题绑定是不可替换、不可收窄的合同；深挖中发现的结构只能作为该节**内部**的子结构
+（`###`）增补，绝不回写报告大纲、绝不增删改确认过的节。
+
+**接法（三件事，全部在既有缝隙上）**：
+
+1. **五档贯通**：报告「研究深度」与 Ask「检索档位」共用 `EffortPicker` 与档名，但报告的
+   `_deep_dive` 调 `ReasoningRetriever.run` 时 `limits=None`——五个档位共享 standard 预算，
+   深度滑块只改每节反思轮数。PR-5 把 `DEPTHS=[1,2,4,8,16]` 映射到
+   `overview/standard/deep/thorough/exhaustive` 的 `ask_retrieval_limits(effort)` 并传入
+   `limits`；**每节 `max_steps` 仍用报告自己的 depth 值**（1/2/4/8/16，成本按节数放大，
+   不采用 Ask 档位的 4/8/16/32/50）。行为变化显式登记：低档报告的检索预算随之变小
+   （概览 1 轮本来也用不满 standard 预算）、高档变大；这是把同名档位的语义对齐，不是回归。
+2. **穷尽档自动激活大纲+弱支撑边**：`limits.effort=="exhaustive"` 时 `outline_wiring_active`
+   在每节深挖里为真，大纲便签、空节账目回喂、`REASONING_OUTLINE_KG_GAP_ENABLED` 的弱支撑边
+   探测（§3.3）原样生效——零新机制，报告引擎不 import 任何大纲内部件。集合枚举保持不可达
+   （报告构造 retriever 时不传 `collection_catalog/collection_enumeration`，wiring 判空自动
+   关闭——这是现状，v1 刻意不改）。Ask 侧按节合成代码不在此路径上（报告只用 `run()` 做检索，
+   撰写是 `_draft_section` 的事），无需禁用。
+3. **子大纲进节撰写 prompt（增补式细化的落点）**：`_deep_dive` 把 `ReasoningResult.outline`
+   （若非空）连同各子节绑定的证据 key→`[k]` 映射整理成一段有界「发现的结构」块
+   （每子节一行：标题 + 该子节绑定证据对应的 `[k]` 列表；≤12 行、行 ≤80 字符、块 ≤1200 字符），
+   附进 `report_section_prompt` 的上下文，prompt 措辞教撰写模型「可用 `###` 子标题按此结构组织
+   本节，子结构只是建议，缺证据的子话题如实略过」。`outline_truncated_kg_evidence` 带出的
+   截断绑定对象照 Ask 侧同规则并入该节证据分类池。子大纲为空/低档位时该块缺席，prompt 逐字
+   回到现状。
+4. **进度可见**：报告的节级 `section_status` 在深挖阶段已有 phase 文案；大纲步经 `on_step`
+   流过时把该节 phase 细化为「深挖中（已整理大纲 N 节）」（沿用既有 2 秒节流持久化）；
+   不新增表列、不新增 SSE。前端 `report-view.tsx` 的节进度文案随 phase 字符串自然显示，
+   无需新组件。
+
+**门控**：不加新 flag。报告侧激活条件 = 报告深度选「穷尽」+ 既有 `REASONING_OUTLINE_ENABLED`
+（+ 弱支撑边另有 `REASONING_OUTLINE_KG_GAP_ENABLED`）。关掉大纲总闸即回到纯档位映射
+（第 1 件事保留——它自身是独立成立的对齐修复）。
+
+**验收**：
+- 档位映射逐档钉死（1→overview…16→exhaustive）；`max_steps` 仍等于 depth 值；
+  非穷尽档 `outline_wiring_active` 为假、prompt 与现状逐字一致（除预算数值）。
+- 穷尽档节深挖 reflect prompt 含 `update_outline`；子大纲非空时「发现的结构」块进
+  `report_section_prompt` 且有界；子大纲为空时块缺席。
+- 「发现的结构」只影响节内 `###`，`reports.outline_json`（用户确认的大纲）逐字节不变；
+  `missing_intents` 校验、最后绑定不可删语义不受影响。
+- 弱支撑边探测在报告路径可触发（穷尽+flag 开）且 fail-open 语义保持。
+- 节 phase 文案含大纲进度；报告状态机/取消语义不变。
+- 变异：映射表错位、「发现的结构」块删除/越界、outline_json 被回写（负向守卫）、
+  phase 细化删除。
+
+**真机评估观察项（未定，等数据）**：报告 depth=16 时每节 `max_steps` 就是 16，而
+`_MAX_OUTLINE_UPDATES = 6` 是按 Ask 侧穷尽档的 50 步定标的（12%）——同一个常数放在报告
+的一节里占掉 **37.5%** 的步数预算。叠加上「连续 3 轮纯大纲整理触发 stale 熔断」（大纲
+修订对 stale 中性，不清零），穷尽档报告的一节完全可能把预算花在整理结构上而检索没推进
+几步。是否需要给报告侧一个独立定标（按 `max_steps` 比例、或报告专用常数），由真机评估
+定；v1 刻意先共用同一个常数，不预先分叉。
+
+**任务拆分**：
+
+| 任务 | 内容 | 角色/模型 |
+| --- | --- | --- |
+| R1 | 档位映射+limits 传入+子大纲块+phase 细化+定向测试 | general-purpose (opus) |
+| R2 | 文档同步（product-and-api 中英+AGENTS/CLAUDE/architecture/fangan_done+部署文档行为变化登记） | impl-task (sonnet) |
+| R3 | check.sh+PG lane+提 PR+codex 闭环 | 主代理 |
+
 ## 4. 任务拆分与模型分配
 
 | 任务 | 内容 | 角色/模型 |

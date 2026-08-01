@@ -432,6 +432,42 @@ EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # chunks taken per section (default 12)
 EXACT_SECTION_RESERVE      # mix-selection seats reserved for those chunks, inside the existing budget (default 4)
 ```
 
+**Behaviour change — these settings no longer size a deep report's per-section
+deep dive.** That deep dive now maps the report's own research-depth level onto
+the same five-level budget table Ask's retrieval effort uses, and passes the whole
+row down; the numeric contract lives in `docs/product-and-api.md`
+(「大纲便签与按节合成」 and the effort table), not here.
+
+* `REASONING_TOP_N_PER_QUERY` / `REASONING_TOP_N_CAP` — no longer read on the
+  report path at all. The level's per-aspect seats and cap decide the section's
+  final relevance budget.
+* `RETRIEVAL_TOP_N` — no longer the report section's evidence floor (the level's
+  floor is). It still bounds the top-up retrieval that executes each confirmed
+  outline direction.
+* `REASONING_MAX_SUBQUERIES` — no longer read on the report path. This one bites
+  at the **default** depth 2 too: that level allows 5 first-round sub-queries per
+  section where the settings-derived path allowed `REASONING_MAX_SUBQUERIES + 1`
+  (6 at the default).
+
+Raising these four therefore no longer widens a report; raise the research depth
+instead. Ask's `mix`/`graph` modes and any reasoning run made without an effort
+level still read them unchanged.
+
+The same applies to the two **context assembly** budgets a report section used to
+size from settings — the level's own numbers replace them:
+
+* `ANSWER_CONTEXT_BUDGET_CHARS` — no longer the report section's KG-context
+  budget (the level's `kg_context_chars` is: 4000/6000/8000/12000/16000). It
+  still sizes Ask's answer context.
+* `REPORT_SECTION_CHUNK_BUDGET` — no longer read when the report supplies a
+  research depth (the level's `chunk_context_chars` is:
+  12000/30000/50000/80000/120000, and the direct-element sub-budget is derived
+  from it as before). It remains the value for callers with no depth.
+
+A report section also admits at most the level's `answer_element_items` direct
+source elements (4/6/8/12/16), chosen by retrieval relevance rather than
+insertion order.
+
 **Exact-identifier fast path:** when a question names something exactly
 lookup-able (`set_db`, `place_opt_design`, `config.yaml`), retrieval first
 locates the section that name occurs in and fetches that whole section, so a
@@ -601,7 +637,7 @@ KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (def
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
 KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
 KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports during rebuild (community layer; default false)
-ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000)
+ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000; not read by a deep report's sections — see the retrieval behaviour-change note)
 ANSWER_CONTEXT_MIN_ITEMS     # keep >= N items regardless of budget (default 3)
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
@@ -614,8 +650,8 @@ KG_CANONICAL_FOLD_ENABLED    # fold same-canonical fragmented KG nodes at retrie
 KG_ABOUT_DOWNWEIGHT_ENABLED  # rank-down-weight weak `about` edges in relation retrieval (default false)
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # projected Knowhow cell objects join reasoning/graph KG-node retrieval (default true; false disables only this direct-node path, not cell-chunk search)
 REASONING_ENUM_TOOLS_ENABLED # reasoning Ask's typed collection-enumeration reflect tools, enumerate_elements/enumerate_kg_objects (default true; false disables both tools and the collection map, zero extra queries)
-REASONING_OUTLINE_ENABLED    # reasoning Ask's outline scratchpad reflect action, update_outline (default true; only offered at the `exhaustive` effort tier regardless of this flag; false disables the action and section-by-section synthesis, reverting to byte-identical pre-feature behavior)
-REASONING_OUTLINE_KG_GAP_ENABLED # weak-support KG relation hint fed back into the outline scratchpad after each accepted update_outline (default true; layered on top of REASONING_OUTLINE_ENABLED; false stops the scratchpad from carrying weak-support relation hints, zero extra queries)
+REASONING_OUTLINE_ENABLED    # reasoning Ask's outline scratchpad reflect action, update_outline (default true; only offered at the `exhaustive` effort tier regardless of this flag; false disables the action and section-by-section synthesis, reverting to byte-identical pre-feature behavior); also gates Deep Report's per-section deep-dive at its exhaustive depth tier (depth 16, see REPORT_MAX_SECTIONS below) — same flag, no report-specific toggle
+REASONING_OUTLINE_KG_GAP_ENABLED # weak-support KG relation hint fed back into the outline scratchpad after each accepted update_outline (default true; layered on top of REASONING_OUTLINE_ENABLED; false stops the scratchpad from carrying weak-support relation hints, zero extra queries); applies identically inside Deep Report's per-section deep-dive once it reaches the exhaustive depth tier
 CHUNK_RECALL                 # chunk 大召回数 (default 200; mix 候选池 / MMR 候选)
 CHUNK_MMR_K                  # MMR-selected chunks when rerank is off (default 16)
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix: add local KG structure + source chunks (default true; rerank path requires `retrieval_rerank` bound)
@@ -624,10 +660,12 @@ MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
 MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
 MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
 REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
-REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000)
+REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000; only for callers without a research depth — see the retrieval behaviour-change note)
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 ```
+
+**Behavior change (PR-5, no new flag):** each report section's deep-dive retrieval budget now follows the report's own `depth` value (1/2/4/8/16, clamped API-side to `[1, 16]`) mapped onto the same named effort tiers reasoning Ask uses (`overview`/`standard`/`deep`/`thorough`/`exhaustive`) rather than always running at the `standard` budget. Low depths therefore retrieve with a smaller budget than before this change and high depths with a larger one — this is an intentional alignment fix (same tier name, same budget in both Ask and Deep Report), not a regression. Reaching depth 16 (`exhaustive`) additionally activates the outline scratchpad and KG weak-support gap feedback described above inside that section's deep-dive only; see `docs/product-and-api.md`'s "Deep Report outline co-evolution" section for the full contract.
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
 A notebook's `tier` (`base` | `personal`, default `personal`) is data on the notebook

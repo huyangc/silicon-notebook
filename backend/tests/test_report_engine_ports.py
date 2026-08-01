@@ -83,8 +83,12 @@ class _Evidence:
         self.calls.append(("chunk", notebook_id, budget_chars))
         return "(none)", {}
 
-    def knowledge_context(self, notebook_id, hits, *, id_offset=0):
-        self.calls.append(("kg", notebook_id, id_offset))
+    # 签名逐字镜像 EvidenceContextPort.knowledge_context —— `budget_chars` 一直在
+    # 端口上,只是引擎此前没显式传;替身漏一个关键字参数就会把「引擎按端口调用」
+    # 变成「引擎按替身调用」。
+    def knowledge_context(self, notebook_id, hits, *, id_offset=0,
+                          budget_chars=None):
+        self.calls.append(("kg", notebook_id, id_offset, budget_chars))
         return "(none)", {}
 
     def element_context(self, elements, *, notebook_id, id_offset=4000,
@@ -372,7 +376,7 @@ def test_draft_section_routes_evidence_through_ports():
     out = eng._draft_section("nb", {"title": "T", "scope": "S"}, "q", ReasoningResult())
     assert deps.evidence_context.calls == [
         ("chunk", "nb", deps.settings.report_section_chunk_budget),
-        ("kg", "nb", 0),
+        ("kg", "nb", 0, deps.settings.answer_context_budget_chars),
         ("element", "nb", 4000,
          max(2000, deps.settings.report_section_chunk_budget // 3)),
     ]

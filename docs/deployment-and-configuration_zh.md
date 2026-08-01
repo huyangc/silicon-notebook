@@ -375,6 +375,33 @@ EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # 每个小节最多取几块（默认 12�
 EXACT_SECTION_RESERVE      # mix 最终选择为这些块预留的席位，仍在既有预算内（默认 4）
 ```
 
+**行为变化——这几项不再决定深度报告逐节深挖的预算。** 逐节深挖现在把报告自己的
+「研究深度」映射到与逐步推理「检索档位」同一张五档预算表，并整行下传；数值契约在
+`docs/product-and-api_zh.md`（「大纲便签与按节合成」与档位表），不在这里重复。
+
+* `REASONING_TOP_N_PER_QUERY` / `REASONING_TOP_N_CAP`——报告路径完全不再读取，
+  该节的最终相关性预算由档位的每方面席位与上限决定。
+* `RETRIEVAL_TOP_N`——不再是报告节的证据预算下界（改由档位的 floor 决定）；它仍然
+  约束「按已确认检索方向补检索」那一路的有界取数。
+* `REASONING_MAX_SUBQUERIES`——报告路径不再读取。它连**默认**的深度 2 也受影响：该
+  档每节首轮子查询为 5，而按配置推导的旧路径是 `REASONING_MAX_SUBQUERIES + 1`
+  （默认值下为 6）。
+
+所以调大这四项已经不会让报告更宽，要更宽请调高研究深度。逐步推理的 `mix`/`graph`
+模式，以及任何不带档位的推理调用，仍照旧读取它们。
+
+报告节此前从配置取的两项**上下文装配**预算同理，改由档位自己的数值决定：
+
+* `ANSWER_CONTEXT_BUDGET_CHARS`——不再是报告节的 KG 上下文预算（改由档位的
+  `kg_context_chars` 决定：4000/6000/8000/12000/16000）。它仍然决定逐步推理答案
+  上下文的预算。
+* `REPORT_SECTION_CHUNK_BUDGET`——报告带研究深度时不再读取（改由档位的
+  `chunk_context_chars` 决定：12000/30000/50000/80000/120000；直接原文段的字符
+  子预算仍按同一比例从它派生）。不带深度的调用方仍用它。
+
+报告节进入 prompt 的直接原文段条数同样按档位的 `answer_element_items` 封顶
+（4/6/8/12/16），并按检索相关度择优而非插入序切片。
+
 **精确标识符通道：**问题里点到可精确查找的名称（`set_db`、`place_opt_design`、
 `config.yaml`）时，检索先精确定位它所在的小节，再把整节取齐，避免一条命令的参数表
 和示例被切散后又被预算截掉。
@@ -507,7 +534,7 @@ KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 t
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
 KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
 KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
-ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
+ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000；深度报告的节不再读取，见检索段的行为变化说明）
 ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
@@ -520,8 +547,8 @@ KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节�
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 KNOWHOW_KG_NODE_RETRIEVAL_ENABLED # Knowhow 格子对象进入 reasoning/graph 节点检索（默认 true；false 只关闭直接节点路径，不影响格子 chunk 检索）
 REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工具，enumerate_elements/enumerate_kg_objects（默认 true；false 同时关闭两个工具与集合地图，零额外查询）
-REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）
-REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）
+REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）；同一个开关也管深度报告每节深挖在穷尽档（depth 16，见下方 REPORT_MAX_SECTIONS）的启用，不另设报告专属开关
+REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
 CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
@@ -530,10 +557,12 @@ MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
 MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
 MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
-REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000）
+REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000；仅对不带研究深度的调用方生效，见检索段的行为变化说明）
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
 REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
 ```
+
+**行为变化（PR-5，不新增开关）：** 每节深挖的检索预算现在按报告自己的 `depth` 值（1/2/4/8/16，接口侧夹在 `[1, 16]`）映射到与逐步推理相同的档名（`overview`/`standard`/`deep`/`thorough`/`exhaustive`），不再永远按 `standard` 预算跑。低档位因此比这次改动前检索预算更小、高档位更大——这是把同名档位对齐（同一档名在 Ask 与深度报告两处买到同一份预算）的有意修复，不是回归。到达 depth 16（`exhaustive`）时，该节深挖内部还会额外激活上文的大纲便签与 KG 弱支撑边回喂；完整合同见 `docs/product-and-api_zh.md`「深度报告接入大纲共演化」一节。
 
 **两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
 （`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法

@@ -2183,6 +2183,14 @@ button.chat-session-card {
   color: #6b7280;
   font-size: 12px;
   white-space: nowrap;
+  /* 阶段文案不再是「深挖」两个字：穷尽档带大纲进度（「深挖中（已整理大纲 N 节）
+     第N步」≈21 字符）。这一列是 auto 轨，不封顶就会按 max-content 占满，把
+     minmax(0,1fr) 的标题列在窄侧栏里压成一个省略号。封顶后按标题列同样的方式
+     截断（省略号 + hover 看全文），两列都留得下内容。 */
+  min-width: 0;
+  max-width: 11em;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .report-markdown {

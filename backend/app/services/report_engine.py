@@ -19,8 +19,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
+from app.core.ask_retrieval_policy import (
+    AskRetrievalLimits, RetrievalEffort, ask_retrieval_limits,
+)
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.report_execution import REPORT_CANCELLATIONS
@@ -46,6 +49,280 @@ _GENERIC_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
+
+
+# --- 研究深度 → 检索档位(报告 PR-5,设计文档 §3.4)------------------------
+# 报告的「研究深度」与 Ask 的「检索档位」共用 EffortPicker 和同一批档名,但报告
+# 此前调 ReasoningRetriever.run 时 limits=None —— 五档共享 standard 预算,滑块只
+# 改每节反思轮数。这张表把同名档位的**语义**对齐:同一个档名在两处买到同一份
+# 相关性/上下文预算。行为变化是显式的(低档报告的检索预算随之变小、高档变大),
+# 它是对齐修复,不是回归。
+#
+# 每节 `max_steps` 仍用报告自己的 depth 值(1/2/4/8/16),**不**采用档位表里的
+# 4/8/16/32/50:报告的成本按节数放大,一节 50 轮乘以 6 节不是用户在滑块上同意的
+# 那个量级。run() 里 `min(max_steps, limits.max_reasoning_steps)` 保证 depth 永远
+# 是更紧的那个。
+#
+# 阈值表(depth 下界 → 档位),顺序必须与 frontend/app/report-view.tsx 的
+# `DEPTHS = [1, 2, 4, 8, 16]` 逐档对应。写成阈值而不是精确字典:API 只把 depth
+# clamp 到 [1,16],3/5/7 这类值必须有确定答案,而不是抛 KeyError。
+REPORT_DEPTH_EFFORTS: Tuple[Tuple[int, RetrievalEffort], ...] = (
+    (1, "overview"),
+    (2, "standard"),
+    (4, "deep"),
+    (8, "thorough"),
+    (16, "exhaustive"),
+)
+
+
+def report_retrieval_effort(depth: int) -> RetrievalEffort:
+    """报告深度值 → 检索档位 id(总函数,表外深度取不超过它的最高档)。"""
+    effort: RetrievalEffort = REPORT_DEPTH_EFFORTS[0][1]
+    for threshold, candidate in REPORT_DEPTH_EFFORTS:
+        if depth >= threshold:
+            effort = candidate
+    return effort
+
+
+def report_retrieval_limits(depth: Optional[int]) -> Optional[AskRetrievalLimits]:
+    """本次深挖的档位预算。``depth`` 为 None(未指定深度的调用方)时保持 None,
+    即接入前的「无 limits」行为。"""
+    if depth is None:
+        return None
+    return ask_retrieval_limits(report_retrieval_effort(int(depth)))
+
+
+# --- 方向合并后的最终选集上限(报告 PR-5,codex PR#418 R1 P2-1)------------
+
+def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> None:
+    """把「按已确认检索方向补检索」合并进来的证据压回所选档位的最终选集上限。
+
+    档位贯通此前只到 `ReasoningRetriever.run` 为止:run 内部按 `ranked_final_*`
+    夹好选集,`_deep_dive` 随后**逐方向**再追加(每方向一批 KG 命中 + 8 个元素),
+    合并结果直接绕过了这个上限 —— 概览档买到的是 12 条 KG 的预算,4 个方向却能
+    让它拿到 4 倍。方向本身照常执行(「已确认方向必须真执行」是合同,这里不动),
+    只在合并**之后**重新截断。
+
+    截断口径与 Ask 侧最终选集一致:KG 按相关度降序、同分保持原顺序;元素按
+    `(-score, element_id)`(逐字照抄 `_answer_reasoning` 的键,两处对同一批元素
+    必须给出同一个前 N,否则 `_draft_section` 的第二道同名闸会挑出另一批)。
+    **没超上限就一个字节都不动**:未超限时重排没有任何取舍可做,却会改变上下文
+    渲染顺序,那是一处与本修复无关、五档全会碰上的行为变化。
+
+    **两种「绑定」待遇不同**(codex PR#418 R5 P2):
+
+    * `outline_evidence` 那一批是**上限之外**的补集 —— retriever 已经把它们判在选集
+      之外了(相关度被刻意夹到选集最低分以下,见 `outline_truncated_kg_evidence`),
+      让它们参与同一次排序等于把它们再删一次。Ask 侧同样把它们放在 `top_hits` 之外
+      (`outline_pool_extra` 直接进分类池),所以这是同一条规则,不是报告的例外。
+    * 已经在选集里、又被大纲绑上的对象**照常占用上限席位**,只是**优先占**:把它们
+      整体移出分母的话,「96 条选集 + 8 条绑定 + 8 条方向补检索」会得到 104 条而
+      clamp 什么都不做 —— 上限就成了摆设。优先占位保证绑定不会被方向补检索挤掉,
+      同时总数仍守在 `cap + len(outline_evidence)`。
+
+    元素同理:绑定的元素先占 `answer_element_items` 的席位,其余按 `(-score, id)` 补满。
+    """
+    if limits is None:
+        return
+    # 「大纲绑定」= 子大纲各节绑定的候选键 ∪ retriever 带出的截断补集。前者是必须
+    # 的:绑定键横跨知识对象/元素/原文段三个 id 空间,只看后者(它只装知识对象)会
+    # 让绑定的**元素**照常被条数上限截掉 —— 那一条子话题的 [k] 同样解析不出来
+    # (codex PR#418 R3 P1)。三个 id 空间互不相交,一个集合足够。
+    bound = outline_bound_evidence_keys(getattr(result, "outline", None) or ())
+    supplemental = {
+        str(getattr(hit, "object_id", "") or "")
+        for hit in (getattr(result, "outline_evidence", None) or [])
+    }
+    bound |= supplemental
+
+    def _object_id(hit) -> str:
+        return str(getattr(hit, "object_id", "") or "")
+
+    within = [hit for hit in result.top_hits if _object_id(hit) not in supplemental]
+    if len(within) > limits.ranked_final_cap:
+        bound_within = [hit for hit in within if _object_id(hit) in bound]
+        others = [hit for hit in within if _object_id(hit) not in bound]
+        room = max(0, limits.ranked_final_cap - len(bound_within))
+        keep = {_object_id(hit) for hit in bound_within}
+        keep |= {
+            _object_id(hit) for hit in sorted(
+                others, key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0)
+            )[:room]
+        }
+        result.top_hits = sorted(
+            [hit for hit in within if _object_id(hit) in keep],
+            key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0),
+        ) + [hit for hit in result.top_hits if _object_id(hit) in supplemental]
+
+    def _element_id(element) -> str:
+        return str(getattr(element, "element_id", "") or "")
+
+    if len(result.elements) > limits.answer_element_items:
+        # 绑定的元素**优先占**席位,但上限是**闭**的(codex PR#418 R6 P2):一份大纲
+        # 最多能绑 96 个键,而穷尽档的元素上限是 16 —— 全部豁免就等于宣布了一个
+        # 「至多 16 条」又送进去几十条。绑定内部同样按 (-score, id) 择优。
+        bound_elements = rank_elements(
+            [element for element in result.elements if _element_id(element) in bound],
+            limits.answer_element_items,
+        )
+        others = [
+            element for element in result.elements if _element_id(element) not in bound
+        ]
+        room = max(0, limits.answer_element_items - len(bound_elements))
+        result.elements = bound_elements + rank_elements(others, room)
+
+
+def rank_elements(elements: Sequence[Any], keep: int) -> List[Any]:
+    """按检索相关度降序取前 ``keep`` 个直接原文段(tie-break `element_id`)。
+
+    键与 `ask_service._answer_reasoning` 逐字相同:按插入序切片会在检索到的元素
+    多于上限时静默丢掉最相关的那几个。
+    """
+    return sorted(
+        elements,
+        key=lambda element: (-float(getattr(element, "score", 0.0) or 0.0),
+                             str(getattr(element, "element_id", ""))),
+    )[: max(0, int(keep))]
+
+
+# --- 大纲绑定证据的 KG 上下文子预算(报告 PR-5)---------------------------
+# 绑定子集分到的那一份 = 总预算的 1/2(照 ask_service 枚举块 `chunk_context_chars
+# // 2` 的先例)。留一半而不是全给:绑定证据是结构支撑,不是本节证据的全部,
+# ranked 命中被它整个饿死同样是一种坏法。
+_OUTLINE_KG_BUDGET_DIVISOR = 2
+
+
+def outline_bound_evidence_keys(sections: Sequence[Any]) -> set:
+    """子大纲各节绑定的候选键(检索期 id;知识对象/元素/原文段三个 id 空间混在
+    一起,消费方按自己那一路匹配即可 —— 三者互不相交)。"""
+    return {
+        str(key)
+        for section in (sections or ())
+        for key in (getattr(section, "evidence_keys", None) or ())
+        if key
+    }
+
+
+def knowledge_context_with_outline(
+    evidence_context: Any,
+    notebook_id: str,
+    hits: Sequence[Any],
+    sections: Sequence[Any],
+    *,
+    id_offset: int,
+    budget_chars: int,
+) -> Tuple[str, Dict[str, Dict[str, Any]]]:
+    """KG 上下文:本节子大纲绑定的命中先拿一份子预算,其余 ranked 命中吃剩下的。
+
+    **为什么需要子预算**:`knowledge_context` 按输入序渲染、预算用尽即停,而
+    `_deep_dive` 把大纲绑定的截断对象**追加在 `top_hits` 尾部**(它们的相关度本来
+    就低于选集,只能排在后面)。KG 预算大约只装得下前几十条的一部分,而穷尽档的
+    最终相关性 floor 是 40 —— 于是在候选池够大的场景里,尾部那批「模型自己指名要
+    的结构支撑」**恒**被挤出上下文;`outline_structure_block` 反查不到就如实丢弃
+    绑定,子话题退成裸标题,prompt 又教「缺证据的子话题略过」,最后它从成稿里
+    整条消失。尾插本身不是承诺,子预算才是。
+
+    **优先级交给端口在一次调用里处理,绝不由这里拆成两次**(codex PR#418 R2 P2):
+    `knowledge_context` 末尾的 `relations:` 行是对本次证据集**内部**的边求的,拆两
+    次会丢掉所有跨两半的关系(一个绑定对象与一个 ranked 对象同时在 prompt 里、它们
+    之间那条存下来的边却没了),还会渲染出两行 `relations:` 各记一次预算,cluster
+    去重也会各算各的。
+
+    绑定子集为空(非穷尽档、或本节没整理出大纲、或绑定的全是元素/原文段)时不传
+    优先级参数,输出与接入前逐字相同 —— 那是这条路径唯一可接受的关闭态。
+    """
+    bound_keys = outline_bound_evidence_keys(sections)
+    bound_ids = [
+        str(getattr(hit, "object_id", "") or "") for hit in hits
+        if str(getattr(hit, "object_id", "") or "") in bound_keys
+    ] if bound_keys else []
+    if not bound_ids:
+        return evidence_context.knowledge_context(
+            notebook_id, hits, id_offset=id_offset, budget_chars=budget_chars)
+    return evidence_context.knowledge_context(
+        notebook_id, hits, id_offset=id_offset, budget_chars=budget_chars,
+        priority_object_ids=bound_ids,
+        priority_budget_chars=max(0, int(budget_chars)) // _OUTLINE_KG_BUDGET_DIVISOR)
+
+
+# --- 「发现的结构」块(报告 PR-5)-----------------------------------------
+# 深挖时整理出的子大纲进节撰写 prompt 的有界形态。硬界三条:行数、单行字符、
+# 整块字符。纯拼装,零模型调用、零新查询 —— 大纲与 id_map 都是手上现成的。
+_STRUCTURE_MAX_LINES = 12
+_STRUCTURE_MAX_LINE_CHARS = 80
+_STRUCTURE_MAX_CHARS = 1200
+
+
+def outline_structure_block(
+    sections: Sequence[Any], id_map: Dict[str, Dict[str, Any]]
+) -> str:
+    """终态子大纲 + 本节证据 id_map → 「发现的结构」块(每子节一行)。
+
+    ``[k]`` 必须与撰写模型手上的**同一套** id 空间一致:绑定键存的是检索期的
+    object/element/chunk id,而 `[k]` 是 `_draft_section` 装配上下文时分配的,所以
+    这里按 id_map 的 `object_id` 反查。**映射不到的绑定如实丢弃**(它被上下文预算
+    截断了,写进去就是让模型引用一个它看不见的 id),标题仍保留 —— 那一条子话题
+    prompt 会教它「缺证据就略过」。
+
+    顶层节渲染成 `###`(报告的节本身已经是 `##`),有父节的渲染成 `####`,层级
+    信息不丢。超界按顺序截断并显式记账 `(+N 子节略)`:静默丢行会让模型以为它
+    看到的就是全部结构。
+    """
+    if not sections:
+        return ""
+    by_object: Dict[str, str] = {}
+    for key, value in (id_map or {}).items():
+        object_id = str((value or {}).get("object_id") or "")
+        if object_id:
+            by_object.setdefault(object_id, key)
+    candidates: List[str] = []
+    for section in sections:
+        title = str(getattr(section, "title", "") or "").strip()
+        if not title:
+            continue
+        marks = list(dict.fromkeys(
+            by_object[key]
+            for key in (getattr(section, "evidence_keys", None) or [])
+            if key in by_object
+        ))
+        heading = "####" if str(getattr(section, "parent", "") or "") else "###"
+        # 行内先裁标题、再逐个装 [k],装不下的整条丢弃 —— 直接裁整行会在长标题
+        # (parse 允许 60 字符)加多个绑定时把标记切成半截 `[k1, k`,那是一个撰写
+        # 模型解释不了、却看着像引用的东西。
+        line = f"{heading} {title}"[:_STRUCTURE_MAX_LINE_CHARS]
+        rendered: List[str] = []
+        for mark in marks:
+            candidate = f"{line} — 证据: [" + ", ".join(rendered + [mark]) + "]"
+            if len(candidate) > _STRUCTURE_MAX_LINE_CHARS:
+                break
+            rendered.append(mark)
+        if rendered:
+            line = f"{line} — 证据: [" + ", ".join(rendered) + "]"
+        candidates.append(line)
+    kept: List[str] = []
+    used = 0
+    for line in candidates:
+        separator = 1 if kept else 0
+        if (len(kept) >= _STRUCTURE_MAX_LINES
+                or used + separator + len(line) > _STRUCTURE_MAX_CHARS):
+            break
+        kept.append(line)
+        used += separator + len(line)
+    if not kept:
+        return ""
+    omitted = len(candidates) - len(kept)
+    while omitted:
+        suffix = f"(+{omitted} 子节略)"
+        if used + 1 + len(suffix) <= _STRUCTURE_MAX_CHARS:
+            kept.append(suffix)
+            break
+        # 账目行本身也要在预算内:挤不下就再退一行(退掉的那行计进 N)。
+        used -= len(kept[-1]) + (1 if len(kept) > 1 else 0)
+        kept.pop()
+        omitted += 1
+        if not kept:
+            return ""
+    return "\n".join(kept)
 
 
 # --- 取消注册表委托:report_id → threading.Event(活动后台 job 才在册) ---
@@ -665,25 +942,53 @@ class ReportEngine:
         )
         # 与 ask 走同一套流程:不传 top_n → run 按本节方面数自适应证据预算
         # (effective_top_n:floor=retrieval_top_n,横向对比节因兄弟子查询多而扩容)。
+        # `limits` 按研究深度选档(PR-5):档名与 Ask 对齐,并让穷尽档在每节深挖里
+        # 自动激活大纲便签与弱支撑边回喂(`outline_wiring_active` 判的就是它)——
+        # 报告引擎因此不 import 任何大纲内部件。集合枚举保持不可达:构造 retriever
+        # 时不传 collection_catalog/collection_enumeration,wiring 判空自动关闭。
+        limits = report_retrieval_limits(depth)
         result = ReasoningRetriever(
             retrieval=deps.retrieval,
             model_clients=deps.model_clients,
             communities=deps.communities,
             settings=self.settings,
             cancel_event=self.cancel_event,
-        ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth)
+        ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
+              limits=limits)
 
         # The outline's approved retrieval directions are execution requirements,
         # not merely prose hints to the reasoning planner.  Merge their bounded
         # direct KG/element results so replanning cannot silently drop one.
         seen_objects = {hit.object_id for hit in result.top_hits}
         seen_elements = {item.element_id for item in result.elements}
+        # 大纲绑上、却被最终相关性选集挤出 top_hits 的知识对象(仅穷尽档非空,见
+        # reasoning_retrieval.outline_truncated_kg_evidence)。规则同 ask_service 的
+        # 按节合成路径:它们是模型自己指名要的结构支撑,要能进本节上下文并计入
+        # classify_evidence 的证据池 —— 否则「发现的结构」里指向它们的 [k] 解析不
+        # 出来,而引用了它们的句子在分级眼里就是引了个不存在的东西。相关度已在
+        # retriever 侧与选集同口径夹好,这里直接并入,零新查询。
+        # 注意这里**只**做「在池子里」:它们的相关度低于选集,尾插的位置在大候选池
+        # 下必然被上下文预算截掉。真正让它们进得了 prompt 的是 `_draft_section` 的
+        # 两遍渲染(`knowledge_context_with_outline` 的子预算),不是这个 append。
+        for hit in list(getattr(result, "outline_evidence", None) or []):
+            if hit.object_id in seen_objects:
+                continue
+            result.top_hits.append(hit)
+            seen_objects.add(hit.object_id)
+        # 每个方向取多少,也按档位走(codex PR#418 R5 P2):方向照常逐条执行,但
+        # 「每查询取几条」在档位表里就是 `ranked_per_query_take`(概览 4、穷尽 16),
+        # 而这里此前恒取 `retrieval_top_n`(20)。只在合并后截断的话,低档位仍然付了
+        # 高档位的取数与 hydration 成本,截断只是把多拿的再扔掉。
+        direction_take = (limits.ranked_per_query_take if limits is not None
+                          else self.settings.retrieval_top_n)
+        direction_elements = (min(8, limits.answer_element_items)
+                              if limits is not None else 8)
         for query in list(section.get("sub_queries") or [])[:4]:
             new_count = 0
             try:
                 hits = self.dependencies.retrieval.federated_retrieve(
                     notebook_id, str(query)
-                )[: self.settings.retrieval_top_n]
+                )[:direction_take]
                 for hit in hits:
                     if hit.object_id not in seen_objects:
                         result.top_hits.append(hit)
@@ -693,7 +998,7 @@ class ReportEngine:
                 pass
             try:
                 elements = self.dependencies.retrieval.retrieve_elements(
-                    notebook_id, str(query), limit=8
+                    notebook_id, str(query), limit=direction_elements
                 )
                 for element in elements:
                     if element.element_id not in seen_elements:
@@ -705,32 +1010,124 @@ class ReportEngine:
             if not any(str(row.get("query") or "") == str(query)
                        for row in result.attempted):
                 result.attempted.append({"query": str(query), "new": new_count, "tries": 1})
+        # 方向合并绕过了档位的最终选集上限 —— 每个方向照常执行(账目里的 `new` 记的
+        # 是它真的找到多少),合并后再统一压回上限。
+        clamp_merged_evidence(result, limits)
         return result
 
     # --- Stage C(单节):撰写 ---
-    def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
+    def _draft_section(self, notebook_id: str, section: dict, question: str, result,
+                       depth=None) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
         deps = self.dependencies
-        chunk_block, chunk_map = deps.evidence_context.chunk_context(
-            result.chunks, notebook_id=notebook_id,
-            budget_chars=self.settings.report_section_chunk_budget)
-        kg_block, kg_map = deps.evidence_context.knowledge_context(
-            notebook_id, result.top_hits, id_offset=len(chunk_map))
-        element_block, element_map = deps.evidence_context.element_context(
-            list(getattr(result, "elements", []) or []),
-            notebook_id=notebook_id,
-            id_offset=4000,
-            budget_chars=max(2000, self.settings.report_section_chunk_budget // 3),
+        # 撰写上下文的预算同样随研究深度走(codex PR#418 R1 P2-2):档位贯通此前只
+        # 到检索为止,而「概览」和「穷尽」此前拿到的是同一份 6000/20000 字符上下文
+        # —— 检索按档缩放、装配却是定值,等于把档位的一半买空。`depth=None` 的调用方
+        # (直接调 `_draft_section` 的测试与冻结调用点)保持旧固定值。
+        limits = report_retrieval_limits(depth)
+        chunk_budget = (limits.chunk_context_chars if limits is not None
+                        else self.settings.report_section_chunk_budget)
+        kg_budget = (limits.kg_context_chars if limits is not None
+                     else self.settings.answer_context_budget_chars)
+        # 本节深挖整理出的子大纲(仅穷尽档非空)。它有三个消费点,顺序不能倒:先决定
+        # 谁进来源分区、再决定谁进 KG 上下文,最后才据装配好的 id_map 渲染结构块。
+        sub_outline = list(getattr(result, "outline", None) or [])
+        bound_keys = (outline_bound_evidence_keys(sub_outline)
+                      if limits is not None else set())
+        # 来源分区(chunk + 直接原文段)同样要给大纲绑定留位置(codex PR#418 R4):
+        # 它是一份**共享**预算,chunk 按输入序吃满之后,绑在后面的原文段拿到的
+        # 就是 0,绑定照样从结构块里消失 —— 那正是前两轮修 KG 侧要防的事。
+        # 两件事:绑定的 chunk 排到最前(chunk_context 按输入序渲染,逐 chunk 独立,
+        # 重排是安全的);绑定的原文段按它们**自己的实际长度**预留额度(上限仍是
+        # 分区的一半,与 KG 侧的子预算同一个比例),chunk 只吃预留之外的部分。
+        chunks = list(getattr(result, "chunks", None) or [])
+        elements = list(getattr(result, "elements", []) or [])
+        bound_elements = [
+            element for element in elements
+            if str(getattr(element, "element_id", "") or "") in bound_keys
+        ]
+        if bound_keys:
+            chunks = [
+                chunk for chunk in chunks
+                if str(getattr(chunk, "chunk_id", "") or "") in bound_keys
+            ] + [
+                chunk for chunk in chunks
+                if str(getattr(chunk, "chunk_id", "") or "") not in bound_keys
+            ]
+        element_reserve = min(
+            chunk_budget // _OUTLINE_KG_BUDGET_DIVISOR,
+            # 每条 ≈ 正文 + 前缀(`k4001: [source-element][tier] 标题 · 位置 — `)。
+            # 估多了只是少给 chunk 几百字符,估少了才会让绑定进不来。
+            sum(len(str(getattr(element, "text", "") or "")) + 120
+                for element in bound_elements),
         )
+        chunk_block, chunk_map = deps.evidence_context.chunk_context(
+            chunks, notebook_id=notebook_id,
+            budget_chars=max(0, chunk_budget - element_reserve))
+        kg_block, kg_map = knowledge_context_with_outline(
+            deps.evidence_context, notebook_id, result.top_hits, sub_outline,
+            id_offset=len(chunk_map), budget_chars=kg_budget)
         # 现场事实:chunk_context/knowledge_context 空输入返回 "(none)" 哨兵
         # (非空串),先归一再拼接,避免把哨兵当真实证据块。
         chunk_block = "" if chunk_block == "(none)" else chunk_block
         kg_block = "" if kg_block == "(none)" else kg_block
+        # 直接原文段:条数按档位的 `answer_element_items`,择优规则与 Ask 侧同口径
+        # (相关度降序、tie-break element_id)。
+        # 字符预算与原文块**共享同一个分区上限**(codex PR#418 R2 P2):
+        # `chunk_context_chars` 在 `AskRetrievalLimits` 里就是「结构化预览 + chunk +
+        # 直接原文段」这一整个分区的上限,再在它之外加一份 1/3 等于自己宣布了一个
+        # 上限又立刻超过它 —— 穷尽档下那是额外 40000 字符。取剩余额度的写法逐字照
+        # `_answer_reasoning`(`max(0, chunk_budget - len(source_context))`)。
+        # 不选档的调用方保持旧的 `max(2000, …//3)`,那条路径没有分区合同可言。
+        # 大纲绑定的元素在这里同样豁免条数上限,并排在最前(codex PR#418 R3 P1):
+        # 绑定键横跨三个 id 空间,一个被 `answer_element_items` 截掉的绑定元素,在
+        # `outline_structure_block` 里就是一个解析不出的绑定,子话题退成裸标题。
+        # 排最前是因为字符预算仍按输入序消耗 —— 与 KG 那边的优先前缀同一个理由。
+        if limits is not None:
+            # 与 `clamp_merged_evidence` 同一条规则:绑定优先占席位,但上限是闭的。
+            kept_bound = rank_elements(bound_elements, limits.answer_element_items)
+            others = [
+                element for element in elements
+                if str(getattr(element, "element_id", "") or "") not in bound_keys
+            ]
+            elements = kept_bound + rank_elements(
+                others, max(0, limits.answer_element_items - len(kept_bound)))
+        element_budget = (max(0, chunk_budget - len(chunk_block))
+                          if limits is not None else max(2000, chunk_budget // 3))
+        element_block, element_map = deps.evidence_context.element_context(
+            elements,
+            notebook_id=notebook_id,
+            id_offset=4000,
+            budget_chars=element_budget,
+        )
         element_block = "" if element_block == "(none)" else element_block
         context_block = (f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
                          if chunk_block else kg_block) or "(no evidence retrieved)"
         if element_block:
             context_block = f"{context_block}\n\n[Direct source elements]\n{element_block}"
+        # KG 分区的剩余额度:`kg_context_chars` 在 AskRetrievalLimits 里是「KG 对象/
+        # 关系 + confirmed Memory + 查询期推导链」这一整个分区的上限(codex PR#418
+        # R3 P2)。推导链与 Memory 因此不再无条件接在 KG 块之后,而是按剩余额度
+        # **整块**准入:两者都自带硬上限(Memory 6000 字符封顶、推导链条数由本 run 的
+        # follow_chain 次数封顶),所以整块准入不会把常见情形挡在门外;而截半块会把
+        # 一行 `[k]` 标记切断,那比少一块更糟。没被准入的块也**不**并进 id_map ——
+        # 模型没看见的东西不能算进 classify_evidence 的证据池。
+        # 不选档的调用方保持接入前的「无条件追加」。
+        kg_room = (max(0, kg_budget - len(kg_block)) if limits is not None else None)
+
+        def _admit_block(block: str, heading: str) -> str:
+            """返回要拼进 context_block 的那一段(含前缀);装不下就是空串。"""
+            nonlocal kg_room
+            if not block or block == "(none)":
+                return ""
+            prefix = f"\n\n[{heading}]\n" if heading else "\n\n"
+            if kg_room is None:
+                return prefix + block
+            if len(prefix) + len(block) > kg_room:
+                return ""
+            kg_room -= len(prefix) + len(block)
+            return prefix + block
+
         chain_map = {}
         if getattr(result, "chains", None):
             from app.services.kg.follow_chain import render_follow_chain_context
@@ -742,8 +1139,11 @@ class ReportEngine:
                 value["relevance"] = float(
                     relation_relevances.get(value.get("object_id"), 0.0)
                 )
-            if chain_block and chain_block != "(none)":
-                context_block = f"{context_block}\n\n{chain_block}"
+            admitted = _admit_block(chain_block, "")
+            if admitted:
+                context_block = f"{context_block}{admitted}"
+            elif limits is not None:
+                chain_map = {}
         memory_map = {}
         try:
             memories = (
@@ -758,12 +1158,19 @@ class ReportEngine:
                 deps.memory_retriever.context(memories, id_offset=3000)
                 if memories else ("(none)", {})
             )
-            if memory_block and memory_block != "(none)":
-                context_block = f"{context_block}\n\n[Confirmed Memory]\n{memory_block}"
+            admitted = _admit_block(memory_block, "Confirmed Memory")
+            if admitted:
+                context_block = f"{context_block}{admitted}"
+            elif limits is not None:
+                memory_map = {}
         except Exception:
             memory_map = {}
         client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map, **element_map}
+        # 子大纲 → 有界「发现的结构」块。它只作用于本节内部的 `###` 组织,绝不回写
+        # reports.outline_json 里用户确认过的大纲。两次重试共用同一份块:它与
+        # id_map 一样在这轮里是常量。
+        structure_block = outline_structure_block(sub_outline, id_map)
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
         # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。
@@ -776,7 +1183,8 @@ class ReportEngine:
                 raw = client.chat_json(
                     [{"role": "user", "content": report_section_prompt(
                         section["title"], section["scope"], question, context_block,
-                        allow_parametric=self.settings.report_allow_parametric)}],
+                        allow_parametric=self.settings.report_allow_parametric,
+                        discovered_structure=structure_block)}],
                     REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
                     **cap_kwargs(client, "report_section_max_tokens"))
                 data = json.loads(raw)
@@ -850,6 +1258,13 @@ class ReportEngine:
 
         _PHASE = {"plan": "规划", "reflect": "深挖", "retrieve": "深挖", "expand": "深挖",
                   "ppr": "深挖", "follow_chain": "深挖", "fallback": "深挖"}
+        # 本节深挖到目前为止整理出的大纲节数(仅穷尽档会非零)。深挖阶段的 phase
+        # 文案据此细化;写入仍走既有的 2 秒节流 persist,不新增落库次数。
+        outline_sections = [0] * len(outline)
+
+        def _deep_phase(index):
+            count = outline_sections[index]
+            return f"深挖中（已整理大纲 {count} 节）" if count else "深挖"
 
         def _one(i, section):
             raise_if_cancelled(self.cancel_event)
@@ -859,19 +1274,33 @@ class ReportEngine:
 
             def on_step(step, _i=i):
                 with lock:
+                    if step.step_type == "outline":
+                        # 大纲步没有自己的阶段(它发生在深挖里),但它是这一节
+                        # 唯一能看出「模型在整理结构」的时刻:立刻更新计数并改写
+                        # 文案,不等下一个检索步来带 —— 大纲步完全可能是本节反思
+                        # 循环的最后一个动作。
+                        outline_sections[_i] = len(
+                            (getattr(step, "detail", None) or {}).get("sections") or [])
+                        status[_i]["phase"] = _deep_phase(_i)
                     ph = _PHASE.get(step.step_type)
                     if ph:
-                        status[_i]["phase"] = ph
+                        status[_i]["phase"] = _deep_phase(_i) if ph == "深挖" else ph
                     if step.step_type == "reflect":
                         status[_i]["step"] += 1
-                persist()
+                # 大纲步强制落库(codex PR#418 R6 P2):它紧跟在同一轮的 reflect 步
+                # 之后发出,2 秒节流几乎总是刚被那一步推过 → 这次写被跳过;而大纲
+                # 步又完全可能是本节的最后一个推理动作,`_deep_dive` 一返回,强制写
+                # 的「撰写」就把内存里的文案盖掉,用户从头到尾看不到「已整理大纲 N
+                # 节」。每节至多 `_MAX_OUTLINE_UPDATES` 次,新增写入是有界的。
+                persist(force=step.step_type == "outline")
 
             try:
                 result = self._deep_dive(notebook_id, section, question, depth, on_step)
                 with lock:
                     status[i]["phase"] = "撰写"
                 persist(force=True)
-                drafted = self._draft_section(notebook_id, section, question, result)
+                drafted = self._draft_section(notebook_id, section, question, result,
+                                              depth)
                 with lock:
                     status[i]["phase"] = "完成"
             except AskCancelled:
