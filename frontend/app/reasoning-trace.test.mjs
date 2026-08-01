@@ -168,6 +168,28 @@ test("next_action 不把状态机动作名直出给用户,而是显示中文人�
     getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "add_subquery" } }),
     "换个角度再查一遍",
   );
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "search_evidence" } }),
+    "按指定资料搜索证据",
+  );
+});
+
+
+test("来源范围轨迹显示安全标题，不显示内部来源 ID", () => {
+  const step = {
+    step_type: "source_scope",
+    summary: "已确认检索范围：仅限 2 个来源",
+    detail: {
+      count: 2,
+      sources: [
+        { title: "Manual A", source_file_name: "a.pdf", source_id: "secret-a" },
+        { title: "", source_file_name: "b.pdf", source_id: "secret-b" },
+      ],
+    },
+  };
+  assert.equal(getReasoningTraceSummary([step], false).latestLabel, "范围");
+  assert.equal(getTraceStepDetail(step), "Manual A、b.pdf");
+  assert.doesNotMatch(getTraceStepDetail(step), /secret/);
 });
 
 test("未知 next_action 不显示,而不是显示原值", () => {
@@ -187,7 +209,7 @@ test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () =>
   );
 });
 
-test("NEXT_ACTION 覆盖后端全部 11 个真实取值(非机制名)", () => {
+test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
   // 真源是 reasoning_retrieval.py 里 reflect 循环的 next_action if/elif 分发链
   // (不按行号钉——本仓库行号指针已知会腐烂;按分支内容定位,见 reasoning-trace.ts
   // 顶部 NEXT_ACTION 上方注释)。精确查找通道加了 exact_lookup,PR-2 加了
@@ -202,6 +224,7 @@ test("NEXT_ACTION 覆盖后端全部 11 个真实取值(非机制名)", () => {
     ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
     exact_lookup: "按名称精确查找", update_outline: "整理大纲",
+    search_evidence: "按指定资料搜索证据",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });

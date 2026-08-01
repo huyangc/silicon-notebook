@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any, Iterable
 
 from app.core.ask_retrieval_policy import RESULT_SCOPES
@@ -78,6 +79,94 @@ _ANALYSIS_REQUEST = re.compile(
     r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
     re.IGNORECASE,
 )
+_MAX_SOURCE_REFS = 8
+_MAX_SOURCE_REF_CHARS = 500
+_SOURCE_LABEL_PATTERN = (
+    r"(?:来源|资料|文档|文件|手册|指南|论文|文章|书籍|原文|"
+    r"\b(?:manual|guide|reference|paper|article|book|file|document|source)s?\b)"
+)
+_SOURCE_LABEL = re.compile(
+    _SOURCE_LABEL_PATTERN,
+    re.IGNORECASE,
+)
+_SOURCE_FILE_NAME = re.compile(
+    r"\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)$",
+    re.IGNORECASE,
+)
+_NON_SOURCE_ROLE_AFTER = re.compile(
+    r"^\s*[，,:：]?\s*(?:"
+    r"(?:是|作为)?\s*(?:一个|一款|一种)?\s*"
+    r"(?:工具|产品|命令|函数|库|框架)(?:名|名称)?(?:来)?(?:使用)?"
+    r"|(?:is|used\s+as|as)\s+(?:an?\s+)?"
+    r"(?:tool|product|command|function|library|framework)\b)",
+    re.IGNORECASE,
+)
+
+
+def _normalized_identity_text(value: object) -> str:
+    return unicodedata.normalize("NFKC", str(value or "")).casefold()
+
+
+def _explicit_source_refs(value: object, question: str, history: str) -> list[str]:
+    """Keep only source identities the user's own wording explicitly contains.
+
+    The model identifies the semantic role, but cannot invent the identity. A
+    literal occurrence plus a nearby source label (or a recognizable file
+    extension) is the deterministic authority boundary. Conversation history
+    contains user questions only; assistant/corpus text never reaches here.
+    """
+
+    if not isinstance(value, list):
+        return []
+    context = _normalized_identity_text(f"{question}\n{history}")
+    accepted: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        reference = item.strip()[:_MAX_SOURCE_REF_CHARS]
+        needle = _normalized_identity_text(reference)
+        if not needle:
+            continue
+        starts: list[int] = []
+        cursor = 0
+        while (start := context.find(needle, cursor)) >= 0:
+            starts.append(start)
+            cursor = start + max(1, len(needle))
+        if not starts:
+            continue
+        explicitly_bound = bool(_SOURCE_FILE_NAME.search(needle))
+        for start in starts:
+            end = start + len(needle)
+            left = context[max(0, start - 64):start]
+            right = context[end:min(len(context), end + 64)]
+            # ASCII quotes are the product's whole-phrase search syntax, not
+            # source syntax.  Book-title marks are unambiguous source identity.
+            wrapped = left.endswith("《") and right.startswith("》")
+            label_before = re.search(
+                _SOURCE_LABEL_PATTERN
+                + r"\s*(?:(?:名为|叫作|标题为)|(?:named|called))?\s*[：:]?\s*$",
+                left,
+                re.IGNORECASE,
+            )
+            label_after = re.match(
+                r"^\s*(?:[》\"”']\s*)?(?:这?(?:份|篇|本))?\s*"
+                + _SOURCE_LABEL_PATTERN,
+                right,
+                re.IGNORECASE,
+            )
+            self_describing_title = bool(
+                _SOURCE_LABEL.search(needle)
+                and not _NON_SOURCE_ROLE_AFTER.search(right)
+            )
+            if wrapped or label_before or label_after or self_describing_title:
+                explicitly_bound = True
+                break
+        if not explicitly_bound:
+            continue
+        accepted.append(reference)
+        if len(accepted) >= _MAX_SOURCE_REFS:
+            break
+    return accepted
 
 
 def _complete_match_is_negated(question: str, match: re.Match) -> bool:
@@ -256,6 +345,13 @@ def plan_query_intent(
 
     normalized_candidate = str(data.get("normalized_question") or "").strip()
     entities = _bounded_strings(data.get("entities"))
+    # Deliberately trust only the intent model's explicit-source field here.
+    # Tool/product/domain entities are not promoted into source references by
+    # deterministic similarity; uniqueness and authorization belong to the
+    # later identity resolver.
+    source_refs = _explicit_source_refs(
+        data.get("source_refs"), question, history
+    )
     context_for_referent = f"{question}\n{history}".casefold()
     has_verified_referent = any(
         entity.casefold() in context_for_referent for entity in entities
@@ -305,7 +401,7 @@ def plan_query_intent(
         str(data.get("normalized_question") or "").strip()[:4000] or question
     )
     result_scope, completeness_required = _result_scope(data, question)
-    return {
+    contract = {
         "objective": question,
         "resolved_question": normalized_question,
         "intent_type": intent_type,
@@ -325,6 +421,12 @@ def plan_query_intent(
         ),
         "confirmed": False,
     }
+    # Preserve the historical all-source contract byte shape where practical:
+    # omission means all authorized sources, while an empty list must not be a
+    # second spelling of that mode.
+    if source_refs:
+        contract["source_refs"] = source_refs
+    return contract
 
 
 def finalize_query_intent(
@@ -365,6 +467,18 @@ def finalize_query_intent(
         "answer": answer,
     } for ambiguity_id, answer in submitted.items()]
     final = dict(seed)
+    source_refs = _bounded_strings(
+        seed.get("source_refs"),
+        _MAX_SOURCE_REFS,
+        _MAX_SOURCE_REF_CHARS,
+    )
+    if source_refs:
+        # Copy the already-reviewed strings without another model pass.  The
+        # later resolver may resolve or reject them, but cannot reinterpret
+        # what the user confirmed here.
+        final["source_refs"] = source_refs
+    else:
+        final.pop("source_refs", None)
     # The user-visible confirmation field is authoritative when it was edited
     # (or clarification answers changed the reviewed direction).  A clear
     # auto-confirmed preview is different: product policy keeps the original

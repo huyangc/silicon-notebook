@@ -427,6 +427,7 @@ def reflect_schema_hint(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
     outline: bool = False,
+    source_scope_tools: bool = False,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -446,6 +447,17 @@ def reflect_schema_hint(
         "answer|expand_graph|add_subquery|"
         "search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup"
     )
+    source_scope_branch = ""
+    if source_scope_tools:
+        actions += "|search_evidence"
+        source_scope_branch = (
+            # ``source_refs`` is deliberately absent from the example.  Its
+            # presence is semantic: omission inherits the confirmed run
+            # ceiling, while an explicit empty list is invalid.  Showing an
+            # empty placeholder here teaches otherwise well-behaved models to
+            # emit the invalid spelling on every inherited search.
+            '"search_evidence":{"query":""},'
+        )
     enumerate_branch = ""
     if element_kinds or object_types:
         actions += "|enumerate_elements|enumerate_kg_objects"
@@ -488,7 +500,7 @@ def reflect_schema_hint(
         '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
         '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
         '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-        + enumerate_branch + outline_branch +
+        + enumerate_branch + outline_branch + source_scope_branch +
         '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
         '"reason":""}'
     )
@@ -503,6 +515,8 @@ def reflect_prompt(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
     outline: bool = False,
+    source_scope_tools: bool = False,
+    selected_source_scope: bool = False,
 ) -> str:
     """Next-step decision prompt.
 
@@ -638,6 +652,23 @@ def reflect_prompt(
         "Instead state what has actually been found so far and what, if "
         "anything, is still missing.\n\n"
     )
+    source_scope_action = ""
+    if source_scope_tools:
+        source_scope_action = (
+            "- search_evidence: run one combined knowledge-and-original-text "
+            "search. Set search_evidence.query to the evidence question. The "
+            "run's source ceiling was decided by the corpus-blind preview and "
+            "user confirmation before any retrieval. Omit source_refs to inherit "
+            "that ceiling. "
+        )
+        source_scope_action += (
+            "This run already has a selected ceiling: you may include a NON-EMPTY "
+            "source_refs list only for a call-local subset of those confirmed "
+            "sources. Copy exact confirmed titles/file names; never broaden it.\n"
+            if selected_source_scope else
+            "This is an all-source run: ALWAYS omit source_refs. A run may not "
+            "establish its first selected scope after retrieval has begun.\n"
+        )
     return (
         "You decide the NEXT retrieval step for answering a question from a "
         "knowledge graph. Below are the candidates gathered so far.\n"
@@ -675,6 +706,7 @@ def reflect_prompt(
         "EXACTLY as written in the documentation; this matches the name literally "
         "and returns the whole manual section it heads, so a name you invent or "
         "paraphrase returns nothing.\n"
+        f"{source_scope_action}"
         f"{enumerate_actions}"
         f"{outline_action}"
         f"{SCOPE_DEIXIS_GROUNDING}"
@@ -837,7 +869,8 @@ QUERY_INTENT_SCHEMA_HINT = (
     '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
     '"result_scope":"ranked|complete|aggregate|hybrid",'
     '"completeness_required":false,'
-    '"entities":[""],"mandatory_topics":[{"id":"","title":"",'
+    '"entities":[""],"source_refs":[""],'
+    '"mandatory_topics":[{"id":"","title":"",'
     '"question":"","retrieval_queries":[""]}],"comparison_axes":[""],'
     '"constraints":[""],"excluded_topics":[""],"expected_output":"",'
     '"assumptions":[""],"ambiguities":[{"id":"","question":"",'
@@ -894,7 +927,14 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "\"place_opt_design usage\".\n"
         "normalized_question is a standalone, precise formulation in the user's "
         "language. intent_type classifies the requested operation. entities lists "
-        "the concrete research objects. confidence is 0..1 confidence that the "
+        "the concrete research objects. source_refs contains at most 8 source "
+        "references copied from what the user explicitly identifies as a manual, "
+        "paper, book, file, document title, file name, or demonstrative source set. "
+        "Preserve each reference in the user's wording. A tool, product, library, "
+        "author, or domain name by itself is an entity, NOT a source reference, even "
+        "when it resembles a likely document title. Never infer source_refs from "
+        "subject similarity or general knowledge; return [] when the user did not "
+        "explicitly identify source material. confidence is 0..1 confidence that the "
         "request is sufficiently specified. Classify result_scope as ranked for "
         "best/most-relevant evidence, complete for an explicit full list, aggregate "
         "for an exact count/grouping over the whole collection, or hybrid for a "

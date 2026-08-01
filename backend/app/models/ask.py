@@ -104,6 +104,22 @@ class QueryIntentAnswer(BaseModel):
     answer: str = Field(min_length=1, max_length=2000)
 
 
+class QueryIntentSourceSnapshot(BaseModel):
+    """Server-resolved source identity persisted with a reviewed intent."""
+
+    source_id: str = Field(min_length=1, max_length=500)
+    notebook_id: str = Field(min_length=1, max_length=500)
+    title: str = Field(default="", max_length=1000)
+    source_file_name: str = Field(default="", max_length=1000)
+
+
+class QueryIntentSourceScope(BaseModel):
+    """Immutable selected-source ceiling; omission means all sources."""
+
+    mode: Literal["selected"] = "selected"
+    sources: List[QueryIntentSourceSnapshot] = Field(min_length=1, max_length=8)
+
+
 class QueryIntentContract(BaseModel):
     """Corpus-blind understanding shared by report and reasoning retrieval."""
     objective: str = Field(min_length=1, max_length=4000)
@@ -115,6 +131,22 @@ class QueryIntentContract(BaseModel):
     result_scope: ResultScope = "ranked"
     completeness_required: bool = False
     entities: List[str] = Field(default_factory=list, max_length=8)
+    # Source names/file names explicitly referenced by the user.  These are
+    # identity hints for the later authorized resolver, never source ids or a
+    # prompt-only retrieval filter.  Empty values stay absent from serialized
+    # legacy contracts so an ordinary all-source question keeps its historical
+    # payload shape.
+    source_refs: List[
+        Annotated[str, Field(min_length=1, max_length=500)]
+    ] = Field(
+        default_factory=list,
+        max_length=8,
+        exclude_if=lambda value: not value,
+    )
+    source_scope: Optional[QueryIntentSourceScope] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     mandatory_topics: List[QueryIntentTopic] = Field(default_factory=list, max_length=16)
     comparison_axes: List[str] = Field(default_factory=list, max_length=8)
     constraints: List[str] = Field(default_factory=list, max_length=8)
@@ -128,6 +160,14 @@ class QueryIntentContract(BaseModel):
     clarification_answers: List[Dict[str, str]] = Field(
         default_factory=list, max_length=8
     )
+
+    @field_validator("source_refs")
+    @classmethod
+    def validate_source_refs(cls, values: List[str]) -> List[str]:
+        cleaned = [value.strip() for value in values]
+        if any(not value for value in cleaned):
+            raise ValueError("source_refs cannot contain blank values")
+        return cleaned
 
     @model_validator(mode="after")
     def enforce_scope_completeness(self) -> "QueryIntentContract":

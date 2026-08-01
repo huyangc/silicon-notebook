@@ -50,6 +50,8 @@ from app.models.ask import (
     ConversationBulkDeleteResult,
     ModelError,
     QueryIntentContract,
+    QueryIntentSourceScope,
+    QueryIntentSourceSnapshot,
     TraceStep,
 )
 from app.models.knowledge import (
@@ -527,6 +529,7 @@ class AskService:
 
     def preview_reasoning_intent(
         self,
+        notebook_id: str,
         question: str,
         history: str = "",
         cancel_event: CancelEvent = None,
@@ -542,7 +545,89 @@ class AskService:
             purpose="step-by-step evidence-grounded answer",
             cancel_event=cancel_event,
         )
+        source_refs = list(contract.get("source_refs") or [])
+        if source_refs:
+            from app.services.evidence_scope import EvidenceScopeResolutionError
+
+            try:
+                resolved = self.collection_enumeration.resolve_evidence_scope(
+                    notebook_id, source_refs, cancel_event=cancel_event
+                )
+            except EvidenceScopeResolutionError as exc:
+                if exc.status == "ambiguous":
+                    names = [
+                        item.title or item.source_file_name
+                        for item in exc.candidates
+                        if item.title or item.source_file_name
+                    ]
+                    suffix = f"（候选：{'、'.join(names[:4])}）" if names else ""
+                    raise ValueError(
+                        f"指定的来源名称不唯一，请改用完整文件名或来源编号{suffix}"
+                    ) from exc
+                if exc.status == "not_found":
+                    raise ValueError(
+                        f"找不到指定来源：{exc.reference}，请核对来源标题或文件名"
+                    ) from exc
+                raise ValueError("指定来源当前不可用，请重新选择来源") from exc
+            contract["source_scope"] = self._intent_scope_snapshot(resolved).model_dump()
+            # A selected source set is a user-reviewed retrieval contract, even
+            # when the semantic question itself is otherwise clear.
+            # QueryIntentContract has a hard eight-row ambiguity ceiling.  A
+            # selected-source confirmation is mandatory, so reserve its slot
+            # rather than producing a ninth row that makes an otherwise valid
+            # preview fail validation.  The planner's ordering already puts
+            # deterministic missing-referent questions first.
+            ambiguities = list(contract.get("ambiguities") or [])[:7]
+            ambiguities.append({
+                "id": "source_scope_confirmation",
+                "question": f"确认本次仅依据这 {len(resolved.sources)} 个指定来源吗？",
+                "reason": "限定后的来源集合将约束本轮全部证据与引用",
+                "required": True,
+                "options": ["确认"],
+            })
+            contract["ambiguities"] = ambiguities
+            contract["needs_clarification"] = True
         return QueryIntentContract(**contract)
+
+    @staticmethod
+    def _intent_scope_snapshot(scope) -> QueryIntentSourceScope:
+        if not scope.restricted:
+            raise ValueError("all-source mode has no selected scope snapshot")
+        return QueryIntentSourceScope(sources=[
+            QueryIntentSourceSnapshot(
+                source_id=item.source_id,
+                notebook_id=item.notebook_id,
+                title=item.title,
+                source_file_name=item.source_file_name,
+            )
+            for item in scope.sources
+        ])
+
+    def _confirmed_evidence_scope(
+        self,
+        notebook_id: str,
+        intent: QueryIntentContract,
+        cancel_event: CancelEvent = None,
+    ):
+        """Re-authorize a persisted snapshot immediately before evidence I/O."""
+        from app.services.evidence_scope import ResolvedEvidenceScope
+
+        if not intent.source_refs:
+            if intent.source_scope is not None:
+                raise ValueError("来源范围与问题理解不一致，请重新确认")
+            return ResolvedEvidenceScope.all()
+        resolved = self.collection_enumeration.resolve_evidence_scope(
+            notebook_id, intent.source_refs, cancel_event=cancel_event
+        )
+        if intent.source_scope is None:
+            raise ValueError("指定来源尚未确认，请重新确认问题理解")
+        expected = {
+            (item.notebook_id, item.source_id)
+            for item in intent.source_scope.sources
+        }
+        if resolved.allowed_source_keys != expected:
+            raise ValueError("指定来源已删除、变更或不再可用，请重新确认")
+        return resolved
 
     @staticmethod
     def _confirmed_reasoning_intent(
@@ -1702,6 +1787,10 @@ class AskService:
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         intent_contract = self._confirmed_reasoning_intent(payload, history)
+        evidence_scope = self._confirmed_evidence_scope(
+            notebook_id, intent_contract, cancel_event=cancel_event
+        )
+        reasoning_history = "" if evidence_scope.restricted else history
         limits = ask_retrieval_limits(payload.retrieval_effort)
         from app.services.query_intent import (
             confirmed_intent_queries,
@@ -1767,12 +1856,28 @@ class AskService:
             ),
         )
         pre_trace: list[TraceStep] = [intent_step]
+        if evidence_scope.restricted:
+            pre_trace.append(TraceStep(
+                step_type="source_scope",
+                summary=f"已确认检索范围：仅限 {len(evidence_scope.sources)} 个来源",
+                detail={
+                    "count": len(evidence_scope.sources),
+                    "sources": [
+                        {
+                            "title": item.title,
+                            "source_file_name": item.source_file_name,
+                        }
+                        for item in evidence_scope.sources
+                    ],
+                },
+            ))
         intent_streamed = False
 
         def stream_intent() -> None:
             nonlocal intent_streamed
             if not intent_streamed and on_trace:
-                on_trace(intent_step)
+                for step in pre_trace:
+                    on_trace(step)
             intent_streamed = True
 
         def checked_pre_trace(step: TraceStep) -> None:
@@ -1792,7 +1897,11 @@ class AskService:
 
         structured_batch = None
         completeness_unavailable = False
-        if intent_contract.completeness_required and self.knowhow_store is not None:
+        if (
+            intent_contract.completeness_required
+            and self.knowhow_store is not None
+            and not evidence_scope.restricted
+        ):
             from app.services.structured_retrieval import (
                 enumerate_knowhow,
                 is_knowhow_enumeration_query,
@@ -1898,8 +2007,10 @@ class AskService:
         # watching an empty trace through work that is already under way.
         stream_intent()
         memory_started = time.perf_counter()
-        memory_hits = self._memory_hits(
-            user_id, notebook_id, research_question
+        memory_hits = (
+            []
+            if evidence_scope.restricted
+            else self._memory_hits(user_id, notebook_id, research_question)
         )
         # The duration covers the embedding round trip plus the vector scan
         # above: this step is the trace's only account of that work, so leaving
@@ -1922,7 +2033,14 @@ class AskService:
             轨迹记录的是引擎做过什么,不是答案归因了什么;归因由答案里的 [k] 引用
             承担。反向护栏见 test_reasoning_stream.py 的
             test_memory_step_reports_recall_not_attribution。"""
-            if memory_hits:
+            if evidence_scope.restricted:
+                checked_pre_trace(TraceStep(
+                    step_type="skip",
+                    summary="限定来源下未检索记忆",
+                    detail={"reason": "source_scope_excludes_memory"},
+                    duration_ms=memory_ms,
+                ))
+            elif memory_hits:
                 checked_pre_trace(TraceStep(
                     step_type="memory",
                     summary=f"找到 {len(memory_hits)} 条相关记忆",
@@ -1997,7 +2115,10 @@ class AskService:
         no_usable_kg = not memory_hits and not (
             self.candidates.has_kg(notebook_id)
             or self.candidates.any_base_has_kg(notebook_id))
-        if no_usable_kg and not self._collections_reachable(notebook_id):
+        if no_usable_kg and not (
+            evidence_scope.restricted
+            or self._collections_reachable(notebook_id)
+        ):
             coverage_prefix = ""
             coverage_answer = ""
             if structured_batch is not None:
@@ -2078,10 +2199,11 @@ class AskService:
                 ).run(
                     notebook_id,
                     research_question,
-                    history,
+                    reasoning_history,
                     on_step=checked_trace,
                     intent_queries=intent_queries,
                     limits=limits,
+                    evidence_scope=evidence_scope,
                 )
                 top_hits, elements, trace, chunks, chains = (
                     result.top_hits, result.elements, result.trace, result.chunks,
@@ -2097,6 +2219,11 @@ class AskService:
                 # (见 reasoning_retrieval.outline_truncated_kg_evidence)。
                 reasoning_outline = result.outline
                 reasoning_outline_evidence = result.outline_evidence
+                evidence_scope = result.evidence_scope
+                if evidence_scope.restricted:
+                    intent_contract = intent_contract.model_copy(update={
+                        "source_scope": self._intent_scope_snapshot(evidence_scope)
+                    })
                 trace = [*pre_trace, *trace]
             except AskCancelled:
                 raise
@@ -2249,7 +2376,8 @@ class AskService:
                 # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
                 # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
                 ans, llm_grounded_, anchors_, _counts = self._answer_reasoning(
-                    notebook_id, research_question, top_hits, elements, history,
+                    notebook_id, research_question, top_hits, elements,
+                    reasoning_history,
                     cancel_event=cancel_event, chunks=chunks, chains=chains,
                     memory_hits=memory_hits, answer_client=answer_client,
                     kg_context_chars=limits.kg_context_chars,
@@ -2313,7 +2441,7 @@ class AskService:
                         outline_attempted = True
                         sectioned = self._answer_reasoning_sections(
                             notebook_id, research_question, outline_slices,
-                            history=history, limits=limits,
+                            history=reasoning_history, limits=limits,
                             answer_client=answer_client, cancel_event=cancel_event,
                             on_section=record_section_step,
                         )

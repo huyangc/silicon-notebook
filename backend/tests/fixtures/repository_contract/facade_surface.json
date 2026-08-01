@@ -742,7 +742,7 @@
     "owner": "SourceEmbeddingService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', items: 'List[dict]', progress=None, commit_every: 'Optional[int]' = None) -> 'None'"
+    "signature": "(self, notebook_id: 'str', items: 'List[dict]', progress=None, commit_every: 'Optional[int]' = None) -> 'int'"
   },
   "_embed_relations_batch": {
     "consumers": [
@@ -1488,6 +1488,12 @@
         "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>.notebook_sharing_repository",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/deps.py",
+        "scope": "<module>.notebook_store_port",
         "target": "_runtime"
       },
       {
@@ -4451,6 +4457,24 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_limited_kg_interrupt_cancels_and_drains_accepted_workers",
+        "target": "build_notebook_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_limited_kg_interrupt_during_submission_drains_already_accepted_worker",
+        "target": "build_notebook_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_limited_kg_uses_durable_termination_signals",
+        "target": "build_notebook_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_main_interrupt_after_a_committed_build_still_reports_130",
         "target": "build_notebook_kg"
       },
@@ -4469,7 +4493,7 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_kg_limit_extracts_subset",
+        "scope": "<module>.test_run_kg_plain_no_rebuild_without_llm_is_noop",
         "target": "build_notebook_kg"
       }
     ],
@@ -4489,6 +4513,30 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_limited_kg_interrupt_cancels_and_drains_accepted_workers",
+        "target": "build_notebook_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_limited_kg_interrupt_during_submission_drains_already_accepted_worker",
+        "target": "build_notebook_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_limited_kg_uses_durable_termination_signals",
+        "target": "build_notebook_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_main_interrupt_after_a_committed_build_still_reports_130",
         "target": "build_notebook_kg"
       },
@@ -4513,12 +4561,12 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_kg_limit_extracts_subset",
+        "scope": "<module>.test_run_kg_plain_no_rebuild_without_llm_is_noop",
         "target": "build_notebook_kg"
       }
     ],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', *, progress=None) -> 'dict'"
+    "signature": "(self, notebook_id: 'str', *, progress=None, target_limit: 'int | None' = None, retry_partial: 'bool' = False, finalize=None, job_id: 'str | None' = None) -> 'dict'"
   },
   "build_scale_index": {
     "consumers": [
@@ -4537,7 +4585,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_kg",
+        "scope": "<module>.run_kg._finalize",
         "target": "build_scale_index"
       },
       {
@@ -5409,7 +5457,7 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', job_id: 'str', mode: 'str', *, progress=None) -> 'dict'"
+    "signature": "(self, notebook_id: 'str', job_id: 'str', mode: 'str', *, progress=None, target_limit: 'int | None' = None, retry_partial: 'bool' = False, finalize=None) -> 'dict'"
   },
   "export_reports": {
     "consumers": [
@@ -5851,7 +5899,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_kg",
+        "scope": "<module>.run_kg._finalize",
         "target": "get_notebook"
       },
       {
@@ -7142,7 +7190,7 @@
     "owner": "KnowledgeLifecycleService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', mode: 'str') -> 'dict'"
+    "signature": "(self, notebook_id: 'str', mode: 'str', *, target_limit: 'int | None' = None, retry_partial: 'bool' = False) -> 'dict'"
   },
   "preview_reasoning_intent": {
     "consumers": [
@@ -7157,7 +7205,7 @@
     "owner": "AskService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'"
+    "signature": "(self, notebook_id: 'str', question: 'str', history: 'str' = '', cancel_event: 'CancelEvent' = None) -> 'QueryIntentContract'"
   },
   "process_source": {
     "consumers": [
@@ -7284,7 +7332,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_kg",
+        "scope": "<module>.run_kg._finalize",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7320,12 +7368,6 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_non_durable_paths_keep_default_termination_signals",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
         "target": "rebuild_unified_kg"
       },
@@ -7356,7 +7398,19 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_finalizer_failure_marks_durable_job_failed",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_limit_extracts_subset",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_plain_no_rebuild_without_llm_is_noop",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7430,14 +7484,6 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_non_durable_paths_keep_default_termination_signals",
-        "target": "rebuild_unified_kg"
-      },
-      {
-        "base": "repo",
-        "compatibility": "test-only",
-        "kind": "patch",
-        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
         "target": "rebuild_unified_kg"
       },
@@ -7478,7 +7524,23 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_finalizer_failure_marks_durable_job_failed",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_kg_limit_extracts_subset",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_plain_no_rebuild_without_llm_is_noop",
         "target": "rebuild_unified_kg"
       },
       {

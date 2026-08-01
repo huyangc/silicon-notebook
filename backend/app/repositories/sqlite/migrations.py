@@ -24,7 +24,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 # rewritten wholesale by rebuild_communities under the community_seq gate.
 # v37 adds the indexed (source_id, element_type, created_at, id) keyset order
 # on source_elements for bounded, per-type collection enumeration.
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1911,6 +1911,15 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_source_elements_source_type
                   ON source_elements(source_id, element_type, created_at, id);
                 """
+            )
+
+    def _migration_38(self) -> None:
+        """Bounded user-visible source identity roster for reasoning scope."""
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sources_visible_identity "
+                "ON sources(notebook_id, created_at, id) "
+                "WHERE source_type NOT IN ('memory','knowhow')"
             )
 
     def _recover_interrupted_jobs(self) -> None:

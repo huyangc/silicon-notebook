@@ -419,6 +419,20 @@ class SourceStore:
             ).fetchall())
         return out
 
+    def visible_source_identity_rows_bounded(
+        self, db: sqlite3.Connection, notebook_id: str, limit: int
+    ) -> List[sqlite3.Row]:
+        if int(limit) <= 0:
+            return []
+        return db.execute(
+            "SELECT s.id, s.notebook_id, s.title, s.file_name, "
+            "m.is_paper, m.paper_title "
+            "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+            f"WHERE s.notebook_id=? AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+            "ORDER BY s.created_at, s.id LIMIT ?",
+            (notebook_id, int(limit)),
+        ).fetchall()
+
     def evidence_elements(
         self, element_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
@@ -479,7 +493,24 @@ class SourceStore:
             }
 
     @staticmethod
-    def retrieval_element_rows(db: sqlite3.Connection, notebook_id: str):
+    def retrieval_element_rows(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        allowed_source_ids: Sequence[str] | None = None,
+    ):
+        if allowed_source_ids is not None:
+            source_ids = list(dict.fromkeys(allowed_source_ids))
+            if not source_ids:
+                return []
+            placeholders = ",".join("?" for _ in source_ids)
+            return db.execute(
+                "SELECT e.id,e.source_id,e.element_type,e.location_label,e.text,"
+                "s.title AS source_title,em.vector AS vector "
+                "FROM source_elements e JOIN sources s ON s.id=e.source_id "
+                "LEFT JOIN element_embeddings em ON em.element_id=e.id "
+                f"WHERE s.notebook_id=? AND e.source_id IN ({placeholders})",
+                (notebook_id, *source_ids),
+            ).fetchall()
         return db.execute(
             """
             SELECT e.id, e.source_id, e.element_type, e.location_label, e.text,

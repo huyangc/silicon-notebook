@@ -117,9 +117,14 @@ async def preview_ask_intent(
         history = _intent_history(
             repo, notebook_id, payload.conversation_id, user.id
         )
-        return repo.preview_reasoning_intent(
-            question, history, cancel_event=cancel_event
-        )
+        try:
+            return repo.preview_reasoning_intent(
+                notebook_id, question, history, cancel_event=cancel_event
+            )
+        except ValueError as exc:
+            raise user_error(
+                422, "无法确认指定的来源，请核对标题或文件名后重试"
+            ) from exc
 
     task = asyncio.create_task(asyncio.to_thread(run_preview))
     try:

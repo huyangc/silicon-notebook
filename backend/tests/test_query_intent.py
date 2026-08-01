@@ -30,6 +30,8 @@ class _IntentClient:
         assert "mandatory_topics" in schema_hint
         assert '"result_scope"' in schema_hint
         assert '"completeness_required"' in schema_hint
+        assert '"source_refs"' in schema_hint
+        assert "NOT a source reference" in messages[-1]["content"]
         return json.dumps({
             "normalized_question": "比较 PLL A 与 PLL B 的锁定时间和抖动",
             "intent_type": "compare",
@@ -77,6 +79,235 @@ def test_query_intent_is_corpus_blind_and_bounded():
     assert contract["confirmed"] is False
     assert contract["result_scope"] == "ranked"
     assert contract["completeness_required"] is False
+    assert "source_refs" not in contract
+
+
+@pytest.mark.parametrize(
+    ("question", "refs"),
+    [
+        (
+            "只依据《Innovus User Guide》和《ICC2 Command Reference》比较命令。",
+            ["Innovus User Guide", "ICC2 Command Reference"],
+        ),
+        (
+            "Compare the commands using only timing_manual.pdf and pnr-reference.md.",
+            ["timing_manual.pdf", "pnr-reference.md"],
+        ),
+    ],
+)
+def test_query_intent_keeps_explicit_source_references_for_confirmation(question, refs):
+    class _ExplicitSourceClient:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert "explicitly identifies" in messages[-1]["content"]
+            return json.dumps({
+                "normalized_question": question,
+                "intent_type": "compare",
+                "entities": ["Innovus", "ICC2"],
+                "source_refs": refs,
+                "mandatory_topics": [],
+                "ambiguities": [],
+                "confidence": 0.95,
+                "needs_clarification": False,
+            })
+
+    contract = plan_query_intent(_ExplicitSourceClient(), question)
+
+    assert contract["source_refs"] == refs
+    # A clear scoped question is not turned into a fake blocking ambiguity.
+    # The caller recognizes source_refs itself and opens the confirmation gate.
+    assert contract["needs_clarification"] is False
+    assert contract["ambiguities"] == []
+    assert contract["confirmed"] is False
+
+
+def test_source_references_are_bounded_and_legacy_serialization_omits_empty_field():
+    refs = [f"manual-{index}-" + ("x" * 600) + ".pdf" for index in range(12)]
+
+    class _OversizedSourceClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "Compare the explicitly named manuals",
+                "source_refs": refs,
+            })
+
+    contract = plan_query_intent(
+        _OversizedSourceClient(),
+        "Compare these files: " + ", ".join(refs),
+    )
+
+    assert len(contract["source_refs"]) == 8
+    assert all(len(ref) == 500 for ref in contract["source_refs"])
+
+    legacy = QueryIntentContract(**plan_query_intent(None, "比较 PLL A 与 PLL B"))
+    assert legacy.source_refs == []
+    assert "source_refs" not in legacy.model_dump()
+
+
+def test_finalize_freezes_source_references_without_reinterpretation():
+    seed = plan_query_intent(None, "比较两个命令")
+    seed["source_refs"] = ["《工具 A Manual》", "tool-b-reference.pdf"]
+
+    final = finalize_query_intent(seed)
+
+    assert final["source_refs"] == seed["source_refs"]
+    assert final["source_refs"] is not seed["source_refs"]
+    assert QueryIntentContract(**final).model_dump()["source_refs"] == seed["source_refs"]
+
+
+def test_tool_and_domain_entities_are_not_deterministically_promoted_to_sources():
+    class _HallucinatedSourceClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "place_opt_design 在 ICC2 中对应哪个命令？",
+                "entities": ["place_opt_design", "ICC2"],
+                # ICC2 occurs in the question but was identified as a tool,
+                # not a manual; the longer title was never written at all.
+                "source_refs": ["ICC2", "ICC2 Command Reference"],
+            })
+
+    contract = plan_query_intent(
+        _HallucinatedSourceClient(),
+        "place_opt_design 在 ICC2 中对应哪个命令？",
+    )
+
+    assert "source_refs" not in contract
+
+
+def test_source_reference_must_be_present_in_user_owned_history_or_question():
+    class _HistorySourceClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "比较这两份资料",
+                "source_refs": ["timing_manual.pdf", "invented.pdf"],
+            })
+
+    contract = plan_query_intent(
+        _HistorySourceClient(),
+        "比较这两份资料",
+        "User: 请先阅读 timing_manual.pdf 这份文件",
+    )
+
+    assert contract["source_refs"] == ["timing_manual.pdf"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "请依据 Innovus manual 回答 place_opt_design 在 ICC2 中对应什么？",
+        "profile ICC2 的命令差异",
+    ],
+)
+def test_nearby_unrelated_source_words_do_not_promote_a_tool_name(question):
+    class _WrongScopeClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": question,
+                "source_refs": ["ICC2"],
+            })
+
+    assert "source_refs" not in plan_query_intent(_WrongScopeClient(), question)
+
+
+def test_quoted_search_phrase_is_not_source_syntax():
+    class _WrongScopeClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": '"set_db" 在 ICC2 中对应什么命令？',
+                "source_refs": ["set_db"],
+            })
+
+    contract = plan_query_intent(
+        _WrongScopeClient(), '"set_db" 在 ICC2 中对应什么命令？'
+    )
+    assert "source_refs" not in contract
+
+
+def test_later_explicit_occurrence_can_authorize_the_same_source_title():
+    class _RepeatedSourceClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "比较 Manual A",
+                "source_refs": ["Manual A"],
+            })
+
+    contract = plan_query_intent(
+        _RepeatedSourceClient(),
+        "Manual A 是工具名；请只依据《Manual A》回答。",
+    )
+    assert contract["source_refs"] == ["Manual A"]
+
+
+def test_self_describing_manual_name_explicitly_used_as_a_tool_is_not_a_source():
+    class _WrongScopeClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "比较两个工具",
+                "source_refs": ["Manual A", "Manual B"],
+            })
+
+    contract = plan_query_intent(
+        _WrongScopeClient(),
+        "Manual A 是工具名；只依据《Manual B》回答。",
+    )
+    assert contract["source_refs"] == ["Manual B"]
+
+
+@pytest.mark.parametrize(
+    "wording",
+    ["Manual A 是一个工具", "Manual A，作为工具使用"],
+)
+def test_self_describing_name_with_common_tool_role_wording_is_rejected(wording):
+    class _WrongScopeClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": wording,
+                "source_refs": ["Manual A"],
+            })
+
+    assert "source_refs" not in plan_query_intent(_WrongScopeClient(), wording)
+
+
+def test_nfkc_full_width_file_name_is_an_explicit_source_reference():
+    class _FileClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "依据指定文件回答",
+                "source_refs": ["clock．ｐｄｆ"],
+            })
+
+    contract = plan_query_intent(
+        _FileClient(), "只依据 clock．ｐｄｆ 回答。"
+    )
+    assert contract["source_refs"] == ["clock．ｐｄｆ"]
+
+
+def test_query_intent_contract_rejects_blank_source_reference():
+    with pytest.raises(ValueError):
+        QueryIntentContract(
+            objective="q",
+            resolved_question="q",
+            source_refs=["   "],
+        )
 
 
 @pytest.mark.parametrize(

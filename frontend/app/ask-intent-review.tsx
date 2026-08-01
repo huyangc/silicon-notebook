@@ -45,6 +45,8 @@ export function AskIntentReview({
   const reasoningLabel = modeLabel("reasoning");
   const [resolvedQuestion, setResolvedQuestion] = useState(contract.resolved_question);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const sourceScope = contract.source_scope;
+  const hasSelectedSources = sourceScope?.mode === "selected" && sourceScope.sources.length > 0;
 
   useEffect(() => {
     setResolvedQuestion(contract.resolved_question);
@@ -76,8 +78,17 @@ export function AskIntentReview({
     >
       <div className="intent-card-head">
         <div>
-          <h3>先补充问题信息</h3>
-          <p>这一步只理解你的问题，不读取资料；确认后才会开始逐步检索。</p>
+          {hasSelectedSources ? (
+            <>
+              <h3>本轮只检索下列来源</h3>
+              <p>请确认资料范围；确认后，本轮证据与引用都不会超出这些来源。</p>
+            </>
+          ) : (
+            <>
+              <h3>先补充问题信息</h3>
+              <p>这一步只理解你的问题，不读取资料；确认后才会开始逐步检索。</p>
+            </>
+          )}
         </div>
         {/* 按钮钉在卡头:确认动作不该藏在一张最高 58vh、可滚动的卡片底部。 */}
         <div className="intent-card-actions">
@@ -104,12 +115,33 @@ export function AskIntentReview({
           {pending === 0 && contract.ambiguities.length > 0 && <em className="done">已补齐</em>}
         </p>
 
+        {hasSelectedSources && (
+          <section className="intent-card-source-scope" aria-label="本轮检索资料">
+            <strong>检索资料：仅限 {sourceScope.sources.length} 个来源</strong>
+            <ul>
+              {sourceScope.sources.map((source) => {
+                const title = source.title || source.source_file_name || "未命名来源";
+                const showFileName = Boolean(
+                  source.source_file_name && source.source_file_name !== title,
+                );
+                return (
+                  <li key={`${source.notebook_id}\0${source.source_id}`}>
+                    <span>{title}</span>
+                    {showFileName && <small>原始文件：{source.source_file_name}</small>}
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
+
         <label className="intent-card-question">
           <span>确认后的问题</span>
           <textarea
             rows={2}
             value={resolvedQuestion}
-            disabled={busy}
+            disabled={busy || hasSelectedSources}
+            readOnly={hasSelectedSources}
             onChange={(event) => setResolvedQuestion(event.target.value)}
           />
         </label>
@@ -129,7 +161,22 @@ export function AskIntentReview({
                 {item.required !== false && <em>必填</em>}
               </span>
               {item.reason && <small>{item.reason}</small>}
-              {item.options && item.options.length > 0 && (
+              {item.id === "source_scope_confirmation" && hasSelectedSources ? (
+                <label className="intent-card-scope-confirmation">
+                  <input
+                    type="radio"
+                    name="source-scope-confirmation"
+                    value="确认"
+                    checked={(answers[item.id] || "") === "确认"}
+                    disabled={busy}
+                    onChange={() => setAnswers((current) => ({
+                      ...current,
+                      [item.id]: "确认",
+                    }))}
+                  />
+                  <span>确认，仅检索上述来源</span>
+                </label>
+              ) : item.options && item.options.length > 0 && (
                 <span className="intent-card-options">
                   {item.options.map((option) => (
                     <button
@@ -145,17 +192,19 @@ export function AskIntentReview({
                   ))}
                 </span>
               )}
-              <textarea
-                aria-label={`${item.question}的补充答案`}
-                rows={2}
-                value={answers[item.id] || ""}
-                disabled={busy}
-                placeholder="补充你的答案"
-                onChange={(event) => setAnswers((current) => ({
-                  ...current,
-                  [item.id]: event.target.value,
-                }))}
-              />
+              {item.id !== "source_scope_confirmation" && (
+                <textarea
+                  aria-label={`${item.question}的补充答案`}
+                  rows={2}
+                  value={answers[item.id] || ""}
+                  disabled={busy}
+                  placeholder="补充你的答案"
+                  onChange={(event) => setAnswers((current) => ({
+                    ...current,
+                    [item.id]: event.target.value,
+                  }))}
+                />
+              )}
             </div>
           ))}
         </div>

@@ -72,7 +72,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -324,7 +324,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -402,7 +402,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -467,7 +467,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 15
+    assert PostgresMigrator(postgres_database).migrate() == 16
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -1229,6 +1229,72 @@ def test_typed_collection_source_primitives_match_sqlite_semantics(
     assert set(metadata) == {"src-doc-a", "src-doc-b"}
     assert metadata["src-doc-a"]["summary"] == "first summary"
     assert metadata["src-doc-b"]["doc_type"] == ""
+
+
+def test_bounded_visible_source_identity_rows_match_sqlite_semantics(
+    core_stores: CoreStores,
+):
+    owner = core_stores.identity.create_user("v00123456", "password-12")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Bounded source identities"), owner.id
+    )
+    for source_id, source_type in (
+        ("src-bounded-a", "pdf"),
+        ("src-bounded-b", "markdown"),
+        ("src-bounded-memory", "memory"),
+        ("src-bounded-knowhow", "knowhow"),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type=source_type,
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash="hash",
+            summary="",
+            doc_type="",
+        )
+    core_stores.sources.upsert_paper_meta(
+        "src-bounded-a",
+        notebook_id,
+        {
+            "is_paper": True,
+            "paper_title": "Bounded Paper Title",
+            "authors": [],
+        },
+    )
+
+    with core_stores.database.connect() as connection:
+        first = core_stores.sources.visible_source_identity_rows_bounded(
+            connection, notebook_id, 1
+        )
+        all_visible = core_stores.sources.visible_source_identity_rows_bounded(
+            connection, notebook_id, 3
+        )
+        none = core_stores.sources.visible_source_identity_rows_bounded(
+            connection, notebook_id, 0
+        )
+
+    assert [row["id"] for row in first] == ["src-bounded-a"]
+    assert [row["id"] for row in all_visible] == [
+        "src-bounded-a", "src-bounded-b"
+    ]
+    assert all_visible[0]["notebook_id"] == notebook_id
+    assert all_visible[0]["file_name"] == "src-bounded-a.md"
+    assert all_visible[0]["paper_title"] == "Bounded Paper Title"
+    assert none == []
+    index = _fetch_one(
+        core_stores,
+        "SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+        "AND indexname='idx_sources_visible_identity'",
+    )
+    assert index is not None
+    assert "notebook_id, created_at, id" in index["indexdef"]
+    assert "source_type" in index["indexdef"]
 
 
 def test_postgres_element_page_stays_on_the_typed_index(core_stores: CoreStores):

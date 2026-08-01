@@ -800,7 +800,7 @@
               "type": "array"
             },
             "contract": {
-              "$ref": "#/components/schemas/QueryIntentContract"
+              "$ref": "#/components/schemas/QueryIntentContract-Input"
             },
             "resolved_question": {
               "maxLength": 4000,
@@ -983,7 +983,7 @@
             "intent": {
               "anyOf": [
                 {
-                  "$ref": "#/components/schemas/QueryIntentContract"
+                  "$ref": "#/components/schemas/QueryIntentContract-Output"
                 },
                 {
                   "type": "null"
@@ -5897,7 +5897,7 @@
           "title": "QueryIntentAnswer",
           "type": "object"
         },
-        "QueryIntentContract": {
+        "QueryIntentContract-Input": {
           "description": "Corpus-blind understanding shared by report and reasoning retrieval.",
           "properties": {
             "ambiguities": {
@@ -6022,6 +6022,26 @@
               ],
               "title": "Result Scope",
               "type": "string"
+            },
+            "source_refs": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Source Refs",
+              "type": "array"
+            },
+            "source_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/QueryIntentSourceScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -6029,6 +6049,220 @@
             "resolved_question"
           ],
           "title": "QueryIntentContract",
+          "type": "object"
+        },
+        "QueryIntentContract-Output": {
+          "description": "Corpus-blind understanding shared by report and reasoning retrieval.",
+          "properties": {
+            "ambiguities": {
+              "items": {
+                "$ref": "#/components/schemas/QueryIntentAmbiguity"
+              },
+              "maxItems": 8,
+              "title": "Ambiguities",
+              "type": "array"
+            },
+            "assumptions": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Assumptions",
+              "type": "array"
+            },
+            "clarification_answers": {
+              "items": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "maxItems": 8,
+              "title": "Clarification Answers",
+              "type": "array"
+            },
+            "comparison_axes": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Comparison Axes",
+              "type": "array"
+            },
+            "completeness_required": {
+              "default": false,
+              "title": "Completeness Required",
+              "type": "boolean"
+            },
+            "confidence": {
+              "default": 0.0,
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "confirmed": {
+              "default": false,
+              "title": "Confirmed",
+              "type": "boolean"
+            },
+            "constraints": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Constraints",
+              "type": "array"
+            },
+            "entities": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Entities",
+              "type": "array"
+            },
+            "excluded_topics": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Excluded Topics",
+              "type": "array"
+            },
+            "expected_output": {
+              "default": "",
+              "maxLength": 1000,
+              "title": "Expected Output",
+              "type": "string"
+            },
+            "intent_type": {
+              "default": "other",
+              "title": "Intent Type",
+              "type": "string"
+            },
+            "mandatory_topics": {
+              "items": {
+                "$ref": "#/components/schemas/QueryIntentTopic"
+              },
+              "maxItems": 16,
+              "title": "Mandatory Topics",
+              "type": "array"
+            },
+            "needs_clarification": {
+              "default": false,
+              "title": "Needs Clarification",
+              "type": "boolean"
+            },
+            "objective": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Objective",
+              "type": "string"
+            },
+            "resolved_question": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "title": "Resolved Question",
+              "type": "string"
+            },
+            "result_scope": {
+              "default": "ranked",
+              "enum": [
+                "ranked",
+                "complete",
+                "aggregate",
+                "hybrid"
+              ],
+              "title": "Result Scope",
+              "type": "string"
+            },
+            "source_refs": {
+              "items": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 8,
+              "title": "Source Refs",
+              "type": "array"
+            },
+            "source_scope": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/QueryIntentSourceScope"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "objective",
+            "resolved_question"
+          ],
+          "title": "QueryIntentContract",
+          "type": "object"
+        },
+        "QueryIntentSourceScope": {
+          "description": "Immutable selected-source ceiling; omission means all sources.",
+          "properties": {
+            "mode": {
+              "const": "selected",
+              "default": "selected",
+              "title": "Mode",
+              "type": "string"
+            },
+            "sources": {
+              "items": {
+                "$ref": "#/components/schemas/QueryIntentSourceSnapshot"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "title": "Sources",
+              "type": "array"
+            }
+          },
+          "required": [
+            "sources"
+          ],
+          "title": "QueryIntentSourceScope",
+          "type": "object"
+        },
+        "QueryIntentSourceSnapshot": {
+          "description": "Server-resolved source identity persisted with a reviewed intent.",
+          "properties": {
+            "notebook_id": {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "source_file_name": {
+              "default": "",
+              "maxLength": 1000,
+              "title": "Source File Name",
+              "type": "string"
+            },
+            "source_id": {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Source Id",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "maxLength": 1000,
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_id",
+            "notebook_id"
+          ],
+          "title": "QueryIntentSourceSnapshot",
           "type": "object"
         },
         "QueryIntentTopic": {
@@ -10974,7 +11208,7 @@
               "content": {
                 "application/json": {
                   "schema": {
-                    "$ref": "#/components/schemas/QueryIntentContract"
+                    "$ref": "#/components/schemas/QueryIntentContract-Output"
                   }
                 }
               },
