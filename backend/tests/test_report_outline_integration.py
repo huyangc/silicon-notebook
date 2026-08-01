@@ -34,7 +34,9 @@ from app.services.report_engine import (
     knowledge_context_with_outline, outline_structure_block,
     report_retrieval_effort, report_retrieval_limits,
 )
-from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
+from app.services.retrieval import (
+    RetrievedChunk, RetrievedElement, RetrievedKnowledge,
+)
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
 
@@ -360,6 +362,56 @@ def test_the_clamp_leaves_the_outline_bound_objects_alone(repo, monkeypatch):
     assert len(ids) == limits.ranked_final_cap + 1        # 上限 + 豁免的那一条
     assert ids[-1] == "o-bound"
     assert ids.count("o-bound") == 1
+
+
+def test_the_clamp_leaves_outline_bound_elements_alone(repo, monkeypatch):
+    """绑定键横跨知识对象/元素/原文段三个 id 空间:只豁免知识对象,绑定的**元素**
+    照样被 `answer_element_items` 截掉,而它的 [k] 在「发现的结构」里同样解析不出来
+    (codex PR#418 R3 P1)。"""
+    limits = ask_retrieval_limits("overview")
+    elements = [SimpleNamespace(element_id=f"e{index}", score=0.9)
+                for index in range(10)]
+    bound = SimpleNamespace(element_id="e-bound", score=0.01)   # 分数垫底
+
+    def _run(self, notebook_id, question, history="", **kwargs):
+        return ReasoningResult(
+            elements=elements + [bound],
+            outline=[_section("s1", "绑了元素的一节", ["e-bound"])])
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda nb, query: [])
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements",
+                        lambda nb, query, limit=8: [])
+    engine = _engine(repo, _SectionLLM())
+
+    result = engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["a"]}, "Q", depth=1)
+
+    ids = [item.element_id for item in result.elements]
+    assert len(ids) == limits.answer_element_items + 1     # 上限 + 豁免的那一条
+    assert ids[-1] == "e-bound"
+
+
+def test_an_outline_bound_element_reaches_the_writer_despite_the_cap(repo):
+    """撰写那一步也要豁免:`_draft_section` 自己还有一道同名的条数闸。"""
+    elements = [RetrievedElement(
+        element_id=f"el-{index:02d}", source_id="s1", source_title="论文一",
+        location_label=f"p{index}", element_type="paragraph",
+        text=f"原文段落{index}", score=0.9 - index / 100.0) for index in range(10)]
+    bound = elements[-1]                                   # 分数垫底,必被截掉
+    llm = _SectionLLM()
+    engine = _engine(repo, llm)
+    result = ReasoningResult(
+        elements=elements,
+        outline=[_section("s1", "绑了元素的一节", [bound.element_id])])
+
+    engine._draft_section("nb", {"title": "A", "scope": "sa",
+                                 "sub_queries": ["q"]}, "Q", result, 1)
+
+    prompt = llm.section_prompts[0]
+    match = re.search(r"### 绑了元素的一节 — 证据: \[(k\d+)\]", prompt)
+    assert match, "绑定的元素被条数上限截掉了,子话题只剩裸标题"
+    assert f"\n{match.group(1)}: [source-element]" in prompt
 
 
 def test_a_section_under_the_cap_is_left_byte_identical(repo, monkeypatch):
@@ -727,6 +779,48 @@ def test_every_writing_budget_is_the_levels_own_number(repo, monkeypatch):
     # 按插入序切片——按插入序会静默丢掉最相关的那几个。
     assert seen["element_ids"] == [
         f"e{index:02d}" for index in range(39, 39 - limits.answer_element_items, -1)]
+
+
+def test_the_chain_block_is_charged_against_the_kg_partition(repo, monkeypatch):
+    """`kg_context_chars` 是「KG 对象/关系 + confirmed Memory + 查询期推导链」整个
+    分区的上限(codex PR#418 R3 P2)。KG 块吃满之后再无条件接上推导链,就是自己
+    宣布了一个上限又当场超过它。装不下时整块不进 prompt,它的 [k] 也不得进 id_map
+    —— 模型没看见的东西不能算进 classify_evidence 的证据池。
+    """
+    from app.services.kg import follow_chain
+
+    chain_block = "k2001: A -[supports]-> B" + "。" * 400
+    monkeypatch.setattr(
+        follow_chain, "render_follow_chain_context",
+        lambda chains, id_offset=2000, *, active_notebook_id: (
+            chain_block, {"k2001": {"object_id": "rel-1"}}))
+    monkeypatch.setattr(follow_chain, "chain_anchor_relevances",
+                        lambda chains: {"rel-1": 0.5})
+    notebook = _notebook(repo)
+    object_ids = _claims_with_definitions(repo, notebook.id, 60)
+    hits = [RetrievedKnowledge(object_id=object_id, object_type="claim",
+                               payload={"name": f"论断{index:03d}"}, relevance=0.9)
+            for index, object_id in enumerate(object_ids)]
+
+    outcomes = {}
+    for depth, kg_hits in ((1, hits), (16, hits[:2])):
+        llm = _SectionLLM()
+        engine = _engine(repo, llm)
+        outcomes[depth] = (
+            engine._draft_section(
+                notebook.id, {"title": "A", "scope": "sa", "sub_queries": ["q"]},
+                "Q", ReasoningResult(top_hits=kg_hits, chains=[object()]), depth),
+            llm.section_prompts[0],
+        )
+
+    # 概览档:4000 字符的 KG 预算被 60 条知识对象吃满,推导链整块进不来。
+    drafted, prompt = outcomes[1]
+    assert chain_block not in prompt
+    assert "k2001" not in drafted["id_map"]
+    # 穷尽档:16000 的预算里只用了两条,推导链照常进来。
+    drafted, prompt = outcomes[16]
+    assert chain_block in prompt
+    assert drafted["id_map"]["k2001"]["object_id"] == "rel-1"
 
 
 # -------------------------------------- 大纲绑定证据的 KG 上下文子预算(P1)

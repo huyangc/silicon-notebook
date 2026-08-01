@@ -118,7 +118,12 @@ def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> 
     """
     if limits is None:
         return
-    bound = {
+    # 「大纲绑定」= 子大纲各节绑定的候选键 ∪ retriever 带出的截断补集。前者是必须
+    # 的:绑定键横跨知识对象/元素/原文段三个 id 空间,只看后者(它只装知识对象)会
+    # 让绑定的**元素**照常被条数上限截掉 —— 那一条子话题的 [k] 同样解析不出来
+    # (codex PR#418 R3 P1)。三个 id 空间互不相交,一个集合足够。
+    bound = outline_bound_evidence_keys(getattr(result, "outline", None) or ())
+    bound |= {
         str(getattr(hit, "object_id", "") or "")
         for hit in (getattr(result, "outline_evidence", None) or [])
     }
@@ -134,9 +139,16 @@ def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> 
         result.top_hits = sorted(
             ranked, key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0)
         )[: limits.ranked_final_cap] + exempt
-    if len(result.elements) > limits.answer_element_items:
+    ranked_elements = [
+        element for element in result.elements
+        if str(getattr(element, "element_id", "") or "") not in bound
+    ]
+    if len(ranked_elements) > limits.answer_element_items:
         result.elements = rank_elements(
-            result.elements, limits.answer_element_items)
+            ranked_elements, limits.answer_element_items) + [
+            element for element in result.elements
+            if str(getattr(element, "element_id", "") or "") in bound
+        ]
 
 
 def rank_elements(elements: Sequence[Any], keep: int) -> List[Any]:
@@ -1008,9 +1020,23 @@ class ReportEngine:
         # 上限又立刻超过它 —— 穷尽档下那是额外 40000 字符。取剩余额度的写法逐字照
         # `_answer_reasoning`(`max(0, chunk_budget - len(source_context))`)。
         # 不选档的调用方保持旧的 `max(2000, …//3)`,那条路径没有分区合同可言。
+        # 大纲绑定的元素在这里同样豁免条数上限,并排在最前(codex PR#418 R3 P1):
+        # 绑定键横跨三个 id 空间,一个被 `answer_element_items` 截掉的绑定元素,在
+        # `outline_structure_block` 里就是一个解析不出的绑定,子话题退成裸标题。
+        # 排最前是因为字符预算仍按输入序消耗 —— 与 KG 那边的优先前缀同一个理由。
         elements = list(getattr(result, "elements", []) or [])
         if limits is not None:
-            elements = rank_elements(elements, limits.answer_element_items)
+            bound_keys = outline_bound_evidence_keys(sub_outline)
+            bound_elements = [
+                element for element in elements
+                if str(getattr(element, "element_id", "") or "") in bound_keys
+            ]
+            others = [
+                element for element in elements
+                if str(getattr(element, "element_id", "") or "") not in bound_keys
+            ]
+            elements = bound_elements + rank_elements(
+                others, limits.answer_element_items)
         element_budget = (max(0, chunk_budget - len(chunk_block))
                           if limits is not None else max(2000, chunk_budget // 3))
         element_block, element_map = deps.evidence_context.element_context(
@@ -1024,6 +1050,29 @@ class ReportEngine:
                          if chunk_block else kg_block) or "(no evidence retrieved)"
         if element_block:
             context_block = f"{context_block}\n\n[Direct source elements]\n{element_block}"
+        # KG 分区的剩余额度:`kg_context_chars` 在 AskRetrievalLimits 里是「KG 对象/
+        # 关系 + confirmed Memory + 查询期推导链」这一整个分区的上限(codex PR#418
+        # R3 P2)。推导链与 Memory 因此不再无条件接在 KG 块之后,而是按剩余额度
+        # **整块**准入:两者都自带硬上限(Memory 6000 字符封顶、推导链条数由本 run 的
+        # follow_chain 次数封顶),所以整块准入不会把常见情形挡在门外;而截半块会把
+        # 一行 `[k]` 标记切断,那比少一块更糟。没被准入的块也**不**并进 id_map ——
+        # 模型没看见的东西不能算进 classify_evidence 的证据池。
+        # 不选档的调用方保持接入前的「无条件追加」。
+        kg_room = (max(0, kg_budget - len(kg_block)) if limits is not None else None)
+
+        def _admit_block(block: str, heading: str) -> str:
+            """返回要拼进 context_block 的那一段(含前缀);装不下就是空串。"""
+            nonlocal kg_room
+            if not block or block == "(none)":
+                return ""
+            prefix = f"\n\n[{heading}]\n" if heading else "\n\n"
+            if kg_room is None:
+                return prefix + block
+            if len(prefix) + len(block) > kg_room:
+                return ""
+            kg_room -= len(prefix) + len(block)
+            return prefix + block
+
         chain_map = {}
         if getattr(result, "chains", None):
             from app.services.kg.follow_chain import render_follow_chain_context
@@ -1035,8 +1084,11 @@ class ReportEngine:
                 value["relevance"] = float(
                     relation_relevances.get(value.get("object_id"), 0.0)
                 )
-            if chain_block and chain_block != "(none)":
-                context_block = f"{context_block}\n\n{chain_block}"
+            admitted = _admit_block(chain_block, "")
+            if admitted:
+                context_block = f"{context_block}{admitted}"
+            elif limits is not None:
+                chain_map = {}
         memory_map = {}
         try:
             memories = (
@@ -1051,8 +1103,11 @@ class ReportEngine:
                 deps.memory_retriever.context(memories, id_offset=3000)
                 if memories else ("(none)", {})
             )
-            if memory_block and memory_block != "(none)":
-                context_block = f"{context_block}\n\n[Confirmed Memory]\n{memory_block}"
+            admitted = _admit_block(memory_block, "Confirmed Memory")
+            if admitted:
+                context_block = f"{context_block}{admitted}"
+            elif limits is not None:
+                memory_map = {}
         except Exception:
             memory_map = {}
         client = deps.model_clients.chat("report_section")
