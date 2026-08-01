@@ -3017,6 +3017,14 @@ class RepositoryFacade:
             notebook_id, question, history, cancel_event
         )
 
+    def validate_reasoning_submission(
+        self, notebook_id: str, payload: AskRequest
+    ) -> None:
+        """Preflight a selected scope before API code creates a durable Ask."""
+        return self._runtime.ask_component.validate_reasoning_submission(
+            notebook_id, payload
+        )
+
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)
     # 已删除。旧会话/书签中的 mode="fast"/"global" 通过 ask_modes._RETIRED_MODES 映射到
     # "chunk"，不会触发 422。

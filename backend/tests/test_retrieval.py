@@ -249,14 +249,21 @@ def test_source_scoped_chunk_fts_filters_before_limit(repo):
     assert {hit["chunk_id"] for hit in hits} == {"chunk-a", "chunk-b"}
 
 
-def test_large_selected_element_search_routes_scope_into_bounded_chunks(
+def test_copyable_selected_element_search_routes_scope_into_bounded_chunks(
     repo, monkeypatch
 ):
     calls = []
     monkeypatch.setattr(
         repo.retrieval.candidates,
         "notebook_copy_stats",
-        lambda _notebook_id: {"copyable": False},
+        lambda _notebook_id: {"copyable": True},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_gather_elements",
+        lambda *_args, **_kwargs: pytest.fail(
+            "selected source search must not materialize every element/vector"
+        ),
     )
 
     def scoped_chunks(notebook_id, query, recall=0, *, allowed_source_ids=None):
@@ -268,6 +275,47 @@ def test_large_selected_element_search_routes_scope_into_bounded_chunks(
         "nb", "target command", allowed_source_ids=("A", "B")
     ) == []
     assert calls == [("nb", "target command", 32, ("A", "B"))]
+
+
+def test_copyable_selected_chunk_search_always_uses_bounded_fts(
+    repo, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "notebook_copy_stats",
+        lambda _notebook_id: {"copyable": True},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_gather_chunks",
+        lambda *_args, **_kwargs: pytest.fail(
+            "selected source search must not materialize every chunk/vector"
+        ),
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.chunks,
+        "count_row",
+        lambda *_args, **_kwargs: pytest.fail(
+            "selected source search must not scan the notebook for a count"
+        ),
+    )
+
+    def bounded(notebook_id, query, query_vector, recall, n_chunks, *,
+                allowed_source_ids=None):
+        calls.append((
+            notebook_id, query, recall, n_chunks,
+            tuple(allowed_source_ids or ()),
+        ))
+        return [], [], None
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", bounded
+    )
+    assert repo.retrieval.candidates._retrieve_chunks(
+        "nb", "target command", recall=7, allowed_source_ids=("A", "B")
+    ) == ([], [], None)
+    assert calls == [("nb", "target command", 7, -1, ("A", "B"))]
 
 
 def test_keyword_score_ignores_stopwords():

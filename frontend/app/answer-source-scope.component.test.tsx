@@ -83,11 +83,14 @@ test("reopened scoped answer shows its persisted source scope before the body", 
   const user = userEvent.setup();
   const { container } = render(view(answer(true)));
   const summary = screen.getByText("本次依据：2 个指定来源");
+  const sourceScope = container.querySelector(".answer-source-scope");
+  const answerMarkdown = container.querySelector(".answer-markdown");
   expect(summary.closest("details")).not.toHaveAttribute("open");
+  expect(sourceScope).not.toBeNull();
+  expect(answerMarkdown).not.toBeNull();
   expect(
-    container.querySelector(".answer-source-scope")?.compareDocumentPosition(
-      container.querySelector(".answer-markdown")!,
-    ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    sourceScope!.compareDocumentPosition(answerMarkdown!) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
   ).toBeTruthy();
 
   await user.click(summary);

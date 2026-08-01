@@ -7,9 +7,16 @@ only become narrower.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import hmac
+import json
+import secrets
+import time
 import unicodedata
 from dataclasses import dataclass, replace
-from typing import Iterable, Literal, Protocol, Sequence
+from typing import Any, Iterable, Literal, Protocol, Sequence
 
 from app.services.retrieval import (
     RetrievedChunk,
@@ -20,6 +27,90 @@ from app.services.source_display import source_display_title
 
 
 ScopeResolutionStatus = Literal["not_found", "ambiguous", "unavailable"]
+
+
+# Kept in process on purpose: a service restart invalidates an unfinished
+# browser review instead of accepting a capability whose source roster may
+# have changed while the process was down.  Deployments are single-worker.
+_SCOPE_CAPABILITY_SECRET = secrets.token_bytes(32)
+_SCOPE_CAPABILITY_TTL_SECONDS = 10 * 60
+
+
+def _capability_contract_bytes(contract: object) -> bytes:
+    """Canonicalize the reviewed contract without its bearer capability."""
+    if hasattr(contract, "model_dump"):
+        value = contract.model_dump()
+    elif isinstance(contract, dict):
+        value = dict(contract)
+    else:
+        raise ValueError("来源范围确认已失效，请重新确认问题理解")
+    if not isinstance(value, dict):
+        raise ValueError("来源范围确认已失效，请重新确认问题理解")
+    scope = value.get("source_scope")
+    if not isinstance(scope, dict):
+        raise ValueError("来源范围确认已失效，请重新确认问题理解")
+    value["source_scope"] = {
+        key: item for key, item in scope.items() if key != "preview_capability"
+    }
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def issue_source_scope_preview_capability(notebook_id: str, contract: object) -> str:
+    """Mint a short-lived, tamper-evident selected-scope review capability."""
+    payload = {
+        "notebook_id": str(notebook_id),
+        "expires_at": int(time.time()) + _SCOPE_CAPABILITY_TTL_SECONDS,
+        "contract_sha256": hashlib.sha256(
+            _capability_contract_bytes(contract)
+        ).hexdigest(),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=")
+    signature = hmac.new(_SCOPE_CAPABILITY_SECRET, encoded, hashlib.sha256).digest()
+    signed = base64.urlsafe_b64encode(signature).rstrip(b"=").decode("ascii")
+    return f"v1.{encoded.decode('ascii')}.{signed}"
+
+
+def verify_source_scope_preview_capability(
+    notebook_id: str, contract: object,
+) -> None:
+    """Reject forged, expired, cross-notebook, or modified scope reviews."""
+    scope = getattr(contract, "source_scope", None)
+    if scope is None and isinstance(contract, dict):
+        scope = contract.get("source_scope")
+    capability = (
+        getattr(scope, "preview_capability", "")
+        if scope is not None and not isinstance(scope, dict)
+        else (scope or {}).get("preview_capability", "")
+    )
+    try:
+        version, encoded_text, signature_text = str(capability).split(".", 2)
+        if version != "v1":
+            raise ValueError
+        encoded = encoded_text.encode("ascii")
+        padding = b"=" * (-len(encoded) % 4)
+        signature = signature_text.encode("ascii")
+        supplied = base64.urlsafe_b64decode(
+            signature + b"=" * (-len(signature) % 4)
+        )
+        expected = hmac.new(_SCOPE_CAPABILITY_SECRET, encoded, hashlib.sha256).digest()
+        payload: Any = json.loads(base64.urlsafe_b64decode(encoded + padding))
+        if not isinstance(payload, dict) or not hmac.compare_digest(supplied, expected):
+            raise ValueError
+        if str(payload.get("notebook_id") or "") != str(notebook_id):
+            raise ValueError
+        if int(payload.get("expires_at") or 0) < int(time.time()):
+            raise ValueError
+        if not hmac.compare_digest(
+            str(payload.get("contract_sha256") or ""),
+            hashlib.sha256(_capability_contract_bytes(contract)).hexdigest(),
+        ):
+            raise ValueError
+    except (TypeError, ValueError, UnicodeError, binascii.Error, json.JSONDecodeError):
+        raise ValueError("来源范围确认已失效，请重新确认问题理解") from None
 
 
 class SourceIdentityRow(Protocol):

@@ -877,14 +877,24 @@ QUERY_INTENT_SCHEMA_HINT = (
     '"reason":"","required":true,"options":[""]}],'
     '"confidence":0.0,"needs_clarification":false}')
 
-# Compatibility alias: reports and reasoning Ask now share this contract.
-REPORT_INTENT_SCHEMA_HINT = QUERY_INTENT_SCHEMA_HINT
+REPORT_INTENT_SCHEMA_HINT = (
+    '{"normalized_question":"","intent_type":"explain|compare|diagnose|design|review|other",'
+    '"result_scope":"ranked|complete|aggregate|hybrid",'
+    '"completeness_required":false,'
+    '"entities":[""],'
+    '"mandatory_topics":[{"id":"","title":"",'
+    '"question":"","retrieval_queries":[""]}],"comparison_axes":[""],'
+    '"constraints":[""],"excluded_topics":[""],"expected_output":"",'
+    '"assumptions":[""],"ambiguities":[{"id":"","question":"",'
+    '"reason":"","required":true,"options":[""]}],'
+    '"confidence":0.0,"needs_clarification":false}')
 
 
 def query_intent_prompt(question: str, max_topics: int = 6,
                         history_block: str = "", *,
                         purpose: str = "deep report",
-                        confirmation_mode: bool = False) -> str:
+                        confirmation_mode: bool = False,
+                        source_refs_enabled: bool = True) -> str:
     history_section = (
         f"Prior conversation (context only; the latest request wins):\n{history_block}\n\n"
         if history_block else ""
@@ -901,6 +911,21 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "in ambiguities with required=true and ask one concise user-facing question. "
         "Do not block for optional stylistic preferences; record safe, reversible "
         "defaults in assumptions instead.\n"
+    )
+    source_refs_rule = (
+        "source_refs contains at most 8 source references copied from what the "
+        "user explicitly identifies as a manual, paper, book, file, document "
+        "title, file name, or demonstrative source set. Preserve each reference "
+        "in the user's wording. A tool, product, library, author, or domain name "
+        "by itself is an entity, NOT a source reference, even when it resembles "
+        "a likely document title. Never infer source_refs from subject similarity "
+        "or general knowledge; return [] when the user did not explicitly "
+        "identify source material. "
+        if source_refs_enabled else ""
+    )
+    schema_hint = (
+        QUERY_INTENT_SCHEMA_HINT
+        if source_refs_enabled else REPORT_INTENT_SCHEMA_HINT
     )
     return (
         f"Create an INTENT CONTRACT for a {purpose} before seeing any corpus. "
@@ -927,14 +952,9 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "\"place_opt_design usage\".\n"
         "normalized_question is a standalone, precise formulation in the user's "
         "language. intent_type classifies the requested operation. entities lists "
-        "the concrete research objects. source_refs contains at most 8 source "
-        "references copied from what the user explicitly identifies as a manual, "
-        "paper, book, file, document title, file name, or demonstrative source set. "
-        "Preserve each reference in the user's wording. A tool, product, library, "
-        "author, or domain name by itself is an entity, NOT a source reference, even "
-        "when it resembles a likely document title. Never infer source_refs from "
-        "subject similarity or general knowledge; return [] when the user did not "
-        "explicitly identify source material. confidence is 0..1 confidence that the "
+        "the concrete research objects. "
+        f"{source_refs_rule}"
+        "confidence is 0..1 confidence that the "
         "request is sufficiently specified. Classify result_scope as ranked for "
         "best/most-relevant evidence, complete for an explicit full list, aggregate "
         "for an exact count/grouping over the whole collection, or hybrid for a "
@@ -948,7 +968,7 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "raise an ambiguity asking WHICH library — the open one is the answer.\n"
         f"{confirmation_rule}\n"
         f"{history_section}User request: {question}\n\n"
-        f"Return JSON only: {QUERY_INTENT_SCHEMA_HINT}"
+        f"Return JSON only: {schema_hint}"
     )
 
 
@@ -961,6 +981,7 @@ def report_intent_prompt(question: str, max_topics: int = 6,
         history_block=history_block,
         purpose="deep report",
         confirmation_mode=confirmation_mode,
+        source_refs_enabled=False,
     )
 
 

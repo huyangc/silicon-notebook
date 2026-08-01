@@ -6214,6 +6214,12 @@
               "title": "Mode",
               "type": "string"
             },
+            "preview_capability": {
+              "default": "",
+              "maxLength": 4096,
+              "title": "Preview Capability",
+              "type": "string"
+            },
             "sources": {
               "items": {
                 "$ref": "#/components/schemas/QueryIntentSourceSnapshot"

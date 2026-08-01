@@ -108,6 +108,8 @@ def test_report_prompts_contract():
     assert "before seeing any corpus" in intent and "原始问题" in intent
     assert "mandatory_topics" in REPORT_INTENT_SCHEMA_HINT
     assert "ambiguities" in REPORT_INTENT_SCHEMA_HINT and "needs_clarification" in intent
+    assert "source_refs" not in REPORT_INTENT_SCHEMA_HINT
+    assert "source_refs" not in intent
     confirmed = report_intent_prompt(
         "已确认的问题", history_block="对象：PLL", confirmation_mode=True
     )

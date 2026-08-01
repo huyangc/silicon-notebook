@@ -1465,10 +1465,14 @@ class CandidateRetrievalService(_RetrievalState):
                            limit: int = 8, *,
                            allowed_source_ids=None) -> List[RetrievedElement]:
         """Keyword+semantic search over raw source_elements (fallback layer 2)."""
-        if not self.notebook_copy_stats(notebook_id)["copyable"]:
+        if (allowed_source_ids is not None
+                or not self.notebook_copy_stats(notebook_id)["copyable"]):
             # source_elements 没有独立 ANN；绝不恢复 17 万元素×4096 维的
             # 全表扫描。先走已有 chunk ANN/FTS 召回，再只按这些 chunk 的
-            # element_ids 做有界 PK hydration，仍能返回精确 element_id。
+            # element_ids 做有界 PK hydration，仍能返回精确 element_id。显式
+            # 来源范围不论 notebook 是否 copyable 都走这条路：一个
+            # 小文件仍可以产生大量 element/vector，所以 copyable 不是
+            # 选定来源的候选行数上限。
             chunks, _ids, _matrix = self._retrieve_chunks(
                 notebook_id, query, recall=max(limit * 4, limit),
                 allowed_source_ids=allowed_source_ids,
@@ -1607,6 +1611,16 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 if ann is not None:
                     return ann
+        if allowed_source_ids is not None:
+            # A selected scope is always a bounded candidate query.  Do not
+            # materialize every chunk/vector merely because the enclosing
+            # notebook is below the broad copy/share threshold.  The degraded
+            # helper uses n_chunks only for diagnostics; avoid an otherwise
+            # unnecessary whole-notebook COUNT on this source-bounded path.
+            return self._retrieve_chunks_fts_degraded(
+                notebook_id, query, query_vector, recall, -1,
+                allowed_source_ids=allowed_source_ids,
+            )
         # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
         # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
         # 绝不落进下面「全表拉文本 + 逐 chunk 纯 Python 分词」——生产 55 万 KG 级
@@ -1622,13 +1636,8 @@ class CandidateRetrievalService(_RetrievalState):
             with self._connect() as db:
                 n_chunks = self.chunks.count_row(db, notebook_id)["c"]
             if large or n_chunks > threshold:
-                if allowed_source_ids is None:
-                    return self._retrieve_chunks_fts_degraded(
-                        notebook_id, query, query_vector, recall, n_chunks
-                    )
                 return self._retrieve_chunks_fts_degraded(
-                    notebook_id, query, query_vector, recall, n_chunks,
-                    allowed_source_ids=allowed_source_ids,
+                    notebook_id, query, query_vector, recall, n_chunks
                 )
         # ↓ 现有暴力路径保持不变
         with self._connect() as db:

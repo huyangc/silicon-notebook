@@ -29,12 +29,14 @@ from app.core.config import Settings
 from app.models.schemas import AskRequest, AskResponse, NotebookCreate
 from app.models.ask import (
     AskIntentConfirmation,
+    QueryIntentAnswer,
     QueryIntentContract,
     QueryIntentSourceScope,
     QueryIntentSourceSnapshot,
 )
 from app.models.common import Evidence
 from app.services.ask_service import AskService
+from app.services.evidence_scope import issue_source_scope_preview_capability
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 import asyncio
@@ -499,8 +501,20 @@ def test_selected_reasoning_scope_blocks_outer_memory_knowhow_and_assistant_hist
             )
             for item in scope.sources
         ]),
+        ambiguities=[{
+            "id": "source_scope_confirmation",
+            "question": "确认本次仅依据指定来源吗？",
+            "required": True,
+            "options": ["确认"],
+        }],
+        needs_clarification=True,
         confirmed=True,
     )
+    contract = contract.model_copy(update={
+        "source_scope": contract.source_scope.model_copy(update={
+            "preview_capability": issue_source_scope_preview_capability("nb", contract),
+        }),
+    })
 
     response = service.ask_reasoning(
         "nb",
@@ -508,7 +522,11 @@ def test_selected_reasoning_scope_blocks_outer_memory_knowhow_and_assistant_hist
             question=question,
             mode="reasoning",
             intent=AskIntentConfirmation(
-                contract=contract, resolved_question=question, answers=[]
+                contract=contract,
+                resolved_question=question,
+                answers=[QueryIntentAnswer(
+                    id="source_scope_confirmation", answer="确认",
+                )],
             ),
         ),
         user_id="user",
@@ -518,6 +536,9 @@ def test_selected_reasoning_scope_blocks_outer_memory_knowhow_and_assistant_hist
     assert captured["scope"].allowed_source_ids == {"source-a", "source-b"}
     assert [item.id for item in response.related_knowledge] == ["ko-a"]
     assert response.result_sets == []
+    assert response.intent is not None
+    assert response.intent.source_scope is not None
+    assert response.intent.source_scope.preview_capability == ""
 
 
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():

@@ -23,6 +23,8 @@ export type QueryIntentSourceSnapshot = {
 export type QueryIntentSourceScope = {
   mode: "selected";
   sources: QueryIntentSourceSnapshot[];
+  /** Opaque, short-lived server capability echoed only when confirming scope. */
+  preview_capability?: string;
 };
 
 export type QueryIntentContract = {

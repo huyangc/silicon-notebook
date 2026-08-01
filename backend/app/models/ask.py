@@ -118,6 +118,13 @@ class QueryIntentSourceScope(BaseModel):
 
     mode: Literal["selected"] = "selected"
     sources: List[QueryIntentSourceSnapshot] = Field(min_length=1, max_length=8)
+    # An opaque, short-lived capability minted by ``/ask/intent``.  It is
+    # intentionally not a source identity: the browser echoes it only while
+    # submitting the reviewed intent and AskService strips it before an answer
+    # is persisted/replayed.
+    preview_capability: str = Field(
+        default="", max_length=4096, exclude_if=lambda value: not value,
+    )
 
 
 class QueryIntentContract(BaseModel):

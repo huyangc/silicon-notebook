@@ -6,12 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.common import Evidence
-from app.models.ask import QueryIntentContract
+from app.models.ask import AskIntentConfirmation, AskRequest, QueryIntentContract
 from app.core.config import Settings
 from app.services.ask_service import AskService
 from app.services.evidence_scope import (
     ResolvedEvidenceScope,
     SourceIdentitySnapshot,
+    issue_source_scope_preview_capability,
 )
 from app.services.reasoning_retrieval import (
     ReasoningRetriever,
@@ -341,8 +342,19 @@ def test_execution_reauthorizes_snapshot_and_rejects_changed_source_set():
         resolved_question="只依据《Manual A》回答",
         source_refs=["Manual A"],
         source_scope=AskService._intent_scope_snapshot(_selected_scope("A")),
+        clarification_answers=[{
+            "id": "source_scope_confirmation", "question": "确认范围？", "answer": "确认",
+        }],
     )
-    assert service._confirmed_evidence_scope("nb", intent).allowed_source_ids == {"A"}
+    preview = intent.model_copy(update={
+        "source_scope": intent.source_scope.model_copy(update={
+            "preview_capability": issue_source_scope_preview_capability("nb", intent),
+        }),
+    })
+    intent = intent.model_copy(update={"source_scope": preview.source_scope})
+    assert service._confirmed_evidence_scope(
+        "nb", intent, preview_contract=preview,
+    ).allowed_source_ids == {"A"}
 
     class _ChangedDirectory:
         def resolve_evidence_scope(self, *args, **kwargs):
@@ -350,7 +362,48 @@ def test_execution_reauthorizes_snapshot_and_rejects_changed_source_set():
 
     service.collection_enumeration = _ChangedDirectory()
     with pytest.raises(ValueError, match="已删除、变更或不再可用"):
-        service._confirmed_evidence_scope("nb", intent)
+        service._confirmed_evidence_scope("nb", intent, preview_contract=preview)
+
+
+def test_selected_scope_requires_issued_capability_and_exact_confirmation():
+    service = object.__new__(AskService)
+    service.collection_enumeration = _ScopeDirectory()
+    intent = QueryIntentContract(
+        objective="只依据《Manual A》回答",
+        resolved_question="只依据《Manual A》回答",
+        source_refs=["Manual A"],
+        source_scope=AskService._intent_scope_snapshot(_selected_scope("A")),
+    )
+    with pytest.raises(ValueError, match="确认已失效"):
+        service._confirmed_evidence_scope("nb", intent, preview_contract=intent)
+
+    preview = intent.model_copy(update={
+        "source_scope": intent.source_scope.model_copy(update={
+            "preview_capability": issue_source_scope_preview_capability("nb", intent),
+        }),
+    })
+    with pytest.raises(ValueError, match="明确确认"):
+        service._confirmed_evidence_scope("nb", preview, preview_contract=preview)
+
+
+def test_explicit_source_scope_cannot_be_downgraded_to_unsigned_all_sources():
+    service = object.__new__(AskService)
+    question = "只依据《Manual A》回答"
+    payload = AskRequest(
+        question=question,
+        mode="reasoning",
+        intent=AskIntentConfirmation(
+            contract=QueryIntentContract(
+                objective=question,
+                resolved_question=question,
+            ),
+            resolved_question=question,
+            answers=[],
+        ),
+    )
+
+    with pytest.raises(ValueError, match="重新确认问题理解"):
+        service.validate_reasoning_submission("nb", payload)
 
 
 def test_federated_elements_group_mounted_sources_and_skip_empty_participant():

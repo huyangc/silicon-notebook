@@ -33,7 +33,11 @@ from app.models.identity import UserProfile
 from app.repositories.ports import AskStreamPort, ConversationBusyError
 from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
 from app.services.cancellation import AskCancelled
-from app.services.query_intent import finalize_query_intent, plan_query_intent
+from app.services.query_intent import (
+    finalize_query_intent,
+    has_explicit_source_restriction,
+    plan_query_intent,
+)
 
 
 router = APIRouter()
@@ -123,7 +127,7 @@ async def preview_ask_intent(
             )
         except ValueError as exc:
             raise user_error(
-                422, "无法确认指定的来源，请核对标题或文件名后重试"
+                422, str(exc)
             ) from exc
 
     task = asyncio.create_task(asyncio.to_thread(run_preview))
@@ -154,6 +158,8 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
     if spec.id != "reasoning":
         return
     if payload.intent is None:
+        if has_explicit_source_restriction(payload.question):
+            raise user_error(422, "问题限定了来源范围，请先确认问题理解")
         # Direct compatibility clients may bypass /ask/intent. Keep clear
         # requests compatible, but fail closed on the same deterministic vague
         # wording before begin_durable_job can publish a transient session.
@@ -178,6 +184,16 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
         raise user_error(422, "确认后的问题不能为空")
 
 
+def _validate_reasoning_scope_preflight(repo, notebook_id: str, spec, payload: AskRequest) -> None:
+    """Keep invalid/expired selected scopes out of durable jobs and streams."""
+    if spec.id != "reasoning":
+        return
+    try:
+        repo.validate_reasoning_submission(notebook_id, payload)
+    except ValueError as exc:
+        raise user_error(409, str(exc)) from exc
+
+
 @router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
 def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     repo = repository()
@@ -193,6 +209,7 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
     _require_ask_available(notebook)
+    _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     try:
         return repo.ask(notebook_id, payload)
     except UnknownAskMode as exc:
@@ -266,6 +283,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
     _validate_confirmed_reasoning_intent(payload, spec)
     _require_ask_available(notebook)  # 硬约束:空库 ask 权威拒绝(复用上面已拉的快照,零额外查询)
+    _validate_reasoning_scope_preflight(repo, notebook_id, spec, payload)
     return StreamingResponse(
         _stream_ask_events(repo, notebook_id, payload, spec, request),
         media_type="application/x-ndjson",

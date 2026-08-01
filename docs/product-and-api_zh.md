@@ -288,7 +288,7 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 
 #### 来源限定证据搜索
 
-逐步推理问题明确指称 manual、论文或文件时，语料盲意图规划器可以输出非空 `source_refs`。`/ask/intent` 会立刻在当前 notebook 与有效挂载库的有界、纯身份来源目录中解析这些引用；只接受规范化后的稳定 id、用户可见标题和原始文件名精确匹配，不读取来源正文、摘要、元素、KG payload 或 embedding。唯一结果会持久化成展示安全的 `source_scope` 快照，并且即使语义问题本身清晰，也必须进入意图审阅。零匹配、同名多匹配、目录截断导致无法证明唯一、来源删除、挂载撤销或权限漂移全部 fail closed。界面列出选中标题和不同的原始文件名，在这次范围确认中锁定已审阅的问题文本，在轨迹里展示范围；回答完成或重开会话后，从 `AskResponse.intent` 恢复可展开的「本次依据：N 个指定来源」。
+逐步推理问题明确指称 manual、论文或文件时，语料盲意图规划器可以输出非空 `source_refs`。`/ask/intent` 会立刻在当前 notebook 与有效挂载库的有界、纯身份来源目录中解析这些引用；只接受规范化后的稳定 id、用户可见标题和原始文件名精确匹配，不读取来源正文、摘要、元素、KG payload 或 embedding。唯一结果会持久化成展示安全的 `source_scope` 快照，并且即使语义问题本身清晰，也必须进入意图审阅。浏览器交接携带绑定 notebook 与已审阅合同的短时、进程内、防篡改能力；必须精确提交 `source_scope_confirmation="确认"`，伪造、过期或已失效的快照会在创建持久 conversation/job 或 stream 前被拒绝。零匹配、同名多匹配、目录截断导致无法证明唯一、来源删除、挂载撤销或权限漂移全部 fail closed。界面列出选中标题和不同的原始文件名，在这次范围确认中锁定已审阅的问题文本，在轨迹里展示范围；回答完成或重开会话后，从 `AskResponse.intent` 恢复可展开的「本次依据：N 个指定来源」。
 
 run 边界刻意严于 Agent 内部动作。每轮从开始就是 `all` 或 `selected`；`all` run 不允许通过后续 `search_evidence` 首次动态建立限制。`selected` run 中，`search_evidence` 省略 `source_refs` 表示继承当前上限，显式带引用也只能保持或收窄已经授权的集合，绝不能扩大或切回全库。同一份不可变 `(notebook_id,source_id)` 上限约束首轮/补充 KG、原文元素/chunk、枚举、候选合并、证据 hydration、合成、anchors 与 citations。可安全实现的路径把过滤下推到有界 repository 候选生成；跨来源 KG evidence 只保留允许来源，裁剪后为空就删除该对象。某个配置下若图/PPR/精查或扩展通道无法证明可按来源安全隔离，受限模式会跳过它并留下可见轨迹原因，绝不能先跑全库再只过滤输出。repository 边界的空来源 id 集合表示空，不表示不限制。
 

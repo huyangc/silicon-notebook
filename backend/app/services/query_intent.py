@@ -93,6 +93,10 @@ _SOURCE_FILE_NAME = re.compile(
     r"\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)$",
     re.IGNORECASE,
 )
+_SOURCE_FILE_MENTION = re.compile(
+    r"\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)(?:\b|$)",
+    re.IGNORECASE,
+)
 _NON_SOURCE_ROLE_AFTER = re.compile(
     r"^\s*[，,:：]?\s*(?:"
     r"(?:是|作为)?\s*(?:一个|一款|一种)?\s*"
@@ -102,9 +106,105 @@ _NON_SOURCE_ROLE_AFTER = re.compile(
     re.IGNORECASE,
 )
 
+# This guard is deliberately syntax-only: direct Ask clients must use the
+# preview when they explicitly limit corpus scope, but this preflight must not
+# enumerate or resolve a source catalog.  A product/tool subject by itself is
+# not enough; the phrase must also identify a document-like source.
+_SOURCE_EXCLUSIVITY = re.compile(
+    r"(?:只|仅|仅仅)\s*(?:使用|用|采用|检索|搜索|查阅|参考|依据|根据|基于|按|从)"
+    r"|(?:使用|用|采用|检索|搜索|查阅|参考|依据|根据|基于|按|从)"
+    r"\s*(?:且\s*)?(?:只|仅|仅仅)"
+    r"|唯一(?:的)?\s*(?:来源|参考|依据|文档|文件|手册)"
+    r"|(?:来源|参考|依据|文档|文件|手册)\s*(?:是|为)?\s*唯一"
+    r"|\b(?:only|just|solely|exclusively)\s+"
+    r"(?:use|using|consult|search|retrieve|refer|rely|base|based|according|from)\b"
+    r"|\b(?:use|using|consult|search|retrieve|refer|rely|base|based|according)"
+    r"(?:\s+(?:to|on))?\s+(?:only|just|solely|exclusively)\b"
+    r"|\b(?:restrict(?:ed|ing)?|limit(?:ed|ing)?)\s+to\b"
+    r"|\b(?:no\s+other\s+sources?|sources?\s+other\s+than|"
+    r"only\s+sources?|sole\s+sources?|exclusive\s+sources?)\b",
+    re.IGNORECASE,
+)
+_CONCRETE_SOURCE = (
+    r"(?:《[^》]{1,500}》|[^\s，。；!?！？]{1,500}\."
+    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)|"
+    r"[A-Za-z0-9_.-]{1,120}\s*(?:手册|指南|论文|文档|文件|书籍))"
+)
+_SOURCE_SCOPE_BOUNDARY = re.compile(
+    rf"{_CONCRETE_SOURCE}\s*(?:的)?\s*(?:范围内|之外)"
+    r"|(?:来源|文档|文件|手册|资料)\s*(?:的)?\s*范围内"
+    rf"|(?:限定(?:在|为)?|限于)\s*(?:{_CONCRETE_SOURCE}|这些来源|上述来源|所列来源)"
+    r"|(?:不要|不得|不能|不应).{0,120}(?:"
+    r"之外的\s*(?:来源|文档|文件|资料)|(?:其他|其它|别的)\s*(?:来源|文档|文件|资料))",
+    re.IGNORECASE,
+)
+_DIRECT_CONCRETE_SOURCE_USE = re.compile(
+    # Non-exclusive wording such as “根据 A.pdf 回答” still directs evidence
+    # to a concrete source, but generic subject prose (“this paper is based on
+    # prior work”) must not be blocked.  Couple the use verb to a filename,
+    # Chinese title, or an explicitly named manual/document.
+    r"(?:根据|依据|基于|参考|查阅|使用|用|采用|按|从)\s*"
+    r"(?:文件|文档|手册|指南|论文|书籍)?\s*"
+    r"(?:《[^》]{1,500}》|[^\s，。；!?！？]{1,500}\."
+    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)|"
+    r"[A-Za-z0-9_.-]{1,120}\s*(?:手册|指南|论文|文档|文件|书籍))"
+    r"|\b(?:using|consult(?:ing)?|according\s+to|relying\s+on|from)\s+"
+    r"(?:the\s+)?(?:manual|guide|reference|paper|article|book|file|document|source)\s+"
+    r"[A-Za-z0-9_.-]{1,120}\b"
+    r"|\b(?:using|consult(?:ing)?|according\s+to|relying\s+on|from)\s+"
+    r"[^\s,.;!?]{1,500}\.(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?)\b",
+    re.IGNORECASE,
+)
+_BASED_ON_SOURCE_DIRECTIVE = re.compile(
+    r"\b(?:answer|respond|explain|analy[sz]e|compare)\b[^.?!]{0,120}\bbase(?:d)?\s+on\s+"
+    r"(?:(?:the\s+)?(?:manual|guide|reference|paper|article|book|file|document|source)\s+"
+    r"[A-Za-z0-9_.-]{1,120}|[^\s,.;!?]{1,500}\."
+    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?))\b"
+    r"|\bbase(?:d)?\s+on\s+"
+    r"(?:(?:the\s+)?(?:manual|guide|reference|paper|article|book|file|document|source)\s+"
+    r"[A-Za-z0-9_.-]{1,120}|[^\s,.;!?]{1,500}\."
+    r"(?:pdf|md|markdown|txt|doc|docx|ppt|pptx|html?|csv|xlsx?))"
+    r"[^.?!]{0,120}\b(?:answer|respond|explain|analy[sz]e|compare)\b",
+    re.IGNORECASE,
+)
+
 
 def _normalized_identity_text(value: object) -> str:
     return unicodedata.normalize("NFKC", str(value or "")).casefold()
+
+
+def has_explicit_source_restriction(question: str) -> bool:
+    """Whether direct reasoning Ask must first obtain a reviewed scope.
+
+    This is intentionally narrower than source-reference extraction.  It only
+    blocks wording that both *limits* retrieval and names a document-like
+    source (a file extension, a source label, or Chinese book-title marks).
+    """
+    text = unicodedata.normalize("NFKC", str(question or ""))
+    exclusive_source = False
+    for match in _SOURCE_EXCLUSIVITY.finditer(text):
+        # Bind the exclusivity grammar to a source cue in the same forward
+        # clause.  A document noun elsewhere must not turn subject prose such
+        # as “this paper is limited to a 2-D experiment” into a scope command.
+        clause = re.split(
+            r"[，,。;；:：!?！？\r\n…—–]|\.{2,}|"
+            r"\.(?=[\"'”’」』】）)]?(?:\s|$))",
+            text[match.start():match.end() + 160],
+            maxsplit=1,
+        )[0]
+        if (
+            _SOURCE_FILE_MENTION.search(clause)
+            or _SOURCE_LABEL.search(clause)
+            or ("《" in clause and "》" in clause)
+        ):
+            exclusive_source = True
+            break
+    return bool(
+        exclusive_source
+        or _SOURCE_SCOPE_BOUNDARY.search(text)
+        or _DIRECT_CONCRETE_SOURCE_USE.search(text)
+        or _BASED_ON_SOURCE_DIRECTIVE.search(text)
+    )
 
 
 def _explicit_source_refs(value: object, question: str, history: str) -> list[str]:

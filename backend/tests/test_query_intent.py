@@ -18,6 +18,7 @@ from app.services.query_intent import (
     confirmed_intent_queries,
     confirmed_research_question,
     finalize_query_intent,
+    has_explicit_source_restriction,
     plan_query_intent,
 )
 
@@ -308,6 +309,57 @@ def test_query_intent_contract_rejects_blank_source_reference():
             resolved_question="q",
             source_refs=["   "],
         )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "only use Manual A to answer",
+        "only use timing_manual.pdf to answer",
+        "using only Manual A",
+        "based only on Manual A",
+        "consult only Manual A",
+        "do not use sources other than Manual A",
+        "use Manual A and no other sources",
+        "仅使用 A.pdf 回答",
+        "只依据《Manual A》回答",
+        "不要使用 A.pdf 之外的来源",
+        "以 A.pdf 为唯一来源",
+        "根据 A.pdf 回答",
+        "用 A.pdf 回答这个问题",
+        "按 A.pdf 回答",
+        "从 A.pdf 中寻找答案",
+    ],
+)
+def test_explicit_source_restriction_requires_intent_preview(question):
+    assert has_explicit_source_restriction(question) is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "解释 Manual A 中的时序概念",
+        "only use ICC2 commands in the implementation",
+        "仅使用 ICC2 优化布局",
+        "比较 Manual A 和 Manual B 的差异",
+        "This paper is based on prior work; explain its novelty",
+        "Is Manual A based on Paper B?",
+        "这篇论文使用 ICC2 优化布局，请解释该方法",
+        "This paper only compares approach A and B; explain its conclusion",
+        "这篇论文仅比较方法 A 和 B，请解释其结论",
+        "这篇论文讨论了 A 之外的其他方法，请解释其结论",
+        "这篇论文把实验限定在二维范围内，请解释原因",
+        "This paper is limited to a two-dimensional experiment",
+        "This document is restricted to describing the API",
+        "这篇论文仅使用 ICC2 优化布局",
+        "This paper is limited to 2D:\nCompare Manual A and Manual B.",
+        "“this paper is limited to 2D.” Compare Manual A and Manual B",
+        "这篇论文仅使用 ICC2……比较 Manual A 和 Manual B",
+        "This paper is limited to 2D — compare Manual A and Manual B",
+    ],
+)
+def test_source_restriction_guard_does_not_treat_subject_mentions_as_scope(question):
+    assert has_explicit_source_restriction(question) is False
 
 
 @pytest.mark.parametrize(

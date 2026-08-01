@@ -309,6 +309,7 @@ class AskService:
 
         user_id = self.current_user_id()
         mode = resolve_mode(getattr(payload, "mode", None))
+        self.validate_reasoning_submission(notebook_id, payload)
         cancel_event = threading.Event()
         job_id, _conversation_id = self.begin_job_current(
             notebook_id, payload, mode.id, cancel_event
@@ -587,7 +588,17 @@ class AskService:
             })
             contract["ambiguities"] = ambiguities
             contract["needs_clarification"] = True
-        return QueryIntentContract(**contract)
+        preview = QueryIntentContract(**contract)
+        if preview.source_scope is None:
+            return preview
+        from app.services.evidence_scope import issue_source_scope_preview_capability
+
+        capability = issue_source_scope_preview_capability(notebook_id, preview)
+        return preview.model_copy(update={
+            "source_scope": preview.source_scope.model_copy(update={
+                "preview_capability": capability,
+            }),
+        })
 
     @staticmethod
     def _intent_scope_snapshot(scope) -> QueryIntentSourceScope:
@@ -607,15 +618,29 @@ class AskService:
         self,
         notebook_id: str,
         intent: QueryIntentContract,
+        preview_contract: QueryIntentContract | None = None,
         cancel_event: CancelEvent = None,
     ):
         """Re-authorize a persisted snapshot immediately before evidence I/O."""
-        from app.services.evidence_scope import ResolvedEvidenceScope
+        from app.services.evidence_scope import (
+            ResolvedEvidenceScope,
+            verify_source_scope_preview_capability,
+        )
 
         if not intent.source_refs:
             if intent.source_scope is not None:
                 raise ValueError("来源范围与问题理解不一致，请重新确认")
             return ResolvedEvidenceScope.all()
+        if preview_contract is None or preview_contract.source_scope is None:
+            raise ValueError("指定来源尚未确认，请重新确认问题理解")
+        verify_source_scope_preview_capability(notebook_id, preview_contract)
+        confirmations = {
+            str(row.get("id") or ""): str(row.get("answer") or "")
+            for row in intent.clarification_answers
+            if isinstance(row, dict)
+        }
+        if confirmations.get("source_scope_confirmation") != "确认":
+            raise ValueError("请明确确认本轮仅检索所列来源")
         resolved = self.collection_enumeration.resolve_evidence_scope(
             notebook_id, intent.source_refs, cancel_event=cancel_event
         )
@@ -628,6 +653,42 @@ class AskService:
         if resolved.allowed_source_keys != expected:
             raise ValueError("指定来源已删除、变更或不再可用，请重新确认")
         return resolved
+
+    def validate_reasoning_submission(
+        self, notebook_id: str, payload: AskRequest,
+    ) -> None:
+        """Validate a selected scope before a durable Ask is created.
+
+        This is intentionally also called from ``ask_reasoning``: API routes
+        protect stream headers/jobs, while direct service callers cannot turn a
+        browser-supplied snapshot or source id into authority.
+        """
+        from app.services.ask_modes import resolve_mode
+        from app.services.query_intent import has_explicit_source_restriction
+
+        if resolve_mode(getattr(payload, "mode", None)).id != "reasoning":
+            return
+        explicitly_restricted = has_explicit_source_restriction(payload.question)
+        if payload.intent is None:
+            if explicitly_restricted:
+                raise ValueError("问题限定了来源范围，请先确认问题理解")
+            return
+        intent = self._confirmed_reasoning_intent(payload, "")
+        # Authenticate the scope *mode*, not only a selected snapshot.  A
+        # client must not be able to strip source_refs/source_scope from a
+        # valid preview and thereby downgrade an explicitly restricted
+        # question to unsigned all-source retrieval.
+        if explicitly_restricted and (
+            not intent.source_refs
+            or payload.intent.contract.source_scope is None
+        ):
+            raise ValueError("问题限定了来源范围，请重新确认问题理解")
+        if intent.source_refs:
+            self._confirmed_evidence_scope(
+                notebook_id,
+                intent,
+                preview_contract=payload.intent.contract,
+            )
 
     @staticmethod
     def _confirmed_reasoning_intent(
@@ -1777,6 +1838,7 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
+        self.validate_reasoning_submission(notebook_id, payload)
         turn = self._prepare_turn(
             notebook_id,
             payload.conversation_id,
@@ -1788,8 +1850,18 @@ class AskService:
         raise_if_cancelled(cancel_event)
         intent_contract = self._confirmed_reasoning_intent(payload, history)
         evidence_scope = self._confirmed_evidence_scope(
-            notebook_id, intent_contract, cancel_event=cancel_event
+            notebook_id,
+            intent_contract,
+            preview_contract=(payload.intent.contract if payload.intent else None),
+            cancel_event=cancel_event,
         )
+        # A capability belongs only to the preview handoff.  Persist the same
+        # display-safe source snapshot without its bearer token in answers and
+        # reloaded conversation history.
+        if evidence_scope.restricted:
+            intent_contract = intent_contract.model_copy(update={
+                "source_scope": self._intent_scope_snapshot(evidence_scope),
+            })
         reasoning_history = "" if evidence_scope.restricted else history
         limits = ask_retrieval_limits(payload.retrieval_effort)
         from app.services.query_intent import (
