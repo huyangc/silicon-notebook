@@ -87,11 +87,14 @@ class ReportStore:
 
     def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
         """Atomically claim one outline-ready report for generation."""
+        now = self.now()
         with self.database.write() as db:
             cursor = db.execute(
-                "UPDATE reports SET status='generating',progress=?,updated_at=? "
+                "UPDATE reports SET status='generating',progress=?,"
+                "understanding_json=json_set(understanding_json,"
+                "'$._generation_started_at',?),updated_at=? "
                 "WHERE id=? AND notebook_id=? AND status='outline_ready'",
-                ("准备生成", self.now(), report_id, notebook_id),
+                ("准备生成", now, now, report_id, notebook_id),
             )
         return cursor.rowcount > 0
 
@@ -106,9 +109,14 @@ class ReportStore:
         return cursor.rowcount > 0
 
     def row_to_dict(self, row, *, full: bool) -> dict:
+        understanding = json.loads(row["understanding_json"] or "{}")
+        generation_started_at = str(
+            understanding.pop("_generation_started_at", "") or ""
+        )
         d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
              "status": row["status"], "progress": row["progress"], "error": row["error"],
              "created_by": row["created_by"], "created_at": row["created_at"],
+             "generation_started_at": generation_started_at,
              "updated_at": row["updated_at"], "depth": row["depth"],
              "section_count": len(json.loads(row["outline_json"] or "[]"))}
         if full:
@@ -117,7 +125,7 @@ class ReportStore:
                      gaps=json.loads(row["gaps_json"] or "[]"),
                      references=json.loads(row["references_json"] or "[]"),
                      section_status=json.loads(row["section_status_json"] or "[]"),
-                     understanding=json.loads(row["understanding_json"] or "{}"),
+                     understanding=understanding,
                      content_md=row["content_md"])
         return d
 

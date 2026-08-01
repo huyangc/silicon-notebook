@@ -53,6 +53,13 @@ class _Reports:
     def create_report(self, notebook_id, question, depth=2):
         return self.seed(notebook_id, question, depth=depth)
 
+    def claim_report_generation(self, notebook_id, report_id):
+        row = self.rows.get(report_id)
+        if not row or row.get("status") != "outline_ready":
+            return False
+        row.update(status="generating", generation_started_at="fixture-start")
+        return True
+
     def list_reports(self, notebook_id):
         return list(self.rows.values())
 

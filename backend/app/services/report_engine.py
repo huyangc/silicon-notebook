@@ -1387,7 +1387,7 @@ class ReportEngine:
         )
         if not auto_generate:
             return
-        if self.dependencies.reports.get_report(notebook_id, rid).get("status") == "outline_ready":
+        if self.dependencies.reports.claim_report_generation(notebook_id, rid):
             self.generate(notebook_id, rid, question, depth)
 
     # --- Stage D:汇总——执行摘要 + 章节 + 参考文献 +(结尾)局限 ---

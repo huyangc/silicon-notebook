@@ -26,6 +26,7 @@ import { logDiagnostic, toUserMessage } from "./errors";
 import { EffortPicker, type EffortOption } from "./effort-picker";
 import { quotedPhraseHint } from "./query-syntax";
 import { formatReportCoverage, parseReportSubQueries, type ReportCoverage } from "./report-outline-model";
+import { formatReportTiming } from "./report-time";
 import { label } from "./vocabulary";
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,8 @@ export type ReportSummaryT = {
   progress: string;
   section_count: number;
   created_at: string;
+  generation_started_at?: string;
+  updated_at?: string;
   created_by: string;
   depth?: number;
 };
@@ -157,18 +160,6 @@ const STATUS_LABELS: Record<string, string> = {
   failed: "失败",
   cancelled: "已取消",
 };
-
-// 与 page.tsx 的 formatRelativeTime 同款(page.tsx 未导出,报告面板本地复刻)。
-function formatReportTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return "";
-  const diffSec = Math.round((Date.now() - then) / 1000);
-  if (diffSec < 60) return "刚刚";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
-  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
-  return new Date(then).toLocaleDateString();
-}
 
 // 计划指定的导出方式:Blob → 临时 URL → 触发下载。
 function downloadMd(r: ReportDetailT) {
@@ -1140,8 +1131,8 @@ export function ReportsPanel({
           <h2 title={displayQuestion}>{displayQuestion}</h2>
           <div className="report-detail-meta">
             <ReportStatusBadge status={active.status} progress={active.progress} />
-            <small>
-              {formatReportTime(active.created_at)}
+            <small title={active.status === "done" ? "总耗时按确认大纲、开始生成完整报告到完成计算" : undefined}>
+              {formatReportTiming(active.status, active.created_at, active.updated_at, active.generation_started_at)}
               {active.section_count > 0 && ` · ${active.section_count} 节`}
             </small>
           </div>
@@ -1365,8 +1356,8 @@ export function ReportsPanel({
                     onClick={() => (selectMode && isDone ? toggleSelected(r.id) : void openReport(r.id))}
                   >
                     <span>{r.question}</span>
-                    <small>
-                      {formatReportTime(r.created_at)}
+                    <small title={r.status === "done" ? "总耗时按确认大纲、开始生成完整报告到完成计算" : undefined}>
+                      {formatReportTiming(r.status, r.created_at, r.updated_at, r.generation_started_at)}
                       {r.section_count > 0 && ` · ${r.section_count} 节`}
                     </small>
                   </button>
