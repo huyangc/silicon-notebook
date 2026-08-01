@@ -26,3 +26,13 @@ test("approved report retrieval directions remain user-editable", () => {
     "query A", "query B", "",
   ]);
 });
+
+test("deep report exposes reader-facing credibility disclosure without internal retrieval terms", () => {
+  const visibleCopy = jsxTextValues(reportView).join(" ");
+  const sourceText = reportView.getFullText();
+  assert.match(visibleCopy, /资料基础/);
+  assert.match(visibleCopy, /分析框架/);
+  assert.match(sourceText, /引证覆盖率/);
+  assert.match(sourceText, /本报告按相关性检索生成，未做完整枚举。/);
+  assert.doesNotMatch(sourceText, /\bKG\b|\bchunk\b|canonical/i);
+});

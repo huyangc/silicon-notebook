@@ -1010,12 +1010,20 @@ def report_outline_prompt(question: str, max_sections: int = 6,
     )
 
 
-REPORT_SECTION_SCHEMA_HINT = '{"markdown":"","grounded":true}'
+REPORT_SECTION_SCHEMA_HINT = (
+    '{"markdown":"","grounded":true,"claims":[{"claim_id":"",'
+    '"statement":"","type":"fact|comparison|trend|inference|general",'
+    '"entities":[""],"evidence_keys":["k1"],"conditions":[""],'
+    '"same_paper_baseline":false,"confidence":0.0,'
+    '"frame_assignments":{"facet-id":"value"}}]}'
+)
 
 
 def report_section_prompt(section_title: str, section_scope: str, question: str,
                           context_block: str, allow_parametric: bool = True,
-                          discovered_structure: str = "") -> str:
+                          discovered_structure: str = "",
+                          assumptions: str = "", report_frame: str = "",
+                          synthesis_commitment: str = "") -> str:
     """``discovered_structure`` = 本节深挖时整理出的子大纲(报告 PR-5)。
 
     它是**增补式细化**:只影响本节内部的 `###` 子标题,绝不增删改用户确认过的
@@ -1043,6 +1051,27 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "[k] markers on the statements they support, never in the heading.\n\n"
         if discovered_structure else ""
     )
+    assumption_block = (
+        f"Intent assumptions (scope defaults only; NEVER evidence): {assumptions}\n"
+        if assumptions else ""
+    )
+    frame_block = (
+        "Confirmed analytical frame (authoritative; classifications must use these "
+        "dimensions and must not present combinable dimensions as mutually exclusive):\n"
+        f"{report_frame}\n"
+        if report_frame else ""
+    )
+    commitment_block = (
+        "Report-wide synthesis commitment (write this section's assigned part of the "
+        "shared argument; evidence ids have already been translated to local [k] ids):\n"
+        f"{synthesis_commitment}\n"
+        "Lead with this section's conclusion. Synthesize agreement, disagreement, and "
+        "conditions across evidence; do not narrate one paper at a time. Respect "
+        "do_not_repeat and use handoff only as a concise transition. A finding backed "
+        "by one source must be attributed as that source's result. Never rank results "
+        "from different studies unless their stated conditions are comparable.\n"
+        if synthesis_commitment else ""
+    )
     return (
         "You write ONE section of a deep technical report for an engineer. "
         "Write ONLY this section — no report title, no executive summary, no "
@@ -1050,6 +1079,9 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         f"Report question: {question}\n"
         f"Section title: {section_title}\n"
         f"Section scope: {section_scope}\n"
+        f"{assumption_block}"
+        f"{frame_block}"
+        f"{commitment_block}"
         "Rules:\n"
         "1. When a sentence uses a knowledge item, append its id marker like "
         "[k1] at the end of that sentence. A [k] marker may ONLY be attached "
@@ -1074,16 +1106,60 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "relevant to this section, do NOT force it in.\n"
         "9. Items tagged [memory][personal][confirmed] are user-accepted "
         "conclusions. For relevant personal-tier conflicts, prefer confirmed "
-        "Memory over raw personal passages; base evidence remains final.\n\n"
+        "Memory over raw personal passages; base evidence remains final.\n"
+        "10. Assumptions in the intent/question contract only delimit scope. They "
+        "are NOT evidence and must never authorize a factual conclusion; any such "
+        "conclusion still follows rules 1-4.\n"
+        "11. Return a bounded claim ledger (at most 24 items). statement must be an "
+        "EXACT sentence or table row copied from markdown, including its [k] markers. "
+        "fact/comparison/trend claims need direct evidence_keys that occur in that "
+        "same statement. A comparison needs explicit conditions or "
+        "same_paper_baseline=true. When a synthesis commitment supplies claim ids, "
+        "reuse those ids and do not invent replacements. frame_assignments may use "
+        "only ids and values from the confirmed frame.\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         f"{structure_block}"
-        'Return JSON only: {"markdown":"","grounded":true|false}'
+        f"Return JSON only: {REPORT_SECTION_SCHEMA_HINT}"
     )
 
 
 REPORT_SUMMARY_SCHEMA_HINT = (
     '{"summary":"","coverage":[{"intent_id":"","covered":true,"note":""}],'
     '"contradictions":[""]}')
+
+
+REPORT_SYNTHESIS_SCHEMA_HINT = (
+    '{"central_answer":"","shared_definitions":[{"term":"",'
+    '"definition":"","evidence_keys":[""]}],"claims":[{"id":"c1",'
+    '"statement":"","type":"fact|comparison|trend|inference|general",'
+    '"facet_id":"","evidence_keys":[""],"counterevidence_keys":[""],'
+    '"conditions":[""],"owner_section_id":"section-1"}],"sections":'
+    '[{"section_id":"section-1","thesis":"","claim_ids":["c1"],'
+    '"must_contrast":[""],"handoff":"","do_not_repeat":[""]}]}'
+)
+
+
+def report_synthesis_prompt(question: str, intent_block: str, frame_block: str,
+                            evidence_block: str) -> str:
+    return (
+        "Act as the report-wide EVIDENCE SYNTHESIZER before any prose is written. "
+        "Create one coherent argument across all confirmed sections. Organize claims "
+        "by analytical question, facet, and comparison condition — never by paper "
+        "order. The confirmed intent, frame, and section set are immutable: do not "
+        "add, remove, rename, or reassign a mandatory section. Use only evidence_ids "
+        "present in the supplied evidence. Every fact/comparison/trend claim needs "
+        "direct evidence; retain counterevidence and conditions. Assign every claim "
+        "to exactly one owner section. Use must_contrast for genuine disagreements, "
+        "handoff for the next logical step, and do_not_repeat to prevent duplicated "
+        "background. Single-source findings must remain conditional and attributed. "
+        "Do not infer a high-confidence trend merely from source count. Intent "
+        "assumptions delimit scope only and are never evidence.\n\n"
+        f"Question:\n{question}\n\n"
+        f"Confirmed intent:\n{intent_block}\n\n"
+        f"Confirmed frame (may be empty):\n{frame_block or '{}'}\n\n"
+        f"Section-keyed evidence:\n{evidence_block}\n\n"
+        f"Return JSON only: {REPORT_SYNTHESIS_SCHEMA_HINT}"
+    )
 
 
 def report_summary_prompt(question: str, sections_block: str,
@@ -1100,6 +1176,8 @@ def report_summary_prompt(question: str, sections_block: str,
         "sections: no new facts, no citation markers, no headings, and do not rewrite "
         "or silently repair a missing topic. Coverage notes and contradictions must "
         "also be grounded only in the supplied sections.\n\n"
+        "Any intent assumptions only delimit scope; they are not evidence and may "
+        "not be promoted into conclusions.\n\n"
         f"Question: {question}\n\n{intent_section}Report sections:\n{sections_block}\n\n"
         f"Return JSON only: {REPORT_SUMMARY_SCHEMA_HINT}"
     )
@@ -1107,7 +1185,10 @@ def report_summary_prompt(question: str, sections_block: str,
 
 REPORT_STORM_SCHEMA_HINT = (
     '{"sections":[{"title":"","scope":"","sub_queries":[""],'
-    '"intent_ids":[""],"perspectives":[""],"tensions":[""]}]}')
+    '"intent_ids":[""],"perspectives":[""],"tensions":[""]}],'
+    '"frame":{"subject_kind":"","facets":[{"id":"","name":"",'
+    '"values":[""],"exclusive":true}],"axes":[{"id":"","name":"",'
+    '"condition_fields":[""]}],"instance_policy":""}}')
 
 
 def report_storm_outline_prompt(question: str, corpus_map: str,
@@ -1143,6 +1224,13 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         "8. If the question compares an entity with its peers, plan ONE dedicated "
         "cross-model comparison section (横向对比) whose sub_queries target the peer "
         "entities' corresponding dimensions.\n"
+        "9. For a comparison, review, or classification-shaped question, optionally "
+        "return one orthogonal frame: subject_kind; bounded facets (classification "
+        "dimensions and whether values are exclusive); comparison axes with the "
+        "condition fields needed for fair comparison; and an instance_policy. A "
+        "capacity mechanism, sequence mixer, macro topology, and memory mechanism are "
+        "different facets and must not be emitted as mutually exclusive peers. For "
+        "other questions omit frame or return an empty object.\n"
         f"Produce 3-{max_sections} sections. Do NOT include executive-summary / "
         "references / knowledge-gap sections (auto-appended). Each section: title "
         "(question's language), scope (one line), sub_queries (2-4 focused ENGLISH "
@@ -1154,8 +1242,7 @@ def report_storm_outline_prompt(question: str, corpus_map: str,
         f"Immutable intent contract:\n{intent_block or '(not supplied)'}\n\n"
         f"Intent-first coverage probe:\n{coverage_block or '(not supplied)'}\n\n"
         f"Corpus map (what the library actually contains):\n{corpus_map}\n\n"
-        'Return JSON only: {"sections":[{"title":"","scope":"","sub_queries":[""],'
-        '"intent_ids":[""],"perspectives":[""],"tensions":[""]}]}'
+        f"Return JSON only: {REPORT_STORM_SCHEMA_HINT}"
     )
 
 
@@ -1164,16 +1251,24 @@ REPORT_SUFFICIENCY_SCHEMA_HINT = (
     '"gap_note":"","action":"keep|supplement|external"}]}')
 
 
-def report_sufficiency_prompt(question: str, probe_block: str) -> str:
+def report_sufficiency_prompt(question: str, probe_block: str, *,
+                              result_scope: str = "ranked",
+                              completeness_required: bool = False) -> str:
     return (
         "You judge whether the notebook library has ENOUGH evidence for each planned "
         "report section. You are given each section's title and its OBJECTIVE retrieval "
-        "hit counts (hits = distinct knowledge items; base_hits = authoritative base "
-        "items; element_hits = direct parsed SourceElements). Trust the counts as the ground truth "
-        "of coverage; your job is to interpret them into a verdict + a one-line gap note "
-        "+ a suggested action. Rough guide: many hits → 充足(keep); few/only-tangential "
+        "signals. relevant_items are relevant evidence objects/elements; "
+        "independent_families and top_family_share describe document diversity. "
+        "base_hits is only a governance-tier count, NOT a separate proof of authority "
+        "or sufficiency. Trust these signals as the ground truth of coverage; your job "
+        "is to interpret them into a verdict + a one-line gap note + a suggested "
+        "action. Diverse relevant families may be sufficient; few/only-tangential "
         "→ 薄弱(supplement, note what's missing); ~0 hits → 缺失(external, the library "
-        "cannot support it). Do not invent coverage the counts don't show.\n\n"
+        "cannot support it). Do not invent coverage the signals don't show. "
+        f"The confirmed result scope is {result_scope}; completeness_required="
+        f"{str(bool(completeness_required)).lower()}. For a completeness request, "
+        "ranked retrieval is not enumeration and must be judged by the stricter "
+        "coverage standard.\n\n"
         f"Report question: {question}\n\n"
         f"Sections with hit counts:\n{probe_block}\n\n"
         'Return JSON only: {"verdicts":[{"title":"","sufficiency":"","gap_note":"","action":""}]}'

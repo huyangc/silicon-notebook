@@ -174,6 +174,8 @@ def get_report(notebook_id: str, report_id: str) -> ReportDetail:
 @router.patch("/notebooks/{notebook_id}/reports/{report_id}/outline",
               dependencies=[Depends(require_notebook_write)])
 def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutlineUpdate) -> dict:
+    from app.services.report_synthesis import normalize_report_frame
+
     repo = repository()
     try:
         cur = repo.get_report(notebook_id, report_id)
@@ -191,6 +193,13 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
          if isinstance(section, dict) and section.get("intent_contract")),
         {},
     )
+    understanding = dict(cur.get("understanding") or {})
+    report_frame = understanding.get("report_frame")
+    if payload.frame is not None:
+        try:
+            report_frame = normalize_report_frame(payload.frame, strict=True)
+        except (TypeError, ValueError):
+            raise user_error(422, "分析框架格式无效，请检查分类维度和比较条件")
     known_intents = {
         str(item.get("id") or ""): item for item in intent_catalog
         if isinstance(item, dict) and item.get("id")
@@ -227,6 +236,8 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
             section["intent_catalog"] = intent_catalog
         if intent_contract:
             section["intent_contract"] = intent_contract
+        if report_frame:
+            section["report_frame"] = report_frame
         secs.append(section)
     if not secs:
         raise HTTPException(status_code=422, detail="at least one valid section required")
@@ -243,7 +254,13 @@ def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutli
             422,
             "大纲必须保留每个必答主题，请恢复被删除的主题后再试",
         )
-    repo.update_report(notebook_id, report_id, outline=secs)
+    if report_frame:
+        understanding["report_frame"] = report_frame
+    else:
+        understanding.pop("report_frame", None)
+    repo.update_report(
+        notebook_id, report_id, outline=secs, understanding=understanding
+    )
     return {"status": "ok", "sections": len(secs)}
 
 

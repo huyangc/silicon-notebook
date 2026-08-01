@@ -523,10 +523,9 @@ class SourceStore:
             (notebook_id,),
         ).fetchall()
 
-    def report_source_rows(self, notebook_id: str) -> List[Dict[str, str]]:
-        """Report corpus-map recon (Task 25): source titles in creation order,
-        LIMIT 20 — the deep-report engine's scout cap.  SQL frozen from the
-        facade's inline query; strip/filter formatting stays engine-side.
+    def report_source_rows(self, notebook_id: str) -> List[Dict[str, object]]:
+        """Complete visible-source projection for deterministic report profiling.
+
         Excludes source_type IN ('memory', 'knowhow') so a hidden Memory- or
         knowhow-projection-derived title is never shown to the report planner
         as a source doc (their KG objects/chunks still participate via
@@ -534,12 +533,14 @@ class SourceStore:
         split as the other memory-kg-extract sites in this file)."""
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT title FROM sources WHERE notebook_id=? "
-                "AND source_type NOT IN ('memory', 'knowhow') "
-                "ORDER BY created_at LIMIT 20",
+                "SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,s.file_hash,"
+                "m.paper_title,m.pub_year,m.is_paper "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "WHERE s.notebook_id=? AND s.source_type NOT IN ('memory','knowhow') "
+                "ORDER BY s.created_at,s.id",
                 (notebook_id,),
             ).fetchall()
-        return [{"title": row["title"]} for row in rows]
+        return [dict(row) for row in rows]
 
     def source_titles(self, source_ids: List[str]) -> Dict[str, str]:
         """Batch {source_id: title} lookup (Task 24): ask_graph 的源 chunk 引用

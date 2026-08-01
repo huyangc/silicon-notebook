@@ -504,15 +504,17 @@ class SourceStore:
             (notebook_id,),
         ).fetchall()
 
-    def report_source_rows(self, notebook_id: str) -> list[dict[str, str]]:
+    def report_source_rows(self, notebook_id: str) -> list[dict[str, object]]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT title FROM sources WHERE notebook_id=%s "
-                "AND source_type NOT IN ('memory','knowhow') "
-                "ORDER BY created_at,id COLLATE \"C\" LIMIT 20",
+                "SELECT s.id,s.title,s.file_name,s.source_type,s.doc_type,s.file_hash,"
+                "m.paper_title,m.pub_year,m.is_paper "
+                "FROM sources s LEFT JOIN source_paper_meta m ON m.source_id=s.id "
+                "WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') "
+                "ORDER BY s.created_at,s.id COLLATE \"C\"",
                 (notebook_id,),
             ).fetchall()
-        return [{"title": row["title"]} for row in rows]
+        return [dict(row) for row in rows]
 
     def source_titles(self, source_ids: list[str]) -> dict[str, str]:
         ids = [str(value) for value in source_ids if value]

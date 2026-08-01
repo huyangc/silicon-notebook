@@ -5,7 +5,7 @@
  * page.tsx 已过大,面板逻辑集中在这里;page.tsx 只负责接线
  * (类型化 api 函数 + chat-body 里的 <ReportsPanel …/> 分支)。
  *
- * 轮询约定(镜像 page.tsx 的 kg 构建轮询写法):
+ * 轮询约定(镜像 page.tsx 的索引构建轮询写法):
  * - 列表视图:存在非终态(pending/running)报告时每 6s 刷一次列表,终态即停;
  * - 详情视图:打开的报告非终态时每 6s 刷一次详情,到终态后再同步一次列表;
  * - 组件卸载/依赖变化时清理 interval。
@@ -93,11 +93,91 @@ export type ReportUnderstandingT = {
   confidence?: number;
   needs_clarification?: boolean;
   confirmed?: boolean;
+  /** 检索口径由共享问题理解合同给出；旧报告没有这两个字段。 */
+  result_scope?: "ranked" | "complete" | "aggregate" | "hybrid";
+  completeness_required?: boolean;
+  corpus_profile?: ReportCorpusProfileT;
+  report_frame?: ReportFrameT;
+  credibility?: ReportCredibilityT;
+};
+
+export type ReportDistributionT = {
+  label?: string;
+  name?: string;
+  value?: string | number;
+  type?: string;
+  year?: string | number;
+  count?: number;
+};
+
+/** 报告所依据资料的可见摘要。所有字段可选，以兼容历史报告和 fail-open 后端。 */
+export type ReportCorpusProfileT = {
+  total_sources?: number;
+  displayed_sources?: number;
+  representative_count?: number;
+  independent_documents?: number;
+  independent_families?: number;
+  duplicate_inflation?: number;
+  identity_uncertain_sources?: number;
+  type_distribution?: ReportDistributionT[] | Record<string, number>;
+  year_distribution?: ReportDistributionT[] | Record<string, number>;
+  representatives?: { title?: string; label?: string; source_title?: string }[];
+  metadata_coverage?: number;
+  metadata_sources?: number;
+  unknown_year?: number;
+  completeness_disclosure?: string;
+};
+
+export type ReportFrameFacetT = {
+  id: string;
+  name: string;
+  values: string[];
+  exclusive?: boolean;
+};
+
+export type ReportFrameAxisT = {
+  id: string;
+  name: string;
+  condition_fields: string[];
+};
+
+/** 仅在比较/分类报告中出现；缺失时按历史大纲流程退化。 */
+export type ReportFrameT = {
+  subject_kind?: string;
+  facets?: ReportFrameFacetT[];
+  axes?: ReportFrameAxisT[];
+  instance_policy?: string;
+};
+
+export type ReportCredibilityT = {
+  independent_documents?: number;
+  independent_source_families?: number;
+  independent_sources?: number;
+  anchor_count?: number;
+  top1_share?: number;
+  top1_concentration?: number;
+};
+
+export type ReportCitationAuditT = {
+  support_rate?: number;
+  supported_claims?: number;
+  total_claims?: number;
+  high_risk_uncited_count?: number;
+  /** 当前确定性审计的命名；保留上面的 UI 别名以兼容后续演进。 */
+  unsupported?: number;
+  high_risk_assertions?: number;
 };
 
 export type ReportDetailT = ReportSummaryT & {
   outline: ReportOutlineSectionT[];
-  sections: { title: string; markdown: string; grounded: boolean; evidence_level?: string; failed?: boolean }[];
+  sections: {
+    title: string;
+    markdown: string;
+    grounded: boolean;
+    evidence_level?: string;
+    failed?: boolean;
+    citation_audit?: ReportCitationAuditT;
+  }[];
   section_status?: { title: string; phase: string; step: number }[];
   gaps: string[];
   content_md: string;
@@ -114,6 +194,8 @@ export type ReportDetailT = ReportSummaryT & {
     element_id?: string;
     snippet?: string;
     tier?: string;
+    /** 同一可区分资料可能有多个锚点；仅用于统计，不改引用跳转。 */
+    family_key?: string;
   }[];
   understanding: ReportUnderstandingT;
   error: string;
@@ -550,6 +632,215 @@ const SUFFICIENCY_META: Record<ReportSufficiency, { label: string; cls: string }
   缺失: { label: "证据缺失", cls: "missing" },
 };
 
+const trimmedLines = (value: string) => value.split("\n").map((item) => item.trim()).filter(Boolean);
+
+function asDistributionRows(
+  value: ReportDistributionT[] | Record<string, number> | undefined,
+): { label: string; count: number }[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((row) => {
+      const label = String(row.label ?? row.name ?? row.value ?? row.type ?? row.year ?? "").trim();
+      const count = Number(row.count ?? 0);
+      return label && Number.isFinite(count) ? [{ label, count }] : [];
+    });
+  }
+  if (value && typeof value === "object") {
+    return Object.entries(value).flatMap(([label, count]) =>
+      Number.isFinite(Number(count)) ? [{ label, count: Number(count) }] : [],
+    );
+  }
+  return [];
+}
+
+function formatDistribution(
+  value: ReportDistributionT[] | Record<string, number> | undefined,
+  max = 4,
+): string {
+  const rows = asDistributionRows(value);
+  const shown = rows.slice(0, max).map((row) => `${row.label} ${row.count}`);
+  return rows.length > max ? `${shown.join(" · ")} · 其余 ${rows.length - max} 类` : shown.join(" · ");
+}
+
+function percent(value: number | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const normalized = value <= 1 ? value * 100 : value;
+  return `${Math.round(Math.max(0, Math.min(100, normalized)))}%`;
+}
+
+function citationSummary(report: ReportDetailT): {
+  independent: number | null;
+  top1: string | null;
+} {
+  const credibility = report.understanding?.credibility || {};
+  const declared = credibility.independent_documents
+    ?? credibility.independent_source_families
+    ?? credibility.independent_sources;
+  const familyCounts = new Map<string, number>();
+  for (const reference of report.references || []) {
+    // Never use the number of citation anchors as a source count. A row without
+    // a stable source/family identity is deliberately excluded from this metric.
+    const key = String(reference.family_key || reference.source_id || "").trim();
+    if (key) familyCounts.set(key, (familyCounts.get(key) || 0) + 1);
+  }
+  const independent = typeof declared === "number" && Number.isFinite(declared)
+    ? declared
+    : familyCounts.size > 0 ? familyCounts.size : null;
+  const top1 = percent(credibility.top1_share ?? credibility.top1_concentration)
+    ?? (familyCounts.size > 0
+      ? percent(Math.max(...familyCounts.values()) / Math.max(1, [...familyCounts.values()].reduce((a, b) => a + b, 0)))
+      : null);
+  return { independent, top1 };
+}
+
+function citationAuditLabel(audit: ReportCitationAuditT | undefined): string | null {
+  if (!audit) return null;
+  const fromRate = percent(audit.support_rate);
+  if (fromRate) return `引证覆盖率 ${fromRate}`;
+  if (typeof audit.supported_claims === "number" && typeof audit.total_claims === "number" && audit.total_claims > 0) {
+    return `引证覆盖率 ${Math.round(audit.supported_claims / audit.total_claims * 100)}%`;
+  }
+  return null;
+}
+
+export function ReportCorpusBasis({ report }: { report: ReportDetailT }) {
+  const profile = report.understanding?.corpus_profile;
+  const scope = report.understanding?.result_scope;
+  const disclosure = profile?.completeness_disclosure
+    || ((scope === "complete" || scope === "aggregate" || scope === "hybrid")
+      ? "本报告按相关性检索生成，未做完整枚举。"
+      : "");
+  if (!profile && !disclosure) return null;
+  const typeText = formatDistribution(profile?.type_distribution);
+  const yearText = formatDistribution(profile?.year_distribution);
+  const representativeTitles = (profile?.representatives || [])
+    .map((item) => String(item.title || item.label || item.source_title || "").trim())
+    .filter(Boolean);
+  return (
+    <section className="report-corpus-basis" aria-label="资料基础">
+      <div className="report-corpus-basis-head">
+        <h3>资料基础</h3>
+        {typeof profile?.total_sources === "number" && (
+          <span>{profile.total_sources} 份资料</span>
+        )}
+      </div>
+      {profile && (
+        <div className="report-corpus-basis-facts">
+          {typeof (profile.independent_documents ?? profile.independent_families) === "number" && (
+            <span>可区分资料 {profile.independent_documents ?? profile.independent_families}</span>
+          )}
+          {typeof (profile.displayed_sources ?? profile.representative_count) === "number" && typeof profile.total_sources === "number" && (
+            <span>代表资料 {profile.displayed_sources ?? profile.representative_count}/{profile.total_sources}</span>
+          )}
+          {typeof profile.identity_uncertain_sources === "number" && profile.identity_uncertain_sources > 0 && (
+            <span>另有 {profile.identity_uncertain_sources} 份资料无法可靠合并</span>
+          )}
+          {typeof profile.duplicate_inflation === "number" && profile.duplicate_inflation > 0 && (
+            <span>保守识别重复 {profile.duplicate_inflation} 份</span>
+          )}
+          {percent(profile.metadata_coverage) && (
+            <span>资料识别信息完整度 {percent(profile.metadata_coverage)}</span>
+          )}
+        </div>
+      )}
+      {(typeText || yearText) && (
+        <dl className="report-corpus-basis-distributions">
+          {typeText && <><dt>资料类型</dt><dd>{typeText}</dd></>}
+          {yearText && <><dt>时间分布</dt><dd>{yearText}{typeof profile?.unknown_year === "number" ? ` · 年份未知 ${profile.unknown_year}` : ""}</dd></>}
+        </dl>
+      )}
+      {representativeTitles.length > 0 && (
+        <p className="report-corpus-basis-representatives">代表资料：{representativeTitles.join("；")}</p>
+      )}
+      {disclosure && <p className="report-corpus-basis-disclosure">{disclosure}</p>}
+    </section>
+  );
+}
+
+export function ReportFrameEditor({
+  frame,
+  disabled,
+  onChange,
+}: {
+  frame: ReportFrameT | undefined;
+  disabled: boolean;
+  onChange: (next: ReportFrameT | undefined) => void;
+}) {
+  if (!frame) return null;
+  const facets = frame.facets || [];
+  const axes = frame.axes || [];
+  const patch = (part: Partial<ReportFrameT>) => onChange({ ...frame, ...part });
+  return (
+    <section className="report-frame-editor" aria-label="分析框架">
+      <div>
+        <h4>分析框架</h4>
+        <p>用于统一分类和比较口径；确认后会随大纲一同保存。</p>
+      </div>
+      <label>
+        <span>对象类型</span>
+        <input value={frame.subject_kind || ""} disabled={disabled}
+          onChange={(event) => patch({ subject_kind: event.target.value })} />
+      </label>
+      <label>
+        <span>实例使用方式</span>
+        <input value={frame.instance_policy || ""} disabled={disabled}
+          onChange={(event) => patch({ instance_policy: event.target.value })} />
+      </label>
+      {facets.map((facet, index) => (
+        <fieldset key={facet.id || `facet-${index}`}>
+          <legend>分类维度</legend>
+          <label>
+            <span>名称</span>
+            <input value={facet.name || ""} disabled={disabled} onChange={(event) => {
+              const next = facets.slice();
+              next[index] = { ...facet, name: event.target.value };
+              patch({ facets: next });
+            }} />
+          </label>
+          <label>
+            <span>可选值（每行一项）</span>
+            <textarea value={(facet.values || []).join("\n")} disabled={disabled} rows={Math.max(2, Math.min(5, facet.values?.length || 2))}
+              onChange={(event) => {
+                const next = facets.slice();
+                next[index] = { ...facet, values: trimmedLines(event.target.value) };
+                patch({ facets: next });
+              }} />
+          </label>
+          <label className="report-frame-check">
+            <input type="checkbox" checked={facet.exclusive === true} disabled={disabled} onChange={(event) => {
+              const next = facets.slice();
+              next[index] = { ...facet, exclusive: event.target.checked };
+              patch({ facets: next });
+            }} />
+            <span>同一实例只能归入一个值</span>
+          </label>
+        </fieldset>
+      ))}
+      {axes.map((axis, index) => (
+        <fieldset key={axis.id || `axis-${index}`}>
+          <legend>比较条件</legend>
+          <label>
+            <span>名称</span>
+            <input value={axis.name || ""} disabled={disabled} onChange={(event) => {
+              const next = axes.slice();
+              next[index] = { ...axis, name: event.target.value };
+              patch({ axes: next });
+            }} />
+          </label>
+          <label>
+            <span>适用条件（每行一项）</span>
+            <textarea value={(axis.condition_fields || []).join("\n")} disabled={disabled} rows={Math.max(2, Math.min(5, axis.condition_fields?.length || 2))}
+              onChange={(event) => {
+                const next = axes.slice();
+                next[index] = { ...axis, condition_fields: trimmedLines(event.target.value) };
+                patch({ axes: next });
+              }} />
+          </label>
+        </fieldset>
+      ))}
+    </section>
+  );
+}
+
 // 后端富字段编辑期原样透传;title/scope/sub_queries 可改,也可增删排序。
 type EditSection = ReportOutlineSectionT & { _key: string };
 let _outlineKeySeq = 0;
@@ -557,7 +848,7 @@ const freshOutlineKey = () => `sec-${Date.now().toString(36)}-${(_outlineKeySeq+
 const toEditSections = (outline: ReportOutlineSectionT[]): EditSection[] =>
   outline.map((s) => ({ ...s, _key: freshOutlineKey() }));
 
-function OutlineEditor({
+export function OutlineEditor({
   report,
   notebookId,
   updateReportOutline,
@@ -567,20 +858,26 @@ function OutlineEditor({
 }: {
   report: ReportDetailT;
   notebookId: string;
-  updateReportOutline: (nb: string, rid: string, sections: unknown[]) => Promise<{ status: string; sections: number }>;
+  updateReportOutline: (
+    nb: string,
+    rid: string,
+    payload: { sections: unknown[]; frame?: ReportFrameT },
+  ) => Promise<{ status: string; sections: number }>;
   generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   onGenerating: (detail: ReportDetailT) => void;
   setToast: (message: string) => void;
 }) {
   // 本地可编辑副本;仅当报告 id 变化时重新播种(避免打字被父层 state 覆盖)。
   const [sections, setSections] = useState<EditSection[]>(() => toEditSections(report.outline));
+  const [frame, setFrame] = useState<ReportFrameT | undefined>(() => report.understanding?.report_frame);
   const seededId = useRef(report.id);
   useEffect(() => {
     if (seededId.current !== report.id) {
       seededId.current = report.id;
       setSections(toEditSections(report.outline));
+      setFrame(report.understanding?.report_frame);
     }
-  }, [report.id, report.outline]);
+  }, [report.id, report.outline, report.understanding?.report_frame]);
 
   const [busy, setBusy] = useState(false);
 
@@ -628,7 +925,7 @@ function OutlineEditor({
     }
     setBusy(true);
     try {
-      await updateReportOutline(notebookId, report.id, cleaned);
+      await updateReportOutline(notebookId, report.id, { sections: cleaned, frame });
       await generateReport(notebookId, report.id);
       setToast("已确认大纲，开始生成完整报告");
       // 乐观切到生成态,让父层立刻进 section_status 进度视图并恢复轮询。
@@ -654,6 +951,8 @@ function OutlineEditor({
           <Plus size={14} /> 新增章节
         </button>
       </div>
+
+      <ReportFrameEditor frame={frame} disabled={busy} onChange={setFrame} />
 
       {sections.length === 0 ? (
         <div className="report-outline-empty">大纲为空,点「新增章节」添加,或返回列表重新规划。</div>
@@ -799,7 +1098,11 @@ export interface ReportsPanelProps {
     rid: string,
     payload: { resolved_question: string; answers: { id: string; answer: string }[] },
   ) => Promise<{ status: string }>;
-  updateReportOutline: (nb: string, rid: string, sections: unknown[]) => Promise<{ status: string; sections: number }>;
+  updateReportOutline: (
+    nb: string,
+    rid: string,
+    payload: { sections: unknown[]; frame?: ReportFrameT },
+  ) => Promise<{ status: string; sections: number }>;
   generateReport: (nb: string, rid: string, depth?: number) => Promise<{ status: string }>;
   cancelReport: (nb: string, rid: string) => Promise<{ status: string }>;
   deleteReport: (nb: string, rid: string) => Promise<{ status: string }>;
@@ -1229,16 +1532,33 @@ export function ReportsPanel({
             )}
           </div>
         )}
-        {active.content_md && active.references && active.references.length > 0 && (() => {
-          let base = 0;
-          for (const r of active.references) if (r.tier === "base") base += 1;
+        <ReportCorpusBasis report={active} />
+        {active.content_md && (() => {
+          const summary = citationSummary(active);
+          if (summary.independent == null && !summary.top1) return null;
           return (
-            <div className="report-source-dist" title="本报告引用的来源分布（个人知识库 / 公共知识库）">
-              来源 · 个人 {active.references.length - base}
-              {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
+            <div className="report-source-dist" title="按可区分资料统计，不以引用标记数量代替资料数量">
+              {summary.independent != null && <>可区分资料 {summary.independent}</>}
+              {summary.top1 && <><span aria-hidden> · </span>最集中资料占 {summary.top1}</>}
             </div>
           );
         })()}
+        {active.content_md && active.sections.some((section) => citationAuditLabel(section.citation_audit)) && (
+          <div className="report-section-audits" aria-label="章节引证覆盖率">
+            {active.sections.map((section, index) => {
+              const coverage = citationAuditLabel(section.citation_audit);
+              if (!coverage) return null;
+              const uncited = section.citation_audit?.high_risk_uncited_count
+                ?? section.citation_audit?.unsupported;
+              return (
+                <span className="report-citation-audit" key={`${section.title}-${index}`}>
+                  {section.title} · {coverage}
+                  {typeof uncited === "number" && uncited > 0 && ` · ${uncited} 条高风险断言待补引证`}
+                </span>
+              );
+            })}
+          </div>
+        )}
         {active.content_md ? (
           <ReportMarkdown markdown={active.content_md} references={active.references} />
         ) : (

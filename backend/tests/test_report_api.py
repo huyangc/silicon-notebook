@@ -343,6 +343,62 @@ def test_outline_patch_preserves_intent_catalog_and_bounds_sections(client, monk
     assert all(section["intent_contract"] == contract for section in outline)
 
 
+def test_outline_patch_persists_the_user_confirmed_report_frame(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready", understanding={"confirmed": True},
+        outline=[{"title": "A and B", "scope": "s", "sub_queries": ["A", "B"]}],
+    )
+    frame = {
+        "subject_kind": "model",
+        "facets": [{"id": "mixer", "name": "Sequence mixer",
+                    "values": ["Attention", "SSM"], "exclusive": True}],
+        "axes": [{"id": "latency", "name": "Latency",
+                  "condition_fields": ["context length"]}],
+        "instance_policy": "An instance can combine mechanisms across facets.",
+    }
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": [{"title": "A and B", "scope": "s",
+                            "sub_queries": ["A", "B"]}], "frame": frame},
+    )
+    assert response.status_code == 200
+    detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert detail["understanding"]["report_frame"] == frame
+    assert detail["outline"][0]["report_frame"] == frame
+
+
+def test_outline_patch_rejects_a_malformed_user_frame(client, monkeypatch):
+    import app.api.report_routes as R
+    from app.api.deps import repository
+
+    monkeypatch.setattr(R, "_launch_plan_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "compare A and B"}
+    ).json()["report_id"]
+    repository().update_report(
+        nb["id"], rid, status="outline_ready",
+        outline=[{"title": "A", "scope": "s", "sub_queries": ["A"]}],
+    )
+    response = client.patch(
+        f"/api/notebooks/{nb['id']}/reports/{rid}/outline",
+        json={"sections": [{"title": "A", "scope": "s", "sub_queries": ["A"]}],
+              "frame": {"facets": "not-a-list"}},
+    )
+    assert response.status_code == 422
+    assert response.headers["X-User-Message"] == "1"
+
+
 def test_outline_patch_rejects_dropping_a_mandatory_intent(client, monkeypatch):
     import app.api.report_routes as R
     from app.api.deps import repository

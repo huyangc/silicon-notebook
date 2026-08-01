@@ -1088,6 +1088,7 @@ class RepositoryRuntime:
         Deliberately NO restart recovery: a dead process leaves the report row
         at its last persisted status."""
         from app.services.report_engine import ReportEngine, ReportEngineDependencies
+        from app.services.report_corpus_profile import ReportCorpusProfileService
 
         def engine_factory(
             *, user_id: str, cancel_event=None, settings=None
@@ -1109,6 +1110,7 @@ class RepositoryRuntime:
                 settings=engine_settings,
                 event_log=self.event_log,
                 memory_retriever=self.memory_retriever,
+                corpus_profile=ReportCorpusProfileService(self.source_store),
             )
             return ReportEngine(
                 dependencies, user_id=user_id, cancel_event=cancel_event

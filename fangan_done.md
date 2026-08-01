@@ -388,8 +388,9 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **内容感知列宽与补全回归**：主表继续使用 fixed layout、横向滚动与 sticky 首列，通过 `colgroup` 应用 memoized 宽度；只采样可见物理行前 48 + 后 16（最多 64），每格最多 8 行/每行 120 grapheme，按 Markdown 可见文本与 CJK/全角/emoji、ASCII、标点、空白权重估算，并套 desktop/窄屏 clamp，状态列固定。本次未增加拖拽或持久化。既有“智能补全空列”仍是零新增：行详情与矩阵物理分支入口保留，只补缺省/精确空串，纯空白和已有内容不可覆盖，最多 8 条同表参考、一次有界推理检索、最多 20 项且逐项接受。
 - **验证**：新增/相关前端 Node 583 项、组件 13 项、后端专项 175 项通过；分拆完整后端（排除需本机端口的生命周期文件）6579 项通过、341 项跳过，生命周期 9 项在沙箱外串行通过；`npm run build` 通过。最终以 `BACKEND_PYTEST_WORKERS=1` 运行完整 `scripts/check.sh` 退出 0，`git diff --check` 通过。
 
-## 20. 当前边界（后续阶段，未计入已完成）
+- **深度报告可信度与全篇综合（§6.7 / §11 延伸，2026-08-01）**：共享意图合同现在保留 `result_scope`/`completeness_required`，完整枚举未接入时如实披露相关性检索边界；规划、正文与界面共用完整来源计数、保守可区分资料、重复/元数据/时间边界画像。充分性不再由对象命中数授权，高风险事实句接受同句锚点审计，参考文献披露集中度。比较/综述可确认正交框架；详尽/穷尽档先完成全部章节检索，再以至多一次全局综合蓝图统一定义、条件、反证与章节 owner，随后才并行写作，主张账本、趋势资料数封顶和跨节冲突供终审只审计。所有可选结构畸形均回退旧路径，不新增 migration；SQLite 与 PostgreSQL、前端全量测试/build、删除与移动变异验证均通过。
 
+## 20. 当前边界（后续阶段，未计入已完成）
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。
 - **v0.4 Review Mode**：review session、场景 checklist sign-off、reviewer 评论、action items、导出 review 报告。
 - **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。

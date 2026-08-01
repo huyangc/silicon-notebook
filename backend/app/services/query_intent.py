@@ -625,6 +625,7 @@ def confirmed_research_question(
     fallback: str,
     *,
     objective_is_authoritative: bool = False,
+    include_assumptions: bool = True,
 ) -> str:
     """Combine reviewed wording and explicit answers for every retrieval plane."""
     objective = str(intent_contract.get("objective") or fallback).strip()
@@ -657,12 +658,17 @@ def confirmed_research_question(
         supplements.append("必须覆盖的问题：\n" + "\n".join(
             f"- {topic[:1000]}" for topic in topics
         ))
-    for label, key in (
+    scoped_fields = [
         ("比较维度", "comparison_axes"),
         ("约束条件", "constraints"),
         ("明确排除范围", "excluded_topics"),
-        ("成立前提", "assumptions"),
-    ):
+    ]
+    # Reports keep model-suggested assumptions visible to writers and auditors,
+    # but do not lexicalise them into retrieval.  Other consumers retain the
+    # historical combined query by default.
+    if include_assumptions:
+        scoped_fields.append(("成立前提", "assumptions"))
+    for label, key in scoped_fields:
         values = _bounded_strings(intent_contract.get(key))
         if values:
             supplements.append(f"{label}：" + "、".join(values))

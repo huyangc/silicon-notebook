@@ -12,6 +12,10 @@ class ReportCreate(BaseModel):
 
 class ReportOutlineUpdate(BaseModel):
     sections: List[dict] = Field(default_factory=list)
+    # Optional comparison/classification frame confirmed with the outline.  The
+    # service layer applies the bounded semantic validator; keeping this field
+    # additive preserves old clients and persisted reports.
+    frame: dict | None = None
 
 
 class ReportGenerateRequest(BaseModel):
