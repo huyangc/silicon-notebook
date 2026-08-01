@@ -280,6 +280,119 @@ def test_deep_dive_merges_the_outline_bound_truncated_objects(repo, monkeypatch)
     assert [hit.object_id for hit in result.top_hits] == ["o-kept", "o-extra"]
 
 
+# ------------------------------ 方向合并后的最终选集上限(codex R1 P2-1)
+
+def _merge_stubs(monkeypatch, repo, run_hits, per_direction=10, hot=None):
+    """run 返回 ``run_hits``;每个方向再补 ``per_direction`` 条 KG 与 8 个元素。"""
+    def _run(self, notebook_id, question, history="", **kwargs):
+        return ReasoningResult(top_hits=list(run_hits))
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, query: (
+            [SimpleNamespace(object_id=f"{query}-hot", relevance=0.99)]
+            if query == hot else []
+        ) + [SimpleNamespace(object_id=f"{query}-{index}", relevance=0.5)
+             for index in range(per_direction)])
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements",
+        lambda nb, query, limit=8: [
+            SimpleNamespace(element_id=f"{query}-e{index}", score=0.5)
+            for index in range(limit)])
+
+
+def test_the_merged_directions_are_clamped_to_the_levels_final_cap(repo, monkeypatch):
+    """P2-1:逐方向补检索的合并结果绕过了档位的最终选集上限。
+
+    档位贯通此前只做到 `run()` 为止:run 内部按 `ranked_final_*` 夹好选集,
+    `_deep_dive` 随后按已确认方向逐条追加(每方向一批 KG + 8 个元素)。概览档买到
+    的是 12 条 KG / 4 个原文段的预算,4 个方向却能让合并结果翻几倍——用户在滑块
+    上选的那一档说了不算。方向仍逐条真执行(那是合同),只在合并之后压回上限。
+    """
+    limits = ask_retrieval_limits("overview")
+    assert (limits.ranked_final_cap, limits.answer_element_items) == (12, 4)
+    run_hits = [SimpleNamespace(object_id=f"run-{index}", relevance=0.9)
+                for index in range(limits.ranked_final_cap)]
+    _merge_stubs(monkeypatch, repo, run_hits, hot="b")
+    engine = _engine(repo, _SectionLLM())
+    section = {"title": "t", "scope": "s", "sub_queries": ["a", "b", "c", "d"]}
+
+    result = engine._deep_dive("nb", section, "Q", depth=1)
+
+    assert len(result.top_hits) == 12
+    assert len(result.elements) == 4
+    # 截断按**相关度降序**,不是按插入序砍尾巴:某个方向补进来的高分命中要能挤掉
+    # run 选集里较弱的一条,否则「方向也是证据」这句话在预算里不成立。
+    assert [hit.object_id for hit in result.top_hits] == (
+        ["b-hot"] + [f"run-{index}" for index in range(11)])
+    # 方向照常逐条执行,账目记的是它真的找到多少(不是被截断后剩下多少)。
+    assert [row["query"] for row in result.attempted] == ["a", "b", "c", "d"]
+    assert [row["new"] for row in result.attempted] == [18, 19, 18, 18]
+
+
+def test_the_clamp_leaves_the_outline_bound_objects_alone(repo, monkeypatch):
+    """大纲绑定对象豁免截断:它们的相关度被 retriever 刻意夹到选集最低分以下,
+    一起排序必然垫底 —— 跟着截断等于把「被挤出去、但模型指名要」的那批再删一次。
+    Ask 侧同样把它们放在 top_hits 选集之外,这里是同一条规则。"""
+    limits = ask_retrieval_limits("exhaustive")
+    run_hits = [SimpleNamespace(object_id=f"run-{index}", relevance=0.9)
+                for index in range(limits.ranked_final_cap)]
+    bound = SimpleNamespace(object_id="o-bound", relevance=0.01)
+
+    def _run(self, notebook_id, question, history="", **kwargs):
+        return ReasoningResult(top_hits=list(run_hits), outline_evidence=[bound])
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, query: [SimpleNamespace(object_id=f"{query}-{index}",
+                                           relevance=0.5)
+                           for index in range(10)])
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements",
+                        lambda nb, query, limit=8: [])
+    engine = _engine(repo, _SectionLLM())
+
+    result = engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["a", "b"]}, "Q", depth=16)
+
+    ids = [hit.object_id for hit in result.top_hits]
+    assert len(ids) == limits.ranked_final_cap + 1        # 上限 + 豁免的那一条
+    assert ids[-1] == "o-bound"
+    assert ids.count("o-bound") == 1
+
+
+def test_a_section_under_the_cap_is_left_byte_identical(repo, monkeypatch):
+    """没超上限就一个字节都不动:未超限时重排没有取舍可做,却会改变上下文渲染
+    顺序——那是与本修复无关、五档全会碰上的行为变化。"""
+    run_hits = [SimpleNamespace(object_id=f"run-{index}", relevance=0.1 * index)
+                for index in range(5)]
+    _merge_stubs(monkeypatch, repo, run_hits, per_direction=2)
+    engine = _engine(repo, _SectionLLM())
+
+    result = engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["a"]}, "Q", depth=16)
+
+    assert [hit.object_id for hit in result.top_hits] == (
+        [f"run-{index}" for index in range(5)] + ["a-0", "a-1"])
+    assert [item.element_id for item in result.elements] == [
+        f"a-e{index}" for index in range(8)]
+
+
+def test_the_clamp_is_off_for_callers_without_a_depth(repo, monkeypatch):
+    """没有深度的调用方保持接入前的「无 limits」:不选档就没有档位上限可执行。"""
+    run_hits = [SimpleNamespace(object_id=f"run-{index}", relevance=0.9)
+                for index in range(40)]
+    _merge_stubs(monkeypatch, repo, run_hits)
+    engine = _engine(repo, _SectionLLM())
+
+    result = engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["a", "b"]}, "Q")
+
+    assert len(result.top_hits) == 60
+    assert len(result.elements) == 16
+
+
 def test_a_real_outline_action_reaches_the_section_writer(repo):
     """端到端:节深挖的 reflect 真的返回 `update_outline` → `ReasoningResult.outline`
     → 「发现的结构」进节撰写 prompt。
@@ -503,6 +616,114 @@ def test_draft_section_without_an_outline_keeps_the_prompt_unchanged(repo):
     assert "Discovered structure" not in llm.section_prompts[0]
 
 
+# ---------------------------- 撰写上下文预算随档位缩放(codex R1 P2-2)
+
+def _claims_with_definitions(repo, notebook_id, count, *, chars=400):
+    """建 count 条**带证据元素**的知识对象。
+
+    元素正文会成为 `node_context` 的 definition,KG 上下文的每一行才真的很长
+    (无证据的对象只渲染出一行 ~50 字符的名字,4000/6000/16000 三个预算在它上面
+    看不出任何区别——那样的用例删掉预算改动照样全绿)。
+    """
+    source_id = f"src-def-{count}"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, "长文", "markdown", "extracted",
+             "extracted", NOW, NOW))
+        for index in range(count):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"el-{index:03d}", source_id, "paragraph", f"p{index}",
+                 "论" * chars, "{}", NOW))
+    objects = [{"local_id": f"D{index}", "object_type": "claim",
+                "payload": {"name": f"论断{index:03d}", "section_path": "1"},
+                "evidence": [{"element_id": f"el-{index:03d}"}]}
+               for index in range(count)]
+    repo.store_kg(notebook_id, None, objects, [])
+    return [obj["_oid"] for obj in objects]
+
+
+def test_the_section_writing_budget_follows_the_level(repo):
+    """P2-2:撰写上下文的预算此前是定值(KG 6000 / chunk 20000),与档位无关。
+
+    检索按档缩放、装配却不缩放,等于让用户在「穷尽」上付的钱只买到一半——多检索
+    到的证据在装配这一步被同一把旧尺子截掉。这里量的是**真进 prompt 的条数**而不是
+    传参:60 条带 300 字符定义的知识对象下,概览(4000)< 旧定值(6000)< 穷尽(16000)
+    必须逐级更多。
+    """
+    notebook = _notebook(repo)
+    object_ids = _claims_with_definitions(repo, notebook.id, 60)
+    hits = [RetrievedKnowledge(object_id=object_id, object_type="claim",
+                               payload={"name": f"论断{index:03d}"}, relevance=0.9)
+            for index, object_id in enumerate(object_ids)]
+    counts: dict = {}
+    blocks: dict = {}
+
+    for depth in (1, None, 16):
+        llm = _SectionLLM()
+        engine = _engine(repo, llm)
+        engine._draft_section(notebook.id,
+                              {"title": "A", "scope": "sa", "sub_queries": ["q"]},
+                              "Q", ReasoningResult(top_hits=hits), depth)
+        prompt = llm.section_prompts[0]
+        counts[depth] = len(re.findall(r"\nk\d+: \[claim\]", prompt))
+        blocks[depth] = re.search(
+            r"Knowledge items \(id: \[type\]\[tier\] name — context\):\n(.*?)\n\n",
+            prompt, re.S).group(1)
+
+    # depth=None 是旧的固定 6000,夹在概览与穷尽之间——三者逐级递增同时证明了
+    # 「预算随档位走」和「不选档的调用方没被改掉」。
+    assert counts[1] < counts[None] < counts[16]
+    assert counts[16] > 2 * counts[None]        # 16000 / 6000,不是抖动
+    assert len(blocks[1]) <= ask_retrieval_limits("overview").kg_context_chars
+    assert len(blocks[16]) <= ask_retrieval_limits("exhaustive").kg_context_chars
+    # 穷尽档确实吃到了它那一档的预算(而不是刚过 6000 就停)。
+    assert len(blocks[16]) > ask_retrieval_limits("exhaustive").kg_context_chars - 500
+
+
+def test_every_writing_budget_is_the_levels_own_number(repo, monkeypatch):
+    """三份预算(chunk / KG / 直接原文段)与元素条数都取自所选档位。
+
+    上面那条用例量的是 KG 的可观测结果;这一条把另外两份预算与 `answer_element_items`
+    钉在传参上——它们各自的可观测面(超长 chunk / 元素择优)要么很贵、要么在别处
+    已有同口径用例。
+    """
+    limits = ask_retrieval_limits("exhaustive")
+    context = ReportEngine.from_repository(repo, repo.settings).dependencies.evidence_context
+    seen: dict = {}
+    monkeypatch.setattr(context, "chunk_context",
+                        lambda chunks, *, notebook_id, budget_chars=None:
+                        (seen.__setitem__("chunk", budget_chars), ("(none)", {}))[1])
+    monkeypatch.setattr(context, "knowledge_context",
+                        lambda notebook_id, hits, *, id_offset=0, budget_chars=None:
+                        (seen.__setitem__("kg", budget_chars), ("(none)", {}))[1])
+    monkeypatch.setattr(context, "element_context",
+                        lambda elements, *, notebook_id, id_offset=4000,
+                        budget_chars=None: (
+                            seen.__setitem__("element", budget_chars),
+                            seen.__setitem__(
+                                "element_ids",
+                                [item.element_id for item in elements]),
+                            ("(none)", {}))[2])
+    engine = _engine(repo, _SectionLLM())
+    elements = [SimpleNamespace(element_id=f"e{index:02d}", score=index / 100.0)
+                for index in range(40)]
+
+    engine._draft_section("nb", {"title": "A", "scope": "sa", "sub_queries": ["q"]},
+                          "Q", ReasoningResult(elements=elements), 16)
+
+    assert seen["chunk"] == limits.chunk_context_chars == 120000
+    assert seen["kg"] == limits.kg_context_chars == 16000
+    assert seen["element"] == max(2000, limits.chunk_context_chars // 3)
+    # 元素择优:相关度降序、tie-break element_id(与 Ask 侧逐字同一把键),不是
+    # 按插入序切片——按插入序会静默丢掉最相关的那几个。
+    assert seen["element_ids"] == [
+        f"e{index:02d}" for index in range(39, 39 - limits.answer_element_items, -1)]
+
+
 # -------------------------------------- 大纲绑定证据的 KG 上下文子预算(P1)
 
 def _claims(repo, notebook_id, count):
@@ -684,9 +905,11 @@ def test_the_section_phase_shows_the_outline_progress(repo, monkeypatch):
         return ReasoningResult()
 
     monkeypatch.setattr(engine, "_deep_dive", _dive)
+    # 签名镜像真方法(含 PR#418 R1 P2-2 加的 depth):替身少一个参数就会把整节
+    # 打成「失败」,而这条用例断言的正是 phase 文案。
     monkeypatch.setattr(engine, "_draft_section",
-                        lambda nb, section, q, result: {"title": section["title"],
-                                                        "markdown": "x"})
+                        lambda nb, section, q, result, depth=None: {
+                            "title": section["title"], "markdown": "x"})
     report_id = repo.create_report(notebook.id, "Q", depth=16)
     outline = [{"title": "有大纲的一节", "scope": "s", "sub_queries": ["q"]},
                {"title": "没大纲的一节", "scope": "s", "sub_queries": ["q"]}]

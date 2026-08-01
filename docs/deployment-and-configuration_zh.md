@@ -390,6 +390,18 @@ EXACT_SECTION_RESERVE      # mix 最终选择为这些块预留的席位，仍�
 所以调大这四项已经不会让报告更宽，要更宽请调高研究深度。逐步推理的 `mix`/`graph`
 模式，以及任何不带档位的推理调用，仍照旧读取它们。
 
+报告节此前从配置取的两项**上下文装配**预算同理，改由档位自己的数值决定：
+
+* `ANSWER_CONTEXT_BUDGET_CHARS`——不再是报告节的 KG 上下文预算（改由档位的
+  `kg_context_chars` 决定：4000/6000/8000/12000/16000）。它仍然决定逐步推理答案
+  上下文的预算。
+* `REPORT_SECTION_CHUNK_BUDGET`——报告带研究深度时不再读取（改由档位的
+  `chunk_context_chars` 决定：12000/30000/50000/80000/120000；直接原文段的字符
+  子预算仍按同一比例从它派生）。不带深度的调用方仍用它。
+
+报告节进入 prompt 的直接原文段条数同样按档位的 `answer_element_items` 封顶
+（4/6/8/12/16），并按检索相关度择优而非插入序切片。
+
 **精确标识符通道：**问题里点到可精确查找的名称（`set_db`、`place_opt_design`、
 `config.yaml`）时，检索先精确定位它所在的小节，再把整节取齐，避免一条命令的参数表
 和示例被切散后又被预算截掉。
@@ -522,7 +534,7 @@ KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 t
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）
 KG_CONCEPT_DESC_ENABLED      # LLM 融合跨文档概念簇描述（默认 true）
 KG_COMMUNITY_SUMMARY_ENABLED # rebuild 期生成 LLM 社区报告（社区层；默认 false）
-ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000）
+ANSWER_CONTEXT_BUDGET_CHARS  # 答案上下文装配字符预算（默认 6000；深度报告的节不再读取，见检索段的行为变化说明）
 ANSWER_CONTEXT_MIN_ITEMS     # 不论预算至少保留 N 条（默认 3）
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF 排序，替代关键词+语义融合（默认 false）
 RETRIEVAL_RRF_K              # RRF 的 k（默认 60）
@@ -545,7 +557,7 @@ MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
 MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
 MAX_TOTAL_TOKENS             # mix 总上下文 token 预算（默认 30000）
 REPORT_MAX_SECTIONS          # 深度报告大纲：最大章节数（默认 6）
-REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000）
+REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（默认 20000；仅对不带研究深度的调用方生效，见检索段的行为变化说明）
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 max_tokens（默认 8192）
 REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通识，行内标注且提示未经验证，默认 true）
 ```

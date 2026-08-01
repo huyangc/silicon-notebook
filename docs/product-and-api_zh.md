@@ -408,6 +408,8 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 
 **行为变化，显式登记。** 因为此前不论 depth 取值，检索预算都固定在 `standard`，所以低档位（1、2）现在的检索预算比接入前更小，高档位（8、16）现在的检索预算比接入前更大。这是把同名档位的语义对齐（同一个档名在 Ask 与深度报告两处买到同一份相关性/上下文预算）的修复，不是回归。
 
+**档位管的是整节，不只是 `run()`。** 检索之后还有两段此前不看滑块、按定值跑，等于 `run()` 刚兑现的档位又被送了回去。两段现在同样随档位缩放：(a) 按方向补检索的**合并**——每条已确认检索方向仍然逐条真执行，但合并结果按该档的 `ranked_final_cap`（知识对象，按相关度降序）与 `answer_element_items`（直接原文段，相关度降序、tie-break `element_id`）重新截断，4 个方向不再能把概览档的报告顶到它自己的上限之外；大纲绑定的对象豁免该截断，与它们在 Ask 侧位于 `top_hits` 选集之外是同一条规则。(b) 节撰写上下文——KG 块用 `kg_context_chars`、原文块用 `chunk_context_chars`、最多 `answer_element_items` 条直接原文段进 prompt（按相关度择优而非插入序），不再是 `ANSWER_CONTEXT_BUDGET_CHARS` / `REPORT_SECTION_CHUNK_BUDGET` 那对定值。
+
 **大纲便签与 KG 弱支撑边回喂在 depth=16（穷尽）时自动激活。** 因为 `outline_wiring_active` 只判 `limits.effort == "exhaustive"` 与 `REASONING_OUTLINE_ENABLED`（见上文）两个条件，报告经 depth 映射到达穷尽档时，每节深挖里会原样激活同一套大纲便签、`update_outline` 反思动作，以及（`REASONING_OUTLINE_KG_GAP_ENABLED` 开启时）弱支撑关系提示——零新增开关、报告侧零专属接线。集合枚举工具在这条路径上仍不可达：报告构造 `ReasoningRetriever` 时不传 `collection_catalog`/`collection_enumeration`，枚举闸不论档位都保持关闭。
 
 **「发现的结构」块（仅节内生效，绝不回写已确认大纲）。** 当某节深挖整理出非空大纲便签时，`_deep_dive` 把终态子大纲连同各子节绑定的证据 key 折成一段有界的「发现的结构」块（≤12 行、行 ≤80 字符、整块 ≤1200 字符；超界按顺序截断并显式记账 `(+N 子节略)`，不静默丢行），作为 `discovered_structure` 传给 `report_section_prompt`。prompt 教撰写模型：这只是一条**建议，不是合同**——可以用 `###` 子标题按此结构组织本节正文，缺证据的子话题必须如实略过，且不得越出本节自己的范围。它绝不增删改用户确认过的节，也绝不触碰 `reports.outline_json`——报告自己确认的大纲（必答主题、节绑定）不受影响。低于 depth 16，或某节深挖没整理出大纲时，该块缺席，prompt 逐字回到接入前的措辞。

@@ -453,6 +453,21 @@ Raising these four therefore no longer widens a report; raise the research depth
 instead. Ask's `mix`/`graph` modes and any reasoning run made without an effort
 level still read them unchanged.
 
+The same applies to the two **context assembly** budgets a report section used to
+size from settings — the level's own numbers replace them:
+
+* `ANSWER_CONTEXT_BUDGET_CHARS` — no longer the report section's KG-context
+  budget (the level's `kg_context_chars` is: 4000/6000/8000/12000/16000). It
+  still sizes Ask's answer context.
+* `REPORT_SECTION_CHUNK_BUDGET` — no longer read when the report supplies a
+  research depth (the level's `chunk_context_chars` is:
+  12000/30000/50000/80000/120000, and the direct-element sub-budget is derived
+  from it as before). It remains the value for callers with no depth.
+
+A report section also admits at most the level's `answer_element_items` direct
+source elements (4/6/8/12/16), chosen by retrieval relevance rather than
+insertion order.
+
 **Exact-identifier fast path:** when a question names something exactly
 lookup-able (`set_db`, `place_opt_design`, `config.yaml`), retrieval first
 locates the section that name occurs in and fetches that whole section, so a
@@ -622,7 +637,7 @@ KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (def
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
 KG_CONCEPT_DESC_ENABLED      # LLM-fuse cross-doc concept-cluster descriptions (default true)
 KG_COMMUNITY_SUMMARY_ENABLED # LLM community reports during rebuild (community layer; default false)
-ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000)
+ANSWER_CONTEXT_BUDGET_CHARS  # answer-context assembly char budget (default 6000; not read by a deep report's sections — see the retrieval behaviour-change note)
 ANSWER_CONTEXT_MIN_ITEMS     # keep >= N items regardless of budget (default 3)
 RETRIEVAL_RRF_ENABLED        # BM25(Okapi)+RRF ranking vs keyword+semantic fusion (default false)
 RETRIEVAL_RRF_K              # reciprocal-rank-fusion k (default 60)
@@ -645,7 +660,7 @@ MAX_ENTITY_TOKENS            # mix KG entity-segment token budget (default 6000)
 MAX_RELATION_TOKENS          # mix KG relation-segment token budget (default 8000)
 MAX_TOTAL_TOKENS             # mix total context token budget (default 30000)
 REPORT_MAX_SECTIONS          # deep-report outline: max sections (default 6)
-REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000)
+REPORT_SECTION_CHUNK_BUDGET  # deep-report: per-section chunk-context char budget (default 20000; only for callers without a research depth — see the retrieval behaviour-change note)
 REPORT_SECTION_MAX_TOKENS    # deep-report: per-section drafting max_tokens (default 8192)
 REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge tier, marked & unverified (default true)
 ```

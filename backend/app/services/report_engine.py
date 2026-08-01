@@ -92,6 +92,66 @@ def report_retrieval_limits(depth: Optional[int]) -> Optional[AskRetrievalLimits
     return ask_retrieval_limits(report_retrieval_effort(int(depth)))
 
 
+# --- 方向合并后的最终选集上限(报告 PR-5,codex PR#418 R1 P2-1)------------
+
+def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> None:
+    """把「按已确认检索方向补检索」合并进来的证据压回所选档位的最终选集上限。
+
+    档位贯通此前只到 `ReasoningRetriever.run` 为止:run 内部按 `ranked_final_*`
+    夹好选集,`_deep_dive` 随后**逐方向**再追加(每方向一批 KG 命中 + 8 个元素),
+    合并结果直接绕过了这个上限 —— 概览档买到的是 12 条 KG 的预算,4 个方向却能
+    让它拿到 4 倍。方向本身照常执行(「已确认方向必须真执行」是合同,这里不动),
+    只在合并**之后**重新截断。
+
+    截断口径与 Ask 侧最终选集一致:KG 按相关度降序、同分保持原顺序;元素按
+    `(-score, element_id)`(逐字照抄 `_answer_reasoning` 的键,两处对同一批元素
+    必须给出同一个前 N,否则 `_draft_section` 的第二道同名闸会挑出另一批)。
+    **没超上限就一个字节都不动**:未超限时重排没有任何取舍可做,却会改变上下文
+    渲染顺序,那是一处与本修复无关、五档全会碰上的行为变化。
+
+    **大纲绑定的对象豁免**(`outline_evidence` 那一批):它们的相关度在 retriever
+    侧被刻意夹到选集最低分以下(见 `outline_truncated_kg_evidence`),按相关度排序
+    必然排在最末 —— 一起参与截断等于把它们再删一次,而它们恰恰是「被选集挤出去、
+    但模型指名要」的那一批。Ask 侧同样把它们放在 `top_hits` 选集之外
+    (`outline_pool_extra` 直接进分类池),所以这里的豁免是同一条规则,不是报告
+    的例外。它们进 prompt 仍由 `knowledge_context_with_outline` 的子预算负责。
+    """
+    if limits is None:
+        return
+    bound = {
+        str(getattr(hit, "object_id", "") or "")
+        for hit in (getattr(result, "outline_evidence", None) or [])
+    }
+    ranked = [
+        hit for hit in result.top_hits
+        if str(getattr(hit, "object_id", "") or "") not in bound
+    ]
+    if len(ranked) > limits.ranked_final_cap:
+        exempt = [
+            hit for hit in result.top_hits
+            if str(getattr(hit, "object_id", "") or "") in bound
+        ]
+        result.top_hits = sorted(
+            ranked, key=lambda hit: -float(getattr(hit, "relevance", 0.0) or 0.0)
+        )[: limits.ranked_final_cap] + exempt
+    if len(result.elements) > limits.answer_element_items:
+        result.elements = rank_elements(
+            result.elements, limits.answer_element_items)
+
+
+def rank_elements(elements: Sequence[Any], keep: int) -> List[Any]:
+    """按检索相关度降序取前 ``keep`` 个直接原文段(tie-break `element_id`)。
+
+    键与 `ask_service._answer_reasoning` 逐字相同:按插入序切片会在检索到的元素
+    多于上限时静默丢掉最相关的那几个。
+    """
+    return sorted(
+        elements,
+        key=lambda element: (-float(getattr(element, "score", 0.0) or 0.0),
+                             str(getattr(element, "element_id", ""))),
+    )[: max(0, int(keep))]
+
+
 # --- 大纲绑定证据的 KG 上下文子预算(报告 PR-5)---------------------------
 # 绑定子集分到的那一份 = 总预算的 1/2(照 ask_service 枚举块 `chunk_context_chars
 # // 2` 的先例)。留一半而不是全给:绑定证据是结构支撑,不是本节证据的全部,
@@ -874,6 +934,7 @@ class ReportEngine:
         # 自动激活大纲便签与弱支撑边回喂(`outline_wiring_active` 判的就是它)——
         # 报告引擎因此不 import 任何大纲内部件。集合枚举保持不可达:构造 retriever
         # 时不传 collection_catalog/collection_enumeration,wiring 判空自动关闭。
+        limits = report_retrieval_limits(depth)
         result = ReasoningRetriever(
             retrieval=deps.retrieval,
             model_clients=deps.model_clients,
@@ -881,7 +942,7 @@ class ReportEngine:
             settings=self.settings,
             cancel_event=self.cancel_event,
         ).run(notebook_id, sec_question, on_step=on_step, max_steps=depth,
-              limits=report_retrieval_limits(depth))
+              limits=limits)
 
         # The outline's approved retrieval directions are execution requirements,
         # not merely prose hints to the reasoning planner.  Merge their bounded
@@ -929,27 +990,44 @@ class ReportEngine:
             if not any(str(row.get("query") or "") == str(query)
                        for row in result.attempted):
                 result.attempted.append({"query": str(query), "new": new_count, "tries": 1})
+        # 方向合并绕过了档位的最终选集上限 —— 每个方向照常执行(账目里的 `new` 记的
+        # 是它真的找到多少),合并后再统一压回上限。
+        clamp_merged_evidence(result, limits)
         return result
 
     # --- Stage C(单节):撰写 ---
-    def _draft_section(self, notebook_id: str, section: dict, question: str, result) -> dict:
+    def _draft_section(self, notebook_id: str, section: dict, question: str, result,
+                       depth=None) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
         deps = self.dependencies
+        # 撰写上下文的预算同样随研究深度走(codex PR#418 R1 P2-2):档位贯通此前只
+        # 到检索为止,而「概览」和「穷尽」此前拿到的是同一份 6000/20000 字符上下文
+        # —— 检索按档缩放、装配却是定值,等于把档位的一半买空。`depth=None` 的调用方
+        # (直接调 `_draft_section` 的测试与冻结调用点)保持旧固定值。
+        limits = report_retrieval_limits(depth)
+        chunk_budget = (limits.chunk_context_chars if limits is not None
+                        else self.settings.report_section_chunk_budget)
+        kg_budget = (limits.kg_context_chars if limits is not None
+                     else self.settings.answer_context_budget_chars)
         chunk_block, chunk_map = deps.evidence_context.chunk_context(
-            result.chunks, notebook_id=notebook_id,
-            budget_chars=self.settings.report_section_chunk_budget)
+            result.chunks, notebook_id=notebook_id, budget_chars=chunk_budget)
         # 本节深挖整理出的子大纲(仅穷尽档非空)。它有两个消费点,顺序不能倒:先决定
         # 谁进 KG 上下文(绑定证据的子预算),再据装配好的 id_map 渲染结构块。
         sub_outline = list(getattr(result, "outline", None) or [])
         kg_block, kg_map = knowledge_context_with_outline(
             deps.evidence_context, notebook_id, result.top_hits, sub_outline,
-            id_offset=len(chunk_map),
-            budget_chars=self.settings.answer_context_budget_chars)
+            id_offset=len(chunk_map), budget_chars=kg_budget)
+        # 直接原文段:条数按档位的 `answer_element_items`,择优规则与 Ask 侧同口径
+        # (相关度降序、tie-break element_id)。字符预算仍是 chunk 预算的 1/3,只是
+        # 基数换成了本档的那一份。
+        elements = list(getattr(result, "elements", []) or [])
+        if limits is not None:
+            elements = rank_elements(elements, limits.answer_element_items)
         element_block, element_map = deps.evidence_context.element_context(
-            list(getattr(result, "elements", []) or []),
+            elements,
             notebook_id=notebook_id,
             id_offset=4000,
-            budget_chars=max(2000, self.settings.report_section_chunk_budget // 3),
+            budget_chars=max(2000, chunk_budget // 3),
         )
         # 现场事实:chunk_context/knowledge_context 空输入返回 "(none)" 哨兵
         # (非空串),先归一再拼接,避免把哨兵当真实证据块。
@@ -1120,7 +1198,8 @@ class ReportEngine:
                 with lock:
                     status[i]["phase"] = "撰写"
                 persist(force=True)
-                drafted = self._draft_section(notebook_id, section, question, result)
+                drafted = self._draft_section(notebook_id, section, question, result,
+                                              depth)
                 with lock:
                     status[i]["phase"] = "完成"
             except AskCancelled:
