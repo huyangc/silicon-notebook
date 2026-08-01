@@ -344,10 +344,14 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 `knowhow:code`，跨 owner 探测一律统一 404、不暴露存在性。判别集按列全量返回（刻意不做语义预筛），
 行详情机器视图把图片剥成占位文本并附代码本体，供外部 Agent 自带判别/修复逻辑消费。
 
-每张 knowhow 表带完整变更历史（`knowhow_changes` + `knowhow_milestones`，schema v26）。15 个写方法
-在各自写事务的最后一步经模块级 `record_change` 追加一条流水，存受影响实体的 before/after 加**变更后的
+每张 knowhow 表带完整变更历史（`knowhow_changes` + `knowhow_milestones`，schema v26）。每个写事务方法
+都在各自写事务的最后一步经模块级 `record_change` 追加一条流水，存受影响实体的 before/after 加**变更后的
 整表指纹**（复用传输守卫的 `_FINGERPRINT_SQL`，覆盖表元/列/行/格子/代码附件、刻意不含时间戳）；一条
-架构守卫（`test_knowhow_history_coverage_guard.py`）保证白名单外的写事务默认报红，防将来新增写路径漏挂。
+架构守卫（`backend/tests/test_knowhow_history_coverage_guard.py`）对 SQLite 与 PostgreSQL 两份
+`KnowhowStore` 各扫一遍，保证白名单外的写事务默认报红，防将来新增写路径漏挂，也防某个后端的 store
+文件搬家后悄悄脱离覆盖。它要求 `record_change` 落在写事务 `with` 块**体内**（挪到块外就丢了
+「数据变更与流水同事务」的原子性，照样报红）；不钉的是它在块内的**位置**，「挂在最后一步」仍由
+代码评审承担。
 回退是纯 delta 反向重放：在一个写事务内先校验当前指纹等于最新流水的指纹（否则中止），从 head 逆序把
 before 写回到目标点（行/列**原样复用 id**，引用跳转与代码附件才不断），再校验结果指纹等于目标点的指纹
 （否则整事务回滚），最后追加一条 `revert` 流水——历史只增不减，故「回退的回退」天然成立。里程碑零快照，
