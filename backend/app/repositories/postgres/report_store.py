@@ -83,14 +83,18 @@ class ReportStore:
 
     def claim_report_generation(self, notebook_id: str, report_id: str) -> bool:
         """Atomically claim one outline-ready report for generation."""
+        now = normalize_timestamp(self.now())
         with self.database.write() as db:
             row = db.execute(
-                "UPDATE reports SET status='generating',progress=%s,updated_at=%s "
+                "UPDATE reports SET status='generating',progress=%s,"
+                "understanding_json=jsonb_set(understanding_json,"
+                "'{_generation_started_at}',%s,true),updated_at=%s "
                 "WHERE id=%s AND notebook_id=%s AND status='outline_ready' "
                 "RETURNING id",
                 (
                     "准备生成",
-                    normalize_timestamp(self.now()),
+                    jsonb(now.isoformat()),
+                    now,
                     report_id,
                     notebook_id,
                 ),
@@ -113,10 +117,15 @@ class ReportStore:
         return row is not None
 
     def row_to_dict(self, row, *, full: bool) -> dict:
+        understanding = dict(json_value(row["understanding_json"], {}))
+        generation_started_at = str(
+            understanding.pop("_generation_started_at", "") or ""
+        )
         d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],
              "status": row["status"], "progress": row["progress"], "error": row["error"],
              "created_by": row["created_by"],
              "created_at": iso_timestamp(row["created_at"]),
+             "generation_started_at": generation_started_at,
              "updated_at": iso_timestamp(row["updated_at"]), "depth": row["depth"],
              "section_count": len(json_value(row["outline_json"], []))}
         if full:
@@ -125,7 +134,7 @@ class ReportStore:
                      gaps=json_value(row["gaps_json"], []),
                      references=json_value(row["references_json"], []),
                      section_status=json_value(row["section_status_json"], []),
-                     understanding=json_value(row["understanding_json"], {}),
+                     understanding=understanding,
                      content_md=row["content_md"])
         return d
 

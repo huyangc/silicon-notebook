@@ -38,11 +38,26 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     rid = r.json()["report_id"]
     lst = client.get(f"/api/notebooks/{nb['id']}/reports").json()
     assert lst[0]["id"] == rid and lst[0]["status"] == "pending"
+    assert lst[0]["created_at"] and lst[0]["updated_at"]
+    assert lst[0]["generation_started_at"] == ""
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["question"] == "为什么?" and "content_md" in detail
+    assert detail["created_at"] and detail["updated_at"]
     assert "references" in detail and detail["references"] == []
     assert detail["depth"] == 8
     assert "section_status" in detail
+    from app.api.deps import repository
+    repo = repository()
+    repo.update_report(nb["id"], rid, status="outline_ready")
+    assert repo.claim_report_generation(nb["id"], rid)
+    repo.update_report(nb["id"], rid, status="done", progress="完成")
+    completed = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert completed["status"] == "done"
+    assert completed["generation_started_at"]
+    assert completed["updated_at"] >= completed["generation_started_at"]
+    assert client.get(f"/api/notebooks/{nb['id']}/reports").json()[0][
+        "generation_started_at"
+    ] == completed["generation_started_at"]
     assert client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel").status_code == 200
     assert client.delete(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 200
     assert client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").status_code == 404

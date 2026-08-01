@@ -35,6 +35,8 @@ class ReportSummary(BaseModel):
     progress: str = ""
     section_count: int = 0
     created_at: str = ""
+    generation_started_at: str = ""
+    updated_at: str = ""
     created_by: str = ""
 
 

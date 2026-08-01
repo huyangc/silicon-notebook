@@ -6223,6 +6223,11 @@
               "title": "Gaps",
               "type": "array"
             },
+            "generation_started_at": {
+              "default": "",
+              "title": "Generation Started At",
+              "type": "string"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -6281,6 +6286,11 @@
               "additionalProperties": true,
               "title": "Understanding",
               "type": "object"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
             }
           },
           "required": [
@@ -6370,6 +6380,11 @@
               "title": "Created By",
               "type": "string"
             },
+            "generation_started_at": {
+              "default": "",
+              "title": "Generation Started At",
+              "type": "string"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -6390,6 +6405,11 @@
             },
             "status": {
               "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
               "type": "string"
             }
           },
@@ -17230,6 +17250,7 @@
       "depth": 2,
       "error": "",
       "gaps": [],
+      "generation_started_at": "",
       "id": "rep-api",
       "outline": [
         {
@@ -17255,7 +17276,8 @@
       ],
       "sections": [],
       "status": "outline_ready",
-      "understanding": {}
+      "understanding": {},
+      "updated_at": "2024-01-02T03:04:05"
     },
     "sharing": {
       "preview": {

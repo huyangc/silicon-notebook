@@ -64,12 +64,17 @@ def test_report_crud_roundtrip(repo):
     assert rid.startswith("rep-")
     detail = repo.get_report(nb.id, rid)
     assert detail["status"] == "pending" and detail["question"].startswith("为什么")
-    repo.update_report(nb.id, rid, status="running", progress="大纲规划中")
+    repo.update_report(nb.id, rid, status="outline_ready", progress="大纲规划完成")
+    assert repo.claim_report_generation(nb.id, rid)
+    started_at = repo.get_report(nb.id, rid)["generation_started_at"]
+    assert started_at
     repo.update_report(nb.id, rid, outline=[{"title": "机理", "scope": "s", "sub_queries": ["q1"]}],
                        sections=[{"title": "机理", "markdown": "md", "grounded": True}],
                        gaps=["缺 X"], content_md="# 报告", status="done", progress="完成")
     detail = repo.get_report(nb.id, rid)
     assert detail["status"] == "done" and detail["content_md"] == "# 报告"
+    assert detail["generation_started_at"] == started_at
+    assert detail["updated_at"] >= started_at
     assert detail["outline"][0]["title"] == "机理" and detail["gaps"] == ["缺 X"]
     lst = repo.list_reports(nb.id)
     assert len(lst) == 1 and lst[0]["id"] == rid and "content_md" not in lst[0]
@@ -1078,6 +1083,8 @@ def test_run_backcompat_plans_then_generates(repo, monkeypatch):
     # (Task 25:引擎读 reports 端口 = runtime 的 ReportStore,桩打在所有者上)
     monkeypatch.setattr(repo._runtime.report_store, "get_report",
                         lambda n,r: {"status":"outline_ready","outline":[{"title":"A"}]})
+    monkeypatch.setattr(repo._runtime.report_store, "claim_report_generation",
+                        lambda n, r: True)
     eng.run("nb","rid","q", auto_generate=True)
     assert calls==["plan","gen"]
 

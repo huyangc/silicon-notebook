@@ -224,6 +224,12 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
             ).fetchone()["n"] == 2
 
         report_id = repository.create_report(notebook.id, "Boot report", depth=1)
+        repository.update_report(notebook.id, report_id, status="outline_ready")
+        assert repository.claim_report_generation(notebook.id, report_id)
+        generation_started_at = repository.get_report(
+            notebook.id, report_id
+        )["generation_started_at"]
+        assert generation_started_at
         repository.update_report(
             notebook.id,
             report_id,
@@ -231,7 +237,10 @@ def test_complete_postgres_repository_smoke_from_empty_schema(
             progress="complete",
             content_md="# PostgreSQL report",
         )
-        assert repository.get_report(notebook.id, report_id)["status"] == "done"
+        completed_report = repository.get_report(notebook.id, report_id)
+        assert completed_report["status"] == "done"
+        assert completed_report["generation_started_at"] == generation_started_at
+        assert completed_report["updated_at"] >= generation_started_at
         assert [item["id"] for item in repository.list_reports(notebook.id)] == [
             report_id
         ]
