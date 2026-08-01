@@ -158,9 +158,13 @@ def clamp_merged_evidence(result: Any, limits: Optional[AskRetrievalLimits]) -> 
         return str(getattr(element, "element_id", "") or "")
 
     if len(result.elements) > limits.answer_element_items:
-        bound_elements = [
-            element for element in result.elements if _element_id(element) in bound
-        ]
+        # 绑定的元素**优先占**席位,但上限是**闭**的(codex PR#418 R6 P2):一份大纲
+        # 最多能绑 96 个键,而穷尽档的元素上限是 16 —— 全部豁免就等于宣布了一个
+        # 「至多 16 条」又送进去几十条。绑定内部同样按 (-score, id) 择优。
+        bound_elements = rank_elements(
+            [element for element in result.elements if _element_id(element) in bound],
+            limits.answer_element_items,
+        )
         others = [
             element for element in result.elements if _element_id(element) not in bound
         ]
@@ -1080,12 +1084,14 @@ class ReportEngine:
         # `outline_structure_block` 里就是一个解析不出的绑定,子话题退成裸标题。
         # 排最前是因为字符预算仍按输入序消耗 —— 与 KG 那边的优先前缀同一个理由。
         if limits is not None:
+            # 与 `clamp_merged_evidence` 同一条规则:绑定优先占席位,但上限是闭的。
+            kept_bound = rank_elements(bound_elements, limits.answer_element_items)
             others = [
                 element for element in elements
                 if str(getattr(element, "element_id", "") or "") not in bound_keys
             ]
-            elements = bound_elements + rank_elements(
-                others, limits.answer_element_items)
+            elements = kept_bound + rank_elements(
+                others, max(0, limits.answer_element_items - len(kept_bound)))
         element_budget = (max(0, chunk_budget - len(chunk_block))
                           if limits is not None else max(2000, chunk_budget // 3))
         element_block, element_map = deps.evidence_context.element_context(
@@ -1281,7 +1287,12 @@ class ReportEngine:
                         status[_i]["phase"] = _deep_phase(_i) if ph == "深挖" else ph
                     if step.step_type == "reflect":
                         status[_i]["step"] += 1
-                persist()
+                # 大纲步强制落库(codex PR#418 R6 P2):它紧跟在同一轮的 reflect 步
+                # 之后发出,2 秒节流几乎总是刚被那一步推过 → 这次写被跳过;而大纲
+                # 步又完全可能是本节的最后一个推理动作,`_deep_dive` 一返回,强制写
+                # 的「撰写」就把内存里的文案盖掉,用户从头到尾看不到「已整理大纲 N
+                # 节」。每节至多 `_MAX_OUTLINE_UPDATES` 次,新增写入是有界的。
+                persist(force=step.step_type == "outline")
 
             try:
                 result = self._deep_dive(notebook_id, section, question, depth, on_step)

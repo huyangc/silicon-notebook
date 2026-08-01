@@ -435,6 +435,38 @@ def test_the_clamp_leaves_outline_bound_elements_alone(repo, monkeypatch):
     assert ids[0] == "e-bound"
 
 
+def test_the_element_cap_stays_closed_even_with_many_bindings(repo, monkeypatch):
+    """绑定优先占席位,但上限是**闭**的(codex PR#418 R6 P2):一份大纲最多能绑 96
+    个键,而穷尽档的元素上限是 16 —— 全部豁免就等于宣布了一个「至多 16 条」又送进
+    去几十条。"""
+    limits = ask_retrieval_limits("exhaustive")
+    bound_elements = [SimpleNamespace(element_id=f"b{index:02d}", score=index / 100.0)
+                      for index in range(40)]
+    others = [SimpleNamespace(element_id=f"e{index}", score=0.99) for index in range(5)]
+
+    def _run(self, notebook_id, question, history="", **kwargs):
+        return ReasoningResult(
+            elements=bound_elements + others,
+            outline=[_section("s1", "一节",
+                              [item.element_id for item in bound_elements[:8]]),
+                     _section("s2", "另一节",
+                              [item.element_id for item in bound_elements[8:16]])])
+
+    monkeypatch.setattr(ReasoningRetriever, "run", _run)
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", lambda nb, query: [])
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements",
+                        lambda nb, query, limit=8: [])
+    engine = _engine(repo, _SectionLLM())
+
+    result = engine._deep_dive(
+        "nb", {"title": "t", "scope": "s", "sub_queries": ["a"]}, "Q", depth=16)
+
+    assert len(result.elements) == limits.answer_element_items
+    # 席位全给了绑定(16 条绑定 ≥ 上限),且绑定内部同样按分数择优。
+    assert [item.element_id for item in result.elements] == [
+        f"b{index:02d}" for index in range(15, -1, -1)][:limits.answer_element_items]
+
+
 def test_an_outline_bound_element_reaches_the_writer_despite_the_cap(repo):
     """撰写那一步也要豁免:`_draft_section` 自己还有一道同名的条数闸。"""
     elements = [RetrievedElement(
@@ -1084,6 +1116,52 @@ def test_without_bindings_the_kg_context_is_a_single_untouched_pass(repo):
         # 关闭态连优先级参数都不传:传一个空 tuple 也是同一个输出,但那会让
         # 「什么都没发生」这件事只能靠端口内部的判空来保证。
         assert calls[0] == (len(hits), 7, 200, (), None)
+
+
+def test_the_outline_progress_survives_the_persist_throttle(repo, monkeypatch):
+    """大纲步必须强制落库(codex PR#418 R6 P2)。
+
+    它紧跟在同一轮的 reflect 步之后发出,2 秒节流几乎总是刚被那一步推过 → 这次写
+    被跳过;而大纲步又完全可能是本节最后一个推理动作,`_deep_dive` 一返回,强制写
+    的「撰写」就把内存里的文案盖掉——于是这个特性可见的那一半在真机上从来不出现。
+    这里的假时钟每次只走 0.1 秒,节流窗**不会**自己过去。
+    """
+    from app.services import report_engine as engine_module
+
+    notebook = _notebook(repo)
+    engine = _engine(repo, _SectionLLM())
+    ticks = iter([index * 0.1 for index in range(10_000)])
+    monkeypatch.setattr(engine_module, "time",
+                        SimpleNamespace(monotonic=lambda: next(ticks)))
+    recorded: list[list[dict]] = []
+    reports_port = engine.dependencies.reports
+    original = reports_port.update_report
+
+    def _spy(notebook_id, report_id, **kwargs):
+        if kwargs.get("section_status") is not None:
+            recorded.append(kwargs["section_status"])
+        return original(notebook_id, report_id, **kwargs)
+
+    monkeypatch.setattr(reports_port, "update_report", _spy)
+
+    def _dive(nb_id, section, question, depth=None, on_step=None):
+        on_step(TraceStep(step_type="reflect", summary="反思"))
+        on_step(TraceStep(step_type="outline", summary="更新大纲: 2 节",
+                          detail={"sections": [{"id": "a"}, {"id": "b"}]}))
+        return ReasoningResult()          # 大纲步就是本节最后一个动作
+
+    monkeypatch.setattr(engine, "_deep_dive", _dive)
+    monkeypatch.setattr(engine, "_draft_section",
+                        lambda nb, section, q, result, depth=None: {
+                            "title": section["title"], "markdown": "x"})
+    report_id = repo.create_report(notebook.id, "Q", depth=16)
+
+    engine._run_sections(notebook.id, report_id,
+                         [{"title": "一节", "scope": "s", "sub_queries": ["q"]}],
+                         "Q", 16)
+
+    phases = [row["phase"] for snapshot in recorded for row in snapshot]
+    assert _OUTLINE_PROGRESS_PHASE in phases
 
 
 # ------------------------------------------- 负向守卫:确认过的大纲不被回写
