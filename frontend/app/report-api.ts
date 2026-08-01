@@ -1,5 +1,5 @@
 import { requestBlob, requestJson } from "./api-client.ts";
-import type { ReportDetailT, ReportSummaryT } from "./report-view.tsx";
+import type { ReportDetailT, ReportFrameT, ReportSummaryT } from "./report-view.tsx";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
 
@@ -39,10 +39,14 @@ export const deleteReport = (nb: string, id: string) =>
     method: "DELETE",
   });
 
-export const updateReportOutline = (nb: string, id: string, sections: unknown[]) =>
+export const updateReportOutline = (
+  nb: string,
+  id: string,
+  payload: { sections: unknown[]; frame?: ReportFrameT },
+) =>
   requestJson<{ status: string; sections: number }>(
     `/notebooks/${nb}/reports/${id}/outline`,
-    { ...options, method: "PATCH", body: JSON.stringify({ sections }) },
+    { ...options, method: "PATCH", body: JSON.stringify(payload) },
   );
 
 export const generateReport = (nb: string, id: string, depth?: number) =>

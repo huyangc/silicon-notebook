@@ -6596,6 +6596,18 @@
         },
         "ReportOutlineUpdate": {
           "properties": {
+            "frame": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Frame"
+            },
             "sections": {
               "items": {
                 "additionalProperties": true,

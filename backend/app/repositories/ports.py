@@ -2055,13 +2055,11 @@ class MemoryStorePort(Protocol):
 
 
 class ReportSourceQueryPort(Protocol):
-    """Report corpus-map recon projection over sources (Task 25): title-only
-    rows in creation order, capped — the deep-report engine's 0-LLM 语料侦察
-    read (SQL frozen from the facade's inline query)."""
+    """Complete visible-source projection for deterministic report profiling."""
 
     def report_source_rows(
         self, notebook_id: str
-    ) -> list[dict[str, str]]: ...
+    ) -> list[dict[str, Any]]: ...
 
 
 class ContentOverviewMemoryStorePort(Protocol):

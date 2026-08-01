@@ -23,7 +23,7 @@ from app.core.config import Settings
 from app.models.ask import TraceStep
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
-from app.services.prompts import report_section_prompt
+from app.services.prompts import REPORT_SECTION_SCHEMA_HINT, report_section_prompt
 from app.services.reasoning_retrieval import (
     OUTLINE_ACTION, OutlineSection, ReasoningResult, ReasoningRetriever,
     outline_wiring_active,
@@ -716,7 +716,7 @@ def test_the_section_prompt_is_byte_identical_without_the_block():
     assert report_section_prompt("T", "S", "Q", "CTX",
                                  discovered_structure="") == base
     assert "Discovered structure" not in base
-    assert base.endswith('Return JSON only: {"markdown":"","grounded":true|false}')
+    assert base.endswith(f"Return JSON only: {REPORT_SECTION_SCHEMA_HINT}")
 
 
 def test_the_section_prompt_teaches_the_block_as_a_suggestion():

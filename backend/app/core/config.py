@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     # 【通识】层:允许报告引入库外参数知识(行内标注,仅报告管线读取)。
     report_allow_parametric: bool = Field(
         True, validation_alias="REPORT_ALLOW_PARAMETRIC")
+    # Deterministic citation audit for numeric/complexity/absolute/ranking
+    # assertions.  A section above this unsupported ratio cannot be grounded.
+    report_high_risk_unsupported_ratio: float = Field(
+        0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias="REPORT_HIGH_RISK_UNSUPPORTED_RATIO",
+    )
     # 节间并行度复用 kg_job_concurrency(节深挖无耦合;尊重全局限流退避)。
 
     # --- 跨文档社区层(communities;GraphRAG 式社区检测 + 兄弟扩展) ---

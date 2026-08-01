@@ -546,6 +546,145 @@ def test_run_sections_concurrency_uses_report_section_parallelism(repo, monkeypa
     assert seen["max"] == 4          # 4 节 ≤ 上限5 → 全并行
 
 
+def test_detailed_report_retrieves_all_sections_then_synthesizes_once_before_writing(
+    repo, monkeypatch,
+):
+    """The report-wide barrier is the anti-stitching contract, not prompt advice."""
+    from types import SimpleNamespace
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    monkeypatch.setattr(
+        eng.dependencies.model_clients, "parallelism", lambda _workload: 3
+    )
+    events = []
+    import threading as _t
+    barrier = _t.Barrier(3, timeout=5)
+    lock = _t.Lock()
+
+    def _deep(_nb, section, _question, depth=None, on_step=None):
+        barrier.wait()
+        with lock:
+            events.append(f"retrieve:{section['title']}")
+        return SimpleNamespace(top_hits=[], elements=[], chunks=[])
+
+    blueprint = {
+        "central_answer": "one argument", "shared_definitions": [],
+        "claims": [],
+        "sections": [
+            {"section_id": f"section-{i}", "thesis": title,
+             "claim_ids": [], "must_contrast": [], "handoff": "",
+             "do_not_repeat": []}
+            for i, title in enumerate(("A", "B", "C"), 1)
+        ],
+    }
+
+    def _synthesize(outline, results, question, frame):
+        assert len([event for event in events if event.startswith("retrieve:")]) == 3
+        events.append("synthesis")
+        return blueprint
+
+    def _draft(_nb, section, _question, _result, depth=None, **kwargs):
+        assert "synthesis" in events
+        assert kwargs["synthesis"]["section"]["thesis"] == section["title"]
+        with lock:
+            events.append(f"draft:{section['title']}")
+        return {"title": section["title"], "scope": "s", "markdown": "## x",
+                "grounded": False, "id_map": {}, "claims": [],
+                "claim_ledger_status": "missing"}
+
+    monkeypatch.setattr(eng, "_deep_dive", _deep)
+    monkeypatch.setattr(eng, "_synthesize_report_blueprint", _synthesize)
+    monkeypatch.setattr(eng, "_draft_section", _draft)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    outline = [
+        {"title": title, "scope": "s", "sub_queries": [title]}
+        for title in ("A", "B", "C")
+    ]
+    sections = eng._run_sections(nb.id, rid, outline, "q", depth=8)
+    assert events.count("synthesis") == 1
+    assert max(events.index(event) for event in events if event.startswith("retrieve:")) < events.index("synthesis")
+    assert events.index("synthesis") < min(
+        events.index(event) for event in events if event.startswith("draft:")
+    )
+    assert sections[0]["_synthesis_blueprint"] == blueprint
+
+
+def test_standard_report_adds_no_report_wide_model_call(repo, monkeypatch):
+    from types import SimpleNamespace
+
+    eng = _mk_engine(repo, _OutlineLLM())
+    monkeypatch.setattr(
+        eng, "_deep_dive",
+        lambda *args, **kwargs: SimpleNamespace(top_hits=[], elements=[], chunks=[]),
+    )
+    monkeypatch.setattr(
+        eng, "_synthesize_report_blueprint",
+        lambda *args, **kwargs: pytest.fail("standard depth must not synthesize"),
+    )
+    monkeypatch.setattr(
+        eng, "_draft_section",
+        lambda _nb, section, *_args, **_kwargs: {
+            "title": section["title"], "scope": "s", "markdown": "## x",
+            "grounded": False, "id_map": {}, "claims": [],
+            "claim_ledger_status": "missing",
+        },
+    )
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    sections = eng._run_sections(
+        nb.id, rid, [{"title": "A", "scope": "s", "sub_queries": ["A"]}],
+        "q", depth=2,
+    )
+    assert "_synthesis_blueprint" not in sections[0]
+
+
+def test_malformed_report_synthesis_fails_open_to_independent_drafting(repo, monkeypatch):
+    from types import SimpleNamespace
+
+    class _MalformedBlueprintLLM(_OutlineLLM):
+        def __init__(self):
+            super().__init__()
+            self.synthesis_calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "EVIDENCE SYNTHESIZER" in messages[-1]["content"]:
+                self.synthesis_calls += 1
+                return '{"claims":[{"evidence_keys":["invented"]}]}'
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    llm = _MalformedBlueprintLLM()
+    eng = _mk_engine(repo, llm)
+    hit = SimpleNamespace(
+        object_id="o1", object_type="Claim", relevance=0.9,
+        payload={"name": "claim", "definition": "evidence"},
+    )
+    monkeypatch.setattr(
+        eng, "_deep_dive",
+        lambda *args, **kwargs: SimpleNamespace(
+            top_hits=[hit], elements=[], chunks=[]
+        ),
+    )
+    draft_options = []
+
+    def _draft(_nb, section, *_args, **kwargs):
+        draft_options.append(kwargs)
+        return {"title": section["title"], "scope": "s", "markdown": "## x",
+                "grounded": False, "id_map": {}, "claims": [],
+                "claim_ledger_status": "missing"}
+
+    monkeypatch.setattr(eng, "_draft_section", _draft)
+    nb = _mk_nb(repo)
+    rid = repo.create_report(nb.id, "q")
+    sections = eng._run_sections(
+        nb.id, rid, [{"title": "A", "scope": "s", "sub_queries": ["A"]}],
+        "q", depth=8,
+    )
+    assert llm.synthesis_calls == 1
+    assert "synthesis" not in draft_options[0]
+    assert "_synthesis_blueprint" not in sections[0]
+
+
 def test_run_sections_writes_section_status(repo, monkeypatch):
     """每节完成后 section_status 落库,各节 phase=完成。"""
     eng = _mk_engine(repo, _OutlineLLM())
@@ -947,6 +1086,35 @@ def test_plan_outline_produces_enriched_outline_ready(repo, monkeypatch):
     sec = d["outline"][0]
     assert sec["title"]=="机理" and sec["perspectives"]==["领域专家"]
     assert sec["sufficiency"]=="薄弱" and sec["action"]=="supplement"
+
+
+def test_storm_comparison_frame_is_bounded_and_attached_to_the_outline(repo):
+    class _FrameLLM(_OutlineLLM):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "PRE-WRITING" in messages[-1]["content"]:
+                return json.dumps({
+                    "sections": [{"title": "比较", "scope": "同口径比较",
+                                  "sub_queries": ["A", "B"],
+                                  "intent_ids": ["intent-1"]}],
+                    "frame": {
+                        "subject_kind": "模型实例",
+                        "facets": [{"id": "mixer", "name": "序列建模机制",
+                                    "values": ["Attention", "SSM"],
+                                    "exclusive": True}],
+                        "axes": [{"id": "cost", "name": "效率",
+                                  "condition_fields": ["上下文长度"]}],
+                        "instance_policy": "实例可组合不同层级机制",
+                    },
+                })
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    eng = _mk_engine(repo, _FrameLLM())
+    sections = eng._storm_outline(
+        "nb", "compare A and B", "", "MAP",
+        intent_contract={"intent_type": "compare", "entities": ["A", "B"]},
+        intent_probe=[],
+    )
+    assert sections[0]["report_frame"]["facets"][0]["id"] == "mixer"
 
 
 def test_plan_outline_freezes_intent_before_corpus_scout(repo, monkeypatch):

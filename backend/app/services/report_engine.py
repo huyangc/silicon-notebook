@@ -27,6 +27,22 @@ from app.core.ask_retrieval_policy import (
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.report_execution import REPORT_CANCELLATIONS
+from app.services.report_corpus_profile import (
+    ReportCorpusProfileService,
+    corpus_profile_planner_block,
+    corpus_profile_reader_markdown,
+)
+from app.services.report_synthesis import (
+    annotate_trend_evidence,
+    blueprint_for_section,
+    exclusive_frame_conflicts,
+    fair_editor_context,
+    localize_blueprint_evidence,
+    normalize_claim_ledger,
+    normalize_report_frame,
+    normalize_synthesis_blueprint,
+    synthesis_evidence_payload,
+)
 
 if TYPE_CHECKING:
     from app.core.config import Settings
@@ -49,6 +65,104 @@ _GENERIC_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
+
+_HIGH_RISK_NUMBER = re.compile(
+    r"(?<![\w])\d+(?:[.,]\d+)?\s*(?:%|％|ms|s|秒|分钟|小时|天|KB|MB|GB|TB|"
+    r"K|M|B|万|亿|token(?:s)?|参数|倍|层|篇|份|个)?(?!\w)",
+    re.IGNORECASE,
+)
+_HIGH_RISK_COMPLEXITY = re.compile(r"\bO\s*\([^\n)]{1,80}\)", re.IGNORECASE)
+_HIGH_RISK_ASSERTION = re.compile(
+    r"(?:最(?:高|低|快|慢|强|弱|优|差|大|小)|第一|唯一|全部|所有|均|必然|"
+    r"显著(?:高于|低于|优于|劣于)|优于|劣于|高于|低于|排名|排序|"
+    r"best|worst|fastest|slowest|all|always|never|significantly\s+"
+    r"(?:better|worse|higher|lower)|outperform(?:s|ed)?)",
+    re.IGNORECASE,
+)
+
+
+def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
+                               max_unsupported_ratio: float) -> dict[str, Any]:
+    """Audit citation presence for deterministically recognisable risky prose.
+
+    This is intentionally narrower than semantic fact checking: it catches
+    numbers, complexity, absolute and ranking assertions, and only credits a
+    citation marker in the same sentence/Markdown table row whose keys all bind
+    to the writer's evidence map.
+    """
+    assertions: list[str] = []
+    unsupported_samples: list[str] = []
+    supported = 0
+    in_code = False
+    for raw_line in str(markdown or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("```") or line.startswith("~~~"):
+            in_code = not in_code
+            continue
+        if (
+            not line or in_code or line.startswith("#")
+            or line.startswith("$$") or line.startswith("\\[")
+            or "（推断）" in line or "【通识】" in line
+            or re.fullmatch(r"[-:|\s]+", line)
+        ):
+            continue
+        # Preserve a Markdown table row as one assertion unit; prose uses
+        # punctuation boundaries so a citation on the next sentence cannot
+        # accidentally support the previous one.
+        units = [line] if line.startswith("|") else re.split(r"(?<=[。！？!?；;])\s*", line)
+        for sentence in units:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            without_markers = _MARKER.sub("", sentence)
+            if not (
+                _HIGH_RISK_COMPLEXITY.search(without_markers)
+                or _HIGH_RISK_NUMBER.search(without_markers)
+                or _HIGH_RISK_ASSERTION.search(without_markers)
+            ):
+                continue
+            assertions.append(sentence[:500])
+            markers = _MARKER.findall(sentence)
+            is_supported = False
+            if markers:
+                keys = [key.strip() for group in markers for key in group.split(",")]
+                if keys and all(key in id_map for key in keys):
+                    supported += 1
+                    is_supported = True
+            if not is_supported and len(unsupported_samples) < 5:
+                unsupported_samples.append(sentence[:500])
+    total = len(assertions)
+    unsupported = total - supported
+    ratio = unsupported / total if total else 0.0
+    threshold = max(0.0, min(1.0, float(max_unsupported_ratio)))
+    return {
+        "high_risk_assertions": total,
+        "supported": supported,
+        "unsupported": unsupported,
+        "support_rate": (supported / total if total else 1.0),
+        "unsupported_ratio": ratio,
+        "threshold": threshold,
+        "downgraded": bool(total and ratio > threshold),
+        "unsupported_samples": unsupported_samples,
+    }
+
+
+def fair_editor_sections(sections: Sequence[dict], *, total_chars: int = 12000) -> str:
+    """Give every section a fair bounded editor view, including both ends."""
+    visible = [section for section in sections if section.get("markdown")]
+    if not visible:
+        return ""
+    share = max(600, total_chars // len(visible))
+    rendered: list[str] = []
+    for section in visible:
+        text = str(section.get("markdown") or "")
+        if len(text) > share:
+            head = share * 2 // 3
+            tail = share - head
+            text = text[:head] + "\n…（本节中段已按审校预算省略）…\n" + text[-tail:]
+        audit = json.dumps(section.get("citation_audit") or {}, ensure_ascii=False)
+        rendered.append(f"{text}\n[本节引证审计]{audit}")
+    return "\n\n".join(rendered)
 
 
 # --- 研究深度 → 检索档位(报告 PR-5,设计文档 §3.4)------------------------
@@ -357,6 +471,7 @@ class ReportEngineDependencies:
     settings: "Settings"
     event_log: Any
     memory_retriever: Any = None
+    corpus_profile: Any = None
 
 
 class ReportEngine:
@@ -417,139 +532,25 @@ class ReportEngine:
 
     def _plan_intent_contract(self, question: str, history: str, *,
                               confirmation_mode: bool = False) -> dict:
-        """Freeze user semantics before any corpus-derived planning signal exists."""
-        from app.services.prompts import report_intent_prompt, REPORT_INTENT_SCHEMA_HINT
+        """Freeze user semantics through the shared query-intent parser."""
+        from app.services.query_intent import finalize_query_intent, plan_query_intent
 
-        topics: List[dict] = []
-        data: dict = {}
-        try:
-            raw = self.dependencies.model_clients.chat("report_outline").chat_json(
-                [{"role": "user", "content": report_intent_prompt(
-                    question,
-                    max_topics=self.settings.report_max_sections,
-                    history_block=history,
-                    confirmation_mode=confirmation_mode,
-                )}],
-                REPORT_INTENT_SCHEMA_HINT,
-                cancel_event=self.cancel_event,
-            )
-            parsed = json.loads(raw)
-            data = parsed if isinstance(parsed, dict) else {}
-            for index, topic in enumerate(
-                (data.get("mandatory_topics") or [])[: self.settings.report_max_sections], 1
-            ):
-                if not isinstance(topic, dict):
-                    continue
-                topic_question = str(topic.get("question") or "").strip()
-                title = str(topic.get("title") or topic_question).strip()
-                queries = [
-                    str(item).strip()
-                    for item in (topic.get("retrieval_queries") or [])
-                    if str(item).strip()
-                ][:4]
-                if not title or not topic_question:
-                    continue
-                topics.append({
-                    "id": f"intent-{index}",
-                    "title": title,
-                    "question": topic_question,
-                    "retrieval_queries": queries or [topic_question],
-                })
-        except AskCancelled:
-            raise
-        except Exception:
-            data = {}
-
-        if not topics:
-            topics = [{
-                "id": "intent-1",
-                "title": question[:80] or "分析",
-                "question": question,
-                "retrieval_queries": [question],
-            }]
-
-        def _strings(key: str, limit: int = 8) -> List[str]:
-            return [
-                str(item).strip() for item in (data.get(key) or [])
-                if str(item).strip()
-            ][:limit]
-
-        ambiguities: List[dict] = []
+        contract = plan_query_intent(
+            self.dependencies.model_clients.chat("report_outline"),
+            question,
+            history,
+            max_topics=self.settings.report_max_sections,
+            purpose="deep report",
+            cancel_event=self.cancel_event,
+        )
         if not confirmation_mode:
-            for index, item in enumerate((data.get("ambiguities") or [])[:8], 1):
-                if not isinstance(item, dict):
-                    continue
-                prompt = str(item.get("question") or "").strip()
-                if not prompt:
-                    continue
-                ambiguities.append({
-                    "id": f"ambiguity-{index}",
-                    "question": prompt,
-                    "reason": str(item.get("reason") or "").strip()[:300],
-                    "required": item.get("required") is not False,
-                    "options": [
-                        str(option).strip() for option in (item.get("options") or [])
-                        if str(option).strip()
-                    ][:4],
-                })
-
-            deterministic_question = ""
-            deterministic_reason = ""
-            if not history.strip() and _UNRESOLVED_REFERENCE.search(question):
-                deterministic_question = "你提到的对象具体是什么？请给出名称或简要背景。"
-                deterministic_reason = "问题包含无法从当前报告上下文解析的指代。"
-            elif _GENERIC_REQUEST.fullmatch(question.strip()):
-                deterministic_question = "你希望研究的具体对象和最关心的问题是什么？"
-                deterministic_reason = "当前输入缺少可确定报告主题的研究对象或目标。"
-            if deterministic_question and not any(
-                row["question"] == deterministic_question for row in ambiguities
-            ):
-                ambiguities.insert(0, {
-                    "id": "ambiguity-input",
-                    "question": deterministic_question,
-                    "reason": deterministic_reason,
-                    "required": True,
-                    "options": [],
-                })
-
-            if bool(data.get("needs_clarification")) and not ambiguities:
-                ambiguities.append({
-                    "id": "ambiguity-1",
-                    "question": "为了准确规划报告，还需要补充哪项关键信息？",
-                    "reason": "问题理解模型判断当前请求仍存在会改变研究主题的歧义。",
-                    "required": True,
-                    "options": [],
-                })
-
-        try:
-            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
-        except (TypeError, ValueError):
-            confidence = 0.0
-        normalized_question = str(data.get("normalized_question") or "").strip() or question
-        intent_type = str(data.get("intent_type") or "other").strip().lower()
-        if intent_type not in _INTENT_TYPES:
-            intent_type = "other"
-
-        return {
-            # The original request is the authority.  A model-authored paraphrase is
-            # useful only as decomposition metadata and must never replace it.
-            "objective": question,
-            "resolved_question": normalized_question,
-            "intent_type": intent_type,
-            "entities": _strings("entities"),
-            "mandatory_topics": topics,
-            "comparison_axes": _strings("comparison_axes"),
-            "constraints": _strings("constraints"),
-            "excluded_topics": _strings("excluded_topics"),
-            "expected_output": str(data.get("expected_output") or "").strip(),
-            "assumptions": _strings("assumptions"),
-            "ambiguities": ambiguities,
-            "confidence": confidence,
-            "needs_clarification": any(
-                row.get("required") is not False for row in ambiguities
-            ),
-            "confirmed": confirmation_mode,
-        }
+            return contract
+        # Legacy direct-generation callers have already confirmed outside the
+        # two-stage UI.  Keep the shared normalisation/scope result but suppress
+        # a second clarification gate, matching the historical route behaviour.
+        legacy = dict(contract)
+        legacy.update(ambiguities=[], needs_clarification=False)
+        return finalize_query_intent(legacy)
 
     def prepare_intent(self, notebook_id: str, rid: str, question: str,
                        history: str = "", *, auto_generate: bool = False) -> None:
@@ -608,42 +609,40 @@ class ReportEngine:
         and clarification answers are therefore overlaid deterministically on
         the exact contract that reached ``intent_ready``.
         """
+        from app.services.query_intent import finalize_query_intent
+
         confirmed_input = seed.get("confirmed_input") or {}
-        resolved_question = str(
-            confirmed_input.get("resolved_question")
-            or seed.get("resolved_question")
-            or seed.get("objective")
-            or ""
-        ).strip()
-        answers = [
-            {
-                "id": str(row.get("id") or "").strip(),
-                "question": str(row.get("question") or "").strip(),
-                "answer": str(row.get("answer") or "").strip(),
-            }
-            for row in (confirmed_input.get("answers") or [])
-            if isinstance(row, dict) and str(row.get("answer") or "").strip()
-        ][:8]
-        final = dict(seed)
-        final.update(
-            resolved_question=resolved_question,
-            ambiguities=[],
-            needs_clarification=False,
-            confirmed=True,
-            clarification_answers=answers,
+        return finalize_query_intent(
+            seed,
+            resolved_question=str(confirmed_input.get("resolved_question") or ""),
+            answers=confirmed_input.get("answers") or [],
         )
-        final.pop("confirmed_input", None)
-        return final
 
     @staticmethod
     def _confirmed_research_question(intent_contract: dict, fallback: str) -> str:
         """Build the shared authoritative query without changing the visible title."""
         from app.services.query_intent import confirmed_research_question
 
-        return confirmed_research_question(intent_contract, fallback)
+        return confirmed_research_question(
+            intent_contract, fallback, include_assumptions=False
+        )
 
-    def _probe_queries(self, notebook_id: str, queries: List[str]) -> dict:
+    def _probe_queries(self, notebook_id: str, queries: List[str], *,
+                       family_by_source: Optional[dict[str, str]] = None) -> dict:
         seen, base, elements, sources = set(), set(), set(), set()
+        relevant_items = 0
+        family_support: Dict[str, int] = {}
+
+        def note_source(source_id: Any, *, relevant: bool = False) -> None:
+            source_id = str(source_id or "")
+            if not source_id:
+                return
+            sources.add(source_id)
+            if not relevant:
+                return
+            family = (family_by_source or {}).get(source_id, f"source:{source_id}")
+            family_support[family] = family_support.get(family, 0) + 1
+
         for query in queries[:4]:
             try:
                 for hit in self.dependencies.retrieval.federated_retrieve(
@@ -652,6 +651,15 @@ class ReportEngine:
                     seen.add(hit.object_id)
                     if getattr(hit, "tier", "") == "base":
                         base.add(hit.object_id)
+                    relevant = float(
+                        getattr(hit, "relevance", 0.0) or 0.0
+                    ) >= float(self.settings.evidence_tau_low)
+                    if relevant:
+                        relevant_items += 1
+                    for evidence in (getattr(hit, "evidence", None) or []):
+                        note_source(
+                            getattr(evidence, "source_id", ""), relevant=relevant
+                        )
             except Exception:
                 pass
             try:
@@ -659,15 +667,28 @@ class ReportEngine:
                     notebook_id, str(query), limit=8
                 ):
                     elements.add(element.element_id)
-                    if element.source_id:
-                        sources.add(element.source_id)
+                    relevant = float(
+                        getattr(element, "score", 0.0) or 0.0
+                    ) >= float(
+                        self.settings.evidence_tau_low
+                    )
+                    note_source(element.source_id, relevant=relevant)
+                    if relevant:
+                        relevant_items += 1
             except Exception:
                 pass
+        support_total = sum(family_support.values())
+        top_family_share = (
+            max(family_support.values()) / support_total if support_total else 1.0
+        )
         return {
             "hits": len(seen),
             "base_hits": len(base),
             "element_hits": len(elements),
             "source_hits": len(sources),
+            "relevant_items": relevant_items,
+            "relevant_family_count": len(family_support),
+            "top_family_share": top_family_share,
         }
 
     def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict) -> List[dict]:
@@ -697,16 +718,25 @@ class ReportEngine:
     _SCOUT_KG_N = 12
     _SCOUT_CHUNK_N = 8
 
-    def _build_corpus_map(self, notebook_id: str, question: str) -> str:
+    def _corpus_profile(self, notebook_id: str, *, result_scope: str = "ranked") -> dict:
+        service = self.dependencies.corpus_profile or ReportCorpusProfileService(
+            self.dependencies.source_query
+        )
+        return service.build(notebook_id, result_scope=result_scope)
+
+    def _build_corpus_map(self, notebook_id: str, question: str,
+                          profile: Optional[dict] = None) -> str:
         """0-LLM 语料侦察:来源标题 + federated KG 命中 + PPR chunk 来源·路径。
         给 STORM 规划接地(治盲规划)。任一子步失败静默降级为空段。"""
         deps = self.dependencies
         parts: List[str] = []
         try:
-            rows = deps.source_query.report_source_rows(notebook_id)
-            titles = [str(r["title"]).strip() for r in rows if str(r["title"]).strip()]
-            if titles:
-                parts.append("本 notebook 来源文件:\n" + "\n".join(f"- {t}" for t in titles))
+            active_profile = (
+                profile
+                or getattr(self, "_planning_corpus_profile", None)
+                or self._corpus_profile(notebook_id)
+            )
+            parts.append(corpus_profile_planner_block(active_profile))
         except Exception:
             pass
         try:
@@ -737,13 +767,22 @@ class ReportEngine:
                 ))
         except Exception:
             pass
-        return ("\n\n".join(parts))[:4000] if parts else "(语料侦察无结果)"
+        return ("\n\n".join(parts))[:6000] if parts else "(语料侦察无结果)"
 
-    def _probe_sufficiency(self, notebook_id: str, sections: List[dict]) -> List[dict]:
+    def _probe_sufficiency(self, notebook_id: str, sections: List[dict], *,
+                           family_by_source: Optional[dict[str, str]] = None) -> List[dict]:
         """0-LLM objective signal over both KG objects and raw SourceElements."""
+        family_by_source = (
+            family_by_source
+            if family_by_source is not None
+            else getattr(self, "_planning_family_by_source", None)
+        )
         out = []
         for s in sections:
-            counts = self._probe_queries(notebook_id, list(s.get("sub_queries") or []))
+            counts = self._probe_queries(
+                notebook_id, list(s.get("sub_queries") or []),
+                family_by_source=family_by_source,
+            )
             out.append({"title": s.get("title", ""), **counts})
         return out
 
@@ -768,9 +807,26 @@ class ReportEngine:
             research_question = self._confirmed_research_question(
                 intent_contract, question
             )
-            reports.update_report(
-                notebook_id, rid, understanding=intent_contract
+            try:
+                corpus_profile = self._corpus_profile(
+                    notebook_id,
+                    result_scope=str(intent_contract.get("result_scope") or "ranked"),
+                )
+            except Exception:
+                # Profiling is additive governance.  A malformed row/projection
+                # must not make the report fail.
+                corpus_profile = {}
+            intent_contract = dict(intent_contract)
+            intent_contract["corpus_profile"] = corpus_profile
+            self._planning_corpus_profile = corpus_profile
+            self._planning_family_by_source = corpus_profile.get("family_by_source") or {}
+            self._planning_result_scope = str(
+                intent_contract.get("result_scope") or "ranked"
             )
+            self._planning_completeness_required = bool(
+                intent_contract.get("completeness_required")
+            )
+            reports.update_report(notebook_id, rid, understanding=intent_contract)
             raise_if_cancelled(self.cancel_event)
             reports.update_report(notebook_id, rid, progress="按用户问题检查证据覆盖")
             intent_probe = self._probe_intent_coverage(notebook_id, intent_contract)
@@ -783,6 +839,17 @@ class ReportEngine:
                 notebook_id, research_question, history, corpus_map,
                 intent_contract=intent_contract, intent_probe=intent_probe,
             )
+            report_frame = next(
+                (dict(section.get("report_frame") or {}) for section in sections
+                 if section.get("report_frame")),
+                normalize_report_frame(intent_contract.get("report_frame")),
+            )
+            if report_frame:
+                intent_contract = dict(intent_contract)
+                intent_contract["report_frame"] = report_frame
+                reports.update_report(
+                    notebook_id, rid, understanding=intent_contract
+                )
             sections = self._bind_outline_to_intent(
                 sections, intent_contract, intent_probe
             )
@@ -811,18 +878,30 @@ class ReportEngine:
                 )}],
                 REPORT_STORM_SCHEMA_HINT, cancel_event=self.cancel_event)
             data = json.loads(raw)
+            intent_type = str((intent_contract or {}).get("intent_type") or "")
+            frame_shape = (
+                intent_type in {"compare", "review"}
+                or len((intent_contract or {}).get("entities") or []) >= 2
+                or bool((intent_contract or {}).get("comparison_axes"))
+            )
+            report_frame = (
+                normalize_report_frame(data.get("frame")) if frame_shape else None
+            )
             out = []
             for s in (data.get("sections") or [])[: self.settings.report_max_sections]:
                 title = str(s.get("title", "")).strip()
                 subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
                 if title and subs:
-                    out.append({
+                    section = {
                         "title": title, "scope": str(s.get("scope", "")).strip(),
                         "sub_queries": subs[:4],
                         "intent_ids": [str(item).strip() for item in
                                        (s.get("intent_ids") or []) if str(item).strip()],
                         "perspectives": [str(p).strip() for p in (s.get("perspectives") or []) if str(p).strip()],
-                        "tensions": [str(t).strip() for t in (s.get("tensions") or []) if str(t).strip()]})
+                        "tensions": [str(t).strip() for t in (s.get("tensions") or []) if str(t).strip()]}
+                    if report_frame:
+                        section["report_frame"] = report_frame
+                    out.append(section)
             if out:
                 return out
         except AskCancelled:
@@ -892,34 +971,79 @@ class ReportEngine:
             # final editor's knowledge of an originally mandatory topic.
             section["intent_catalog"] = catalog
             section["intent_contract"] = intent_contract
+            if intent_contract.get("report_frame"):
+                section["report_frame"] = intent_contract["report_frame"]
         return out
 
-    def _judge_sufficiency(self, question, sections, probe) -> List[dict]:
+    def _judge_sufficiency(self, question, sections, probe, *,
+                           result_scope: str = "ranked",
+                           completeness_required: bool = False) -> List[dict]:
         from app.services.prompts import report_sufficiency_prompt, REPORT_SUFFICIENCY_SCHEMA_HINT
         by_title = {p["title"]: p for p in probe}
-        # 缺省:按探针命中给保守判定(Judge 失败也有充分性信号)
+        result_scope = str(
+            getattr(self, "_planning_result_scope", result_scope) or result_scope
+        )
+        completeness_required = bool(
+            getattr(self, "_planning_completeness_required", completeness_required)
+        )
+        deterministic_by_title: Dict[str, str] = {}
+        # Fail-open judge fallback, but fail-closed evidence semantics: volume of
+        # graph objects alone is never sufficient.  Require relevant items from
+        # multiple independently identifiable document families and reject a
+        # heavily single-family distribution.
         for s in sections:
             h = by_title.get(s["title"], {"hits": 0, "base_hits": 0,
                                          "element_hits": 0, "source_hits": 0})
-            total = h["hits"] + h.get("element_hits", 0)
-            s["coverage"] = {key: int(h.get(key, 0)) for key in
-                             ("hits", "base_hits", "element_hits", "source_hits")}
-            s.setdefault("sufficiency", "充足" if total >= 3 else "薄弱" if total else "缺失")
+            relevant = int(h.get("relevant_items", 0))
+            families = int(h.get("relevant_family_count", 0))
+            top_share = float(h.get("top_family_share", 1.0) or 1.0)
+            required_families = 3 if completeness_required else 2
+            enough = relevant >= 3 and families >= required_families and top_share <= 0.8
+            thin = relevant > 0 and families > 0
+            fallback = "充足" if enough else "薄弱" if thin else "缺失"
+            deterministic_by_title[s["title"]] = fallback
+            s["coverage"] = {
+                key: (float(h.get(key, 0)) if key == "top_family_share"
+                      else int(h.get(key, 0)))
+                for key in (
+                    "hits", "base_hits", "element_hits", "source_hits",
+                    "relevant_items", "relevant_family_count", "top_family_share",
+                )
+            }
+            s.setdefault("sufficiency", fallback)
             s.setdefault("gap_note", "")
-            s.setdefault("action", "keep" if total >= 3 else "supplement" if total else "external")
+            s.setdefault("action", "keep" if enough else "supplement" if thin else "external")
         try:
             block = "\n".join(
                 f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']} "
-                f"element_hits={p.get('element_hits', 0)} source_hits={p.get('source_hits', 0)}"
+                f"element_hits={p.get('element_hits', 0)} "
+                f"relevant_items={p.get('relevant_items', 0)} "
+                f"independent_families={p.get('relevant_family_count', 0)} "
+                f"top_family_share={float(p.get('top_family_share', 1.0)):.3f}"
                 for p in probe
             )
             raw = self.dependencies.model_clients.chat("report_sufficiency").chat_json(
-                [{"role": "user", "content": report_sufficiency_prompt(question, block)}],
+                [{"role": "user", "content": report_sufficiency_prompt(
+                    question,
+                    block,
+                    result_scope=result_scope,
+                    completeness_required=completeness_required,
+                )}],
                 REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
             for v in (json.loads(raw).get("verdicts") or []):
                 for s in sections:
                     if s["title"] == str(v.get("title", "")).strip():
-                        if v.get("sufficiency"): s["sufficiency"] = str(v["sufficiency"])
+                        verdict = str(v.get("sufficiency") or "")
+                        # The judge may call a zero-hit probe "薄弱" (for example
+                        # when the planned scope is still partially answerable),
+                        # but it cannot manufacture the family diversity required
+                        # for "充足".
+                        order = {"缺失": 0, "薄弱": 1, "充足": 2}
+                        ceiling = deterministic_by_title.get(s["title"], "缺失")
+                        if verdict in order and (
+                            verdict != "充足" or ceiling == "充足"
+                        ):
+                            s["sufficiency"] = verdict
                         if v.get("gap_note") is not None: s["gap_note"] = str(v.get("gap_note", ""))
                         if v.get("action"): s["action"] = str(v["action"])
         except AskCancelled:
@@ -1017,7 +1141,8 @@ class ReportEngine:
 
     # --- Stage C(单节):撰写 ---
     def _draft_section(self, notebook_id: str, section: dict, question: str, result,
-                       depth=None) -> dict:
+                       depth=None, *, report_frame: Optional[dict] = None,
+                       synthesis: Optional[dict] = None) -> dict:
         from app.services.prompts import report_section_prompt, REPORT_SECTION_SCHEMA_HINT
         deps = self.dependencies
         # 撰写上下文的预算同样随研究深度走(codex PR#418 R1 P2-2):档位贯通此前只
@@ -1167,6 +1292,14 @@ class ReportEngine:
             memory_map = {}
         client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map, **element_map}
+        localized_synthesis = localize_blueprint_evidence(synthesis, id_map)
+        synthesis_block = (
+            json.dumps(localized_synthesis, ensure_ascii=False)
+            if localized_synthesis else ""
+        )
+        frame_block = (
+            json.dumps(report_frame, ensure_ascii=False) if report_frame else ""
+        )
         # 子大纲 → 有界「发现的结构」块。它只作用于本节内部的 `###` 组织,绝不回写
         # reports.outline_json 里用户确认过的大纲。两次重试共用同一份块:它与
         # id_map 一样在这轮里是常量。
@@ -1177,20 +1310,29 @@ class ReportEngine:
         # 有界重试一次("{}" 不入 LLM 缓存,真·重掷);仍空则标 failed(→渲染「本节生成失败」
         # note,不再静默)+ emit model_error(report_engine 原先零可观测)。章节更长/预算更小
         # (report_section_max_tokens 仅 answer 的一半),故比 ask 更易触发。
-        markdown, llm_grounded = "", False
+        markdown, llm_grounded, raw_claims = "", False, None
         for _ in range(2):
             try:
                 raw = client.chat_json(
                     [{"role": "user", "content": report_section_prompt(
                         section["title"], section["scope"], question, context_block,
                         allow_parametric=self.settings.report_allow_parametric,
-                        discovered_structure=structure_block)}],
+                        discovered_structure=structure_block,
+                        assumptions="；".join(
+                            str(item) for item in
+                            ((section.get("intent_contract") or {}).get("assumptions") or [])
+                            if str(item).strip()
+                        )[:1000],
+                        report_frame=frame_block,
+                        synthesis_commitment=synthesis_block,
+                    )}],
                     REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
                     **cap_kwargs(client, "report_section_max_tokens"))
                 data = json.loads(raw)
                 if isinstance(data, dict):
                     markdown = str(data.get("markdown", "")).strip()
                     llm_grounded = bool(data.get("grounded", False))
+                    raw_claims = data.get("claims")
             except AskCancelled:
                 raise
             except Exception:
@@ -1208,9 +1350,40 @@ class ReportEngine:
             evidence_pool, anchors, llm_grounded,
             self.settings.evidence_tau_low, self.settings.evidence_tau_high,
         )
+        citation_audit = audit_high_risk_assertions(
+            markdown,
+            id_map,
+            max_unsupported_ratio=self.settings.report_high_risk_unsupported_ratio,
+        )
+        if citation_audit["downgraded"] and evidence_level == "grounded":
+            evidence_level = "overview"
+        blueprint_claim_ids = (
+            {str(row.get("id") or "") for row in localized_synthesis.get("claims") or []}
+            if localized_synthesis else None
+        )
+        claims, claim_ledger_status = normalize_claim_ledger(
+            raw_claims,
+            markdown=markdown,
+            legal_anchor_keys=set(id_map),
+            blueprint_claim_ids=blueprint_claim_ids,
+            frame=report_frame,
+        )
+        family_by_source = dict(
+            ((section.get("intent_contract") or {}).get("corpus_profile") or {}).get(
+                "family_by_source"
+            ) or {}
+        )
+        claims = annotate_trend_evidence(
+            claims, id_map=id_map, family_by_source=family_by_source
+        )
         base = {"title": section["title"], "scope": section["scope"],
                 "markdown": markdown, "grounded": evidence_level == "grounded",
                 "evidence_level": evidence_level, "top_relevance": top_relevance,
+                "citation_audit": citation_audit,
+                "claims": claims,
+                "claim_ledger_status": claim_ledger_status,
+                "synthesis_used": bool(localized_synthesis),
+                "synthesis_requested": bool(depth is not None and depth >= 8),
                 "intent_ids": list(section.get("intent_ids") or []),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
@@ -1231,6 +1404,46 @@ class ReportEngine:
             base["failed"] = True
             base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
         return base
+
+    def _synthesize_report_blueprint(self, outline: Sequence[dict], results: Sequence[Any],
+                                     question: str, report_frame: Optional[dict]) -> Optional[dict]:
+        """Use the one detailed-tier report-wide call, then validate atomically."""
+        from app.services.prompts import (
+            REPORT_SYNTHESIS_SCHEMA_HINT,
+            report_synthesis_prompt,
+        )
+
+        evidence_sections, legal_evidence_ids = synthesis_evidence_payload(
+            outline, results
+        )
+        if not legal_evidence_ids:
+            return None
+        intent_contract = next(
+            (dict(section.get("intent_contract") or {}) for section in outline
+             if section.get("intent_contract")),
+            {},
+        )
+        try:
+            client = self.dependencies.model_clients.chat("report_summary")
+            raw = client.chat_json(
+                [{"role": "user", "content": report_synthesis_prompt(
+                    question,
+                    json.dumps(intent_contract, ensure_ascii=False),
+                    json.dumps(report_frame or {}, ensure_ascii=False),
+                    json.dumps(evidence_sections, ensure_ascii=False),
+                )}],
+                REPORT_SYNTHESIS_SCHEMA_HINT,
+                cancel_event=self.cancel_event,
+            )
+            return normalize_synthesis_blueprint(
+                json.loads(raw), outline=outline,
+                legal_evidence_ids=legal_evidence_ids,
+                frame=report_frame,
+            )
+        except AskCancelled:
+            raise
+        except Exception:
+            return None
 
     # --- Stage B+C 并行编排 ---
     def _run_sections(self, notebook_id, rid, outline, question, depth):
@@ -1266,7 +1479,7 @@ class ReportEngine:
             count = outline_sections[index]
             return f"深挖中（已整理大纲 {count} 节）" if count else "深挖"
 
-        def _one(i, section):
+        def _retrieve_one(i, section):
             raise_if_cancelled(self.cancel_event)
             with lock:
                 status[i]["phase"] = "规划"
@@ -1297,26 +1510,19 @@ class ReportEngine:
             try:
                 result = self._deep_dive(notebook_id, section, question, depth, on_step)
                 with lock:
-                    status[i]["phase"] = "撰写"
+                    status[i]["phase"] = "待综合" if depth >= 8 else "待撰写"
                 persist(force=True)
-                drafted = self._draft_section(notebook_id, section, question, result,
-                                              depth)
-                with lock:
-                    status[i]["phase"] = "完成"
+                return result, None
             except AskCancelled:
                 with lock:
                     status[i]["phase"] = "失败"
                 persist(force=True)
                 raise
             except Exception as exc:
-                drafted = {"title": section["title"], "scope": section["scope"],
-                           "markdown": "", "grounded": False, "failed": True,
-                           "error": str(exc)[:300], "id_map": {},
-                           "attempted": []}
                 with lock:
                     status[i]["phase"] = "失败"
-            persist(force=True)
-            return drafted
+                persist(force=True)
+                return None, exc
 
         # One configured service owns capacity.  Do not create a second report
         # concurrency knob that can exceed the scheduler's physical limit.
@@ -1328,9 +1534,81 @@ class ReportEngine:
             ),
         )
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(contextvars.copy_context().run, _one, i, s)
+            futures = [pool.submit(contextvars.copy_context().run, _retrieve_one, i, s)
                        for i, s in enumerate(outline)]
-            return [f.result() for f in futures]
+            retrieved = [future.result() for future in futures]
+
+        results = [row[0] for row in retrieved]
+        report_frame = next(
+            (normalize_report_frame(section.get("report_frame")) for section in outline
+             if section.get("report_frame")),
+            None,
+        )
+        blueprint = None
+        if depth >= 8:
+            with lock:
+                for index, (result, error) in enumerate(retrieved):
+                    if result is not None and error is None:
+                        status[index]["phase"] = "整合全篇证据"
+            persist(force=True)
+            blueprint = self._synthesize_report_blueprint(
+                outline, results, question, report_frame
+            )
+
+        def _draft_one(i, section):
+            result, retrieval_error = retrieved[i]
+            if retrieval_error is not None or result is None:
+                return {
+                    "title": section["title"], "scope": section["scope"],
+                    "markdown": "", "grounded": False, "failed": True,
+                    "error": str(retrieval_error or "retrieval failed")[:300],
+                    "id_map": {}, "attempted": [], "claims": [],
+                    "claim_ledger_status": "missing", "synthesis_used": False,
+                    "synthesis_requested": bool(depth >= 8),
+                }
+            raise_if_cancelled(self.cancel_event)
+            with lock:
+                status[i]["phase"] = "撰写"
+            persist(force=True)
+            try:
+                draft_options: Dict[str, Any] = {}
+                if report_frame:
+                    draft_options["report_frame"] = report_frame
+                section_synthesis = blueprint_for_section(blueprint, i)
+                if section_synthesis:
+                    draft_options["synthesis"] = section_synthesis
+                drafted = self._draft_section(
+                    notebook_id, section, question, result, depth, **draft_options
+                )
+                with lock:
+                    status[i]["phase"] = "完成"
+            except AskCancelled:
+                with lock:
+                    status[i]["phase"] = "失败"
+                persist(force=True)
+                raise
+            except Exception as exc:
+                drafted = {
+                    "title": section["title"], "scope": section["scope"],
+                    "markdown": "", "grounded": False, "failed": True,
+                    "error": str(exc)[:300], "id_map": {}, "attempted": [],
+                    "claims": [], "claim_ledger_status": "missing",
+                    "synthesis_used": False, "synthesis_requested": bool(depth >= 8),
+                }
+                with lock:
+                    status[i]["phase"] = "失败"
+            persist(force=True)
+            return drafted
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, _draft_one, i, section)
+                       for i, section in enumerate(outline)]
+            drafted_sections = [future.result() for future in futures]
+        if drafted_sections and blueprint:
+            # Ephemeral hand-off to the final editor; generate() removes it before
+            # sections are persisted.
+            drafted_sections[0]["_synthesis_blueprint"] = blueprint
+        return drafted_sections
 
     # --- 入口:Stage B/C/D(生成阶段)——读 outline_json → 深挖 → 汇总 → done ---
     def generate(self, notebook_id, rid, question, depth: int = 2) -> None:
@@ -1362,6 +1640,7 @@ class ReportEngine:
             )
             for s in sections:
                 s.pop("id_map", None)          # 账目仅供 assemble,不入库
+                s.pop("_synthesis_blueprint", None)
             reports.update_report(notebook_id, rid, sections=sections,
                                   content_md=content_md, gaps=gaps,
                                   references=references, status="done", progress="完成")
@@ -1410,13 +1689,27 @@ class ReportEngine:
             intent_contract or {"objective": question, "mandatory_topics": intent_catalog},
             ensure_ascii=False,
         )
+        report_frame = (
+            normalize_report_frame(intent_contract.get("report_frame"))
+            or next(
+                (normalize_report_frame(section.get("report_frame"))
+                 for section in outline if section.get("report_frame")),
+                None,
+            )
+        )
+        synthesis_blueprint = next(
+            (dict(section.get("_synthesis_blueprint") or {}) for section in sections
+             if section.get("_synthesis_blueprint")),
+            None,
+        )
         editor_coverage: Dict[str, dict] = {}
         contradictions: List[str] = []
         # 执行摘要 + 只读覆盖/冲突审校(容错:失败不拖垮报告,也不重写正文)。
         summary = ""
         try:
-            sections_block = "\n\n".join(
-                s["markdown"][:2000] for s in sections if s.get("markdown"))
+            sections_block = fair_editor_context(
+                sections, frame=report_frame, blueprint=synthesis_blueprint
+            )
             raw = self.dependencies.model_clients.chat("report_summary").chat_json(
                 [{"role": "user", "content": report_summary_prompt(
                     question, sections_block, intent_block=intent_block
@@ -1446,6 +1739,8 @@ class ReportEngine:
         # --- 全局引用重编号(按具体证据锚点去重,不再把同源不同元素折叠) ---
         references: List[dict] = []
         ref_pos: Dict[str, int] = {}       # dedup key -> 全局 1-based
+        corpus_profile = dict(intent_contract.get("corpus_profile") or {})
+        family_by_source = dict(corpus_profile.get("family_by_source") or {})
         citation_source_info = self.dependencies.evidence_context.citation_source_info(
             str(ctx.get("source_id") or "")
             for section in sections
@@ -1463,6 +1758,15 @@ class ReportEngine:
             return (citation_source_info.get(source_id) or {}).get(
                 "file_name", str(ctx.get("source_file_name") or "").strip()
             )
+
+        def _family_key(ctx):
+            source_id = str(ctx.get("source_id") or "")
+            if source_id:
+                return family_by_source.get(source_id, f"source:{source_id}")
+            # Legacy/test evidence can lack source_id.  Keep distinct named
+            # sources distinct rather than collapsing every missing id.
+            title = " ".join(_source_title(ctx).casefold().split())
+            return f"source-title:{title}" if title else f"evidence:{_dk(ctx)}"
 
         def _dk(ctx):
             object_type = str(ctx.get("object_type") or "evidence")
@@ -1517,6 +1821,7 @@ class ReportEngine:
                             "source_file_name": _source_file_name(ctx),
                             "location_label": str(ctx.get("location_label") or ""),
                             "source_id": str(ctx.get("source_id") or ""),
+                            "family_key": _family_key(ctx),
                             "element_id": str(ctx.get("element_id") or ""),
                             "snippet": str(ctx.get("snippet") or ""),
                             "tier": str(ctx.get("tier") or "personal"),
@@ -1553,21 +1858,104 @@ class ReportEngine:
                 intent_gaps.append(f"必答主题「{title}」回答不完整{note}")
         gaps.extend(intent_gaps)
         gaps.extend(f"跨章节可能存在冲突:{item}" for item in contradictions)
+        frame_conflicts = exclusive_frame_conflicts(sections, report_frame)
+        gaps.extend(f"分析框架冲突:{item}" for item in frame_conflicts)
+        trend_wording_violations = sum(
+            bool(claim.get("trend_wording_violation"))
+            for section in sections for claim in (section.get("claims") or [])
+        )
+        if trend_wording_violations:
+            gaps.append(
+                f"{trend_wording_violations} 条趋势判断的确定语气超过可区分资料数量所支持的等级"
+            )
+        unsupported_assertions = sum(
+            int((section.get("citation_audit") or {}).get("unsupported") or 0)
+            for section in sections
+        )
+        if unsupported_assertions:
+            gaps.append(f"{unsupported_assertions} 句高风险事实断言缺少同句引证")
+
+        family_counts: Dict[str, int] = {}
+        for reference in references:
+            family = str(reference.get("family_key") or "source:unknown")
+            family_counts[family] = family_counts.get(family, 0) + 1
+        top_family_count = max(family_counts.values()) if family_counts else 0
+        credibility = {
+            "citation_anchors": len(references),
+            "independent_cited_families": len(family_counts),
+            "top1_family_anchors": top_family_count,
+            "top1_family_share": (
+                top_family_count / len(references) if references else 0.0
+            ),
+            # Stable UI aliases; values still describe conservative document
+            # groups, not semantic/canonical deduplication.
+            "anchor_count": len(references),
+            "independent_documents": len(family_counts),
+            "top1_share": (
+                top_family_count / len(references) if references else 0.0
+            ),
+            "anchor_inflation": max(0, len(references) - len(family_counts)),
+            "unsupported_high_risk_assertions": unsupported_assertions,
+            "high_risk_assertions": sum(
+                int((section.get("citation_audit") or {}).get("high_risk_assertions") or 0)
+                for section in sections
+            ),
+            "synthesis_status": (
+                "available" if synthesis_blueprint else
+                "unavailable" if any(section.get("synthesis_requested")
+                                     for section in sections) else "not_requested"
+            ),
+            "claim_ledgers_available": sum(
+                section.get("claim_ledger_status") == "available"
+                for section in sections
+            ),
+            "trend_wording_violations": trend_wording_violations,
+        }
+        persisted_understanding = dict(intent_contract)
+        if report_frame:
+            persisted_understanding["report_frame"] = report_frame
+        persisted_understanding["credibility"] = credibility
+        try:
+            self.dependencies.reports.update_report(
+                notebook_id, rid, understanding=persisted_understanding
+            )
+        except Exception:
+            # Reporting disclosure must not become a terminal write failure; the
+            # same statistics remain derivable from persisted references.
+            pass
 
         # --- 组装 content_md:执行摘要 + 章节 + 参考文献 +(结尾)局限 ---
         parts = [f"# 深度报告:{display_question or question}", ""]
         if summary:
             parts += ["## 执行摘要", "", summary, ""]
+        parts += corpus_profile_reader_markdown(corpus_profile)
         for si, s in enumerate(sections):
             if s.get("failed"):
                 parts += [f"## {s['title']}", "", f"（本节生成失败:{s.get('error','')}）", ""]
             elif remapped.get(si):
                 parts += [remapped[si], ""]
         if references:
-            parts += ["## 参考文献", ""] + [
-                f"- [{r['key']}] {r['label']}"
-                + (f" · {r['location_label']}" if r["location_label"] else "")
-                for r in references] + [""]
+            grouped: Dict[str, List[dict]] = {}
+            for reference in references:
+                grouped.setdefault(str(reference.get("family_key") or ""), []).append(reference)
+            bibliography = []
+            for family_references in grouped.values():
+                keys = " ".join(f"[{row['key']}]" for row in family_references)
+                locations = list(dict.fromkeys(
+                    str(row.get("location_label") or "").strip()
+                    for row in family_references if str(row.get("location_label") or "").strip()
+                ))
+                bibliography.append(
+                    f"- {keys} {family_references[0]['label']}"
+                    + (f" · {'；'.join(locations[:4])}" if locations else "")
+                )
+            parts += ["## 参考文献", ""] + bibliography + [""]
+            parts += [
+                f"> 引证分布：{len(references)} 处证据锚点来自 {len(family_counts)} 个可区分文档族；"
+                f"占比最高的单一文档族为 {credibility['top1_family_share']:.1%}；"
+                f"同族多锚点形成的锚点膨胀为 {credibility['anchor_inflation']}。",
+                "",
+            ]
         limitations: List[str] = []
         if weak:
             limitations.append(
@@ -1577,6 +1965,12 @@ class ReportEngine:
             limitations.append(";".join(intent_gaps))
         if contradictions:
             limitations.append("发现需人工复核的跨章节冲突:" + ";".join(contradictions))
+        if frame_conflicts:
+            limitations.append("发现需人工复核的分析框架冲突:" + ";".join(frame_conflicts))
+        if unsupported_assertions:
+            limitations.append(
+                f"{unsupported_assertions} 句含数字、复杂度或绝对/排序表述的高风险断言缺少同句引证"
+            )
         if limitations:
             parts += [
                 "> **范围与证据局限**:" + ";".join(limitations)

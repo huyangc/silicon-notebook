@@ -2747,6 +2747,86 @@ button.chat-session-card {
   line-height: 1.6;
 }
 
+/* 可选分析框架：属于已确认大纲的一部分，缺失时整个面板不渲染，旧报告保持原样。 */
+.report-frame-editor {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #d9e2f0;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: #f8faff;
+}
+
+.report-frame-editor h4 {
+  margin: 0 0 3px;
+  color: #24344d;
+  font-size: 14px;
+}
+
+.report-frame-editor p {
+  margin: 0;
+  color: #5c6a7f;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.report-frame-editor > label,
+.report-frame-editor fieldset > label {
+  display: grid;
+  gap: 5px;
+  color: #526071;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.report-frame-editor input:not([type="checkbox"]),
+.report-frame-editor textarea {
+  width: 100%;
+  border: 1px solid #d8e0ed;
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: #fff;
+  color: #27354a;
+  font: inherit;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.report-frame-editor textarea {
+  min-height: 48px;
+  resize: vertical;
+}
+
+.report-frame-editor fieldset {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #dfe6f2;
+  border-radius: 9px;
+  padding: 9px 10px 10px;
+}
+
+.report-frame-editor legend {
+  padding: 0 4px;
+  color: #48628c;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.report-frame-check {
+  display: inline-flex !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 7px !important;
+  color: #48586e !important;
+  font-weight: 500 !important;
+}
+
+.report-frame-check input {
+  margin: 0;
+}
+
 .report-outline-cards {
   margin: 0;
   padding: 0;
@@ -3006,6 +3086,90 @@ button.chat-session-card {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+/* 正文前的资料基础与报告级引证透明度。 */
+.report-corpus-basis {
+  display: grid;
+  gap: 8px;
+  margin: 2px 0 12px;
+  border: 1px solid #dce5ef;
+  border-radius: 11px;
+  padding: 11px 13px;
+  background: #fbfcfe;
+}
+
+.report-corpus-basis-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.report-corpus-basis h3 {
+  margin: 0;
+  color: #2c3a4d;
+  font-size: 14px;
+}
+
+.report-corpus-basis-head span,
+.report-corpus-basis-facts,
+.report-corpus-basis-distributions,
+.report-corpus-basis-representatives,
+.report-corpus-basis-disclosure {
+  color: #5e6a79;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.report-corpus-basis-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.report-corpus-basis-distributions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 9px;
+  margin: 0;
+}
+
+.report-corpus-basis-distributions dt {
+  color: #4e6078;
+  font-weight: 700;
+}
+
+.report-corpus-basis-distributions dd,
+.report-corpus-basis-representatives,
+.report-corpus-basis-disclosure {
+  margin: 0;
+  word-break: break-word;
+}
+
+.report-corpus-basis-disclosure {
+  border-top: 1px dashed #dce3ec;
+  padding-top: 7px;
+  color: #865a17;
+}
+
+.report-section-audits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.report-citation-audit {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 3px 8px;
+  border: 1px solid #d9e2ef;
+  border-radius: 999px;
+  background: #f7faff;
+  color: #52657d;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .chat-body {
