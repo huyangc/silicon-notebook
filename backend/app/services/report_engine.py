@@ -179,58 +179,37 @@ def knowledge_context_with_outline(
     id_offset: int,
     budget_chars: int,
 ) -> Tuple[str, Dict[str, Dict[str, Any]]]:
-    """KG 上下文两遍渲染:先给本节子大纲绑定的命中一份子预算,再让其余 ranked
-    命中吃剩下的额度。
+    """KG 上下文:本节子大纲绑定的命中先拿一份子预算,其余 ranked 命中吃剩下的。
 
-    **为什么必须两遍**:`knowledge_context` 按输入序渲染、预算用尽即 break,而
+    **为什么需要子预算**:`knowledge_context` 按输入序渲染、预算用尽即停,而
     `_deep_dive` 把大纲绑定的截断对象**追加在 `top_hits` 尾部**(它们的相关度本来
-    就低于选集,只能排在后面)。KG 预算 6000 字符大约只装得下前几十条的一部分,
-    而穷尽档的最终相关性 floor 是 40 —— 于是在候选池够大的场景里,尾部那批「模型
-    自己指名要的结构支撑」**恒**被挤出上下文;`outline_structure_block` 反查不到就
-    如实丢弃绑定,子话题退成裸标题,prompt 又教「缺证据的子话题略过」,最后它从
-    成稿里整条消失。尾插本身不是承诺,子预算才是。
+    就低于选集,只能排在后面)。KG 预算大约只装得下前几十条的一部分,而穷尽档的
+    最终相关性 floor 是 40 —— 于是在候选池够大的场景里,尾部那批「模型自己指名要
+    的结构支撑」**恒**被挤出上下文;`outline_structure_block` 反查不到就如实丢弃
+    绑定,子话题退成裸标题,prompt 又教「缺证据的子话题略过」,最后它从成稿里
+    整条消失。尾插本身不是承诺,子预算才是。
 
-    绑定子集为空(非穷尽档、或本节没整理出大纲、或绑定的全是元素/原文段)时**单遍
-    渲染**,输出与接入前逐字相同 —— 那是这条路径唯一可接受的关闭态。
+    **优先级交给端口在一次调用里处理,绝不由这里拆成两次**(codex PR#418 R2 P2):
+    `knowledge_context` 末尾的 `relations:` 行是对本次证据集**内部**的边求的,拆两
+    次会丢掉所有跨两半的关系(一个绑定对象与一个 ranked 对象同时在 prompt 里、它们
+    之间那条存下来的边却没了),还会渲染出两行 `relations:` 各记一次预算,cluster
+    去重也会各算各的。
 
-    两遍的 `[k]` 连续且不重叠(第二遍的 `id_offset` 加上第一遍实际分配的条数),
-    两份 evidence map 合并后就是本节 KG 证据的全集。第一遍的实际消耗按块长度算:
-    `knowledge_context` 的内部预算账 `used` 逐字等于它返回的 `"\\n".join(lines)`
-    的长度,端口不需要为此多回传一个值。
-
-    残留(有意接受):两遍各自的 cluster 去重是独立的,所以同一 canonical 簇的两个
-    别名对象可能各渲染一行。代价是一行重复,绝不会产生解析不出的 `[k]`;绑定子集
-    本身是小集合,为它把 cluster map 拉进这一层不值。
+    绑定子集为空(非穷尽档、或本节没整理出大纲、或绑定的全是元素/原文段)时不传
+    优先级参数,输出与接入前逐字相同 —— 那是这条路径唯一可接受的关闭态。
     """
     bound_keys = outline_bound_evidence_keys(sections)
-    bound_hits = [
-        hit for hit in hits
+    bound_ids = [
+        str(getattr(hit, "object_id", "") or "") for hit in hits
         if str(getattr(hit, "object_id", "") or "") in bound_keys
     ] if bound_keys else []
-    if not bound_hits:
+    if not bound_ids:
         return evidence_context.knowledge_context(
             notebook_id, hits, id_offset=id_offset, budget_chars=budget_chars)
-    budget = max(0, int(budget_chars))
-    bound_block, bound_map = evidence_context.knowledge_context(
-        notebook_id, bound_hits, id_offset=id_offset,
-        budget_chars=budget // _OUTLINE_KG_BUDGET_DIVISOR)
-    bound_block = "" if bound_block == "(none)" else bound_block
-    # 排除的是**真的渲染出来了**的那些,不是整个绑定子集:子预算没装下的绑定
-    # 命中仍按原相关度顺序参与第二遍,它没有理由因为「曾被优先考虑过」而出局。
-    rendered = {
-        str((value or {}).get("object_id") or "") for value in bound_map.values()
-    }
-    rest = [
-        hit for hit in hits
-        if str(getattr(hit, "object_id", "") or "") not in rendered
-    ]
-    remaining = budget - len(bound_block) - (1 if bound_block else 0)
-    rest_block, rest_map = evidence_context.knowledge_context(
-        notebook_id, rest, id_offset=id_offset + len(bound_map),
-        budget_chars=max(0, remaining))
-    rest_block = "" if rest_block == "(none)" else rest_block
-    block = "\n".join(part for part in (bound_block, rest_block) if part)
-    return (block or "(none)"), {**bound_map, **rest_map}
+    return evidence_context.knowledge_context(
+        notebook_id, hits, id_offset=id_offset, budget_chars=budget_chars,
+        priority_object_ids=bound_ids,
+        priority_budget_chars=max(0, int(budget_chars)) // _OUTLINE_KG_BUDGET_DIVISOR)
 
 
 # --- 「发现的结构」块(报告 PR-5)-----------------------------------------
@@ -1017,22 +996,29 @@ class ReportEngine:
         kg_block, kg_map = knowledge_context_with_outline(
             deps.evidence_context, notebook_id, result.top_hits, sub_outline,
             id_offset=len(chunk_map), budget_chars=kg_budget)
-        # 直接原文段:条数按档位的 `answer_element_items`,择优规则与 Ask 侧同口径
-        # (相关度降序、tie-break element_id)。字符预算仍是 chunk 预算的 1/3,只是
-        # 基数换成了本档的那一份。
-        elements = list(getattr(result, "elements", []) or [])
-        if limits is not None:
-            elements = rank_elements(elements, limits.answer_element_items)
-        element_block, element_map = deps.evidence_context.element_context(
-            elements,
-            notebook_id=notebook_id,
-            id_offset=4000,
-            budget_chars=max(2000, chunk_budget // 3),
-        )
         # 现场事实:chunk_context/knowledge_context 空输入返回 "(none)" 哨兵
         # (非空串),先归一再拼接,避免把哨兵当真实证据块。
         chunk_block = "" if chunk_block == "(none)" else chunk_block
         kg_block = "" if kg_block == "(none)" else kg_block
+        # 直接原文段:条数按档位的 `answer_element_items`,择优规则与 Ask 侧同口径
+        # (相关度降序、tie-break element_id)。
+        # 字符预算与原文块**共享同一个分区上限**(codex PR#418 R2 P2):
+        # `chunk_context_chars` 在 `AskRetrievalLimits` 里就是「结构化预览 + chunk +
+        # 直接原文段」这一整个分区的上限,再在它之外加一份 1/3 等于自己宣布了一个
+        # 上限又立刻超过它 —— 穷尽档下那是额外 40000 字符。取剩余额度的写法逐字照
+        # `_answer_reasoning`(`max(0, chunk_budget - len(source_context))`)。
+        # 不选档的调用方保持旧的 `max(2000, …//3)`,那条路径没有分区合同可言。
+        elements = list(getattr(result, "elements", []) or [])
+        if limits is not None:
+            elements = rank_elements(elements, limits.answer_element_items)
+        element_budget = (max(0, chunk_budget - len(chunk_block))
+                          if limits is not None else max(2000, chunk_budget // 3))
+        element_block, element_map = deps.evidence_context.element_context(
+            elements,
+            notebook_id=notebook_id,
+            id_offset=4000,
+            budget_chars=element_budget,
+        )
         element_block = "" if element_block == "(none)" else element_block
         context_block = (f"{chunk_block}\n\n[Knowledge graph]\n{kg_block}"
                          if chunk_block else kg_block) or "(no evidence retrieved)"

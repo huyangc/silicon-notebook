@@ -1505,6 +1505,13 @@ class EvidenceContextPort(Protocol):
         *,
         id_offset: int = 0,
         budget_chars: int | None = None,
+        # ``priority_object_ids`` are assembled before the rest and may carry a
+        # tighter sub-budget.  It is one call, not two, because the ``relations:``
+        # line is computed over this call's own evidence map: splitting the hits
+        # across two calls silently drops every edge whose endpoints land on
+        # opposite sides.
+        priority_object_ids: Sequence[str] = (),
+        priority_budget_chars: int | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]: ...
     def parse_anchors(
         self,

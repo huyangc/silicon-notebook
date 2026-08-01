@@ -696,9 +696,11 @@ def test_every_writing_budget_is_the_levels_own_number(repo, monkeypatch):
     seen: dict = {}
     monkeypatch.setattr(context, "chunk_context",
                         lambda chunks, *, notebook_id, budget_chars=None:
-                        (seen.__setitem__("chunk", budget_chars), ("(none)", {}))[1])
+                        (seen.__setitem__("chunk", budget_chars),
+                         ("原文" * 500, {}))[1])
     monkeypatch.setattr(context, "knowledge_context",
-                        lambda notebook_id, hits, *, id_offset=0, budget_chars=None:
+                        lambda notebook_id, hits, *, id_offset=0, budget_chars=None,
+                        priority_object_ids=(), priority_budget_chars=None:
                         (seen.__setitem__("kg", budget_chars), ("(none)", {}))[1])
     monkeypatch.setattr(context, "element_context",
                         lambda elements, *, notebook_id, id_offset=4000,
@@ -717,7 +719,10 @@ def test_every_writing_budget_is_the_levels_own_number(repo, monkeypatch):
 
     assert seen["chunk"] == limits.chunk_context_chars == 120000
     assert seen["kg"] == limits.kg_context_chars == 16000
-    assert seen["element"] == max(2000, limits.chunk_context_chars // 3)
+    # 直接原文段与 chunk **共享**这一个分区上限(`chunk_context_chars` 在
+    # AskRetrievalLimits 里就是整个来源分区的上限),拿到的是它的剩余额度——
+    # 在它之外另加一份 `//3` 等于宣布了上限又当场超过它(穷尽档下多 40000 字符)。
+    assert seen["element"] == limits.chunk_context_chars - 1000
     # 元素择优:相关度降序、tie-break element_id(与 Ask 侧逐字同一把键),不是
     # 按插入序切片——按插入序会静默丢掉最相关的那几个。
     assert seen["element_ids"] == [
@@ -783,12 +788,12 @@ def test_outline_bound_evidence_survives_a_full_kg_budget(repo):
     # ranked 命中没有被绑定子集饿死:剩余预算仍渲染了别的候选。
     keys = re.findall(r"\n(k\d+): \[claim\]", prompt)
     assert len(keys) >= 3
-    # 两遍的 [k] 连续且不重叠。
+    # 优先前缀与其余命中的 [k] 连续且不重叠。
     assert keys == [f"k{index}" for index in range(1, len(keys) + 1)]
 
 
-def test_the_kg_context_stays_within_the_budget_across_both_passes(repo):
-    """两遍共用一份总预算,不是各拿一份。"""
+def test_the_priority_prefix_and_the_rest_share_one_budget(repo):
+    """优先前缀与其余命中共用一份总预算,不是各拿一份。"""
     notebook = _notebook(repo)
     object_ids = _claims(repo, notebook.id, 12)
     context = ReportEngine.from_repository(
@@ -805,6 +810,42 @@ def test_the_kg_context_stays_within_the_budget_across_both_passes(repo):
     assert len(block.split("\n")) == len(id_map)
 
 
+def test_the_priority_prefix_keeps_relations_that_cross_the_two_groups(repo):
+    """优先级必须在**一次**端口调用里完成 —— 这是 codex PR#418 R2 抓到的回归。
+
+    `knowledge_context` 末尾的 `relations:` 行是对**本次**证据集内部的边求的。把绑定
+    命中和其余命中拆成两次调用,一个绑定对象与一个 ranked 对象可以同时出现在
+    prompt 里,而它们之间那条存下来的边整条消失(两次调用各自只看得见自己那一半),
+    并且会渲染出两行各记一次预算的 `relations:`。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    objects = [{"local_id": f"R{index}", "object_type": "claim",
+                "payload": {"name": f"论断{index}", "section_path": "1"},
+                "evidence": []} for index in range(3)]
+    repo.store_kg(notebook.id, None, objects,
+                  [{"source_local_id": "R0", "target_local_id": "R2",
+                    "edge_type": "supports", "evidence": []}])
+    object_ids = [obj["_oid"] for obj in objects]
+    hits = [RetrievedKnowledge(object_id=object_id, object_type="claim",
+                               payload={"name": f"论断{index}"}, relevance=0.9)
+            for index, object_id in enumerate(object_ids)]
+    context = ReportEngine.from_repository(
+        repo, repo.settings).dependencies.evidence_context
+
+    block, id_map = knowledge_context_with_outline(
+        context, notebook.id, hits,
+        [_section("s1", "一节", [object_ids[2]])],      # 绑定的是边的**目标**
+        id_offset=0, budget_chars=400)
+
+    relation_lines = [line for line in block.split("\n")
+                      if line.startswith("relations: ")]
+    assert len(relation_lines) == 1                     # 不是两行,也不是零行
+    assert id_map["k1"]["object_id"] == object_ids[2]   # 绑定的排在最前
+    source_key = next(key for key, value in id_map.items()
+                      if value["object_id"] == object_ids[0])
+    assert f"{source_key} -[supports]-> k1" in relation_lines[0]
+
+
 def test_without_bindings_the_kg_context_is_a_single_untouched_pass(repo):
     """关闭态(没有大纲、或绑定的全不是知识对象)必须逐字回到接入前:一次调用、
     同一份输出。多一次调用就是多一份预算账,输出会与单遍不同。"""
@@ -817,11 +858,15 @@ def test_without_bindings_the_kg_context_is_a_single_untouched_pass(repo):
 
     class _Spy:
         def knowledge_context(self, notebook_id, hits, *, id_offset=0,
-                              budget_chars=None):
-            calls.append((len(hits), id_offset, budget_chars))
-            return inner.knowledge_context(notebook_id, hits,
-                                           id_offset=id_offset,
-                                           budget_chars=budget_chars)
+                              budget_chars=None, priority_object_ids=(),
+                              priority_budget_chars=None):
+            calls.append((len(hits), id_offset, budget_chars,
+                          tuple(priority_object_ids), priority_budget_chars))
+            return inner.knowledge_context(
+                notebook_id, hits, id_offset=id_offset,
+                budget_chars=budget_chars,
+                priority_object_ids=priority_object_ids,
+                priority_budget_chars=priority_budget_chars)
 
     baseline = inner.knowledge_context(notebook.id, hits, id_offset=7,
                                        budget_chars=200)
@@ -833,7 +878,9 @@ def test_without_bindings_the_kg_context_is_a_single_untouched_pass(repo):
             _Spy(), notebook.id, hits, sections,
             id_offset=7, budget_chars=200) == baseline
         assert len(calls) == 1
-        assert calls[0] == (len(hits), 7, 200)
+        # 关闭态连优先级参数都不传:传一个空 tuple 也是同一个输出,但那会让
+        # 「什么都没发生」这件事只能靠端口内部的判空来保证。
+        assert calls[0] == (len(hits), 7, 200, (), None)
 
 
 # ------------------------------------------- 负向守卫:确认过的大纲不被回写
